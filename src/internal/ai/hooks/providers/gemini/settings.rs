@@ -121,7 +121,16 @@ pub(super) fn install_gemini_hooks(options: &ProviderInstallOptions) -> Result<(
 
     let settings_path = gemini_settings_path()?;
     let mut settings = load_gemini_settings(&settings_path)?;
-    let changed = upsert_gemini_hooks(&mut settings, &binary_path)?;
+    let command_prefix = options
+        .hook_command_prefix
+        .as_deref()
+        .unwrap_or("hooks gemini");
+    let changed = upsert_gemini_hooks(
+        &mut settings,
+        &binary_path,
+        command_prefix,
+        options.fail_safe_shell,
+    )?;
 
     if changed {
         write_json_settings(&settings_path, &settings, "Gemini")?;
@@ -173,7 +182,7 @@ pub(super) fn gemini_hooks_are_installed() -> Result<bool> {
     }
     let settings = load_gemini_settings(&settings_path)?;
     let binary_path = resolve_hook_binary_path(None)?;
-    all_gemini_specs_installed(&settings, &binary_path)
+    all_gemini_specs_installed(&settings, &binary_path, "hooks gemini", false)
 }
 
 fn gemini_settings_path() -> Result<PathBuf> {
@@ -186,7 +195,12 @@ fn load_gemini_settings(path: &Path) -> Result<GeminiSettings> {
     load_json_settings(path, "Gemini")
 }
 
-fn upsert_gemini_hooks(settings: &mut GeminiSettings, binary_path: &str) -> Result<bool> {
+fn upsert_gemini_hooks(
+    settings: &mut GeminiSettings,
+    binary_path: &str,
+    command_prefix: &str,
+    fail_safe_shell: bool,
+) -> Result<bool> {
     let mut changed = false;
     if !settings.hooks_config.enabled {
         settings.hooks_config.enabled = true;
@@ -199,7 +213,12 @@ fn upsert_gemini_hooks(settings: &mut GeminiSettings, binary_path: &str) -> Resu
             .remove(spec.event_name)
             .unwrap_or(Value::Array(Vec::new()));
         let original_matchers = parse_gemini_hook_matchers(&value, spec.event_name)?;
-        let expected_command = format!("{binary_path} hooks gemini {}", spec.subcommand);
+        let expected_command = build_hook_command(
+            binary_path,
+            command_prefix,
+            spec.subcommand,
+            fail_safe_shell,
+        );
         let desired_matcher = GeminiHookMatcher {
             matcher: spec.matcher.map(ToString::to_string),
             hooks: vec![GeminiHookEntry {
@@ -283,7 +302,26 @@ fn remove_libra_gemini_hooks(settings: &mut GeminiSettings) -> Result<bool> {
     Ok(changed)
 }
 
-fn all_gemini_specs_installed(settings: &GeminiSettings, binary_path: &str) -> Result<bool> {
+fn build_hook_command(
+    binary_path: &str,
+    command_prefix: &str,
+    subcommand: &str,
+    fail_safe_shell: bool,
+) -> String {
+    let command = format!("{binary_path} {command_prefix} {subcommand}");
+    if fail_safe_shell {
+        format!("{command} || true")
+    } else {
+        command
+    }
+}
+
+fn all_gemini_specs_installed(
+    settings: &GeminiSettings,
+    binary_path: &str,
+    command_prefix: &str,
+    fail_safe_shell: bool,
+) -> Result<bool> {
     if !settings.hooks_config.enabled {
         return Ok(false);
     }
@@ -295,7 +333,12 @@ fn all_gemini_specs_installed(settings: &GeminiSettings, binary_path: &str) -> R
             .cloned()
             .unwrap_or(Value::Array(Vec::new()));
         let matchers = parse_gemini_hook_matchers(&value, spec.event_name)?;
-        let expected_command = format!("{binary_path} hooks gemini {}", spec.subcommand);
+        let expected_command = build_hook_command(
+            binary_path,
+            command_prefix,
+            spec.subcommand,
+            fail_safe_shell,
+        );
         if !contains_gemini_command(&matchers, spec.matcher, spec.hook_name, &expected_command) {
             return Ok(false);
         }
@@ -360,12 +403,38 @@ mod tests {
     #[test]
     fn upsert_gemini_hooks_is_idempotent() {
         let mut settings = GeminiSettings::default();
-        let changed_first = upsert_gemini_hooks(&mut settings, "/tmp/libra").expect("upsert");
-        let changed_second = upsert_gemini_hooks(&mut settings, "/tmp/libra").expect("upsert");
+        let changed_first = upsert_gemini_hooks(&mut settings, "/tmp/libra", "hooks gemini", false)
+            .expect("upsert");
+        let changed_second =
+            upsert_gemini_hooks(&mut settings, "/tmp/libra", "hooks gemini", false)
+                .expect("upsert");
 
         assert!(changed_first);
         assert!(!changed_second);
-        assert!(all_gemini_specs_installed(&settings, "/tmp/libra").expect("installed"));
+        assert!(
+            all_gemini_specs_installed(&settings, "/tmp/libra", "hooks gemini", false)
+                .expect("installed")
+        );
+    }
+
+    #[test]
+    fn upsert_gemini_hooks_can_target_agent_traces_fail_safe_entrypoint() {
+        let mut settings = GeminiSettings::default();
+        assert!(
+            upsert_gemini_hooks(&mut settings, "/tmp/libra", "agent hooks gemini", true)
+                .expect("upsert")
+        );
+
+        assert!(
+            all_gemini_specs_installed(&settings, "/tmp/libra", "agent hooks gemini", true)
+                .expect("installed")
+        );
+        let value = settings.hooks.get("AfterAgent").cloned().expect("hook");
+        let matchers = parse_gemini_hook_matchers(&value, "AfterAgent").expect("parse");
+        assert_eq!(
+            matchers[0].hooks[0].command,
+            "/tmp/libra agent hooks gemini stop || true"
+        );
     }
 
     #[test]

@@ -1,5 +1,7 @@
 //! Sandbox subsystem for AI tool calls.
 //!
+//! AI 工具调用的沙箱子系统。
+//!
 //! Boundary: exposes policy parsing, command-safety checks, and runtime enforcement;
 //! it does not decide workflow phase state. AI hardening contract tests exercise the
 //! public guarantees of this module.
@@ -67,6 +69,11 @@ pub struct ToolRuntimeContext {
     pub approval: Option<ToolApprovalContext>,
     pub file_history: Option<FileHistoryRuntimeContext>,
     pub max_output_bytes: Option<usize>,
+    /// Owning sub-agent run id, when this context drives a sub-agent's tool
+    /// calls (CEX-S2-14 trace chain). Source-Pool calls read it to attribute
+    /// the `source_call_log` row to the run (`thread → agent_run_id →
+    /// tool_call_id → source_call`). `None` on the main-session path.
+    pub agent_run_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]

@@ -87,6 +87,51 @@ fn test_shortlog_json_output_has_author_summary() {
 
 #[tokio::test]
 #[serial]
+async fn test_shortlog_json_revision_summary_email_contract() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    fs::write(repo.path().join("second.txt"), "second\n").unwrap();
+    let output = run_libra_command(&["add", "second.txt"], repo.path());
+    assert_cli_success(&output, "failed to add second file");
+    let output = run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    assert_cli_success(&output, "failed to create second commit");
+
+    let head = Head::current_commit().await.unwrap();
+    let commits = get_reachable_commits(head.to_string(), None).await.unwrap();
+    let base_commit = commits
+        .iter()
+        .find(|commit| commit.message.contains("base"))
+        .expect("expected base commit")
+        .id
+        .to_string();
+
+    let output = run_libra_command(
+        &["shortlog", &base_commit, "-s", "-e", "--json"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "shortlog revision -s -e --json should succeed");
+    let json = parse_json_stdout(&output);
+
+    assert_eq!(json["command"], "shortlog");
+    assert_eq!(json["data"]["revision"], base_commit);
+    assert_eq!(json["data"]["summary"], true);
+    assert_eq!(json["data"]["email"], true);
+    assert_eq!(json["data"]["total_commits"], 1);
+    assert_eq!(json["data"]["authors"][0]["name"], "Test User");
+    assert_eq!(json["data"]["authors"][0]["email"], "test@example.com");
+    assert_eq!(json["data"]["authors"][0]["count"], 1);
+    assert_eq!(
+        json["data"]["authors"][0]["subjects"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_shortlog_revision_argument_limits_history() {
     let repo = create_committed_repo_via_cli();
     let _guard = ChangeDirGuard::new(repo.path());

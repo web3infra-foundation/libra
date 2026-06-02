@@ -23,6 +23,7 @@ EXAMPLES:
     libra hash-object README.md                         Compute the blob id (no write)
     libra hash-object -w src/main.rs                    Compute and write the object to .libra/objects/
     printf 'hello' | libra hash-object --stdin          Hash stdin instead of a file
+    printf 'a.txt\\nb.txt\\n' | libra hash-object --stdin-paths    Hash paths listed on stdin
     printf 'hello' | libra hash-object --stdin --json   Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -33,8 +34,12 @@ pub struct HashObjectArgs {
     pub write: bool,
 
     /// Read the object contents from standard input
-    #[arg(long, conflicts_with = "paths")]
+    #[arg(long, conflicts_with_all = ["paths", "stdin_paths"])]
     pub stdin: bool,
+
+    /// Read newline-delimited file paths from standard input
+    #[arg(long = "stdin-paths", conflicts_with_all = ["paths", "stdin"])]
+    pub stdin_paths: bool,
 
     /// Object type to hash. Only `blob` is currently supported.
     #[arg(
@@ -46,7 +51,10 @@ pub struct HashObjectArgs {
     pub object_type: String,
 
     /// File paths to hash
-    #[arg(value_name = "PATH", required_unless_present = "stdin")]
+    #[arg(
+        value_name = "PATH",
+        required_unless_present_any = ["stdin", "stdin_paths"]
+    )]
     pub paths: Vec<PathBuf>,
 }
 
@@ -101,16 +109,10 @@ pub async fn execute_safe(args: HashObjectArgs, output: &OutputConfig) -> CliRes
 fn hash_objects(args: &HashObjectArgs) -> CliResult<HashObjectOutput> {
     let objects = if args.stdin {
         vec![hash_one_source("-", read_stdin()?, args.write)?]
+    } else if args.stdin_paths {
+        hash_path_entries(&read_stdin_paths()?, args.write)?
     } else {
-        let mut entries = Vec::with_capacity(args.paths.len());
-        for path in &args.paths {
-            entries.push(hash_one_source(
-                path.display().to_string(),
-                read_file(path)?,
-                args.write,
-            )?);
-        }
-        entries
+        hash_path_entries(&args.paths, args.write)?
     };
 
     Ok(HashObjectOutput {
@@ -134,12 +136,29 @@ fn hash_objects_streaming(args: &HashObjectArgs, output: &OutputConfig) -> CliRe
         return Ok(());
     }
 
-    for path in &args.paths {
-        let entry = hash_one_source(path.display().to_string(), read_file(path)?, args.write)?;
+    let paths = if args.stdin_paths {
+        read_stdin_paths()?
+    } else {
+        args.paths.clone()
+    };
+    for path in paths {
+        let entry = hash_one_source(path.display().to_string(), read_file(&path)?, args.write)?;
         write_hash_line(&mut writer, &entry.oid)?;
     }
 
     Ok(())
+}
+
+fn hash_path_entries(paths: &[PathBuf], write: bool) -> CliResult<Vec<HashObjectEntry>> {
+    let mut entries = Vec::with_capacity(paths.len());
+    for path in paths {
+        entries.push(hash_one_source(
+            path.display().to_string(),
+            read_file(path)?,
+            write,
+        )?);
+    }
+    Ok(entries)
 }
 
 fn hash_one_source(
@@ -186,6 +205,17 @@ fn read_stdin() -> CliResult<Vec<u8>> {
             .with_stable_code(StableErrorCode::IoReadFailed)
     })?;
     Ok(data)
+}
+
+fn read_stdin_paths() -> CliResult<Vec<PathBuf>> {
+    let data = read_stdin()?;
+    let text = String::from_utf8(data).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to parse standard input paths as UTF-8: {error}"
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+    })?;
+    Ok(text.lines().map(PathBuf::from).collect())
 }
 
 fn render_hash_object_output(result: &HashObjectOutput, output: &OutputConfig) -> CliResult<()> {

@@ -187,6 +187,7 @@ impl LibraMcpServer {
         Ok(vec![
             RawResource::new("libra://history/latest", "Latest History Head").no_annotation(),
             RawResource::new("libra://context/active", "Active Context").no_annotation(),
+            RawResource::new("libra://agents/runs", "Sub-agent Runs").no_annotation(),
         ])
     }
 
@@ -268,7 +269,235 @@ impl LibraMcpServer {
             }
         }
 
+        if let Some(request) = super::agents_resource::AgentResourceRequest::parse(uri) {
+            return self.read_agent_resource(uri, request).await;
+        }
+
         Err(ErrorData::resource_not_found("Resource not found", None))
+    }
+
+    /// Best-effort count of persisted Source Pool / MCP / OpenAPI calls
+    /// attributed to `run_id`, for the budget view's `source_call_count`
+    /// (CEX-S2-16). The per-run attribution landed with the v0.17.1254 trace
+    /// link (`source_call_log.agent_run_id`). Resolves the repo's `libra.db`
+    /// from `working_dir` exactly as the dispatcher does and queries
+    /// `source_call_log`; any failure (no working dir, unresolved path, a
+    /// connection or query error) yields 0 so the budget view never fails on a
+    /// telemetry-layer issue — the same soft posture as session bootstrap.
+    async fn read_run_source_call_count(&self, run_id: &str) -> u32 {
+        let Some(working_dir) = self.working_dir.as_ref() else {
+            return 0;
+        };
+        let db_path = crate::utils::util::try_get_storage_path(Some(working_dir.clone()))
+            .unwrap_or_else(|_| working_dir.join(".libra"))
+            .join(crate::utils::util::DATABASE);
+        let Some(db_path) = db_path.to_str() else {
+            return 0;
+        };
+        let conn = match crate::internal::db::establish_connection(db_path).await {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    run_id,
+                    "agent budget: source-call count DB connect failed; reporting 0",
+                );
+                return 0;
+            }
+        };
+        match crate::internal::model::source_call_log::count_for_run(&conn, run_id).await {
+            Ok(count) => count.min(u64::from(u32::MAX)) as u32,
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    run_id,
+                    "agent budget: source-call count query failed; reporting 0",
+                );
+                0
+            }
+        }
+    }
+
+    /// Serve a `libra://agents/*` resource (CEX-S2-16). The URI has already been
+    /// parsed by [`super::agents_resource::AgentResourceRequest::parse`].
+    ///
+    /// The run **list**, **detail**, **permissions**, **context**, and **budget**
+    /// views read the records the sub-agent dispatcher persists under
+    /// `<storage_root>/sessions` (the `AgentRun` snapshot and its sibling
+    /// permission profile, context pack, and usage totals — CEX-S2-16 run
+    /// persistence). Merge candidates have no persisted record through this
+    /// server yet (they need patch-set persistence), so they return a structured
+    /// not-found. With no working dir (an in-memory server) there is nothing to
+    /// read: the list view is empty.
+    async fn read_agent_resource(
+        &self,
+        uri: &str,
+        request: super::agents_resource::AgentResourceRequest,
+    ) -> Result<Vec<ResourceContents>, ErrorData> {
+        use super::agents_resource::{
+            AgentResourceRequest, render_merge_candidate, render_run_budget, render_run_context,
+            render_run_detail, render_run_list, render_run_permissions,
+        };
+        use crate::internal::ai::agent_run::{
+            AgentBudget, AgentRunId, MergeCandidateId, event_store::AgentRunEventStore,
+        };
+
+        // Build the snapshot/permissions store rooted at the same sessions root
+        // the dispatcher writes to (`resolve_storage_root` = shared
+        // `try_get_storage_path` with the `<working_dir>/.libra` fallback, then
+        // `join("sessions")`), so the read path matches the write path. `None`
+        // when there is no working dir (an in-memory server) — nothing to read.
+        let store = self.working_dir.as_ref().map(|working_dir| {
+            let sessions_root = crate::utils::util::try_get_storage_path(Some(working_dir.clone()))
+                .unwrap_or_else(|_| working_dir.join(".libra"))
+                .join("sessions");
+            AgentRunEventStore::new(sessions_root)
+        });
+        let snapshots = match store.as_ref() {
+            Some(store) => store.list_all_snapshots().map_err(|err| {
+                ErrorData::internal_error(
+                    format!("failed to read sub-agent run snapshots: {err}"),
+                    None,
+                )
+            })?,
+            None => Vec::new(),
+        };
+        let find_run = |run_id: &str| {
+            uuid::Uuid::parse_str(run_id)
+                .ok()
+                .map(AgentRunId::from)
+                .and_then(|id| snapshots.iter().find(|run| run.id == id))
+        };
+
+        match request {
+            AgentResourceRequest::RunList => {
+                let body = render_run_list(&snapshots);
+                Ok(vec![ResourceContents::text(body.to_string(), uri)])
+            }
+            AgentResourceRequest::RunDetail { ref run_id } => match find_run(run_id) {
+                Some(run) => {
+                    let source_call_count = self.read_run_source_call_count(run_id).await;
+                    let body = render_run_detail(run, source_call_count);
+                    Ok(vec![ResourceContents::text(body.to_string(), uri)])
+                }
+                None => Err(ErrorData::resource_not_found(
+                    format!("No persisted sub-agent run for `{run_id}`"),
+                    None,
+                )),
+            },
+            AgentResourceRequest::RunPermissions { ref run_id } => {
+                // Resolve the run's thread via its snapshot, then read the
+                // sibling permission profile the dispatcher persisted.
+                let profile = match (find_run(run_id), store.as_ref()) {
+                    (Some(run), Some(store)) => store
+                        .read_run_permissions(run.thread_id, run.id)
+                        .map_err(|err| {
+                        ErrorData::internal_error(
+                            format!("failed to read run permission profile: {err}"),
+                            None,
+                        )
+                    })?,
+                    _ => None,
+                };
+                match profile {
+                    Some(profile) => {
+                        let body = render_run_permissions(run_id, &profile);
+                        Ok(vec![ResourceContents::text(body.to_string(), uri)])
+                    }
+                    None => Err(ErrorData::resource_not_found(
+                        format!("No persisted permission profile for run `{run_id}`"),
+                        None,
+                    )),
+                }
+            }
+            AgentResourceRequest::RunContext { ref run_id } => {
+                let pack = match (find_run(run_id), store.as_ref()) {
+                    (Some(run), Some(store)) => store
+                        .read_run_context_pack(run.thread_id, run.id)
+                        .map_err(|err| {
+                            ErrorData::internal_error(
+                                format!("failed to read run context pack: {err}"),
+                                None,
+                            )
+                        })?,
+                    _ => None,
+                };
+                match pack {
+                    Some(pack) => {
+                        let body = render_run_context(run_id, &pack);
+                        Ok(vec![ResourceContents::text(body.to_string(), uri)])
+                    }
+                    None => Err(ErrorData::resource_not_found(
+                        format!("No persisted context pack for run `{run_id}`"),
+                        None,
+                    )),
+                }
+            }
+            AgentResourceRequest::RunBudget { ref run_id } => {
+                let usage = match (find_run(run_id), store.as_ref()) {
+                    (Some(run), Some(store)) => {
+                        store.read_run_usage(run.thread_id, run.id).map_err(|err| {
+                            ErrorData::internal_error(
+                                format!("failed to read run usage: {err}"),
+                                None,
+                            )
+                        })?
+                    }
+                    _ => None,
+                };
+                match usage {
+                    // The run carries no configured per-run budget caps, so the
+                    // default (unlimited) `AgentBudget` is reported — the usage
+                    // totals are real; nothing is "exceeded". `source_call_count`
+                    // is now attributed per run via the v0.17.1254 trace link
+                    // (`source_call_log.agent_run_id`); count this run's rows.
+                    Some(usage) => {
+                        let source_call_count = self.read_run_source_call_count(run_id).await;
+                        let body = render_run_budget(
+                            run_id,
+                            &AgentBudget::default(),
+                            &usage,
+                            source_call_count,
+                        );
+                        Ok(vec![ResourceContents::text(body.to_string(), uri)])
+                    }
+                    None => Err(ErrorData::resource_not_found(
+                        format!("No persisted usage record for run `{run_id}`"),
+                        None,
+                    )),
+                }
+            }
+            AgentResourceRequest::MergeCandidate { ref candidate_id } => {
+                // Merge candidates are keyed by their own id (not a run id) and
+                // may live under any thread, so `find_merge_candidate` scans the
+                // sessions root. The dispatcher persists one per successful
+                // sub-agent run (CEX-S2-16).
+                let candidate = match (
+                    uuid::Uuid::parse_str(candidate_id)
+                        .ok()
+                        .map(MergeCandidateId::from),
+                    store.as_ref(),
+                ) {
+                    (Some(id), Some(store)) => store.find_merge_candidate(id).map_err(|err| {
+                        ErrorData::internal_error(
+                            format!("failed to read merge candidate: {err}"),
+                            None,
+                        )
+                    })?,
+                    _ => None,
+                };
+                match candidate {
+                    Some(candidate) => {
+                        let body = render_merge_candidate(&candidate);
+                        Ok(vec![ResourceContents::text(body.to_string(), uri)])
+                    }
+                    None => Err(ErrorData::resource_not_found(
+                        format!("No persisted merge candidate for `{candidate_id}`"),
+                        None,
+                    )),
+                }
+            }
+        }
     }
 
     /// Build the `libra://context/active` resource by finding the latest
@@ -478,29 +707,57 @@ impl ServerHandler for LibraMcpServer {
     ) -> Result<ListResourceTemplatesResult, ErrorData> {
         self.authorize_or_error(McpOperation::ListResourceTemplates)
             .await?;
-        Ok(ListResourceTemplatesResult::with_all_items(vec![
-            ResourceTemplate::new(
-                RawResourceTemplate {
-                    uri_template: "libra://object/{object_id}".to_string(),
-                    name: "Get AI Object by ID".to_string(),
-                    description: None,
-                    mime_type: None,
-                    title: None,
-                    icons: None,
-                },
-                None,
-            ),
-            ResourceTemplate::new(
-                RawResourceTemplate {
-                    uri_template: "libra://objects/{object_type}".to_string(),
-                    name: "List AI Objects by Type".to_string(),
-                    description: None,
-                    mime_type: None,
-                    title: None,
-                    icons: None,
-                },
-                None,
-            ),
-        ]))
+        Ok(ListResourceTemplatesResult::with_all_items(
+            ai_resource_templates(),
+        ))
     }
+}
+
+/// The MCP resource *templates* (parameterized URIs) this server advertises via
+/// `resources/templates/list`: the two AI-object templates plus the four
+/// readable agent-run detail views and the `merge-candidates/{id}` view
+/// (CEX-S2-16, `docs/improvement/agent.md:1631` "6 个新 URI 模板"). The
+/// non-parameterized `libra://agents/runs` list URI is a concrete resource
+/// (advertised by `list_resources_impl`), not a template. `merge-candidates/{id}`
+/// is now served from the dispatcher-persisted records (CEX-S2-16 B2a/B2b), so a
+/// template is advertised for it — every advertised template is one this server
+/// can actually serve.
+///
+/// Extracted as a free function so it is unit-testable without fabricating a
+/// `RequestContext` for the trait method.
+pub(crate) fn ai_resource_templates() -> Vec<ResourceTemplate> {
+    let template = |uri: &str, name: &str| {
+        ResourceTemplate::new(
+            RawResourceTemplate {
+                uri_template: uri.to_string(),
+                name: name.to_string(),
+                description: None,
+                mime_type: None,
+                title: None,
+                icons: None,
+            },
+            None,
+        )
+    };
+    vec![
+        template("libra://object/{object_id}", "Get AI Object by ID"),
+        template("libra://objects/{object_type}", "List AI Objects by Type"),
+        template("libra://agents/runs/{id}", "Get sub-agent run detail"),
+        template(
+            "libra://agents/runs/{id}/permissions",
+            "Get sub-agent run permission profile",
+        ),
+        template(
+            "libra://agents/runs/{id}/budget",
+            "Get sub-agent run budget and usage",
+        ),
+        template(
+            "libra://agents/runs/{id}/context",
+            "Get sub-agent run context pack",
+        ),
+        template(
+            "libra://agents/merge-candidates/{id}",
+            "Get sub-agent merge candidate",
+        ),
+    ]
 }

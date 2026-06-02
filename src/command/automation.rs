@@ -1,4 +1,6 @@
 //! `libra automation` command surface for CEX-15.
+//!
+//! `libra automation` 命令接口，用于 CEX-15。
 
 use std::path::PathBuf;
 

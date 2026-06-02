@@ -24,8 +24,13 @@ use std::{
 use uuid::Uuid;
 
 use super::{
-    AgentRunId,
-    event::{AgentRunEvent, AgentRunEventEnvelope},
+    AgentRunId, MergeCandidateId,
+    context_pack::AgentContextPack,
+    decision::MergeCandidate,
+    event::{AgentRunEvent, AgentRunEventEnvelope, RunUsage},
+    patchset::AgentPatchSet,
+    permission::AgentPermissionProfile,
+    run::AgentRun,
 };
 
 /// Append-only store for per-run agent event transcripts, rooted at a
@@ -134,6 +139,348 @@ impl AgentRunEventStore {
         }
         Ok(events)
     }
+
+    /// Resolve the per-run **snapshot** path
+    /// `.libra/sessions/{thread_id}/agents/{run_id}.run.json`.
+    ///
+    /// The `.run.json` suffix keeps the snapshot distinct from the run's
+    /// append-only `{run_id}.jsonl` event transcript in the same `agents/`
+    /// directory. Where the transcript is the run's event *history*, the
+    /// snapshot is its current materialized [`AgentRun`] state — the record
+    /// the MCP `libra://agents/runs` resources and the TUI agent pane read.
+    pub fn snapshot_path(&self, thread_id: Uuid, run_id: AgentRunId) -> PathBuf {
+        self.sessions_root
+            .join(thread_id.to_string())
+            .join("agents")
+            .join(format!("{}.run.json", run_id.0))
+    }
+
+    /// Persist the latest [`AgentRun`] snapshot, **overwriting** any prior
+    /// snapshot for the run. Unlike [`append`](Self::append), this is not
+    /// append-only: the snapshot is the run's *current* state, so the
+    /// producer rewrites it as the run transitions (spawned → running →
+    /// terminal). Creates the `{thread_id}/agents/` parent dirs on first
+    /// write. The snapshot is keyed by `run.id`, so the same store can hold
+    /// many runs under one thread.
+    pub fn write_snapshot(&self, thread_id: Uuid, run: &AgentRun) -> io::Result<()> {
+        let path = self.snapshot_path(thread_id, run.id);
+        ensure_parent_dir(&path)?;
+        let json = serde_json::to_string_pretty(run).map_err(io::Error::other)?;
+        fs::write(&path, json)
+    }
+
+    /// Read one run's snapshot. A missing snapshot is `Ok(None)` (a run that
+    /// never persisted one) rather than an error; a present-but-corrupt
+    /// snapshot surfaces as an error so corruption is never silently treated
+    /// as "no run".
+    pub fn read_snapshot(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+    ) -> io::Result<Option<AgentRun>> {
+        let path = self.snapshot_path(thread_id, run_id);
+        match fs::read_to_string(&path) {
+            Ok(json) => serde_json::from_str(&json)
+                .map(Some)
+                .map_err(io::Error::other),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// List every persisted run snapshot under a thread's `agents/` directory,
+    /// sorted by run id for deterministic output. A missing `agents/` directory
+    /// yields an empty vec. Only `*.run.json` snapshot files are read — the
+    /// sibling `.jsonl` event transcripts are skipped — and a snapshot file that
+    /// fails to parse fails the listing (corruption is not silently dropped).
+    pub fn list_snapshots(&self, thread_id: Uuid) -> io::Result<Vec<AgentRun>> {
+        let dir = self
+            .sessions_root
+            .join(thread_id.to_string())
+            .join("agents");
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+
+        let mut runs = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            let is_snapshot = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".run.json"));
+            if !is_snapshot {
+                continue;
+            }
+            let json = fs::read_to_string(&path)?;
+            let run: AgentRun = serde_json::from_str(&json).map_err(io::Error::other)?;
+            runs.push(run);
+        }
+        runs.sort_by_key(|run| run.id.0);
+        Ok(runs)
+    }
+
+    /// List every persisted run snapshot across **all** threads under the
+    /// sessions root, sorted by run id. The MCP `libra://agents/runs` list view
+    /// is not scoped to one thread, so it aggregates every `{thread_id}/agents/
+    /// *.run.json` snapshot. A missing sessions root yields an empty vec;
+    /// top-level entries whose name is not a UUID (non-thread directories) are
+    /// skipped, and a corrupt snapshot fails the listing.
+    pub fn list_all_snapshots(&self) -> io::Result<Vec<AgentRun>> {
+        let entries = match fs::read_dir(&self.sessions_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+
+        let mut runs = Vec::new();
+        for entry in entries {
+            let thread_dir = entry?.path();
+            // Each top-level entry is a `{thread_id}` directory; parse its name
+            // as a UUID so `list_snapshots` can resolve its `agents/` subdir.
+            // Non-UUID entries (other session state) are skipped.
+            let Some(thread_id) = thread_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| Uuid::parse_str(name).ok())
+            else {
+                continue;
+            };
+            runs.extend(self.list_snapshots(thread_id)?);
+        }
+        runs.sort_by_key(|run| run.id.0);
+        Ok(runs)
+    }
+
+    /// Resolve the per-run **permission profile** path
+    /// `.libra/sessions/{thread_id}/agents/{run_id}.permissions.json`. A sibling
+    /// of the run snapshot, holding the run's static [`AgentPermissionProfile`]
+    /// (it does not change over the run's life) for the MCP
+    /// `libra://agents/runs/{id}/permissions` resource.
+    pub fn permissions_path(&self, thread_id: Uuid, run_id: AgentRunId) -> PathBuf {
+        self.sessions_root
+            .join(thread_id.to_string())
+            .join("agents")
+            .join(format!("{}.permissions.json", run_id.0))
+    }
+
+    /// Persist a run's permission profile (write-once; the profile is fixed at
+    /// dispatch). Creates the `{thread_id}/agents/` parent dirs on first write.
+    pub fn write_run_permissions(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+        profile: &AgentPermissionProfile,
+    ) -> io::Result<()> {
+        let path = self.permissions_path(thread_id, run_id);
+        ensure_parent_dir(&path)?;
+        let json = serde_json::to_string_pretty(profile).map_err(io::Error::other)?;
+        fs::write(&path, json)
+    }
+
+    /// Read a run's persisted permission profile. A missing profile is
+    /// `Ok(None)`; a present-but-corrupt profile surfaces as an error.
+    pub fn read_run_permissions(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+    ) -> io::Result<Option<AgentPermissionProfile>> {
+        let path = self.permissions_path(thread_id, run_id);
+        match fs::read_to_string(&path) {
+            Ok(json) => serde_json::from_str(&json)
+                .map(Some)
+                .map_err(io::Error::other),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resolve the per-run **context pack** path
+    /// `.libra/sessions/{thread_id}/agents/{run_id}.context.json`. A sibling of
+    /// the run snapshot holding the run's static [`AgentContextPack`] (goal /
+    /// read+write scope / source intent) for the MCP
+    /// `libra://agents/runs/{id}/context` resource.
+    pub fn context_pack_path(&self, thread_id: Uuid, run_id: AgentRunId) -> PathBuf {
+        self.sessions_root
+            .join(thread_id.to_string())
+            .join("agents")
+            .join(format!("{}.context.json", run_id.0))
+    }
+
+    /// Persist a run's context pack (write-once; the pack is fixed at dispatch).
+    /// Creates the `{thread_id}/agents/` parent dirs on first write.
+    pub fn write_run_context_pack(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+        pack: &AgentContextPack,
+    ) -> io::Result<()> {
+        let path = self.context_pack_path(thread_id, run_id);
+        ensure_parent_dir(&path)?;
+        let json = serde_json::to_string_pretty(pack).map_err(io::Error::other)?;
+        fs::write(&path, json)
+    }
+
+    /// Read a run's persisted context pack. A missing pack is `Ok(None)`; a
+    /// present-but-corrupt pack surfaces as an error.
+    pub fn read_run_context_pack(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+    ) -> io::Result<Option<AgentContextPack>> {
+        let path = self.context_pack_path(thread_id, run_id);
+        match fs::read_to_string(&path) {
+            Ok(json) => serde_json::from_str(&json)
+                .map(Some)
+                .map_err(io::Error::other),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resolve the per-run **usage** path
+    /// `.libra/sessions/{thread_id}/agents/{run_id}.usage.json`. A sibling of
+    /// the run snapshot holding the run's terminal [`RunUsage`] (tokens / tool
+    /// calls / wall-clock / cost) for the MCP `libra://agents/runs/{id}/budget`
+    /// resource.
+    pub fn usage_path(&self, thread_id: Uuid, run_id: AgentRunId) -> PathBuf {
+        self.sessions_root
+            .join(thread_id.to_string())
+            .join("agents")
+            .join(format!("{}.usage.json", run_id.0))
+    }
+
+    /// Persist a run's terminal usage totals (write-once at the run's terminal
+    /// transition). Creates the `{thread_id}/agents/` parent dirs on first write.
+    pub fn write_run_usage(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+        usage: &RunUsage,
+    ) -> io::Result<()> {
+        let path = self.usage_path(thread_id, run_id);
+        ensure_parent_dir(&path)?;
+        let json = serde_json::to_string_pretty(usage).map_err(io::Error::other)?;
+        fs::write(&path, json)
+    }
+
+    /// Read a run's persisted usage totals. A missing record is `Ok(None)`; a
+    /// present-but-corrupt record surfaces as an error.
+    pub fn read_run_usage(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+    ) -> io::Result<Option<RunUsage>> {
+        let path = self.usage_path(thread_id, run_id);
+        match fs::read_to_string(&path) {
+            Ok(json) => serde_json::from_str(&json)
+                .map(Some)
+                .map_err(io::Error::other),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resolve the per-run **patch-set** path
+    /// `.libra/sessions/{thread_id}/agents/{run_id}.patchset.json`. A sibling of
+    /// the run snapshot holding the [`AgentPatchSet`] reference for the run's
+    /// captured workspace diff (CEX-S2-15/16), which a [`MergeCandidate`]
+    /// aggregates for the MCP `libra://agents/merge-candidates/{id}` resource.
+    pub fn patchset_path(&self, thread_id: Uuid, run_id: AgentRunId) -> PathBuf {
+        self.sessions_root
+            .join(thread_id.to_string())
+            .join("agents")
+            .join(format!("{}.patchset.json", run_id.0))
+    }
+
+    /// Persist a run's `AgentPatchSet` reference (write-once at run completion).
+    pub fn write_run_patchset(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+        patchset: &AgentPatchSet,
+    ) -> io::Result<()> {
+        let path = self.patchset_path(thread_id, run_id);
+        ensure_parent_dir(&path)?;
+        let json = serde_json::to_string_pretty(patchset).map_err(io::Error::other)?;
+        fs::write(&path, json)
+    }
+
+    /// Read a run's persisted `AgentPatchSet`. Missing is `Ok(None)`; corrupt is
+    /// an error.
+    pub fn read_run_patchset(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+    ) -> io::Result<Option<AgentPatchSet>> {
+        let path = self.patchset_path(thread_id, run_id);
+        match fs::read_to_string(&path) {
+            Ok(json) => serde_json::from_str(&json)
+                .map(Some)
+                .map_err(io::Error::other),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resolve a **merge-candidate** path
+    /// `.libra/sessions/{thread_id}/agents/{candidate_id}.candidate.json`. Keyed
+    /// by candidate id (not run id) since a candidate may aggregate several runs.
+    pub fn merge_candidate_path(&self, thread_id: Uuid, candidate_id: MergeCandidateId) -> PathBuf {
+        self.sessions_root
+            .join(thread_id.to_string())
+            .join("agents")
+            .join(format!("{}.candidate.json", candidate_id.0))
+    }
+
+    /// Persist a [`MergeCandidate`] under a thread.
+    pub fn write_merge_candidate(
+        &self,
+        thread_id: Uuid,
+        candidate: &MergeCandidate,
+    ) -> io::Result<()> {
+        let path = self.merge_candidate_path(thread_id, candidate.id);
+        ensure_parent_dir(&path)?;
+        let json = serde_json::to_string_pretty(candidate).map_err(io::Error::other)?;
+        fs::write(&path, json)
+    }
+
+    /// Find a persisted [`MergeCandidate`] by id across **all** threads (the MCP
+    /// `merge-candidates/{id}` resource is not thread-scoped). `Ok(None)` when no
+    /// thread holds it; a present-but-corrupt record surfaces as an error.
+    pub fn find_merge_candidate(
+        &self,
+        candidate_id: MergeCandidateId,
+    ) -> io::Result<Option<MergeCandidate>> {
+        let entries = match fs::read_dir(&self.sessions_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let Some(thread_id) = entry?
+                .path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| Uuid::parse_str(name).ok())
+            else {
+                continue;
+            };
+            let path = self.merge_candidate_path(thread_id, candidate_id);
+            match fs::read_to_string(&path) {
+                Ok(json) => {
+                    return serde_json::from_str(&json)
+                        .map(Some)
+                        .map_err(io::Error::other);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(None)
+    }
 }
 
 fn ensure_parent_dir(path: &Path) -> io::Result<()> {
@@ -147,6 +494,7 @@ fn ensure_parent_dir(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::internal::ai::agent_run::{
+        AgentRunStatus, AgentTaskId,
         event::WorkspaceStrategy,
         workspace_strategy::{WorkspaceSizing, record_materialization},
     };
@@ -156,6 +504,19 @@ mod tests {
         let sessions_root = temp.path().join(".libra").join("sessions");
         let store = AgentRunEventStore::new(&sessions_root);
         (temp, store)
+    }
+
+    fn sample_run(id: AgentRunId, status: AgentRunStatus) -> AgentRun {
+        AgentRun {
+            id,
+            task_id: AgentTaskId::new(),
+            thread_id: Uuid::new_v4(),
+            provider: "deepseek".to_string(),
+            model: "deepseek-chat".to_string(),
+            transcript_path: format!("agents/{}.jsonl", id.0),
+            workspace_path: None,
+            status,
+        }
     }
 
     /// The transcript path is exactly
@@ -313,6 +674,349 @@ mod tests {
             events[1].is_unknown(),
             "unrecognized future event must parse as Unknown, not fail the read",
         );
+    }
+
+    /// The snapshot path sits in the same `agents/` dir as the transcript but
+    /// carries the distinct `.run.json` suffix, so the run's current-state
+    /// snapshot never collides with its append-only `.jsonl` event log.
+    #[test]
+    fn snapshot_path_is_distinct_from_transcript() {
+        let (_temp, store) = store();
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+
+        let snapshot = store.snapshot_path(thread_id, run_id);
+        let transcript = store.transcript_path(thread_id, run_id);
+        assert_ne!(snapshot, transcript);
+        assert!(
+            snapshot
+                .to_string_lossy()
+                .ends_with(&format!("{}.run.json", run_id.0)),
+        );
+        assert_eq!(snapshot.parent(), transcript.parent());
+    }
+
+    /// A written snapshot round-trips: reading it back yields the same run
+    /// fields. (`AgentRun` is not `PartialEq`, so the key fields are checked
+    /// individually.)
+    #[test]
+    fn write_then_read_snapshot_round_trips() {
+        let (_temp, store) = store();
+        let thread_id = Uuid::new_v4();
+        let run = sample_run(AgentRunId::new(), AgentRunStatus::Running);
+
+        store
+            .write_snapshot(thread_id, &run)
+            .expect("write snapshot");
+        let back = store
+            .read_snapshot(thread_id, run.id)
+            .expect("read snapshot")
+            .expect("snapshot must be present");
+
+        assert_eq!(back.id, run.id);
+        assert_eq!(back.task_id, run.task_id);
+        assert_eq!(back.thread_id, run.thread_id);
+        assert_eq!(back.provider, run.provider);
+        assert_eq!(back.model, run.model);
+        assert_eq!(back.transcript_path, run.transcript_path);
+        assert_eq!(back.status, run.status);
+    }
+
+    /// A run that never persisted a snapshot reads as `None`, not an error.
+    #[test]
+    fn read_missing_snapshot_yields_none() {
+        let (_temp, store) = store();
+        let snapshot = store
+            .read_snapshot(Uuid::new_v4(), AgentRunId::new())
+            .expect("missing snapshot must read as Ok(None)");
+        assert!(snapshot.is_none());
+    }
+
+    /// The snapshot is current-state, not append-only: a second write for the
+    /// same run id overwrites the first, so a status transition is reflected.
+    #[test]
+    fn write_snapshot_overwrites_prior_state() {
+        let (_temp, store) = store();
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+
+        store
+            .write_snapshot(thread_id, &sample_run(run_id, AgentRunStatus::Running))
+            .expect("write running snapshot");
+        store
+            .write_snapshot(thread_id, &sample_run(run_id, AgentRunStatus::Completed))
+            .expect("overwrite with completed snapshot");
+
+        let back = store
+            .read_snapshot(thread_id, run_id)
+            .expect("read snapshot")
+            .expect("present");
+        assert_eq!(
+            back.status,
+            AgentRunStatus::Completed,
+            "the latest write must win — snapshot is current state, not history",
+        );
+    }
+
+    /// `list_snapshots` returns every run snapshot under a thread, sorted by
+    /// run id, and skips the sibling `.jsonl` event transcript (a run can have
+    /// both a transcript and a snapshot in the same `agents/` dir).
+    #[test]
+    fn list_snapshots_returns_all_sorted_and_skips_transcripts() {
+        let (_temp, store) = store();
+        let thread_id = Uuid::new_v4();
+        let run_a = sample_run(
+            AgentRunId::from(Uuid::from_u128(1)),
+            AgentRunStatus::Running,
+        );
+        let run_b = sample_run(
+            AgentRunId::from(Uuid::from_u128(2)),
+            AgentRunStatus::Completed,
+        );
+
+        store.write_snapshot(thread_id, &run_b).expect("write b");
+        store.write_snapshot(thread_id, &run_a).expect("write a");
+        // Also append an event transcript for run_a — it must NOT be parsed as
+        // a snapshot by the listing.
+        store
+            .append(
+                thread_id,
+                run_a.id,
+                &AgentRunEvent::Started {
+                    agent_run_id: run_a.id,
+                },
+            )
+            .expect("append transcript event");
+
+        let runs = store.list_snapshots(thread_id).expect("list snapshots");
+        assert_eq!(
+            runs.len(),
+            2,
+            "exactly the two snapshots, not the transcript"
+        );
+        assert_eq!(runs[0].id, run_a.id, "sorted by run id: u128(1) first");
+        assert_eq!(runs[1].id, run_b.id);
+    }
+
+    /// `list_all_snapshots` aggregates snapshots across every thread under the
+    /// sessions root (the MCP run-list view is not thread-scoped), sorted by run
+    /// id, and skips non-UUID top-level entries.
+    #[test]
+    fn list_all_snapshots_aggregates_across_threads() {
+        let (temp, store) = store();
+        let thread_a = Uuid::new_v4();
+        let thread_b = Uuid::new_v4();
+        let run_a = sample_run(
+            AgentRunId::from(Uuid::from_u128(1)),
+            AgentRunStatus::Running,
+        );
+        let run_b = sample_run(
+            AgentRunId::from(Uuid::from_u128(2)),
+            AgentRunStatus::Completed,
+        );
+        store.write_snapshot(thread_a, &run_a).expect("write a");
+        store.write_snapshot(thread_b, &run_b).expect("write b");
+        // A non-UUID sibling directory under the sessions root must be ignored.
+        std::fs::create_dir_all(
+            temp.path()
+                .join(".libra")
+                .join("sessions")
+                .join("not-a-thread"),
+        )
+        .expect("mk non-thread dir");
+
+        let runs = store.list_all_snapshots().expect("list all snapshots");
+        assert_eq!(
+            runs.len(),
+            2,
+            "both threads' snapshots, skipping non-thread dirs"
+        );
+        assert_eq!(runs[0].id, run_a.id, "sorted by run id across threads");
+        assert_eq!(runs[1].id, run_b.id);
+    }
+
+    /// A run's permission profile round-trips through its sibling
+    /// `*.permissions.json` record; a missing profile reads as `None`.
+    #[test]
+    fn write_then_read_run_permissions_round_trips() {
+        use std::collections::BTreeSet;
+
+        use crate::internal::ai::agent_run::permission::{AgentPermissionProfile, ApprovalRouting};
+
+        let (_temp, store) = store();
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+        let mut allowed = BTreeSet::new();
+        allowed.insert("read_file".to_string());
+        let profile = AgentPermissionProfile {
+            allowed_tools: allowed,
+            denied_tools: BTreeSet::new(),
+            allowed_source_slugs: BTreeSet::new(),
+            approval_routing: ApprovalRouting::Layer1Human,
+            may_spawn_sub_agents: false,
+        };
+
+        store
+            .write_run_permissions(thread_id, run_id, &profile)
+            .expect("write permissions");
+        let back = store
+            .read_run_permissions(thread_id, run_id)
+            .expect("read permissions")
+            .expect("profile must be present");
+        assert!(back.allowed_tools.contains("read_file"));
+        assert!(!back.may_spawn_sub_agents);
+
+        assert!(
+            store
+                .read_run_permissions(Uuid::new_v4(), AgentRunId::new())
+                .expect("missing profile reads Ok(None)")
+                .is_none(),
+        );
+    }
+
+    /// A run's context pack round-trips through its sibling `*.context.json`
+    /// record; a missing pack reads as `None`.
+    #[test]
+    fn write_then_read_run_context_pack_round_trips() {
+        let (_temp, store) = store();
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+        let pack = AgentContextPack {
+            task_id: AgentTaskId::new(),
+            goal: "summarise the module".to_string(),
+            read_scope: Vec::new(),
+            write_scope: Vec::new(),
+            source_intent_id: None,
+        };
+
+        store
+            .write_run_context_pack(thread_id, run_id, &pack)
+            .expect("write context pack");
+        let back = store
+            .read_run_context_pack(thread_id, run_id)
+            .expect("read context pack")
+            .expect("pack must be present");
+        assert_eq!(back.task_id, pack.task_id);
+        assert_eq!(back.goal, "summarise the module");
+        assert!(back.read_scope.is_empty() && back.write_scope.is_empty());
+
+        assert!(
+            store
+                .read_run_context_pack(Uuid::new_v4(), AgentRunId::new())
+                .expect("missing pack reads Ok(None)")
+                .is_none(),
+        );
+    }
+
+    /// A run's terminal usage round-trips through its sibling `*.usage.json`
+    /// record; a missing record reads as `None`.
+    #[test]
+    fn write_then_read_run_usage_round_trips() {
+        let (_temp, store) = store();
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+        let usage = RunUsage {
+            prompt_tokens: 120,
+            completion_tokens: 60,
+            wall_clock_ms: 4_200,
+            tool_call_count: 3,
+            cost_estimate_micro_dollars: 1_500,
+            ..RunUsage::default()
+        };
+
+        store
+            .write_run_usage(thread_id, run_id, &usage)
+            .expect("write usage");
+        let back = store
+            .read_run_usage(thread_id, run_id)
+            .expect("read usage")
+            .expect("usage must be present");
+        assert_eq!(back.prompt_tokens, 120);
+        assert_eq!(back.tool_call_count, 3);
+        assert_eq!(back.wall_clock_ms, 4_200);
+
+        assert!(
+            store
+                .read_run_usage(Uuid::new_v4(), AgentRunId::new())
+                .expect("missing usage reads Ok(None)")
+                .is_none(),
+        );
+    }
+
+    /// A run's `AgentPatchSet` round-trips through its sibling, and a
+    /// `MergeCandidate` aggregating it round-trips + is findable by id across
+    /// threads (the MCP merge-candidates resource path).
+    #[test]
+    fn write_then_read_patchset_and_find_merge_candidate() {
+        use crate::internal::ai::agent_run::{
+            AgentPatchSetId, MergeCandidateId, decision::MergeCandidate,
+        };
+
+        let (_temp, store) = store();
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+        let patchset = AgentPatchSet {
+            id: AgentPatchSetId::new(),
+            agent_run_id: run_id,
+            patchset_id: Uuid::new_v4(),
+            workspace_scope_constrained: false,
+        };
+
+        store
+            .write_run_patchset(thread_id, run_id, &patchset)
+            .expect("write patchset");
+        let back = store
+            .read_run_patchset(thread_id, run_id)
+            .expect("read patchset")
+            .expect("patchset must be present");
+        assert_eq!(back.id, patchset.id);
+        assert_eq!(back.agent_run_id, run_id);
+
+        let candidate = MergeCandidate::from_patchsets(
+            MergeCandidateId::new(),
+            std::slice::from_ref(&patchset),
+        );
+        let candidate_id = candidate.id;
+        store
+            .write_merge_candidate(thread_id, &candidate)
+            .expect("write candidate");
+
+        let found = store
+            .find_merge_candidate(candidate_id)
+            .expect("find candidate")
+            .expect("candidate must be found across threads");
+        assert_eq!(found.id, candidate_id);
+        assert!(found.patchset_ids.contains(&patchset.id));
+
+        assert!(
+            store
+                .find_merge_candidate(MergeCandidateId::new())
+                .expect("missing candidate reads Ok(None)")
+                .is_none(),
+        );
+    }
+
+    /// A missing sessions root lists as empty (no runs ever persisted).
+    #[test]
+    fn list_all_snapshots_missing_root_yields_empty() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = AgentRunEventStore::new(temp.path().join("nonexistent-sessions"));
+        assert!(
+            store
+                .list_all_snapshots()
+                .expect("missing root → empty")
+                .is_empty()
+        );
+    }
+
+    /// A missing `agents/` directory (no runs ever persisted) lists as empty.
+    #[test]
+    fn list_snapshots_missing_dir_yields_empty() {
+        let (_temp, store) = store();
+        let runs = store
+            .list_snapshots(Uuid::new_v4())
+            .expect("missing dir must list as empty, not error");
+        assert!(runs.is_empty());
     }
 
     /// Pins the documented `read()` contract: a line whose `kind` IS

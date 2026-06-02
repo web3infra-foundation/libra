@@ -1,7 +1,6 @@
 //! Exposes SeaORM entity modules for config, reference, reflog, and object_index tables used across the internal database layer.
 
 pub mod ai_decision_proposal;
-pub mod ai_final_decision;
 pub mod ai_index_intent_context_frame;
 pub mod ai_index_intent_plan;
 pub mod ai_index_intent_task;

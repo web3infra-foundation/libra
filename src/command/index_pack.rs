@@ -1,4 +1,6 @@
 //! Builds pack index files by reading pack data, computing object offsets and hashes, and writing corresponding .idx outputs.
+//!
+//! 通过读取 pack 数据、计算对象偏移和哈希以及写入相应的 .idx 输出来构建 pack 索引文件。
 
 use std::{
     collections::BTreeMap,

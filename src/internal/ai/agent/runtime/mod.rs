@@ -56,7 +56,9 @@ pub use sub_agent::{
 // parent-cancel propagation, SafetyDecision checks, AgentRunEvent
 // Spawned/Completed/Failed wiring, timeout caps, and budget caps.
 pub mod sub_agent_dispatcher;
-pub use sub_agent_dispatcher::{AgentSpecRegistry, DefaultSubAgentDispatcher, MultiAgentConfig};
+pub use sub_agent_dispatcher::{
+    AgentSpecRegistry, DefaultSubAgentDispatcher, MultiAgentConfig, RunPatchStore,
+};
 
 /// An AI Agent that manages interactions with a CompletionModel.
 ///

@@ -1,3 +1,7 @@
+//! Usage statistics formatting for human-readable display and reporting.
+//!
+//! 用于人类可读显示和报告的使用统计格式化。
+
 use super::query::UsageAggregate;
 
 #[derive(Clone, Debug, PartialEq)]

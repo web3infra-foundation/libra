@@ -1,5 +1,7 @@
 //! CEX-S2-18 (Step 2.8): read-only Evidence → Memory Distillation query API.
 //!
+//! CEX-S2-18（步骤 2.8）：只读证据 → 内存蒸馏查询 API。
+//!
 //! Three read-only accessors over sub-agent [`AgentEvidence`] and the
 //! [`MergeDecision`] distillable-evidence list. Read-only **by design**
 //! (CEX-S2-18 (5)): no distillation pipeline, no AI summarisation, no

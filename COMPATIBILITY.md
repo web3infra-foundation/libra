@@ -31,9 +31,10 @@ batch document.
 | usage | intentionally-different | Libra AI provider/model usage reporting extension, not a Git command |
 | graph | intentionally-different | Libra AI graph inspection extension, not a Git command |
 | sandbox | intentionally-different | Libra AI sandbox diagnostics extension, not a Git command |
+| package | intentionally-different | Libra AI capability-package install/list/diff extension, not a Git command |
 | add | partial | sparse-checkout flag unsupported |
 | rm | partial | `--force` / `--dry-run` / `--cached` / `--recursive` / `--ignore-unmatch` / `--pathspec-from-file` / `--pathspec-file-nul` supported; sparse-checkout flag unsupported; per-command `--quiet` not exposed (use global `--quiet`) |
-| mv | partial | sparse-checkout flag unsupported; `--skip-errors` not exposed |
+| mv | partial | sparse-checkout flag unsupported |
 | restore | supported | |
 | status | supported | |
 | clean | supported | |
@@ -50,7 +51,7 @@ batch document.
 | commit | supported | |
 | switch | supported | |
 | rebase | partial | `--autosquash` / `--reapply-cherry-picks` not supported |
-| merge | partial | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |
+| merge | partial | fast-forward, best-base single-head three-way, clean disjoint octopus, `--squash`, `--no-ff`, `--ff-only`, `--no-commit`, message/signoff/shortlog, `ours` strategy, `-X ours/theirs`, binary conflict handling, and diff3 markers supported; `--autostash`, signature verification/signing flags, progress flags, `--into-name`, `--no-verify`, diff algorithms, whitespace strategy options, subtree/custom strategies/drivers, and conflicted octopus resolution deferred |
 | reset | supported | |
 | rev-parse | supported | |
 | rev-list | supported | |
@@ -58,13 +59,13 @@ batch document.
 | cherry-pick | supported | |
 | push | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected — intentional (see [docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push](docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push)) |
 | fetch | supported | `--depth` public flag |
-| pull | partial | fetch + fast-forward/three-way merge supported; no `--ff-only` / `--rebase` / `--squash` strategy flags exposed |
+| pull | partial | fetch + fast-forward/three-way merge supported; `--ff-only` and `--rebase` (`-r`) strategy flags exposed; `--squash` deferred |
 | diff | supported | |
 | grep | supported | |
 | blame | supported | |
 | revert | supported | |
 | remote | supported | |
-| hash-object | partial | Blob hashing for files and `--stdin`; `-w` writes blob objects. Other object types and advanced Git hash-object flags are unsupported |
+| hash-object | partial | Blob hashing for files, `--stdin`, and `--stdin-paths`; `-w` writes blob objects. Other object types and advanced Git hash-object flags are unsupported |
 | open | supported | |
 | config | supported | vault-backed |
 | db | intentionally-different | Libra repository database schema inspection/upgrade extension, not a Git command |
@@ -76,7 +77,7 @@ batch document.
 | hooks | intentionally-different | Hidden compatibility entry for hook configs installed by `libra agent enable` |
 | cat-file | supported | `-e` does not support JSON |
 | fsck | supported | |
-| verify-pack | partial | validates one `.idx` file against a matching `.pack`; Git's multi-index form and `-s` / `--stat-only` are not exposed |
+| verify-pack | partial | validates `.idx` files against matching `.pack` files; multi-index and Git's `-s` / `--stat-only` are supported; `--pack` is a Libra-only explicit pack path |
 | index-pack | supported | hidden plumbing command |
 | checkout | partial | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore`; detached HEAD and patch modes still partial |
 | bisect | partial | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` supported; `replay` (see [docs/improvement/compatibility/declined.md#d6-bisect-replay](docs/improvement/compatibility/declined.md#d6-bisect-replay)) / `terms` (see [docs/improvement/compatibility/declined.md#d7-bisect-terms](docs/improvement/compatibility/declined.md#d7-bisect-terms)) deferred |

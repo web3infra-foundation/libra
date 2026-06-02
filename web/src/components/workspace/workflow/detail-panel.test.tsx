@@ -41,7 +41,9 @@ describe("DetailPanel", () => {
       },
     };
 
-    const { container, unmount } = render(<DetailPanel detail={detail} onClose={() => {}} />);
+    const { container, unmount } = render(
+      <DetailPanel detail={detail} onClose={() => {}} snapshot={null} />,
+    );
 
     expect(container.textContent).toContain("Audit Code UI");
     expect(container.textContent).toContain("Do not show mock workflow content.");
@@ -64,7 +66,9 @@ describe("DetailPanel", () => {
       },
     };
 
-    const { container, unmount } = render(<DetailPanel detail={detail} onClose={() => {}} />);
+    const { container, unmount } = render(
+      <DetailPanel detail={detail} onClose={() => {}} snapshot={null} />,
+    );
 
     expect(container.textContent).toContain("actual tool output from the snapshot");
     expect(container.textContent).not.toContain("cargo test --lib optimistic");

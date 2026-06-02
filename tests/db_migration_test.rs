@@ -48,7 +48,7 @@ fn builtin_migrations_register_current_schema_migrations() {
         versions,
         vec![
             2026050301, 2026050302, 2026050303, 2026050501, 2026050601, 2026050801, 2026052301,
-            2026053101
+            2026060201
         ]
     );
     assert_eq!(
@@ -61,14 +61,14 @@ fn builtin_migrations_register_current_schema_migrations() {
             "approved_permission",
             "agent_usage_stats_agent_name",
             "source_call_log",
-            "ai_final_decision",
+            "source_call_log_agent_run_id",
         ]
     );
 
     let runner = builtin_runner().expect("builtin registry must build clean");
     assert!(!runner.is_empty());
     assert_eq!(runner.len(), 8);
-    assert_eq!(runner.max_registered_version(), Some(2026053101));
+    assert_eq!(runner.max_registered_version(), Some(2026060201));
 }
 
 // ---------------------------------------------------------------------------
@@ -1041,11 +1041,10 @@ async fn run_builtin_migrations_applies_current_builtin_registry() {
         applied,
         vec![
             2026050301, 2026050302, 2026050303, 2026050501, 2026050601, 2026050801, 2026052301,
-            2026053101
+            2026060201
         ]
     );
     assert!(table_exists(&conn, "schema_versions").await);
-    assert!(table_exists(&conn, "ai_final_decision").await);
     assert!(table_exists(&conn, "automation_log").await);
     assert!(table_exists(&conn, "agent_usage_stats").await);
     assert!(table_exists(&conn, "agent_session").await);
@@ -1055,6 +1054,8 @@ async fn run_builtin_migrations_applies_current_builtin_registry() {
     assert!(index_exists(&conn, "idx_agent_usage_stats_agent_name_provider_model").await);
     assert!(table_exists(&conn, "source_call_log").await);
     assert!(index_exists(&conn, "idx_source_call_log_session").await);
+    assert!(column_exists(&conn, "source_call_log", "agent_run_id").await);
+    assert!(index_exists(&conn, "idx_source_call_log_agent_run_id").await);
 }
 
 /// OC-Phase 2 P2.5 regression guard: `approved_permission` survives an
@@ -1081,7 +1082,7 @@ async fn approved_permission_up_down_up_round_trip() {
         .rollback_to(&conn, 2026050501)
         .await
         .expect("rollback past approved_permission");
-    assert_eq!(rolled, vec![2026053101, 2026052301, 2026050801, 2026050601]);
+    assert_eq!(rolled, vec![2026060201, 2026052301, 2026050801, 2026050601]);
     assert!(
         !table_exists(&conn, "approved_permission").await,
         "down migration must drop the table"
@@ -1102,7 +1103,7 @@ async fn approved_permission_up_down_up_round_trip() {
         .expect("second up reapplies cleanly");
     assert_eq!(
         reapplied,
-        vec![2026050601, 2026050801, 2026052301, 2026053101]
+        vec![2026050601, 2026050801, 2026052301, 2026060201]
     );
     assert!(table_exists(&conn, "approved_permission").await);
     assert!(index_exists(&conn, "idx_approved_permission_project").await);

@@ -67,17 +67,17 @@ The bundled
 [`template/seccomp-default.json`](../template/seccomp-default.json)
 groups syscalls into six intent-labelled buckets:
 
-- **Mount manipulation** (`mount` / `umount2` / `pivot_root` /
-  `open_tree` / `move_mount` / `fsopen` / `fsmount` / `fsconfig` /
-  `fspick`) — could remount `/proc` or escape the bwrap mount
-  namespace.
+- **Mount manipulation** (`mount` / `umount` / `pivot_root` /
+  `move_mount` / etc.) — could remount `/proc` or escape the
+  bwrap mount namespace.
 - **Kernel module + kexec** (`init_module`, `finit_module`,
   `delete_module`, `kexec_load`, `kexec_file_load`) — direct
   kernel-mode escalation.
 - **Process tampering** (`ptrace`, `process_vm_writev`,
   `process_vm_readv`) — cross-process memory access bypass.
 - **Host control** (`reboot`, `setdomainname`, `sethostname`,
-  `syslog`) — system-wide identity / power state.
+  `syslog`, `iopl`, `ioperm`) — system-wide identity / power /
+  I/O port access.
 - **Sandbox-bypass primitives** (`setns`, `unshare`) — re-enter
   namespaces or create new ones for escape.
 - **Kernel-introspection surfaces** (`perf_event_open`, `bpf`,
@@ -87,18 +87,6 @@ Default action is `allow`, so tools like `cargo`, `pytest`,
 `npm`, and standard shell commands stay fully functional.
 Tighten by adding more denies (mind that some legitimate tools
 need `clone3` / `io_uring_setup` on newer kernels).
-
-The bundled baseline uses only syscalls that resolve on every
-architecture Libra's runtime compiler targets (it must compile
-cleanly via `compile_bundled_seccomp_policy()`, whose
-`host_target_arch()` currently maps `x86_64` and `aarch64`).
-Architecture-specific denials — e.g. the x86-only
-`iopl` / `ioperm` I/O-port syscalls — are intentionally left out
-of the portable baseline; add them to a host-specific copy if you
-run exclusively on `x86_64` and want to block direct I/O-port
-access. Note `umount` (the legacy syscall) is absent on `x86_64`
-and `aarch64`; the baseline blocks `umount2`, which is what those
-architectures actually expose.
 
 ### Architecture caveat
 

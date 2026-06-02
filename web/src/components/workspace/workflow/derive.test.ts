@@ -52,4 +52,41 @@ describe("deriveWorkflow", () => {
       label: "cargo test",
     });
   });
+
+  it("preserves live plan metadata on the projected workflow plans", () => {
+    const state = snapshot();
+    state.plans = [
+      {
+        id: "plan-1",
+        title: "Execution plan",
+        summary: "Apply the live session snapshot to the workflow pane.",
+        status: "running",
+        steps: [
+          { step: "inspect", status: "running" },
+          { step: "verify", status: "queued" },
+        ],
+        updatedAt: "2026-05-14T00:00:00Z",
+      },
+      {
+        id: "plan-2",
+        title: "Test plan",
+        summary: "Confirm the projection keeps the metadata visible.",
+        status: "queued",
+        steps: [],
+        updatedAt: "2026-05-14T00:00:00Z",
+      },
+    ];
+
+    const workflow = deriveWorkflow(state);
+    expect(workflow.plans.execution).toMatchObject({
+      id: "plan-1",
+      title: "Execution plan",
+      summary: "Apply the live session snapshot to the workflow pane.",
+    });
+    expect(workflow.plans.test).toMatchObject({
+      id: "plan-2",
+      title: "Test plan",
+      summary: "Confirm the projection keeps the metadata visible.",
+    });
+  });
 });

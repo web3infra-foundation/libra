@@ -20,8 +20,8 @@ use crate::{
 /// `--help` examples shown in `libra mv --help` output.
 ///
 /// `mv` accepts `<source>... <destination>` with optional `--dry-run`,
-/// `--force`, and `--verbose`. The banner covers the rename, move-into-dir,
-/// multi-source, dry-run, force-overwrite, and JSON-for-agents forms so
+/// `--force`, `--skip-errors`, and `--verbose`. The banner covers the rename, move-into-dir,
+/// multi-source, dry-run, force-overwrite, skip-errors, and JSON-for-agents forms so
 /// users can map intent to invocation without reading the design doc.
 /// Cross-cutting `--help` EXAMPLES rollout per
 /// `docs/improvement/README.md` item B.
@@ -32,6 +32,7 @@ EXAMPLES:
     libra mv a.txt b.txt subdir/          Move multiple files into a directory
     libra mv -n old.txt new.txt           Dry-run: preview the rename without touching the index
     libra mv -f stale.txt fresh.txt       Overwrite the destination if it already exists
+    libra mv -k missing.txt a.txt dst/    Skip invalid move actions and keep valid sources
     libra mv -v old.txt new.txt           Verbose: print each move as it happens
     libra mv --json src/foo.rs src/bar.rs    Structured JSON output for agents";
 
@@ -52,6 +53,10 @@ pub struct MvArgs {
     /// Force move/rename even if the destination already exists (overwriting it)
     #[clap(short = 'f', long)]
     pub force: bool,
+
+    /// Skip move actions that would fail validation.
+    #[clap(short = 'k', long = "skip-errors")]
+    pub skip_errors: bool,
 }
 
 #[derive(Default)]
@@ -79,6 +84,7 @@ struct MvOutput {
     index_updates: Vec<MovePair>,
     dry_run: bool,
     forced: bool,
+    skip_errors: bool,
     verbose: bool,
 }
 
@@ -106,7 +112,7 @@ async fn execute_inner(args: MvArgs, output: &OutputConfig) -> Result<MvOutput, 
     // If the user just types `git mv` without enough arguments, print usage information instead of an error message.
     if args.paths.len() < 2 {
         return Err(
-            "usage: libra mv [<options>] <source>... <destination>\n\n-v, --verbose    be verbose\n-n, --dry-run    dry run\n-f, --force      force move/rename even if target exists"
+            "usage: libra mv [<options>] <source>... <destination>\n\n-v, --verbose       be verbose\n-n, --dry-run       dry run\n-f, --force         force move/rename even if target exists\n-k, --skip-errors   skip move actions that would fail validation"
                 .to_string(),
         );
     }
@@ -135,6 +141,7 @@ async fn execute_inner(args: MvArgs, output: &OutputConfig) -> Result<MvOutput, 
 
     // Check the validity of all sources and collect the valid move operations.
     let mut move_plan = MovePlan::default();
+    let mut accepted_targets = HashSet::new();
     let index_file = path::index();
     let mut index = match Index::load(&index_file) {
         Ok(index) => index,
@@ -150,14 +157,25 @@ async fn execute_inner(args: MvArgs, output: &OutputConfig) -> Result<MvOutput, 
             &index,
             args.force,
         ) {
-            Ok(plan) => move_plan.extend(plan),
+            Ok(plan) => {
+                if args.skip_errors && plan_has_duplicate_target(&plan.fs_moves, &accepted_targets)
+                {
+                    continue;
+                }
+                if args.skip_errors {
+                    accepted_targets.extend(plan.fs_moves.iter().map(|(_, target)| target.clone()));
+                }
+                move_plan.extend(plan);
+            }
             Err(err) => {
-                return Err(err);
+                if !args.skip_errors {
+                    return Err(err);
+                }
             }
         }
     }
 
-    if has_duplicate_target(&move_plan.fs_moves) {
+    if !args.skip_errors && has_duplicate_target(&move_plan.fs_moves) {
         return Err(format!(
             "fatal: multiple sources moving to the same target path, source={}, destination={}",
             util::to_workdir_path(&sources[sources.len() - 1]).display(),
@@ -169,6 +187,7 @@ async fn execute_inner(args: MvArgs, output: &OutputConfig) -> Result<MvOutput, 
         args.verbose,
         args.dry_run,
         args.force,
+        args.skip_errors,
         &mut index,
         output,
     )
@@ -398,6 +417,19 @@ fn has_duplicate_target(moves: &[(PathBuf, PathBuf)]) -> bool {
     false
 }
 
+fn plan_has_duplicate_target(
+    moves: &[(PathBuf, PathBuf)],
+    accepted_targets: &HashSet<PathBuf>,
+) -> bool {
+    let mut plan_targets = HashSet::new();
+    for (_, target) in moves {
+        if accepted_targets.contains(target) || !plan_targets.insert(target.clone()) {
+            return true;
+        }
+    }
+    false
+}
+
 fn remove_index_entry_all_stages(index: &mut Index, path: &str) {
     for stage in 0..=3 {
         let _ = index.remove(path, stage);
@@ -409,6 +441,7 @@ fn perform_moves(
     verbose: bool,
     dry_run: bool,
     force: bool,
+    skip_errors: bool,
     index: &mut Index,
     output: &OutputConfig,
 ) -> Result<MvOutput, String> {
@@ -418,6 +451,7 @@ fn perform_moves(
         index_updates: move_pairs_for_output(&plan.index_updates),
         dry_run,
         forced: force,
+        skip_errors,
         verbose,
     };
 

@@ -1,32 +1,5 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## ⚠️ This repository is a Libra repository — use `libra`, not `git`
-
-This working tree is version-controlled by **Libra**, not Git: its metadata lives in `.libra/` (there is no `.git/`). Run **`libra <command>`** for all version-control operations — `git` commands will not work here.
-
-`libra` is installed on `PATH`. If it is missing locally, install it with:
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://download.libra.tools/install.sh | sh
-```
-
-Its CLI is largely Git-compatible, so the everyday commands map one-to-one — just swap the binary name:
-
-```bash
-libra status              # not: git status
-libra add <path>          # not: git add
-libra commit -m "..."     # not: git commit
-libra log                 # not: git log
-libra diff                # not: git diff
-libra branch / switch / checkout / merge / rebase / push / pull / fetch …
-```
-
-Compatibility is *partial* and governed by the four-tier matrix in [`COMPATIBILITY.md`](COMPATIBILITY.md) (`supported` / `partial` / `unsupported` / `intentionally-different`) — consult it before assuming a Git flag or subcommand behaves identically. Libra also adds AI-native subcommands with no Git equivalent (`code`, `code-control`, `automation`, `usage`, `graph`, `sandbox`, `agent`, `publish`).
-
-(Note: this constraint is about operating *in* this repo. To build/test the Libra source itself, use the `cargo` commands in **Build & Development Commands** below; to run the in-tree build of the CLI use `cargo run -- <command>`.)
-
 ## Project Overview
 
 Libra is an **AI agent–native version control system** written in Rust. It partially implements a Git client with full on-disk format compatibility (`objects`, `index`, `pack`, `pack-index`) while using SQLite for transactional metadata (`config`, `HEAD`, `refs`). It is designed for monorepo/trunk-based development with tiered cloud storage (S3/R2) and a Cloudflare D1/R2 backup path.
@@ -100,7 +73,7 @@ src/
     ├── object.rs, object_ext.rs, tree.rs, path.rs, path_ext.rs, storage_ext.rs, text.rs, convert.rs, util.rs
     └── test.rs                  # Test helpers (ChangeDirGuard, setup_with_new_libra_in)
 
-tests/                           # ~98 top-level integration test files + ~21 tests/compat/ surface guards, layered L1/L2/L3 (see "Test Layers" below)
+tests/                           # 96 top-level integration test files + 17 tests/compat/ surface guards, layered L1/L2/L3 (see "Test Layers" below)
 ├── command/                     # Per-command integration tests mirroring real Git workflows
 ├── compat/                      # Compatibility-surface guards (must be registered as [[test]] in Cargo.toml)
 ├── harness/, helpers/, fixtures/, data/, objects/
@@ -118,7 +91,6 @@ sql/
 ├── sqlite_20260415_ai_runtime_contract.sql  # AI runtime contract extension
 ├── migrations/                              # Versioned forward + matching `_down.sql` migrations (YYYYMMDDNN naming)
 └── publish/                                 # Publish Worker D1 schema (0001_publish.sql, …)
-scripts/                         # check_compat_matrix.sh, check_docs_consistency.sh, check_integration_plan_consistency.sh
 template/                        # Git hook templates (pre-commit.sh, pre-commit.ps1, exclude, description) + sandbox seccomp filter (seccomp-default.json)
 web/                             # Next.js 16 frontend (pnpm); built into web/out/ and embedded via rust-embed
 worker/                          # Cloudflare Worker for read-only publishing (OpenNext + wrangler + playwright)
@@ -169,9 +141,9 @@ pnpm --dir web install --frozen-lockfile && pnpm --dir web build
 All PRs must pass these jobs on the `[self-hosted]` runner pool:
 1. **compat-rustfmt** — `cargo +nightly fmt --all --check`
 2. **compat-clippy** — `cargo clippy --all-targets --all-features -- -D warnings` (with `LIBRA_SKIP_WEB_BUILD=1`)
-3. **compat-web-check** — `pnpm --dir web lint` + `pnpm --dir web build` so `web/out/` cannot drift from `WebAssets`
+3. **compat-web-check** — `pnpm --dir web lint` + `pnpm --dir web build`, then an inline `git status --porcelain -- web/out` drift check so `web/out/` cannot drift from `WebAssets`
 4. **compat-redundancy** — directory-shape check on `third-party/rust/crates`
-5. **compat-offline-core** — `scripts/check_compat_matrix.sh` + `cargo test --all` + a second pass with `--features test-provider` for the TUI automation matrices (`code_ui_scenarios`, `harness_self_test`, `code_codex_default_tui_test`, `code_ui_remote_lease_matrix`, `code_ui_remote_sse_matrix`) under `--test-threads=1`
+5. **compat-offline-core** — `cargo test --test compat_matrix_alignment` (the `COMPATIBILITY.md` ↔ `src/cli.rs::Commands` drift check, self-contained Rust — there is no `scripts/` dir) + `cargo test --all` + a second pass with `--features test-provider` for the TUI automation matrices (`code_ui_scenarios`, `harness_self_test`, `code_codex_default_tui_test`, `code_ui_remote_lease_matrix`, `code_ui_remote_sse_matrix`) under `--test-threads=1`
 6. **compat-network-remotes** — `cargo test --features test-network --test network_remotes_test`
 
 Additional workflows: `codeql.yml` (security analysis), `model-generation-nightly.yml` (nightly model-generation matrix), `release.yml` (release pipeline).
@@ -212,7 +184,6 @@ Gate L2 / L3 tests with the small `env_var_is_set(name) -> bool` helper (see e.g
 - **Builder pattern**: Used for `AgentBuilder`, with validation in builder methods returning `Result`
 - **Guard pattern (RAII)**: `ChangeDirGuard` for safe directory changes in tests
 - **Provider pattern**: Each AI provider has `mod.rs` + `client.rs` + `completion.rs`
-- **Global hash-kind preflight**: Before dispatching most object-touching subcommands, `cli.rs` reads `core.objectformat` (defaulting to `"sha1"`, also accepting `"sha256"`) and calls `git_internal::hash::set_hash_kind` so the entire process hashes consistently. New commands that read/write objects must run through this preflight rather than assuming SHA-1 or hard-coding object-ID byte lengths (20 vs 32).
 
 ### Documentation
 
@@ -232,16 +203,6 @@ Gate L2 / L3 tests with the small `env_var_is_set(name) -> bool` helper (see e.g
 - **Fixtures**: Keep small and local in `tests/data/` and `tests/fixtures/`; reuse helpers from `tests/command/mod.rs`, `tests/harness/`, and `tests/helpers/`
 - **Gating**: Use the `env_var_is_set(name)` helper pattern (see `tests/cloud_storage_backup_test.rs:30`) plus an early `eprintln!("skipped (set ...)")` return so missing vars print a skip notice and do not fail the test. Match the L1/L2/L3 layering and the matching `test-network` / `test-live-ai` / `test-live-cloud` Cargo features
 - **Coverage**: Pair new commands/options with at least one end-to-end test plus a focused unit test, and an entry in `COMPATIBILITY.md` if you change the Git surface. New `StableErrorCode` variants must also be added to `docs/error-codes.md` (the `compat_error_codes_doc_sync` guard fails the build otherwise).
-
-## Quality Acceptance Criteria (质量验收标准)
-
-A change is considered done only when all three of the following pass locally with no manual fix-ups:
-
-1. **Formatting** — `cargo +nightly fmt --all --check` reports no formatting differences.
-2. **Lint** — `cargo clippy --all-targets --all-features -- -D warnings` reports no warnings.
-3. **Tests** — `source .env.test && cargo test --all` passes in full (L1 always runs; L2/L3 print "skipped" rather than fail when their env vars are unset — that is acceptable, an actual failure is not).
-
-These mirror the `compat-rustfmt`, `compat-clippy`, and `compat-offline-core` CI jobs, so passing them locally is the precondition for opening a PR. Run all three before reporting work as complete.
 
 ## Commit & PR Conventions
 

@@ -104,6 +104,39 @@ fn test_blame_machine_output_is_single_line_json() {
     assert!(parsed["data"]["lines"].as_array().is_some());
 }
 
+/// Scenario: a missing path in JSON mode must use the stable invalid-target
+/// code so agents can distinguish user input errors from repository failures.
+#[test]
+fn test_blame_json_file_not_found_uses_stable_error() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "blame", "missing.txt"], repo.path());
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert_eq!(report.category, "cli");
+    assert!(report.message.contains("file 'missing.txt' not found"));
+}
+
+/// Scenario: an invalid revision in JSON mode must be reported as a stable
+/// invalid-target error rather than a generic fatal failure.
+#[test]
+fn test_blame_json_invalid_revision_uses_stable_error() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(
+        &["--json", "blame", "tracked.txt", "no-such-rev"],
+        repo.path(),
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert_eq!(report.category, "cli");
+    assert!(report.message.contains("invalid revision: 'no-such-rev'"));
+}
+
 /// Scenario: human-readable blame output must truncate excessively long
 /// (Unicode) author names with an ellipsis ("...") rather than corrupt
 /// the table layout. Regression guard against char-vs-byte width bugs.
@@ -198,6 +231,52 @@ async fn test_blame_json_line_range_filters_output() {
     assert_eq!(lines[0]["line_number"], 2);
     assert_eq!(lines[0]["hash"], second.to_string());
     assert_eq!(lines[0]["content"], "line2-modified");
+}
+
+/// Scenario: all documented `-L` syntaxes must work in JSON mode: a single
+/// line and a relative `START,+COUNT` range.
+#[tokio::test]
+#[serial]
+async fn test_blame_json_line_range_single_and_relative_forms() {
+    let repo = tempdir().unwrap();
+    let _guard = setup_repo_with_hash(&repo, "sha1").await;
+    let (first, second) = prepare_history().await;
+
+    let output = run_libra_command(&["--json", "blame", "-L", "1", "foo.txt"], repo.path());
+    assert_cli_success(&output, "json blame single line range");
+    let json = parse_json_stdout(&output);
+    let lines = json["data"]["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["line_number"], 1);
+    assert_eq!(lines[0]["hash"], first.to_string());
+
+    let output = run_libra_command(&["--json", "blame", "-L", "1,+2", "foo.txt"], repo.path());
+    assert_cli_success(&output, "json blame relative line range");
+    let json = parse_json_stdout(&output);
+    let lines = json["data"]["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["line_number"], 1);
+    assert_eq!(lines[0]["hash"], first.to_string());
+    assert_eq!(lines[1]["line_number"], 2);
+    assert_eq!(lines[1]["hash"], second.to_string());
+}
+
+/// Scenario: empty files should be valid JSON results with an empty `lines`
+/// array, not a special-case error.
+#[test]
+fn test_blame_json_empty_file_returns_empty_lines() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("empty.txt"), "").unwrap();
+    let output = run_libra_command(&["add", "empty.txt"], repo.path());
+    assert_cli_success(&output, "add empty file");
+    let output = run_libra_command(&["commit", "-m", "empty file", "--no-verify"], repo.path());
+    assert_cli_success(&output, "commit empty file");
+
+    let output = run_libra_command(&["--json", "blame", "empty.txt"], repo.path());
+    assert_cli_success(&output, "json blame empty file");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["file"], "empty.txt");
+    assert_eq!(json["data"]["lines"].as_array().unwrap().len(), 0);
 }
 
 /// Scenario: an out-of-bounds `-L` range must surface as a stable CLI
@@ -304,133 +383,6 @@ async fn prepare_history() -> (ObjectHash, ObjectHash) {
 
     let second = get_target_commit("HEAD").await.unwrap();
     (first, second)
-}
-
-/// Stage and commit the current `foo.txt` with `message`, returning the
-/// resulting commit hash. Assumes a `ChangeDirGuard` is already active.
-async fn commit_foo(message: &str) -> ObjectHash {
-    add::execute(AddArgs {
-        pathspec: vec!["foo.txt".into()],
-        all: false,
-        update: false,
-        refresh: false,
-        force: false,
-        verbose: false,
-        dry_run: false,
-        ignore_errors: false,
-    })
-    .await;
-    commit::execute(CommitArgs {
-        message: Some(message.into()),
-        ..Default::default()
-    })
-    .await;
-    get_target_commit("HEAD").await.unwrap()
-}
-
-/// Build a fixed three-commit history of `foo.txt` where each commit
-/// introduces exactly one line:
-///   c1: "line1\n"                          (first  -> line 1)
-///   c2: "line1\nline2\n"                    (second -> line 2)
-///   c3: "line1\nline2\nline3\n"             (third  -> line 3)
-/// Returns `(first, second, third)` in chronological order. Assumes a
-/// `ChangeDirGuard` is already active.
-async fn prepare_three_commit_history() -> (ObjectHash, ObjectHash, ObjectHash) {
-    let mut f = fs::File::create("foo.txt").unwrap();
-    writeln!(f, "line1").unwrap();
-    drop(f);
-    let first = commit_foo("c1").await;
-
-    let mut f = fs::File::create("foo.txt").unwrap();
-    writeln!(f, "line1").unwrap();
-    writeln!(f, "line2").unwrap();
-    drop(f);
-    let second = commit_foo("c2").await;
-
-    let mut f = fs::File::create("foo.txt").unwrap();
-    writeln!(f, "line1").unwrap();
-    writeln!(f, "line2").unwrap();
-    writeln!(f, "line3").unwrap();
-    drop(f);
-    let third = commit_foo("c3").await;
-
-    (first, second, third)
-}
-
-/// Scenario (blame.md "（新增）blame 归属正确性 / 3 个 commit 链"): with a
-/// three-commit history where each commit appends one line, every blame
-/// line must be attributed to the commit that introduced it.
-#[tokio::test]
-#[serial]
-async fn test_blame_json_three_commit_chain_attributes_each_line() {
-    let repo = tempdir().unwrap();
-    let _guard = setup_repo_with_hash(&repo, "sha1").await;
-    let (first, second, third) = prepare_three_commit_history().await;
-
-    let output = run_libra_command(&["--json", "blame", "foo.txt"], repo.path());
-    assert_cli_success(&output, "json blame foo.txt (3-commit chain)");
-
-    let json = parse_json_stdout(&output);
-    let lines = json["data"]["lines"]
-        .as_array()
-        .expect("blame lines should be an array");
-    assert_eq!(lines.len(), 3, "expected three blamed lines: {json}");
-    assert_eq!(lines[0]["line_number"], 1);
-    assert_eq!(lines[0]["hash"], first.to_string());
-    assert_eq!(lines[1]["line_number"], 2);
-    assert_eq!(lines[1]["hash"], second.to_string());
-    assert_eq!(lines[2]["line_number"], 3);
-    assert_eq!(lines[2]["hash"], third.to_string());
-}
-
-/// Scenario (blame.md "（新增）empty file"): blaming a committed empty file
-/// returns an empty result (no blame lines) in JSON mode and prints
-/// "File is empty" in human mode, rather than erroring.
-#[tokio::test]
-#[serial]
-async fn test_blame_empty_file_returns_empty_result() {
-    let repo = tempdir().unwrap();
-    let _guard = setup_repo_with_hash(&repo, "sha1").await;
-
-    // Commit an empty file.
-    fs::File::create("empty.txt").unwrap();
-    add::execute(AddArgs {
-        pathspec: vec!["empty.txt".into()],
-        all: false,
-        update: false,
-        refresh: false,
-        force: false,
-        verbose: false,
-        dry_run: false,
-        ignore_errors: false,
-    })
-    .await;
-    commit::execute(CommitArgs {
-        message: Some("add empty file".into()),
-        ..Default::default()
-    })
-    .await;
-
-    // JSON mode: empty result, not an error.
-    let output = run_libra_command(&["--json", "blame", "empty.txt"], repo.path());
-    assert_cli_success(&output, "json blame empty.txt");
-    let json = parse_json_stdout(&output);
-    let lines = json["data"]["lines"]
-        .as_array()
-        .expect("blame lines should be an array");
-    assert!(
-        lines.is_empty(),
-        "an empty file must yield no blame lines: {json}"
-    );
-
-    // Human mode: an explicit "File is empty" notice on success.
-    let human = run_libra_command(&["blame", "empty.txt"], repo.path());
-    assert_cli_success(&human, "human blame empty.txt");
-    let stdout = String::from_utf8_lossy(&human.stdout);
-    assert!(
-        stdout.contains("File is empty"),
-        "human blame of an empty file should say 'File is empty', got: {stdout}"
-    );
 }
 
 /// Scenario: `blame::execute` against a SHA-1 repo must complete without

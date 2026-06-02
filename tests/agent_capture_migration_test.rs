@@ -133,9 +133,7 @@ async fn agent_capture_rollback_drops_tables_and_indexes_only() {
         .expect("rollback_to(2026050302)");
     assert_eq!(
         rolled_back,
-        vec![
-            2026053101, 2026052301, 2026050801, 2026050601, 2026050501, 2026050303
-        ]
+        vec![2026052301, 2026050801, 2026050601, 2026050501, 2026050303]
     );
 
     // agent_capture artifacts gone.

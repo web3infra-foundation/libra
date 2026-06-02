@@ -90,6 +90,16 @@ impl fmt::Display for ProviderHookCommand {
 pub struct ProviderInstallOptions {
     pub binary_path: Option<String>,
     pub timeout_secs: Option<u64>,
+    /// Optional hook command prefix after the Libra binary path.
+    ///
+    /// Default provider installs use the legacy compatibility entry point
+    /// (`hooks <provider>`). `libra agent enable` overrides this with
+    /// `agent hooks <agent>` so external-agent capture writes to
+    /// `refs/libra/agent-traces` instead of the historical AI intent ref.
+    pub hook_command_prefix: Option<String>,
+    /// Append `|| true` to installed hook commands so provider sessions are not
+    /// failed by Libra hook ingestion errors.
+    pub fail_safe_shell: bool,
 }
 
 /// A statically registered provider that can parse lifecycle payloads and manage hook setup.
@@ -238,6 +248,8 @@ mod tests {
         let opts = ProviderInstallOptions::default();
         assert!(opts.binary_path.is_none());
         assert!(opts.timeout_secs.is_none());
+        assert!(opts.hook_command_prefix.is_none());
+        assert!(!opts.fail_safe_shell);
     }
 
     /// `CANONICAL_DEDUP_IDENTITY_KEYS` priority ordering matters —

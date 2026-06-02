@@ -407,6 +407,12 @@ enum Commands {
     Cloud(command::cloud::CloudArgs),
     #[command(about = "Manage read-only Cloudflare Worker publishing")]
     Publish(command::publish::PublishArgs),
+    #[command(
+        subcommand,
+        about = "Install / list / diff auditable capability packages",
+        after_help = command::package::PACKAGE_EXAMPLES
+    )]
+    Package(command::package::PackageCmds),
 
     #[command(about = "Start Libra Code interactive TUI (with background web server)")]
     Code(command::code::CodeArgs),
@@ -1189,6 +1195,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Blame(cmd_args) => command::blame::execute_safe(cmd_args, &output).await?,
         Commands::Revert(cmd_args) => command::revert::execute_safe(cmd_args, &output).await?,
         Commands::Remote(cmd) => command::remote::execute_safe(cmd, &output).await?,
+        Commands::Package(cmd) => command::package::execute_safe(cmd, &output).await?,
         Commands::Open(cmd_args) => command::open::execute_safe(cmd_args, &output).await?,
         Commands::Pull(cmd_args) => command::pull::execute_safe(cmd_args, &output).await?,
         Commands::Config(cmd_args) => command::config::execute_safe(cmd_args, &output).await?,

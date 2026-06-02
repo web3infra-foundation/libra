@@ -35,11 +35,24 @@ fn read_fuse_state() -> FuseState {
 }
 
 fn can_run_fuse_tests() -> bool {
+    has_fuse_device_or_helper() && fuse_tests_enabled()
+}
+
+fn fuse_tests_enabled() -> bool {
+    std::env::var("LIBRA_RUN_FUSE_TESTS")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn has_fuse_device_or_helper() -> bool {
+    Path::new("/Library/Filesystems/macfuse.fs/Contents/Resources/mount_macfuse").exists()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn has_fuse_device_or_helper() -> bool {
     Path::new("/dev/fuse").exists()
-        && std::env::var("LIBRA_RUN_FUSE_TESTS")
-            .ok()
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-            .unwrap_or(false)
 }
 
 fn is_known_fuse_env_error(message: &str) -> bool {
@@ -58,17 +71,39 @@ fn try_write_probe(path: &Path) -> bool {
 }
 
 fn is_mounted(path: &Path) -> bool {
-    let Ok(content) = fs::read_to_string("/proc/self/mountinfo") else {
+    #[cfg(target_os = "macos")]
+    {
+        macos_mount_command_contains(path)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let Ok(content) = fs::read_to_string("/proc/self/mountinfo") else {
+            return false;
+        };
+        let target = path.to_string_lossy().to_string();
+        content.lines().any(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 5 {
+                return false;
+            }
+            fields[4].replace("\\040", " ") == target
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_mount_command_contains(path: &Path) -> bool {
+    let Ok(output) = std::process::Command::new("mount").output() else {
         return false;
     };
-    let target = path.to_string_lossy().to_string();
-    content.lines().any(|line| {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 5 {
-            return false;
-        }
-        fields[4].replace("\\040", " ") == target
-    })
+    if !output.status.success() {
+        return false;
+    }
+    let target = path.to_string_lossy();
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.contains(" on ") && line.contains(target.as_ref()))
 }
 
 #[test]
@@ -192,6 +227,50 @@ async fn test_fuse_worktree_add_list_remove_flow() {
 
     let state = read_fuse_state();
     assert!(state.worktrees.is_empty(), "fuse state should be cleaned");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_fuse_worktree_exposes_committed_files_immediately_after_add() {
+    if !can_run_fuse_tests() {
+        return;
+    }
+
+    let repo_dir = tempdir().expect("create temp repo");
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    fs::write(repo_dir.path().join("seed.txt"), "seed\n").expect("write seed");
+    let add_output = run_libra_command(&["add", "seed.txt"], repo_dir.path());
+    assert_cli_success(&add_output, "add seed");
+    let commit_output =
+        run_libra_command(&["commit", "-m", "seed", "--no-verify"], repo_dir.path());
+    assert_cli_success(&commit_output, "commit seed");
+
+    if let Err(err) = exec_async(vec!["worktree", "add", "wt-fuse-visible", "--fuse"]).await {
+        if is_known_fuse_env_error(&err.to_string()) {
+            return;
+        }
+        panic!("fuse add should succeed: {err}");
+    }
+
+    let mount_path = repo_dir.path().join("wt-fuse-visible");
+    if !is_mounted(&mount_path) || !try_write_probe(&mount_path) {
+        return;
+    }
+
+    assert_eq!(
+        fs::read_to_string(mount_path.join("seed.txt"))
+            .expect("read committed seed from FUSE worktree"),
+        "seed\n",
+    );
+
+    if let Err(err) = exec_async(vec!["worktree", "remove", "wt-fuse-visible"]).await {
+        if is_known_fuse_env_error(&err.to_string()) {
+            return;
+        }
+        panic!("fuse remove should succeed: {err}");
+    }
 }
 
 #[tokio::test]

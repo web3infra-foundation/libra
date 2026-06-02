@@ -68,9 +68,8 @@ use crate::{
         projection::ProjectionRebuilder,
         runtime::{
             DecisionPolicy, DecisionProposal, DecisionProposalRoute, DecisionProposalStore,
-            FinalDecision, FinalDecisionStore, ValidationOutcome, ValidationReportStore,
-            ValidationStage, ValidationStageResult, ValidatorEngine, aggregate_risk_score,
-            build_decision_proposal,
+            ValidationOutcome, ValidationReportStore, ValidationStage, ValidationStageResult,
+            ValidatorEngine, aggregate_risk_score, build_decision_proposal,
             contracts::{EvidenceKind, FinalDecisionVerdict, TaskExecutionStatus},
             phase3::{ArtifactLedger, TaskArtifactRefs},
         },
@@ -4252,7 +4251,7 @@ async fn persist_validation_decision_derivatives(
         ))
     })?;
 
-    let decision_store = DecisionProposalStore::new(db.clone());
+    let decision_store = DecisionProposalStore::new(db);
     if let Some(session_mirror) = session_mirror.as_ref() {
         decision_store
             .write_latest_with_session_mirror(&risk, &proposal, session_mirror)
@@ -4266,29 +4265,6 @@ async fn persist_validation_decision_derivatives(
             proposal.proposal_id, proposal.thread_id
         ))
     })?;
-
-    // Phase 4 completion: finalise an AutoAccept proposal into the formal
-    // final `Decision` artifact, closing the
-    // ValidationReport -> RiskScoreBreakdown -> DecisionProposal -> Decision
-    // chain. Human-gated routes (HumanReview / RequestChanges) are NOT
-    // finalised here — they resolve through the CEX-S2-13 human-gated merge
-    // flow that owns the approval interaction.
-    if let Some(final_decision) = FinalDecision::finalize_auto_accept(&proposal, Utc::now()) {
-        let final_store = FinalDecisionStore::new(db);
-        if let Some(session_mirror) = session_mirror.as_ref() {
-            final_store
-                .write_latest_with_session_mirror(&final_decision, session_mirror)
-                .await
-        } else {
-            final_store.write_latest(&final_decision).await
-        }
-        .map_err(|error| {
-            OrchestratorError::ConfigError(format!(
-                "failed to persist final decision {} for thread {}: {error}",
-                final_decision.decision_id, final_decision.thread_id
-            ))
-        })?;
-    }
 
     Ok(PersistedDerivedRecords {
         validation_report_id: report.report_id,
