@@ -617,23 +617,6 @@ fn test_prune_invalid_ref_oid_fails() {
 
 #[test]
 #[serial]
-fn test_prune_ambiguous_tag_ref_fails() {
-    let repo = create_committed_repo_via_cli();
-    let (commit, tree, blob) = create_unreachable_commit(repo.path(), "tagged-commit");
-    let tag = create_annotated_tag(repo.path(), &commit, &commit.to_string());
-
-    assert!(object_exists(repo.path(), &commit.to_string()));
-    assert!(object_exists(repo.path(), &tree.to_string()));
-    assert!(object_exists(repo.path(), &blob.to_string()));
-
-    let output = run_libra_command(&["prune", &tag.to_string()], repo.path());
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("ambiguous argument"));
-}
-
-#[test]
-#[serial]
 /// Tests prune reports a usage error when --expire is missing its value.
 fn test_prune_expire_missing_value_fails() {
     let repo = create_committed_repo_via_cli();

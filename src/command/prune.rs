@@ -379,33 +379,17 @@ async fn collect_starting_points(
 
 /// Resolve a user-provided head argument to an object hash.
 async fn resolve_head_object(head: &str, storage: &ClientStorage) -> CliResult<ObjectHash> {
-    let mut results = HashSet::new();
-    if let Some(hash) = resolve_tag_object_ref(head).await {
-        results.insert(hash);
-    } else if let Ok(hash) = util::get_commit_base(head).await {
-        results.insert(hash);
-    }
-
+    // If the head is a valid object hash, ignore any reference.
     if let Ok(hash) = ObjectHash::from_str(head) {
-        results.insert(hash);
-        if let Ok(obj_type) = storage.get_object_type(&hash)
-            && obj_type != ObjectType::Tag
-        {
-            if let Ok(hash) = util::get_commit_base(head).await {
-                results.insert(hash);
-            }
-        }
+        return Ok(hash);
     }
 
-    if results.len() == 1 {
-        return Ok(results.into_iter().next().unwrap());
+    if let Some(hash) = resolve_tag_object_ref(head).await {
+        return Ok(hash);
     }
-    if results.len() > 1 {
-        return Err(CliError::command_usage(format!(
-            "ambiguous argument '{head}': matched {} objects",
-            results.len()
-        ))
-        .with_stable_code(StableErrorCode::CliInvalidArguments));
+
+    if let Ok(hash) = util::get_commit_base(head).await {
+        return Ok(hash);
     }
 
     let results = storage.search_result(head).await.map_err(|error| {
