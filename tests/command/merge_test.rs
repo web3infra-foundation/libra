@@ -1631,3 +1631,85 @@ fn test_merge_no_stat_default_omits_diffstat() {
         "default merge output should not include a diffstat: {stdout}"
     );
 }
+
+#[test]
+fn test_merge_autostash_preserves_local_changes_on_fast_forward() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    commit_file(temp_path, "tracked.txt", "base\n", "base tracked");
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feat add");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+
+    // Uncommitted local change that would normally block the merge.
+    std::fs::write(temp_path.join("tracked.txt"), "base\nlocal-dirty\n").expect("write dirty");
+
+    let output = run_libra_command(&["merge", "--autostash", "feature"], temp_path);
+    assert_cli_success(&output, "merge --autostash");
+
+    assert!(
+        temp_path.join("feature.txt").exists(),
+        "fast-forward should bring in feature.txt"
+    );
+    let tracked = std::fs::read_to_string(temp_path.join("tracked.txt")).expect("read tracked");
+    assert!(
+        tracked.contains("local-dirty"),
+        "autostash should reapply local changes: {tracked}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_merge_autostash_preserves_local_changes_on_three_way() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    commit_file(temp_path, "tracked.txt", "base\n", "base tracked");
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feat add");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    std::fs::write(temp_path.join("tracked.txt"), "base\nlocal-dirty\n").expect("write dirty");
+
+    let output = run_libra_command(&["merge", "--autostash", "feature"], temp_path);
+    assert_cli_success(&output, "merge --autostash three-way");
+
+    let tracked = std::fs::read_to_string(temp_path.join("tracked.txt")).expect("read tracked");
+    assert!(
+        tracked.contains("local-dirty"),
+        "three-way autostash should reapply local changes: {tracked}"
+    );
+
+    let _guard = ChangeDirGuard::new(temp_path);
+    let head = Head::current_commit()
+        .await
+        .expect("merge should create HEAD");
+    let commit: Commit = load_object(&head).expect("load merge commit");
+    assert_eq!(
+        commit.parent_commit_ids.len(),
+        2,
+        "three-way merge should produce a two-parent commit"
+    );
+}

@@ -651,6 +651,7 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
         }
         merge::PullMergeError::StateSave(..)
         | merge::PullMergeError::StateCleanup(..)
+        | merge::PullMergeError::Autostash(..)
         | merge::PullMergeError::IndexSave(..)
         | merge::PullMergeError::TreeCreate(..)
         | merge::PullMergeError::CommitSave(..)

@@ -35,6 +35,7 @@ Libra supports fast-forward policy flags/config (`--ff-only`, `--no-ff`, `merge.
 | `--no-commit` | Stop after a clean real merge with merge state, index, and worktree updated; finish with `libra merge --continue`. Fast-forwards still fast-forward unless `--no-ff` is also used. |
 | `--commit` | Explicitly request the default commit-after-clean-merge behavior. |
 | `--allow-unrelated-histories` | Permit a two-head merge without a common ancestor. |
+| `--autostash`, `--no-autostash` | Stash local changes before merging and reapply them afterward. Honors `merge.autoStash`. A conflict defers reapplication until `--continue`/`--abort`. |
 | `-m`, `--message <msg>` | Use the provided merge commit message. |
 | `-F`, `--file <path>` | Read the merge commit message from a file. |
 | `--signoff` | Append a `Signed-off-by` trailer to merge commit messages. |
@@ -65,6 +66,7 @@ Progress output is controlled by the global `--progress=<json\|text\|none\|auto>
 | `merge.ff` | `true`/`false`/`only` | Default/true allows fast-forward, false behaves like `--no-ff`, only behaves like `--ff-only`. CLI flags override config. |
 | `merge.conflictstyle` | `merge`/`diff3` | Selects default conflict marker style. |
 | `merge.stat` | `true`/`false` | When true, print a diffstat after a successful merge (off by default; `--stat`/`--no-stat` override). |
+| `merge.autoStash` | `true`/`false` | When true, autostash local changes around every merge (off by default; `--autostash`/`--no-autostash` override). |
 
 `merge.commit` is intentionally absent because stock Git does not define that config key.
 
@@ -95,7 +97,7 @@ Run `libra merge --abort` before continuing to restore the branch, index, and wo
 
 ## Deferred Git Merge Features
 
-The following Git flags are not implemented and are not accepted as ignored no-ops: `--autostash`, `--verify-signatures`, `-S`/`--gpg-sign`, `--no-gpg-sign`, `--edit`/`--no-edit`, whitespace strategy options, custom merge drivers, custom strategies beyond `ours`, subtree strategy, and advanced octopus conflict resolution.
+The following Git flags are not implemented and are not accepted as ignored no-ops: `--verify-signatures`, `-S`/`--gpg-sign`, `--no-gpg-sign`, `--edit`/`--no-edit`, whitespace strategy options, custom merge drivers, custom strategies beyond `ours`, subtree strategy, and advanced octopus conflict resolution.
 
 ## Human Output
 

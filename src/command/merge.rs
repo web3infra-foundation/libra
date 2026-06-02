@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     get_target_commit, load_object, log, reset,
     restore::{self, RestoreArgs},
-    save_object, status, switch,
+    save_object, stash, status, switch,
 };
 use crate::{
     common_utils::format_commit_msg,
@@ -108,6 +108,14 @@ pub struct MergeArgs {
     /// Allow merging histories with no common ancestor
     #[arg(long)]
     pub allow_unrelated_histories: bool,
+
+    /// Stash local changes before merging and reapply them afterward
+    #[arg(long, conflicts_with = "no_autostash")]
+    pub autostash: bool,
+
+    /// Do not autostash local changes (default; overrides merge.autoStash)
+    #[arg(long = "no-autostash", conflicts_with = "autostash")]
+    pub no_autostash: bool,
 
     /// Use the given merge commit message
     #[arg(short, long, conflicts_with = "file")]
@@ -251,6 +259,7 @@ pub(crate) struct PullMergeOptions {
     pub log: Option<usize>,
     pub conflict_style: MergeConflictStyle,
     pub into_name: Option<String>,
+    pub autostash: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -269,6 +278,9 @@ pub(crate) struct MergeState {
     pub log: Option<usize>,
     #[serde(default)]
     pub conflict_style: MergeConflictStyle,
+    /// Stash id saved by `--autostash`, reapplied on `--continue`/`--abort`.
+    #[serde(default)]
+    pub autostash: Option<String>,
 }
 
 impl MergeState {
@@ -373,6 +385,8 @@ pub(crate) enum PullMergeError {
     StateSave(String),
     #[error("failed to clean up merge state: {0}")]
     StateCleanup(String),
+    #[error("autostash failed: {0}")]
+    Autostash(String),
     #[error("failed to load index: {0}")]
     IndexLoad(String),
     #[error("failed to save index: {0}")]
@@ -448,6 +462,7 @@ impl From<PullMergeError> for CliError {
             }
             PullMergeError::StateSave(..)
             | PullMergeError::StateCleanup(..)
+            | PullMergeError::Autostash(..)
             | PullMergeError::IndexSave(..)
             | PullMergeError::TreeCreate(..)
             | PullMergeError::CommitSave(..)
@@ -522,10 +537,14 @@ async fn run_merge(args: MergeArgs, output: &OutputConfig) -> Result<MergeOutput
         args.quit,
     ) {
         ([branch], false, false, false) => {
-            run_merge_for_pull_with_options(branch, branch, output, options).await
+            let stash_id = maybe_autostash_push(&options).await?;
+            let result = run_merge_for_pull_with_options(branch, branch, output, options).await;
+            finalize_autostash(stash_id, result).await
         }
         (branches, false, false, false) if branches.len() > 1 => {
-            run_octopus_merge(branches, output, options).await
+            let stash_id = maybe_autostash_push(&options).await?;
+            let result = run_octopus_merge(branches, output, options).await;
+            finalize_autostash(stash_id, result).await
         }
         ([], true, false, false) => run_merge_continue(output, options).await,
         ([], false, true, false) => run_merge_abort(output).await,
@@ -533,6 +552,39 @@ async fn run_merge(args: MergeArgs, output: &OutputConfig) -> Result<MergeOutput
         ([], false, false, false) => Err(MergeError::MissingAction),
         _ => Err(MergeError::ConflictingAction),
     }
+}
+
+/// Stash the working tree before a merge when `--autostash` is in effect.
+/// Returns the saved stash id, or `None` when autostash is off or the tree is
+/// already clean.
+async fn maybe_autostash_push(options: &PullMergeOptions) -> Result<Option<String>, MergeError> {
+    if !options.autostash {
+        return Ok(None);
+    }
+    stash::autostash_push()
+        .await
+        .map_err(PullMergeError::Autostash)
+}
+
+/// Reapply (or defer) an autostash once the merge settles. A merge that left
+/// state behind (conflict or `--no-commit`) records the stash id so
+/// `--continue`/`--abort` can reapply it; otherwise the stash is popped now.
+async fn finalize_autostash(
+    stash_id: Option<String>,
+    result: Result<MergeOutput, MergeError>,
+) -> Result<MergeOutput, MergeError> {
+    let Some(stash_id) = stash_id else {
+        return result;
+    };
+    if let Some(mut state) = MergeState::load_optional_sync().map_err(PullMergeError::StateLoad)? {
+        state.autostash = Some(stash_id);
+        state.save()?;
+        return result;
+    }
+    if let Err(error) = stash::autostash_pop().await {
+        eprintln!("warning: failed to reapply autostashed changes: {error}");
+    }
+    result
 }
 
 async fn merge_options_from_args(args: &MergeArgs) -> Result<PullMergeOptions, MergeError> {
@@ -562,7 +614,30 @@ async fn merge_options_from_args(args: &MergeArgs) -> Result<PullMergeOptions, M
         log: if args.no_log { None } else { args.log },
         conflict_style: resolve_conflict_style(args.conflict).await?,
         into_name: args.into_name.clone(),
+        autostash: resolve_autostash(args).await,
     })
+}
+
+/// Resolve `--autostash`/`--no-autostash`, falling back to the
+/// `merge.autoStash` config key (default off).
+async fn resolve_autostash(args: &MergeArgs) -> bool {
+    if args.no_autostash {
+        return false;
+    }
+    if args.autostash {
+        return true;
+    }
+    read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.autoStash")
+        .await
+        .ok()
+        .flatten()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "yes" | "on" | "1"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Accept Git's `--diff-algorithm` flag for content merges. Libra's blob
@@ -1153,6 +1228,7 @@ fn save_clean_merge_state(input: CleanMergeStateInput) -> Result<(), PullMergeEr
         signoff: input.signoff,
         log: input.log,
         conflict_style: input.conflict_style,
+        autostash: None,
     }
     .save()
 }
@@ -1209,6 +1285,7 @@ fn write_conflicted_merge_state(input: MergeConflictInput) -> Result<(), PullMer
         signoff: input.signoff,
         log: input.log,
         conflict_style: input.conflict_style,
+        autostash: None,
     };
     state.save()?;
 
@@ -1308,6 +1385,7 @@ async fn run_merge_continue(
     .await?;
     reset_index_and_workdir_to_tree(&tree_id)?;
     MergeState::cleanup()?;
+    reapply_recorded_autostash(state.autostash.as_deref()).await;
 
     Ok(PullMergeSummary {
         strategy: "three-way".to_string(),
@@ -1320,6 +1398,18 @@ async fn run_merge_continue(
         aborted: false,
         continued: true,
     })
+}
+
+/// Reapply an autostash recorded in the merge state once the merge finishes
+/// via `--continue`/`--abort`. Failures are surfaced as a warning rather than
+/// failing the completed operation, mirroring Git.
+async fn reapply_recorded_autostash(autostash: Option<&str>) {
+    if autostash.is_none() {
+        return;
+    }
+    if let Err(error) = stash::autostash_pop().await {
+        eprintln!("warning: failed to reapply autostashed changes: {error}");
+    }
 }
 
 async fn run_merge_quit() -> Result<MergeOutput, MergeError> {
@@ -1358,6 +1448,7 @@ async fn run_merge_abort(_output: &OutputConfig) -> Result<MergeOutput, MergeErr
         })?;
     reset_index_and_workdir_to_tree(&original_commit.tree_id)?;
     MergeState::cleanup()?;
+    reapply_recorded_autostash(state.autostash.as_deref()).await;
 
     Ok(PullMergeSummary {
         strategy: "abort".to_string(),
@@ -2676,6 +2767,10 @@ mod tests {
             }
             .to_string(),
             "unknown cleanup mode 'bogus' (expected strip, whitespace, verbatim, scissors, or default)",
+        );
+        assert_eq!(
+            PullMergeError::Autostash("stash push failed".to_string()).to_string(),
+            "autostash failed: stash push failed",
         );
     }
 
