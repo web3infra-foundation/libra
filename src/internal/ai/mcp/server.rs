@@ -376,7 +376,8 @@ impl LibraMcpServer {
             }
             AgentResourceRequest::RunDetail { ref run_id } => match find_run(run_id) {
                 Some(run) => {
-                    let body = render_run_detail(run);
+                    let source_call_count = self.read_run_source_call_count(run_id).await;
+                    let body = render_run_detail(run, source_call_count);
                     Ok(vec![ResourceContents::text(body.to_string(), uri)])
                 }
                 None => Err(ErrorData::resource_not_found(

@@ -371,6 +371,9 @@ async fn test_mcp_agents_runs_lists_persisted_snapshots() {
         serde_json::from_str(&detail_text).expect("valid JSON body");
     assert_eq!(detail_body["id"], run_id.0.to_string());
     assert_eq!(detail_body["model"], "deepseek-chat");
+    // The detail view carries the run's persisted source-call count (the two
+    // calls attributed to this run; CEX-S2-16, v0.17.1254 trace link).
+    assert_eq!(detail_body["source_call_count"], 2);
 
     // The permissions view resolves the run's thread via its snapshot and
     // serves the persisted profile.
