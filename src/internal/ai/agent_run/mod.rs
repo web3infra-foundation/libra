@@ -66,6 +66,7 @@ pub mod event_store;
 pub mod evidence;
 pub mod evidence_query;
 pub mod hook_dispatch;
+pub mod live_registry;
 pub mod merge_metrics;
 pub mod merge_pipeline;
 pub mod parallel;
@@ -272,6 +273,7 @@ pub use evidence_query::{
 pub use hook_dispatch::{
     HookOutcome, PreToolUseDecision, classify_post_tool_use, classify_pre_tool_use,
 };
+pub use live_registry::{LiveRunRegistry, LiveRunSnapshot, LiveRunState};
 pub use merge_metrics::{MergeMetrics, MergeOutcomeCounts};
 pub use merge_pipeline::{
     MergeDecisionSignals, build_merge_decision_payload, build_payload_from_patches,
