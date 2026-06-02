@@ -1772,6 +1772,8 @@ fn test_merge_help_lists_whitespace_flags() {
         "--no-gpg-sign",
         "--verify-signatures",
         "--no-verify-signatures",
+        "--find-renames",
+        "--no-renames",
     ] {
         assert!(
             stdout.contains(flag),
@@ -1867,6 +1869,112 @@ fn test_merge_help_lists_edit_flags() {
             "merge --help should list {flag}: {stdout}"
         );
     }
+}
+
+#[test]
+fn test_merge_rename_with_edit_on_other_side_merges_cleanly() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    commit_file(temp_path, "old.txt", "line1\nline2\nline3\n", "base file");
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    // theirs: edit the file in place
+    commit_file(
+        temp_path,
+        "old.txt",
+        "line1\nline2-EDITED\nline3\n",
+        "edit on feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    // ours: rename old.txt -> new.txt with identical content
+    std::fs::write(temp_path.join("new.txt"), "line1\nline2\nline3\n").expect("write new.txt");
+    assert_cli_success(
+        &run_libra_command(&["add", "new.txt"], temp_path),
+        "add new",
+    );
+    assert_cli_success(&run_libra_command(&["rm", "old.txt"], temp_path), "rm old");
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "rename on main", "--no-verify"],
+            temp_path,
+        ),
+        "commit rename",
+    );
+
+    let output = run_libra_command(&["merge", "feature"], temp_path);
+    assert_cli_success(&output, "merge rename+edit");
+
+    assert!(
+        !temp_path.join("old.txt").exists(),
+        "renamed-away source should be gone"
+    );
+    let merged = std::fs::read_to_string(temp_path.join("new.txt")).expect("read new.txt");
+    assert!(
+        merged.contains("line2-EDITED"),
+        "the edit should follow the rename: {merged}"
+    );
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "rename + edit should not conflict: {merged}"
+    );
+}
+
+#[test]
+fn test_merge_no_renames_falls_back_to_conflict() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    commit_file(temp_path, "old.txt", "line1\nline2\nline3\n", "base file");
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(
+        temp_path,
+        "old.txt",
+        "line1\nline2-EDITED\nline3\n",
+        "edit on feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    std::fs::write(temp_path.join("new.txt"), "line1\nline2\nline3\n").expect("write new.txt");
+    assert_cli_success(
+        &run_libra_command(&["add", "new.txt"], temp_path),
+        "add new",
+    );
+    assert_cli_success(&run_libra_command(&["rm", "old.txt"], temp_path), "rm old");
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "rename on main", "--no-verify"],
+            temp_path,
+        ),
+        "commit rename",
+    );
+
+    // With rename detection disabled, the delete/modify pair conflicts.
+    let output = run_libra_command(&["merge", "--no-renames", "feature"], temp_path);
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "--no-renames should surface the delete/modify conflict: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[cfg(unix)]

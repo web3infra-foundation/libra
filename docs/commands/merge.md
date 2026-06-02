@@ -54,6 +54,7 @@ Libra supports fast-forward policy flags/config (`--ff-only`, `--no-ff`, `merge.
 | `--stat`, `-n`/`--no-stat` | Print (or suppress) a diffstat of what the merge brought in. `--summary`/`--no-summary` are accepted aliases. Honors the `merge.stat` config; defaults off so existing output stays stable. |
 | `--diff-algorithm <algo>` | Validate the requested content-merge algorithm (`myers`/`histogram`/`patience`/`minimal`). Libra uses a single Myers-style backend. |
 | `--ignore-space-change`, `--ignore-all-space`, `--ignore-space-at-eol`, `--ignore-cr-at-eol` | Ignore the named whitespace class when auto-merging text, so a side whose only change is whitespace yields to the side with a real change. |
+| `--find-renames`, `--no-renames` | Enable (default) or disable rename detection so an edit on one side follows a rename on the other. Honors `merge.renames`; uses a 50% content-similarity threshold. |
 | `--cleanup <mode>` | Validate the message cleanup mode (`strip`/`whitespace`/`verbatim`/`scissors`/`default`). Libra already trims merge messages. |
 | `--no-verify` | Accepted for Git compatibility. Libra runs no pre-merge or commit-msg hooks yet, so this has no effect. |
 | `--overwrite-ignore`, `--no-overwrite-ignore` | Accepted for Git compatibility; Libra always preserves ignored files during merge. |
@@ -73,6 +74,7 @@ Progress output is controlled by the global `--progress=<json\|text\|none\|auto>
 | `merge.stat` | `true`/`false` | When true, print a diffstat after a successful merge (off by default; `--stat`/`--no-stat` override). |
 | `merge.autoStash` | `true`/`false` | When true, autostash local changes around every merge (off by default; `--autostash`/`--no-autostash` override). |
 | `merge.verifySignatures` | `true`/`false` | When true, require the merged commit to be signed (off by default; `--verify-signatures`/`--no-verify-signatures` override). |
+| `merge.renames` | `true`/`false` | Enable rename detection (on by default; `--find-renames`/`--no-renames` override). |
 
 `merge.commit` is intentionally absent because stock Git does not define that config key.
 
@@ -103,7 +105,7 @@ Run `libra merge --abort` before continuing to restore the branch, index, and wo
 
 ## Deferred Git Merge Features
 
-The following Git flags are not implemented and are not accepted as ignored no-ops: custom merge drivers, custom strategies beyond `ours`, subtree strategy, and advanced octopus conflict resolution. Full cryptographic verification of signatures is reduced to a presence check; `--verify-signatures` confirms a signature exists rather than validating it against a keyring. Cross-rename detection is not yet performed (a rename plus an edit on the other side surfaces as a delete/modify conflict).
+The following Git flags are not implemented and are not accepted as ignored no-ops: custom merge drivers, custom strategies beyond `ours`, subtree strategy, and advanced octopus conflict resolution. Full cryptographic verification of signatures is reduced to a presence check; `--verify-signatures` confirms a signature exists rather than validating it against a keyring. Rename detection handles the clean rename-plus-edit case (and falls back to a delete/modify conflict when the relocated merge would itself conflict); directory renames are not tracked.
 
 ## Human Output
 

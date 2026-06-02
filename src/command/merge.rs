@@ -198,6 +198,14 @@ pub struct MergeArgs {
     #[arg(long = "ignore-cr-at-eol")]
     pub ignore_cr_at_eol: bool,
 
+    /// Detect file renames so an edit on one side follows a rename on the other (default)
+    #[arg(long = "find-renames", conflicts_with = "no_renames")]
+    pub find_renames: bool,
+
+    /// Turn off rename detection (overrides merge.renames)
+    #[arg(long = "no-renames", conflicts_with = "find_renames")]
+    pub no_renames: bool,
+
     /// Diff algorithm to use for content merges (myers, histogram, patience, minimal)
     #[arg(long = "diff-algorithm", value_name = "ALGO")]
     pub diff_algorithm: Option<String>,
@@ -359,6 +367,7 @@ pub(crate) struct PullMergeOptions {
     pub sign: bool,
     pub verify_signatures: bool,
     pub edit: bool,
+    pub detect_renames: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -731,7 +740,30 @@ async fn merge_options_from_args(args: &MergeArgs) -> Result<PullMergeOptions, M
         sign: !args.no_gpg_sign && args.gpg_sign,
         verify_signatures: resolve_verify_signatures(args).await,
         edit: args.edit && !args.no_edit,
+        detect_renames: resolve_detect_renames(args).await,
     })
+}
+
+/// Resolve whether to run rename detection (`--find-renames`/`--no-renames`,
+/// falling back to the `merge.renames` config; defaults on like Git).
+async fn resolve_detect_renames(args: &MergeArgs) -> bool {
+    if args.no_renames {
+        return false;
+    }
+    if args.find_renames {
+        return true;
+    }
+    read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.renames")
+        .await
+        .ok()
+        .flatten()
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "false" | "no" | "off" | "0"
+            )
+        })
+        .unwrap_or(true)
 }
 
 /// Resolve `--verify-signatures`/`--no-verify-signatures`, falling back to the
@@ -2232,6 +2264,32 @@ fn merge_tree_items_with_options(
     their_items: &HashMap<PathBuf, MergeTreeEntry>,
     options: &PullMergeOptions,
 ) -> Result<ThreeWayMergeResult, PullMergeError> {
+    let renames = if options.detect_renames {
+        detect_clean_renames(base_items, our_items, their_items, options)?
+    } else {
+        Vec::new()
+    };
+    if renames.is_empty() {
+        return resolve_item_maps(base_items, our_items, their_items, options);
+    }
+
+    // Relocate each detected rename so the renamed file is resolved at its new
+    // path (carrying the other side's edit), then run the normal resolution.
+    let mut base = base_items.clone();
+    let mut ours = our_items.clone();
+    let mut theirs = their_items.clone();
+    for rename in &renames {
+        apply_rename(&mut base, &mut ours, &mut theirs, rename);
+    }
+    resolve_item_maps(&base, &ours, &theirs, options)
+}
+
+fn resolve_item_maps(
+    base_items: &HashMap<PathBuf, MergeTreeEntry>,
+    our_items: &HashMap<PathBuf, MergeTreeEntry>,
+    their_items: &HashMap<PathBuf, MergeTreeEntry>,
+    options: &PullMergeOptions,
+) -> Result<ThreeWayMergeResult, PullMergeError> {
     let mut all_paths: HashSet<PathBuf> = base_items.keys().cloned().collect();
     all_paths.extend(our_items.keys().cloned());
     all_paths.extend(their_items.keys().cloned());
@@ -2257,6 +2315,196 @@ fn merge_tree_items_with_options(
         merged_items,
         conflicts,
     })
+}
+
+/// A detected file rename: `source` (a base path removed on one side) was
+/// renamed to `dest` (a new path added on that same side), while the other
+/// side kept editing `source`.
+#[derive(Debug, Clone)]
+struct Rename {
+    source: PathBuf,
+    dest: PathBuf,
+    /// True when `ours` performed the rename (so `theirs` holds the edit).
+    renamed_by_ours: bool,
+}
+
+/// Minimum content similarity (Git's default 50%) for two blobs to count as a
+/// rename pair.
+const RENAME_SIMILARITY_THRESHOLD: f64 = 0.5;
+
+/// Cap on `deleted × added` candidate comparisons, mirroring Git's
+/// `merge.renameLimit`, to keep detection from blowing up on huge trees.
+const RENAME_LIMIT: usize = 1000;
+
+/// Detect renames where one side renamed a base file while the other side
+/// edited it, but only when the relocated three-way merge resolves cleanly.
+/// Ambiguous or conflicting cases are left alone so the existing delete/modify
+/// conflict still surfaces.
+fn detect_clean_renames(
+    base_items: &HashMap<PathBuf, MergeTreeEntry>,
+    our_items: &HashMap<PathBuf, MergeTreeEntry>,
+    their_items: &HashMap<PathBuf, MergeTreeEntry>,
+    options: &PullMergeOptions,
+) -> Result<Vec<Rename>, PullMergeError> {
+    let our_added: Vec<&PathBuf> = our_items
+        .keys()
+        .filter(|path| !base_items.contains_key(*path) && !their_items.contains_key(*path))
+        .collect();
+    let their_added: Vec<&PathBuf> = their_items
+        .keys()
+        .filter(|path| !base_items.contains_key(*path) && !our_items.contains_key(*path))
+        .collect();
+    if our_added.is_empty() && their_added.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let deleted_sources = base_items.len();
+    if deleted_sources.saturating_mul(our_added.len().max(their_added.len())) > RENAME_LIMIT {
+        return Ok(Vec::new());
+    }
+
+    let mut renames = Vec::new();
+    let mut used_dests: HashSet<PathBuf> = HashSet::new();
+    for (source, base_entry) in base_items {
+        // `ours` renamed the file away while `theirs` edited it in place.
+        if !our_items.contains_key(source)
+            && let Some(their_entry) = their_items.get(source)
+            && their_entry != base_entry
+            && let Some(dest) = best_rename_dest(base_entry, &our_added, our_items, &used_dests)?
+            && rename_resolves_cleanly(
+                base_entry,
+                our_items.get(&dest),
+                Some(their_entry),
+                options,
+            )?
+        {
+            used_dests.insert(dest.clone());
+            renames.push(Rename {
+                source: source.clone(),
+                dest,
+                renamed_by_ours: true,
+            });
+            continue;
+        }
+        // `theirs` renamed the file away while `ours` edited it in place.
+        if !their_items.contains_key(source)
+            && let Some(our_entry) = our_items.get(source)
+            && our_entry != base_entry
+            && let Some(dest) =
+                best_rename_dest(base_entry, &their_added, their_items, &used_dests)?
+            && rename_resolves_cleanly(
+                base_entry,
+                Some(our_entry),
+                their_items.get(&dest),
+                options,
+            )?
+        {
+            used_dests.insert(dest.clone());
+            renames.push(Rename {
+                source: source.clone(),
+                dest,
+                renamed_by_ours: false,
+            });
+        }
+    }
+    Ok(renames)
+}
+
+/// Pick the highest-similarity unused destination for a renamed `base_entry`.
+fn best_rename_dest(
+    base_entry: &MergeTreeEntry,
+    candidates: &[&PathBuf],
+    side_items: &HashMap<PathBuf, MergeTreeEntry>,
+    used_dests: &HashSet<PathBuf>,
+) -> Result<Option<PathBuf>, PullMergeError> {
+    let mut best: Option<(PathBuf, f64)> = None;
+    for candidate in candidates {
+        if used_dests.contains(*candidate) {
+            continue;
+        }
+        let Some(candidate_entry) = side_items.get(*candidate) else {
+            continue;
+        };
+        let similarity = content_similarity(base_entry, candidate_entry)?;
+        if similarity >= RENAME_SIMILARITY_THRESHOLD
+            && best.as_ref().is_none_or(|(_, score)| similarity > *score)
+        {
+            best = Some(((*candidate).clone(), similarity));
+        }
+    }
+    Ok(best.map(|(path, _)| path))
+}
+
+/// Verify the relocated three-way merge (base = renamed source, plus the two
+/// sides at the new path) resolves without a conflict.
+fn rename_resolves_cleanly(
+    base_entry: &MergeTreeEntry,
+    ours: Option<&MergeTreeEntry>,
+    theirs: Option<&MergeTreeEntry>,
+    options: &PullMergeOptions,
+) -> Result<bool, PullMergeError> {
+    Ok(matches!(
+        resolve_three_way_with_options(Some(base_entry), ours, theirs, options)?,
+        MergeResolution::Use(_) | MergeResolution::Delete
+    ))
+}
+
+/// Apply a detected rename to the working item maps: move the base entry and
+/// the editing side's entry onto the destination path, and drop the source so
+/// it resolves as deleted.
+fn apply_rename(
+    base: &mut HashMap<PathBuf, MergeTreeEntry>,
+    ours: &mut HashMap<PathBuf, MergeTreeEntry>,
+    theirs: &mut HashMap<PathBuf, MergeTreeEntry>,
+    rename: &Rename,
+) {
+    if let Some(base_entry) = base.remove(&rename.source) {
+        base.insert(rename.dest.clone(), base_entry);
+    }
+    if rename.renamed_by_ours {
+        if let Some(their_entry) = theirs.remove(&rename.source) {
+            theirs.insert(rename.dest.clone(), their_entry);
+        }
+    } else if let Some(our_entry) = ours.remove(&rename.source) {
+        ours.insert(rename.dest.clone(), our_entry);
+    }
+}
+
+/// Dice-coefficient line similarity between two blobs (1.0 when the hashes are
+/// identical). Binary blobs only match on an exact hash.
+fn content_similarity(a: &MergeTreeEntry, b: &MergeTreeEntry) -> Result<f64, PullMergeError> {
+    if a.hash == b.hash {
+        return Ok(1.0);
+    }
+    if !matches!(a.mode, TreeItemMode::Blob | TreeItemMode::BlobExecutable)
+        || !matches!(b.mode, TreeItemMode::Blob | TreeItemMode::BlobExecutable)
+    {
+        return Ok(0.0);
+    }
+    let a_data = load_merge_blob(a.hash)?.data;
+    let b_data = load_merge_blob(b.hash)?.data;
+    if is_binary_blob(&a_data) || is_binary_blob(&b_data) {
+        return Ok(0.0);
+    }
+    let a_lines = bytes_to_lines(&a_data);
+    let b_lines = bytes_to_lines(&b_data);
+    if a_lines.is_empty() && b_lines.is_empty() {
+        return Ok(1.0);
+    }
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for line in &a_lines {
+        *counts.entry(line.as_str()).or_default() += 1;
+    }
+    let mut common = 0usize;
+    for line in &b_lines {
+        if let Some(count) = counts.get_mut(line.as_str())
+            && *count > 0
+        {
+            *count -= 1;
+            common += 1;
+        }
+    }
+    Ok((2.0 * common as f64) / (a_lines.len() + b_lines.len()) as f64)
 }
 
 fn count_item_map_changes(
