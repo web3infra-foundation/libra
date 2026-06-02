@@ -51,7 +51,7 @@ batch document.
 | commit | supported | |
 | switch | supported | |
 | rebase | partial | `--autosquash` / `--reapply-cherry-picks` not supported |
-| merge | partial | fast-forward, best-base single-head three-way, clean disjoint octopus, `--squash`, `--no-ff`, `--ff-only`, `--no-commit`, message/signoff/shortlog, `ours` strategy, `-X ours/theirs`, binary conflict handling, and diff3 markers supported; `--autostash`, signature verification/signing flags, progress flags, `--into-name`, `--no-verify`, diff algorithms, whitespace strategy options, subtree/custom strategies/drivers, and conflicted octopus resolution deferred |
+| merge | supported | fast-forward, best-base single-head three-way (criss-cross LCA), clean disjoint octopus, `--squash`, `--no-ff`/`--ff-only`/`merge.ff`, `--no-commit`, `-m`/`-F`/`--signoff`/`--log`/`--into-name`, `-e`/`--edit`, `ours` strategy, `-X ours/theirs`, diff3 markers, `--stat`/`merge.stat`, `--autostash`/`merge.autoStash`, `-S`/`--gpg-sign` vault signing, `--verify-signatures`/`merge.verifySignatures`, whitespace-insensitive merge, rename detection (`--find-renames`/`merge.renames`), and `--diff-algorithm`/`--cleanup` validation. Remaining gaps: subtree/custom strategies and merge drivers, conflicted-octopus resolution, and directory-rename tracking are deferred; signature verification is a presence check, not cryptographic (see [docs/improvement/compatibility/merge.md](docs/improvement/compatibility/merge.md)) |
 | reset | supported | |
 | rev-parse | supported | |
 | rev-list | supported | |
