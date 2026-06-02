@@ -312,6 +312,7 @@ mod pull_test;
 mod push_error_test;
 mod push_json_test;
 mod push_test;
+mod range_diff_test;
 mod rebase_test;
 mod reflog_test;
 mod remote_test;

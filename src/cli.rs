@@ -32,7 +32,7 @@ const ROOT_AFTER_HELP: &str = "\
 Command Groups:
   Repository Setup        init, clone, config
   Working Tree            status, add, rm, mv, restore, clean, stash, lfs, worktree
-  History Inspection      log, shortlog, show, show-ref, ls-remote, diff, grep, blame, describe
+  History Inspection      log, shortlog, show, show-ref, ls-remote, diff, grep, blame, describe, range-diff
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent, package
@@ -378,6 +378,11 @@ enum Commands {
     Push(command::push::PushArgs),
     #[command(about = "Download objects and refs from another repository")]
     Fetch(command::fetch::FetchArgs),
+    #[command(
+        about = "Compare two commit ranges (e.g., old-base..old-head new-base..new-head)",
+        alias = "rdiff"
+    )]
+    RangeDiff(command::range_diff::RangeDiffArgs),
     #[command(about = "Fetch from and integrate with another repository or a local branch")]
     Pull(command::pull::PullArgs),
     #[command(about = "Verify the integrity of objects, refs, and index")]
@@ -1177,6 +1182,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             command::cherry_pick::execute_safe(cmd_args, &output).await?
         }
         Commands::Push(cmd_args) => command::push::execute_safe(cmd_args, &output).await?,
+        Commands::RangeDiff(cmd_args) => {
+            command::range_diff::execute_safe(cmd_args, &output).await?
+        }
         Commands::CatFile(cmd_args) => command::cat_file::execute_safe(cmd_args, &output).await?,
         Commands::HashObject(cmd_args) => {
             command::hash_object::execute_safe(cmd_args, &output).await?
