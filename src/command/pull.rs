@@ -605,7 +605,9 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
         | merge::PullMergeError::ConflictingAction
         | merge::PullMergeError::SquashNoFf
         | merge::PullMergeError::SquashCommit
-        | merge::PullMergeError::InvalidMergeFfConfig { .. } => {
+        | merge::PullMergeError::InvalidMergeFfConfig { .. }
+        | merge::PullMergeError::InvalidDiffAlgorithm { .. }
+        | merge::PullMergeError::InvalidCleanupMode { .. } => {
             CliError::command_usage(error.to_string())
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
         }

@@ -41,8 +41,19 @@ Libra supports fast-forward policy flags/config (`--ff-only`, `--no-ff`, `merge.
 | `-s ours`, `--strategy ours` | Use Git's `ours` strategy for the merge result. |
 | `-X ours`, `-X theirs` | Resolve content/delete conflicts in favor of one side. |
 | `--log[=<n>]` | Append up to `n` shortlog entries to the merge commit message (`20` when omitted). |
+| `--no-log` | Do not append a shortlog (overrides `--log`). |
+| `--no-signoff` | Do not add a `Signed-off-by` trailer (overrides `--signoff`). |
+| `--no-squash` | Create a merge commit instead of squashing (the default; overrides `--squash`). |
+| `--into-name <name>` | Override the branch name recorded in the auto-generated merge message. |
 | `--conflict=diff3` | Include base content in conflict markers. `merge.conflictstyle=diff3` is also supported. |
 | `--stat`, `--no-stat` | Accepted for Git-compatible CLI surface. Libra currently has no reusable diffstat renderer, so merge success output remains unchanged. |
+| `--diff-algorithm <algo>` | Validate the requested content-merge algorithm (`myers`/`histogram`/`patience`/`minimal`). Libra uses a single Myers-style backend. |
+| `--cleanup <mode>` | Validate the message cleanup mode (`strip`/`whitespace`/`verbatim`/`scissors`/`default`). Libra already trims merge messages. |
+| `--no-verify` | Accepted for Git compatibility. Libra runs no pre-merge or commit-msg hooks yet, so this has no effect. |
+| `--overwrite-ignore`, `--no-overwrite-ignore` | Accepted for Git compatibility; Libra always preserves ignored files during merge. |
+| `--rerere-autoupdate`, `--no-rerere-autoupdate` | Accepted for Git compatibility; Libra has no rerere resolution store. |
+
+Progress output is controlled by the global `--progress=<json\|text\|none\|auto>` flag rather than a merge-specific `--progress` toggle.
 | `--json` | Emit a structured success envelope. |
 | `--machine` | Emit the same structured envelope as one compact JSON line. |
 | `--quiet` | Suppress human success output. |
@@ -83,7 +94,7 @@ Run `libra merge --abort` before continuing to restore the branch, index, and wo
 
 ## Deferred Git Merge Features
 
-The following Git flags are not implemented and are not accepted as ignored no-ops: `--autostash`, `--verify-signatures`, `-S`/`--gpg-sign`, `--no-gpg-sign`, `--progress`, `--no-progress`, `--into-name`, `--no-verify`, `--diff-algorithm`, whitespace strategy options, custom merge drivers, custom strategies beyond `ours`, subtree strategy, and advanced octopus conflict resolution.
+The following Git flags are not implemented and are not accepted as ignored no-ops: `--autostash`, `--verify-signatures`, `-S`/`--gpg-sign`, `--no-gpg-sign`, `--edit`/`--no-edit`, whitespace strategy options, custom merge drivers, custom strategies beyond `ours`, subtree strategy, and advanced octopus conflict resolution.
 
 ## Human Output
 

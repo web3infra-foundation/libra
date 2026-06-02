@@ -1418,3 +1418,121 @@ fn test_merge_help_lists_examples_banner() {
         );
     }
 }
+
+#[tokio::test]
+#[serial]
+async fn test_merge_into_name_overrides_message_branch_name() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feature change");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    let output = run_libra_command(
+        &["merge", "--into-name", "release-1.0", "feature"],
+        temp_path,
+    );
+    assert_cli_success(&output, "merge with --into-name");
+
+    let _guard = ChangeDirGuard::new(temp_path);
+    let head = Head::current_commit()
+        .await
+        .expect("merge should create HEAD");
+    let commit: Commit = load_object(&head).expect("load merge commit");
+    assert!(
+        commit.message.contains("into release-1.0"),
+        "merge message should honor --into-name: {}",
+        commit.message
+    );
+}
+
+#[test]
+fn test_merge_diff_algorithm_rejects_unknown_value() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["merge", "--diff-algorithm", "bogus", "main"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        stderr.contains("unknown diff algorithm 'bogus'"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn test_merge_diff_algorithm_accepts_known_value() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feature change");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+
+    let output = run_libra_command(
+        &["merge", "--diff-algorithm", "histogram", "feature"],
+        temp_path,
+    );
+    assert_cli_success(&output, "merge with --diff-algorithm histogram");
+}
+
+#[test]
+fn test_merge_cleanup_rejects_unknown_mode() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["merge", "--cleanup", "bogus", "main"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(stderr.contains("unknown cleanup mode 'bogus'"), "{stderr}");
+}
+
+#[test]
+fn test_merge_help_accepts_git_compat_flags() {
+    let repo = tempfile::tempdir().expect("tempdir for merge --help");
+    let output = run_libra_command(&["merge", "--help"], repo.path());
+    assert_cli_success(&output, "merge help");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for flag in [
+        "--into-name",
+        "--no-log",
+        "--no-signoff",
+        "--no-squash",
+        "--diff-algorithm",
+        "--cleanup",
+        "--no-verify",
+        "--overwrite-ignore",
+        "--no-overwrite-ignore",
+        "--rerere-autoupdate",
+        "--no-rerere-autoupdate",
+    ] {
+        assert!(
+            stdout.contains(flag),
+            "merge --help should list {flag}, stdout: {stdout}"
+        );
+    }
+}

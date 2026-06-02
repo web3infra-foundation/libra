@@ -133,6 +133,22 @@ pub struct MergeArgs {
     #[arg(long, num_args = 0..=1, default_missing_value = "20")]
     pub log: Option<usize>,
 
+    /// Do not append a shortlog to the merge commit message (overrides --log)
+    #[arg(long = "no-log", conflicts_with = "log")]
+    pub no_log: bool,
+
+    /// Do not add a Signed-off-by trailer (overrides --signoff)
+    #[arg(long = "no-signoff", conflicts_with = "signoff")]
+    pub no_signoff: bool,
+
+    /// Create a merge commit instead of squashing (default; overrides --squash)
+    #[arg(long = "no-squash", conflicts_with = "squash")]
+    pub no_squash: bool,
+
+    /// Override the branch name recorded in the merge commit message
+    #[arg(long = "into-name", value_name = "NAME")]
+    pub into_name: Option<String>,
+
     /// Show a diffstat after merging when supported
     #[arg(long, conflicts_with = "no_stat")]
     pub stat: bool,
@@ -144,6 +160,34 @@ pub struct MergeArgs {
     /// Conflict marker style
     #[arg(long, value_enum)]
     pub conflict: Option<MergeConflictStyle>,
+
+    /// Diff algorithm to use for content merges (myers, histogram, patience, minimal)
+    #[arg(long = "diff-algorithm", value_name = "ALGO")]
+    pub diff_algorithm: Option<String>,
+
+    /// How to clean up the merge commit message (accepted for Git compatibility)
+    #[arg(long, value_name = "MODE")]
+    pub cleanup: Option<String>,
+
+    /// Skip pre-merge/commit-msg hooks (accepted; Libra runs no merge hooks yet)
+    #[arg(long = "no-verify")]
+    pub no_verify: bool,
+
+    /// Overwrite ignored files when merging (default; accepted for Git compatibility)
+    #[arg(long = "overwrite-ignore", conflicts_with = "no_overwrite_ignore")]
+    pub overwrite_ignore: bool,
+
+    /// Do not overwrite ignored files when merging (accepted for Git compatibility)
+    #[arg(long = "no-overwrite-ignore", conflicts_with = "overwrite_ignore")]
+    pub no_overwrite_ignore: bool,
+
+    /// Update the rerere resolution database (accepted; Libra has no rerere store)
+    #[arg(long = "rerere-autoupdate", conflicts_with = "no_rerere_autoupdate")]
+    pub rerere_autoupdate: bool,
+
+    /// Do not update the rerere database (default; accepted for Git compatibility)
+    #[arg(long = "no-rerere-autoupdate", conflicts_with = "rerere_autoupdate")]
+    pub no_rerere_autoupdate: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -201,6 +245,7 @@ pub(crate) struct PullMergeOptions {
     pub strategy_option: Option<MergeFavor>,
     pub log: Option<usize>,
     pub conflict_style: MergeConflictStyle,
+    pub into_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -279,6 +324,12 @@ pub(crate) enum PullMergeError {
     SquashCommit,
     #[error("invalid merge.ff value '{value}'")]
     InvalidMergeFfConfig { value: String },
+    #[error("unknown diff algorithm '{value}' (expected myers, histogram, patience, or minimal)")]
+    InvalidDiffAlgorithm { value: String },
+    #[error(
+        "unknown cleanup mode '{value}' (expected strip, whitespace, verbatim, scissors, or default)"
+    )]
+    InvalidCleanupMode { value: String },
     #[error("octopus merge refused: {detail}")]
     OctopusConflict { detail: String },
     #[error("directory/file conflict in merge: {path}")]
@@ -348,7 +399,9 @@ impl From<PullMergeError> for CliError {
             | PullMergeError::ConflictingAction
             | PullMergeError::SquashNoFf
             | PullMergeError::SquashCommit
-            | PullMergeError::InvalidMergeFfConfig { .. } => {
+            | PullMergeError::InvalidMergeFfConfig { .. }
+            | PullMergeError::InvalidDiffAlgorithm { .. }
+            | PullMergeError::InvalidCleanupMode { .. } => {
                 CliError::command_usage(error.to_string())
                     .with_stable_code(StableErrorCode::CliInvalidArguments)
             }
@@ -459,6 +512,8 @@ async fn merge_options_from_args(args: &MergeArgs) -> Result<PullMergeOptions, M
     if args.squash && args.commit {
         return Err(MergeError::SquashCommit);
     }
+    validate_diff_algorithm(args.diff_algorithm.as_deref())?;
+    validate_cleanup_mode(args.cleanup.as_deref())?;
     let mut ff_only = args.ff_only;
     let mut no_ff = args.no_ff;
     if !ff_only && !no_ff {
@@ -474,9 +529,41 @@ async fn merge_options_from_args(args: &MergeArgs) -> Result<PullMergeOptions, M
         signoff: args.signoff,
         strategy: args.strategy,
         strategy_option: args.strategy_option,
-        log: args.log,
+        log: if args.no_log { None } else { args.log },
         conflict_style: resolve_conflict_style(args.conflict).await?,
+        into_name: args.into_name.clone(),
     })
+}
+
+/// Accept Git's `--diff-algorithm` flag for content merges. Libra's blob
+/// merge currently uses a single Myers-style backend, so we validate the
+/// requested algorithm name and proceed with that backend rather than
+/// silently ignoring an unknown value.
+fn validate_diff_algorithm(algorithm: Option<&str>) -> Result<(), MergeError> {
+    match algorithm {
+        None => Ok(()),
+        Some(name) => match name.trim().to_ascii_lowercase().as_str() {
+            "myers" | "histogram" | "patience" | "minimal" => Ok(()),
+            other => Err(MergeError::InvalidDiffAlgorithm {
+                value: other.to_string(),
+            }),
+        },
+    }
+}
+
+/// Accept Git's `--cleanup=<mode>` flag for the merge message. The mode is
+/// validated against Git's documented set; the actual message body produced
+/// by Libra is already trimmed, so non-`verbatim` modes are equivalent here.
+fn validate_cleanup_mode(mode: Option<&str>) -> Result<(), MergeError> {
+    match mode {
+        None => Ok(()),
+        Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "strip" | "whitespace" | "verbatim" | "scissors" | "default" => Ok(()),
+            other => Err(MergeError::InvalidCleanupMode {
+                value: other.to_string(),
+            }),
+        },
+    }
 }
 
 async fn resolve_conflict_style(
@@ -746,10 +833,7 @@ async fn run_octopus_merge(
         let lca = lca_commit(&current_commit, &target_commit)
             .await
             .map_err(|error| PullMergeError::History(error.to_string()))?;
-        if !lca
-            .as_ref()
-            .is_some_and(|base| base.id == current_commit.id)
-        {
+        if lca.as_ref().is_none_or(|base| base.id != current_commit.id) {
             return Err(PullMergeError::OctopusConflict {
                 detail: format!("target '{branch}' is not a clean descendant of HEAD"),
             });
@@ -793,10 +877,13 @@ async fn run_octopus_merge(
     ensure_no_untracked_conflicts(&current_index, &paths_to_write)?;
     let tree_id = create_tree_from_items_map(&merged_items).map_err(PullMergeError::TreeCreate)?;
     let head_name = current_head_name().await?;
-    let message = format!(
-        "Merge branches {} into {head_name}",
-        target_names.join(", ")
-    );
+    let into_label = options.into_name.as_deref().unwrap_or(&head_name);
+    let message = options.message.clone().unwrap_or_else(|| {
+        format!(
+            "Merge branches {} into {into_label}",
+            target_names.join(", ")
+        )
+    });
     let merge_commit =
         Commit::from_tree_id(tree_id, parents.clone(), &format_commit_msg(&message, None));
     save_object(&merge_commit, &merge_commit.id)
@@ -1551,15 +1638,6 @@ fn classify_relative_to_base(
     }
 }
 
-#[cfg(test)]
-fn resolve_three_way(
-    base: Option<&MergeTreeEntry>,
-    ours: Option<&MergeTreeEntry>,
-    theirs: Option<&MergeTreeEntry>,
-) -> Result<MergeResolution, PullMergeError> {
-    resolve_three_way_with_options(base, ours, theirs, &PullMergeOptions::default())
-}
-
 fn resolve_three_way_with_options(
     base: Option<&MergeTreeEntry>,
     ours: Option<&MergeTreeEntry>,
@@ -1597,9 +1675,9 @@ fn resolve_three_way_with_options(
         }
         (true, RelativeState::Modified(ours), RelativeState::Same(_)) => MergeResolution::Use(ours),
         (true, RelativeState::Modified(ours), RelativeState::Modified(theirs)) => {
-            if ours == theirs {
-                MergeResolution::Use(theirs)
-            } else if ours.hash == theirs.hash {
+            // Identical content (even when only the file mode differs) needs no
+            // textual merge; both sides agree on the blob bytes.
+            if ours.hash == theirs.hash {
                 MergeResolution::Use(theirs)
             } else if let Some(base) = base
                 && let Some(merged) = try_merge_blob_contents(base, ours, theirs)?
@@ -2203,10 +2281,11 @@ async fn merge_commit_message(
     commits: Option<(&Commit, &Commit)>,
     options: &PullMergeOptions,
 ) -> Result<String, PullMergeError> {
+    let into_label = options.into_name.as_deref().unwrap_or(head_name);
     let mut base_message = options
         .message
         .clone()
-        .unwrap_or_else(|| format!("Merge {upstream} into {head_name}"));
+        .unwrap_or_else(|| format!("Merge {upstream} into {into_label}"));
     if let Some(limit) = options.log
         && limit > 0
         && let Some((current, target)) = commits
@@ -2378,6 +2457,20 @@ mod tests {
         assert_eq!(
             PullMergeError::Restore("checkout failed".to_string()).to_string(),
             "failed to restore working tree after merge: checkout failed",
+        );
+        assert_eq!(
+            PullMergeError::InvalidDiffAlgorithm {
+                value: "bogus".to_string(),
+            }
+            .to_string(),
+            "unknown diff algorithm 'bogus' (expected myers, histogram, patience, or minimal)",
+        );
+        assert_eq!(
+            PullMergeError::InvalidCleanupMode {
+                value: "bogus".to_string(),
+            }
+            .to_string(),
+            "unknown cleanup mode 'bogus' (expected strip, whitespace, verbatim, scissors, or default)",
         );
     }
 
