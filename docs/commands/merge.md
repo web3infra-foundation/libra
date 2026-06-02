@@ -49,6 +49,7 @@ Libra supports fast-forward policy flags/config (`--ff-only`, `--no-ff`, `merge.
 | `--no-signoff` | Do not add a `Signed-off-by` trailer (overrides `--signoff`). |
 | `--no-squash` | Create a merge commit instead of squashing (the default; overrides `--squash`). |
 | `--into-name <name>` | Override the branch name recorded in the auto-generated merge message. |
+| `-e`, `--edit`, `--no-edit` | Open (or skip) the merge commit message in `$GIT_EDITOR`/`core.editor`/`$VISUAL`/`$EDITOR`. With no usable editor the message is used unchanged. |
 | `--conflict=diff3` | Include base content in conflict markers. `merge.conflictstyle=diff3` is also supported. |
 | `--stat`, `-n`/`--no-stat` | Print (or suppress) a diffstat of what the merge brought in. `--summary`/`--no-summary` are accepted aliases. Honors the `merge.stat` config; defaults off so existing output stays stable. |
 | `--diff-algorithm <algo>` | Validate the requested content-merge algorithm (`myers`/`histogram`/`patience`/`minimal`). Libra uses a single Myers-style backend. |
@@ -102,7 +103,7 @@ Run `libra merge --abort` before continuing to restore the branch, index, and wo
 
 ## Deferred Git Merge Features
 
-The following Git flags are not implemented and are not accepted as ignored no-ops: `--edit`/`--no-edit`, custom merge drivers, custom strategies beyond `ours`, subtree strategy, and advanced octopus conflict resolution. Full cryptographic verification of signatures is reduced to a presence check; `--verify-signatures` confirms a signature exists rather than validating it against a keyring.
+The following Git flags are not implemented and are not accepted as ignored no-ops: custom merge drivers, custom strategies beyond `ours`, subtree strategy, and advanced octopus conflict resolution. Full cryptographic verification of signatures is reduced to a presence check; `--verify-signatures` confirms a signature exists rather than validating it against a keyring. Cross-rename detection is not yet performed (a rename plus an edit on the other side surfaces as a delete/modify conflict).
 
 ## Human Output
 

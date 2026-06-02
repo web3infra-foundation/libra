@@ -14,7 +14,7 @@ use serial_test::serial;
 
 use super::{
     assert_cli_success, create_committed_repo_via_cli, parse_cli_error_stderr, parse_json_stdout,
-    run_libra_command,
+    run_libra_command, run_libra_command_with_stdin_and_env,
 };
 
 fn commit_file(repo: &Path, file: &str, content: &str, message: &str) {
@@ -1851,6 +1851,74 @@ async fn test_merge_gpg_sign_produces_signed_merge_commit() {
     assert!(
         commit.message.contains("PGP SIGNATURE"),
         "merge -S should embed a PGP signature: {}",
+        commit.message
+    );
+}
+
+#[test]
+fn test_merge_help_lists_edit_flags() {
+    let repo = tempfile::tempdir().expect("tempdir for merge --help");
+    let output = run_libra_command(&["merge", "--help"], repo.path());
+    assert_cli_success(&output, "merge help");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for flag in ["--edit", "--no-edit"] {
+        assert!(
+            stdout.contains(flag),
+            "merge --help should list {flag}: {stdout}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_merge_edit_rewrites_message_via_editor() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    // A non-interactive "editor" that rewrites the merge message file.
+    let editor = temp_path.join("editor.sh");
+    std::fs::write(
+        &editor,
+        "#!/bin/sh\nprintf 'EDITED MERGE MESSAGE\\n' > \"$1\"\n",
+    )
+    .expect("write editor script");
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod editor");
+
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feat add");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    let output = run_libra_command_with_stdin_and_env(
+        &["merge", "--edit", "feature"],
+        temp_path,
+        "",
+        &[("GIT_EDITOR", editor.to_str().expect("editor path"))],
+    );
+    assert_cli_success(&output, "merge --edit");
+
+    let _guard = ChangeDirGuard::new(temp_path);
+    let head = Head::current_commit()
+        .await
+        .expect("merge should create HEAD");
+    let commit: Commit = load_object(&head).expect("load merge commit");
+    assert!(
+        commit.message.contains("EDITED MERGE MESSAGE"),
+        "--edit should apply the editor's message: {}",
         commit.message
     );
 }

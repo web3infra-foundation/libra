@@ -157,6 +157,14 @@ pub struct MergeArgs {
     #[arg(long = "into-name", value_name = "NAME")]
     pub into_name: Option<String>,
 
+    /// Open the merge commit message in an editor before committing
+    #[arg(short = 'e', long, conflicts_with = "no_edit")]
+    pub edit: bool,
+
+    /// Accept the auto-generated merge message without editing (default)
+    #[arg(long = "no-edit", conflicts_with = "edit")]
+    pub no_edit: bool,
+
     /// Show a diffstat of what the merge brought in
     #[arg(long, visible_alias = "summary", conflicts_with = "no_stat")]
     pub stat: bool,
@@ -350,6 +358,7 @@ pub(crate) struct PullMergeOptions {
     pub whitespace: WhitespaceMode,
     pub sign: bool,
     pub verify_signatures: bool,
+    pub edit: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -721,6 +730,7 @@ async fn merge_options_from_args(args: &MergeArgs) -> Result<PullMergeOptions, M
         },
         sign: !args.no_gpg_sign && args.gpg_sign,
         verify_signatures: resolve_verify_signatures(args).await,
+        edit: args.edit && !args.no_edit,
     })
 }
 
@@ -1141,8 +1151,14 @@ async fn run_octopus_merge(
             target_names.join(", ")
         )
     });
-    let merge_commit =
-        create_merge_commit(tree_id, parents.clone(), &message, options.sign).await?;
+    let merge_commit = create_merge_commit(
+        tree_id,
+        parents.clone(),
+        &message,
+        options.sign,
+        options.edit,
+    )
+    .await?;
     save_object(&merge_commit, &merge_commit.id)
         .map_err(|error| PullMergeError::CommitSave(error.to_string()))?;
     update_head_with_reflog(
@@ -1308,6 +1324,7 @@ async fn perform_three_way_merge(
         vec![current_commit.id, target_commit.id],
         &message,
         options.sign,
+        options.edit,
     )
     .await?;
     save_object(&merge_commit, &merge_commit.id)
@@ -1510,8 +1527,14 @@ async fn run_merge_continue(
         Some(message) => message,
         None => merge_commit_message(&state.target_ref, &state.head_name, None, &options).await?,
     };
-    let merge_commit =
-        create_merge_commit(tree_id, vec![orig_head, target], &message, options.sign).await?;
+    let merge_commit = create_merge_commit(
+        tree_id,
+        vec![orig_head, target],
+        &message,
+        options.sign,
+        options.edit,
+    )
+    .await?;
     save_object(&merge_commit, &merge_commit.id)
         .map_err(|error| MergeError::CommitSave(error.to_string()))?;
     update_head_with_reflog(
@@ -1558,7 +1581,10 @@ async fn create_merge_commit(
     parents: Vec<ObjectHash>,
     message: &str,
     sign: bool,
+    edit: bool,
 ) -> Result<Commit, PullMergeError> {
+    let message = maybe_edit_message(message, edit).await?;
+    let message = message.as_str();
     if !sign {
         return Ok(Commit::from_tree_id(
             tree_id,
@@ -1582,6 +1608,68 @@ async fn create_merge_commit(
             "vault signing key unavailable; configure libra vault to use --gpg-sign".to_string(),
         )),
     }
+}
+
+/// Let the user edit the merge message in `$GIT_EDITOR`/`core.editor`/`$VISUAL`/
+/// `$EDITOR` when `--edit` is set. If no usable editor is configured the message
+/// is returned unchanged (Libra is agent-first and does not force interactivity).
+async fn maybe_edit_message(message: &str, edit: bool) -> Result<String, PullMergeError> {
+    if !edit {
+        return Ok(message.to_string());
+    }
+    let Some(editor) = resolve_editor().await else {
+        return Ok(message.to_string());
+    };
+    let path = util::storage_path().join("MERGE_MSG");
+    fs::write(&path, message)
+        .map_err(|error| PullMergeError::StateSave(format!("{}: {error}", path.display())))?;
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"{}\"", path.display()))
+        .status();
+    match status {
+        Ok(code) if code.success() => fs::read_to_string(&path).map_err(|error| {
+            PullMergeError::StateLoad(format!("failed to read edited merge message: {error}"))
+        }),
+        // A failed or unavailable editor leaves the original message in place.
+        _ => Ok(message.to_string()),
+    }
+}
+
+/// Resolve the editor command Git would use, honoring `GIT_EDITOR`,
+/// `core.editor`, `VISUAL`, then `EDITOR`. No-op editors (`:`/`true`) and empty
+/// values resolve to `None`.
+async fn resolve_editor() -> Option<String> {
+    fn runnable(value: String) -> Option<String> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || trimmed == ":" || trimmed == "true" {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+    if let Ok(editor) = std::env::var("GIT_EDITOR")
+        && let Some(editor) = runnable(editor)
+    {
+        return Some(editor);
+    }
+    if let Some(editor) =
+        read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "core.editor")
+            .await
+            .ok()
+            .flatten()
+        && let Some(editor) = runnable(editor)
+    {
+        return Some(editor);
+    }
+    for var in ["VISUAL", "EDITOR"] {
+        if let Ok(editor) = std::env::var(var)
+            && let Some(editor) = runnable(editor)
+        {
+            return Some(editor);
+        }
+    }
+    None
 }
 
 /// Whether a commit carries an embedded PGP/SSH signature.
