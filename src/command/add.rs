@@ -54,7 +54,11 @@ EXAMPLES:
     libra add -u                       Update tracked files only (no new files)
     libra add --dry-run .              Preview what would be staged
     libra add -f ignored_file.log      Force-add an ignored file
-    libra add --refresh                Refresh index metadata without staging";
+    libra add --refresh                Refresh index metadata without staging
+    libra add --chmod=+x build.sh      Record the executable bit in the index (not the worktree)
+    libra add --renormalize .          Re-stage tracked files (force-rewrite their blobs)
+    libra add --pathspec-from-file list.txt   Stage paths read from a file ('-' for stdin)
+    libra add --dry-run --ignore-missing x    Preview; skip paths missing from the worktree";
 
 /// Stage file contents for the next commit.
 // EXAMPLES are wired via `#[command(after_help = ADD_EXAMPLES)]` and render

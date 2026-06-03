@@ -96,11 +96,50 @@ libra add -v src/
 ### `--ignore-errors`
 
 Continue staging remaining files when individual paths fail. Failed paths are reported
-in the output but do not cause the command to exit with an error.
+in the output but do not cause the command to exit with an error. The default can be set
+via the `add.ignoreErrors` config key (a local/global boolean); an explicit
+`--ignore-errors` / `--no-ignore-errors` on the command line overrides the config.
 
 ```bash
 libra add --ignore-errors src/
 ```
+
+### `--chmod=(+|-)x`
+
+Record the executable bit in the **index** for the matching entries: `+x` stores mode
+`100755`, `-x` stores `100644`. Only the index is changed — the working-tree file's
+filesystem permissions are never touched. The candidate set includes already-tracked
+entries that match the pathspec even if their content is unchanged. Under
+`core.fileMode = false` the mode is still recorded, with a warning.
+
+### `--renormalize`
+
+Re-stage already-tracked files matching the pathspec, implying `-u` (tracked files only;
+untracked files are never added, and tracked files deleted from the working tree are
+staged as deletions). **Intentionally different from Git:** libra has no clean/CRLF
+filter, so this force-rewrites the tracked entries' blobs rather than normalizing line
+endings.
+
+### `--pathspec-from-file <file>` / `--pathspec-file-nul`
+
+Read pathspecs from `<file>` (or `-` for stdin) instead of the command line — mutually
+exclusive with positional pathspecs. Items are newline-separated unless
+`--pathspec-file-nul` is given (then NUL-separated; Git's `add` has no `-z` short option).
+The input is capped at 128 MiB. **Partial:** quoted/escaped pathspecs are not unescaped —
+bytes are taken verbatim.
+
+### `--ignore-missing`
+
+Only valid together with `--dry-run`. Paths that do not exist in the working tree are
+skipped with a warning instead of erroring; paths ignored by `.libraignore` are reported
+as ignored. **Intentionally different from Git:** the "would this be ignored even if
+missing" check is simplified to "skip missing paths with a warning".
+
+### `--sparse` (declined) · `-N`, `--intent-to-add` (deferred)
+
+`--sparse` is declined — libra does not support sparse checkout. `-N` / `--intent-to-add`
+is deferred: the on-disk index format has no intent-to-add bit (see the design notes).
+Both return a usage error (exit 129) inside a repository.
 
 ## Common Commands
 
@@ -111,6 +150,11 @@ libra add .
 libra add -n file.txt
 libra add --refresh
 libra add --ignore-errors src/
+libra add --chmod=+x build.sh              # record the executable bit in the index (not the worktree)
+libra add --renormalize .                  # re-stage tracked files (force-rewrite their blobs)
+libra add --pathspec-from-file paths.txt   # stage paths read from a file ('-' for stdin)
+libra add --pathspec-from-file=- --pathspec-file-nul   # NUL-separated paths from stdin
+libra add --dry-run --ignore-missing a b   # preview; skip paths missing from the working tree
 ```
 
 ## Human Output
@@ -298,7 +342,12 @@ Every `AddError` variant maps to an explicit `StableErrorCode`.
 | Working directory error | `LBR-REPO-001` | 128 | "cannot determine the working tree" |
 | Status computation failed | `LBR-REPO-002` | 128 | -- |
 | All paths ignored (nothing staged) | `LBR-ADD-001` | 128 | "use -f if you really want to add them" |
-| No pathspec and no mode flag | `LBR-CLI-001` | 129 | "maybe you wanted to say 'libra add .'?" |
+| No pathspec and no mode flag | `LBR-CLI-002` | 129 | "maybe you wanted to say 'libra add .'?" |
+| Invalid `--chmod` value (not `+x`/`-x`) | `LBR-CLI-003` | 129 | "only '+x' and '-x' are accepted" |
+| `--sparse` (declined) | `LBR-CLI-003` | 129 | "libra does not support sparse checkout; remove --sparse" |
+| `-N` / `--intent-to-add` (declined) | `LBR-CLI-003` | 129 | "intent-to-add needs extended index capabilities, currently unsupported" |
+| `--pathspec-from-file` read failure / over 128 MiB | `LBR-IO-001` | 128 | -- |
+| `--dry-run --ignore-missing` skipped a missing path (with `--exit-code-on-warning`) | `LBR-WARN-001` | 9 | -- |
 
 ## Compatibility Notes
 

@@ -32,7 +32,7 @@ batch document.
 | graph | intentionally-different | Libra AI graph inspection extension, not a Git command |
 | sandbox | intentionally-different | Libra AI sandbox diagnostics extension, not a Git command |
 | package | intentionally-different | Libra AI capability-package install/list/diff extension, not a Git command |
-| add | partial | sparse-checkout flag unsupported |
+| add | partial | `--chmod=(+\|-)x` supported (index mode only, not worktree perms); `--renormalize` intentionally-different (force-rewrites tracked entries' blobs; no CRLF/EOL normalization — git-internal has no clean filter); `--pathspec-from-file` / `--pathspec-file-nul` partial (no quoted/escaped pathspec — raw bytes; 128 MiB cap); `--ignore-missing` partial/intentionally-different (dry-run only; missing paths skipped with a warning rather than the Git ignored-even-if-missing check); `add.ignoreErrors` config honored; `--sparse` unsupported (declined); `-N` / `--intent-to-add` deferred (on-disk index has no intent-to-add bit) |
 | rm | partial | `--force` / `--dry-run` / `--cached` / `--recursive` / `--ignore-unmatch` / `--pathspec-from-file` / `--pathspec-file-nul` supported; sparse-checkout flag unsupported; per-command `--quiet` not exposed (use global `--quiet`) |
 | mv | partial | sparse-checkout flag unsupported |
 | restore | supported | |
