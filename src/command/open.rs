@@ -32,7 +32,7 @@ EXAMPLES:
     libra open --print-only                               Print the resolved URL without opening the browser
     libra open origin --print-only                        Print a specific remote's URL without opening the browser";
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(after_help = OPEN_EXAMPLES)]
 pub struct OpenArgs {
     /// Remote name (e.g. `origin`) or a direct URL. Omit to auto-detect from the current branch's upstream
@@ -99,7 +99,7 @@ pub async fn execute(args: OpenArgs) {
 /// browser.
 pub async fn execute_safe(args: OpenArgs, output: &OutputConfig) -> CliResult<()> {
     let in_repo = require_repo().is_ok();
-    let resolution = resolve_open_target(args, in_repo)
+    let resolution = resolve_open_target(args.clone(), in_repo)
         .await
         .map_err(open_cli_error)?;
     let web_url = transform_url(&resolution.remote_url);
