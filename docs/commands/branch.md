@@ -9,6 +9,7 @@ Create, delete, rename, inspect, or list branches.
 ```
 libra branch [<new_branch>] [<commit_hash>]
 libra branch -l [-r | -a] [--contains <commit>] [--no-contains <commit>]
+libra branch -l [--merged [<commit>] | --no-merged [<commit>]] [--points-at <object>] [--ignore-case]
 libra branch -d <name>
 libra branch -D <name>
 libra branch -m [<old>] <new>
@@ -40,6 +41,10 @@ The `--contains` and `--no-contains` filters (aliased as `--with` and `--without
 | `-a` | `--all` | | Show local and remote-tracking branches |
 | | `--contains` | `[commit]` (default HEAD) | Only list branches containing the commit. Alias: `--with` |
 | | `--no-contains` | `[commit]` (default HEAD) | Only list branches not containing the commit. Alias: `--without` |
+| | `--merged` | `[commit]` (default HEAD) | Only list branches whose tip is merged into the commit. Mutually exclusive with `--no-merged` |
+| | `--no-merged` | `[commit]` (default HEAD) | Only list branches whose tip is not merged into the commit |
+| | `--points-at` | `<object>` | Only list branches whose tip points exactly at the object |
+| | `--ignore-case` | | Sort branch names case-insensitively in list output |
 
 ### Flag examples
 
@@ -62,6 +67,18 @@ libra branch --contains v2.0
 
 # List branches that do NOT contain HEAD
 libra branch --no-contains
+
+# List branches already merged into HEAD (safe to delete)
+libra branch --merged
+
+# List branches not yet merged into main
+libra branch --no-merged main
+
+# List branches whose tip is exactly at HEAD
+libra branch --points-at HEAD
+
+# List branches sorted case-insensitively
+libra branch --ignore-case
 
 # Safe-delete a merged branch
 libra branch -d topic
@@ -92,6 +109,9 @@ libra branch feature-x                  # Create a branch from HEAD
 libra branch feature-x main             # Create a branch from another branch
 libra branch -d topic                   # Delete a fully merged branch
 libra branch -D topic                   # Force-delete a branch
+libra branch --merged                   # List branches merged into HEAD
+libra branch --no-merged main           # List branches not yet merged into main
+libra branch --points-at HEAD           # List branches whose tip is at HEAD
 libra branch --set-upstream-to origin/main
                                         # Set upstream for the current branch
 libra branch --json --show-current      # Structured JSON output for agents

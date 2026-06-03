@@ -79,6 +79,29 @@ pub fn is_locked_revision(rev: &str) -> bool {
     is_locked_branch(head)
 }
 
+/// Retain only branches whose tip is (or is not) reachable from a baseline.
+///
+/// `reachable` is the precomputed ancestor set of a `--merged` / `--no-merged`
+/// baseline commit. When `want_merged` is `true`, the predicate keeps branches
+/// whose tip commit lies inside the set (i.e. merged into the baseline); when
+/// `false`, it keeps the complement (not merged). This is a pure set-membership
+/// filter — the caller supplies the reachability set and no storage is touched.
+pub fn retain_by_merge_status(
+    branches: &mut Vec<Branch>,
+    reachable: &std::collections::HashSet<ObjectHash>,
+    want_merged: bool,
+) {
+    branches.retain(|branch| reachable.contains(&branch.commit) == want_merged);
+}
+
+/// Retain only branches whose tip points exactly at `target`.
+///
+/// Backs `libra branch --points-at <object>`: the caller resolves the requested
+/// revision to a commit hash, and this keeps only branches whose tip equals it.
+pub fn retain_by_points_at(branches: &mut Vec<Branch>, target: &ObjectHash) {
+    branches.retain(|branch| &branch.commit == target);
+}
+
 /// In-memory branch view materialised from a [`reference::Model`] row.
 ///
 /// `commit` is parsed into a typed [`ObjectHash`]; rows that are missing a

@@ -387,6 +387,10 @@ async fn test_branch() {
             all: false,
             contains: vec![],
             no_contains: vec![],
+            merged: None,
+            no_merged: None,
+            points_at: None,
+            ignore_case: false,
         };
         execute(args).await;
 
@@ -422,6 +426,10 @@ async fn test_branch() {
             all: false,
             contains: vec![],
             no_contains: vec![],
+            merged: None,
+            no_merged: None,
+            points_at: None,
+            ignore_case: false,
         };
         execute(args).await;
         let second_branch = Branch::find_branch_result(&second_branch_name, None)
@@ -447,6 +455,10 @@ async fn test_branch() {
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await;
 
@@ -499,6 +511,10 @@ async fn test_create_branch_from_remote() {
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await;
 
@@ -553,6 +569,10 @@ async fn test_create_branch_from_remote_tracking_ref() {
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 
@@ -761,6 +781,10 @@ async fn test_branch_rename() {
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await;
 
@@ -785,6 +809,10 @@ async fn test_branch_rename() {
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await;
 
@@ -871,6 +899,10 @@ async fn test_rename_current_branch() {
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await;
 
@@ -938,6 +970,10 @@ async fn test_rename_to_existing_branch() {
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await;
 
@@ -954,6 +990,10 @@ async fn test_rename_to_existing_branch() {
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await;
 
@@ -971,6 +1011,10 @@ async fn test_rename_to_existing_branch() {
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await;
 
@@ -1031,6 +1075,10 @@ async fn test_list_all_branches() {
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await;
 
@@ -1058,6 +1106,10 @@ async fn test_list_all_branches() {
         all: true,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await; // This will print to stdout, which is fine for tests
 
@@ -1123,6 +1175,10 @@ async fn test_branch_delete_safe() {
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 
@@ -1173,6 +1229,10 @@ async fn test_branch_delete_safe() {
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 
@@ -1225,6 +1285,10 @@ async fn test_branch_delete_safe() {
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 
@@ -1309,6 +1373,10 @@ async fn test_branch_contains_commit_filter() {
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 
@@ -1581,5 +1649,437 @@ fn test_filter_branches_propagates_error_for_corrupt_commit() {
         err.message().contains("failed to load commit"),
         "error should mention failed commit load, got: {}",
         err.message()
+    );
+}
+
+// =====================================================================
+//  Wave 1 — `--merged` / `--no-merged` / `--points-at` / `--ignore-case`
+// =====================================================================
+
+/// Collect branch names from `libra branch` human output in printed order,
+/// stripping the `* ` current-branch marker and surrounding whitespace.
+fn list_names_in_order(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .map(str::trim_start)
+        .filter(|line| !line.is_empty() && !line.starts_with("HEAD detached"))
+        .map(|line| line.trim_start_matches("* ").trim().to_string())
+        .collect()
+}
+
+/// Scenario: end-to-end `--merged` / `--no-merged` / `--points-at` over a
+/// divergent graph built through the real CLI:
+///
+/// ```text
+/// main:           base ← m1                (HEAD)
+/// merged-topic:   base                     (ancestor of m1 → merged)
+/// unmerged-topic: base ← m1 ← u1           (not an ancestor of m1)
+/// ```
+///
+/// `--merged` (baseline HEAD = m1) keeps branches whose tip is reachable
+/// from m1; `--no-merged` keeps the complement; `--points-at HEAD` keeps
+/// only the exact-tip match; and `--merged --contains HEAD` proves the two
+/// filters combine with AND semantics.
+#[test]
+#[serial]
+fn test_branch_merged_no_merged_points_at_cli() {
+    let repo = create_committed_repo_via_cli();
+
+    // merged-topic stays pinned at the base commit.
+    assert_cli_success(
+        &run_libra_command(&["branch", "merged-topic"], repo.path()),
+        "create merged-topic",
+    );
+    // Advance main to m1.
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "--allow-empty", "-m", "m1", "--no-verify"],
+            repo.path(),
+        ),
+        "commit m1 on main",
+    );
+    // unmerged-topic forks at m1 and gains its own commit u1.
+    assert_cli_success(
+        &run_libra_command(&["branch", "unmerged-topic"], repo.path()),
+        "create unmerged-topic",
+    );
+    assert_cli_success(
+        &run_libra_command(&["switch", "unmerged-topic"], repo.path()),
+        "switch to unmerged-topic",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "--allow-empty", "-m", "u1", "--no-verify"],
+            repo.path(),
+        ),
+        "commit u1 on unmerged-topic",
+    );
+    assert_cli_success(
+        &run_libra_command(&["switch", "main"], repo.path()),
+        "switch back to main",
+    );
+
+    // --merged (default baseline HEAD = m1)
+    let merged = run_libra_command(&["branch", "--merged"], repo.path());
+    assert_cli_success(&merged, "branch --merged");
+    let names = list_names_in_order(&String::from_utf8_lossy(&merged.stdout));
+    assert!(
+        names.iter().any(|n| n == "main"),
+        "merged should list main: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "merged-topic"),
+        "merged should list merged-topic: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "unmerged-topic"),
+        "merged must exclude unmerged-topic: {names:?}"
+    );
+
+    // --no-merged is the exact complement.
+    let no_merged = run_libra_command(&["branch", "--no-merged"], repo.path());
+    assert_cli_success(&no_merged, "branch --no-merged");
+    let names = list_names_in_order(&String::from_utf8_lossy(&no_merged.stdout));
+    assert!(
+        names.iter().any(|n| n == "unmerged-topic"),
+        "no-merged should list unmerged-topic: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "main"),
+        "no-merged must exclude main: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "merged-topic"),
+        "no-merged must exclude merged-topic: {names:?}"
+    );
+
+    // --points-at HEAD matches only the current tip (m1).
+    let points = run_libra_command(&["branch", "--points-at", "HEAD"], repo.path());
+    assert_cli_success(&points, "branch --points-at HEAD");
+    let names = list_names_in_order(&String::from_utf8_lossy(&points.stdout));
+    assert_eq!(
+        names,
+        vec!["main".to_string()],
+        "points-at HEAD should match only main: {names:?}"
+    );
+
+    // --merged AND --contains HEAD narrows {main, merged-topic} to {main}
+    // (merged-topic does not contain m1; unmerged-topic is not merged).
+    let combined = run_libra_command(&["branch", "--merged", "--contains", "HEAD"], repo.path());
+    assert_cli_success(&combined, "branch --merged --contains HEAD");
+    let names = list_names_in_order(&String::from_utf8_lossy(&combined.stdout));
+    assert_eq!(
+        names,
+        vec!["main".to_string()],
+        "merged AND contains-HEAD should match only main: {names:?}"
+    );
+}
+
+/// `--merged` and `--no-merged` are mutually exclusive. The clap conflict is
+/// surfaced through libra's parse-error path as `CliInvalidArguments`
+/// (`LBR-CLI-002`), which is coarse exit code 129 (the fine-grained `2` only
+/// applies under `LIBRA_FINE_EXIT_CODES=1`).
+#[test]
+#[serial]
+fn test_branch_merged_and_no_merged_conflict_rejected() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["branch", "--merged", "--no-merged"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        stderr.contains("cannot be used with")
+            && stderr.contains("--merged")
+            && stderr.contains("--no-merged"),
+        "conflicting --merged/--no-merged should be rejected at parse time: {stderr}"
+    );
+}
+
+/// In detached-HEAD mode the default `--merged` baseline resolves to the
+/// detached commit (not an error), and branches reachable from it are listed.
+#[test]
+#[serial]
+fn test_branch_merged_detached_head_uses_detached_commit() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "topic"], repo.path()),
+        "create topic at base",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "--allow-empty", "-m", "m1", "--no-verify"],
+            repo.path(),
+        ),
+        "advance main to m1",
+    );
+    assert_cli_success(
+        &run_libra_command(&["switch", "--detach", "HEAD"], repo.path()),
+        "detach HEAD at m1",
+    );
+
+    let merged = run_libra_command(&["branch", "--merged"], repo.path());
+    assert_cli_success(&merged, "branch --merged while detached");
+    let names = list_names_in_order(&String::from_utf8_lossy(&merged.stdout));
+    assert!(
+        names.iter().any(|n| n == "main"),
+        "detached --merged should list main (reachable from detached commit): {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "topic"),
+        "detached --merged should list topic (base is an ancestor of m1): {names:?}"
+    );
+}
+
+/// `--ignore-case` switches the list sort from case-sensitive (ASCII, so
+/// uppercase sorts before lowercase) to case-insensitive ordering.
+#[test]
+#[serial]
+fn test_branch_ignore_case_sorts_case_insensitively() {
+    let repo = create_committed_repo_via_cli();
+    for name in ["Zebra", "apple", "Banana"] {
+        assert_cli_success(
+            &run_libra_command(&["branch", name], repo.path()),
+            "create mixed-case branch",
+        );
+    }
+
+    // Case-sensitive default: 'B'(66) < 'Z'(90) < 'a'(97).
+    let sensitive = run_libra_command(&["branch"], repo.path());
+    assert_cli_success(&sensitive, "branch (case-sensitive list)");
+    let names = list_names_in_order(&String::from_utf8_lossy(&sensitive.stdout));
+    let after_main: Vec<&String> = names.iter().filter(|n| *n != "main").collect();
+    assert_eq!(
+        after_main,
+        vec!["Banana", "Zebra", "apple"],
+        "default sort is case-sensitive: {names:?}"
+    );
+
+    // Case-insensitive: apple < Banana < Zebra.
+    let folded = run_libra_command(&["branch", "--ignore-case"], repo.path());
+    assert_cli_success(&folded, "branch --ignore-case");
+    let names = list_names_in_order(&String::from_utf8_lossy(&folded.stdout));
+    let after_main: Vec<&String> = names.iter().filter(|n| *n != "main").collect();
+    assert_eq!(
+        after_main,
+        vec!["apple", "Banana", "Zebra"],
+        "--ignore-case folds case before sorting: {names:?}"
+    );
+}
+
+/// A branch name longer than the 255-byte ref limit is rejected by the
+/// validator with `LBR-CLI-002` and no branch is created.
+#[test]
+#[serial]
+fn test_branch_overlong_name_rejected() {
+    let repo = create_committed_repo_via_cli();
+    let overlong = "x".repeat(256);
+    let output = run_libra_command(&["branch", &overlong], repo.path());
+    assert!(
+        !output.status.success(),
+        "256-byte branch name should be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("is not a valid branch name"),
+        "overlong name should report an invalid-name message, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Error-Code: LBR-CLI-002"),
+        "overlong name should surface CliInvalidArguments (LBR-CLI-002), got: {stderr}"
+    );
+}
+
+/// Unit boundary check for the 255-byte limit added in Wave 1: exactly 255
+/// bytes is accepted, 256 bytes is rejected.
+#[test]
+fn test_is_valid_git_branch_name_length_limit() {
+    use libra::command::branch::is_valid_git_branch_name;
+
+    assert!(
+        is_valid_git_branch_name(&"a".repeat(255)),
+        "255-byte name should be valid"
+    );
+    assert!(
+        !is_valid_git_branch_name(&"a".repeat(256)),
+        "256-byte name should be rejected"
+    );
+}
+
+/// Unit coverage for the pure filter helpers backing `--merged` /
+/// `--no-merged` (set membership) and `--points-at` (exact-tip match).
+#[test]
+#[serial]
+fn test_branch_filter_helpers_are_pure() {
+    use std::str::FromStr;
+
+    use libra::internal::branch::{Branch, retain_by_merge_status, retain_by_points_at};
+
+    // ObjectHash::from_str needs the repo's hash kind initialised.
+    let temp_path = tempdir().unwrap();
+    init_repo_via_cli(temp_path.path());
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let hash = |c: char| ObjectHash::from_str(&c.to_string().repeat(64)).expect("valid hex");
+    let merged_tip = hash('1');
+    let unmerged_tip = hash('2');
+    let baseline_anc = hash('3');
+
+    let reachable: HashSet<ObjectHash> = [merged_tip, baseline_anc].into_iter().collect();
+    let names =
+        |branches: &[Branch]| -> Vec<String> { branches.iter().map(|b| b.name.clone()).collect() };
+
+    // want_merged = true keeps only the tip inside the reachable set.
+    let mut keep_merged = vec![
+        Branch {
+            name: "merged".into(),
+            commit: merged_tip,
+            remote: None,
+        },
+        Branch {
+            name: "unmerged".into(),
+            commit: unmerged_tip,
+            remote: None,
+        },
+    ];
+    retain_by_merge_status(&mut keep_merged, &reachable, true);
+    assert_eq!(names(&keep_merged), vec!["merged".to_string()]);
+
+    // want_merged = false keeps the complement.
+    let mut keep_unmerged = vec![
+        Branch {
+            name: "merged".into(),
+            commit: merged_tip,
+            remote: None,
+        },
+        Branch {
+            name: "unmerged".into(),
+            commit: unmerged_tip,
+            remote: None,
+        },
+    ];
+    retain_by_merge_status(&mut keep_unmerged, &reachable, false);
+    assert_eq!(names(&keep_unmerged), vec!["unmerged".to_string()]);
+
+    // points-at keeps only the exact-tip match.
+    let mut points = vec![
+        Branch {
+            name: "merged".into(),
+            commit: merged_tip,
+            remote: None,
+        },
+        Branch {
+            name: "unmerged".into(),
+            commit: unmerged_tip,
+            remote: None,
+        },
+    ];
+    retain_by_points_at(&mut points, &merged_tip);
+    assert_eq!(names(&points), vec!["merged".to_string()]);
+}
+
+/// `--json branch -l` must emit the list envelope (`{"ok","command":"branch",
+/// "data":{"action":"list","branches":[...]}}`) with a stable per-branch
+/// `commit` field, and must never leak the human-only skip-serialized fields
+/// (`ignore_case`/`head_name`/`detached_head`/`show_unborn_head`/`display_name`).
+/// Pins the JSON list contract that Wave 1 extended with the `ignore_case`
+/// field — a regression that un-skipped it or renamed `commit` would otherwise
+/// pass the whole suite.
+#[test]
+#[serial]
+fn test_branch_json_list_exposes_commit_field() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "topic"], repo.path()),
+        "create topic",
+    );
+
+    let output = run_libra_command(&["--json", "branch", "-l"], repo.path());
+    assert_cli_success(&output, "--json branch -l");
+    let json = parse_json_stdout(&output);
+
+    assert_eq!(json["command"], "branch");
+    assert_eq!(json["data"]["action"], "list");
+    let branches = json["data"]["branches"]
+        .as_array()
+        .expect("data.branches must be an array");
+    assert!(!branches.is_empty(), "list should not be empty");
+    for entry in branches {
+        assert!(
+            entry["name"].as_str().is_some(),
+            "entry.name must be a string"
+        );
+        assert!(
+            entry["commit"].as_str().is_some(),
+            "entry.commit must be a string"
+        );
+        assert!(
+            entry["current"].as_bool().is_some(),
+            "entry.current must be a bool"
+        );
+        // display_name is a human-only field and must stay out of JSON.
+        assert!(
+            entry.get("display_name").is_none(),
+            "display_name must not serialize"
+        );
+    }
+    // Human-only List fields must stay skip-serialized.
+    for key in [
+        "ignore_case",
+        "head_name",
+        "detached_head",
+        "show_unborn_head",
+    ] {
+        assert!(
+            json["data"].get(key).is_none(),
+            "{key} must not appear in the list JSON envelope"
+        );
+    }
+
+    // --ignore-case must not leak into the envelope either.
+    let folded = run_libra_command(&["--json", "branch", "-l", "--ignore-case"], repo.path());
+    assert_cli_success(&folded, "--json branch -l --ignore-case");
+    let folded_json = parse_json_stdout(&folded);
+    assert!(
+        folded_json["data"].get("ignore_case").is_none(),
+        "ignore_case must not leak into JSON even when set"
+    );
+}
+
+/// A bare `libra branch` (no action flag) defaults to the list action and
+/// produces the same branch set as `branch -l`; the JSON envelope reports
+/// `data.action == "list"`.
+#[test]
+#[serial]
+fn test_branch_default_no_action_is_list() {
+    let repo = create_committed_repo_via_cli();
+    for name in ["alpha", "beta"] {
+        assert_cli_success(
+            &run_libra_command(&["branch", name], repo.path()),
+            "create branch",
+        );
+    }
+
+    let bare = run_libra_command(&["branch"], repo.path());
+    assert_cli_success(&bare, "bare branch lists");
+    let listed = run_libra_command(&["branch", "-l"], repo.path());
+    assert_cli_success(&listed, "branch -l lists");
+
+    let mut bare_names = list_names_in_order(&String::from_utf8_lossy(&bare.stdout));
+    let mut l_names = list_names_in_order(&String::from_utf8_lossy(&listed.stdout));
+    bare_names.sort();
+    l_names.sort();
+    assert_eq!(bare_names, l_names, "bare `branch` must equal `branch -l`");
+    assert!(bare_names.iter().any(|n| n == "alpha"));
+    assert!(bare_names.iter().any(|n| n == "beta"));
+    assert!(bare_names.iter().any(|n| n == "main"));
+
+    // Bare invocation routes to the list action in JSON.
+    let json = run_libra_command(&["--json", "branch"], repo.path());
+    assert_cli_success(&json, "--json bare branch");
+    let v = parse_json_stdout(&json);
+    assert_eq!(
+        v["data"]["action"], "list",
+        "bare branch JSON action must be list"
     );
 }

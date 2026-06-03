@@ -77,6 +77,9 @@ EXAMPLES:
     libra branch -d topic                 Delete a fully merged branch
     libra branch -D topic                 Force-delete a branch
     libra branch -u origin/main           Set upstream for the current branch
+    libra branch --merged                 List branches merged into HEAD
+    libra branch --no-merged main         List branches not yet merged into main
+    libra branch --points-at HEAD         List branches whose tip is at HEAD
     libra branch --json --show-current    Structured JSON output for agents";
 
 /// Tagged-union output type for `libra branch`.
@@ -87,10 +90,10 @@ EXAMPLES:
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "action")]
 pub enum BranchOutput {
-    /// Result of a list operation. The `head_name`, `detached_head`, and
-    /// `show_unborn_head` fields are skipped from JSON; they only exist to
-    /// drive the human renderer's "*"-prefixed current-branch line and
-    /// detached/unborn HEAD banners.
+    /// Result of a list operation. The `head_name`, `detached_head`,
+    /// `show_unborn_head`, and `ignore_case` fields are skipped from JSON; they
+    /// only exist to drive the human renderer's "*"-prefixed current-branch
+    /// line, detached/unborn HEAD banners, and case-folded sort order.
     #[serde(rename = "list")]
     List {
         branches: Vec<BranchListEntry>,
@@ -100,6 +103,8 @@ pub enum BranchOutput {
         detached_head: Option<String>,
         #[serde(skip_serializing)]
         show_unborn_head: bool,
+        #[serde(skip_serializing)]
+        ignore_case: bool,
     },
     /// `branch <name> [base]` succeeded.
     #[serde(rename = "create")]
@@ -216,6 +221,22 @@ pub struct BranchArgs {
     /// Only list branches which don’t contain the specified commit (HEAD if not specified). Implies --list.
     #[clap(long, group = "query", alias = "without", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD", action = clap::ArgAction::Append)]
     pub no_contains: Vec<String>,
+
+    /// Only list branches whose tip is merged into the specified commit (HEAD if not specified). Implies --list.
+    #[clap(long, group = "query", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD", conflicts_with = "no_merged")]
+    pub merged: Option<String>,
+
+    /// Only list branches whose tip is not merged into the specified commit (HEAD if not specified). Implies --list.
+    #[clap(long = "no-merged", group = "query", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD")]
+    pub no_merged: Option<String>,
+
+    /// Only list branches whose tip points exactly at the specified object. Implies --list.
+    #[clap(long = "points-at", group = "query", value_name = "object")]
+    pub points_at: Option<String>,
+
+    /// Sort branch names case-insensitively in list output.
+    #[clap(long = "ignore-case", group = "query", action = clap::ArgAction::SetTrue)]
+    pub ignore_case: bool,
 }
 /// Fire-and-forget entry: prints the rendered error to stderr but does not
 /// signal exit code.
@@ -865,7 +886,11 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
     } else {
         BranchListMode::Local
     };
-    let has_commit_filters = !args.contains.is_empty() || !args.no_contains.is_empty();
+    let has_commit_filters = !args.contains.is_empty()
+        || !args.no_contains.is_empty()
+        || args.merged.is_some()
+        || args.no_merged.is_some()
+        || args.points_at.is_some();
     let (head_name, detached_head) = match Head::current().await {
         Head::Branch(name) => (Some(name), None),
         Head::Detached(commit_hash) => (None, Some(commit_hash.to_string())),
@@ -885,8 +910,38 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
 
     let contains_set = resolve_commits(&args.contains).await?;
     let no_contains_set = resolve_commits(&args.no_contains).await?;
+
+    // Merge-status filter (`--merged` / `--no-merged`). The two flags are
+    // mutually exclusive at the clap layer, so at most one branch is taken.
+    // The baseline commit (HEAD when no value is given) yields an ancestor
+    // reachability set; a branch is "merged" when its tip lies inside it.
+    let merge_filter = if let Some(baseline) = args.merged.as_deref() {
+        Some((resolve_reachable_set(baseline).await?, true))
+    } else if let Some(baseline) = args.no_merged.as_deref() {
+        Some((resolve_reachable_set(baseline).await?, false))
+    } else {
+        None
+    };
+
+    // Exact-tip filter (`--points-at`): keep only branches whose tip resolves
+    // to the same object as the requested revision.
+    let points_at = match args.points_at.as_deref() {
+        Some(object) => Some(
+            get_target_commit(object)
+                .await
+                .map_err(|_| BranchError::InvalidCommit(object.to_string()))?,
+        ),
+        None => None,
+    };
+
     for branches in [&mut local_branches, &mut remote_branches] {
         filter_branches_result(branches, &contains_set, &no_contains_set)?;
+        if let Some((reachable, want_merged)) = &merge_filter {
+            branch::retain_by_merge_status(branches, reachable, *want_merged);
+        }
+        if let Some(target) = &points_at {
+            branch::retain_by_points_at(branches, target);
+        }
     }
     let local_branches_empty = local_branches.is_empty();
 
@@ -920,6 +975,7 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
         head_name,
         detached_head,
         show_unborn_head,
+        ignore_case: args.ignore_case,
     })
 }
 
@@ -998,6 +1054,7 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
             head_name,
             detached_head,
             show_unborn_head,
+            ignore_case,
         } => {
             if let Some(detached_head) = detached_head {
                 println!(
@@ -1012,12 +1069,18 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
                 return Ok(());
             }
 
+            let ignore_case = *ignore_case;
             let mut sorted = branches.clone();
             sorted.sort_by(|a, b| {
                 if a.current {
                     std::cmp::Ordering::Less
                 } else if b.current {
                     std::cmp::Ordering::Greater
+                } else if ignore_case {
+                    a.name
+                        .to_lowercase()
+                        .cmp(&b.name.to_lowercase())
+                        .then_with(|| a.name.cmp(&b.name))
                 } else {
                     a.name.cmp(&b.name)
                 }
@@ -1170,6 +1233,10 @@ pub async fn list_branches(
         all: matches!(list_mode, BranchListMode::All),
         contains: commits_contains.to_vec(),
         no_contains: commits_no_contains.to_vec(),
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     };
     let result = collect_branch_output(&args).await.map_err(CliError::from)?;
     render_branch_output(&result, &OutputConfig::default())
@@ -1234,6 +1301,23 @@ async fn resolve_commits(commits: &[String]) -> Result<HashSet<ObjectHash>, Bran
         set.insert(target_commit);
     }
     Ok(set)
+}
+
+/// Resolve a `--merged` / `--no-merged` baseline into its ancestor set.
+///
+/// The baseline reference (e.g. `HEAD`, a branch name, or a raw OID) is
+/// resolved to a commit, then [`get_reachable_commits`] walks its full
+/// ancestry. A branch tip contained in the returned set is considered merged
+/// into the baseline. In detached-HEAD mode the default `HEAD` resolves to the
+/// detached commit, matching the delete-path merged check.
+async fn resolve_reachable_set(baseline: &str) -> Result<HashSet<ObjectHash>, BranchError> {
+    let baseline_commit = get_target_commit(baseline)
+        .await
+        .map_err(|_| BranchError::InvalidCommit(baseline.to_string()))?;
+    let reachable = get_reachable_commits(baseline_commit.to_string(), None)
+        .await
+        .map_err(BranchError::DelegatedCli)?;
+    Ok(reachable.into_iter().map(|c| c.id).collect())
 }
 
 /// check if a branch contains at least one of the commits
@@ -1301,6 +1385,12 @@ pub fn is_valid_git_branch_name(name: &str) -> bool {
 
     // Not be empty or just a dot ('.')
     if name.trim().is_empty() || name.trim() == "." {
+        return false;
+    }
+
+    // Not exceed the 255-byte ref-name limit imposed by the on-disk and
+    // SQLite-backed reference stores.
+    if name.len() > 255 {
         return false;
     }
 
