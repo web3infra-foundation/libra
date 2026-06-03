@@ -1264,6 +1264,29 @@ async fn test_add_pathspec_from_file_nul() {
     assert!(out.added.iter().any(|p| p == "b.txt"), "{:?}", out.added);
 }
 
+/// Scenario: `--pathspec-from-file=-` reads newline-separated pathspecs from
+/// stdin through the real binary and stops at EOF.
+#[tokio::test]
+#[serial]
+async fn test_add_pathspec_from_file_stdin() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    fs::write(test_dir.path().join("a.txt"), "a").unwrap();
+    fs::write(test_dir.path().join("b.txt"), "b").unwrap();
+
+    let output = run_libra_command_with_stdin(
+        &["add", "--pathspec-from-file", "-"],
+        test_dir.path(),
+        "a.txt\nb.txt\n",
+    );
+    assert_cli_success(&output, "add --pathspec-from-file=-");
+
+    let status = run_libra_command(&["status", "--short"], test_dir.path());
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(stdout.contains("A  a.txt"), "status was: {stdout}");
+    assert!(stdout.contains("A  b.txt"), "status was: {stdout}");
+}
+
 /// Scenario: a missing `--pathspec-from-file` returns a read error (IoReadFailed)
 /// whose message names the file.
 #[tokio::test]

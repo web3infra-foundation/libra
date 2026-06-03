@@ -1336,11 +1336,18 @@ fn check_file_status(file: &Path, index: &Index, workdir: &Path) -> Result<FileS
 fn gen_blob_from_file(path: impl AsRef<Path>) -> Result<Blob, AddError> {
     let path = path.as_ref();
     if lfs::is_lfs_tracked(path) {
-        let _probe = fs::File::open(path).map_err(|source| AddError::BlobRead {
+        let oid = lfs::calc_lfs_file_hash(path).map_err(|source| AddError::BlobRead {
             path: path.to_path_buf(),
             source,
         })?;
-        let (pointer, oid) = lfs::generate_pointer_file(path);
+        let size = path
+            .metadata()
+            .map_err(|source| AddError::BlobRead {
+                path: path.to_path_buf(),
+                source,
+            })?
+            .len();
+        let pointer = lfs::format_pointer_string(&oid, size);
         lfs::backup_lfs_file(path, &oid).map_err(|source| AddError::BlobSave {
             path: path.to_path_buf(),
             source,
@@ -1388,12 +1395,13 @@ pub fn save_index_atomic(index: &Index, index_path: &Path) -> Result<(), AddErro
     let dir = index_path.parent().unwrap_or_else(|| Path::new("."));
     let tmp_path = dir.join(format!("index.{}.tmp", std::process::id()));
 
-    index
-        .save(&tmp_path)
-        .map_err(|source| AddError::IndexSave {
+    if let Err(source) = index.save(&tmp_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(AddError::IndexSave {
             path: tmp_path.clone(),
             source,
-        })?;
+        });
+    }
 
     // fsync the temp file so a crash between write and rename cannot expose a
     // half-flushed index.

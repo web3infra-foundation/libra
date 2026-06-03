@@ -142,7 +142,7 @@ async fn test_bisect_start_creates_state() {
 
     // Start bisect
     let args = Bisect::Start {
-        bad: None,
+        revs: vec![],
         good: None,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
@@ -175,7 +175,7 @@ async fn test_bisect_start_with_bad_and_good() {
     let good = hashes[4].clone(); // oldest
 
     let args = Bisect::Start {
-        bad: Some(bad.clone()),
+        revs: vec![bad.clone()],
         good: Some(good.clone()),
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
@@ -205,7 +205,7 @@ async fn test_bisect_mark_bad_then_good() {
 
     // Start bisect
     let args = Bisect::Start {
-        bad: None,
+        revs: vec![],
         good: None,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
@@ -253,7 +253,7 @@ async fn test_bisect_find_first_bad_commit() {
     let good = hashes[3].clone(); // Commit 3
 
     let args = Bisect::Start {
-        bad: Some(bad),
+        revs: vec![bad],
         good: Some(good),
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
@@ -305,7 +305,7 @@ async fn test_bisect_reset() {
 
     // Start bisect
     let args = Bisect::Start {
-        bad: None,
+        revs: vec![],
         good: None,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
@@ -352,7 +352,7 @@ async fn test_bisect_reset_surfaces_corrupt_original_branch_storage() {
 
     execute_safe(
         Bisect::Start {
-            bad: None,
+            revs: vec![],
             good: None,
         },
         &OutputConfig::default(),
@@ -389,7 +389,7 @@ async fn test_bisect_skip() {
     let good = hashes[4].clone(); // oldest
 
     let args = Bisect::Start {
-        bad: Some(bad),
+        revs: vec![bad],
         good: Some(good),
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
@@ -426,7 +426,7 @@ async fn test_bisect_log() {
 
     // Start bisect and mark some commits
     let args = Bisect::Start {
-        bad: Some(hashes[0].clone()),
+        revs: vec![hashes[0].clone()],
         good: Some(hashes[2].clone()),
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
@@ -451,14 +451,14 @@ async fn test_bisect_start_already_in_progress_fails() {
 
     // Start first bisect
     let args = Bisect::Start {
-        bad: None,
+        revs: vec![],
         good: None,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
 
     // Try to start again - should fail
     let args = Bisect::Start {
-        bad: None,
+        revs: vec![],
         good: None,
     };
     let result = execute_safe(args, &OutputConfig::default()).await;
@@ -587,7 +587,7 @@ async fn test_bisect_view_inside_active_session() {
 
     execute_safe(
         Bisect::Start {
-            bad: Some(hashes[0].clone()),
+            revs: vec![hashes[0].clone()],
             good: Some(hashes[4].clone()),
         },
         &OutputConfig::default(),
@@ -618,7 +618,7 @@ async fn test_bisect_json_view_outputs_clean_envelope() {
 
     execute_safe(
         Bisect::Start {
-            bad: Some(hashes[0].clone()),
+            revs: vec![hashes[0].clone()],
             good: Some(hashes[4].clone()),
         },
         &OutputConfig::default(),
@@ -687,7 +687,7 @@ async fn test_bisect_run_without_bounds_does_not_spawn_command() {
 
     execute_safe(
         Bisect::Start {
-            bad: None,
+            revs: vec![],
             good: None,
         },
         &OutputConfig::default(),
@@ -731,7 +731,7 @@ async fn test_bisect_run_propagates_fatal_exit_code() {
 
     execute_safe(
         Bisect::Start {
-            bad: Some(hashes[0].clone()),
+            revs: vec![hashes[0].clone()],
             good: Some(hashes[4].clone()),
         },
         &OutputConfig::default(),
@@ -769,7 +769,7 @@ async fn test_bisect_machine_run_outputs_single_json_line() {
 
     execute_safe(
         Bisect::Start {
-            bad: Some(hashes[0].clone()),
+            revs: vec![hashes[0].clone()],
             good: Some(hashes[4].clone()),
         },
         &OutputConfig::default(),
@@ -803,4 +803,122 @@ async fn test_bisect_machine_run_outputs_single_json_line() {
     assert_eq!(json["data"]["action"], "run");
     assert_eq!(json["data"]["steps"].as_u64(), Some(2));
     assert!(json["data"]["first_bad"].as_str().is_some());
+}
+
+/// Scenario: `bisect start <bad> <good1> <good2>` records multiple good bounds
+/// from positional args (git parity for `git bisect start <bad> <good>...`).
+#[tokio::test]
+#[serial]
+async fn test_bisect_start_multiple_good_positional() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    configure_identity().await;
+    let hashes = create_linear_commits(5).await;
+
+    // bad = newest; two good bounds among the older commits.
+    let args = Bisect::Start {
+        revs: vec![hashes[0].clone(), hashes[3].clone(), hashes[4].clone()],
+        good: None,
+    };
+    execute_safe(args, &OutputConfig::default()).await.unwrap();
+
+    let state = BisectState::load().await.unwrap();
+    assert_eq!(state.bad.unwrap().to_string(), hashes[0]);
+    assert_eq!(state.good.len(), 2, "two positional good bounds recorded");
+    assert_eq!(state.good[0].to_string(), hashes[3]);
+    assert_eq!(state.good[1].to_string(), hashes[4]);
+}
+
+/// Scenario: a positional good and the `--good` alias merge into one good list.
+#[tokio::test]
+#[serial]
+async fn test_bisect_start_positional_and_good_flag_merge() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    configure_identity().await;
+    let hashes = create_linear_commits(5).await;
+
+    let args = Bisect::Start {
+        revs: vec![hashes[0].clone(), hashes[3].clone()],
+        good: Some(hashes[4].clone()),
+    };
+    execute_safe(args, &OutputConfig::default()).await.unwrap();
+
+    let state = BisectState::load().await.unwrap();
+    assert_eq!(state.good.len(), 2, "positional good + --good alias merged");
+    assert_eq!(state.good[0].to_string(), hashes[3]);
+    assert_eq!(state.good[1].to_string(), hashes[4]);
+}
+
+/// Scenario: the dirty-tree guard still fires on the multi-good positional path.
+#[tokio::test]
+#[serial]
+async fn test_bisect_start_multiple_good_dirty_tree_rejected() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    configure_identity().await;
+    let hashes = create_linear_commits(5).await;
+
+    // Dirty the working tree.
+    test::ensure_file("file.txt", Some("dirty uncommitted change\n"));
+
+    let args = Bisect::Start {
+        revs: vec![hashes[0].clone(), hashes[3].clone(), hashes[4].clone()],
+        good: None,
+    };
+    let err = execute_safe(args, &OutputConfig::default())
+        .await
+        .expect_err("dirty tree must reject multi-good start");
+    assert!(
+        err.message().contains("uncommitted changes"),
+        "msg: {}",
+        err.message()
+    );
+    assert!(!BisectState::is_in_progress().await.unwrap());
+}
+
+/// Scenario: an unresolvable positional good fails with a "Cannot resolve" fatal
+/// (not a fabricated error variant) and writes no state.
+#[tokio::test]
+#[serial]
+async fn test_bisect_start_invalid_rev_rejected() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    configure_identity().await;
+    let hashes = create_linear_commits(3).await;
+
+    let args = Bisect::Start {
+        revs: vec![hashes[0].clone(), "deadbeefdeadbeef".to_string()],
+        good: None,
+    };
+    let err = execute_safe(args, &OutputConfig::default())
+        .await
+        .expect_err("invalid rev must be rejected");
+    assert!(
+        err.message().contains("Cannot resolve"),
+        "msg: {}",
+        err.message()
+    );
+    assert!(!BisectState::is_in_progress().await.unwrap());
+}
+
+/// Scenario: `bisect start <bad> -- <pathspec>` is rejected by the pre-clap
+/// preflight (exit 129 / LBR-CLI-002) rather than silently folding the pathspec
+/// into the good revs (path-limited bisect is unsupported).
+#[::std::prelude::rust_2024::test]
+fn test_bisect_start_pathspec_rejected() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["bisect", "start", "HEAD", "--", "src/"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("LBR-CLI-002"),
+        "expected LBR-CLI-002, got: {stderr}"
+    );
 }
