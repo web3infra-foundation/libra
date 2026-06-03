@@ -266,14 +266,15 @@ Partial failure with `--ignore-errors`:
 
 ## Design Rationale
 
-### No `--intent-to-add` / `-N`
+### Deferred `--intent-to-add` / `-N`
 
 Git's `--intent-to-add` (`-N`) records an empty blob for untracked files so that they
 appear in `git diff` output without actually staging their content. This is a workflow
-convenience for reviewing new files before staging them. Libra omits this flag because
-`libra status` already shows untracked files clearly, and `libra diff` is designed to
-work with the full working tree state. The two-step "intent then stage" workflow adds
-cognitive overhead without meaningfully improving the review experience. Users who want
+convenience for reviewing new files before staging them. Libra registers the flag but
+declines it for now because the current on-disk index model does not expose Git's
+intent-to-add extended flag. Implementing it safely would require either an index-format
+upgrade or a Libra sidecar plus `status` and `commit` integration, so it is tracked as a
+deferred compatibility item rather than simulated with private index bits. Users who want
 to review new files before committing can use `libra add --dry-run` followed by
 `libra diff --staged` after staging.
 
@@ -315,12 +316,15 @@ non-bare clones copy existing `.gitignore` files to matching `.libraignore` file
 | Refresh stat info | `git add --refresh` | N/A | `libra add --refresh` |
 | Verbose output | `git add -v` | N/A | `libra add -v` |
 | Ignore errors | `git add --ignore-errors` | N/A | `libra add --ignore-errors` |
-| Intent to add | `git add -N` / `--intent-to-add` | N/A | N/A (not implemented) |
+| Chmod/index executable bit | `git add --chmod=(+|-)x` | N/A | `libra add --chmod=(+|-)x` |
+| Renormalize tracked files | `git add --renormalize` | N/A | `libra add --renormalize` (tracked-only force rewrite; no CRLF/EOL clean filter) |
+| Pathspecs from file | `git add --pathspec-from-file` / `--pathspec-file-nul` | N/A | `libra add --pathspec-from-file` / `--pathspec-file-nul` |
+| Ignore missing dry-run paths | `git add --dry-run --ignore-missing` | N/A | `libra add --dry-run --ignore-missing` (missing paths warn and skip) |
+| Intent to add | `git add -N` / `--intent-to-add` | N/A | Deferred / declined with `LBR-CLI-003` |
 | Interactive patch | `git add -p` / `--patch` | N/A | N/A (use `libra code` TUI) |
 | Interactive select | `git add -i` / `--interactive` | N/A | N/A (use `libra code` TUI) |
 | Edit diff before staging | `git add -e` / `--edit` | N/A | N/A |
-| Chmod only | `git add --chmod=+x` | N/A | N/A |
-| Sparse checkout paths | `git add --sparse` | N/A | N/A |
+| Sparse checkout paths | `git add --sparse` | N/A | Declined with `LBR-CLI-003` |
 | Ignore file | `.gitignore` | N/A (jj uses `.gitignore`) | `.libraignore` |
 | Structured JSON output | N/A | N/A | `--json` / `--machine` |
 | Error hints | Minimal | N/A | Every error type has an actionable hint |

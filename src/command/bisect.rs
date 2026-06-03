@@ -1499,10 +1499,15 @@ async fn run_bisect_run(cmd: Vec<String>) -> CliResult<BisectOutput> {
             });
         }
 
-        let head_short = Head::current_commit()
-            .await
-            .map(|h| h.to_string()[..7].to_string())
-            .unwrap_or_else(|| "(no HEAD)".to_string());
+        // During an in-progress bisect HEAD must point at the checked-out
+        // candidate; a missing HEAD means the session state is corrupt, so fail
+        // with a diagnostic rather than silently labelling it "(no HEAD)".
+        let head = Head::current_commit().await.ok_or_else(|| {
+            CliError::fatal("bisect is in progress but HEAD could not be resolved")
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("the bisect state may be corrupt; run 'libra bisect reset'")
+        })?;
+        let head_short = head.to_string()[..7].to_string();
 
         let status = Command::new(executable).args(args).status().map_err(|e| {
             CliError::fatal(format!("failed to spawn `{executable}`: {e}"))
@@ -1542,7 +1547,7 @@ async fn run_bisect_run(cmd: Vec<String>) -> CliResult<BisectOutput> {
             });
         }
 
-        let remaining = count_commits_to_test(&next_state).await.unwrap_or(0);
+        let remaining = map_remaining_count(count_commits_to_test(&next_state).await)?;
         if remaining == 0 {
             return Err(BisectError::NoMoreCandidates.into());
         }
@@ -1874,4 +1879,38 @@ async fn count_commits_to_test(state: &BisectState) -> Result<usize, String> {
 
     let testable = get_testable_commits(&bad, &state.good, &state.skipped).await?;
     Ok(testable.len())
+}
+
+/// Convert a candidate-count result into a fatal error on failure.
+///
+/// `count_commits_to_test` can fail (e.g. an object becomes unreadable during
+/// the walk). Silently treating such a failure as `0` would masquerade as
+/// convergence and end the bisect with a wrong "no more candidates" result, so
+/// a count error is surfaced as a fatal [`StableErrorCode::RepoStateInvalid`].
+/// `Ok(n)` (including `Ok(0)`) passes through unchanged; the caller converts
+/// `0` into [`BisectError::NoMoreCandidates`].
+fn map_remaining_count(result: Result<usize, String>) -> CliResult<usize> {
+    result.map_err(|e| {
+        CliError::fatal(e)
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+            .with_hint("the bisect state may be corrupt; run 'libra bisect reset'")
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `map_remaining_count` must surface a count failure as a fatal
+    /// RepoStateInvalid error, pass `Ok(0)` through (the caller converts it to
+    /// NoMoreCandidates), and pass `Ok(n)` through unchanged.
+    #[test]
+    fn map_remaining_count_classifies_all_branches() {
+        let err = map_remaining_count(Err("walk failed".to_string()))
+            .expect_err("a count failure must be fatal, not silently treated as 0");
+        assert_eq!(err.stable_code(), StableErrorCode::RepoStateInvalid);
+
+        assert_eq!(map_remaining_count(Ok(0)).unwrap(), 0);
+        assert_eq!(map_remaining_count(Ok(7)).unwrap(), 7);
+    }
 }
