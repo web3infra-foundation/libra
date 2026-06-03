@@ -1,14 +1,6 @@
-//! Main integration test entry point that re-exports the command test modules.
-//!
-//! Cargo treats every `tests/*.rs` file as its own crate. By declaring a single `mod
-//! command` here, the per-command integration tests in `tests/command/*.rs` compile
-//! into one shared binary. This avoids paying the build-time cost of one binary per
-//! command while still letting each command live in its own file.
-
-mod command;
-use assert_cmd::Command;
 use std::fs;
 use tempfile::TempDir;
+use assert_cmd::Command;
 
 #[test]
 fn test_stats_counts_extensions_in_workdir() {
@@ -50,7 +42,7 @@ fn test_stats_json_output() {
     std::env::set_current_dir(temp_path).unwrap();
 
     let mut cmd = Command::cargo_bin("libra").unwrap();
-    let output = cmd.arg("stats").arg("--output-json").output().unwrap();
+    let output = cmd.arg("stats").arg("--json").output().unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 

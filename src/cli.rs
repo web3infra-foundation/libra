@@ -438,6 +438,11 @@ enum Commands {
         hide = true
     )]
     Hooks(command::hooks::HooksArgs),
+    #[command(about = "统计当前目录的文件扩展名分布")]
+    Stats {
+        #[arg(long)]
+        output_json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1205,6 +1210,12 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Agent(cmd_args) => command::agent::execute_safe(cmd_args, &output).await?,
         Commands::Hooks(cmd_args) => command::hooks::execute_safe(cmd_args, &output).await?,
         Commands::Bisect(bisect_cmd) => command::bisect::execute_safe(bisect_cmd, &output).await?,
+        Commands::Stats { output_json } => {
+            let result = command::stats::execute(output_json);
+            if let Err(e) = result {
+                return Err(CliError::fatal(e.to_string()));
+            }
+        }
     }
 
     // Check for warnings when --exit-code-on-warning is active.
