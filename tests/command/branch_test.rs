@@ -3550,3 +3550,61 @@ fn test_branch_create_camelcase_and_dotted_via_cli() {
     assert!(names.iter().any(|n| n == "featureBranch"));
     assert!(names.iter().any(|n| n == "feature/sub_topic.v2"));
 }
+
+/// Reflog migration is optional: copying a branch in a repo whose `reflog`
+/// table is absent (older/partially-migrated repos) still succeeds — the
+/// migration is a no-op and the ref + config transaction is not aborted.
+/// Regression guard for the Codex-flagged missing-`reflog`-table case.
+#[tokio::test]
+#[serial]
+async fn test_branch_copy_succeeds_without_reflog_table() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = ChangeDirGuard::new(temp.path());
+
+    commit::execute(CommitArgs {
+        message: Some("base".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: true,
+        author: None,
+    })
+    .await;
+    execute(BranchArgs {
+        new_branch: Some("src".to_string()),
+        ..branch_args_default()
+    })
+    .await;
+
+    // Simulate an older/variant repo with no reflog storage.
+    let db = libra::internal::db::get_db_conn_instance().await;
+    db.execute(Statement::from_string(
+        DbBackend::Sqlite,
+        "DROP TABLE IF EXISTS reflog",
+    ))
+    .await
+    .expect("drop reflog table");
+
+    // Copy must still succeed (reflog migration becomes a no-op).
+    execute(BranchArgs {
+        copy: vec!["src".to_string(), "dst".to_string()],
+        ..branch_args_default()
+    })
+    .await;
+
+    assert!(
+        Branch::find_branch_result("dst", None)
+            .await
+            .expect("query dst")
+            .is_some(),
+        "copy must succeed even when the reflog table is absent"
+    );
+}

@@ -261,11 +261,18 @@ impl Reflog {
     /// Returns the number of entries copied (0 is a valid no-op when the
     /// source ref has no reflog). Entries are inserted oldest-first so the
     /// destination's `id` ordering matches chronological order.
+    ///
+    /// Reflog migration is optional: if the repo has no `reflog` table (older
+    /// or partially-migrated repos), this is a no-op (`Ok(0)`) so the caller's
+    /// transaction is never aborted just because reflog storage is absent.
     pub async fn copy_entries_with_conn<C: ConnectionTrait>(
         db: &C,
         src_ref: &str,
         dst_ref: &str,
     ) -> Result<usize, ReflogError> {
+        if !reflog_table_exists(db).await? {
+            return Ok(0);
+        }
         // `find_all` returns newest-first; reverse to insert oldest-first.
         let mut entries = Self::find_all(db, src_ref).await?;
         entries.reverse();
@@ -302,10 +309,16 @@ impl Reflog {
     /// connection/transaction. Returns the number of rows removed. Used to
     /// give branch rename move-semantics (copy to the new ref, then drop the
     /// old ref's reflog so no dangling rows remain).
+    ///
+    /// No-op (`Ok(0)`) when the repo has no `reflog` table, so the caller's
+    /// transaction is not aborted by absent reflog storage.
     pub async fn delete_entries_with_conn<C: ConnectionTrait>(
         db: &C,
         ref_name: &str,
     ) -> Result<usize, ReflogError> {
+        if !reflog_table_exists(db).await? {
+            return Ok(0);
+        }
         let result = reflog::Entity::delete_many()
             .filter(reflog::Column::RefName.eq(ref_name))
             .exec(db)
