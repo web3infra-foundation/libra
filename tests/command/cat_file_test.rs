@@ -787,3 +787,399 @@ fn test_cat_file_cli_outside_repository_returns_fatal_128() {
         "unexpected stderr: {stderr}"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════
+//  Batch 0 — `--batch-check` streaming engine, -Z, modifier/contract guards
+// ════════════════════════════════════════════════════════════════════════
+
+/// Spawn `libra <args>` in `temp_path`, feed `stdin_data`, and collect output.
+fn run_cat_file_with_stdin(
+    temp_path: &std::path::Path,
+    args: &[&str],
+    stdin_data: &[u8],
+) -> std::process::Output {
+    use std::process::Stdio;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn libra");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(stdin_data)
+        .expect("write stdin");
+    child.wait_with_output().expect("wait for libra")
+}
+
+/// Resolve `HEAD` to its full commit hash via `rev-parse`.
+fn head_commit_hash(temp_path: &std::path::Path) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("rev-parse HEAD");
+    assert!(out.status.success(), "rev-parse failed");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Resolve the first blob hash reachable from HEAD's tree.
+fn head_first_blob_hash(temp_path: &std::path::Path) -> String {
+    let commit = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "-p", "HEAD"])
+        .output()
+        .expect("cat-file -p HEAD");
+    let commit_stdout = String::from_utf8_lossy(&commit.stdout);
+    let tree = commit_stdout
+        .lines()
+        .find(|l| l.starts_with("tree "))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .expect("tree line")
+        .to_string();
+    let tree_out = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "-p", &tree])
+        .output()
+        .expect("cat-file -p tree");
+    let tree_stdout = String::from_utf8_lossy(&tree_out.stdout);
+    tree_stdout
+        .lines()
+        .find(|l| l.contains(" blob "))
+        .and_then(|l| l.split_whitespace().nth(2))
+        .expect("blob entry")
+        .to_string()
+}
+
+fn batch_repo() -> tempfile::TempDir {
+    let repo = init_temp_repo();
+    configure_user_identity(repo.path());
+    create_commit(repo.path(), "hello.txt", "hello world\n", "first commit");
+    repo
+}
+
+/// A full blob OID resolves to `<oid> blob <size>`.
+#[tokio::test]
+async fn batch_check_resolves_valid_oid() {
+    let repo = batch_repo();
+    let blob = head_first_blob_hash(repo.path());
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-check"],
+        format!("{blob}\n").as_bytes(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout.lines().next().expect("one output line");
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    assert_eq!(parts[0], blob, "objectname echoes the OID");
+    assert_eq!(parts[1], "blob", "blob type");
+    assert!(parts[2].parse::<u64>().is_ok(), "size is numeric: {line}");
+}
+
+/// A full commit hash resolves to `<hash> commit <size>`.
+#[tokio::test]
+async fn batch_check_resolves_commit() {
+    let repo = batch_repo();
+    let commit = head_commit_hash(repo.path());
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-check"],
+        format!("{commit}\n").as_bytes(),
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parts: Vec<&str> = stdout.split_whitespace().collect();
+    assert_eq!(parts[0], commit);
+    assert_eq!(parts[1], "commit");
+}
+
+/// `HEAD` resolves to the current commit metadata.
+#[tokio::test]
+async fn batch_check_resolves_head_ref() {
+    let repo = batch_repo();
+    let commit = head_commit_hash(repo.path());
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--batch-check"], b"HEAD\n");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&commit),
+        "HEAD resolves to commit hash: {stdout}"
+    );
+    assert!(stdout.contains(" commit "), "type is commit: {stdout}");
+}
+
+/// An unresolvable token prints `<input> missing` and the process exits 0.
+#[tokio::test]
+async fn batch_check_missing_object() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-check"],
+        b"INVALIDOBJECT\n",
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "missing must not change exit code"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.trim_end(), "INVALIDOBJECT missing");
+}
+
+/// A short SHA that matches ≥2 objects prints `<input> ambiguous` (exit 0).
+#[tokio::test]
+async fn batch_check_ambiguous_short_sha() {
+    let repo = init_temp_repo();
+    configure_user_identity(repo.path());
+    // Lay down enough commits that two object hashes share a 1-hex prefix.
+    let mut hashes = Vec::new();
+    for i in 0..20 {
+        create_commit(
+            repo.path(),
+            &format!("f{i}.txt"),
+            &format!("content number {i}\n"),
+            &format!("commit {i}"),
+        );
+        hashes.push(head_commit_hash(repo.path()));
+    }
+    // Find the shortest prefix shared by ≥2 collected hashes.
+    let mut ambiguous_prefix: Option<String> = None;
+    'outer: for len in 1..=8 {
+        for a in 0..hashes.len() {
+            let pfx = &hashes[a][..len];
+            let count = hashes.iter().filter(|h| h.starts_with(pfx)).count();
+            if count >= 2 {
+                ambiguous_prefix = Some(pfx.to_string());
+                break 'outer;
+            }
+        }
+    }
+    let prefix = ambiguous_prefix.expect("two commit hashes should share a short prefix");
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-check"],
+        format!("{prefix}\n").as_bytes(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "ambiguous must not change exit code"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.trim_end(),
+        format!("{prefix} ambiguous"),
+        "stdout: {stdout}"
+    );
+}
+
+/// A `\r\n`-terminated record is trimmed and resolves normally.
+#[tokio::test]
+async fn batch_check_trims_crlf() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--batch-check"], b"HEAD\r\n");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(" commit "),
+        "CRLF trimmed, resolves commit: {stdout}"
+    );
+    assert!(
+        !stdout.contains("missing"),
+        "must not be treated as missing: {stdout}"
+    );
+}
+
+/// Under `-Z`, only NUL separates records and stdout records are NUL-terminated;
+/// a bare `\n` does not split.
+#[tokio::test]
+async fn batch_check_z_uses_nul_separator() {
+    let repo = batch_repo();
+    // Two NUL-separated HEAD tokens -> two commit records, each NUL-terminated.
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-check", "-Z"],
+        b"HEAD\0HEAD\0",
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let nul_count = out.stdout.iter().filter(|&&b| b == 0).count();
+    assert_eq!(nul_count, 2, "two NUL-terminated records");
+    assert!(
+        !out.stdout.contains(&b'\n'),
+        "no LF used as separator under -Z"
+    );
+
+    // A bare LF is NOT a separator under -Z: the whole thing is one token.
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-check", "-Z"],
+        b"HEAD\nHEAD",
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("missing"),
+        "LF-joined token is one unresolved token: {stdout}"
+    );
+}
+
+/// A custom `--batch-check=<format>` renders the requested atoms.
+#[tokio::test]
+async fn batch_check_custom_format() {
+    let repo = batch_repo();
+    let commit = head_commit_hash(repo.path());
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-check=%(objectname) - %(objecttype)"],
+        b"HEAD\n",
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.trim_end(), format!("{commit} - commit"));
+}
+
+/// EOF on empty stdin exits 0 with no output.
+#[tokio::test]
+async fn batch_check_eof_exits_zero() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--batch-check"], b"");
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty(), "no output for empty stdin");
+}
+
+/// An over-long (>4KiB) input record is rejected with LBR-CLI-003 (129).
+#[tokio::test]
+async fn batch_check_oversize_line_rejected() {
+    let repo = batch_repo();
+    let oversize = vec![b'a'; 5000]; // no terminator
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--batch-check"], &oversize);
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "oversize line is a usage error"
+    );
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+}
+
+/// A closed downstream pipe (BrokenPipe) terminates the stream quietly (exit 0).
+#[tokio::test]
+async fn batch_check_brokenpipe_exits_zero() {
+    use std::process::Stdio;
+    let repo = batch_repo();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(repo.path())
+        .args(["cat-file", "--batch-check"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn cat-file");
+    let mut stdin = child.stdin.take().expect("stdin");
+    // Feed a long stream of unresolved tokens from a thread; ignore write
+    // errors (the child closes its stdin when it exits).
+    let writer = std::thread::spawn(move || {
+        for _ in 0..200_000 {
+            if stdin.write_all(b"INVALIDOBJECT\n").is_err() {
+                break;
+            }
+        }
+    });
+    // Read a little, then close the read end so the child's next write fails.
+    let mut stdout = child.stdout.take().expect("stdout");
+    let mut buf = [0u8; 16];
+    let _ = stdout.read(&mut buf);
+    drop(stdout);
+    let status = child.wait().expect("wait");
+    let _ = writer.join();
+    assert_eq!(status.code(), Some(0), "BrokenPipe must exit 0");
+}
+
+/// `--batch-check -p` is a mode-group conflict. Libra surfaces clap parse
+/// conflicts through its usage path (coarse exit 129), not clap's native 2.
+#[tokio::test]
+async fn batch_mode_conflicts_with_single_mode() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--batch-check", "-p"], b"");
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "mode conflict is a usage error"
+    );
+}
+
+/// An unknown format placeholder is rejected (LBR-CLI-002), even on empty stdin.
+#[tokio::test]
+async fn batch_check_unknown_placeholder() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--batch-check=%(bogus)"], b"");
+    assert_eq!(out.status.code(), Some(129));
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// `--textconv` is explicitly unsupported (LBR-UNSUPPORTED-001, 128).
+#[tokio::test]
+async fn textconv_flag_rejected_unsupported() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--textconv", "HEAD"], b"");
+    assert_eq!(out.status.code(), Some(128));
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-UNSUPPORTED-001");
+}
+
+/// `--filters` is explicitly unsupported (LBR-UNSUPPORTED-001, 128).
+#[tokio::test]
+async fn filters_flag_rejected_unsupported() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--filters", "HEAD"], b"");
+    assert_eq!(out.status.code(), Some(128));
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-UNSUPPORTED-001");
+}
+
+/// Batch modes do not support `--json`/`--machine` (LBR-CLI-002, 129).
+#[tokio::test]
+async fn batch_with_json_rejected() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["--json", "cat-file", "--batch-check"], b"");
+    assert_eq!(out.status.code(), Some(129));
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// Batch modes read from stdin; a positional OBJECT is rejected (LBR-CLI-002).
+#[tokio::test]
+async fn batch_with_positional_object_rejected() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--batch-check", "HEAD"], b"");
+    assert_eq!(out.status.code(), Some(129));
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// A bare `-Z` modifier without a batch mode is rejected (LBR-CLI-002).
+#[tokio::test]
+async fn z_modifier_without_batch_rejected() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "-Z"], b"");
+    assert_eq!(out.status.code(), Some(129));
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}

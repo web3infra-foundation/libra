@@ -62,6 +62,14 @@ const CAT_FILE_AFTER_HELP: &str = "EXAMPLES:
     libra cat-file --ai patchset:call_KjR3NB4cQaT5Rm1c7…    Look up an AI object by TYPE:ID
     libra cat-file --ai 5b878637-f852-4bff-adee-3354c42a…   Look up an AI object across all types by id";
 
+/// Default `--batch`/`--batch-check` output format when none is given via `=<format>`.
+/// Matches Git's default: object name, type, and size separated by spaces.
+const DEFAULT_BATCH_FORMAT: &str = "%(objectname) %(objecttype) %(objectsize)";
+
+/// Maximum accepted length (bytes) of a single batch input record, before the
+/// terminator. Over-long input is rejected as a syntax error (DoS hardening).
+const MAX_BATCH_LINE_BYTES: usize = 4096;
+
 /// Provide content, type, or size information for repository objects (Git and AI).
 #[derive(Parser, Debug)]
 #[command(
@@ -86,6 +94,32 @@ pub struct CatFileArgs {
     /// Check if the object exists (exit with zero status if it does)
     #[clap(short = 'e', group = "mode")]
     pub check_exist: bool,
+
+    // ── Batch modes (read objects from stdin) ───────────────────────────
+    /// Print object metadata for each object read from stdin. Optional =<format> (defaults to "%(objectname) %(objecttype) %(objectsize)").
+    #[clap(
+        long = "batch-check",
+        group = "mode",
+        value_name = "FORMAT",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = DEFAULT_BATCH_FORMAT,
+    )]
+    pub batch_check: Option<String>,
+
+    // ── Batch modifiers (require a batch mode) ──────────────────────────
+    /// Use NUL ('\0') instead of newline to separate/terminate batch input and output records.
+    #[clap(short = 'Z')]
+    pub nul: bool,
+
+    // ── Explicitly unsupported (rejected) ───────────────────────────────
+    /// Unsupported: Libra has no textconv driver. Rejected with LBR-UNSUPPORTED-001.
+    #[clap(long = "textconv")]
+    pub textconv: bool,
+
+    /// Unsupported: Libra has no clean/smudge filter driver. Rejected with LBR-UNSUPPORTED-001.
+    #[clap(long = "filters")]
+    pub filters: bool,
 
     // ── AI object modes ─────────────────────────────────────────────────
     /// Pretty-print an AI object by ID across all stored AI types, or disambiguate with TYPE:ID.
@@ -327,6 +361,22 @@ pub async fn execute(args: CatFileArgs) {
 /// safe path only delegates to it for plain human-output mode.
 pub async fn execute_safe(args: CatFileArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
+
+    // `--textconv` / `--filters` are explicitly unsupported (Libra has no
+    // clean/smudge/textconv drivers); reject before any other dispatch.
+    if args.textconv || args.filters {
+        return Err(CliError::fatal(
+            "cat-file --textconv/--filters is not supported: Libra has no clean/smudge/textconv drivers",
+        )
+        .with_stable_code(StableErrorCode::Unsupported));
+    }
+
+    // Batch surface (`--batch-check` and, in later batches, `--batch` /
+    // modifiers) bypasses the legacy single-object path entirely and runs the
+    // streaming protocol on its own `CliResult` path.
+    if uses_batch_surface(&args) {
+        return run_batch(&args, output).await;
+    }
 
     if args.check_exist && !output.is_json() {
         execute(args).await;
@@ -1272,6 +1322,263 @@ async fn ai_show_type(uuid: &str) {
     match resolve_ai_object(uuid).await {
         Ok((_hash, type_name)) => println!("{}", type_name),
         Err(err) => cat_file_exit_error(err),
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  Batch protocol engine (`--batch-check`, and later `--batch` / scanning).
+//
+//  The batch surface is a machine-readable text protocol that reads object
+//  references from stdin and writes one record per object to stdout. It runs
+//  on its own `CliResult` path (bypassing the legacy single-object `execute`),
+//  tolerates a closed downstream pipe (BrokenPipe → exit 0), and never panics
+//  on malformed input.
+// ════════════════════════════════════════════════════════════════════════
+
+/// Whether any batch flag/modifier appears, so `execute_safe` should hand off
+/// to [`run_batch`] instead of the legacy single-object path. (Modifier-only
+/// invocations are caught and reported inside `run_batch`.)
+fn uses_batch_surface(args: &CatFileArgs) -> bool {
+    args.batch_check.is_some() || args.nul
+}
+
+/// Whether a real batch *mode* (not just a modifier) is selected.
+fn batch_mode_selected(args: &CatFileArgs) -> bool {
+    args.batch_check.is_some()
+}
+
+/// Per-line resolution outcome for a batch token.
+enum BatchResolution {
+    Resolved(ObjectHash),
+    Missing,
+    Ambiguous,
+}
+
+/// Validate batch-surface flag combinations, then run the selected batch mode.
+async fn run_batch(args: &CatFileArgs, output: &OutputConfig) -> CliResult<()> {
+    // Batch output is itself a machine-parseable protocol; `--json`/`--machine`
+    // are not layered on top of it.
+    if output.is_json() {
+        return Err(
+            CliError::command_usage("batch modes do not support --json/--machine output")
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+        );
+    }
+
+    // Modifiers (`-Z`, and later `--buffer` / `--unordered` / `--follow-symlinks`
+    // / `--batch-all-objects`) only make sense alongside a batch mode.
+    if !batch_mode_selected(args) {
+        let modifier = if args.nul { "-Z" } else { "a batch modifier" };
+        return Err(CliError::command_usage(format!(
+            "{modifier} requires --batch or --batch-check"
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+
+    // Batch modes read object references from stdin; a positional OBJECT would
+    // be ambiguous.
+    if args.object.is_some() {
+        return Err(CliError::command_usage(
+            "batch modes read objects from stdin; positional OBJECT is not allowed",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+
+    let storage = ClientStorage::init(path::objects());
+    if let Some(format) = args.batch_check.as_deref() {
+        return run_batch_check(format, args.nul, &storage).await;
+    }
+    Ok(())
+}
+
+/// Resolve one batch input token into a three-state outcome, distinguishing a
+/// missing object from an ambiguous short SHA (≥2 candidates). Unlike
+/// [`resolve_object_safe`], a missing/ambiguous token is *not* an error here —
+/// those are protocol states printed inline without changing the exit code.
+async fn resolve_batch_token(token: &str, storage: &ClientStorage) -> CliResult<BatchResolution> {
+    if let Some(hash) = resolve_tag_object_ref(token).await {
+        return Ok(BatchResolution::Resolved(hash));
+    }
+    if let Ok(hash) = util::get_commit_base(token).await {
+        return Ok(BatchResolution::Resolved(hash));
+    }
+    if let Ok(hash) = ObjectHash::from_str(token) {
+        // A syntactically valid full hash that is not present is `missing`.
+        return Ok(if storage.exist(&hash) {
+            BatchResolution::Resolved(hash)
+        } else {
+            BatchResolution::Missing
+        });
+    }
+    let candidates = storage.search_result(token).await.map_err(|error| {
+        CliError::fatal(format!(
+            "failed to search objects while resolving '{token}': {error}"
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    Ok(match candidates.len() {
+        0 => BatchResolution::Missing,
+        1 => BatchResolution::Resolved(candidates[0]),
+        _ => BatchResolution::Ambiguous,
+    })
+}
+
+/// Bounded read of one stdin record terminated by `sep`. Returns `Ok(None)` at
+/// EOF. Rejects records whose content exceeds `max` bytes (DoS hardening) with
+/// `LBR-CLI-003` — without first reading the whole over-long line into memory
+/// (the `take(max + 1)` cap bounds the read).
+fn read_bounded_record<R: std::io::BufRead>(
+    reader: &mut R,
+    sep: u8,
+    max: usize,
+) -> CliResult<Option<Vec<u8>>> {
+    use std::io::{BufRead, Read};
+
+    let mut buf = Vec::new();
+    let read = reader
+        .by_ref()
+        .take((max as u64) + 1)
+        .read_until(sep, &mut buf)
+        .map_err(|e| {
+            CliError::fatal(format!("failed to read batch input: {e}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if buf.last() == Some(&sep) {
+        buf.pop();
+        return Ok(Some(buf));
+    }
+    // No terminator within the cap: either the final unterminated record (EOF)
+    // or an over-long line. `buf.len() > max` distinguishes the latter.
+    if buf.len() > max {
+        return Err(
+            CliError::fatal(format!("batch input record exceeds the {max}-byte limit"))
+                .with_stable_code(StableErrorCode::CliInvalidTarget),
+        );
+    }
+    Ok(Some(buf))
+}
+
+/// Decode a raw record into a token string, tolerating a trailing `\r` (CRLF)
+/// in newline-separated mode. The trailing separator is already stripped by
+/// [`read_bounded_record`].
+fn batch_token_string(record: &[u8], sep: u8) -> String {
+    let mut token = String::from_utf8_lossy(record).into_owned();
+    if sep == b'\n' && token.ends_with('\r') {
+        token.pop();
+    }
+    token
+}
+
+/// Render a batch output line from a format template, substituting the known
+/// atoms `%(objectname)` / `%(objecttype)` / `%(objectsize)`. An unknown or
+/// unterminated `%(…)` atom is a usage error (`LBR-CLI-002`). `oid` is passed
+/// pre-stringified so the up-front format validation can use a dummy value.
+fn render_batch_format(format: &str, oid: &str, obj_type: &str, size: usize) -> CliResult<String> {
+    let mut out = String::with_capacity(format.len() + oid.len());
+    let mut chars = format.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' || chars.peek() != Some(&'(') {
+            out.push(c);
+            continue;
+        }
+        chars.next(); // consume '('
+        let mut atom = String::new();
+        let mut closed = false;
+        for ac in chars.by_ref() {
+            if ac == ')' {
+                closed = true;
+                break;
+            }
+            atom.push(ac);
+        }
+        if !closed {
+            return Err(CliError::command_usage(format!(
+                "unterminated batch format placeholder: %({atom}"
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+        }
+        match atom.as_str() {
+            "objectname" => out.push_str(oid),
+            "objecttype" => out.push_str(obj_type),
+            "objectsize" => out.push_str(&size.to_string()),
+            other => {
+                return Err(CliError::command_usage(format!(
+                    "unknown batch format placeholder: %({other})"
+                ))
+                .with_stable_code(StableErrorCode::CliInvalidArguments));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Write `bytes` followed by the record separator. Returns `Ok(false)` when the
+/// downstream pipe is closed (`BrokenPipe`) so the caller can stop quietly with
+/// exit code 0; `Ok(true)` to continue.
+fn write_record(w: &mut impl std::io::Write, bytes: &[u8], sep: u8) -> CliResult<bool> {
+    match w.write_all(bytes).and_then(|()| w.write_all(&[sep])) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
+        Err(e) => Err(
+            CliError::fatal(format!("failed to write batch output: {e}"))
+                .with_stable_code(StableErrorCode::IoWriteFailed),
+        ),
+    }
+}
+
+/// `--batch-check`: stream object metadata for each stdin token.
+async fn run_batch_check(format: &str, nul: bool, storage: &ClientStorage) -> CliResult<()> {
+    use std::io::{BufReader, BufWriter, Write};
+
+    let sep = if nul { b'\0' } else { b'\n' };
+
+    // Validate the format up front so a bad placeholder fails fast, even with
+    // empty stdin (dummy values; the result is discarded).
+    render_batch_format(format, "", "", 0)?;
+
+    let stdin = std::io::stdin();
+    let mut reader = BufReader::new(stdin.lock());
+    let stdout = std::io::stdout();
+    let mut writer = BufWriter::new(stdout.lock());
+
+    while let Some(record) = read_bounded_record(&mut reader, sep, MAX_BATCH_LINE_BYTES)? {
+        let token = batch_token_string(&record, sep);
+        if token.is_empty() {
+            continue;
+        }
+        let line = match resolve_batch_token(&token, storage).await? {
+            BatchResolution::Resolved(hash) => {
+                let obj_type = storage.get_object_type(&hash).map_err(|e| {
+                    CliError::fatal(format!("could not resolve object type for {hash}: {e}"))
+                        .with_stable_code(StableErrorCode::RepoCorrupt)
+                })?;
+                let size = storage
+                    .get(&hash)
+                    .map_err(|e| {
+                        CliError::fatal(format!("could not read object {hash}: {e}"))
+                            .with_stable_code(StableErrorCode::IoReadFailed)
+                    })?
+                    .len();
+                render_batch_format(format, &hash.to_string(), &obj_type.to_string(), size)?
+            }
+            BatchResolution::Missing => format!("{token} missing"),
+            BatchResolution::Ambiguous => format!("{token} ambiguous"),
+        };
+        if !write_record(&mut writer, line.as_bytes(), sep)? {
+            return Ok(()); // downstream closed the pipe
+        }
+    }
+
+    match writer.flush() {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(
+            CliError::fatal(format!("failed to flush batch output: {e}"))
+                .with_stable_code(StableErrorCode::IoWriteFailed),
+        ),
     }
 }
 
