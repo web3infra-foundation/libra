@@ -1180,3 +1180,35 @@ fn test_add_index_save_failure_no_partial() {
         "the original index must be untouched after a failed atomic save"
     );
 }
+
+/// Scenario (regression): `--chmod=+x` on a brand-new file must report the path
+/// once (as a new file), not double-count it as both added and modified.
+#[tokio::test]
+#[serial]
+async fn test_add_chmod_new_file_reported_once() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write("script.sh", "#!/bin/sh\n").unwrap();
+
+    let out = add::run_add(&AddArgs {
+        pathspec: vec!["script.sh".to_string()],
+        chmod: Some("+x".to_string()),
+        ..Default::default()
+    })
+    .await
+    .expect("add --chmod=+x on a new file");
+
+    assert!(
+        out.added.iter().any(|p| p == "script.sh"),
+        "new file must be in `added`: {:?}",
+        out.added
+    );
+    assert!(
+        !out.modified.iter().any(|p| p == "script.sh"),
+        "new file must NOT also be in `modified` (no double count): {:?}",
+        out.modified
+    );
+    // And the recorded index mode is still the executable bit.
+    assert_eq!(index_mode(test_dir.path(), "script.sh"), Some(0o100755));
+}

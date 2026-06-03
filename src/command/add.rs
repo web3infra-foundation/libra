@@ -662,8 +662,14 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
             if let Some(mut entry) = index.remove(name, 0) {
                 if apply_chmod(&mut entry, executable) {
                     chmod_changed = true;
+                    // Report the path as modified only if staging did not
+                    // already account for it (a newly added / content-modified /
+                    // removed entry must not be double-counted by the chmod pass).
                     let path_str = rel.display().to_string();
-                    if !add_output.modified.contains(&path_str) {
+                    let already_reported = add_output.added.contains(&path_str)
+                        || add_output.modified.contains(&path_str)
+                        || add_output.removed.contains(&path_str);
+                    if !already_reported {
                         add_output.modified.push(path_str);
                     }
                 }
