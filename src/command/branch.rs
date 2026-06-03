@@ -862,9 +862,24 @@ async fn edit_description_impl(branch: String) -> Result<BranchOutput, BranchErr
         )
     })?;
 
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("{editor} \"{}\"", tmp.path().display()))
+    // Parse the (trusted) editor command into argv with shell-style word
+    // splitting, then exec it directly — passing the temp-file path as a
+    // separate argument. This avoids `sh -c "<editor> <path>"`, so a stray
+    // metacharacter in `core.editor` / `$EDITOR` can't be reinterpreted by a
+    // shell, while still supporting editors with flags (e.g. `code --wait`).
+    let mut argv = match shlex::split(&editor) {
+        Some(argv) if !argv.is_empty() => argv,
+        _ => {
+            return Err(BranchError::DelegatedCli(
+                CliError::command_usage(format!("could not parse editor command: {editor}"))
+                    .with_hint("check core.editor / EDITOR for unbalanced quotes"),
+            ));
+        }
+    };
+    let program = argv.remove(0);
+    let status = std::process::Command::new(program)
+        .args(&argv)
+        .arg(tmp.path())
         .status();
 
     let edited = match status {
@@ -1181,6 +1196,15 @@ async fn rename_branch_impl(args: &[String]) -> Result<BranchOutput, BranchError
         _ => return Err(BranchError::RenameTooManyArgs),
     };
 
+    // Renaming a branch onto itself is a degenerate request: the move/migrate
+    // steps would delete the (only) source row, so reject it before any
+    // mutation rather than destroy the branch.
+    if old_name == new_name {
+        return Err(BranchError::DelegatedCli(CliError::command_usage(format!(
+            "cannot rename branch '{old_name}' onto itself"
+        ))));
+    }
+
     // All read-only validation happens before the transaction opens (fail-fast,
     // no partial state). `is_valid_git_branch_name` already enforces the
     // 255-byte cap added in Wave 1.
@@ -1279,6 +1303,15 @@ async fn copy_branch_impl(args: &[String], force: bool) -> Result<BranchOutput, 
         2 => (args[0].clone(), args[1].clone()),
         _ => return Err(BranchError::RenameTooManyArgs),
     };
+
+    // Copying a branch onto itself is rejected before any mutation: with
+    // `-C`/`-f` the reflog "clear dst then copy src" step would erase the
+    // (shared) reflog while reporting success.
+    if src == dst {
+        return Err(BranchError::DelegatedCli(CliError::command_usage(format!(
+            "cannot copy branch '{src}' onto itself"
+        ))));
+    }
 
     if !is_valid_git_branch_name(&dst) {
         return Err(BranchError::InvalidName(dst));

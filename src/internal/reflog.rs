@@ -340,7 +340,9 @@ impl Reflog {
 
 fn timestamp_seconds() -> i64 {
     let now = SystemTime::now();
-    let since_the_epoch = now.duration_since(UNIX_EPOCH).expect("Time went backwards");
+    // A clock set before the Unix epoch should never abort a reflog write;
+    // fall back to 0 (epoch) instead of panicking.
+    let since_the_epoch = now.duration_since(UNIX_EPOCH).unwrap_or_default();
     since_the_epoch.as_secs() as i64
 }
 

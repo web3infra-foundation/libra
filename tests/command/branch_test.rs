@@ -3608,3 +3608,91 @@ async fn test_branch_copy_succeeds_without_reflog_table() {
         "copy must succeed even when the reflog table is absent"
     );
 }
+
+// =====================================================================
+//  Codex review round 2 — self-copy/self-rename guards, shlex editor
+// =====================================================================
+
+/// Copying a branch onto itself is rejected (even with `-C`) as a usage error,
+/// before any mutation — so the branch's reflog/config is never erased.
+#[test]
+#[serial]
+fn test_branch_copy_onto_itself_rejected() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], repo.path()),
+        "create feature",
+    );
+    for flag in ["-c", "-C"] {
+        let output = run_libra_command(&["branch", flag, "feature", "feature"], repo.path());
+        assert_eq!(output.status.code(), Some(129), "flag {flag}");
+        let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+        assert_eq!(report.error_code, "LBR-CLI-002", "flag {flag}");
+        assert!(
+            stderr.contains("onto itself"),
+            "self-copy message: {stderr}"
+        );
+    }
+    // feature still exists and is unchanged.
+    assert!(
+        branch_commit_json(repo.path(), "feature").is_some(),
+        "feature must survive a rejected self-copy"
+    );
+}
+
+/// Renaming a branch onto itself is rejected before any mutation — guarding
+/// against the move/migrate steps deleting the (only) source row.
+#[test]
+#[serial]
+fn test_branch_rename_onto_itself_rejected() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], repo.path()),
+        "create feature",
+    );
+    let output = run_libra_command(&["branch", "-m", "feature", "feature"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        stderr.contains("onto itself"),
+        "self-rename message: {stderr}"
+    );
+    // The branch must still exist (not deleted by a botched self-rename).
+    assert!(
+        branch_commit_json(repo.path(), "feature").is_some(),
+        "feature must survive a rejected self-rename"
+    );
+}
+
+/// The editor is launched via shell-style argv splitting (not `sh -c`), so an
+/// editor command with flags (e.g. `code --wait`) still works: the temp-file
+/// path is appended as the final argument.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_branch_edit_description_editor_with_args() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], repo.path()),
+        "create feature",
+    );
+    // Stub writes fixed content to its LAST argument (the temp-file path),
+    // proving the leading `--flag` token was parsed as a separate arg.
+    let stub = write_stub_editor(
+        repo.path(),
+        "args.sh",
+        "#!/bin/sh\nfor a in \"$@\"; do f=\"$a\"; done\nprintf 'edited with args\\n' > \"$f\"\n",
+    );
+    let editor = format!("{stub} --wait");
+
+    let output = run_libra_command_with_stdin_and_env(
+        &["--json", "branch", "--edit-description", "feature"],
+        repo.path(),
+        "",
+        &[("EDITOR", editor.as_str())],
+    );
+    assert_cli_success(&output, "edit-description editor-with-args");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["description"], "edited with args");
+}
