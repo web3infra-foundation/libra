@@ -1431,6 +1431,49 @@ mod tests {
         }
     }
 
+    /// Pin the stable-code mapping for the path-mode / conflict / IO variants
+    /// introduced for `--ours`/`--theirs`/`-f` (Batch 1) per the exit-code
+    /// contract: usage → `CliInvalidArguments` (129), non-conflict path →
+    /// `ConflictOperationBlocked` (128), read → `IoReadFailed` (128), write →
+    /// `IoWriteFailed` (128).
+    #[test]
+    fn checkout_error_maps_new_variants_to_stable_codes() {
+        let cases: Vec<(CheckoutError, StableErrorCode)> = vec![
+            (
+                CheckoutError::ConflictPathRequired { flag: "--ours" },
+                StableErrorCode::CliInvalidArguments,
+            ),
+            (
+                CheckoutError::InvalidPathMode("-b".to_string()),
+                StableErrorCode::CliInvalidArguments,
+            ),
+            (
+                CheckoutError::NotInMergeConflict {
+                    path: "a.txt".to_string(),
+                },
+                StableErrorCode::ConflictOperationBlocked,
+            ),
+            (
+                CheckoutError::IndexReadFailed {
+                    path: "<index>".to_string(),
+                    detail: "bad header".to_string(),
+                },
+                StableErrorCode::IoReadFailed,
+            ),
+            (
+                CheckoutError::WorktreeWriteFailed {
+                    path: "a.txt".to_string(),
+                    detail: "permission denied".to_string(),
+                },
+                StableErrorCode::IoWriteFailed,
+            ),
+        ];
+        for (err, expected) in cases {
+            let cli: CliError = err.into();
+            assert_eq!(cli.stable_code(), expected);
+        }
+    }
+
     #[test]
     fn checkout_remote_sync_failed_preserves_inner_stable_code() {
         let inner = CliError::fatal("upstream missing")

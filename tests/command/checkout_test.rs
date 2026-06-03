@@ -1601,3 +1601,70 @@ fn checkout_ours_write_error_propagates() {
     let (_h, report) = parse_cli_error_stderr(&out.stderr);
     assert_eq!(report.error_code, "LBR-IO-002");
 }
+
+// ── Batch 2: exit-code alignment + bare-checkout status output ──
+
+/// Bare `libra checkout` on a branch prints `Current branch is <branch>.` (exit 0).
+#[test]
+fn checkout_bare_shows_current_branch() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["checkout"], repo.path());
+    assert_cli_success(&out, "bare checkout");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Current branch is main."),
+        "stdout: {stdout}"
+    );
+}
+
+/// Bare `libra checkout` while detached prints `HEAD detached at <short8>` (exit 0).
+#[test]
+fn checkout_bare_detached_shows_head() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--detach"], repo.path()),
+        "detach at HEAD",
+    );
+    let out = run_libra_command(&["checkout"], repo.path());
+    assert_cli_success(&out, "bare checkout while detached");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("HEAD detached at "),
+        "expected detached status line, got: {stdout}"
+    );
+}
+
+/// `-b <name> -- <path>` mixes branch-creation and path mode: usage error
+/// (`InvalidPathMode` → `CliInvalidArguments`, 129).
+#[test]
+fn checkout_b_with_pathspec_is_usage_error() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["checkout", "-b", "x", "--", "tracked.txt"], repo.path());
+    assert_eq!(out.status.code(), Some(129), "mixed -b + pathspec");
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// User-facing error messages do not leak the repository's internal absolute path.
+#[test]
+fn checkout_error_message_has_no_internal_paths() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let repo_abs = repo.path().to_string_lossy().to_string();
+
+    // A non-conflict `--ours` error: the message must name the pathspec only.
+    let out = run_libra_command(&["checkout", "--ours", "--", "tracked.txt"], repo.path());
+    let (human, report) = parse_cli_error_stderr(&out.stderr);
+    assert!(
+        !report.message.contains(&repo_abs),
+        "error message leaked an absolute path: {}",
+        report.message
+    );
+    assert!(
+        !human.contains(&repo_abs),
+        "human error block leaked an absolute path: {human}"
+    );
+}
