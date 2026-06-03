@@ -966,3 +966,217 @@ async fn test_add_cli_overrides_config_ignore_errors() {
         .await
     );
 }
+
+/// Read the recorded index mode for a stage-0 entry, reloading `.libra/index`
+/// from disk so the assertion reflects the persisted (atomically saved) state.
+fn index_mode(repo: &std::path::Path, name: &str) -> Option<u32> {
+    let index = git_internal::internal::index::Index::load(repo.join(".libra/index")).ok()?;
+    index.get(name, 0).map(|entry| entry.mode)
+}
+
+/// Scenario: `--chmod=+x` records index mode 0o100755 for a staged file.
+#[tokio::test]
+#[serial]
+async fn test_add_chmod_plus_x() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write("script.sh", "#!/bin/sh\necho hi\n").unwrap();
+
+    add::run_add(&AddArgs {
+        pathspec: vec!["script.sh".to_string()],
+        chmod: Some("+x".to_string()),
+        ..Default::default()
+    })
+    .await
+    .expect("add --chmod=+x");
+
+    assert_eq!(index_mode(test_dir.path(), "script.sh"), Some(0o100755));
+}
+
+/// Scenario: `--chmod=-x` records index mode 0o100644 even when the worktree
+/// file is executable (only the index mode is changed).
+#[tokio::test]
+#[serial]
+async fn test_add_chmod_minus_x() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write("script.sh", "#!/bin/sh\necho hi\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions("script.sh", fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    add::run_add(&AddArgs {
+        pathspec: vec!["script.sh".to_string()],
+        chmod: Some("-x".to_string()),
+        ..Default::default()
+    })
+    .await
+    .expect("add --chmod=-x");
+
+    assert_eq!(index_mode(test_dir.path(), "script.sh"), Some(0o100644));
+}
+
+/// Scenario: `--chmod` updates an already-tracked entry whose content/stat is
+/// unchanged — proving the candidate set includes entries outside the
+/// status-change set (`git add --chmod` semantics).
+#[tokio::test]
+#[serial]
+async fn test_add_chmod_unchanged_tracked() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write("tracked.sh", "#!/bin/sh\n").unwrap();
+
+    // First stage: entry exists with the default (non-executable) mode.
+    add::run_add(&AddArgs {
+        pathspec: vec!["tracked.sh".to_string()],
+        ..Default::default()
+    })
+    .await
+    .expect("initial add");
+    assert_eq!(index_mode(test_dir.path(), "tracked.sh"), Some(0o100644));
+
+    // No worktree change; --chmod must still flip the recorded index mode.
+    add::run_add(&AddArgs {
+        pathspec: vec!["tracked.sh".to_string()],
+        chmod: Some("+x".to_string()),
+        ..Default::default()
+    })
+    .await
+    .expect("chmod on unchanged tracked file");
+    assert_eq!(index_mode(test_dir.path(), "tracked.sh"), Some(0o100755));
+}
+
+/// Scenario: `--chmod` changes only the index mode, never the working-tree
+/// file's filesystem permissions.
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_add_chmod_does_not_touch_worktree_perms() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write("script.sh", "#!/bin/sh\n").unwrap();
+    fs::set_permissions("script.sh", fs::Permissions::from_mode(0o644)).unwrap();
+    let before = fs::metadata("script.sh").unwrap().permissions().mode();
+
+    add::run_add(&AddArgs {
+        pathspec: vec!["script.sh".to_string()],
+        chmod: Some("+x".to_string()),
+        ..Default::default()
+    })
+    .await
+    .expect("add --chmod=+x");
+
+    let after = fs::metadata("script.sh").unwrap().permissions().mode();
+    assert_eq!(before, after, "worktree file permissions must be unchanged");
+    assert_eq!(index_mode(test_dir.path(), "script.sh"), Some(0o100755));
+}
+
+/// Scenario: under `core.fileMode = false`, `--chmod` still records the index
+/// mode but emits a warning (driving `--exit-code-on-warning`).
+#[tokio::test]
+#[serial]
+async fn test_add_chmod_core_filemode_false_warns() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write("script.sh", "#!/bin/sh\n").unwrap();
+    libra::internal::config::ConfigKv::set("core.filemode", "false", false)
+        .await
+        .unwrap();
+
+    libra::utils::output::reset_warning_tracker();
+    add::run_add(&AddArgs {
+        pathspec: vec!["script.sh".to_string()],
+        chmod: Some("+x".to_string()),
+        ..Default::default()
+    })
+    .await
+    .expect("add --chmod=+x under core.fileMode=false");
+
+    assert!(
+        libra::utils::output::warning_was_emitted(),
+        "a warning must be emitted when core.fileMode is false"
+    );
+    assert_eq!(index_mode(test_dir.path(), "script.sh"), Some(0o100755));
+}
+
+/// Scenario (Wave 1 prerequisite regression): with the fallible blob path,
+/// `--ignore-errors` skips an unreadable file instead of panicking, and still
+/// stages the readable ones.
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_add_ignore_errors_skips_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write("readable.txt", "ok").unwrap();
+    fs::write("secret.txt", "nope").unwrap();
+    fs::set_permissions("secret.txt", fs::Permissions::from_mode(0o000)).unwrap();
+
+    let out = add::run_add(&AddArgs {
+        pathspec: vec!["readable.txt".to_string(), "secret.txt".to_string()],
+        ignore_errors: true,
+        ..Default::default()
+    })
+    .await
+    .expect("--ignore-errors must not abort on an unreadable file");
+
+    // restore perms so the tempdir can be cleaned up
+    fs::set_permissions("secret.txt", fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert!(
+        out.added.iter().any(|p| p == "readable.txt"),
+        "readable file should be staged: {:?}",
+        out.added
+    );
+    assert!(
+        out.failed.iter().any(|f| f.path == "secret.txt"),
+        "unreadable file should be reported as failed: {:?}",
+        out.failed
+    );
+}
+
+/// Scenario: an atomic index save that fails (here: the target directory is
+/// read-only, so the temp-file write fails) leaves the existing index file
+/// byte-identical — no partial write.
+#[cfg(unix)]
+#[test]
+fn test_add_index_save_failure_no_partial() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let index_path = dir.path().join("index");
+    fs::write(&index_path, b"ORIGINAL-INDEX-SENTINEL-BYTES").unwrap();
+    let original = fs::read(&index_path).unwrap();
+
+    // An empty in-memory index we would attempt to persist over the sentinel.
+    let index = git_internal::internal::index::Index::load(dir.path().join("nonexistent"))
+        .expect("missing index loads as empty");
+
+    // Make the directory read-only so creating the sibling temp file fails.
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500)).unwrap();
+    let result = add::save_index_atomic(&index, &index_path);
+    // Restore before asserting so the tempdir can be cleaned up.
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(
+        result.is_err(),
+        "atomic save into a read-only dir must fail"
+    );
+    assert_eq!(
+        fs::read(&index_path).unwrap(),
+        original,
+        "the original index must be untouched after a failed atomic save"
+    );
+}

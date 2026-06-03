@@ -19,7 +19,7 @@
 //!   change set before pathspec validation runs.
 
 use std::{
-    env,
+    env, fs,
     io::{self, Write},
     path::{Path, PathBuf},
 };
@@ -29,7 +29,7 @@ use git_internal::{
     errors::GitError,
     internal::{
         index::{Index, IndexEntry},
-        object::blob::Blob,
+        object::{ObjectTrait, blob::Blob},
     },
 };
 use serde::Serialize;
@@ -40,7 +40,6 @@ use crate::{
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         lfs,
-        object_ext::BlobExt,
         output::{self, OutputConfig},
         path, util,
     },
@@ -216,9 +215,14 @@ pub enum AddError {
     #[error("failed to read '{path}': {source}")]
     BlobRead { path: PathBuf, source: io::Error },
     /// Writing a blob object (or its LFS backup) to storage failed (the
-    /// fallible replacement for [`BlobExt::save`] / [`BlobExt::from_lfs_file`]).
+    /// fallible replacement for `BlobExt::save` / `BlobExt::from_lfs_file`).
     #[error("failed to write object for '{path}': {source}")]
     BlobSave { path: PathBuf, source: io::Error },
+    /// The atomic index save failed at the fsync or rename step (an `io::Error`
+    /// rather than the `GitError` produced by the temp-file write in
+    /// [`IndexSave`](AddError::IndexSave)).
+    #[error("unable to write index '{path}': {source}")]
+    IndexSaveIo { path: PathBuf, source: io::Error },
 }
 
 impl From<AddError> for CliError {
@@ -279,6 +283,9 @@ impl From<AddError> for CliError {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
             }
             AddError::BlobSave { .. } => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
+            }
+            AddError::IndexSaveIo { .. } => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
             }
         }
@@ -578,12 +585,7 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
         } else {
             let refreshed = do_refresh_files(&mut index, &tracked_modified, &workdir)?;
             add_output.refreshed = refreshed.iter().map(|f| f.display().to_string()).collect();
-            index
-                .save(&index_path)
-                .map_err(|source| AddError::IndexSave {
-                    path: index_path.clone(),
-                    source,
-                })?;
+            save_index_atomic(&index, &index_path)?;
         }
 
         return check_ignored_only_error(add_output);
@@ -639,12 +641,53 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
         }
     }
 
-    index
-        .save(&index_path)
-        .map_err(|source| AddError::IndexSave {
-            path: index_path.clone(),
-            source,
-        })?;
+    // --- Apply --chmod to matching tracked index entries. The candidate set is
+    // every entry already in `.libra/index` that matches a requested pathspec —
+    // not just the status-change set — so unchanged tracked files also have
+    // their recorded index mode updated, matching `git add --chmod`. Only the
+    // index mode is changed; working-tree permissions are never touched.
+    if let Some(spec) = args.chmod.as_deref() {
+        let executable = validate_chmod_spec(spec)?;
+        let targets = filter_candidates(
+            &index.tracked_files(),
+            &validated.files,
+            &workdir,
+            &current_dir,
+        );
+        let mut chmod_changed = false;
+        for rel in &targets {
+            let Some(name) = rel.to_str() else { continue };
+            // remove + re-insert (keyed by name) avoids borrowing the index
+            // while mutating it and needs no Clone on IndexEntry.
+            if let Some(mut entry) = index.remove(name, 0) {
+                if apply_chmod(&mut entry, executable) {
+                    chmod_changed = true;
+                    let path_str = rel.display().to_string();
+                    if !add_output.modified.contains(&path_str) {
+                        add_output.modified.push(path_str);
+                    }
+                }
+                index.add(entry);
+            }
+        }
+        // `core.fileMode = false` weakens executable-bit semantics, but Git (and
+        // libra) still record the requested index mode. Warn on stderr — the
+        // warning text is not suppressed by `-q` and drives
+        // `--exit-code-on-warning`.
+        if chmod_changed
+            && matches!(
+                crate::internal::config::read_cascaded_bool("core.filemode").await,
+                Ok(Some(false))
+            )
+        {
+            eprintln!(
+                "warning: core.fileMode is false; --chmod still updates the recorded index mode"
+            );
+            output::record_warning();
+        }
+    }
+
+    save_index_atomic(&index, &index_path)?;
 
     check_ignored_only_error(add_output)
 }
@@ -1092,8 +1135,8 @@ async fn stage_a_file(
     let file_status = check_file_status(file, index, workdir)?;
     match file_status {
         FileStatus::New => {
-            let blob = gen_blob_from_file(&file_abs);
-            blob.save();
+            let blob = gen_blob_from_file(&file_abs)?;
+            save_blob(&blob, &file_abs)?;
             index.add(
                 IndexEntry::new_from_file(file, blob.id, workdir).map_err(|source| {
                     AddError::CreateIndexEntry {
@@ -1106,9 +1149,9 @@ async fn stage_a_file(
         }
         FileStatus::Modified => {
             if index.is_modified(file_str, 0, workdir) {
-                let blob = gen_blob_from_file(&file_abs);
+                let blob = gen_blob_from_file(&file_abs)?;
                 if !index.verify_hash(file_str, 0, &blob.id) {
-                    blob.save();
+                    save_blob(&blob, &file_abs)?;
                     index.update(IndexEntry::new_from_file(file, blob.id, workdir).map_err(
                         |source| AddError::CreateIndexEntry {
                             path: file.to_path_buf(),
@@ -1176,18 +1219,107 @@ fn check_file_status(file: &Path, index: &Index, workdir: &Path) -> Result<FileS
     }
 }
 
-/// Generate a `Blob` from a file.
+/// Build a [`Blob`] from a worktree file, fallibly.
 ///
-/// Functional scope:
-/// - When the file matches a `.libra_attributes` LFS filter, returns a pointer
-///   blob via [`Blob::from_lfs_file`]; otherwise reads the file content
-///   verbatim into a regular blob.
-fn gen_blob_from_file(path: impl AsRef<Path>) -> Blob {
-    if lfs::is_lfs_tracked(&path) {
-        Blob::from_lfs_file(&path)
+/// This is the fallible replacement for the previous panic path
+/// (`BlobExt::from_file` / `from_lfs_file`): a missing/unreadable file becomes
+/// [`AddError::BlobRead`] and an LFS backup failure becomes
+/// [`AddError::BlobSave`], so `--ignore-errors` can skip the file instead of
+/// aborting the whole command. For LFS-tracked paths we first probe readability
+/// with `File::open`, because `lfs::generate_pointer_file` opens the file and
+/// panics on failure (a `stat` succeeds on a `chmod 000` file, an `open` does
+/// not).
+fn gen_blob_from_file(path: impl AsRef<Path>) -> Result<Blob, AddError> {
+    let path = path.as_ref();
+    if lfs::is_lfs_tracked(path) {
+        let _probe = fs::File::open(path).map_err(|source| AddError::BlobRead {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let (pointer, oid) = lfs::generate_pointer_file(path);
+        lfs::backup_lfs_file(path, &oid).map_err(|source| AddError::BlobSave {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(Blob::from_content(&pointer))
     } else {
-        Blob::from_file(&path)
+        let data = fs::read(path).map_err(|source| AddError::BlobRead {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(Blob::from_content_bytes(data))
     }
+}
+
+/// Persist `blob` to object storage if it is not already present.
+///
+/// The fallible replacement for `BlobExt::save`'s panic path: a `storage.put`
+/// failure becomes [`AddError::BlobSave`] (carrying the worktree `path` for
+/// context) so `--ignore-errors` can skip it.
+fn save_blob(blob: &Blob, path: &Path) -> Result<(), AddError> {
+    let storage = util::objects_storage();
+    if !storage.exist(&blob.id) {
+        storage
+            .put(&blob.id, &blob.data, blob.get_type())
+            .map_err(|source| AddError::BlobSave {
+                path: path.to_path_buf(),
+                source,
+            })?;
+    }
+    Ok(())
+}
+
+/// Persist `index` to `index_path` atomically: write to a sibling temp file,
+/// fsync it, then rename over the target.
+///
+/// `git-internal`'s own `Index::save` uses `File::create` (truncate-in-place,
+/// non-atomic), so a crash or I/O error mid-write could leave a partially
+/// written `.libra/index`. Writing to a temp file in the same directory and
+/// renaming makes the replacement atomic: on any failure (temp write, fsync, or
+/// rename) the original index is left untouched and the temp file is cleaned up.
+///
+/// Exposed (`pub`) so failure-injection tests can assert the no-partial-write
+/// guarantee directly.
+pub fn save_index_atomic(index: &Index, index_path: &Path) -> Result<(), AddError> {
+    let dir = index_path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp_path = dir.join(format!("index.{}.tmp", std::process::id()));
+
+    index
+        .save(&tmp_path)
+        .map_err(|source| AddError::IndexSave {
+            path: tmp_path.clone(),
+            source,
+        })?;
+
+    // fsync the temp file so a crash between write and rename cannot expose a
+    // half-flushed index.
+    if let Err(source) = fs::File::open(&tmp_path).and_then(|f| f.sync_all()) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(AddError::IndexSaveIo {
+            path: index_path.to_path_buf(),
+            source,
+        });
+    }
+
+    if let Err(source) = fs::rename(&tmp_path, index_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(AddError::IndexSaveIo {
+            path: index_path.to_path_buf(),
+            source,
+        });
+    }
+    Ok(())
+}
+
+/// Set the executable bit on a staged index entry's mode: `+x` -> `0o100755`,
+/// `-x` -> `0o100644`. Returns whether the mode actually changed (so callers can
+/// decide whether to report the path as modified). Only the index entry's mode
+/// is touched; working-tree file permissions are never modified.
+fn apply_chmod(entry: &mut IndexEntry, executable: bool) -> bool {
+    let new_mode = if executable { 0o100755 } else { 0o100644 };
+    let changed = entry.mode != new_mode;
+    entry.mode = new_mode;
+    changed
 }
 
 /// Validate a `--chmod` spec. Only `+x` and `-x` are accepted (matching Git's
