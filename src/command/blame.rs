@@ -443,7 +443,19 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
                 _ => continue,
             };
 
-            let operations = compute_diff(&parent_lines, &current_lines);
+            // With `-w`, diff the whitespace-normalized line vectors so a
+            // whitespace-only change does not re-attribute the line; otherwise
+            // diff the raw lines. The normalized vectors are built only on the
+            // `-w` path (the one extra allocation the plan permits).
+            let parent_norm: Vec<String>;
+            let current_norm: Vec<String>;
+            let operations = if args.ignore_whitespace {
+                parent_norm = parent_lines.iter().map(|l| normalize_ws(l)).collect();
+                current_norm = current_lines.iter().map(|l| normalize_ws(l)).collect();
+                compute_diff(&parent_norm, &current_norm)
+            } else {
+                compute_diff(&parent_lines, &current_lines)
+            };
             for op in operations {
                 use git_internal::diff::DiffOperation;
                 match op {
@@ -453,8 +465,18 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
                         if let Some(blame) = blame_lines.get_mut(final_idx)
                             && blame.commit_id == current_id
                         {
+                            // Index the ORIGINAL parent line so the displayed
+                            // content keeps its whitespace. Under `-w` compare on
+                            // the normalized form; otherwise byte-for-byte.
                             let parent_content = parent_lines.get(old_line - 1);
-                            if Some(&blame.content) == parent_content {
+                            let matches = if args.ignore_whitespace {
+                                parent_content
+                                    .map(|p| normalize_ws(p) == normalize_ws(&blame.content))
+                                    .unwrap_or(false)
+                            } else {
+                                Some(&blame.content) == parent_content
+                            };
+                            if matches {
                                 blame.commit_id = *parent_id;
                                 blame.author = parent_commit.author.name.clone();
                                 blame.email = parent_commit.author.email.clone();
@@ -468,6 +490,18 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
                 }
             }
             queue.push_back((*parent_id, parent_commit, parent_lines));
+        }
+
+        // Conservative global early-exit: once no still-queued node owns any
+        // blame line, no further traversal can change attribution. Evaluated
+        // AFTER parents are enqueued and looking only at queued nodes (never the
+        // just-processed `current_id`), so an in-flight migration to a parent is
+        // never cut short.
+        let still_changeable = queue
+            .iter()
+            .any(|(qid, _, _)| blame_lines.iter().any(|b| b.commit_id == *qid));
+        if !still_changeable {
+            break;
         }
     }
 
@@ -552,6 +586,15 @@ fn format_blame_timestamp(timestamp: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0)
         .map(|dt| dt.to_rfc3339())
         .unwrap_or_else(|| timestamp.to_string())
+}
+
+/// Collapse internal whitespace runs to a single space and trim both ends.
+///
+/// Used by `-w` (ignore-whitespace) blame: two lines that differ only in
+/// whitespace normalize to the same string, so a whitespace-only edit does not
+/// re-attribute the line. An all-whitespace line normalizes to the empty string.
+fn normalize_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Parse a `-L` argument into an inclusive `(start, end)` line range.
@@ -674,5 +717,17 @@ mod tests {
             revision: "HEAD".to_string(),
         });
         assert_eq!(error.stable_code(), StableErrorCode::CliInvalidTarget);
+    }
+
+    /// `normalize_ws` collapses whitespace runs and trims, so that `-w` treats
+    /// whitespace-only differences as equal (and blank lines as empty).
+    #[test]
+    fn test_blame_normalize_ws_unit() {
+        assert_eq!(normalize_ws("  a   b  "), "a b");
+        assert_eq!(normalize_ws("\t a\tb \t"), "a b");
+        assert_eq!(normalize_ws("    indented"), "indented");
+        assert_eq!(normalize_ws("   "), "");
+        assert_eq!(normalize_ws(""), "");
+        assert_eq!(normalize_ws("abc"), "abc");
     }
 }

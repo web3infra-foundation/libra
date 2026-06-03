@@ -903,3 +903,163 @@ fn test_blame_porcelain_orig_lineno_simple_insert() {
         "expected a porcelain header with orig=1 final=2 for the shifted line: {stdout}"
     );
 }
+
+fn first_line_hash(out: &std::process::Output) -> String {
+    parse_json_stdout(out)["data"]["lines"][0]["hash"]
+        .as_str()
+        .expect("line hash")
+        .to_string()
+}
+
+/// `-w` attributes a whitespace-only (indent) change to the OLDER commit, while
+/// the default byte-exact comparison attributes it to the indent changer. Also
+/// confirms `-w` works through the `--json` path. (Batch 2 tests 1, 2, 6.)
+#[test]
+fn test_blame_ignore_whitespace_attributes_to_older() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("f.txt"), "    foo\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "f.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "c1", "--no-verify"], repo.path())
+            .status
+            .success()
+    );
+    let c1 = first_line_hash(&run_libra_command(
+        &["--json", "blame", "f.txt"],
+        repo.path(),
+    ));
+
+    // C2: whitespace-only indent change (4 spaces -> 2 spaces).
+    std::fs::write(repo.path().join("f.txt"), "  foo\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "f.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "c2", "--no-verify"], repo.path())
+            .status
+            .success()
+    );
+
+    let with_w = first_line_hash(&run_libra_command(
+        &["--json", "blame", "-w", "f.txt"],
+        repo.path(),
+    ));
+    assert_eq!(
+        with_w, c1,
+        "-w should attribute the indent-only change to C1"
+    );
+
+    let without_w = first_line_hash(&run_libra_command(
+        &["--json", "blame", "f.txt"],
+        repo.path(),
+    ));
+    assert_ne!(
+        without_w, c1,
+        "without -w the indent changer (C2) owns the line"
+    );
+}
+
+/// `-w` treats an all-whitespace (blank) line whose indentation changed as
+/// unchanged, attributing it to the older commit.
+#[test]
+fn test_blame_ignore_whitespace_blank_line() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("b.txt"), "alpha\n    \n").unwrap();
+    assert!(
+        run_libra_command(&["add", "b.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "c1", "--no-verify"], repo.path())
+            .status
+            .success()
+    );
+    let c1 = first_line_hash(&run_libra_command(
+        &["--json", "blame", "b.txt"],
+        repo.path(),
+    ));
+
+    // Change only the amount of whitespace on the blank line.
+    std::fs::write(repo.path().join("b.txt"), "alpha\n  \n").unwrap();
+    assert!(
+        run_libra_command(&["add", "b.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "c2", "--no-verify"], repo.path())
+            .status
+            .success()
+    );
+
+    let json = parse_json_stdout(&run_libra_command(
+        &["--json", "blame", "-w", "b.txt"],
+        repo.path(),
+    ));
+    let line2 = json["data"]["lines"][1]["hash"]
+        .as_str()
+        .expect("line 2 hash");
+    assert_eq!(
+        line2, c1,
+        "-w should attribute the blank-line whitespace change to C1"
+    );
+}
+
+/// BFS early-exit correctness: on a known 2-commit history, line 1 stays
+/// attributed to its introducing commit (C1) and is never mis-folded into a
+/// later commit by the early-exit. Line 2 (changed in C2) is a different commit.
+#[test]
+fn test_blame_bfs_early_exit_correctness() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("h.txt"), "a\nb\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "h.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "c1", "--no-verify"], repo.path())
+            .status
+            .success()
+    );
+    let c1 = first_line_hash(&run_libra_command(
+        &["--json", "blame", "h.txt"],
+        repo.path(),
+    ));
+
+    std::fs::write(repo.path().join("h.txt"), "a\nB\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "h.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "c2", "--no-verify"], repo.path())
+            .status
+            .success()
+    );
+
+    let json = parse_json_stdout(&run_libra_command(
+        &["--json", "blame", "h.txt"],
+        repo.path(),
+    ));
+    let lines = json["data"]["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(
+        lines[0]["hash"].as_str().unwrap(),
+        c1,
+        "line 1 must stay attributed to C1"
+    );
+    assert_ne!(
+        lines[1]["hash"].as_str().unwrap(),
+        c1,
+        "line 2 (changed in C2) must not be attributed to C1"
+    );
+}
