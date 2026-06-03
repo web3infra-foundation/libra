@@ -1493,3 +1493,35 @@ async fn test_add_renormalize_rewrites_unchanged_tracked() {
     .expect("renormalize_entry");
     assert_eq!(action, add::StagedAction::Modified);
 }
+
+/// Scenario: `--dry-run --renormalize` previews the tracked entries that would
+/// be rewritten, instead of the (often empty) status-change set. Regression for
+/// the Codex finding that dry-run ignored the renormalize candidate set.
+#[tokio::test]
+#[serial]
+async fn test_add_renormalize_dry_run_previews_tracked() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write("tracked.txt", "v1").unwrap();
+    add::run_add(&AddArgs {
+        pathspec: vec!["tracked.txt".to_string()],
+        ..Default::default()
+    })
+    .await
+    .expect("stage tracked.txt");
+
+    // Content/stat unchanged: dry-run --renormalize must still preview it.
+    let out = add::run_add(&AddArgs {
+        renormalize: true,
+        dry_run: true,
+        ..Default::default()
+    })
+    .await
+    .expect("dry-run renormalize");
+    assert!(
+        out.modified.iter().any(|p| p == "tracked.txt"),
+        "dry-run should preview the renormalize rewrite: {:?}",
+        out.modified
+    );
+}

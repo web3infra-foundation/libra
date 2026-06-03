@@ -20,7 +20,7 @@
 
 use std::{
     env, fs,
-    io::{self, Read, Write},
+    io::{self, BufRead, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -644,15 +644,37 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
     files.dedup();
 
     if args.dry_run {
-        // Classify files for dry-run preview
-        for file in &files {
-            let status = check_file_status(file, &index, &workdir)?;
-            let path_str = file.display().to_string();
-            match status {
-                FileStatus::New => add_output.added.push(path_str),
-                FileStatus::Modified => add_output.modified.push(path_str),
-                FileStatus::Deleted => add_output.removed.push(path_str),
-                FileStatus::Unchanged | FileStatus::NotFound => {}
+        if args.renormalize {
+            // Preview the renormalize set the same way the real run computes it:
+            // tracked entries matching the pathspec would be force-rewritten
+            // (Modified), or staged as deletions (Removed) if removed from the
+            // working tree. Keeps `--dry-run --renormalize` consistent with the
+            // non-dry-run path instead of showing the (often empty) status set.
+            let targets = filter_candidates(
+                &index.tracked_files(),
+                &validated.files,
+                &workdir,
+                &current_dir,
+            );
+            for file in &targets {
+                let path_str = file.display().to_string();
+                if workdir.join(file).exists() {
+                    add_output.modified.push(path_str);
+                } else {
+                    add_output.removed.push(path_str);
+                }
+            }
+        } else {
+            // Classify files for dry-run preview
+            for file in &files {
+                let status = check_file_status(file, &index, &workdir)?;
+                let path_str = file.display().to_string();
+                match status {
+                    FileStatus::New => add_output.added.push(path_str),
+                    FileStatus::Modified => add_output.modified.push(path_str),
+                    FileStatus::Deleted => add_output.removed.push(path_str),
+                    FileStatus::Unchanged | FileStatus::NotFound => {}
+                }
             }
         }
         return check_ignored_only_error(add_output);
@@ -1390,6 +1412,18 @@ pub fn save_index_atomic(index: &Index, index_path: &Path) -> Result<(), AddErro
             source,
         });
     }
+
+    // fsync the parent directory so the rename itself is durable across a crash.
+    // Opening a directory as a file is not portable (e.g. Windows), so the open
+    // is best-effort; a genuine sync failure is surfaced.
+    if let Ok(dir_handle) = fs::File::open(dir) {
+        dir_handle
+            .sync_all()
+            .map_err(|source| AddError::IndexSaveIo {
+                path: index_path.to_path_buf(),
+                source,
+            })?;
+    }
     Ok(())
 }
 
@@ -1408,29 +1442,22 @@ fn apply_chmod(entry: &mut IndexEntry, executable: bool) -> bool {
 /// OOM / DoS from a pathological input.
 const MAX_PATHSPEC_FILE_BYTES: u64 = 128 * 1024 * 1024;
 
-/// Read pathspecs from `path` (a file, or `-` for stdin).
+/// Read pathspecs from `path` (a file, or `-` for stdin), streaming.
 ///
 /// Items are separated by NUL when `nul` is set (`--pathspec-file-nul`),
 /// otherwise by newline (a trailing `\r` is stripped so CRLF files work). Empty
-/// items are dropped. The whole input is capped at [`MAX_PATHSPEC_FILE_BYTES`];
-/// exceeding it (or any read failure) returns [`AddError::PathspecFileRead`].
-/// Non-UTF-8 input returns [`AddError::InvalidPathEncoding`]. Returned items are
-/// raw pathspecs; the caller still normalises and bounds-checks each one via
-/// [`validate_pathspecs`].
+/// items are dropped. Input is read incrementally via [`BufRead::read_until`]
+/// and bounded at [`MAX_PATHSPEC_FILE_BYTES`] as it is consumed, so even an
+/// unbounded stdin pipe cannot exhaust memory; exceeding the cap (or any read
+/// failure) returns [`AddError::PathspecFileRead`] and non-UTF-8 input returns
+/// [`AddError::InvalidPathEncoding`]. Returned items are raw pathspecs; the
+/// caller still normalises and bounds-checks each one via [`validate_pathspecs`].
 fn read_pathspec_from_file(path: &str, nul: bool) -> Result<Vec<String>, AddError> {
-    let (label, raw): (String, Vec<u8>) = if path == "-" {
-        let mut buf = Vec::new();
-        // `take` bounds stdin so an unbounded pipe cannot exhaust memory.
-        io::stdin()
-            .lock()
-            .take(MAX_PATHSPEC_FILE_BYTES + 1)
-            .read_to_end(&mut buf)
-            .map_err(|source| AddError::PathspecFileRead {
-                path: "<stdin>".to_string(),
-                source,
-            })?;
-        ("<stdin>".to_string(), buf)
+    let separator = if nul { b'\0' } else { b'\n' };
+    let (label, reader): (String, Box<dyn Read>) = if path == "-" {
+        ("<stdin>".to_string(), Box::new(io::stdin().lock()))
     } else {
+        // Fail fast on an oversized file without opening/reading it.
         let meta = fs::metadata(path).map_err(|source| AddError::PathspecFileRead {
             path: path.to_string(),
             source,
@@ -1444,43 +1471,55 @@ fn read_pathspec_from_file(path: &str, nul: bool) -> Result<Vec<String>, AddErro
                 ),
             });
         }
-        let bytes = fs::read(path).map_err(|source| AddError::PathspecFileRead {
+        let file = fs::File::open(path).map_err(|source| AddError::PathspecFileRead {
             path: path.to_string(),
             source,
         })?;
-        (path.to_string(), bytes)
+        (path.to_string(), Box::new(file))
     };
 
-    if raw.len() as u64 > MAX_PATHSPEC_FILE_BYTES {
-        return Err(AddError::PathspecFileRead {
-            path: label,
-            source: io::Error::new(
-                io::ErrorKind::InvalidData,
-                "pathspec input exceeds the 128 MiB limit",
-            ),
-        });
-    }
-
-    let text = String::from_utf8(raw).map_err(|_| AddError::InvalidPathEncoding {
-        path: PathBuf::from(&label),
-    })?;
-
-    let separator = if nul { '\0' } else { '\n' };
-    Ok(text
-        .split(separator)
-        .filter_map(|item| {
-            let item = if nul {
-                item
-            } else {
-                item.strip_suffix('\r').unwrap_or(item)
-            };
-            if item.is_empty() {
-                None
-            } else {
-                Some(item.to_string())
+    // `take` bounds the total read so an unbounded stdin pipe cannot exhaust
+    // memory; `total` enforces the cap precisely as bytes are consumed.
+    let mut reader = io::BufReader::new(reader.take(MAX_PATHSPEC_FILE_BYTES + 1));
+    let mut items = Vec::new();
+    let mut chunk = Vec::new();
+    let mut total: u64 = 0;
+    loop {
+        chunk.clear();
+        let read = reader.read_until(separator, &mut chunk).map_err(|source| {
+            AddError::PathspecFileRead {
+                path: label.clone(),
+                source,
             }
-        })
-        .collect())
+        })?;
+        if read == 0 {
+            break;
+        }
+        total += read as u64;
+        if total > MAX_PATHSPEC_FILE_BYTES {
+            return Err(AddError::PathspecFileRead {
+                path: label.clone(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "pathspec input exceeds the 128 MiB limit",
+                ),
+            });
+        }
+        if chunk.last() == Some(&separator) {
+            chunk.pop();
+        }
+        if !nul && chunk.last() == Some(&b'\r') {
+            chunk.pop();
+        }
+        if chunk.is_empty() {
+            continue;
+        }
+        let item = std::str::from_utf8(&chunk).map_err(|_| AddError::InvalidPathEncoding {
+            path: PathBuf::from(&label),
+        })?;
+        items.push(item.to_string());
+    }
+    Ok(items)
 }
 
 /// Force-rewrite an already-tracked entry for `--renormalize` (implies `-u`).
