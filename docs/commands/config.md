@@ -108,7 +108,9 @@ List all configuration entries in the active scope.
 | Flag | Description |
 |------|-------------|
 | `--name-only` | Show only key names, not values |
-| `--show-origin` | Prefix each entry with its scope (`local` or `global`) |
+| `--show-origin` | Prefix each entry with its `file:<path>` SQLite origin |
+| `--show-scope` | Prefix each entry with its `local`/`global` scope label |
+| `--null` / `-z` | NUL-delimit records (Git `key\nvalue\0` format) |
 | `--vault` | Show only `vault.env.*` entries |
 | `--ssh-keys` | Show SSH key entries |
 | `--gpg-keys` | Show GPG key entries |
@@ -268,11 +270,24 @@ user.email=jane@example.com
 core.editor=vim
 ```
 
-With `--show-origin`:
+With `--show-origin` (the `file:<path>` SQLite origin, tab-separated before the record):
 
 ```
-local   user.name=Jane Doe
-global  user.email=jane@example.com
+file:/home/user/repo/.libra/libra.db	user.name=Jane Doe
+file:/home/user/.libra/config.db	user.email=jane@example.com
+```
+
+With `--show-scope` (the `local`/`global` scope label):
+
+```
+local	user.name=Jane Doe
+global	user.email=jane@example.com
+```
+
+With `--null` (Git record format `key\nvalue\0`, value NUL-terminated):
+
+```
+user.name\nJane Doe\0user.email\njane@example.com\0
 ```
 
 With `--name-only`:

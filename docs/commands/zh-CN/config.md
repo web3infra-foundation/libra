@@ -107,7 +107,9 @@ libra config get --regexp "user\\..*"
 | 标志 | 说明 |
 |------|------|
 | `--name-only` | 只显示 key 名，不显示值 |
-| `--show-origin` | 为每个条目加上 scope 前缀（`local` 或 `global`） |
+| `--show-origin` | 为每个条目加上 `file:<path>` SQLite 来源前缀 |
+| `--show-scope` | 为每个条目加上 `local`/`global` scope 标签前缀 |
+| `--null` / `-z` | 用 NUL 分隔记录（Git `key\nvalue\0` 格式） |
 | `--vault` | 只显示 `vault.env.*` 条目 |
 | `--ssh-keys` | 显示 SSH key 条目 |
 | `--gpg-keys` | 显示 GPG key 条目 |
@@ -267,11 +269,24 @@ user.email=jane@example.com
 core.editor=vim
 ```
 
-带 `--show-origin`：
+带 `--show-origin`（`file:<path>` SQLite 来源，记录前以 tab 分隔）：
 
 ```
-local   user.name=Jane Doe
-global  user.email=jane@example.com
+file:/home/user/repo/.libra/libra.db	user.name=Jane Doe
+file:/home/user/.libra/config.db	user.email=jane@example.com
+```
+
+带 `--show-scope`（`local`/`global` scope 标签）：
+
+```
+local	user.name=Jane Doe
+global	user.email=jane@example.com
+```
+
+带 `--null`（Git 记录格式 `key\nvalue\0`，value 以 NUL 结尾）：
+
+```
+user.name\nJane Doe\0user.email\njane@example.com\0
 ```
 
 带 `--name-only`：
