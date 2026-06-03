@@ -28,7 +28,9 @@ EXAMPLES:
     libra open                                            Open the auto-detected upstream in the browser
     libra open origin                                     Open a specific remote
     libra open https://github.com/web3infra-foundation/libra    Open a direct URL
-    libra open --json                                     Structured JSON output for agents (no browser)";
+    libra open --json                                     Structured JSON output for agents (no browser)
+    libra open --print-only                               Print the resolved URL without opening the browser
+    libra open origin --print-only                        Print a specific remote's URL without opening the browser";
 
 #[derive(Parser, Debug)]
 #[command(after_help = OPEN_EXAMPLES)]
@@ -36,6 +38,10 @@ pub struct OpenArgs {
     /// Remote name (e.g. `origin`) or a direct URL. Omit to auto-detect from the current branch's upstream
     #[arg(value_name = "REMOTE_OR_URL")]
     pub remote: Option<String>,
+
+    /// Only print the resolved URL; do not open the browser
+    #[arg(long = "print-only")]
+    pub print_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,12 +50,14 @@ struct OpenOutput {
     remote_url: String,
     web_url: String,
     launched: bool,
+    resolved_from_remote: bool,
 }
 
 #[derive(Debug)]
 struct OpenResolution {
     remote: Option<String>,
     remote_url: String,
+    resolved_from_remote: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -100,7 +108,7 @@ pub async fn execute_safe(args: OpenArgs, output: &OutputConfig) -> CliResult<()
         return Err(open_cli_error(OpenError::UnsafeUrl(web_url)));
     }
 
-    let launched = if output.is_json() {
+    let launched = if args.print_only || output.is_json() {
         false
     } else {
         open_browser(&web_url)
@@ -112,10 +120,13 @@ pub async fn execute_safe(args: OpenArgs, output: &OutputConfig) -> CliResult<()
         remote_url: resolution.remote_url,
         web_url: web_url.clone(),
         launched,
+        resolved_from_remote: resolution.resolved_from_remote,
     };
 
     if output.is_json() {
         emit_json_data("open", &open_output, output)?;
+    } else if args.print_only {
+        println!("{}", web_url);
     } else if !output.quiet {
         println!("Opening {}", web_url);
     }
@@ -134,6 +145,7 @@ async fn resolve_open_target(args: OpenArgs, in_repo: bool) -> Result<OpenResolu
                 return Ok(OpenResolution {
                     remote: Some(input),
                     remote_url,
+                    resolved_from_remote: true,
                 });
             }
         }
@@ -141,6 +153,7 @@ async fn resolve_open_target(args: OpenArgs, in_repo: bool) -> Result<OpenResolu
         return Ok(OpenResolution {
             remote: None,
             remote_url: input,
+            resolved_from_remote: false,
         });
     }
 
@@ -165,6 +178,7 @@ async fn resolve_open_target(args: OpenArgs, in_repo: bool) -> Result<OpenResolu
                 return Ok(OpenResolution {
                     remote: Some(current_remote),
                     remote_url,
+                    resolved_from_remote: true,
                 });
             }
             Err(_) => {
@@ -186,12 +200,14 @@ async fn resolve_open_target(args: OpenArgs, in_repo: bool) -> Result<OpenResolu
         return Ok(OpenResolution {
             remote: Some("origin".to_string()),
             remote_url: origin.url.clone(),
+            resolved_from_remote: true,
         });
     }
     if let Some(first) = remotes.iter().find(|remote| !remote.url.trim().is_empty()) {
         return Ok(OpenResolution {
             remote: Some(first.name.clone()),
             remote_url: first.url.clone(),
+            resolved_from_remote: true,
         });
     }
     if let Some(first) = remotes.first() {
