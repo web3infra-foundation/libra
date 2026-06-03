@@ -35,6 +35,7 @@ On macOS the command uses `open`, on Linux `xdg-open`, and on Windows `cmd /C st
 | `--json` | Emit structured JSON envelope to stdout instead of opening a browser (global flag). | `libra open --json` |
 | `--machine` | Compact single-line JSON without launching a browser (global flag). | `libra open --machine` |
 | `--quiet` | Suppress the "Opening ..." message on stdout. | `libra open --quiet` |
+| `--print-only` | Print the resolved URL to stdout without opening the browser. | `libra open --print-only` |
 
 ## Common Commands
 
@@ -43,6 +44,8 @@ libra open
 libra open origin
 libra open https://github.com/web3infra-foundation/libra
 libra open --json
+libra open --print-only
+libra open origin --print-only
 ```
 
 ## Human Output
@@ -63,12 +66,13 @@ Opening https://github.com/web3infra-foundation/libra
     "remote": "origin",
     "remote_url": "git@github.com:web3infra-foundation/libra.git",
     "web_url": "https://github.com/web3infra-foundation/libra",
-    "launched": false
+    "launched": false,
+    "resolved_from_remote": true
   }
 }
 ```
 
-When the argument is a direct URL instead of a remote name, `remote` is `null`:
+When the argument is a direct URL instead of a remote name, `remote` is `null` and `resolved_from_remote` is `false`:
 
 ```json
 {
@@ -78,7 +82,8 @@ When the argument is a direct URL instead of a remote name, `remote` is `null`:
     "remote": null,
     "remote_url": "https://github.com/web3infra-foundation/libra",
     "web_url": "https://github.com/web3infra-foundation/libra",
-    "launched": false
+    "launched": false,
+    "resolved_from_remote": false
   }
 }
 ```
@@ -89,7 +94,8 @@ When the argument is a direct URL instead of a remote name, `remote` is `null`:
 - `remote_url` is the raw URL from config (or the direct URL argument)
 - `web_url` is the transformed browsable HTTPS URL
 - `launched` is `true` when the browser was successfully spawned in human mode
-- `launched` is `false` for `--json` / `--machine`, where browser launch is intentionally skipped
+- `launched` is `false` for `--json` / `--machine` / `--print-only`, where browser launch is intentionally skipped
+- `resolved_from_remote` is `true` when the URL was resolved from a configured remote name; `false` when a direct URL was provided
 
 ### URL Transformation Rules
 
@@ -144,6 +150,7 @@ and deliberate attacks via crafted remote URLs.
 | SCP-to-HTTPS transform | Automatic | N/A | N/A |
 | URL safety validation | http/https only | N/A | N/A |
 | Structured output | `--json` / `--machine` | No | No |
+| Print-only mode | `--print-only` | No | No |
 | Auto-detect remote | Tracking -> origin -> first | N/A | N/A |
 
 ## Error Handling
