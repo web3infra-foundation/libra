@@ -13,6 +13,9 @@
 //!     suppressing individual commit subjects.
 //!   - `email` (`-e` / `--email`): include the author email address in the
 //!     report header.
+//!   - `top`, `min_count`, `reverse`: post-aggregation filters controlling
+//!     how many authors are shown, the minimum commit threshold, and whether
+//!     the final display order is inverted.
 //!   - `since` / `until`: restrict the set of commits by committer timestamp,
 //!     using the repository-wide date parser in [`parse_date`].
 //!
@@ -73,6 +76,8 @@ EXAMPLES:
     libra shortlog                  Summarize commits reachable from HEAD by author
     libra shortlog HEAD~5           Summarize a subset of history starting from a revision
     libra shortlog -n -s            Sort by commit count, suppress subjects (count only)
+    libra shortlog -n --top 5       Show only the five most prolific authors
+    libra shortlog --min-count 2    Hide authors with fewer than two commits
     libra shortlog --since 24h      Restrict to commits in the last 24 hours
     libra shortlog --json           Structured JSON output for agents";
 
@@ -90,6 +95,18 @@ pub struct ShortlogArgs {
     /// Show the email address of each author
     #[clap(short = 'e', long = "email")]
     pub email: bool,
+
+    /// Show only the first N authors after sorting and filtering
+    #[clap(long = "top", value_name = "N")]
+    pub top: Option<usize>,
+
+    /// Hide authors with fewer than N commits
+    #[clap(long = "min-count", value_name = "N")]
+    pub min_count: Option<usize>,
+
+    /// Reverse the final author display order
+    #[clap(long = "reverse")]
+    pub reverse: bool,
 
     /// Show commits more recent than DATE (RFC3339, `YYYY-MM-DD`, or relative like `24h` / `7d`)
     #[clap(long = "since", value_name = "DATE")]
@@ -140,6 +157,9 @@ struct ShortlogOutput {
     numbered: bool,
     summary: bool,
     email: bool,
+    top: Option<usize>,
+    min_count: Option<usize>,
+    reverse: bool,
     total_authors: usize,
     total_commits: usize,
     authors: Vec<ShortlogAuthor>,
@@ -249,11 +269,26 @@ fn aggregate_shortlog(args: &ShortlogArgs, revision: &str, commits: Vec<Commit>)
         authors.sort_by_key(|stats| stats.name.to_lowercase());
     }
 
+    if let Some(min_count) = args.min_count {
+        authors.retain(|stats| stats.count >= min_count);
+    }
+
+    if let Some(top) = args.top {
+        authors.truncate(top);
+    }
+
+    if args.reverse {
+        authors.reverse();
+    }
+
     ShortlogOutput {
         revision: revision.to_string(),
         numbered: args.numbered,
         summary: args.summary,
         email: args.email,
+        top: args.top,
+        min_count: args.min_count,
+        reverse: args.reverse,
         total_authors: authors.len(),
         total_commits,
         authors,
@@ -391,11 +426,27 @@ mod tests {
         assert!(!args.numbered);
         assert!(!args.summary);
         assert!(!args.email);
+        assert_eq!(args.top, None);
+        assert_eq!(args.min_count, None);
+        assert!(!args.reverse);
 
-        let args = ShortlogArgs::parse_from(["shortlog", "-n", "-s", "-e"]);
+        let args = ShortlogArgs::parse_from([
+            "shortlog",
+            "-n",
+            "-s",
+            "-e",
+            "--top",
+            "3",
+            "--min-count",
+            "2",
+            "--reverse",
+        ]);
         assert!(args.numbered);
         assert!(args.summary);
         assert!(args.email);
+        assert_eq!(args.top, Some(3));
+        assert_eq!(args.min_count, Some(2));
+        assert!(args.reverse);
 
         let args = ShortlogArgs::parse_from(["shortlog", "--since", "2024-01-01"]);
         assert!(args.since.is_some());
