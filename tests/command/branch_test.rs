@@ -392,11 +392,15 @@ async fn test_branch() {
             no_merged: None,
             points_at: None,
             ignore_case: false,
+            sort: None,
+            format: None,
             copy: vec![],
             force_copy: vec![],
             edit_description: None,
             force: false,
             create_reflog: false,
+            track: None,
+            no_track: false,
         };
         execute(args).await;
 
@@ -437,11 +441,15 @@ async fn test_branch() {
             no_merged: None,
             points_at: None,
             ignore_case: false,
+            sort: None,
+            format: None,
             copy: vec![],
             force_copy: vec![],
             edit_description: None,
             force: false,
             create_reflog: false,
+            track: None,
+            no_track: false,
         };
         execute(args).await;
         let second_branch = Branch::find_branch_result(&second_branch_name, None)
@@ -472,11 +480,15 @@ async fn test_branch() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     };
     execute(args).await;
 
@@ -534,11 +546,15 @@ async fn test_create_branch_from_remote() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     };
     execute(args).await;
 
@@ -598,11 +614,15 @@ async fn test_create_branch_from_remote_tracking_ref() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     })
     .await;
 
@@ -816,11 +836,15 @@ async fn test_branch_rename() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     };
     execute(args).await;
 
@@ -850,11 +874,15 @@ async fn test_branch_rename() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     };
     execute(args).await;
 
@@ -946,11 +974,15 @@ async fn test_rename_current_branch() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     };
     execute(args).await;
 
@@ -1023,11 +1055,15 @@ async fn test_rename_to_existing_branch() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     };
     execute(args).await;
 
@@ -1049,11 +1085,15 @@ async fn test_rename_to_existing_branch() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     };
     execute(args).await;
 
@@ -1076,11 +1116,15 @@ async fn test_rename_to_existing_branch() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     };
     execute(args).await;
 
@@ -1146,11 +1190,15 @@ async fn test_list_all_branches() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     };
     execute(args).await;
 
@@ -1183,11 +1231,15 @@ async fn test_list_all_branches() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     };
     execute(args).await; // This will print to stdout, which is fine for tests
 
@@ -1258,11 +1310,15 @@ async fn test_branch_delete_safe() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     })
     .await;
 
@@ -1318,11 +1374,15 @@ async fn test_branch_delete_safe() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     })
     .await;
 
@@ -1380,11 +1440,15 @@ async fn test_branch_delete_safe() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     })
     .await;
 
@@ -1474,11 +1538,15 @@ async fn test_branch_contains_commit_filter() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     })
     .await;
 
@@ -2212,11 +2280,15 @@ fn unset_upstream_args(unset_upstream: Option<Option<String>>) -> BranchArgs {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     }
 }
 
@@ -2534,8 +2606,12 @@ fn branch_args_default() -> BranchArgs {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     }
 }
 
@@ -3309,4 +3385,168 @@ fn test_branch_list_json_exposes_description() {
         main.get("description").is_none(),
         "branch without a description must omit the field"
     );
+}
+
+// =====================================================================
+//  Wave 5 — decline --track/--no-track, --sort/--format stub,
+//           name-length boundary
+// =====================================================================
+
+/// `--track[=mode]` is declined as a usage error (`LBR-CLI-002`, exit 129)
+/// with a hint pointing at the supported alternatives — both the `=mode` form
+/// and the bare flag.
+#[test]
+#[serial]
+fn test_branch_track_declined_exit_129() {
+    let repo = create_committed_repo_via_cli();
+    for args in [
+        vec!["branch", "--track=direct", "newbranch"],
+        vec!["branch", "--track"],
+    ] {
+        let output = run_libra_command(&args, repo.path());
+        assert_eq!(output.status.code(), Some(129), "args: {args:?}");
+        let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+        assert_eq!(report.error_code, "LBR-CLI-002", "args: {args:?}");
+        assert!(
+            stderr.contains("switch --track") || stderr.contains("branch -u"),
+            "decline hint should point at the alternatives: {stderr}"
+        );
+    }
+    // The declined create must not have produced a branch.
+    let listed = run_libra_command(&["branch", "-l"], repo.path());
+    let names = list_names_in_order(&String::from_utf8_lossy(&listed.stdout));
+    assert!(
+        !names.iter().any(|n| n == "newbranch"),
+        "declined --track must not create the branch: {names:?}"
+    );
+}
+
+/// `--no-track` is declined the same way (exit 129, `LBR-CLI-002`).
+#[test]
+#[serial]
+fn test_branch_no_track_declined_exit_129() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["branch", "--no-track", "newbranch"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    let (_s, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    let listed = run_libra_command(&["branch", "-l"], repo.path());
+    let names = list_names_in_order(&String::from_utf8_lossy(&listed.stdout));
+    assert!(!names.iter().any(|n| n == "newbranch"));
+}
+
+/// `--track` declined error is JSON-renderable with its stable code under
+/// `--json` (still exit 129).
+#[test]
+#[serial]
+fn test_branch_track_declined_json_stable_code() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["--json", "branch", "--track=inherit"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    let (_s, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// `--sort` is accepted but ignored on the list path: the list still prints in
+/// the default order, a `note:` is emitted to stderr, and the exit code is 0.
+#[test]
+#[serial]
+fn test_branch_sort_flag_stub_exit0_with_note() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "topic"], repo.path()),
+        "create topic",
+    );
+    let output = run_libra_command(&["branch", "--sort=committerdate"], repo.path());
+    assert!(output.status.success(), "stub --sort must exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let names = list_names_in_order(&stdout);
+    assert!(
+        names.iter().any(|n| n == "main"),
+        "list still printed: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "topic"),
+        "list still printed: {names:?}"
+    );
+    assert!(
+        stderr.contains("note:") && stderr.contains("--json"),
+        "stderr should carry the informational note: {stderr}"
+    );
+}
+
+/// `--format` behaves like `--sort`: ignored, default list, stderr note, exit 0.
+#[test]
+#[serial]
+fn test_branch_format_flag_stub_exit0_with_note() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["branch", "--format=%(refname)"], repo.path());
+    assert!(output.status.success(), "stub --format must exit 0");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("note:") && stderr.contains("--json"),
+        "stderr should carry the informational note: {stderr}"
+    );
+    let names = list_names_in_order(&String::from_utf8_lossy(&output.stdout));
+    assert!(names.iter().any(|n| n == "main"));
+}
+
+/// `--sort` is in the `query` group, so combining it with a create positional
+/// trips the action↔query mutual exclusion. Libra surfaces that clap conflict
+/// as a usage error (exit 129, like other branch parse conflicts) and the
+/// branch is NOT created.
+#[test]
+#[serial]
+fn test_branch_sort_with_create_is_group_conflict() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(
+        &["branch", "newbranch", "--sort=committerdate"],
+        repo.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "create + query-group flag must be rejected as a usage conflict"
+    );
+    let listed = run_libra_command(&["branch", "-l"], repo.path());
+    let names = list_names_in_order(&String::from_utf8_lossy(&listed.stdout));
+    assert!(
+        !names.iter().any(|n| n == "newbranch"),
+        "conflicting invocation must not create the branch: {names:?}"
+    );
+}
+
+/// Branch-name validation stays lenient: camelCase and multi-segment dotted
+/// names are valid; only the existing illegal forms plus the 255-byte cap are
+/// rejected.
+#[test]
+fn test_branch_valid_name_allows_camelcase_and_dotted() {
+    use libra::command::branch::is_valid_git_branch_name;
+    assert!(is_valid_git_branch_name("featureBranch"));
+    assert!(is_valid_git_branch_name("feature/sub_topic.v2"));
+    assert!(is_valid_git_branch_name("release/2.0-rc1"));
+    // A bare '@' (not '@{') and interior '/' remain legal.
+    assert!(is_valid_git_branch_name("user@host-work"));
+    // Still rejects the existing illegal forms.
+    assert!(!is_valid_git_branch_name("bad..name"));
+    assert!(!is_valid_git_branch_name("has space"));
+    assert!(!is_valid_git_branch_name("ends/"));
+}
+
+/// camelCase / dotted names are creatable end-to-end through the CLI.
+#[test]
+#[serial]
+fn test_branch_create_camelcase_and_dotted_via_cli() {
+    let repo = create_committed_repo_via_cli();
+    for name in ["featureBranch", "feature/sub_topic.v2"] {
+        assert_cli_success(
+            &run_libra_command(&["branch", name], repo.path()),
+            "create lenient name",
+        );
+    }
+    let listed = run_libra_command(&["branch", "-l"], repo.path());
+    let names = list_names_in_order(&String::from_utf8_lossy(&listed.stdout));
+    assert!(names.iter().any(|n| n == "featureBranch"));
+    assert!(names.iter().any(|n| n == "feature/sub_topic.v2"));
 }

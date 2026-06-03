@@ -46,6 +46,10 @@ The `--contains` and `--no-contains` filters (aliased as `--with` and `--without
 | `-C` | | `<old> <new>` or `<new>` | Copy a branch, overwriting the destination if it exists (force copy) |
 | `-f` | `--force` | | Allow create/copy to overwrite an existing branch by resetting its tip (locked branches still refused; ignored by other actions) |
 | | `--create-reflog` | | Accepted for Git compatibility; has no effect (Libra `branch` does not maintain per-branch reflogs) |
+| | `--track[=<mode>]` | | **Declined** (exit 129): Libra keeps creation and tracking separate. Use `libra switch --track` or `libra branch -u <remote>/<branch>` |
+| | `--no-track` | | **Declined** (exit 129): see `--track` |
+| | `--sort` | `<key>` | Accepted but ignored (list prints in default order); use `--json` for structured output |
+| | `--format` | `<format>` | Accepted but ignored (list prints in default format); use `--json` |
 | `-r` | `--remotes` | | Show remote-tracking branches only |
 | `-a` | `--all` | | Show local and remote-tracking branches |
 | | `--contains` | `[commit]` (default HEAD) | Only list branches containing the commit. Alias: `--with` |
@@ -275,7 +279,11 @@ Supported actions:
 
 ### Why no --track/--no-track?
 
-Git's `--track` and `--no-track` flags control whether a new branch automatically sets up an upstream relationship. Libra omits these from `branch` because tracking configuration is handled explicitly through `--set-upstream-to` or at switch time via `libra switch --track`. This separation keeps `branch` focused on ref creation and avoids the confusing implicit behavior where `git branch feature origin/feature` silently configures tracking. When an agent creates a branch, it should know whether tracking was configured -- explicit is better than implicit.
+Git's `--track` and `--no-track` flags control whether a new branch automatically sets up an upstream relationship. Libra omits these from `branch` because tracking configuration is handled explicitly through `--set-upstream-to` or at switch time via `libra switch --track`. This separation keeps `branch` focused on ref creation and avoids the confusing implicit behavior where `git branch feature origin/feature` silently configures tracking. When an agent creates a branch, it should know whether tracking was configured -- explicit is better than implicit. The flags are **declined** rather than silently ignored: passing `--track`/`--no-track` exits with `LBR-CLI-002` (exit 129) and a hint pointing at `libra switch --track` / `libra branch -u`.
+
+### Why are --sort/--format accepted but ignored?
+
+Git's `--sort` and `--format` customize how the branch list is ordered and rendered. Libra does not implement a `--format` placeholder language (it overlaps with the structured `--json` output) and does not yet support custom sort keys. Rather than rejecting these flags as unknown -- which would make existing Git scripts fail hard -- Libra accepts them, prints the list in the default order, and emits an informational note to stderr suggesting `--json`. The exit code stays `0`. This contrasts with the hard-declined `--track`/`--no-track`: sort/format are *tolerated but not implemented*, whereas track is an *intentional behavioral difference*.
 
 ### Why --contains/--no-contains with aliases --with/--without?
 
@@ -307,7 +315,13 @@ The trade-off is that refs are not directly inspectable as plain files. Libra co
 | Remote branches | `git branch -r` | `libra branch -r` | `jj branch list --all` |
 | All branches | `git branch -a` | `libra branch -a` | `jj branch list --all` |
 | Contains filter | `git branch --contains <commit>` | `libra branch --contains <commit>` | `jj log -r 'branches() & ancestors(<rev>)'` |
-| Auto-track | `git branch --track` | N/A (use `switch --track`) | N/A |
+| Merged filter | `git branch --merged [<commit>]` | `libra branch --merged [<commit>]` | `jj log -r '::<rev> & branches()'` |
+| Points-at filter | `git branch --points-at <object>` | `libra branch --points-at <object>` | N/A |
+| Copy | `git branch -c/-C <old> <new>` | `libra branch -c/-C <old> <new>` | Not supported |
+| Unset upstream | `git branch --unset-upstream` | `libra branch --unset-upstream` | N/A (no upstream concept) |
+| Edit description | `git branch --edit-description` | `libra branch --edit-description` | N/A |
+| Auto-track | `git branch --track` | Declined, exit 129 (use `switch --track` / `-u`) | N/A |
+| Sort / Format | `git branch --sort/--format` | Accepted but ignored (use `--json`) | `--template` |
 | Structured output | No | `--json` / `--machine` | `--template` |
 | Fuzzy suggestions | No | Levenshtein-based "did you mean" | No |
 

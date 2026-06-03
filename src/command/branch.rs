@@ -73,6 +73,9 @@ NOTES:
     This differs from `git branch --quiet`, which still prints the primary list.
     --create-reflog is accepted for Git compatibility but has no effect:
     Libra `branch` does not maintain per-branch reflogs.
+    --track/--no-track are declined (exit 129): use `libra switch --track`
+    or `libra branch -u <remote>/<branch>`. --sort/--format are accepted but
+    ignored (the list prints in the default order); use `--json` instead.
 
 EXAMPLES:
     libra branch feature-x                Create a branch from HEAD
@@ -304,6 +307,14 @@ pub struct BranchArgs {
     #[clap(long = "ignore-case", group = "query", action = clap::ArgAction::SetTrue)]
     pub ignore_case: bool,
 
+    /// Accepted but not implemented; the list is printed in the default order. Use `--json` for structured output.
+    #[clap(long = "sort", group = "query", value_name = "KEY")]
+    pub sort: Option<String>,
+
+    /// Accepted but not implemented; the list is printed in the default format. Use `--json` for structured output.
+    #[clap(long = "format", group = "query", value_name = "FORMAT")]
+    pub format: Option<String>,
+
     /// Allow create/copy to overwrite an existing branch by resetting its tip (locked branches are still refused; ignored by other actions).
     #[clap(short = 'f', long = "force", action = clap::ArgAction::SetTrue)]
     pub force: bool,
@@ -311,6 +322,14 @@ pub struct BranchArgs {
     /// Accepted for Git compatibility; Libra `branch` does not maintain per-branch reflogs, so this flag has no effect.
     #[clap(long = "create-reflog", action = clap::ArgAction::SetTrue)]
     pub create_reflog: bool,
+
+    /// Declined: Libra `branch` does not set up tracking. Use `libra switch --track` or `libra branch -u <remote>/<branch>`.
+    #[clap(long = "track", value_name = "MODE", num_args = 0..=1, require_equals = true, default_missing_value = "direct")]
+    pub track: Option<String>,
+
+    /// Declined: Libra `branch` does not manage tracking. Use `libra switch` or `libra branch -u`/`--unset-upstream`.
+    #[clap(long = "no-track", action = clap::ArgAction::SetTrue)]
+    pub no_track: bool,
 }
 /// Fire-and-forget entry: prints the rendered error to stderr but does not
 /// signal exit code.
@@ -1466,6 +1485,17 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
 /// - Returns [`BranchError::NotInRepo`] if the CWD is outside a `.libra`
 ///   repository.
 async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
+    // `--track` / `--no-track` are intentionally declined (Libra keeps branch
+    // creation and tracking setup separate). Fail fast, before any repo access,
+    // as a usage error (CliInvalidArguments → exit 129) rather than a clap
+    // parse error so the message can point at the supported alternatives.
+    if args.track.is_some() || args.no_track {
+        return Err(BranchError::DelegatedCli(
+            CliError::command_usage("libra branch does not support --track/--no-track").with_hint(
+                "set tracking with 'libra switch --track' or 'libra branch -u <remote>/<branch>'",
+            ),
+        ));
+    }
     require_repo().map_err(|_| BranchError::NotInRepo)?;
 
     if let Some(new_branch) = args.new_branch.clone() {
@@ -1533,6 +1563,14 @@ async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
         };
         edit_description_impl(branch).await
     } else {
+        // `--sort` / `--format` are accepted-but-ignored on the list path: the
+        // list still prints in the default order/format and we emit a plain
+        // informational note to stderr (not a warning, exit stays 0).
+        if args.sort.is_some() || args.format.is_some() {
+            eprintln!(
+                "note: --sort/--format are not implemented; use 'libra branch --json' for structured output"
+            );
+        }
         collect_branch_output(args).await
     }
 }
@@ -1779,8 +1817,12 @@ pub async fn list_branches(
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     };
     let result = collect_branch_output(&args).await.map_err(CliError::from)?;
     render_branch_output(&result, &OutputConfig::default())

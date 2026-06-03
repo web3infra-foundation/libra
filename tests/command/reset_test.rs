@@ -639,11 +639,15 @@ async fn setup_standard_repo(
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     })
     .await;
 
@@ -693,11 +697,15 @@ async fn setup_standard_repo(
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     })
     .await;
 
@@ -747,11 +755,15 @@ async fn setup_standard_repo(
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     })
     .await;
 
@@ -801,11 +813,15 @@ async fn setup_standard_repo(
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        sort: None,
+        format: None,
         copy: vec![],
         force_copy: vec![],
         edit_description: None,
         force: false,
         create_reflog: false,
+        track: None,
+        no_track: false,
     })
     .await;
 

@@ -46,7 +46,7 @@ batch document.
 | show-ref | supported | |
 | ls-remote | supported | |
 | symbolic-ref | partial | Supports local `HEAD` only; other symbolic refs are rejected because Libra stores refs in SQLite |
-| branch | supported | |
+| branch | partial | SQLite-backed refs (reference table, not `.git/refs`). List filters `--contains`/`--no-contains`/`--merged`/`--no-merged`/`--points-at` and `--ignore-case` sort supported; upstream set (`-u`) / unset (`--unset-upstream`) with tracking shown in list; copy (`-c`/`-C`) and transaction-hardened rename with config + conditional reflog migration; `--edit-description` supported; `-f`/`--force` resets existing create/copy targets (locked branches always refused); `--create-reflog` accepted-but-no-op (no per-branch reflog). `--track`/`--no-track` declined (intentionally-different — use `libra switch --track` or `-u`); `--sort`/`--format` unsupported (accepted-but-ignored, use `--json`). Locked branches (main/intent/agent-traces) are protected from destructive ops (intentionally-different) |
 | tag | supported | |
 | commit | supported | |
 | switch | supported | |
