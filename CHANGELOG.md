@@ -4,6 +4,12 @@
 
 ### Added
 
+- **`libra maintenance` command**: implements Git-compatible `maintenance`
+  with subcommands `run`, `register`, `unregister`, and `status`. Supports
+  tasks `gc`, `loose-objects`, `pack-refs`, `incremental-repack`,
+  `commit-graph`, and `prefetch`. Includes dry-run mode, JSON output, and
+  26 integration tests plus 12 unit tests.
+
 - **Cross-cutting `--help` EXAMPLES rollout (v0.17.812..v0.17.836, sealed
   v0.17.837)**: every visible command in `src/cli.rs::Commands` now ends
   its `--help` output with an `EXAMPLES:` section listing the canonical
