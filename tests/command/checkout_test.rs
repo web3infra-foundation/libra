@@ -1251,3 +1251,353 @@ fn test_checkout_create_agent_traces_branch_is_blocked() {
         report.message,
     );
 }
+
+// ── Batch 1: --ours / --theirs conflict-path checkout + -f/--force ──
+
+/// Build a repo paused mid-merge with a 3-way conflict on each of `files`.
+/// ours (main / stage #2) = `ours-<name>\n`; theirs (feature / stage #3) =
+/// `theirs-<name>\n`; common base = `base\n`. When `executable`, each file is
+/// mode `0o755` before every `add` (unix only), so the conflict stages carry the
+/// executable bit.
+fn create_conflict_repo(files: &[&str], executable: bool) -> tempfile::TempDir {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path().to_path_buf();
+
+    let write = |name: &str, content: &str| {
+        let fp = p.join(name);
+        std::fs::write(&fp, content).expect("write conflict file");
+        #[cfg(unix)]
+        if executable {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fp, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod conflict file");
+        }
+    };
+    let add = |name: &str| {
+        assert_cli_success(&run_libra_command(&["add", name], &p), "add conflict file");
+    };
+    let commit = |msg: &str| {
+        assert_cli_success(
+            &run_libra_command(&["commit", "-m", msg, "--no-verify"], &p),
+            "commit conflict file",
+        );
+    };
+
+    for name in files {
+        write(name, "base\n");
+        add(name);
+    }
+    commit("conflict base");
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], &p),
+        "branch feature",
+    );
+
+    for name in files {
+        write(name, &format!("ours-{name}\n"));
+        add(name);
+    }
+    commit("main edit");
+
+    assert_cli_success(
+        &run_libra_command(&["switch", "feature"], &p),
+        "switch feature",
+    );
+    for name in files {
+        write(name, &format!("theirs-{name}\n"));
+        add(name);
+    }
+    commit("feature edit");
+
+    assert_cli_success(&run_libra_command(&["switch", "main"], &p), "switch main");
+    let merge = run_libra_command(&["merge", "feature"], &p);
+    assert!(
+        !merge.status.success(),
+        "expected merge conflict, got success: {}",
+        String::from_utf8_lossy(&merge.stdout)
+    );
+    repo
+}
+
+/// Load the on-disk index for in-process stage/mode assertions.
+fn load_index(repo: &std::path::Path) -> git_internal::internal::index::Index {
+    git_internal::internal::index::Index::load(repo.join(".libra/index")).expect("load index")
+}
+
+/// `--ours -- <path>` restores the stage #2 (our side) content into the worktree.
+#[test]
+fn checkout_ours_restores_stage2() {
+    use super::{assert_cli_success, run_libra_command};
+    let repo = create_conflict_repo(&["conflict.txt"], false);
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--ours", "--", "conflict.txt"], repo.path()),
+        "checkout --ours",
+    );
+    let content = std::fs::read_to_string(repo.path().join("conflict.txt")).unwrap();
+    assert_eq!(content, "ours-conflict.txt\n");
+}
+
+/// `--theirs -- <path>` restores the stage #3 (their side) content into the worktree.
+#[test]
+fn checkout_theirs_restores_stage3() {
+    use super::{assert_cli_success, run_libra_command};
+    let repo = create_conflict_repo(&["conflict.txt"], false);
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--theirs", "--", "conflict.txt"], repo.path()),
+        "checkout --theirs",
+    );
+    let content = std::fs::read_to_string(repo.path().join("conflict.txt")).unwrap();
+    assert_eq!(content, "theirs-conflict.txt\n");
+}
+
+/// After `--ours`, the conflicted path collapses to a single stage #0 index entry.
+#[test]
+fn checkout_ours_clears_conflict_to_stage0() {
+    use super::{assert_cli_success, run_libra_command};
+    let repo = create_conflict_repo(&["conflict.txt"], false);
+    // Sanity: the merge really left conflict stages behind.
+    let before = load_index(repo.path());
+    assert!(
+        before.get("conflict.txt", 2).is_some() && before.get("conflict.txt", 3).is_some(),
+        "fixture must start in a conflicted (stage 2/3) state",
+    );
+
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--ours", "--", "conflict.txt"], repo.path()),
+        "checkout --ours",
+    );
+
+    let after = load_index(repo.path());
+    assert!(
+        after.get("conflict.txt", 0).is_some(),
+        "stage 0 entry must exist after --ours",
+    );
+    assert!(
+        after.get("conflict.txt", 1).is_none()
+            && after.get("conflict.txt", 2).is_none()
+            && after.get("conflict.txt", 3).is_none(),
+        "all conflict stages (1/2/3) must be cleared after --ours",
+    );
+}
+
+/// `--ours` on a path that is not in a merge conflict is rejected (128, LBR-CONFLICT-002).
+#[test]
+fn checkout_ours_on_non_conflict_path_errors() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["checkout", "--ours", "--", "tracked.txt"], repo.path());
+    assert_eq!(out.status.code(), Some(128), "non-conflict --ours blocked");
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
+    assert!(
+        report.message.contains("not in a merge conflict"),
+        "message: {}",
+        report.message
+    );
+}
+
+/// `--ours` on a clean (non-conflicted) file errors WITHOUT silently rewriting it.
+#[test]
+fn checkout_ours_on_clean_file_no_silent_rewrite() {
+    use super::{create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let before = std::fs::read_to_string(repo.path().join("tracked.txt")).unwrap();
+    let out = run_libra_command(&["checkout", "--ours", "--", "tracked.txt"], repo.path());
+    assert_eq!(out.status.code(), Some(128));
+    let after = std::fs::read_to_string(repo.path().join("tracked.txt")).unwrap();
+    assert_eq!(after, before, "clean file must not be rewritten on error");
+}
+
+/// `--ours --theirs` together is a usage conflict. Libra remaps clap's
+/// `ArgumentConflict` (subcommand present) to `command_usage` (129), not clap's
+/// native exit 2.
+#[test]
+fn checkout_ours_and_theirs_conflict_rejected_by_clap() {
+    use super::{create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(
+        &["checkout", "--ours", "--theirs", "--", "tracked.txt"],
+        repo.path(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "clap mode conflict → command_usage: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `--ours` without a pathspec is a usage error (CliInvalidArguments).
+#[test]
+fn checkout_ours_without_pathspec_errors() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["checkout", "--ours"], repo.path());
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report.message.contains("requires a pathspec"),
+        "message: {}",
+        report.message
+    );
+}
+
+/// Pin the exit code for `--ours`/`--theirs` without a pathspec at 129.
+#[test]
+fn checkout_ours_without_pathspec_exit_code_129() {
+    use super::{create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["checkout", "--theirs"], repo.path());
+    assert_eq!(out.status.code(), Some(129));
+}
+
+/// `-f` switching overwrites uncommitted changes that would otherwise block the switch.
+#[test]
+fn checkout_force_switch_overwrites_dirty_worktree() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // A second branch where tracked.txt differs.
+    assert_cli_success(&run_libra_command(&["branch", "other"], p), "branch other");
+    assert_cli_success(&run_libra_command(&["switch", "other"], p), "switch other");
+    std::fs::write(p.join("tracked.txt"), "other-content\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], p), "add other");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "other edit", "--no-verify"], p),
+        "commit other",
+    );
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+
+    // Dirty the worktree, then a plain switch must be refused.
+    std::fs::write(p.join("tracked.txt"), "dirty-uncommitted\n").unwrap();
+    let blocked = run_libra_command(&["checkout", "other"], p);
+    assert!(
+        !blocked.status.success(),
+        "plain checkout over a dirty file should be blocked",
+    );
+
+    // `-f` forces the switch through and overwrites the dirty edit.
+    assert_cli_success(
+        &run_libra_command(&["checkout", "-f", "other"], p),
+        "checkout -f",
+    );
+    let content = std::fs::read_to_string(p.join("tracked.txt")).unwrap();
+    assert_ne!(
+        content, "dirty-uncommitted\n",
+        "dirty edit must be overwritten"
+    );
+    assert_eq!(content, "other-content\n");
+}
+
+/// After a forced switch, the working tree is aligned to the target commit's tree.
+#[test]
+fn checkout_force_switch_aligns_worktree_to_target() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(&run_libra_command(&["branch", "other"], p), "branch other");
+    assert_cli_success(&run_libra_command(&["switch", "other"], p), "switch other");
+    std::fs::write(p.join("tracked.txt"), "target-tree\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], p), "add other");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "other", "--no-verify"], p),
+        "commit other",
+    );
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    std::fs::write(p.join("tracked.txt"), "scratch\n").unwrap();
+
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--force", "other"], p),
+        "checkout --force",
+    );
+    assert_eq!(
+        std::fs::read_to_string(p.join("tracked.txt")).unwrap(),
+        "target-tree\n",
+    );
+}
+
+/// `--ours` promotes the chosen stage to stage #0 while preserving the index mode
+/// (executable bit), proving the owned-entry path (not `new_from_blob`) is used.
+#[cfg(unix)]
+#[test]
+fn checkout_ours_preserves_index_mode() {
+    use super::{assert_cli_success, run_libra_command};
+    let repo = create_conflict_repo(&["conflict.txt"], true);
+    let before = load_index(repo.path());
+    let stage2_mode = before.get("conflict.txt", 2).expect("stage 2 entry").mode;
+    assert_eq!(stage2_mode, 0o100755, "fixture stage 2 must be executable");
+
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--ours", "--", "conflict.txt"], repo.path()),
+        "checkout --ours",
+    );
+
+    let after = load_index(repo.path());
+    let stage0_mode = after.get("conflict.txt", 0).expect("stage 0 entry").mode;
+    assert_eq!(
+        stage0_mode, stage2_mode,
+        "stage 0 mode must match the promoted stage 2 mode (executable bit preserved)",
+    );
+}
+
+/// `--ours` handles multiple pathspecs in one invocation.
+#[test]
+fn checkout_ours_multiple_pathspecs() {
+    use super::{assert_cli_success, run_libra_command};
+    let repo = create_conflict_repo(&["a.txt", "b.txt"], false);
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--ours", "--", "a.txt", "b.txt"], repo.path()),
+        "checkout --ours a.txt b.txt",
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("a.txt")).unwrap(),
+        "ours-a.txt\n",
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("b.txt")).unwrap(),
+        "ours-b.txt\n",
+    );
+}
+
+/// A corrupt on-disk index propagates as a read failure (128, LBR-IO-001).
+#[test]
+fn checkout_ours_read_error_propagates() {
+    use super::{parse_cli_error_stderr, run_libra_command};
+    let repo = create_conflict_repo(&["conflict.txt"], false);
+    std::fs::write(repo.path().join(".libra/index"), b"not a valid DIRC index").unwrap();
+    let out = run_libra_command(&["checkout", "--ours", "--", "conflict.txt"], repo.path());
+    assert_eq!(out.status.code(), Some(128), "corrupt index → read failure");
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-IO-001");
+}
+
+/// A worktree write failure (read-only target file) propagates as a write failure
+/// (128, LBR-IO-002).
+#[cfg(unix)]
+#[test]
+fn checkout_ours_write_error_propagates() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::{parse_cli_error_stderr, run_libra_command, skip_permission_denied_test_if_root};
+    if skip_permission_denied_test_if_root("checkout_ours_write_error_propagates") {
+        return;
+    }
+    let repo = create_conflict_repo(&["conflict.txt"], false);
+    let fp = repo.path().join("conflict.txt");
+    std::fs::set_permissions(&fp, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+    let out = run_libra_command(&["checkout", "--ours", "--", "conflict.txt"], repo.path());
+
+    // Restore perms so the TempDir can be cleaned up.
+    let _ = std::fs::set_permissions(&fp, std::fs::Permissions::from_mode(0o644));
+
+    assert_eq!(
+        out.status.code(),
+        Some(128),
+        "read-only worktree file → write failure: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-IO-002");
+}

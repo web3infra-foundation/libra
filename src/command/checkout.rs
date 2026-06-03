@@ -1,13 +1,18 @@
 //! Handles checkout-style flows to show the current branch, switch to existing branches, or create and switch to a new one using restore utilities.
 
+use std::{fs, path::PathBuf};
+
 use clap::Parser;
-use git_internal::hash::{ObjectHash, get_hash_kind};
+use git_internal::{
+    hash::{ObjectHash, get_hash_kind},
+    internal::{index::Index, object::blob::Blob},
+};
 use sea_orm::DbErr;
 use serde::Serialize;
 
 use crate::{
     command::{
-        branch, get_target_commit, pull,
+        branch, get_target_commit, load_object, pull,
         restore::{self, RestoreArgs},
         switch,
     },
@@ -23,7 +28,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
-        util,
+        path, util,
     },
 };
 
@@ -66,6 +71,18 @@ pub struct CheckoutArgs {
     /// Create a new unborn branch whose first commit will have no parents
     #[clap(long = "orphan", value_name = "branch", group = "sub")]
     orphan: Option<String>,
+
+    /// On a conflicted path, check out our side of the merge (stage #2); requires `-- <path>`
+    #[clap(long = "ours", conflicts_with = "theirs")]
+    ours: bool,
+
+    /// On a conflicted path, check out their side of the merge (stage #3); requires `-- <path>`
+    #[clap(long = "theirs")]
+    theirs: bool,
+
+    /// Force checkout: proceed even when the working tree has changes that would be overwritten
+    #[clap(short = 'f', long = "force")]
+    force: bool,
 
     /// Paths to restore after an explicit `--` separator
     #[clap(last = true, value_name = "pathspec")]
@@ -138,6 +155,18 @@ enum CheckoutError {
 
     #[error("failed to update HEAD/branch reference: {detail}")]
     HeadUpdateFailed { detail: String },
+
+    #[error("'{flag}' requires a pathspec after '--' (e.g. 'libra checkout {flag} -- <path>')")]
+    ConflictPathRequired { flag: &'static str },
+
+    #[error("path '{path}' is not in a merge conflict state")]
+    NotInMergeConflict { path: String },
+
+    #[error("failed to read index/object for '{path}': {detail}")]
+    IndexReadFailed { path: String, detail: String },
+
+    #[error("failed to write '{path}': {detail}")]
+    WorktreeWriteFailed { path: String, detail: String },
 
     #[error("checkout remote branch left HEAD without a commit")]
     RemoteHeadMissing,
@@ -214,6 +243,24 @@ impl From<CheckoutError> for CliError {
                     .with_stable_code(StableErrorCode::IoWriteFailed)
                     .with_hint("check that the repository database is writable, then retry")
             }
+            CheckoutError::ConflictPathRequired { flag } => CliError::fatal(format!(
+                "'{flag}' requires a pathspec after '--' (e.g. 'libra checkout {flag} -- <path>')"
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidArguments),
+            CheckoutError::NotInMergeConflict { path } => {
+                CliError::failure(format!("path '{path}' is not in a merge conflict state"))
+                    .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                    .with_hint("only conflicted paths accept '--ours'/'--theirs'")
+            }
+            CheckoutError::IndexReadFailed { path, detail } => CliError::fatal(format!(
+                "failed to read index/object for '{path}': {detail}"
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed),
+            CheckoutError::WorktreeWriteFailed { path, detail } => {
+                CliError::fatal(format!("failed to write '{path}': {detail}"))
+                    .with_stable_code(StableErrorCode::IoWriteFailed)
+                    .with_hint("check that the path is writable, then retry")
+            }
             CheckoutError::RemoteHeadMissing => {
                 CliError::fatal("checkout remote branch left HEAD without a commit")
                     .with_stable_code(StableErrorCode::RepoStateInvalid)
@@ -264,6 +311,12 @@ async fn run_checkout(
     args: CheckoutArgs,
     output: &OutputConfig,
 ) -> Result<CheckoutOutput, CheckoutError> {
+    // `--ours`/`--theirs` operate on conflicted paths only; without a pathspec
+    // after `--` they are a usage error (mirrors Git's "no paths given").
+    if (args.ours || args.theirs) && args.pathspec.is_empty() {
+        let flag = if args.ours { "--ours" } else { "--theirs" };
+        return Err(CheckoutError::ConflictPathRequired { flag });
+    }
     if !args.pathspec.is_empty() {
         return restore_checkout_paths(args).await;
     }
@@ -301,13 +354,14 @@ async fn run_checkout(
 
     // ── New branch-control modes (Batch 0) ──
     if let Some(force_branch) = args.force_new_branch.clone() {
-        return run_force_branch_checkout(&force_branch, args.branch.clone(), output).await;
+        return run_force_branch_checkout(&force_branch, args.branch.clone(), args.force, output)
+            .await;
     }
     if args.detach {
-        return run_detach_checkout(args.branch.clone(), output).await;
+        return run_detach_checkout(args.branch.clone(), args.force, output).await;
     }
     if let Some(orphan_branch) = args.orphan.clone() {
-        return run_orphan_checkout(&orphan_branch, args.branch.clone(), output).await;
+        return run_orphan_checkout(&orphan_branch, args.branch.clone(), args.force, output).await;
     }
 
     let previous_branch = get_current_branch().await;
@@ -346,23 +400,16 @@ async fn run_checkout(
         None
     };
 
-    let clean_status = match target_commit {
-        Some(target_commit) => switch::ensure_clean_status_for_commit(target_commit, output).await,
-        None => switch::ensure_clean_status(output).await,
-    };
-
-    match clean_status {
-        Ok(()) => {}
-        Err(switch::SwitchError::DirtyUnstaged) => {
-            return Err(CheckoutError::DirtyUnstaged);
-        }
-        Err(switch::SwitchError::DirtyUncommitted) => {
-            return Err(CheckoutError::DirtyUncommitted);
-        }
-        Err(switch::SwitchError::UntrackedOverwrite(path)) => {
-            return Err(CheckoutError::UntrackedOverwrite(path));
-        }
-        Err(err) => return Err(CheckoutError::DelegatedCli(CliError::from(err))),
+    // `-f`/`--force` skips the dirty-working-tree guard, letting the target
+    // commit overwrite uncommitted changes (matches Git's forced checkout).
+    if !args.force {
+        let clean_status = match target_commit {
+            Some(target_commit) => {
+                switch::ensure_clean_status_for_commit(target_commit, output).await
+            }
+            None => switch::ensure_clean_status(output).await,
+        };
+        map_clean_status(clean_status)?;
     }
 
     match (args.branch, args.new_branch) {
@@ -400,6 +447,12 @@ async fn restore_checkout_paths(args: CheckoutArgs) -> Result<CheckoutOutput, Ch
         return Err(CheckoutError::InvalidPathMode("-b".to_string()));
     }
 
+    // `--ours`/`--theirs` need a dedicated direct-write path: `RestoreArgs`
+    // carries only `source`/`staged`/`pathspec` and cannot target a merge stage.
+    if args.ours || args.theirs {
+        return restore_conflict_stage_paths(&args.pathspec, args.ours).await;
+    }
+
     let previous_branch = get_current_branch().await;
     let previous_commit = current_commit_string().await?;
     let source = args.branch;
@@ -430,6 +483,120 @@ async fn restore_checkout_paths(args: CheckoutArgs) -> Result<CheckoutOutput, Ch
         orphan: false,
         tracking: None,
         restore: Some(restore),
+    })
+}
+
+/// `--ours` / `--theirs` path checkout: for each conflicted pathspec, restore the
+/// requested merge stage (stage #2 = ours, stage #3 = theirs) into the working
+/// tree and collapse the index to a clean stage #0 entry, dropping the remaining
+/// conflict stages.
+///
+/// Uses a dedicated direct-write path because [`RestoreArgs`] can only select a
+/// `source`/`staged` target, never a specific merge stage. Validation is a
+/// pre-pass: every pathspec must carry the requested stage before *any* write
+/// happens, so a non-conflicted path fails the whole operation cleanly (no
+/// half-restored worktree). The promoted stage #0 entry is taken **owned** from
+/// `Index::remove` (since `IndexEntry` is not `Clone`) and only has its stage
+/// rewritten, preserving the original mode/metadata — `IndexEntry::new_from_blob`
+/// is avoided because it hard-codes `0o100644` and would drop the executable bit.
+async fn restore_conflict_stage_paths(
+    pathspec: &[String],
+    use_ours: bool,
+) -> Result<CheckoutOutput, CheckoutError> {
+    let stage: u8 = if use_ours { 2 } else { 3 };
+    let other_stage: u8 = if use_ours { 3 } else { 2 };
+
+    let index_path = path::index();
+    // Use a stable "<index>" label rather than the absolute on-disk path so error
+    // messages never leak internal filesystem locations.
+    let mut index = Index::load(&index_path).map_err(|e| CheckoutError::IndexReadFailed {
+        path: "<index>".to_string(),
+        detail: e.to_string(),
+    })?;
+
+    // Pre-pass: every pathspec must be in a conflict state for the requested
+    // side before we touch the worktree or index.
+    let mut targets = Vec::with_capacity(pathspec.len());
+    for spec in pathspec {
+        let hash = index
+            .get_hash(spec, stage)
+            .ok_or_else(|| CheckoutError::NotInMergeConflict { path: spec.clone() })?;
+        targets.push((spec.clone(), hash));
+    }
+
+    let mut restored_files = Vec::with_capacity(targets.len());
+    for (spec, hash) in &targets {
+        // Read the chosen-stage blob and write it to the working tree.
+        let blob = load_object::<Blob>(hash).map_err(|e| CheckoutError::IndexReadFailed {
+            path: spec.clone(),
+            detail: e.to_string(),
+        })?;
+        let path_abs = util::workdir_to_absolute(PathBuf::from(spec));
+        if let Some(parent) = path_abs.parent() {
+            fs::create_dir_all(parent).map_err(|e| CheckoutError::WorktreeWriteFailed {
+                path: spec.clone(),
+                detail: e.to_string(),
+            })?;
+        }
+        util::write_file(&blob.data, &path_abs).map_err(|e| {
+            CheckoutError::WorktreeWriteFailed {
+                path: spec.clone(),
+                detail: e.to_string(),
+            }
+        })?;
+
+        // Promote the chosen stage to stage #0 (owned move; preserves mode), then
+        // drop the base (#1) and the opposite side so only stage #0 remains.
+        let mut entry = index
+            .remove(spec, stage)
+            .ok_or_else(|| CheckoutError::NotInMergeConflict { path: spec.clone() })?;
+        entry.flags.stage = 0;
+        index.add(entry);
+        index.remove(spec, 1);
+        index.remove(spec, other_stage);
+
+        restored_files.push(spec.clone());
+    }
+
+    index
+        .to_file(&index_path)
+        .map_err(|e| CheckoutError::WorktreeWriteFailed {
+            path: "<index>".to_string(),
+            detail: e.to_string(),
+        })?;
+
+    let previous_branch = get_current_branch().await;
+    let previous_commit = current_commit_string().await?;
+    let was_detached = previous_branch.is_none();
+    Ok(CheckoutOutput {
+        action: "restore-paths".to_string(),
+        previous_branch: previous_branch.clone(),
+        previous_commit: previous_commit.clone(),
+        branch: previous_branch,
+        commit: previous_commit.clone(),
+        short_commit: previous_commit.as_deref().map(short_oid),
+        switched: false,
+        created: false,
+        pulled: false,
+        already_on: false,
+        detached: was_detached,
+        reset: false,
+        orphan: false,
+        tracking: None,
+        restore: Some(restore::RestoreOutput {
+            source: Some(
+                if use_ours {
+                    "stage2-ours"
+                } else {
+                    "stage3-theirs"
+                }
+                .to_string(),
+            ),
+            worktree: true,
+            staged: true,
+            restored_files,
+            deleted_files: Vec::new(),
+        }),
     })
 }
 
@@ -603,6 +770,7 @@ fn reflog_from_label(previous_branch: &Option<String>, old_oid: &str) -> String 
 async fn run_force_branch_checkout(
     branch_name: &str,
     start_point: Option<String>,
+    force: bool,
     output: &OutputConfig,
 ) -> Result<CheckoutOutput, CheckoutError> {
     let previous_branch = get_current_branch().await;
@@ -615,8 +783,10 @@ async fn run_force_branch_checkout(
         })?;
 
     // clean-status → restore happen BEFORE the ref is reset, so a failure here
-    // leaves the target branch unchanged (no half-reset).
-    map_clean_status(switch::ensure_clean_status_for_commit(resolved_commit, output).await)?;
+    // leaves the target branch unchanged (no half-reset). `-f` skips the guard.
+    if !force {
+        map_clean_status(switch::ensure_clean_status_for_commit(resolved_commit, output).await)?;
+    }
     restore_to_commit(resolved_commit, output)
         .await
         .map_err(CheckoutError::DelegatedCli)?;
@@ -665,6 +835,7 @@ async fn run_force_branch_checkout(
 /// move HEAD into the detached state.
 async fn run_detach_checkout(
     commit_ish: Option<String>,
+    force: bool,
     output: &OutputConfig,
 ) -> Result<CheckoutOutput, CheckoutError> {
     let previous_branch = get_current_branch().await;
@@ -676,7 +847,9 @@ async fn run_detach_checkout(
             CheckoutError::BranchNotFound(commit_ish.clone().unwrap_or_else(|| "HEAD".to_string()))
         })?;
 
-    map_clean_status(switch::ensure_clean_status_for_commit(resolved_commit, output).await)?;
+    if !force {
+        map_clean_status(switch::ensure_clean_status_for_commit(resolved_commit, output).await)?;
+    }
     restore_to_commit(resolved_commit, output)
         .await
         .map_err(CheckoutError::DelegatedCli)?;
@@ -723,6 +896,7 @@ async fn run_detach_checkout(
 async fn run_orphan_checkout(
     branch_name: &str,
     start_point: Option<String>,
+    force: bool,
     output: &OutputConfig,
 ) -> Result<CheckoutOutput, CheckoutError> {
     let previous_branch = get_current_branch().await;
@@ -732,11 +906,13 @@ async fn run_orphan_checkout(
     let start_commit = resolve_start_point(start_point.as_deref()).await?;
 
     if let Some(start_commit) = start_commit {
-        map_clean_status(switch::ensure_clean_status_for_commit(start_commit, output).await)?;
+        if !force {
+            map_clean_status(switch::ensure_clean_status_for_commit(start_commit, output).await)?;
+        }
         restore_to_commit(start_commit, output)
             .await
             .map_err(CheckoutError::DelegatedCli)?;
-    } else {
+    } else if !force {
         // Unborn HEAD with no start point: nothing to restore; only rename HEAD.
         map_clean_status(switch::ensure_clean_status(output).await)?;
     }
@@ -1121,6 +1297,33 @@ mod tests {
             CheckoutError::RemoteHeadMissing.to_string(),
             "checkout remote branch left HEAD without a commit",
         );
+        assert_eq!(
+            CheckoutError::ConflictPathRequired { flag: "--ours" }.to_string(),
+            "'--ours' requires a pathspec after '--' (e.g. 'libra checkout --ours -- <path>')",
+        );
+        assert_eq!(
+            CheckoutError::NotInMergeConflict {
+                path: "a.txt".to_string(),
+            }
+            .to_string(),
+            "path 'a.txt' is not in a merge conflict state",
+        );
+        assert_eq!(
+            CheckoutError::IndexReadFailed {
+                path: "a.txt".to_string(),
+                detail: "object missing".to_string(),
+            }
+            .to_string(),
+            "failed to read index/object for 'a.txt': object missing",
+        );
+        assert_eq!(
+            CheckoutError::WorktreeWriteFailed {
+                path: "a.txt".to_string(),
+                detail: "disk full".to_string(),
+            }
+            .to_string(),
+            "failed to write 'a.txt': disk full",
+        );
         let proxy_err = CliError::failure("remote not configured")
             .with_stable_code(StableErrorCode::NetworkUnavailable);
         assert_eq!(
@@ -1189,6 +1392,34 @@ mod tests {
             (
                 CheckoutError::HeadUpdateFailed {
                     detail: "database is locked".to_string(),
+                },
+                StableErrorCode::IoWriteFailed,
+            ),
+            (
+                CheckoutError::InvalidPathMode("-b".to_string()),
+                StableErrorCode::CliInvalidArguments,
+            ),
+            (
+                CheckoutError::ConflictPathRequired { flag: "--theirs" },
+                StableErrorCode::CliInvalidArguments,
+            ),
+            (
+                CheckoutError::NotInMergeConflict {
+                    path: "a.txt".to_string(),
+                },
+                StableErrorCode::ConflictOperationBlocked,
+            ),
+            (
+                CheckoutError::IndexReadFailed {
+                    path: "a.txt".to_string(),
+                    detail: "object missing".to_string(),
+                },
+                StableErrorCode::IoReadFailed,
+            ),
+            (
+                CheckoutError::WorktreeWriteFailed {
+                    path: "a.txt".to_string(),
+                    detail: "disk full".to_string(),
                 },
                 StableErrorCode::IoWriteFailed,
             ),
