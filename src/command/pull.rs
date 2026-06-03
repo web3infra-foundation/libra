@@ -606,6 +606,7 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
         | merge::PullMergeError::SquashNoFf
         | merge::PullMergeError::SquashCommit
         | merge::PullMergeError::InvalidMergeFfConfig { .. }
+        | merge::PullMergeError::InvalidMergeCommitConfig { .. }
         | merge::PullMergeError::InvalidDiffAlgorithm { .. }
         | merge::PullMergeError::InvalidCleanupMode { .. } => {
             CliError::command_usage(error.to_string())
@@ -622,6 +623,7 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
         merge::PullMergeError::TargetLoad { .. }
         | merge::PullMergeError::CurrentLoad { .. }
         | merge::PullMergeError::History(..)
+        | merge::PullMergeError::VirtualMergeBase(..)
         | merge::PullMergeError::TreeLoad { .. }
         | merge::PullMergeError::ObjectLoad { .. } => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::RepoCorrupt)
@@ -634,6 +636,7 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
             .with_hint("run 'libra pull' without --ff-only to allow a merge commit")
             .with_hint("or run 'libra pull --rebase' to replay local commits"),
         merge::PullMergeError::Conflicts { .. }
+        | merge::PullMergeError::SquashConflicts
         | merge::PullMergeError::OctopusConflict { .. }
         | merge::PullMergeError::DirectoryFileConflict { .. }
         | merge::PullMergeError::DirtyWorktree

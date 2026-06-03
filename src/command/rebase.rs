@@ -23,7 +23,7 @@ use serde::Serialize;
 
 use crate::{
     cli_error,
-    command::{load_object, save_object, status},
+    command::{load_object, merge_base, save_object, status},
     common_utils::parse_commit_msg,
     internal::{
         branch::Branch,
@@ -3005,54 +3005,11 @@ async fn replay_commit_with_conflict_detection(
     ReplayResult::Success(new_commit.id)
 }
 
-/// Find the merge base (common ancestor) of two commits
-///
-/// This function implements a simple merge base algorithm:
-/// 1. Traverse all ancestors of the first commit and store them in a set
-/// 2. Traverse ancestors of the second commit until we find one in the set
-/// 3. Return the first common ancestor found
-///
-/// Note: This returns the first common ancestor found, not necessarily the
-/// best common ancestor. A more sophisticated algorithm would find the
-/// lowest common ancestor (LCA).
-///
-/// TODO: Implement proper LCA algorithm for better merge base detection
-/// TODO: Optimize performance for large repositories with many commits
 async fn find_merge_base(
     commit1_id: &ObjectHash,
     commit2_id: &ObjectHash,
 ) -> Result<Option<ObjectHash>, String> {
-    let mut visited1 = HashSet::new();
-    let mut visited2 = HashSet::new();
-    let mut queue1 = vec![*commit1_id];
-    let mut queue2 = vec![*commit2_id];
-    while !queue1.is_empty() || !queue2.is_empty() {
-        // Process one level of ancestors for commit1
-        if let Some(current_id) = queue1.pop() {
-            if visited2.contains(&current_id) {
-                return Ok(Some(current_id)); // Found common ancestor
-            }
-            if visited1.insert(current_id) {
-                let commit: Commit = load_object(&current_id).map_err(|e| e.to_string())?;
-                for parent_id in &commit.parent_commit_ids {
-                    queue1.push(*parent_id);
-                }
-            }
-        }
-        // Process one level of ancestors for commit2
-        if let Some(current_id) = queue2.pop() {
-            if visited1.contains(&current_id) {
-                return Ok(Some(current_id)); // Found common ancestor
-            }
-            if visited2.insert(current_id) {
-                let commit: Commit = load_object(&current_id).map_err(|e| e.to_string())?;
-                for parent_id in &commit.parent_commit_ids {
-                    queue2.push(*parent_id);
-                }
-            }
-        }
-    }
-    Ok(None)
+    merge_base::find_best_merge_base(*commit1_id, *commit2_id).map_err(|error| error.to_string())
 }
 
 /// Collect all commits from base (exclusive) to head (inclusive) that need to be replayed

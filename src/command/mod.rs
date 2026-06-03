@@ -41,6 +41,7 @@ pub mod lfs_schema;
 pub mod log;
 pub mod ls_remote;
 pub mod merge;
+pub(crate) mod merge_base;
 pub mod mv;
 pub mod open;
 pub mod package;

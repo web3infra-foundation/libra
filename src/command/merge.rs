@@ -4,7 +4,7 @@
 use std::os::unix::ffi::OsStringExt;
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
@@ -26,7 +26,7 @@ use git_internal::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    commit, get_target_commit, load_object, log, reset,
+    commit, get_target_commit, load_object, log, merge_base, reset,
     restore::{self, RestoreArgs},
     save_object, stash, status, switch,
 };
@@ -449,6 +449,8 @@ pub(crate) enum PullMergeError {
     SquashCommit,
     #[error("invalid merge.ff value '{value}'")]
     InvalidMergeFfConfig { value: String },
+    #[error("invalid merge.commit value '{value}'")]
+    InvalidMergeCommitConfig { value: String },
     #[error("unknown diff algorithm '{value}' (expected myers, histogram, patience, or minimal)")]
     InvalidDiffAlgorithm { value: String },
     #[error(
@@ -471,6 +473,8 @@ pub(crate) enum PullMergeError {
     CurrentLoad { commit_id: String, detail: String },
     #[error("failed to inspect merge history: {0}")]
     History(String),
+    #[error("failed to synthesize recursive merge base: {0}")]
+    VirtualMergeBase(String),
     #[error("refusing to merge unrelated histories")]
     UnrelatedHistories,
     #[error("merge has conflicts in {paths}")]
@@ -503,6 +507,10 @@ pub(crate) enum PullMergeError {
     IndexLoad(String),
     #[error("failed to save index: {0}")]
     IndexSave(String),
+    #[error(
+        "squash merge has conflicts; resolve them and run 'libra commit' instead of 'libra merge --continue'"
+    )]
+    SquashConflicts,
     #[error("failed to create merge tree: {0}")]
     TreeCreate(String),
     #[error("failed to save merge commit: {0}")]
@@ -531,6 +539,7 @@ impl From<PullMergeError> for CliError {
             | PullMergeError::SquashNoFf
             | PullMergeError::SquashCommit
             | PullMergeError::InvalidMergeFfConfig { .. }
+            | PullMergeError::InvalidMergeCommitConfig { .. }
             | PullMergeError::InvalidDiffAlgorithm { .. }
             | PullMergeError::InvalidCleanupMode { .. } => {
                 CliError::command_usage(error.to_string())
@@ -547,6 +556,7 @@ impl From<PullMergeError> for CliError {
             PullMergeError::TargetLoad { .. }
             | PullMergeError::CurrentLoad { .. }
             | PullMergeError::History(..)
+            | PullMergeError::VirtualMergeBase(..)
             | PullMergeError::TreeLoad { .. }
             | PullMergeError::ObjectLoad { .. } => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::RepoCorrupt)
@@ -558,6 +568,7 @@ impl From<PullMergeError> for CliError {
                 .with_hint("run 'libra pull' without --ff-only to allow a merge commit")
                 .with_hint("or run 'libra pull --rebase' to replay local commits"),
             PullMergeError::Conflicts { .. }
+            | PullMergeError::SquashConflicts
             | PullMergeError::OctopusConflict { .. }
             | PullMergeError::DirectoryFileConflict { .. }
             | PullMergeError::DirtyWorktree
@@ -721,7 +732,7 @@ async fn merge_options_from_args(args: &MergeArgs) -> Result<PullMergeOptions, M
         ff_only,
         no_ff,
         squash: args.squash,
-        no_commit: args.no_commit,
+        no_commit: resolve_no_commit(args).await?,
         allow_unrelated_histories: args.allow_unrelated_histories,
         message: read_merge_message(args)?,
         signoff: args.signoff,
@@ -742,6 +753,29 @@ async fn merge_options_from_args(args: &MergeArgs) -> Result<PullMergeOptions, M
         edit: args.edit && !args.no_edit,
         detect_renames: resolve_detect_renames(args).await,
     })
+}
+
+/// Resolve `--commit`/`--no-commit`, falling back to the plan-required
+/// `merge.commit` key where false means stop before creating the merge commit.
+async fn resolve_no_commit(args: &MergeArgs) -> Result<bool, PullMergeError> {
+    if args.commit {
+        return Ok(false);
+    }
+    if args.no_commit {
+        return Ok(true);
+    }
+    let Some(value) = read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.commit")
+        .await
+        .ok()
+        .flatten()
+    else {
+        return Ok(false);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Ok(false),
+        "false" | "no" | "off" | "0" => Ok(true),
+        _ => Err(PullMergeError::InvalidMergeCommitConfig { value }),
+    }
 }
 
 /// Resolve whether to run rename detection (`--find-renames`/`--no-renames`,
@@ -951,6 +985,10 @@ fn merge_error_to_cli(error: MergeError) -> CliError {
         MergeError::Conflicts { .. } => CliError::from(error)
             .with_priority_hint("resolve conflicts, then run 'libra merge --continue'")
             .with_hint("or run 'libra merge --abort' to restore the pre-merge state"),
+        MergeError::SquashConflicts => CliError::failure(error.to_string())
+            .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+            .with_priority_hint("resolve conflicts, stage the result, then run 'libra commit'")
+            .with_hint("squash merges do not support 'libra merge --continue'"),
         error => CliError::from(error),
     }
 }
@@ -1007,9 +1045,7 @@ pub(crate) async fn run_merge_for_pull_with_options(
             detail: error.to_string(),
         })?;
 
-    let lca = lca_commit(&current_commit, &target_commit)
-        .await
-        .map_err(|error| PullMergeError::History(error.to_string()))?;
+    let lca = recursive_merge_base(&current_commit, &target_commit)?;
 
     if lca.is_none() && !options.allow_unrelated_histories {
         return Err(PullMergeError::UnrelatedHistories);
@@ -1129,9 +1165,7 @@ async fn run_octopus_merge(
                 target: branch.clone(),
             });
         }
-        let lca = lca_commit(&current_commit, &target_commit)
-            .await
-            .map_err(|error| PullMergeError::History(error.to_string()))?;
+        let lca = recursive_merge_base(&current_commit, &target_commit)?;
         if lca.as_ref().is_none_or(|base| base.id != current_commit.id) {
             return Err(PullMergeError::OctopusConflict {
                 detail: format!("target '{branch}' is not a clean descendant of HEAD"),
@@ -1266,9 +1300,16 @@ async fn perform_three_way_merge(
     )?;
 
     if !merge_result.conflicts.is_empty() {
+        let paths = merge_result
+            .conflicts
+            .iter()
+            .map(|(path, _)| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         write_conflicted_merge_state(MergeConflictInput {
             head_name: head_name.clone(),
             upstream: upstream.to_string(),
+            squash: options.squash,
             base: base_commit
                 .as_ref()
                 .map(|commit| commit.id)
@@ -1291,8 +1332,11 @@ async fn perform_three_way_merge(
             log: options.log,
             conflict_style: options.conflict_style,
         })?;
-        let paths = MergeState::load_required()?.conflicted_paths.join(", ");
-        return Err(PullMergeError::Conflicts { paths });
+        return if options.squash {
+            Err(PullMergeError::SquashConflicts)
+        } else {
+            Err(PullMergeError::Conflicts { paths })
+        };
     }
 
     let current_index =
@@ -1380,6 +1424,7 @@ async fn perform_three_way_merge(
 struct MergeConflictInput {
     head_name: String,
     upstream: String,
+    squash: bool,
     base: ObjectHash,
     ours: ObjectHash,
     theirs: ObjectHash,
@@ -1461,23 +1506,25 @@ fn write_conflicted_merge_state(input: MergeConflictInput) -> Result<(), PullMer
         }
     }
 
-    let state = MergeState {
-        head_name: input.head_name,
-        orig_head: input.ours.to_string(),
-        target: input.theirs.to_string(),
-        target_ref: input.upstream,
-        base: input.base.to_string(),
-        conflicted_paths: conflict_paths
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect(),
-        message: Some(input.message),
-        signoff: input.signoff,
-        log: input.log,
-        conflict_style: input.conflict_style,
-        autostash: None,
-    };
-    state.save()?;
+    if !input.squash {
+        let state = MergeState {
+            head_name: input.head_name,
+            orig_head: input.ours.to_string(),
+            target: input.theirs.to_string(),
+            target_ref: input.upstream,
+            base: input.base.to_string(),
+            conflicted_paths: conflict_paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+            message: Some(input.message),
+            signoff: input.signoff,
+            log: input.log,
+            conflict_style: input.conflict_style,
+            autostash: None,
+        };
+        state.save()?;
+    }
 
     if let Err(error) = index.save(path::index()) {
         let _ = MergeState::cleanup();
@@ -1775,76 +1822,64 @@ async fn resolve_merge_target(target_ref: &str) -> Result<ObjectHash, Box<dyn st
     get_target_commit(target_ref).await
 }
 
-async fn lca_commit(lhs: &Commit, rhs: &Commit) -> Result<Option<Commit>, CliError> {
-    let lhs_reachable = log::get_reachable_commits(lhs.id.to_string(), None).await?;
-    let rhs_reachable = log::get_reachable_commits(rhs.id.to_string(), None).await?;
-    Ok(best_common_ancestor(lhs_reachable, rhs_reachable))
-}
-
-fn best_common_ancestor(lhs_reachable: Vec<Commit>, rhs_reachable: Vec<Commit>) -> Option<Commit> {
-    let lhs_distance = commit_distances(&lhs_reachable);
-    let rhs_distance = commit_distances(&rhs_reachable);
-    let lhs_by_id: HashMap<ObjectHash, Commit> = lhs_reachable
-        .into_iter()
-        .map(|commit| (commit.id, commit))
-        .collect();
-    let parent_map: HashMap<ObjectHash, Vec<ObjectHash>> = lhs_by_id
-        .values()
-        .chain(rhs_reachable.iter())
-        .map(|commit| (commit.id, commit.parent_commit_ids.clone()))
-        .collect();
-    let common: Vec<ObjectHash> = lhs_distance
-        .keys()
-        .filter(|id| rhs_distance.contains_key(id))
-        .copied()
-        .collect();
-    let best_ids: Vec<ObjectHash> = common
-        .iter()
-        .copied()
-        .filter(|candidate| {
-            !common
-                .iter()
-                .any(|other| other != candidate && commit_reaches(*other, *candidate, &parent_map))
-        })
-        .collect();
-
-    best_ids
-        .into_iter()
-        .min_by_key(|id| {
-            let lhs = lhs_distance.get(id).copied().unwrap_or(usize::MAX);
-            let rhs = rhs_distance.get(id).copied().unwrap_or(usize::MAX);
-            (lhs.max(rhs), lhs + rhs, id.to_string())
-        })
-        .and_then(|id| lhs_by_id.get(&id).cloned())
-}
-
-fn commit_distances(commits: &[Commit]) -> HashMap<ObjectHash, usize> {
-    commits
-        .iter()
-        .enumerate()
-        .map(|(distance, commit)| (commit.id, distance))
-        .collect()
-}
-
-fn commit_reaches(
-    start: ObjectHash,
-    target: ObjectHash,
-    parent_map: &HashMap<ObjectHash, Vec<ObjectHash>>,
-) -> bool {
-    let mut seen = HashSet::new();
-    let mut queue = VecDeque::from([start]);
-    while let Some(id) = queue.pop_front() {
-        if id == target {
-            return true;
-        }
-        if !seen.insert(id) {
-            continue;
-        }
-        if let Some(parents) = parent_map.get(&id) {
-            queue.extend(parents.iter().copied());
-        }
+fn recursive_merge_base(lhs: &Commit, rhs: &Commit) -> Result<Option<Commit>, PullMergeError> {
+    let base_ids = merge_base::find_best_merge_bases(lhs.id, rhs.id)
+        .map_err(|error| PullMergeError::History(error.to_string()))?;
+    match base_ids.as_slice() {
+        [] => Ok(None),
+        [id] => load_object(id)
+            .map(Some)
+            .map_err(|error| PullMergeError::History(error.to_string())),
+        ids => synthesize_virtual_merge_base(ids),
     }
-    false
+}
+
+fn synthesize_virtual_merge_base(
+    base_ids: &[ObjectHash],
+) -> Result<Option<Commit>, PullMergeError> {
+    let mut bases = base_ids
+        .iter()
+        .map(|id| load_object(id).map_err(|error| PullMergeError::History(error.to_string())))
+        .collect::<Result<Vec<Commit>, PullMergeError>>()?;
+    let mut current = bases.remove(0);
+    for next in bases {
+        current = merge_base_pair(&current, &next)?;
+    }
+    Ok(Some(current))
+}
+
+fn merge_base_pair(lhs: &Commit, rhs: &Commit) -> Result<Commit, PullMergeError> {
+    let base = recursive_merge_base(lhs, rhs)?;
+    let base_items = match &base {
+        Some(commit) => commit_tree_items(commit)?,
+        None => HashMap::new(),
+    };
+    let lhs_items = commit_tree_items(lhs)?;
+    let rhs_items = commit_tree_items(rhs)?;
+    let options = PullMergeOptions {
+        detect_renames: true,
+        ..Default::default()
+    };
+    let merge_result =
+        merge_tree_items_with_options(&base_items, &lhs_items, &rhs_items, &options)?;
+    if !merge_result.conflicts.is_empty() {
+        let paths = merge_result
+            .conflicts
+            .iter()
+            .map(|(path, _)| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(PullMergeError::VirtualMergeBase(format!(
+            "recursive merge base conflicts in {paths}"
+        )));
+    }
+    let tree_id = create_tree_from_items_map(&merge_result.merged_items)
+        .map_err(PullMergeError::TreeCreate)?;
+    Ok(Commit::from_tree_id(
+        tree_id,
+        vec![lhs.id, rhs.id],
+        "virtual recursive merge base",
+    ))
 }
 
 async fn apply_fast_forward_merge(
@@ -3363,33 +3398,6 @@ mod tests {
             none.canonicalize(b"a  b\n"),
             none.canonicalize(b"a b\n"),
             "default mode preserves whitespace differences"
-        );
-    }
-
-    #[test]
-    fn best_common_ancestor_picks_lca_in_criss_cross_history() {
-        // A is the root; B and C diverge from A; D and E are independent merges
-        // of B and C — a criss-cross. The merge base of D and E must be a real
-        // lowest common ancestor (B or C), never the older shared ancestor A.
-        let tree = ObjectHash::new(&[7u8; 20]);
-        let a = Commit::from_tree_id(tree, vec![], "A");
-        let b = Commit::from_tree_id(tree, vec![a.id], "B");
-        let c = Commit::from_tree_id(tree, vec![a.id], "C");
-        let d = Commit::from_tree_id(tree, vec![b.id, c.id], "D");
-        let e = Commit::from_tree_id(tree, vec![b.id, c.id], "E");
-
-        let lhs = vec![d, b.clone(), c.clone(), a.clone()];
-        let rhs = vec![e, b.clone(), c.clone(), a.clone()];
-        let base = best_common_ancestor(lhs, rhs).expect("a common ancestor exists");
-
-        assert!(
-            base.id == b.id || base.id == c.id,
-            "criss-cross merge base must be a real LCA (B or C), got {}",
-            base.id
-        );
-        assert_ne!(
-            base.id, a.id,
-            "must not select the suboptimal older ancestor A"
         );
     }
 
