@@ -168,6 +168,9 @@ enum CheckoutError {
     #[error("path '{path}' is not in a merge conflict state")]
     NotInMergeConflict { path: String },
 
+    #[error("a branch named '{0}' already exists")]
+    BranchAlreadyExists(String),
+
     #[error("failed to read index/object for '{path}': {detail}")]
     IndexReadFailed { path: String, detail: String },
 
@@ -257,6 +260,11 @@ impl From<CheckoutError> for CliError {
                 CliError::failure(format!("path '{path}' is not in a merge conflict state"))
                     .with_stable_code(StableErrorCode::ConflictOperationBlocked)
                     .with_hint("only conflicted paths accept '--ours'/'--theirs'")
+            }
+            CheckoutError::BranchAlreadyExists(name) => {
+                CliError::failure(format!("a branch named '{name}' already exists"))
+                    .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                    .with_hint("delete it first or choose a different name")
             }
             CheckoutError::IndexReadFailed { path, detail } => CliError::fatal(format!(
                 "failed to read index/object for '{path}': {detail}"
@@ -905,6 +913,17 @@ async fn run_orphan_checkout(
     force: bool,
     output: &OutputConfig,
 ) -> Result<CheckoutOutput, CheckoutError> {
+    // Match Git: `checkout --orphan <name>` refuses when the branch already
+    // exists. Without this guard, pointing HEAD at an existing ref would resolve
+    // to that ref's commit (a normal checkout), not the intended unborn branch.
+    if Branch::find_branch_result(branch_name, None)
+        .await
+        .map_err(|error| map_checkout_branch_store_error("resolve orphan target", error))?
+        .is_some()
+    {
+        return Err(CheckoutError::BranchAlreadyExists(branch_name.to_string()));
+    }
+
     let previous_branch = get_current_branch().await;
     let previous_commit = current_commit_string().await?;
 
@@ -1315,6 +1334,10 @@ mod tests {
             "path 'a.txt' is not in a merge conflict state",
         );
         assert_eq!(
+            CheckoutError::BranchAlreadyExists("feature".to_string()).to_string(),
+            "a branch named 'feature' already exists",
+        );
+        assert_eq!(
             CheckoutError::IndexReadFailed {
                 path: "a.txt".to_string(),
                 detail: "object missing".to_string(),
@@ -1413,6 +1436,10 @@ mod tests {
                 CheckoutError::NotInMergeConflict {
                     path: "a.txt".to_string(),
                 },
+                StableErrorCode::ConflictOperationBlocked,
+            ),
+            (
+                CheckoutError::BranchAlreadyExists("feature".to_string()),
                 StableErrorCode::ConflictOperationBlocked,
             ),
             (

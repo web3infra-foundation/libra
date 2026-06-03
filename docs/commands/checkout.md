@@ -31,7 +31,7 @@ The internal `intent` and `agent-traces` branches are protected: `-b`/`-B`/`--or
 
 - **`-B <name> [<start-point>]`** — create the branch if absent, or reset it to the start point (default current HEAD) if it already exists, then switch. Records a `checkout` reflog entry.
 - **`--detach [<commit-ish>]`** — move HEAD to the resolved commit (default current HEAD) in the detached state, leaving no branch checked out.
-- **`--orphan <name> [<start-point>]`** — point HEAD at a new unborn branch (no `reference` row exists until the first commit). The index/worktree are aligned to the start point, matching Git's "as if you had run `checkout <start-point>`". Following Git, `--orphan` writes **no** HEAD reflog entry (the target has no commit OID yet). The first commit on the orphan branch has no parents.
+- **`--orphan <name> [<start-point>]`** — point HEAD at a new unborn branch (no `reference` row exists until the first commit). The index/worktree are aligned to the start point, matching Git's "as if you had run `checkout <start-point>`". Following Git, `--orphan` writes **no** HEAD reflog entry (the target has no commit OID yet) and **refuses if `<name>` already exists** (otherwise HEAD would resolve to the existing branch's commit rather than being unborn). The first commit on the orphan branch has no parents.
 - **`-f` / `--force`** — skip the dirty-working-tree guard and let the target overwrite uncommitted changes (applies to plain switch, `-B`, `--detach`, and `--orphan`).
 
 ### Conflicted-path checkout (`--ours` / `--theirs`)
@@ -298,6 +298,7 @@ clap argument conflicts for a present subcommand (e.g. `--detach -b`,
 | `-b` combined with path mode | `LBR-CLI-002` | "checkout path mode cannot be combined with -b" | 129 |
 | `--ours`/`--theirs` without a pathspec | `LBR-CLI-002` | "'--ours' requires a pathspec after '--' ..." | 129 |
 | `--ours`/`--theirs` on a non-conflicted path | `LBR-CONFLICT-002` | "path '{path}' is not in a merge conflict state" | 128 |
+| `--orphan <name>` when `<name>` already exists | `LBR-CONFLICT-002` | "a branch named '{name}' already exists" | 128 |
 | `--ours --theirs` together (clap conflict) | `LBR-CLI-002` | usage error (remapped from clap conflict) | 129 |
 | Index/object read failure (conflict-stage checkout) | `LBR-IO-001` | "failed to read index/object for '{path}': {detail}" | 128 |
 | Worktree/index write failure | `LBR-IO-002` | "failed to write '{path}': {detail}" | 128 |

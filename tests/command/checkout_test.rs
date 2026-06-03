@@ -1668,3 +1668,38 @@ fn checkout_error_message_has_no_internal_paths() {
         "human error block leaked an absolute path: {human}"
     );
 }
+
+/// `--orphan` on an existing branch name is refused (matches Git): the branch
+/// would otherwise resolve to its existing commit instead of being unborn.
+/// Rejected with `ConflictOperationBlocked` (128, LBR-CONFLICT-002), HEAD unchanged.
+#[test]
+fn checkout_orphan_on_existing_branch_is_rejected() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_cli_error_stderr,
+        run_libra_command,
+    };
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], repo.path()),
+        "create feature branch",
+    );
+
+    let out = run_libra_command(&["checkout", "--orphan", "feature"], repo.path());
+    assert_eq!(
+        out.status.code(),
+        Some(128),
+        "orphan on existing branch must be refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
+    assert!(
+        report.message.contains("already exists"),
+        "message: {}",
+        report.message
+    );
+
+    // HEAD must be unchanged — still the existing `main` branch.
+    let cur = run_libra_command(&["branch", "--show-current"], repo.path());
+    assert_eq!(String::from_utf8_lossy(&cur.stdout).trim(), "main");
+}

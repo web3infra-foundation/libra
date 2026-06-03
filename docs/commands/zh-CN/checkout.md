@@ -31,7 +31,7 @@ libra checkout [<tree-ish>] -- <pathspec>...
 
 - **`-B <name> [<start-point>]`** —— 分支不存在则创建，已存在则重置到 start point（默认当前 HEAD），然后切换。会记录一条 `checkout` reflog 条目。
 - **`--detach [<commit-ish>]`** —— 把 HEAD 移动到解析出的提交（默认当前 HEAD）并进入分离态，不检出任何分支。
-- **`--orphan <name> [<start-point>]`** —— 把 HEAD 指向一个新的、尚未诞生（unborn）的分支（在首次提交前不存在 `reference` 行）。索引/工作区会对齐到 start point，与 Git 的 “如同执行了 `checkout <start-point>`” 一致。与 Git 一致，`--orphan` **不**写 HEAD reflog 条目（目标还没有提交 OID）。孤儿分支的首个提交没有父提交。
+- **`--orphan <name> [<start-point>]`** —— 把 HEAD 指向一个新的、尚未诞生（unborn）的分支（在首次提交前不存在 `reference` 行）。索引/工作区会对齐到 start point，与 Git 的 “如同执行了 `checkout <start-point>`” 一致。与 Git 一致，`--orphan` **不**写 HEAD reflog 条目（目标还没有提交 OID），并且**当 `<name>` 已存在时拒绝**（否则 HEAD 会解析到该已存在分支的提交，而非 unborn）。孤儿分支的首个提交没有父提交。
 - **`-f` / `--force`** —— 跳过工作区脏检查，让目标覆盖未提交改动（对普通切换、`-B`、`--detach`、`--orphan` 均生效）。
 
 ### 冲突路径检出（`--ours` / `--theirs`）
@@ -179,6 +179,7 @@ Switched to branch 'feature-x'
 | `-b` 与路径模式混用 | `LBR-CLI-002` | 129 |
 | `--ours`/`--theirs` 缺少 pathspec | `LBR-CLI-002` | 129 |
 | `--ours`/`--theirs` 作用于非冲突路径 | `LBR-CONFLICT-002` | 128 |
+| `--orphan <name>` 而 `<name>` 已存在 | `LBR-CONFLICT-002` | 128 |
 | `--ours --theirs` 同用（clap 冲突） | `LBR-CLI-002` | 129 |
 | 冲突 stage 检出时索引/对象读失败 | `LBR-IO-001` | 128 |
 | 工作区/索引写失败 | `LBR-IO-002` | 128 |
