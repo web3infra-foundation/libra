@@ -916,10 +916,13 @@ async fn run_orphan_checkout(
     // Match Git: `checkout --orphan <name>` refuses when the branch already
     // exists. Without this guard, pointing HEAD at an existing ref would resolve
     // to that ref's commit (a normal checkout), not the intended unborn branch.
-    if Branch::find_branch_result(branch_name, None)
+    //
+    // Use `exists_result` (raw reference-row presence), NOT `find_branch_result`:
+    // the latter returns `None` for rows whose `commit IS NULL` (unborn refs),
+    // which would let an already-existing unborn branch slip through this guard.
+    if Branch::exists_result(branch_name, None)
         .await
         .map_err(|error| map_checkout_branch_store_error("resolve orphan target", error))?
-        .is_some()
     {
         return Err(CheckoutError::BranchAlreadyExists(branch_name.to_string()));
     }
