@@ -641,6 +641,7 @@ async fn setup_standard_repo(
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     })
@@ -694,6 +695,7 @@ async fn setup_standard_repo(
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     })
@@ -747,6 +749,7 @@ async fn setup_standard_repo(
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     })
@@ -800,6 +803,7 @@ async fn setup_standard_repo(
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     })

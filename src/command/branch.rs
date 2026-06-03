@@ -83,6 +83,7 @@ EXAMPLES:
     libra branch -D topic                 Force-delete a branch
     libra branch -u origin/main           Set upstream for the current branch
     libra branch --unset-upstream         Remove upstream tracking for the current branch
+    libra branch --edit-description       Edit the current branch's description
     libra branch --merged                 List branches merged into HEAD
     libra branch --no-merged main         List branches not yet merged into main
     libra branch --points-at HEAD         List branches whose tip is at HEAD
@@ -143,6 +144,15 @@ pub enum BranchOutput {
     /// had no tracking configured (the operation is an idempotent no-op).
     #[serde(rename = "unset-upstream")]
     UnsetUpstream { branch: String, had_upstream: bool },
+    /// `--edit-description` succeeded. `description` is the value after editing,
+    /// or `None` when the description was cleared (the field is omitted from
+    /// JSON in that case).
+    #[serde(rename = "edit-description")]
+    EditDescription {
+        branch: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
     /// `--show-current` result. `detached` is true when HEAD is detached;
     /// `name` is `None` in that case.
     #[serde(rename = "show-current")]
@@ -163,6 +173,7 @@ impl BranchOutput {
                 | Self::Copy { .. }
                 | Self::SetUpstream { .. }
                 | Self::UnsetUpstream { .. }
+                | Self::EditDescription { .. }
         )
     }
 }
@@ -190,6 +201,10 @@ pub struct BranchListEntry {
     /// compatible — existing consumers see no new key for untracked branches).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracking: Option<BranchTracking>,
+    /// Branch description (`branch.<name>.description`), when set. Omitted from
+    /// JSON entirely when absent (backward compatible).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 // action options are mutually exclusive with query options
@@ -251,6 +266,10 @@ pub struct BranchArgs {
     /// Copy a branch, overwriting NEW_BRANCH if it already exists (force copy).
     #[clap(short = 'C', group = "action", value_names = ["OLD_BRANCH", "NEW_BRANCH"], num_args = 1..=2)]
     pub force_copy: Vec<String>,
+
+    /// Edit a branch's description in your editor (the current branch when no name is given).
+    #[clap(long = "edit-description", group = "action", value_name = "BRANCH", num_args = 0..=1)]
+    pub edit_description: Option<Option<String>>,
 
     /// show remote branches
     #[clap(short, long, group = "query")]
@@ -744,6 +763,128 @@ async fn unset_upstream_impl(branch: &str) -> Result<bool, BranchError> {
             detail: format!("failed to commit config transaction: {e}"),
         })?;
     Ok(had_upstream)
+}
+
+/// Build an IO-class branch error tagged with a specific stable code.
+fn branch_io_error(code: StableErrorCode, detail: impl ToString) -> BranchError {
+    BranchError::DelegatedCli(CliError::fatal(detail.to_string()).with_stable_code(code))
+}
+
+/// Resolve the editor for `--edit-description`, honoring `core.editor` (local
+/// config) then the `$EDITOR` environment variable. No-op editors (`:` /
+/// `true`) and empty values resolve to `None`.
+async fn resolve_branch_editor() -> Option<String> {
+    fn runnable(value: String) -> Option<String> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || trimmed == ":" || trimmed == "true" {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+    if let Ok(Some(entry)) = ConfigKv::get("core.editor").await
+        && let Some(editor) = runnable(entry.value)
+    {
+        return Some(editor);
+    }
+    if let Ok(editor) = std::env::var("EDITOR")
+        && let Some(editor) = runnable(editor)
+    {
+        return Some(editor);
+    }
+    None
+}
+
+/// Body of `libra branch --edit-description [branch]`.
+///
+/// Functional scope:
+/// - Opens the branch's current `branch.<name>.description` in the configured
+///   editor (`core.editor` / `$EDITOR`) via a `0o600` temp file, then writes
+///   the trimmed result back; an empty result clears the key.
+///
+/// Boundary conditions (see the plan's editor contract):
+/// - No configured editor → [`CliError::command_usage`] (`CliInvalidArguments`,
+///   exit 129); the command never hangs.
+/// - Editor exits non-zero (or fails to launch) → treated as a cancel: the
+///   description is left unchanged and the command exits 0.
+/// - Temp-file read/write failures map to the Io stable codes (exit 128).
+/// - Locked branches are refused with [`BranchError::Locked`] (exit 128).
+async fn edit_description_impl(branch: String) -> Result<BranchOutput, BranchError> {
+    if branch::is_locked_branch(&branch) {
+        return Err(BranchError::Locked(branch));
+    }
+
+    let key = format!("branch.{branch}.description");
+    let current = ConfigKv::get(&key)
+        .await
+        .map_err(|e| branch_config_read_error(format!("description for branch '{branch}'"), e))?
+        .map(|entry| entry.value)
+        .unwrap_or_default();
+
+    let Some(editor) = resolve_branch_editor().await else {
+        return Err(BranchError::DelegatedCli(
+            CliError::command_usage("no editor configured for --edit-description")
+                .with_hint("set core.editor or the EDITOR environment variable"),
+        ));
+    };
+
+    // A `tempfile::NamedTempFile` is created mode 0600 on Unix and removed on
+    // drop, satisfying the "0o600 temp file, cleaned up afterwards" contract.
+    let tmp = tempfile::NamedTempFile::new().map_err(|e| {
+        branch_io_error(
+            StableErrorCode::IoWriteFailed,
+            format!("failed to create temp file for description: {e}"),
+        )
+    })?;
+    std::fs::write(tmp.path(), &current).map_err(|e| {
+        branch_io_error(
+            StableErrorCode::IoWriteFailed,
+            format!("failed to write {}: {e}", tmp.path().display()),
+        )
+    })?;
+
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"{}\"", tmp.path().display()))
+        .status();
+
+    let edited = match status {
+        Ok(code) if code.success() => std::fs::read_to_string(tmp.path()).map_err(|e| {
+            branch_io_error(
+                StableErrorCode::IoReadFailed,
+                format!("failed to read edited description: {e}"),
+            )
+        })?,
+        // Editor cancelled (non-zero exit) or failed to launch: leave the
+        // description unchanged and report success.
+        _ => {
+            let description = (!current.is_empty()).then_some(current);
+            return Ok(BranchOutput::EditDescription {
+                branch,
+                description,
+            });
+        }
+    };
+
+    let trimmed = edited.trim_end().to_string();
+    if trimmed.is_empty() {
+        // An empty description clears the key.
+        ConfigKv::unset_all(&key)
+            .await
+            .map_err(|e| branch_config_write_error(&key, e))?;
+        Ok(BranchOutput::EditDescription {
+            branch,
+            description: None,
+        })
+    } else {
+        ConfigKv::set(&key, &trimmed, false)
+            .await
+            .map_err(|e| branch_config_write_error(&key, e))?;
+        Ok(BranchOutput::EditDescription {
+            branch,
+            description: Some(trimmed),
+        })
+    }
 }
 
 /// Enumerate every branch stored under each known remote.
@@ -1272,11 +1413,19 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
                 remote: cfg.remote,
                 merge: cfg.merge,
             });
+        let description =
+            ConfigKv::get_with_conn(&db, &format!("branch.{}.description", branch.name))
+                .await
+                .map_err(|e| {
+                    branch_config_read_error(format!("description for branch '{}'", branch.name), e)
+                })?
+                .map(|entry| entry.value);
         entries.push(BranchListEntry {
             current: current_name == Some(branch.name.as_str()),
             commit: branch.commit.to_string(),
             display_name: branch.name.clone(),
             tracking,
+            description,
             name: branch.name,
         });
     }
@@ -1286,6 +1435,7 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
             commit: branch.commit.to_string(),
             display_name: format_branch_name(&branch),
             tracking: None,
+            description: None,
             name: branch.name,
         });
     }
@@ -1373,6 +1523,15 @@ async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
     } else if !args.copy.is_empty() {
         // `-c` honours the standalone `-f` modifier for force-overwrite.
         copy_branch_impl(&args.copy, args.force).await
+    } else if let Some(maybe_branch) = args.edit_description.clone() {
+        let branch = match maybe_branch {
+            Some(name) => name,
+            None => match Head::current().await {
+                Head::Branch(name) => name,
+                Head::Detached(_) => return Err(detached_head_branch_error()),
+            },
+        };
+        edit_description_impl(branch).await
     } else {
         collect_branch_output(args).await
     }
@@ -1485,6 +1644,13 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
                 println!("Branch '{branch}' has no upstream tracking to remove");
             }
         }
+        BranchOutput::EditDescription {
+            branch,
+            description,
+        } => match description {
+            Some(_) => println!("Updated description for branch '{branch}'"),
+            None => println!("Cleared description for branch '{branch}'"),
+        },
         BranchOutput::ShowCurrent {
             name,
             detached,
@@ -1604,6 +1770,7 @@ pub async fn list_branches(
         rename: vec![],
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         remotes: matches!(list_mode, BranchListMode::Remote),
         all: matches!(list_mode, BranchListMode::All),
         contains: commits_contains.to_vec(),

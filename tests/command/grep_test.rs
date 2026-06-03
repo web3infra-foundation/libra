@@ -156,6 +156,7 @@ async fn test_grep_tree_accepts_branch_revisions() {
             ignore_case: false,
             copy: vec![],
             force_copy: vec![],
+            edit_description: None,
             force: false,
             create_reflog: false,
         },

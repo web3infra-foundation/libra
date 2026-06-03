@@ -394,6 +394,7 @@ async fn test_branch() {
             ignore_case: false,
             copy: vec![],
             force_copy: vec![],
+            edit_description: None,
             force: false,
             create_reflog: false,
         };
@@ -438,6 +439,7 @@ async fn test_branch() {
             ignore_case: false,
             copy: vec![],
             force_copy: vec![],
+            edit_description: None,
             force: false,
             create_reflog: false,
         };
@@ -472,6 +474,7 @@ async fn test_branch() {
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     };
@@ -533,6 +536,7 @@ async fn test_create_branch_from_remote() {
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     };
@@ -596,6 +600,7 @@ async fn test_create_branch_from_remote_tracking_ref() {
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     })
@@ -813,6 +818,7 @@ async fn test_branch_rename() {
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     };
@@ -846,6 +852,7 @@ async fn test_branch_rename() {
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     };
@@ -941,6 +948,7 @@ async fn test_rename_current_branch() {
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     };
@@ -1017,6 +1025,7 @@ async fn test_rename_to_existing_branch() {
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     };
@@ -1042,6 +1051,7 @@ async fn test_rename_to_existing_branch() {
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     };
@@ -1068,6 +1078,7 @@ async fn test_rename_to_existing_branch() {
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     };
@@ -1137,6 +1148,7 @@ async fn test_list_all_branches() {
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     };
@@ -1173,6 +1185,7 @@ async fn test_list_all_branches() {
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     };
@@ -1247,6 +1260,7 @@ async fn test_branch_delete_safe() {
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     })
@@ -1306,6 +1320,7 @@ async fn test_branch_delete_safe() {
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     })
@@ -1367,6 +1382,7 @@ async fn test_branch_delete_safe() {
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     })
@@ -1460,6 +1476,7 @@ async fn test_branch_contains_commit_filter() {
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     })
@@ -2197,6 +2214,7 @@ fn unset_upstream_args(unset_upstream: Option<Option<String>>) -> BranchArgs {
         ignore_case: false,
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         force: false,
         create_reflog: false,
     }
@@ -2507,6 +2525,7 @@ fn branch_args_default() -> BranchArgs {
         rename: vec![],
         copy: vec![],
         force_copy: vec![],
+        edit_description: None,
         remotes: false,
         all: false,
         contains: vec![],
@@ -3015,4 +3034,279 @@ fn test_branch_copy_json_schema() {
     assert_cli_success(&forced, "--json force copy");
     let json = parse_json_stdout(&forced);
     assert_eq!(json["data"]["force"], true);
+}
+
+// =====================================================================
+//  Wave 4 — `--edit-description` + list description metadata
+// =====================================================================
+
+/// Write an executable stub editor script and return its path. The stub
+/// receives the temp file path as `$1`. Unix-only (the editor is invoked via
+/// `sh -c`).
+#[cfg(unix)]
+fn write_stub_editor(dir: &std::path::Path, name: &str, body: &str) -> String {
+    let path = dir.join(name);
+    fs::write(&path, body).expect("write stub editor");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod stub editor");
+    path.to_str().expect("utf8 path").to_string()
+}
+
+/// `--edit-description` with no configured editor (`EDITOR=""`, no
+/// `core.editor`) is a usage error: `LBR-CLI-002`, exit 129, and it must not
+/// hang.
+#[test]
+#[serial]
+fn test_branch_edit_description_no_editor_errors() {
+    let repo = create_committed_repo_via_cli();
+    // Target a non-locked branch so the editor check (not the locked guard) is
+    // what's exercised.
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], repo.path()),
+        "create feature",
+    );
+    let output = run_libra_command_with_stdin_and_env(
+        &["branch", "--edit-description", "feature"],
+        repo.path(),
+        "",
+        &[("EDITOR", "")],
+    );
+    assert_eq!(output.status.code(), Some(129));
+    let (_s, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// `--edit-description` refuses a locked branch (before touching the editor):
+/// `LBR-CONFLICT-002`, exit 128.
+#[test]
+#[serial]
+fn test_branch_edit_description_locked_rejected() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command_with_stdin_and_env(
+        &["branch", "--edit-description", "main"],
+        repo.path(),
+        "",
+        &[("EDITOR", "")],
+    );
+    assert_eq!(output.status.code(), Some(128));
+    let (_s, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
+}
+
+/// `--edit-description` from detached HEAD without a branch name reports
+/// `LBR-REPO-003` (exit 128).
+#[test]
+#[serial]
+fn test_branch_edit_description_detached_errors() {
+    let repo = create_committed_repo_via_cli();
+    let detach = run_libra_command(&["switch", "--detach", "HEAD"], repo.path());
+    assert!(detach.status.success(), "detach failed");
+    let output = run_libra_command_with_stdin_and_env(
+        &["branch", "--edit-description"],
+        repo.path(),
+        "",
+        &[("EDITOR", "")],
+    );
+    assert_eq!(output.status.code(), Some(128));
+    let (_s, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+}
+
+/// `--edit-description` on a non-locked branch captures the editor's content,
+/// persists it to `branch.<name>.description`, and the `--json` envelope
+/// reports `{action, branch, description}`.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_branch_edit_description_writes_and_persists() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], repo.path()),
+        "create feature",
+    );
+    let editor = write_stub_editor(
+        repo.path(),
+        "ed.sh",
+        "#!/bin/sh\nprintf 'the feature branch\\n' > \"$1\"\n",
+    );
+
+    let output = run_libra_command_with_stdin_and_env(
+        &["--json", "branch", "--edit-description", "feature"],
+        repo.path(),
+        "",
+        &[("EDITOR", editor.as_str())],
+    );
+    assert_cli_success(&output, "edit-description feature");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "branch");
+    assert_eq!(json["data"]["action"], "edit-description");
+    assert_eq!(json["data"]["branch"], "feature");
+    assert_eq!(json["data"]["description"], "the feature branch");
+
+    // Persisted: list JSON exposes the description on the feature entry.
+    let listed = run_libra_command(&["--json", "branch", "-l"], repo.path());
+    let json = parse_json_stdout(&listed);
+    let feature = json["data"]["branches"]
+        .as_array()
+        .expect("branches")
+        .iter()
+        .find(|e| e["name"] == "feature")
+        .expect("feature entry");
+    assert_eq!(feature["description"], "the feature branch");
+}
+
+/// A stub editor that exits non-zero is treated as a cancel: the description is
+/// left unchanged and the command exits 0.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_branch_edit_description_nonzero_exit_is_cancel() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], repo.path()),
+        "create feature",
+    );
+    // Pre-set a description via config.
+    assert_cli_success(
+        &run_libra_command(
+            &["config", "branch.feature.description", "original"],
+            repo.path(),
+        ),
+        "set description",
+    );
+    let editor = write_stub_editor(repo.path(), "cancel.sh", "#!/bin/sh\nexit 1\n");
+
+    let output = run_libra_command_with_stdin_and_env(
+        &["branch", "--edit-description", "feature"],
+        repo.path(),
+        "",
+        &[("EDITOR", editor.as_str())],
+    );
+    assert_cli_success(&output, "edit-description cancel exits 0");
+
+    // Description unchanged.
+    let listed = run_libra_command(&["--json", "branch", "-l"], repo.path());
+    let json = parse_json_stdout(&listed);
+    let feature = json["data"]["branches"]
+        .as_array()
+        .expect("branches")
+        .iter()
+        .find(|e| e["name"] == "feature")
+        .expect("feature entry");
+    assert_eq!(
+        feature["description"], "original",
+        "cancel must not change description"
+    );
+}
+
+/// Editing to an empty description clears `branch.<name>.description`; the list
+/// entry then omits the field (backward compatible).
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_branch_edit_description_empty_clears() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], repo.path()),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["config", "branch.feature.description", "to be cleared"],
+            repo.path(),
+        ),
+        "set description",
+    );
+    let editor = write_stub_editor(repo.path(), "empty.sh", "#!/bin/sh\n: > \"$1\"\n");
+
+    let output = run_libra_command_with_stdin_and_env(
+        &["--json", "branch", "--edit-description", "feature"],
+        repo.path(),
+        "",
+        &[("EDITOR", editor.as_str())],
+    );
+    assert_cli_success(&output, "edit-description empty clears");
+    let json = parse_json_stdout(&output);
+    // Cleared description is omitted from the JSON (skip_serializing_if).
+    assert!(
+        json["data"].get("description").is_none(),
+        "cleared description must be omitted from JSON"
+    );
+
+    let listed = run_libra_command(&["--json", "branch", "-l"], repo.path());
+    let json = parse_json_stdout(&listed);
+    let feature = json["data"]["branches"]
+        .as_array()
+        .expect("branches")
+        .iter()
+        .find(|e| e["name"] == "feature")
+        .expect("feature entry");
+    assert!(
+        feature.get("description").is_none(),
+        "list entry must omit cleared description"
+    );
+}
+
+/// UTF-8 (multi-byte) descriptions round-trip losslessly through the editor.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_branch_edit_description_utf8_roundtrip() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], repo.path()),
+        "create feature",
+    );
+    let editor = write_stub_editor(
+        repo.path(),
+        "utf8.sh",
+        "#!/bin/sh\nprintf '%s\\n' '\u{63cf}\u{8ff0} \u{1f33f}' > \"$1\"\n",
+    );
+
+    let output = run_libra_command_with_stdin_and_env(
+        &["--json", "branch", "--edit-description", "feature"],
+        repo.path(),
+        "",
+        &[("EDITOR", editor.as_str())],
+    );
+    assert_cli_success(&output, "edit-description utf8");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["description"], "\u{63cf}\u{8ff0} \u{1f33f}");
+}
+
+/// Setting a description via config surfaces it in `branch -l --json`; branches
+/// without a description omit the field (backward compatible).
+#[test]
+#[serial]
+fn test_branch_list_json_exposes_description() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], repo.path()),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["config", "branch.feature.description", "documented branch"],
+            repo.path(),
+        ),
+        "set description",
+    );
+
+    let listed = run_libra_command(&["--json", "branch", "-l"], repo.path());
+    assert_cli_success(&listed, "branch -l --json");
+    let json = parse_json_stdout(&listed);
+    let branches = json["data"]["branches"].as_array().expect("branches");
+    let feature = branches
+        .iter()
+        .find(|e| e["name"] == "feature")
+        .expect("feature entry");
+    assert_eq!(feature["description"], "documented branch");
+    // main has no description -> field omitted.
+    let main = branches
+        .iter()
+        .find(|e| e["name"] == "main")
+        .expect("main entry");
+    assert!(
+        main.get("description").is_none(),
+        "branch without a description must omit the field"
+    );
 }

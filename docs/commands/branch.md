@@ -16,6 +16,7 @@ libra branch -m [<old>] <new>
 libra branch (-c | -C) [<old>] <new>
 libra branch -u <upstream>
 libra branch --unset-upstream [<branch>]
+libra branch --edit-description [<branch>]
 libra branch --show-current
 ```
 
@@ -38,6 +39,7 @@ The `--contains` and `--no-contains` filters (aliased as `--with` and `--without
 | `-d` | `--delete` | `<name>` | Safe-delete a branch (must be fully merged) |
 | `-u` | `--set-upstream-to` | `<upstream>` | Set upstream tracking for the current branch |
 | | `--unset-upstream` | `[branch]` | Remove upstream tracking (the current branch when no name is given) |
+| | `--edit-description` | `[branch]` | Edit a branch's description in `$EDITOR`/`core.editor` (the current branch when no name is given) |
 | | `--show-current` | | Print the current branch name or detached HEAD state |
 | `-m` | `--move` | `<old> <new>` or `<new>` | Rename a branch; with one argument renames the current branch |
 | `-c` | `--copy` | `<old> <new>` or `<new>` | Copy a branch (and its tracking/description config); with one argument copies the current branch |
@@ -116,6 +118,12 @@ libra branch --unset-upstream
 
 # Remove upstream tracking for a named branch
 libra branch --unset-upstream feature
+
+# Edit the current branch's description in your editor
+libra branch --edit-description
+
+# Edit a named branch's description
+libra branch --edit-description feature
 
 # Show current branch name
 libra branch --show-current
@@ -217,6 +225,24 @@ Copy action (`force` is `true` for `-C`, or `-c` combined with `-f`):
 }
 ```
 
+Edit-description action (`description` is omitted when the description is cleared):
+
+```json
+{
+  "ok": true,
+  "command": "branch",
+  "data": {
+    "action": "edit-description",
+    "branch": "feature",
+    "description": "the feature branch"
+  }
+}
+```
+
+The editor honors `core.editor` then `$EDITOR`; with no editor configured the
+command fails with `LBR-CLI-002` (exit 129) rather than hanging. A non-zero
+editor exit is treated as a cancel (description unchanged, exit 0).
+
 Show-current action:
 
 ```json
@@ -241,8 +267,9 @@ Supported actions:
 - `copy`: `src`, `dst`, `commit`, `force`
 - `set-upstream`: `branch`, `upstream`
 - `unset-upstream`: `branch`, `had_upstream`
+- `edit-description`: `branch`, `description` (omitted when cleared)
 - `show-current`: `name`, `detached`, `commit`
-- `list` entries optionally include `tracking`: `{ remote, merge }`
+- `list` entries optionally include `tracking`: `{ remote, merge }` and `description`
 
 ## Design Rationale
 
