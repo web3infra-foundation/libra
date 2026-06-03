@@ -1183,3 +1183,247 @@ async fn z_modifier_without_batch_rejected() {
     let (_human, report) = parse_cli_error_stderr(&out.stderr);
     assert_eq!(report.error_code, "LBR-CLI-002");
 }
+
+// ════════════════════════════════════════════════════════════════════════
+//  Batch 1 — `--batch` full content output + `--buffer`
+// ════════════════════════════════════════════════════════════════════════
+
+/// Stage and commit `bytes` (possibly non-UTF-8) under `filename`.
+fn commit_bytes(temp_path: &std::path::Path, filename: &str, bytes: &[u8]) {
+    std::fs::write(temp_path.join(filename), bytes).expect("write file");
+    let add = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["add", filename])
+        .output()
+        .expect("add");
+    assert!(
+        add.status.success(),
+        "add: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let commit = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["commit", "-m", "binary", "--no-verify"])
+        .output()
+        .expect("commit");
+    assert!(
+        commit.status.success(),
+        "commit: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+}
+
+/// `--batch` emits `<oid> SP blob SP <size> LF <content> LF` byte-for-byte.
+#[tokio::test]
+async fn batch_output_format_exact() {
+    let repo = batch_repo();
+    let blob = head_first_blob_hash(repo.path());
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch"],
+        format!("{blob}\n").as_bytes(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let expected = format!("{blob} blob 12\nhello world\n\n");
+    assert_eq!(out.stdout, expected.as_bytes(), "exact batch output bytes");
+}
+
+/// `--batch -Z` terminates both the metadata line and the content block with NUL.
+#[tokio::test]
+async fn batch_output_z_uses_nul_record_sep() {
+    let repo = batch_repo();
+    let blob = head_first_blob_hash(repo.path());
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch", "-Z"],
+        format!("{blob}\0").as_bytes(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut expected = format!("{blob} blob 12").into_bytes();
+    expected.push(0);
+    expected.extend_from_slice(b"hello world\n");
+    expected.push(0);
+    assert_eq!(out.stdout, expected, "NUL-terminated records under -Z");
+}
+
+/// Binary (non-UTF-8) blob content is written through verbatim.
+#[tokio::test]
+async fn batch_binary_blob_passthrough() {
+    let repo = init_temp_repo();
+    configure_user_identity(repo.path());
+    let payload: &[u8] = &[0xFF, 0xFE, 0x00, 0x01, 0x80, 0x7F, 0x0A, 0xC0];
+    commit_bytes(repo.path(), "bin.dat", payload);
+    let blob = head_first_blob_hash(repo.path());
+
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch"],
+        format!("{blob}\n").as_bytes(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // stdout = "<oid> blob <len>\n" + <payload> + "\n"
+    let nl = out
+        .stdout
+        .iter()
+        .position(|&b| b == b'\n')
+        .expect("metadata terminator");
+    let content = &out.stdout[nl + 1..out.stdout.len() - 1];
+    assert_eq!(content, payload, "binary content preserved byte-for-byte");
+}
+
+/// Multiple input tokens produce records in input order.
+#[tokio::test]
+async fn batch_multiple_objects_in_order() {
+    let repo = batch_repo();
+    let blob = head_first_blob_hash(repo.path());
+    let commit = head_commit_hash(repo.path());
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-check"],
+        format!("{blob}\n{commit}\n").as_bytes(),
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines[0].starts_with(&blob),
+        "first record is the blob: {stdout}"
+    );
+    assert!(lines[0].contains(" blob "));
+    assert!(
+        lines[1].starts_with(&commit),
+        "second record is the commit: {stdout}"
+    );
+    assert!(lines[1].contains(" commit "));
+}
+
+/// A missing object in `--batch` prints only `<object> SP missing LF` with no
+/// trailing content block.
+#[tokio::test]
+async fn batch_missing_no_trailing_content() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--batch"], b"NOPE\n");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        out.stdout, b"NOPE missing\n",
+        "missing has no content block"
+    );
+}
+
+/// An empty blob (size 0) emits the metadata line then a 0-byte content block.
+#[tokio::test]
+async fn batch_empty_blob_object() {
+    let repo = init_temp_repo();
+    configure_user_identity(repo.path());
+    commit_bytes(repo.path(), "empty.txt", b"");
+    let blob = head_first_blob_hash(repo.path());
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch"],
+        format!("{blob}\n").as_bytes(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let expected = format!("{blob} blob 0\n\n");
+    assert_eq!(
+        out.stdout,
+        expected.as_bytes(),
+        "empty blob: meta + empty content"
+    );
+}
+
+/// A corrupt (undecodable) object surfaces an I/O read failure (LBR-IO-001, 128).
+#[tokio::test]
+async fn batch_read_failure_maps_io_error() {
+    let repo = batch_repo();
+    let blob = head_first_blob_hash(repo.path());
+    // Overwrite the loose object with bytes that are not a valid zlib stream.
+    let object_path = loose_object_path(repo.path(), &blob);
+    std::fs::write(&object_path, b"not a valid zlib object stream at all").expect("corrupt object");
+
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch"],
+        format!("{blob}\n").as_bytes(),
+    );
+    assert_eq!(out.status.code(), Some(128), "corrupt object read is fatal");
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-IO-001");
+}
+
+/// A bare `--buffer` without a batch mode is rejected (LBR-CLI-002, 129).
+#[tokio::test]
+async fn buffer_without_batch_rejected() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--buffer"], b"");
+    assert_eq!(out.status.code(), Some(129));
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// Drive a `--batch[ --buffer]` child with stdin held open after one token, and
+/// report whether the first record reaches stdout *before* EOF. Without
+/// `--buffer` the per-object flush makes it visible; with `--buffer` it stays
+/// buffered until EOF.
+fn batch_first_record_visible_before_eof(extra: &[&str]) -> bool {
+    use std::{process::Stdio, sync::mpsc, time::Duration};
+    let repo = batch_repo();
+    let mut argv = vec!["cat-file", "--batch"];
+    argv.extend_from_slice(extra);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(repo.path())
+        .args(&argv)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn cat-file");
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin.write_all(b"HEAD\n").expect("write token");
+    // Intentionally keep `stdin` open so the child does not see EOF yet.
+    let mut stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut buf = [0u8; 64];
+        let n = stdout.read(&mut buf).unwrap_or(0);
+        let _ = tx.send(n);
+    });
+    let visible = matches!(rx.recv_timeout(Duration::from_secs(3)), Ok(n) if n > 0);
+    drop(stdin); // let the child reach EOF and exit
+    let _ = child.wait();
+    let _ = reader.join();
+    visible
+}
+
+/// Without `--buffer`, each object's record is flushed immediately.
+#[tokio::test]
+async fn batch_no_buffer_flushes_per_object() {
+    assert!(
+        batch_first_record_visible_before_eof(&[]),
+        "no --buffer should flush the first record before EOF"
+    );
+}
+
+/// With `--buffer`, output is coalesced and not flushed until EOF.
+#[tokio::test]
+async fn batch_buffer_flag_coalesces_writes() {
+    assert!(
+        !batch_first_record_visible_before_eof(&["--buffer"]),
+        "--buffer should defer output until EOF"
+    );
+}

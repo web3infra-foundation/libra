@@ -96,6 +96,17 @@ pub struct CatFileArgs {
     pub check_exist: bool,
 
     // ── Batch modes (read objects from stdin) ───────────────────────────
+    /// Print metadata and raw content for each object read from stdin. Optional =<format>.
+    #[clap(
+        long = "batch",
+        group = "mode",
+        value_name = "FORMAT",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = DEFAULT_BATCH_FORMAT,
+    )]
+    pub batch: Option<String>,
+
     /// Print object metadata for each object read from stdin. Optional =<format> (defaults to "%(objectname) %(objecttype) %(objectsize)").
     #[clap(
         long = "batch-check",
@@ -111,6 +122,10 @@ pub struct CatFileArgs {
     /// Use NUL ('\0') instead of newline to separate/terminate batch input and output records.
     #[clap(short = 'Z')]
     pub nul: bool,
+
+    /// Buffer batch output and flush once at EOF, instead of after every object.
+    #[clap(long = "buffer")]
+    pub buffer: bool,
 
     // ── Explicitly unsupported (rejected) ───────────────────────────────
     /// Unsupported: Libra has no textconv driver. Rejected with LBR-UNSUPPORTED-001.
@@ -1339,12 +1354,12 @@ async fn ai_show_type(uuid: &str) {
 /// to [`run_batch`] instead of the legacy single-object path. (Modifier-only
 /// invocations are caught and reported inside `run_batch`.)
 fn uses_batch_surface(args: &CatFileArgs) -> bool {
-    args.batch_check.is_some() || args.nul
+    args.batch.is_some() || args.batch_check.is_some() || args.nul || args.buffer
 }
 
 /// Whether a real batch *mode* (not just a modifier) is selected.
 fn batch_mode_selected(args: &CatFileArgs) -> bool {
-    args.batch_check.is_some()
+    args.batch.is_some() || args.batch_check.is_some()
 }
 
 /// Per-line resolution outcome for a batch token.
@@ -1365,10 +1380,16 @@ async fn run_batch(args: &CatFileArgs, output: &OutputConfig) -> CliResult<()> {
         );
     }
 
-    // Modifiers (`-Z`, and later `--buffer` / `--unordered` / `--follow-symlinks`
+    // Modifiers (`-Z`, `--buffer`, and later `--unordered` / `--follow-symlinks`
     // / `--batch-all-objects`) only make sense alongside a batch mode.
     if !batch_mode_selected(args) {
-        let modifier = if args.nul { "-Z" } else { "a batch modifier" };
+        let modifier = if args.nul {
+            "-Z"
+        } else if args.buffer {
+            "--buffer"
+        } else {
+            "a batch modifier"
+        };
         return Err(CliError::command_usage(format!(
             "{modifier} requires --batch or --batch-check"
         ))
@@ -1385,10 +1406,29 @@ async fn run_batch(args: &CatFileArgs, output: &OutputConfig) -> CliResult<()> {
     }
 
     let storage = ClientStorage::init(path::objects());
+    if let Some(format) = args.batch.as_deref() {
+        return run_batch_stream(format, args.nul, args.buffer, BatchKind::Content, &storage).await;
+    }
     if let Some(format) = args.batch_check.as_deref() {
-        return run_batch_check(format, args.nul, &storage).await;
+        return run_batch_stream(
+            format,
+            args.nul,
+            args.buffer,
+            BatchKind::CheckOnly,
+            &storage,
+        )
+        .await;
     }
     Ok(())
+}
+
+/// Whether a batch run emits object content after each metadata line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BatchKind {
+    /// `--batch-check`: metadata line only.
+    CheckOnly,
+    /// `--batch`: metadata line followed by the raw object payload.
+    Content,
 }
 
 /// Resolve one batch input token into a three-state outcome, distinguishing a
@@ -1529,9 +1569,32 @@ fn write_record(w: &mut impl std::io::Write, bytes: &[u8], sep: u8) -> CliResult
     }
 }
 
-/// `--batch-check`: stream object metadata for each stdin token.
-async fn run_batch_check(format: &str, nul: bool, storage: &ClientStorage) -> CliResult<()> {
-    use std::io::{BufReader, BufWriter, Write};
+/// Flush `writer`, mapping a closed downstream pipe to a quiet success.
+/// Returns `Ok(false)` on `BrokenPipe` (caller should stop with exit 0).
+fn flush_batch_writer(writer: &mut impl std::io::Write) -> CliResult<bool> {
+    match writer.flush() {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
+        Err(e) => Err(
+            CliError::fatal(format!("failed to flush batch output: {e}"))
+                .with_stable_code(StableErrorCode::IoWriteFailed),
+        ),
+    }
+}
+
+/// Stream the batch protocol over stdin: one record per token. `kind` selects
+/// `--batch-check` (metadata only) vs `--batch` (metadata + raw payload).
+/// Without `--buffer`, output is flushed after every object so interactive
+/// drivers see each record immediately. A closed downstream pipe stops the
+/// stream quietly (exit 0); no path panics.
+async fn run_batch_stream(
+    format: &str,
+    nul: bool,
+    buffer: bool,
+    kind: BatchKind,
+    storage: &ClientStorage,
+) -> CliResult<()> {
+    use std::io::{BufReader, BufWriter};
 
     let sep = if nul { b'\0' } else { b'\n' };
 
@@ -1549,37 +1612,52 @@ async fn run_batch_check(format: &str, nul: bool, storage: &ClientStorage) -> Cl
         if token.is_empty() {
             continue;
         }
-        let line = match resolve_batch_token(&token, storage).await? {
+        match resolve_batch_token(&token, storage).await? {
             BatchResolution::Resolved(hash) => {
+                // The decompressed object body is both the size source and, for
+                // `--batch`, the raw payload written verbatim (binary tree/commit
+                // encodings included — never the `-p` pretty-print rendering).
+                // Read it first so an unreadable/corrupt object surfaces as an
+                // I/O failure before the (separate) type lookup.
+                let body = storage.get(&hash).map_err(|e| {
+                    CliError::fatal(format!("could not read object {hash}: {e}"))
+                        .with_stable_code(StableErrorCode::IoReadFailed)
+                })?;
                 let obj_type = storage.get_object_type(&hash).map_err(|e| {
                     CliError::fatal(format!("could not resolve object type for {hash}: {e}"))
                         .with_stable_code(StableErrorCode::RepoCorrupt)
                 })?;
-                let size = storage
-                    .get(&hash)
-                    .map_err(|e| {
-                        CliError::fatal(format!("could not read object {hash}: {e}"))
-                            .with_stable_code(StableErrorCode::IoReadFailed)
-                    })?
-                    .len();
-                render_batch_format(format, &hash.to_string(), &obj_type.to_string(), size)?
+                let meta = render_batch_format(
+                    format,
+                    &hash.to_string(),
+                    &obj_type.to_string(),
+                    body.len(),
+                )?;
+                if !write_record(&mut writer, meta.as_bytes(), sep)? {
+                    return Ok(());
+                }
+                if kind == BatchKind::Content && !write_record(&mut writer, &body, sep)? {
+                    return Ok(());
+                }
             }
-            BatchResolution::Missing => format!("{token} missing"),
-            BatchResolution::Ambiguous => format!("{token} ambiguous"),
-        };
-        if !write_record(&mut writer, line.as_bytes(), sep)? {
+            BatchResolution::Missing => {
+                if !write_record(&mut writer, format!("{token} missing").as_bytes(), sep)? {
+                    return Ok(());
+                }
+            }
+            BatchResolution::Ambiguous => {
+                if !write_record(&mut writer, format!("{token} ambiguous").as_bytes(), sep)? {
+                    return Ok(());
+                }
+            }
+        }
+        if !buffer && !flush_batch_writer(&mut writer)? {
             return Ok(()); // downstream closed the pipe
         }
     }
 
-    match writer.flush() {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        Err(e) => Err(
-            CliError::fatal(format!("failed to flush batch output: {e}"))
-                .with_stable_code(StableErrorCode::IoWriteFailed),
-        ),
-    }
+    flush_batch_writer(&mut writer)?;
+    Ok(())
 }
 
 #[cfg(test)]
