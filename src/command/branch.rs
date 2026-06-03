@@ -47,6 +47,7 @@ use crate::{
         config::ConfigKv,
         db::get_db_conn_instance,
         head::Head,
+        reflog::Reflog,
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -70,10 +71,14 @@ const BRANCH_AFTER_HELP: &str = "\
 NOTES:
     Libra's global --quiet suppresses the branch listing itself.
     This differs from `git branch --quiet`, which still prints the primary list.
+    --create-reflog is accepted for Git compatibility but has no effect:
+    Libra `branch` does not maintain per-branch reflogs.
 
 EXAMPLES:
     libra branch feature-x                Create a branch from HEAD
     libra branch feature-x main           Create a branch from another branch
+    libra branch -c old new               Copy a branch (with its tracking config)
+    libra branch -C old existing          Force-copy, overwriting the destination
     libra branch -d topic                 Delete a fully merged branch
     libra branch -D topic                 Force-delete a branch
     libra branch -u origin/main           Set upstream for the current branch
@@ -122,6 +127,15 @@ pub enum BranchOutput {
     /// state references.
     #[serde(rename = "rename")]
     Rename { old_name: String, new_name: String },
+    /// `-c` / `-C` succeeded. `force` is true when the copy overwrote an
+    /// existing destination (`-C`, or `-c -f`).
+    #[serde(rename = "copy")]
+    Copy {
+        src: String,
+        dst: String,
+        commit: String,
+        force: bool,
+    },
     /// `--set-upstream-to` succeeded. `upstream` is in `remote/branch` form.
     #[serde(rename = "set-upstream")]
     SetUpstream { branch: String, upstream: String },
@@ -146,6 +160,7 @@ impl BranchOutput {
             Self::Create { .. }
                 | Self::Delete { .. }
                 | Self::Rename { .. }
+                | Self::Copy { .. }
                 | Self::SetUpstream { .. }
                 | Self::UnsetUpstream { .. }
         )
@@ -229,6 +244,14 @@ pub struct BranchArgs {
     #[clap(short = 'm', long = "move", group = "action", value_names = ["OLD_BRANCH", "NEW_BRANCH"], num_args = 1..=2)]
     pub rename: Vec<String>,
 
+    /// Copy a branch (and its tracking/description config). With one argument copies the current branch to NEW_BRANCH; with two copies OLD_BRANCH to NEW_BRANCH.
+    #[clap(short = 'c', long = "copy", group = "action", value_names = ["OLD_BRANCH", "NEW_BRANCH"], num_args = 1..=2)]
+    pub copy: Vec<String>,
+
+    /// Copy a branch, overwriting NEW_BRANCH if it already exists (force copy).
+    #[clap(short = 'C', group = "action", value_names = ["OLD_BRANCH", "NEW_BRANCH"], num_args = 1..=2)]
+    pub force_copy: Vec<String>,
+
     /// show remote branches
     #[clap(short, long, group = "query")]
     // TODO limit to required `list` option, even in default
@@ -261,6 +284,14 @@ pub struct BranchArgs {
     /// Sort branch names case-insensitively in list output.
     #[clap(long = "ignore-case", group = "query", action = clap::ArgAction::SetTrue)]
     pub ignore_case: bool,
+
+    /// Allow create/copy to overwrite an existing branch by resetting its tip (locked branches are still refused; ignored by other actions).
+    #[clap(short = 'f', long = "force", action = clap::ArgAction::SetTrue)]
+    pub force: bool,
+
+    /// Accepted for Git compatibility; Libra `branch` does not maintain per-branch reflogs, so this flag has no effect.
+    #[clap(long = "create-reflog", action = clap::ArgAction::SetTrue)]
+    pub create_reflog: bool,
 }
 /// Fire-and-forget entry: prints the rendered error to stderr but does not
 /// signal exit code.
@@ -752,6 +783,81 @@ async fn load_remote_branches() -> Result<Vec<Branch>, BranchError> {
     load_remote_branches_with_conn(&db).await
 }
 
+/// The reflog ref-name for a local branch. Libra `branch` does not currently
+/// write per-branch reflogs, so this only matters for the conditional reflog
+/// migration in copy/rename (migrate rows if any exist under the source ref).
+fn branch_reflog_ref(name: &str) -> String {
+    format!("refs/heads/{name}")
+}
+
+/// Map a reflog-layer error onto the branch domain (fatal, repo-state class).
+fn reflog_migration_error(error: impl ToString) -> BranchError {
+    BranchError::DelegatedCli(
+        CliError::fatal(format!(
+            "failed to migrate branch reflog: {}",
+            error.to_string()
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid),
+    )
+}
+
+/// Map a transaction begin/commit failure onto the branch domain.
+fn branch_txn_error(stage: &str, error: impl ToString) -> BranchError {
+    BranchError::DelegatedCli(
+        CliError::fatal(format!(
+            "failed to {stage} branch transaction: {}",
+            error.to_string()
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid),
+    )
+}
+
+/// Migrate the tracking/description config keys from `src` to `dst` within the
+/// caller's transaction.
+///
+/// For each of `branch.<name>.{remote,merge,description}`:
+/// - if `src` has the key, it is written to `dst` (preserving the encrypted
+///   flag) and, when `delete_source` is set (rename), removed from `src`;
+/// - if `src` lacks the key, `dst`'s key is cleared so an overwritten copy
+///   target does not retain a previous occupant's stale value.
+///
+/// The net effect is that `dst`'s tracking/description config exactly mirrors
+/// `src`'s after the call.
+async fn migrate_branch_config_with_conn<C: ConnectionTrait>(
+    db: &C,
+    src: &str,
+    dst: &str,
+    delete_source: bool,
+) -> Result<(), BranchError> {
+    for key in ["remote", "merge", "description"] {
+        let src_key = format!("branch.{src}.{key}");
+        let dst_key = format!("branch.{dst}.{key}");
+        match ConfigKv::get_with_conn(db, &src_key)
+            .await
+            .map_err(|e| branch_config_read_error(format!("config '{src_key}'"), e))?
+        {
+            Some(entry) => {
+                ConfigKv::set_with_conn(db, &dst_key, &entry.value, entry.encrypted)
+                    .await
+                    .map_err(|e| branch_config_write_error(&dst_key, e))?;
+                if delete_source {
+                    ConfigKv::unset_all_with_conn(db, &src_key)
+                        .await
+                        .map_err(|e| branch_config_write_error(&src_key, e))?;
+                }
+            }
+            None => {
+                // Mirror absence onto dst (clears any stale value left by a
+                // prior occupant when overwriting an existing copy target).
+                ConfigKv::unset_all_with_conn(db, &dst_key)
+                    .await
+                    .map_err(|e| branch_config_write_error(&dst_key, e))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Body of `libra branch <new> [base]`.
 ///
 /// Functional scope:
@@ -768,20 +874,24 @@ async fn load_remote_branches() -> Result<Vec<Branch>, BranchError> {
 async fn create_branch_impl(
     new_branch: String,
     branch_or_commit: Option<String>,
+    force: bool,
 ) -> Result<BranchOutput, BranchError> {
     tracing::debug!("create branch: {} from {:?}", new_branch, branch_or_commit);
 
     if !is_valid_git_branch_name(&new_branch) {
         return Err(BranchError::InvalidName(new_branch));
     }
+    // Locked targets are refused even with `-f` — `--force` only relaxes the
+    // "already exists" guard, never the locked-branch protection.
     if branch::is_locked_branch(&new_branch) {
         return Err(BranchError::Locked(new_branch));
     }
 
-    if Branch::find_branch_result(&new_branch, None)
-        .await
-        .map_err(map_branch_store_error)?
-        .is_some()
+    if !force
+        && Branch::find_branch_result(&new_branch, None)
+            .await
+            .map_err(map_branch_store_error)?
+            .is_some()
     {
         return Err(BranchError::AlreadyExists(new_branch));
     }
@@ -911,6 +1021,9 @@ async fn rename_branch_impl(args: &[String]) -> Result<BranchOutput, BranchError
         _ => return Err(BranchError::RenameTooManyArgs),
     };
 
+    // All read-only validation happens before the transaction opens (fail-fast,
+    // no partial state). `is_valid_git_branch_name` already enforces the
+    // 255-byte cap added in Wave 1.
     if !is_valid_git_branch_name(&new_name) {
         return Err(BranchError::InvalidName(new_name));
     }
@@ -931,24 +1044,140 @@ async fn rename_branch_impl(args: &[String]) -> Result<BranchOutput, BranchError
     }
 
     let commit_hash = old_branch.commit.to_string();
-    Branch::update_branch(&new_name, &commit_hash, None)
-        .await
-        .map_err(|e| BranchError::CreateFailed {
-            branch: new_name.clone(),
-            detail: e.to_string(),
-        })?;
+    let renames_current = matches!(Head::current().await, Head::Branch(name) if name == old_name);
 
-    if let Head::Branch(name) = Head::current().await
-        && name == old_name
-    {
-        Head::update(Head::Branch(new_name.clone()), None).await;
+    // Ref write, HEAD move, config migration, reflog move, and old-row delete
+    // all run in one transaction so a mid-way failure leaves no half-rename.
+    let db = get_db_conn_instance().await;
+    let txn = db.begin().await.map_err(|e| branch_txn_error("begin", e))?;
+    let result: Result<(), BranchError> = async {
+        Branch::update_branch_with_conn(&txn, &new_name, &commit_hash, None)
+            .await
+            .map_err(|e| BranchError::CreateFailed {
+                branch: new_name.clone(),
+                detail: e.to_string(),
+            })?;
+        if renames_current {
+            Head::update_result_with_conn(&txn, Head::Branch(new_name.clone()), None)
+                .await
+                .map_err(map_branch_store_error)?;
+        }
+        migrate_branch_config_with_conn(&txn, &old_name, &new_name, true).await?;
+        // Move the reflog: copy old -> new, then drop the old ref's rows so no
+        // dangling reflog remains (no-op when the branch has no reflog).
+        Reflog::copy_entries_with_conn(
+            &txn,
+            &branch_reflog_ref(&old_name),
+            &branch_reflog_ref(&new_name),
+        )
+        .await
+        .map_err(reflog_migration_error)?;
+        Reflog::delete_entries_with_conn(&txn, &branch_reflog_ref(&old_name))
+            .await
+            .map_err(reflog_migration_error)?;
+        Branch::delete_branch_result_with_conn(&txn, &old_name, None)
+            .await
+            .map_err(map_branch_store_error)?;
+        Ok(())
+    }
+    .await;
+    match result {
+        Ok(()) => txn
+            .commit()
+            .await
+            .map_err(|e| branch_txn_error("commit", e))?,
+        Err(error) => {
+            let _ = txn.rollback().await;
+            return Err(error);
+        }
     }
 
-    Branch::delete_branch_result(&old_name, None)
-        .await
-        .map_err(map_branch_store_error)?;
-
     Ok(BranchOutput::Rename { old_name, new_name })
+}
+
+/// Body of `libra branch -c [old] new` / `-C [old] new`.
+///
+/// Functional scope:
+/// - One argument: copy the current branch to NEW_BRANCH; two arguments:
+///   copy OLD_BRANCH to NEW_BRANCH.
+/// - Creates the destination pointing at the source tip and mirrors the
+///   source's `branch.<src>.{remote,merge,description}` config onto the
+///   destination, plus a conditional reflog copy.
+/// - `force` (from `-C`, or `-c` with `-f`) permits overwriting an existing
+///   destination by resetting it; a locked destination is always refused.
+///
+/// Boundary conditions:
+/// - The source MAY be a locked branch (copy-from is read-only); the
+///   destination may NOT be locked.
+/// - Ref write, config mirror, and reflog copy all run in one transaction.
+async fn copy_branch_impl(args: &[String], force: bool) -> Result<BranchOutput, BranchError> {
+    let (src, dst) = match args.len() {
+        1 => match Head::current().await {
+            Head::Branch(name) => (name, args[0].clone()),
+            Head::Detached(_) => return Err(detached_head_branch_error()),
+        },
+        2 => (args[0].clone(), args[1].clone()),
+        _ => return Err(BranchError::RenameTooManyArgs),
+    };
+
+    if !is_valid_git_branch_name(&dst) {
+        return Err(BranchError::InvalidName(dst));
+    }
+    // The copy TARGET is a write target, so a locked destination is refused
+    // even with `-f`/`-C`. The SOURCE may be locked — copy-from is read-only.
+    if branch::is_locked_branch(&dst) {
+        return Err(BranchError::Locked(dst));
+    }
+
+    let src_branch = require_existing_local_branch(&src).await?;
+    if !force
+        && Branch::find_branch_result(&dst, None)
+            .await
+            .map_err(map_branch_store_error)?
+            .is_some()
+    {
+        return Err(BranchError::AlreadyExists(dst));
+    }
+    let commit_hash = src_branch.commit.to_string();
+
+    let db = get_db_conn_instance().await;
+    let txn = db.begin().await.map_err(|e| branch_txn_error("begin", e))?;
+    let result: Result<(), BranchError> = async {
+        Branch::update_branch_with_conn(&txn, &dst, &commit_hash, None)
+            .await
+            .map_err(|e| BranchError::CreateFailed {
+                branch: dst.clone(),
+                detail: e.to_string(),
+            })?;
+        migrate_branch_config_with_conn(&txn, &src, &dst, false).await?;
+        // Make the destination reflog mirror the source: clear any rows left by
+        // an overwritten target, then copy the source's (no-op if empty).
+        Reflog::delete_entries_with_conn(&txn, &branch_reflog_ref(&dst))
+            .await
+            .map_err(reflog_migration_error)?;
+        Reflog::copy_entries_with_conn(&txn, &branch_reflog_ref(&src), &branch_reflog_ref(&dst))
+            .await
+            .map_err(reflog_migration_error)?;
+        Ok(())
+    }
+    .await;
+    match result {
+        Ok(()) => txn
+            .commit()
+            .await
+            .map_err(|e| branch_txn_error("commit", e))?,
+        Err(error) => {
+            let _ = txn.rollback().await;
+            return Err(error);
+        }
+    }
+
+    Ok(BranchOutput::Copy {
+        src,
+        dst,
+        commit: commit_hash,
+        force,
+    })
 }
 
 /// Body of `libra branch -l` / `-r` / `-a` (with optional commit filters).
@@ -1090,7 +1319,7 @@ async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
     require_repo().map_err(|_| BranchError::NotInRepo)?;
 
     if let Some(new_branch) = args.new_branch.clone() {
-        create_branch_impl(new_branch, args.commit_hash.clone()).await
+        create_branch_impl(new_branch, args.commit_hash.clone(), args.force).await
     } else if let Some(branch_to_delete) = args.delete.clone() {
         delete_branch_impl(branch_to_delete, true).await
     } else if let Some(branch_to_delete) = args.delete_safe.clone() {
@@ -1138,6 +1367,12 @@ async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
         })
     } else if !args.rename.is_empty() {
         rename_branch_impl(&args.rename).await
+    } else if !args.force_copy.is_empty() {
+        // `-C` is copy + force-overwrite.
+        copy_branch_impl(&args.force_copy, true).await
+    } else if !args.copy.is_empty() {
+        // `-c` honours the standalone `-f` modifier for force-overwrite.
+        copy_branch_impl(&args.copy, args.force).await
     } else {
         collect_branch_output(args).await
     }
@@ -1225,6 +1460,18 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
         BranchOutput::Rename { old_name, new_name } => {
             println!("Renamed branch '{old_name}' to '{new_name}'");
         }
+        BranchOutput::Copy {
+            src,
+            dst,
+            commit,
+            force,
+        } => {
+            let overwrite = if *force { " (overwrote existing)" } else { "" };
+            println!(
+                "Copied branch '{src}' to '{dst}' at {}{overwrite}",
+                short_display_hash(commit)
+            );
+        }
         BranchOutput::SetUpstream { branch, upstream } => {
             println!("Branch '{branch}' set up to track remote branch '{upstream}'");
         }
@@ -1303,7 +1550,7 @@ pub async fn create_branch_safe(
     new_branch: String,
     branch_or_commit: Option<String>,
 ) -> CliResult<()> {
-    create_branch_impl(new_branch, branch_or_commit)
+    create_branch_impl(new_branch, branch_or_commit, false)
         .await
         .map(|_| ())
         .map_err(CliError::from)?;
@@ -1355,6 +1602,8 @@ pub async fn list_branches(
         unset_upstream: None,
         show_current: false,
         rename: vec![],
+        copy: vec![],
+        force_copy: vec![],
         remotes: matches!(list_mode, BranchListMode::Remote),
         all: matches!(list_mode, BranchListMode::All),
         contains: commits_contains.to_vec(),
@@ -1363,6 +1612,8 @@ pub async fn list_branches(
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        force: false,
+        create_reflog: false,
     };
     let result = collect_branch_output(&args).await.map_err(CliError::from)?;
     render_branch_output(&result, &OutputConfig::default())

@@ -639,6 +639,10 @@ async fn setup_standard_repo(
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     })
     .await;
 
@@ -688,6 +692,10 @@ async fn setup_standard_repo(
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     })
     .await;
 
@@ -737,6 +745,10 @@ async fn setup_standard_repo(
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     })
     .await;
 
@@ -786,6 +798,10 @@ async fn setup_standard_repo(
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     })
     .await;
 

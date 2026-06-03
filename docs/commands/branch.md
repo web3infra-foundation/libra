@@ -13,6 +13,7 @@ libra branch -l [--merged [<commit>] | --no-merged [<commit>]] [--points-at <obj
 libra branch -d <name>
 libra branch -D <name>
 libra branch -m [<old>] <new>
+libra branch (-c | -C) [<old>] <new>
 libra branch -u <upstream>
 libra branch --unset-upstream [<branch>]
 libra branch --show-current
@@ -39,6 +40,10 @@ The `--contains` and `--no-contains` filters (aliased as `--with` and `--without
 | | `--unset-upstream` | `[branch]` | Remove upstream tracking (the current branch when no name is given) |
 | | `--show-current` | | Print the current branch name or detached HEAD state |
 | `-m` | `--move` | `<old> <new>` or `<new>` | Rename a branch; with one argument renames the current branch |
+| `-c` | `--copy` | `<old> <new>` or `<new>` | Copy a branch (and its tracking/description config); with one argument copies the current branch |
+| `-C` | | `<old> <new>` or `<new>` | Copy a branch, overwriting the destination if it exists (force copy) |
+| `-f` | `--force` | | Allow create/copy to overwrite an existing branch by resetting its tip (locked branches still refused; ignored by other actions) |
+| | `--create-reflog` | | Accepted for Git compatibility; has no effect (Libra `branch` does not maintain per-branch reflogs) |
 | `-r` | `--remotes` | | Show remote-tracking branches only |
 | `-a` | `--all` | | Show local and remote-tracking branches |
 | | `--contains` | `[commit]` (default HEAD) | Only list branches containing the commit. Alias: `--with` |
@@ -94,6 +99,15 @@ libra branch -m new-name
 # Rename any branch
 libra branch -m old-name new-name
 
+# Copy a branch (duplicates its tracking/description config)
+libra branch -c old-name new-name
+
+# Force-copy, overwriting an existing destination
+libra branch -C old-name existing-name
+
+# Force-create / force-copy by resetting an existing branch's tip
+libra branch -f new-name base-ref
+
 # Set upstream tracking
 libra branch -u origin/main
 
@@ -117,6 +131,8 @@ libra branch feature-x                  # Create a branch from HEAD
 libra branch feature-x main             # Create a branch from another branch
 libra branch -d topic                   # Delete a fully merged branch
 libra branch -D topic                   # Force-delete a branch
+libra branch -c old new                 # Copy a branch with its config
+libra branch -C old existing            # Force-copy, overwriting the destination
 libra branch --merged                   # List branches merged into HEAD
 libra branch --no-merged main           # List branches not yet merged into main
 libra branch --points-at HEAD           # List branches whose tip is at HEAD
@@ -185,6 +201,22 @@ Unset-upstream action (`had_upstream` is `false` for an idempotent no-op):
 }
 ```
 
+Copy action (`force` is `true` for `-C`, or `-c` combined with `-f`):
+
+```json
+{
+  "ok": true,
+  "command": "branch",
+  "data": {
+    "action": "copy",
+    "src": "old",
+    "dst": "new",
+    "commit": "abc1234...",
+    "force": false
+  }
+}
+```
+
 Show-current action:
 
 ```json
@@ -206,6 +238,7 @@ Supported actions:
 - `create`: `name`, `commit`
 - `delete`: `name`, `commit`, `force`
 - `rename`: `old_name`, `new_name`
+- `copy`: `src`, `dst`, `commit`, `force`
 - `set-upstream`: `branch`, `upstream`
 - `unset-upstream`: `branch`, `had_upstream`
 - `show-current`: `name`, `detached`, `commit`

@@ -392,6 +392,10 @@ async fn test_branch() {
             no_merged: None,
             points_at: None,
             ignore_case: false,
+            copy: vec![],
+            force_copy: vec![],
+            force: false,
+            create_reflog: false,
         };
         execute(args).await;
 
@@ -432,6 +436,10 @@ async fn test_branch() {
             no_merged: None,
             points_at: None,
             ignore_case: false,
+            copy: vec![],
+            force_copy: vec![],
+            force: false,
+            create_reflog: false,
         };
         execute(args).await;
         let second_branch = Branch::find_branch_result(&second_branch_name, None)
@@ -462,6 +470,10 @@ async fn test_branch() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     };
     execute(args).await;
 
@@ -519,6 +531,10 @@ async fn test_create_branch_from_remote() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     };
     execute(args).await;
 
@@ -578,6 +594,10 @@ async fn test_create_branch_from_remote_tracking_ref() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     })
     .await;
 
@@ -791,6 +811,10 @@ async fn test_branch_rename() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     };
     execute(args).await;
 
@@ -820,6 +844,10 @@ async fn test_branch_rename() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     };
     execute(args).await;
 
@@ -911,6 +939,10 @@ async fn test_rename_current_branch() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     };
     execute(args).await;
 
@@ -983,6 +1015,10 @@ async fn test_rename_to_existing_branch() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     };
     execute(args).await;
 
@@ -1004,6 +1040,10 @@ async fn test_rename_to_existing_branch() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     };
     execute(args).await;
 
@@ -1026,6 +1066,10 @@ async fn test_rename_to_existing_branch() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     };
     execute(args).await;
 
@@ -1091,6 +1135,10 @@ async fn test_list_all_branches() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     };
     execute(args).await;
 
@@ -1123,6 +1171,10 @@ async fn test_list_all_branches() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     };
     execute(args).await; // This will print to stdout, which is fine for tests
 
@@ -1193,6 +1245,10 @@ async fn test_branch_delete_safe() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     })
     .await;
 
@@ -1248,6 +1304,10 @@ async fn test_branch_delete_safe() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     })
     .await;
 
@@ -1305,6 +1365,10 @@ async fn test_branch_delete_safe() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     })
     .await;
 
@@ -1394,6 +1458,10 @@ async fn test_branch_contains_commit_filter() {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     })
     .await;
 
@@ -2127,6 +2195,10 @@ fn unset_upstream_args(unset_upstream: Option<Option<String>>) -> BranchArgs {
         no_merged: None,
         points_at: None,
         ignore_case: false,
+        copy: vec![],
+        force_copy: vec![],
+        force: false,
+        create_reflog: false,
     }
 }
 
@@ -2413,4 +2485,534 @@ fn test_branch_list_survives_dangling_remote() {
         stdout.contains("[ghost/main]"),
         "list should show tracking name even for a missing remote: {stdout}"
     );
+}
+
+// =====================================================================
+//  Wave 3 — copy (-c/-C), txn-hardened rename/copy, reflog migration,
+//           -f/--force, --create-reflog (accepted-noop)
+// =====================================================================
+
+/// A fully-defaulted `BranchArgs` (list mode, every action off) for tests that
+/// override one field via struct-update syntax.
+fn branch_args_default() -> BranchArgs {
+    BranchArgs {
+        new_branch: None,
+        commit_hash: None,
+        list: false,
+        delete: None,
+        delete_safe: None,
+        set_upstream_to: None,
+        unset_upstream: None,
+        show_current: false,
+        rename: vec![],
+        copy: vec![],
+        force_copy: vec![],
+        remotes: false,
+        all: false,
+        contains: vec![],
+        no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
+        force: false,
+        create_reflog: false,
+    }
+}
+
+/// Read the `commit` field of a named branch from `--json branch -l`.
+fn branch_commit_json(repo: &std::path::Path, name: &str) -> Option<String> {
+    let out = run_libra_command(&["--json", "branch", "-l"], repo);
+    let json = parse_json_stdout(&out);
+    json["data"]["branches"]
+        .as_array()?
+        .iter()
+        .find(|e| e["name"] == name)?
+        .get("commit")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// `branch -c old new` creates a destination pointing at the source tip.
+#[test]
+#[serial]
+fn test_branch_copy_creates_pointer_to_same_commit() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "old"], repo.path()),
+        "create old",
+    );
+    assert_cli_success(
+        &run_libra_command(&["branch", "-c", "old", "newcopy"], repo.path()),
+        "copy old -> newcopy",
+    );
+    let old_commit = branch_commit_json(repo.path(), "old").expect("old commit");
+    let new_commit = branch_commit_json(repo.path(), "newcopy").expect("newcopy commit");
+    assert_eq!(old_commit, new_commit, "copy must point at the same commit");
+}
+
+/// `branch -C old existing` overwrites an existing destination; plain `-c`
+/// without force is refused and leaves the destination untouched.
+#[test]
+#[serial]
+fn test_branch_copy_force_overwrites_existing() {
+    let repo = create_committed_repo_via_cli();
+    // old @ base, then advance main so `another` (created now) differs from old.
+    assert_cli_success(
+        &run_libra_command(&["branch", "old"], repo.path()),
+        "create old",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "--allow-empty", "-m", "m1", "--no-verify"],
+            repo.path(),
+        ),
+        "advance main",
+    );
+    assert_cli_success(
+        &run_libra_command(&["branch", "existing"], repo.path()),
+        "create existing at m1",
+    );
+    let old_commit = branch_commit_json(repo.path(), "old").expect("old commit");
+
+    // Without force: refused, `existing` unchanged.
+    let plain = run_libra_command(&["branch", "-c", "old", "existing"], repo.path());
+    assert!(
+        !plain.status.success(),
+        "plain -c must refuse existing dest"
+    );
+    let still = branch_commit_json(repo.path(), "existing").expect("existing commit");
+    assert_ne!(still, old_commit, "rejected copy must not mutate existing");
+
+    // With -C: overwrite to old's commit.
+    assert_cli_success(
+        &run_libra_command(&["branch", "-C", "old", "existing"], repo.path()),
+        "force-copy old -> existing",
+    );
+    let now = branch_commit_json(repo.path(), "existing").expect("existing commit");
+    assert_eq!(
+        now, old_commit,
+        "force-copy must reset existing to old's tip"
+    );
+}
+
+/// Copy mirrors the source's tracking + description config onto the
+/// destination.
+#[tokio::test]
+#[serial]
+async fn test_branch_copy_migrates_config_tracking() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = ChangeDirGuard::new(temp.path());
+
+    // Give an empty commit so a branch tip exists, then create `src`.
+    commit::execute(CommitArgs {
+        message: Some("base".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: true,
+        author: None,
+    })
+    .await;
+    execute(BranchArgs {
+        new_branch: Some("src".to_string()),
+        ..branch_args_default()
+    })
+    .await;
+    ConfigKv::set("branch.src.remote", "origin", false)
+        .await
+        .expect("set remote");
+    ConfigKv::set("branch.src.merge", "refs/heads/main", false)
+        .await
+        .expect("set merge");
+    ConfigKv::set("branch.src.description", "the source branch", false)
+        .await
+        .expect("set description");
+
+    execute(BranchArgs {
+        copy: vec!["src".to_string(), "dst".to_string()],
+        ..branch_args_default()
+    })
+    .await;
+
+    assert_eq!(
+        ConfigKv::get("branch.dst.remote")
+            .await
+            .unwrap()
+            .map(|e| e.value),
+        Some("origin".to_string())
+    );
+    assert_eq!(
+        ConfigKv::get("branch.dst.merge")
+            .await
+            .unwrap()
+            .map(|e| e.value),
+        Some("refs/heads/main".to_string())
+    );
+    assert_eq!(
+        ConfigKv::get("branch.dst.description")
+            .await
+            .unwrap()
+            .map(|e| e.value),
+        Some("the source branch".to_string())
+    );
+    // Source config is preserved (copy, not move).
+    assert!(
+        ConfigKv::get("branch.src.remote").await.unwrap().is_some(),
+        "copy must not remove source config"
+    );
+}
+
+/// Copy migrates the source ref's reflog faithfully (field-for-field) when it
+/// has entries; with no source reflog the copy is a clean no-op.
+#[tokio::test]
+#[serial]
+async fn test_branch_copy_migrates_reflog_when_present() {
+    use libra::internal::reflog::{Reflog, ReflogAction, ReflogContext};
+
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = ChangeDirGuard::new(temp.path());
+
+    commit::execute(CommitArgs {
+        message: Some("base".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: true,
+        author: None,
+    })
+    .await;
+    execute(BranchArgs {
+        new_branch: Some("src".to_string()),
+        ..branch_args_default()
+    })
+    .await;
+
+    let db = libra::internal::db::get_db_conn_instance().await;
+    // Seed two reflog rows on the source ref.
+    for i in 0..2 {
+        Reflog::insert_single_entry(
+            &db,
+            &ReflogContext {
+                old_oid: format!("{i}{}", "0".repeat(63)),
+                new_oid: format!("{}{}", i + 1, "0".repeat(63)),
+                action: ReflogAction::Commit {
+                    message: format!("entry {i}"),
+                },
+            },
+            "refs/heads/src",
+        )
+        .await
+        .expect("seed reflog");
+    }
+    let src_entries = Reflog::find_all(&db, "refs/heads/src")
+        .await
+        .expect("src reflog");
+    assert_eq!(src_entries.len(), 2);
+
+    execute(BranchArgs {
+        copy: vec!["src".to_string(), "dst".to_string()],
+        ..branch_args_default()
+    })
+    .await;
+
+    let dst_entries = Reflog::find_all(&db, "refs/heads/dst")
+        .await
+        .expect("dst reflog");
+    assert_eq!(dst_entries.len(), 2, "all reflog rows must migrate");
+    // Faithful field-for-field copy. The two seeded rows can share a timestamp,
+    // so compare as order-independent tuple sets rather than zipping by index.
+    let fingerprint = |e: &libra::internal::model::reflog::Model| {
+        (
+            e.old_oid.clone(),
+            e.new_oid.clone(),
+            e.action.clone(),
+            e.committer_name.clone(),
+            e.committer_email.clone(),
+            e.timestamp,
+            e.message.clone(),
+        )
+    };
+    let mut src_fp: Vec<_> = src_entries.iter().map(fingerprint).collect();
+    let mut dst_fp: Vec<_> = dst_entries.iter().map(fingerprint).collect();
+    src_fp.sort();
+    dst_fp.sort();
+    assert_eq!(src_fp, dst_fp, "reflog rows must be copied field-for-field");
+    for d in &dst_entries {
+        assert_eq!(d.ref_name, "refs/heads/dst", "ref_name must be rewritten");
+    }
+}
+
+/// Copy with no source reflog leaves the destination reflog empty (no error,
+/// no assumption that the source has a reflog).
+#[tokio::test]
+#[serial]
+async fn test_branch_copy_no_reflog_is_noop() {
+    use libra::internal::reflog::Reflog;
+
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = ChangeDirGuard::new(temp.path());
+
+    commit::execute(CommitArgs {
+        message: Some("base".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: true,
+        author: None,
+    })
+    .await;
+    execute(BranchArgs {
+        new_branch: Some("src".to_string()),
+        ..branch_args_default()
+    })
+    .await;
+    execute(BranchArgs {
+        copy: vec!["src".to_string(), "dst".to_string()],
+        ..branch_args_default()
+    })
+    .await;
+
+    let db = libra::internal::db::get_db_conn_instance().await;
+    assert!(
+        Reflog::find_all(&db, "refs/heads/dst")
+            .await
+            .expect("dst reflog")
+            .is_empty(),
+        "no source reflog => empty destination reflog"
+    );
+}
+
+/// Locked branches: rejected as rename source and as copy/force-copy target,
+/// but allowed as a read-only copy source.
+#[test]
+#[serial]
+fn test_branch_locked_protection_copy_rename() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "topic"], repo.path()),
+        "create topic",
+    );
+
+    // (a) rename a locked source -> Locked (128).
+    let rename_locked = run_libra_command(&["branch", "-m", "main", "renamed"], repo.path());
+    let (_s, report) = parse_cli_error_stderr(&rename_locked.stderr);
+    assert_eq!(rename_locked.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
+
+    // (b) copy onto a locked target -> Locked (128).
+    let copy_to_locked = run_libra_command(&["branch", "-c", "topic", "main"], repo.path());
+    assert_eq!(copy_to_locked.status.code(), Some(128));
+    let (_s, report) = parse_cli_error_stderr(&copy_to_locked.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
+
+    // (b') force-copy onto a locked target is STILL refused.
+    let force_to_locked = run_libra_command(&["branch", "-C", "topic", "main"], repo.path());
+    assert_eq!(force_to_locked.status.code(), Some(128));
+
+    // (c) copy FROM a locked source to a normal target -> success.
+    let copy_from_locked = run_libra_command(&["branch", "-c", "main", "from-main"], repo.path());
+    assert_cli_success(&copy_from_locked, "copy from locked source");
+    let main_commit = branch_commit_json(repo.path(), "main").expect("main commit");
+    let copy_commit = branch_commit_json(repo.path(), "from-main").expect("from-main commit");
+    assert_eq!(
+        main_commit, copy_commit,
+        "copy-from-locked must duplicate tip"
+    );
+}
+
+/// `branch -m` (rename) refuses a locked source.
+#[test]
+#[serial]
+fn test_branch_rename_locked_source_rejected() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["branch", "-m", "main", "trunk"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+    let (_s, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
+}
+
+/// Renaming the current branch migrates all config keys, updates HEAD in the
+/// same transaction, and leaves no `branch.<old>.*` residue.
+#[tokio::test]
+#[serial]
+async fn test_branch_rename_migrates_config_and_updates_head() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = ChangeDirGuard::new(temp.path());
+
+    commit::execute(CommitArgs {
+        message: Some("base".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: true,
+        author: None,
+    })
+    .await;
+    // Create + switch to a renamable (non-locked) current branch.
+    execute(BranchArgs {
+        new_branch: Some("feature".to_string()),
+        ..branch_args_default()
+    })
+    .await;
+    switch::execute(SwitchArgs {
+        branch: Some("feature".to_string()),
+        create: None,
+        detach: false,
+        track: false,
+    })
+    .await;
+    ConfigKv::set("branch.feature.remote", "origin", false)
+        .await
+        .expect("set remote");
+    ConfigKv::set("branch.feature.description", "desc", false)
+        .await
+        .expect("set description");
+
+    execute(BranchArgs {
+        rename: vec!["feature".to_string(), "feature2".to_string()],
+        ..branch_args_default()
+    })
+    .await;
+
+    // HEAD followed the rename.
+    match Head::current().await {
+        Head::Branch(name) => assert_eq!(name, "feature2", "HEAD must follow rename"),
+        _ => panic!("expected to be on a branch"),
+    }
+    // Config migrated, no residue.
+    assert_eq!(
+        ConfigKv::get("branch.feature2.remote")
+            .await
+            .unwrap()
+            .map(|e| e.value),
+        Some("origin".to_string())
+    );
+    assert_eq!(
+        ConfigKv::get("branch.feature2.description")
+            .await
+            .unwrap()
+            .map(|e| e.value),
+        Some("desc".to_string())
+    );
+    assert!(
+        ConfigKv::get("branch.feature.remote")
+            .await
+            .unwrap()
+            .is_none(),
+        "old branch config must be removed"
+    );
+    assert!(
+        ConfigKv::get("branch.feature.description")
+            .await
+            .unwrap()
+            .is_none(),
+        "old branch description must be removed"
+    );
+}
+
+/// `branch -f <existing>` resets an existing branch's tip instead of erroring.
+#[test]
+#[serial]
+fn test_branch_create_force_resets_existing() {
+    let repo = create_committed_repo_via_cli();
+    let base = branch_commit_json(repo.path(), "main").expect("main commit");
+    assert_cli_success(
+        &run_libra_command(&["branch", "topic"], repo.path()),
+        "create topic at base",
+    );
+    // Advance main so HEAD differs from topic.
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "--allow-empty", "-m", "m1", "--no-verify"],
+            repo.path(),
+        ),
+        "advance main",
+    );
+
+    // Plain create on existing -> AlreadyExists.
+    let plain = run_libra_command(&["branch", "topic"], repo.path());
+    assert!(
+        !plain.status.success(),
+        "plain create on existing must fail"
+    );
+
+    // -f resets topic to current HEAD (m1).
+    assert_cli_success(
+        &run_libra_command(&["branch", "-f", "topic"], repo.path()),
+        "force-create resets topic",
+    );
+    let head = branch_commit_json(repo.path(), "main").expect("main commit");
+    let topic = branch_commit_json(repo.path(), "topic").expect("topic commit");
+    assert_eq!(topic, head, "force-create must reset topic to HEAD");
+    assert_ne!(
+        topic, base,
+        "topic should no longer point at the base commit"
+    );
+}
+
+/// `--create-reflog` is accepted and is a strict no-op (branch still created,
+/// exit 0).
+#[test]
+#[serial]
+fn test_branch_create_reflog_flag_accepted_noop() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["branch", "feature", "--create-reflog"], repo.path());
+    assert_cli_success(&output, "branch --create-reflog");
+    // Branch was created normally.
+    assert!(
+        branch_commit_json(repo.path(), "feature").is_some(),
+        "branch should be created with --create-reflog"
+    );
+}
+
+/// `-c old new --json` emits the copy envelope with the exact `data` key set
+/// {action, src, dst, commit, force}.
+#[test]
+#[serial]
+fn test_branch_copy_json_schema() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "old"], repo.path()),
+        "create old",
+    );
+    let output = run_libra_command(&["--json", "branch", "-c", "old", "newcopy"], repo.path());
+    assert_cli_success(&output, "--json copy");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "branch");
+    assert_eq!(json["data"]["action"], "copy");
+    assert_eq!(json["data"]["src"], "old");
+    assert_eq!(json["data"]["dst"], "newcopy");
+    assert!(json["data"]["commit"].as_str().is_some());
+    assert_eq!(json["data"]["force"], false);
+
+    // Force-copy reports force=true.
+    let forced = run_libra_command(&["--json", "branch", "-C", "old", "newcopy"], repo.path());
+    assert_cli_success(&forced, "--json force copy");
+    let json = parse_json_stdout(&forced);
+    assert_eq!(json["data"]["force"], true);
 }
