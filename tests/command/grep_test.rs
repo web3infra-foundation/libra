@@ -27,6 +27,7 @@ async fn add_and_commit(message: &str, pathspec: Vec<String>) {
             force: false,
             dry_run: false,
             ignore_errors: false,
+            ..Default::default()
         },
         &OutputConfig::default(),
     )

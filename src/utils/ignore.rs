@@ -419,6 +419,7 @@ mod tests {
             verbose: false,
             dry_run: false,
             ignore_errors: false,
+            ..Default::default()
         })
         .await;
 
@@ -492,6 +493,7 @@ mod tests {
             verbose: false,
             dry_run: false,
             ignore_errors: false,
+            ..Default::default()
         })
         .await;
 
@@ -527,6 +529,7 @@ mod tests {
             verbose: false,
             dry_run: false,
             ignore_errors: false,
+            ..Default::default()
         })
         .await;
 

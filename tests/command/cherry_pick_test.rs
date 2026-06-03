@@ -53,6 +53,7 @@ async fn test_basic_cherry_pick() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -93,6 +94,7 @@ async fn test_basic_cherry_pick() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -127,6 +129,7 @@ async fn test_basic_cherry_pick() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -264,6 +267,7 @@ async fn test_cherry_pick_with_commit() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -300,6 +304,7 @@ async fn test_cherry_pick_with_commit() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -383,6 +388,7 @@ async fn test_cherry_pick_multiple_commits() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -420,6 +426,7 @@ async fn test_cherry_pick_multiple_commits() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -449,6 +456,7 @@ async fn test_cherry_pick_multiple_commits() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -653,6 +661,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(commit::CommitArgs {
@@ -688,6 +697,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(commit::CommitArgs {

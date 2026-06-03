@@ -1418,6 +1418,26 @@ pub async fn read_cascaded_config_value(
     global_config_value(key).await
 }
 
+/// Read a boolean config value with local-scope-first, then global fallback.
+///
+/// The stored string is parsed via [`parse_config_bool`] (so `true`/`yes`/`on`/
+/// `1` are truthy). Returns `Ok(None)` when the key is unset in both scopes or
+/// its value is not a recognised boolean. The local scope wins even when its
+/// value is unparseable, matching Git's scope precedence.
+///
+/// Used by commands such as `add` for `add.ignoreErrors`, whose config default
+/// can be overridden by an explicit CLI flag. (This reader spans two databases,
+/// so there is no single-connection `_with_conn` variant.)
+pub async fn read_cascaded_bool(key: &str) -> Result<Option<bool>> {
+    if let Some(entry) = ConfigKv::get(key).await? {
+        return Ok(parse_config_bool(&entry.value));
+    }
+    if let Some(value) = global_config_value(key).await? {
+        return Ok(parse_config_bool(&value));
+    }
+    Ok(None)
+}
+
 /// Read a config value for the given target using local-first, then global, and
 /// decrypt encrypted entries with the matching vault.
 ///

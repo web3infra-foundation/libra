@@ -62,7 +62,7 @@ EXAMPLES:
 // at the bottom of `libra add --help`. The meta-commentary that used to live
 // here as a `///` line leaked into clap's `--help` body (see
 // `tests/command/add_test.rs::test_add_help_does_not_leak_impl_meta`).
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Default)]
 #[command(after_help = ADD_EXAMPLES)]
 pub struct AddArgs {
     /// pathspec... files & dir to add content from.
@@ -101,8 +101,54 @@ pub struct AddArgs {
     pub dry_run: bool,
 
     /// ignore errors
-    #[clap(long)]
+    #[clap(long, overrides_with = "no_ignore_errors")]
     pub ignore_errors: bool,
+
+    /// Force `--ignore-errors` off for this run, overriding a configured
+    /// `add.ignoreErrors = true`. The effective value is: CLI flag > config >
+    /// default (false).
+    #[clap(long = "no-ignore-errors", overrides_with = "ignore_errors")]
+    pub no_ignore_errors: bool,
+
+    /// Override the executable bit recorded in the index for the staged
+    /// entries: `+x` records mode 0o100755, `-x` records 0o100644.
+    ///
+    /// Only the index entry's mode is changed; working-tree file permissions
+    /// are never modified.
+    #[clap(long, value_name = "(+|-)x")]
+    pub chmod: Option<String>,
+
+    /// Re-stage already-tracked files matching the pathspec, bypassing the
+    /// unchanged/modified short-circuit. Implies `-u` (tracked files only).
+    ///
+    /// Note: libra has no clean/CRLF filter, so this force-rewrites the tracked
+    /// entries' blobs rather than normalizing line endings.
+    #[clap(long)]
+    pub renormalize: bool,
+
+    /// Read pathspecs from the given file (`-` for stdin). Separated by newlines
+    /// unless `--pathspec-file-nul` is given.
+    #[clap(long, value_name = "FILE", conflicts_with = "pathspec")]
+    pub pathspec_from_file: Option<String>,
+
+    /// Treat `--pathspec-from-file` input as NUL-separated instead of
+    /// line-separated. (Git's `add` has no `-z` short option.)
+    #[clap(long, requires = "pathspec_from_file")]
+    pub pathspec_file_nul: bool,
+
+    /// Check whether the given paths would be ignored. Only valid together with
+    /// `--dry-run`; missing paths are skipped with a warning instead of erroring.
+    #[clap(long, requires = "dry_run")]
+    pub ignore_missing: bool,
+
+    /// (declined) Restrict to the sparse-checkout cone — not supported by libra.
+    #[clap(long)]
+    pub sparse: bool,
+
+    /// (declined) Record an intent-to-add entry — libra's on-disk index cannot
+    /// model it yet.
+    #[clap(short = 'N', long = "intent-to-add")]
+    pub intent_to_add: bool,
 }
 
 /// Domain error for `libra add`.
@@ -154,6 +200,25 @@ pub enum AddError {
     /// [`status::StatusError`] is preserved as a source.
     #[error("failed to inspect repository status: {source}")]
     Status { source: status::StatusError },
+    /// `--sparse` was requested. Libra has no sparse-checkout support, so the
+    /// flag is declined with a friendly usage error.
+    #[error("sparse checkout is not supported by libra add")]
+    SparseDeclined,
+    /// `-N` / `--intent-to-add` was requested. The on-disk index format used by
+    /// `git-internal` cannot model an intent-to-add entry, so it is declined.
+    #[error("intent-to-add (-N/--intent-to-add) is not supported")]
+    IntentToAddDeclined,
+    /// `--chmod` was given a value other than `+x` / `-x`.
+    #[error("invalid --chmod value '{spec}' (expected '+x' or '-x')")]
+    InvalidChmod { spec: String },
+    /// Reading a worktree file to build its blob failed (the fallible
+    /// replacement for [`BlobExt::from_file`]'s panic path).
+    #[error("failed to read '{path}': {source}")]
+    BlobRead { path: PathBuf, source: io::Error },
+    /// Writing a blob object (or its LFS backup) to storage failed (the
+    /// fallible replacement for [`BlobExt::save`] / [`BlobExt::from_lfs_file`]).
+    #[error("failed to write object for '{path}': {source}")]
+    BlobSave { path: PathBuf, source: io::Error },
 }
 
 impl From<AddError> for CliError {
@@ -196,6 +261,26 @@ impl From<AddError> for CliError {
             AddError::Status { .. } => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::RepoCorrupt)
                 .with_hint("failed to compute working tree status"),
+            // Declined flags reuse CliInvalidTarget (Cli category -> exit 129)
+            // and carry a specific hint so users understand why the flag was
+            // refused rather than silently ignored.
+            AddError::SparseDeclined => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("libra does not support sparse checkout; remove --sparse"),
+            AddError::IntentToAddDeclined => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint(
+                    "intent-to-add needs extended index capabilities, currently unsupported",
+                ),
+            AddError::InvalidChmod { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("only '+x' and '-x' are accepted"),
+            AddError::BlobRead { .. } => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            AddError::BlobSave { .. } => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
+            }
         }
     }
 }
@@ -410,6 +495,25 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
         }
     })?;
 
+    // --- Declined flags: surfaced as a friendly usage error (exit 129) now
+    // that repository discovery has succeeded. Outside a repo, the lookups
+    // above already returned NotInRepo (128) — matching `git add --sparse`
+    // outside a repository.
+    if args.sparse {
+        return Err(AddError::SparseDeclined.into());
+    }
+    if args.intent_to_add {
+        return Err(AddError::IntentToAddDeclined.into());
+    }
+    // Validate the --chmod value up front (whitelist: +x / -x). The mode change
+    // itself is applied during staging.
+    if let Some(spec) = args.chmod.as_deref() {
+        validate_chmod_spec(spec)?;
+    }
+    // Effective --ignore-errors: explicit CLI flag > config `add.ignoreErrors`
+    // > default false.
+    let ignore_errors = resolve_ignore_errors(args).await;
+
     // Resolve pathspecs
     let requested_paths: Vec<PathBuf> = if args.pathspec.is_empty() {
         if !args.all && !args.update && !args.refresh {
@@ -524,7 +628,7 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
                 }
             }
             Err(err) => {
-                if !args.ignore_errors {
+                if !ignore_errors {
                     return Err(CliError::from(err));
                 }
                 add_output.failed.push(AddFailure {
@@ -1086,6 +1190,48 @@ fn gen_blob_from_file(path: impl AsRef<Path>) -> Blob {
     }
 }
 
+/// Validate a `--chmod` spec. Only `+x` and `-x` are accepted (matching Git's
+/// `git add --chmod`). Returns `true` for `+x` (executable; index mode
+/// `0o100755`) and `false` for `-x` (index mode `0o100644`).
+///
+/// Any other value is rejected with [`AddError::InvalidChmod`]; the echoed spec
+/// is capped at 8 characters so pathological input cannot bloat the message.
+fn validate_chmod_spec(spec: &str) -> Result<bool, AddError> {
+    match spec {
+        "+x" => Ok(true),
+        "-x" => Ok(false),
+        _ => Err(AddError::InvalidChmod {
+            spec: spec.chars().take(8).collect(),
+        }),
+    }
+}
+
+/// Resolve the effective `--ignore-errors` setting.
+///
+/// Precedence: an explicit CLI flag (`--ignore-errors` / `--no-ignore-errors`)
+/// wins; otherwise the `add.ignoreErrors` config value (local scope first, then
+/// global) applies; otherwise the default is `false`. A config read failure is
+/// treated as "unset" so a broken config never blocks staging.
+///
+/// Note: libra config keys are case-sensitive (unlike Git), so the key is read
+/// exactly as `add.ignoreErrors`.
+///
+/// Exposed (`pub`) so integration tests can assert the CLI > config > default
+/// precedence directly without depending on an actual staging failure.
+pub async fn resolve_ignore_errors(args: &AddArgs) -> bool {
+    if args.no_ignore_errors {
+        return false;
+    }
+    if args.ignore_errors {
+        return true;
+    }
+    crate::internal::config::read_cascaded_bool("add.ignoreErrors")
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -1127,6 +1273,21 @@ mod test {
             .to_string(),
             "path 'src/foo' is not valid UTF-8",
         );
+        assert_eq!(
+            AddError::SparseDeclined.to_string(),
+            "sparse checkout is not supported by libra add",
+        );
+        assert_eq!(
+            AddError::IntentToAddDeclined.to_string(),
+            "intent-to-add (-N/--intent-to-add) is not supported",
+        );
+        assert_eq!(
+            AddError::InvalidChmod {
+                spec: "foo".to_string(),
+            }
+            .to_string(),
+            "invalid --chmod value 'foo' (expected '+x' or '-x')",
+        );
     }
 
     /// Scenario: clap should reject incompatible mode flags up front so the
@@ -1152,5 +1313,90 @@ mod test {
         out.added.push("a.rs".to_string());
         assert_eq!(out.total_staged(), 1);
         assert!(!out.is_empty());
+    }
+
+    /// Scenario: `libra add -h` must surface every newly added flag so users
+    /// can discover them. Renders the clap help and asserts each long flag.
+    #[test]
+    fn test_add_help_lists_new_flags() {
+        use clap::CommandFactory;
+        let help = AddArgs::command().render_long_help().to_string();
+        for flag in [
+            "--chmod",
+            "--renormalize",
+            "--pathspec-from-file",
+            "--pathspec-file-nul",
+            "--ignore-missing",
+            "--sparse",
+            "--intent-to-add",
+        ] {
+            assert!(help.contains(flag), "help is missing {flag}:\n{help}");
+        }
+    }
+
+    /// Scenario: `--chmod` only accepts `+x` / `-x`; any other value is a
+    /// validation error and the echoed spec is length-capped.
+    #[test]
+    fn test_add_chmod_rejects_invalid_value() {
+        assert!(validate_chmod_spec("+x").expect("+x is valid"));
+        assert!(!validate_chmod_spec("-x").expect("-x is valid"));
+        assert!(matches!(
+            validate_chmod_spec("foo"),
+            Err(AddError::InvalidChmod { .. })
+        ));
+        // Length cap: an over-long spec is rejected and truncated to <= 8 chars
+        // in the echoed message.
+        match validate_chmod_spec("+xxxxxxxxxxxxxxxx") {
+            Err(AddError::InvalidChmod { spec }) => assert!(spec.chars().count() <= 8),
+            other => panic!("expected InvalidChmod, got {other:?}"),
+        }
+    }
+
+    /// Scenario: `--pathspec-file-nul` is meaningless without
+    /// `--pathspec-from-file`; clap `requires` must reject the lone flag.
+    #[test]
+    fn test_add_pathspec_file_nul_requires_from_file() {
+        assert!(AddArgs::try_parse_from(["add", "--pathspec-file-nul"]).is_err());
+        assert!(
+            AddArgs::try_parse_from([
+                "add",
+                "--pathspec-from-file",
+                "list.txt",
+                "--pathspec-file-nul",
+            ])
+            .is_ok()
+        );
+    }
+
+    /// Scenario: `--pathspec-from-file` conflicts with positional pathspecs
+    /// (Git rejects mixing the two).
+    #[test]
+    fn test_add_pathspec_from_file_conflicts_positional() {
+        assert!(
+            AddArgs::try_parse_from(["add", "--pathspec-from-file", "list.txt", "foo.rs"]).is_err()
+        );
+        // The flag alone (no positional) parses fine.
+        assert!(AddArgs::try_parse_from(["add", "--pathspec-from-file", "list.txt"]).is_ok());
+    }
+
+    /// Scenario: `--ignore-missing` is only valid with `--dry-run` (Git
+    /// semantics); clap `requires` must enforce this.
+    #[test]
+    fn test_add_ignore_missing_requires_dry_run() {
+        assert!(AddArgs::try_parse_from(["add", "--ignore-missing", "f"]).is_err());
+        assert!(AddArgs::try_parse_from(["add", "--ignore-missing", "--dry-run", "f"]).is_ok());
+    }
+
+    /// Scenario: `--no-ignore-errors` and `--ignore-errors` override each other
+    /// so the last one on the command line wins (drives the tri-state in
+    /// [`resolve_ignore_errors`]).
+    #[test]
+    fn test_add_ignore_errors_negation_overrides() {
+        let a = AddArgs::try_parse_from(["add", "--ignore-errors", "--no-ignore-errors", "f"])
+            .expect("parses");
+        assert!(!a.ignore_errors && a.no_ignore_errors);
+        let b = AddArgs::try_parse_from(["add", "--no-ignore-errors", "--ignore-errors", "f"])
+            .expect("parses");
+        assert!(b.ignore_errors && !b.no_ignore_errors);
     }
 }

@@ -347,6 +347,7 @@ async fn prepare_history() -> (ObjectHash, ObjectHash) {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -372,6 +373,7 @@ async fn prepare_history() -> (ObjectHash, ObjectHash) {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 

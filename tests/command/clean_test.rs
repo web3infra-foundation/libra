@@ -106,6 +106,7 @@ async fn test_clean_force_keeps_tracked_files() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -166,6 +167,7 @@ async fn test_clean_force_respects_ignore_rules() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -205,6 +207,7 @@ async fn test_clean_force_multiple_untracked_with_tracked() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -504,6 +507,7 @@ async fn test_clean_d_flag_keeps_dirs_with_tracked_files() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -545,6 +549,7 @@ async fn test_clean_x_flag_removes_ignored_files() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -586,6 +591,7 @@ async fn test_clean_x_flag_removes_only_ignored_files() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -726,6 +732,7 @@ async fn test_clean_dx_removes_ignored_directories() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 

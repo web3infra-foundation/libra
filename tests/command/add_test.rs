@@ -41,6 +41,7 @@ async fn test_add_single_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -78,6 +79,7 @@ async fn test_add_dispatches_vcs_automation_history() {
             verbose: false,
             dry_run: false,
             ignore_errors: false,
+            ..Default::default()
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -120,6 +122,7 @@ async fn test_add_dry_run_does_not_dispatch_vcs_automation_history() {
             verbose: false,
             dry_run: true,
             ignore_errors: false,
+            ..Default::default()
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -163,6 +166,7 @@ async fn test_add_multiple_files() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -216,6 +220,7 @@ async fn test_add_all_flag() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -273,6 +278,7 @@ async fn test_add_update_flag() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -301,6 +307,7 @@ async fn test_add_update_flag() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -367,6 +374,7 @@ async fn test_add_with_ignore_patterns() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -448,6 +456,7 @@ async fn test_add_force_tracks_ignored_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -469,6 +478,7 @@ async fn test_add_force_tracks_ignored_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -500,6 +510,7 @@ async fn test_add_force_tracks_ignored_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -545,6 +556,7 @@ async fn test_add_force_dot_includes_ignored_directory() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -574,6 +586,7 @@ async fn test_add_force_dot_includes_ignored_directory() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -613,6 +626,7 @@ async fn test_add_dry_run() {
         verbose: false,
         dry_run: true,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -647,6 +661,7 @@ async fn test_add_without_path_should_error() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -680,6 +695,7 @@ async fn test_add_nonexistent_file_should_error() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -717,6 +733,7 @@ async fn test_add_duplicate_file_should_not_duplicate_index() {
             verbose: false,
             dry_run: false,
             ignore_errors: false,
+            ..Default::default()
         })
         .await;
 
@@ -759,6 +776,7 @@ async fn test_add_empty_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -796,6 +814,7 @@ async fn test_add_sub_directory_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -807,5 +826,143 @@ async fn test_add_sub_directory_file() {
             .iter()
             .any(|x| x.to_str().unwrap().replace("\\", "/") == file_path),
         "File in nested subdirectory should be added to index"
+    );
+}
+
+/// Scenario: `--sparse` is declined inside a repo with a friendly usage error
+/// (CliInvalidTarget -> exit 129) rather than being silently ignored.
+#[tokio::test]
+#[serial]
+async fn test_add_sparse_declined() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    let err = add::run_add(&AddArgs {
+        sparse: true,
+        ..Default::default()
+    })
+    .await
+    .expect_err("--sparse must be declined inside a repo");
+    assert_eq!(
+        err.stable_code(),
+        libra::utils::error::StableErrorCode::CliInvalidTarget
+    );
+    assert!(err.message().contains("sparse"), "msg: {}", err.message());
+}
+
+/// Scenario: outside a repository, `--sparse` first hits repo discovery and
+/// returns RepoNotFound (128) — matching `git add --sparse` outside a repo.
+#[tokio::test]
+#[serial]
+async fn test_add_sparse_outside_repo_is_repo_not_found() {
+    let test_dir = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    let err = add::run_add(&AddArgs {
+        sparse: true,
+        ..Default::default()
+    })
+    .await
+    .expect_err("outside a repo, add must fail with RepoNotFound");
+    assert_eq!(
+        err.stable_code(),
+        libra::utils::error::StableErrorCode::RepoNotFound
+    );
+}
+
+/// Scenario: `-N`/`--intent-to-add` is declined (the on-disk index cannot model
+/// an intent-to-add entry).
+#[tokio::test]
+#[serial]
+async fn test_add_intent_to_add_declined() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    let err = add::run_add(&AddArgs {
+        intent_to_add: true,
+        ..Default::default()
+    })
+    .await
+    .expect_err("-N must be declined");
+    assert_eq!(
+        err.stable_code(),
+        libra::utils::error::StableErrorCode::CliInvalidTarget
+    );
+    assert!(
+        err.message().contains("intent-to-add"),
+        "msg: {}",
+        err.message()
+    );
+}
+
+/// Scenario: an invalid `--chmod` value is rejected at the run_add entry with
+/// CliInvalidTarget before any staging happens.
+#[tokio::test]
+#[serial]
+async fn test_add_chmod_rejects_invalid_value_via_run_add() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    let err = add::run_add(&AddArgs {
+        chmod: Some("xyz".to_string()),
+        pathspec: vec![".".to_string()],
+        ..Default::default()
+    })
+    .await
+    .expect_err("invalid --chmod must be rejected");
+    assert_eq!(
+        err.stable_code(),
+        libra::utils::error::StableErrorCode::CliInvalidTarget
+    );
+}
+
+/// Scenario: `add.ignoreErrors = true` in config makes `--ignore-errors` the
+/// default when no CLI flag is given (tri-state precedence: config layer).
+#[tokio::test]
+#[serial]
+async fn test_add_config_ignore_errors_default() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    libra::internal::config::ConfigKv::set("add.ignoreErrors", "true", false)
+        .await
+        .unwrap();
+    assert!(
+        add::resolve_ignore_errors(&AddArgs::default()).await,
+        "config add.ignoreErrors=true should make ignore-errors the default"
+    );
+}
+
+/// Scenario: an explicit CLI flag overrides the config default in both
+/// directions (proves the `Option<bool>`-equivalent tri-state).
+#[tokio::test]
+#[serial]
+async fn test_add_cli_overrides_config_ignore_errors() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    libra::internal::config::ConfigKv::set("add.ignoreErrors", "true", false)
+        .await
+        .unwrap();
+    // Explicit --no-ignore-errors overrides config=true -> false.
+    assert!(
+        !add::resolve_ignore_errors(&AddArgs {
+            no_ignore_errors: true,
+            ..Default::default()
+        })
+        .await
+    );
+    // Explicit --ignore-errors is honored regardless of config -> true.
+    assert!(
+        add::resolve_ignore_errors(&AddArgs {
+            ignore_errors: true,
+            ..Default::default()
+        })
+        .await
     );
 }

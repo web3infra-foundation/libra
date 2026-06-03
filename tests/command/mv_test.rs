@@ -32,6 +32,7 @@ async fn stage_file(path: &str, content: &str) {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 }

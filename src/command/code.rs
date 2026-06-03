@@ -5757,6 +5757,7 @@ no_cache_unknown_network = true
                 verbose: false,
                 dry_run: false,
                 ignore_errors: false,
+                ..Default::default()
             })
             .await;
             crate::command::commit::execute(crate::command::commit::CommitArgs {

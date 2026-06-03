@@ -70,6 +70,7 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -249,6 +250,7 @@ async fn test_execute_commit() {
             ignore_errors: false,
             refresh: false,
             force: false,
+            ..Default::default()
         };
         add::execute(args).await;
     }
@@ -339,6 +341,7 @@ async fn test_commit_with_all_flag_stages_tracked_changes() {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -411,6 +414,7 @@ async fn test_commit_with_all_flag_records_deletions() {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -508,6 +512,7 @@ async fn test_commit_sha256() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -594,6 +599,7 @@ async fn test_commit_with_custom_author() {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -755,6 +761,7 @@ async fn test_commit_with_actual_changes() {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     };
     add::execute(add_args).await;
 
@@ -834,6 +841,7 @@ async fn test_commit_signoff_persists_trailer() {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -994,6 +1002,7 @@ async fn test_commit_without_identity_fails_by_default() {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
