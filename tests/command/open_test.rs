@@ -40,6 +40,7 @@ async fn test_open_remote_origin() {
     open::execute_safe(
         open::OpenArgs {
             remote: Some("origin".to_string()),
+            print_only: false,
         },
         &output,
     )
@@ -47,13 +48,20 @@ async fn test_open_remote_origin() {
     .expect("opening explicit origin remote should succeed");
 
     // Test default remote should find origin
-    open::execute_safe(open::OpenArgs { remote: None }, &output)
-        .await
-        .expect("opening default remote should succeed");
+    open::execute_safe(
+        open::OpenArgs {
+            remote: None,
+            print_only: false,
+        },
+        &output,
+    )
+    .await
+    .expect("opening default remote should succeed");
 
     let error = open::execute_safe(
         open::OpenArgs {
             remote: Some("nonexistent".to_string()),
+            print_only: false,
         },
         &output,
     )
@@ -79,9 +87,15 @@ async fn test_open_no_remote() {
         ..OutputConfig::default()
     };
 
-    let error = open::execute_safe(open::OpenArgs { remote: None }, &output)
-        .await
-        .expect_err("opening without a configured remote should fail");
+    let error = open::execute_safe(
+        open::OpenArgs {
+            remote: None,
+            print_only: false,
+        },
+        &output,
+    )
+    .await
+    .expect_err("opening without a configured remote should fail");
     assert_eq!(error.stable_code(), StableErrorCode::RepoStateInvalid);
     assert_eq!(error.exit_code(), 128);
     assert!(
@@ -284,4 +298,70 @@ fn test_open_json_output_keeps_explicit_https_url() {
         "https://github.com/web3infra-foundation/libra"
     );
     assert_eq!(json["data"]["launched"], false);
+}
+
+#[test]
+fn test_open_print_only_prints_url_without_opening_browser() {
+    let repo = create_committed_repo_via_cli();
+
+    let add_remote = run_libra_command(
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:web3infra-foundation/libra.git",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&add_remote, "failed to add origin for print-only test");
+
+    let output = run_libra_command(&["open", "--print-only"], repo.path());
+    assert_cli_success(&output, "open --print-only should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    assert_eq!(stdout, "https://github.com/web3infra-foundation/libra");
+}
+
+#[test]
+fn test_open_print_only_with_json_includes_resolved_from_remote() {
+    let repo = create_committed_repo_via_cli();
+
+    let add_remote = run_libra_command(
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:web3infra-foundation/libra.git",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&add_remote, "failed to add origin for print-only json test");
+
+    let output = run_libra_command(&["open", "--print-only", "--json"], repo.path());
+    assert_cli_success(&output, "open --print-only --json should succeed");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["resolved_from_remote"], true);
+    assert_eq!(json["data"]["launched"], false);
+    assert_eq!(
+        json["data"]["web_url"],
+        "https://github.com/web3infra-foundation/libra"
+    );
+}
+
+#[test]
+fn test_open_print_only_with_explicit_url() {
+    let temp = tempdir().unwrap();
+
+    let output = run_libra_command(
+        &[
+            "open",
+            "--print-only",
+            "ssh://git@github.com/web3infra-foundation/libra.git",
+        ],
+        temp.path(),
+    );
+    assert_cli_success(&output, "open --print-only with explicit URL should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    assert_eq!(stdout, "https://github.com/web3infra-foundation/libra");
 }
