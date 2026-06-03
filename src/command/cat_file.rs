@@ -62,6 +62,9 @@ Notes:
 const CAT_FILE_AFTER_HELP: &str = "EXAMPLES:
     libra cat-file -p HEAD                                  Pretty-print the commit object at HEAD
     libra cat-file -t 40d352ee7190f9…                       Print the object type (blob/tree/commit/tag)
+    echo HEAD | libra cat-file --batch-check                Stream object metadata for refs read from stdin
+    echo HEAD | libra cat-file --batch                      Stream metadata + raw content per object
+    libra cat-file --batch-all-objects --batch-check        Print metadata for every local object
     libra cat-file --ai-list intent                         List all AI objects of a built-in type
     libra cat-file --ai-list-types                          List every AI object type in the history branch
     libra cat-file --ai patchset:call_KjR3NB4cQaT5Rm1c7…    Look up an AI object by TYPE:ID

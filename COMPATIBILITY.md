@@ -75,7 +75,7 @@ batch document.
 | publish | intentionally-different | Libra Cloudflare publish extension, not a Git command |
 | agent | intentionally-different | Libra external-agent capture extension, not a Git command |
 | hooks | intentionally-different | Hidden compatibility entry for hook configs installed by `libra agent enable` |
-| cat-file | supported | `-e` does not support JSON |
+| cat-file | partial | Single-object `-t`/`-s`/`-p`/`-e` and `--ai*` supported. Batch protocol supported: `--batch`/`--batch-check` (with `=<format>` and `%(objectname)`/`%(objecttype)`/`%(objectsize)` atoms), `--batch-all-objects` (local loose+pack only — not un-fetched cloud-tiered objects), `--unordered`, `-Z` (NUL records), `--buffer`, `--follow-symlinks`. Batch per-line states: only `missing`/`ambiguous` (filtered/submodule deferred). `--follow-symlinks` resolves in the object graph only (never the working tree); escaping the tree root yields `missing` rather than Git's `symlink <size>` line (intentionally-different); link-follow depth capped at 32. 4 KiB cap on a batch input record (over-long → `LBR-CLI-003`/129; Libra hardening). `--textconv`/`--filters` rejected (`LBR-UNSUPPORTED-001`/128, intentionally-different). `--batch-command`/`--filter`/`--use-mailmap`/`--path`/bare `<type> <object>` form deferred. Deprecated lowercase `-z` deferred (only `-Z`). `-e` does not support JSON |
 | fsck | supported | |
 | verify-pack | partial | validates `.idx` files against matching `.pack` files; multi-index and Git's `-s` / `--stat-only` are supported; `--pack` is a Libra-only explicit pack path |
 | index-pack | supported | hidden plumbing command |
