@@ -677,6 +677,17 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
                 }
             }
         }
+        if let Some(spec) = args.chmod.as_deref() {
+            let executable = validate_chmod_spec(spec)?;
+            append_chmod_preview(
+                &mut add_output,
+                &index,
+                &validated.files,
+                &workdir,
+                &current_dir,
+                executable,
+            );
+        }
         return check_ignored_only_error(add_output);
     }
 
@@ -1440,10 +1451,47 @@ pub fn save_index_atomic(index: &Index, index_path: &Path) -> Result<(), AddErro
 /// decide whether to report the path as modified). Only the index entry's mode
 /// is touched; working-tree file permissions are never modified.
 fn apply_chmod(entry: &mut IndexEntry, executable: bool) -> bool {
-    let new_mode = if executable { 0o100755 } else { 0o100644 };
+    let new_mode = chmod_mode(executable);
     let changed = entry.mode != new_mode;
     entry.mode = new_mode;
     changed
+}
+
+fn chmod_mode(executable: bool) -> u32 {
+    if executable { 0o100755 } else { 0o100644 }
+}
+
+fn append_chmod_preview(
+    output: &mut AddOutput,
+    index: &Index,
+    requested_paths: &[PathBuf],
+    workdir: &Path,
+    current_dir: &Path,
+    executable: bool,
+) {
+    let target_mode = chmod_mode(executable);
+    let targets = filter_candidates(
+        &index.tracked_files(),
+        requested_paths,
+        workdir,
+        current_dir,
+    );
+    for rel in &targets {
+        let Some(name) = rel.to_str() else { continue };
+        let Some(entry) = index.get(name, 0) else {
+            continue;
+        };
+        if entry.mode == target_mode {
+            continue;
+        }
+        let path_str = rel.display().to_string();
+        let already_reported = output.added.contains(&path_str)
+            || output.modified.contains(&path_str)
+            || output.removed.contains(&path_str);
+        if !already_reported {
+            output.modified.push(path_str);
+        }
+    }
 }
 
 /// Upper bound on `--pathspec-from-file` input (file or stdin) to guard against

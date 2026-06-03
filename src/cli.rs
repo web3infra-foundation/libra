@@ -659,33 +659,24 @@ fn find_subcommand_index(args: &[String]) -> Option<(usize, bool)> {
     None
 }
 
-/// True when raw argv is a `bisect start ... -- ...` invocation.
+/// True when raw argv contains a `--` pathspec separator after the `bisect`
+/// `start` tokens.
 ///
-/// `bisect start` collects variadic positional revs, so clap would silently
-/// consume a `--` separator and fold the trailing pathspec into the good revs.
-/// We detect it pre-clap so path-limited bisect can be rejected as a usage
-/// error (it is unsupported). The subcommand scan mirrors [`find_subcommand_index`]
-/// (a value-taking global flag placed before `bisect` is not handled, matching
-/// that helper's behavior).
-fn bisect_start_uses_pathspec_separator(argv: &[String]) -> bool {
-    // Top-level subcommand: first non-option token after argv[0].
-    let mut i = 1;
-    while i < argv.len() && argv[i].starts_with('-') && argv[i] != "--" {
-        i += 1;
-    }
-    if argv.get(i).map(String::as_str) != Some("bisect") {
+/// `bisect start` collects variadic positional revs, so clap silently consumes a
+/// `--` separator and folds the trailing pathspec into the good revs. Callers
+/// invoke this only after clap has confirmed the command is `bisect start`, so
+/// the `bisect`/`start` tokens are guaranteed present and global flags (incl.
+/// value-taking ones placed before `bisect`) cannot confuse the scan — we simply
+/// locate the `bisect` then `start` tokens and look for a bare `--` after them.
+fn bisect_start_has_pathspec_separator(argv: &[String]) -> bool {
+    let Some(bisect_idx) = argv.iter().position(|t| t == "bisect") else {
         return false;
-    }
-    // Bisect subcommand: next non-option token.
-    let mut j = i + 1;
-    while j < argv.len() && argv[j].starts_with('-') && argv[j] != "--" {
-        j += 1;
-    }
-    if argv.get(j).map(String::as_str) != Some("start") {
+    };
+    let Some(start_off) = argv[bisect_idx + 1..].iter().position(|t| t == "start") else {
         return false;
-    }
-    // A bare `--` anywhere after `start` is a pathspec separator.
-    argv[j + 1..].iter().any(|tok| tok == "--")
+    };
+    let start_idx = bisect_idx + 1 + start_off;
+    argv[start_idx + 1..].iter().any(|tok| tok == "--")
 }
 
 fn is_short_number_flag(arg: &str) -> bool {
@@ -1100,17 +1091,6 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     if is_error_codes_help_topic(&argv) {
         return print_error_codes_help();
     }
-    // `bisect start` takes variadic positional revs; clap would silently swallow
-    // a `--` pathspec separator and fold the path into the good revs. Reject it
-    // before clap so `start <bad> -- <pathspec>` is a clear usage error rather
-    // than treating the pathspec as a good commit (path-limited bisect is
-    // unsupported — see docs/improvement/compatibility/declined.md).
-    if bisect_start_uses_pathspec_separator(&argv) {
-        return Err(CliError::command_usage(
-            "libra bisect start does not support '--' pathspec limiting",
-        )
-        .with_hint("remove the '--' and pathspec; path-limited bisect is not supported"));
-    }
     let args = match Cli::try_parse_from(argv.clone()) {
         Ok(args) => args,
         Err(err) => match err.kind() {
@@ -1127,6 +1107,20 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     };
     if let Commands::Tag(tag_args) = &args.command {
         command::tag::validate_cli_args(tag_args)?;
+    }
+    // `bisect start` collects variadic positional revs, so clap silently consumes
+    // a `--` pathspec separator and folds the trailing path into the good revs.
+    // Now that clap has confirmed this *is* `bisect start`, reject a `--`
+    // separator so a path is never mistaken for a good commit (path-limited
+    // bisect is unsupported — see docs/improvement/compatibility/declined.md).
+    // Done post-parse so global flags before `bisect` cannot confuse the scan.
+    if matches!(&args.command, Commands::Bisect(Bisect::Start { .. }))
+        && bisect_start_has_pathspec_separator(&argv)
+    {
+        return Err(CliError::command_usage(
+            "libra bisect start does not support '--' pathspec limiting",
+        )
+        .with_hint("remove the '--' and pathspec; path-limited bisect is not supported"));
     }
     let preflight = command_preflight(&args.command)?;
     if let Some(storage) = preflight.storage.as_deref() {

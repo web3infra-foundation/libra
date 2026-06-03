@@ -1051,6 +1051,45 @@ async fn test_add_chmod_unchanged_tracked() {
     assert_eq!(index_mode(test_dir.path(), "tracked.sh"), Some(0o100755));
 }
 
+/// Scenario: `--dry-run --chmod` previews a mode-only change for an unchanged
+/// tracked file without writing the index.
+#[tokio::test]
+#[serial]
+async fn test_add_chmod_dry_run_previews_unchanged_tracked() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write("tracked.sh", "#!/bin/sh\n").unwrap();
+
+    add::run_add(&AddArgs {
+        pathspec: vec!["tracked.sh".to_string()],
+        ..Default::default()
+    })
+    .await
+    .expect("initial add");
+    assert_eq!(index_mode(test_dir.path(), "tracked.sh"), Some(0o100644));
+
+    let out = add::run_add(&AddArgs {
+        pathspec: vec!["tracked.sh".to_string()],
+        chmod: Some("+x".to_string()),
+        dry_run: true,
+        ..Default::default()
+    })
+    .await
+    .expect("dry-run chmod on unchanged tracked file");
+
+    assert!(
+        out.modified.iter().any(|p| p == "tracked.sh"),
+        "dry-run should preview the mode-only change: {:?}",
+        out.modified
+    );
+    assert_eq!(
+        index_mode(test_dir.path(), "tracked.sh"),
+        Some(0o100644),
+        "dry-run must not write the chmod mode to the index"
+    );
+}
+
 /// Scenario: `--chmod` changes only the index mode, never the working-tree
 /// file's filesystem permissions.
 #[cfg(unix)]

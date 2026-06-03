@@ -906,7 +906,7 @@ async fn test_bisect_start_invalid_rev_rejected() {
     assert!(!BisectState::is_in_progress().await.unwrap());
 }
 
-/// Scenario: `bisect start <bad> -- <pathspec>` is rejected by the pre-clap
+/// Scenario: `bisect start <bad> -- <pathspec>` is rejected by the post-parse
 /// preflight (exit 129 / LBR-CLI-002) rather than silently folding the pathspec
 /// into the good revs (path-limited bisect is unsupported).
 #[::std::prelude::rust_2024::test]
@@ -915,6 +915,27 @@ fn test_bisect_start_pathspec_rejected() {
     init_repo_via_cli(repo.path());
 
     let output = run_libra_command(&["bisect", "start", "HEAD", "--", "src/"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("LBR-CLI-002"),
+        "expected LBR-CLI-002, got: {stderr}"
+    );
+}
+
+/// Scenario (regression): a value-taking global flag before `bisect` must not
+/// let the `--` pathspec separator slip past the preflight. The check runs
+/// after clap parsing, so `--color never` (a separate value token) cannot be
+/// mistaken for the subcommand.
+#[::std::prelude::rust_2024::test]
+fn test_bisect_start_pathspec_rejected_with_global_flag() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(
+        &["--color", "never", "bisect", "start", "HEAD", "--", "src/"],
+        repo.path(),
+    );
     assert_eq!(output.status.code(), Some(129));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
