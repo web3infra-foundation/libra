@@ -356,8 +356,6 @@ Sometimes the user wants to end the bisect session but go to a different commit 
 | Show log | `bisect log` | `bisect log` | N/A |
 | Automated run | `bisect run <cmd> [<args>...]` | `bisect run <script>` | N/A |
 | Show current state | `bisect view` | `bisect visualize` (GUI / log) | N/A |
-| Custom terms | Not supported (deferred — see compatibility/declined.md D7) | `bisect terms` / `--term-old` / `--term-new` | N/A |
-| Replay session | Not supported (deferred — see compatibility/declined.md D6) | `bisect replay <logfile>` | N/A |
 | Visualize (GUI) | Not supported | `bisect visualize` | N/A |
 | First-parent only | Not supported | `--first-parent` | N/A |
 | Multiple good commits | Positional args to `start` (or repeated `bisect good`) | Positional args to `start` | N/A |
@@ -379,7 +377,7 @@ coarse exit code **129**; `2` under `LIBRA_FINE_EXIT_CODES=1`):
 |----------|-----|-------------|
 | `bisect terms` / `--term-old` / `--term-new` | Custom good/bad aliases (e.g. fast/slow) are workflow personalisation, not core locating — see [declined.md D7](../improvement/compatibility/declined.md#d7-bisect-terms). | Use the default `good`/`bad` vocabulary; wrap custom semantics in your own script. |
 | `bisect replay <logfile>` | Replaying a session from a `bisect log` dump has limited CI value and is reassessed once `bisect log` output stabilises — see [declined.md D6](../improvement/compatibility/declined.md#d6-bisect-replay). | Re-issue the `good`/`bad` sequence from `bisect log` manually. |
-| `bisect start -- <pathspec>` | Path-limited bisect is a low-priority topology feature. Because `start` collects variadic positional revs, a `--` separator is rejected pre-parse so the pathspec is never silently treated as a good commit. | Filter paths in a wrapper script, then bisect normally. |
+| `bisect start -- <pathspec>` | Path-limited bisect is a low-priority topology feature. Because `start` collects variadic positional revs, a raw `--` separator is rejected after clap confirms `bisect start`, so the pathspec is never silently treated as a good commit. | Filter paths in a wrapper script, then bisect normally. |
 
 `bisect next` and `bisect visualize` are also not separate subcommands: candidate
 advancement is built into `bad`/`good`/`run`, and `bisect view` is the
@@ -387,19 +385,19 @@ intentionally-different equivalent of `visualize`.
 
 ## Error Handling
 
-| Code | Condition |
-|------|-----------|
-| `LBR-REPO-001` | Not a libra repository |
-| `LBR-REPO-003` | No commits in repository |
-| `LBR-REPO-003` | `bisect run` invoked before both good/bad bounds select a candidate |
-| `LBR-CLI-002` | Bisect session already in progress (for `start`) |
-| `LBR-CLI-002` | No bisect session in progress (for `bad`, `good`, `skip`, `log`) |
-| `LBR-CLI-003` | Commit not found (invalid rev argument) |
-| `LBR-CLI-003` | Bad commit is an ancestor of good commit (invalid range) |
-| `LBR-CONFLICT-001` | Uncommitted changes would be overwritten by checkout |
-| `LBR-IO-001` | Failed to read bisect state from database |
-| `LBR-IO-002` | Failed to save bisect state to database |
-| `LBR-IO-002` | Failed to create bisect_state table |
-| `LBR-BISECT-001` | `bisect view` or `bisect run` invoked outside an active bisect session (`NOT_IN_BISECT`) |
-| `LBR-BISECT-002` | `bisect run` command exited with code ≥ 128 or was killed by a signal (`BISECT_RUN_FAILED`) |
-| `LBR-BISECT-003` | `bisect run` cannot advance because no candidate commits remain (`BISECT_NO_CANDIDATES`) |
+Libra maps clap parse errors and bisect runtime errors through the shared
+`CliError` layer. Default exits use Git-style coarse categories; setting
+`LIBRA_FINE_EXIT_CODES=1` switches to the stable code's fine category.
+
+| Scenario | Stable code | Default exit | Fine exit | Notes |
+|----------|-------------|--------------|-----------|-------|
+| Success, including a completed `bisect run` | — | 0 | 0 | The script's `0` / `125` / `1..=127` values are interpreted as good / skip / bad, not returned directly. |
+| Bare `libra bisect` with no subcommand | — | 0 | 0 | Clap prints help and returns success. |
+| Unknown subcommand (`terms`, `replay`) or unknown term flag (`--term-old`, `--term-new`) | `LBR-CLI-002` | 129 | 2 | Parser rejection; stderr names the unrecognized subcommand or unexpected argument. |
+| Unsupported path-limited start (`bisect start <bad> -- <pathspec>`) | `LBR-CLI-002` | 129 | 2 | Rejected after parse so a pathspec cannot be mistaken for a good revision. |
+| Invalid revision / invalid bisect range | `LBR-CLI-003` | 129 | 2 | The error names the bad argument or range. |
+| Dirty tree, empty repository, missing/corrupt run state, missing HEAD, or candidate-count failure | `LBR-REPO-003` | 128 | 3 | Fatal repository-state error with a reset/stash hint where applicable. |
+| `bisect view` / `bisect run` without an active session | `LBR-BISECT-001` | 128 | 3 | Start a session before calling the subcommand. |
+| `bisect run` script exits `128+` or is killed by a signal | `LBR-BISECT-002` | 128 | 8 | The bisect state is preserved for inspection. |
+| `bisect run` has no remaining candidate commits | `LBR-BISECT-003` | 128 | 3 | Inspect with `libra bisect view` or reset the session. |
+| Bisect state database read/write failure | `LBR-IO-001` / `LBR-IO-002` | 128 | 5 | Check repository database health and filesystem permissions. |

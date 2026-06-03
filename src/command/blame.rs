@@ -43,7 +43,7 @@ EXAMPLES:
     libra blame -L 10,+5 src/main.rs       Blame 5 lines starting at line 10
     libra --json blame src/main.rs         Structured JSON output for agents";
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Default)]
 #[command(after_help = BLAME_EXAMPLES)]
 pub struct BlameArgs {
     /// The file to blame
@@ -57,6 +57,48 @@ pub struct BlameArgs {
     /// The line range to blame
     #[clap(short = 'L', value_name = "RANGE")]
     pub line_range: Option<String>,
+
+    /// Show the full commit hash instead of the abbreviated form
+    #[clap(short = 'l')]
+    pub long_rev: bool,
+
+    /// Show the raw commit timestamp (epoch seconds) instead of a formatted date
+    #[clap(short = 't')]
+    pub raw_timestamp: bool,
+
+    /// Show the file name for each blamed line
+    #[clap(short = 'f')]
+    pub show_filename: bool,
+
+    /// Show the original (pre-image) line number of each line
+    #[clap(short = 'n')]
+    pub show_number: bool,
+
+    /// Suppress the author name and timestamp columns
+    #[clap(short = 's')]
+    pub suppress_metadata: bool,
+
+    /// Show the author email instead of the author name
+    #[clap(short = 'e')]
+    pub show_email: bool,
+
+    /// Ignore whitespace-only changes when assigning blame
+    #[clap(short = 'w')]
+    pub ignore_whitespace: bool,
+
+    /// Emit machine-readable porcelain output (one record per line)
+    #[clap(short = 'p', long = "porcelain")]
+    pub porcelain: bool,
+
+    /// Detect moved lines (parsed only; cross-file move detection is not
+    /// implemented — blame still walks this file). Optional threshold: `-M=<num>`
+    #[clap(short = 'M', num_args = 0..=1, default_missing_value = "0", require_equals = true, value_name = "NUM")]
+    pub detect_moved: Option<u32>,
+
+    /// Detect copied lines (parsed only; cross-file copy detection is not
+    /// implemented — blame still walks this file). Optional threshold: `-C=<num>`
+    #[clap(short = 'C', num_args = 0..=1, default_missing_value = "0", require_equals = true, value_name = "NUM")]
+    pub detect_copied: Option<u32>,
 }
 
 /// Single attributed line of a blame report. Serialised verbatim to JSON.
@@ -68,6 +110,18 @@ pub struct BlameLine {
     pub author: String,
     pub date: String,
     pub content: String,
+    // Fields below are appended (backward-compatible JSON: existing consumers
+    // keep working) to support `-e`, `-t`, `-n`, and `--porcelain` rendering.
+    /// Author email of the introducing commit.
+    pub email: String,
+    /// Raw author timestamp (epoch seconds) of the introducing commit.
+    pub timestamp: i64,
+    /// Author timezone of the introducing commit (e.g. `+0800`).
+    pub timezone: String,
+    /// First non-empty line of the introducing commit message (summary).
+    pub summary: String,
+    /// Line number in the introducing commit (pre-image), for `-n`/porcelain.
+    pub original_line_number: usize,
 }
 
 /// Whole-file result of a `libra blame` invocation.
@@ -83,9 +137,13 @@ pub struct BlameOutput {
 /// text — the final value is the line's introducing commit.
 struct LineBlame {
     line_number: usize,
+    original_line_number: usize,
     commit_id: ObjectHash,
     author: String,
+    email: String,
     timestamp: i64,
+    timezone: String,
+    summary: String,
     content: String,
 }
 
@@ -183,34 +241,77 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
         return Ok(());
     }
 
-    let mut output = String::new();
-    for blame in &result.lines {
-        let author_short = if blame.author.chars().count() > 15 {
-            let truncated: String = blame.author.chars().take(12).collect();
-            format!("{truncated}...")
-        } else {
-            format!("{:15}", blame.author)
-        };
-        let date_formatted = blame
-            .date
-            .parse::<DateTime<chrono::FixedOffset>>()
-            .map(|dt| {
-                dt.with_timezone(&chrono::Local)
-                    .format("%Y-%m-%d %H:%M:%S %z")
-                    .to_string()
-            })
-            .unwrap_or_else(|_| blame.date.clone());
-
-        output.push_str(&format!(
-            "{} ({:19} {} {}) {}\n",
-            blame.short_hash, author_short, date_formatted, blame.line_number, blame.content
-        ));
-    }
+    let output = render_human(&result, &args);
 
     let mut pager = Pager::with_config(out_config)?;
     pager.write_str(&output)?;
     pager.finish()?;
     Ok(())
+}
+
+/// Render the human-readable blame text, honoring the display flags.
+///
+/// With no flags the output is byte-identical to the original layout
+/// (`<short-hash> (<author:19> <date> <line>) <content>`). Flags adjust it:
+/// `-l` full hash, `-s` drops the author+date columns, `-e` shows the email
+/// instead of the name, `-t` shows the raw epoch timestamp, `-n` uses the
+/// original (pre-image) line number, and `-f` prefixes the file name.
+fn render_human(out: &BlameOutput, args: &BlameArgs) -> String {
+    let mut output = String::new();
+    for blame in &out.lines {
+        let hash_col: &str = if args.long_rev {
+            &blame.hash
+        } else {
+            &blame.short_hash
+        };
+
+        let meta = if args.suppress_metadata {
+            String::new()
+        } else {
+            let who: &str = if args.show_email {
+                &blame.email
+            } else {
+                &blame.author
+            };
+            let who_col = if who.chars().count() > 15 {
+                let truncated: String = who.chars().take(12).collect();
+                format!("{truncated}...")
+            } else {
+                format!("{who:15}")
+            };
+            let when = if args.raw_timestamp {
+                blame.timestamp.to_string()
+            } else {
+                blame
+                    .date
+                    .parse::<DateTime<chrono::FixedOffset>>()
+                    .map(|dt| {
+                        dt.with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M:%S %z")
+                            .to_string()
+                    })
+                    .unwrap_or_else(|_| blame.date.clone())
+            };
+            format!("{who_col:19} {when} ")
+        };
+
+        let line_no = if args.show_number {
+            blame.original_line_number
+        } else {
+            blame.line_number
+        };
+        let filename = if args.show_filename {
+            format!("{} ", out.file)
+        } else {
+            String::new()
+        };
+
+        output.push_str(&format!(
+            "{filename}{hash_col} ({meta}{line_no}) {content}\n",
+            content = blame.content
+        ));
+    }
+    output
 }
 
 /// Compute the per-line attribution.
@@ -257,9 +358,13 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
         .enumerate()
         .map(|(idx, content)| LineBlame {
             line_number: idx + 1,
+            original_line_number: idx + 1,
             commit_id,
             author: commit_obj.author.name.clone(),
+            email: commit_obj.author.email.clone(),
             timestamp: commit_obj.author.timestamp as i64,
+            timezone: commit_obj.author.timezone.clone(),
+            summary: commit_obj.format_message(),
             content: content.clone(),
         })
         .collect();
@@ -299,7 +404,11 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
                             if Some(&blame.content) == parent_content {
                                 blame.commit_id = *parent_id;
                                 blame.author = parent_commit.author.name.clone();
+                                blame.email = parent_commit.author.email.clone();
                                 blame.timestamp = parent_commit.author.timestamp as i64;
+                                blame.timezone = parent_commit.author.timezone.clone();
+                                blame.summary = parent_commit.format_message();
+                                blame.original_line_number = old_line;
                             }
                         }
                     }
@@ -334,6 +443,11 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
                     author: line.author,
                     date: format_blame_timestamp(line.timestamp),
                     content: line.content,
+                    email: line.email,
+                    timestamp: line.timestamp,
+                    timezone: line.timezone,
+                    summary: line.summary,
+                    original_line_number: line.original_line_number,
                 }
             })
             .collect(),

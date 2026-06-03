@@ -76,7 +76,21 @@ fn test_blame_json_output_includes_lines() {
     let json = parse_json_stdout(&output);
     assert_eq!(json["command"], "blame");
     assert_eq!(json["data"]["file"], "tracked.txt");
-    assert!(json["data"]["lines"].as_array().is_some());
+    let lines = json["data"]["lines"].as_array().expect("lines array");
+    assert!(!lines.is_empty(), "expected blamed lines");
+    // Backward-compatible schema: existing fields plus the appended ones.
+    let first = &lines[0];
+    assert!(first["line_number"].is_number());
+    assert!(first["hash"].is_string());
+    assert!(
+        first["email"].is_string(),
+        "appended email field must be present"
+    );
+    assert!(
+        first["timestamp"].is_number(),
+        "appended timestamp field present"
+    );
+    assert!(first["original_line_number"].is_number());
 }
 
 /// Scenario: `--machine blame` must emit exactly one non-empty stdout
@@ -401,6 +415,7 @@ async fn blame_runs_with_sha1() {
         file: "foo.txt".into(),
         commit: "HEAD".into(),
         line_range: None,
+        ..Default::default()
     })
     .await;
 }
@@ -420,6 +435,7 @@ async fn blame_runs_with_sha256() {
         file: "foo.txt".into(),
         commit: "HEAD".into(),
         line_range: None,
+        ..Default::default()
     })
     .await;
 }
@@ -439,5 +455,217 @@ async fn blame_rejects_sha1_length_on_sha256_repo() {
     assert!(
         res.is_err(),
         "expect get_target_commit to reject SHA-1 length hash in SHA-256 repo"
+    );
+}
+
+/// Build a committed repo containing `tracked.txt` (3 lines) for human-render tests.
+fn repo_with_tracked_file() -> tempfile::TempDir {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "line1\nline2\nline3\n").unwrap();
+    let add = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert!(
+        add.status.success(),
+        "add: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let commit = run_libra_command(&["commit", "-m", "add tracked", "--no-verify"], repo.path());
+    assert!(
+        commit.status.success(),
+        "commit: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    repo
+}
+
+/// `-s` suppresses the author/date columns; the line number follows the open
+/// paren directly (`(<num>)`), which never happens when metadata is present.
+#[test]
+fn test_blame_human_suppress_metadata() {
+    let repo = repo_with_tracked_file();
+    let out = run_libra_command(&["blame", "-s", "tracked.txt"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("(1)") && stdout.contains("line1"),
+        "-s output should put the line number right after '(' : {stdout}"
+    );
+}
+
+/// `-l` shows the full-length commit hash (40 hex for SHA-1, 64 for SHA-256).
+#[test]
+fn test_blame_human_long_rev() {
+    let repo = repo_with_tracked_file();
+    let out = run_libra_command(&["blame", "-l", "tracked.txt"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.split_whitespace().any(|t| {
+            (t.len() == 40 || t.len() == 64) && t.chars().all(|c| c.is_ascii_hexdigit())
+        }),
+        "-l output should contain a full-length hash: {stdout}"
+    );
+}
+
+/// `-t` shows the raw epoch timestamp (a long digit run) instead of a date.
+#[test]
+fn test_blame_human_raw_timestamp() {
+    let repo = repo_with_tracked_file();
+    let out = run_libra_command(&["blame", "-t", "tracked.txt"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let has_epoch = stdout
+        .split(|c: char| !c.is_ascii_digit())
+        .any(|run| run.len() >= 9);
+    assert!(
+        has_epoch,
+        "-t output should contain a raw epoch timestamp: {stdout}"
+    );
+}
+
+/// `-e` shows the author email (contains `@`) instead of the name.
+#[test]
+fn test_blame_human_show_email() {
+    let repo = repo_with_tracked_file();
+    let out = run_libra_command(&["blame", "-e", "tracked.txt"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains('@'),
+        "-e output should show an email: {stdout}"
+    );
+}
+
+/// `-n` shows the original (pre-image) line number: a line that shifted down
+/// because a line was prepended keeps its original number.
+#[test]
+fn test_blame_human_show_number() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("t.txt"), "alpha\nbeta\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "t.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "c1", "--no-verify"], repo.path())
+            .status
+            .success()
+    );
+    // Prepend a line so alpha/beta shift from original lines 1/2 to final 2/3.
+    std::fs::write(repo.path().join("t.txt"), "zero\nalpha\nbeta\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "t.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "c2", "--no-verify"], repo.path())
+            .status
+            .success()
+    );
+
+    let out = run_libra_command(&["blame", "-n", "t.txt"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // With -n, alpha shows its ORIGINAL line number 1 (not final 2).
+    assert!(
+        stdout.contains("1) alpha") && stdout.contains("2) beta"),
+        "-n should show original line numbers: {stdout}"
+    );
+}
+
+/// `-l -n -e` combine: full hash + original line numbers + email all present.
+#[test]
+fn test_blame_human_combined_flags() {
+    let repo = repo_with_tracked_file();
+    let out = run_libra_command(&["blame", "-l", "-n", "-e", "tracked.txt"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains('@'), "combined -e: {stdout}");
+    assert!(
+        stdout.split_whitespace().any(|t| {
+            (t.len() == 40 || t.len() == 64) && t.chars().all(|c| c.is_ascii_hexdigit())
+        }),
+        "combined -l: {stdout}"
+    );
+}
+
+/// `-M`/`-C` (incl. `-M=50`) parse and fall back to same-file blame (parsed only).
+#[test]
+fn test_blame_accepts_move_copy_flags() {
+    let repo = repo_with_tracked_file();
+    let plain = run_libra_command(&["--json", "blame", "tracked.txt"], repo.path());
+    assert!(plain.status.success());
+    let moved = run_libra_command(&["--json", "blame", "-M=50", "tracked.txt"], repo.path());
+    assert!(
+        moved.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+    let copied = run_libra_command(&["--json", "blame", "-C", "tracked.txt"], repo.path());
+    assert!(
+        copied.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&copied.stderr)
+    );
+    // Same-file fallback: attribution identical to the no-flag run.
+    assert_eq!(
+        parse_json_stdout(&plain)["data"]["lines"],
+        parse_json_stdout(&moved)["data"]["lines"]
+    );
+}
+
+/// `-M`/`-C` must not swallow the FILE positional (require_equals contract).
+#[test]
+fn test_blame_move_copy_flag_does_not_swallow_file() {
+    use clap::Parser;
+    let a = BlameArgs::try_parse_from(["blame", "-M", "file.txt"]).expect("bare -M parses");
+    assert_eq!(a.file, "file.txt");
+    assert_eq!(a.detect_moved, Some(0));
+    let b = BlameArgs::try_parse_from(["blame", "-C", "file.txt"]).expect("bare -C parses");
+    assert_eq!(b.file, "file.txt");
+    assert_eq!(b.detect_copied, Some(0));
+    let c = BlameArgs::try_parse_from(["blame", "-M=50", "file.txt"]).expect("-M=50 parses");
+    assert_eq!(c.file, "file.txt");
+    assert_eq!(c.detect_moved, Some(50));
+    let d = BlameArgs::try_parse_from(["blame", "-C=50", "file.txt"]).expect("-C=50 parses");
+    assert_eq!(d.file, "file.txt");
+    assert_eq!(d.detect_copied, Some(50));
+}
+
+/// An unknown flag is rejected with the default coarse usage exit code 129.
+#[test]
+fn test_blame_bogus_flag_exits_129() {
+    let repo = repo_with_tracked_file();
+    let out = run_libra_command(&["blame", "--bogus-flag", "tracked.txt"], repo.path());
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
