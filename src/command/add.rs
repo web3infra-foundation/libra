@@ -529,6 +529,13 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
     if args.intent_to_add {
         return Err(AddError::IntentToAddDeclined.into());
     }
+    if args.ignore_missing && !args.dry_run {
+        return Err(
+            CliError::command_usage("--ignore-missing can only be used with --dry-run")
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("add --dry-run when checking paths that may be missing"),
+        );
+    }
     // Validate the --chmod value up front (whitelist: +x / -x). The mode change
     // itself is applied during staging.
     if let Some(spec) = args.chmod.as_deref() {

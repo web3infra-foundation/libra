@@ -241,12 +241,65 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
         return Ok(());
     }
 
-    let output = render_human(&result, &args);
+    let output = if args.porcelain {
+        render_porcelain(&result)
+    } else {
+        render_human(&result, &args)
+    };
 
     let mut pager = Pager::with_config(out_config)?;
     pager.write_str(&output)?;
     pager.finish()?;
     Ok(())
+}
+
+/// Render Git-compatible `--porcelain` output.
+///
+/// Each line emits a `<full-hash> <orig-lineno> <final-lineno>` header (the
+/// first line of a contiguous same-commit group also carries the group line
+/// count), the per-commit metadata block (`author`/`author-mail`/`author-time`/
+/// `author-tz`/`summary`/`filename`) the first time a commit is seen, and a
+/// Tab-prefixed content line. The hash is always full-length, independent of
+/// `-l`/`-s`.
+fn render_porcelain(out: &BlameOutput) -> String {
+    use std::collections::HashSet;
+    let mut output = String::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    let lines = &out.lines;
+    let mut i = 0;
+    while i < lines.len() {
+        let group_hash = &lines[i].hash;
+        let mut group_len = 1;
+        while i + group_len < lines.len() && &lines[i + group_len].hash == group_hash {
+            group_len += 1;
+        }
+        for (offset, line) in lines[i..i + group_len].iter().enumerate() {
+            if offset == 0 {
+                output.push_str(&format!(
+                    "{} {} {} {}\n",
+                    line.hash, line.original_line_number, line.line_number, group_len
+                ));
+            } else {
+                output.push_str(&format!(
+                    "{} {} {}\n",
+                    line.hash, line.original_line_number, line.line_number
+                ));
+            }
+            if seen.insert(line.hash.as_str()) {
+                output.push_str(&format!("author {}\n", line.author));
+                output.push_str(&format!("author-mail <{}>\n", line.email));
+                output.push_str(&format!("author-time {}\n", line.timestamp));
+                output.push_str(&format!("author-tz {}\n", line.timezone));
+                output.push_str(&format!("summary {}\n", line.summary));
+                output.push_str(&format!("filename {}\n", out.file));
+            }
+            output.push('\t');
+            output.push_str(&line.content);
+            output.push('\n');
+        }
+        i += group_len;
+    }
+    output
 }
 
 /// Render the human-readable blame text, honoring the display flags.
@@ -534,14 +587,21 @@ fn parse_line_range(range_str: &str, total_lines: usize) -> Result<(usize, usize
                 let offset = parts[1][1..]
                     .parse::<usize>()
                     .map_err(|_| format!("Invalid offset: {}", parts[1]))?;
-                start + offset - 1
+                // Checked arithmetic: a huge offset must not overflow/panic.
+                start
+                    .checked_add(offset)
+                    .and_then(|v| v.checked_sub(1))
+                    .ok_or_else(|| format!("Range offset {} overflows", parts[1]))?
             } else {
                 parts[1]
                     .parse::<usize>()
                     .map_err(|_| format!("Invalid end line: {}", parts[1]))?
             };
 
-            if start == 0 || start > total_lines || end == 0 || end > total_lines || start > end {
+            // Clamp an over-long end to the file length (matches Git); a start
+            // past the end of the file is still an error.
+            let end = end.min(total_lines);
+            if start == 0 || start > total_lines || end == 0 || start > end {
                 return Err(format!(
                     "Invalid range {},{} (total lines: {})",
                     start, end, total_lines

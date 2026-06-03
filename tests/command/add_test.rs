@@ -1416,6 +1416,28 @@ async fn test_add_ignore_missing_dry_run_skips_missing() {
     assert!(out.added.iter().any(|p| p == "real.txt"), "{:?}", out.added);
 }
 
+/// Scenario: the in-process API must enforce the same Git/clap contract as the
+/// CLI: `--ignore-missing` is only legal with `--dry-run`.
+#[tokio::test]
+#[serial]
+async fn test_add_ignore_missing_requires_dry_run_via_run_add() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    let err = add::run_add(&AddArgs {
+        pathspec: vec!["ghost.txt".to_string()],
+        ignore_missing: true,
+        ..Default::default()
+    })
+    .await
+    .expect_err("run_add must reject --ignore-missing without --dry-run");
+    assert_eq!(
+        err.stable_code(),
+        libra::utils::error::StableErrorCode::CliInvalidArguments
+    );
+}
+
 /// Scenario: under `--ignore-missing`, a path that EXISTS but matches nothing
 /// (an empty directory) still errors with PathspecNotMatched.
 #[tokio::test]

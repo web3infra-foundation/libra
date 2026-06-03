@@ -669,3 +669,237 @@ fn test_blame_bogus_flag_exits_129() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// Build a committed repo containing a 10-line `ten.txt` for `-L` range tests.
+fn repo_with_ten_line_file() -> tempfile::TempDir {
+    let repo = create_committed_repo_via_cli();
+    let content: String = (1..=10).map(|i| format!("line{i}\n")).collect();
+    std::fs::write(repo.path().join("ten.txt"), content).unwrap();
+    assert!(
+        run_libra_command(&["add", "ten.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "ten", "--no-verify"], repo.path())
+            .status
+            .success()
+    );
+    repo
+}
+
+fn porcelain_first_token_is_full_hash(stdout: &str) -> bool {
+    stdout
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().next())
+        .is_some_and(|t| {
+            (t.len() == 40 || t.len() == 64) && t.chars().all(|c| c.is_ascii_hexdigit())
+        })
+}
+
+/// `--porcelain` emits a `<hash> <orig> <final> [count]` header, `author ` KV
+/// lines, and Tab-prefixed content lines.
+#[test]
+fn test_blame_porcelain() {
+    let repo = repo_with_tracked_file();
+    let out = run_libra_command(&["blame", "--porcelain", "tracked.txt"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        porcelain_first_token_is_full_hash(&stdout),
+        "header hash: {stdout}"
+    );
+    assert!(
+        stdout.lines().any(|l| l.starts_with("author ")),
+        "author KV: {stdout}"
+    );
+    assert!(
+        stdout.lines().any(|l| l.starts_with("author-mail <")),
+        "author-mail KV: {stdout}"
+    );
+    assert!(
+        stdout.lines().any(|l| l.starts_with('\t')),
+        "tab content: {stdout}"
+    );
+}
+
+/// `-p` is an exact alias of `--porcelain`.
+#[test]
+fn test_blame_porcelain_p_alias() {
+    let repo = repo_with_tracked_file();
+    let p = run_libra_command(&["blame", "-p", "tracked.txt"], repo.path());
+    let long = run_libra_command(&["blame", "--porcelain", "tracked.txt"], repo.path());
+    assert!(p.status.success() && long.status.success());
+    assert_eq!(
+        p.stdout, long.stdout,
+        "-p and --porcelain must be byte-identical"
+    );
+}
+
+/// Porcelain hash header is always full-length, unaffected by `-l`/`-s`.
+#[test]
+fn test_blame_porcelain_hash_full_length() {
+    let repo = repo_with_tracked_file();
+    for extra in [["-l"], ["-s"]] {
+        let mut argv = vec!["blame", "--porcelain"];
+        argv.extend_from_slice(&extra);
+        argv.push("tracked.txt");
+        let out = run_libra_command(&argv, repo.path());
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            porcelain_first_token_is_full_hash(&stdout),
+            "porcelain hash must stay full-length with {extra:?}: {stdout}"
+        );
+    }
+}
+
+/// `-L 5,9999` on a 10-line file clamps the end to 10 (lines 5..=10), exit 0.
+#[test]
+fn test_blame_line_range_truncates_overlong_end() {
+    let repo = repo_with_ten_line_file();
+    let out = run_libra_command(&["--json", "blame", "-L", "5,9999", "ten.txt"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = parse_json_stdout(&out);
+    let lines = json["data"]["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 6, "lines 5..=10 expected");
+}
+
+/// `-L 1,+100` on a 10-line file returns all 10 lines (relative end clamped).
+#[test]
+fn test_blame_line_range_relative_truncation() {
+    let repo = repo_with_ten_line_file();
+    let out = run_libra_command(&["--json", "blame", "-L", "1,+100", "ten.txt"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["data"]["lines"].as_array().unwrap().len(), 10);
+}
+
+/// `-L 9999,10000` (start past EOF) is an error, not an empty result.
+#[test]
+fn test_blame_line_range_start_overflow_errors() {
+    let repo = repo_with_ten_line_file();
+    let out = run_libra_command(&["blame", "-L", "9999,10000", "ten.txt"], repo.path());
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `-L 1,+<usize::MAX>` must error via checked arithmetic, not panic.
+#[test]
+fn test_blame_line_range_offset_arithmetic_overflow() {
+    let repo = repo_with_ten_line_file();
+    let out = run_libra_command(
+        &["blame", "-L", "1,+18446744073709551615", "ten.txt"],
+        repo.path(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A non-UTF-8 blob renders under `--porcelain` via lossy decoding without panic.
+#[test]
+fn test_blame_porcelain_non_utf8_lossy() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("bin.txt"), [0xFFu8, 0xFE, b'\n']).unwrap();
+    assert!(
+        run_libra_command(&["add", "bin.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "bin", "--no-verify"], repo.path())
+            .status
+            .success()
+    );
+    let out = run_libra_command(&["blame", "--porcelain", "bin.txt"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `--json` takes precedence over `--porcelain` (root-global JSON wins).
+#[test]
+fn test_blame_json_overrides_porcelain() {
+    let repo = repo_with_tracked_file();
+    let out = run_libra_command(&["--json", "blame", "-p", "tracked.txt"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["command"], "blame");
+    assert!(json["data"]["lines"].as_array().is_some());
+}
+
+/// Porcelain `<orig-lineno>` reflects the parent-side line number: after a line
+/// is prepended, an inherited line keeps its original (pre-image) number.
+#[test]
+fn test_blame_porcelain_orig_lineno_simple_insert() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("ins.txt"), "alpha\nbeta\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "ins.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "c1", "--no-verify"], repo.path())
+            .status
+            .success()
+    );
+    std::fs::write(repo.path().join("ins.txt"), "zero\nalpha\nbeta\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "ins.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "c2", "--no-verify"], repo.path())
+            .status
+            .success()
+    );
+
+    let out = run_libra_command(&["blame", "--porcelain", "ins.txt"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // alpha: final line 2, original (pre-image) line 1 -> a header "<hash> 1 2 ...".
+    assert!(
+        stdout.lines().any(|l| {
+            let t: Vec<&str> = l.split_whitespace().collect();
+            t.len() >= 3 && t[0].len() >= 40 && t[1] == "1" && t[2] == "2"
+        }),
+        "expected a porcelain header with orig=1 final=2 for the shifted line: {stdout}"
+    );
+}
