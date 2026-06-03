@@ -79,6 +79,20 @@ pub fn is_locked_revision(rev: &str) -> bool {
     is_locked_branch(head)
 }
 
+/// Return `true` if `rev` targets an AI-managed branch (`intent` /
+/// `agent-traces`) — including via revision suffixes (`agent-traces~1`,
+/// `intent^`, `agent-traces@{0}`).
+///
+/// Mirrors [`is_locked_revision`] (strip the first `~` / `^` / `@` suffix, then
+/// test the prefix) but uses [`is_ai_managed_branch`], so it **excludes**
+/// [`DEFAULT_BRANCH`]. This is the right guard for `checkout` targets such as
+/// `--detach <commit-ish>` and `-B`/`--orphan <start_point>`, where `main` and
+/// `main~1` must remain reachable but `intent`/`agent-traces` history must not.
+pub fn is_ai_managed_revision(rev: &str) -> bool {
+    let head = rev.split(['~', '^', '@']).next().unwrap_or(rev);
+    is_ai_managed_branch(head)
+}
+
 /// Retain only branches whose tip is (or is not) reachable from a baseline.
 ///
 /// `reachable` is the precomputed ancestor set of a `--merged` / `--no-merged`
@@ -705,5 +719,25 @@ mod tests {
         assert!(!is_locked_revision("agent-traces-feature^"));
         assert!(!is_locked_revision("not-locked@{0}"));
         assert!(!is_locked_revision(""));
+    }
+
+    #[test]
+    fn is_ai_managed_revision_strips_suffixes_and_excludes_main() {
+        // AI-managed bare names and suffixed revisions are caught.
+        assert!(is_ai_managed_revision("agent-traces"));
+        assert!(is_ai_managed_revision("intent"));
+        assert!(is_ai_managed_revision("agent-traces~1"));
+        assert!(is_ai_managed_revision("intent^"));
+        assert!(is_ai_managed_revision("agent-traces@{0}"));
+        assert!(is_ai_managed_revision("intent~1^2"));
+
+        // Crucially, `main` (and its history) is NOT AI-managed — checkout
+        // targets like `-B main` / `--detach main~1` must remain allowed.
+        assert!(!is_ai_managed_revision(DEFAULT_BRANCH));
+        assert!(!is_ai_managed_revision("main~1"));
+        assert!(!is_ai_managed_revision("HEAD~1"));
+        assert!(!is_ai_managed_revision("feature/x~1"));
+        assert!(!is_ai_managed_revision("agent-traces-feature"));
+        assert!(!is_ai_managed_revision(""));
     }
 }

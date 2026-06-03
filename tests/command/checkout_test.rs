@@ -692,6 +692,395 @@ fn test_checkout_plain_name_stays_branch_mode_when_file_matches_branch() {
     );
 }
 
+// ════════════════════════════════════════════════════════════════════════
+//  Batch 0 — -B / --detach / --orphan branch checkout modes
+// ════════════════════════════════════════════════════════════════════════
+
+/// `libra rev-parse <rev>` → trimmed OID (panics on failure).
+fn rev_parse(repo: &std::path::Path, rev: &str) -> String {
+    let out = super::run_libra_command(&["rev-parse", rev], repo);
+    assert!(
+        out.status.success(),
+        "rev-parse {rev} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Add a second empty commit so `HEAD~1` exists.
+fn add_empty_commit(repo: &std::path::Path, msg: &str) {
+    super::assert_cli_success(
+        &super::run_libra_command(&["commit", "--allow-empty", "-m", msg, "--no-verify"], repo),
+        "empty commit",
+    );
+}
+
+/// `-B <branch>` resets an existing branch to the current HEAD and switches.
+#[test]
+fn checkout_force_branch_resets_existing_branch_to_head() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    // branch_x is created at the first commit, then main advances.
+    assert_cli_success(
+        &run_libra_command(&["branch", "branch_x"], repo.path()),
+        "branch",
+    );
+    add_empty_commit(repo.path(), "m2");
+    let head = rev_parse(repo.path(), "HEAD");
+    assert_ne!(
+        rev_parse(repo.path(), "branch_x"),
+        head,
+        "precondition: branch_x behind HEAD"
+    );
+
+    let out = run_libra_command(&["checkout", "-B", "branch_x"], repo.path());
+    assert_cli_success(&out, "checkout -B branch_x");
+    assert_eq!(
+        rev_parse(repo.path(), "branch_x"),
+        head,
+        "branch_x reset to HEAD"
+    );
+    let cur = run_libra_command(&["branch", "--show-current"], repo.path());
+    assert_eq!(String::from_utf8_lossy(&cur.stdout).trim(), "branch_x");
+}
+
+/// `-B <branch> <start_point>` resets to the given start point.
+#[test]
+fn checkout_force_branch_with_start_point_resets_to_target() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "branch_x"], repo.path()),
+        "branch",
+    );
+    add_empty_commit(repo.path(), "m2");
+    let parent = rev_parse(repo.path(), "HEAD~1");
+
+    let out = run_libra_command(&["checkout", "-B", "branch_x", "HEAD~1"], repo.path());
+    assert_cli_success(&out, "checkout -B branch_x HEAD~1");
+    assert_eq!(
+        rev_parse(repo.path(), "branch_x"),
+        parent,
+        "reset to HEAD~1"
+    );
+}
+
+/// `-B <new>` (absent) creates the branch at the current HEAD.
+#[test]
+fn checkout_force_branch_creates_when_absent() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let head = rev_parse(repo.path(), "HEAD");
+    let out = run_libra_command(&["checkout", "-B", "new_x"], repo.path());
+    assert_cli_success(&out, "checkout -B new_x");
+    assert_eq!(
+        rev_parse(repo.path(), "new_x"),
+        head,
+        "new_x created at HEAD"
+    );
+}
+
+/// `-B <new> <start_point>` (absent) creates the branch at the start point, not HEAD.
+#[test]
+fn checkout_force_branch_creates_absent_at_start_point() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    add_empty_commit(repo.path(), "m2");
+    let parent = rev_parse(repo.path(), "HEAD~1");
+    let head = rev_parse(repo.path(), "HEAD");
+    let out = run_libra_command(&["checkout", "-B", "new_x", "HEAD~1"], repo.path());
+    assert_cli_success(&out, "checkout -B new_x HEAD~1");
+    assert_eq!(
+        rev_parse(repo.path(), "new_x"),
+        parent,
+        "created at HEAD~1, not HEAD"
+    );
+    assert_ne!(parent, head, "HEAD~1 must differ from HEAD");
+}
+
+/// `-B intent` (AI-managed branch) is blocked with CliInvalidTarget (129).
+#[test]
+fn checkout_force_branch_on_intent_is_blocked() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["checkout", "-B", "intent"], repo.path());
+    assert_eq!(out.status.code(), Some(129));
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+}
+
+/// `-B main` and `--detach main~1` are NOT blocked (main is not AI-managed).
+#[test]
+fn checkout_force_branch_on_main_is_allowed() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    add_empty_commit(repo.path(), "m2");
+    // -B main resets main to HEAD (no-op-ish), must not be blocked.
+    let out = run_libra_command(&["checkout", "-B", "main"], repo.path());
+    assert_cli_success(&out, "-B main must be allowed");
+    // --detach main~1 must also be allowed.
+    let out = run_libra_command(&["checkout", "--detach", "main~1"], repo.path());
+    assert_cli_success(&out, "--detach main~1 must be allowed");
+}
+
+/// `--detach <commit>` moves HEAD to a detached state and prints the banner.
+#[test]
+fn checkout_detach_to_commit_sets_detached_head() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    add_empty_commit(repo.path(), "m2");
+    let parent = rev_parse(repo.path(), "HEAD~1");
+
+    let out = run_libra_command(&["checkout", "--detach", "HEAD~1"], repo.path());
+    assert_cli_success(&out, "checkout --detach HEAD~1");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("HEAD detached at"),
+        "detach banner: {stdout}"
+    );
+    assert!(
+        stdout.contains(&parent[..8]),
+        "banner shows short hash: {stdout}"
+    );
+}
+
+/// After `--detach`, JSON checkout reports `detached == true`.
+#[test]
+fn checkout_detach_then_show_current_reports_detached() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_json_stdout, run_libra_command,
+    };
+    let repo = create_committed_repo_via_cli();
+    add_empty_commit(repo.path(), "m2");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--detach", "HEAD~1"], repo.path()),
+        "detach",
+    );
+    let out = run_libra_command(&["--json", "checkout"], repo.path());
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["data"]["detached"], true);
+}
+
+/// From a detached HEAD, `checkout <branch>` rebinds HEAD to that branch.
+#[test]
+fn checkout_from_detached_back_to_branch_rebinds_head() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    add_empty_commit(repo.path(), "m2");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--detach", "HEAD~1"], repo.path()),
+        "detach",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], repo.path()),
+        "back to main",
+    );
+    let cur = run_libra_command(&["branch", "--show-current"], repo.path());
+    assert_eq!(String::from_utf8_lossy(&cur.stdout).trim(), "main");
+}
+
+/// `--detach agent-traces~1` (AI-managed revision suffix) is blocked (129).
+#[test]
+fn checkout_detach_on_ai_managed_revision_suffix_is_blocked() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["checkout", "--detach", "agent-traces~1"], repo.path());
+    assert_eq!(out.status.code(), Some(129));
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+}
+
+/// `--orphan <branch>` creates an unborn branch (JSON: orphan=true, no commit).
+#[test]
+fn checkout_orphan_creates_unborn_branch() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_json_stdout, run_libra_command,
+    };
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["--json", "checkout", "--orphan", "orphan_x"], repo.path());
+    assert_cli_success(&out, "checkout --orphan orphan_x");
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["data"]["action"], "create");
+    assert_eq!(json["data"]["branch"], "orphan_x");
+    assert_eq!(json["data"]["orphan"], true);
+    assert_eq!(json["data"]["created"], true);
+    assert!(json["data"]["commit"].is_null(), "unborn: no commit");
+    // HEAD is on orphan_x but has no commit yet (rev-parse HEAD fails).
+    let cur = run_libra_command(&["branch", "--show-current"], repo.path());
+    assert_eq!(String::from_utf8_lossy(&cur.stdout).trim(), "orphan_x");
+    let head = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert!(!head.status.success(), "unborn HEAD has no commit");
+}
+
+/// `--orphan agent-traces` (AI-managed name) is blocked (129).
+#[test]
+fn checkout_orphan_on_agent_traces_is_blocked() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["checkout", "--orphan", "agent-traces"], repo.path());
+    assert_eq!(out.status.code(), Some(129));
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+}
+
+/// `--orphan` then a first commit produces a parentless commit that fsck accepts.
+#[test]
+fn checkout_orphan_then_first_commit_passes_fsck() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--orphan", "orphan_x"], repo.path()),
+        "orphan",
+    );
+    std::fs::write(repo.path().join("seed.txt"), "seed\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "seed.txt"], repo.path()), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "orphan root", "--no-verify"], repo.path()),
+        "first orphan commit",
+    );
+    // The new commit has no parent.
+    let head = rev_parse(repo.path(), "HEAD");
+    let show = run_libra_command(&["cat-file", "-p", &head], repo.path());
+    assert!(
+        !String::from_utf8_lossy(&show.stdout).contains("parent "),
+        "orphan root commit must have no parent"
+    );
+    let fsck = run_libra_command(&["fsck"], repo.path());
+    assert_cli_success(&fsck, "fsck after orphan commit");
+}
+
+/// `-B` writes a `checkout: moving from <old> to <new>` reflog entry.
+#[test]
+fn checkout_force_branch_reflog_records_moving_from_to() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_json_stdout, run_libra_command,
+    };
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "branch_x"], repo.path()),
+        "branch",
+    );
+    add_empty_commit(repo.path(), "m2");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "-B", "branch_x"], repo.path()),
+        "-B",
+    );
+
+    let out = run_libra_command(&["--json", "reflog", "show"], repo.path());
+    let json = parse_json_stdout(&out);
+    let newest = &json["data"]["entries"][0];
+    assert_eq!(newest["action"], "checkout");
+    let msg = newest["message"].as_str().unwrap_or("");
+    assert!(
+        msg.starts_with("moving from") && msg.contains("branch_x"),
+        "reflog msg: {msg}"
+    );
+}
+
+/// `--orphan` writes NO HEAD reflog entry (verified against stock Git, whose
+/// `.git/logs/HEAD` gains no row): the target branch is unborn, so there is no
+/// commit OID to record. The pre-orphan entry stays newest and `reflog show`
+/// still renders cleanly (no all-zero `new_oid` to choke the commit lookup).
+#[test]
+fn checkout_orphan_writes_no_head_reflog_entry() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_json_stdout, run_libra_command,
+    };
+    let repo = create_committed_repo_via_cli();
+
+    let before = run_libra_command(&["--json", "reflog", "show"], repo.path());
+    assert_cli_success(&before, "reflog show before orphan");
+    let before_json = parse_json_stdout(&before);
+    let before_count = before_json["data"]["entries"]
+        .as_array()
+        .map(|e| e.len())
+        .unwrap_or(0);
+    let before_newest = before_json["data"]["entries"][0]["new_oid"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--orphan", "orphan_x"], repo.path()),
+        "orphan",
+    );
+
+    // reflog show must still succeed (valid JSON) and be unchanged: orphan adds
+    // no entry, so the count and the newest commit OID are identical.
+    let after = run_libra_command(&["--json", "reflog", "show"], repo.path());
+    assert_cli_success(&after, "reflog show after orphan");
+    let after_json = parse_json_stdout(&after);
+    let after_entries = after_json["data"]["entries"].as_array();
+    assert_eq!(
+        after_entries.map(|e| e.len()).unwrap_or(0),
+        before_count,
+        "orphan must not add a HEAD reflog entry"
+    );
+    assert_eq!(
+        after_json["data"]["entries"][0]["new_oid"]
+            .as_str()
+            .unwrap_or(""),
+        before_newest,
+        "newest reflog entry must be unchanged by orphan"
+    );
+    let newest_msg = after_json["data"]["entries"][0]["message"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        !newest_msg.contains("orphan_x"),
+        "orphan must not write a checkout reflog entry, got: {newest_msg}"
+    );
+}
+
+/// Dirty worktree without `--force` blocks `--detach` (RepoStateInvalid, 128); HEAD unchanged.
+#[test]
+fn checkout_detach_dirty_without_force_blocks() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_cli_error_stderr,
+        run_libra_command,
+    };
+    let repo = create_committed_repo_via_cli();
+    add_empty_commit(repo.path(), "m2");
+    // Make the worktree dirty (modify a tracked file).
+    std::fs::write(repo.path().join("tracked.txt"), "dirty edit\n").unwrap();
+    let out = run_libra_command(&["checkout", "--detach", "HEAD~1"], repo.path());
+    assert_eq!(out.status.code(), Some(128), "dirty detach blocked");
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    // HEAD still on main.
+    let cur = run_libra_command(&["branch", "--show-current"], repo.path());
+    assert_eq!(String::from_utf8_lossy(&cur.stdout).trim(), "main");
+    assert_cli_success(&cur, "still on a branch");
+}
+
+/// Dirty worktree without `--force` blocks `--orphan` (128).
+#[test]
+fn checkout_orphan_dirty_without_force_blocks() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    add_empty_commit(repo.path(), "m2");
+    std::fs::write(repo.path().join("tracked.txt"), "dirty edit\n").unwrap();
+    let out = run_libra_command(&["checkout", "--orphan", "orphan_x", "HEAD~1"], repo.path());
+    assert_eq!(out.status.code(), Some(128), "dirty orphan blocked");
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+}
+
+/// `--detach -b x` (mode conflict) is rejected as a usage error. Libra remaps
+/// clap's `ArgumentConflict` for a present subcommand to `command_usage` (129),
+/// not clap's native exit 2.
+#[test]
+fn checkout_detach_with_b_is_clap_conflict() {
+    use super::{create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["checkout", "--detach", "-b", "x"], repo.path());
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "clap mode conflict → command_usage"
+    );
+}
+
 #[test]
 fn test_checkout_json_treeish_separator_path_restores_index_and_worktree() {
     use super::{
