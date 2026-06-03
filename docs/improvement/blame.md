@@ -48,11 +48,12 @@
 - 继续维护 blame 归属正确性、范围过滤和格式化稳定性回归
 
 **本批非目标：**
-- **不改变 blame 归属算法**。基于内容相等性的 BFS 回溯逻辑不变
-- **不引入 `--porcelain` 格式**。Git 的 porcelain blame 格式留后续需要时实现
-- **不引入 `--show-email` / `--show-name` 选项**。保持现有输出字段
+- **不改变 blame 归属算法的核心**。基于内容相等性的 BFS 回溯逻辑不变（`-w` 仅在送入 `compute_diff` 前对父子两侧行做空白规范化，并新增"队列中无待访问节点仍拥有归属行即提前退出"的保守剪枝，归属判据本身不变）
+- ~~**不引入 `--porcelain` 格式**~~ → **已在 `blame-improvement-plan.md` 中重新决策为支持**：`--porcelain`/`-p` 已落地（hash 头 + `author`/`author-mail`/`author-time`/`author-tz`/`summary`/`filename` KV + Tab 内容行）。
+- ~~**不引入 `--show-email` / `--show-name` 选项**~~ → **已在 `blame-improvement-plan.md` 中重新决策为支持**：`-e`（显示邮箱）已落地，并补齐 `-l`/`-t`/`-f`/`-n`/`-s`/`-w` 展示 flag；`BlameLine` 追加 `email`/`timestamp`/`timezone`/`summary`/`original_line_number` 字段（`--json` 向后兼容只增不删）。
 - **不引入增量 blame 或 blame 缓存**。性能优化留后续
 - **不支持 blame 范围的函数名语法**（如 `git blame -L :funcName`）
+- **`-M`/`-C` 移动/复制检测仅解析参数**，不做跨文件检测（partial，见 `COMPATIBILITY.md`）
 
 ### 设计原则
 
@@ -170,7 +171,12 @@ pub struct BlameOutput {
         "hash": "abc1234567890abcdef1234567890abcdef123456",
         "author": "Alice",
         "date": "2026-03-30T10:00:00+08:00",
-        "content": "fn main() {"
+        "content": "fn main() {",
+        "email": "alice@example.com",
+        "timestamp": 1743300000,
+        "timezone": "+0800",
+        "summary": "add main entrypoint",
+        "original_line_number": 1
       },
       {
         "line_number": 2,
@@ -178,7 +184,12 @@ pub struct BlameOutput {
         "hash": "def5678901234abcdef5678901234abcdef567890",
         "author": "Bob",
         "date": "2026-03-29T14:00:00+08:00",
-        "content": "    println!(\"Hello\");"
+        "content": "    println!(\"Hello\");",
+        "email": "bob@example.com",
+        "timestamp": 1743228000,
+        "timezone": "+0800",
+        "summary": "print greeting",
+        "original_line_number": 2
       }
     ]
   }

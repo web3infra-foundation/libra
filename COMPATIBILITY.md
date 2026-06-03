@@ -62,7 +62,7 @@ batch document.
 | pull | partial | fetch + fast-forward/three-way merge supported; `--ff-only` and `--rebase` (`-r`) strategy flags exposed; `--squash` deferred |
 | diff | supported | |
 | grep | supported | |
-| blame | supported | |
+| blame | supported | `-L` ranges, `--json`/`--machine`, and display flags `-l`/`-t`/`-f`/`-n`/`-s`/`-e`/`-w` supported; `--porcelain`/`-p` supported; `-M`/`-C` partial (flags parsed but cross-file move/copy detection is not implemented — blame still walks this file) |
 | revert | supported | |
 | remote | supported | |
 | hash-object | partial | Blob hashing for files, `--stdin`, and `--stdin-paths`; `-w` writes blob objects. Other object types and advanced Git hash-object flags are unsupported |

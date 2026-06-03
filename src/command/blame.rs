@@ -41,6 +41,9 @@ EXAMPLES:
     libra blame src/main.rs abc1234        Blame a file at a specific commit
     libra blame -L 10,20 src/main.rs       Blame lines 10-20
     libra blame -L 10,+5 src/main.rs       Blame 5 lines starting at line 10
+    libra blame -s src/main.rs             Suppress the author/date columns
+    libra blame -w src/main.rs             Ignore whitespace-only changes
+    libra blame --porcelain src/main.rs    Machine-readable porcelain output
     libra --json blame src/main.rs         Structured JSON output for agents";
 
 #[derive(Parser, Debug, Default)]

@@ -25,6 +25,16 @@ For large files, the `-L` option restricts output to a specific line range, redu
 | Line range | `-L` | `-L <RANGE>` | Restrict blame to a line range. See formats below. |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Validate inputs but suppress all blame output. |
+| Long hash | `-l` | | Show the full commit hash instead of the abbreviated form. |
+| Raw timestamp | `-t` | | Show the raw commit timestamp (epoch seconds) instead of a formatted date. |
+| File name | `-f` | | Show the file name for each blamed line. |
+| Original line number | `-n` | | Show the original (pre-image) line number. |
+| Suppress metadata | `-s` | | Suppress the author name and date columns. |
+| Show email | `-e` | | Show the author email instead of the name. |
+| Ignore whitespace | `-w` | | Ignore whitespace-only changes when assigning blame. |
+| Porcelain | `-p` | `--porcelain` | Machine-readable porcelain output (one record per line). |
+| Detect moved | `-M` | | Parsed only; cross-file move detection is not implemented (blame still walks this file). Optional threshold `-M=<num>`. |
+| Detect copied | `-C` | | Parsed only; cross-file copy detection is not implemented. Optional threshold `-C=<num>`. |
 
 ### Line Range Formats (`-L`)
 
@@ -36,7 +46,8 @@ The `-L` flag supports three formats:
 | `N,M` | Lines N through M (inclusive) | `-L 10,20` |
 | `N,+C` | C lines starting at line N | `-L 10,+5` (lines 10-14) |
 
-Line numbers are 1-based. Out-of-range values produce an error.
+Line numbers are 1-based. A `start` past the end of the file is an error; an
+`end` (or `+count`) past the end of the file is clamped to the last line.
 
 ```bash
 # Blame a single line
@@ -66,6 +77,18 @@ libra blame -L 10,+5 src/main.rs
 
 # JSON output for agents
 libra --json blame src/main.rs
+
+# Suppress author/date columns (hash + line + content only)
+libra blame -s src/main.rs
+
+# Full hash with original line numbers and author email
+libra blame -l -n -e src/main.rs
+
+# Ignore whitespace-only changes when assigning blame
+libra blame -w src/main.rs
+
+# Machine-readable porcelain output for IDEs/scripts
+libra blame --porcelain src/main.rs
 ```
 
 ## Human Output
@@ -141,11 +164,13 @@ The commit argument is positional (second argument after the file path) rather t
 | Line range (numeric) | `-L N,M` / `-L N,+C` / `-L N` | `-L <start>,<end>` | N/A |
 | Line range (regex) | Not supported | `-L :<funcname>` / `-L /regex/` | N/A |
 | Reverse blame | Not supported | `--reverse` | N/A |
-| Show email | Not supported | `-e` / `--show-email` | N/A |
-| Show timestamp | Included by default | `-t` (raw timestamp) | N/A |
-| Porcelain format | Not supported | `--porcelain` / `--line-porcelain` | N/A |
+| Show email | `-e` | `-e` / `--show-email` | N/A |
+| Show timestamp | Default; `-t` for raw epoch | `-t` (raw timestamp) | N/A |
+| Display flags | `-l` / `-f` / `-n` / `-s` | `-l` / `-f` / `-n` / `-s` | N/A |
+| Ignore whitespace | `-w` | `-w` | N/A |
+| Porcelain format | `--porcelain` / `-p` | `--porcelain` / `--line-porcelain` | N/A |
 | Incremental output | Not supported | `--incremental` | N/A |
-| Score threshold | Not supported | `-M` / `-C` (move/copy detection) | N/A |
+| Move/copy detection | Partial (`-M` / `-C` parsed only, no cross-file detection) | `-M` / `-C` | N/A |
 | Ignore revisions | Not supported | `--ignore-rev` / `--ignore-revs-file` | N/A |
 | Working tree contents | Not supported | `--contents <file>` | N/A |
 | Date format | Not supported (fixed) | `--date <format>` | N/A |
