@@ -22,7 +22,12 @@ use clap::Parser;
 use git_internal::{
     errors::GitError,
     hash::ObjectHash,
-    internal::object::{blob::Blob, commit::Commit, tree::Tree, types::ObjectType},
+    internal::object::{
+        blob::Blob,
+        commit::Commit,
+        tree::{Tree, TreeItemMode},
+        types::ObjectType,
+    },
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
@@ -126,6 +131,18 @@ pub struct CatFileArgs {
     /// Buffer batch output and flush once at EOF, instead of after every object.
     #[clap(long = "buffer")]
     pub buffer: bool,
+
+    /// With --batch/--batch-check, iterate every local object instead of reading stdin.
+    #[clap(long = "batch-all-objects")]
+    pub batch_all_objects: bool,
+
+    /// With --batch-all-objects, emit objects in scan order instead of sorted by object id.
+    #[clap(long = "unordered")]
+    pub unordered: bool,
+
+    /// Follow in-tree symlinks when resolving <tree-ish>:<path> batch inputs (object graph only).
+    #[clap(long = "follow-symlinks")]
+    pub follow_symlinks: bool,
 
     // ── Explicitly unsupported (rejected) ───────────────────────────────
     /// Unsupported: Libra has no textconv driver. Rejected with LBR-UNSUPPORTED-001.
@@ -1354,7 +1371,13 @@ async fn ai_show_type(uuid: &str) {
 /// to [`run_batch`] instead of the legacy single-object path. (Modifier-only
 /// invocations are caught and reported inside `run_batch`.)
 fn uses_batch_surface(args: &CatFileArgs) -> bool {
-    args.batch.is_some() || args.batch_check.is_some() || args.nul || args.buffer
+    args.batch.is_some()
+        || args.batch_check.is_some()
+        || args.nul
+        || args.buffer
+        || args.batch_all_objects
+        || args.unordered
+        || args.follow_symlinks
 }
 
 /// Whether a real batch *mode* (not just a modifier) is selected.
@@ -1387,6 +1410,12 @@ async fn run_batch(args: &CatFileArgs, output: &OutputConfig) -> CliResult<()> {
             "-Z"
         } else if args.buffer {
             "--buffer"
+        } else if args.batch_all_objects {
+            "--batch-all-objects"
+        } else if args.unordered {
+            "--unordered"
+        } else if args.follow_symlinks {
+            "--follow-symlinks"
         } else {
             "a batch modifier"
         };
@@ -1405,21 +1434,38 @@ async fn run_batch(args: &CatFileArgs, output: &OutputConfig) -> CliResult<()> {
         .with_stable_code(StableErrorCode::CliInvalidArguments));
     }
 
+    // Exactly one of `--batch` / `--batch-check` is set (mutual exclusion is
+    // enforced by the clap `mode` group + `batch_mode_selected` above).
+    let (format, kind) = match (args.batch.as_deref(), args.batch_check.as_deref()) {
+        (Some(format), _) => (format, BatchKind::Content),
+        (_, Some(format)) => (format, BatchKind::CheckOnly),
+        _ => return Ok(()),
+    };
+
     let storage = ClientStorage::init(path::objects());
-    if let Some(format) = args.batch.as_deref() {
-        return run_batch_stream(format, args.nul, args.buffer, BatchKind::Content, &storage).await;
-    }
-    if let Some(format) = args.batch_check.as_deref() {
-        return run_batch_stream(
+    if args.batch_all_objects {
+        // `--batch-all-objects` iterates the local object store instead of
+        // stdin; `--follow-symlinks` has no stdin tokens to act on here.
+        run_batch_all_objects(
             format,
             args.nul,
             args.buffer,
-            BatchKind::CheckOnly,
+            kind,
+            args.unordered,
             &storage,
         )
-        .await;
+        .await
+    } else {
+        run_batch_stream(
+            format,
+            args.nul,
+            args.buffer,
+            kind,
+            args.follow_symlinks,
+            &storage,
+        )
+        .await
     }
-    Ok(())
 }
 
 /// Whether a batch run emits object content after each metadata line.
@@ -1582,16 +1628,51 @@ fn flush_batch_writer(writer: &mut impl std::io::Write) -> CliResult<bool> {
     }
 }
 
+/// Write one resolved object's record: the metadata line and, for `--batch`,
+/// the raw payload. Returns `Ok(false)` on `BrokenPipe` (caller stops, exit 0).
+fn write_object_record(
+    writer: &mut impl std::io::Write,
+    format: &str,
+    kind: BatchKind,
+    sep: u8,
+    hash: &ObjectHash,
+    storage: &ClientStorage,
+) -> CliResult<bool> {
+    // Read the body first so a corrupt/unreadable object surfaces as an I/O
+    // failure before the (separate) type lookup. The decompressed body is both
+    // the size source and the raw `--batch` payload written verbatim (binary
+    // tree/commit encodings included — never the `-p` pretty-print rendering).
+    let body = storage.get(hash).map_err(|e| {
+        CliError::fatal(format!("could not read object {hash}: {e}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    let obj_type = storage.get_object_type(hash).map_err(|e| {
+        CliError::fatal(format!("could not resolve object type for {hash}: {e}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    let meta = render_batch_format(format, &hash.to_string(), &obj_type.to_string(), body.len())?;
+    if !write_record(writer, meta.as_bytes(), sep)? {
+        return Ok(false);
+    }
+    if kind == BatchKind::Content && !write_record(writer, &body, sep)? {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 /// Stream the batch protocol over stdin: one record per token. `kind` selects
-/// `--batch-check` (metadata only) vs `--batch` (metadata + raw payload).
-/// Without `--buffer`, output is flushed after every object so interactive
-/// drivers see each record immediately. A closed downstream pipe stops the
-/// stream quietly (exit 0); no path panics.
+/// `--batch-check` (metadata only) vs `--batch` (metadata + raw payload). When
+/// `follow_symlinks` is set, `<tree-ish>:<path>` tokens are resolved through the
+/// object graph, following in-tree symlinks. Without `--buffer`, output is
+/// flushed after every object so interactive drivers see each record
+/// immediately. A closed downstream pipe stops the stream quietly (exit 0); no
+/// path panics.
 async fn run_batch_stream(
     format: &str,
     nul: bool,
     buffer: bool,
     kind: BatchKind,
+    follow_symlinks: bool,
     storage: &ClientStorage,
 ) -> CliResult<()> {
     use std::io::{BufReader, BufWriter};
@@ -1612,44 +1693,24 @@ async fn run_batch_stream(
         if token.is_empty() {
             continue;
         }
-        match resolve_batch_token(&token, storage).await? {
+        let resolution = if follow_symlinks {
+            resolve_follow_symlinks(&token, storage).await?
+        } else {
+            resolve_batch_token(&token, storage).await?
+        };
+        let keep_going = match resolution {
             BatchResolution::Resolved(hash) => {
-                // The decompressed object body is both the size source and, for
-                // `--batch`, the raw payload written verbatim (binary tree/commit
-                // encodings included — never the `-p` pretty-print rendering).
-                // Read it first so an unreadable/corrupt object surfaces as an
-                // I/O failure before the (separate) type lookup.
-                let body = storage.get(&hash).map_err(|e| {
-                    CliError::fatal(format!("could not read object {hash}: {e}"))
-                        .with_stable_code(StableErrorCode::IoReadFailed)
-                })?;
-                let obj_type = storage.get_object_type(&hash).map_err(|e| {
-                    CliError::fatal(format!("could not resolve object type for {hash}: {e}"))
-                        .with_stable_code(StableErrorCode::RepoCorrupt)
-                })?;
-                let meta = render_batch_format(
-                    format,
-                    &hash.to_string(),
-                    &obj_type.to_string(),
-                    body.len(),
-                )?;
-                if !write_record(&mut writer, meta.as_bytes(), sep)? {
-                    return Ok(());
-                }
-                if kind == BatchKind::Content && !write_record(&mut writer, &body, sep)? {
-                    return Ok(());
-                }
+                write_object_record(&mut writer, format, kind, sep, &hash, storage)?
             }
             BatchResolution::Missing => {
-                if !write_record(&mut writer, format!("{token} missing").as_bytes(), sep)? {
-                    return Ok(());
-                }
+                write_record(&mut writer, format!("{token} missing").as_bytes(), sep)?
             }
             BatchResolution::Ambiguous => {
-                if !write_record(&mut writer, format!("{token} ambiguous").as_bytes(), sep)? {
-                    return Ok(());
-                }
+                write_record(&mut writer, format!("{token} ambiguous").as_bytes(), sep)?
             }
+        };
+        if !keep_going {
+            return Ok(());
         }
         if !buffer && !flush_batch_writer(&mut writer)? {
             return Ok(()); // downstream closed the pipe
@@ -1658,6 +1719,189 @@ async fn run_batch_stream(
 
     flush_batch_writer(&mut writer)?;
     Ok(())
+}
+
+/// `--batch-all-objects`: emit a record for every local object (loose ∪ pack,
+/// de-duplicated), with no stdin. Sorted by object id unless `--unordered`.
+async fn run_batch_all_objects(
+    format: &str,
+    nul: bool,
+    buffer: bool,
+    kind: BatchKind,
+    unordered: bool,
+    storage: &ClientStorage,
+) -> CliResult<()> {
+    use std::io::BufWriter;
+
+    let sep = if nul { b'\0' } else { b'\n' };
+    render_batch_format(format, "", "", 0)?;
+
+    let (mut oids, skipped) = storage.list_all_local_oids();
+    // The storage layer only logs skipped/corrupt indexes via `tracing`; surface
+    // them on stderr so scripts and tests can observe the warning.
+    for note in &skipped {
+        eprintln!("warning: skipping pack index ({note})");
+    }
+    if !unordered {
+        oids.sort_by_key(|oid| oid.to_string());
+    }
+
+    let stdout = std::io::stdout();
+    let mut writer = BufWriter::new(stdout.lock());
+    for oid in oids {
+        if !write_object_record(&mut writer, format, kind, sep, &oid, storage)? {
+            return Ok(()); // downstream closed the pipe
+        }
+        if !buffer && !flush_batch_writer(&mut writer)? {
+            return Ok(());
+        }
+    }
+    flush_batch_writer(&mut writer)?;
+    Ok(())
+}
+
+/// Maximum number of in-tree symlinks followed while resolving one token.
+const FOLLOW_SYMLINK_DEPTH_CAP: usize = 32;
+
+/// Intermediate result while walking a `<tree>:<path>` within a single tree.
+enum WalkOutcome {
+    Resolved(ObjectHash),
+    Missing,
+    /// A `TreeItemMode::Link` was hit at `link_index` in the path; `target_oid`
+    /// holds the link object whose body is the (relative) target path.
+    Symlink {
+        link_index: usize,
+        target_oid: ObjectHash,
+    },
+}
+
+/// Resolve a `--follow-symlinks` token `<tree-ish>:<path>`, walking the path in
+/// the object graph and following in-tree symlinks (`TreeItemMode::Link`). This
+/// never touches the working tree / host filesystem. Escaping the tree root,
+/// dangling targets, type mismatches, and exceeding the depth cap all resolve
+/// to `Missing` (a Libra simplification vs. Git's `symlink <size>` output — see
+/// the plan's decision ledger).
+async fn resolve_follow_symlinks(
+    token: &str,
+    storage: &ClientStorage,
+) -> CliResult<BatchResolution> {
+    let Some((rev, path)) = token.split_once(':') else {
+        // Not a `<tree>:<path>` token; resolve as an ordinary object reference.
+        return resolve_batch_token(token, storage).await;
+    };
+
+    let Some(root_tree) = resolve_to_root_tree(rev, storage).await? else {
+        return Ok(BatchResolution::Missing);
+    };
+
+    let Some(mut components) = normalize_tree_path(&[], path) else {
+        return Ok(BatchResolution::Missing); // escaped the root
+    };
+
+    let mut depth = 0usize;
+    loop {
+        // Walk `components` from the root tree.
+        let Ok(mut current) = load_object::<Tree>(&root_tree) else {
+            return Ok(BatchResolution::Missing);
+        };
+        let mut idx = 0usize;
+        let outcome = loop {
+            let Some(name) = components.get(idx) else {
+                // Path exhausted on a directory: the tree itself is the target.
+                break WalkOutcome::Resolved(current.id);
+            };
+            let Some(item) = current.tree_items.iter().find(|i| &i.name == name) else {
+                break WalkOutcome::Missing;
+            };
+            let is_last = idx + 1 == components.len();
+            match item.mode {
+                TreeItemMode::Link => {
+                    break WalkOutcome::Symlink {
+                        link_index: idx,
+                        target_oid: item.id,
+                    };
+                }
+                TreeItemMode::Tree => {
+                    if is_last {
+                        break WalkOutcome::Resolved(item.id);
+                    }
+                    match load_object::<Tree>(&item.id) {
+                        Ok(next) => {
+                            current = next;
+                            idx += 1;
+                        }
+                        Err(_) => break WalkOutcome::Missing,
+                    }
+                }
+                // Blob / BlobExecutable / Commit: only valid as the final segment.
+                _ => {
+                    break if is_last {
+                        WalkOutcome::Resolved(item.id)
+                    } else {
+                        WalkOutcome::Missing
+                    };
+                }
+            }
+        };
+
+        match outcome {
+            WalkOutcome::Resolved(hash) => return Ok(BatchResolution::Resolved(hash)),
+            WalkOutcome::Missing => return Ok(BatchResolution::Missing),
+            WalkOutcome::Symlink {
+                link_index,
+                target_oid,
+            } => {
+                depth += 1;
+                if depth > FOLLOW_SYMLINK_DEPTH_CAP {
+                    return Ok(BatchResolution::Missing); // link loop / too deep
+                }
+                let Ok(target_bytes) = storage.get(&target_oid) else {
+                    return Ok(BatchResolution::Missing);
+                };
+                let target = String::from_utf8_lossy(&target_bytes);
+                // The target is relative to the link's parent directory
+                // (`components[..link_index]`); the remaining components after
+                // the link are re-appended after normalization.
+                let Some(mut rewritten) = normalize_tree_path(&components[..link_index], &target)
+                else {
+                    return Ok(BatchResolution::Missing); // escaped the root
+                };
+                rewritten.extend_from_slice(&components[link_index + 1..]);
+                components = rewritten;
+                // Re-walk from the root with the rewritten path.
+            }
+        }
+    }
+}
+
+/// Resolve a tree-ish to its root tree hash: a commit maps to its tree; a tree
+/// is used directly. Returns `Ok(None)` when it cannot be resolved to a tree.
+async fn resolve_to_root_tree(rev: &str, storage: &ClientStorage) -> CliResult<Option<ObjectHash>> {
+    let hash = match resolve_batch_token(rev, storage).await? {
+        BatchResolution::Resolved(h) => h,
+        _ => return Ok(None),
+    };
+    match storage.get_object_type(&hash) {
+        Ok(ObjectType::Tree) => Ok(Some(hash)),
+        Ok(ObjectType::Commit) => Ok(load_object::<Commit>(&hash).ok().map(|c| c.tree_id)),
+        _ => Ok(None),
+    }
+}
+
+/// Normalize `path` relative to the `base` directory components, resolving `.`
+/// and `..`. Returns `None` if it escapes above the tree root.
+fn normalize_tree_path(base: &[String], path: &str) -> Option<Vec<String>> {
+    let mut out: Vec<String> = base.to_vec();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => continue,
+            ".." => {
+                out.pop()?; // escaped above the root
+            }
+            other => out.push(other.to_string()),
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]

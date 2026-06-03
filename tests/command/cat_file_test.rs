@@ -18,6 +18,15 @@ use std::{
 };
 
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
+use git_internal::internal::object::{
+    blob::Blob,
+    tree::{Tree, TreeItem, TreeItemMode},
+};
+use libra::{
+    command::save_object,
+    utils::test::{self, ChangeDirGuard},
+};
+use serial_test::serial;
 
 use super::{loose_object_path, parse_cli_error_stderr, parse_json_stdout};
 
@@ -1425,5 +1434,278 @@ async fn batch_buffer_flag_coalesces_writes() {
     assert!(
         !batch_first_record_visible_before_eof(&["--buffer"]),
         "--buffer should defer output until EOF"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  Batch 2 — --batch-all-objects, --unordered, --follow-symlinks
+// ════════════════════════════════════════════════════════════════════════
+
+/// `--batch-all-objects --batch-check` enumerates every local object without
+/// reading stdin (commit + tree + blob for a single-file commit).
+#[tokio::test]
+async fn batch_all_objects_no_stdin() {
+    let repo = batch_repo();
+    let commit = head_commit_hash(repo.path());
+    let blob = head_first_blob_hash(repo.path());
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-all-objects", "--batch-check"],
+        b"", // no stdin
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let names: Vec<&str> = stdout
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .collect();
+    assert!(names.len() >= 3, "expected >=3 objects, got: {stdout}");
+    assert!(names.contains(&commit.as_str()), "commit present: {stdout}");
+    assert!(names.contains(&blob.as_str()), "blob present: {stdout}");
+    assert!(stdout.contains(" commit "));
+    assert!(stdout.contains(" tree "));
+    assert!(stdout.contains(" blob "));
+}
+
+/// `--batch-all-objects` without a batch mode is rejected (LBR-CLI-002).
+#[tokio::test]
+async fn batch_all_objects_requires_batch_mode() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--batch-all-objects"], b"");
+    assert_eq!(out.status.code(), Some(129));
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// `--unordered` / `--follow-symlinks` without a batch mode are rejected.
+#[tokio::test]
+async fn unordered_and_follow_symlinks_require_batch_mode() {
+    let repo = batch_repo();
+    for modifier in ["--unordered", "--follow-symlinks"] {
+        let out = run_cat_file_with_stdin(repo.path(), &["cat-file", modifier], b"");
+        assert_eq!(out.status.code(), Some(129), "{modifier}");
+        let (_human, report) = parse_cli_error_stderr(&out.stderr);
+        assert_eq!(report.error_code, "LBR-CLI-002", "{modifier}");
+    }
+}
+
+/// Default `--batch-all-objects` output is sorted by object id (ascending).
+#[tokio::test]
+async fn batch_all_objects_sorted_default() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-all-objects", "--batch-check"],
+        b"",
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let oids: Vec<String> = stdout
+        .lines()
+        .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+        .collect();
+    let mut sorted = oids.clone();
+    sorted.sort();
+    assert_eq!(
+        oids, sorted,
+        "default order must be sorted by OID: {oids:?}"
+    );
+}
+
+/// `--unordered` still emits every object (count matches the sorted run).
+#[tokio::test]
+async fn batch_all_objects_unordered_flag() {
+    let repo = batch_repo();
+    let sorted = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-all-objects", "--batch-check"],
+        b"",
+    );
+    let unordered = run_cat_file_with_stdin(
+        repo.path(),
+        &[
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check",
+            "--unordered",
+        ],
+        b"",
+    );
+    assert!(sorted.status.success() && unordered.status.success());
+    let sorted_count = String::from_utf8_lossy(&sorted.stdout).lines().count();
+    let unordered_count = String::from_utf8_lossy(&unordered.stdout).lines().count();
+    assert_eq!(
+        sorted_count, unordered_count,
+        "same object set regardless of order"
+    );
+    assert!(sorted_count >= 3);
+}
+
+/// Every emitted object id is a valid hex string of the repo's hash length.
+#[tokio::test]
+async fn batch_all_objects_oids_valid_hex() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-all-objects", "--batch-check"],
+        b"",
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in stdout.lines() {
+        let oid = line.split_whitespace().next().expect("oid token");
+        assert!(
+            (oid.len() == 40 || oid.len() == 64) && oid.bytes().all(|b| b.is_ascii_hexdigit()),
+            "invalid OID hex: {oid}"
+        );
+    }
+}
+
+/// A corrupt/garbage pack index is skipped (no rebuild); loose objects still
+/// enumerate and the command warns on stderr with the offending idx path.
+#[tokio::test]
+async fn batch_all_objects_skips_corrupt_idx() {
+    let repo = batch_repo();
+    let pack_dir = repo.path().join(".libra").join("objects").join("pack");
+    std::fs::create_dir_all(&pack_dir).expect("create pack dir");
+    std::fs::write(pack_dir.join("garbage.pack"), b"PACK not-a-real-pack").expect("write pack");
+    std::fs::write(pack_dir.join("garbage.idx"), b"not a real idx file").expect("write idx");
+
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-all-objects", "--batch-check"],
+        b"",
+    );
+    assert!(out.status.success(), "scan continues past corrupt idx");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.lines().count() >= 3,
+        "loose objects still enumerated: {stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("skipping pack index") && stderr.contains("garbage.idx"),
+        "stderr must warn about the skipped idx: {stderr}"
+    );
+}
+
+/// Build a tree from `(mode, content, name)` items, saving the item blobs and
+/// the tree into the repo at `temp` (must be a `setup_with_new_libra_in` repo).
+/// Returns `(tree_hash, [(name, item_oid)...])`.
+async fn save_link_tree(
+    temp: &std::path::Path,
+    items: &[(TreeItemMode, &str, &str)],
+) -> (String, Vec<(String, String)>) {
+    let _guard = ChangeDirGuard::new(temp);
+    let mut tree_items = Vec::new();
+    let mut oids = Vec::new();
+    for (mode, content, name) in items {
+        let blob = Blob::from_content(content);
+        save_object(&blob, &blob.id).expect("save blob");
+        tree_items.push(TreeItem::new(*mode, blob.id, (*name).to_string()));
+        oids.push(((*name).to_string(), blob.id.to_string()));
+    }
+    let tree = Tree::from_tree_items(tree_items).expect("build tree");
+    save_object(&tree, &tree.id).expect("save tree");
+    (tree.id.to_string(), oids)
+}
+
+/// `--follow-symlinks` resolves an in-tree symlink to its target blob.
+#[tokio::test]
+#[serial]
+async fn follow_symlinks_resolves_in_tree_link() {
+    let temp = tempfile::tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let (tree, oids) = save_link_tree(
+        temp.path(),
+        &[
+            (TreeItemMode::Blob, "the real content\n", "real.txt"),
+            (TreeItemMode::Link, "real.txt", "link.txt"),
+        ],
+    )
+    .await;
+    let real_hash = oids
+        .iter()
+        .find(|(n, _)| n == "real.txt")
+        .map(|(_, h)| h.clone())
+        .expect("real.txt oid");
+
+    let out = run_cat_file_with_stdin(
+        temp.path(),
+        &["cat-file", "--batch-check", "--follow-symlinks"],
+        format!("{tree}:link.txt\n").as_bytes(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.starts_with(&real_hash),
+        "link.txt should resolve to real.txt's blob ({real_hash}): {stdout}"
+    );
+    assert!(
+        stdout.contains(" blob "),
+        "resolved object is a blob: {stdout}"
+    );
+}
+
+/// A symlink that escapes the tree root resolves to `missing` (never touches
+/// the host filesystem).
+#[tokio::test]
+#[serial]
+async fn follow_symlinks_escape_tree_returns_missing() {
+    let temp = tempfile::tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let (tree, _) = save_link_tree(
+        temp.path(),
+        &[(TreeItemMode::Link, "../../etc/passwd", "escape")],
+    )
+    .await;
+
+    let out = run_cat_file_with_stdin(
+        temp.path(),
+        &["cat-file", "--batch-check", "--follow-symlinks"],
+        format!("{tree}:escape\n").as_bytes(),
+    );
+    assert_eq!(out.status.code(), Some(0), "escape is not an error");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("missing"),
+        "escaping link is missing: {stdout}"
+    );
+}
+
+/// A symlink loop (a → b → a) is bounded by the depth cap and resolves to
+/// `missing` without a stack overflow.
+#[tokio::test]
+#[serial]
+async fn follow_symlinks_depth_cap_32() {
+    let temp = tempfile::tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let (tree, _) = save_link_tree(
+        temp.path(),
+        &[
+            (TreeItemMode::Link, "b", "a"),
+            (TreeItemMode::Link, "a", "b"),
+        ],
+    )
+    .await;
+
+    let out = run_cat_file_with_stdin(
+        temp.path(),
+        &["cat-file", "--batch-check", "--follow-symlinks"],
+        format!("{tree}:a\n").as_bytes(),
+    );
+    assert_eq!(out.status.code(), Some(0), "loop is bounded, not fatal");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("missing"),
+        "looping link resolves to missing: {stdout}"
     );
 }
