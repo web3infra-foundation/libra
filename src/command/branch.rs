@@ -35,7 +35,7 @@ use std::collections::{HashSet, VecDeque};
 use clap::{ArgGroup, Parser};
 use colored::Colorize;
 use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
-use sea_orm::ConnectionTrait;
+use sea_orm::{ConnectionTrait, TransactionTrait};
 use serde::Serialize;
 
 use crate::{
@@ -77,6 +77,7 @@ EXAMPLES:
     libra branch -d topic                 Delete a fully merged branch
     libra branch -D topic                 Force-delete a branch
     libra branch -u origin/main           Set upstream for the current branch
+    libra branch --unset-upstream         Remove upstream tracking for the current branch
     libra branch --merged                 List branches merged into HEAD
     libra branch --no-merged main         List branches not yet merged into main
     libra branch --points-at HEAD         List branches whose tip is at HEAD
@@ -124,6 +125,10 @@ pub enum BranchOutput {
     /// `--set-upstream-to` succeeded. `upstream` is in `remote/branch` form.
     #[serde(rename = "set-upstream")]
     SetUpstream { branch: String, upstream: String },
+    /// `--unset-upstream` succeeded. `had_upstream` is false when the branch
+    /// had no tracking configured (the operation is an idempotent no-op).
+    #[serde(rename = "unset-upstream")]
+    UnsetUpstream { branch: String, had_upstream: bool },
     /// `--show-current` result. `detached` is true when HEAD is detached;
     /// `name` is `None` in that case.
     #[serde(rename = "show-current")]
@@ -142,8 +147,18 @@ impl BranchOutput {
                 | Self::Delete { .. }
                 | Self::Rename { .. }
                 | Self::SetUpstream { .. }
+                | Self::UnsetUpstream { .. }
         )
     }
+}
+
+/// Upstream tracking information for a local branch, derived from
+/// `branch.<name>.{remote,merge}`. `merge` is the short upstream branch name
+/// (the stored `refs/heads/` prefix is stripped by `branch_config_with_conn`).
+#[derive(Debug, Clone, Serialize)]
+pub struct BranchTracking {
+    pub remote: String,
+    pub merge: String,
 }
 
 /// One row in [`BranchOutput::List`]. `display_name` carries the colorised
@@ -155,6 +170,11 @@ pub struct BranchListEntry {
     pub commit: String,
     #[serde(skip_serializing)]
     pub display_name: String,
+    /// Upstream tracking, when the branch has both `remote` and `merge`
+    /// configured. Omitted from JSON entirely when absent (backward
+    /// compatible — existing consumers see no new key for untracked branches).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracking: Option<BranchTracking>,
 }
 
 // action options are mutually exclusive with query options
@@ -196,6 +216,10 @@ pub struct BranchArgs {
     /// Set up the branch's tracking information so `upstream` is considered its upstream branch.
     #[clap(short = 'u', long, group = "action", value_name = "UPSTREAM")]
     pub set_upstream_to: Option<String>,
+
+    /// Remove the upstream tracking information for a branch (the current branch when no name is given).
+    #[clap(long = "unset-upstream", group = "action", value_name = "BRANCH", num_args = 0..=1)]
+    pub unset_upstream: Option<Option<String>>,
 
     /// show current branch
     #[clap(long, group = "action")]
@@ -633,6 +657,64 @@ async fn set_upstream_impl(branch: &str, upstream: &str) -> Result<(), BranchErr
     set_upstream_with_conn(&db, branch, upstream).await
 }
 
+/// Remove `branch.<name>.{remote,merge}` for `branch` within the caller's
+/// connection/transaction.
+///
+/// Functional scope:
+/// - Deletes both the `remote` and `merge` config keys. Returns `true` when
+///   either key existed (so callers can report whether tracking was present).
+///
+/// Boundary conditions:
+/// - Each delete is fallible; a SQL failure becomes a
+///   [`BranchError::ConfigWriteFailed`] keyed by the offending config key. The
+///   caller wraps both deletes in a single transaction so a mid-way failure
+///   leaves no half-removed tracking config.
+async fn unset_upstream_with_conn<C: ConnectionTrait>(
+    db: &C,
+    branch: &str,
+) -> Result<bool, BranchError> {
+    let remote_key = format!("branch.{branch}.remote");
+    let removed_remote = ConfigKv::unset_all_with_conn(db, &remote_key)
+        .await
+        .map_err(|e| branch_config_write_error(&remote_key, e))?;
+    let merge_key = format!("branch.{branch}.merge");
+    let removed_merge = ConfigKv::unset_all_with_conn(db, &merge_key)
+        .await
+        .map_err(|e| branch_config_write_error(&merge_key, e))?;
+    Ok(removed_remote > 0 || removed_merge > 0)
+}
+
+/// Transactional wrapper for [`unset_upstream_with_conn`].
+///
+/// Opens an explicit SQLite transaction so the two key deletions commit or
+/// roll back together (no orphaned `branch.<name>.remote` / `.merge`). Returns
+/// whether the branch previously had tracking configured.
+async fn unset_upstream_impl(branch: &str) -> Result<bool, BranchError> {
+    let db = get_db_conn_instance().await;
+    let txn = db
+        .begin()
+        .await
+        .map_err(|e| BranchError::ConfigWriteFailed {
+            key: format!("branch.{branch}.remote"),
+            detail: format!("failed to begin config transaction: {e}"),
+        })?;
+    let had_upstream = match unset_upstream_with_conn(&txn, branch).await {
+        Ok(value) => value,
+        Err(error) => {
+            // Best-effort rollback; surface the original error regardless.
+            let _ = txn.rollback().await;
+            return Err(error);
+        }
+    };
+    txn.commit()
+        .await
+        .map_err(|e| BranchError::ConfigWriteFailed {
+            key: format!("branch.{branch}.remote"),
+            detail: format!("failed to commit config transaction: {e}"),
+        })?;
+    Ok(had_upstream)
+}
+
 /// Enumerate every branch stored under each known remote.
 ///
 /// Functional scope:
@@ -946,12 +1028,26 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
     let local_branches_empty = local_branches.is_empty();
 
     let current_name = head_name.as_deref();
+    let db = get_db_conn_instance().await;
     let mut entries = Vec::new();
     for branch in local_branches {
+        // Reading `branch.<name>.{remote,merge}` is independent of whether the
+        // referenced remote still exists, so a dangling remote still surfaces
+        // the configured tracking name rather than crashing the listing.
+        let tracking = ConfigKv::branch_config_with_conn(&db, &branch.name)
+            .await
+            .map_err(|e| {
+                branch_config_read_error(format!("upstream config for branch '{}'", branch.name), e)
+            })?
+            .map(|cfg| BranchTracking {
+                remote: cfg.remote,
+                merge: cfg.merge,
+            });
         entries.push(BranchListEntry {
             current: current_name == Some(branch.name.as_str()),
             commit: branch.commit.to_string(),
             display_name: branch.name.clone(),
+            tracking,
             name: branch.name,
         });
     }
@@ -960,6 +1056,7 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
             current: false,
             commit: branch.commit.to_string(),
             display_name: format_branch_name(&branch),
+            tracking: None,
             name: branch.name,
         });
     }
@@ -1026,6 +1123,19 @@ async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
             branch,
             upstream: upstream.to_string(),
         })
+    } else if let Some(maybe_branch) = args.unset_upstream.clone() {
+        let branch = match maybe_branch {
+            Some(name) => name,
+            None => match Head::current().await {
+                Head::Branch(name) => name,
+                Head::Detached(_) => return Err(detached_head_branch_error()),
+            },
+        };
+        let had_upstream = unset_upstream_impl(&branch).await?;
+        Ok(BranchOutput::UnsetUpstream {
+            branch,
+            had_upstream,
+        })
     } else if !args.rename.is_empty() {
         rename_branch_impl(&args.rename).await
     } else {
@@ -1087,10 +1197,15 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
             });
 
             for branch in sorted {
+                let tracking = branch
+                    .tracking
+                    .as_ref()
+                    .map(|t| format!(" [{}/{}]", t.remote, t.merge))
+                    .unwrap_or_default();
                 if branch.current {
-                    println!("* {}", branch.display_name.green());
+                    println!("* {}{tracking}", branch.display_name.green());
                 } else {
-                    println!("  {}", branch.display_name);
+                    println!("  {}{tracking}", branch.display_name);
                 }
             }
         }
@@ -1112,6 +1227,16 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
         }
         BranchOutput::SetUpstream { branch, upstream } => {
             println!("Branch '{branch}' set up to track remote branch '{upstream}'");
+        }
+        BranchOutput::UnsetUpstream {
+            branch,
+            had_upstream,
+        } => {
+            if *had_upstream {
+                println!("Removed upstream tracking for branch '{branch}'");
+            } else {
+                println!("Branch '{branch}' has no upstream tracking to remove");
+            }
         }
         BranchOutput::ShowCurrent {
             name,
@@ -1227,6 +1352,7 @@ pub async fn list_branches(
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: matches!(list_mode, BranchListMode::Remote),

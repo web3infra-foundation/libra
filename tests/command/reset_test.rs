@@ -628,12 +628,17 @@ async fn setup_standard_repo(
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 
@@ -672,12 +677,17 @@ async fn setup_standard_repo(
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 
@@ -716,12 +726,17 @@ async fn setup_standard_repo(
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 
@@ -760,12 +775,17 @@ async fn setup_standard_repo(
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 

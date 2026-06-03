@@ -381,6 +381,7 @@ async fn test_branch() {
             delete: None,
             delete_safe: None,
             set_upstream_to: None,
+            unset_upstream: None,
             show_current: false,
             rename: vec![],
             remotes: false,
@@ -420,6 +421,7 @@ async fn test_branch() {
             delete: None,
             delete_safe: None,
             set_upstream_to: None,
+            unset_upstream: None,
             show_current: false,
             rename: vec![],
             remotes: false,
@@ -449,6 +451,7 @@ async fn test_branch() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: true,
         rename: vec![],
         remotes: false,
@@ -505,6 +508,7 @@ async fn test_create_branch_from_remote() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
@@ -563,6 +567,7 @@ async fn test_create_branch_from_remote_tracking_ref() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
@@ -775,6 +780,7 @@ async fn test_branch_rename() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
@@ -803,6 +809,7 @@ async fn test_branch_rename() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec!["old_name".to_string(), "new_name".to_string()],
         remotes: false,
@@ -893,6 +900,7 @@ async fn test_rename_current_branch() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![feature_new.clone()],
         remotes: false,
@@ -964,6 +972,7 @@ async fn test_rename_to_existing_branch() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
@@ -984,6 +993,7 @@ async fn test_rename_to_existing_branch() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
@@ -1005,6 +1015,7 @@ async fn test_rename_to_existing_branch() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec!["branch1".to_string(), "branch2".to_string()],
         remotes: false,
@@ -1069,6 +1080,7 @@ async fn test_list_all_branches() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
@@ -1100,6 +1112,7 @@ async fn test_list_all_branches() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
@@ -1169,6 +1182,7 @@ async fn test_branch_delete_safe() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
@@ -1223,6 +1237,7 @@ async fn test_branch_delete_safe() {
         delete: None,
         delete_safe: Some("feature".to_string()),
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
@@ -1279,6 +1294,7 @@ async fn test_branch_delete_safe() {
         delete: None,
         delete_safe: Some("feature".to_string()),
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
@@ -1367,6 +1383,7 @@ async fn test_branch_contains_commit_filter() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
@@ -2081,5 +2098,319 @@ fn test_branch_default_no_action_is_list() {
     assert_eq!(
         v["data"]["action"], "list",
         "bare branch JSON action must be list"
+    );
+}
+
+// =====================================================================
+//  Wave 2 — `--unset-upstream` + tracking display in list
+// =====================================================================
+
+/// Build a `BranchArgs` for an `--unset-upstream` invocation with all other
+/// fields defaulted. `Some(None)` targets the current branch; `Some(Some(n))`
+/// targets the named branch.
+fn unset_upstream_args(unset_upstream: Option<Option<String>>) -> BranchArgs {
+    BranchArgs {
+        new_branch: None,
+        commit_hash: None,
+        list: false,
+        delete: None,
+        delete_safe: None,
+        set_upstream_to: None,
+        unset_upstream,
+        show_current: false,
+        rename: vec![],
+        remotes: false,
+        all: false,
+        contains: vec![],
+        no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
+    }
+}
+
+/// `--unset-upstream` (current branch) removes BOTH `branch.<name>.remote`
+/// and `branch.<name>.merge` from config_kv.
+#[tokio::test]
+#[serial]
+async fn test_branch_unset_upstream_removes_both_keys() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = ChangeDirGuard::new(temp.path());
+
+    let branch = match Head::current().await {
+        Head::Branch(name) => name,
+        _ => panic!("expected to start on a branch"),
+    };
+    ConfigKv::set(&format!("branch.{branch}.remote"), "origin", false)
+        .await
+        .expect("set remote");
+    ConfigKv::set(&format!("branch.{branch}.merge"), "refs/heads/main", false)
+        .await
+        .expect("set merge");
+
+    execute(unset_upstream_args(Some(None))).await;
+
+    assert!(
+        ConfigKv::get(&format!("branch.{branch}.remote"))
+            .await
+            .expect("get remote")
+            .is_none(),
+        "branch.<name>.remote must be removed"
+    );
+    assert!(
+        ConfigKv::get(&format!("branch.{branch}.merge"))
+            .await
+            .expect("get merge")
+            .is_none(),
+        "branch.<name>.merge must be removed"
+    );
+}
+
+/// `--unset-upstream <branch>` clears tracking for a NAMED (non-current)
+/// branch's config.
+#[tokio::test]
+#[serial]
+async fn test_branch_unset_upstream_named() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = ChangeDirGuard::new(temp.path());
+
+    ConfigKv::set("branch.feature.remote", "origin", false)
+        .await
+        .expect("set remote");
+    ConfigKv::set("branch.feature.merge", "refs/heads/feature", false)
+        .await
+        .expect("set merge");
+
+    execute(unset_upstream_args(Some(Some("feature".to_string())))).await;
+
+    assert!(
+        ConfigKv::get("branch.feature.remote")
+            .await
+            .expect("get remote")
+            .is_none(),
+        "named branch remote must be removed"
+    );
+    assert!(
+        ConfigKv::get("branch.feature.merge")
+            .await
+            .expect("get merge")
+            .is_none(),
+        "named branch merge must be removed"
+    );
+}
+
+/// `--unset-upstream` on a branch with no tracking is an idempotent no-op:
+/// it completes successfully and leaves config untouched.
+#[tokio::test]
+#[serial]
+async fn test_branch_unset_upstream_noop_when_absent() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = ChangeDirGuard::new(temp.path());
+
+    // No tracking configured; must not panic or create keys.
+    execute(unset_upstream_args(Some(Some("ghost".to_string())))).await;
+
+    assert!(
+        ConfigKv::get("branch.ghost.remote")
+            .await
+            .expect("get remote")
+            .is_none()
+    );
+    assert!(
+        ConfigKv::get("branch.ghost.merge")
+            .await
+            .expect("get merge")
+            .is_none()
+    );
+}
+
+/// `--unset-upstream` from detached HEAD without an explicit branch name
+/// reports `LBR-REPO-003` (exit 128) and writes nothing.
+#[test]
+#[serial]
+fn test_branch_unset_upstream_detached_errors() {
+    let repo = create_committed_repo_via_cli();
+    let detach = run_libra_command(&["switch", "--detach", "HEAD"], repo.path());
+    assert!(
+        detach.status.success(),
+        "detach failed: {}",
+        String::from_utf8_lossy(&detach.stderr)
+    );
+
+    let output = run_libra_command(&["branch", "--unset-upstream"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert!(stderr.contains("HEAD is detached"));
+}
+
+/// `branch -l` renders a `[<remote>/<branch>]` tracking suffix; after
+/// `--unset-upstream` the suffix disappears. End-to-end via the binary.
+#[test]
+#[serial]
+fn test_branch_list_shows_tracking_suffix_then_unset_clears_it() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/repo.git",
+            ],
+            repo.path(),
+        ),
+        "remote add origin",
+    );
+    assert_cli_success(
+        &run_libra_command(&["branch", "--set-upstream-to", "origin/main"], repo.path()),
+        "set upstream",
+    );
+
+    let listed = run_libra_command(&["branch", "-l"], repo.path());
+    assert_cli_success(&listed, "branch -l with tracking");
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        stdout.contains("[origin/main]"),
+        "list should show tracking suffix: {stdout}"
+    );
+
+    let unset = run_libra_command(&["branch", "--unset-upstream"], repo.path());
+    assert_cli_success(&unset, "unset upstream");
+    let stdout = String::from_utf8_lossy(&unset.stdout);
+    assert!(
+        stdout.contains("Removed upstream tracking"),
+        "unset should confirm removal: {stdout}"
+    );
+
+    let relisted = run_libra_command(&["branch", "-l"], repo.path());
+    assert_cli_success(&relisted, "branch -l after unset");
+    let stdout = String::from_utf8_lossy(&relisted.stdout);
+    assert!(
+        !stdout.contains("[origin/main]"),
+        "tracking suffix must be gone after unset: {stdout}"
+    );
+}
+
+/// JSON list output: untracked branches carry NO `tracking` key (backward
+/// compatible); a tracked branch carries `tracking: {remote, merge}`.
+#[test]
+#[serial]
+fn test_branch_list_json_tracking_backward_compatible() {
+    let repo = create_committed_repo_via_cli();
+
+    // Untracked: no `tracking` key anywhere.
+    let untracked = run_libra_command(&["--json", "branch", "-l"], repo.path());
+    assert_cli_success(&untracked, "--json branch -l untracked");
+    let json = parse_json_stdout(&untracked);
+    for entry in json["data"]["branches"].as_array().expect("branches array") {
+        assert!(
+            entry.get("tracking").is_none(),
+            "untracked entry must omit tracking: {entry}"
+        );
+    }
+
+    // Configure tracking, then the entry must expose tracking.{remote,merge}.
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/repo.git",
+            ],
+            repo.path(),
+        ),
+        "remote add origin",
+    );
+    assert_cli_success(
+        &run_libra_command(&["branch", "--set-upstream-to", "origin/main"], repo.path()),
+        "set upstream",
+    );
+
+    let tracked = run_libra_command(&["--json", "branch", "-l"], repo.path());
+    assert_cli_success(&tracked, "--json branch -l tracked");
+    let json = parse_json_stdout(&tracked);
+    let main_entry = json["data"]["branches"]
+        .as_array()
+        .expect("branches array")
+        .iter()
+        .find(|e| e["name"] == "main")
+        .expect("main entry");
+    assert_eq!(main_entry["tracking"]["remote"], "origin");
+    assert_eq!(main_entry["tracking"]["merge"], "main");
+}
+
+/// `--json branch --unset-upstream` emits the unset-upstream envelope with the
+/// exact `data` key set {action, branch, had_upstream}; the no-op case reports
+/// `had_upstream=false` and exits 0.
+#[test]
+#[serial]
+fn test_branch_unset_upstream_json_schema() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/repo.git",
+            ],
+            repo.path(),
+        ),
+        "remote add origin",
+    );
+    assert_cli_success(
+        &run_libra_command(&["branch", "--set-upstream-to", "origin/main"], repo.path()),
+        "set upstream",
+    );
+
+    let output = run_libra_command(&["--json", "branch", "--unset-upstream"], repo.path());
+    assert_cli_success(&output, "--json unset-upstream");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "branch");
+    assert_eq!(json["data"]["action"], "unset-upstream");
+    assert_eq!(json["data"]["branch"], "main");
+    assert_eq!(json["data"]["had_upstream"], true);
+
+    // Second invocation is a no-op: had_upstream=false, still exit 0.
+    let noop = run_libra_command(&["--json", "branch", "--unset-upstream"], repo.path());
+    assert_cli_success(&noop, "--json unset-upstream noop");
+    let json = parse_json_stdout(&noop);
+    assert_eq!(json["data"]["action"], "unset-upstream");
+    assert_eq!(json["data"]["had_upstream"], false);
+}
+
+/// Listing a branch that tracks a now-deleted remote must not crash: the
+/// configured tracking name is still shown (config read is independent of
+/// remote existence).
+#[test]
+#[serial]
+fn test_branch_list_survives_dangling_remote() {
+    let repo = create_committed_repo_via_cli();
+    // Write tracking config directly, pointing at a remote that does not exist.
+    assert_cli_success(
+        &run_libra_command(&["config", "branch.main.remote", "ghost"], repo.path()),
+        "set branch.main.remote",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["config", "branch.main.merge", "refs/heads/main"],
+            repo.path(),
+        ),
+        "set branch.main.merge",
+    );
+
+    let listed = run_libra_command(&["branch", "-l"], repo.path());
+    assert_cli_success(&listed, "branch -l with dangling remote");
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        stdout.contains("[ghost/main]"),
+        "list should show tracking name even for a missing remote: {stdout}"
     );
 }

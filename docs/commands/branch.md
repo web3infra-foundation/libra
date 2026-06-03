@@ -14,6 +14,7 @@ libra branch -d <name>
 libra branch -D <name>
 libra branch -m [<old>] <new>
 libra branch -u <upstream>
+libra branch --unset-upstream [<branch>]
 libra branch --show-current
 ```
 
@@ -35,6 +36,7 @@ The `--contains` and `--no-contains` filters (aliased as `--with` and `--without
 | `-D` | `--delete-force` | `<name>` | Force-delete a branch, even if not fully merged |
 | `-d` | `--delete` | `<name>` | Safe-delete a branch (must be fully merged) |
 | `-u` | `--set-upstream-to` | `<upstream>` | Set upstream tracking for the current branch |
+| | `--unset-upstream` | `[branch]` | Remove upstream tracking (the current branch when no name is given) |
 | | `--show-current` | | Print the current branch name or detached HEAD state |
 | `-m` | `--move` | `<old> <new>` or `<new>` | Rename a branch; with one argument renames the current branch |
 | `-r` | `--remotes` | | Show remote-tracking branches only |
@@ -95,6 +97,12 @@ libra branch -m old-name new-name
 # Set upstream tracking
 libra branch -u origin/main
 
+# Remove upstream tracking (current branch)
+libra branch --unset-upstream
+
+# Remove upstream tracking for a named branch
+libra branch --unset-upstream feature
+
 # Show current branch name
 libra branch --show-current
 
@@ -112,6 +120,7 @@ libra branch -D topic                   # Force-delete a branch
 libra branch --merged                   # List branches merged into HEAD
 libra branch --no-merged main           # List branches not yet merged into main
 libra branch --points-at HEAD           # List branches whose tip is at HEAD
+libra branch --unset-upstream           # Remove tracking for the current branch
 libra branch --set-upstream-to origin/main
                                         # Set upstream for the current branch
 libra branch --json --show-current      # Structured JSON output for agents
@@ -119,9 +128,11 @@ libra branch --json --show-current      # Structured JSON output for agents
 
 ## Human Output
 
-- List: prints the branch list with `*` marking the current branch
+- List: prints the branch list with `*` marking the current branch. Branches with upstream tracking show a `[<remote>/<branch>]` suffix (e.g. `* main [origin/main]`).
 - Safe delete: `Deleted branch feature (was abc123...)`
 - Rename: `Renamed branch 'old' to 'new'`
+- `--set-upstream-to`: `Branch 'main' set up to track remote branch 'origin/main'`
+- `--unset-upstream`: `Removed upstream tracking for branch 'main'`, or `Branch 'main' has no upstream tracking to remove` when none was configured
 - `--show-current`: prints the current branch name, or `HEAD detached at <hash>` when detached
 
 ## Structured Output (JSON examples)
@@ -149,9 +160,27 @@ List action:
   "data": {
     "action": "list",
     "branches": [
-      { "name": "main", "current": true, "commit": "abc1234..." },
+      { "name": "main", "current": true, "commit": "abc1234...", "tracking": { "remote": "origin", "merge": "main" } },
       { "name": "feature", "current": false, "commit": "def5678..." }
     ]
+  }
+}
+```
+
+The optional `tracking` object appears only for branches with upstream
+tracking configured; untracked entries omit the key entirely (backward
+compatible).
+
+Unset-upstream action (`had_upstream` is `false` for an idempotent no-op):
+
+```json
+{
+  "ok": true,
+  "command": "branch",
+  "data": {
+    "action": "unset-upstream",
+    "branch": "main",
+    "had_upstream": true
   }
 }
 ```
@@ -178,7 +207,9 @@ Supported actions:
 - `delete`: `name`, `commit`, `force`
 - `rename`: `old_name`, `new_name`
 - `set-upstream`: `branch`, `upstream`
+- `unset-upstream`: `branch`, `had_upstream`
 - `show-current`: `name`, `detached`, `commit`
+- `list` entries optionally include `tracking`: `{ remote, merge }`
 
 ## Design Rationale
 
