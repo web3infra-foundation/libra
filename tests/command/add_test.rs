@@ -1212,3 +1212,284 @@ async fn test_add_chmod_new_file_reported_once() {
     // And the recorded index mode is still the executable bit.
     assert_eq!(index_mode(test_dir.path(), "script.sh"), Some(0o100755));
 }
+
+/// Scenario: `--pathspec-from-file` stages every path listed in the file.
+#[tokio::test]
+#[serial]
+async fn test_add_pathspec_from_file() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write("a.txt", "a").unwrap();
+    fs::write("b.txt", "b").unwrap();
+    fs::write("list.txt", "a.txt\nb.txt\n").unwrap();
+
+    let out = add::run_add(&AddArgs {
+        pathspec_from_file: Some("list.txt".to_string()),
+        ..Default::default()
+    })
+    .await
+    .expect("add --pathspec-from-file");
+
+    assert!(out.added.iter().any(|p| p == "a.txt"), "{:?}", out.added);
+    assert!(out.added.iter().any(|p| p == "b.txt"), "{:?}", out.added);
+    // The list file itself was not listed, so it is not staged.
+    assert!(
+        !out.added.iter().any(|p| p == "list.txt"),
+        "{:?}",
+        out.added
+    );
+}
+
+/// Scenario: `--pathspec-file-nul` parses NUL-separated input.
+#[tokio::test]
+#[serial]
+async fn test_add_pathspec_from_file_nul() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write("a.txt", "a").unwrap();
+    fs::write("b.txt", "b").unwrap();
+    fs::write("list.txt", "a.txt\0b.txt\0").unwrap();
+
+    let out = add::run_add(&AddArgs {
+        pathspec_from_file: Some("list.txt".to_string()),
+        pathspec_file_nul: true,
+        ..Default::default()
+    })
+    .await
+    .expect("add --pathspec-from-file --pathspec-file-nul");
+
+    assert!(out.added.iter().any(|p| p == "a.txt"), "{:?}", out.added);
+    assert!(out.added.iter().any(|p| p == "b.txt"), "{:?}", out.added);
+}
+
+/// Scenario: a missing `--pathspec-from-file` returns a read error (IoReadFailed)
+/// whose message names the file.
+#[tokio::test]
+#[serial]
+async fn test_add_pathspec_from_file_missing() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    let err = add::run_add(&AddArgs {
+        pathspec_from_file: Some("nope.txt".to_string()),
+        ..Default::default()
+    })
+    .await
+    .expect_err("missing pathspec file must error");
+    assert_eq!(
+        err.stable_code(),
+        libra::utils::error::StableErrorCode::IoReadFailed
+    );
+    assert!(err.message().contains("nope.txt"), "msg: {}", err.message());
+}
+
+/// Scenario: a `--pathspec-from-file` larger than 128 MiB is rejected without
+/// reading it into memory (uses a sparse file so the test stays cheap).
+#[tokio::test]
+#[serial]
+async fn test_add_pathspec_from_file_oversize() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    let f = fs::File::create("big.txt").unwrap();
+    f.set_len(128 * 1024 * 1024 + 1).unwrap();
+    drop(f);
+
+    let err = add::run_add(&AddArgs {
+        pathspec_from_file: Some("big.txt".to_string()),
+        ..Default::default()
+    })
+    .await
+    .expect_err("oversize pathspec file must error");
+    assert_eq!(
+        err.stable_code(),
+        libra::utils::error::StableErrorCode::IoReadFailed
+    );
+}
+
+/// Scenario: a `../escape` entry in a `--pathspec-from-file` is rejected as
+/// outside the repository (CliInvalidTarget), not silently resolved.
+#[tokio::test]
+#[serial]
+async fn test_add_pathspec_from_file_traversal_blocked() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write("list.txt", "../escape.txt\n").unwrap();
+
+    let err = add::run_add(&AddArgs {
+        pathspec_from_file: Some("list.txt".to_string()),
+        ..Default::default()
+    })
+    .await
+    .expect_err("traversal pathspec must be rejected");
+    assert_eq!(
+        err.stable_code(),
+        libra::utils::error::StableErrorCode::CliInvalidTarget
+    );
+}
+
+/// Scenario: `--dry-run --ignore-missing` skips a path that does not exist in
+/// the working tree (with a warning) instead of erroring, and still previews
+/// the present paths.
+#[tokio::test]
+#[serial]
+async fn test_add_ignore_missing_dry_run_skips_missing() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write("real.txt", "x").unwrap();
+
+    let out = add::run_add(&AddArgs {
+        pathspec: vec!["real.txt".to_string(), "ghost.txt".to_string()],
+        dry_run: true,
+        ignore_missing: true,
+        ..Default::default()
+    })
+    .await
+    .expect("--dry-run --ignore-missing must skip the missing path");
+    assert!(out.added.iter().any(|p| p == "real.txt"), "{:?}", out.added);
+}
+
+/// Scenario: under `--ignore-missing`, a path that EXISTS but matches nothing
+/// (an empty directory) still errors with PathspecNotMatched.
+#[tokio::test]
+#[serial]
+async fn test_add_ignore_missing_still_errors_present_unmatched() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::create_dir("emptydir").unwrap();
+
+    let err = add::run_add(&AddArgs {
+        pathspec: vec!["emptydir".to_string()],
+        dry_run: true,
+        ignore_missing: true,
+        ..Default::default()
+    })
+    .await
+    .expect_err("present-but-unmatched path must still error");
+    assert_eq!(
+        err.stable_code(),
+        libra::utils::error::StableErrorCode::CliInvalidTarget
+    );
+}
+
+/// Scenario: `--dry-run` WITHOUT `--ignore-missing` still errors on a missing
+/// path (the relaxation is opt-in).
+#[tokio::test]
+#[serial]
+async fn test_add_missing_dry_run_without_ignore_missing() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    let err = add::run_add(&AddArgs {
+        pathspec: vec!["ghost.txt".to_string()],
+        dry_run: true,
+        ..Default::default()
+    })
+    .await
+    .expect_err("missing path without --ignore-missing must error");
+    assert_eq!(
+        err.stable_code(),
+        libra::utils::error::StableErrorCode::CliInvalidTarget
+    );
+}
+
+/// Scenario: `--renormalize` (implies `-u`) never stages an untracked file.
+#[tokio::test]
+#[serial]
+async fn test_add_renormalize_only_tracked() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write("tracked.txt", "v1").unwrap();
+    add::run_add(&AddArgs {
+        pathspec: vec!["tracked.txt".to_string()],
+        ..Default::default()
+    })
+    .await
+    .expect("stage tracked.txt");
+    fs::write("untracked.txt", "new").unwrap();
+
+    let out = add::run_add(&AddArgs {
+        renormalize: true,
+        ..Default::default()
+    })
+    .await
+    .expect("renormalize");
+
+    assert!(
+        !out.added.iter().any(|p| p == "untracked.txt")
+            && !out.modified.iter().any(|p| p == "untracked.txt"),
+        "untracked file must not be staged by --renormalize: added={:?} modified={:?}",
+        out.added,
+        out.modified
+    );
+}
+
+/// Scenario: `--renormalize` stages the deletion of a tracked file removed from
+/// the working tree (the `-u` part).
+#[tokio::test]
+#[serial]
+async fn test_add_renormalize_stages_tracked_deletion() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write("tracked.txt", "v1").unwrap();
+    add::run_add(&AddArgs {
+        pathspec: vec!["tracked.txt".to_string()],
+        ..Default::default()
+    })
+    .await
+    .expect("stage tracked.txt");
+    fs::remove_file("tracked.txt").unwrap();
+
+    let out = add::run_add(&AddArgs {
+        pathspec: vec!["tracked.txt".to_string()],
+        renormalize: true,
+        ..Default::default()
+    })
+    .await
+    .expect("renormalize a deleted tracked file");
+
+    assert!(
+        out.removed.iter().any(|p| p == "tracked.txt"),
+        "deletion should be staged: {:?}",
+        out.removed
+    );
+}
+
+/// Scenario (direct): `renormalize_entry` rewrites an unchanged tracked entry,
+/// bypassing the unchanged/verify-hash short-circuit (returns `Modified`).
+#[tokio::test]
+#[serial]
+async fn test_add_renormalize_rewrites_unchanged_tracked() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write("tracked.txt", "v1").unwrap();
+    add::run_add(&AddArgs {
+        pathspec: vec!["tracked.txt".to_string()],
+        ..Default::default()
+    })
+    .await
+    .expect("stage tracked.txt");
+
+    // Content/stat unchanged; renormalize_entry must still report a rewrite.
+    let mut index =
+        git_internal::internal::index::Index::load(test_dir.path().join(".libra/index"))
+            .expect("load index");
+    let action = add::renormalize_entry(
+        std::path::Path::new("tracked.txt"),
+        &mut index,
+        test_dir.path(),
+    )
+    .await
+    .expect("renormalize_entry");
+    assert_eq!(action, add::StagedAction::Modified);
+}

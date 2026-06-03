@@ -20,7 +20,7 @@
 
 use std::{
     env, fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -223,6 +223,10 @@ pub enum AddError {
     /// [`IndexSave`](AddError::IndexSave)).
     #[error("unable to write index '{path}': {source}")]
     IndexSaveIo { path: PathBuf, source: io::Error },
+    /// Reading the `--pathspec-from-file` input (a file or stdin) failed, or it
+    /// exceeded the size limit. Mapped to [`StableErrorCode::IoReadFailed`].
+    #[error("failed to read pathspec file '{path}': {source}")]
+    PathspecFileRead { path: String, source: io::Error },
 }
 
 impl From<AddError> for CliError {
@@ -287,6 +291,9 @@ impl From<AddError> for CliError {
             }
             AddError::IndexSaveIo { .. } => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
+            }
+            AddError::PathspecFileRead { .. } => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
             }
         }
     }
@@ -366,10 +373,12 @@ impl AddOutput {
 // Action tracking for add_a_file
 // ---------------------------------------------------------------------------
 
-/// The outcome of staging a single path. Returned by [`stage_a_file`] so the
-/// caller can sort each path into the correct [`AddOutput`] bucket.
+/// The outcome of staging a single path. Returned by [`stage_a_file`] and
+/// [`renormalize_entry`] so the caller can sort each path into the correct
+/// [`AddOutput`] bucket. Public so the `--renormalize` rewrite can be asserted
+/// directly in tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StagedAction {
+pub enum StagedAction {
     Added,
     Modified,
     Removed,
@@ -387,6 +396,10 @@ enum StagedAction {
 struct ValidatedPathspecs {
     files: Vec<PathBuf>,
     ignored: Vec<String>,
+    /// Pathspecs skipped under `--ignore-missing` because they do not exist in
+    /// the working tree (dry-run only). Reported as stderr warnings, never in a
+    /// JSON list.
+    missing: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -521,17 +534,28 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
     // > default false.
     let ignore_errors = resolve_ignore_errors(args).await;
 
-    // Resolve pathspecs
-    let requested_paths: Vec<PathBuf> = if args.pathspec.is_empty() {
-        if !args.all && !args.update && !args.refresh {
-            return Err(CliError::command_usage("nothing specified, nothing added")
-                .with_stable_code(StableErrorCode::CliInvalidArguments)
-                .with_hint("maybe you wanted to say 'libra add .'?"));
-        }
-        vec![workdir.clone()]
-    } else {
-        args.pathspec.iter().map(PathBuf::from).collect()
+    // Effective pathspec list: from --pathspec-from-file (or `-` for stdin) when
+    // given, otherwise the positional pathspecs. clap guarantees the two are
+    // mutually exclusive.
+    let effective_pathspec: Vec<String> = match args.pathspec_from_file.as_deref() {
+        Some(file) => read_pathspec_from_file(file, args.pathspec_file_nul)?,
+        None => args.pathspec.clone(),
     };
+
+    // Nothing-specified guard: an empty pathspec set is only valid for the
+    // whole-tree modes. `--renormalize` implies `-u`, so (like `-A` / `-u` /
+    // `--refresh`) it may run without an explicit pathspec over all tracked
+    // files; `validate_pathspecs` maps an empty set to the workdir root.
+    if effective_pathspec.is_empty()
+        && !args.all
+        && !args.update
+        && !args.refresh
+        && !args.renormalize
+    {
+        return Err(CliError::command_usage("nothing specified, nothing added")
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint("maybe you wanted to say 'libra add .'?"));
+    }
 
     let mut index = Index::load(&index_path).map_err(|source| AddError::IndexLoad {
         path: index_path.clone(),
@@ -550,13 +574,13 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
     }
 
     let validated = validate_pathspecs(
-        &args.pathspec,
-        &requested_paths,
+        &effective_pathspec,
         &workdir,
         &current_dir,
         &visible_changes,
         &ignored_changes,
         &index,
+        args.ignore_missing,
     )?;
 
     let mut add_output = AddOutput::empty(args.dry_run);
@@ -567,6 +591,19 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
         sorted_ignored.sort();
         sorted_ignored.dedup();
         add_output.ignored = sorted_ignored;
+    }
+
+    // --ignore-missing (dry-run only): pathspecs that do not exist in the
+    // working tree are skipped with a stderr warning instead of erroring. They
+    // are intentionally NOT added to any JSON list (stderr-only), and the
+    // warning drives `--exit-code-on-warning`.
+    if !validated.missing.is_empty() {
+        for pathspec in &validated.missing {
+            eprintln!(
+                "warning: pathspec '{pathspec}' did not match any files and was skipped (--ignore-missing)"
+            );
+        }
+        output::record_warning();
     }
 
     // --- Refresh mode ---
@@ -617,9 +654,27 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
         return check_ignored_only_error(add_output);
     }
 
-    // Stage each file
-    for file in &files {
-        match stage_a_file(file, &mut index, &workdir, &storage_path).await {
+    // Stage each file. `--renormalize` implies `-u`: it force-rewrites the blobs
+    // of already-tracked entries matching the pathspec (bypassing the
+    // unchanged/modified short-circuit) and stages deletions for tracked files
+    // removed from the working tree — untracked files are never added.
+    let staging_files: Vec<PathBuf> = if args.renormalize {
+        filter_candidates(
+            &index.tracked_files(),
+            &validated.files,
+            &workdir,
+            &current_dir,
+        )
+    } else {
+        files
+    };
+    for file in &staging_files {
+        let staged = if args.renormalize {
+            renormalize_entry(file, &mut index, &workdir).await
+        } else {
+            stage_a_file(file, &mut index, &workdir, &storage_path).await
+        };
+        match staged {
             Ok(action) => {
                 let path_str = file.display().to_string();
                 match action {
@@ -908,8 +963,9 @@ fn write_err(e: io::Error) -> CliError {
 /// Resolve, canonicalise and classify each user-supplied pathspec.
 ///
 /// Functional scope:
-/// - When `raw_pathspecs` is empty, returns `requested_paths` unchanged
-///   (caller passes the workdir as the implicit pathspec for `-A` / `-u`).
+/// - When `raw_pathspecs` is empty, returns the workdir root as the single
+///   implicit pathspec (the whole-tree modes `-A` / `-u` / `--refresh` /
+///   `--renormalize`).
 /// - For each pathspec, makes the path absolute, rejects anything outside
 ///   `workdir`, and probes three candidate sets in order: visible changes,
 ///   tracked files in the index, and ignored changes.
@@ -924,17 +980,18 @@ fn write_err(e: io::Error) -> CliError {
 ///   pre-flight stage.
 fn validate_pathspecs(
     raw_pathspecs: &[String],
-    requested_paths: &[PathBuf],
     workdir: &Path,
     current_dir: &Path,
     visible_changes: &Changes,
     ignored_changes: &Changes,
     index: &Index,
+    ignore_missing: bool,
 ) -> Result<ValidatedPathspecs, AddError> {
     if raw_pathspecs.is_empty() {
         return Ok(ValidatedPathspecs {
-            files: requested_paths.to_vec(),
+            files: vec![workdir.to_path_buf()],
             ignored: Vec::new(),
+            missing: Vec::new(),
         });
     }
 
@@ -944,8 +1001,10 @@ fn validate_pathspecs(
 
     let mut ignored = Vec::new();
     let mut files = Vec::new();
-    for (raw, requested_path) in raw_pathspecs.iter().zip(requested_paths.iter()) {
-        let requested_abs = resolve_pathspec(requested_path, current_dir);
+    let mut missing = Vec::new();
+    for raw in raw_pathspecs {
+        let requested_path = PathBuf::from(raw);
+        let requested_abs = resolve_pathspec(&requested_path, current_dir);
         if !util::is_sub_path(&requested_abs, workdir) {
             return Err(AddError::PathOutsideRepo {
                 path: raw.clone(),
@@ -966,12 +1025,25 @@ fn validate_pathspecs(
             continue;
         }
 
+        // Nothing matched. With --ignore-missing (dry-run only), a pathspec that
+        // does not exist in the working tree is skipped with a warning; an
+        // existing-but-unmatched pathspec still errors, matching Git's
+        // "ignored-even-if-missing" being scoped to genuinely missing paths.
+        if ignore_missing && !requested_abs.exists() {
+            missing.push(raw.clone());
+            continue;
+        }
+
         return Err(AddError::PathspecNotMatched {
             pathspec: raw.clone(),
         });
     }
 
-    Ok(ValidatedPathspecs { files, ignored })
+    Ok(ValidatedPathspecs {
+        files,
+        ignored,
+        missing,
+    })
 }
 
 /// Flatten the three change buckets (`new`, `modified`, `deleted`) into a
@@ -1326,6 +1398,129 @@ fn apply_chmod(entry: &mut IndexEntry, executable: bool) -> bool {
     let changed = entry.mode != new_mode;
     entry.mode = new_mode;
     changed
+}
+
+/// Upper bound on `--pathspec-from-file` input (file or stdin) to guard against
+/// OOM / DoS from a pathological input.
+const MAX_PATHSPEC_FILE_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Read pathspecs from `path` (a file, or `-` for stdin).
+///
+/// Items are separated by NUL when `nul` is set (`--pathspec-file-nul`),
+/// otherwise by newline (a trailing `\r` is stripped so CRLF files work). Empty
+/// items are dropped. The whole input is capped at [`MAX_PATHSPEC_FILE_BYTES`];
+/// exceeding it (or any read failure) returns [`AddError::PathspecFileRead`].
+/// Non-UTF-8 input returns [`AddError::InvalidPathEncoding`]. Returned items are
+/// raw pathspecs; the caller still normalises and bounds-checks each one via
+/// [`validate_pathspecs`].
+fn read_pathspec_from_file(path: &str, nul: bool) -> Result<Vec<String>, AddError> {
+    let (label, raw): (String, Vec<u8>) = if path == "-" {
+        let mut buf = Vec::new();
+        // `take` bounds stdin so an unbounded pipe cannot exhaust memory.
+        io::stdin()
+            .lock()
+            .take(MAX_PATHSPEC_FILE_BYTES + 1)
+            .read_to_end(&mut buf)
+            .map_err(|source| AddError::PathspecFileRead {
+                path: "<stdin>".to_string(),
+                source,
+            })?;
+        ("<stdin>".to_string(), buf)
+    } else {
+        let meta = fs::metadata(path).map_err(|source| AddError::PathspecFileRead {
+            path: path.to_string(),
+            source,
+        })?;
+        if meta.len() > MAX_PATHSPEC_FILE_BYTES {
+            return Err(AddError::PathspecFileRead {
+                path: path.to_string(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "pathspec file exceeds the 128 MiB limit",
+                ),
+            });
+        }
+        let bytes = fs::read(path).map_err(|source| AddError::PathspecFileRead {
+            path: path.to_string(),
+            source,
+        })?;
+        (path.to_string(), bytes)
+    };
+
+    if raw.len() as u64 > MAX_PATHSPEC_FILE_BYTES {
+        return Err(AddError::PathspecFileRead {
+            path: label,
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                "pathspec input exceeds the 128 MiB limit",
+            ),
+        });
+    }
+
+    let text = String::from_utf8(raw).map_err(|_| AddError::InvalidPathEncoding {
+        path: PathBuf::from(&label),
+    })?;
+
+    let separator = if nul { '\0' } else { '\n' };
+    Ok(text
+        .split(separator)
+        .filter_map(|item| {
+            let item = if nul {
+                item
+            } else {
+                item.strip_suffix('\r').unwrap_or(item)
+            };
+            if item.is_empty() {
+                None
+            } else {
+                Some(item.to_string())
+            }
+        })
+        .collect())
+}
+
+/// Force-rewrite an already-tracked entry for `--renormalize` (implies `-u`).
+///
+/// Unlike [`stage_a_file`], this bypasses the `FileStatus::Unchanged` /
+/// `is_modified` / `verify_hash` short-circuits: it unconditionally regenerates
+/// the blob for a tracked file and replaces the index entry, so even a file
+/// whose stat/content appears unchanged is rewritten. A tracked file deleted
+/// from the working tree is staged as a deletion (the `-u` part). Because libra
+/// has no clean/CRLF filter, this is a force-rewrite, not EOL normalisation.
+///
+/// `file` must be the workdir-relative path of an entry already in the index;
+/// callers restrict the candidate set to tracked files matching the pathspec.
+/// Public so the rewrite action can be asserted directly in tests.
+pub async fn renormalize_entry(
+    file: &Path,
+    index: &mut Index,
+    workdir: &Path,
+) -> Result<StagedAction, AddError> {
+    let file_str = file.to_str().ok_or_else(|| AddError::InvalidPathEncoding {
+        path: file.to_path_buf(),
+    })?;
+    let file_abs = workdir.join(file);
+
+    if !file_abs.exists() {
+        // Tracked but deleted in the working tree -> stage the deletion.
+        index.remove(file_str, 0);
+        return Ok(StagedAction::Removed);
+    }
+    if file_abs.is_dir() {
+        return Ok(StagedAction::Unchanged);
+    }
+
+    let blob = gen_blob_from_file(&file_abs)?;
+    save_blob(&blob, &file_abs)?;
+    index.update(
+        IndexEntry::new_from_file(file, blob.id, workdir).map_err(|source| {
+            AddError::CreateIndexEntry {
+                path: file.to_path_buf(),
+                source,
+            }
+        })?,
+    );
+    Ok(StagedAction::Modified)
 }
 
 /// Validate a `--chmod` spec. Only `+x` and `-x` are accepted (matching Git's
