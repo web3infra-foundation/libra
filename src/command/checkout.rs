@@ -45,6 +45,12 @@ EXAMPLES:
     libra checkout main                    Switch to a branch (prefer: libra switch main)
     libra checkout feature-x               Switch to another branch (prefer: libra switch feature-x)
     libra checkout -b feature-x            Create + switch to a new branch (prefer: libra switch -c feature-x)
+    libra checkout -B feature-x            Create or reset a branch to HEAD, then switch
+    libra checkout --detach HEAD~1         Detach HEAD at a commit (no branch)
+    libra checkout --orphan fresh          Start a new unborn branch with no history
+    libra checkout -f main                 Force switch, discarding local changes
+    libra checkout --ours -- file.txt      Take our side of a conflicted path
+    libra checkout --theirs -- file.txt    Take their side of a conflicted path
     libra checkout -- file.txt             Restore a path from the index (prefer: libra restore file.txt)
     libra checkout HEAD -- file.txt        Restore a path from HEAD into index + worktree
     libra --json checkout main             Structured compatibility output

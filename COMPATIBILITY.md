@@ -79,7 +79,7 @@ batch document.
 | fsck | supported | |
 | verify-pack | partial | validates `.idx` files against matching `.pack` files; multi-index and Git's `-s` / `--stat-only` are supported; `--pack` is a Libra-only explicit pack path |
 | index-pack | supported | hidden plumbing command |
-| checkout | partial | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore`; detached HEAD and patch modes still partial |
+| checkout | partial | branch compatibility surface plus path restoration. Branch modes `-b`, `-B` (create/reset), `--detach`, `--orphan`, and `-f`/`--force` supported; `--ours`/`--theirs` conflict-path checkout partial (restores one merge stage and collapses to stage 0; no `-p`/`--patch`, no `--conflict`); explicit `checkout [<tree-ish>] -- <path>` restoration alias supported. Plain `checkout <commit-ish>`/`<tag>` without `--detach`, patch mode (`-p`), and `--conflict` deferred. Internal `intent`/`agent-traces` branches protected. Prefer `switch` / `restore` |
 | bisect | partial | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` supported; `start` accepts `<bad> <good>...` positional bounds (multiple good commits); `replay` (see [docs/improvement/compatibility/declined.md#d6-bisect-replay](docs/improvement/compatibility/declined.md#d6-bisect-replay)) / `terms` (see [docs/improvement/compatibility/declined.md#d7-bisect-terms](docs/improvement/compatibility/declined.md#d7-bisect-terms)) deferred; `start -- <pathspec>` rejected (path-limited bisect unsupported) |
 
 ## Git commands intentionally absent from `src/cli.rs`
