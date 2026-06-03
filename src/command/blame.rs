@@ -324,16 +324,16 @@ fn render_human(out: &BlameOutput, args: &BlameArgs) -> String {
         let meta = if args.suppress_metadata {
             String::new()
         } else {
-            let who: &str = if args.show_email {
-                &blame.email
+            let who_col = if args.show_email {
+                format!("<{}>", blame.email)
             } else {
-                &blame.author
-            };
-            let who_col = if who.chars().count() > 15 {
-                let truncated: String = who.chars().take(12).collect();
-                format!("{truncated}...")
-            } else {
-                format!("{who:15}")
+                let who = blame.author.as_str();
+                if who.chars().count() > 15 {
+                    let truncated: String = who.chars().take(12).collect();
+                    format!("{truncated}...")
+                } else {
+                    format!("{who:15}")
+                }
             };
             let when = if args.raw_timestamp {
                 blame.timestamp.to_string()
@@ -732,5 +732,39 @@ mod tests {
         assert_eq!(normalize_ws("   "), "");
         assert_eq!(normalize_ws(""), "");
         assert_eq!(normalize_ws("abc"), "abc");
+    }
+
+    #[test]
+    fn test_blame_porcelain_signed_commit_summary() {
+        let signed_message = "-----BEGIN PGP SIGNATURE-----\nabcDEF123\n-----END PGP SIGNATURE-----\n\nreal subject\n\nbody";
+        let commit = Commit::from_tree_id(ObjectHash::new(&[1; 20]), Vec::new(), signed_message);
+        let hash = commit.id.to_string();
+        let out = BlameOutput {
+            file: "signed.txt".to_string(),
+            revision: hash.clone(),
+            lines: vec![BlameLine {
+                line_number: 1,
+                short_hash: hash.chars().take(8).collect(),
+                hash,
+                author: commit.author.name.clone(),
+                date: format_blame_timestamp(commit.author.timestamp as i64),
+                content: "line".to_string(),
+                email: commit.author.email.clone(),
+                timestamp: commit.author.timestamp as i64,
+                timezone: commit.author.timezone.clone(),
+                summary: commit.format_message(),
+                original_line_number: 1,
+            }],
+        };
+
+        let porcelain = render_porcelain(&out);
+        assert!(
+            porcelain.contains("summary real subject\n"),
+            "summary should use the real commit subject: {porcelain}"
+        );
+        assert!(
+            !porcelain.contains("summary -----BEGIN PGP SIGNATURE-----"),
+            "summary must not expose the signature header: {porcelain}"
+        );
     }
 }

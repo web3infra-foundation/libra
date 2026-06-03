@@ -5,7 +5,9 @@ Trace each line of a file to the commit that last introduced it.
 ## Synopsis
 
 ```
-libra blame <file> [<commit>] [-L <range>]
+libra blame [OPTIONS] <file> [<commit>]
+libra --json blame [OPTIONS] <file> [<commit>]
+libra --quiet blame [OPTIONS] <file> [<commit>]
 ```
 
 ## Description
@@ -23,14 +25,14 @@ For large files, the `-L` option restricts output to a specific line range, redu
 | File | | positional (required) | The file to blame. Must exist in the specified revision. |
 | Commit | | positional (optional) | The revision to start blame from. Defaults to `HEAD`. |
 | Line range | `-L` | `-L <RANGE>` | Restrict blame to a line range. See formats below. |
-| JSON | | `--json` | Emit structured JSON output. |
-| Quiet | | `--quiet` | Validate inputs but suppress all blame output. |
+| JSON | | global `--json` | Emit structured JSON output. Pass before the subcommand: `libra --json blame ...`. |
+| Quiet | | global `--quiet` | Validate inputs but suppress all blame output. Pass before the subcommand: `libra --quiet blame ...`. |
 | Long hash | `-l` | | Show the full commit hash instead of the abbreviated form. |
 | Raw timestamp | `-t` | | Show the raw commit timestamp (epoch seconds) instead of a formatted date. |
 | File name | `-f` | | Show the file name for each blamed line. |
 | Original line number | `-n` | | Show the original (pre-image) line number. |
 | Suppress metadata | `-s` | | Suppress the author name and date columns. |
-| Show email | `-e` | | Show the author email instead of the name. |
+| Show email | `-e` | | Show the author email in angle brackets instead of the name. |
 | Ignore whitespace | `-w` | | Ignore whitespace-only changes when assigning blame. |
 | Porcelain | `-p` | `--porcelain` | Machine-readable porcelain output (one record per line). |
 | Detect moved | `-M` | | Parsed only; cross-file move detection is not implemented (blame still walks this file). Optional threshold `-M=<num>`. |
@@ -106,6 +108,11 @@ Each line shows:
 - **Line number**: 1-based line number in the file.
 - **Content**: the actual line content.
 
+With `-e`, the author column shows `<email>` instead of the author name. With
+`-n`, the line number is the original pre-image line number when attribution
+was inherited from an older commit. With `-f`, the file name is prefixed before
+the hash.
+
 `--quiet` validates the revision, file, and line range but suppresses all output. This is useful for scripted checks ("does this file exist at this revision?").
 
 Output is automatically paged when connected to a terminal.
@@ -126,14 +133,19 @@ Output is automatically paged when connected to a terminal.
         "hash": "abc123...",
         "author": "Test User",
         "date": "2026-03-30T10:00:00+00:00",
-        "content": "tracked"
+        "content": "tracked",
+        "email": "test@example.com",
+        "timestamp": 1774864800,
+        "timezone": "+0000",
+        "summary": "update tracked",
+        "original_line_number": 1
       }
     ]
   }
 }
 ```
 
-The `revision` field contains the full commit hash that was used as the blame starting point. Each line entry includes both the `short_hash` (8 characters) and full `hash` for programmatic use.
+The `revision` field contains the full commit hash that was used as the blame starting point. Each line entry includes both the `short_hash` (8 characters) and full `hash` for programmatic use. The appended `email`, `timestamp`, `timezone`, `summary`, and `original_line_number` fields support `-e`, `-t`, `-n`, and porcelain rendering while preserving the existing fields.
 
 When the file is empty, the `lines` array is empty and human output shows "File is empty".
 

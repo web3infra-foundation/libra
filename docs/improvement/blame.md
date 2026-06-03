@@ -37,7 +37,7 @@
 后续维护重点：
 
 - 继续观察 blame 算法在更长提交链和重复内容场景下的归属正确性
-- 如后续要对齐 Git porcelain blame，再在本计划之外新增独立 schema，而不是修改当前 JSON 契约
+- Git porcelain blame 已在 `blame-improvement-plan.md` 中重新决策并落地为独立文本格式；JSON 契约保持向后兼容，只追加渲染所需字段
 
 ### 目标与非目标
 
@@ -58,7 +58,7 @@
 ### 设计原则
 
 1. **执行层与渲染层拆分**：`execute_safe()` 调用 `run_blame()` 收集结构化结果，再根据 `OutputConfig` 渲染
-2. **JSON 按行返回归属信息**：每行包含 commit hash、author、date、line number、content
+2. **JSON 按行返回归属信息**：每行包含 commit hash、author、date、line number、content，并向后兼容追加 email、timestamp、timezone、summary、original_line_number
 3. **错误码显式映射**：每个 `BlameError` 变体都有确定的 `StableErrorCode`
 4. **JSON 模式下 `-L` 仍然生效**：行范围过滤在执行层完成
 
@@ -125,6 +125,16 @@ pub struct BlameLine {
     pub date: String,
     /// Line content
     pub content: String,
+    /// Author email
+    pub email: String,
+    /// Raw author timestamp (epoch seconds)
+    pub timestamp: i64,
+    /// Author timezone (for example, +0800)
+    pub timezone: String,
+    /// First meaningful line of the commit message
+    pub summary: String,
+    /// Pre-image line number in the introducing commit
+    pub original_line_number: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -142,7 +152,7 @@ pub struct BlameOutput {
 - `execute_safe(args, out_config)` → `run_blame(args)` → 返回 `BlameOutput`
 - `run_blame()` 执行 blame 算法 + 行范围过滤 + 收集结构化结果
 - `execute_safe()` 根据 `OutputConfig` 选择渲染：human / JSON / machine
-- human 模式使用现有格式（8-char hash, 15-char author, date, line number, content）
+- human 模式默认使用现有格式（8-char hash, 15-char author, date, line number, content），并支持 `-l`/`-t`/`-f`/`-n`/`-s`/`-e`/`-w` 展示控制
 - JSON/machine 模式使用 `emit_json_data("blame", &output, config)`
 
 **渲染规则：**
@@ -235,7 +245,7 @@ pub struct BlameOutput {
 | **A** | 退出码 `0/128/129` | 参数错误（无效 revision、file not found、无效行范围）→ exit `129`；运行时错误（object 损坏）→ exit `128`；成功 → exit `0` |
 | **B** | `--help` EXAMPLES | 见下方 EXAMPLES 段 |
 | **F** | 拼写纠错 | **不适用**——blame 的参数是文件路径和 revision，无 enum 值可做 fuzzy match |
-| **G** | Issues URL | 仅在 `CommitLoad` 错误时输出 Issues URL |
+| **G** | Issues URL | 对象加载失败统一经 `ObjectLoad` 映射为 RepoCorrupt，并保留面向用户的修复 hint |
 
 ### `--help` EXAMPLES 段
 
@@ -245,7 +255,10 @@ EXAMPLES:
     libra blame src/main.rs abc1234        Blame at a specific commit
     libra blame -L 10,20 src/main.rs       Blame lines 10-20
     libra blame -L 10,+5 src/main.rs       Blame 5 lines starting at line 10
-    libra blame --json src/main.rs         Structured JSON output for agents
+    libra blame -s src/main.rs             Suppress the author/date columns
+    libra blame -w src/main.rs             Ignore whitespace-only changes
+    libra blame --porcelain src/main.rs    Machine-readable porcelain output
+    libra --json blame src/main.rs         Structured JSON output for agents
 ```
 
 ### 测试要求
@@ -267,14 +280,14 @@ EXAMPLES:
   - `InvalidLineRange`：无效行范围格式返回 exit `129`
 - **（新增）empty file**：空文件返回空结果或 "File is empty" 信息
 
-#### `tests/command/blame_json_test.rs`（JSON schema 稳定性，新增文件）
+#### `tests/command/blame_test.rs`（JSON schema 稳定性，已合并在同一文件）
 
-- **schema 完整性**：验证 `--json` 输出中每个字段的类型和存在性
+- **schema 完整性**：验证 `--json` 输出中每个字段的类型和存在性（含 `email`/`timestamp`/`timezone`/`summary`/`original_line_number` 追加字段）
 - **blame 归属 `--json`**：验证 `lines` 数组中 hash/author/date/content 正确
 - **`-L --json`**：行范围过滤后 `lines` 数组仅包含指定范围
 - **file not found `--json`**：`ok == false`，`error_code == "LBR-CLI-003"`
 - **`--machine blame`**：stdout 恰好 1 行非空行
-- **specific commit `--json`**：`revision` 字段为指定 commit hash
+- **display / porcelain / `-w`**：覆盖 `-l`/`-t`/`-f`/`-n`/`-s`/`-e`、`--porcelain`/`-p`、`-M`/`-C` parsed-only、`-L` 截断与 `-w` 归属
 
 ### 质量验收
 
@@ -290,6 +303,4 @@ EXAMPLES:
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
 | `src/command/blame.rs` | **重构** | 新增 `BlameError` typed enum；新增 `BlameOutput` / `BlameLine` 结构体；新增 `run_blame()` 纯执行入口；`BlameError → CliError` 显式 `StableErrorCode` 映射；JSON 输出替代 `command_usage` 拒绝；`LineBlame` 升级为 `BlameLine`（pub + Serialize）；补齐 `--help` EXAMPLES |
-| `tests/command/blame_test.rs` | **重大扩展** | 新增归属正确性、行范围过滤、错误变体覆盖 |
-| `tests/command/blame_json_test.rs` | **新增** | JSON schema 完整性和稳定性验证 |
-| `tests/command/mod.rs` | **修改** | 注册新增的测试文件 |
+| `tests/command/blame_test.rs` | **重大扩展** | 新增归属正确性、行范围过滤、错误变体、JSON schema、display flags、porcelain 与 `-w` 覆盖 |

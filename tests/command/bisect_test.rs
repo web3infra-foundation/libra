@@ -898,6 +898,7 @@ async fn test_bisect_start_invalid_rev_rejected() {
     let err = execute_safe(args, &OutputConfig::default())
         .await
         .expect_err("invalid rev must be rejected");
+    assert_eq!(err.stable_code().as_str(), "LBR-CLI-003");
     assert!(
         err.message().contains("Cannot resolve"),
         "msg: {}",

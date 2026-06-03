@@ -534,7 +534,6 @@ fn test_blame_human_raw_timestamp() {
     );
 }
 
-/// `-e` shows the author email (contains `@`) instead of the name.
 #[test]
 fn test_blame_human_show_email() {
     let repo = repo_with_tracked_file();
@@ -546,8 +545,8 @@ fn test_blame_human_show_email() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains('@'),
-        "-e output should show an email: {stdout}"
+        stdout.contains("<test@example.com>"),
+        "-e output should show an angle-bracketed email: {stdout}"
     );
 }
 
@@ -594,6 +593,22 @@ fn test_blame_human_show_number() {
     );
 }
 
+#[test]
+fn test_blame_human_show_filename() {
+    let repo = repo_with_tracked_file();
+    let out = run_libra_command(&["blame", "-f", "tracked.txt"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.lines().all(|line| line.starts_with("tracked.txt ")),
+        "-f should prefix every blamed line with the file name: {stdout}"
+    );
+}
+
 /// `-l -n -e` combine: full hash + original line numbers + email all present.
 #[test]
 fn test_blame_human_combined_flags() {
@@ -605,7 +620,10 @@ fn test_blame_human_combined_flags() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains('@'), "combined -e: {stdout}");
+    assert!(
+        stdout.contains("<test@example.com>"),
+        "combined -e: {stdout}"
+    );
     assert!(
         stdout.split_whitespace().any(|t| {
             (t.len() == 40 || t.len() == 64) && t.chars().all(|c| c.is_ascii_hexdigit())

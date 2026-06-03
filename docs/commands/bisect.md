@@ -5,7 +5,7 @@ Use binary search to find the commit that introduced a bug.
 ## Synopsis
 
 ```
-libra bisect start [<bad>] [--good <commit>]
+libra bisect start [<bad> [<good>...]] [--good <commit>]
 libra bisect bad [<rev>]
 libra bisect good [<rev>]
 libra bisect reset [<rev>]

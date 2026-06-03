@@ -1558,9 +1558,11 @@ async fn run_bisect_run(cmd: Vec<String>) -> CliResult<BisectOutput> {
 /// concrete commit it points at. Errors out fatally with the underlying
 /// resolver message if it cannot be resolved.
 async fn resolve_ref(ref_str: &str) -> CliResult<ObjectHash> {
-    util::get_commit_base(ref_str)
-        .await
-        .map_err(|e| CliError::fatal(format!("Cannot resolve '{}': {}", ref_str, e)))
+    util::get_commit_base(ref_str).await.map_err(|e| {
+        CliError::fatal(format!("Cannot resolve '{}': {}", ref_str, e))
+            .with_stable_code(StableErrorCode::CliInvalidTarget)
+            .with_hint("check the revision and try again")
+    })
 }
 
 /// Move HEAD to `commit_hash` in detached mode and lay the matching tree on
