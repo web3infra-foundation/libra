@@ -31,6 +31,8 @@ are loaded automatically when configured via `vault.ssh.<remote>.privkey`.
 | `<refspec>` | Branch name to fetch. Requires `<repository>`. When omitted, all branches from the remote are fetched. | `libra fetch origin main` |
 | `-a`, `--all` | Fetch from every configured remote. Conflicts with `<repository>`. | `libra fetch --all` |
 | `--depth <N>` | Limit fetching to the specified number of commits from the tip of each remote branch (shallow fetch). Public stable flag. | `libra fetch origin --depth 1` |
+| `--deepen <N>` | Deepen the history of a shallow repository by `N` commits beyond the current boundary. Conflicts with `--unshallow`. | `libra fetch origin --deepen 10` |
+| `--unshallow` | Convert a shallow repository into a complete one by fetching all missing history, then removing the `.libra/shallow` boundary file. Conflicts with `--depth`. | `libra fetch origin --unshallow` |
 | `--json` | Emit structured JSON envelope to stdout (global flag). | `libra --json fetch origin` |
 | `--machine` | Compact single-line JSON; suppresses progress (global flag). | `libra --machine fetch origin` |
 | `--progress none` | Suppress NDJSON progress events on stderr in JSON mode. | `libra --json fetch origin --progress none` |
@@ -174,6 +176,10 @@ for some time; C3 surfaces it on the CLI and binds the contract:
 - Re-fetching an already-shallow repository at the same depth is also
   idempotent: Libra persists server-advertised shallow boundaries in
   `.libra/shallow` and sends them during later upload-pack negotiation.
+- `--deepen N` extends a shallow repository by `N` more commits beyond the
+  current boundary, and `--unshallow` restores complete history (requesting the
+  full depth and then clearing `.libra/shallow`). `--deepen` and `--unshallow`
+  conflict with each other and with `--depth`.
 - Sparse checkout (`clone --sparse`) is **not** part of this contract — see
   [`docs/improvement/compatibility/declined.md`](../improvement/compatibility/declined.md)
   for why sparse-checkout is intentionally deferred.

@@ -32,7 +32,7 @@ use crate::{
         db::get_db_conn_instance,
         head::Head,
         protocol::{
-            DiscRef, DiscoveryResult, FetchStream, ProtocolClient,
+            DiscRef, DiscoveryResult, FetchStream, ProtocolClient, ShallowOptions,
             git_client::GitClient,
             https_client::HttpsClient,
             local_client::LocalClient,
@@ -136,13 +136,13 @@ impl RemoteClient {
         have: &[String],
         want: &[String],
         shallow: &[String],
-        depth: Option<usize>,
+        options: &ShallowOptions,
     ) -> Result<FetchStream, IoError> {
         match self {
-            RemoteClient::Http(client) => client.fetch_objects(have, want, shallow, depth).await,
-            RemoteClient::Local(client) => client.fetch_objects(have, want, shallow, depth).await,
-            RemoteClient::Git(client) => client.fetch_objects(have, want, shallow, depth).await,
-            RemoteClient::Ssh(client) => client.fetch_objects(have, want, shallow, depth).await,
+            RemoteClient::Http(client) => client.fetch_objects(have, want, shallow, options).await,
+            RemoteClient::Local(client) => client.fetch_objects(have, want, shallow, options).await,
+            RemoteClient::Git(client) => client.fetch_objects(have, want, shallow, options).await,
+            RemoteClient::Ssh(client) => client.fetch_objects(have, want, shallow, options).await,
         }
     }
 }
@@ -487,6 +487,16 @@ pub struct FetchArgs {
     /// Limit fetching to the specified number of commits from the tip of each remote branch
     #[clap(long, value_name = "N")]
     pub depth: Option<usize>,
+
+    /// Deepen the history of a shallow repository by N commits beyond the current
+    /// boundary (only meaningful when the repository was cloned with `--depth`).
+    #[clap(long, value_name = "N", conflicts_with = "unshallow")]
+    pub deepen: Option<usize>,
+
+    /// Convert a shallow repository into a complete one by fetching all missing
+    /// history, then removing the `.libra/shallow` boundary file.
+    #[clap(long, conflicts_with = "depth")]
+    pub unshallow: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -765,7 +775,11 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         refspec,
         all,
         depth,
+        deepen,
+        unshallow,
     } = args;
+
+    let shallow = build_fetch_shallow_options(depth, deepen, unshallow);
 
     if all {
         let remotes = ConfigKv::all_remote_configs().await.map_err(|error| {
@@ -776,9 +790,16 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         let mut results = Vec::with_capacity(remotes.len());
         for remote in remotes {
             results.push(
-                fetch_repository_with_result(remote, None, false, depth, output)
-                    .await
-                    .map_err(CliError::from)?,
+                fetch_repository_with_result(
+                    remote,
+                    None,
+                    false,
+                    shallow.clone(),
+                    unshallow,
+                    output,
+                )
+                .await
+                .map_err(CliError::from)?,
             );
         }
 
@@ -821,9 +842,16 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
                 .with_hint("use 'libra remote -v' to inspect configured remotes")
         })?;
 
-    let result = fetch_repository_with_result(remote_config, refspec.clone(), false, depth, output)
-        .await
-        .map_err(CliError::from)?;
+    let result = fetch_repository_with_result(
+        remote_config,
+        refspec.clone(),
+        false,
+        shallow,
+        unshallow,
+        output,
+    )
+    .await
+    .map_err(CliError::from)?;
 
     Ok(FetchOutput {
         all: false,
@@ -994,7 +1022,7 @@ pub async fn fetch_repository(
         remote_config,
         branch,
         single_branch,
-        depth,
+        ShallowOptions::from_depth(depth),
         &OutputConfig::default(),
     )
     .await
@@ -1003,14 +1031,34 @@ pub async fn fetch_repository(
     }
 }
 
+/// Git uses a very large deepen value to request the complete history when
+/// unshallowing; mirror that here so a shallow source is fully materialized.
+pub(crate) const UNSHALLOW_DEPTH: usize = 0x7fff_ffff;
+
+/// Translate the `fetch` CLI depth/deepen/unshallow flags into a single
+/// [`ShallowOptions`] request. `--unshallow` requests the complete history,
+/// `--deepen N` takes precedence over `--depth N`, otherwise `--depth N` is used.
+pub(crate) fn build_fetch_shallow_options(
+    depth: Option<usize>,
+    deepen: Option<usize>,
+    unshallow: bool,
+) -> ShallowOptions {
+    let effective_depth = if unshallow {
+        Some(UNSHALLOW_DEPTH)
+    } else {
+        deepen.or(depth)
+    };
+    ShallowOptions::from_depth(effective_depth)
+}
+
 pub async fn fetch_repository_safe(
     remote_config: RemoteConfig,
     branch: Option<String>,
     single_branch: bool,
-    depth: Option<usize>,
+    shallow: ShallowOptions,
     output: &OutputConfig,
 ) -> Result<(), FetchError> {
-    fetch_repository_with_result(remote_config, branch, single_branch, depth, output)
+    fetch_repository_with_result(remote_config, branch, single_branch, shallow, false, output)
         .await
         .map(|_| ())
 }
@@ -1019,7 +1067,8 @@ pub(crate) async fn fetch_repository_with_result(
     remote_config: RemoteConfig,
     branch: Option<String>,
     single_branch: bool,
-    depth: Option<usize>,
+    shallow: ShallowOptions,
+    unshallow: bool,
     output: &OutputConfig,
 ) -> Result<FetchRepositoryResult, FetchError> {
     let (remote_client, discovery) =
@@ -1091,9 +1140,9 @@ pub(crate) async fn fetch_repository_with_result(
     want.dedup();
     let have = current_have_safe().await?;
     let shallow_boundaries = read_shallow_boundaries()?;
-    let shallow = shallow_boundaries.iter().cloned().collect::<Vec<_>>();
+    let shallow_boundary_oids = shallow_boundaries.iter().cloned().collect::<Vec<_>>();
     let mut result_stream = remote_client
-        .fetch_objects(&have, &want, &shallow, depth)
+        .fetch_objects(&have, &want, &shallow_boundary_oids, &shallow)
         .await
         .map_err(|source| FetchError::FetchObjects {
             remote: remote_config.url.clone(),
@@ -1101,7 +1150,13 @@ pub(crate) async fn fetch_repository_with_result(
         })?;
 
     let task = format!("fetch {}", remote_config.name);
-    let fetch_data = read_fetch_stream(&mut result_stream, output, &task).await?;
+    // When any deepen/shallow request is made (depth/since/exclude, an existing
+    // shallow boundary, or unshallow), upload-pack always prefixes the pack with
+    // a shallow section terminated by a flush packet — even when no boundary is
+    // cut. The reader must consume that leading flush instead of stopping early.
+    let shallow_requested = shallow.is_requested() || !shallow_boundary_oids.is_empty();
+    let fetch_data =
+        read_fetch_stream(&mut result_stream, output, &task, shallow_requested).await?;
     let objects_fetched = pack_object_count(&fetch_data.pack_data);
     let pack_file = write_pack_and_index(&fetch_data.pack_data)?;
     if let Some(pack_file) = pack_file {
@@ -1123,6 +1178,11 @@ pub(crate) async fn fetch_repository_with_result(
         }
     }
     apply_shallow_updates(&fetch_data.shallow, &fetch_data.unshallow)?;
+    if unshallow {
+        // `--unshallow` requests the complete history; once the pack is written,
+        // drop every shallow boundary so the repository is no longer shallow.
+        write_shallow_boundaries(&BTreeSet::new())?;
+    }
 
     let refs_updated =
         update_references(&remote_config, &refs, &ref_heads, remote_head, branch).await?;
@@ -1315,12 +1375,18 @@ async fn read_fetch_stream(
     result_stream: &mut FetchStream,
     output: &OutputConfig,
     task: &str,
+    shallow_requested: bool,
 ) -> Result<FetchStreamData, FetchError> {
     let mut reader = StreamReader::new(result_stream);
     let mut data_out = FetchStreamData::default();
     let mut pack_completion = PackCompletionTracker::default();
     let mut reach_pack = false;
     let mut saw_shallow_response = false;
+    // upload-pack emits a shallow section (possibly empty) terminated by a flush
+    // packet before the pack whenever a deepen/shallow request was made. Expect to
+    // consume that one leading flush so an empty shallow section is not mistaken
+    // for end-of-stream.
+    let mut expecting_shallow_terminator = shallow_requested;
     let render_progress = matches!(output.progress, ProgressMode::Text);
     let json_progress = matches!(output.progress, ProgressMode::Json);
     let bar = render_progress.then(ProgressBar::new_spinner);
@@ -1335,8 +1401,11 @@ async fn read_fetch_stream(
             Err(source) => return Err(FetchError::PacketRead { source }),
         };
         if len == 0 {
-            if !reach_pack && saw_shallow_response {
+            if !reach_pack && (saw_shallow_response || expecting_shallow_terminator) {
+                // End of the (possibly empty) shallow section that always precedes
+                // the pack for a deepen/shallow request. Consume it exactly once.
                 saw_shallow_response = false;
+                expecting_shallow_terminator = false;
                 continue;
             }
             break;
@@ -1632,7 +1701,7 @@ fn shallow_file_path() -> Result<PathBuf, FetchError> {
         })
 }
 
-fn read_shallow_boundaries() -> Result<BTreeSet<String>, FetchError> {
+pub(crate) fn read_shallow_boundaries() -> Result<BTreeSet<String>, FetchError> {
     let path = shallow_file_path()?;
     let content = match fs::read_to_string(&path) {
         Ok(content) => content,
@@ -2105,9 +2174,36 @@ mod tests {
             stream::iter(vec![Ok::<Bytes, std::io::Error>(response.freeze())]).boxed();
         let output = OutputConfig::default();
 
-        let data = read_fetch_stream(&mut stream, &output, "fetch origin")
+        let data = read_fetch_stream(&mut stream, &output, "fetch origin", false)
             .await
             .expect("EOF after a complete pack should finish the fetch stream");
+
+        assert_eq!(data.pack_data, pack);
+    }
+
+    #[tokio::test]
+    async fn read_fetch_stream_consumes_empty_shallow_section_before_pack() {
+        // A deepen/shallow request whose result cuts no boundary still yields a
+        // shallow section: a leading flush packet before NAK + pack. The reader
+        // must consume it instead of treating it as end-of-stream.
+        let pack = empty_pack_bytes();
+        let mut response = BytesMut::new();
+        // Empty shallow section terminator.
+        response.extend_from_slice(b"0000");
+        append_pkt_line(&mut response, b"NAK\n");
+
+        let mut sideband = Vec::with_capacity(pack.len() + 1);
+        sideband.push(1);
+        sideband.extend_from_slice(&pack);
+        append_pkt_line(&mut response, &sideband);
+
+        let mut stream: FetchStream =
+            stream::iter(vec![Ok::<Bytes, std::io::Error>(response.freeze())]).boxed();
+        let output = OutputConfig::default();
+
+        let data = read_fetch_stream(&mut stream, &output, "fetch origin", true)
+            .await
+            .expect("empty shallow section must not be mistaken for end-of-stream");
 
         assert_eq!(data.pack_data, pack);
     }
@@ -2131,7 +2227,7 @@ mod tests {
 
         let data = tokio::time::timeout(
             Duration::from_millis(250),
-            read_fetch_stream(&mut stream, &output, "fetch origin"),
+            read_fetch_stream(&mut stream, &output, "fetch origin", false),
         )
         .await
         .expect("complete pack should not wait for transport EOF or flush")
@@ -2159,7 +2255,7 @@ mod tests {
 
         let data = tokio::time::timeout(
             Duration::from_millis(250),
-            read_fetch_stream(&mut stream, &output, "fetch origin"),
+            read_fetch_stream(&mut stream, &output, "fetch origin", false),
         )
         .await
         .expect("complete non-empty pack should not wait for transport EOF or flush")

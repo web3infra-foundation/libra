@@ -24,7 +24,7 @@ batch document.
 | Command | Tier | Notes |
 |---------|------|-------|
 | init | supported | |
-| clone | partial | `--depth` and `--single-branch` supported; `--sparse` unsupported (see [docs/improvement/compatibility/declined.md#d10-clone---sparse-与顶层-sparse-checkout-命令](docs/improvement/compatibility/declined.md#d10-clone---sparse-与顶层-sparse-checkout-命令)); `--recurse-submodules` unsupported (see [docs/improvement/compatibility/declined.md#d4-clone---recurse-submodules](docs/improvement/compatibility/declined.md#d4-clone---recurse-submodules)) |
+| clone | partial | `--depth`, `--single-branch`/`--no-single-branch`, `--shallow-since`, `--shallow-exclude`, and `--reject-shallow` supported (`--depth` may be combined with `--shallow-since`/`--shallow-exclude`; the time/ref request supersedes plain depth per the upload-pack protocol); `--sparse` unsupported (see [docs/improvement/compatibility/declined.md#d10-clone---sparse-与顶层-sparse-checkout-命令](docs/improvement/compatibility/declined.md#d10-clone---sparse-与顶层-sparse-checkout-命令)); `--recurse-submodules` unsupported (see [docs/improvement/compatibility/declined.md#d4-clone---recurse-submodules](docs/improvement/compatibility/declined.md#d4-clone---recurse-submodules)) |
 | code | intentionally-different | Libra AI extension, not a Git command |
 | code-control | intentionally-different | Libra AI automation extension, not a Git command |
 | automation | intentionally-different | Libra AI automation rules/history extension, not a Git command |
@@ -58,7 +58,7 @@ batch document.
 | describe | supported | |
 | cherry-pick | partial | `-x` (off by default), `-s`/`--signoff`, `-e`/`--edit`, `--allow-empty`/`--allow-empty-message`/`--keep-redundant-commits`, `-m <parent-number>` (merge commits apply along the named parent only), `--ff`, and `-S`/`--gpg-sign` (reuses the vault chain, same as `merge`) supported; multi-commit `--no-commit` accumulates into the index. Conflict sequencer `--continue`/`--skip`/`--abort`/`--quit` persists in the SQLite `cherry_pick_state` table — not a `.git`/`.libra` sequencer file (intentionally-different); conflict detection is path-level, not Git's line-level hunk merge. `--strategy`/`-X`, `--empty`, `--cleanup`, `--rerere-autoupdate`, and `--commit` are unsupported (`LBR-UNSUPPORTED-001`). A `--no-commit` multi-commit conflict is terminal (no continuation) |
 | push | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected — intentional (see [docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push](docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push)) |
-| fetch | supported | `--depth` public flag |
+| fetch | supported | `--depth`, `--deepen`, and `--unshallow` public flags |
 | pull | partial | fetch + fast-forward/three-way merge supported; `--ff-only` and `--rebase` (`-r`) strategy flags exposed; `--squash` deferred |
 | diff | supported | |
 | grep | supported | |

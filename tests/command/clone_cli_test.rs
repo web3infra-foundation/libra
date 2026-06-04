@@ -1728,3 +1728,289 @@ fn json_clone_init_output_isolation() {
         "json clone stderr should not contain fetch NDJSON progress, got: {stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Batch 1 — advanced shallow flags + fetch interop
+// ---------------------------------------------------------------------------
+
+/// Build a bare git source with two commits on `main`, so that a `--depth 1`
+/// clone produces a genuine shallow boundary at the tip's parent cut.
+fn create_remote_with_two_commits(base: &Path) -> std::path::PathBuf {
+    let remote = base.join("remote2.git");
+    assert!(
+        run_git(&["init", "--bare", remote.to_str().unwrap()], base)
+            .status
+            .success()
+    );
+
+    let work = base.join("work2");
+    fs::create_dir_all(&work).unwrap();
+    assert!(run_git(&["init"], &work).status.success());
+    assert!(
+        run_git(&["config", "user.name", "T"], &work)
+            .status
+            .success()
+    );
+    assert!(
+        run_git(&["config", "user.email", "t@example.com"], &work)
+            .status
+            .success()
+    );
+    assert!(
+        run_git(&["config", "commit.gpgsign", "false"], &work)
+            .status
+            .success()
+    );
+    fs::write(work.join("README.md"), "hello\n").unwrap();
+    assert!(run_git(&["add", "README.md"], &work).status.success());
+    assert!(
+        run_git(&["commit", "-m", "initial"], &work)
+            .status
+            .success()
+    );
+    fs::write(work.join("README.md"), "hello again\n").unwrap();
+    assert!(run_git(&["add", "README.md"], &work).status.success());
+    assert!(run_git(&["commit", "-m", "second"], &work).status.success());
+    assert!(run_git(&["branch", "-M", "main"], &work).status.success());
+    assert!(
+        run_git(
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+            &work
+        )
+        .status
+        .success()
+    );
+    assert!(run_git(&["push", "origin", "main"], &work).status.success());
+    assert!(
+        run_git(&["symbolic-ref", "HEAD", "refs/heads/main"], &remote)
+            .status
+            .success()
+    );
+    remote
+}
+
+/// `--single-branch --no-single-branch` is a Git-style negation, not a usage
+/// conflict; clap `overrides_with` makes the last occurrence win and the clone
+/// succeeds (exit 0) instead of failing with a 129 usage error.
+#[test]
+fn single_branch_negation_last_wins() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-negation");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--single-branch",
+            "--no-single-branch",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "combining --single-branch and --no-single-branch must not be a usage conflict: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `libra+cloud://` sources reject the new shaping flags during fail-fast
+/// validation (exit 129) before any config lookup or remote discovery.
+#[test]
+fn cloud_source_rejects_shallow_flags() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("restored");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--shallow-since",
+            "2024-01-01",
+            "libra+cloud://code.example.com/kepler-ledger",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "cloud source must reject --shallow-since: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !dest.exists(),
+        "no destination should be created on rejection"
+    );
+}
+
+/// A `--depth` clone reports `shallow: true` in JSON while preserving every
+/// pre-existing field (backward-compatible schema).
+#[test]
+fn shallow_clone_json_schema_backward_compatible() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-shallow-json");
+
+    let output = run_libra(
+        &[
+            "--json",
+            "clone",
+            "--depth",
+            "1",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "shallow clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["command"], "clone");
+    let data = &json["data"];
+    // New behaviour: shallow is true.
+    assert_eq!(data["shallow"], true);
+    // Backward-compatible: pre-existing fields keep their shape.
+    assert!(data["path"].is_string());
+    assert_eq!(data["bare"], false);
+    assert!(data["remote_url"].is_string());
+    assert_eq!(data["branch"], "main");
+    assert!(data["object_format"].is_string());
+    assert!(data["repo_id"].is_string());
+    assert!(data["vault_signing"].is_boolean());
+    assert!(data["warnings"].is_array());
+}
+
+/// A malformed `--shallow-since` time is rejected by fail-fast validation with
+/// exit code 129, before any network access.
+#[test]
+fn shallow_since_invalid_time_exits_129() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("clone-bad-time");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--shallow-since",
+            "not-a-date",
+            "file:///definitely/not/here",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "invalid --shallow-since must exit 129: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `--depth` together with `--shallow-since` is accepted (no usage conflict);
+/// the clone succeeds because the time-based request supersedes plain depth at
+/// the protocol layer (git-upload-pack rejects sending both).
+#[test]
+fn depth_and_shallow_since_combine_ok() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-combo");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--depth",
+            "5",
+            "--shallow-since",
+            "2020-01-01",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--depth + --shallow-since must be accepted and succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `--reject-shallow` against a shallow local source fails fast with exit 128
+/// before remote discovery or directory creation.
+#[test]
+fn reject_shallow_source_exits_128() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    // Mark the bare source as shallow by writing a boundary file.
+    fs::write(remote.join("shallow"), format!("{}\n", "a".repeat(40))).unwrap();
+    let dest = temp.path().join("clone-reject");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--reject-shallow",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "--reject-shallow against a shallow source must exit 128: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !dest.exists(),
+        "no destination should be created when rejecting a shallow source"
+    );
+}
+
+/// A `--depth 1` clone of a two-commit history writes a `.libra/shallow`
+/// boundary file whose contents round-trip (no half-written state).
+#[test]
+fn shallow_file_consistent_after_clone() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_two_commits(temp.path());
+    let dest = temp.path().join("clone-shallow-file");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--depth",
+            "1",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "shallow clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shallow_file = dest.join(".libra").join("shallow");
+    let contents = fs::read_to_string(&shallow_file)
+        .expect(".libra/shallow should exist after a depth-limited clone");
+    let lines: Vec<&str> = contents.lines().filter(|l| !l.is_empty()).collect();
+    assert!(
+        !lines.is_empty(),
+        "shallow boundary file should record at least one boundary commit"
+    );
+    for line in &lines {
+        assert!(
+            line.len() == 40 || line.len() == 64,
+            "shallow boundary should be a valid object id, got: {line}"
+        );
+    }
+}

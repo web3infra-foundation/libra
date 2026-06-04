@@ -220,7 +220,8 @@ pub(crate) async fn run_pull(
         target.remote_config.clone(),
         Some(target.remote_branch.clone()),
         false,
-        None,
+        crate::internal::protocol::ShallowOptions::default(),
+        false,
         &child_output,
     )
     .await

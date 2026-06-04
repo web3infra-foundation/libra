@@ -101,6 +101,17 @@ because the restored local repository must preserve all published refs.
 libra clone --single-branch -b main git@github.com:user/repo.git
 ```
 
+### `--no-single-branch`
+
+The opposite of `--single-branch`; clone all branches. This is a Git-style negation: when
+both `--single-branch` and `--no-single-branch` appear on the command line, the last one
+wins (handled natively by clap's `overrides_with`). It is **not** a usage conflict, so
+combining them does not return an error.
+
+```bash
+libra clone --no-single-branch git@github.com:user/repo.git
+```
+
 ### `--bare`
 
 Create a bare repository without a working tree. The destination directory becomes the
@@ -122,6 +133,41 @@ because it must download the complete published object set.
 ```bash
 libra clone --depth 1 git@github.com:user/repo.git
 libra clone --depth 50 git@github.com:user/repo.git
+```
+
+### `--shallow-since <time>`
+
+Create a shallow clone with history limited to commits newer than `<time>`. Accepts a date
+(`2024-01-01`), an RFC3339 timestamp, a Unix epoch, or a relative form like `2 weeks ago`.
+A malformed time is rejected up front with `LBR-CLI-002` (exit 129) before any network
+access. May be combined with `--depth`; because `git-upload-pack` rejects sending both a
+plain `deepen` and a `deepen-since`/`deepen-not` request together, the time/ref request
+supersedes plain depth at the protocol layer. Only Git remotes support shallow transfer;
+`libra+cloud://` restore rejects it.
+
+```bash
+libra clone --shallow-since 2024-01-01 git@github.com:user/repo.git
+```
+
+### `--shallow-exclude <revision>`
+
+Create a shallow clone that excludes history reachable from the given ref or revision
+(`deepen-not`). May be combined with `--depth` (the exclude request supersedes plain depth,
+as with `--shallow-since`). Only Git remotes support it; `libra+cloud://` restore rejects it.
+
+```bash
+libra clone --shallow-exclude refs/tags/v1.0.0 git@github.com:user/repo.git
+```
+
+### `--reject-shallow`
+
+Fail (exit 128) if the source repository is itself a shallow repository, rather than
+producing a shallow clone of a shallow source. Local sources are detected before any
+directory is created; remote sources are detected from the shallow boundaries advertised
+during fetch.
+
+```bash
+libra clone --reject-shallow git@github.com:user/repo.git
 ```
 
 ## Common Commands
@@ -272,9 +318,13 @@ are preserved and surfaced as warnings; the original `.gitignore` files remain u
 Shallow clones are essential for CI/CD pipelines and large monorepos where full history is
 unnecessary. Libra supports `--depth N` with the same semantics as Git: the history is
 truncated to the specified number of commits. The depth value is validated at parse time
-(must be a positive integer) and propagated to the fetch protocol layer. Unlike Git, Libra
-does not yet support `--shallow-since` or `--shallow-exclude` for date-based or ref-based
-shallow boundaries, keeping the initial implementation focused and predictable.
+(must be a positive integer) and propagated to the fetch protocol layer. Libra additionally
+supports date-based `--shallow-since` (`deepen-since`), ref-based `--shallow-exclude`
+(`deepen-not`), and `--reject-shallow` to refuse a shallow source. `--depth` may be combined
+with `--shallow-since`/`--shallow-exclude`; because `git-upload-pack` rejects sending a plain
+`deepen` alongside `deepen-since`/`deepen-not`, the time/ref request supersedes plain depth at
+the protocol layer. After a shallow clone, `libra fetch --unshallow` restores complete history
+and `libra fetch --deepen N` extends it further.
 
 ### `--sparse` is intentionally unsupported
 
