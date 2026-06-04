@@ -626,6 +626,8 @@ pub async fn execute(args: MergeArgs) {
 /// Returns [`CliError`] when the target is invalid, histories are unrelated,
 /// conflicts need resolution, objects cannot be read, or HEAD/worktree updates fail.
 pub async fn execute_safe(args: MergeArgs, output: &OutputConfig) -> CliResult<()> {
+    // Refuse to start a merge while a cherry-pick sequence is in progress.
+    crate::command::cherry_pick::ensure_no_cherry_pick_in_progress().await?;
     let want_stat = resolve_merge_stat(&args).await;
     let result = run_merge(args, output).await.map_err(merge_error_to_cli)?;
     render_merge_output(&result, want_stat, output)
@@ -1718,7 +1720,10 @@ async fn maybe_edit_message(message: &str, edit: bool) -> Result<String, PullMer
 /// Resolve the editor command Git would use, honoring `GIT_EDITOR`,
 /// `core.editor`, `VISUAL`, then `EDITOR`. No-op editors (`:`/`true`) and empty
 /// values resolve to `None`.
-async fn resolve_editor() -> Option<String> {
+///
+/// `pub(crate)` so sibling commands (e.g. `cherry-pick -e`) reuse the identical
+/// editor-resolution cascade instead of re-implementing it.
+pub(crate) async fn resolve_editor() -> Option<String> {
     fn runnable(value: String) -> Option<String> {
         let trimmed = value.trim();
         if trimmed.is_empty() || trimmed == ":" || trimmed == "true" {
@@ -3211,7 +3216,12 @@ fn first_non_empty_line(message: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-async fn resolve_signoff_identity() -> Result<(String, String), PullMergeError> {
+/// Resolve the `Signed-off-by` identity (name, email), honoring repo/global
+/// config first, then the `GIT_*` / `LIBRA_COMMITTER_*` / `EMAIL` env cascade.
+///
+/// `pub(crate)` so sibling commands (e.g. `cherry-pick -s`) reuse the identical
+/// identity cascade rather than re-implementing it.
+pub(crate) async fn resolve_signoff_identity() -> Result<(String, String), PullMergeError> {
     let config_name = read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "user.name")
         .await
         .ok()

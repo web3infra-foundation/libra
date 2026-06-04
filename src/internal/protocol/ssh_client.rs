@@ -13,7 +13,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
-    DiscoveryResult, FetchStream, generate_upload_pack_content, parse_discovered_references,
+    DiscoveryResult, FetchStream, ShallowOptions, generate_upload_pack_content,
+    parse_discovered_references,
 };
 use crate::git_protocol::ServiceType;
 
@@ -264,7 +265,7 @@ impl SshClient {
         have: &[String],
         want: &[String],
         shallow: &[String],
-        depth: Option<usize>,
+        options: &ShallowOptions,
     ) -> Result<FetchStream, IoError> {
         let mut child = self.spawn_service(ServiceType::UploadPack).await?;
         let advertisement = {
@@ -287,7 +288,7 @@ impl SshClient {
         }
 
         // Send the upload-pack request
-        let body = generate_upload_pack_content(have, want, shallow, depth);
+        let body = generate_upload_pack_content(have, want, shallow, options);
         let mut stdin = child
             .stdin
             .take()

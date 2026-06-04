@@ -692,6 +692,395 @@ fn test_checkout_plain_name_stays_branch_mode_when_file_matches_branch() {
     );
 }
 
+// ════════════════════════════════════════════════════════════════════════
+//  Batch 0 — -B / --detach / --orphan branch checkout modes
+// ════════════════════════════════════════════════════════════════════════
+
+/// `libra rev-parse <rev>` → trimmed OID (panics on failure).
+fn rev_parse(repo: &std::path::Path, rev: &str) -> String {
+    let out = super::run_libra_command(&["rev-parse", rev], repo);
+    assert!(
+        out.status.success(),
+        "rev-parse {rev} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Add a second empty commit so `HEAD~1` exists.
+fn add_empty_commit(repo: &std::path::Path, msg: &str) {
+    super::assert_cli_success(
+        &super::run_libra_command(&["commit", "--allow-empty", "-m", msg, "--no-verify"], repo),
+        "empty commit",
+    );
+}
+
+/// `-B <branch>` resets an existing branch to the current HEAD and switches.
+#[test]
+fn checkout_force_branch_resets_existing_branch_to_head() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    // branch_x is created at the first commit, then main advances.
+    assert_cli_success(
+        &run_libra_command(&["branch", "branch_x"], repo.path()),
+        "branch",
+    );
+    add_empty_commit(repo.path(), "m2");
+    let head = rev_parse(repo.path(), "HEAD");
+    assert_ne!(
+        rev_parse(repo.path(), "branch_x"),
+        head,
+        "precondition: branch_x behind HEAD"
+    );
+
+    let out = run_libra_command(&["checkout", "-B", "branch_x"], repo.path());
+    assert_cli_success(&out, "checkout -B branch_x");
+    assert_eq!(
+        rev_parse(repo.path(), "branch_x"),
+        head,
+        "branch_x reset to HEAD"
+    );
+    let cur = run_libra_command(&["branch", "--show-current"], repo.path());
+    assert_eq!(String::from_utf8_lossy(&cur.stdout).trim(), "branch_x");
+}
+
+/// `-B <branch> <start_point>` resets to the given start point.
+#[test]
+fn checkout_force_branch_with_start_point_resets_to_target() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "branch_x"], repo.path()),
+        "branch",
+    );
+    add_empty_commit(repo.path(), "m2");
+    let parent = rev_parse(repo.path(), "HEAD~1");
+
+    let out = run_libra_command(&["checkout", "-B", "branch_x", "HEAD~1"], repo.path());
+    assert_cli_success(&out, "checkout -B branch_x HEAD~1");
+    assert_eq!(
+        rev_parse(repo.path(), "branch_x"),
+        parent,
+        "reset to HEAD~1"
+    );
+}
+
+/// `-B <new>` (absent) creates the branch at the current HEAD.
+#[test]
+fn checkout_force_branch_creates_when_absent() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let head = rev_parse(repo.path(), "HEAD");
+    let out = run_libra_command(&["checkout", "-B", "new_x"], repo.path());
+    assert_cli_success(&out, "checkout -B new_x");
+    assert_eq!(
+        rev_parse(repo.path(), "new_x"),
+        head,
+        "new_x created at HEAD"
+    );
+}
+
+/// `-B <new> <start_point>` (absent) creates the branch at the start point, not HEAD.
+#[test]
+fn checkout_force_branch_creates_absent_at_start_point() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    add_empty_commit(repo.path(), "m2");
+    let parent = rev_parse(repo.path(), "HEAD~1");
+    let head = rev_parse(repo.path(), "HEAD");
+    let out = run_libra_command(&["checkout", "-B", "new_x", "HEAD~1"], repo.path());
+    assert_cli_success(&out, "checkout -B new_x HEAD~1");
+    assert_eq!(
+        rev_parse(repo.path(), "new_x"),
+        parent,
+        "created at HEAD~1, not HEAD"
+    );
+    assert_ne!(parent, head, "HEAD~1 must differ from HEAD");
+}
+
+/// `-B intent` (AI-managed branch) is blocked with CliInvalidTarget (129).
+#[test]
+fn checkout_force_branch_on_intent_is_blocked() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["checkout", "-B", "intent"], repo.path());
+    assert_eq!(out.status.code(), Some(129));
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+}
+
+/// `-B main` and `--detach main~1` are NOT blocked (main is not AI-managed).
+#[test]
+fn checkout_force_branch_on_main_is_allowed() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    add_empty_commit(repo.path(), "m2");
+    // -B main resets main to HEAD (no-op-ish), must not be blocked.
+    let out = run_libra_command(&["checkout", "-B", "main"], repo.path());
+    assert_cli_success(&out, "-B main must be allowed");
+    // --detach main~1 must also be allowed.
+    let out = run_libra_command(&["checkout", "--detach", "main~1"], repo.path());
+    assert_cli_success(&out, "--detach main~1 must be allowed");
+}
+
+/// `--detach <commit>` moves HEAD to a detached state and prints the banner.
+#[test]
+fn checkout_detach_to_commit_sets_detached_head() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    add_empty_commit(repo.path(), "m2");
+    let parent = rev_parse(repo.path(), "HEAD~1");
+
+    let out = run_libra_command(&["checkout", "--detach", "HEAD~1"], repo.path());
+    assert_cli_success(&out, "checkout --detach HEAD~1");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("HEAD detached at"),
+        "detach banner: {stdout}"
+    );
+    assert!(
+        stdout.contains(&parent[..8]),
+        "banner shows short hash: {stdout}"
+    );
+}
+
+/// After `--detach`, JSON checkout reports `detached == true`.
+#[test]
+fn checkout_detach_then_show_current_reports_detached() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_json_stdout, run_libra_command,
+    };
+    let repo = create_committed_repo_via_cli();
+    add_empty_commit(repo.path(), "m2");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--detach", "HEAD~1"], repo.path()),
+        "detach",
+    );
+    let out = run_libra_command(&["--json", "checkout"], repo.path());
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["data"]["detached"], true);
+}
+
+/// From a detached HEAD, `checkout <branch>` rebinds HEAD to that branch.
+#[test]
+fn checkout_from_detached_back_to_branch_rebinds_head() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    add_empty_commit(repo.path(), "m2");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--detach", "HEAD~1"], repo.path()),
+        "detach",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], repo.path()),
+        "back to main",
+    );
+    let cur = run_libra_command(&["branch", "--show-current"], repo.path());
+    assert_eq!(String::from_utf8_lossy(&cur.stdout).trim(), "main");
+}
+
+/// `--detach agent-traces~1` (AI-managed revision suffix) is blocked (129).
+#[test]
+fn checkout_detach_on_ai_managed_revision_suffix_is_blocked() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["checkout", "--detach", "agent-traces~1"], repo.path());
+    assert_eq!(out.status.code(), Some(129));
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+}
+
+/// `--orphan <branch>` creates an unborn branch (JSON: orphan=true, no commit).
+#[test]
+fn checkout_orphan_creates_unborn_branch() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_json_stdout, run_libra_command,
+    };
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["--json", "checkout", "--orphan", "orphan_x"], repo.path());
+    assert_cli_success(&out, "checkout --orphan orphan_x");
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["data"]["action"], "create");
+    assert_eq!(json["data"]["branch"], "orphan_x");
+    assert_eq!(json["data"]["orphan"], true);
+    assert_eq!(json["data"]["created"], true);
+    assert!(json["data"]["commit"].is_null(), "unborn: no commit");
+    // HEAD is on orphan_x but has no commit yet (rev-parse HEAD fails).
+    let cur = run_libra_command(&["branch", "--show-current"], repo.path());
+    assert_eq!(String::from_utf8_lossy(&cur.stdout).trim(), "orphan_x");
+    let head = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert!(!head.status.success(), "unborn HEAD has no commit");
+}
+
+/// `--orphan agent-traces` (AI-managed name) is blocked (129).
+#[test]
+fn checkout_orphan_on_agent_traces_is_blocked() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["checkout", "--orphan", "agent-traces"], repo.path());
+    assert_eq!(out.status.code(), Some(129));
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+}
+
+/// `--orphan` then a first commit produces a parentless commit that fsck accepts.
+#[test]
+fn checkout_orphan_then_first_commit_passes_fsck() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--orphan", "orphan_x"], repo.path()),
+        "orphan",
+    );
+    std::fs::write(repo.path().join("seed.txt"), "seed\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "seed.txt"], repo.path()), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "orphan root", "--no-verify"], repo.path()),
+        "first orphan commit",
+    );
+    // The new commit has no parent.
+    let head = rev_parse(repo.path(), "HEAD");
+    let show = run_libra_command(&["cat-file", "-p", &head], repo.path());
+    assert!(
+        !String::from_utf8_lossy(&show.stdout).contains("parent "),
+        "orphan root commit must have no parent"
+    );
+    let fsck = run_libra_command(&["fsck"], repo.path());
+    assert_cli_success(&fsck, "fsck after orphan commit");
+}
+
+/// `-B` writes a `checkout: moving from <old> to <new>` reflog entry.
+#[test]
+fn checkout_force_branch_reflog_records_moving_from_to() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_json_stdout, run_libra_command,
+    };
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "branch_x"], repo.path()),
+        "branch",
+    );
+    add_empty_commit(repo.path(), "m2");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "-B", "branch_x"], repo.path()),
+        "-B",
+    );
+
+    let out = run_libra_command(&["--json", "reflog", "show"], repo.path());
+    let json = parse_json_stdout(&out);
+    let newest = &json["data"]["entries"][0];
+    assert_eq!(newest["action"], "checkout");
+    let msg = newest["message"].as_str().unwrap_or("");
+    assert!(
+        msg.starts_with("moving from") && msg.contains("branch_x"),
+        "reflog msg: {msg}"
+    );
+}
+
+/// `--orphan` writes NO HEAD reflog entry (verified against stock Git, whose
+/// `.git/logs/HEAD` gains no row): the target branch is unborn, so there is no
+/// commit OID to record. The pre-orphan entry stays newest and `reflog show`
+/// still renders cleanly (no all-zero `new_oid` to choke the commit lookup).
+#[test]
+fn checkout_orphan_writes_no_head_reflog_entry() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_json_stdout, run_libra_command,
+    };
+    let repo = create_committed_repo_via_cli();
+
+    let before = run_libra_command(&["--json", "reflog", "show"], repo.path());
+    assert_cli_success(&before, "reflog show before orphan");
+    let before_json = parse_json_stdout(&before);
+    let before_count = before_json["data"]["entries"]
+        .as_array()
+        .map(|e| e.len())
+        .unwrap_or(0);
+    let before_newest = before_json["data"]["entries"][0]["new_oid"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--orphan", "orphan_x"], repo.path()),
+        "orphan",
+    );
+
+    // reflog show must still succeed (valid JSON) and be unchanged: orphan adds
+    // no entry, so the count and the newest commit OID are identical.
+    let after = run_libra_command(&["--json", "reflog", "show"], repo.path());
+    assert_cli_success(&after, "reflog show after orphan");
+    let after_json = parse_json_stdout(&after);
+    let after_entries = after_json["data"]["entries"].as_array();
+    assert_eq!(
+        after_entries.map(|e| e.len()).unwrap_or(0),
+        before_count,
+        "orphan must not add a HEAD reflog entry"
+    );
+    assert_eq!(
+        after_json["data"]["entries"][0]["new_oid"]
+            .as_str()
+            .unwrap_or(""),
+        before_newest,
+        "newest reflog entry must be unchanged by orphan"
+    );
+    let newest_msg = after_json["data"]["entries"][0]["message"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        !newest_msg.contains("orphan_x"),
+        "orphan must not write a checkout reflog entry, got: {newest_msg}"
+    );
+}
+
+/// Dirty worktree without `--force` blocks `--detach` (RepoStateInvalid, 128); HEAD unchanged.
+#[test]
+fn checkout_detach_dirty_without_force_blocks() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_cli_error_stderr,
+        run_libra_command,
+    };
+    let repo = create_committed_repo_via_cli();
+    add_empty_commit(repo.path(), "m2");
+    // Make the worktree dirty (modify a tracked file).
+    std::fs::write(repo.path().join("tracked.txt"), "dirty edit\n").unwrap();
+    let out = run_libra_command(&["checkout", "--detach", "HEAD~1"], repo.path());
+    assert_eq!(out.status.code(), Some(128), "dirty detach blocked");
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    // HEAD still on main.
+    let cur = run_libra_command(&["branch", "--show-current"], repo.path());
+    assert_eq!(String::from_utf8_lossy(&cur.stdout).trim(), "main");
+    assert_cli_success(&cur, "still on a branch");
+}
+
+/// Dirty worktree without `--force` blocks `--orphan` (128).
+#[test]
+fn checkout_orphan_dirty_without_force_blocks() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    add_empty_commit(repo.path(), "m2");
+    std::fs::write(repo.path().join("tracked.txt"), "dirty edit\n").unwrap();
+    let out = run_libra_command(&["checkout", "--orphan", "orphan_x", "HEAD~1"], repo.path());
+    assert_eq!(out.status.code(), Some(128), "dirty orphan blocked");
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+}
+
+/// `--detach -b x` (mode conflict) is rejected as a usage error. Libra remaps
+/// clap's `ArgumentConflict` for a present subcommand to `command_usage` (129),
+/// not clap's native exit 2.
+#[test]
+fn checkout_detach_with_b_is_clap_conflict() {
+    use super::{create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["checkout", "--detach", "-b", "x"], repo.path());
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "clap mode conflict → command_usage"
+    );
+}
+
 #[test]
 fn test_checkout_json_treeish_separator_path_restores_index_and_worktree() {
     use super::{
@@ -861,4 +1250,456 @@ fn test_checkout_create_agent_traces_branch_is_blocked() {
         "error message must name the agent-traces branch verbatim, got: {}",
         report.message,
     );
+}
+
+// ── Batch 1: --ours / --theirs conflict-path checkout + -f/--force ──
+
+/// Build a repo paused mid-merge with a 3-way conflict on each of `files`.
+/// ours (main / stage #2) = `ours-<name>\n`; theirs (feature / stage #3) =
+/// `theirs-<name>\n`; common base = `base\n`. When `executable`, each file is
+/// mode `0o755` before every `add` (unix only), so the conflict stages carry the
+/// executable bit.
+fn create_conflict_repo(files: &[&str], executable: bool) -> tempfile::TempDir {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path().to_path_buf();
+
+    let write = |name: &str, content: &str| {
+        let fp = p.join(name);
+        std::fs::write(&fp, content).expect("write conflict file");
+        #[cfg(unix)]
+        if executable {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fp, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod conflict file");
+        }
+    };
+    let add = |name: &str| {
+        assert_cli_success(&run_libra_command(&["add", name], &p), "add conflict file");
+    };
+    let commit = |msg: &str| {
+        assert_cli_success(
+            &run_libra_command(&["commit", "-m", msg, "--no-verify"], &p),
+            "commit conflict file",
+        );
+    };
+
+    for name in files {
+        write(name, "base\n");
+        add(name);
+    }
+    commit("conflict base");
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], &p),
+        "branch feature",
+    );
+
+    for name in files {
+        write(name, &format!("ours-{name}\n"));
+        add(name);
+    }
+    commit("main edit");
+
+    assert_cli_success(
+        &run_libra_command(&["switch", "feature"], &p),
+        "switch feature",
+    );
+    for name in files {
+        write(name, &format!("theirs-{name}\n"));
+        add(name);
+    }
+    commit("feature edit");
+
+    assert_cli_success(&run_libra_command(&["switch", "main"], &p), "switch main");
+    let merge = run_libra_command(&["merge", "feature"], &p);
+    assert!(
+        !merge.status.success(),
+        "expected merge conflict, got success: {}",
+        String::from_utf8_lossy(&merge.stdout)
+    );
+    repo
+}
+
+/// Load the on-disk index for in-process stage/mode assertions.
+fn load_index(repo: &std::path::Path) -> git_internal::internal::index::Index {
+    git_internal::internal::index::Index::load(repo.join(".libra/index")).expect("load index")
+}
+
+/// `--ours -- <path>` restores the stage #2 (our side) content into the worktree.
+#[test]
+fn checkout_ours_restores_stage2() {
+    use super::{assert_cli_success, run_libra_command};
+    let repo = create_conflict_repo(&["conflict.txt"], false);
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--ours", "--", "conflict.txt"], repo.path()),
+        "checkout --ours",
+    );
+    let content = std::fs::read_to_string(repo.path().join("conflict.txt")).unwrap();
+    assert_eq!(content, "ours-conflict.txt\n");
+}
+
+/// `--theirs -- <path>` restores the stage #3 (their side) content into the worktree.
+#[test]
+fn checkout_theirs_restores_stage3() {
+    use super::{assert_cli_success, run_libra_command};
+    let repo = create_conflict_repo(&["conflict.txt"], false);
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--theirs", "--", "conflict.txt"], repo.path()),
+        "checkout --theirs",
+    );
+    let content = std::fs::read_to_string(repo.path().join("conflict.txt")).unwrap();
+    assert_eq!(content, "theirs-conflict.txt\n");
+}
+
+/// After `--ours`, the conflicted path collapses to a single stage #0 index entry.
+#[test]
+fn checkout_ours_clears_conflict_to_stage0() {
+    use super::{assert_cli_success, run_libra_command};
+    let repo = create_conflict_repo(&["conflict.txt"], false);
+    // Sanity: the merge really left conflict stages behind.
+    let before = load_index(repo.path());
+    assert!(
+        before.get("conflict.txt", 2).is_some() && before.get("conflict.txt", 3).is_some(),
+        "fixture must start in a conflicted (stage 2/3) state",
+    );
+
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--ours", "--", "conflict.txt"], repo.path()),
+        "checkout --ours",
+    );
+
+    let after = load_index(repo.path());
+    assert!(
+        after.get("conflict.txt", 0).is_some(),
+        "stage 0 entry must exist after --ours",
+    );
+    assert!(
+        after.get("conflict.txt", 1).is_none()
+            && after.get("conflict.txt", 2).is_none()
+            && after.get("conflict.txt", 3).is_none(),
+        "all conflict stages (1/2/3) must be cleared after --ours",
+    );
+}
+
+/// `--ours` on a path that is not in a merge conflict is rejected (128, LBR-CONFLICT-002).
+#[test]
+fn checkout_ours_on_non_conflict_path_errors() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["checkout", "--ours", "--", "tracked.txt"], repo.path());
+    assert_eq!(out.status.code(), Some(128), "non-conflict --ours blocked");
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
+    assert!(
+        report.message.contains("not in a merge conflict"),
+        "message: {}",
+        report.message
+    );
+}
+
+/// `--ours` on a clean (non-conflicted) file errors WITHOUT silently rewriting it.
+#[test]
+fn checkout_ours_on_clean_file_no_silent_rewrite() {
+    use super::{create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let before = std::fs::read_to_string(repo.path().join("tracked.txt")).unwrap();
+    let out = run_libra_command(&["checkout", "--ours", "--", "tracked.txt"], repo.path());
+    assert_eq!(out.status.code(), Some(128));
+    let after = std::fs::read_to_string(repo.path().join("tracked.txt")).unwrap();
+    assert_eq!(after, before, "clean file must not be rewritten on error");
+}
+
+/// `--ours --theirs` together is a usage conflict. Libra remaps clap's
+/// `ArgumentConflict` (subcommand present) to `command_usage` (129), not clap's
+/// native exit 2.
+#[test]
+fn checkout_ours_and_theirs_conflict_rejected_by_clap() {
+    use super::{create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(
+        &["checkout", "--ours", "--theirs", "--", "tracked.txt"],
+        repo.path(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "clap mode conflict → command_usage: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `--ours` without a pathspec is a usage error (CliInvalidArguments).
+#[test]
+fn checkout_ours_without_pathspec_errors() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["checkout", "--ours"], repo.path());
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report.message.contains("requires a pathspec"),
+        "message: {}",
+        report.message
+    );
+}
+
+/// Pin the exit code for `--ours`/`--theirs` without a pathspec at 129.
+#[test]
+fn checkout_ours_without_pathspec_exit_code_129() {
+    use super::{create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["checkout", "--theirs"], repo.path());
+    assert_eq!(out.status.code(), Some(129));
+}
+
+/// `-f` switching overwrites uncommitted changes that would otherwise block the switch.
+#[test]
+fn checkout_force_switch_overwrites_dirty_worktree() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // A second branch where tracked.txt differs.
+    assert_cli_success(&run_libra_command(&["branch", "other"], p), "branch other");
+    assert_cli_success(&run_libra_command(&["switch", "other"], p), "switch other");
+    std::fs::write(p.join("tracked.txt"), "other-content\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], p), "add other");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "other edit", "--no-verify"], p),
+        "commit other",
+    );
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+
+    // Dirty the worktree, then a plain switch must be refused.
+    std::fs::write(p.join("tracked.txt"), "dirty-uncommitted\n").unwrap();
+    let blocked = run_libra_command(&["checkout", "other"], p);
+    assert!(
+        !blocked.status.success(),
+        "plain checkout over a dirty file should be blocked",
+    );
+
+    // `-f` forces the switch through and overwrites the dirty edit.
+    assert_cli_success(
+        &run_libra_command(&["checkout", "-f", "other"], p),
+        "checkout -f",
+    );
+    let content = std::fs::read_to_string(p.join("tracked.txt")).unwrap();
+    assert_ne!(
+        content, "dirty-uncommitted\n",
+        "dirty edit must be overwritten"
+    );
+    assert_eq!(content, "other-content\n");
+}
+
+/// After a forced switch, the working tree is aligned to the target commit's tree.
+#[test]
+fn checkout_force_switch_aligns_worktree_to_target() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(&run_libra_command(&["branch", "other"], p), "branch other");
+    assert_cli_success(&run_libra_command(&["switch", "other"], p), "switch other");
+    std::fs::write(p.join("tracked.txt"), "target-tree\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], p), "add other");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "other", "--no-verify"], p),
+        "commit other",
+    );
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    std::fs::write(p.join("tracked.txt"), "scratch\n").unwrap();
+
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--force", "other"], p),
+        "checkout --force",
+    );
+    assert_eq!(
+        std::fs::read_to_string(p.join("tracked.txt")).unwrap(),
+        "target-tree\n",
+    );
+}
+
+/// `--ours` promotes the chosen stage to stage #0 while preserving the index mode
+/// (executable bit), proving the owned-entry path (not `new_from_blob`) is used.
+#[cfg(unix)]
+#[test]
+fn checkout_ours_preserves_index_mode() {
+    use super::{assert_cli_success, run_libra_command};
+    let repo = create_conflict_repo(&["conflict.txt"], true);
+    let before = load_index(repo.path());
+    let stage2_mode = before.get("conflict.txt", 2).expect("stage 2 entry").mode;
+    assert_eq!(stage2_mode, 0o100755, "fixture stage 2 must be executable");
+
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--ours", "--", "conflict.txt"], repo.path()),
+        "checkout --ours",
+    );
+
+    let after = load_index(repo.path());
+    let stage0_mode = after.get("conflict.txt", 0).expect("stage 0 entry").mode;
+    assert_eq!(
+        stage0_mode, stage2_mode,
+        "stage 0 mode must match the promoted stage 2 mode (executable bit preserved)",
+    );
+}
+
+/// `--ours` handles multiple pathspecs in one invocation.
+#[test]
+fn checkout_ours_multiple_pathspecs() {
+    use super::{assert_cli_success, run_libra_command};
+    let repo = create_conflict_repo(&["a.txt", "b.txt"], false);
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--ours", "--", "a.txt", "b.txt"], repo.path()),
+        "checkout --ours a.txt b.txt",
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("a.txt")).unwrap(),
+        "ours-a.txt\n",
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("b.txt")).unwrap(),
+        "ours-b.txt\n",
+    );
+}
+
+/// A corrupt on-disk index propagates as a read failure (128, LBR-IO-001).
+#[test]
+fn checkout_ours_read_error_propagates() {
+    use super::{parse_cli_error_stderr, run_libra_command};
+    let repo = create_conflict_repo(&["conflict.txt"], false);
+    std::fs::write(repo.path().join(".libra/index"), b"not a valid DIRC index").unwrap();
+    let out = run_libra_command(&["checkout", "--ours", "--", "conflict.txt"], repo.path());
+    assert_eq!(out.status.code(), Some(128), "corrupt index → read failure");
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-IO-001");
+}
+
+/// A worktree write failure (read-only target file) propagates as a write failure
+/// (128, LBR-IO-002).
+#[cfg(unix)]
+#[test]
+fn checkout_ours_write_error_propagates() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::{parse_cli_error_stderr, run_libra_command, skip_permission_denied_test_if_root};
+    if skip_permission_denied_test_if_root("checkout_ours_write_error_propagates") {
+        return;
+    }
+    let repo = create_conflict_repo(&["conflict.txt"], false);
+    let fp = repo.path().join("conflict.txt");
+    std::fs::set_permissions(&fp, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+    let out = run_libra_command(&["checkout", "--ours", "--", "conflict.txt"], repo.path());
+
+    // Restore perms so the TempDir can be cleaned up.
+    let _ = std::fs::set_permissions(&fp, std::fs::Permissions::from_mode(0o644));
+
+    assert_eq!(
+        out.status.code(),
+        Some(128),
+        "read-only worktree file → write failure: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-IO-002");
+}
+
+// ── Batch 2: exit-code alignment + bare-checkout status output ──
+
+/// Bare `libra checkout` on a branch prints `Current branch is <branch>.` (exit 0).
+#[test]
+fn checkout_bare_shows_current_branch() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["checkout"], repo.path());
+    assert_cli_success(&out, "bare checkout");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Current branch is main."),
+        "stdout: {stdout}"
+    );
+}
+
+/// Bare `libra checkout` while detached prints `HEAD detached at <short8>` (exit 0).
+#[test]
+fn checkout_bare_detached_shows_head() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--detach"], repo.path()),
+        "detach at HEAD",
+    );
+    let out = run_libra_command(&["checkout"], repo.path());
+    assert_cli_success(&out, "bare checkout while detached");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("HEAD detached at "),
+        "expected detached status line, got: {stdout}"
+    );
+}
+
+/// `-b <name> -- <path>` mixes branch-creation and path mode: usage error
+/// (`InvalidPathMode` → `CliInvalidArguments`, 129).
+#[test]
+fn checkout_b_with_pathspec_is_usage_error() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["checkout", "-b", "x", "--", "tracked.txt"], repo.path());
+    assert_eq!(out.status.code(), Some(129), "mixed -b + pathspec");
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// User-facing error messages do not leak the repository's internal absolute path.
+#[test]
+fn checkout_error_message_has_no_internal_paths() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+    let repo = create_committed_repo_via_cli();
+    let repo_abs = repo.path().to_string_lossy().to_string();
+
+    // A non-conflict `--ours` error: the message must name the pathspec only.
+    let out = run_libra_command(&["checkout", "--ours", "--", "tracked.txt"], repo.path());
+    let (human, report) = parse_cli_error_stderr(&out.stderr);
+    assert!(
+        !report.message.contains(&repo_abs),
+        "error message leaked an absolute path: {}",
+        report.message
+    );
+    assert!(
+        !human.contains(&repo_abs),
+        "human error block leaked an absolute path: {human}"
+    );
+}
+
+/// `--orphan` on an existing branch name is refused (matches Git): the branch
+/// would otherwise resolve to its existing commit instead of being unborn.
+/// Rejected with `ConflictOperationBlocked` (128, LBR-CONFLICT-002), HEAD unchanged.
+#[test]
+fn checkout_orphan_on_existing_branch_is_rejected() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_cli_error_stderr,
+        run_libra_command,
+    };
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], repo.path()),
+        "create feature branch",
+    );
+
+    let out = run_libra_command(&["checkout", "--orphan", "feature"], repo.path());
+    assert_eq!(
+        out.status.code(),
+        Some(128),
+        "orphan on existing branch must be refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
+    assert!(
+        report.message.contains("already exists"),
+        "message: {}",
+        report.message
+    );
+
+    // HEAD must be unchanged — still the existing `main` branch.
+    let cur = run_libra_command(&["branch", "--show-current"], repo.path());
+    assert_eq!(String::from_utf8_lossy(&cur.stdout).trim(), "main");
 }

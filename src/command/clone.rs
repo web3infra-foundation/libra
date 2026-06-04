@@ -40,7 +40,11 @@ use crate::{
         },
         db::get_db_conn_instance,
         head::Head,
-        protocol::DiscoveryResult,
+        log::date_parser::parse_date,
+        protocol::{
+            DiscoveryResult, ShallowOptions,
+            clone_support::{self, CloneSupportError},
+        },
         publish::{
             ai_export::publish_ai_graph_relative_key,
             contract::{
@@ -80,7 +84,7 @@ const CLOUD_CLONE_D1_API_BASE_URL_ENV: &str = "LIBRA_D1_API_BASE_URL";
 // rustdoc. Keeping the rustdoc to one summary line stops clap from
 // echoing a markdown `# Examples` heading and triple-backtick fences
 // verbatim into `--help` output (those don't render outside cargo doc).
-#[derive(Parser, Debug, Clone)]
+#[derive(Parser, Debug, Clone, Default)]
 #[clap(after_help = "EXAMPLES:\n    \
     libra clone git@github.com:user/repo.git             Clone via SSH\n    \
     libra clone https://github.com/user/repo.git          Clone via HTTPS\n    \
@@ -88,7 +92,16 @@ const CLOUD_CLONE_D1_API_BASE_URL_ENV: &str = "LIBRA_D1_API_BASE_URL";
     libra clone --bare git@github.com:user/repo.git       Create bare clone\n    \
     libra clone -b develop git@github.com:user/repo.git   Clone specific branch\n    \
     libra clone --single-branch -b main <url>             Clone only one branch\n    \
-    libra clone --depth 1 <url>                           Shallow clone (latest commit only)")]
+    libra clone --no-single-branch <url>                  Clone all branches (override --single-branch)\n    \
+    libra clone --depth 1 <url>                           Shallow clone (latest commit only)\n    \
+    libra clone --shallow-since 2024-01-01 <url>          Shallow clone since a date\n    \
+    libra clone --shallow-exclude refs/tags/v1 <url>      Shallow clone excluding a ref\n    \
+    libra clone --reject-shallow <url>                    Fail if the source is shallow\n    \
+    libra clone -o upstream <url>                         Name the remote 'upstream' instead of 'origin'\n    \
+    libra clone --no-checkout <url>                       Clone without checking out the working tree\n    \
+    libra clone --mirror <url>                            Mirror clone (bare, all refs)\n    \
+    libra clone --reference /path/to/repo <url>           Copy objects from a local reference repository\n    \
+    libra clone --dissociate --reference /repo <url>      Reference, then ensure no borrow dependency")]
 pub struct CloneArgs {
     /// The remote repository location to clone from, usually a URL with HTTPS or SSH
     pub remote_repo: String,
@@ -101,8 +114,14 @@ pub struct CloneArgs {
     pub branch: Option<String>,
 
     /// Clone only one branch, HEAD or --branch
-    #[clap(long)]
+    #[clap(long, overrides_with = "no_single_branch")]
     pub single_branch: bool,
+
+    /// Opposite of --single-branch; clone all branches. Git-style negation —
+    /// when combined with --single-branch the last one on the command line wins
+    /// (clap `overrides_with`), it is not a usage conflict.
+    #[clap(long = "no-single-branch", overrides_with = "single_branch")]
+    pub no_single_branch: bool,
 
     /// Create a bare repository without checking out a working tree
     #[clap(long)]
@@ -111,6 +130,52 @@ pub struct CloneArgs {
     /// Create a shallow clone with history truncated to N commits (must be > 0)
     #[clap(long, value_name = "N", value_parser = validate_depth)]
     pub depth: Option<usize>,
+
+    /// Create a shallow clone with history after a specific time. Accepts a date
+    /// (`2024-01-01`), an RFC3339 timestamp, a Unix epoch, or a relative form
+    /// like `2 weeks ago`. May be combined with `--depth`.
+    #[clap(long, value_name = "time")]
+    pub shallow_since: Option<String>,
+
+    /// Create a shallow clone with history excluding commits reachable from the
+    /// given ref or revision. May be combined with `--depth`.
+    #[clap(long, value_name = "revision")]
+    pub shallow_exclude: Option<String>,
+
+    /// Fail if the source repository is a shallow repository.
+    #[clap(long)]
+    pub reject_shallow: bool,
+
+    /// Use <name> instead of 'origin' for the tracked remote.
+    #[clap(short = 'o', long = "origin", value_name = "name")]
+    pub origin: Option<String>,
+
+    /// Do not check out HEAD after the clone. Metadata, refs, and config are
+    /// still written; only the working-tree checkout is skipped.
+    #[clap(short = 'n', long = "no-checkout")]
+    pub no_checkout: bool,
+
+    /// Set up a mirror of the source repository. Implies `--bare` and maps all
+    /// refs (`+refs/*:refs/*`); the remote is recorded with `mirror = true`.
+    #[clap(long)]
+    pub mirror: bool,
+
+    /// Copy objects from a local reference repository into the new clone
+    /// (copy semantics; no long-term alternates dependency). The source must be
+    /// a real (non-symlink) local libra or git repository.
+    #[clap(long, value_name = "repo")]
+    pub reference: Option<String>,
+
+    /// Like `--reference`, but degrade to a normal clone with a warning when the
+    /// reference path does not exist instead of failing.
+    #[clap(long = "reference-if-able", value_name = "repo")]
+    pub reference_if_able: Option<String>,
+
+    /// Ensure the clone has no borrow dependency on the reference. With the
+    /// default copy semantics this confirms the objects are fully local (a
+    /// no-op beyond reporting `dissociated = true`). Requires `--reference`.
+    #[clap(long)]
+    pub dissociate: bool,
 }
 
 const REPO_MARKERS: &[&str] = &["description", "libra.db", "info/exclude", "objects"];
@@ -152,6 +217,18 @@ pub struct CloneOutput {
     /// Cloudflare publish metadata for `libra+cloud://` sources.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cloud_site: Option<CloudCloneSiteOutput>,
+    /// Remote name written for the clone when overridden with `-o/--origin`.
+    /// Omitted (defaults to `origin`) when not customized.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_name: Option<String>,
+    /// Canonical path of the reference repository whose objects were copied
+    /// (`--reference`/`--reference-if-able`). Omitted when no reference was used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference_used: Option<String>,
+    /// `Some(true)` when `--dissociate` confirmed the clone is fully local with
+    /// no borrow dependency. Omitted when `--dissociate` was not requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dissociated: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -365,6 +442,18 @@ pub enum CloneError {
     },
     #[error("invalid libra+cloud clone source '{input}': {reason}")]
     InvalidCloudPublishSource { input: String, reason: String },
+    #[error("refusing to clone shallow source '{repo}' because --reject-shallow was specified")]
+    RejectedShallowSource { repo: String },
+    #[error(
+        "reference object source '{path}' contains a symbolic link, which is blocked for security reasons"
+    )]
+    ReferenceSourceInsecure { path: String },
+    #[error("reference source path is too long ({len} bytes, limit 4096)")]
+    ReferenceSourcePathTooLong { len: usize },
+    #[error("reference source '{path}' is not a libra or git repository")]
+    ReferenceSourceInvalid { path: String },
+    #[error("failed to copy objects from reference source '{path}': {message}")]
+    ReferenceCopyFailed { path: String, message: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -731,6 +820,23 @@ impl From<CloneError> for CliError {
                          `?ref=<branch|tag|full-ref>` or `?revision=<oid|latest>`",
                     )
             }
+            CloneError::RejectedShallowSource { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("omit --reject-shallow, or clone from a complete (non-shallow) source"),
+            CloneError::ReferenceSourceInsecure { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::AuthPermissionDenied)
+                .with_hint("use a real (non-symlink) local repository path for --reference"),
+            CloneError::ReferenceSourcePathTooLong { .. } => {
+                CliError::command_usage(error.to_string())
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+                    .with_hint("shorten the --reference path (limit is 4096 bytes)")
+            }
+            CloneError::ReferenceSourceInvalid { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("point --reference at a local libra or git repository"),
+            CloneError::ReferenceCopyFailed { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::IoWriteFailed)
+                .with_hint("check disk space and permissions for the destination object store"),
         }
     }
 }
@@ -907,6 +1013,152 @@ fn validate_depth(s: &str) -> Result<usize, String> {
         })
 }
 
+/// Parse a `--shallow-since` time string into a Unix timestamp, reusing the
+/// `log` date parser so the accepted formats stay consistent across commands.
+fn parse_shallow_since(input: &str) -> Result<i64, String> {
+    parse_date(input).map_err(|_| {
+        format!(
+            "invalid --shallow-since time '{input}': use a date (2024-01-01), an RFC3339 \
+             timestamp, a Unix epoch, or a relative form like '2 weeks ago'"
+        )
+    })
+}
+
+/// Semantic argument validation that runs **before** any directory creation,
+/// database connection, remote discovery, or stdin consumption (fail-fast).
+///
+/// clap already rejects unknown flags / type errors and maps them to exit code
+/// 129 via `classify_parse_error`; this function only covers the range/format
+/// checks clap cannot express. All failures here are usage errors (exit 129).
+fn validate_clone_args(args: &CloneArgs) -> CliResult<()> {
+    if args.remote_repo.starts_with("libra+cloud://")
+        && (args.shallow_since.is_some()
+            || args.shallow_exclude.is_some()
+            || args.reject_shallow
+            || args.no_single_branch
+            || args.origin.is_some()
+            || args.no_checkout
+            || args.mirror
+            || args.reference.is_some()
+            || args.reference_if_able.is_some()
+            || args.dissociate)
+    {
+        return Err(CliError::command_usage(
+            "shaping flags (--shallow-since/--shallow-exclude/--reject-shallow/--no-single-branch/\
+             --origin/--no-checkout/--mirror/--reference/--reference-if-able/--dissociate) are not \
+             supported with cloud (libra+cloud://) sources",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+        .with_hint(
+            "select cloud refs in the libra+cloud:// URL with ?ref=, and omit Git shaping flags",
+        ));
+    }
+
+    if args.dissociate && args.reference.is_none() && args.reference_if_able.is_none() {
+        return Err(CliError::command_usage(
+            "--dissociate requires --reference or --reference-if-able",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+
+    if let Some(since) = &args.shallow_since {
+        parse_shallow_since(since).map_err(|message| {
+            CliError::command_usage(message).with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Build the protocol-level shallow request from the clone arguments. `depth`,
+/// `--shallow-since`, and `--shallow-exclude` are layered together (Git accepts
+/// the combination). The time string is re-parsed here, but it was already
+/// validated by [`validate_clone_args`], so this never surfaces a new usage error.
+fn clone_shallow_options(args: &CloneArgs) -> Result<ShallowOptions, CloneError> {
+    let deepen_since = match &args.shallow_since {
+        Some(since) => Some(parse_shallow_since(since).map_err(|message| {
+            // Defensive: validation already passed, so reaching here means an
+            // internal inconsistency rather than user error.
+            CloneError::SetupFailed { message }
+        })?),
+        None => None,
+    };
+    let deepen_not = args.shallow_exclude.clone().into_iter().collect::<Vec<_>>();
+    Ok(ShallowOptions {
+        depth: args.depth,
+        deepen_since,
+        deepen_not,
+    })
+}
+
+/// Detect whether a **local** clone source is itself a shallow repository by
+/// inspecting its `shallow` boundary file. Remote shallowness is detected
+/// post-fetch from the boundaries the server advertises, so this only inspects
+/// on-disk local sources (it returns `false` for URLs that are not local paths).
+fn source_is_shallow(remote_repo: &str) -> bool {
+    let trimmed = remote_repo.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return false;
+    }
+    let base = Path::new(trimmed);
+    if !base.exists() {
+        return false;
+    }
+    // Non-bare libra repos store the boundary at `.libra/shallow`; bare repos
+    // store it at the repository root (`<repo>/shallow`).
+    for candidate in [
+        base.join(util::ROOT_DIR).join("shallow"),
+        base.join("shallow"),
+    ] {
+        if let Ok(metadata) = fs::metadata(&candidate)
+            && metadata.is_file()
+            && metadata.len() > 0
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Map a `CloneSupportError` from the reference-object copy path onto the
+/// corresponding `CloneError` so exit codes and hints stay precise.
+fn map_clone_support_error(reference: &str, error: CloneSupportError) -> CloneError {
+    match error {
+        CloneSupportError::Symlink(path) => CloneError::ReferenceSourceInsecure {
+            path: path.display().to_string(),
+        },
+        CloneSupportError::PathTooLong(len) => CloneError::ReferenceSourcePathTooLong { len },
+        CloneSupportError::NotARepository(path) => CloneError::ReferenceSourceInvalid {
+            path: path.display().to_string(),
+        },
+        CloneSupportError::Io(io_error) => CloneError::ReferenceCopyFailed {
+            path: reference.to_string(),
+            message: io_error.to_string(),
+        },
+    }
+}
+
+/// Copy objects from a `--reference`/`--reference-if-able` source into the new
+/// clone's object store (copy semantics; no alternates dependency). Must be
+/// called with the current directory set to the new clone so `path::objects()`
+/// resolves to the destination store. Returns the canonical reference path on
+/// success, or `None` when an `--reference-if-able` source is absent (the caller
+/// degrades to a normal clone with a warning).
+fn copy_reference_objects(reference: &str, if_able: bool) -> Result<Option<String>, CloneError> {
+    let source = Path::new(reference);
+    if if_able && !source.exists() {
+        return Ok(None);
+    }
+    let canonical = clone_support::check_local_security(source)
+        .map_err(|error| map_clone_support_error(reference, error))?;
+    let src_objects = clone_support::resolve_reference_objects_dir(&canonical)
+        .map_err(|error| map_clone_support_error(reference, error))?;
+    let dest_objects = path::objects();
+    clone_support::copy_objects(&src_objects, &dest_objects)
+        .map_err(|error| map_clone_support_error(reference, error))?;
+    Ok(Some(canonical.display().to_string()))
+}
+
 fn display_home_relative(path: &str) -> String {
     let Some(home) = dirs::home_dir() else {
         return path.to_string();
@@ -985,6 +1237,10 @@ pub async fn execute(args: CloneArgs) {
 /// This is the **rendering layer**: it calls `execute_clone()` to get a
 /// `CloneOutput` and then renders it according to the `OutputConfig`.
 pub async fn execute_safe(args: CloneArgs, output: &OutputConfig) -> CliResult<()> {
+    // Fail-fast semantic validation before any directory creation, DB
+    // connection, or remote discovery.
+    validate_clone_args(&args)?;
+
     let original_dir = util::cur_dir();
     let (result, cleanup_warning) = execute_clone(&args, &original_dir, output).await;
 
@@ -1030,7 +1286,8 @@ fn render_clone_result(result: &CloneOutput, output: &OutputConfig) -> CliResult
             .unwrap_or(&result.path);
         println!("Cloned into '{display_path}'");
     }
-    println!("  remote: origin → {}", result.remote_url);
+    let remote_name = result.origin_name.as_deref().unwrap_or("origin");
+    println!("  remote: {remote_name} → {}", result.remote_url);
     if let Some(branch) = &result.branch {
         println!("  branch: {branch}");
     }
@@ -1121,6 +1378,18 @@ async fn execute_clone_inner(
             output,
         )
         .await;
+    }
+
+    // --- Fail-fast: --reject-shallow against a shallow local source ---
+    // Detected before directory creation and remote discovery for local sources;
+    // remote sources are additionally checked post-fetch in `clone_into_destination`.
+    if args.reject_shallow && source_is_shallow(&args.remote_repo) {
+        return Err((
+            CloneError::RejectedShallowSource {
+                repo: args.remote_repo.clone(),
+            },
+            None,
+        ));
     }
 
     let mut remote_repo = args.remote_repo.clone();
@@ -1428,6 +1697,9 @@ async fn clone_cloud_publish_into_destination(
             ref_name: restore_plan.checkout.ref_name.clone(),
             revision: restore_plan.checkout.revision_oid.clone(),
         }),
+        origin_name: None,
+        reference_used: None,
+        dissociated: None,
     })
 }
 
@@ -2760,13 +3032,22 @@ async fn clone_into_destination(
         git_internal::hash::HashKind::Sha256 => "sha256".to_string(),
     };
 
+    // `--mirror` implies a bare repository; `--no-checkout` keeps the metadata
+    // but skips the working-tree checkout. `--mirror` also clones every branch
+    // regardless of `--single-branch`. The remote name defaults to `origin`
+    // unless overridden with `-o/--origin`.
+    let bare = args.bare || args.mirror;
+    let origin_name = args.origin.clone().unwrap_or_else(|| "origin".to_string());
+    let checkout_worktree = !bare && !args.no_checkout;
+    let single_branch = args.single_branch && !args.mirror;
+
     // --- Step 4: Initialize repository ---
     if !output.quiet && !output.is_json() {
         eprintln!("Initializing repository ...");
     }
 
     let init_output = command::init::run_init(command::init::InitArgs {
-        bare: args.bare,
+        bare,
         template: None,
         initial_branch: args.branch.clone(),
         repo_directory: local_path.to_string_lossy().into_owned(),
@@ -2780,6 +3061,27 @@ async fn clone_into_destination(
     .await
     .map_err(|source| CloneError::InitializeRepository { source })?;
 
+    // --- Reference object reuse (copy semantics) ---
+    // Copy a local reference repository's objects into the new store before the
+    // fetch so they are present locally; the clone never depends on alternates.
+    let mut reference_warnings: Vec<String> = Vec::new();
+    let reference_used = if let Some(reference) = &args.reference {
+        copy_reference_objects(reference, false)?
+    } else if let Some(reference) = &args.reference_if_able {
+        match copy_reference_objects(reference, true)? {
+            Some(path) => Some(path),
+            None => {
+                reference_warnings.push(format!(
+                    "reference-if-able source '{reference}' was not found; \
+                     continuing without object reuse"
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // --- Step 5: Fetch objects ---
     if !output.quiet && !output.is_json() {
         eprintln!("Fetching objects ...");
@@ -2787,34 +3089,53 @@ async fn clone_into_destination(
 
     let child_output = output.child_output_config();
     let remote_config = RemoteConfig {
-        name: "origin".to_string(),
+        name: origin_name.clone(),
         url: remote_url.to_string(),
     };
+    let shallow = clone_shallow_options(args)?;
     fetch::fetch_repository_safe(
         remote_config.clone(),
         args.branch.clone(),
-        args.single_branch,
-        args.depth,
+        single_branch,
+        shallow,
         &child_output,
     )
     .await
     .map_err(|source| CloneError::FetchFailed { source })?;
+
+    // --- Post-fetch: reject a shallow result when --reject-shallow is set ---
+    // Covers remote sources that advertise shallow boundaries even though the
+    // pre-fetch local-source check could not inspect them.
+    if args.reject_shallow {
+        let boundaries = fetch::read_shallow_boundaries()
+            .map_err(|source| CloneError::FetchFailed { source })?;
+        if !boundaries.is_empty() {
+            return Err(CloneError::RejectedShallowSource {
+                repo: remote_url.to_string(),
+            });
+        }
+    }
 
     // --- Step 6–7: Configure repository + checkout ---
     if !output.quiet && !output.is_json() {
         eprintln!("Configuring repository ...");
     }
 
-    if !args.bare && !output.quiet && !output.is_json() {
+    if checkout_worktree && !output.quiet && !output.is_json() {
         eprintln!("Checking out working copy ...");
     }
 
-    let setup_result =
-        setup_repository(remote_config.clone(), args.branch.clone(), !args.bare).await?;
+    let setup_result = setup_repository(
+        remote_config.clone(),
+        args.branch.clone(),
+        checkout_worktree,
+    )
+    .await?;
 
     let mut warnings = init_output.warnings.clone();
+    warnings.extend(reference_warnings);
     let mut gitignore_converted = Vec::new();
-    if !args.bare {
+    if checkout_worktree {
         let summary = ignore_utils::convert_gitignore_files_to_libraignore(local_path, local_path)
             .map_err(|source| CloneError::IgnoreFile { source })?;
         warnings.extend(summary.warnings);
@@ -2838,18 +3159,23 @@ async fn clone_into_destination(
 
     Ok(CloneOutput {
         path: local_path.to_string_lossy().into_owned(),
-        bare: args.bare,
+        bare,
         remote_url: remote_url.to_string(),
         branch: setup_result.branch_name,
         object_format,
         repo_id: init_output.repo_id,
         vault_signing: init_output.vault_signing,
         ssh_key_detected: init_output.ssh_key_detected,
-        shallow: args.depth.is_some(),
+        shallow: args.depth.is_some()
+            || args.shallow_since.is_some()
+            || args.shallow_exclude.is_some(),
         warnings,
         gitignore_converted,
         source_kind: None,
         cloud_site: None,
+        origin_name: args.origin.clone(),
+        reference_used,
+        dissociated: args.dissociate.then_some(true),
     })
 }
 
@@ -3328,11 +3654,7 @@ mod tests {
     fn cloud_clone_args_baseline() -> CloneArgs {
         CloneArgs {
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
-            local_path: None,
-            branch: None,
-            single_branch: false,
-            bare: false,
-            depth: None,
+            ..Default::default()
         }
     }
 
@@ -3535,11 +3857,7 @@ mod tests {
         let (restore_plan, remote, commit_id) = cloud_restore_fixture(true).await;
         let args = CloneArgs {
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
-            local_path: None,
-            branch: None,
-            single_branch: false,
-            bare: false,
-            depth: None,
+            ..Default::default()
         };
         let output = OutputConfig {
             quiet: true,
@@ -3630,11 +3948,7 @@ mod tests {
         let args = CloneArgs {
             remote_repo: "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0"
                 .to_string(),
-            local_path: None,
-            branch: None,
-            single_branch: false,
-            bare: false,
-            depth: None,
+            ..Default::default()
         };
         let output = OutputConfig {
             quiet: true,
@@ -3692,11 +4006,7 @@ mod tests {
         let (restore_plan, remote, _) = cloud_restore_fixture(false).await;
         let args = CloneArgs {
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
-            local_path: None,
-            branch: None,
-            single_branch: false,
-            bare: false,
-            depth: None,
+            ..Default::default()
         };
         let output = OutputConfig {
             quiet: true,
@@ -3752,11 +4062,7 @@ mod tests {
             .expect("metadata should overwrite in-memory remote");
         let args = CloneArgs {
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
-            local_path: None,
-            branch: None,
-            single_branch: false,
-            bare: false,
-            depth: None,
+            ..Default::default()
         };
         let output = OutputConfig {
             quiet: true,
@@ -4273,6 +4579,9 @@ mod tests {
             gitignore_converted: vec![".libraignore".to_string(), "sub/.libraignore".to_string()],
             source_kind: None,
             cloud_site: None,
+            origin_name: None,
+            reference_used: None,
+            dissociated: None,
         };
 
         let value = serde_json::to_value(&output).expect("CloneOutput must serialize");
@@ -4317,6 +4626,10 @@ mod tests {
             !map.contains_key("cloud_site"),
             "cloud_site must be omitted when None (skip_serializing_if)",
         );
+        assert!(
+            !map.contains_key("origin_name"),
+            "origin_name must be omitted when None (skip_serializing_if)",
+        );
     }
 
     /// A bare clone reports no `.gitignore` conversions (clone.md: "Empty
@@ -4338,6 +4651,9 @@ mod tests {
             gitignore_converted: Vec::new(),
             source_kind: None,
             cloud_site: None,
+            origin_name: None,
+            reference_used: None,
+            dissociated: None,
         };
 
         let value = serde_json::to_value(&output).expect("CloneOutput must serialize");

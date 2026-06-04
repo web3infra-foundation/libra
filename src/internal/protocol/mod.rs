@@ -14,6 +14,7 @@ use crate::{
     internal::branch::Branch,
 };
 
+pub mod clone_support; // local-object reuse helpers for `clone --reference`/`--shared`/`--local`
 pub mod git_client; // to support git server protocol (git://) over TCP
 pub mod https_client;
 pub mod lfs_client;
@@ -193,11 +194,46 @@ pub fn parse_discovered_references(
     })
 }
 
+/// Advanced shallow-clone negotiation parameters carried alongside the existing
+/// `shallow` boundary set. Models the three Git upload-pack deepen requests:
+///
+/// - [`depth`](Self::depth) → `deepen <n>` (`--depth N` / `--deepen N`)
+/// - [`deepen_since`](Self::deepen_since) → `deepen-since <unix>` (`--shallow-since`)
+/// - [`deepen_not`](Self::deepen_not) → one `deepen-not <ref>` per entry (`--shallow-exclude`)
+///
+/// Git accepts `--depth` combined with `--shallow-since`/`--shallow-exclude`, so
+/// these are layered into the request rather than treated as mutually exclusive.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShallowOptions {
+    /// Truncate history to this many commits from each tip (`deepen <n>`).
+    pub depth: Option<usize>,
+    /// Restrict shallow history to commits newer than this Unix timestamp
+    /// (`deepen-since <unix-seconds>`).
+    pub deepen_since: Option<i64>,
+    /// Exclude history reachable from these refs/revisions (`deepen-not <ref>`).
+    pub deepen_not: Vec<String>,
+}
+
+impl ShallowOptions {
+    /// Convenience constructor for a plain `--depth` request.
+    pub fn from_depth(depth: Option<usize>) -> Self {
+        Self {
+            depth,
+            ..Self::default()
+        }
+    }
+
+    /// Whether any shallow-shaping request is present.
+    pub fn is_requested(&self) -> bool {
+        self.depth.is_some() || self.deepen_since.is_some() || !self.deepen_not.is_empty()
+    }
+}
+
 pub fn generate_upload_pack_content(
     have: &[String],
     want: &[String],
     shallow: &[String],
-    depth: Option<usize>,
+    options: &ShallowOptions,
 ) -> Bytes {
     let mut buf = BytesMut::new();
     let mut write_first_line = false;
@@ -205,6 +241,15 @@ pub fn generate_upload_pack_content(
     let mut capability = vec!["side-band-64k", "multi_ack_detailed"];
     if get_wire_hash_kind() == HashKind::Sha256 {
         capability.push("object-format=sha256");
+    }
+    // `deepen-since`/`deepen-not` commands are only honored by upload-pack when
+    // the corresponding capability is advertised on the first `want` line; a
+    // plain `deepen <n>` does not need one.
+    if options.deepen_since.is_some() {
+        capability.push("deepen-since");
+    }
+    if !options.deepen_not.is_empty() {
+        capability.push("deepen-not");
     }
     let capability = capability.join(" ");
     for w in want {
@@ -227,8 +272,19 @@ pub fn generate_upload_pack_content(
         add_pkt_line_string(&mut buf, format!("shallow {oid}\n"));
     }
 
-    // Add deepen line if depth is specified
-    if let Some(d) = depth {
+    // Git's upload-pack rejects `deepen` combined with `deepen-since`/`deepen-not`
+    // ("deepen and deepen-since (or deepen-not) cannot be used together"), so the
+    // time/ref-based requests take precedence over a plain commit-count depth when
+    // both are supplied. This keeps `--depth` + `--shallow-since`/`--shallow-exclude`
+    // accepted at the CLI while still producing a protocol-valid request.
+    if options.deepen_since.is_some() || !options.deepen_not.is_empty() {
+        if let Some(since) = options.deepen_since {
+            add_pkt_line_string(&mut buf, format!("deepen-since {since}\n").to_string());
+        }
+        for reference in &options.deepen_not {
+            add_pkt_line_string(&mut buf, format!("deepen-not {reference}\n").to_string());
+        }
+    } else if let Some(d) = options.depth {
         add_pkt_line_string(&mut buf, format!("deepen {d}\n").to_string());
     }
 
@@ -260,4 +316,52 @@ impl From<Branch> for DiscoveredReference {
 }
 
 #[cfg(test)]
-mod test {}
+mod test {
+    use super::{ShallowOptions, generate_upload_pack_content};
+
+    fn render(want: &[String], shallow: &[String], opts: &ShallowOptions) -> String {
+        let bytes = generate_upload_pack_content(&[], want, shallow, opts);
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[test]
+    fn upload_pack_emits_shallow_and_depth_frames() {
+        let want = vec!["a".repeat(40)];
+        let shallow = vec!["b".repeat(40)];
+        let content = render(&want, &shallow, &ShallowOptions::from_depth(Some(5)));
+        assert!(content.contains(&format!("shallow {}", "b".repeat(40))));
+        assert!(content.contains("deepen 5\n"));
+        assert!(!content.contains("deepen-since"));
+        assert!(!content.contains("deepen-not"));
+    }
+
+    #[test]
+    fn upload_pack_emits_deepen_since_and_not_frames() {
+        let want = vec!["a".repeat(40)];
+        let opts = ShallowOptions {
+            // `depth` is intentionally also set: git-upload-pack rejects `deepen`
+            // alongside `deepen-since`/`deepen-not`, so the time/ref requests must
+            // take precedence and the plain `deepen` line must be suppressed.
+            depth: Some(2),
+            deepen_since: Some(1_704_067_200),
+            deepen_not: vec!["refs/tags/v1".to_string(), "refs/heads/legacy".to_string()],
+        };
+        let content = render(&want, &[], &opts);
+        assert!(
+            !content.contains("deepen 2\n"),
+            "plain deepen must be suppressed when deepen-since/deepen-not present"
+        );
+        assert!(content.contains("deepen-since 1704067200\n"));
+        assert!(content.contains("deepen-not refs/tags/v1\n"));
+        assert!(content.contains("deepen-not refs/heads/legacy\n"));
+    }
+
+    #[test]
+    fn upload_pack_omits_deepen_frames_when_unset() {
+        let want = vec!["a".repeat(40)];
+        let content = render(&want, &[], &ShallowOptions::default());
+        assert!(!content.contains("deepen"));
+        assert!(content.contains("done\n"));
+        assert!(!ShallowOptions::default().is_requested());
+    }
+}

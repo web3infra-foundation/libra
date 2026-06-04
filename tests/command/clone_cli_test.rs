@@ -1728,3 +1728,672 @@ fn json_clone_init_output_isolation() {
         "json clone stderr should not contain fetch NDJSON progress, got: {stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Batch 1 — advanced shallow flags + fetch interop
+// ---------------------------------------------------------------------------
+
+/// Build a bare git source with two commits on `main`, so that a `--depth 1`
+/// clone produces a genuine shallow boundary at the tip's parent cut.
+fn create_remote_with_two_commits(base: &Path) -> std::path::PathBuf {
+    let remote = base.join("remote2.git");
+    assert!(
+        run_git(&["init", "--bare", remote.to_str().unwrap()], base)
+            .status
+            .success()
+    );
+
+    let work = base.join("work2");
+    fs::create_dir_all(&work).unwrap();
+    assert!(run_git(&["init"], &work).status.success());
+    assert!(
+        run_git(&["config", "user.name", "T"], &work)
+            .status
+            .success()
+    );
+    assert!(
+        run_git(&["config", "user.email", "t@example.com"], &work)
+            .status
+            .success()
+    );
+    assert!(
+        run_git(&["config", "commit.gpgsign", "false"], &work)
+            .status
+            .success()
+    );
+    fs::write(work.join("README.md"), "hello\n").unwrap();
+    assert!(run_git(&["add", "README.md"], &work).status.success());
+    assert!(
+        run_git(&["commit", "-m", "initial"], &work)
+            .status
+            .success()
+    );
+    fs::write(work.join("README.md"), "hello again\n").unwrap();
+    assert!(run_git(&["add", "README.md"], &work).status.success());
+    assert!(run_git(&["commit", "-m", "second"], &work).status.success());
+    assert!(run_git(&["branch", "-M", "main"], &work).status.success());
+    assert!(
+        run_git(
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+            &work
+        )
+        .status
+        .success()
+    );
+    assert!(run_git(&["push", "origin", "main"], &work).status.success());
+    assert!(
+        run_git(&["symbolic-ref", "HEAD", "refs/heads/main"], &remote)
+            .status
+            .success()
+    );
+    remote
+}
+
+/// `--single-branch --no-single-branch` is a Git-style negation, not a usage
+/// conflict; clap `overrides_with` makes the last occurrence win and the clone
+/// succeeds (exit 0) instead of failing with a 129 usage error.
+#[test]
+fn single_branch_negation_last_wins() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-negation");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--single-branch",
+            "--no-single-branch",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "combining --single-branch and --no-single-branch must not be a usage conflict: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `libra+cloud://` sources reject the new shaping flags during fail-fast
+/// validation (exit 129) before any config lookup or remote discovery.
+#[test]
+fn cloud_source_rejects_shallow_flags() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("restored");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--shallow-since",
+            "2024-01-01",
+            "libra+cloud://code.example.com/kepler-ledger",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "cloud source must reject --shallow-since: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !dest.exists(),
+        "no destination should be created on rejection"
+    );
+}
+
+/// A `--depth` clone reports `shallow: true` in JSON while preserving every
+/// pre-existing field (backward-compatible schema).
+#[test]
+fn shallow_clone_json_schema_backward_compatible() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-shallow-json");
+
+    let output = run_libra(
+        &[
+            "--json",
+            "clone",
+            "--depth",
+            "1",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "shallow clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["command"], "clone");
+    let data = &json["data"];
+    // New behaviour: shallow is true.
+    assert_eq!(data["shallow"], true);
+    // Backward-compatible: pre-existing fields keep their shape.
+    assert!(data["path"].is_string());
+    assert_eq!(data["bare"], false);
+    assert!(data["remote_url"].is_string());
+    assert_eq!(data["branch"], "main");
+    assert!(data["object_format"].is_string());
+    assert!(data["repo_id"].is_string());
+    assert!(data["vault_signing"].is_boolean());
+    assert!(data["warnings"].is_array());
+}
+
+/// A malformed `--shallow-since` time is rejected by fail-fast validation with
+/// exit code 129, before any network access.
+#[test]
+fn shallow_since_invalid_time_exits_129() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("clone-bad-time");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--shallow-since",
+            "not-a-date",
+            "file:///definitely/not/here",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "invalid --shallow-since must exit 129: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `--depth` together with `--shallow-since` is accepted (no usage conflict);
+/// the clone succeeds because the time-based request supersedes plain depth at
+/// the protocol layer (git-upload-pack rejects sending both).
+#[test]
+fn depth_and_shallow_since_combine_ok() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-combo");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--depth",
+            "5",
+            "--shallow-since",
+            "2020-01-01",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--depth + --shallow-since must be accepted and succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `--reject-shallow` against a shallow local source fails fast with exit 128
+/// before remote discovery or directory creation.
+#[test]
+fn reject_shallow_source_exits_128() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    // Mark the bare source as shallow by writing a boundary file.
+    fs::write(remote.join("shallow"), format!("{}\n", "a".repeat(40))).unwrap();
+    let dest = temp.path().join("clone-reject");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--reject-shallow",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "--reject-shallow against a shallow source must exit 128: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !dest.exists(),
+        "no destination should be created when rejecting a shallow source"
+    );
+}
+
+/// A `--depth 1` clone of a two-commit history writes a `.libra/shallow`
+/// boundary file whose contents round-trip (no half-written state).
+#[test]
+fn shallow_file_consistent_after_clone() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_two_commits(temp.path());
+    let dest = temp.path().join("clone-shallow-file");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--depth",
+            "1",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "shallow clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shallow_file = dest.join(".libra").join("shallow");
+    let contents = fs::read_to_string(&shallow_file)
+        .expect(".libra/shallow should exist after a depth-limited clone");
+    let lines: Vec<&str> = contents.lines().filter(|l| !l.is_empty()).collect();
+    assert!(
+        !lines.is_empty(),
+        "shallow boundary file should record at least one boundary commit"
+    );
+    for line in &lines {
+        assert!(
+            line.len() == 40 || line.len() == 64,
+            "shallow boundary should be a valid object id, got: {line}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch 2a — origin / no-checkout / mirror
+// ---------------------------------------------------------------------------
+
+/// `--no-checkout` writes metadata but skips the working-tree checkout: `.libra`
+/// exists, but no source files are materialized.
+#[test]
+fn no_checkout_skips_worktree() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-nocheckout");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--no-checkout",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--no-checkout clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        dest.join(".libra").exists(),
+        "metadata must still be written"
+    );
+    assert!(
+        !dest.join("README.md").exists(),
+        "--no-checkout must not materialize the working tree"
+    );
+}
+
+/// `--mirror` implies a bare clone: no working tree and no `.libraignore`.
+#[test]
+fn mirror_clone_is_bare() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("mirror.git");
+
+    let output = run_libra(
+        &[
+            "--json",
+            "clone",
+            "--mirror",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--mirror clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    assert_eq!(json["data"]["bare"], true, "--mirror implies a bare clone");
+    assert!(
+        !dest.join(".libraignore").exists(),
+        "bare mirror clone should not create a worktree .libraignore"
+    );
+    assert!(
+        !dest.join("README.md").exists(),
+        "bare mirror clone has no working tree"
+    );
+}
+
+/// `-o/--origin` names the tracked remote and records it in branch config.
+#[test]
+fn origin_name_used_in_branch_config() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-origin");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "-o",
+            "upstream",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "-o upstream clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cfg = run_libra(&["config", "--get", "branch.main.remote"], &dest);
+    assert_eq!(cfg.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&cfg.stdout).trim(),
+        "upstream",
+        "branch.main.remote must record the custom origin name"
+    );
+
+    let url = run_libra(&["config", "--get", "remote.upstream.url"], &dest);
+    assert_eq!(
+        url.status.code(),
+        Some(0),
+        "remote.upstream.url must be written for the custom remote name"
+    );
+}
+
+/// `--json` reports the custom remote name in `origin_name`.
+#[test]
+fn origin_name_in_json_output() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-origin-json");
+
+    let output = run_libra(
+        &[
+            "--json",
+            "clone",
+            "--origin",
+            "upstream",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    assert_eq!(json["data"]["origin_name"], "upstream");
+}
+
+/// Cloud sources reject `--mirror`, `--origin`, and `--no-checkout` (exit 129).
+#[test]
+fn cloud_source_rejects_mirror_origin_no_checkout() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("restored");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--mirror",
+            "libra+cloud://code.example.com/kepler-ledger",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "cloud source must reject --mirror: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Batch 2b — reference / reference-if-able / dissociate
+// ---------------------------------------------------------------------------
+
+/// Clone `remote` into a local reference repository under `base` and return its
+/// path, for use as a `--reference` source.
+fn create_local_reference(base: &Path, remote: &Path) -> std::path::PathBuf {
+    let refrepo = base.join("refrepo");
+    let output = run_libra(
+        &["clone", remote.to_str().unwrap(), refrepo.to_str().unwrap()],
+        base,
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "reference repo clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    refrepo
+}
+
+/// `--reference` copies the source objects into the new clone and the result
+/// passes `libra fsck` (objects readable, no alternates dependency).
+#[test]
+fn reference_clone_objects_readable() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let refrepo = create_local_reference(temp.path(), &remote);
+    let dest = temp.path().join("clone-reference");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--reference",
+            refrepo.to_str().unwrap(),
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--reference clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The clone has no alternates dependency: no info/alternates file is written.
+    assert!(
+        !dest
+            .join(".libra")
+            .join("objects")
+            .join("info")
+            .join("alternates")
+            .exists(),
+        "copy-semantics --reference must not write info/alternates"
+    );
+
+    let fsck = run_libra(&["fsck"], &dest);
+    assert_eq!(
+        fsck.status.code(),
+        Some(0),
+        "fsck must pass after --reference clone: {}",
+        String::from_utf8_lossy(&fsck.stderr)
+    );
+}
+
+/// `--reference-if-able` with a missing path degrades to a normal clone and
+/// surfaces a warning rather than failing.
+#[test]
+fn reference_if_able_missing_path_warns() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-ifable");
+    let missing = temp.path().join("does-not-exist");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--reference-if-able",
+            missing.to_str().unwrap(),
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--reference-if-able with a missing path must still succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reference-if-able") && stderr.contains("not found"),
+        "expected a degrade warning, got: {stderr}"
+    );
+    assert!(
+        dest.join("README.md").exists(),
+        "clone should still complete"
+    );
+}
+
+/// `--dissociate` without a reference is a usage error (exit 129).
+#[test]
+fn dissociate_requires_reference_exits_129() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-dissociate");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--dissociate",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "--dissociate without --reference must exit 129: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `--json` reports `reference_used` and `dissociated`, and preserves the
+/// pre-existing field set.
+#[test]
+fn reference_clone_json_schema() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let refrepo = create_local_reference(temp.path(), &remote);
+    let dest = temp.path().join("clone-reference-json");
+
+    let output = run_libra(
+        &[
+            "--json",
+            "clone",
+            "--dissociate",
+            "--reference",
+            refrepo.to_str().unwrap(),
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--reference --dissociate clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    let data = &json["data"];
+    assert!(
+        data["reference_used"].is_string(),
+        "reference_used should be the canonical reference path"
+    );
+    assert_eq!(data["dissociated"], true);
+    // Backward-compatible fields remain.
+    assert!(data["path"].is_string());
+    assert_eq!(data["bare"], false);
+    assert!(data["repo_id"].is_string());
+}
+
+/// A symlinked reference object source is rejected for security (exit 128).
+#[cfg(unix)]
+#[test]
+fn symlink_object_source_exits_128() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let refrepo = create_local_reference(temp.path(), &remote);
+    let link = temp.path().join("ref-link");
+    symlink(&refrepo, &link).unwrap();
+    let dest = temp.path().join("clone-symlink-ref");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--reference",
+            link.to_str().unwrap(),
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "symlinked --reference source must be rejected with 128: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Cloud sources reject `--reference` (exit 129).
+#[test]
+fn cloud_source_rejects_reference() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("restored-ref");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--reference",
+            "/tmp/whatever",
+            "libra+cloud://code.example.com/kepler-ledger",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "cloud source must reject --reference: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

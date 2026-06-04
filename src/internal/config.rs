@@ -1581,8 +1581,13 @@ async fn local_config_entry_for_target(
 ) -> Result<Option<ConfigKvEntry>> {
     match local_target {
         LocalIdentityTarget::CurrentRepo => {
-            let storage = crate::utils::util::try_get_storage_path(None)
-                .context("failed to resolve current repository storage")?;
+            let storage = match crate::utils::util::try_get_storage_path(None) {
+                Ok(storage) => storage,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => {
+                    return Err(error).context("failed to resolve current repository storage");
+                }
+            };
             let db_path = storage.join(crate::utils::util::DATABASE);
             read_config_entry_from_db_path(&db_path, key).await
         }
@@ -1633,8 +1638,13 @@ async fn local_config_value_for_target(
 ) -> Result<Option<String>> {
     match local_target {
         LocalIdentityTarget::CurrentRepo => {
-            let storage = try_get_storage_path(None)
-                .context("failed to resolve current repository storage")?;
+            let storage = match try_get_storage_path(None) {
+                Ok(storage) => storage,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => {
+                    return Err(error).context("failed to resolve current repository storage");
+                }
+            };
             let db_path = storage.join(DATABASE);
             read_config_value_from_db_path(&db_path, key).await
         }

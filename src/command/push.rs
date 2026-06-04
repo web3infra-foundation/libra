@@ -478,6 +478,26 @@ fn validate_push_args(args: &PushArgs) -> Result<(), PushError> {
     Ok(())
 }
 
+async fn validate_explicit_refspecs_before_discovery(args: &PushArgs) -> Result<(), PushError> {
+    if args.mirror {
+        return Ok(());
+    }
+
+    for refspec in &args.refspecs {
+        match parse_refspec(refspec)? {
+            ParsedRefspec::Update { src, dst } => {
+                let local_ref = resolve_local_ref(&src).await?;
+                normalize_destination_ref(&dst, local_ref.kind)?;
+            }
+            ParsedRefspec::Delete { dst } => {
+                normalize_delete_ref(&dst)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Pure execution
 // ---------------------------------------------------------------------------
@@ -518,6 +538,8 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     if is_local_file_remote(&repo_url) {
         return Err(PushError::UnsupportedLocalFileRemote);
     }
+
+    validate_explicit_refspecs_before_discovery(&args).await?;
 
     // Determine transport: SSH or HTTPS
     let is_ssh = is_ssh_spec(&repo_url);

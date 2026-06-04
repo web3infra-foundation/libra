@@ -6,6 +6,8 @@
 
 #[cfg(target_os = "macos")]
 use std::env;
+#[cfg(target_os = "macos")]
+use std::process::{Command, Stdio};
 use std::{
     collections::HashMap,
     fs, io,
@@ -693,7 +695,8 @@ async fn add_fuse_worktree(
     let id = Uuid::new_v4().simple().to_string();
     let data_dir = fuse_data_root().join(id);
     let upper_dir = data_dir.join("upper");
-    let _lower_dir = data_dir.join("lower");
+    #[cfg(target_os = "macos")]
+    let lower_dir = data_dir.join("lower");
     fs::create_dir_all(&upper_dir)?;
 
     #[cfg(target_os = "macos")]
