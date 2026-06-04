@@ -19,7 +19,7 @@ use git_internal::{
     hash::{ObjectHash, get_hash_kind},
 };
 use object_store::{aws::AmazonS3Builder, local::LocalFileSystem};
-use sea_orm::{DatabaseConnection, DatabaseTransaction};
+use sea_orm::{DatabaseConnection, DatabaseTransaction, DbErr, TransactionTrait};
 use serde::Serialize;
 use url::Url;
 
@@ -1605,7 +1605,12 @@ async fn execute_clone_inner(
 
     // --- Step 2: Remote discovery ---
     if !output.quiet && !output.is_json() {
-        eprintln!("Connecting to {} ...", args.remote_repo);
+        // Redact credentials from the displayed URL (the raw URL is still used
+        // for the actual connection).
+        eprintln!(
+            "Connecting to {} ...",
+            fetch::redact_url_credentials(&args.remote_repo)
+        );
     }
 
     let (remote_client, discovery) = fetch::discover_remote(&remote_repo)
@@ -3328,6 +3333,7 @@ async fn clone_into_destination(
         remote_config.clone(),
         args.branch.clone(),
         checkout_worktree,
+        args.mirror,
     )
     .await
     .map_err(|error| match error {
@@ -3370,7 +3376,8 @@ async fn clone_into_destination(
     Ok(CloneOutput {
         path: local_path.to_string_lossy().into_owned(),
         bare,
-        remote_url: remote_url.to_string(),
+        // Redact any credentials before surfacing the URL in JSON / human output.
+        remote_url: fetch::redact_url_credentials(remote_url),
         branch: setup_result.branch_name,
         object_format,
         repo_id: init_output.repo_id,
@@ -3409,9 +3416,21 @@ pub(crate) async fn setup_repository(
     remote_config: RemoteConfig,
     specified_branch: Option<String>,
     checkout_worktree: bool,
+    mirror: bool,
 ) -> Result<SetupResult, CloneError> {
     let db = get_db_conn_instance().await;
     let remote_head = Head::remote_current_with_conn(&db, &remote_config.name).await;
+
+    // Persist a credential-redacted URL (the live transport already used the raw
+    // URL for discovery/fetch); config_kv is non-vault storage, so a token or
+    // password must never be written there or into the reflog.
+    let redacted_url = fetch::redact_url_credentials(&remote_config.url);
+    // `--mirror` maps every ref; an ordinary clone maps only branch heads.
+    let fetch_refspec = if mirror {
+        "+refs/*:refs/*".to_string()
+    } else {
+        format!("+refs/heads/*:refs/remotes/{}/*", remote_config.name)
+    };
 
     let branch_to_checkout = match specified_branch {
         Some(branch_name) => Some(branch_name),
@@ -3435,7 +3454,7 @@ pub(crate) async fn setup_repository(
         })?;
 
         let action = ReflogAction::Clone {
-            from: remote_config.url.clone(),
+            from: redacted_url.clone(),
         };
         let context = ReflogContext {
             old_oid: ObjectHash::zero_str(get_hash_kind()).to_string(),
@@ -3443,8 +3462,9 @@ pub(crate) async fn setup_repository(
             action,
         };
 
-        // Clone the branch name before moving it into the closure.
+        // Clone the values that move into the transaction closure.
         let branch_name_for_result = branch_name.clone();
+        let remote_name = remote_config.name.clone();
         with_reflog(
             context,
             move |txn: &DatabaseTransaction| {
@@ -3458,28 +3478,52 @@ pub(crate) async fn setup_repository(
                     .await?;
                     Head::update_with_conn(txn, Head::Branch(branch_name.to_owned()), None).await;
 
-                    let merge_ref = format!("refs/heads/{}", branch_name);
-                    let _ = ConfigKv::set_with_conn(
+                    // Config writes propagate (`?`) so any failure rolls back the
+                    // whole reflog transaction — all-or-nothing metadata.
+                    let to_db_err = |error: anyhow::Error| DbErr::Custom(error.to_string());
+                    let merge_ref = format!("refs/heads/{branch_name}");
+                    ConfigKv::set_with_conn(
                         txn,
-                        &format!("branch.{}.merge", branch_name),
+                        &format!("branch.{branch_name}.merge"),
                         &merge_ref,
                         false,
                     )
-                    .await;
-                    let _ = ConfigKv::set_with_conn(
+                    .await
+                    .map_err(to_db_err)?;
+                    ConfigKv::set_with_conn(
                         txn,
-                        &format!("branch.{}.remote", branch_name),
-                        &remote_config.name,
+                        &format!("branch.{branch_name}.remote"),
+                        &remote_name,
                         false,
                     )
-                    .await;
-                    let _ = ConfigKv::set_with_conn(
+                    .await
+                    .map_err(to_db_err)?;
+                    ConfigKv::set_with_conn(
                         txn,
-                        &format!("remote.{}.url", remote_config.name),
-                        &remote_config.url,
+                        &format!("remote.{remote_name}.url"),
+                        &redacted_url,
                         false,
                     )
-                    .await;
+                    .await
+                    .map_err(to_db_err)?;
+                    ConfigKv::set_with_conn(
+                        txn,
+                        &format!("remote.{remote_name}.fetch"),
+                        &fetch_refspec,
+                        false,
+                    )
+                    .await
+                    .map_err(to_db_err)?;
+                    if mirror {
+                        ConfigKv::set_with_conn(
+                            txn,
+                            &format!("remote.{remote_name}.mirror"),
+                            "true",
+                            false,
+                        )
+                        .await
+                        .map_err(to_db_err)?;
+                    }
                     Ok(())
                 })
             },
@@ -3505,22 +3549,46 @@ pub(crate) async fn setup_repository(
             branch_name: Some(branch_name_for_result),
         })
     } else {
-        let _ = ConfigKv::set(
+        // Empty remote / no advertised branch: write only the remote URL and
+        // fetch refspec, inside a single transaction (all-or-nothing). No
+        // synthetic `branch.*` is written — there is no known branch to track.
+        let txn = db.begin().await.map_err(|error| CloneError::SetupFailed {
+            message: error.to_string(),
+        })?;
+        let to_setup_err = |error: anyhow::Error| CloneError::SetupFailed {
+            message: error.to_string(),
+        };
+        ConfigKv::set_with_conn(
+            &txn,
             &format!("remote.{}.url", remote_config.name),
-            &remote_config.url,
+            &redacted_url,
             false,
         )
-        .await;
-
-        let default_branch = "main";
-        let merge_ref = format!("refs/heads/{}", default_branch);
-        let _ = ConfigKv::set(&format!("branch.{default_branch}.merge"), &merge_ref, false).await;
-        let _ = ConfigKv::set(
-            &format!("branch.{default_branch}.remote"),
-            &remote_config.name,
+        .await
+        .map_err(to_setup_err)?;
+        ConfigKv::set_with_conn(
+            &txn,
+            &format!("remote.{}.fetch", remote_config.name),
+            &fetch_refspec,
             false,
         )
-        .await;
+        .await
+        .map_err(to_setup_err)?;
+        if mirror {
+            ConfigKv::set_with_conn(
+                &txn,
+                &format!("remote.{}.mirror", remote_config.name),
+                "true",
+                false,
+            )
+            .await
+            .map_err(to_setup_err)?;
+        }
+        txn.commit()
+            .await
+            .map_err(|error| CloneError::SetupFailed {
+                message: error.to_string(),
+            })?;
 
         Ok(SetupResult { branch_name: None })
     }

@@ -458,6 +458,22 @@ repositories with many long-lived branches where only one branch is needed for t
 workflow (e.g., CI building a specific release branch). Git supports this as well; jj does
 not, because its operation-log model fetches all refs by design.
 
+### Metadata write and credential redaction
+
+Clone metadata is written atomically: the branch ref, `HEAD`, and the
+`branch.<branch>.merge` / `branch.<branch>.remote` / `remote.<name>.url` /
+`remote.<name>.fetch` config entries are all written inside one transaction, so a failure
+rolls every entry back (no half-configured repository). An empty remote writes only
+`remote.<name>.url` and `remote.<name>.fetch` (no synthetic branch tracking). The fetch
+refspec is `+refs/heads/*:refs/remotes/<name>/*` for an ordinary clone and `+refs/*:refs/*`
+for `--mirror` (which also records `remote.<name>.mirror = true`).
+
+Credentials embedded in a clone URL (an HTTP(S) token or password) are redacted from every
+output and persistence surface — the "Connecting to …" line, the stored `remote.<name>.url`,
+the reflog `clone: from <url>` entry, the JSON `remote_url`, and error messages. SSH-style
+`git@host` user prefixes are conventional and preserved. The raw URL is used only for the
+live transport.
+
 ## Parameter Comparison: Libra vs Git vs jj
 
 | Parameter / Flag | Git | jj | Libra |

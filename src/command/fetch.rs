@@ -939,7 +939,8 @@ pub(crate) async fn discover_remote_with_name(
         RemoteClient::from_spec_with_remote(remote_spec, remote_name).map_err(|message| {
             let (kind, reason) = classify_remote_spec_error(remote_spec, &message);
             FetchError::InvalidRemoteSpec {
-                spec: remote_spec.to_string(),
+                // Redact credentials so a token/password never reaches error output.
+                spec: redact_url_credentials(remote_spec),
                 kind,
                 reason,
             }
@@ -948,7 +949,8 @@ pub(crate) async fn discover_remote_with_name(
         .discovery_reference(UploadPack)
         .await
         .map_err(|source| FetchError::Discovery {
-            remote: remote_spec.to_string(),
+            // Redact credentials so a token/password never reaches error output.
+            remote: redact_url_credentials(remote_spec),
             source,
         })?;
     Ok((remote_client, discovery))
@@ -1145,7 +1147,8 @@ pub(crate) async fn fetch_repository_with_result(
         .fetch_objects(&have, &want, &shallow_boundary_oids, &shallow)
         .await
         .map_err(|source| FetchError::FetchObjects {
-            remote: remote_config.url.clone(),
+            // Redact credentials so a token/password never reaches error output.
+            remote: redact_url_credentials(&remote_config.url),
             source,
         })?;
 

@@ -468,6 +468,8 @@ impl SandboxManager {
         let _ = use_linux_sandbox_bwrap;
         #[cfg(not(target_os = "linux"))]
         let _ = linux_sandbox_exe;
+        #[cfg(not(target_os = "linux"))]
+        let _ = &seccomp_policy_path_for_transform;
         #[cfg(not(target_os = "macos"))]
         let _ = deny_read_paths;
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
