@@ -668,8 +668,10 @@ async fn run_cherry_pick(
 
 /// Pick the remaining `todo` of an in-progress sequence (used by `--continue`
 /// after the resolved commit and by `--skip` after the dropped commit). On a
-/// fresh conflict it re-persists state (advancing `current_oid`/`todo`) and
-/// returns `Conflict`; on completion it clears the state row.
+/// fresh conflict — or a non-conflict stop — it re-persists state advancing
+/// `current_oid`/`todo` to the commit that stopped the sequence, so a follow-up
+/// `--skip`/`--abort`/`--continue` operates on the correct position rather than
+/// the stale pre-resume one. On completion it clears the state row.
 async fn resume_picks(
     head_name: &str,
     head_orig: ObjectHash,
@@ -680,17 +682,24 @@ async fn resume_picks(
     picked: &mut Vec<CherryPickEntry>,
 ) -> Result<(), CherryPickError> {
     while let Some(commit_id) = todo.pop_front() {
+        // Persist the position BEFORE attempting each commit so that whatever
+        // happens — clean success, conflict, or a non-conflict hard error — the
+        // `cherry_pick_state` row already reflects `current_oid = commit_id` and
+        // the remaining `todo`. This keeps state accurate even when the pick
+        // fails with a non-conflict error after earlier resumed commits landed.
+        let pending = CherryPickState {
+            head_name: head_name.to_string(),
+            head_orig,
+            current_oid: commit_id,
+            todo: todo.clone(),
+            opts_json: opts_json.to_string(),
+        };
+        pending.save().await.map_err(CherryPickError::SaveFailed)?;
+
         match cherry_pick_single_commit(&commit_id, opts_args, output).await {
             Ok(new_commit_id) => picked.push(make_entry(&commit_id, new_commit_id)),
             Err(CherryPickSingleError::Conflicted(paths)) => {
-                let state = CherryPickState {
-                    head_name: head_name.to_string(),
-                    head_orig,
-                    current_oid: commit_id,
-                    todo,
-                    opts_json: opts_json.to_string(),
-                };
-                state.save().await.map_err(CherryPickError::SaveFailed)?;
+                // State already points at this commit + the remaining todo.
                 return Err(CherryPickError::Conflict {
                     commit: commit_id.to_string(),
                     reason: format!("conflicts in {} path(s)", paths.len()),

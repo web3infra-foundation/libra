@@ -1650,3 +1650,84 @@ fn cherry_pick_continue_retains_gpg_sign() {
         "finalized conflicted commit must stay signed: {prev_body}"
     );
 }
+
+/// A non-conflict hard error part-way through a resumed sequence leaves the
+/// sequencer pointing at the failing commit (not the stale pre-resume one), so
+/// a follow-up `--skip` correctly drops just that commit and finishes.
+#[test]
+fn cherry_pick_resume_nonconflict_error_keeps_accurate_state() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("shared.txt"), "base\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add base");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base shared", "--no-verify"], p),
+        "commit base",
+    );
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "feature"], p),
+        "branch",
+    );
+    // f1: conflicting edit
+    std::fs::write(p.join("shared.txt"), "feature\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add f1");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "f1", "--no-verify"], p),
+        "commit f1",
+    );
+    let f1 = cp_rev_parse(p, "HEAD");
+    // f2: clean (adds extra.txt)
+    std::fs::write(p.join("extra.txt"), "extra\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "extra.txt"], p), "add f2");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "f2", "--no-verify"], p),
+        "commit f2",
+    );
+    let f2 = cp_rev_parse(p, "HEAD");
+    // f3: originally-empty → hard EmptyCommit error when picked without --allow-empty
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "--allow-empty", "-m", "f3 empty", "--no-verify"],
+            p,
+        ),
+        "commit f3 empty",
+    );
+    let f3 = cp_rev_parse(p, "HEAD");
+    // main diverges on shared.txt
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    std::fs::write(p.join("shared.txt"), "main\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add main");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main edit", "--no-verify"], p),
+        "commit main",
+    );
+
+    // Pick all three → f1 conflicts.
+    assert_eq!(
+        run_libra_command(&["cherry-pick", &f1, &f2, &f3], p)
+            .status
+            .code(),
+        Some(128),
+        "f1 conflicts"
+    );
+    // Resolve f1 + continue → f2 applies cleanly, f3 hard-errors (empty commit).
+    std::fs::write(p.join("shared.txt"), "resolved\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "shared.txt"], p),
+        "add resolved",
+    );
+    let cont = run_libra_command(&["cherry-pick", "--continue"], p);
+    assert_eq!(cont.status.code(), Some(129), "f3 empty-commit hard error");
+    assert!(p.join("extra.txt").exists(), "f2 applied before f3 failed");
+
+    // State must now point at f3 (todo empty). `--skip` drops f3 and finishes —
+    // if state were stale (pointing at f1), this would mis-recover.
+    assert_cli_success(&run_libra_command(&["cherry-pick", "--skip"], p), "skip f3");
+    // Sequence complete → state cleared.
+    let after = run_libra_command(&["cherry-pick", "--skip"], p);
+    let (_h, report) = parse_cli_error_stderr(&after.stderr);
+    assert_eq!(
+        report.error_code, "LBR-REPO-003",
+        "state cleared after skip"
+    );
+}
