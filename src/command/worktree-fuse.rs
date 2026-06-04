@@ -701,7 +701,7 @@ async fn add_fuse_worktree(
 
     #[cfg(target_os = "macos")]
     {
-        fs::create_dir_all(&_lower_dir)?;
+        fs::create_dir_all(&lower_dir)?;
         if let Err(err) = populate_macos_fuse_upper_dir(&upper_dir, &checkout_branch).await {
             let _ = fs::remove_dir_all(&data_dir);
             if created_target {
@@ -712,7 +712,7 @@ async fn add_fuse_worktree(
     }
 
     #[cfg(target_os = "macos")]
-    let lower_dirs = vec![_lower_dir.clone()];
+    let lower_dirs = vec![lower_dir.clone()];
     #[cfg(not(target_os = "macos"))]
     let lower_dirs = vec![canonicalize_like_worktree(util::working_dir())?];
 
