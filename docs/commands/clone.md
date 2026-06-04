@@ -200,6 +200,32 @@ restore rejects it.
 libra clone --mirror git@github.com:user/repo.git
 ```
 
+### `--reference <repo>` / `--reference-if-able <repo>`
+
+Reuse objects from a **local** reference repository to reduce work. **Intentionally different
+from Git**: because Libra's object reader has no `info/alternates` fallback, these flags use
+**copy semantics** — the reference's objects are copied into the new clone's tiered storage and
+the clone carries no long-term alternates dependency (no `info/alternates` is written). The source
+must be a real (non-symlink) local libra or git repository; a symlinked source is rejected with
+exit 128, and the path is length-capped at 4 KiB. `--reference-if-able` degrades to a normal clone
+with a warning when the path does not exist, whereas `--reference` fails. `libra+cloud://` rejects both.
+
+```bash
+libra clone --reference /srv/mirror/repo git@github.com:user/repo.git
+libra clone --reference-if-able /srv/mirror/repo git@github.com:user/repo.git
+```
+
+### `--dissociate`
+
+Ensure the clone has no borrow dependency on the reference. With the default copy semantics the
+objects are already fully local, so this confirms that state (reported as `dissociated = true` in
+JSON) — it never leaves a dangling alternates reference. Requires `--reference` or
+`--reference-if-able`; using it alone is a usage error (exit 129).
+
+```bash
+libra clone --dissociate --reference /srv/mirror/repo git@github.com:user/repo.git
+```
+
 ## Common Commands
 
 ```bash

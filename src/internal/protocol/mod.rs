@@ -14,6 +14,7 @@ use crate::{
     internal::branch::Branch,
 };
 
+pub mod clone_support; // local-object reuse helpers for `clone --reference`/`--shared`/`--local`
 pub mod git_client; // to support git server protocol (git://) over TCP
 pub mod https_client;
 pub mod lfs_client;

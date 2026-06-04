@@ -41,7 +41,10 @@ use crate::{
         db::get_db_conn_instance,
         head::Head,
         log::date_parser::parse_date,
-        protocol::{DiscoveryResult, ShallowOptions},
+        protocol::{
+            DiscoveryResult, ShallowOptions,
+            clone_support::{self, CloneSupportError},
+        },
         publish::{
             ai_export::publish_ai_graph_relative_key,
             contract::{
@@ -96,7 +99,9 @@ const CLOUD_CLONE_D1_API_BASE_URL_ENV: &str = "LIBRA_D1_API_BASE_URL";
     libra clone --reject-shallow <url>                    Fail if the source is shallow\n    \
     libra clone -o upstream <url>                         Name the remote 'upstream' instead of 'origin'\n    \
     libra clone --no-checkout <url>                       Clone without checking out the working tree\n    \
-    libra clone --mirror <url>                            Mirror clone (bare, all refs)")]
+    libra clone --mirror <url>                            Mirror clone (bare, all refs)\n    \
+    libra clone --reference /path/to/repo <url>           Copy objects from a local reference repository\n    \
+    libra clone --dissociate --reference /repo <url>      Reference, then ensure no borrow dependency")]
 pub struct CloneArgs {
     /// The remote repository location to clone from, usually a URL with HTTPS or SSH
     pub remote_repo: String,
@@ -154,6 +159,23 @@ pub struct CloneArgs {
     /// refs (`+refs/*:refs/*`); the remote is recorded with `mirror = true`.
     #[clap(long)]
     pub mirror: bool,
+
+    /// Copy objects from a local reference repository into the new clone
+    /// (copy semantics; no long-term alternates dependency). The source must be
+    /// a real (non-symlink) local libra or git repository.
+    #[clap(long, value_name = "repo")]
+    pub reference: Option<String>,
+
+    /// Like `--reference`, but degrade to a normal clone with a warning when the
+    /// reference path does not exist instead of failing.
+    #[clap(long = "reference-if-able", value_name = "repo")]
+    pub reference_if_able: Option<String>,
+
+    /// Ensure the clone has no borrow dependency on the reference. With the
+    /// default copy semantics this confirms the objects are fully local (a
+    /// no-op beyond reporting `dissociated = true`). Requires `--reference`.
+    #[clap(long)]
+    pub dissociate: bool,
 }
 
 const REPO_MARKERS: &[&str] = &["description", "libra.db", "info/exclude", "objects"];
@@ -199,6 +221,14 @@ pub struct CloneOutput {
     /// Omitted (defaults to `origin`) when not customized.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin_name: Option<String>,
+    /// Canonical path of the reference repository whose objects were copied
+    /// (`--reference`/`--reference-if-able`). Omitted when no reference was used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference_used: Option<String>,
+    /// `Some(true)` when `--dissociate` confirmed the clone is fully local with
+    /// no borrow dependency. Omitted when `--dissociate` was not requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dissociated: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -414,6 +444,16 @@ pub enum CloneError {
     InvalidCloudPublishSource { input: String, reason: String },
     #[error("refusing to clone shallow source '{repo}' because --reject-shallow was specified")]
     RejectedShallowSource { repo: String },
+    #[error(
+        "reference object source '{path}' contains a symbolic link, which is blocked for security reasons"
+    )]
+    ReferenceSourceInsecure { path: String },
+    #[error("reference source path is too long ({len} bytes, limit 4096)")]
+    ReferenceSourcePathTooLong { len: usize },
+    #[error("reference source '{path}' is not a libra or git repository")]
+    ReferenceSourceInvalid { path: String },
+    #[error("failed to copy objects from reference source '{path}': {message}")]
+    ReferenceCopyFailed { path: String, message: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -783,6 +823,20 @@ impl From<CloneError> for CliError {
             CloneError::RejectedShallowSource { .. } => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("omit --reject-shallow, or clone from a complete (non-shallow) source"),
+            CloneError::ReferenceSourceInsecure { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::AuthPermissionDenied)
+                .with_hint("use a real (non-symlink) local repository path for --reference"),
+            CloneError::ReferenceSourcePathTooLong { .. } => {
+                CliError::command_usage(error.to_string())
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+                    .with_hint("shorten the --reference path (limit is 4096 bytes)")
+            }
+            CloneError::ReferenceSourceInvalid { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("point --reference at a local libra or git repository"),
+            CloneError::ReferenceCopyFailed { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::IoWriteFailed)
+                .with_hint("check disk space and permissions for the destination object store"),
         }
     }
 }
@@ -984,16 +1038,27 @@ fn validate_clone_args(args: &CloneArgs) -> CliResult<()> {
             || args.no_single_branch
             || args.origin.is_some()
             || args.no_checkout
-            || args.mirror)
+            || args.mirror
+            || args.reference.is_some()
+            || args.reference_if_able.is_some()
+            || args.dissociate)
     {
         return Err(CliError::command_usage(
             "shaping flags (--shallow-since/--shallow-exclude/--reject-shallow/--no-single-branch/\
-             --origin/--no-checkout/--mirror) are not supported with cloud (libra+cloud://) sources",
+             --origin/--no-checkout/--mirror/--reference/--reference-if-able/--dissociate) are not \
+             supported with cloud (libra+cloud://) sources",
         )
         .with_stable_code(StableErrorCode::CliInvalidArguments)
         .with_hint(
             "select cloud refs in the libra+cloud:// URL with ?ref=, and omit Git shaping flags",
         ));
+    }
+
+    if args.dissociate && args.reference.is_none() && args.reference_if_able.is_none() {
+        return Err(CliError::command_usage(
+            "--dissociate requires --reference or --reference-if-able",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
     }
 
     if let Some(since) = &args.shallow_since {
@@ -1053,6 +1118,45 @@ fn source_is_shallow(remote_repo: &str) -> bool {
         }
     }
     false
+}
+
+/// Map a `CloneSupportError` from the reference-object copy path onto the
+/// corresponding `CloneError` so exit codes and hints stay precise.
+fn map_clone_support_error(reference: &str, error: CloneSupportError) -> CloneError {
+    match error {
+        CloneSupportError::Symlink(path) => CloneError::ReferenceSourceInsecure {
+            path: path.display().to_string(),
+        },
+        CloneSupportError::PathTooLong(len) => CloneError::ReferenceSourcePathTooLong { len },
+        CloneSupportError::NotARepository(path) => CloneError::ReferenceSourceInvalid {
+            path: path.display().to_string(),
+        },
+        CloneSupportError::Io(io_error) => CloneError::ReferenceCopyFailed {
+            path: reference.to_string(),
+            message: io_error.to_string(),
+        },
+    }
+}
+
+/// Copy objects from a `--reference`/`--reference-if-able` source into the new
+/// clone's object store (copy semantics; no alternates dependency). Must be
+/// called with the current directory set to the new clone so `path::objects()`
+/// resolves to the destination store. Returns the canonical reference path on
+/// success, or `None` when an `--reference-if-able` source is absent (the caller
+/// degrades to a normal clone with a warning).
+fn copy_reference_objects(reference: &str, if_able: bool) -> Result<Option<String>, CloneError> {
+    let source = Path::new(reference);
+    if if_able && !source.exists() {
+        return Ok(None);
+    }
+    let canonical = clone_support::check_local_security(source)
+        .map_err(|error| map_clone_support_error(reference, error))?;
+    let src_objects = clone_support::resolve_reference_objects_dir(&canonical)
+        .map_err(|error| map_clone_support_error(reference, error))?;
+    let dest_objects = path::objects();
+    clone_support::copy_objects(&src_objects, &dest_objects)
+        .map_err(|error| map_clone_support_error(reference, error))?;
+    Ok(Some(canonical.display().to_string()))
 }
 
 fn display_home_relative(path: &str) -> String {
@@ -1594,6 +1698,8 @@ async fn clone_cloud_publish_into_destination(
             revision: restore_plan.checkout.revision_oid.clone(),
         }),
         origin_name: None,
+        reference_used: None,
+        dissociated: None,
     })
 }
 
@@ -2955,6 +3061,27 @@ async fn clone_into_destination(
     .await
     .map_err(|source| CloneError::InitializeRepository { source })?;
 
+    // --- Reference object reuse (copy semantics) ---
+    // Copy a local reference repository's objects into the new store before the
+    // fetch so they are present locally; the clone never depends on alternates.
+    let mut reference_warnings: Vec<String> = Vec::new();
+    let reference_used = if let Some(reference) = &args.reference {
+        copy_reference_objects(reference, false)?
+    } else if let Some(reference) = &args.reference_if_able {
+        match copy_reference_objects(reference, true)? {
+            Some(path) => Some(path),
+            None => {
+                reference_warnings.push(format!(
+                    "reference-if-able source '{reference}' was not found; \
+                     continuing without object reuse"
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // --- Step 5: Fetch objects ---
     if !output.quiet && !output.is_json() {
         eprintln!("Fetching objects ...");
@@ -3006,6 +3133,7 @@ async fn clone_into_destination(
     .await?;
 
     let mut warnings = init_output.warnings.clone();
+    warnings.extend(reference_warnings);
     let mut gitignore_converted = Vec::new();
     if checkout_worktree {
         let summary = ignore_utils::convert_gitignore_files_to_libraignore(local_path, local_path)
@@ -3046,6 +3174,8 @@ async fn clone_into_destination(
         source_kind: None,
         cloud_site: None,
         origin_name: args.origin.clone(),
+        reference_used,
+        dissociated: args.dissociate.then_some(true),
     })
 }
 
@@ -4450,6 +4580,8 @@ mod tests {
             source_kind: None,
             cloud_site: None,
             origin_name: None,
+            reference_used: None,
+            dissociated: None,
         };
 
         let value = serde_json::to_value(&output).expect("CloneOutput must serialize");
@@ -4520,6 +4652,8 @@ mod tests {
             source_kind: None,
             cloud_site: None,
             origin_name: None,
+            reference_used: None,
+            dissociated: None,
         };
 
         let value = serde_json::to_value(&output).expect("CloneOutput must serialize");

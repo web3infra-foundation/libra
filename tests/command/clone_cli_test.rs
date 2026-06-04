@@ -2174,3 +2174,226 @@ fn cloud_source_rejects_mirror_origin_no_checkout() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Batch 2b — reference / reference-if-able / dissociate
+// ---------------------------------------------------------------------------
+
+/// Clone `remote` into a local reference repository under `base` and return its
+/// path, for use as a `--reference` source.
+fn create_local_reference(base: &Path, remote: &Path) -> std::path::PathBuf {
+    let refrepo = base.join("refrepo");
+    let output = run_libra(
+        &["clone", remote.to_str().unwrap(), refrepo.to_str().unwrap()],
+        base,
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "reference repo clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    refrepo
+}
+
+/// `--reference` copies the source objects into the new clone and the result
+/// passes `libra fsck` (objects readable, no alternates dependency).
+#[test]
+fn reference_clone_objects_readable() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let refrepo = create_local_reference(temp.path(), &remote);
+    let dest = temp.path().join("clone-reference");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--reference",
+            refrepo.to_str().unwrap(),
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--reference clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The clone has no alternates dependency: no info/alternates file is written.
+    assert!(
+        !dest
+            .join(".libra")
+            .join("objects")
+            .join("info")
+            .join("alternates")
+            .exists(),
+        "copy-semantics --reference must not write info/alternates"
+    );
+
+    let fsck = run_libra(&["fsck"], &dest);
+    assert_eq!(
+        fsck.status.code(),
+        Some(0),
+        "fsck must pass after --reference clone: {}",
+        String::from_utf8_lossy(&fsck.stderr)
+    );
+}
+
+/// `--reference-if-able` with a missing path degrades to a normal clone and
+/// surfaces a warning rather than failing.
+#[test]
+fn reference_if_able_missing_path_warns() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-ifable");
+    let missing = temp.path().join("does-not-exist");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--reference-if-able",
+            missing.to_str().unwrap(),
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--reference-if-able with a missing path must still succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reference-if-able") && stderr.contains("not found"),
+        "expected a degrade warning, got: {stderr}"
+    );
+    assert!(
+        dest.join("README.md").exists(),
+        "clone should still complete"
+    );
+}
+
+/// `--dissociate` without a reference is a usage error (exit 129).
+#[test]
+fn dissociate_requires_reference_exits_129() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-dissociate");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--dissociate",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "--dissociate without --reference must exit 129: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `--json` reports `reference_used` and `dissociated`, and preserves the
+/// pre-existing field set.
+#[test]
+fn reference_clone_json_schema() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let refrepo = create_local_reference(temp.path(), &remote);
+    let dest = temp.path().join("clone-reference-json");
+
+    let output = run_libra(
+        &[
+            "--json",
+            "clone",
+            "--dissociate",
+            "--reference",
+            refrepo.to_str().unwrap(),
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--reference --dissociate clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    let data = &json["data"];
+    assert!(
+        data["reference_used"].is_string(),
+        "reference_used should be the canonical reference path"
+    );
+    assert_eq!(data["dissociated"], true);
+    // Backward-compatible fields remain.
+    assert!(data["path"].is_string());
+    assert_eq!(data["bare"], false);
+    assert!(data["repo_id"].is_string());
+}
+
+/// A symlinked reference object source is rejected for security (exit 128).
+#[cfg(unix)]
+#[test]
+fn symlink_object_source_exits_128() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let refrepo = create_local_reference(temp.path(), &remote);
+    let link = temp.path().join("ref-link");
+    symlink(&refrepo, &link).unwrap();
+    let dest = temp.path().join("clone-symlink-ref");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--reference",
+            link.to_str().unwrap(),
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "symlinked --reference source must be rejected with 128: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Cloud sources reject `--reference` (exit 129).
+#[test]
+fn cloud_source_rejects_reference() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("restored-ref");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--reference",
+            "/tmp/whatever",
+            "libra+cloud://code.example.com/kepler-ledger",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "cloud source must reject --reference: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

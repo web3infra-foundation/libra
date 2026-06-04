@@ -145,6 +145,23 @@ libra clone --no-checkout git@github.com:user/repo.git
 libra clone --mirror git@github.com:user/repo.git
 ```
 
+### `--reference <repo>` / `--reference-if-able <repo>`
+
+复用**本地**参考仓库的对象以减少工作量。**与 Git 有意不同**：由于 Libra 的对象读取没有 `info/alternates` 回退，这两个标志采用**复制语义**——把参考仓库的对象复制到新克隆的分层存储，克隆不携带任何长期 alternates 依赖（不写 `info/alternates`）。源必须是真实（非符号链接）的本地 libra 或 git 仓库；符号链接源会以退出码 128 拒绝，路径长度上限为 4 KiB。`--reference-if-able` 在路径不存在时降级为普通克隆并给出警告，而 `--reference` 会失败。`libra+cloud://` 会拒绝二者。
+
+```bash
+libra clone --reference /srv/mirror/repo git@github.com:user/repo.git
+libra clone --reference-if-able /srv/mirror/repo git@github.com:user/repo.git
+```
+
+### `--dissociate`
+
+确保克隆对参考没有借用依赖。在默认复制语义下对象本就完全本地，因此该标志只是确认这一状态（JSON 中报告 `dissociated = true`）——绝不会留下悬空的 alternates 引用。需要 `--reference` 或 `--reference-if-able`；单独使用是用法错误（退出码 129）。
+
+```bash
+libra clone --dissociate --reference /srv/mirror/repo git@github.com:user/repo.git
+```
+
 ## 常用命令
 
 ```bash
