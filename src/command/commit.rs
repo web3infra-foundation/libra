@@ -27,8 +27,8 @@ use sea_orm::ConnectionTrait;
 use serde::Serialize;
 
 use crate::{
-    command::{load_object, save_object_to_storage, status},
-    common_utils::{check_conventional_commits_message, format_commit_msg},
+    command::{get_target_commit, load_object, save_object_to_storage, status},
+    common_utils::{check_conventional_commits_message, format_commit_msg, parse_commit_msg},
     internal::{
         ai::automation::{VCS_EVENT_POST_COMMIT, dispatch_current_repo_vcs_event_to_history},
         branch::Branch,
@@ -76,6 +76,10 @@ EXAMPLES:
     libra commit -s -m 'Add feature'                 Add Signed-off-by trailer
     libra commit -S -m 'Signed release'              Force a vault-backed GPG signature
     libra commit --no-gpg-sign -m 'Quick fix'        Suppress signing for this commit
+    libra commit --fixup HEAD                         Make a fixup! commit for autosquash
+    libra commit --squash HEAD -m 'note'             Make a squash! commit for autosquash
+    libra commit --dry-run --porcelain               Preview the would-commit set (machine-readable)
+    libra commit -v -m 'Add feature'                 Show the staged diff in the editor
     libra commit --allow-empty -m 'Trigger CI'       Create an empty commit
     libra commit --json -m 'Add feature'             Structured JSON output for agents";
 
@@ -161,6 +165,26 @@ pub struct CommitArgs {
     /// Override the commit author. Specify an explicit author using the standard A U Thor <author@example.com> format.
     #[arg(long)]
     pub author: Option<String>,
+
+    /// Construct a `fixup! <subject>` commit targeting <commit> for `rebase --autosquash`
+    #[arg(long, value_name = "commit", conflicts_with_all = ["message", "file", "amend", "squash"])]
+    pub fixup: Option<String>,
+
+    /// Construct a `squash! <subject>` commit targeting <commit> for `rebase --autosquash`
+    #[arg(long, value_name = "commit", conflicts_with_all = ["amend", "file"])]
+    pub squash: Option<String>,
+
+    /// Show what would be committed without creating a commit
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Machine-readable status output (requires --dry-run)
+    #[arg(long, requires = "dry_run")]
+    pub porcelain: bool,
+
+    /// Show a unified diff of the staged changes in the commit message editor
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +260,14 @@ pub enum CommitError {
         "cannot open an editor for the commit message without a terminal; provide a message with -m/-F or use --no-edit"
     )]
     NoEditorAvailable,
+
+    #[error("could not resolve --fixup/--squash target '{target}': {detail}")]
+    AutosquashTargetNotFound { target: String, detail: String },
+
+    #[error(
+        "the --fixup={prefix}:<commit> form is not supported; use a bare commit-ish (e.g. --fixup=<commit>)"
+    )]
+    UnsupportedAutosquashPrefix { prefix: String },
 }
 
 impl From<CommitError> for CliError {
@@ -309,6 +341,14 @@ impl From<CommitError> for CliError {
             CommitError::NoEditorAvailable => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("provide a message with -m/-F, or run in a terminal with an editor"),
+            CommitError::AutosquashTargetNotFound { .. } => CliError::command_usage(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("check the target with 'libra log' and pass an existing commit-ish"),
+            CommitError::UnsupportedAutosquashPrefix { .. } => {
+                CliError::command_usage(error.to_string())
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+                    .with_hint("the amend:/reword: autosquash forms are not supported yet")
+            }
         }
     }
 }
@@ -349,6 +389,41 @@ pub struct CommitOutput {
     pub conventional: Option<bool>,
     /// Whether the commit was vault-GPG-signed
     pub signed: bool,
+}
+
+/// One would-commit file in a `--dry-run` preview, carrying its 2-character
+/// `XY` short-status code (e.g. `"M "`, `"A "`, `"D "`) and workdir path.
+#[derive(Debug, Clone, Serialize)]
+pub struct DryRunFile {
+    pub xy: String,
+    pub path: String,
+}
+
+/// Machine-readable result of `libra commit --dry-run`: the set of files that
+/// *would* be committed, without writing any object/index/reflog state.
+#[derive(Debug, Clone, Serialize)]
+pub struct DryRunOutput {
+    /// Always `true`; marks this payload as a dry-run preview.
+    pub dry_run: bool,
+    /// Whether a real commit would be created (false only never reaches here —
+    /// nothing-to-commit short-circuits to an error before this is built).
+    pub would_commit: bool,
+    /// Files that would be committed, with their `XY` short-status codes.
+    pub files: Vec<DryRunFile>,
+    /// Branch name, or `"detached"` for a detached HEAD.
+    pub branch: String,
+    /// Render hint: emit the porcelain `XY <path>` format. Not serialized — the
+    /// JSON schema is `{dry_run, would_commit, files, branch}`.
+    #[serde(skip)]
+    pub porcelain: bool,
+}
+
+/// The outcome of [`run_commit`]: either a real commit was created, or a
+/// `--dry-run` preview was produced (no objects/refs written).
+#[derive(Debug)]
+pub enum CommitResult {
+    Created(CommitOutput),
+    DryRun(DryRunOutput),
 }
 
 /// Parse author string in format "Name <email>" and return (name, email)
@@ -480,6 +555,24 @@ fn first_message_line(message: &str) -> String {
 /// Git's `wt_status_truncate_message_at_cut_line` semantics.
 const SCISSORS_TOKEN: &str = " >8 ";
 
+/// The cut line appended by `--verbose` above the staged diff. Everything from
+/// this line down is removed before the message is committed.
+const VERBOSE_SCISSORS_LINE: &str = "# ------------------------ >8 ------------------------";
+
+/// Drop the first scissors cut line and everything below it. Used by `--verbose`
+/// so the embedded diff never reaches the final message, regardless of the
+/// configured `--cleanup` mode.
+fn truncate_before_scissors(content: &str) -> String {
+    let mut kept = Vec::new();
+    for line in content.lines() {
+        if line.starts_with("# ") && line.contains(SCISSORS_TOKEN) {
+            break;
+        }
+        kept.push(line);
+    }
+    kept.join("\n")
+}
+
 /// Clean a commit message according to `mode`. `edited` selects the behaviour of
 /// [`CleanupMode::Default`] (`strip` after an editor, `whitespace` otherwise).
 fn cleanup_message(message: &str, mode: CleanupMode, edited: bool) -> String {
@@ -600,6 +693,69 @@ async fn resolve_sign_decision(args: &CommitArgs) -> SignDecision {
     }
 }
 
+/// Resolve a `--fixup`/`--squash` target commit-ish to the first line of its
+/// message (the `fixup!`/`squash!` subject). The `amend:`/`reword:` extended
+/// forms are rejected (deferred); a bare commit-ish is resolved via the shared
+/// `get_target_commit` revision resolver.
+async fn resolve_autosquash_subject(target: &str) -> Result<String, CommitError> {
+    if let Some((prefix, _)) = target.split_once(':')
+        && (prefix == "amend" || prefix == "reword")
+    {
+        return Err(CommitError::UnsupportedAutosquashPrefix {
+            prefix: prefix.to_string(),
+        });
+    }
+    let oid =
+        get_target_commit(target)
+            .await
+            .map_err(|e| CommitError::AutosquashTargetNotFound {
+                target: target.to_string(),
+                detail: e.to_string(),
+            })?;
+    let commit =
+        load_object::<Commit>(&oid).map_err(|e| CommitError::AutosquashTargetNotFound {
+            target: target.to_string(),
+            detail: e.to_string(),
+        })?;
+    // Strip any `gpgsig` block so the subject is the real first message line.
+    let (message, _) = parse_commit_msg(&commit.message);
+    Ok(first_message_line(message))
+}
+
+/// Build the autosquash initial message from `--fixup`/`--squash`, or `None`
+/// when neither flag is set. `--fixup` yields `fixup! <subject>` (no body);
+/// `--squash` yields `squash! <subject>` with any `-m` appended as the body.
+async fn resolve_autosquash_initial(args: &CommitArgs) -> Result<Option<String>, CommitError> {
+    if let Some(target) = &args.fixup {
+        let subject = resolve_autosquash_subject(target).await?;
+        Ok(Some(format!("fixup! {subject}")))
+    } else if let Some(target) = &args.squash {
+        let subject = resolve_autosquash_subject(target).await?;
+        let mut message = format!("squash! {subject}");
+        if let Some(body) = &args.message {
+            message.push_str("\n\n");
+            message.push_str(body);
+        }
+        Ok(Some(message))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Whether `--verbose` is active for this invocation: the `-v` flag, or the
+/// `commit.verbose=true` config default.
+async fn resolve_verbose(args: &CommitArgs) -> bool {
+    if args.verbose {
+        return true;
+    }
+    read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "commit.verbose")
+        .await
+        .ok()
+        .flatten()
+        .map(|v| v.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Launch the editor on `file_path`, splitting the command into argv (program +
 /// leading args) and appending the file path as the last argument. Never wrapped
 /// in a shell, preventing command injection.
@@ -709,19 +865,24 @@ async fn resolve_commit_message(
     output: &OutputConfig,
     amend_parent_message: Option<&str>,
     skip_commit_msg: bool,
+    autosquash_initial: Option<String>,
+    verbose: bool,
 ) -> Result<String, CommitError> {
     let has_explicit_message = args.message.is_some() || args.file.is_some();
 
     // Load any template once (used both for the initial content and the
-    // prepare-commit-msg `source` label).
-    let template_content = if has_explicit_message {
+    // prepare-commit-msg `source` label). Autosquash overrides any template.
+    let template_content = if has_explicit_message || autosquash_initial.is_some() {
         None
     } else {
         load_template_content(args).await?
     };
 
-    // 1. Initial content (precedence: -m > -F > template > amend-parent > empty).
-    let mut content = if let Some(msg) = &args.message {
+    // 1. Initial content. Autosquash (`fixup!`/`squash!`) takes precedence;
+    //    otherwise -m > -F > template > amend-parent > empty.
+    let mut content = if let Some(initial) = &autosquash_initial {
+        initial.clone()
+    } else if let Some(msg) = &args.message {
         msg.clone()
     } else if let Some(file_path) = &args.file {
         tokio::fs::read_to_string(file_path)
@@ -739,7 +900,7 @@ async fn resolve_commit_message(
     };
 
     // The prepare-commit-msg `source` argument, aligned with Git.
-    let source = if has_explicit_message {
+    let source = if autosquash_initial.is_some() || has_explicit_message {
         "message"
     } else if template_content.is_some() {
         "template"
@@ -757,12 +918,32 @@ async fn resolve_commit_message(
     std::fs::write(&file_path, &content)
         .map_err(|e| CommitError::EditorFailed(format!("failed to write edit file: {e}")))?;
 
-    // 2. Editor. `--edit` forces it; `--no-edit` suppresses it; otherwise it runs
-    //    only when no explicit message was supplied.
+    // With --verbose, append the staged diff below a scissors cut line so the
+    // editor shows it; it is stripped again before the commit (see step 4).
+    if verbose {
+        let diff = crate::command::diff::staged_diff_text().await;
+        let mut edit_file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file_path)
+            .map_err(|e| CommitError::EditorFailed(format!("failed to open edit file: {e}")))?;
+        write!(
+            edit_file,
+            "\n{VERBOSE_SCISSORS_LINE}\n# Do not modify or remove the line above.\n# Everything below it will be ignored.\n{diff}\n"
+        )
+        .map_err(|e| CommitError::EditorFailed(format!("failed to write edit file: {e}")))?;
+    }
+
+    // 2. Editor. `--edit` forces it; `--no-edit` suppresses it; `--fixup` uses the
+    //    generated message directly; `--squash` opens the editor for the body;
+    //    otherwise it runs only when no explicit message was supplied.
     let launch_editor = if args.edit {
         true
-    } else if args.no_edit {
+    } else if args.no_edit || args.fixup.is_some() {
+        // `--no-edit` suppresses the editor; `--fixup` uses its generated message directly.
         false
+    } else if args.squash.is_some() {
+        // `--squash` opens the editor so the user can add the squash body.
+        true
     } else {
         !has_explicit_message
     };
@@ -790,7 +971,11 @@ async fn resolve_commit_message(
     content = std::fs::read_to_string(&file_path)
         .map_err(|e| CommitError::EditorFailed(format!("failed to read edit file: {e}")))?;
 
-    // 4. Cleanup.
+    // 4. Cleanup. With --verbose, always drop the scissors block first so the
+    //    embedded diff never survives, regardless of the configured mode.
+    if verbose {
+        content = truncate_before_scissors(&content);
+    }
     let cleaned = cleanup_message(&content, args.cleanup, edited);
     std::fs::write(&file_path, &cleaned)
         .map_err(|e| CommitError::EditorFailed(format!("failed to write edit file: {e}")))?;
@@ -808,15 +993,22 @@ async fn resolve_commit_message(
 pub async fn run_commit(
     args: CommitArgs,
     output: &OutputConfig,
-) -> Result<CommitOutput, CommitError> {
+) -> Result<CommitResult, CommitError> {
+    // `--dry-run` previews the would-commit set and returns before writing any
+    // object/index/reflog state (no auto-stage, no tree, no commit object).
+    if args.dry_run {
+        return run_dry_run(&args).await.map(CommitResult::DryRun);
+    }
+
     let is_amend = args.amend;
     let is_signoff = args.signoff;
     let is_conventional = args.conventional;
     // `--disable-pre` only skips pre-commit; `--no-verify` skips pre-commit AND
-    // the commit-msg/prepare-commit-msg hooks and the conventional check.
+    // the commit-msg/prepare-commit-msg hooks and the conventional check. An
+    // autosquash `fixup!` message is also exempt from the conventional check.
     let skip_pre_commit = args.disable_pre || args.no_verify;
     let skip_commit_msg = args.no_verify;
-    let skip_conventional_check = args.no_verify;
+    let skip_conventional_check = args.no_verify || args.fixup.is_some();
 
     // Auto-stage tracked modifications/deletions (git commit -a)
     let auto_stage_applied = if args.all {
@@ -874,12 +1066,19 @@ pub async fn run_commit(
         (parents_commit_ids, None)
     };
 
+    // Resolve `--fixup`/`--squash` autosquash message and `--verbose` before
+    // building the message (an unknown target aborts before any writes).
+    let autosquash_initial = resolve_autosquash_initial(&args).await?;
+    let verbose = resolve_verbose(&args).await;
+
     // Resolve the cleaned/hooked commit message from all sources.
     let message = resolve_commit_message(
         &args,
         output,
         amend_parent_message.as_deref(),
         skip_commit_msg,
+        autosquash_initial,
+        verbose,
     )
     .await?;
 
@@ -966,16 +1165,84 @@ pub async fn run_commit(
     } else {
         None
     };
-    Ok(build_commit_output(
-        &commit,
-        &commit_message,
-        &staged_changes,
-        is_amend,
-        is_signoff,
-        conventional_result,
-        gpg_sig.is_some(),
-    )
-    .await)
+    Ok(CommitResult::Created(
+        build_commit_output(
+            &commit,
+            &commit_message,
+            &staged_changes,
+            is_amend,
+            is_signoff,
+            conventional_result,
+            gpg_sig.is_some(),
+        )
+        .await,
+    ))
+}
+
+/// Build a `--dry-run` preview of the would-commit set without writing any
+/// object/index/reflog state. Returns [`CommitError::NothingToCommit`] /
+/// [`CommitError::NothingToCommitNoTracked`] (exit 128) when nothing would be
+/// committed, matching the real commit path's exit codes.
+async fn run_dry_run(args: &CommitArgs) -> Result<DryRunOutput, CommitError> {
+    let index = Index::load(path::index()).map_err(|e| CommitError::IndexLoad(e.to_string()))?;
+    let tracked_entries = index.tracked_entries(0);
+
+    // Staged set (index vs HEAD).
+    let mut staged = status::changes_to_be_committed_safe()
+        .await
+        .map_err(|e| CommitError::StagedChanges(e.to_string()))?;
+
+    // With -a, fold in the tracked modifications/deletions that *would* be
+    // staged — read-only, never persisting index/blobs. This mirrors
+    // `auto_stage_tracked_changes()` (modified + deleted only; never untracked).
+    if args.all {
+        let pending =
+            status::changes_to_be_staged().map_err(|e| CommitError::AutoStage(e.to_string()))?;
+        for file in pending.modified {
+            if !staged.modified.contains(&file) && !staged.new.contains(&file) {
+                staged.modified.push(file);
+            }
+        }
+        for file in pending.deleted {
+            if !staged.deleted.contains(&file) {
+                staged.deleted.push(file);
+            }
+        }
+    }
+
+    // Committability mirrors the real path: nothing staged + no --allow-empty +
+    // not an amend ⇒ nothing to commit (exit 128).
+    if staged.is_empty() && !args.allow_empty && !args.amend {
+        return if tracked_entries.is_empty() {
+            Err(CommitError::NothingToCommitNoTracked)
+        } else {
+            Err(CommitError::NothingToCommit)
+        };
+    }
+
+    // Build the would-commit file list with `status`'s XY short-status codes;
+    // untracked files stay advisory and are excluded from the would-commit set.
+    let empty = status::Changes::default();
+    let files = status::generate_short_format_status(&staged, &empty)
+        .into_iter()
+        .map(|(path, x, y)| DryRunFile {
+            xy: format!("{x}{y}"),
+            path: path.display().to_string(),
+        })
+        .collect();
+
+    let branch = match Head::current().await {
+        Head::Branch(name) => name,
+        Head::Detached(_) => "detached".to_string(),
+    };
+
+    Ok(DryRunOutput {
+        dry_run: true,
+        would_commit: true,
+        files,
+        branch,
+        porcelain: args.porcelain,
+    })
 }
 
 /// Run the pre-commit hook, respecting OutputConfig for I/O isolation.
@@ -1089,8 +1356,51 @@ async fn build_commit_output(
     }
 }
 
-/// Render commit output according to OutputConfig (human / JSON / machine).
-fn render_commit_output(result: &CommitOutput, output: &OutputConfig) -> CliResult<()> {
+/// Render the outcome of [`run_commit`] (a created commit or a dry-run preview).
+fn render_commit_output(result: &CommitResult, output: &OutputConfig) -> CliResult<()> {
+    match result {
+        CommitResult::Created(created) => render_created_commit(created, output),
+        CommitResult::DryRun(dry_run) => render_dry_run(dry_run, output),
+    }
+}
+
+/// Render a `--dry-run` preview (porcelain `XY <path>` lines, JSON envelope, or a
+/// human-readable would-commit list).
+fn render_dry_run(result: &DryRunOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("commit", result, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+
+    let stdout = std::io::stdout();
+    let mut writer = stdout.lock();
+    if result.porcelain {
+        // Machine-readable: reuse `status`'s `XY <path>` byte format.
+        for file in &result.files {
+            writeln!(writer, "{} {}", file.xy, file.path)
+                .map_err(|e| CliError::io(format!("failed to write dry-run status: {e}")))?;
+        }
+        return Ok(());
+    }
+
+    writeln!(writer, "Changes to be committed:")
+        .map_err(|e| CliError::io(format!("failed to write dry-run status: {e}")))?;
+    for file in &result.files {
+        let label = match file.xy.chars().next() {
+            Some('A') => "new file",
+            Some('D') => "deleted",
+            _ => "modified",
+        };
+        writeln!(writer, "\t{label}: {}", file.path)
+            .map_err(|e| CliError::io(format!("failed to write dry-run status: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Render a successfully created commit according to OutputConfig.
+fn render_created_commit(result: &CommitOutput, output: &OutputConfig) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("commit", result, output);
     }
@@ -1157,7 +1467,10 @@ pub async fn execute(args: CommitArgs) {
 pub async fn execute_safe(args: CommitArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_commit(args, output).await.map_err(CliError::from)?;
     render_commit_output(&result, output)?;
-    dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_COMMIT).await;
+    // A `--dry-run` writes nothing, so it must not fire post-commit automation.
+    if matches!(result, CommitResult::Created(_)) {
+        dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_COMMIT).await;
+    }
     Ok(())
 }
 

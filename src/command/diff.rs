@@ -668,6 +668,28 @@ fn format_unified_diff(result: &DiffOutput) -> String {
         .join("\n")
 }
 
+/// Produce the unified diff text of staged changes (index vs HEAD), for
+/// `commit --verbose` to embed under the scissors cut line. Best-effort: returns
+/// an empty string when the diff cannot be computed.
+pub async fn staged_diff_text() -> String {
+    let args = DiffArgs {
+        old: None,
+        new: None,
+        staged: true,
+        pathspec: Vec::new(),
+        algorithm: Some("histogram".to_string()),
+        output: None,
+        name_only: false,
+        name_status: false,
+        numstat: false,
+        stat: false,
+    };
+    match run_diff(&args).await {
+        Ok(result) => format_unified_diff(&result),
+        Err(_) => String::new(),
+    }
+}
+
 fn maybe_colorize_diff(diff_text: &str, should_colorize: bool) -> String {
     if should_colorize {
         colorize_diff(diff_text)
