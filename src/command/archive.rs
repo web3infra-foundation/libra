@@ -1,11 +1,16 @@
 //! Command-line surface for creating archives from committed tree snapshots.
 
-use std::path::{Component, Path, PathBuf};
+use std::{
+    fs::File,
+    io::{BufWriter, Write},
+    path::{Component, Path, PathBuf},
+};
 
 use clap::Parser;
 use git_internal::{
     hash::ObjectHash,
     internal::object::{
+        blob::Blob,
         commit::Commit,
         tree::{Tree, TreeItemMode},
     },
@@ -183,21 +188,164 @@ fn validate_prefix(prefix: Option<&str>) -> Result<Option<PathBuf>, CliError> {
     Ok(Some(path.to_path_buf()))
 }
 
+/// Apply the user-requested prefix to a path within the archive.
+fn apply_prefix(prefix: Option<&Path>, path: &Path) -> PathBuf {
+    match prefix {
+        Some(prefix) => prefix.join(path),
+        None => path.to_path_buf(),
+    }
+}
+
+/// Load blob content for a given hash.
+fn load_blob_content(hash: &ObjectHash) -> Result<Vec<u8>, CliError> {
+    let blob: Blob = load_object(hash).map_err(|error| {
+        CliError::fatal(format!("failed to load blob {hash}: {error}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    Ok(blob.data)
+}
+
+/// Determine the UNIX mode bits for a tree entry stored in a tar header.
+fn tar_entry_mode(mode: &TreeItemMode) -> u32 {
+    match mode {
+        TreeItemMode::Blob => 0o644,
+        TreeItemMode::BlobExecutable => 0o755,
+        TreeItemMode::Link => 0o644,
+        TreeItemMode::Tree => 0o755,
+        TreeItemMode::Commit => 0o644,
+    }
+}
+
+/// Determine the tar entry type for a tree item.
+fn tar_entry_type(mode: &TreeItemMode) -> tar::EntryType {
+    match mode {
+        TreeItemMode::Link => tar::EntryType::Symlink,
+        _ => tar::EntryType::Regular,
+    }
+}
+
+/// Write a tar archive of the given entries to `writer`.
+fn write_tar_archive<W: Write>(
+    entries: &[ArchiveEntry],
+    prefix: Option<&Path>,
+    writer: W,
+) -> Result<(), CliError> {
+    let mut builder = tar::Builder::new(writer);
+
+    for entry in entries {
+        let archive_path = apply_prefix(prefix, &entry.path);
+        let data = load_blob_content(&entry.hash)?;
+        let mode = tar_entry_mode(&entry.mode);
+        let entry_type = tar_entry_type(&entry.mode);
+
+        let mut header = tar::Header::new_gnu();
+        header.set_path(&archive_path).map_err(|error| {
+            CliError::fatal(format!(
+                "invalid archive path '{}': {error}",
+                archive_path.display()
+            ))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+        })?;
+        header.set_size(data.len() as u64);
+        header.set_mode(mode);
+        header.set_mtime(0);
+        header.set_entry_type(entry_type);
+        header.set_cksum();
+
+        if entry_type == tar::EntryType::Symlink {
+            let link_target = String::from_utf8(data).map_err(|error| {
+                CliError::fatal(format!(
+                    "symlink target for '{}' is not valid UTF-8: {error}",
+                    archive_path.display()
+                ))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+            })?;
+            header.set_link_name(&link_target).map_err(|error| {
+                CliError::fatal(format!(
+                    "invalid symlink target for '{}': {error}",
+                    archive_path.display()
+                ))
+                .with_stable_code(StableErrorCode::IoWriteFailed)
+            })?;
+            header.set_size(0);
+            builder.append(&header, std::io::empty()).map_err(|error| {
+                CliError::fatal(format!(
+                    "failed to write symlink '{}': {error}",
+                    archive_path.display()
+                ))
+                .with_stable_code(StableErrorCode::IoWriteFailed)
+            })?;
+            continue;
+        }
+
+        builder.append(&header, data.as_slice()).map_err(|error| {
+            CliError::fatal(format!(
+                "failed to write entry '{}': {error}",
+                archive_path.display()
+            ))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+        })?;
+    }
+
+    builder.finish().map_err(|error| {
+        CliError::fatal(format!("failed to finalize archive: {error}"))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+    })?;
+
+    Ok(())
+}
+
+/// Open the output destination: either a file path or stdout.
+fn open_output(path: Option<&str>) -> Result<Box<dyn Write>, CliError> {
+    match path {
+        Some(path) => {
+            let file = File::create(path).map_err(|error| {
+                CliError::fatal(format!("failed to create output file '{path}': {error}"))
+                    .with_stable_code(StableErrorCode::IoWriteFailed)
+            })?;
+            Ok(Box::new(BufWriter::new(file)))
+        }
+        None => Ok(Box::new(std::io::stdout())),
+    }
+}
+
+/// Create an archive from tree entries, dispatching to the correct writer.
+fn create_archive(
+    format: ArchiveFormat,
+    entries: &[ArchiveEntry],
+    prefix: Option<&Path>,
+    output: Option<&str>,
+) -> Result<(), CliError> {
+    match format {
+        ArchiveFormat::Tar => {
+            let writer = open_output(output)?;
+            write_tar_archive(entries, prefix, writer)
+        }
+        ArchiveFormat::TarGz | ArchiveFormat::TarBz2 | ArchiveFormat::Zip => {
+            Err(CliError::failure(format!(
+                "archive format '{format:?}' is not implemented yet"
+            ))
+            .with_stable_code(StableErrorCode::Unsupported))
+        }
+    }
+}
+
 /// # Side Effects
 ///
-/// Reads commit and tree objects from the local object store.
+/// Reads commit, tree, and blob objects from the local object store. Writes tar
+/// archive bytes to stdout or the requested output file.
 ///
 /// # Errors
 ///
 /// Returns `CliInvalidArguments` for unsupported formats or unsafe prefixes.
 /// Returns `CliInvalidTarget` when the tree-ish cannot be resolved.
 /// Returns `RepoCorrupt` when referenced commit or tree objects cannot be read.
-/// Returns `Unsupported` until archive creation is implemented.
+/// Returns `Unsupported` for non-tar archive formats until later commits.
 pub async fn execute_safe(args: ArchiveArgs, _output: &OutputConfig) -> CliResult<()> {
-    let _format = ArchiveFormat::parse_strict(&args.format).map_err(|message| {
+    let format = ArchiveFormat::parse_strict(&args.format).map_err(|message| {
         CliError::command_usage(message).with_stable_code(StableErrorCode::CliInvalidArguments)
     })?;
-    let _prefix = validate_prefix(args.prefix.as_deref())?;
+    let prefix = validate_prefix(args.prefix.as_deref())?;
     let entries = resolve_entries(&args.treeish).await?;
 
     if entries.is_empty() {
@@ -209,10 +357,7 @@ pub async fn execute_safe(args: ArchiveArgs, _output: &OutputConfig) -> CliResul
     }
     debug_assert!(entries.iter().all(entry_has_archive_metadata));
 
-    Err(CliError::failure(
-        "archive command is registered but archive creation is not implemented yet",
-    )
-    .with_stable_code(StableErrorCode::Unsupported))
+    create_archive(format, &entries, prefix.as_deref(), args.output.as_deref())
 }
 
 #[cfg(test)]
@@ -286,6 +431,18 @@ mod tests {
     }
 
     #[test]
+    fn apply_prefix_prepends_relative_prefix() {
+        assert_eq!(
+            apply_prefix(Some(Path::new("release")), Path::new("src/lib.rs")),
+            PathBuf::from("release/src/lib.rs")
+        );
+        assert_eq!(
+            apply_prefix(None, Path::new("src/lib.rs")),
+            PathBuf::from("src/lib.rs")
+        );
+    }
+
+    #[test]
     fn collect_tree_entries_keeps_blob_metadata() {
         let hash =
             ObjectHash::from_str("8ab686eafeb1f44702738c8b0f24f2567c36da6d").expect("valid hash");
@@ -321,5 +478,22 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, PathBuf::from("README.md"));
+    }
+
+    #[test]
+    fn tar_helpers_map_supported_file_modes() {
+        assert_eq!(tar_entry_mode(&TreeItemMode::Blob), 0o644);
+        assert_eq!(tar_entry_mode(&TreeItemMode::BlobExecutable), 0o755);
+        assert_eq!(tar_entry_type(&TreeItemMode::Blob), tar::EntryType::Regular);
+        assert_eq!(tar_entry_type(&TreeItemMode::Link), tar::EntryType::Symlink);
+    }
+
+    #[test]
+    fn write_tar_archive_accepts_empty_entries_for_writer_helper() {
+        let mut buf = Vec::new();
+
+        write_tar_archive(&[], None, &mut buf).expect("empty tar should finalize");
+
+        assert!(!buf.is_empty());
     }
 }
