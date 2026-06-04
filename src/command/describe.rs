@@ -9,7 +9,10 @@ use git_internal::{
 use serde::Serialize;
 
 use crate::{
-    command::load_object,
+    command::{
+        load_object,
+        status::{changes_to_be_committed_safe, changes_to_be_staged},
+    },
     internal::tag::{self, TagObject},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -27,6 +30,9 @@ EXAMPLES:
     libra describe --abbrev 12      Use 12 hex digits instead of the default 7 in the hash portion
     libra describe --exact-match    Only succeed when a tag points at the commit exactly
     libra describe --first-parent   Follow only the first parent of merge commits
+    libra describe --match 'v1.*'   Only consider tags whose name matches the glob
+    libra describe --exclude '*rc*' Skip tags whose name matches the glob
+    libra describe --dirty          Append '-dirty' when the worktree has tracked changes
     libra describe --json           Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -54,12 +60,29 @@ pub struct DescribeArgs {
     /// Follow only the first parent of merge commits when walking history
     #[clap(long = "first-parent")]
     pub first_parent: bool,
+
+    /// Only consider tags whose name matches the glob (repeatable; OR semantics)
+    #[clap(long = "match", value_name = "PATTERN")]
+    pub match_patterns: Vec<String>,
+
+    /// Exclude tags whose name matches the glob (repeatable; takes precedence over --match)
+    #[clap(long, value_name = "PATTERN")]
+    pub exclude: Vec<String>,
+
+    /// Append a marker (default `-dirty`) when the worktree has tracked changes
+    #[clap(long, value_name = "MARK", num_args = 0..=1, require_equals = true)]
+    pub dirty: Option<Option<String>>,
 }
 
 /// Maximum number of commits the describe walk visits before failing. Guards
 /// against unbounded traversal (and OOM) on very deep histories; when the cap is
 /// hit without `--always`, the command fails with [`DescribeError::TraversalLimitExceeded`].
 const MAX_WALK: usize = 10_000;
+
+/// Maximum byte length accepted for a `--match`/`--exclude` glob pattern, guarding
+/// against pathological inputs. Longer patterns are rejected up front with
+/// [`DescribeError::InvalidArgument`] (`CliInvalidArguments`, exit 129).
+const MAX_GLOB_LEN: usize = 256;
 
 // Entry in tag lookup map
 struct TagInfo {
@@ -77,6 +100,8 @@ struct DescribeOutput {
     abbreviated_commit: Option<String>,
     exact_match: bool,
     used_always: bool,
+    dirty: bool,
+    dirty_suffix: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -97,6 +122,8 @@ enum DescribeError {
         "history too deep: walked more than {limit} commits; pass --always or narrow the range"
     )]
     TraversalLimitExceeded { limit: usize },
+    #[error("{0}")]
+    InvalidArgument(String),
 }
 
 impl From<CommitBaseError> for DescribeError {
@@ -139,7 +166,12 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
     let resolved_commit = start_hash.to_string();
     let abbrev = args.abbrev.unwrap_or(7);
 
-    // 2. Load all tags and build a mapping table: commit hash -> tag info (name, is_annotated)
+    // Compile the --match / --exclude name filters once. Overly long or malformed
+    // patterns are rejected up front as usage errors (CliInvalidArguments, 129).
+    let matchers = compile_globs(&args.match_patterns)?;
+    let excluders = compile_globs(&args.exclude)?;
+
+    // Load all tags and build a mapping table: commit hash -> tag info (name, is_annotated)
     let all_tags = tag::list()
         .await
         .map_err(|e| DescribeError::CorruptReference(e.to_string()))?;
@@ -151,6 +183,10 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
         // Only include light-weight tags if --tags is specified
         if is_annotated || args.tags {
             let tag_name = t.name;
+            // Apply --match / --exclude name filters (exclude wins over match).
+            if !tag_passes_filters(&tag_name, &matchers, &excluders) {
+                continue;
+            }
             let target_commit_hash = match t.object {
                 TagObject::Commit(c) => c.id,
                 TagObject::Tag(tg) => tg.object_hash,
@@ -172,57 +208,60 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
         }
     }
 
-    // 3. `--exact-match` short-circuits: only a distance-0 tag describes the
-    //    target; anything else is a (run-time) failure, matching Git.
-    if args.exact_match {
-        return match tag_map.get(&start_hash) {
-            Some(tag_info) => Ok(describe_output(
-                input,
-                resolved_commit,
-                &tag_info.name,
-                0,
-                abbrev,
-            )),
-            None => Err(DescribeError::NoNamesFound),
+    // Build the base description. `--exact-match` short-circuits: only a distance-0
+    // tag describes the target; anything else is a (run-time) failure, matching Git.
+    let mut output = if args.exact_match {
+        match tag_map.get(&start_hash) {
+            Some(tag_info) => describe_output(input, resolved_commit, &tag_info.name, 0, abbrev),
+            None => return Err(DescribeError::NoNamesFound),
+        }
+    } else {
+        // Search for the closest tag using a bounded BFS. The commit loader is
+        // injected so the walk can be unit-tested against an in-memory graph.
+        let load = |hash: &ObjectHash| -> Result<Vec<ObjectHash>, DescribeError> {
+            let commit =
+                load_object::<Commit>(hash).map_err(|error| DescribeError::LoadCommit {
+                    commit_id: hash.to_string(),
+                    detail: error.to_string(),
+                })?;
+            Ok(commit.parent_commit_ids)
         };
-    }
 
-    // 4. Search for the closest tag using a bounded BFS. The commit loader is
-    //    injected so the walk can be unit-tested against an in-memory graph.
-    let load = |hash: &ObjectHash| -> Result<Vec<ObjectHash>, DescribeError> {
-        let commit = load_object::<Commit>(hash).map_err(|error| DescribeError::LoadCommit {
-            commit_id: hash.to_string(),
-            detail: error.to_string(),
-        })?;
-        Ok(commit.parent_commit_ids)
+        match find_nearest_tag(start_hash, &tag_map, args.first_parent, MAX_WALK, load) {
+            Ok(Some((tag_name, dist))) => {
+                describe_output(input, resolved_commit, &tag_name, dist, abbrev)
+            }
+            Ok(None) => {
+                if args.always {
+                    always_output(input, resolved_commit, abbrev)
+                } else {
+                    return Err(DescribeError::NoNamesFound);
+                }
+            }
+            // A traversal-cap hit still honors `--always` (abbreviated fallback);
+            // without it, surface the dedicated deep-history error.
+            Err(DescribeError::TraversalLimitExceeded { limit }) => {
+                if args.always {
+                    always_output(input, resolved_commit, abbrev)
+                } else {
+                    return Err(DescribeError::TraversalLimitExceeded { limit });
+                }
+            }
+            Err(other) => return Err(other),
+        }
     };
 
-    match find_nearest_tag(start_hash, &tag_map, args.first_parent, MAX_WALK, load) {
-        Ok(Some((tag_name, dist))) => Ok(describe_output(
-            input,
-            resolved_commit,
-            &tag_name,
-            dist,
-            abbrev,
-        )),
-        Ok(None) => {
-            if args.always {
-                Ok(always_output(input, resolved_commit, abbrev))
-            } else {
-                Err(DescribeError::NoNamesFound)
-            }
-        }
-        // A traversal-cap hit still honors `--always` (abbreviated fallback);
-        // without it, surface the dedicated deep-history error.
-        Err(DescribeError::TraversalLimitExceeded { limit }) => {
-            if args.always {
-                Ok(always_output(input, resolved_commit, abbrev))
-            } else {
-                Err(DescribeError::TraversalLimitExceeded { limit })
-            }
-        }
-        Err(other) => Err(other),
+    // Apply the `--dirty` suffix when the worktree carries tracked changes.
+    if let Some(mark) = args.dirty.as_ref()
+        && worktree_is_dirty().await
+    {
+        let suffix = mark.clone().unwrap_or_else(|| "-dirty".to_string());
+        output.result.push_str(&suffix);
+        output.dirty = true;
+        output.dirty_suffix = Some(suffix);
     }
+
+    Ok(output)
 }
 
 /// Walk the commit DAG breadth-first from `start`, returning the nearest tag
@@ -292,6 +331,8 @@ fn always_output(input: String, resolved_commit: String, abbrev: usize) -> Descr
         abbreviated_commit: Some(abbreviated),
         exact_match: false,
         used_always: true,
+        dirty: false,
+        dirty_suffix: None,
     }
 }
 
@@ -326,6 +367,8 @@ fn describe_output(
         abbreviated_commit,
         exact_match: distance == 0,
         used_always: false,
+        dirty: false,
+        dirty_suffix: None,
     }
 }
 
@@ -342,6 +385,74 @@ fn prefer_tag(existing: &TagInfo, candidate_name: &str, candidate_is_annotated: 
         (false, true) => true,
         (true, false) => false,
         _ => candidate_name < existing.name.as_str(),
+    }
+}
+
+/// Compile `--match`/`--exclude` glob patterns, rejecting overly long or malformed
+/// patterns with [`DescribeError::InvalidArgument`] (`CliInvalidArguments`, exit 129).
+/// Returned globs borrow `patterns`, so the slice must outlive the filter loop.
+fn compile_globs(patterns: &[String]) -> Result<Vec<wax::Glob<'_>>, DescribeError> {
+    let mut globs = Vec::with_capacity(patterns.len());
+    for pattern in patterns {
+        if pattern.len() > MAX_GLOB_LEN {
+            return Err(DescribeError::InvalidArgument(format!(
+                "glob pattern too long ({} chars); the limit is {MAX_GLOB_LEN}",
+                pattern.len()
+            )));
+        }
+        let glob = wax::Glob::new(pattern.as_str()).map_err(|error| {
+            DescribeError::InvalidArgument(format!("invalid glob pattern '{pattern}': {error}"))
+        })?;
+        globs.push(glob);
+    }
+    Ok(globs)
+}
+
+/// Whether a tag name survives the `--match`/`--exclude` filters. An exclude match
+/// always rejects; with no `--match` patterns every non-excluded name passes,
+/// otherwise the name must match at least one `--match` glob.
+fn tag_passes_filters(name: &str, matchers: &[wax::Glob<'_>], excluders: &[wax::Glob<'_>]) -> bool {
+    if excluders
+        .iter()
+        .any(|glob| wax::Program::is_match(glob, name))
+    {
+        return false;
+    }
+    if matchers.is_empty() {
+        return true;
+    }
+    matchers
+        .iter()
+        .any(|glob| wax::Program::is_match(glob, name))
+}
+
+/// Read-only worktree dirtiness probe for `--dirty`. Tracked modifications,
+/// deletions, and staged additions count; untracked files never do. Any status
+/// read error degrades to "clean" rather than panicking, so a status hiccup never
+/// fabricates a `-dirty` suffix.
+async fn worktree_is_dirty() -> bool {
+    // Staged (index-vs-HEAD): any tracked new/modified/deleted entry is dirty.
+    match changes_to_be_committed_safe().await {
+        Ok(changes) => {
+            if !changes.new.is_empty()
+                || !changes.modified.is_empty()
+                || !changes.deleted.is_empty()
+            {
+                return true;
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "describe --dirty: staged status scan failed; treating as clean");
+        }
+    }
+    // Unstaged (worktree-vs-index): only modified/deleted count. The `new` set here
+    // includes untracked files, which must never mark the worktree dirty.
+    match changes_to_be_staged() {
+        Ok(changes) => !changes.modified.is_empty() || !changes.deleted.is_empty(),
+        Err(error) => {
+            tracing::warn!(%error, "describe --dirty: unstaged status scan failed; treating as clean");
+            false
+        }
     }
 }
 
@@ -371,6 +482,8 @@ fn describe_cli_error(error: DescribeError) -> CliError {
         DescribeError::TraversalLimitExceeded { .. } => CliError::fatal(error.to_string())
             .with_stable_code(StableErrorCode::RepoStateInvalid)
             .with_hint("history is very deep; pass '--always' for an abbreviated hash or narrow the range."),
+        DescribeError::InvalidArgument(message) => CliError::command_usage(message)
+            .with_hint("check the --match/--exclude glob syntax and any --candidates value."),
     }
 }
 
@@ -419,6 +532,41 @@ mod tests {
             DescribeError::TraversalLimitExceeded { limit: 10_000 }.to_string(),
             "history too deep: walked more than 10000 commits; pass --always or narrow the range",
         );
+        assert_eq!(
+            DescribeError::InvalidArgument("candidates must be >= 1".to_string()).to_string(),
+            "candidates must be >= 1",
+        );
+    }
+
+    #[test]
+    fn test_tag_passes_filters_match_exclude_semantics() {
+        let no_globs: [wax::Glob<'_>; 0] = [];
+        // No filters: every name passes.
+        assert!(tag_passes_filters("v1.0", &no_globs, &no_globs));
+        // --match only: name must match at least one glob.
+        let match_pats = ["v1.*".to_string()];
+        let m = compile_globs(&match_pats).expect("valid glob");
+        assert!(tag_passes_filters("v1.2", &m, &no_globs));
+        assert!(!tag_passes_filters("v2.0", &m, &no_globs));
+        // --exclude wins over --match.
+        let exclude_pats = ["*rc*".to_string()];
+        let e = compile_globs(&exclude_pats).expect("valid glob");
+        assert!(!tag_passes_filters("v1.0rc1", &m, &e));
+        assert!(tag_passes_filters("v1.0", &m, &e));
+    }
+
+    #[test]
+    fn test_compile_globs_rejects_overlong_and_invalid() {
+        let long = "a".repeat(MAX_GLOB_LEN + 1);
+        assert!(matches!(
+            compile_globs(&[long]),
+            Err(DescribeError::InvalidArgument(_))
+        ));
+        // An unterminated alternation `{` is not a valid glob.
+        assert!(matches!(
+            compile_globs(&["v{1".to_string()]),
+            Err(DescribeError::InvalidArgument(_))
+        ));
     }
 
     /// Build a distinct in-memory commit hash for graph-shaped unit tests.
