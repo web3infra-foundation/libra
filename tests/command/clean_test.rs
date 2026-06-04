@@ -1046,3 +1046,60 @@ fn test_clean_tolerant_removal_continues_after_failure() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// End-to-end `clean -i`: typing `clean` at the menu confirms removal of the
+/// initially all-selected candidate. Drives the real binary via piped stdin so
+/// the interactive loop is exercised through `execute` (no isatty gating).
+#[test]
+fn test_clean_interactive_clean_removes_via_stdin() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("scratch.txt"), "content").unwrap();
+
+    let output = run_libra_command_with_stdin(&["clean", "-i"], repo.path(), "clean\n");
+    assert_cli_success(&output, "clean -i + 'clean' should succeed");
+    assert!(
+        !repo.path().join("scratch.txt").exists(),
+        "interactive 'clean' should remove the candidate"
+    );
+}
+
+/// End-to-end `clean -i`: typing `quit` leaves every candidate untouched.
+#[test]
+fn test_clean_interactive_quit_keeps_files_via_stdin() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("scratch.txt"), "content").unwrap();
+
+    let output = run_libra_command_with_stdin(&["clean", "-i"], repo.path(), "quit\n");
+    assert_cli_success(&output, "clean -i + 'quit' should succeed");
+    assert!(
+        repo.path().join("scratch.txt").exists(),
+        "interactive 'quit' must not remove anything"
+    );
+}
+
+/// End-to-end `clean -i`: `filter by pattern` deselects a named candidate, so
+/// the following `clean` removes only the remaining one.
+#[test]
+fn test_clean_interactive_filter_keeps_named_file_via_stdin() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("keep_me.txt"), "a").unwrap();
+    fs::write(repo.path().join("remove_me.txt"), "b").unwrap();
+
+    // filter -> exclude "keep_me.txt" -> blank to return -> clean. Using a name
+    // filter (not a positional index) keeps this independent of the
+    // platform-dependent candidate ordering.
+    let output = run_libra_command_with_stdin(
+        &["clean", "-i"],
+        repo.path(),
+        "filter\nkeep_me.txt\n\nclean\n",
+    );
+    assert_cli_success(&output, "clean -i filter subset should succeed");
+    assert!(
+        repo.path().join("keep_me.txt").exists(),
+        "filtered candidate must survive"
+    );
+    assert!(
+        !repo.path().join("remove_me.txt").exists(),
+        "unfiltered candidate must be removed"
+    );
+}

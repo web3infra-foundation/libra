@@ -2,6 +2,7 @@
 
 use std::{
     fs,
+    io::{BufRead, Write},
     path::{Path, PathBuf},
 };
 
@@ -82,6 +83,8 @@ enum CleanError {
     OutsideWorkdir(String),
     #[error("failed to remove {path}: {detail}")]
     RemoveFile { path: String, detail: String },
+    #[error("interactive clean I/O error: {detail}")]
+    Io { detail: String },
 }
 
 pub async fn execute(args: CleanArgs) {
@@ -196,13 +199,40 @@ async fn preflight(args: &CleanArgs, output: &OutputConfig) -> Result<(), CleanE
 fn run_clean(args: CleanArgs, quiet: bool) -> Result<CleanOutput, CleanError> {
     // Mode validation (missing-mode / -x+-X / -i+--json / -i+-n) is performed once
     // in `preflight`; `run_clean` assumes the arguments have already been vetted.
+    let candidates = collect_clean_candidates(&args, quiet)?;
 
-    // Interactive selection is wired in a later batch; until the loop exists,
-    // `-i` performs no removal (a safe no-op) so it can never silently delete.
     if args.interactive {
-        return Ok(CleanOutput::default());
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        let mut reader = stdin.lock();
+        let mut writer = stdout.lock();
+        let selected = run_interactive_loop(&mut reader, &mut writer, &args, &candidates)?;
+        return delete_clean_candidates(&selected, quiet);
     }
 
+    if candidates.is_empty() {
+        return Ok(CleanOutput {
+            dry_run: args.dry_run,
+            ..Default::default()
+        });
+    }
+
+    if args.dry_run {
+        return Ok(CleanOutput {
+            dry_run: true,
+            removed: candidates.iter().map(|p| p.display().to_string()).collect(),
+            ..Default::default()
+        });
+    }
+
+    delete_clean_candidates(&candidates, quiet)
+}
+
+/// Scan the working tree and return the final list of removal candidates
+/// (relative paths) after the ignore policy, nested-repo pruning, `-d` directory
+/// merge, and `--exclude` filters. Performs NO removal and NO dry-run shortcut,
+/// so it can feed both the non-interactive delete path and the interactive loop.
+fn collect_clean_candidates(args: &CleanArgs, quiet: bool) -> Result<Vec<PathBuf>, CleanError> {
     let index_path = path::index();
     let index = match Index::load(&index_path) {
         Ok(index) => index,
@@ -295,30 +325,21 @@ fn run_clean(args: CleanArgs, quiet: bool) -> Result<CleanOutput, CleanError> {
         });
     }
 
-    if untracked.is_empty() {
-        return Ok(CleanOutput {
-            dry_run: args.dry_run,
-            ..Default::default()
-        });
-    }
+    Ok(untracked)
+}
 
-    if args.dry_run {
-        return Ok(CleanOutput {
-            dry_run: true,
-            removed: untracked
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect(),
-            ..Default::default()
-        });
-    }
-
+/// Physically remove the given candidate paths, tolerating per-path failures.
+///
+/// A failure to delete a single path (e.g. a read-only file) is warned about and
+/// recorded in `CleanOutput.failed` while cleanup continues. The workdir-escape
+/// check stays fatal — it indicates a symlink/traversal attack, not a hiccup.
+fn delete_clean_candidates(candidates: &[PathBuf], quiet: bool) -> Result<CleanOutput, CleanError> {
     let workdir = fs::canonicalize(util::working_dir())
         .map_err(|e| CleanError::ResolveWorkdir(e.to_string()))?;
     let mut removed = Vec::new();
     let mut failed = Vec::new();
-    for path in untracked {
-        let abs_path = util::workdir_to_absolute(&path);
+    for path in candidates {
+        let abs_path = util::workdir_to_absolute(path);
         if !abs_path.exists() {
             continue;
         }
@@ -326,13 +347,9 @@ fn run_clean(args: CleanArgs, quiet: bool) -> Result<CleanOutput, CleanError> {
             path: abs_path.display().to_string(),
             detail: e.to_string(),
         })?;
-        // The workdir-escape check stays fatal: it indicates a symlink/traversal
-        // attack, not a per-file permission hiccup.
         if !resolved.starts_with(&workdir) {
             return Err(CleanError::OutsideWorkdir(abs_path.display().to_string()));
         }
-        // Tolerant removal: a per-path failure (e.g. read-only file) is recorded
-        // and warned about, then cleanup continues with the remaining paths.
         let outcome = if abs_path.is_dir() {
             fs::remove_dir_all(&abs_path)
         } else {
@@ -389,6 +406,322 @@ fn find_nested_repo_roots() -> Result<Vec<PathBuf>, CleanError> {
 
     walk(&workdir, &workdir, &mut roots)?;
     Ok(roots)
+}
+
+/// The seven help lines rendered by the interactive `help` subcommand. Mirrors
+/// the layout of `git clean -i`'s help so the experience is familiar.
+const INTERACTIVE_HELP_LINES: [&str; 7] = [
+    "clean               - start cleaning",
+    "filter by pattern   - exclude items from deletion",
+    "select by numbers   - select items to be deleted by numbers",
+    "ask each            - confirm each deletion (like \"rm -i\")",
+    "quit                - stop cleaning",
+    "help                - this screen",
+    "?                   - help for prompt selection",
+];
+
+/// Run the interactive `clean -i` selection loop against `reader`/`writer`.
+///
+/// This is a pure state machine: it NEVER touches the filesystem. It starts with
+/// every candidate selected, lets the user refine the selection via the same six
+/// subcommands Git offers (`clean`, `filter by pattern`, `select by numbers`,
+/// `ask each`, `quit`, `help`), and returns the final list of paths to delete.
+/// Taking generic `BufRead`/`Write` makes it unit-testable with `io::Cursor`.
+///
+/// EOF (a `read_line` of 0 bytes) is treated as `quit` so a closed/piped stdin
+/// can never hang the loop. `quit` returns an empty selection.
+fn run_interactive_loop<R: BufRead, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    _args: &CleanArgs,
+    candidates: &[PathBuf],
+) -> Result<Vec<PathBuf>, CleanError> {
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // `selected[i]` tracks whether candidate `i` is still slated for removal.
+    let mut selected = vec![true; candidates.len()];
+
+    loop {
+        render_candidate_list(writer, candidates, &selected)?;
+        write!(
+            writer,
+            "*** Commands ***\n    1: clean                2: filter by pattern    3: select by numbers\n    4: ask each             5: quit                 6: help\nWhat now> "
+        )
+        .map_err(map_io_write)?;
+        writer.flush().map_err(map_io_write)?;
+
+        let Some(line) = read_line(reader)? else {
+            // EOF: behave like `quit` to avoid hanging on a closed stdin.
+            return Ok(Vec::new());
+        };
+        let choice = line.trim();
+        match interactive_command(choice) {
+            InteractiveCommand::Clean => {
+                return Ok(collect_selected(candidates, &selected));
+            }
+            InteractiveCommand::FilterByPattern => {
+                interactive_filter_by_pattern(reader, writer, candidates, &mut selected)?;
+            }
+            InteractiveCommand::SelectByNumbers => {
+                interactive_select_by_numbers(reader, writer, candidates, &mut selected)?;
+            }
+            InteractiveCommand::AskEach => {
+                interactive_ask_each(reader, writer, candidates, &mut selected)?;
+            }
+            InteractiveCommand::Quit => {
+                return Ok(Vec::new());
+            }
+            InteractiveCommand::Help => {
+                for help_line in INTERACTIVE_HELP_LINES {
+                    writeln!(writer, "{help_line}").map_err(map_io_write)?;
+                }
+            }
+            InteractiveCommand::Unknown => {
+                writeln!(writer, "Huh ({choice})?").map_err(map_io_write)?;
+            }
+        }
+    }
+}
+
+/// The six interactive subcommands plus an `Unknown` fallback.
+enum InteractiveCommand {
+    Clean,
+    FilterByPattern,
+    SelectByNumbers,
+    AskEach,
+    Quit,
+    Help,
+    Unknown,
+}
+
+/// Map a raw menu entry to a command. Accepts the leading number, the full word,
+/// or a case-insensitive first-letter shortcut — matching `git clean -i`.
+fn interactive_command(choice: &str) -> InteractiveCommand {
+    let normalized = choice.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "" => InteractiveCommand::Unknown,
+        "1" | "c" | "clean" => InteractiveCommand::Clean,
+        "2" | "f" | "filter by pattern" | "filter" => InteractiveCommand::FilterByPattern,
+        "3" | "s" | "select by numbers" | "select" => InteractiveCommand::SelectByNumbers,
+        "4" | "a" | "ask each" | "ask" => InteractiveCommand::AskEach,
+        "5" | "q" | "quit" => InteractiveCommand::Quit,
+        "6" | "h" | "help" => InteractiveCommand::Help,
+        "?" => InteractiveCommand::Help,
+        _ => InteractiveCommand::Unknown,
+    }
+}
+
+/// Render the numbered candidate list, marking still-selected entries with `*`.
+fn render_candidate_list<W: Write>(
+    writer: &mut W,
+    candidates: &[PathBuf],
+    selected: &[bool],
+) -> Result<(), CleanError> {
+    writeln!(writer, "Would remove the following items:").map_err(map_io_write)?;
+    for (idx, path) in candidates.iter().enumerate() {
+        let marker = if selected[idx] { '*' } else { ' ' };
+        writeln!(writer, "  {marker} {:>3}: {}", idx + 1, path.display()).map_err(map_io_write)?;
+    }
+    Ok(())
+}
+
+/// `filter by pattern`: read space-separated globs and deselect any candidate
+/// matched by one — directly or via one of its ancestors. A blank line returns.
+fn interactive_filter_by_pattern<R: BufRead, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    candidates: &[PathBuf],
+    selected: &mut [bool],
+) -> Result<(), CleanError> {
+    loop {
+        write!(writer, "Input ignore patterns>> ").map_err(map_io_write)?;
+        writer.flush().map_err(map_io_write)?;
+        let Some(line) = read_line(reader)? else {
+            return Ok(());
+        };
+        let patterns: Vec<&str> = line.split_whitespace().collect();
+        if patterns.is_empty() {
+            return Ok(());
+        }
+        for (idx, path) in candidates.iter().enumerate() {
+            if !selected[idx] {
+                continue;
+            }
+            if patterns
+                .iter()
+                .any(|pattern| pattern_matches_with_ancestors(path, pattern))
+            {
+                selected[idx] = false;
+            }
+        }
+        render_candidate_list(writer, candidates, selected)?;
+    }
+}
+
+/// `select by numbers`: toggle selection by index. Accepts comma/space-separated
+/// tokens: a bare number selects, `N-M` a closed range, `N-` an open range, `*`
+/// all, and a leading `-` deselects (`-3`, `-2-5`). Out-of-range tokens are
+/// ignored. After applying, the selection becomes ONLY the marked items.
+fn interactive_select_by_numbers<R: BufRead, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    candidates: &[PathBuf],
+    selected: &mut [bool],
+) -> Result<(), CleanError> {
+    write!(writer, "Select items to delete>> ").map_err(map_io_write)?;
+    writer.flush().map_err(map_io_write)?;
+    let Some(line) = read_line(reader)? else {
+        return Ok(());
+    };
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+
+    let tokens: Vec<&str> = trimmed
+        .split([',', ' '])
+        .filter(|t| !t.is_empty())
+        .collect();
+    let any_select = tokens.iter().any(|t| !t.starts_with('-'));
+
+    if any_select {
+        // At least one positive token: the selection is REPLACED by exactly the
+        // marked items (positive tokens set, trailing `-` tokens then clear).
+        let mut next = vec![false; candidates.len()];
+        for token in &tokens {
+            match token.strip_prefix('-') {
+                Some(rest) => apply_select_token(rest, candidates.len(), true, &mut next),
+                None => apply_select_token(token, candidates.len(), false, &mut next),
+            }
+        }
+        selected.copy_from_slice(&next);
+    } else {
+        // Pure deselect (e.g. `-3`): refine the EXISTING selection in place.
+        for token in &tokens {
+            if let Some(rest) = token.strip_prefix('-') {
+                apply_select_token(rest, candidates.len(), true, selected);
+            }
+        }
+    }
+    render_candidate_list(writer, candidates, selected)?;
+    Ok(())
+}
+
+/// Apply one selection token (`*`, `N`, `N-M`, `N-`) to `target`. `deselect`
+/// inverts the operation. Indices are 1-based on input; out-of-range is ignored.
+fn apply_select_token(body: &str, len: usize, deselect: bool, target: &mut [bool]) {
+    let value = !deselect;
+    if body == "*" {
+        target.iter_mut().for_each(|slot| *slot = value);
+        return;
+    }
+    if let Some((start, end)) = body.split_once('-') {
+        let start_idx = start.trim().parse::<usize>().ok();
+        let end_idx = if end.trim().is_empty() {
+            Some(len)
+        } else {
+            end.trim().parse::<usize>().ok()
+        };
+        if let (Some(start_idx), Some(end_idx)) = (start_idx, end_idx)
+            && start_idx >= 1
+            && start_idx <= end_idx
+        {
+            for one_based in start_idx..=end_idx.min(len) {
+                target[one_based - 1] = value;
+            }
+        }
+        return;
+    }
+    if let Ok(one_based) = body.trim().parse::<usize>()
+        && one_based >= 1
+        && one_based <= len
+    {
+        target[one_based - 1] = value;
+    }
+}
+
+/// `ask each`: walk the selected candidates, prompt `Remove <path>? [y/N]`, and
+/// keep only the ones answered yes. This NEVER deletes — it just refines the set.
+fn interactive_ask_each<R: BufRead, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    candidates: &[PathBuf],
+    selected: &mut [bool],
+) -> Result<(), CleanError> {
+    for (idx, path) in candidates.iter().enumerate() {
+        if !selected[idx] {
+            continue;
+        }
+        write!(writer, "Remove {}? [y/N] ", path.display()).map_err(map_io_write)?;
+        writer.flush().map_err(map_io_write)?;
+        let Some(line) = read_line(reader)? else {
+            // EOF: leave the remaining answers as the default (No) and stop.
+            selected[idx] = false;
+            for slot in selected.iter_mut().skip(idx + 1) {
+                *slot = false;
+            }
+            return Ok(());
+        };
+        let answer = line.trim().to_ascii_lowercase();
+        selected[idx] = matches!(answer.as_str(), "y" | "yes");
+    }
+    Ok(())
+}
+
+/// Collect the still-selected candidates into a fresh `Vec`.
+fn collect_selected(candidates: &[PathBuf], selected: &[bool]) -> Vec<PathBuf> {
+    candidates
+        .iter()
+        .zip(selected)
+        .filter(|&(_, keep)| *keep)
+        .map(|(path, _)| path.clone())
+        .collect()
+}
+
+/// Does `pattern` match `path` directly, or any of its ancestor directories?
+///
+/// Ancestor inheritance means filtering `build` also removes `build/out/app.js`,
+/// matching how `git clean -i`'s pattern filter prunes whole subtrees.
+fn pattern_matches_with_ancestors(path: &Path, pattern: &str) -> bool {
+    let path_str = path.display().to_string();
+    if matches_exclude_pattern(&path_str, pattern) {
+        return true;
+    }
+    let mut current = path;
+    while let Some(parent) = current.parent() {
+        if parent.as_os_str().is_empty() {
+            break;
+        }
+        let parent_str = parent.display().to_string();
+        if matches_exclude_pattern(&parent_str, pattern) {
+            return true;
+        }
+        current = parent;
+    }
+    false
+}
+
+/// Read one line, returning `None` on EOF (a 0-byte read). The trailing newline
+/// is left intact for callers that `trim()`; `read_line`-style semantics.
+fn read_line<R: BufRead>(reader: &mut R) -> Result<Option<String>, CleanError> {
+    let mut buffer = String::new();
+    let bytes = reader.read_line(&mut buffer).map_err(|e| CleanError::Io {
+        detail: e.to_string(),
+    })?;
+    if bytes == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(buffer))
+    }
+}
+
+/// Map a write failure on the interactive stream to a `CleanError`.
+fn map_io_write(error: std::io::Error) -> CleanError {
+    CleanError::Io {
+        detail: error.to_string(),
+    }
 }
 
 /// Find untracked directories based on the ignore policy.
@@ -530,6 +863,10 @@ fn clean_cli_error(error: CleanError) -> CliError {
             CliError::fatal(format!("failed to remove {path}: {detail}"))
                 .with_stable_code(StableErrorCode::IoWriteFailed)
         }
+        CleanError::Io { detail } => {
+            CliError::fatal(format!("interactive clean I/O error: {detail}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        }
     }
 }
 
@@ -599,5 +936,178 @@ mod tests {
             .to_string(),
             "failed to remove build/artifact.o: permission denied",
         );
+        assert_eq!(
+            CleanError::Io {
+                detail: "broken pipe".to_string(),
+            }
+            .to_string(),
+            "interactive clean I/O error: broken pipe",
+        );
+    }
+
+    /// The `Io` variant maps to the read-failed stable code (a broken
+    /// interactive stream is surfaced as an I/O problem, not an arg error).
+    #[test]
+    fn clean_io_cli_error_maps_to_io_read() {
+        let error = clean_cli_error(CleanError::Io {
+            detail: "stream closed".to_string(),
+        });
+        assert_eq!(error.stable_code(), StableErrorCode::IoReadFailed);
+        assert!(error.message().contains("interactive clean I/O error"));
+    }
+}
+
+#[cfg(test)]
+mod interactive_tests {
+    use std::{io::Cursor, path::PathBuf};
+
+    use super::{CleanArgs, run_interactive_loop};
+
+    /// Build candidate paths from string slices.
+    fn candidates(paths: &[&str]) -> Vec<PathBuf> {
+        paths.iter().map(PathBuf::from).collect()
+    }
+
+    /// Drive the loop with `input` as piped stdin; returns the selected paths
+    /// as display strings plus the full rendered transcript.
+    fn run(input: &str, items: &[&str]) -> (Vec<String>, String) {
+        let args = CleanArgs::default();
+        let cands = candidates(items);
+        let mut reader = Cursor::new(input.as_bytes().to_vec());
+        let mut writer: Vec<u8> = Vec::new();
+        let selected = run_interactive_loop(&mut reader, &mut writer, &args, &cands)
+            .expect("interactive loop should not error on in-memory streams");
+        let chosen = selected
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>();
+        (chosen, String::from_utf8(writer).expect("utf8 transcript"))
+    }
+
+    #[test]
+    fn empty_candidates_returns_immediately() {
+        let args = CleanArgs::default();
+        let mut reader = Cursor::new(Vec::new());
+        let mut writer: Vec<u8> = Vec::new();
+        let selected =
+            run_interactive_loop(&mut reader, &mut writer, &args, &[]).expect("ok with no items");
+        assert!(selected.is_empty());
+        // No prompt should be rendered for an empty candidate list.
+        assert!(writer.is_empty());
+    }
+
+    #[test]
+    fn quit_returns_empty_selection() {
+        let (chosen, _transcript) = run("quit\n", &["a.txt", "b.txt"]);
+        assert!(chosen.is_empty());
+    }
+
+    #[test]
+    fn quit_shortcut_q_returns_empty() {
+        let (chosen, _transcript) = run("q\n", &["a.txt", "b.txt"]);
+        assert!(chosen.is_empty());
+    }
+
+    #[test]
+    fn eof_behaves_like_quit() {
+        // No newline, immediate EOF on the first prompt.
+        let (chosen, _transcript) = run("", &["a.txt"]);
+        assert!(chosen.is_empty());
+    }
+
+    #[test]
+    fn clean_command_keeps_all_by_default() {
+        // `clean` with the initial all-selected state removes everything.
+        let (chosen, _transcript) = run("clean\n", &["a.txt", "b.txt", "c.txt"]);
+        assert_eq!(chosen, vec!["a.txt", "b.txt", "c.txt"]);
+    }
+
+    #[test]
+    fn help_renders_seven_lines_then_quits() {
+        let (_chosen, transcript) = run("help\nquit\n", &["a.txt"]);
+        assert!(transcript.contains("clean               - start cleaning"));
+        assert!(transcript.contains("filter by pattern   - exclude items from deletion"));
+        assert!(transcript.contains("select by numbers   - select items to be deleted by numbers"));
+        assert!(
+            transcript.contains("ask each            - confirm each deletion (like \"rm -i\")")
+        );
+        assert!(transcript.contains("quit                - stop cleaning"));
+        assert!(transcript.contains("help                - this screen"));
+        assert!(transcript.contains("?                   - help for prompt selection"));
+    }
+
+    #[test]
+    fn select_by_numbers_range_replaces_selection() {
+        // Selecting `2-3` of four items, then clean, keeps only items 2 and 3.
+        let (chosen, _transcript) = run("3\n2-3\nclean\n", &["a", "b", "c", "d"]);
+        assert_eq!(chosen, vec!["b", "c"]);
+    }
+
+    #[test]
+    fn select_by_numbers_open_range_to_end() {
+        let (chosen, _transcript) = run("s\n2-\nc\n", &["a", "b", "c", "d"]);
+        assert_eq!(chosen, vec!["b", "c", "d"]);
+    }
+
+    #[test]
+    fn select_by_numbers_star_selects_all() {
+        let (chosen, _transcript) = run("3\n*\nclean\n", &["a", "b"]);
+        assert_eq!(chosen, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn select_by_numbers_deselect_refines_existing() {
+        // Pure deselect `-2` removes item 2 from the initial all-selected set.
+        let (chosen, _transcript) = run("3\n-2\nclean\n", &["a", "b", "c"]);
+        assert_eq!(chosen, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn select_by_numbers_out_of_range_token_ignored() {
+        // `9` is out of range for two items: it selects nothing, so the
+        // replaced selection is empty and `clean` removes nothing.
+        let (chosen, _transcript) = run("3\n9\nclean\n", &["a", "b"]);
+        assert!(chosen.is_empty());
+        // Index 0 is invalid (1-based input); it must not panic or select.
+        let (chosen_zero, _t) = run("3\n0\nclean\n", &["a", "b"]);
+        assert!(chosen_zero.is_empty());
+    }
+
+    #[test]
+    fn filter_by_pattern_ancestor_inheritance() {
+        // Filtering `build` must also drop nested `build/out/app.js`.
+        let (chosen, _transcript) = run(
+            "filter\nbuild\n\nclean\n",
+            &["build/out/app.js", "build/cache", "src/main.rs"],
+        );
+        assert_eq!(chosen, vec!["src/main.rs"]);
+    }
+
+    #[test]
+    fn filter_by_pattern_blank_returns_to_menu() {
+        // An immediate blank line in the filter sub-prompt returns unchanged.
+        let (chosen, _transcript) = run("filter\n\nclean\n", &["a", "b"]);
+        assert_eq!(chosen, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn ask_each_collects_yes_only() {
+        // y/N: only the first and third are confirmed, then `clean` removes them.
+        let (chosen, _transcript) = run("ask\ny\nn\ny\nclean\n", &["a", "b", "c"]);
+        assert_eq!(chosen, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn ask_each_then_clean_uses_refined_set() {
+        // After `ask each` refines to {a}, the next `clean` removes only `a`.
+        let (chosen, _transcript) = run("a\ny\nn\nclean\n", &["a", "b"]);
+        assert_eq!(chosen, vec!["a"]);
+    }
+
+    #[test]
+    fn unknown_command_reprompts() {
+        let (chosen, transcript) = run("zzz\nquit\n", &["a"]);
+        assert!(chosen.is_empty());
+        assert!(transcript.contains("Huh (zzz)?"));
     }
 }
