@@ -170,6 +170,36 @@ during fetch.
 libra clone --reject-shallow git@github.com:user/repo.git
 ```
 
+### `-o, --origin <name>`
+
+Use `<name>` instead of `origin` for the tracked remote. The remote URL, fetch refspec, and
+`branch.<branch>.remote` configuration are all recorded under this name. `libra+cloud://`
+restore rejects it.
+
+```bash
+libra clone -o upstream git@github.com:user/repo.git
+```
+
+### `-n, --no-checkout`
+
+Do not check out HEAD after the clone. Metadata, refs, and config are still written; only
+the working-tree checkout (and the `.gitignore` → `.libraignore` conversion that depends on
+it) is skipped. `libra+cloud://` restore rejects it.
+
+```bash
+libra clone --no-checkout git@github.com:user/repo.git
+```
+
+### `--mirror`
+
+Set up a mirror of the source repository. Implies `--bare` and clones all branches and tags,
+mapping every ref (`+refs/*:refs/*`); the remote is recorded with `mirror = true`. `libra+cloud://`
+restore rejects it.
+
+```bash
+libra clone --mirror git@github.com:user/repo.git
+```
+
 ## Common Commands
 
 ```bash

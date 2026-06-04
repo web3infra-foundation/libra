@@ -2014,3 +2014,163 @@ fn shallow_file_consistent_after_clone() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Batch 2a — origin / no-checkout / mirror
+// ---------------------------------------------------------------------------
+
+/// `--no-checkout` writes metadata but skips the working-tree checkout: `.libra`
+/// exists, but no source files are materialized.
+#[test]
+fn no_checkout_skips_worktree() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-nocheckout");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--no-checkout",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--no-checkout clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        dest.join(".libra").exists(),
+        "metadata must still be written"
+    );
+    assert!(
+        !dest.join("README.md").exists(),
+        "--no-checkout must not materialize the working tree"
+    );
+}
+
+/// `--mirror` implies a bare clone: no working tree and no `.libraignore`.
+#[test]
+fn mirror_clone_is_bare() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("mirror.git");
+
+    let output = run_libra(
+        &[
+            "--json",
+            "clone",
+            "--mirror",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--mirror clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    assert_eq!(json["data"]["bare"], true, "--mirror implies a bare clone");
+    assert!(
+        !dest.join(".libraignore").exists(),
+        "bare mirror clone should not create a worktree .libraignore"
+    );
+    assert!(
+        !dest.join("README.md").exists(),
+        "bare mirror clone has no working tree"
+    );
+}
+
+/// `-o/--origin` names the tracked remote and records it in branch config.
+#[test]
+fn origin_name_used_in_branch_config() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-origin");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "-o",
+            "upstream",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "-o upstream clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cfg = run_libra(&["config", "--get", "branch.main.remote"], &dest);
+    assert_eq!(cfg.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&cfg.stdout).trim(),
+        "upstream",
+        "branch.main.remote must record the custom origin name"
+    );
+
+    let url = run_libra(&["config", "--get", "remote.upstream.url"], &dest);
+    assert_eq!(
+        url.status.code(),
+        Some(0),
+        "remote.upstream.url must be written for the custom remote name"
+    );
+}
+
+/// `--json` reports the custom remote name in `origin_name`.
+#[test]
+fn origin_name_in_json_output() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-origin-json");
+
+    let output = run_libra(
+        &[
+            "--json",
+            "clone",
+            "--origin",
+            "upstream",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    assert_eq!(json["data"]["origin_name"], "upstream");
+}
+
+/// Cloud sources reject `--mirror`, `--origin`, and `--no-checkout` (exit 129).
+#[test]
+fn cloud_source_rejects_mirror_origin_no_checkout() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("restored");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--mirror",
+            "libra+cloud://code.example.com/kepler-ledger",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "cloud source must reject --mirror: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

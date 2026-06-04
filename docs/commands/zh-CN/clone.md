@@ -121,6 +121,30 @@ libra clone --shallow-exclude refs/tags/v1.0.0 git@github.com:user/repo.git
 libra clone --reject-shallow git@github.com:user/repo.git
 ```
 
+### `-o, --origin <name>`
+
+用 `<name>` 代替 `origin` 作为被跟踪的远程名。远程 URL、fetch refspec 与 `branch.<branch>.remote` 配置都会记录在该名称下。`libra+cloud://` 恢复会拒绝它。
+
+```bash
+libra clone -o upstream git@github.com:user/repo.git
+```
+
+### `-n, --no-checkout`
+
+克隆后不检出 HEAD。元数据、refs 与 config 仍会写入；仅跳过工作树检出（以及依赖它的 `.gitignore` → `.libraignore` 转换）。`libra+cloud://` 恢复会拒绝它。
+
+```bash
+libra clone --no-checkout git@github.com:user/repo.git
+```
+
+### `--mirror`
+
+建立源仓库的镜像。隐含 `--bare`，克隆所有分支与标签，映射全部 ref（`+refs/*:refs/*`）；远程会记录 `mirror = true`。`libra+cloud://` 恢复会拒绝它。
+
+```bash
+libra clone --mirror git@github.com:user/repo.git
+```
+
 ## 常用命令
 
 ```bash

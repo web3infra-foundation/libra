@@ -93,7 +93,10 @@ const CLOUD_CLONE_D1_API_BASE_URL_ENV: &str = "LIBRA_D1_API_BASE_URL";
     libra clone --depth 1 <url>                           Shallow clone (latest commit only)\n    \
     libra clone --shallow-since 2024-01-01 <url>          Shallow clone since a date\n    \
     libra clone --shallow-exclude refs/tags/v1 <url>      Shallow clone excluding a ref\n    \
-    libra clone --reject-shallow <url>                    Fail if the source is shallow")]
+    libra clone --reject-shallow <url>                    Fail if the source is shallow\n    \
+    libra clone -o upstream <url>                         Name the remote 'upstream' instead of 'origin'\n    \
+    libra clone --no-checkout <url>                       Clone without checking out the working tree\n    \
+    libra clone --mirror <url>                            Mirror clone (bare, all refs)")]
 pub struct CloneArgs {
     /// The remote repository location to clone from, usually a URL with HTTPS or SSH
     pub remote_repo: String,
@@ -137,6 +140,20 @@ pub struct CloneArgs {
     /// Fail if the source repository is a shallow repository.
     #[clap(long)]
     pub reject_shallow: bool,
+
+    /// Use <name> instead of 'origin' for the tracked remote.
+    #[clap(short = 'o', long = "origin", value_name = "name")]
+    pub origin: Option<String>,
+
+    /// Do not check out HEAD after the clone. Metadata, refs, and config are
+    /// still written; only the working-tree checkout is skipped.
+    #[clap(short = 'n', long = "no-checkout")]
+    pub no_checkout: bool,
+
+    /// Set up a mirror of the source repository. Implies `--bare` and maps all
+    /// refs (`+refs/*:refs/*`); the remote is recorded with `mirror = true`.
+    #[clap(long)]
+    pub mirror: bool,
 }
 
 const REPO_MARKERS: &[&str] = &["description", "libra.db", "info/exclude", "objects"];
@@ -178,6 +195,10 @@ pub struct CloneOutput {
     /// Cloudflare publish metadata for `libra+cloud://` sources.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cloud_site: Option<CloudCloneSiteOutput>,
+    /// Remote name written for the clone when overridden with `-o/--origin`.
+    /// Omitted (defaults to `origin`) when not customized.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -960,11 +981,14 @@ fn validate_clone_args(args: &CloneArgs) -> CliResult<()> {
         && (args.shallow_since.is_some()
             || args.shallow_exclude.is_some()
             || args.reject_shallow
-            || args.no_single_branch)
+            || args.no_single_branch
+            || args.origin.is_some()
+            || args.no_checkout
+            || args.mirror)
     {
         return Err(CliError::command_usage(
-            "shaping flags (--shallow-since/--shallow-exclude/--reject-shallow/--no-single-branch) \
-             are not supported with cloud (libra+cloud://) sources",
+            "shaping flags (--shallow-since/--shallow-exclude/--reject-shallow/--no-single-branch/\
+             --origin/--no-checkout/--mirror) are not supported with cloud (libra+cloud://) sources",
         )
         .with_stable_code(StableErrorCode::CliInvalidArguments)
         .with_hint(
@@ -1158,7 +1182,8 @@ fn render_clone_result(result: &CloneOutput, output: &OutputConfig) -> CliResult
             .unwrap_or(&result.path);
         println!("Cloned into '{display_path}'");
     }
-    println!("  remote: origin → {}", result.remote_url);
+    let remote_name = result.origin_name.as_deref().unwrap_or("origin");
+    println!("  remote: {remote_name} → {}", result.remote_url);
     if let Some(branch) = &result.branch {
         println!("  branch: {branch}");
     }
@@ -1568,6 +1593,7 @@ async fn clone_cloud_publish_into_destination(
             ref_name: restore_plan.checkout.ref_name.clone(),
             revision: restore_plan.checkout.revision_oid.clone(),
         }),
+        origin_name: None,
     })
 }
 
@@ -2900,13 +2926,22 @@ async fn clone_into_destination(
         git_internal::hash::HashKind::Sha256 => "sha256".to_string(),
     };
 
+    // `--mirror` implies a bare repository; `--no-checkout` keeps the metadata
+    // but skips the working-tree checkout. `--mirror` also clones every branch
+    // regardless of `--single-branch`. The remote name defaults to `origin`
+    // unless overridden with `-o/--origin`.
+    let bare = args.bare || args.mirror;
+    let origin_name = args.origin.clone().unwrap_or_else(|| "origin".to_string());
+    let checkout_worktree = !bare && !args.no_checkout;
+    let single_branch = args.single_branch && !args.mirror;
+
     // --- Step 4: Initialize repository ---
     if !output.quiet && !output.is_json() {
         eprintln!("Initializing repository ...");
     }
 
     let init_output = command::init::run_init(command::init::InitArgs {
-        bare: args.bare,
+        bare,
         template: None,
         initial_branch: args.branch.clone(),
         repo_directory: local_path.to_string_lossy().into_owned(),
@@ -2927,14 +2962,14 @@ async fn clone_into_destination(
 
     let child_output = output.child_output_config();
     let remote_config = RemoteConfig {
-        name: "origin".to_string(),
+        name: origin_name.clone(),
         url: remote_url.to_string(),
     };
     let shallow = clone_shallow_options(args)?;
     fetch::fetch_repository_safe(
         remote_config.clone(),
         args.branch.clone(),
-        args.single_branch,
+        single_branch,
         shallow,
         &child_output,
     )
@@ -2959,16 +2994,20 @@ async fn clone_into_destination(
         eprintln!("Configuring repository ...");
     }
 
-    if !args.bare && !output.quiet && !output.is_json() {
+    if checkout_worktree && !output.quiet && !output.is_json() {
         eprintln!("Checking out working copy ...");
     }
 
-    let setup_result =
-        setup_repository(remote_config.clone(), args.branch.clone(), !args.bare).await?;
+    let setup_result = setup_repository(
+        remote_config.clone(),
+        args.branch.clone(),
+        checkout_worktree,
+    )
+    .await?;
 
     let mut warnings = init_output.warnings.clone();
     let mut gitignore_converted = Vec::new();
-    if !args.bare {
+    if checkout_worktree {
         let summary = ignore_utils::convert_gitignore_files_to_libraignore(local_path, local_path)
             .map_err(|source| CloneError::IgnoreFile { source })?;
         warnings.extend(summary.warnings);
@@ -2992,7 +3031,7 @@ async fn clone_into_destination(
 
     Ok(CloneOutput {
         path: local_path.to_string_lossy().into_owned(),
-        bare: args.bare,
+        bare,
         remote_url: remote_url.to_string(),
         branch: setup_result.branch_name,
         object_format,
@@ -3006,6 +3045,7 @@ async fn clone_into_destination(
         gitignore_converted,
         source_kind: None,
         cloud_site: None,
+        origin_name: args.origin.clone(),
     })
 }
 
@@ -4409,6 +4449,7 @@ mod tests {
             gitignore_converted: vec![".libraignore".to_string(), "sub/.libraignore".to_string()],
             source_kind: None,
             cloud_site: None,
+            origin_name: None,
         };
 
         let value = serde_json::to_value(&output).expect("CloneOutput must serialize");
@@ -4453,6 +4494,10 @@ mod tests {
             !map.contains_key("cloud_site"),
             "cloud_site must be omitted when None (skip_serializing_if)",
         );
+        assert!(
+            !map.contains_key("origin_name"),
+            "origin_name must be omitted when None (skip_serializing_if)",
+        );
     }
 
     /// A bare clone reports no `.gitignore` conversions (clone.md: "Empty
@@ -4474,6 +4519,7 @@ mod tests {
             gitignore_converted: Vec::new(),
             source_kind: None,
             cloud_site: None,
+            origin_name: None,
         };
 
         let value = serde_json::to_value(&output).expect("CloneOutput must serialize");
