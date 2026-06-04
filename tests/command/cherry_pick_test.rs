@@ -1109,3 +1109,340 @@ async fn cherry_pick_state_roundtrip_persists_and_clears() {
     assert!(!CherryPickState::is_in_progress().await.unwrap());
     assert!(CherryPickState::load().await.unwrap().is_none());
 }
+
+// ── Batch 1b/1c: conflict sequencer (--continue/--skip/--abort/--quit) ──
+
+/// Build a repo where cherry-picking the returned `feat` commit onto `main`
+/// conflicts on `shared.txt` (base/ours/theirs all differ). HEAD on `main`.
+fn conflict_repo() -> (tempfile::TempDir, String) {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("shared.txt"), "base\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add base");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base shared", "--no-verify"], p),
+        "commit base",
+    );
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "feature"], p),
+        "branch",
+    );
+    std::fs::write(p.join("shared.txt"), "feature side\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add feat");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "feature edit", "--no-verify"], p),
+        "commit feat",
+    );
+    let feat = cp_rev_parse(p, "HEAD");
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    std::fs::write(p.join("shared.txt"), "main side\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add main");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main edit", "--no-verify"], p),
+        "commit main",
+    );
+    (repo, feat)
+}
+
+/// Two-commit feature sequence onto a conflicting main: `f1` conflicts on
+/// `shared.txt`, `f2` cleanly adds `extra.txt`. Returns (repo, f1, f2).
+fn conflict_sequence_repo() -> (tempfile::TempDir, String, String) {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("shared.txt"), "base\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add base");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base shared", "--no-verify"], p),
+        "commit base",
+    );
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "feature"], p),
+        "branch",
+    );
+    std::fs::write(p.join("shared.txt"), "feature side\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add f1");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "f1 edit", "--no-verify"], p),
+        "commit f1",
+    );
+    let f1 = cp_rev_parse(p, "HEAD");
+    std::fs::write(p.join("extra.txt"), "extra\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "extra.txt"], p), "add f2");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "f2 add extra", "--no-verify"], p),
+        "commit f2",
+    );
+    let f2 = cp_rev_parse(p, "HEAD");
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    std::fs::write(p.join("shared.txt"), "main side\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add main");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main edit", "--no-verify"], p),
+        "commit main",
+    );
+    (repo, f1, f2)
+}
+
+/// A conflict exits 128/LBR-CONFLICT-001, writes worktree markers, and persists
+/// resumable state (proven by a follow-up new pick being blocked).
+#[test]
+fn cherry_pick_conflict_persists_state() {
+    let (repo, feat) = conflict_repo();
+    let p = repo.path();
+    let out = run_libra_command(&["cherry-pick", &feat], p);
+    assert_eq!(out.status.code(), Some(128), "conflict exit");
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-001");
+    let body = std::fs::read_to_string(p.join("shared.txt")).unwrap();
+    assert!(body.contains("<<<<<<< HEAD"), "markers: {body}");
+    assert!(body.contains(">>>>>>>"), "markers: {body}");
+    // A new pick is now blocked → state persisted.
+    let blocked = run_libra_command(&["cherry-pick", &feat], p);
+    let (_h2, report2) = parse_cli_error_stderr(&blocked.stderr);
+    assert_eq!(report2.error_code, "LBR-CONFLICT-002");
+}
+
+/// An in-progress cherry-pick blocks a new `merge`.
+#[test]
+fn cherry_pick_in_progress_blocks_merge() {
+    let (repo, feat) = conflict_repo();
+    let p = repo.path();
+    assert_eq!(
+        run_libra_command(&["cherry-pick", &feat], p).status.code(),
+        Some(128)
+    );
+    let out = run_libra_command(&["merge", "feature"], p);
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-002", "merge blocked");
+}
+
+/// An in-progress cherry-pick blocks a new `rebase`.
+#[test]
+fn cherry_pick_in_progress_blocks_rebase() {
+    let (repo, feat) = conflict_repo();
+    let p = repo.path();
+    assert_eq!(
+        run_libra_command(&["cherry-pick", &feat], p).status.code(),
+        Some(128)
+    );
+    let out = run_libra_command(&["rebase", "feature"], p);
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-002", "rebase blocked");
+}
+
+/// `--abort` restores HEAD/worktree to the pre-sequence state and clears it.
+#[test]
+fn cherry_pick_abort_restores_head() {
+    let (repo, feat) = conflict_repo();
+    let p = repo.path();
+    let head_before = cp_rev_parse(p, "HEAD");
+    assert_eq!(
+        run_libra_command(&["cherry-pick", &feat], p).status.code(),
+        Some(128)
+    );
+    assert_cli_success(&run_libra_command(&["cherry-pick", "--abort"], p), "abort");
+    assert_eq!(cp_rev_parse(p, "HEAD"), head_before, "HEAD restored");
+    assert_eq!(
+        std::fs::read_to_string(p.join("shared.txt")).unwrap(),
+        "main side\n",
+        "worktree restored, no markers"
+    );
+    // State cleared → a second --abort now errors with "no cherry-pick".
+    let again = run_libra_command(&["cherry-pick", "--abort"], p);
+    let (_h, report) = parse_cli_error_stderr(&again.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+}
+
+/// `--quit` clears state but leaves the conflicted worktree untouched.
+#[test]
+fn cherry_pick_quit_clears_state_keeps_worktree() {
+    let (repo, feat) = conflict_repo();
+    let p = repo.path();
+    assert_eq!(
+        run_libra_command(&["cherry-pick", &feat], p).status.code(),
+        Some(128)
+    );
+    assert_cli_success(&run_libra_command(&["cherry-pick", "--quit"], p), "quit");
+    // Worktree still has the conflict markers.
+    let body = std::fs::read_to_string(p.join("shared.txt")).unwrap();
+    assert!(body.contains("<<<<<<< HEAD"), "markers kept: {body}");
+    // A fresh pick is no longer blocked (state cleared) — it conflicts again.
+    let out = run_libra_command(&["cherry-pick", &feat], p);
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(
+        report.error_code, "LBR-CONFLICT-001",
+        "not blocked, re-conflicts"
+    );
+}
+
+/// `--continue` with unresolved conflicts is rejected.
+#[test]
+fn cherry_pick_continue_requires_resolved_index() {
+    let (repo, feat) = conflict_repo();
+    let p = repo.path();
+    assert_eq!(
+        run_libra_command(&["cherry-pick", &feat], p).status.code(),
+        Some(128)
+    );
+    // Do NOT resolve/add; continue must refuse.
+    let out = run_libra_command(&["cherry-pick", "--continue"], p);
+    assert_eq!(out.status.code(), Some(128));
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-001");
+}
+
+/// Resolve + add + `--continue` finishes the conflicted pick and the rest of the
+/// sequence.
+#[test]
+fn cherry_pick_continue_resumes_sequence() {
+    let (repo, f1, f2) = conflict_sequence_repo();
+    let p = repo.path();
+    assert_eq!(
+        run_libra_command(&["cherry-pick", &f1, &f2], p)
+            .status
+            .code(),
+        Some(128),
+        "f1 conflicts"
+    );
+    // Resolve the conflict and stage it.
+    std::fs::write(p.join("shared.txt"), "resolved\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "shared.txt"], p),
+        "add resolved",
+    );
+    assert_cli_success(
+        &run_libra_command(&["cherry-pick", "--continue"], p),
+        "continue",
+    );
+    // f2 was applied and the resolution stuck.
+    assert!(p.join("extra.txt").exists(), "f2 applied");
+    assert_eq!(
+        std::fs::read_to_string(p.join("shared.txt")).unwrap(),
+        "resolved\n"
+    );
+    // State cleared.
+    let done = run_libra_command(&["cherry-pick", "--continue"], p);
+    let (_h, report) = parse_cli_error_stderr(&done.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+}
+
+/// `--skip` discards the conflicted commit and applies the rest.
+#[test]
+fn cherry_pick_skip_advances() {
+    let (repo, f1, f2) = conflict_sequence_repo();
+    let p = repo.path();
+    assert_eq!(
+        run_libra_command(&["cherry-pick", &f1, &f2], p)
+            .status
+            .code(),
+        Some(128)
+    );
+    assert_cli_success(&run_libra_command(&["cherry-pick", "--skip"], p), "skip");
+    // f1 dropped (shared.txt stays main side), f2 applied.
+    assert_eq!(
+        std::fs::read_to_string(p.join("shared.txt")).unwrap(),
+        "main side\n",
+        "f1 discarded"
+    );
+    assert!(p.join("extra.txt").exists(), "f2 applied after skip");
+}
+
+/// Sequencer control flags with no in-progress state error with RepoStateInvalid.
+#[test]
+fn cherry_pick_continue_without_state_errors() {
+    let repo = create_committed_repo_via_cli();
+    for flag in ["--continue", "--skip", "--abort", "--quit"] {
+        let out = run_libra_command(&["cherry-pick", flag], repo.path());
+        assert_eq!(out.status.code(), Some(128), "{flag} with no state");
+        let (_h, report) = parse_cli_error_stderr(&out.stderr);
+        assert_eq!(report.error_code, "LBR-REPO-003", "{flag}");
+        assert!(
+            report.message.contains("no cherry-pick in progress"),
+            "{flag}: {}",
+            report.message
+        );
+    }
+}
+
+/// `--continue --abort` together is a usage conflict. Libra remaps clap's
+/// `ArgumentConflict` for a present subcommand to `command_usage` (129), not
+/// clap's native exit 2.
+#[test]
+fn cherry_pick_continue_and_abort_clap_conflict() {
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["cherry-pick", "--continue", "--abort"], repo.path());
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "clap mutex → command_usage: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `-n c1 c2` whose sequence conflicts does NOT persist resumable state.
+#[test]
+fn cherry_pick_no_commit_sequence_conflict_does_not_persist_state() {
+    let (repo, f1, f2) = conflict_sequence_repo();
+    let p = repo.path();
+    let out = run_libra_command(&["cherry-pick", "-n", &f1, &f2], p);
+    assert_eq!(out.status.code(), Some(128), "no-commit conflict");
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-001");
+    // No resumable state: --continue reports nothing in progress.
+    let cont = run_libra_command(&["cherry-pick", "--continue"], p);
+    let (_h2, report2) = parse_cli_error_stderr(&cont.stderr);
+    assert_eq!(report2.error_code, "LBR-REPO-003", "no state persisted");
+}
+
+/// Resuming from a different branch than the sequence started on is rejected.
+#[test]
+fn cherry_pick_continue_on_wrong_branch_rejected() {
+    let (repo, feat) = conflict_repo();
+    let p = repo.path();
+    assert_eq!(
+        run_libra_command(&["cherry-pick", &feat], p).status.code(),
+        Some(128)
+    );
+    // Move off the sequence branch (force past the dirty conflict worktree).
+    assert_cli_success(
+        &run_libra_command(&["checkout", "-f", "feature"], p),
+        "switch away",
+    );
+    let out = run_libra_command(&["cherry-pick", "--continue"], p);
+    assert_eq!(out.status.code(), Some(128));
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003", "wrong-branch rejected");
+}
+
+/// A malformed `todo` OID in the persisted state surfaces as an error, never a panic.
+#[tokio::test]
+#[serial]
+async fn cherry_pick_malformed_todo_oid_errors_not_panics() {
+    use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
+
+    let (repo, f1, f2) = conflict_sequence_repo();
+    let p = repo.path().to_path_buf();
+    // Trigger a conflict so a state row with a non-empty todo exists.
+    assert_eq!(
+        run_libra_command(&["cherry-pick", &f1, &f2], &p)
+            .status
+            .code(),
+        Some(128)
+    );
+    // Corrupt the persisted todo OID directly in the repo database.
+    let db_url = format!("sqlite://{}?mode=rwc", p.join(".libra/libra.db").display());
+    let conn = Database::connect(db_url).await.expect("connect repo db");
+    conn.execute(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        "UPDATE cherry_pick_state SET todo = 'not-a-valid-oid'".to_string(),
+    ))
+    .await
+    .expect("corrupt todo");
+    drop(conn);
+
+    let out = run_libra_command(&["cherry-pick", "--continue"], &p);
+    // Must fail gracefully (non-zero), not panic/crash.
+    assert_eq!(out.status.code(), Some(128), "malformed todo handled");
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-IO-001", "read failure, not panic");
+}
