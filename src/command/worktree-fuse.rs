@@ -582,8 +582,10 @@ fn spawn_macos_fuse_daemon(
     privileged: bool,
     allow_other: bool,
 ) -> io::Result<()> {
-    use std::process::{Command, Stdio};
-    use std::env;
+    use std::{
+        env,
+        process::{Command, Stdio},
+    };
     let lower_dir = lower_dirs
         .first()
         .ok_or_else(|| io::Error::other("macOS FUSE daemon requires a lower layer"))?;
