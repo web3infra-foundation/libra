@@ -291,6 +291,7 @@ mod code_thread_id_test;
 mod commit_editor_test;
 mod commit_error_test;
 mod commit_json_test;
+mod commit_sign_hooks_test;
 mod commit_test;
 mod config_test;
 mod describe_test;

@@ -20,9 +20,18 @@ and updates HEAD and refs.
 
 The command reads the index to determine which files are staged, constructs a tree object
 hierarchy matching the staged content, creates a commit object with the provided message and
-author/committer metadata, and advances the current branch ref. When vault signing is enabled,
-the commit is automatically GPG-signed. Pre-commit and commit-msg hooks are executed unless
-bypassed with `--no-verify`.
+author/committer metadata, and advances the current branch ref.
+
+**Hook lifecycle.** Libra-native hooks under `.libra/hooks/` run at the matching points:
+`pre-commit` (skipped by `--disable-pre` or `--no-verify`), then `prepare-commit-msg`
+(receives the message file and may edit it), then `commit-msg` (receives the final message
+file and may rewrite it or abort by exiting non-zero). `--no-verify` skips every hook;
+`--disable-pre` skips only `pre-commit`, leaving the message hooks active.
+
+**Signing precedence.** A commit is GPG-signed (vault-backed) when, in order:
+`--no-gpg-sign` forces *off*; otherwise `-S`/`--gpg-sign` or `commit.gpgSign true` forces
+*on* (bypassing the `vault.signing` gate); otherwise the commit is signed only when
+`vault.signing` is enabled.
 
 ## Options
 
@@ -125,6 +134,27 @@ identity.
 
 ```bash
 libra commit -s -m "Add feature"
+```
+
+### `-S, --gpg-sign`
+
+Force a vault-backed PGP signature on this commit, bypassing the `vault.signing` gate. This
+is the explicit opt-in equivalent of Git's `-S` and is useful when signing is otherwise
+disabled. The same effect is obtained repository-wide by setting `commit.gpgSign true`
+(either casing — `commit.gpgsign` is also honored).
+
+```bash
+libra commit -S -m "Signed release"
+```
+
+### `--no-gpg-sign`
+
+Suppress signing for this commit even when `vault.signing` or `commit.gpgSign` would
+otherwise sign it. Mutually exclusive with `-S`/`--gpg-sign` (passing both is a parse error,
+exit 129).
+
+```bash
+libra commit --no-gpg-sign -m "Unsigned quick fix"
 ```
 
 ### `--allow-empty`
@@ -342,7 +372,8 @@ switching from Git do not need to learn a new flag name.
 | Auto-stage tracked | `git commit -a` | N/A (automatic tracking) | `libra commit -a` |
 | Allow empty commit | `git commit --allow-empty` | `jj commit --allow-empty` | `libra commit --allow-empty` |
 | Signoff trailer | `git commit -s` / `--signoff` | N/A | `libra commit -s` / `--signoff` |
-| GPG sign commit | `git commit -S` (manual GPG) | N/A (no signing) | Automatic (vault-backed) |
+| GPG sign commit | `git commit -S` (manual GPG) | N/A (no signing) | `libra commit -S` / automatic (vault-backed) |
+| Suppress signing | `git commit --no-gpg-sign` | N/A | `libra commit --no-gpg-sign` |
 | Override author | `git commit --author="..."` | N/A | `libra commit --author="..."` |
 | Conventional check | External tool (commitlint) | N/A | `libra commit --conventional` |
 | Skip pre-commit only | N/A | N/A | `libra commit --disable-pre` |
@@ -352,7 +383,7 @@ switching from Git do not need to learn a new flag name.
 | Interactive message | `git commit` (opens editor) | `jj commit` (opens editor) | N/A (message required via -m or -F) |
 | Verbose diff in editor | `git commit -v` | N/A | N/A |
 | Reset author date | `git commit --reset-author` | N/A | N/A |
-| Cleanup mode | `git commit --cleanup=<mode>` | N/A | N/A |
+| Cleanup mode | `git commit --cleanup=<mode>` | N/A | `libra commit --cleanup=<mode>` |
 | Trailer | `git commit --trailer="..."` | N/A | N/A |
 | Structured JSON output | N/A | N/A | `--json` / `--machine` |
 | Error hints | Minimal | Minimal | Every error type has an actionable hint |
@@ -378,6 +409,9 @@ Every `CommitError` variant maps to an explicit `StableErrorCode`.
 | Parent commit missing | `LBR-REPO-002` | 128 | "the parent commit is missing or corrupted" |
 | HEAD update failed | `LBR-IO-002` | 128 | -- |
 | Pre-commit hook failed | `LBR-REPO-003` | 128 | "use --no-verify to bypass the hook" |
+| Commit-msg hook failed | `LBR-REPO-003` | 128 | "fix the commit message, or use --no-verify to bypass the hook" |
+| Editor failed / spawn error | `LBR-REPO-003` | 128 | "set $EDITOR / core.editor, or provide the message with -m/-F" |
+| No editor available (non-TTY) | `LBR-REPO-003` | 128 | "provide a message with -m/-F, or run in a terminal with an editor" |
 | Conventional commit invalid | `LBR-CLI-002` | 129 | "see https://www.conventionalcommits.org for format rules" |
 | Vault signing failed | `LBR-AUTH-001` | 128 | "check vault configuration with 'libra config --list'" |
 | Auto-stage failed | `LBR-IO-001` | 128 | -- |
@@ -386,7 +420,8 @@ Every `CommitError` variant maps to an explicit `StableErrorCode`.
 ## Compatibility Notes
 
 - Libra opens an editor (`$GIT_EDITOR` → `core.editor` → `$VISUAL` → `$EDITOR` → `vi`) when no message is supplied and `--no-edit` is not given; in a non-TTY with no editor configured it errors instead of hanging
+- `prepare-commit-msg` and `commit-msg` hooks (under `.libra/hooks/`) run on the message file; a non-zero `commit-msg` hook aborts the commit. `--no-verify` skips all hooks; `--disable-pre` skips only `pre-commit`
 - jj does not have a traditional `commit` command with staging; `jj commit` finalizes the working copy commit
 - `--fixup` and `--squash` are not supported; use `libra rebase -i` for commit restructuring
-- Vault signing replaces Git's `commit.gpgsign` and `user.signingkey` configuration
+- `-S`/`--gpg-sign` forces vault-backed signing (and `commit.gpgSign true` does so repository-wide); `--no-gpg-sign` suppresses it. These layer over Libra's default vault signing, which replaces Git's `user.signingkey` configuration
 - `--cleanup` modes (`strip`/`whitespace`/`verbatim`/`scissors`/`default`) are supported; `--allow-empty-message` is not

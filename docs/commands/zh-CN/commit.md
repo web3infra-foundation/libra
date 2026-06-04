@@ -16,7 +16,11 @@ libra commit --amend [--no-edit]
 
 `libra commit` 从已暂存更改创建新提交，构建 tree 和 commit 对象，验证消息（包括可选的 conventional commit 格式，以及通过 vault 进行 GPG 签名），并更新 HEAD 和 refs。
 
-该命令读取索引以确定哪些文件已暂存，构造与暂存内容匹配的 tree 对象层级，使用提供的消息和 author/committer 元数据创建 commit 对象，并推进当前分支 ref。启用 vault signing 时，提交会自动进行 GPG 签名。除非用 `--no-verify` 绕过，pre-commit 和 commit-msg hooks 会被执行。
+该命令读取索引以确定哪些文件已暂存，构造与暂存内容匹配的 tree 对象层级，使用提供的消息和 author/committer 元数据创建 commit 对象，并推进当前分支 ref。
+
+**Hook 生命周期。** `.libra/hooks/` 下的 Libra 原生 hooks 在对应节点运行：`pre-commit`（被 `--disable-pre` 或 `--no-verify` 跳过），然后 `prepare-commit-msg`（接收消息文件并可编辑它），然后 `commit-msg`（接收最终消息文件，可重写它或以非零退出中止提交）。`--no-verify` 跳过所有 hooks；`--disable-pre` 只跳过 `pre-commit`，消息 hooks 仍然运行。
+
+**签名优先级。** 提交是否进行（vault-backed）GPG 签名，按以下顺序决定：`--no-gpg-sign` 强制*关闭*；否则 `-S`/`--gpg-sign` 或 `commit.gpgSign true` 强制*开启*（绕过 `vault.signing` 门控）；否则仅当 `vault.signing` 启用时签名。
 
 ## 选项
 
@@ -101,6 +105,22 @@ libra commit -a -m "Fix typo"
 
 ```bash
 libra commit -s -m "Add feature"
+```
+
+### `-S, --gpg-sign`
+
+对本次提交强制进行 vault-backed PGP 签名，绕过 `vault.signing` 门控。这是 Git `-S` 的显式 opt-in 等价物，在签名被禁用时很有用。设置 `commit.gpgSign true`（任意大小写——`commit.gpgsign` 同样被识别）可在整个仓库范围获得相同效果。
+
+```bash
+libra commit -S -m "Signed release"
+```
+
+### `--no-gpg-sign`
+
+即使 `vault.signing` 或 `commit.gpgSign` 本会签名，也抑制本次提交的签名。与 `-S`/`--gpg-sign` 互斥（同时传递为解析错误，退出 129）。
+
+```bash
+libra commit --no-gpg-sign -m "Unsigned quick fix"
 ```
 
 ### `--allow-empty`
@@ -296,7 +316,8 @@ Git 没有内置提交消息格式验证；团队依赖 commitlint、husky 或 C
 | 自动暂存已跟踪 | `git commit -a` | N/A（自动跟踪） | `libra commit -a` |
 | 允许空提交 | `git commit --allow-empty` | `jj commit --allow-empty` | `libra commit --allow-empty` |
 | Signoff trailer | `git commit -s` / `--signoff` | N/A | `libra commit -s` / `--signoff` |
-| GPG 签名提交 | `git commit -S`（手动 GPG） | N/A（无签名） | 自动（vault-backed） |
+| GPG 签名提交 | `git commit -S`（手动 GPG） | N/A（无签名） | `libra commit -S` / 自动（vault-backed） |
+| 抑制签名 | `git commit --no-gpg-sign` | N/A | `libra commit --no-gpg-sign` |
 | 覆盖 author | `git commit --author="..."` | N/A | `libra commit --author="..."` |
 | Conventional 检查 | 外部工具（commitlint） | N/A | `libra commit --conventional` |
 | 只跳过 pre-commit | N/A | N/A | `libra commit --disable-pre` |
@@ -306,7 +327,7 @@ Git 没有内置提交消息格式验证；团队依赖 commitlint、husky 或 C
 | 交互式消息 | `git commit`（打开编辑器） | `jj commit`（打开编辑器） | N/A（需要通过 -m 或 -F 提供消息） |
 | 编辑器中 verbose diff | `git commit -v` | N/A | N/A |
 | 重置作者日期 | `git commit --reset-author` | N/A | N/A |
-| Cleanup 模式 | `git commit --cleanup=<mode>` | N/A | N/A |
+| Cleanup 模式 | `git commit --cleanup=<mode>` | N/A | `libra commit --cleanup=<mode>` |
 | Trailer | `git commit --trailer="..."` | N/A | N/A |
 | 结构化 JSON 输出 | N/A | N/A | `--json` / `--machine` |
 | 错误提示 | 最少 | 最少 | 每种错误类型都有可操作提示 |
@@ -332,6 +353,9 @@ Git 没有内置提交消息格式验证；团队依赖 commitlint、husky 或 C
 | 父提交缺失 | `LBR-REPO-002` | 128 | "the parent commit is missing or corrupted" |
 | HEAD 更新失败 | `LBR-IO-002` | 128 | -- |
 | Pre-commit hook 失败 | `LBR-REPO-003` | 128 | "use --no-verify to bypass the hook" |
+| Commit-msg hook 失败 | `LBR-REPO-003` | 128 | "fix the commit message, or use --no-verify to bypass the hook" |
+| 编辑器失败 / 启动错误 | `LBR-REPO-003` | 128 | "set $EDITOR / core.editor, or provide the message with -m/-F" |
+| 无可用编辑器（非 TTY） | `LBR-REPO-003` | 128 | "provide a message with -m/-F, or run in a terminal with an editor" |
 | Conventional commit 无效 | `LBR-CLI-002` | 129 | "see https://www.conventionalcommits.org for format rules" |
 | Vault signing 失败 | `LBR-AUTH-001` | 128 | "check vault configuration with 'libra config --list'" |
 | Auto-stage 失败 | `LBR-IO-001` | 128 | -- |
@@ -340,7 +364,8 @@ Git 没有内置提交消息格式验证；团队依赖 commitlint、husky 或 C
 ## 兼容性说明
 
 - 未提供消息且未给 `--no-edit` 时，Libra 打开编辑器（`$GIT_EDITOR` → `core.editor` → `$VISUAL` → `$EDITOR` → `vi`）；在非 TTY 且未配置编辑器时报错而非挂起
+- `prepare-commit-msg` 和 `commit-msg` hooks（位于 `.libra/hooks/`）作用于消息文件；`commit-msg` hook 非零退出会中止提交。`--no-verify` 跳过所有 hooks；`--disable-pre` 只跳过 `pre-commit`
 - jj 没有带暂存的传统 `commit` 命令；`jj commit` 会完成 working copy commit
 - 不支持 `--fixup` 和 `--squash`；使用 `libra rebase -i` 进行提交重组
-- Vault signing 替代 Git 的 `commit.gpgsign` 和 `user.signingkey` 配置
+- `-S`/`--gpg-sign` 强制 vault-backed 签名（`commit.gpgSign true` 在整个仓库范围生效）；`--no-gpg-sign` 抑制签名。它们叠加在 Libra 默认的 vault 签名之上，后者替代 Git 的 `user.signingkey` 配置
 - 支持 `--cleanup` 模式（`strip`/`whitespace`/`verbatim`/`scissors`/`default`）；不支持 `--allow-empty-message`

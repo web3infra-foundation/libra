@@ -74,6 +74,8 @@ EXAMPLES:
     libra commit -t template.txt                     Seed the message from a template file
     libra commit --cleanup=verbatim -m '#keep'       Keep comment lines verbatim
     libra commit -s -m 'Add feature'                 Add Signed-off-by trailer
+    libra commit -S -m 'Signed release'              Force a vault-backed GPG signature
+    libra commit --no-gpg-sign -m 'Quick fix'        Suppress signing for this commit
     libra commit --allow-empty -m 'Trigger CI'       Create an empty commit
     libra commit --json -m 'Add feature'             Structured JSON output for agents";
 
@@ -135,6 +137,14 @@ pub struct CommitArgs {
     /// add signed-off-by line at the end of the commit message
     #[arg(short = 's', long)]
     pub signoff: bool,
+
+    /// GPG/Vault-sign the commit (forces signing regardless of config)
+    #[arg(short = 'S', long = "gpg-sign")]
+    pub gpg_sign: bool,
+
+    /// Do not GPG/Vault-sign the commit (overrides commit.gpgSign / vault.signing)
+    #[arg(long = "no-gpg-sign", conflicts_with = "gpg_sign")]
+    pub no_gpg_sign: bool,
 
     /// Skip pre-commit hooks for this invocation (narrower than --no-verify, which also skips commit-msg hooks)
     #[arg(long)]
@@ -216,6 +226,9 @@ pub enum CommitError {
     #[error("failed to calculate staged changes: {0}")]
     StagedChanges(String),
 
+    #[error("commit-msg hook failed: {0}")]
+    CommitMsgHook(String),
+
     #[error("commit message editor failed: {0}")]
     EditorFailed(String),
 
@@ -287,6 +300,9 @@ impl From<CommitError> for CliError {
             CommitError::StagedChanges(..) => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::RepoCorrupt)
                 .with_hint("failed to compute staged changes"),
+            CommitError::CommitMsgHook(..) => CliError::failure(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("fix the commit message, or use --no-verify to bypass the hook"),
             CommitError::EditorFailed(..) => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("set $EDITOR / core.editor, or provide the message with -m/-F"),
@@ -523,12 +539,10 @@ fn cleanup_message(message: &str, mode: CleanupMode, edited: bool) -> String {
 /// order: `$GIT_EDITOR` → `core.editor` → `$VISUAL` → `$EDITOR`. Returns `None`
 /// when nothing is configured (the caller falls back to `vi` only on a TTY).
 async fn resolve_explicit_editor() -> Option<String> {
-    for var in ["GIT_EDITOR"] {
-        if let Ok(value) = std::env::var(var)
-            && !value.trim().is_empty()
-        {
-            return Some(value);
-        }
+    let nonempty_env = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+
+    if let Some(value) = nonempty_env("GIT_EDITOR") {
+        return Some(value);
     }
     if let Ok(Some(value)) =
         read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "core.editor").await
@@ -536,27 +550,60 @@ async fn resolve_explicit_editor() -> Option<String> {
     {
         return Some(value);
     }
-    for var in ["VISUAL", "EDITOR"] {
-        if let Ok(value) = std::env::var(var)
-            && !value.trim().is_empty()
-        {
-            return Some(value);
-        }
-    }
-    None
+    nonempty_env("VISUAL").or_else(|| nonempty_env("EDITOR"))
 }
 
 /// Launch the editor on a temp file pre-filled with `initial_content`, returning
 /// the edited contents. The editor command is split on whitespace into argv
 /// (program + leading args) and the file path is appended as the last argument;
 /// it is **never** wrapped in a shell, preventing command injection.
-fn edit_commit_message(initial_content: &str, editor_cmd: &str) -> Result<String, CommitError> {
-    let temp_dir = tempfile::tempdir()
-        .map_err(|e| CommitError::EditorFailed(format!("failed to create temp dir: {e}")))?;
-    let file_path = temp_dir.path().join("COMMIT_EDITMSG");
-    std::fs::write(&file_path, initial_content)
-        .map_err(|e| CommitError::EditorFailed(format!("failed to write edit file: {e}")))?;
+/// The signing decision derived from the `-S`/`--no-gpg-sign` flags and the
+/// `commit.gpgSign` config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignDecision {
+    /// Never sign (`--no-gpg-sign`).
+    Skip,
+    /// Always sign, bypassing the `vault.signing` gate (`-S` / `commit.gpgSign=true`).
+    SignForce,
+    /// Sign only if `vault.signing=true` (the default; current behavior).
+    SignIfVaultEnabled,
+}
 
+/// Read `commit.gpgSign` config, accepting both casings (Git is case-insensitive
+/// for config names, but `ConfigKv` matches keys exactly).
+async fn read_commit_gpgsign_config() -> Option<bool> {
+    for key in ["commit.gpgSign", "commit.gpgsign"] {
+        if let Ok(Some(value)) =
+            read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, key).await
+        {
+            match value.trim().to_ascii_lowercase().as_str() {
+                "true" => return Some(true),
+                "false" => return Some(false),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// Resolve the signing decision (`--no-gpg-sign` > `-S` > `commit.gpgSign` > default).
+async fn resolve_sign_decision(args: &CommitArgs) -> SignDecision {
+    if args.no_gpg_sign {
+        return SignDecision::Skip;
+    }
+    if args.gpg_sign {
+        return SignDecision::SignForce;
+    }
+    match read_commit_gpgsign_config().await {
+        Some(true) => SignDecision::SignForce,
+        _ => SignDecision::SignIfVaultEnabled,
+    }
+}
+
+/// Launch the editor on `file_path`, splitting the command into argv (program +
+/// leading args) and appending the file path as the last argument. Never wrapped
+/// in a shell, preventing command injection.
+fn launch_editor_on(file_path: &std::path::Path, editor_cmd: &str) -> Result<(), CommitError> {
     let parts: Vec<&str> = editor_cmd.split_whitespace().collect();
     let Some((program, leading_args)) = parts.split_first() else {
         return Err(CommitError::EditorFailed(
@@ -564,7 +611,7 @@ fn edit_commit_message(initial_content: &str, editor_cmd: &str) -> Result<String
         ));
     };
     let mut command = Command::new(program);
-    command.args(leading_args).arg(&file_path);
+    command.args(leading_args).arg(file_path);
     let status = command
         .status()
         .map_err(|e| CommitError::EditorFailed(format!("failed to start editor: {e}")))?;
@@ -574,10 +621,60 @@ fn edit_commit_message(initial_content: &str, editor_cmd: &str) -> Result<String
             status.code().unwrap_or(-1)
         )));
     }
+    Ok(())
+}
 
-    std::fs::read_to_string(&file_path)
-        .map_err(|e| CommitError::EditorFailed(format!("failed to read edit file: {e}")))
-    // `temp_dir` (TempDir) drops here, removing COMMIT_EDITMSG (RAII cleanup).
+/// Run a Libra-native message hook (`prepare-commit-msg`/`commit-msg`) from
+/// `.libra/hooks/<name>.sh` (Unix) / `.ps1` (Windows). The hook receives the
+/// message file path as its first argument (plus any `extra_args`) and may
+/// rewrite the file. A missing hook is a no-op; a non-zero exit aborts the commit.
+fn run_message_hook(
+    name: &str,
+    msg_path: &std::path::Path,
+    extra_args: &[&str],
+    output: &OutputConfig,
+) -> Result<(), CommitError> {
+    let hooks_dir = path::hooks();
+    #[cfg(not(target_os = "windows"))]
+    let hook_path = hooks_dir.join(format!("{name}.sh"));
+    #[cfg(target_os = "windows")]
+    let hook_path = hooks_dir.join(format!("{name}.ps1"));
+    if !hook_path.exists() {
+        return Ok(());
+    }
+    let hook_display = hook_path.display().to_string();
+    let (stdout_cfg, stderr_cfg) = if output.is_json() {
+        (Stdio::piped(), Stdio::piped())
+    } else {
+        (Stdio::inherit(), Stdio::inherit())
+    };
+    let msg_arg = msg_path.to_string_lossy().into_owned();
+    #[cfg(not(target_os = "windows"))]
+    let mut command = Command::new("sh");
+    #[cfg(not(target_os = "windows"))]
+    command.arg(&hook_path).arg(&msg_arg);
+    #[cfg(target_os = "windows")]
+    let mut command = Command::new("powershell");
+    #[cfg(target_os = "windows")]
+    command.arg("-File").arg(&hook_path).arg(&msg_arg);
+    for arg in extra_args {
+        command.arg(arg);
+    }
+    let result = command
+        .current_dir(util::working_dir())
+        .stdout(stdout_cfg)
+        .stderr(stderr_cfg)
+        .output()
+        .map_err(|e| {
+            CommitError::CommitMsgHook(format!("failed to execute hook {hook_display}: {e}"))
+        })?;
+    if !result.status.success() {
+        return Err(CommitError::CommitMsgHook(format!(
+            "hook {hook_display} failed with exit code {}",
+            result.status.code().unwrap_or(-1)
+        )));
+    }
+    Ok(())
 }
 
 /// Read the initial message content from `-t/--template` or `commit.template`.
@@ -602,15 +699,26 @@ async fn load_template_content(args: &CommitArgs) -> Result<Option<String>, Comm
     }
 }
 
-/// Resolve the final, cleaned commit message from all sources (explicit `-m`/
-/// `-F`, `-t`/`commit.template`, an editor, or the amended parent message),
-/// applying the configured `--cleanup` mode. Returns the cleaned message body
-/// **without** the signoff trailer (which is appended by the caller).
+/// Resolve the final commit message from all sources (explicit `-m`/`-F`,
+/// `-t`/`commit.template`, an editor, or the amended parent message), running the
+/// message hooks and applying the configured `--cleanup` mode. The lifecycle is:
+/// initial content → editor → `prepare-commit-msg` → cleanup → `commit-msg`.
+/// Returns the message body **without** the signoff trailer (appended by the caller).
 async fn resolve_commit_message(
     args: &CommitArgs,
+    output: &OutputConfig,
     amend_parent_message: Option<&str>,
+    skip_commit_msg: bool,
 ) -> Result<String, CommitError> {
     let has_explicit_message = args.message.is_some() || args.file.is_some();
+
+    // Load any template once (used both for the initial content and the
+    // prepare-commit-msg `source` label).
+    let template_content = if has_explicit_message {
+        None
+    } else {
+        load_template_content(args).await?
+    };
 
     // 1. Initial content (precedence: -m > -F > template > amend-parent > empty).
     let mut content = if let Some(msg) = &args.message {
@@ -622,17 +730,35 @@ async fn resolve_commit_message(
                 path: file_path.clone(),
                 detail: e.to_string(),
             })?
-    } else if let Some(template) = load_template_content(args).await? {
-        template
+    } else if let Some(template) = &template_content {
+        template.clone()
     } else if let Some(parent) = amend_parent_message {
         parent.to_string()
     } else {
         String::new()
     };
 
-    // 2. Decide whether to launch the editor.
-    //    --edit forces it; --no-edit suppresses it; otherwise it runs only when
-    //    no explicit message was supplied.
+    // The prepare-commit-msg `source` argument, aligned with Git.
+    let source = if has_explicit_message {
+        "message"
+    } else if template_content.is_some() {
+        "template"
+    } else if amend_parent_message.is_some() {
+        "commit"
+    } else {
+        "message"
+    };
+
+    // Hold the message in a single COMMIT_EDITMSG temp file shared by the editor
+    // and the message hooks (RAII cleanup on drop).
+    let temp_dir = tempfile::tempdir()
+        .map_err(|e| CommitError::EditorFailed(format!("failed to create temp dir: {e}")))?;
+    let file_path = temp_dir.path().join("COMMIT_EDITMSG");
+    std::fs::write(&file_path, &content)
+        .map_err(|e| CommitError::EditorFailed(format!("failed to write edit file: {e}")))?;
+
+    // 2. Editor. `--edit` forces it; `--no-edit` suppresses it; otherwise it runs
+    //    only when no explicit message was supplied.
     let launch_editor = if args.edit {
         true
     } else if args.no_edit {
@@ -640,7 +766,6 @@ async fn resolve_commit_message(
     } else {
         !has_explicit_message
     };
-
     let mut edited = false;
     if launch_editor {
         // An explicitly configured editor runs even without a TTY (e.g. a CI
@@ -654,11 +779,30 @@ async fn resolve_commit_message(
                 "vi".to_string()
             }
         };
-        content = edit_commit_message(&content, &editor)?;
+        launch_editor_on(&file_path, &editor)?;
         edited = true;
     }
 
-    Ok(cleanup_message(&content, args.cleanup, edited))
+    // 3. prepare-commit-msg (before cleanup; sees the raw template/comments).
+    if !skip_commit_msg {
+        run_message_hook("prepare-commit-msg", &file_path, &[source], output)?;
+    }
+    content = std::fs::read_to_string(&file_path)
+        .map_err(|e| CommitError::EditorFailed(format!("failed to read edit file: {e}")))?;
+
+    // 4. Cleanup.
+    let cleaned = cleanup_message(&content, args.cleanup, edited);
+    std::fs::write(&file_path, &cleaned)
+        .map_err(|e| CommitError::EditorFailed(format!("failed to write edit file: {e}")))?;
+
+    // 5. commit-msg (after cleanup; sees the near-final message and may rewrite it).
+    if !skip_commit_msg {
+        run_message_hook("commit-msg", &file_path, &[], output)?;
+        std::fs::read_to_string(&file_path)
+            .map_err(|e| CommitError::EditorFailed(format!("failed to read edit file: {e}")))
+    } else {
+        Ok(cleaned)
+    }
 }
 
 pub async fn run_commit(
@@ -668,7 +812,10 @@ pub async fn run_commit(
     let is_amend = args.amend;
     let is_signoff = args.signoff;
     let is_conventional = args.conventional;
-    let skip_hooks = args.disable_pre || args.no_verify;
+    // `--disable-pre` only skips pre-commit; `--no-verify` skips pre-commit AND
+    // the commit-msg/prepare-commit-msg hooks and the conventional check.
+    let skip_pre_commit = args.disable_pre || args.no_verify;
+    let skip_commit_msg = args.no_verify;
     let skip_conventional_check = args.no_verify;
 
     // Auto-stage tracked modifications/deletions (git commit -a)
@@ -699,7 +846,7 @@ pub async fn run_commit(
     // INVARIANT: hooks and message validation must run before creating the
     // commit object or updating HEAD; once those writes happen, hook failure can
     // no longer block the commit without explicit rollback logic.
-    if !skip_hooks {
+    if !skip_pre_commit {
         run_pre_commit_hook(output)?;
     }
 
@@ -727,8 +874,14 @@ pub async fn run_commit(
         (parents_commit_ids, None)
     };
 
-    // Resolve the cleaned commit message from all sources (editor/template/...).
-    let message = resolve_commit_message(&args, amend_parent_message.as_deref()).await?;
+    // Resolve the cleaned/hooked commit message from all sources.
+    let message = resolve_commit_message(
+        &args,
+        output,
+        amend_parent_message.as_deref(),
+        skip_commit_msg,
+    )
+    .await?;
 
     // A message that is empty after cleanup aborts the commit (Git parity).
     // `--allow-empty` permits an empty tree, not an empty message.
@@ -768,15 +921,32 @@ pub async fn run_commit(
         ));
     }
 
-    let gpg_sig = vault_sign_commit(
-        &tree.id,
-        &effective_parents,
-        &author,
-        &committer,
-        &commit_message,
-        false,
-    )
-    .await?;
+    // Apply the signing decision (`-S` / `--no-gpg-sign` / `commit.gpgSign`).
+    let gpg_sig = match resolve_sign_decision(&args).await {
+        SignDecision::Skip => None,
+        SignDecision::SignForce => {
+            vault_sign_commit(
+                &tree.id,
+                &effective_parents,
+                &author,
+                &committer,
+                &commit_message,
+                true,
+            )
+            .await?
+        }
+        SignDecision::SignIfVaultEnabled => {
+            vault_sign_commit(
+                &tree.id,
+                &effective_parents,
+                &author,
+                &committer,
+                &commit_message,
+                false,
+            )
+            .await?
+        }
+    };
 
     let commit = Commit::new(
         author,
