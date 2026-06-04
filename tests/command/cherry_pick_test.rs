@@ -195,6 +195,7 @@ async fn test_basic_cherry_pick() {
     cherry_pick::execute(cherry_pick::CherryPickArgs {
         commits: vec![c2_commit.to_string()],
         no_commit: true,
+        ..Default::default()
     })
     .await;
 
@@ -342,7 +343,7 @@ async fn test_cherry_pick_with_commit() {
     // Cherry-pick with automatic commit
     cherry_pick::execute(cherry_pick::CherryPickArgs {
         commits: vec![feature_commit.to_string()],
-        no_commit: false,
+        ..Default::default()
     })
     .await;
 
@@ -487,7 +488,7 @@ async fn test_cherry_pick_multiple_commits() {
     // Cherry-pick both commits
     cherry_pick::execute(cherry_pick::CherryPickArgs {
         commits: vec![commit1.to_string(), commit2.to_string()],
-        no_commit: false,
+        ..Default::default()
     })
     .await;
 
@@ -526,7 +527,7 @@ async fn test_cherry_pick_errors() {
     // Test cherry-picking non-existent commit should fail gracefully
     cherry_pick::execute(cherry_pick::CherryPickArgs {
         commits: vec!["nonexistent".to_string()],
-        no_commit: false,
+        ..Default::default()
     })
     .await;
 
@@ -730,7 +731,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
     // attempt cherry-pick with SHA-1 length hash: should no-op and not create file
     cherry_pick::execute(CherryPickArgs {
         commits: vec!["4b825dc642cb6eb9a060e54bf8d69288fbee4904".into()],
-        no_commit: false,
+        ..Default::default()
     })
     .await;
     let head_after_invalid = Head::current_commit().await.unwrap();
@@ -746,7 +747,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
     // cherry-pick with valid SHA-256 commit should succeed
     cherry_pick::execute(CherryPickArgs {
         commits: vec![feature_commit.to_string()],
-        no_commit: false,
+        ..Default::default()
     })
     .await;
     let head_after_valid = Head::current_commit().await.unwrap();
@@ -758,4 +759,304 @@ async fn test_cherry_pick_sha256_hash_handling() {
         PathBuf::from("feature.txt").exists(),
         "feature.txt should be present after valid cherry-pick"
     );
+}
+
+// ── Batch 0: commit-modifier flags (-x / -s / -e / --allow-empty*) ──
+
+/// `libra rev-parse <rev>` → trimmed OID string (panics on failure).
+fn cp_rev_parse(repo: &std::path::Path, rev: &str) -> String {
+    let out = run_libra_command(&["rev-parse", rev], repo);
+    assert_cli_success(&out, "rev-parse");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Raw `cat-file -p HEAD` body (includes the commit message).
+fn cp_head_message(repo: &std::path::Path) -> String {
+    let out = run_libra_command(&["cat-file", "-p", "HEAD"], repo);
+    assert_cli_success(&out, "cat-file -p HEAD");
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// Fresh repo with a `feature` branch holding one commit that adds `file`=`content`
+/// (message `msg`). Returns `(repo, feature_oid)` with HEAD back on `main`.
+fn repo_with_feature_commit(file: &str, content: &str, msg: &str) -> (tempfile::TempDir, String) {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "feature"], p),
+        "switch -c feature",
+    );
+    std::fs::write(p.join(file), content).unwrap();
+    assert_cli_success(&run_libra_command(&["add", file], p), "add feature file");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", msg, "--no-verify"], p),
+        "feature commit",
+    );
+    let oid = cp_rev_parse(p, "HEAD");
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    (repo, oid)
+}
+
+/// Default cherry-pick (no `-x`) must NOT append the cherry-picked-from line
+/// (behavior reversal — previously always appended).
+#[test]
+fn cherry_pick_default_omits_cherry_picked_from_line() {
+    let (repo, oid) = repo_with_feature_commit("f.txt", "feat\n", "feature work");
+    assert_cli_success(
+        &run_libra_command(&["cherry-pick", &oid], repo.path()),
+        "cherry-pick default",
+    );
+    let msg = cp_head_message(repo.path());
+    assert!(
+        !msg.contains("(cherry picked from commit"),
+        "default cherry-pick must not append the origin line, got: {msg}"
+    );
+    assert!(msg.contains("feature work"), "message: {msg}");
+}
+
+/// `-x` appends the cherry-picked-from line (and only once).
+#[test]
+fn cherry_pick_dash_x_appends_origin_line() {
+    let (repo, oid) = repo_with_feature_commit("f.txt", "feat\n", "feature work");
+    assert_cli_success(
+        &run_libra_command(&["cherry-pick", "-x", &oid], repo.path()),
+        "cherry-pick -x",
+    );
+    let msg = cp_head_message(repo.path());
+    let needle = format!("(cherry picked from commit {oid})");
+    assert_eq!(
+        msg.matches(&needle).count(),
+        1,
+        "origin line must appear exactly once, got: {msg}"
+    );
+}
+
+/// `-s` appends a Signed-off-by trailer.
+#[test]
+fn cherry_pick_signoff_appends_trailer() {
+    let (repo, oid) = repo_with_feature_commit("f.txt", "feat\n", "feature work");
+    assert_cli_success(
+        &run_libra_command(&["cherry-pick", "-s", &oid], repo.path()),
+        "cherry-pick -s",
+    );
+    let msg = cp_head_message(repo.path());
+    assert!(
+        msg.contains("Signed-off-by:"),
+        "signoff trailer missing, got: {msg}"
+    );
+}
+
+/// `-x -s` ordering: the cherry-picked-from line precedes Signed-off-by.
+#[test]
+fn cherry_pick_x_and_signoff_ordering() {
+    let (repo, oid) = repo_with_feature_commit("f.txt", "feat\n", "feature work");
+    assert_cli_success(
+        &run_libra_command(&["cherry-pick", "-x", "-s", &oid], repo.path()),
+        "cherry-pick -x -s",
+    );
+    let msg = cp_head_message(repo.path());
+    let x_pos = msg
+        .find("(cherry picked from commit")
+        .expect("origin line present");
+    let s_pos = msg.find("Signed-off-by:").expect("signoff present");
+    assert!(
+        x_pos < s_pos,
+        "cherry-picked-from must precede Signed-off-by, got: {msg}"
+    );
+}
+
+/// `-n c1 c2` no longer errors and accumulates both changes into the index.
+#[test]
+fn cherry_pick_multiple_with_no_commit_accumulates_index() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "feature"], p),
+        "switch -c feature",
+    );
+    std::fs::write(p.join("a.txt"), "aaa\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "a.txt"], p), "add a");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "add a", "--no-verify"], p),
+        "commit a",
+    );
+    let c1 = cp_rev_parse(p, "HEAD");
+    std::fs::write(p.join("b.txt"), "bbb\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "b.txt"], p), "add b");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "add b", "--no-verify"], p),
+        "commit b",
+    );
+    let c2 = cp_rev_parse(p, "HEAD");
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    let head_before = cp_rev_parse(p, "HEAD");
+
+    let out = run_libra_command(&["cherry-pick", "-n", &c1, &c2], p);
+    assert_cli_success(&out, "cherry-pick -n c1 c2 must not error");
+
+    // HEAD unchanged (no commits made), both files staged.
+    assert_eq!(
+        cp_rev_parse(p, "HEAD"),
+        head_before,
+        "HEAD must not advance"
+    );
+    let status = run_libra_command(&["status"], p);
+    let body = String::from_utf8_lossy(&status.stdout);
+    assert!(body.contains("a.txt"), "a.txt staged: {body}");
+    assert!(body.contains("b.txt"), "b.txt staged: {body}");
+}
+
+/// A commit whose own change set is empty is blocked without `--allow-empty`.
+#[test]
+fn cherry_pick_originally_empty_blocked_without_allow_empty() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "feature"], p),
+        "switch -c feature",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "--allow-empty", "-m", "empty feat", "--no-verify"],
+            p,
+        ),
+        "empty feature commit",
+    );
+    let empty_oid = cp_rev_parse(p, "HEAD");
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+
+    let out = run_libra_command(&["cherry-pick", &empty_oid], p);
+    assert_eq!(out.status.code(), Some(129), "empty commit blocked");
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// `--allow-empty` lets an originally-empty commit through.
+#[test]
+fn cherry_pick_allow_empty_creates_commit() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "feature"], p),
+        "switch -c feature",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "--allow-empty", "-m", "empty feat", "--no-verify"],
+            p,
+        ),
+        "empty feature commit",
+    );
+    let empty_oid = cp_rev_parse(p, "HEAD");
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    let head_before = cp_rev_parse(p, "HEAD");
+
+    assert_cli_success(
+        &run_libra_command(&["cherry-pick", "--allow-empty", &empty_oid], p),
+        "cherry-pick --allow-empty",
+    );
+    assert_ne!(
+        cp_rev_parse(p, "HEAD"),
+        head_before,
+        "an empty commit should still create a new commit under --allow-empty"
+    );
+}
+
+/// A commit that becomes redundant after replay is blocked by default, kept with
+/// `--keep-redundant-commits`.
+#[test]
+fn cherry_pick_redundant_blocked_then_kept() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // feature adds dup.txt=same
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "feature"], p),
+        "switch -c feature",
+    );
+    std::fs::write(p.join("dup.txt"), "same\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "dup.txt"], p), "add dup");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "feat dup", "--no-verify"], p),
+        "feature commit",
+    );
+    let feat = cp_rev_parse(p, "HEAD");
+    // main independently adds the identical dup.txt=same
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    std::fs::write(p.join("dup.txt"), "same\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "dup.txt"], p), "add dup main");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main dup", "--no-verify"], p),
+        "main commit",
+    );
+    let head_before = cp_rev_parse(p, "HEAD");
+
+    // default: redundant → blocked, HEAD unchanged.
+    let blocked = run_libra_command(&["cherry-pick", &feat], p);
+    assert_eq!(blocked.status.code(), Some(129), "redundant blocked");
+    let (_h, report) = parse_cli_error_stderr(&blocked.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_eq!(
+        cp_rev_parse(p, "HEAD"),
+        head_before,
+        "HEAD unchanged on block"
+    );
+
+    // --keep-redundant-commits: kept.
+    assert_cli_success(
+        &run_libra_command(&["cherry-pick", "--keep-redundant-commits", &feat], p),
+        "cherry-pick --keep-redundant-commits",
+    );
+    assert_ne!(
+        cp_rev_parse(p, "HEAD"),
+        head_before,
+        "redundant commit kept advances HEAD"
+    );
+}
+
+/// Unsupported Git options are rejected with LBR-UNSUPPORTED-001 / exit 128.
+#[test]
+fn cherry_pick_unsupported_flags_rejected() {
+    let (repo, oid) = repo_with_feature_commit("f.txt", "feat\n", "feature work");
+    let cases: Vec<Vec<&str>> = vec![
+        vec!["cherry-pick", "--empty", "drop", &oid],
+        vec!["cherry-pick", "--cleanup", "strip", &oid],
+        vec!["cherry-pick", "--rerere-autoupdate", &oid],
+        vec!["cherry-pick", "--commit", &oid],
+    ];
+    for args in cases {
+        let out = run_libra_command(&args, repo.path());
+        assert_eq!(
+            out.status.code(),
+            Some(128),
+            "{args:?} should be unsupported: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let (_h, report) = parse_cli_error_stderr(&out.stderr);
+        assert_eq!(report.error_code, "LBR-UNSUPPORTED-001", "args: {args:?}");
+    }
+}
+
+/// `-e` in machine mode (no TTY) degrades to the assembled message without
+/// launching an editor or panicking.
+#[test]
+fn cherry_pick_edit_no_tty_falls_back() {
+    let (repo, oid) = repo_with_feature_commit("f.txt", "feat\n", "feature work");
+    let out = run_libra_command(&["cherry-pick", "--machine", "-e", &oid], repo.path());
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "machine -e should succeed without an editor: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `--machine` emits machine JSON (NDJSON) rather than suppressing stdout.
+#[test]
+fn cherry_pick_machine_emits_ndjson() {
+    let (repo, oid) = repo_with_feature_commit("f.txt", "feat\n", "feature work");
+    let out = run_libra_command(&["cherry-pick", "--machine", &oid], repo.path());
+    assert_cli_success(&out, "cherry-pick --machine");
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["command"], "cherry-pick");
+    assert_eq!(json["data"]["picked"].as_array().unwrap().len(), 1);
 }

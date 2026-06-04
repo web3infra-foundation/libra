@@ -3,6 +3,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io::IsTerminal,
     path::{Path, PathBuf},
 };
 
@@ -23,7 +24,7 @@ use sea_orm::ConnectionTrait;
 use serde::Serialize;
 
 use crate::{
-    command::{load_object, save_object},
+    command::{load_object, merge, save_object},
     common_utils::format_commit_msg,
     internal::{
         branch::Branch,
@@ -60,11 +61,20 @@ enum CherryPickError {
     #[error("failed to resolve commit reference '{0}'")]
     InvalidCommit(String),
 
-    #[error("cannot cherry-pick multiple commits with --no-commit")]
-    MultipleWithNoCommit,
-
     #[error("cherry-picking merge commits is not supported")]
     MergeCommitUnsupported,
+
+    #[error("unsupported cherry-pick option: {0}")]
+    Unsupported(String),
+
+    #[error("commit {0} is empty (its change set is empty)")]
+    EmptyCommit(String),
+
+    #[error("commit {0} became redundant after replay (no changes to apply)")]
+    RedundantCommit(String),
+
+    #[error("commit {0} has an empty commit message")]
+    EmptyMessage(String),
 
     #[error("failed to cherry-pick {commit}: {reason}")]
     Conflict { commit: String, reason: String },
@@ -82,8 +92,11 @@ impl CherryPickError {
             Self::NotInRepo => StableErrorCode::RepoNotFound,
             Self::DetachedHead => StableErrorCode::RepoStateInvalid,
             Self::InvalidCommit(_) => StableErrorCode::CliInvalidTarget,
-            Self::MultipleWithNoCommit => StableErrorCode::CliInvalidArguments,
             Self::MergeCommitUnsupported => StableErrorCode::CliInvalidArguments,
+            Self::Unsupported(_) => StableErrorCode::Unsupported,
+            Self::EmptyCommit(_) => StableErrorCode::CliInvalidArguments,
+            Self::RedundantCommit(_) => StableErrorCode::CliInvalidArguments,
+            Self::EmptyMessage(_) => StableErrorCode::CliInvalidArguments,
             Self::Conflict { .. } => StableErrorCode::ConflictUnresolved,
             Self::LoadObject(_) => StableErrorCode::IoReadFailed,
             Self::SaveFailed(_) => StableErrorCode::IoWriteFailed,
@@ -103,12 +116,21 @@ impl From<CherryPickError> for CliError {
             CherryPickError::InvalidCommit(_) => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("use 'libra log' to find valid commit references"),
-            CherryPickError::MultipleWithNoCommit => CliError::fatal(message)
-                .with_stable_code(stable_code)
-                .with_hint("use 'libra commit' to save the changes from the first cherry-pick"),
             CherryPickError::MergeCommitUnsupported => CliError::fatal(message)
                 .with_stable_code(stable_code)
-                .with_hint("choose a non-merge commit or replay the merge manually"),
+                .with_hint("specify -m <parent-number> to cherry-pick a merge commit"),
+            CherryPickError::Unsupported(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("this Git option is not supported by libra cherry-pick"),
+            CherryPickError::EmptyCommit(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("use --allow-empty to cherry-pick an empty commit"),
+            CherryPickError::RedundantCommit(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("use --keep-redundant-commits to keep the redundant commit"),
+            CherryPickError::EmptyMessage(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("use --allow-empty-message to cherry-pick with an empty message"),
             CherryPickError::Conflict { .. } => CliError::failure(message)
                 .with_stable_code(stable_code)
                 .with_hint("resolve conflicts manually, then use 'libra commit'"),
@@ -125,6 +147,9 @@ impl From<CherryPickError> for CliError {
 #[derive(Debug)]
 enum CherryPickSingleError {
     MergeCommitUnsupported,
+    EmptyCommit(String),
+    RedundantCommit(String),
+    EmptyMessage(String),
     Conflict(String),
     LoadObject(String),
     SaveFailed(String),
@@ -149,7 +174,7 @@ pub struct CherryPickEntry {
 // ── Entry points ─────────────────────────────────────────────────────
 
 /// Arguments for the cherry-pick command
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Default)]
 #[command(about = "Apply the changes introduced by some existing commits")]
 #[command(after_help = CHERRY_PICK_EXAMPLES)]
 pub struct CherryPickArgs {
@@ -160,6 +185,83 @@ pub struct CherryPickArgs {
     /// Don't automatically commit the cherry-pick
     #[clap(short = 'n', long)]
     pub no_commit: bool,
+
+    /// Append a "(cherry picked from commit <oid>)" line to the commit message
+    #[clap(short = 'x')]
+    pub append_source: bool,
+
+    /// Add a Signed-off-by trailer to the commit message
+    #[clap(short = 's', long = "signoff", overrides_with = "no_signoff")]
+    pub signoff: bool,
+
+    /// Edit the commit message before committing
+    #[clap(short = 'e', long = "edit", overrides_with = "no_edit")]
+    pub edit: bool,
+
+    /// Cherry-pick a commit even if its own change set is empty
+    #[clap(long = "allow-empty", overrides_with = "no_allow_empty")]
+    pub allow_empty: bool,
+
+    /// Cherry-pick a commit even if its message is empty
+    #[clap(
+        long = "allow-empty-message",
+        overrides_with = "no_allow_empty_message"
+    )]
+    pub allow_empty_message: bool,
+
+    /// Keep commits that become redundant (empty) after being replayed
+    #[clap(
+        long = "keep-redundant-commits",
+        overrides_with = "no_keep_redundant_commits"
+    )]
+    pub keep_redundant_commits: bool,
+
+    // ── Negative (reset-to-default) forms; last flag wins, never an error ──
+    #[clap(long = "no-signoff", overrides_with = "signoff", hide = true)]
+    pub no_signoff: bool,
+    #[clap(long = "no-edit", overrides_with = "edit", hide = true)]
+    pub no_edit: bool,
+    #[clap(long = "no-allow-empty", overrides_with = "allow_empty", hide = true)]
+    pub no_allow_empty: bool,
+    #[clap(
+        long = "no-allow-empty-message",
+        overrides_with = "allow_empty_message",
+        hide = true
+    )]
+    pub no_allow_empty_message: bool,
+    #[clap(
+        long = "no-keep-redundant-commits",
+        overrides_with = "keep_redundant_commits",
+        hide = true
+    )]
+    pub no_keep_redundant_commits: bool,
+
+    // ── Unsupported Git options captured for explicit rejection ──
+    #[clap(long = "empty", value_name = "mode", hide = true)]
+    pub empty: Option<String>,
+    #[clap(long = "cleanup", value_name = "mode", hide = true)]
+    pub cleanup: Option<String>,
+    #[clap(
+        long = "rerere-autoupdate",
+        overrides_with = "no_rerere_autoupdate",
+        hide = true
+    )]
+    pub rerere_autoupdate: bool,
+    #[clap(
+        long = "no-rerere-autoupdate",
+        overrides_with = "rerere_autoupdate",
+        hide = true
+    )]
+    pub no_rerere_autoupdate: bool,
+    #[clap(long = "commit", hide = true)]
+    pub commit: bool,
+    #[clap(
+        short = 'X',
+        long = "strategy-option",
+        value_name = "option",
+        hide = true
+    )]
+    pub strategy_option: Option<String>,
 }
 
 pub async fn execute(args: CherryPickArgs) {
@@ -172,21 +274,47 @@ pub async fn execute(args: CherryPickArgs) {
 /// errors and exiting. Replays one or more commit changes onto the current
 /// branch, optionally creating new commits or leaving them staged.
 pub async fn execute_safe(args: CherryPickArgs, output: &OutputConfig) -> CliResult<()> {
-    let result = run_cherry_pick(args).await.map_err(CliError::from)?;
+    let result = run_cherry_pick(args, output)
+        .await
+        .map_err(CliError::from)?;
     render_cherry_pick_output(&result, output)
 }
 
 // ── Core execution ───────────────────────────────────────────────────
 
-async fn run_cherry_pick(args: CherryPickArgs) -> Result<CherryPickOutput, CherryPickError> {
+/// Reject Git options libra cherry-pick does not implement. Returns the first
+/// offending flag (so the error names a concrete option) or `None`.
+fn reject_unsupported_options(args: &CherryPickArgs) -> Option<&'static str> {
+    if args.empty.is_some() {
+        return Some("--empty (use --allow-empty / --keep-redundant-commits)");
+    }
+    if args.cleanup.is_some() {
+        return Some("--cleanup");
+    }
+    if args.rerere_autoupdate {
+        return Some("--rerere-autoupdate");
+    }
+    if args.commit {
+        return Some("--commit (auto-commit is the default; use -n to stage only)");
+    }
+    if args.strategy_option.is_some() {
+        return Some("-X / --strategy-option");
+    }
+    None
+}
+
+async fn run_cherry_pick(
+    args: CherryPickArgs,
+    output: &OutputConfig,
+) -> Result<CherryPickOutput, CherryPickError> {
     util::require_repo().map_err(|_| CherryPickError::NotInRepo)?;
+
+    if let Some(flag) = reject_unsupported_options(&args) {
+        return Err(CherryPickError::Unsupported(flag.to_string()));
+    }
 
     if let Head::Detached(_) = Head::current().await {
         return Err(CherryPickError::DetachedHead);
-    }
-
-    if args.no_commit && args.commits.len() > 1 {
-        return Err(CherryPickError::MultipleWithNoCommit);
     }
 
     let mut commit_ids = Vec::new();
@@ -199,7 +327,7 @@ async fn run_cherry_pick(args: CherryPickArgs) -> Result<CherryPickOutput, Cherr
 
     let mut picked = Vec::new();
     for (i, commit_id) in commit_ids.iter().enumerate() {
-        match cherry_pick_single_commit(commit_id, &args).await {
+        match cherry_pick_single_commit(commit_id, &args, output).await {
             Ok(new_commit_id) => {
                 let source_str = commit_id.to_string();
                 picked.push(CherryPickEntry {
@@ -213,6 +341,15 @@ async fn run_cherry_pick(args: CherryPickArgs) -> Result<CherryPickOutput, Cherr
             }
             Err(CherryPickSingleError::MergeCommitUnsupported) => {
                 return Err(CherryPickError::MergeCommitUnsupported);
+            }
+            Err(CherryPickSingleError::EmptyCommit(commit)) => {
+                return Err(CherryPickError::EmptyCommit(commit));
+            }
+            Err(CherryPickSingleError::RedundantCommit(commit)) => {
+                return Err(CherryPickError::RedundantCommit(commit));
+            }
+            Err(CherryPickSingleError::EmptyMessage(commit)) => {
+                return Err(CherryPickError::EmptyMessage(commit));
             }
             Err(CherryPickSingleError::Conflict(reason)) => {
                 return Err(CherryPickError::Conflict {
@@ -264,6 +401,7 @@ fn render_cherry_pick_output(result: &CherryPickOutput, output: &OutputConfig) -
 async fn cherry_pick_single_commit(
     commit_id: &ObjectHash,
     args: &CherryPickArgs,
+    output: &OutputConfig,
 ) -> Result<Option<ObjectHash>, CherryPickSingleError> {
     let commit_to_pick: Commit =
         load_object(commit_id).map_err(|e| CherryPickSingleError::LoadObject(e.to_string()))?;
@@ -293,6 +431,14 @@ async fn cherry_pick_single_commit(
         CherryPickSingleError::LoadObject(format!("failed to load commit tree: {e}"))
     })?;
 
+    // (A) "Empty" class 1: the picked commit's own change set is empty (its tree
+    // equals its parent tree). Git blocks this unless `--allow-empty`. Checked
+    // before any index/worktree mutation so a blocked pick leaves state intact.
+    let originally_empty = commit_to_pick.tree_id == parent_tree.id;
+    if originally_empty && !args.allow_empty {
+        return Err(CherryPickSingleError::EmptyCommit(commit_id.to_string()));
+    }
+
     let index_file = path::index();
     let current_index = Index::load(&index_file).map_err(|e| {
         CherryPickSingleError::LoadObject(format!("failed to load current index: {e}"))
@@ -318,41 +464,130 @@ async fn cherry_pick_single_commit(
         }
     }
 
+    // Build the candidate tree first (saves tree objects, but does NOT touch the
+    // on-disk index or worktree yet) so the "redundant after replay" check can
+    // bail out before mutating any state.
+    let tree_id = create_tree_from_index(&index)?;
+
+    if args.no_commit {
+        index
+            .save(&index_file)
+            .map_err(|e| CherryPickSingleError::SaveFailed(format!("failed to save index: {e}")))?;
+        reset_workdir_tracked_only(&current_index, &index)?;
+        return Ok(None);
+    }
+
+    let current_head = Head::current_commit().await.ok_or_else(|| {
+        CherryPickSingleError::LoadObject("failed to resolve current HEAD".to_string())
+    })?;
+
+    // (B) "Empty" class 2: the replayed change is redundant against the current
+    // HEAD (resulting tree is identical). Git stops unless `--keep-redundant-commits`.
+    // An originally-empty commit that reached here has already passed `--allow-empty`,
+    // so it is allowed through even though its tree is unchanged.
+    let head_commit: Commit = load_object(&current_head).map_err(|e| {
+        CherryPickSingleError::LoadObject(format!("failed to load current HEAD commit: {e}"))
+    })?;
+    if tree_id == head_commit.tree_id && !originally_empty && !args.keep_redundant_commits {
+        return Err(CherryPickSingleError::RedundantCommit(
+            commit_id.to_string(),
+        ));
+    }
+
     index
         .save(&index_file)
         .map_err(|e| CherryPickSingleError::SaveFailed(format!("failed to save index: {e}")))?;
     reset_workdir_tracked_only(&current_index, &index)?;
 
-    if args.no_commit {
-        Ok(None)
-    } else {
-        let current_head = Head::current_commit().await.ok_or_else(|| {
-            CherryPickSingleError::LoadObject("failed to resolve current HEAD".to_string())
+    let cherry_pick_commit_id =
+        create_cherry_pick_commit(&commit_to_pick, &current_head, tree_id, args, output).await?;
+    Ok(Some(cherry_pick_commit_id))
+}
+
+/// Assemble the cherry-pick commit message, honoring `-x` (append source line),
+/// `-s` (Signed-off-by trailer, in that order), and `-e` (interactive edit).
+async fn build_cherry_pick_message(
+    original_commit: &Commit,
+    args: &CherryPickArgs,
+    output: &OutputConfig,
+) -> Result<String, CherryPickSingleError> {
+    let mut message = original_commit.message.trim().to_string();
+
+    // Trailer block: `-x` line first, `Signed-off-by` last (matches Git).
+    let mut trailers: Vec<String> = Vec::new();
+    if args.append_source {
+        let line = format!("(cherry picked from commit {})", original_commit.id);
+        if !message.contains(&line) {
+            trailers.push(line);
+        }
+    }
+    if args.signoff {
+        let (name, email) = merge::resolve_signoff_identity().await.map_err(|e| {
+            CherryPickSingleError::SaveFailed(format!("failed to resolve sign-off identity: {e}"))
         })?;
-        let cherry_pick_commit_id =
-            create_cherry_pick_commit(&commit_to_pick, &current_head).await?;
-        Ok(Some(cherry_pick_commit_id))
+        let line = format!("Signed-off-by: {name} <{email}>");
+        if !message.contains(&line) {
+            trailers.push(line);
+        }
+    }
+    if !trailers.is_empty() {
+        message.push_str("\n\n");
+        message.push_str(&trailers.join("\n"));
+    }
+
+    // `-e`: only launch an editor on an interactive TTY and never in machine/JSON
+    // mode (`--machine`/`--json`); otherwise degrade to the assembled message.
+    if args.edit && !output.is_json() && std::io::stdin().is_terminal() {
+        message = maybe_edit_cherry_pick_message(&message).await?;
+    }
+
+    Ok(message)
+}
+
+/// Launch the resolved editor on a scratch message file, mirroring merge's
+/// `maybe_edit_message`. A missing or failing editor leaves the message intact.
+async fn maybe_edit_cherry_pick_message(message: &str) -> Result<String, CherryPickSingleError> {
+    let Some(editor) = merge::resolve_editor().await else {
+        return Ok(message.to_string());
+    };
+    let path = util::storage_path().join("CHERRY_PICK_MSG");
+    fs::write(&path, message).map_err(|e| {
+        CherryPickSingleError::SaveFailed(format!(
+            "failed to write edit buffer {}: {e}",
+            path.display()
+        ))
+    })?;
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"{}\"", path.display()))
+        .status();
+    match status {
+        Ok(code) if code.success() => fs::read_to_string(&path).map_err(|e| {
+            CherryPickSingleError::LoadObject(format!("failed to read edited message: {e}"))
+        }),
+        _ => Ok(message.to_string()),
     }
 }
 
 async fn create_cherry_pick_commit(
     original_commit: &Commit,
     parent_id: &ObjectHash,
+    tree_id: ObjectHash,
+    args: &CherryPickArgs,
+    output: &OutputConfig,
 ) -> Result<ObjectHash, CherryPickSingleError> {
-    let index = Index::load(path::index())
-        .map_err(|e| CherryPickSingleError::LoadObject(format!("failed to load index: {e}")))?;
-    let tree_id = create_tree_from_index(&index)?;
+    let message = build_cherry_pick_message(original_commit, args, output).await?;
 
-    let cherry_pick_message = format!(
-        "{}\n\n(cherry picked from commit {})",
-        original_commit.message.trim(),
-        original_commit.id
-    );
+    if message.trim().is_empty() && !args.allow_empty_message {
+        return Err(CherryPickSingleError::EmptyMessage(
+            original_commit.id.to_string(),
+        ));
+    }
 
     let commit = Commit::from_tree_id(
         tree_id,
         vec![*parent_id],
-        &format_commit_msg(&cherry_pick_message, None),
+        &format_commit_msg(&message, None),
     );
 
     save_object(&commit, &commit.id)
@@ -590,12 +825,24 @@ mod tests {
             "failed to resolve commit reference 'deadbeef'",
         );
         assert_eq!(
-            CherryPickError::MultipleWithNoCommit.to_string(),
-            "cannot cherry-pick multiple commits with --no-commit",
-        );
-        assert_eq!(
             CherryPickError::MergeCommitUnsupported.to_string(),
             "cherry-picking merge commits is not supported",
+        );
+        assert_eq!(
+            CherryPickError::Unsupported("--cleanup".to_string()).to_string(),
+            "unsupported cherry-pick option: --cleanup",
+        );
+        assert_eq!(
+            CherryPickError::EmptyCommit("abc123".to_string()).to_string(),
+            "commit abc123 is empty (its change set is empty)",
+        );
+        assert_eq!(
+            CherryPickError::RedundantCommit("abc123".to_string()).to_string(),
+            "commit abc123 became redundant after replay (no changes to apply)",
+        );
+        assert_eq!(
+            CherryPickError::EmptyMessage("abc123".to_string()).to_string(),
+            "commit abc123 has an empty commit message",
         );
         assert_eq!(
             CherryPickError::Conflict {
@@ -625,7 +872,7 @@ mod tests {
     /// `CliInvalidArguments` to `CliInvalidTarget` — silently changes
     /// the wire surface unless every variant has its own guard.
     ///
-    /// Enumerate all 8 variants explicitly so adding a new variant
+    /// Enumerate every variant explicitly so adding a new variant
     /// trips the exhaustive match below (the compiler enforces it
     /// alongside the `stable_code()` match in the impl), and silently
     /// changing an existing variant's code trips the assertion.
@@ -644,11 +891,23 @@ mod tests {
             StableErrorCode::CliInvalidTarget,
         );
         assert_eq!(
-            CherryPickError::MultipleWithNoCommit.stable_code(),
+            CherryPickError::MergeCommitUnsupported.stable_code(),
             StableErrorCode::CliInvalidArguments,
         );
         assert_eq!(
-            CherryPickError::MergeCommitUnsupported.stable_code(),
+            CherryPickError::Unsupported("--cleanup".to_string()).stable_code(),
+            StableErrorCode::Unsupported,
+        );
+        assert_eq!(
+            CherryPickError::EmptyCommit("abc123".to_string()).stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            CherryPickError::RedundantCommit("abc123".to_string()).stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            CherryPickError::EmptyMessage("abc123".to_string()).stable_code(),
             StableErrorCode::CliInvalidArguments,
         );
         assert_eq!(
