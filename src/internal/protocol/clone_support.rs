@@ -82,17 +82,33 @@ pub fn check_local_security(path: &Path) -> Result<PathBuf, CloneSupportError> {
 /// Resolve the object directory of a reference repository, supporting libra
 /// (`.libra/objects`), bare (`objects`), and git working-tree (`.git/objects`)
 /// layouts. `reference` should already be canonical (see [`check_local_security`]).
+/// A symlinked object directory is rejected so the security guard cannot be
+/// bypassed by pointing the object root itself at another location.
 pub fn resolve_reference_objects_dir(reference: &Path) -> Result<PathBuf, CloneSupportError> {
     for candidate in [
         reference.join(".libra").join("objects"),
         reference.join("objects"),
         reference.join(".git").join("objects"),
     ] {
-        if candidate.is_dir() {
-            return Ok(candidate);
+        match fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CloneSupportError::Symlink(candidate));
+            }
+            Ok(metadata) if metadata.is_dir() => return Ok(candidate),
+            _ => continue,
         }
     }
     Err(CloneSupportError::NotARepository(reference.to_path_buf()))
+}
+
+/// Reject a symlinked object-source root before any copy/hardlink walk.
+fn reject_symlinked_root(src_objects: &Path) -> Result<(), CloneSupportError> {
+    if let Ok(metadata) = fs::symlink_metadata(src_objects)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(CloneSupportError::Symlink(src_objects.to_path_buf()));
+    }
+    Ok(())
 }
 
 /// Copy every loose object and pack file from `src_objects` into `dest_objects`,
@@ -101,6 +117,7 @@ pub fn resolve_reference_objects_dir(reference: &Path) -> Result<PathBuf, CloneS
 /// are left intact (objects are content-addressed, so a same-named file is the
 /// same object). Returns the number of files copied.
 pub fn copy_objects(src_objects: &Path, dest_objects: &Path) -> Result<usize, CloneSupportError> {
+    reject_symlinked_root(src_objects)?;
     fs::create_dir_all(dest_objects)?;
     let mut copied = 0usize;
     copy_dir_recursive(src_objects, dest_objects, &mut copied)?;
@@ -133,6 +150,7 @@ pub fn link_objects(
     src_objects: &Path,
     dest_objects: &Path,
 ) -> Result<LinkReport, CloneSupportError> {
+    reject_symlinked_root(src_objects)?;
     fs::create_dir_all(dest_objects)?;
     let mut report = LinkReport::default();
     reuse_dir_recursive(src_objects, dest_objects, true, &mut report)?;
@@ -269,6 +287,41 @@ mod tests {
             .unwrap()
             .ino();
         assert_eq!(src_ino, dest_ino, "hardlinked object must share an inode");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_objects_dir_rejects_symlinked_objects_root() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let real_objects = dir.path().join("real-objects");
+        fs::create_dir_all(&real_objects).unwrap();
+        // `<repo>/.libra/objects` is a symlink pointing elsewhere.
+        fs::create_dir_all(dir.path().join("repo").join(".libra")).unwrap();
+        symlink(
+            &real_objects,
+            dir.path().join("repo").join(".libra").join("objects"),
+        )
+        .unwrap();
+        assert!(matches!(
+            resolve_reference_objects_dir(&dir.path().join("repo")),
+            Err(CloneSupportError::Symlink(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_objects_rejects_symlinked_root() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir_all(&real).unwrap();
+        let link = dir.path().join("link-objects");
+        symlink(&real, &link).unwrap();
+        assert!(matches!(
+            copy_objects(&link, &dir.path().join("dest")),
+            Err(CloneSupportError::Symlink(_))
+        ));
     }
 
     #[cfg(unix)]

@@ -140,9 +140,10 @@ pub struct CloneArgs {
     pub shallow_since: Option<String>,
 
     /// Create a shallow clone with history excluding commits reachable from the
-    /// given ref or revision. May be combined with `--depth`.
+    /// given ref or revision. May be combined with `--depth` and repeated to
+    /// exclude multiple refs (one `deepen-not` per value).
     #[clap(long, value_name = "revision")]
-    pub shallow_exclude: Option<String>,
+    pub shallow_exclude: Vec<String>,
 
     /// Fail if the source repository is a shallow repository.
     #[clap(long)]
@@ -157,8 +158,9 @@ pub struct CloneArgs {
     #[clap(short = 'n', long = "no-checkout")]
     pub no_checkout: bool,
 
-    /// Set up a mirror of the source repository. Implies `--bare` and maps all
-    /// refs (`+refs/*:refs/*`); the remote is recorded with `mirror = true`.
+    /// Set up a mirror of the source repository. Implies `--bare`, records the
+    /// `+refs/*:refs/*` refspec and `mirror = true`, and clones all branch heads.
+    /// Partial: tags/exact-`refs/*` mirroring is not yet implemented.
     #[clap(long)]
     pub mirror: bool,
 
@@ -494,6 +496,8 @@ pub enum CloneError {
          blob contents were intentionally omitted"
     )]
     PartialCloneMissingBlob { filter: String },
+    #[error("the remote does not support partial clone filtering (--filter '{filter}')")]
+    FilterNotSupported { filter: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -883,6 +887,12 @@ impl From<CloneError> for CliError {
                     "re-clone with --no-checkout or --bare, or run 'libra fetch' to backfill the \
                      filtered objects before checking out",
                 ),
+            CloneError::FilterNotSupported { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_hint(
+                    "the server must advertise the `filter` capability \
+                     (`uploadpack.allowFilter`); omit --filter or use a server that supports it",
+                ),
         }
     }
 }
@@ -1125,7 +1135,7 @@ fn parse_shallow_since(input: &str) -> Result<i64, String> {
 fn validate_clone_args(args: &CloneArgs) -> CliResult<()> {
     if args.remote_repo.starts_with("libra+cloud://")
         && (args.shallow_since.is_some()
-            || args.shallow_exclude.is_some()
+            || !args.shallow_exclude.is_empty()
             || args.reject_shallow
             || args.no_single_branch
             || args.origin.is_some()
@@ -1194,7 +1204,7 @@ fn clone_shallow_options(args: &CloneArgs) -> Result<ShallowOptions, CloneError>
         })?),
         None => None,
     };
-    let deepen_not = args.shallow_exclude.clone().into_iter().collect::<Vec<_>>();
+    let deepen_not = args.shallow_exclude.clone();
     Ok(ShallowOptions {
         depth: args.depth,
         deepen_since,
@@ -1570,7 +1580,7 @@ async fn execute_clone_inner(
     if args.reject_shallow && source_is_shallow(&args.remote_repo) {
         return Err((
             CloneError::RejectedShallowSource {
-                repo: args.remote_repo.clone(),
+                repo: fetch::redact_url_credentials(&args.remote_repo),
             },
             None,
         ));
@@ -1616,6 +1626,27 @@ async fn execute_clone_inner(
     let (remote_client, discovery) = fetch::discover_remote(&remote_repo)
         .await
         .map_err(|source| (CloneError::DiscoverRemote { source }, None))?;
+
+    // --- Fail-fast: --filter against a server that advertised capabilities but
+    // not `filter` ---. When the remote advertises a capability set (HTTP/SSH
+    // git servers) that omits `filter`, reject up front with a clear error
+    // instead of a confusing "filtering capability not negotiated" failure mid
+    // fetch. Local transports advertise no capabilities (empty set), so the
+    // request is still attempted there.
+    if let Some(filter) = &args.filter
+        && !discovery.capabilities.is_empty()
+        && !discovery
+            .capabilities
+            .iter()
+            .any(|cap| cap == "filter" || cap.starts_with("filter"))
+    {
+        return Err((
+            CloneError::FilterNotSupported {
+                filter: filter.clone(),
+            },
+            None,
+        ));
+    }
 
     // --- Step 3: Destination pre-checks ---
     if metadata_root.exists() && contains_initialized_repo(&metadata_root) {
@@ -3308,7 +3339,7 @@ async fn clone_into_destination(
             .map_err(|source| CloneError::FetchFailed { source })?;
         if !boundaries.is_empty() {
             return Err(CloneError::RejectedShallowSource {
-                repo: remote_url.to_string(),
+                repo: fetch::redact_url_credentials(remote_url),
             });
         }
     }
@@ -3385,7 +3416,7 @@ async fn clone_into_destination(
         ssh_key_detected: init_output.ssh_key_detected,
         shallow: args.depth.is_some()
             || args.shallow_since.is_some()
-            || args.shallow_exclude.is_some(),
+            || !args.shallow_exclude.is_empty(),
         warnings,
         gitignore_converted,
         source_kind: None,

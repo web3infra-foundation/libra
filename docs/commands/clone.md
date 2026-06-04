@@ -41,7 +41,7 @@ in `config_kv`). The authoritative compatibility levels live in
 | All / single branch | `--single-branch` / `--no-single-branch` | supported | Git-style negation, last wins |
 | Custom remote name | `-o/--origin` | supported | Names the tracked remote |
 | Skip checkout | `-n/--no-checkout` | supported | Metadata only, no working tree |
-| Mirror | `--mirror` | supported | Implies bare; `+refs/*:refs/*`; `mirror = true` |
+| Mirror | `--mirror` | partial | Implies bare; writes `+refs/*:refs/*` + `mirror = true`; clones branch heads (tags/exact-`refs/*` mirroring not yet implemented) |
 | Reference reuse | `--reference` / `--reference-if-able` | intentionally-different | Copy semantics (no `info/alternates` borrow) |
 | Dissociate | `--dissociate` | intentionally-different | Confirms fully-local (copy semantics) |
 | Local optimization | `-l/--local` / `--no-hardlinks` | supported | Hardlink (or copy) a local source's objects |
@@ -186,8 +186,9 @@ libra clone --shallow-since 2024-01-01 git@github.com:user/repo.git
 ### `--shallow-exclude <revision>`
 
 Create a shallow clone that excludes history reachable from the given ref or revision
-(`deepen-not`). May be combined with `--depth` (the exclude request supersedes plain depth,
-as with `--shallow-since`). Only Git remotes support it; `libra+cloud://` restore rejects it.
+(`deepen-not`). May be **repeated** to exclude multiple refs (one `deepen-not` frame per
+value) and combined with `--depth` (the exclude request supersedes plain depth, as with
+`--shallow-since`). Only Git remotes support it; `libra+cloud://` restore rejects it.
 
 ```bash
 libra clone --shallow-exclude refs/tags/v1.0.0 git@github.com:user/repo.git
@@ -226,9 +227,11 @@ libra clone --no-checkout git@github.com:user/repo.git
 
 ### `--mirror`
 
-Set up a mirror of the source repository. Implies `--bare` and clones all branches and tags,
-mapping every ref (`+refs/*:refs/*`); the remote is recorded with `mirror = true`. `libra+cloud://`
-restore rejects it.
+Set up a mirror of the source repository. Implies `--bare`, records the mirror refspec
+(`+refs/*:refs/*`) and `remote.<name>.mirror = true`, and clones all branch heads.
+**Known limitation (partial):** branch refs are stored as remote-tracking
+(`refs/remotes/<name>/*`) and tags/other ref namespaces are not yet mirrored at their exact
+`refs/*` names, so this is not yet a full Git-style mirror. `libra+cloud://` restore rejects it.
 
 ```bash
 libra clone --mirror git@github.com:user/repo.git
