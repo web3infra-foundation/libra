@@ -248,6 +248,84 @@ impl Reflog {
             .await?)
     }
 
+    /// Faithfully copy every reflog entry from `src_ref` to `dst_ref` within
+    /// the caller's connection/transaction.
+    ///
+    /// Each source row is duplicated field-for-field — `old_oid`, `new_oid`,
+    /// `action`, `committer_name`, `committer_email`, `timestamp`, and
+    /// `message` are preserved verbatim; only the auto-increment `id` is
+    /// reassigned and `ref_name` is rewritten to `dst_ref`. Do **not** route
+    /// this through [`Self::insert_single_entry`], which rewrites the
+    /// committer/timestamp/message from the current identity and clock.
+    ///
+    /// Returns the number of entries copied (0 is a valid no-op when the
+    /// source ref has no reflog). Entries are inserted oldest-first so the
+    /// destination's `id` ordering matches chronological order.
+    ///
+    /// Reflog migration is optional: if the repo has no `reflog` table (older
+    /// or partially-migrated repos), this is a no-op (`Ok(0)`) so the caller's
+    /// transaction is never aborted just because reflog storage is absent.
+    pub async fn copy_entries_with_conn<C: ConnectionTrait>(
+        db: &C,
+        src_ref: &str,
+        dst_ref: &str,
+    ) -> Result<usize, ReflogError> {
+        if !reflog_table_exists(db).await? {
+            return Ok(0);
+        }
+        // `find_all` returns newest-first; reverse to insert oldest-first.
+        let mut entries = Self::find_all(db, src_ref).await?;
+        entries.reverse();
+        let count = entries.len();
+        for entry in entries {
+            let model = ActiveModel {
+                ref_name: Set(dst_ref.to_string()),
+                old_oid: Set(entry.old_oid),
+                new_oid: Set(entry.new_oid),
+                action: Set(entry.action),
+                committer_name: Set(entry.committer_name),
+                committer_email: Set(entry.committer_email),
+                timestamp: Set(entry.timestamp),
+                message: Set(entry.message),
+                ..Default::default()
+            };
+            for attempt in 0..=SQLITE_BUSY_MAX_RETRIES {
+                match model.clone().save(db).await {
+                    Ok(_) => break,
+                    Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                        sleep(Duration::from_millis(
+                            SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                        ))
+                        .await;
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    /// Delete every reflog entry for `ref_name` within the caller's
+    /// connection/transaction. Returns the number of rows removed. Used to
+    /// give branch rename move-semantics (copy to the new ref, then drop the
+    /// old ref's reflog so no dangling rows remain).
+    ///
+    /// No-op (`Ok(0)`) when the repo has no `reflog` table, so the caller's
+    /// transaction is not aborted by absent reflog storage.
+    pub async fn delete_entries_with_conn<C: ConnectionTrait>(
+        db: &C,
+        ref_name: &str,
+    ) -> Result<usize, ReflogError> {
+        if !reflog_table_exists(db).await? {
+            return Ok(0);
+        }
+        let result = reflog::Entity::delete_many()
+            .filter(reflog::Column::RefName.eq(ref_name))
+            .exec(db)
+            .await?;
+        Ok(result.rows_affected as usize)
+    }
+
     pub async fn find_one<C: ConnectionTrait>(
         db: &C,
         ref_name: &str,
@@ -262,7 +340,9 @@ impl Reflog {
 
 fn timestamp_seconds() -> i64 {
     let now = SystemTime::now();
-    let since_the_epoch = now.duration_since(UNIX_EPOCH).expect("Time went backwards");
+    // A clock set before the Unix epoch should never abort a reflog write;
+    // fall back to 0 (epoch) instead of panicking.
+    let since_the_epoch = now.duration_since(UNIX_EPOCH).unwrap_or_default();
     since_the_epoch.as_secs() as i64
 }
 

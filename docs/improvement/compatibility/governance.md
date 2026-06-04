@@ -65,7 +65,7 @@ C1（Audit P0）
 | graph | intentionally-different | Libra AI graph inspection extension, not a Git command |
 | add | partial | sparse-checkout flag unsupported |
 | rm | partial | --force / --dry-run / --quiet not exposed |
-| mv | partial | sparse-checkout flag unsupported; --skip-errors not exposed |
+| mv | partial | sparse-checkout flag unsupported |
 | restore | supported | |
 | status | supported | |
 | clean | supported | |
@@ -243,4 +243,4 @@ C2 把 `.github/workflows/base.yml` 与 `.github/workflows/codeql.yml` 的 `name
 ## 风险与缓解
 
 1. **`.gitattributes` 影响历史 diff 显示** → 缓解：text=auto eol=lf 对已有 LF 文件无效；仅在新平台 checkout 时归一化。
-2. **`COMPATIBILITY.md` 与代码不同步** → 缓解：C2 已在 `compat-offline-core` job 中加入 `scripts/check_compat_matrix.sh`，并通过 `tests/compat/matrix_alignment.rs` 接入 `cargo test --all`，扫描 `src/cli.rs` Commands 变体并对比矩阵行。
+2. **`COMPATIBILITY.md` 与代码不同步** → 缓解：C2 通过 `tests/compat/matrix_alignment.rs` 接入 `cargo test --all`（compat-offline-core job 另以 `cargo test --test compat_matrix_alignment` 单独 gate），自包含地扫描 `src/cli.rs` Commands 变体并对比矩阵行。原 `scripts/check_compat_matrix.sh` 已移除，检测逻辑内联进该 Rust 测试。

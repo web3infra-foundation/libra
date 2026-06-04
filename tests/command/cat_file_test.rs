@@ -18,6 +18,15 @@ use std::{
 };
 
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
+use git_internal::internal::object::{
+    blob::Blob,
+    tree::{Tree, TreeItem, TreeItemMode},
+};
+use libra::{
+    command::save_object,
+    utils::test::{self, ChangeDirGuard},
+};
+use serial_test::serial;
 
 use super::{loose_object_path, parse_cli_error_stderr, parse_json_stdout};
 
@@ -785,5 +794,918 @@ fn test_cat_file_cli_outside_repository_returns_fatal_128() {
     assert!(
         stderr.contains("fatal: not a libra repository"),
         "unexpected stderr: {stderr}"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  Batch 0 — `--batch-check` streaming engine, -Z, modifier/contract guards
+// ════════════════════════════════════════════════════════════════════════
+
+/// Spawn `libra <args>` in `temp_path`, feed `stdin_data`, and collect output.
+fn run_cat_file_with_stdin(
+    temp_path: &std::path::Path,
+    args: &[&str],
+    stdin_data: &[u8],
+) -> std::process::Output {
+    use std::process::Stdio;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn libra");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(stdin_data)
+        .expect("write stdin");
+    child.wait_with_output().expect("wait for libra")
+}
+
+/// Resolve `HEAD` to its full commit hash via `rev-parse`.
+fn head_commit_hash(temp_path: &std::path::Path) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("rev-parse HEAD");
+    assert!(out.status.success(), "rev-parse failed");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Resolve the first blob hash reachable from HEAD's tree.
+fn head_first_blob_hash(temp_path: &std::path::Path) -> String {
+    let commit = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "-p", "HEAD"])
+        .output()
+        .expect("cat-file -p HEAD");
+    let commit_stdout = String::from_utf8_lossy(&commit.stdout);
+    let tree = commit_stdout
+        .lines()
+        .find(|l| l.starts_with("tree "))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .expect("tree line")
+        .to_string();
+    let tree_out = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "-p", &tree])
+        .output()
+        .expect("cat-file -p tree");
+    let tree_stdout = String::from_utf8_lossy(&tree_out.stdout);
+    tree_stdout
+        .lines()
+        .find(|l| l.contains(" blob "))
+        .and_then(|l| l.split_whitespace().nth(2))
+        .expect("blob entry")
+        .to_string()
+}
+
+fn batch_repo() -> tempfile::TempDir {
+    let repo = init_temp_repo();
+    configure_user_identity(repo.path());
+    create_commit(repo.path(), "hello.txt", "hello world\n", "first commit");
+    repo
+}
+
+/// A full blob OID resolves to `<oid> blob <size>`.
+#[tokio::test]
+async fn batch_check_resolves_valid_oid() {
+    let repo = batch_repo();
+    let blob = head_first_blob_hash(repo.path());
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-check"],
+        format!("{blob}\n").as_bytes(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout.lines().next().expect("one output line");
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    assert_eq!(parts[0], blob, "objectname echoes the OID");
+    assert_eq!(parts[1], "blob", "blob type");
+    assert!(parts[2].parse::<u64>().is_ok(), "size is numeric: {line}");
+}
+
+/// A full commit hash resolves to `<hash> commit <size>`.
+#[tokio::test]
+async fn batch_check_resolves_commit() {
+    let repo = batch_repo();
+    let commit = head_commit_hash(repo.path());
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-check"],
+        format!("{commit}\n").as_bytes(),
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parts: Vec<&str> = stdout.split_whitespace().collect();
+    assert_eq!(parts[0], commit);
+    assert_eq!(parts[1], "commit");
+}
+
+/// `HEAD` resolves to the current commit metadata.
+#[tokio::test]
+async fn batch_check_resolves_head_ref() {
+    let repo = batch_repo();
+    let commit = head_commit_hash(repo.path());
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--batch-check"], b"HEAD\n");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&commit),
+        "HEAD resolves to commit hash: {stdout}"
+    );
+    assert!(stdout.contains(" commit "), "type is commit: {stdout}");
+}
+
+/// An unresolvable token prints `<input> missing` and the process exits 0.
+#[tokio::test]
+async fn batch_check_missing_object() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-check"],
+        b"INVALIDOBJECT\n",
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "missing must not change exit code"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.trim_end(), "INVALIDOBJECT missing");
+}
+
+/// A short SHA that matches ≥2 objects prints `<input> ambiguous` (exit 0).
+#[tokio::test]
+async fn batch_check_ambiguous_short_sha() {
+    let repo = init_temp_repo();
+    configure_user_identity(repo.path());
+    // Lay down enough commits that two object hashes share a 1-hex prefix.
+    let mut hashes = Vec::new();
+    for i in 0..20 {
+        create_commit(
+            repo.path(),
+            &format!("f{i}.txt"),
+            &format!("content number {i}\n"),
+            &format!("commit {i}"),
+        );
+        hashes.push(head_commit_hash(repo.path()));
+    }
+    // Find the shortest prefix shared by ≥2 collected hashes.
+    let mut ambiguous_prefix: Option<String> = None;
+    'outer: for len in 1..=8 {
+        for a in 0..hashes.len() {
+            let pfx = &hashes[a][..len];
+            let count = hashes.iter().filter(|h| h.starts_with(pfx)).count();
+            if count >= 2 {
+                ambiguous_prefix = Some(pfx.to_string());
+                break 'outer;
+            }
+        }
+    }
+    let prefix = ambiguous_prefix.expect("two commit hashes should share a short prefix");
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-check"],
+        format!("{prefix}\n").as_bytes(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "ambiguous must not change exit code"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.trim_end(),
+        format!("{prefix} ambiguous"),
+        "stdout: {stdout}"
+    );
+}
+
+/// A `\r\n`-terminated record is trimmed and resolves normally.
+#[tokio::test]
+async fn batch_check_trims_crlf() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--batch-check"], b"HEAD\r\n");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(" commit "),
+        "CRLF trimmed, resolves commit: {stdout}"
+    );
+    assert!(
+        !stdout.contains("missing"),
+        "must not be treated as missing: {stdout}"
+    );
+}
+
+/// Under `-Z`, only NUL separates records and stdout records are NUL-terminated;
+/// a bare `\n` does not split.
+#[tokio::test]
+async fn batch_check_z_uses_nul_separator() {
+    let repo = batch_repo();
+    // Two NUL-separated HEAD tokens -> two commit records, each NUL-terminated.
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-check", "-Z"],
+        b"HEAD\0HEAD\0",
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let nul_count = out.stdout.iter().filter(|&&b| b == 0).count();
+    assert_eq!(nul_count, 2, "two NUL-terminated records");
+    assert!(
+        !out.stdout.contains(&b'\n'),
+        "no LF used as separator under -Z"
+    );
+
+    // A bare LF is NOT a separator under -Z: the whole thing is one token.
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-check", "-Z"],
+        b"HEAD\nHEAD",
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("missing"),
+        "LF-joined token is one unresolved token: {stdout}"
+    );
+}
+
+/// A custom `--batch-check=<format>` renders the requested atoms.
+#[tokio::test]
+async fn batch_check_custom_format() {
+    let repo = batch_repo();
+    let commit = head_commit_hash(repo.path());
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-check=%(objectname) - %(objecttype)"],
+        b"HEAD\n",
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.trim_end(), format!("{commit} - commit"));
+}
+
+/// EOF on empty stdin exits 0 with no output.
+#[tokio::test]
+async fn batch_check_eof_exits_zero() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--batch-check"], b"");
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty(), "no output for empty stdin");
+}
+
+/// An over-long (>4KiB) input record is rejected with LBR-CLI-003 (129).
+#[tokio::test]
+async fn batch_check_oversize_line_rejected() {
+    let repo = batch_repo();
+    let oversize = vec![b'a'; 5000]; // no terminator
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--batch-check"], &oversize);
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "oversize line is a usage error"
+    );
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+}
+
+/// A closed downstream pipe (BrokenPipe) terminates the stream quietly (exit 0).
+#[tokio::test]
+async fn batch_check_brokenpipe_exits_zero() {
+    use std::process::Stdio;
+    let repo = batch_repo();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(repo.path())
+        .args(["cat-file", "--batch-check"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn cat-file");
+    let mut stdin = child.stdin.take().expect("stdin");
+    // Feed a long stream of unresolved tokens from a thread; ignore write
+    // errors (the child closes its stdin when it exits).
+    let writer = std::thread::spawn(move || {
+        for _ in 0..200_000 {
+            if stdin.write_all(b"INVALIDOBJECT\n").is_err() {
+                break;
+            }
+        }
+    });
+    // Read a little, then close the read end so the child's next write fails.
+    let mut stdout = child.stdout.take().expect("stdout");
+    let mut buf = [0u8; 16];
+    let _ = stdout.read(&mut buf);
+    drop(stdout);
+    let status = child.wait().expect("wait");
+    let _ = writer.join();
+    assert_eq!(status.code(), Some(0), "BrokenPipe must exit 0");
+}
+
+/// `--batch-check -p` is a mode-group conflict. Libra surfaces clap parse
+/// conflicts through its usage path (coarse exit 129), not clap's native 2.
+#[tokio::test]
+async fn batch_mode_conflicts_with_single_mode() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--batch-check", "-p"], b"");
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "mode conflict is a usage error"
+    );
+}
+
+/// An unknown format placeholder is rejected (LBR-CLI-002), even on empty stdin.
+#[tokio::test]
+async fn batch_check_unknown_placeholder() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--batch-check=%(bogus)"], b"");
+    assert_eq!(out.status.code(), Some(129));
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// `--textconv` is explicitly unsupported (LBR-UNSUPPORTED-001, 128).
+#[tokio::test]
+async fn textconv_flag_rejected_unsupported() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--textconv", "HEAD"], b"");
+    assert_eq!(out.status.code(), Some(128));
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-UNSUPPORTED-001");
+}
+
+/// `--filters` is explicitly unsupported (LBR-UNSUPPORTED-001, 128).
+#[tokio::test]
+async fn filters_flag_rejected_unsupported() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--filters", "HEAD"], b"");
+    assert_eq!(out.status.code(), Some(128));
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-UNSUPPORTED-001");
+}
+
+/// Batch modes do not support `--json`/`--machine` (LBR-CLI-002, 129).
+#[tokio::test]
+async fn batch_with_json_rejected() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["--json", "cat-file", "--batch-check"], b"");
+    assert_eq!(out.status.code(), Some(129));
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// Batch modes read from stdin; a positional OBJECT is rejected (LBR-CLI-002).
+#[tokio::test]
+async fn batch_with_positional_object_rejected() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--batch-check", "HEAD"], b"");
+    assert_eq!(out.status.code(), Some(129));
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// A bare `-Z` modifier without a batch mode is rejected (LBR-CLI-002).
+#[tokio::test]
+async fn z_modifier_without_batch_rejected() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "-Z"], b"");
+    assert_eq!(out.status.code(), Some(129));
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  Batch 1 — `--batch` full content output + `--buffer`
+// ════════════════════════════════════════════════════════════════════════
+
+/// Stage and commit `bytes` (possibly non-UTF-8) under `filename`.
+fn commit_bytes(temp_path: &std::path::Path, filename: &str, bytes: &[u8]) {
+    std::fs::write(temp_path.join(filename), bytes).expect("write file");
+    let add = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["add", filename])
+        .output()
+        .expect("add");
+    assert!(
+        add.status.success(),
+        "add: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let commit = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["commit", "-m", "binary", "--no-verify"])
+        .output()
+        .expect("commit");
+    assert!(
+        commit.status.success(),
+        "commit: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+}
+
+/// `--batch` emits `<oid> SP blob SP <size> LF <content> LF` byte-for-byte.
+#[tokio::test]
+async fn batch_output_format_exact() {
+    let repo = batch_repo();
+    let blob = head_first_blob_hash(repo.path());
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch"],
+        format!("{blob}\n").as_bytes(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let expected = format!("{blob} blob 12\nhello world\n\n");
+    assert_eq!(out.stdout, expected.as_bytes(), "exact batch output bytes");
+}
+
+/// `--batch -Z` terminates both the metadata line and the content block with NUL.
+#[tokio::test]
+async fn batch_output_z_uses_nul_record_sep() {
+    let repo = batch_repo();
+    let blob = head_first_blob_hash(repo.path());
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch", "-Z"],
+        format!("{blob}\0").as_bytes(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut expected = format!("{blob} blob 12").into_bytes();
+    expected.push(0);
+    expected.extend_from_slice(b"hello world\n");
+    expected.push(0);
+    assert_eq!(out.stdout, expected, "NUL-terminated records under -Z");
+}
+
+/// Binary (non-UTF-8) blob content is written through verbatim.
+#[tokio::test]
+async fn batch_binary_blob_passthrough() {
+    let repo = init_temp_repo();
+    configure_user_identity(repo.path());
+    let payload: &[u8] = &[0xFF, 0xFE, 0x00, 0x01, 0x80, 0x7F, 0x0A, 0xC0];
+    commit_bytes(repo.path(), "bin.dat", payload);
+    let blob = head_first_blob_hash(repo.path());
+
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch"],
+        format!("{blob}\n").as_bytes(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // stdout = "<oid> blob <len>\n" + <payload> + "\n"
+    let nl = out
+        .stdout
+        .iter()
+        .position(|&b| b == b'\n')
+        .expect("metadata terminator");
+    let content = &out.stdout[nl + 1..out.stdout.len() - 1];
+    assert_eq!(content, payload, "binary content preserved byte-for-byte");
+}
+
+/// Multiple input tokens produce records in input order.
+#[tokio::test]
+async fn batch_multiple_objects_in_order() {
+    let repo = batch_repo();
+    let blob = head_first_blob_hash(repo.path());
+    let commit = head_commit_hash(repo.path());
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-check"],
+        format!("{blob}\n{commit}\n").as_bytes(),
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines[0].starts_with(&blob),
+        "first record is the blob: {stdout}"
+    );
+    assert!(lines[0].contains(" blob "));
+    assert!(
+        lines[1].starts_with(&commit),
+        "second record is the commit: {stdout}"
+    );
+    assert!(lines[1].contains(" commit "));
+}
+
+/// A missing object in `--batch` prints only `<object> SP missing LF` with no
+/// trailing content block.
+#[tokio::test]
+async fn batch_missing_no_trailing_content() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--batch"], b"NOPE\n");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        out.stdout, b"NOPE missing\n",
+        "missing has no content block"
+    );
+}
+
+/// An empty blob (size 0) emits the metadata line then a 0-byte content block.
+#[tokio::test]
+async fn batch_empty_blob_object() {
+    let repo = init_temp_repo();
+    configure_user_identity(repo.path());
+    commit_bytes(repo.path(), "empty.txt", b"");
+    let blob = head_first_blob_hash(repo.path());
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch"],
+        format!("{blob}\n").as_bytes(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let expected = format!("{blob} blob 0\n\n");
+    assert_eq!(
+        out.stdout,
+        expected.as_bytes(),
+        "empty blob: meta + empty content"
+    );
+}
+
+/// A corrupt (undecodable) object surfaces an I/O read failure (LBR-IO-001, 128).
+#[tokio::test]
+async fn batch_read_failure_maps_io_error() {
+    let repo = batch_repo();
+    let blob = head_first_blob_hash(repo.path());
+    // Overwrite the loose object with bytes that are not a valid zlib stream.
+    let object_path = loose_object_path(repo.path(), &blob);
+    std::fs::write(&object_path, b"not a valid zlib object stream at all").expect("corrupt object");
+
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch"],
+        format!("{blob}\n").as_bytes(),
+    );
+    assert_eq!(out.status.code(), Some(128), "corrupt object read is fatal");
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-IO-001");
+}
+
+/// A bare `--buffer` without a batch mode is rejected (LBR-CLI-002, 129).
+#[tokio::test]
+async fn buffer_without_batch_rejected() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--buffer"], b"");
+    assert_eq!(out.status.code(), Some(129));
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// Drive a `--batch[ --buffer]` child with stdin held open after one token, and
+/// report whether the first record reaches stdout *before* EOF. Without
+/// `--buffer` the per-object flush makes it visible; with `--buffer` it stays
+/// buffered until EOF.
+fn batch_first_record_visible_before_eof(extra: &[&str]) -> bool {
+    use std::{process::Stdio, sync::mpsc, time::Duration};
+    let repo = batch_repo();
+    let mut argv = vec!["cat-file", "--batch"];
+    argv.extend_from_slice(extra);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(repo.path())
+        .args(&argv)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn cat-file");
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin.write_all(b"HEAD\n").expect("write token");
+    // Intentionally keep `stdin` open so the child does not see EOF yet.
+    let mut stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut buf = [0u8; 64];
+        let n = stdout.read(&mut buf).unwrap_or(0);
+        let _ = tx.send(n);
+    });
+    let visible = matches!(rx.recv_timeout(Duration::from_secs(3)), Ok(n) if n > 0);
+    drop(stdin); // let the child reach EOF and exit
+    let _ = child.wait();
+    let _ = reader.join();
+    visible
+}
+
+/// Without `--buffer`, each object's record is flushed immediately.
+#[tokio::test]
+async fn batch_no_buffer_flushes_per_object() {
+    assert!(
+        batch_first_record_visible_before_eof(&[]),
+        "no --buffer should flush the first record before EOF"
+    );
+}
+
+/// With `--buffer`, output is coalesced and not flushed until EOF.
+#[tokio::test]
+async fn batch_buffer_flag_coalesces_writes() {
+    assert!(
+        !batch_first_record_visible_before_eof(&["--buffer"]),
+        "--buffer should defer output until EOF"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  Batch 2 — --batch-all-objects, --unordered, --follow-symlinks
+// ════════════════════════════════════════════════════════════════════════
+
+/// `--batch-all-objects --batch-check` enumerates every local object without
+/// reading stdin (commit + tree + blob for a single-file commit).
+#[tokio::test]
+async fn batch_all_objects_no_stdin() {
+    let repo = batch_repo();
+    let commit = head_commit_hash(repo.path());
+    let blob = head_first_blob_hash(repo.path());
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-all-objects", "--batch-check"],
+        b"", // no stdin
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let names: Vec<&str> = stdout
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .collect();
+    assert!(names.len() >= 3, "expected >=3 objects, got: {stdout}");
+    assert!(names.contains(&commit.as_str()), "commit present: {stdout}");
+    assert!(names.contains(&blob.as_str()), "blob present: {stdout}");
+    assert!(stdout.contains(" commit "));
+    assert!(stdout.contains(" tree "));
+    assert!(stdout.contains(" blob "));
+}
+
+/// `--batch-all-objects` without a batch mode is rejected (LBR-CLI-002).
+#[tokio::test]
+async fn batch_all_objects_requires_batch_mode() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(repo.path(), &["cat-file", "--batch-all-objects"], b"");
+    assert_eq!(out.status.code(), Some(129));
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// `--unordered` / `--follow-symlinks` without a batch mode are rejected.
+#[tokio::test]
+async fn unordered_and_follow_symlinks_require_batch_mode() {
+    let repo = batch_repo();
+    for modifier in ["--unordered", "--follow-symlinks"] {
+        let out = run_cat_file_with_stdin(repo.path(), &["cat-file", modifier], b"");
+        assert_eq!(out.status.code(), Some(129), "{modifier}");
+        let (_human, report) = parse_cli_error_stderr(&out.stderr);
+        assert_eq!(report.error_code, "LBR-CLI-002", "{modifier}");
+    }
+}
+
+/// Default `--batch-all-objects` output is sorted by object id (ascending).
+#[tokio::test]
+async fn batch_all_objects_sorted_default() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-all-objects", "--batch-check"],
+        b"",
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let oids: Vec<String> = stdout
+        .lines()
+        .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+        .collect();
+    let mut sorted = oids.clone();
+    sorted.sort();
+    assert_eq!(
+        oids, sorted,
+        "default order must be sorted by OID: {oids:?}"
+    );
+}
+
+/// `--unordered` still emits every object (count matches the sorted run).
+#[tokio::test]
+async fn batch_all_objects_unordered_flag() {
+    let repo = batch_repo();
+    let sorted = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-all-objects", "--batch-check"],
+        b"",
+    );
+    let unordered = run_cat_file_with_stdin(
+        repo.path(),
+        &[
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check",
+            "--unordered",
+        ],
+        b"",
+    );
+    assert!(sorted.status.success() && unordered.status.success());
+    let sorted_count = String::from_utf8_lossy(&sorted.stdout).lines().count();
+    let unordered_count = String::from_utf8_lossy(&unordered.stdout).lines().count();
+    assert_eq!(
+        sorted_count, unordered_count,
+        "same object set regardless of order"
+    );
+    assert!(sorted_count >= 3);
+}
+
+/// Every emitted object id is a valid hex string of the repo's hash length.
+#[tokio::test]
+async fn batch_all_objects_oids_valid_hex() {
+    let repo = batch_repo();
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-all-objects", "--batch-check"],
+        b"",
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in stdout.lines() {
+        let oid = line.split_whitespace().next().expect("oid token");
+        assert!(
+            (oid.len() == 40 || oid.len() == 64) && oid.bytes().all(|b| b.is_ascii_hexdigit()),
+            "invalid OID hex: {oid}"
+        );
+    }
+}
+
+/// A corrupt/garbage pack index is skipped (no rebuild); loose objects still
+/// enumerate and the command warns on stderr with the offending idx path.
+#[tokio::test]
+async fn batch_all_objects_skips_corrupt_idx() {
+    let repo = batch_repo();
+    let pack_dir = repo.path().join(".libra").join("objects").join("pack");
+    std::fs::create_dir_all(&pack_dir).expect("create pack dir");
+    std::fs::write(pack_dir.join("garbage.pack"), b"PACK not-a-real-pack").expect("write pack");
+    std::fs::write(pack_dir.join("garbage.idx"), b"not a real idx file").expect("write idx");
+
+    let out = run_cat_file_with_stdin(
+        repo.path(),
+        &["cat-file", "--batch-all-objects", "--batch-check"],
+        b"",
+    );
+    assert!(out.status.success(), "scan continues past corrupt idx");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.lines().count() >= 3,
+        "loose objects still enumerated: {stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("skipping pack index") && stderr.contains("garbage.idx"),
+        "stderr must warn about the skipped idx: {stderr}"
+    );
+}
+
+/// Build a tree from `(mode, content, name)` items, saving the item blobs and
+/// the tree into the repo at `temp` (must be a `setup_with_new_libra_in` repo).
+/// Returns `(tree_hash, [(name, item_oid)...])`.
+async fn save_link_tree(
+    temp: &std::path::Path,
+    items: &[(TreeItemMode, &str, &str)],
+) -> (String, Vec<(String, String)>) {
+    let _guard = ChangeDirGuard::new(temp);
+    let mut tree_items = Vec::new();
+    let mut oids = Vec::new();
+    for (mode, content, name) in items {
+        let blob = Blob::from_content(content);
+        save_object(&blob, &blob.id).expect("save blob");
+        tree_items.push(TreeItem::new(*mode, blob.id, (*name).to_string()));
+        oids.push(((*name).to_string(), blob.id.to_string()));
+    }
+    let tree = Tree::from_tree_items(tree_items).expect("build tree");
+    save_object(&tree, &tree.id).expect("save tree");
+    (tree.id.to_string(), oids)
+}
+
+/// `--follow-symlinks` resolves an in-tree symlink to its target blob.
+#[tokio::test]
+#[serial]
+async fn follow_symlinks_resolves_in_tree_link() {
+    let temp = tempfile::tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let (tree, oids) = save_link_tree(
+        temp.path(),
+        &[
+            (TreeItemMode::Blob, "the real content\n", "real.txt"),
+            (TreeItemMode::Link, "real.txt", "link.txt"),
+        ],
+    )
+    .await;
+    let real_hash = oids
+        .iter()
+        .find(|(n, _)| n == "real.txt")
+        .map(|(_, h)| h.clone())
+        .expect("real.txt oid");
+
+    let out = run_cat_file_with_stdin(
+        temp.path(),
+        &["cat-file", "--batch-check", "--follow-symlinks"],
+        format!("{tree}:link.txt\n").as_bytes(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.starts_with(&real_hash),
+        "link.txt should resolve to real.txt's blob ({real_hash}): {stdout}"
+    );
+    assert!(
+        stdout.contains(" blob "),
+        "resolved object is a blob: {stdout}"
+    );
+}
+
+/// A symlink that escapes the tree root resolves to `missing` (never touches
+/// the host filesystem).
+#[tokio::test]
+#[serial]
+async fn follow_symlinks_escape_tree_returns_missing() {
+    let temp = tempfile::tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let (tree, _) = save_link_tree(
+        temp.path(),
+        &[(TreeItemMode::Link, "../../etc/passwd", "escape")],
+    )
+    .await;
+
+    let out = run_cat_file_with_stdin(
+        temp.path(),
+        &["cat-file", "--batch-check", "--follow-symlinks"],
+        format!("{tree}:escape\n").as_bytes(),
+    );
+    assert_eq!(out.status.code(), Some(0), "escape is not an error");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("missing"),
+        "escaping link is missing: {stdout}"
+    );
+}
+
+/// A symlink loop (a → b → a) is bounded by the depth cap and resolves to
+/// `missing` without a stack overflow.
+#[tokio::test]
+#[serial]
+async fn follow_symlinks_depth_cap_32() {
+    let temp = tempfile::tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let (tree, _) = save_link_tree(
+        temp.path(),
+        &[
+            (TreeItemMode::Link, "b", "a"),
+            (TreeItemMode::Link, "a", "b"),
+        ],
+    )
+    .await;
+
+    let out = run_cat_file_with_stdin(
+        temp.path(),
+        &["cat-file", "--batch-check", "--follow-symlinks"],
+        format!("{tree}:a\n").as_bytes(),
+    );
+    assert_eq!(out.status.code(), Some(0), "loop is bounded, not fatal");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("missing"),
+        "looping link resolves to missing: {stdout}"
     );
 }

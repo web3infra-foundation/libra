@@ -34,8 +34,9 @@
 //! can see exactly why a candidate scored the way it did.
 
 use super::{
-    BudgetDimension,
+    AgentRun, AgentRunStatus, BudgetDimension,
     decision::{RiskLevel, RiskScore},
+    event::AgentRunEvent,
 };
 
 /// Per-[`BudgetDimension`](super::BudgetDimension) tally of `budget_exceeded`
@@ -132,6 +133,49 @@ pub fn compute_merge_risk_score(inputs: &MergeRiskInputs) -> RiskScore {
     }
 }
 
+/// Tally the [`MergeRiskInputs`] for a merge candidate from its aggregated
+/// sub-agent runs, their lifecycle events, and the validator-supplied conflict
+/// / unverified-scope counts — the **pure** half of the CEX-S2-15
+/// ValidatorEngine's risk-input step (完成判定 (1)).
+///
+/// - `sub_agent_count` = the runs aggregated into the candidate.
+/// - `failed_run_count` = runs that ended in [`AgentRunStatus::Failed`] (the
+///   only non-success terminal state — `Completed` is success and
+///   `Queued`/`Running`/`Blocked` are still in flight, so neither counts).
+/// - `budget_exceeded` = one [`BudgetExceededCounts::record`] per
+///   [`AgentRunEvent::BudgetExceeded`], bucketed by `dimension`.
+/// - `conflict_count` / `unverified_patch_scope` are supplied by the caller
+///   (conflict detection and the validator's scope check live outside this
+///   pure tally).
+///
+/// Pure — a fold over the supplied slices with no I/O — so the orchestrator
+/// ValidatorEngine owns only the loading of `runs` / `events`, and the result
+/// feeds [`compute_merge_risk_score`] unchanged.
+pub fn gather_merge_risk_inputs(
+    runs: &[AgentRun],
+    events: &[AgentRunEvent],
+    conflict_count: u32,
+    unverified_patch_scope: u32,
+) -> MergeRiskInputs {
+    let mut budget_exceeded = BudgetExceededCounts::default();
+    for event in events {
+        if let AgentRunEvent::BudgetExceeded { dimension, .. } = event {
+            budget_exceeded.record(*dimension);
+        }
+    }
+    let failed_run_count = runs
+        .iter()
+        .filter(|run| run.status == AgentRunStatus::Failed)
+        .count() as u32;
+    MergeRiskInputs {
+        sub_agent_count: runs.len() as u32,
+        conflict_count,
+        failed_run_count,
+        unverified_patch_scope,
+        budget_exceeded,
+    }
+}
+
 /// Saturating weighted sum of every risk signal.
 fn weighted_score(i: &MergeRiskInputs) -> u32 {
     let b = &i.budget_exceeded;
@@ -200,7 +244,91 @@ fn push_factor(factors: &mut Vec<(String, String)>, key: &str, count: u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        super::{AgentRunId, AgentTaskId},
+        *,
+    };
+
+    fn run(status: AgentRunStatus) -> AgentRun {
+        let id = AgentRunId::new();
+        AgentRun {
+            id,
+            task_id: AgentTaskId::new(),
+            thread_id: uuid::Uuid::from_u128(0x7777),
+            provider: "deepseek".to_string(),
+            model: "deepseek-chat".to_string(),
+            transcript_path: format!("agents/{}.jsonl", id.0),
+            workspace_path: None,
+            status,
+        }
+    }
+
+    /// CEX-S2-15 完成判定 (1): the pure tally counts sub-agents, failed runs and
+    /// per-dimension budget breaches from the raw run/event slices, passes the
+    /// validator-supplied conflict / unverified counts through, and feeds
+    /// `compute_merge_risk_score` unchanged. Non-budget events and non-failed
+    /// runs are ignored.
+    #[test]
+    fn gather_merge_risk_inputs_tallies_runs_and_budget_events() {
+        let failed = run(AgentRunStatus::Failed);
+        let completed = run(AgentRunStatus::Completed);
+        let running = run(AgentRunStatus::Running);
+        let runs = vec![failed.clone(), completed.clone(), running.clone()];
+
+        let events = vec![
+            AgentRunEvent::BudgetExceeded {
+                agent_run_id: failed.id,
+                dimension: BudgetDimension::Token,
+            },
+            AgentRunEvent::BudgetExceeded {
+                agent_run_id: failed.id,
+                dimension: BudgetDimension::Token,
+            },
+            AgentRunEvent::BudgetExceeded {
+                agent_run_id: completed.id,
+                dimension: BudgetDimension::Cost,
+            },
+            // A non-budget lifecycle event must not be tallied.
+            AgentRunEvent::Started {
+                agent_run_id: running.id,
+            },
+        ];
+
+        let inputs = gather_merge_risk_inputs(&runs, &events, 1, 2);
+        assert_eq!(inputs.sub_agent_count, 3, "all aggregated runs are counted");
+        assert_eq!(
+            inputs.failed_run_count, 1,
+            "only the Failed run counts (Completed = success, Running = in flight)"
+        );
+        assert_eq!(
+            inputs.conflict_count, 1,
+            "caller-supplied conflict count passes through"
+        );
+        assert_eq!(
+            inputs.unverified_patch_scope, 2,
+            "caller-supplied scope count passes through"
+        );
+        assert_eq!(inputs.budget_exceeded.token, 2);
+        assert_eq!(inputs.budget_exceeded.cost, 1);
+        assert_eq!(inputs.budget_exceeded.wall_clock, 0);
+        assert_eq!(inputs.budget_exceeded.tool_call, 0);
+        assert_eq!(inputs.budget_exceeded.source_call, 0);
+
+        // The gathered inputs feed the scorer unchanged.
+        let score = compute_merge_risk_score(&inputs);
+        // 2*token(4) + 1*cost(4) + 1*conflict(3) + 1*failed(3) + 2*unverified(2)
+        // + (3-1) breadth = 8 + 4 + 3 + 3 + 4 + 2 = 24 ≥ critical threshold.
+        assert_eq!(score.level, RiskLevel::Critical);
+    }
+
+    /// Empty inputs tally to the all-zero default (no panic, no underflow on the
+    /// `sub_agent_count - 1` breadth term inside the scorer).
+    #[test]
+    fn gather_merge_risk_inputs_empty_is_zeroed() {
+        let inputs = gather_merge_risk_inputs(&[], &[], 0, 0);
+        assert_eq!(inputs, MergeRiskInputs::default());
+        assert_eq!(compute_merge_risk_score(&inputs).level, RiskLevel::Low);
+    }
 
     /// `record` routes each `BudgetDimension` to its own counter and is
     /// saturating; the all-zero default is distinguishable from any breach.

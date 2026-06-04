@@ -535,6 +535,7 @@ pub async fn run_commit(
             &author,
             &committer,
             &commit_message,
+            false,
         )
         .await?;
 
@@ -590,6 +591,7 @@ pub async fn run_commit(
         &author,
         &committer,
         &commit_message,
+        false,
     )
     .await?;
 
@@ -808,23 +810,32 @@ pub async fn execute_safe(args: CommitArgs, output: &OutputConfig) -> CliResult<
 
 /// If vault signing is enabled, sign the commit content and return the
 /// formatted `gpgsig` header string. Returns `None` if vault is not configured.
-async fn vault_sign_commit(
+/// Sign a commit with the vault PGP key.
+///
+/// Returns the `gpgsig` block, or `None` when signing is not enabled. When
+/// `force` is true the `vault.signing` config gate is bypassed (used by
+/// `merge --gpg-sign`/`-S`, which opts in explicitly); otherwise signing only
+/// happens when `vault.signing=true`.
+pub(crate) async fn vault_sign_commit(
     tree_id: &ObjectHash,
     parent_ids: &[ObjectHash],
     author: &Signature,
     committer: &Signature,
     message: &str,
+    force: bool,
 ) -> Result<Option<String>, CommitError> {
     use crate::internal::{config::ConfigKv, vault};
 
-    // Check if vault signing is enabled
-    let signing_enabled = ConfigKv::get("vault.signing")
-        .await
-        .ok()
-        .flatten()
-        .map(|e| e.value);
-    if signing_enabled.as_deref() != Some("true") {
-        return Ok(None);
+    // Check if vault signing is enabled (unless explicitly forced).
+    if !force {
+        let signing_enabled = ConfigKv::get("vault.signing")
+            .await
+            .ok()
+            .flatten()
+            .map(|e| e.value);
+        if signing_enabled.as_deref() != Some("true") {
+            return Ok(None);
+        }
     }
 
     // Load unseal key

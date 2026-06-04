@@ -23,6 +23,7 @@ After all filesystem moves succeed, the index is updated atomically: old entries
 | Verbose | `-v` | `--verbose` | Print each rename operation as it happens. |
 | Dry run | `-n` | `--dry-run` | Show what would be moved without actually performing any moves. |
 | Force | `-f` | `--force` | Overwrite an existing destination file instead of reporting an error. Only works for regular files and symlinks; directories cannot be overwritten. |
+| Skip errors | `-k` | `--skip-errors` | Skip individual source moves that would fail validation and continue with valid sources. |
 
 ### Option Details
 
@@ -55,6 +56,16 @@ Allows overwriting an existing destination. Without this flag, moving to an exis
 $ libra mv -f src/old.rs src/new.rs
 ```
 
+**`-k` / `--skip-errors`**
+
+Skips invalid source moves and applies the remaining valid moves:
+
+```bash
+$ libra mv -k missing.rs tracked.rs src/
+```
+
+This flag is useful for batch moves where some pathspecs may be absent or otherwise invalid. Invocation-shape errors still fail, such as passing multiple sources with a destination that is not an existing directory.
+
 ## Common Commands
 
 ```bash
@@ -75,6 +86,9 @@ libra mv -n old.rs new.rs
 
 # Force overwrite
 libra mv -f src/draft.rs src/final.rs
+
+# Skip invalid sources in a batch
+libra mv -k missing.rs tracked.rs src/
 
 # Verbose output
 libra mv -v old.rs new.rs
@@ -134,6 +148,7 @@ Example:
     ],
     "dry_run": false,
     "forced": false,
+    "skip_errors": false,
     "verbose": false
   }
 }
@@ -160,6 +175,7 @@ Dry-run:
     ],
     "dry_run": true,
     "forced": false,
+    "skip_errors": false,
     "verbose": false
   }
 }
@@ -187,7 +203,7 @@ Moving a file that is in a conflicted state (stages 1-3 in the index) would lose
 
 ### How does this compare to Git and jj?
 
-Git's `mv` command is similar in design: it moves files in the working tree and updates the index. It supports a few additional flags (`-k` to skip move errors, `--sparse`) but is otherwise straightforward.
+Git's `mv` command is similar in design: it moves files in the working tree and updates the index. It supports `-k` to skip move errors and also supports `--sparse`, which Libra does not yet expose.
 
 jj does not have a `mv` command. Because jj uses automatic snapshotting of the working tree, file moves are detected automatically by the working-copy scanner. Users simply move files with the system `mv` command and jj records the change on the next snapshot. This works well for simple renames but cannot reliably detect moves (as opposed to delete-then-create) for large refactors.
 
@@ -203,7 +219,7 @@ Libra provides an explicit `mv` command (like Git) because its index-based model
 | Dry run | `-n` / `--dry-run` | `-n` / `--dry-run` | N/A |
 | Force overwrite | `-f` / `--force` | `-f` / `--force` | N/A |
 | Structured JSON output | `--json` / `--machine` | N/A | N/A |
-| Skip errors | Not supported | `-k` | N/A |
+| Skip errors | `-k` / `--skip-errors` | `-k` | N/A |
 | Sparse checkout | Not supported | `--sparse` | N/A |
 
 Note: jj does not have a dedicated mv command. File renames are detected automatically by the working-copy snapshot mechanism.

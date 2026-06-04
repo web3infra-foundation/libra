@@ -32,6 +32,7 @@ async fn stage_file(path: &str, content: &str) {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 }
@@ -52,6 +53,7 @@ async fn test_mv_moves_tracked_file_to_new_path() {
             verbose: false,
             dry_run: false,
             force: false,
+            skip_errors: false,
         },
         &OutputConfig::default(),
     )
@@ -83,6 +85,7 @@ async fn test_mv_moves_tracked_file_into_directory() {
             verbose: false,
             dry_run: false,
             force: false,
+            skip_errors: false,
         },
         &OutputConfig::default(),
     )
@@ -114,6 +117,7 @@ async fn test_mv_resolves_paths_from_current_subdirectory() {
             verbose: false,
             dry_run: false,
             force: false,
+            skip_errors: false,
         },
         &OutputConfig::default(),
     )
@@ -146,6 +150,7 @@ async fn test_mv_moves_directory_with_tracked_files() {
             verbose: false,
             dry_run: false,
             force: false,
+            skip_errors: false,
         },
         &OutputConfig::default(),
     )
@@ -181,6 +186,7 @@ async fn test_mv_force_overwrites_tracked_destination_and_replaces_index_entry()
             verbose: false,
             dry_run: false,
             force: true,
+            skip_errors: false,
         },
         &OutputConfig::default(),
     )
@@ -220,6 +226,7 @@ async fn test_mv_rebuilds_index_entry_from_destination_file() {
             verbose: false,
             dry_run: false,
             force: false,
+            skip_errors: false,
         },
         &OutputConfig::default(),
     )
@@ -319,6 +326,7 @@ async fn test_mv_json_dry_run_outputs_plan_without_moving_file() {
     assert_eq!(value["command"], "mv");
     assert_eq!(value["data"]["dry_run"], true);
     assert_eq!(value["data"]["forced"], false);
+    assert_eq!(value["data"]["skip_errors"], false);
     assert_eq!(value["data"]["verbose"], false);
     assert_eq!(value["data"]["moves"][0]["source"], "dry_json.txt");
     assert_eq!(value["data"]["moves"][0]["destination"], "dry_json_new.txt");
@@ -369,6 +377,7 @@ async fn test_mv_machine_success_outputs_single_line_json() {
     assert_eq!(value["command"], "mv");
     assert_eq!(value["data"]["dry_run"], false);
     assert_eq!(value["data"]["forced"], false);
+    assert_eq!(value["data"]["skip_errors"], false);
     assert_eq!(value["data"]["verbose"], false);
     assert_eq!(value["data"]["moves"][0]["source"], "machine.txt");
     assert_eq!(value["data"]["moves"][0]["destination"], "machine_new.txt");
@@ -403,9 +412,10 @@ async fn test_mv_usage_output_matches_command_text() {
     assert_eq!(report.error_code, "LBR-CLI-002");
     assert_eq!(report.exit_code, 129);
     assert!(stderr.contains("usage: libra mv [<options>] <source>... <destination>"));
-    assert!(stderr.contains("-v, --verbose    be verbose"));
-    assert!(stderr.contains("-n, --dry-run    dry run"));
-    assert!(stderr.contains("-f, --force      force move/rename even if target exists"));
+    assert!(stderr.contains("-v, --verbose       be verbose"));
+    assert!(stderr.contains("-n, --dry-run       dry run"));
+    assert!(stderr.contains("-f, --force         force move/rename even if target exists"));
+    assert!(stderr.contains("-k, --skip-errors   skip move actions that would fail validation"));
 }
 
 #[tokio::test]
@@ -606,6 +616,99 @@ async fn test_mv_rejects_multiple_sources_with_same_target_name() {
 
 #[tokio::test]
 #[serial]
+/// Keeps default multi-source validation fail-fast when one source is invalid.
+async fn test_mv_mixed_invalid_source_fails_without_skip_errors() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file("tracked.txt", "t").await;
+    fs::create_dir_all("dest").unwrap();
+
+    let output = run_libra_command(
+        &["mv", "missing.txt", "tracked.txt", "dest"],
+        temp_path.path(),
+    );
+
+    assert_eq!(output.status.code(), Some(129));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        stderr.contains("fatal: bad source, source=missing.txt, destination=dest"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(temp_path.path().join("tracked.txt").exists());
+    assert!(!temp_path.path().join("dest/tracked.txt").exists());
+
+    let index = Index::load(path::index()).unwrap();
+    assert!(index.tracked("tracked.txt", 0));
+    assert!(!index.tracked("dest/tracked.txt", 0));
+}
+
+#[tokio::test]
+#[serial]
+/// `-k` skips invalid move actions while applying valid sources in the same batch.
+async fn test_mv_skip_errors_moves_valid_sources_and_ignores_invalid_sources() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file("tracked.txt", "t").await;
+    fs::create_dir_all("dest").unwrap();
+
+    let output = run_libra_command(
+        &["mv", "-k", "missing.txt", "tracked.txt", "dest"],
+        temp_path.path(),
+    );
+
+    assert_cli_success(&output, "mv -k should skip invalid source");
+    assert!(
+        output.stderr.is_empty(),
+        "skip-errors success should not print skipped source diagnostics: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!temp_path.path().join("missing.txt").exists());
+    assert!(!temp_path.path().join("tracked.txt").exists());
+    assert!(temp_path.path().join("dest/tracked.txt").exists());
+
+    let index = Index::load(path::index()).unwrap();
+    assert!(!index.tracked("tracked.txt", 0));
+    assert!(index.tracked("dest/tracked.txt", 0));
+}
+
+#[tokio::test]
+#[serial]
+/// `-k` skips later sources that would move onto an already accepted target.
+async fn test_mv_skip_errors_skips_duplicate_target_sources() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file("a/same.txt", "from-a").await;
+    stage_file("b/same.txt", "from-b").await;
+    fs::create_dir_all("dest").unwrap();
+
+    let output = run_libra_command(
+        &["mv", "-k", "a/same.txt", "b/same.txt", "dest"],
+        temp_path.path(),
+    );
+
+    assert_cli_success(&output, "mv -k should skip duplicate target source");
+    assert!(!temp_path.path().join("a/same.txt").exists());
+    assert!(temp_path.path().join("b/same.txt").exists());
+    assert_eq!(
+        fs::read_to_string(temp_path.path().join("dest/same.txt")).unwrap(),
+        "from-a"
+    );
+
+    let index = Index::load(path::index()).unwrap();
+    assert!(!index.tracked("a/same.txt", 0));
+    assert!(index.tracked("b/same.txt", 0));
+    assert!(index.tracked("dest/same.txt", 0));
+}
+
+#[tokio::test]
+#[serial]
 /// Moves a directory even when it contains only untracked files.
 async fn test_mv_moves_directory_without_tracked_files() {
     let temp_path = tempdir().unwrap();
@@ -650,6 +753,7 @@ async fn test_mv_moves_mixed_directory_and_updates_only_tracked_index_entries() 
             verbose: false,
             dry_run: false,
             force: false,
+            skip_errors: false,
         },
         &OutputConfig::default(),
     )
@@ -770,6 +874,7 @@ fn test_mv_help_lists_examples_banner() {
         "libra mv src/file.rs lib/",
         "libra mv -n",
         "libra mv -f",
+        "libra mv -k",
         "libra mv --json",
     ] {
         assert!(

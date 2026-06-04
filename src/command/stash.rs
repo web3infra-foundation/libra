@@ -403,6 +403,26 @@ async fn run_pop(stash: Option<String>) -> Result<StashOutput, StashError> {
     })
 }
 
+/// Stash the working tree and index for `merge --autostash`. Returns the
+/// stash commit id when something was saved, or `None` when the tree was
+/// already clean. The working tree is left clean at HEAD on success.
+pub(crate) async fn autostash_push() -> Result<Option<String>, String> {
+    match run_push(Some("merge: autostash".to_string())).await {
+        Ok(StashOutput::Push { stash_id, .. }) => Ok(Some(stash_id)),
+        Ok(_) => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Reapply the most recent stash entry created by [`autostash_push`] and drop
+/// it. Used by `merge --autostash` once the merge settles.
+pub(crate) async fn autostash_pop() -> Result<(), String> {
+    match run_pop(None).await {
+        Ok(_) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 async fn run_list() -> Result<StashOutput, StashError> {
     if !has_stash() {
         return Ok(StashOutput::List {

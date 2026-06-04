@@ -699,6 +699,7 @@ async fn test_basic_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -726,6 +727,7 @@ async fn test_basic_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -763,6 +765,7 @@ async fn test_basic_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -790,6 +793,7 @@ async fn test_basic_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -826,6 +830,7 @@ async fn test_basic_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -919,6 +924,7 @@ async fn test_rebase_preserves_untracked_files() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -955,6 +961,7 @@ async fn test_rebase_preserves_untracked_files() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -991,6 +998,7 @@ async fn test_rebase_preserves_untracked_files() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1059,6 +1067,7 @@ async fn test_rebase_already_up_to_date() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1086,6 +1095,7 @@ async fn test_rebase_already_up_to_date() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1144,6 +1154,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1180,6 +1191,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1216,6 +1228,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1309,6 +1322,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1344,6 +1358,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1380,6 +1395,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1495,6 +1511,7 @@ async fn test_rebase_continue_no_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1542,6 +1559,7 @@ async fn test_rebase_skip_no_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1591,6 +1609,7 @@ async fn test_rebase_with_conflict_and_abort() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1631,6 +1650,7 @@ async fn test_rebase_with_conflict_and_abort() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1667,6 +1687,7 @@ async fn test_rebase_with_conflict_and_abort() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1779,6 +1800,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1814,6 +1836,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1849,6 +1872,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1937,6 +1961,7 @@ async fn test_rebase_with_conflict_and_skip() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1978,6 +2003,7 @@ async fn test_rebase_with_conflict_and_skip() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2010,6 +2036,7 @@ async fn test_rebase_with_conflict_and_skip() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2046,6 +2073,7 @@ async fn test_rebase_with_conflict_and_skip() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2129,6 +2157,7 @@ async fn test_rebase_with_conflict_and_continue() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2169,6 +2198,7 @@ async fn test_rebase_with_conflict_and_continue() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2205,6 +2235,7 @@ async fn test_rebase_with_conflict_and_continue() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2264,6 +2295,7 @@ async fn test_rebase_with_conflict_and_continue() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -2324,6 +2356,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2361,6 +2394,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2393,6 +2427,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2421,6 +2456,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2457,6 +2493,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2557,6 +2594,7 @@ async fn test_rebase_state_persistence() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2593,6 +2631,7 @@ async fn test_rebase_state_persistence() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2629,6 +2668,7 @@ async fn test_rebase_state_persistence() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2730,6 +2770,7 @@ async fn test_rebase_fast_forward_branch_behind() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2775,6 +2816,7 @@ async fn test_rebase_fast_forward_branch_behind() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2846,6 +2888,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2891,6 +2934,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2963,6 +3007,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3008,6 +3053,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3080,6 +3126,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3116,6 +3163,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3152,6 +3200,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3231,6 +3280,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3268,6 +3318,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3304,6 +3355,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3381,6 +3433,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3418,6 +3471,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3471,6 +3525,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3547,6 +3602,7 @@ async fn test_rebase_continue_requires_resolution() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3583,6 +3639,7 @@ async fn test_rebase_continue_requires_resolution() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3619,6 +3676,7 @@ async fn test_rebase_continue_requires_resolution() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {

@@ -272,6 +272,7 @@ pub(crate) async fn run_pull(
         &child_output,
         merge::PullMergeOptions {
             ff_only: args.ff_only,
+            ..Default::default()
         },
     )
     .await
@@ -600,15 +601,29 @@ fn is_timeout_io_error(error: &std::io::Error) -> bool {
 
 fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
     match error {
-        merge::PullMergeError::MissingAction | merge::PullMergeError::ConflictingAction => {
+        merge::PullMergeError::MissingAction
+        | merge::PullMergeError::ConflictingAction
+        | merge::PullMergeError::SquashNoFf
+        | merge::PullMergeError::SquashCommit
+        | merge::PullMergeError::InvalidMergeFfConfig { .. }
+        | merge::PullMergeError::InvalidMergeCommitConfig { .. }
+        | merge::PullMergeError::InvalidDiffAlgorithm { .. }
+        | merge::PullMergeError::InvalidCleanupMode { .. } => {
             CliError::command_usage(error.to_string())
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
+        }
+        merge::PullMergeError::MessageFileRead { .. } => {
+            CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        merge::PullMergeError::SignoffIdentity => {
+            CliError::failure(error.to_string()).with_stable_code(StableErrorCode::RepoStateInvalid)
         }
         merge::PullMergeError::InvalidTarget(..) => CliError::command_usage(error.to_string())
             .with_stable_code(StableErrorCode::CliInvalidTarget),
         merge::PullMergeError::TargetLoad { .. }
         | merge::PullMergeError::CurrentLoad { .. }
         | merge::PullMergeError::History(..)
+        | merge::PullMergeError::VirtualMergeBase(..)
         | merge::PullMergeError::TreeLoad { .. }
         | merge::PullMergeError::ObjectLoad { .. } => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::RepoCorrupt)
@@ -621,6 +636,9 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
             .with_hint("run 'libra pull' without --ff-only to allow a merge commit")
             .with_hint("or run 'libra pull --rebase' to replay local commits"),
         merge::PullMergeError::Conflicts { .. }
+        | merge::PullMergeError::SquashConflicts
+        | merge::PullMergeError::OctopusConflict { .. }
+        | merge::PullMergeError::DirectoryFileConflict { .. }
         | merge::PullMergeError::DirtyWorktree
         | merge::PullMergeError::UntrackedOverwrite { .. }
         | merge::PullMergeError::MergeInProgress
@@ -636,11 +654,16 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
         }
         merge::PullMergeError::StateSave(..)
         | merge::PullMergeError::StateCleanup(..)
+        | merge::PullMergeError::Autostash(..)
+        | merge::PullMergeError::Sign(..)
         | merge::PullMergeError::IndexSave(..)
         | merge::PullMergeError::TreeCreate(..)
         | merge::PullMergeError::CommitSave(..)
         | merge::PullMergeError::WorkdirReset(..) => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
+        }
+        merge::PullMergeError::UnsignedTarget { .. } => {
+            CliError::failure(error.to_string()).with_stable_code(StableErrorCode::RepoStateInvalid)
         }
         merge::PullMergeError::HeadResolve(..) => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)

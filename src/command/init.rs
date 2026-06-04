@@ -534,6 +534,13 @@ async fn run_init_internal(
     let mut warnings = Vec::new();
     if !args.bare {
         ignore::ensure_root_libraignore(&target_dir)?;
+        // Seed a project-local default skill so that `libra code` / agents
+        // immediately have high-quality guidance about this libra-format repo.
+        // Existing files are never overwritten.
+        if let Err(e) = seed_default_libra_skills(&target_dir) {
+            // Non-fatal: the embedded "libra" skill is always available as fallback.
+            tracing::warn!(error = %e, "failed to seed default .libra/skills/libra.md");
+        }
     }
 
     let target_guard_path = target_dir
@@ -730,6 +737,26 @@ fn copy_template(src: &Path, dst: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Seeds a default project-local "libra" skill into `.libra/skills/libra.md`
+/// for newly initialized (non-bare) repositories.
+///
+/// Visible to crate tests so we can verify the non-overwrite behavior in isolation.
+/// Errors from this helper are treated as non-fatal by the init flow (the
+/// embedded "libra" skill in the binary is always available as fallback).
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn seed_default_libra_skills(worktree: &Path) -> io::Result<()> {
+    let skills_dir = worktree.join(ROOT_DIR).join("skills");
+    fs::create_dir_all(&skills_dir)?;
+
+    let target = skills_dir.join("libra.md");
+    if target.exists() {
+        return Ok(());
+    }
+
+    let content = include_str!("../../template/skills/libra.md");
+    fs::write(&target, content)
 }
 
 fn validate_shared_mode(shared_mode: Option<&str>) -> Result<(), InitError> {
@@ -1243,5 +1270,78 @@ mod tests {
                 && !captured_stderr.contains("Generating PGP signing key ..."),
             "run_init must not render init progress to stderr for internal callers, got: {captured_stderr:?}"
         );
+    }
+
+    /// `run_init` on a fresh non-bare directory must seed `.libra/skills/libra.md`
+    /// from the template. This gives every new libra repo a project-local
+    /// starting skill for agents.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn run_init_seeds_default_libra_skill() {
+        use crate::utils::test::{self, ChangeDirGuard};
+
+        let repo = tempdir().expect("failed to create temp repo");
+        test::setup_clean_testing_env_in(repo.path());
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let _ = run_init(InitArgs {
+            bare: false,
+            template: None,
+            initial_branch: None,
+            repo_directory: ".".to_string(),
+            quiet: true,
+            shared: None,
+            object_format: None,
+            ref_format: None,
+            from_git_repository: None,
+            vault: false,
+        })
+        .await
+        .expect("init must succeed");
+
+        let skill_path = repo.path().join(".libra").join("skills").join("libra.md");
+        assert!(
+            skill_path.exists(),
+            "default skill must be seeded at .libra/skills/libra.md"
+        );
+
+        let content = std::fs::read_to_string(&skill_path).expect("read seeded skill");
+        assert!(
+            content.contains("name = \"libra\""),
+            "seeded skill must declare the libra skill name"
+        );
+        assert!(
+            content.contains("This project's libra repository")
+                || content.contains("project-local"),
+            "seeded skill should contain project-oriented language"
+        );
+        // Must be a complete valid skill (frontmatter + body)
+        assert!(
+            content.starts_with("---\nname = \"libra\""),
+            "seeded file must start with valid TOML frontmatter"
+        );
+    }
+
+    /// The seeder helper itself must be idempotent / non-destructive: calling
+    /// it when a user-owned skill file already exists must leave the file
+    /// completely untouched (this can happen in conversion flows, partial
+    /// .libra/ states, or future re-init support).
+    #[test]
+    fn seed_default_libra_skills_leaves_existing_file_alone() {
+        let tmp = tempdir().expect("tmp");
+        let worktree = tmp.path();
+
+        let skills_dir = worktree.join(".libra").join("skills");
+        std::fs::create_dir_all(&skills_dir).expect("mkdir");
+        let skill_path = skills_dir.join("libra.md");
+        std::fs::write(&skill_path, "MY CUSTOM SKILL\n---\nnever overwrite").expect("pre-create");
+
+        // First call seeds nothing (file exists)
+        super::seed_default_libra_skills(worktree).expect("first call");
+        // Second call also does nothing
+        super::seed_default_libra_skills(worktree).expect("second call");
+
+        let content = std::fs::read_to_string(&skill_path).expect("read");
+        assert_eq!(content, "MY CUSTOM SKILL\n---\nnever overwrite");
     }
 }

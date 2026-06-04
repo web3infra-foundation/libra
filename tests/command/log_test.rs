@@ -614,6 +614,7 @@ async fn test_log_patch_no_pathspec() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -642,6 +643,7 @@ async fn test_log_patch_no_pathspec() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -731,6 +733,7 @@ async fn test_log_patch_with_pathspec() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -859,6 +862,7 @@ async fn test_log_stat() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -886,6 +890,7 @@ async fn test_log_stat() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -941,6 +946,7 @@ async fn test_log_stat_with_modifications() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -968,6 +974,7 @@ async fn test_log_stat_with_modifications() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1174,6 +1181,7 @@ async fn test_log_graph_simple_chain() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1201,6 +1209,7 @@ async fn test_log_graph_simple_chain() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1246,6 +1255,7 @@ async fn test_log_stat_and_graph_combined() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1376,6 +1386,7 @@ async fn test_log_double_dash_disables_short_number_rewrite() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1404,6 +1415,7 @@ async fn test_log_double_dash_disables_short_number_rewrite() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1648,6 +1660,7 @@ async fn test_log_grep_filtering() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1676,6 +1689,7 @@ async fn test_log_grep_filtering() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1704,6 +1718,7 @@ async fn test_log_grep_filtering() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {

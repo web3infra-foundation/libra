@@ -35,7 +35,7 @@ Command Groups:
   History Inspection      log, shortlog, show, show-ref, ls-remote, diff, grep, blame, describe
   Commit And Branching    commit, branch, switch, checkout, tag, notes, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
-  AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
+  AI And Automation       code, code-control, automation, usage, graph, sandbox, agent, package
   Maintenance And Plumbing db, fsck, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
 
 Help Topics:
@@ -407,6 +407,12 @@ enum Commands {
     Cloud(command::cloud::CloudArgs),
     #[command(about = "Manage read-only Cloudflare Worker publishing")]
     Publish(command::publish::PublishArgs),
+    #[command(
+        subcommand,
+        about = "Install / list / diff auditable capability packages",
+        after_help = command::package::PACKAGE_EXAMPLES
+    )]
+    Package(command::package::PackageCmds),
 
     #[command(about = "Start Libra Code interactive TUI (with background web server)")]
     Code(command::code::CodeArgs),
@@ -490,9 +496,16 @@ pub enum Stash {
 pub enum Bisect {
     #[command(about = "Start a new bisect session")]
     Start {
-        #[arg(help = "Bad commit to start from")]
-        bad: Option<String>,
-        #[arg(long, short, help = "Good commit to mark")]
+        #[arg(
+            value_name = "REV",
+            help = "Bad commit followed by zero or more good commits (git: start <bad> <good>...)"
+        )]
+        revs: Vec<String>,
+        #[arg(
+            long,
+            short,
+            help = "Good commit to mark (alias appended to positional goods)"
+        )]
         good: Option<String>,
     },
     #[command(about = "Mark the current or given commit as bad")]
@@ -646,6 +659,26 @@ fn find_subcommand_index(args: &[String]) -> Option<(usize, bool)> {
         i += 1;
     }
     None
+}
+
+/// True when raw argv contains a `--` pathspec separator after the `bisect`
+/// `start` tokens.
+///
+/// `bisect start` collects variadic positional revs, so clap silently consumes a
+/// `--` separator and folds the trailing pathspec into the good revs. Callers
+/// invoke this only after clap has confirmed the command is `bisect start`, so
+/// the `bisect`/`start` tokens are guaranteed present and global flags (incl.
+/// value-taking ones placed before `bisect`) cannot confuse the scan — we simply
+/// locate the `bisect` then `start` tokens and look for a bare `--` after them.
+fn bisect_start_has_pathspec_separator(argv: &[String]) -> bool {
+    let Some(bisect_idx) = argv.iter().position(|t| t == "bisect") else {
+        return false;
+    };
+    let Some(start_off) = argv[bisect_idx + 1..].iter().position(|t| t == "start") else {
+        return false;
+    };
+    let start_idx = bisect_idx + 1 + start_off;
+    argv[start_idx + 1..].iter().any(|tok| tok == "--")
 }
 
 fn is_short_number_flag(arg: &str) -> bool {
@@ -1077,6 +1110,20 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     if let Commands::Tag(tag_args) = &args.command {
         command::tag::validate_cli_args(tag_args)?;
     }
+    // `bisect start` collects variadic positional revs, so clap silently consumes
+    // a `--` pathspec separator and folds the trailing path into the good revs.
+    // Now that clap has confirmed this *is* `bisect start`, reject a `--`
+    // separator so a path is never mistaken for a good commit (path-limited
+    // bisect is unsupported — see docs/improvement/compatibility/declined.md).
+    // Done post-parse so global flags before `bisect` cannot confuse the scan.
+    if matches!(&args.command, Commands::Bisect(Bisect::Start { .. }))
+        && bisect_start_has_pathspec_separator(&argv)
+    {
+        return Err(CliError::command_usage(
+            "libra bisect start does not support '--' pathspec limiting",
+        )
+        .with_hint("remove the '--' and pathspec; path-limited bisect is not supported"));
+    }
     let preflight = command_preflight(&args.command)?;
     if let Some(storage) = preflight.storage.as_deref() {
         if preflight.check_schema {
@@ -1189,6 +1236,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Blame(cmd_args) => command::blame::execute_safe(cmd_args, &output).await?,
         Commands::Revert(cmd_args) => command::revert::execute_safe(cmd_args, &output).await?,
         Commands::Remote(cmd) => command::remote::execute_safe(cmd, &output).await?,
+        Commands::Package(cmd) => command::package::execute_safe(cmd, &output).await?,
         Commands::Open(cmd_args) => command::open::execute_safe(cmd_args, &output).await?,
         Commands::Pull(cmd_args) => command::pull::execute_safe(cmd_args, &output).await?,
         Commands::Config(cmd_args) => command::config::execute_safe(cmd_args, &output).await?,

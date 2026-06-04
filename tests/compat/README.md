@@ -28,7 +28,8 @@ top-level `[[test]]` entries in `Cargo.toml`.
 | File | Owning batch | Coverage |
 |------|--------------|----------|
 | `stash_subcommand_surface.rs` | C4 | `stash --help` lists `show` / `branch` / `clear`; cross-subcommand JSON schema agreement |
-| `bisect_subcommand_surface.rs` | C4 | `bisect --help` lists `run` / `view`; EXAMPLES banner is wired |
+| `bisect_subcommand_surface.rs` | C4 | `bisect --help` lists `run` / `view`; EXAMPLES banner is wired; declined `terms` / `replay` / `--term-*` stay parser-rejected |
+| `pull_strategy_flags_surface.rs` | pull follow-up (v0.17.1215) | `pull --help` exposes `--ff-only` / `--rebase` (`-r`); `--squash` stays absent; `COMPATIBILITY.md` pull row records the implemented flags (no-drift guard) |
 | `worktree_delete_dir.rs` | C5 | `worktree remove` with and without `--delete-dir`; dirty-worktree refusal |
 | `checkout_alias_help.rs` | C5 | top-level `--help` includes `checkout`; the help banner mentions `switch` / `restore` |
 | `matrix_alignment.rs` | C2 / Web Phase E | `COMPATIBILITY.md` ↔ `src/cli.rs::Commands` enum drift detection; `local-tui-control.md` docs script coverage for every `/api/code/*` router endpoint; Web CI checks `web/out` drift after static export |

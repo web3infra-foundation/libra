@@ -50,6 +50,7 @@ async fn test_basic_revert() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -79,6 +80,7 @@ async fn test_basic_revert() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -109,6 +111,7 @@ async fn test_basic_revert() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -213,6 +216,7 @@ async fn test_revert_no_commit() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -240,6 +244,7 @@ async fn test_revert_no_commit() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -310,6 +315,7 @@ async fn test_revert_root_commit() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {

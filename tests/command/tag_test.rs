@@ -467,6 +467,7 @@ async fn setup_repo_with_commit_with(
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -654,6 +655,7 @@ async fn test_force_tag() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -813,6 +815,7 @@ async fn test_annotation_lines_tag() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -851,6 +854,7 @@ async fn test_annotation_lines_tag() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {

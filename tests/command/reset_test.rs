@@ -503,6 +503,7 @@ async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -530,6 +531,7 @@ async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -601,6 +603,7 @@ async fn setup_standard_repo(
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -625,12 +628,26 @@ async fn setup_standard_repo(
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
+        sort: None,
+        format: None,
+        copy: vec![],
+        force_copy: vec![],
+        edit_description: None,
+        force: false,
+        create_reflog: false,
+        track: None,
+        no_track: false,
     })
     .await;
 
@@ -644,6 +661,7 @@ async fn setup_standard_repo(
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -668,12 +686,26 @@ async fn setup_standard_repo(
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
+        sort: None,
+        format: None,
+        copy: vec![],
+        force_copy: vec![],
+        edit_description: None,
+        force: false,
+        create_reflog: false,
+        track: None,
+        no_track: false,
     })
     .await;
 
@@ -687,6 +719,7 @@ async fn setup_standard_repo(
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -711,12 +744,26 @@ async fn setup_standard_repo(
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
+        sort: None,
+        format: None,
+        copy: vec![],
+        force_copy: vec![],
+        edit_description: None,
+        force: false,
+        create_reflog: false,
+        track: None,
+        no_track: false,
     })
     .await;
 
@@ -730,6 +777,7 @@ async fn setup_standard_repo(
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -754,12 +802,26 @@ async fn setup_standard_repo(
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
+        sort: None,
+        format: None,
+        copy: vec![],
+        force_copy: vec![],
+        edit_description: None,
+        force: false,
+        create_reflog: false,
+        track: None,
+        no_track: false,
     })
     .await;
 
@@ -782,6 +844,7 @@ async fn setup_test_state() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 }
@@ -962,6 +1025,7 @@ async fn test_reset_mixed_same_target_resets_index_without_moving_head() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -990,6 +1054,7 @@ async fn test_reset_mixed_same_target_resets_index_without_moving_head() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -1039,6 +1104,7 @@ async fn test_reset_hard_same_target_restores_worktree_and_removes_staged_additi
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1067,6 +1133,7 @@ async fn test_reset_hard_same_target_restores_worktree_and_removes_staged_additi
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -1121,6 +1188,7 @@ async fn test_reset_hard_removes_paths_tracked_only_by_head_tree() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1148,6 +1216,7 @@ async fn test_reset_hard_removes_paths_tracked_only_by_head_tree() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1309,6 +1378,7 @@ async fn test_reset_hard_skips_ignored_directories() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {

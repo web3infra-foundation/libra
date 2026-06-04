@@ -18,16 +18,27 @@
 
 use std::collections::BTreeSet;
 
-use super::manifest::{BundledCapabilities, CapabilityPackageManifest};
+use serde::{Deserialize, Serialize};
+
+use super::{
+    diff::StringSetDelta,
+    manifest::{BundledCapabilities, CapabilityPackageManifest},
+};
 
 /// One installed package plus whether it is currently enabled. A package can be
 /// installed-but-disabled; only enabled packages register their capabilities.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Serialize` / `Deserialize` so the installer can persist the installed set
+/// via [`super::store::InstalledPackageStore`]; `enabled` defaults to `false`
+/// (default-deny) when a hand-edited or older store omits it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstalledPackage {
     /// The package's manifest (carries id / version / bundles).
     pub manifest: CapabilityPackageManifest,
     /// Whether the package is enabled. Default-deny: an installed package that
     /// is not explicitly enabled registers nothing.
+    #[serde(default)]
     pub enabled: bool,
 }
 
@@ -59,6 +70,57 @@ impl ActiveCapabilities {
         self.commands.extend(bundle.commands.iter().cloned());
         self.sources.extend(bundle.sources.iter().cloned());
         self.sub_agents.extend(bundle.sub_agents.iter().cloned());
+    }
+
+    /// Compute the per-category register / teardown plan for moving the live
+    /// runtime FROM the `previous` effective set TO `self`. For each category,
+    /// `added` capabilities must be registered and `removed` capabilities torn
+    /// down (CEX-S2-17 应该完成的功能: "package 卸载后相关 tool definitions /
+    /// source connections / agent definitions 消失").
+    ///
+    /// Because both operands are the **effective** (unioned, de-duplicated) sets
+    /// produced by [`active_capabilities`], the teardown is **overlap-safe**: a
+    /// capability still provided by another enabled package after one package is
+    /// uninstalled / disabled stays in the effective set and is therefore *not*
+    /// reported as `removed`. A naive per-package teardown would incorrectly drop
+    /// such shared capabilities; diffing effective sets is the correct authority.
+    ///
+    /// Pure; no I/O. The installer applies the returned plan against the live
+    /// tool / source / skill / agent registries.
+    pub fn delta_since(&self, previous: &ActiveCapabilities) -> ActiveCapabilitiesDelta {
+        ActiveCapabilitiesDelta {
+            skills: StringSetDelta::between_sets(&previous.skills, &self.skills),
+            commands: StringSetDelta::between_sets(&previous.commands, &self.commands),
+            sources: StringSetDelta::between_sets(&previous.sources, &self.sources),
+            sub_agents: StringSetDelta::between_sets(&previous.sub_agents, &self.sub_agents),
+        }
+    }
+}
+
+/// The per-category change in the **effective** active capability set when the
+/// installed / enabled package set changes. For each category, `added` entries
+/// must be registered against the live runtime and `removed` entries torn down.
+/// Produced by [`ActiveCapabilities::delta_since`]; the teardown side is
+/// overlap-safe (see that method).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ActiveCapabilitiesDelta {
+    /// Skill-name register/teardown delta.
+    pub skills: StringSetDelta,
+    /// Slash-command register/teardown delta.
+    pub commands: StringSetDelta,
+    /// Source / MCP-slug register/teardown delta.
+    pub sources: StringSetDelta,
+    /// Sub-agent-definition register/teardown delta.
+    pub sub_agents: StringSetDelta,
+}
+
+impl ActiveCapabilitiesDelta {
+    /// `true` when nothing needs to be registered or torn down in any category.
+    pub fn is_empty(&self) -> bool {
+        self.skills.is_empty()
+            && self.commands.is_empty()
+            && self.sources.is_empty()
+            && self.sub_agents.is_empty()
     }
 }
 
@@ -217,6 +279,96 @@ mod tests {
         assert!(
             !active_capabilities(&disabled).sources.contains("acme-mcp"),
             "disabling the package must drop its source registration",
+        );
+    }
+
+    #[test]
+    fn delta_since_empty_reports_everything_as_added() {
+        // Fresh install: moving from no active capabilities to a full set must
+        // mark every entry as a registration (`added`), nothing torn down.
+        let pkgs = vec![installed(
+            "acme",
+            bundle(&["lint"], &["/acme"], &["acme-mcp"], &["reviewer"]),
+            true,
+        )];
+        let after = active_capabilities(&pkgs);
+        let delta = after.delta_since(&ActiveCapabilities::default());
+        assert_eq!(delta.skills.added, vec!["lint".to_string()]);
+        assert_eq!(delta.commands.added, vec!["/acme".to_string()]);
+        assert_eq!(delta.sources.added, vec!["acme-mcp".to_string()]);
+        assert_eq!(delta.sub_agents.added, vec!["reviewer".to_string()]);
+        assert!(delta.skills.removed.is_empty());
+        assert!(delta.sources.removed.is_empty());
+    }
+
+    #[test]
+    fn delta_since_to_empty_reports_everything_as_removed() {
+        // Full uninstall: moving from a populated set to nothing must mark every
+        // entry as a teardown (`removed`), nothing added.
+        let before = active_capabilities(&[installed(
+            "acme",
+            bundle(&["lint"], &[], &["acme-mcp"], &["reviewer"]),
+            true,
+        )]);
+        let delta = ActiveCapabilities::default().delta_since(&before);
+        assert_eq!(delta.skills.removed, vec!["lint".to_string()]);
+        assert_eq!(delta.sources.removed, vec!["acme-mcp".to_string()]);
+        assert_eq!(delta.sub_agents.removed, vec!["reviewer".to_string()]);
+        assert!(delta.skills.added.is_empty());
+        assert!(delta.sources.added.is_empty());
+    }
+
+    #[test]
+    fn delta_since_is_overlap_safe_for_shared_capabilities() {
+        // Two enabled packages both provide `shared-mcp` and `common`. Disabling
+        // ONE must NOT tear down those shared capabilities (the other still
+        // provides them) — only the uninstalled package's *exclusive* `solo`
+        // source is removed. This is the property a naive per-package teardown
+        // gets wrong; diffing the effective (unioned) sets gets it right.
+        let before = active_capabilities(&[
+            installed(
+                "p1",
+                bundle(&["common"], &[], &["shared-mcp", "solo"], &[]),
+                true,
+            ),
+            installed("p2", bundle(&["common"], &[], &["shared-mcp"], &[]), true),
+        ]);
+        // p1 uninstalled / disabled; p2 stays enabled.
+        let after = active_capabilities(&[
+            installed(
+                "p1",
+                bundle(&["common"], &[], &["shared-mcp", "solo"], &[]),
+                false,
+            ),
+            installed("p2", bundle(&["common"], &[], &["shared-mcp"], &[]), true),
+        ]);
+        let delta = after.delta_since(&before);
+        assert_eq!(
+            delta.sources.removed,
+            vec!["solo".to_string()],
+            "only the exclusively-p1 source must be torn down",
+        );
+        assert!(
+            !delta.sources.removed.contains(&"shared-mcp".to_string()),
+            "a source still provided by an enabled package must NOT be torn down",
+        );
+        assert!(
+            delta.skills.is_empty(),
+            "`common` is still provided by p2, so the skill set is unchanged",
+        );
+        assert!(delta.sources.added.is_empty());
+    }
+
+    #[test]
+    fn delta_since_identical_state_is_empty() {
+        let active = active_capabilities(&[installed(
+            "acme",
+            bundle(&["lint"], &["/acme"], &[], &[]),
+            true,
+        )]);
+        assert!(
+            active.delta_since(&active).is_empty(),
+            "no package-set change means no register/teardown work",
         );
     }
 

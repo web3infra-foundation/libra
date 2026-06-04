@@ -47,6 +47,14 @@ impl UsageRecorder {
         UsageQuery::new(self.conn.clone())
     }
 
+    /// Clone of the underlying SQLite connection, for read queries against
+    /// sibling tables that share this DB (e.g. the CEX-S2-16 agent pane's
+    /// `source_call_log` source-call count). `DatabaseConnection` is an
+    /// `Arc`-backed pool handle, so the clone is cheap.
+    pub fn connection(&self) -> DatabaseConnection {
+        self.conn.clone()
+    }
+
     pub async fn record_optional_summary(
         &self,
         context: &UsageContext,

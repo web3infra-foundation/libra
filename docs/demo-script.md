@@ -233,7 +233,7 @@ libra graph <粘贴 thread id>
 1. 在道具仓库跑一遍 `cargo test command::status_test`，确认稳定通过/失败行为符合预期（镜头 5/6）。
 2. 预录一份 cast，作为 provider 抖动时的兜底：
    ```bash
-   asciinema rec scripts/demo/scene3.cast
+   asciinema rec docs/demo/scene3.cast
    ```
 3. 跑 `cargo test intent_flow_test`，确认 IntentSpec/Plan schema 没有意外变更。
 4. 在 `.libra/code/threads/` 备好"上一次成功 thread id"，作为镜头 7 的 fallback。
@@ -356,7 +356,7 @@ libra automation history --limit 3
 
 1. **Demo 一键准备命令**
    - 目标：新增 `libra demo prepare` 自动生成演示仓库、样例慢路径与校验脚本。
-   - 主要改动：新建 `src/command/demo.rs`（或脚本化到 `scripts/demo/`）。
+   - 主要改动：新建 `src/command/demo.rs`（仓库已无 `scripts/` 目录，不要新建脚本目录）。
    - 验收：新同事在 5 分钟内可复现同一演示环境。
 
 2. **Cloud 恢复后健康检查命令**

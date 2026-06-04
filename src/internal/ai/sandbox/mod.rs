@@ -69,6 +69,11 @@ pub struct ToolRuntimeContext {
     pub approval: Option<ToolApprovalContext>,
     pub file_history: Option<FileHistoryRuntimeContext>,
     pub max_output_bytes: Option<usize>,
+    /// Owning sub-agent run id, when this context drives a sub-agent's tool
+    /// calls (CEX-S2-14 trace chain). Source-Pool calls read it to attribute
+    /// the `source_call_log` row to the run (`thread → agent_run_id →
+    /// tool_call_id → source_call`). `None` on the main-session path.
+    pub agent_run_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]

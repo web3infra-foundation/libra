@@ -48,6 +48,7 @@ async fn test_stash_push_no_changes() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -92,6 +93,7 @@ async fn test_stash_push_no_changes_json_output() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -137,6 +139,7 @@ async fn test_stash_push_and_pop() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -213,6 +216,7 @@ async fn test_stash_push_and_pop_preserves_dotfiles() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -286,6 +290,7 @@ async fn test_stash_list() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -406,6 +411,7 @@ async fn test_stash_drop() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -466,6 +472,7 @@ async fn test_stash_drop_missing_reflog_returns_no_stash_found() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -522,6 +529,7 @@ async fn test_stash_json_output() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
