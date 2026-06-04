@@ -201,6 +201,12 @@ pub struct CloneArgs {
     /// alternates dependency); same security guards as --reference.
     #[clap(short = 's', long)]
     pub shared: bool,
+
+    /// Partial-clone object filter (whitelist: `blob:none`, `blob:limit=<n>`,
+    /// `tree:<depth>`). Records promisor config but does NOT lazily backfill —
+    /// pair with `--no-checkout`/`--bare` to avoid a missing-blob checkout error.
+    #[clap(long, value_name = "spec")]
+    pub filter: Option<String>,
 }
 
 const REPO_MARKERS: &[&str] = &["description", "libra.db", "info/exclude", "objects"];
@@ -254,6 +260,10 @@ pub struct CloneOutput {
     /// no borrow dependency. Omitted when `--dissociate` was not requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dissociated: Option<bool>,
+    /// Partial-clone filter spec recorded for the clone (`--filter`). Omitted
+    /// when no filter was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter_spec: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -479,6 +489,11 @@ pub enum CloneError {
     ReferenceSourceInvalid { path: String },
     #[error("failed to copy objects from reference source '{path}': {message}")]
     ReferenceCopyFailed { path: String, message: String },
+    #[error(
+        "cannot check out the working tree: this is a partial clone (filter '{filter}') and some \
+         blob contents were intentionally omitted"
+    )]
+    PartialCloneMissingBlob { filter: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -862,6 +877,12 @@ impl From<CloneError> for CliError {
             CloneError::ReferenceCopyFailed { .. } => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::IoWriteFailed)
                 .with_hint("check disk space and permissions for the destination object store"),
+            CloneError::PartialCloneMissingBlob { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint(
+                    "re-clone with --no-checkout or --bare, or run 'libra fetch' to backfill the \
+                     filtered objects before checking out",
+                ),
         }
     }
 }
@@ -1038,6 +1059,52 @@ fn validate_depth(s: &str) -> Result<usize, String> {
         })
 }
 
+/// Maximum byte length accepted for a `--filter` spec (bounded input handling).
+const FILTER_SPEC_MAX_LEN: usize = 4096;
+
+/// Validate a `--filter` partial-clone spec against the supported whitelist:
+/// `blob:none`, `blob:limit=<n>[kmg]`, and `tree:<depth>`. Rejects path-traversal
+/// sequences and over-long input. Returns a usage-error message on failure.
+fn validate_filter_spec(spec: &str) -> Result<(), String> {
+    if spec.len() > FILTER_SPEC_MAX_LEN {
+        return Err(format!(
+            "--filter spec exceeds the {FILTER_SPEC_MAX_LEN}-byte limit"
+        ));
+    }
+    if spec.contains("../") {
+        return Err("--filter spec must not contain path-traversal sequences".to_string());
+    }
+    let accepted = spec == "blob:none"
+        || spec
+            .strip_prefix("blob:limit=")
+            .is_some_and(is_valid_blob_limit)
+        || spec
+            .strip_prefix("tree:")
+            .is_some_and(|depth| depth.parse::<u64>().is_ok());
+    if accepted {
+        Ok(())
+    } else {
+        Err(format!(
+            "unsupported --filter spec '{spec}'; supported: blob:none, blob:limit=<n>, tree:<depth>"
+        ))
+    }
+}
+
+/// Whether a `blob:limit=` argument is a positive byte size with an optional
+/// `k`/`m`/`g` (case-insensitive) unit suffix.
+fn is_valid_blob_limit(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    let digits = match value.chars().last() {
+        Some(unit) if matches!(unit.to_ascii_lowercase(), 'k' | 'm' | 'g') => {
+            &value[..value.len() - 1]
+        }
+        _ => value,
+    };
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
 /// Parse a `--shallow-since` time string into a Unix timestamp, reusing the
 /// `log` date parser so the accepted formats stay consistent across commands.
 fn parse_shallow_since(input: &str) -> Result<i64, String> {
@@ -1070,17 +1137,25 @@ fn validate_clone_args(args: &CloneArgs) -> CliResult<()> {
             || args.local
             || args.shared
             || args.no_hardlinks
-            || args.jobs.is_some())
+            || args.jobs.is_some()
+            || args.filter.is_some())
     {
         return Err(CliError::command_usage(
             "shaping flags (--shallow-since/--shallow-exclude/--reject-shallow/--no-single-branch/\
              --origin/--no-checkout/--mirror/--reference/--reference-if-able/--dissociate/--local/\
-             --shared/--no-hardlinks/--jobs) are not supported with cloud (libra+cloud://) sources",
+             --shared/--no-hardlinks/--jobs/--filter) are not supported with cloud \
+             (libra+cloud://) sources",
         )
         .with_stable_code(StableErrorCode::CliInvalidArguments)
         .with_hint(
             "select cloud refs in the libra+cloud:// URL with ?ref=, and omit Git shaping flags",
         ));
+    }
+
+    if let Some(filter) = &args.filter {
+        validate_filter_spec(filter).map_err(|message| {
+            CliError::command_usage(message).with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?;
     }
 
     if args.dissociate && args.reference.is_none() && args.reference_if_able.is_none() {
@@ -1124,6 +1199,7 @@ fn clone_shallow_options(args: &CloneArgs) -> Result<ShallowOptions, CloneError>
         depth: args.depth,
         deepen_since,
         deepen_not,
+        filter: args.filter.clone(),
     })
 }
 
@@ -1193,6 +1269,28 @@ fn copy_reference_objects(reference: &str, if_able: bool) -> Result<Option<Strin
     clone_support::copy_objects(&src_objects, &dest_objects)
         .map_err(|error| map_clone_support_error(reference, error))?;
     Ok(Some(canonical.display().to_string()))
+}
+
+/// Record promisor-remote config for a partial clone (`--filter`). Mirrors Git's
+/// `remote.<name>.promisor = true` and `remote.<name>.partialclonefilter = <spec>`
+/// so a later `libra fetch` recognizes the repository as a partial clone. Stored
+/// via `config_kv` (no schema change).
+async fn write_promisor_config(remote_name: &str, filter: &str) -> Result<(), CloneError> {
+    ConfigKv::set(&format!("remote.{remote_name}.promisor"), "true", false)
+        .await
+        .map_err(|error| CloneError::SetupFailed {
+            message: format!("failed to write promisor config: {error}"),
+        })?;
+    ConfigKv::set(
+        &format!("remote.{remote_name}.partialclonefilter"),
+        filter,
+        false,
+    )
+    .await
+    .map_err(|error| CloneError::SetupFailed {
+        message: format!("failed to write partial-clone filter config: {error}"),
+    })?;
+    Ok(())
 }
 
 /// Resolve a clone source to a local repository path when it is one, supporting
@@ -1786,6 +1884,7 @@ async fn clone_cloud_publish_into_destination(
         origin_name: None,
         reference_used: None,
         dissociated: None,
+        filter_spec: None,
     })
 }
 
@@ -3209,6 +3308,13 @@ async fn clone_into_destination(
         }
     }
 
+    // --- Partial clone: record promisor config before any checkout ---
+    // Written before the checkout so the repository is marked as a partial clone
+    // even if a non-bare checkout later fails on a filtered-out blob.
+    if let Some(filter) = &args.filter {
+        write_promisor_config(&origin_name, filter).await?;
+    }
+
     // --- Step 6–7: Configure repository + checkout ---
     if !output.quiet && !output.is_json() {
         eprintln!("Configuring repository ...");
@@ -3223,7 +3329,18 @@ async fn clone_into_destination(
         args.branch.clone(),
         checkout_worktree,
     )
-    .await?;
+    .await
+    .map_err(|error| match error {
+        // A partial clone that omitted blob contents cannot materialize the
+        // working tree without lazy backfill (which Libra does not do); give
+        // a clear partial-clone diagnostic instead of a raw I/O error.
+        CloneError::CheckoutFailed { .. } if args.filter.is_some() && checkout_worktree => {
+            CloneError::PartialCloneMissingBlob {
+                filter: args.filter.clone().unwrap_or_default(),
+            }
+        }
+        other => other,
+    })?;
 
     let mut warnings = init_output.warnings.clone();
     warnings.extend(reference_warnings);
@@ -3269,6 +3386,7 @@ async fn clone_into_destination(
         origin_name: args.origin.clone(),
         reference_used,
         dissociated: args.dissociate.then_some(true),
+        filter_spec: args.filter.clone(),
     })
 }
 
@@ -3763,6 +3881,41 @@ mod tests {
         let args = cloud_clone_args_baseline();
         validate_cloud_clone_option_compatibility(&args)
             .expect("baseline libra+cloud:// args without extra flags must pass compatibility");
+    }
+
+    #[test]
+    fn validate_filter_spec_whitelist() {
+        for ok in [
+            "blob:none",
+            "blob:limit=0",
+            "blob:limit=100",
+            "blob:limit=10k",
+            "blob:limit=5M",
+            "blob:limit=2g",
+            "tree:0",
+            "tree:3",
+        ] {
+            assert!(validate_filter_spec(ok).is_ok(), "{ok} should be accepted");
+        }
+        for bad in [
+            "weird:thing",
+            "blob:limit=",
+            "blob:limit=abc",
+            "tree:x",
+            "sparse:oid=HEAD",
+            "blob:none/../etc",
+        ] {
+            assert!(
+                validate_filter_spec(bad).is_err(),
+                "{bad} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_filter_spec_length_capped() {
+        let long = format!("blob:limit={}", "9".repeat(FILTER_SPEC_MAX_LEN));
+        assert!(validate_filter_spec(&long).is_err());
     }
 
     #[test]
@@ -4675,6 +4828,7 @@ mod tests {
             origin_name: None,
             reference_used: None,
             dissociated: None,
+            filter_spec: None,
         };
 
         let value = serde_json::to_value(&output).expect("CloneOutput must serialize");
@@ -4723,6 +4877,12 @@ mod tests {
             !map.contains_key("origin_name"),
             "origin_name must be omitted when None (skip_serializing_if)",
         );
+        for key in ["reference_used", "dissociated", "filter_spec"] {
+            assert!(
+                !map.contains_key(key),
+                "{key} must be omitted when None (skip_serializing_if)",
+            );
+        }
     }
 
     /// A bare clone reports no `.gitignore` conversions (clone.md: "Empty
@@ -4747,6 +4907,7 @@ mod tests {
             origin_name: None,
             reference_used: None,
             dissociated: None,
+            filter_spec: None,
         };
 
         let value = serde_json::to_value(&output).expect("CloneOutput must serialize");

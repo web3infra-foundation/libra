@@ -2608,3 +2608,183 @@ fn cloud_source_rejects_local_shared_jobs() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Batch 3b — filter (partial clone)
+// ---------------------------------------------------------------------------
+
+/// Enable server-side partial-clone filtering on a bare git source so libra's
+/// `--filter` request is honored by `git-upload-pack`.
+fn enable_filter_support(remote: &Path) {
+    assert!(
+        run_git(&["config", "uploadpack.allowFilter", "true"], remote)
+            .status
+            .success()
+    );
+}
+
+/// `--filter=blob:none --no-checkout` succeeds and records promisor config.
+#[test]
+fn filter_clone_sets_promisor_config() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    enable_filter_support(&remote);
+    let dest = temp.path().join("clone-filter");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--filter=blob:none",
+            "--no-checkout",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--filter --no-checkout clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let promisor = run_libra(&["config", "--get", "remote.origin.promisor"], &dest);
+    assert_eq!(String::from_utf8_lossy(&promisor.stdout).trim(), "true");
+    let spec = run_libra(
+        &["config", "--get", "remote.origin.partialclonefilter"],
+        &dest,
+    );
+    assert_eq!(String::from_utf8_lossy(&spec.stdout).trim(), "blob:none");
+}
+
+/// Unknown `--filter` specs are rejected by validation (exit 129).
+#[test]
+fn filter_spec_whitelist_rejects_unknown_exits_129() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("clone-filter-bad");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--filter=weird:thing",
+            "file:///definitely/not/here",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "unknown --filter spec must exit 129: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// An over-long `--filter` spec is rejected (4 KiB cap, exit 129).
+#[test]
+fn filter_spec_length_capped_4kib() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("clone-filter-long");
+    let long = format!("blob:limit={}", "9".repeat(5000));
+
+    let output = run_libra(
+        &[
+            "clone",
+            &format!("--filter={long}"),
+            "file:///definitely/not/here",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "over-long --filter spec must exit 129: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `--json` reports `filter_spec` for a partial clone.
+#[test]
+fn filter_clone_json_schema() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    enable_filter_support(&remote);
+    let dest = temp.path().join("clone-filter-json");
+
+    let output = run_libra(
+        &[
+            "--json",
+            "clone",
+            "--filter=blob:none",
+            "--bare",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--filter --bare clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    assert_eq!(json["data"]["filter_spec"], "blob:none");
+    assert_eq!(json["data"]["bare"], true);
+}
+
+/// A non-bare default checkout of a partial clone hits a filtered-out blob and
+/// fails with a clear partial-clone diagnostic (exit 128).
+#[test]
+fn partial_clone_missing_blob_gives_clear_hint() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    enable_filter_support(&remote);
+    let dest = temp.path().join("clone-filter-checkout");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--filter=blob:none",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "non-bare partial clone checkout must fail with 128: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("partial clone"),
+        "expected a partial-clone diagnostic, got: {stderr}"
+    );
+}
+
+/// Cloud sources reject `--filter` (exit 129).
+#[test]
+fn cloud_source_rejects_filter() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("restored-filter");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--filter=blob:none",
+            "libra+cloud://code.example.com/kepler-ledger",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "cloud source must reject --filter: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

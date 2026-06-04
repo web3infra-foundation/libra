@@ -187,6 +187,15 @@ libra clone -s /srv/repos/project.git my-project
 libra clone --jobs 4 git@github.com:user/repo.git
 ```
 
+### `--filter <spec>`
+
+部分克隆：请求远程省略匹配 `<spec>` 的对象以减少传输。支持的 spec（白名单；未知 spec 退出 129，超长 spec 受 4 KiB 上限限制）：`blob:none`、`blob:limit=<n>[kmg]`、`tree:<depth>`。克隆会记录 promisor 配置（`remote.<name>.promisor = true`、`remote.<name>.partialclonefilter = <spec>`），但**不**做按需补取缺失对象。由于非裸默认检出需要 blob 内容，请将 `--filter` 与 `--no-checkout` 或 `--bare` 搭配；否则在命中被过滤的 blob 时检出会以清晰的部分克隆诊断失败（退出码 128）。需要服务端允许过滤（`uploadpack.allowFilter`）。`libra+cloud://` 会拒绝它。
+
+```bash
+libra clone --filter=blob:none --no-checkout git@github.com:user/repo.git
+libra clone --filter=tree:0 --bare git@github.com:user/repo.git
+```
+
 ## 常用命令
 
 ```bash

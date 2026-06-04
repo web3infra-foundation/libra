@@ -260,6 +260,22 @@ for a future transport-concurrency cap.
 libra clone --jobs 4 git@github.com:user/repo.git
 ```
 
+### `--filter <spec>`
+
+Partial clone: ask the remote to omit objects matching `<spec>` to reduce transfer. Supported
+specs (whitelist; unknown specs exit 129, over-long specs are 4 KiB-capped): `blob:none`,
+`blob:limit=<n>[kmg]`, and `tree:<depth>`. The clone records promisor config
+(`remote.<name>.promisor = true`, `remote.<name>.partialclonefilter = <spec>`) but does **not**
+lazily backfill missing objects. Because a non-bare default checkout needs blob contents, pair
+`--filter` with `--no-checkout` or `--bare`; otherwise the checkout fails with a clear
+partial-clone diagnostic (exit 128) when it hits a filtered-out blob. Requires the server to
+allow filtering (`uploadpack.allowFilter`). `libra+cloud://` rejects it.
+
+```bash
+libra clone --filter=blob:none --no-checkout git@github.com:user/repo.git
+libra clone --filter=tree:0 --bare git@github.com:user/repo.git
+```
+
 ## Common Commands
 
 ```bash
