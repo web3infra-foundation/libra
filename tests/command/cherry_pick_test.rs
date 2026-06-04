@@ -1060,3 +1060,52 @@ fn cherry_pick_machine_emits_ndjson() {
     assert_eq!(json["command"], "cherry-pick");
     assert_eq!(json["data"]["picked"].as_array().unwrap().len(), 1);
 }
+
+// ── Batch 1a: cherry_pick_state SQLite sequencer facade ──
+
+/// `CherryPickState` round-trips through the SQLite `cherry_pick_state` table
+/// and clears cleanly (mirrors `RebaseState`).
+#[tokio::test]
+#[serial]
+async fn cherry_pick_state_roundtrip_persists_and_clears() {
+    use std::str::FromStr;
+
+    use git_internal::hash::ObjectHash;
+    use libra::command::cherry_pick::CherryPickState;
+
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = ChangeDirGuard::new(temp.path());
+
+    assert!(
+        !CherryPickState::is_in_progress().await.unwrap(),
+        "a fresh repo has no in-progress cherry-pick"
+    );
+
+    let orig = ObjectHash::from_str(&"a".repeat(40)).unwrap();
+    let current = ObjectHash::from_str(&"b".repeat(40)).unwrap();
+    let next = ObjectHash::from_str(&"c".repeat(40)).unwrap();
+    let state = CherryPickState {
+        head_name: "main".to_string(),
+        head_orig: orig,
+        current_oid: current,
+        todo: std::collections::VecDeque::from(vec![next]),
+        opts_json: "{\"x\":true}".to_string(),
+    };
+    state.save().await.unwrap();
+
+    assert!(CherryPickState::is_in_progress().await.unwrap());
+    let loaded = CherryPickState::load()
+        .await
+        .unwrap()
+        .expect("state present after save");
+    assert_eq!(loaded.head_name, "main");
+    assert_eq!(loaded.head_orig, orig);
+    assert_eq!(loaded.current_oid, current);
+    assert_eq!(loaded.todo, std::collections::VecDeque::from(vec![next]));
+    assert_eq!(loaded.opts_json, "{\"x\":true}");
+
+    CherryPickState::clear().await.unwrap();
+    assert!(!CherryPickState::is_in_progress().await.unwrap());
+    assert!(CherryPickState::load().await.unwrap().is_none());
+}

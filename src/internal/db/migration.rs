@@ -627,6 +627,21 @@ pub fn builtin_migrations() -> Vec<Migration> {
                 "../../../sql/migrations/2026060201_source_call_log_agent_run_id_down.sql"
             )),
         },
+        // cherry-pick sequencer state (Git-core metadata, aligns with
+        // `rebase_state`): persists the in-progress pick sequence — branch name,
+        // original HEAD, current conflict commit, remaining todo OIDs, and the
+        // serialized commit-modifier options — so `cherry-pick --continue/--skip/
+        // --abort/--quit` can resume or roll back. State lives ONLY in SQLite (no
+        // `.libra/CHERRY_PICK_HEAD` file), matching the repo's metadata-in-SQLite
+        // convention. See .omo/plans/cherry-pick-improvement-plan.md Batch 1.
+        Migration {
+            version: 2026060401,
+            name: "cherry_pick_state",
+            up: include_str!("../../../sql/migrations/2026060401_cherry_pick_state.sql"),
+            down: Some(include_str!(
+                "../../../sql/migrations/2026060401_cherry_pick_state_down.sql"
+            )),
+        },
     ]
 }
 
