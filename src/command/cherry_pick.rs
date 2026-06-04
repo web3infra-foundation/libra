@@ -66,6 +66,9 @@ enum CherryPickError {
     #[error("cherry-picking merge commits is not supported")]
     MergeCommitUnsupported,
 
+    #[error("{0}")]
+    InvalidMainline(String),
+
     #[error("unsupported cherry-pick option: {0}")]
     Unsupported(String),
 
@@ -106,6 +109,7 @@ impl CherryPickError {
             Self::DetachedHead => StableErrorCode::RepoStateInvalid,
             Self::InvalidCommit(_) => StableErrorCode::CliInvalidTarget,
             Self::MergeCommitUnsupported => StableErrorCode::CliInvalidArguments,
+            Self::InvalidMainline(_) => StableErrorCode::CliInvalidArguments,
             Self::Unsupported(_) => StableErrorCode::Unsupported,
             Self::EmptyCommit(_) => StableErrorCode::CliInvalidArguments,
             Self::RedundantCommit(_) => StableErrorCode::CliInvalidArguments,
@@ -135,6 +139,9 @@ impl From<CherryPickError> for CliError {
             CherryPickError::MergeCommitUnsupported => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("specify -m <parent-number> to cherry-pick a merge commit"),
+            CherryPickError::InvalidMainline(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("use -m <parent-number> only on a merge commit, within its parent count"),
             CherryPickError::Unsupported(_) => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("this Git option is not supported by libra cherry-pick"),
@@ -177,6 +184,7 @@ impl From<CherryPickError> for CliError {
 #[derive(Debug)]
 enum CherryPickSingleError {
     MergeCommitUnsupported,
+    InvalidMainline(String),
     EmptyCommit(String),
     RedundantCommit(String),
     EmptyMessage(String),
@@ -331,6 +339,18 @@ pub struct CherryPickArgs {
     )]
     pub keep_redundant_commits: bool,
 
+    /// Parent number (1-based) to follow when cherry-picking a merge commit
+    #[clap(short = 'm', long = "mainline", value_name = "parent-number")]
+    pub mainline: Option<usize>,
+
+    /// Fast-forward when the picked commit is a direct child of HEAD
+    #[clap(long = "ff", overrides_with = "no_ff")]
+    pub ff: bool,
+
+    /// GPG-sign the cherry-picked commit using the vault signing key
+    #[clap(short = 'S', long = "gpg-sign", overrides_with = "no_gpg_sign")]
+    pub gpg_sign: bool,
+
     // ── Negative (reset-to-default) forms; last flag wins, never an error ──
     #[clap(long = "no-signoff", overrides_with = "signoff", hide = true)]
     pub no_signoff: bool,
@@ -350,12 +370,18 @@ pub struct CherryPickArgs {
         hide = true
     )]
     pub no_keep_redundant_commits: bool,
+    #[clap(long = "no-ff", overrides_with = "ff", hide = true)]
+    pub no_ff: bool,
+    #[clap(long = "no-gpg-sign", overrides_with = "gpg_sign", hide = true)]
+    pub no_gpg_sign: bool,
 
     // ── Unsupported Git options captured for explicit rejection ──
     #[clap(long = "empty", value_name = "mode", hide = true)]
     pub empty: Option<String>,
     #[clap(long = "cleanup", value_name = "mode", hide = true)]
     pub cleanup: Option<String>,
+    #[clap(long = "strategy", value_name = "name", hide = true)]
+    pub strategy: Option<String>,
     #[clap(
         long = "rerere-autoupdate",
         overrides_with = "no_rerere_autoupdate",
@@ -415,6 +441,9 @@ fn reject_unsupported_options(args: &CherryPickArgs) -> Option<&'static str> {
     if args.strategy_option.is_some() {
         return Some("-X / --strategy-option");
     }
+    if args.strategy.is_some() {
+        return Some("--strategy (custom merge strategies are not supported)");
+    }
     None
 }
 
@@ -423,6 +452,7 @@ fn reject_unsupported_options(args: &CherryPickArgs) -> Option<&'static str> {
 fn map_single_error(err: CherryPickSingleError, commit_label: &str) -> CherryPickError {
     match err {
         CherryPickSingleError::MergeCommitUnsupported => CherryPickError::MergeCommitUnsupported,
+        CherryPickSingleError::InvalidMainline(m) => CherryPickError::InvalidMainline(m),
         CherryPickSingleError::EmptyCommit(c) => CherryPickError::EmptyCommit(c),
         CherryPickSingleError::RedundantCommit(c) => CherryPickError::RedundantCommit(c),
         CherryPickSingleError::EmptyMessage(c) => CherryPickError::EmptyMessage(c),
@@ -822,25 +852,70 @@ async fn cherry_pick_single_commit(
     let commit_to_pick: Commit =
         load_object(commit_id).map_err(|e| CherryPickSingleError::LoadObject(e.to_string()))?;
 
-    if commit_to_pick.parent_commit_ids.len() > 1 {
-        return Err(CherryPickSingleError::MergeCommitUnsupported);
+    let parent_count = commit_to_pick.parent_commit_ids.len();
+    let short = short_display_hash(&commit_id.to_string()).to_string();
+
+    // `--ff`: when the picked commit is a single-parent direct child of HEAD and
+    // no commit-rewriting modifier is set, advance HEAD without replaying or
+    // rewriting the commit (no hash drift).
+    if args.ff
+        && !args.no_commit
+        && !args.append_source
+        && !args.signoff
+        && !args.edit
+        && args.mainline.is_none()
+        && parent_count == 1
+        && let Some(head) = Head::current_commit().await
+        && commit_to_pick.parent_commit_ids[0] == head
+    {
+        reset_hard(&commit_id.to_string(), output)
+            .await
+            .map_err(|e| CherryPickSingleError::SaveFailed(e.to_string()))?;
+        return Ok(Some(*commit_id));
     }
 
-    let parent_tree = if commit_to_pick.parent_commit_ids.is_empty() {
-        let empty_id = ObjectHash::from_type_and_data(ObjectType::Tree, &[]);
-        Tree::from_bytes(&[], empty_id).map_err(|e| {
-            CherryPickSingleError::SaveFailed(format!(
-                "failed to create empty tree for root commit: {e}",
-            ))
-        })?
-    } else {
-        let parent_commit: Commit =
-            load_object(&commit_to_pick.parent_commit_ids[0]).map_err(|e| {
+    // Resolve the diff base parent, honoring `-m <n>` for merge commits.
+    let base_parent: Option<ObjectHash> = match (parent_count, args.mainline) {
+        (0, None) => None,
+        (0, Some(_)) => {
+            return Err(CherryPickSingleError::InvalidMainline(format!(
+                "commit {short} is a root commit; -m/--mainline is invalid"
+            )));
+        }
+        (1, None) => Some(commit_to_pick.parent_commit_ids[0]),
+        (1, Some(_)) => {
+            return Err(CherryPickSingleError::InvalidMainline(format!(
+                "commit {short} is not a merge commit; -m/--mainline only applies to merge commits"
+            )));
+        }
+        (_, None) => return Err(CherryPickSingleError::MergeCommitUnsupported),
+        (n, Some(m)) => {
+            if m < 1 || m > n {
+                return Err(CherryPickSingleError::InvalidMainline(format!(
+                    "mainline {m} is out of range for merge commit {short} with {n} parents"
+                )));
+            }
+            Some(commit_to_pick.parent_commit_ids[m - 1])
+        }
+    };
+
+    let parent_tree = match base_parent {
+        None => {
+            let empty_id = ObjectHash::from_type_and_data(ObjectType::Tree, &[]);
+            Tree::from_bytes(&[], empty_id).map_err(|e| {
+                CherryPickSingleError::SaveFailed(format!(
+                    "failed to create empty tree for root commit: {e}",
+                ))
+            })?
+        }
+        Some(parent_id) => {
+            let parent_commit: Commit = load_object(&parent_id).map_err(|e| {
                 CherryPickSingleError::LoadObject(format!("failed to load parent commit: {e}"))
             })?;
-        load_object(&parent_commit.tree_id).map_err(|e| {
-            CherryPickSingleError::LoadObject(format!("failed to load parent tree: {e}"))
-        })?
+            load_object(&parent_commit.tree_id).map_err(|e| {
+                CherryPickSingleError::LoadObject(format!("failed to load parent tree: {e}"))
+            })?
+        }
     };
 
     let their_tree: Tree = load_object(&commit_to_pick.tree_id).map_err(|e| {
@@ -1042,11 +1117,34 @@ async fn create_cherry_pick_commit(
         ));
     }
 
-    let commit = Commit::from_tree_id(
-        tree_id,
-        vec![*parent_id],
-        &format_commit_msg(&message, None),
-    );
+    let parents = vec![*parent_id];
+    let commit = if args.gpg_sign {
+        // Reuse merge's `--gpg-sign` chain: sign via the libra vault (force=true
+        // so it signs regardless of the `vault.signing` default).
+        let (author, committer) = util::create_signatures().await;
+        let gpgsig = crate::command::commit::vault_sign_commit(
+            &tree_id, &parents, &author, &committer, &message, true,
+        )
+        .await
+        .map_err(|e| CherryPickSingleError::SaveFailed(format!("failed to sign commit: {e}")))?;
+        match gpgsig {
+            Some(sig) => Commit::new(
+                author,
+                committer,
+                tree_id,
+                parents,
+                &format_commit_msg(&message, Some(&sig)),
+            ),
+            None => {
+                return Err(CherryPickSingleError::SaveFailed(
+                    "vault signing key unavailable; configure libra vault to use --gpg-sign"
+                        .to_string(),
+                ));
+            }
+        }
+    } else {
+        Commit::from_tree_id(tree_id, parents, &format_commit_msg(&message, None))
+    };
 
     save_object(&commit, &commit.id)
         .map_err(|e| CherryPickSingleError::SaveFailed(format!("failed to save commit: {e}")))?;
@@ -1577,6 +1675,10 @@ mod tests {
             "cherry-picking merge commits is not supported",
         );
         assert_eq!(
+            CherryPickError::InvalidMainline("mainline 3 is out of range".to_string()).to_string(),
+            "mainline 3 is out of range",
+        );
+        assert_eq!(
             CherryPickError::Unsupported("--cleanup".to_string()).to_string(),
             "unsupported cherry-pick option: --cleanup",
         );
@@ -1656,6 +1758,10 @@ mod tests {
         );
         assert_eq!(
             CherryPickError::MergeCommitUnsupported.stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            CherryPickError::InvalidMainline("out of range".to_string()).stable_code(),
             StableErrorCode::CliInvalidArguments,
         );
         assert_eq!(

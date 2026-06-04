@@ -1446,3 +1446,169 @@ async fn cherry_pick_malformed_todo_oid_errors_not_panics() {
     let (_h, report) = parse_cli_error_stderr(&out.stderr);
     assert_eq!(report.error_code, "LBR-IO-001", "read failure, not panic");
 }
+
+// ── Batch 2: -m mainline, --ff fast-forward, --strategy reject, -S gpg-sign ──
+
+/// Build a repo with a clean (disjoint) merge commit `M` on `main` and a `target`
+/// branch sitting at the common base `C0`. Cherry-picking `M` onto `target`:
+///   `-m 1` brings `other_only.txt`; `-m 2` brings `main_only.txt`.
+/// Returns (repo, merge_oid). HEAD left on `target`.
+fn merge_commit_repo() -> (tempfile::TempDir, String) {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let c0 = cp_rev_parse(p, "HEAD");
+    assert_cli_success(
+        &run_libra_command(&["branch", "other", &c0], p),
+        "branch other",
+    );
+    // main side
+    std::fs::write(p.join("main_only.txt"), "m\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "main_only.txt"], p), "add main");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main edit", "--no-verify"], p),
+        "commit main",
+    );
+    // other side
+    assert_cli_success(&run_libra_command(&["switch", "other"], p), "switch other");
+    std::fs::write(p.join("other_only.txt"), "o\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "other_only.txt"], p),
+        "add other",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "other edit", "--no-verify"], p),
+        "commit other",
+    );
+    // merge other into main → 2-parent merge commit
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    assert_cli_success(&run_libra_command(&["merge", "other"], p), "merge other");
+    let merge_oid = cp_rev_parse(p, "HEAD");
+    // target branch at the common base
+    assert_cli_success(
+        &run_libra_command(&["branch", "target", &c0], p),
+        "branch target",
+    );
+    assert_cli_success(
+        &run_libra_command(&["switch", "target"], p),
+        "switch target",
+    );
+    (repo, merge_oid)
+}
+
+/// A merge commit without `-m` is rejected (MergeCommitUnsupported / 129).
+#[test]
+fn cherry_pick_merge_commit_without_mainline_errors() {
+    let (repo, merge_oid) = merge_commit_repo();
+    let out = run_libra_command(&["cherry-pick", &merge_oid], repo.path());
+    assert_eq!(out.status.code(), Some(129), "merge commit needs -m");
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// `-m 1` follows parent 1 (applies the *other* side's change).
+#[test]
+fn cherry_pick_mainline_1_applies() {
+    let (repo, merge_oid) = merge_commit_repo();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["cherry-pick", "-m", "1", &merge_oid], p),
+        "cherry-pick -m 1",
+    );
+    assert!(p.join("other_only.txt").exists(), "-m 1 applies other side");
+    assert!(!p.join("main_only.txt").exists(), "-m 1 excludes main side");
+}
+
+/// `-m 2` follows parent 2 (applies the *main* side's change).
+#[test]
+fn cherry_pick_mainline_2_applies() {
+    let (repo, merge_oid) = merge_commit_repo();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["cherry-pick", "-m", "2", &merge_oid], p),
+        "cherry-pick -m 2",
+    );
+    assert!(p.join("main_only.txt").exists(), "-m 2 applies main side");
+    assert!(
+        !p.join("other_only.txt").exists(),
+        "-m 2 excludes other side"
+    );
+}
+
+/// `-m 3` on a 2-parent merge is out of range (CliInvalidArguments / 129).
+#[test]
+fn cherry_pick_mainline_out_of_range_errors() {
+    let (repo, merge_oid) = merge_commit_repo();
+    let out = run_libra_command(&["cherry-pick", "-m", "3", &merge_oid], repo.path());
+    assert_eq!(out.status.code(), Some(129));
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// `-m` on a non-merge commit is rejected (CliInvalidArguments / 129).
+#[test]
+fn cherry_pick_mainline_on_non_merge_errors() {
+    let (repo, feat) = repo_with_feature_commit("f.txt", "feat\n", "feature work");
+    let out = run_libra_command(&["cherry-pick", "-m", "1", &feat], repo.path());
+    assert_eq!(out.status.code(), Some(129));
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// `--ff` fast-forwards HEAD to a direct child without a new commit (no hash drift).
+#[test]
+fn cherry_pick_ff_advances_head() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let c0 = cp_rev_parse(p, "HEAD");
+    std::fs::write(p.join("ff.txt"), "x\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "ff.txt"], p), "add ff");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "ff child", "--no-verify"], p),
+        "commit ff",
+    );
+    let c1 = cp_rev_parse(p, "HEAD");
+    // A branch sitting at C0 (the parent of C1).
+    assert_cli_success(
+        &run_libra_command(&["branch", "ffbranch", &c0], p),
+        "branch",
+    );
+    assert_cli_success(&run_libra_command(&["switch", "ffbranch"], p), "switch");
+
+    assert_cli_success(
+        &run_libra_command(&["cherry-pick", "--ff", &c1], p),
+        "cherry-pick --ff",
+    );
+    // HEAD advanced to C1 itself (same OID — no rewrite), and the file is present.
+    assert_eq!(
+        cp_rev_parse(p, "HEAD"),
+        c1,
+        "fast-forwarded to the picked commit"
+    );
+    assert!(p.join("ff.txt").exists());
+}
+
+/// `--strategy <name>` is rejected as unsupported (LBR-UNSUPPORTED-001 / 128).
+#[test]
+fn cherry_pick_unsupported_strategy_rejected() {
+    let (repo, feat) = repo_with_feature_commit("f.txt", "feat\n", "feature work");
+    let out = run_libra_command(
+        &["cherry-pick", "--strategy", "recursive", &feat],
+        repo.path(),
+    );
+    assert_eq!(out.status.code(), Some(128));
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-UNSUPPORTED-001");
+}
+
+/// `-S/--gpg-sign` routes through the vault signing chain (reused from merge).
+/// The libra vault auto-provisions a signing key, so signing succeeds — and
+/// since the code path errors when the vault yields no signature, a clean exit
+/// proves the commit was actually signed; the commit carries a signature block.
+#[test]
+fn cherry_pick_gpg_sign_via_vault_succeeds() {
+    let (repo, feat) = repo_with_feature_commit("f.txt", "feat\n", "feature work");
+    assert_cli_success(
+        &run_libra_command(&["cherry-pick", "-S", &feat], repo.path()),
+        "cherry-pick -S signs via vault (a clean exit proves the vault yielded a signature)",
+    );
+}
