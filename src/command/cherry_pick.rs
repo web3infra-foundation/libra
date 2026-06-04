@@ -48,6 +48,11 @@ EXAMPLES:
     libra cherry-pick abc1234              Apply a single commit
     libra cherry-pick abc1234 def5678      Apply multiple commits in order
     libra cherry-pick -n abc1234           Apply without auto-committing
+    libra cherry-pick -x abc1234           Append a '(cherry picked from ...)' line
+    libra cherry-pick -s abc1234           Add a Signed-off-by trailer
+    libra cherry-pick -m 1 <merge>         Cherry-pick a merge commit along parent 1
+    libra cherry-pick --continue           Resume after resolving conflicts
+    libra cherry-pick --abort              Cancel and restore the original HEAD
     libra cherry-pick --json abc1234       Structured JSON output for agents";
 
 // ── Typed error ──────────────────────────────────────────────────────

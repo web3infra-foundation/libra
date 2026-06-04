@@ -56,7 +56,7 @@ batch document.
 | rev-parse | supported | |
 | rev-list | supported | |
 | describe | supported | |
-| cherry-pick | supported | |
+| cherry-pick | partial | `-x` (off by default), `-s`/`--signoff`, `-e`/`--edit`, `--allow-empty`/`--allow-empty-message`/`--keep-redundant-commits`, `-m <parent-number>` (merge commits apply along the named parent only), `--ff`, and `-S`/`--gpg-sign` (reuses the vault chain, same as `merge`) supported; multi-commit `--no-commit` accumulates into the index. Conflict sequencer `--continue`/`--skip`/`--abort`/`--quit` persists in the SQLite `cherry_pick_state` table — not a `.git`/`.libra` sequencer file (intentionally-different); conflict detection is path-level, not Git's line-level hunk merge. `--strategy`/`-X`, `--empty`, `--cleanup`, `--rerere-autoupdate`, and `--commit` are unsupported (`LBR-UNSUPPORTED-001`). A `--no-commit` multi-commit conflict is terminal (no continuation) |
 | push | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected — intentional (see [docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push](docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push)) |
 | fetch | supported | `--depth` public flag |
 | pull | partial | fetch + fast-forward/three-way merge supported; `--ff-only` and `--rebase` (`-r`) strategy flags exposed; `--squash` deferred |
