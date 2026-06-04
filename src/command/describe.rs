@@ -13,7 +13,11 @@ use crate::{
         load_object,
         status::{changes_to_be_committed_safe, changes_to_be_staged},
     },
-    internal::tag::{self, TagObject},
+    internal::{
+        branch::Branch,
+        config::ConfigKv,
+        tag::{self, TagObject},
+    },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
@@ -33,6 +37,9 @@ EXAMPLES:
     libra describe --match 'v1.*'   Only consider tags whose name matches the glob
     libra describe --exclude '*rc*' Skip tags whose name matches the glob
     libra describe --dirty          Append '-dirty' when the worktree has tracked changes
+    libra describe --contains HEAD  Find which ref contains the commit (refname~N)
+    libra describe --candidates 5   Consider at most 5 candidate tags
+    libra describe --all --contains Search branches and remotes, not just tags
     libra describe --json           Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -72,6 +79,18 @@ pub struct DescribeArgs {
     /// Append a marker (default `-dirty`) when the worktree has tracked changes
     #[clap(long, value_name = "MARK", num_args = 0..=1, require_equals = true)]
     pub dirty: Option<Option<String>>,
+
+    /// Find which ref contains the commit and print `<refname>~<offset>`
+    #[clap(long)]
+    pub contains: bool,
+
+    /// Consider at most N candidate tags (default: describe.maxCandidates; rejects 0)
+    #[clap(long, value_name = "N")]
+    pub candidates: Option<usize>,
+
+    /// Consider all refs (local branches and remote-tracking), not just tags (with --contains)
+    #[clap(long)]
+    pub all: bool,
 }
 
 /// Maximum number of commits the describe walk visits before failing. Guards
@@ -90,6 +109,40 @@ struct TagInfo {
     is_annotated: bool,
 }
 
+/// Kind of ref considered by `--contains` (and `--all`). Ordering encodes the
+/// deterministic tie-break preference: tag beats head beats remote.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RefKind {
+    Tag,
+    Head,
+    Remote,
+}
+
+impl RefKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            RefKind::Tag => "tag",
+            RefKind::Head => "head",
+            RefKind::Remote => "remote",
+        }
+    }
+
+    fn priority(self) -> u8 {
+        match self {
+            RefKind::Tag => 0,
+            RefKind::Head => 1,
+            RefKind::Remote => 2,
+        }
+    }
+}
+
+/// A candidate ref tip for `--contains`: its display name, kind, and commit.
+struct RefTip {
+    name: String,
+    kind: RefKind,
+    commit: ObjectHash,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct DescribeOutput {
     input: String,
@@ -102,6 +155,9 @@ struct DescribeOutput {
     used_always: bool,
     dirty: bool,
     dirty_suffix: Option<String>,
+    contains_offset: Option<usize>,
+    ref_kind: Option<String>,
+    ref_name: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -171,6 +227,27 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
     let matchers = compile_globs(&args.match_patterns)?;
     let excluders = compile_globs(&args.exclude)?;
 
+    // Resolve and validate the candidate cap (rejects --candidates=0 with 129).
+    let max_candidates = resolve_max_candidates(args.candidates).await?;
+
+    // `--contains` is the reverse search: which ref's history contains the target?
+    if args.contains {
+        let mut output = run_contains(
+            input,
+            start_hash,
+            resolved_commit,
+            abbrev,
+            args.all,
+            args.first_parent,
+            args.always,
+            &matchers,
+            &excluders,
+        )
+        .await?;
+        apply_dirty(&mut output, &args.dirty).await;
+        return Ok(output);
+    }
+
     // Load all tags and build a mapping table: commit hash -> tag info (name, is_annotated)
     let all_tags = tag::list()
         .await
@@ -218,7 +295,7 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
     } else {
         // Search for the closest tag using a bounded BFS. The commit loader is
         // injected so the walk can be unit-tested against an in-memory graph.
-        let load = |hash: &ObjectHash| -> Result<Vec<ObjectHash>, DescribeError> {
+        let mut load = |hash: &ObjectHash| -> Result<Vec<ObjectHash>, DescribeError> {
             let commit =
                 load_object::<Commit>(hash).map_err(|error| DescribeError::LoadCommit {
                     commit_id: hash.to_string(),
@@ -227,7 +304,21 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
             Ok(commit.parent_commit_ids)
         };
 
-        match find_nearest_tag(start_hash, &tag_map, args.first_parent, MAX_WALK, load) {
+        // With a candidate cap (`--candidates` / `describe.maxCandidates`), bound the
+        // collection; otherwise early-return at the nearest tag for speed.
+        let nearest = match max_candidates {
+            Some(cap) => find_best_candidate_tag(
+                start_hash,
+                &tag_map,
+                args.first_parent,
+                MAX_WALK,
+                cap,
+                &mut load,
+            ),
+            None => find_nearest_tag(start_hash, &tag_map, args.first_parent, MAX_WALK, &mut load),
+        };
+
+        match nearest {
             Ok(Some((tag_name, dist))) => {
                 describe_output(input, resolved_commit, &tag_name, dist, abbrev)
             }
@@ -252,7 +343,16 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
     };
 
     // Apply the `--dirty` suffix when the worktree carries tracked changes.
-    if let Some(mark) = args.dirty.as_ref()
+    apply_dirty(&mut output, &args.dirty).await;
+
+    Ok(output)
+}
+
+/// Append the `--dirty` suffix to `output` when the worktree carries tracked
+/// changes. A clean worktree, untracked-only changes, or a status read error all
+/// leave `output` untouched.
+async fn apply_dirty(output: &mut DescribeOutput, dirty: &Option<Option<String>>) {
+    if let Some(mark) = dirty.as_ref()
         && worktree_is_dirty().await
     {
         let suffix = mark.clone().unwrap_or_else(|| "-dirty".to_string());
@@ -260,8 +360,210 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
         output.dirty = true;
         output.dirty_suffix = Some(suffix);
     }
+}
 
-    Ok(output)
+/// Reverse `--contains` search: walk from each candidate ref tip toward the target
+/// and report the topologically nearest ref as `<refname>~<offset>` (or just the
+/// refname at offset 0). Honors `--all` (branches + remotes), `--first-parent`,
+/// `--match`/`--exclude`, and `--always`.
+#[allow(clippy::too_many_arguments)]
+async fn run_contains(
+    input: String,
+    start_hash: ObjectHash,
+    resolved_commit: String,
+    abbrev: usize,
+    include_all: bool,
+    first_parent: bool,
+    always: bool,
+    matchers: &[wax::Glob<'_>],
+    excluders: &[wax::Glob<'_>],
+) -> Result<DescribeOutput, DescribeError> {
+    let tips = collect_ref_tips(include_all, matchers, excluders).await?;
+
+    let mut load = |hash: &ObjectHash| -> Result<Vec<ObjectHash>, DescribeError> {
+        let commit = load_object::<Commit>(hash).map_err(|error| DescribeError::LoadCommit {
+            commit_id: hash.to_string(),
+            detail: error.to_string(),
+        })?;
+        Ok(commit.parent_commit_ids)
+    };
+
+    let mut best: Option<(usize, &RefTip)> = None;
+    let mut cap_hit = false;
+    for tip in &tips {
+        match distance_to_target(tip.commit, start_hash, first_parent, MAX_WALK, &mut load) {
+            Ok(Some(distance)) => {
+                let replace = match best {
+                    None => true,
+                    Some((best_distance, best_tip)) => {
+                        distance < best_distance
+                            || (distance == best_distance && tie_break_better(tip, best_tip))
+                    }
+                };
+                if replace {
+                    best = Some((distance, tip));
+                }
+            }
+            Ok(None) => {}
+            Err(DescribeError::TraversalLimitExceeded { .. }) => cap_hit = true,
+            Err(other) => return Err(other),
+        }
+    }
+
+    match best {
+        Some((distance, tip)) => Ok(contains_output(input, resolved_commit, tip, distance)),
+        None if always => Ok(always_output(input, resolved_commit, abbrev)),
+        None if cap_hit => Err(DescribeError::TraversalLimitExceeded { limit: MAX_WALK }),
+        None => Err(DescribeError::NoNamesFound),
+    }
+}
+
+/// Enumerate the candidate ref tips for `--contains`: all tags (including
+/// lightweight, matching Git's `describe --contains`) filtered by
+/// `--match`/`--exclude`, plus local branch heads and remote-tracking branches
+/// when `--all` is set.
+async fn collect_ref_tips(
+    include_all: bool,
+    matchers: &[wax::Glob<'_>],
+    excluders: &[wax::Glob<'_>],
+) -> Result<Vec<RefTip>, DescribeError> {
+    let mut tips = Vec::new();
+
+    let all_tags = tag::list()
+        .await
+        .map_err(|e| DescribeError::CorruptReference(e.to_string()))?;
+    for t in all_tags {
+        if !tag_passes_filters(&t.name, matchers, excluders) {
+            continue;
+        }
+        let commit = match t.object {
+            TagObject::Commit(c) => c.id,
+            TagObject::Tag(tg) => tg.object_hash,
+            _ => continue,
+        };
+        tips.push(RefTip {
+            name: t.name,
+            kind: RefKind::Tag,
+            commit,
+        });
+    }
+
+    if include_all {
+        let heads = Branch::list_branches_result(None)
+            .await
+            .map_err(|e| DescribeError::ReadFailure(format!("failed to list branches: {e}")))?;
+        for branch in heads {
+            tips.push(RefTip {
+                name: format!("heads/{}", branch.name),
+                kind: RefKind::Head,
+                commit: branch.commit,
+            });
+        }
+
+        let remotes = ConfigKv::all_remote_configs()
+            .await
+            .map_err(|e| DescribeError::ReadFailure(format!("failed to list remotes: {e}")))?;
+        for remote in remotes {
+            let remote_branches = Branch::list_branches_result(Some(&remote.name))
+                .await
+                .map_err(|e| {
+                    DescribeError::ReadFailure(format!(
+                        "failed to list remote-tracking branches for '{}': {e}",
+                        remote.name
+                    ))
+                })?;
+            for branch in remote_branches {
+                tips.push(RefTip {
+                    name: format!("remotes/{}/{}", remote.name, branch.name),
+                    kind: RefKind::Remote,
+                    commit: branch.commit,
+                });
+            }
+        }
+    }
+
+    Ok(tips)
+}
+
+/// Reverse-walk breadth-first from `tip` toward `target`, returning the shortest
+/// topological distance when `target` is reachable, or `None` otherwise. Bounded
+/// by `max_walk` and deduplicated via `visited`; with `first_parent`, only the
+/// first parent of each commit is followed. The loader is injected for testing.
+fn distance_to_target<F>(
+    tip: ObjectHash,
+    target: ObjectHash,
+    first_parent: bool,
+    max_walk: usize,
+    mut load: F,
+) -> Result<Option<usize>, DescribeError>
+where
+    F: FnMut(&ObjectHash) -> Result<Vec<ObjectHash>, DescribeError>,
+{
+    let mut queue: VecDeque<(ObjectHash, usize)> = VecDeque::new();
+    let mut visited: HashSet<ObjectHash> = HashSet::new();
+    let mut walked = 0usize;
+
+    queue.push_back((tip, 0));
+    visited.insert(tip);
+
+    while let Some((curr, dist)) = queue.pop_front() {
+        if curr == target {
+            return Ok(Some(dist));
+        }
+
+        walked += 1;
+        if walked > max_walk {
+            return Err(DescribeError::TraversalLimitExceeded { limit: max_walk });
+        }
+
+        let parents = load(&curr)?;
+        if first_parent {
+            if let Some(parent) = parents.first().copied()
+                && visited.insert(parent)
+            {
+                queue.push_back((parent, dist + 1));
+            }
+        } else {
+            for parent in parents {
+                if visited.insert(parent) {
+                    queue.push_back((parent, dist + 1));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Deterministic tie-break for equal-distance `--contains` matches: prefer the
+/// ref kind (tag > head > remote), then the lexicographically smaller refname.
+fn tie_break_better(candidate: &RefTip, current: &RefTip) -> bool {
+    let candidate_priority = candidate.kind.priority();
+    let current_priority = current.kind.priority();
+    candidate_priority < current_priority
+        || (candidate_priority == current_priority && candidate.name < current.name)
+}
+
+/// Resolve the candidate cap for the forward search. An explicit `--candidates=0`
+/// is rejected (`CliInvalidArguments`, 129). With no flag, `describe.maxCandidates`
+/// is consulted; an unparseable or zero config value falls back to the unbounded
+/// nearest-tag search. `Some(n)` bounds candidate collection to `n` tags.
+async fn resolve_max_candidates(flag: Option<usize>) -> Result<Option<usize>, DescribeError> {
+    if let Some(n) = flag {
+        if n == 0 {
+            return Err(DescribeError::InvalidArgument(
+                "candidates must be >= 1".to_string(),
+            ));
+        }
+        return Ok(Some(n));
+    }
+    match ConfigKv::get("describe.maxCandidates").await {
+        Ok(Some(entry)) => match entry.value.trim().parse::<usize>() {
+            Ok(n) if n >= 1 => Ok(Some(n)),
+            _ => Ok(None),
+        },
+        _ => Ok(None),
+    }
 }
 
 /// Walk the commit DAG breadth-first from `start`, returning the nearest tag
@@ -319,6 +621,93 @@ where
     Ok(None)
 }
 
+/// Like [`find_nearest_tag`] but bounded by `max_candidates`: it collects up to
+/// that many reachable tags (continuing past each hit) and returns the
+/// topologically nearest, ties broken by annotated-over-lightweight then name.
+/// Used when `--candidates` / `describe.maxCandidates` bounds the search.
+fn find_best_candidate_tag<F>(
+    start: ObjectHash,
+    tag_map: &HashMap<ObjectHash, TagInfo>,
+    first_parent: bool,
+    max_walk: usize,
+    max_candidates: usize,
+    mut load: F,
+) -> Result<Option<(String, usize)>, DescribeError>
+where
+    F: FnMut(&ObjectHash) -> Result<Vec<ObjectHash>, DescribeError>,
+{
+    let mut queue: VecDeque<(ObjectHash, usize)> = VecDeque::new();
+    let mut visited: HashSet<ObjectHash> = HashSet::new();
+    let mut walked = 0usize;
+    let mut best: Option<(String, usize, bool)> = None;
+    let mut found = 0usize;
+
+    queue.push_back((start, 0));
+    visited.insert(start);
+
+    while let Some((curr, dist)) = queue.pop_front() {
+        if let Some(info) = tag_map.get(&curr) {
+            let replace = match &best {
+                None => true,
+                Some((best_name, best_dist, best_annotated)) => {
+                    dist < *best_dist
+                        || (dist == *best_dist
+                            && better_candidate(
+                                info.is_annotated,
+                                &info.name,
+                                *best_annotated,
+                                best_name,
+                            ))
+                }
+            };
+            if replace {
+                best = Some((info.name.clone(), dist, info.is_annotated));
+            }
+            found += 1;
+            if found >= max_candidates {
+                break;
+            }
+        }
+
+        walked += 1;
+        if walked > max_walk {
+            return Err(DescribeError::TraversalLimitExceeded { limit: max_walk });
+        }
+
+        let parents = load(&curr)?;
+        if first_parent {
+            if let Some(parent) = parents.first().copied()
+                && visited.insert(parent)
+            {
+                queue.push_back((parent, dist + 1));
+            }
+        } else {
+            for parent in parents {
+                if visited.insert(parent) {
+                    queue.push_back((parent, dist + 1));
+                }
+            }
+        }
+    }
+
+    Ok(best.map(|(name, dist, _)| (name, dist)))
+}
+
+/// Whether `candidate` should replace `current` at the same distance: annotated
+/// tags win over lightweight, then the lexicographically smaller name wins.
+fn better_candidate(
+    candidate_annotated: bool,
+    candidate_name: &str,
+    current_annotated: bool,
+    current_name: &str,
+) -> bool {
+    match (candidate_annotated, current_annotated) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => candidate_name < current_name,
+    }
+}
+
 /// Build the `--always` abbreviated-hash fallback output.
 fn always_output(input: String, resolved_commit: String, abbrev: usize) -> DescribeOutput {
     let abbreviated = abbreviate_hash(&resolved_commit, abbrev);
@@ -333,6 +722,40 @@ fn always_output(input: String, resolved_commit: String, abbrev: usize) -> Descr
         used_always: true,
         dirty: false,
         dirty_suffix: None,
+        contains_offset: None,
+        ref_kind: None,
+        ref_name: None,
+    }
+}
+
+/// Build the `--contains` output (`<refname>~<offset>`, or just the refname at
+/// offset 0). For tag tips, the `tag` field is populated; for branch/remote tips
+/// it is null and `ref_kind`/`ref_name` carry the ref identity.
+fn contains_output(
+    input: String,
+    resolved_commit: String,
+    tip: &RefTip,
+    distance: usize,
+) -> DescribeOutput {
+    let result = if distance == 0 {
+        tip.name.clone()
+    } else {
+        format!("{}~{}", tip.name, distance)
+    };
+    DescribeOutput {
+        input,
+        resolved_commit,
+        result,
+        tag: (tip.kind == RefKind::Tag).then(|| tip.name.clone()),
+        distance: None,
+        abbreviated_commit: None,
+        exact_match: distance == 0,
+        used_always: false,
+        dirty: false,
+        dirty_suffix: None,
+        contains_offset: Some(distance),
+        ref_kind: Some(tip.kind.as_str().to_string()),
+        ref_name: Some(tip.name.clone()),
     }
 }
 
@@ -369,6 +792,9 @@ fn describe_output(
         used_always: false,
         dirty: false,
         dirty_suffix: None,
+        contains_offset: None,
+        ref_kind: None,
+        ref_name: None,
     }
 }
 
@@ -679,5 +1105,89 @@ mod tests {
             !visited_second,
             "--first-parent must not visit the second parent"
         );
+    }
+
+    /// The `--contains` reverse walk must deduplicate a diamond: the shared
+    /// ancestor (the target) is reached via both paths but loaded at most once.
+    #[test]
+    fn test_contains_walker_visited_dedup_on_diamond() {
+        let _guard = set_hash_kind_for_test(HashKind::Sha1);
+        let (tip, b, c, target) = (test_hash(1), test_hash(2), test_hash(3), test_hash(4));
+        // tip → b, c ; b → target ; c → target.
+        let graph: HashMap<ObjectHash, Vec<ObjectHash>> =
+            HashMap::from([(tip, vec![b, c]), (b, vec![target]), (c, vec![target])]);
+
+        let mut load_counts: HashMap<ObjectHash, usize> = HashMap::new();
+        let distance = distance_to_target(tip, target, false, 100, |hash| {
+            *load_counts.entry(*hash).or_insert(0) += 1;
+            Ok(graph.get(hash).cloned().unwrap_or_default())
+        })
+        .expect("walk should succeed");
+
+        assert_eq!(distance, Some(2));
+        // The target is found (curr == target) before being loaded, so it is
+        // never expanded; intermediate nodes load exactly once.
+        assert!(
+            load_counts.get(&b).copied().unwrap_or(0) <= 1
+                && load_counts.get(&c).copied().unwrap_or(0) <= 1,
+            "diamond ancestors must not be loaded more than once: {load_counts:?}"
+        );
+    }
+
+    /// A target deeper than `max_walk` aborts with `TraversalLimitExceeded`
+    /// instead of walking the whole history.
+    #[test]
+    fn test_contains_walker_traversal_cap() {
+        let _guard = set_hash_kind_for_test(HashKind::Sha1);
+        // Linear chain 1→2→3→4→5; target is the deepest, cap the walk at 3.
+        let chain: Vec<ObjectHash> = (1..=5).map(test_hash).collect();
+        let mut graph: HashMap<ObjectHash, Vec<ObjectHash>> = HashMap::new();
+        for pair in chain.windows(2) {
+            graph.insert(pair[0], vec![pair[1]]);
+        }
+        let target = chain[4];
+
+        let result = distance_to_target(chain[0], target, false, 3, |hash| {
+            Ok(graph.get(hash).cloned().unwrap_or_default())
+        });
+
+        assert!(
+            matches!(
+                result,
+                Err(DescribeError::TraversalLimitExceeded { limit: 3 })
+            ),
+            "expected TraversalLimitExceeded, got {result:?}"
+        );
+    }
+
+    /// `find_best_candidate_tag` returns the nearest tag and honors the cap.
+    #[test]
+    fn test_find_best_candidate_tag_picks_nearest() {
+        let _guard = set_hash_kind_for_test(HashKind::Sha1);
+        // start → a → b ; a tagged "near" (dist 1), b tagged "far" (dist 2).
+        let (start, a, b) = (test_hash(1), test_hash(2), test_hash(3));
+        let graph: HashMap<ObjectHash, Vec<ObjectHash>> =
+            HashMap::from([(start, vec![a]), (a, vec![b])]);
+        let mut tag_map = HashMap::new();
+        tag_map.insert(
+            a,
+            TagInfo {
+                name: "near".to_string(),
+                is_annotated: true,
+            },
+        );
+        tag_map.insert(
+            b,
+            TagInfo {
+                name: "far".to_string(),
+                is_annotated: true,
+            },
+        );
+
+        let result = find_best_candidate_tag(start, &tag_map, false, 100, 5, |hash| {
+            Ok(graph.get(hash).cloned().unwrap_or_default())
+        })
+        .expect("walk should succeed");
+        assert_eq!(result, Some(("near".to_string(), 1)));
     }
 }

@@ -555,3 +555,213 @@ fn test_describe_dirty_readonly_does_not_touch_mtime() {
         "describe --dirty must not rewrite tracked-file mtime"
     );
 }
+
+/// Advance `tracked.txt` by one commit so the history grows for `--contains`
+/// distance assertions.
+fn advance_commit(repo: &tempfile::TempDir, content: &str) {
+    std::fs::write(repo.path().join("tracked.txt"), content).expect("failed to write tracked file");
+    assert_cli_success(
+        &run_libra_command(&["add", "tracked.txt"], repo.path()),
+        "failed to stage advance commit",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "advance", "--no-verify"], repo.path()),
+        "failed to create advance commit",
+    );
+}
+
+/// `--contains` reports `<tag>~<offset>` for a tag whose history includes the target.
+#[test]
+fn test_describe_contains_returns_tag_offset() {
+    let repo = create_committed_repo_via_cli(); // C1
+    advance_commit(&repo, "two\n"); // C2
+    advance_commit(&repo, "three\n"); // C3 (HEAD)
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "rel", "v1.0"], repo.path()),
+        "tag v1.0",
+    );
+
+    // v1.0 (at C3) contains HEAD~2 (= C1) at topological distance 2.
+    let output = run_libra_command(&["describe", "--contains", "HEAD~2", "--json"], repo.path());
+    assert_cli_success(&output, "describe --contains HEAD~2 should succeed");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["result"], "v1.0~2");
+    assert_eq!(json["data"]["contains_offset"], 2);
+    assert_eq!(json["data"]["ref_kind"], "tag");
+    assert_eq!(json["data"]["ref_name"], "v1.0");
+    assert_eq!(json["data"]["tag"], "v1.0");
+}
+
+/// `--contains` output uses the `tag~N` form and never the default `-g<hash>` form.
+#[test]
+fn test_describe_contains_format_excludes_ghash() {
+    let repo = create_committed_repo_via_cli();
+    advance_commit(&repo, "two\n");
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "rel", "v1.0"], repo.path()),
+        "tag v1.0",
+    );
+
+    let output = run_libra_command(&["describe", "--contains", "HEAD~1"], repo.path());
+    assert_cli_success(&output, "describe --contains should succeed");
+    let result = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(result.trim(), "v1.0~1");
+    assert!(
+        !result.contains("-g"),
+        "contains output must not include -g<hash>: {result:?}"
+    );
+}
+
+/// `--contains` matches lightweight tags by default (Git's `describe --contains`).
+#[test]
+fn test_describe_contains_includes_lightweight_tag_by_default() {
+    let repo = create_committed_repo_via_cli();
+    advance_commit(&repo, "two\n");
+    assert_cli_success(
+        &run_libra_command(&["tag", "lw1.0"], repo.path()),
+        "lightweight tag",
+    );
+
+    let output = run_libra_command(&["describe", "--contains", "HEAD~1", "--json"], repo.path());
+    assert_cli_success(&output, "describe --contains lightweight should succeed");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["ref_name"], "lw1.0");
+    assert_eq!(json["data"]["contains_offset"], 1);
+}
+
+/// `--candidates=N` (N>=1) still returns the topologically nearest tag.
+#[test]
+fn test_describe_candidates_limit_picks_nearest() {
+    let repo = create_committed_repo_via_cli(); // C1
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "rel", "old"], repo.path()),
+        "tag old",
+    );
+    advance_commit(&repo, "two\n"); // C2
+    advance_commit(&repo, "three\n"); // C3
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "rel", "new"], repo.path()),
+        "tag new",
+    );
+    advance_commit(&repo, "four\n"); // C4 (HEAD)
+
+    let output = run_libra_command(&["describe", "--candidates", "5", "--json"], repo.path());
+    assert_cli_success(&output, "describe --candidates=5 should succeed");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["tag"], "new");
+    assert_eq!(json["data"]["distance"], 1);
+}
+
+/// `--candidates=0` is rejected as a usage error (129).
+#[test]
+fn test_describe_candidates_zero_rejected() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "rel", "v1.0"], repo.path()),
+        "tag v1.0",
+    );
+
+    let output = run_libra_command(&["describe", "--candidates", "0"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "--candidates=0 should be rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// `describe.maxCandidates` config is consulted (and does not panic); the nearest
+/// tag is still returned.
+#[test]
+fn test_describe_max_candidates_config_override() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(
+            &["config", "set", "describe.maxCandidates", "3"],
+            repo.path(),
+        ),
+        "set describe.maxCandidates",
+    );
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "rel", "v1.0"], repo.path()),
+        "tag v1.0",
+    );
+    advance_commit(&repo, "two\n");
+
+    let output = run_libra_command(&["describe", "--json"], repo.path());
+    assert_cli_success(&output, "describe with config maxCandidates should succeed");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["tag"], "v1.0");
+    assert_eq!(json["data"]["distance"], 1);
+}
+
+/// `--contains --all` searches branch heads; a branch whose history includes the
+/// target is reported as `heads/<name>` with `ref_kind="head"`.
+#[test]
+fn test_describe_contains_with_all_finds_branch() {
+    let repo = create_committed_repo_via_cli(); // C1
+    advance_commit(&repo, "two\n"); // C2 (HEAD on main)
+    // No tags. Branch "aaa" at HEAD sorts before "main" for a deterministic result.
+    assert_cli_success(
+        &run_libra_command(&["branch", "aaa"], repo.path()),
+        "branch aaa",
+    );
+
+    let output = run_libra_command(
+        &["describe", "--contains", "--all", "HEAD~1", "--json"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "describe --contains --all should succeed");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["ref_kind"], "head");
+    assert_eq!(json["data"]["ref_name"], "heads/aaa");
+    assert_eq!(json["data"]["contains_offset"], 1);
+    assert!(json["data"]["tag"].is_null());
+}
+
+/// `--contains` with no containing ref and no `--always` fails with 128.
+#[test]
+fn test_describe_contains_no_match_errors() {
+    let repo = create_committed_repo_via_cli(); // C1, no tags
+
+    let output = run_libra_command(&["describe", "--contains", "HEAD"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "--contains with no tag should fail with 128: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+}
+
+/// At equal distance, a tag wins over a branch (deterministic kind priority).
+#[test]
+fn test_describe_contains_tiebreak_deterministic() {
+    let repo = create_committed_repo_via_cli(); // C1
+    advance_commit(&repo, "two\n"); // C2 (HEAD)
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "rel", "v1.0"], repo.path()),
+        "tag v1.0",
+    );
+    assert_cli_success(
+        &run_libra_command(&["branch", "zzz"], repo.path()),
+        "branch zzz",
+    );
+
+    // Tag and branches all contain HEAD~1 at distance 1; tag kind wins.
+    let output = run_libra_command(
+        &["describe", "--contains", "--all", "HEAD~1", "--json"],
+        repo.path(),
+    );
+    assert_cli_success(
+        &output,
+        "describe --contains --all tie-break should succeed",
+    );
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["ref_kind"], "tag");
+    assert_eq!(json["data"]["ref_name"], "v1.0");
+    assert_eq!(json["data"]["tag"], "v1.0");
+}
