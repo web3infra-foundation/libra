@@ -37,7 +37,7 @@ batch document.
 | mv | partial | sparse-checkout flag unsupported |
 | restore | supported | |
 | status | supported | |
-| clean | supported | |
+| clean | partial | `-n`/`-f`/`-d`/`-x`/`-X`/`--exclude` supported; `-e` short alias for `--exclude`; `force` is a repeatable count (`-ff` required to also remove nested `.git`/`.libra` repositories, which are otherwise skipped with a `Skipping repository <path>` warning); `clean.requireForce` config honored (default `true`, blocks a mode-less invocation; set `false` to allow `clean` with no flag); `-i`/`--interactive` selection loop (`clean`/filter-by-pattern/select-by-numbers/ask-each/quit/help) — intentionally-different: mutually exclusive with `--json` and `-n` (`LBR-CLI-002`); removal is tolerant (a per-path failure is warned and recorded in the JSON `failed` field, cleanup continues, exit 128). Remaining gap: `<pathspec>...` positional filter is **not supported** (declined — would be a separate plan) |
 | stash | partial | `push` / `pop` / `list` / `apply` / `drop` / `show` / `branch` / `clear` supported; `create` / `store` deferred (see [docs/improvement/compatibility/declined.md#d8-stash-create](docs/improvement/compatibility/declined.md#d8-stash-create) and [#d9-stash-store](docs/improvement/compatibility/declined.md#d9-stash-store)) |
 | lfs | partial | built-in Libra LFS command; uses `.libra_attributes`, not Git LFS filters/hooks (see [docs/improvement/compatibility/declined.md#d5-git-lfs-gitattributes-filter--hooks-bridge](docs/improvement/compatibility/declined.md#d5-git-lfs-gitattributes-filter--hooks-bridge)) |
 | log | supported | |

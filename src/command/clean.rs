@@ -24,6 +24,8 @@ EXAMPLES:
     libra clean -fd                     Also remove untracked directories
     libra clean -fx                     Remove untracked files including ignored ones
     libra clean -fX                     Remove only ignored files
+    libra clean -i                      Interactively choose which items to remove
+    libra clean -n -ffd                 Preview removing nested repos too (-ff) before deleting
     libra clean -f --exclude '*.log'    Layer an additional exclusion on top of .libraignore
     libra clean -n --json               Structured JSON output for agents";
 
