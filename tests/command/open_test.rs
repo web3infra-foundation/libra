@@ -360,7 +360,10 @@ fn test_open_print_only_with_explicit_url() {
         ],
         temp.path(),
     );
-    assert_cli_success(&output, "open --print-only with explicit URL should succeed");
+    assert_cli_success(
+        &output,
+        "open --print-only with explicit URL should succeed",
+    );
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     assert_eq!(stdout, "https://github.com/web3infra-foundation/libra");
