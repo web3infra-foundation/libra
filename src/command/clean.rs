@@ -26,15 +26,18 @@ EXAMPLES:
     libra clean -f --exclude '*.log'    Layer an additional exclusion on top of .libraignore
     libra clean -n --json               Structured JSON output for agents";
 
-#[derive(Parser, Debug, Clone)]
+#[derive(Parser, Debug, Clone, Default)]
 #[command(after_help = CLEAN_EXAMPLES)]
 pub struct CleanArgs {
     /// Show what would be removed without actually removing
     #[clap(short = 'n', long)]
     pub dry_run: bool,
-    /// Force removal of untracked files
-    #[clap(short, long)]
-    pub force: bool,
+    /// Force removal of untracked files (repeat as `-ff` to also remove nested repositories)
+    #[clap(short, long, action = clap::ArgAction::Count)]
+    pub force: u8,
+    /// Interactively choose which untracked items to remove (mutually exclusive with --json)
+    #[clap(short = 'i', long)]
+    pub interactive: bool,
     /// Remove untracked directories in addition to untracked files
     #[clap(short = 'd', long = "dir")]
     pub directories: bool,
@@ -45,7 +48,7 @@ pub struct CleanArgs {
     #[clap(short = 'X')]
     pub only_ignored: bool,
     /// Exclude files matching the given pattern (can be repeated)
-    #[clap(long = "exclude", value_name = "pattern")]
+    #[clap(short = 'e', long = "exclude", value_name = "pattern")]
     pub exclude: Vec<String>,
 }
 
@@ -57,7 +60,9 @@ struct CleanOutput {
 
 #[derive(Debug, thiserror::Error)]
 enum CleanError {
-    #[error("clean requires -f or -n (use -f to remove files, -n to dry-run)")]
+    #[error(
+        "clean requires -f, -n, or -i (use -f to remove files, -n to dry-run, -i for interactive; or set clean.requireForce=false)"
+    )]
     MissingMode,
     #[error("invalid arguments: {0}")]
     InvalidArgs(String),
@@ -95,6 +100,9 @@ pub async fn execute(args: CleanArgs) {
 /// fails.
 pub async fn execute_safe(args: CleanArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
+
+    preflight(&args, output).await.map_err(clean_cli_error)?;
+
     let clean_output = run_clean(args).map_err(clean_cli_error)?;
 
     if output.is_json() {
@@ -112,16 +120,65 @@ pub async fn execute_safe(args: CleanArgs, output: &OutputConfig) -> CliResult<(
     Ok(())
 }
 
-fn run_clean(args: CleanArgs) -> Result<CleanOutput, CleanError> {
-    if !args.force && !args.dry_run {
-        return Err(CleanError::MissingMode);
-    }
+/// Validate argument combinations and the `clean.requireForce` safety fuse
+/// before any scan/removal runs. This is the single source of truth for the
+/// "missing run mode" decision (`run_clean` no longer re-checks it).
+async fn preflight(args: &CleanArgs, output: &OutputConfig) -> Result<(), CleanError> {
+    use crate::internal::config::{
+        LocalIdentityTarget, parse_config_bool, read_cascaded_config_value,
+    };
 
-    // Validate mutually exclusive flags
+    // Interactive mode is human-only and self-previews, so it cannot be combined
+    // with machine output or a separate dry-run.
+    if args.interactive && output.is_json() {
+        return Err(CleanError::InvalidArgs(
+            "cannot use --interactive and --json together".to_string(),
+        ));
+    }
+    if args.interactive && args.dry_run {
+        return Err(CleanError::InvalidArgs(
+            "cannot use --interactive and --dry-run together".to_string(),
+        ));
+    }
     if args.ignored && args.only_ignored {
         return Err(CleanError::InvalidArgs(
             "cannot use -x and -X together".to_string(),
         ));
+    }
+
+    // `clean.requireForce` (documented spelling; the config store matches keys
+    // exactly). Default `true`, matching Git; any read/parse failure falls back
+    // to the safe default rather than panicking.
+    let require_force =
+        match read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "clean.requireForce")
+            .await
+        {
+            Ok(Some(raw)) => parse_config_bool(&raw).unwrap_or(true),
+            Ok(None) => true,
+            Err(error) => {
+                tracing::debug!(%error, "failed to read clean.requireForce; defaulting to true");
+                true
+            }
+        };
+
+    if require_force && args.force == 0 && !args.dry_run && !args.interactive {
+        return Err(CleanError::MissingMode);
+    }
+
+    Ok(())
+}
+
+fn run_clean(args: CleanArgs) -> Result<CleanOutput, CleanError> {
+    // Mode validation (missing-mode / -x+-X / -i+--json / -i+-n) is performed once
+    // in `preflight`; `run_clean` assumes the arguments have already been vetted.
+
+    // Interactive selection is wired in a later batch; until the loop exists,
+    // `-i` performs no removal (a safe no-op) so it can never silently delete.
+    if args.interactive {
+        return Ok(CleanOutput {
+            dry_run: args.dry_run,
+            removed: Vec::new(),
+        });
     }
 
     let index_path = path::index();
@@ -355,7 +412,9 @@ fn clean_cli_error(error: CleanError) -> CliError {
         CleanError::MissingMode => CliError::fatal(error.to_string())
             .with_stable_code(StableErrorCode::CliInvalidArguments)
             .with_hint("use 'libra clean -n' to preview removals.")
-            .with_hint("use 'libra clean -f' to remove untracked files."),
+            .with_hint("use 'libra clean -f' to remove untracked files.")
+            .with_hint("use 'libra clean -i' to choose interactively.")
+            .with_hint("set 'clean.requireForce=false' to allow clean without a mode flag."),
         CleanError::InvalidArgs(message) => {
             CliError::fatal(format!("invalid arguments: {message}"))
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
@@ -413,7 +472,7 @@ mod tests {
     fn clean_error_display_pins_each_variant() {
         assert_eq!(
             CleanError::MissingMode.to_string(),
-            "clean requires -f or -n (use -f to remove files, -n to dry-run)",
+            "clean requires -f, -n, or -i (use -f to remove files, -n to dry-run, -i for interactive; or set clean.requireForce=false)",
         );
         assert_eq!(
             CleanError::InvalidArgs("--fff is not a valid flag".to_string()).to_string(),

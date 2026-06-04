@@ -25,7 +25,8 @@ async fn test_clean_dry_run_keeps_files() {
 
     clean::execute(CleanArgs {
         dry_run: true,
-        force: false,
+        force: 0,
+        interactive: false,
         directories: false,
         ignored: false,
         only_ignored: false,
@@ -49,7 +50,8 @@ async fn test_clean_force_removes_files() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: true,
+        force: 1,
+        interactive: false,
         directories: false,
         ignored: false,
         only_ignored: false,
@@ -79,7 +81,7 @@ async fn test_clean_requires_flag() {
 
     assert_eq!(output.status.code(), Some(129));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("fatal: clean requires -f or -n"));
+    assert!(stderr.contains("fatal: clean requires -f, -n, or -i"));
     assert!(stderr.contains("Error-Code: LBR-CLI-002"));
     assert!(stderr.contains("Hint:"));
 
@@ -112,7 +114,8 @@ async fn test_clean_force_keeps_tracked_files() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: true,
+        force: 1,
+        interactive: false,
         directories: false,
         ignored: false,
         only_ignored: false,
@@ -137,7 +140,8 @@ async fn test_clean_force_removes_nested_untracked() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: true,
+        force: 1,
+        interactive: false,
         directories: false,
         ignored: false,
         only_ignored: false,
@@ -176,7 +180,8 @@ async fn test_clean_force_respects_ignore_rules() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: true,
+        force: 1,
+        interactive: false,
         directories: false,
         ignored: false,
         only_ignored: false,
@@ -216,7 +221,8 @@ async fn test_clean_force_multiple_untracked_with_tracked() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: true,
+        force: 1,
+        interactive: false,
         directories: false,
         ignored: false,
         only_ignored: false,
@@ -246,7 +252,8 @@ async fn test_clean_force_with_missing_index() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: true,
+        force: 1,
+        interactive: false,
         directories: false,
         ignored: false,
         only_ignored: false,
@@ -365,7 +372,8 @@ async fn test_clean_force_with_long_path() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: true,
+        force: 1,
+        interactive: false,
         directories: false,
         ignored: false,
         only_ignored: false,
@@ -393,7 +401,8 @@ async fn test_clean_force_does_not_follow_symlink_dirs() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: true,
+        force: 1,
+        interactive: false,
         directories: false,
         ignored: false,
         only_ignored: false,
@@ -476,7 +485,8 @@ async fn test_clean_d_flag_removes_untracked_dirs() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: true,
+        force: 1,
+        interactive: false,
         directories: true,
         ignored: false,
         only_ignored: false,
@@ -516,7 +526,8 @@ async fn test_clean_d_flag_keeps_dirs_with_tracked_files() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: true,
+        force: 1,
+        interactive: false,
         directories: true,
         ignored: false,
         only_ignored: false,
@@ -559,7 +570,8 @@ async fn test_clean_x_flag_removes_ignored_files() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: true,
+        force: 1,
+        interactive: false,
         directories: false,
         ignored: true,
         only_ignored: false,
@@ -601,7 +613,8 @@ async fn test_clean_x_flag_removes_only_ignored_files() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: true,
+        force: 1,
+        interactive: false,
         directories: false,
         ignored: false,
         only_ignored: true,
@@ -628,7 +641,8 @@ async fn test_clean_exclude_flag_excludes_patterns() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: true,
+        force: 1,
+        interactive: false,
         directories: false,
         ignored: false,
         only_ignored: false,
@@ -656,7 +670,8 @@ async fn test_clean_exclude_multiple_patterns() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: true,
+        force: 1,
+        interactive: false,
         directories: false,
         ignored: false,
         only_ignored: false,
@@ -741,7 +756,8 @@ async fn test_clean_dx_removes_ignored_directories() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: true,
+        force: 1,
+        interactive: false,
         directories: true,
         ignored: true,
         only_ignored: false,
@@ -750,4 +766,136 @@ async fn test_clean_dx_removes_ignored_directories() {
     .await;
 
     assert!(!std::path::Path::new("ignored_dir").exists());
+}
+
+// ── Batch 0: CLI arg interface + clean.requireForce preflight ──
+
+/// `-f` is counted: `-ff` → 2, `-fff` → 3 (enables nested-repo double-force).
+#[test]
+fn test_clean_force_count_increments() {
+    use clap::Parser;
+    assert_eq!(CleanArgs::try_parse_from(["clean", "-f"]).unwrap().force, 1);
+    assert_eq!(
+        CleanArgs::try_parse_from(["clean", "-ff"]).unwrap().force,
+        2
+    );
+    assert_eq!(
+        CleanArgs::try_parse_from(["clean", "-fff"]).unwrap().force,
+        3
+    );
+    assert_eq!(
+        CleanArgs::try_parse_from(["clean", "-f", "-f"])
+            .unwrap()
+            .force,
+        2
+    );
+}
+
+/// `-e <pat>` is the short alias for `--exclude`, and is repeatable.
+#[test]
+fn test_clean_exclude_short_alias_e() {
+    use clap::Parser;
+    let args = CleanArgs::try_parse_from(["clean", "-e", "*.log", "-e", "*.tmp", "-n"]).unwrap();
+    assert_eq!(args.exclude, vec!["*.log".to_string(), "*.tmp".to_string()]);
+    assert!(args.dry_run);
+    // `-i` / `--interactive` parses.
+    assert!(
+        CleanArgs::try_parse_from(["clean", "-i"])
+            .unwrap()
+            .interactive
+    );
+}
+
+/// `-i` with `--json` is rejected at preflight (LBR-CLI-002 / exit 129).
+#[test]
+fn test_clean_interactive_json_conflict_rejected() {
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["clean", "-i", "--json"], repo.path());
+    assert_eq!(out.status.code(), Some(129), "interactive+json rejected");
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report
+            .message
+            .contains("cannot use --interactive and --json together"),
+        "message: {}",
+        report.message
+    );
+}
+
+/// `-i` with `-n` is rejected at preflight (LBR-CLI-002 / exit 129).
+#[test]
+fn test_clean_interactive_dryrun_conflict_rejected() {
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["clean", "-i", "-n"], repo.path());
+    assert_eq!(out.status.code(), Some(129), "interactive+dry-run rejected");
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report
+            .message
+            .contains("cannot use --interactive and --dry-run together"),
+        "message: {}",
+        report.message
+    );
+}
+
+/// `clean.requireForce=false` (local) lets a bare `libra clean` proceed and remove.
+#[test]
+fn test_clean_requireforce_false_allows_no_force() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("untracked.txt"), "scratch\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["config", "clean.requireForce", "false"], p),
+        "set clean.requireForce=false",
+    );
+    // Bare `clean` (no -f/-n/-i) must now proceed and delete the untracked file.
+    let out = run_libra_command(&["clean"], p);
+    assert_cli_success(&out, "bare clean allowed under requireForce=false");
+    assert!(
+        !p.join("untracked.txt").exists(),
+        "untracked file removed when requireForce=false"
+    );
+}
+
+/// A global `clean.requireForce=true` (local unset) still blocks a bare `clean`.
+#[test]
+fn test_clean_requireforce_true_global_blocks() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("untracked.txt"), "scratch\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(
+            &["config", "set", "--global", "clean.requireForce", "true"],
+            p,
+        ),
+        "set global clean.requireForce=true",
+    );
+    let out = run_libra_command(&["clean"], p);
+    assert_eq!(out.status.code(), Some(129), "bare clean blocked");
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        p.join("untracked.txt").exists(),
+        "untracked file untouched when blocked"
+    );
+}
+
+/// Bare `libra clean` (default requireForce) is blocked with the updated message.
+#[test]
+fn test_clean_missing_mode_blocks_without_force() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("untracked.txt"), "scratch\n").unwrap();
+    let out = run_libra_command(&["clean"], p);
+    assert_eq!(out.status.code(), Some(129));
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report.message.contains("clean requires -f, -n, or -i"),
+        "message: {}",
+        report.message
+    );
+    assert!(p.join("untracked.txt").exists(), "nothing removed");
 }
