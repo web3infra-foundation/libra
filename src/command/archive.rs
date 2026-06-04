@@ -6,7 +6,9 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use bzip2::write::BzEncoder;
 use clap::Parser;
+use flate2::{Compression, write::GzEncoder};
 use git_internal::{
     hash::ObjectHash,
     internal::object::{
@@ -295,6 +297,26 @@ fn write_tar_archive<W: Write>(
     Ok(())
 }
 
+/// Write a gzip-compressed tar archive.
+fn write_tar_gz_archive<W: Write>(
+    entries: &[ArchiveEntry],
+    prefix: Option<&Path>,
+    writer: W,
+) -> Result<(), CliError> {
+    let gz = GzEncoder::new(writer, Compression::default());
+    write_tar_archive(entries, prefix, gz)
+}
+
+/// Write a bzip2-compressed tar archive.
+fn write_tar_bz2_archive<W: Write>(
+    entries: &[ArchiveEntry],
+    prefix: Option<&Path>,
+    writer: W,
+) -> Result<(), CliError> {
+    let bz = BzEncoder::new(writer, bzip2::Compression::default());
+    write_tar_archive(entries, prefix, bz)
+}
+
 /// Open the output destination: either a file path or stdout.
 fn open_output(path: Option<&str>) -> Result<Box<dyn Write>, CliError> {
     match path {
@@ -321,12 +343,18 @@ fn create_archive(
             let writer = open_output(output)?;
             write_tar_archive(entries, prefix, writer)
         }
-        ArchiveFormat::TarGz | ArchiveFormat::TarBz2 | ArchiveFormat::Zip => {
-            Err(CliError::failure(format!(
-                "archive format '{format:?}' is not implemented yet"
-            ))
-            .with_stable_code(StableErrorCode::Unsupported))
+        ArchiveFormat::TarGz => {
+            let writer = open_output(output)?;
+            write_tar_gz_archive(entries, prefix, writer)
         }
+        ArchiveFormat::TarBz2 => {
+            let writer = open_output(output)?;
+            write_tar_bz2_archive(entries, prefix, writer)
+        }
+        ArchiveFormat::Zip => Err(CliError::failure(format!(
+            "archive format '{format:?}' is not implemented yet"
+        ))
+        .with_stable_code(StableErrorCode::Unsupported)),
     }
 }
 
@@ -340,7 +368,7 @@ fn create_archive(
 /// Returns `CliInvalidArguments` for unsupported formats or unsafe prefixes.
 /// Returns `CliInvalidTarget` when the tree-ish cannot be resolved.
 /// Returns `RepoCorrupt` when referenced commit or tree objects cannot be read.
-/// Returns `Unsupported` for non-tar archive formats until later commits.
+/// Returns `Unsupported` for zip archives until a later commit.
 pub async fn execute_safe(args: ArchiveArgs, _output: &OutputConfig) -> CliResult<()> {
     let format = ArchiveFormat::parse_strict(&args.format).map_err(|message| {
         CliError::command_usage(message).with_stable_code(StableErrorCode::CliInvalidArguments)
@@ -495,5 +523,23 @@ mod tests {
         write_tar_archive(&[], None, &mut buf).expect("empty tar should finalize");
 
         assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn write_tar_gz_archive_accepts_empty_entries() {
+        let mut buf = Vec::new();
+
+        write_tar_gz_archive(&[], None, &mut buf).expect("empty tar.gz should finalize");
+
+        assert!(buf.starts_with(&[0x1f, 0x8b]));
+    }
+
+    #[test]
+    fn write_tar_bz2_archive_accepts_empty_entries() {
+        let mut buf = Vec::new();
+
+        write_tar_bz2_archive(&[], None, &mut buf).expect("empty tar.bz2 should finalize");
+
+        assert!(buf.starts_with(b"BZh"));
     }
 }

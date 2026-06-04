@@ -3352,6 +3352,7 @@ dependencies = [
  "byte-unit",
  "byteorder",
  "bytes",
+ "bzip2",
  "chrono",
  "clap",
  "colored",
