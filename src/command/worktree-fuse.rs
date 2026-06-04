@@ -4,6 +4,8 @@
 //! worktree management remains in `command::worktree`. Worktree-fuse command tests
 //! cover argument parsing and unsupported-platform behavior.
 
+#[cfg(target_os = "macos")]
+use std::env;
 use std::{
     collections::HashMap,
     fs, io,
