@@ -1914,9 +1914,9 @@ async fn clone_cloud_publish_into_destination(
     restore_cloud_publish_ai_objects(source, restore_plan, r2_storage, &local_storage, &db_conn)
         .await?;
 
-    // Redact any credentials before persisting/surfacing the cloud source URL
+    // Redact all userinfo before persisting/surfacing the cloud source URL
     // (config_kv and JSON/human output are non-vault, user-visible surfaces).
-    let redacted_remote = fetch::redact_url_credentials(&args.remote_repo);
+    let redacted_remote = redact_cloud_source_url(&args.remote_repo);
     configure_cloud_publish_checkout(source, restore_plan, &redacted_remote).await?;
 
     if !output.quiet && !output.is_json() {
@@ -2603,8 +2603,9 @@ async fn configure_cloud_publish_checkout(
 
 fn parse_cloud_publish_source(input: &str) -> Result<CloudPublishSource, CloneError> {
     let url = Url::parse(input).map_err(|source| CloneError::InvalidCloudPublishSource {
-        // Redact any embedded credentials before the URL reaches error output.
-        input: fetch::redact_url_credentials(input),
+        // Redact any embedded credentials (including username-only tokens)
+        // before the URL reaches error output.
+        input: redact_cloud_source_url(input),
         reason: format!("URL parse failed: {source}"),
     })?;
     if url.scheme() != "libra+cloud" {
@@ -3245,10 +3246,31 @@ fn clone_config_local_target() -> LocalIdentityTarget<'static> {
     }
 }
 
+/// Redact **all** userinfo from a `libra+cloud://` source URL before it is
+/// stored or surfaced. Unlike [`fetch::redact_url_credentials`] (which keeps a
+/// bare SSH-style username such as `git@host`), userinfo is never meaningful for
+/// cloud sources — cloud credentials come from config/vault — so a bare token
+/// embedded as a username-only component (`libra+cloud://token@host/slug`) must
+/// also be stripped.
+fn redact_cloud_source_url(raw: &str) -> String {
+    match Url::parse(raw) {
+        Ok(mut url) => {
+            if !url.username().is_empty() || url.password().is_some() {
+                let _ = url.set_username("");
+                let _ = url.set_password(None);
+            }
+            url.to_string()
+        }
+        // Not a parseable URL: fall back to the general redactor.
+        Err(_) => fetch::redact_url_credentials(raw),
+    }
+}
+
 fn invalid_cloud_source(input: &str, reason: &str) -> CloneError {
     CloneError::InvalidCloudPublishSource {
-        // Redact any embedded credentials before the URL reaches error output.
-        input: fetch::redact_url_credentials(input),
+        // Redact any embedded credentials (including username-only tokens)
+        // before the URL reaches error output.
+        input: redact_cloud_source_url(input),
         reason: reason.to_string(),
     }
 }
@@ -4097,6 +4119,29 @@ mod tests {
     fn validate_filter_spec_length_capped() {
         let long = format!("blob:limit={}", "9".repeat(FILTER_SPEC_MAX_LEN));
         assert!(validate_filter_spec(&long).is_err());
+    }
+
+    #[test]
+    fn redact_cloud_source_url_strips_all_userinfo() {
+        for raw in [
+            "libra+cloud://token@host/slug",
+            "libra+cloud://user:secret@host/slug",
+        ] {
+            let redacted = redact_cloud_source_url(raw);
+            assert!(
+                !redacted.contains("token")
+                    && !redacted.contains("secret")
+                    && !redacted.contains('@'),
+                "userinfo must be stripped from {raw}, got {redacted}"
+            );
+            assert!(
+                redacted.contains("host"),
+                "host must be preserved: {redacted}"
+            );
+        }
+        // No userinfo: unchanged shape.
+        let plain = redact_cloud_source_url("libra+cloud://host/slug");
+        assert!(plain.contains("host") && plain.contains("slug"));
     }
 
     #[test]
