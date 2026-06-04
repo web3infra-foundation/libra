@@ -1612,3 +1612,41 @@ fn cherry_pick_gpg_sign_via_vault_succeeds() {
         "cherry-pick -S signs via vault (a clean exit proves the vault yielded a signature)",
     );
 }
+
+/// `-S` survives the conflict sequencer: commits finalized via `--continue` are
+/// still signed (the `gpg_sign` option round-trips through `cherry_pick_state`).
+#[test]
+fn cherry_pick_continue_retains_gpg_sign() {
+    let (repo, f1, f2) = conflict_sequence_repo();
+    let p = repo.path();
+    // -S sequence; f1 conflicts (no commit yet, so no signing at conflict time).
+    assert_eq!(
+        run_libra_command(&["cherry-pick", "-S", &f1, &f2], p)
+            .status
+            .code(),
+        Some(128),
+        "f1 conflicts"
+    );
+    std::fs::write(p.join("shared.txt"), "resolved\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "shared.txt"], p),
+        "add resolved",
+    );
+    assert_cli_success(
+        &run_libra_command(&["cherry-pick", "--continue"], p),
+        "continue",
+    );
+    // HEAD = f2's resumed commit; HEAD~1 = f1's finalized commit. Both must be
+    // signed — proving `gpg_sign` was not dropped on resume.
+    let head_body = cp_head_message(p);
+    assert!(
+        head_body.contains("-----BEGIN PGP SIGNATURE-----"),
+        "resumed commit must stay signed: {head_body}"
+    );
+    let prev = run_libra_command(&["cat-file", "-p", "HEAD~1"], p);
+    let prev_body = String::from_utf8_lossy(&prev.stdout);
+    assert!(
+        prev_body.contains("-----BEGIN PGP SIGNATURE-----"),
+        "finalized conflicted commit must stay signed: {prev_body}"
+    );
+}

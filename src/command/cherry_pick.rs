@@ -219,6 +219,8 @@ struct CherryPickOpts {
     allow_empty_message: bool,
     #[serde(default)]
     keep_redundant_commits: bool,
+    #[serde(default)]
+    gpg_sign: bool,
 }
 
 impl CherryPickOpts {
@@ -230,11 +232,14 @@ impl CherryPickOpts {
             allow_empty: args.allow_empty,
             allow_empty_message: args.allow_empty_message,
             keep_redundant_commits: args.keep_redundant_commits,
+            gpg_sign: args.gpg_sign,
         }
     }
 
     /// Rebuild a minimal [`CherryPickArgs`] carrying just these options (used to
-    /// re-run the commit-assembly path during `--continue`/`--skip`).
+    /// re-run the commit-assembly path during `--continue`/`--skip`). All
+    /// commit-shaping modifiers (including `-S`) must round-trip so resumed
+    /// commits keep the same shape — e.g. a `-S` sequence stays signed.
     fn into_args(self) -> CherryPickArgs {
         CherryPickArgs {
             append_source: self.append_source,
@@ -243,6 +248,7 @@ impl CherryPickOpts {
             allow_empty: self.allow_empty,
             allow_empty_message: self.allow_empty_message,
             keep_redundant_commits: self.keep_redundant_commits,
+            gpg_sign: self.gpg_sign,
             ..Default::default()
         }
     }
