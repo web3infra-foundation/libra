@@ -16,6 +16,31 @@ libra clone [OPTIONS] <REMOTE_REPO> [LOCAL_PATH]
 
 对于裸克隆，不会执行工作树检出，仓库目录本身会直接成为对象存储。裸克隆不会创建 `.libraignore`。
 
+## 能力矩阵与决策账本
+
+Libra 以其事务型 SQLite 元数据（`.libra/libra.db`）、vault 秘密与分层对象存储为权威实现，同时在协议层对标常见 `git clone` 标志的行为。**clone 核心不需要任何 SQL schema 迁移**（元数据在 SQLite；对象在分层存储；部分克隆的 promisor 状态记录在 `config_kv`）。权威兼容级别见 [`COMPATIBILITY.md`](../../../COMPATIBILITY.md)；下表汇总决策：
+
+| 能力 | 标志 | Libra 级别 | 说明 |
+|---|---|---|---|
+| 按数量浅克隆 | `--depth` | supported | 复用 `.libra/shallow` 边界 + deepen 协商 |
+| 按日期浅克隆 | `--shallow-since` | supported | `deepen-since`；组合时取代普通 depth |
+| 按 ref 浅克隆 | `--shallow-exclude` | supported | `deepen-not`；组合时取代普通 depth |
+| 拒绝浅源 | `--reject-shallow` | supported | 浅源时失败（128） |
+| 全部/单分支 | `--single-branch` / `--no-single-branch` | supported | Git 风格反义，后者生效 |
+| 自定义远程名 | `-o/--origin` | supported | 命名被跟踪的远程 |
+| 跳过检出 | `-n/--no-checkout` | supported | 仅元数据，无工作树 |
+| 镜像 | `--mirror` | supported | 隐含 bare；`+refs/*:refs/*`；`mirror = true` |
+| 参考复用 | `--reference` / `--reference-if-able` | intentionally-different | 复制语义（不借用 `info/alternates`） |
+| Dissociate | `--dissociate` | intentionally-different | 确认完全本地（复制语义） |
+| 本地优化 | `-l/--local` / `--no-hardlinks` | supported | 硬链接（或复制）本地源对象 |
+| 共享对象 | `-s/--shared` | intentionally-different | 复制语义，无 alternates |
+| 并行任务 | `-j/--jobs` | intentionally-different | 校验 1..=16，预留/no-op（串行传输） |
+| 部分克隆 | `--filter` | partial | 白名单 spec；promisor 配置；无按需补取 |
+| 稀疏检出 | `--sparse` | declined | 见 [declined.md#d10](../../improvement/compatibility/declined.md#d10-clone---sparse-与顶层-sparse-checkout-命令) |
+| 子模块 | `--recurse-submodules` | declined | 见 [declined.md#d4](../../improvement/compatibility/declined.md#d4-clone---recurse-submodules) |
+
+**云克隆**（`libra+cloud://`）从 Cloudflare D1/R2 恢复完整的已发布对象集，并在任何 clone-domain 配置查找或目录创建之前，对上表所有 Git 整形标志**快速失败（退出码 129）**（请用 URL 中的 `?ref=<branch|tag|full-ref>` 选择检出目标）。新增的 `StableErrorCode` 变体（如有）记录在 [`docs/error-codes.md`](../../error-codes.md)。
+
 ## 选项
 
 ### `<REMOTE_REPO>`（必需）

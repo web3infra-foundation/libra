@@ -23,6 +23,40 @@ copied to matching `.libraignore` files so Libra ignore rules work immediately.
 For bare clones, no working tree checkout is performed and the repository directory itself
 becomes the object store. Bare clones do not create `.libraignore`.
 
+## Capability Matrix and Decision Ledger
+
+Libra keeps its transactional SQLite metadata (`.libra/libra.db`), vault-backed secrets, and
+tiered object storage as the authoritative implementation, while matching the protocol-layer
+behavior of common `git clone` flags. **No SQL schema migration is required for clone core**
+(metadata stays in SQLite; objects in tiered storage; partial-clone promisor state is recorded
+in `config_kv`). The authoritative compatibility levels live in
+[`COMPATIBILITY.md`](../../COMPATIBILITY.md); this table summarizes the decisions:
+
+| Capability | Flag | Libra level | Notes |
+|---|---|---|---|
+| Shallow by count | `--depth` | supported | Reuses `.libra/shallow` boundary + deepen negotiation |
+| Shallow by date | `--shallow-since` | supported | `deepen-since`; supersedes plain depth when combined |
+| Shallow by ref | `--shallow-exclude` | supported | `deepen-not`; supersedes plain depth when combined |
+| Reject shallow source | `--reject-shallow` | supported | Fails (128) on a shallow source |
+| All / single branch | `--single-branch` / `--no-single-branch` | supported | Git-style negation, last wins |
+| Custom remote name | `-o/--origin` | supported | Names the tracked remote |
+| Skip checkout | `-n/--no-checkout` | supported | Metadata only, no working tree |
+| Mirror | `--mirror` | supported | Implies bare; `+refs/*:refs/*`; `mirror = true` |
+| Reference reuse | `--reference` / `--reference-if-able` | intentionally-different | Copy semantics (no `info/alternates` borrow) |
+| Dissociate | `--dissociate` | intentionally-different | Confirms fully-local (copy semantics) |
+| Local optimization | `-l/--local` / `--no-hardlinks` | supported | Hardlink (or copy) a local source's objects |
+| Shared objects | `-s/--shared` | intentionally-different | Copy semantics, no alternates |
+| Parallel jobs | `-j/--jobs` | intentionally-different | Validated 1..=16, reserved/no-op (serial transport) |
+| Partial clone | `--filter` | partial | Whitelist specs; promisor config; no lazy backfill |
+| Sparse checkout | `--sparse` | declined | See [declined.md#d10](../improvement/compatibility/declined.md#d10-clone---sparse-与顶层-sparse-checkout-命令) |
+| Submodules | `--recurse-submodules` | declined | See [declined.md#d4](../improvement/compatibility/declined.md#d4-clone---recurse-submodules) |
+
+**Cloud clones** (`libra+cloud://`) restore a complete published object set from Cloudflare D1/R2
+and **fail-fast (exit 129) on every Git shaping flag** above (use `?ref=<branch|tag|full-ref>` in
+the URL to select a checkout target) before any clone-domain config lookup or directory creation.
+New `StableErrorCode` variants (if any) are recorded in
+[`docs/error-codes.md`](../error-codes.md).
+
 ## Options
 
 ### `<REMOTE_REPO>` (required)

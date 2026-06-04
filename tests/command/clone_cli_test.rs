@@ -2959,3 +2959,53 @@ fn credentials_redacted_in_error_output() {
         "credentials must be redacted from all output, got: {combined}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Batch 5 — documentation / help sync contract
+// ---------------------------------------------------------------------------
+
+/// Every implemented clone flag must appear in `clone --help` and in both the
+/// English and Chinese command docs, keeping the surface, help, and docs in sync.
+#[test]
+fn clone_documentation_and_help_sync() {
+    use clap::CommandFactory;
+
+    let root = env!("CARGO_MANIFEST_DIR");
+    let doc_en = fs::read_to_string(format!("{root}/docs/commands/clone.md"))
+        .expect("docs/commands/clone.md must exist");
+    let doc_zh = fs::read_to_string(format!("{root}/docs/commands/zh-CN/clone.md"))
+        .expect("docs/commands/zh-CN/clone.md must exist");
+    let help = libra::command::clone::CloneArgs::command()
+        .render_long_help()
+        .to_string();
+
+    let expected_flags = [
+        "--depth",
+        "--shallow-since",
+        "--shallow-exclude",
+        "--reject-shallow",
+        "--no-single-branch",
+        "--origin",
+        "--no-checkout",
+        "--mirror",
+        "--reference",
+        "--reference-if-able",
+        "--dissociate",
+        "--local",
+        "--no-hardlinks",
+        "--shared",
+        "--jobs",
+        "--filter",
+    ];
+    for flag in expected_flags {
+        assert!(help.contains(flag), "clone --help is missing {flag}");
+        assert!(
+            doc_en.contains(flag),
+            "docs/commands/clone.md is missing {flag}"
+        );
+        assert!(
+            doc_zh.contains(flag),
+            "docs/commands/zh-CN/clone.md is missing {flag}"
+        );
+    }
+}
