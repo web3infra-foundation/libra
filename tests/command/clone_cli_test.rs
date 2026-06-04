@@ -3010,6 +3010,31 @@ fn clone_documentation_and_help_sync() {
     }
 }
 
+/// `--shallow-exclude` values are validated against control characters so they
+/// cannot inject extra `deepen-not` upload-pack frames (exit 129).
+#[test]
+fn shallow_exclude_rejects_control_chars() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("clone-ctrl");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--shallow-exclude",
+            "refs/heads/x\nrefs/heads/y",
+            "file:///definitely/not/here",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "control characters in --shallow-exclude must be rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Credentials in a malformed/invalid URL are redacted from the error reason
 /// (not just the discovery error), covering the spec-classification path.
 #[test]

@@ -2055,6 +2055,15 @@ async fn read_pkt_line(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<(usi
     if len == 0 {
         return Ok((0, Vec::new()));
     }
+    // Reject malformed/short lengths (1..=3) before subtracting the 4-byte
+    // header, so a hostile server cannot underflow the length into a huge
+    // allocation. (`0001`/`0002`/`0003` are not valid data frames here.)
+    if len < 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid pkt-line length {len}"),
+        ));
+    }
     let mut data = vec![0u8; (len - 4) as usize];
     reader.read_exact(&mut data).await?;
     Ok((len as usize, data))

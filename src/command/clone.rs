@@ -545,6 +545,8 @@ impl From<CloneError> for CliError {
             CloneError::RemoteBranchNotFound { ref branch } => CliError::fatal(format!(
                 "remote branch '{branch}' not found in upstream origin"
             ))
+            // Intentionally fatal (exit 128) to match `git clone -b <missing>`,
+            // which exits 128 for a missing remote branch.
             .with_stable_code(StableErrorCode::RepoStateInvalid)
             .with_hint(
                 "use `-b <branch>` to specify an existing branch, or omit to use remote HEAD",
@@ -1177,6 +1179,19 @@ fn validate_clone_args(args: &CloneArgs) -> CliResult<()> {
         validate_filter_spec(filter).map_err(|message| {
             CliError::command_usage(message).with_stable_code(StableErrorCode::CliInvalidArguments)
         })?;
+    }
+
+    // Bound and sanitize each `--shallow-exclude` value: it is written verbatim
+    // into a `deepen-not <ref>` upload-pack frame, so control characters (NUL /
+    // CR / LF) could otherwise inject extra protocol frames.
+    for exclude in &args.shallow_exclude {
+        if exclude.is_empty() || exclude.len() > 256 || exclude.chars().any(|c| c.is_control()) {
+            return Err(CliError::command_usage(
+                "--shallow-exclude value must be a non-empty ref/revision \
+                 (≤256 bytes, no control characters)",
+            )
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+        }
     }
 
     if args.dissociate && args.reference.is_none() && args.reference_if_able.is_none() {
@@ -2500,6 +2515,16 @@ async fn configure_cloud_publish_checkout(
     )?;
 
     let db = get_db_conn_instance().await;
+    let cfg_domain = source.clone_domain.clone();
+    let cfg_target = site_target_label(source, &restore_plan.site);
+    // Map a config-write failure to a typed checkout-setup error instead of
+    // silently discarding it (a partially-written remote/cloud config otherwise
+    // leaves the clone reporting success while unusable).
+    let on_cfg_err = move |error: anyhow::Error| CloneError::CloudPublishCheckoutSetupFailed {
+        domain: cfg_domain.clone(),
+        target: cfg_target.clone(),
+        message: format!("failed to write clone config: {error}"),
+    };
     if let Some(branch_name) = cloud_checkout_branch_name(&restore_plan.checkout) {
         Branch::update_branch_with_conn(&db, &branch_name, &selected_commit.to_string(), None)
             .await
@@ -2517,8 +2542,12 @@ async fn configure_cloud_publish_checkout(
             })?;
 
         let merge_ref = format!("refs/heads/{branch_name}");
-        let _ = ConfigKv::set(&format!("branch.{branch_name}.merge"), &merge_ref, false).await;
-        let _ = ConfigKv::set(&format!("branch.{branch_name}.remote"), "origin", false).await;
+        ConfigKv::set(&format!("branch.{branch_name}.merge"), &merge_ref, false)
+            .await
+            .map_err(&on_cfg_err)?;
+        ConfigKv::set(&format!("branch.{branch_name}.remote"), "origin", false)
+            .await
+            .map_err(&on_cfg_err)?;
     } else {
         Head::update_result_with_conn(&db, Head::Detached(selected_commit), None)
             .await
@@ -2529,37 +2558,53 @@ async fn configure_cloud_publish_checkout(
             })?;
     }
 
-    let _ = ConfigKv::set("remote.origin.url", remote_url, false).await;
-    let _ = ConfigKv::set("remote.origin.type", "libra+cloud", false).await;
-    let _ = ConfigKv::set("cloud.origin.clone_domain", &source.clone_domain, false).await;
-    let _ = ConfigKv::set("cloud.origin.site_id", &restore_plan.site.site_id, false).await;
-    let _ = ConfigKv::set("cloud.origin.repo_id", &restore_plan.site.repo_id, false).await;
-    let _ = ConfigKv::set(
+    ConfigKv::set("remote.origin.url", remote_url, false)
+        .await
+        .map_err(&on_cfg_err)?;
+    ConfigKv::set("remote.origin.type", "libra+cloud", false)
+        .await
+        .map_err(&on_cfg_err)?;
+    ConfigKv::set("cloud.origin.clone_domain", &source.clone_domain, false)
+        .await
+        .map_err(&on_cfg_err)?;
+    ConfigKv::set("cloud.origin.site_id", &restore_plan.site.site_id, false)
+        .await
+        .map_err(&on_cfg_err)?;
+    ConfigKv::set("cloud.origin.repo_id", &restore_plan.site.repo_id, false)
+        .await
+        .map_err(&on_cfg_err)?;
+    ConfigKv::set(
         "cloud.origin.repository_name",
         &restore_plan.repository.name,
         false,
     )
-    .await;
-    let _ = ConfigKv::set("cloud.origin.slug", &restore_plan.site.slug, false).await;
-    let _ = ConfigKv::set(
+    .await
+    .map_err(&on_cfg_err)?;
+    ConfigKv::set("cloud.origin.slug", &restore_plan.site.slug, false)
+        .await
+        .map_err(&on_cfg_err)?;
+    ConfigKv::set(
         "cloud.origin.revision_status",
         &restore_plan.revision.status,
         false,
     )
-    .await;
-    let _ = ConfigKv::set(
+    .await
+    .map_err(&on_cfg_err)?;
+    ConfigKv::set(
         "cloud.origin.revision_oid",
         &restore_plan.checkout.revision_oid,
         false,
     )
-    .await;
+    .await
+    .map_err(&on_cfg_err)?;
 
     Ok(())
 }
 
 fn parse_cloud_publish_source(input: &str) -> Result<CloudPublishSource, CloneError> {
     let url = Url::parse(input).map_err(|source| CloneError::InvalidCloudPublishSource {
-        input: input.to_string(),
+        // Redact any embedded credentials before the URL reaches error output.
+        input: fetch::redact_url_credentials(input),
         reason: format!("URL parse failed: {source}"),
     })?;
     if url.scheme() != "libra+cloud" {
@@ -3202,7 +3247,8 @@ fn clone_config_local_target() -> LocalIdentityTarget<'static> {
 
 fn invalid_cloud_source(input: &str, reason: &str) -> CloneError {
     CloneError::InvalidCloudPublishSource {
-        input: input.to_string(),
+        // Redact any embedded credentials before the URL reaches error output.
+        input: fetch::redact_url_credentials(input),
         reason: reason.to_string(),
     }
 }
