@@ -7,6 +7,16 @@
 
 ## 0. TL;DR
 
+**完整性结论**：本计划作为“人工黑盒执行规范”和“未来 runner 的需求说明”已可落地（覆盖矩阵、隔离安全模型、37 个具体场景 + 参数表 + 断言强化标准 + 输出契约 + PR/Review 协议 + 维护规则均已定义）。作为“让 Agent 直接生成可执行实施计划”的输入也可用，但只适合按 R0-R5 垂直切片推进；它不是“全量 runner 已实现”的声明。
+
+本次改进引入了配套的结构化清单 `docs/development/integration-scenarios.yaml`（场景 ID、wave、group、purpose、gh_required、key_assertion_categories 等机器可读元数据），作为 runner registry 与 `check-plan` 的**主要事实来源**。MD 保留全部可执行 bash 示例、参数表、叙述与强化断言细节。双文件模型显著降低了“解析大段 Markdown 提取 registry”的脆弱性，使 Agent 生成计划和未来 runner 实现更稳定可维护。
+
+本次核查修正了 Agent 落地风险：每个 yaml 场景都必须在 MD 中有匹配的 `### <id>` 标题和 `SCENARIO=<id>` 代码块；config 子场景不得复用前一个场景的 `$RUN_DIR/config-repo`；`config --import` 的正向路径只放在显式 `requires_git` 的 `cli.config-import-path-edit` 场景中。
+
+Agent 仍**不得**把 Wave 1/2 全矩阵一次性作为首个实现任务；必须按 §3.3.3 的 R0-R5 切片分批交付，每批可独立验证。
+
+**推荐落地方式**：先实现 runner 骨架 + `check-plan` + 3 个最小场景，再逐批迁移 Wave 1/2。每批必须能独立编译、运行、产出 §5 报告，并保持黑盒边界（只执行编译后的 `libra`）。
+
 **默认阻断门**：Wave 0 编译产物可用 + Wave 1 CLI 核心版本管理场景全绿 + Wave 2 CLI 兼容/存储场景全绿。
 
 **GitHub 真实远端门**：当改动触达 `clone`、`fetch`、`pull`、`push`、`remote`、`ls-remote` 或协议层真实远端语义时，额外执行 Wave 3。Wave 3 必须用 `gh` 创建临时 GitHub 仓库，并用 `gh` 查询和删除该仓库；`libra` 只作为被测 VCS 命令访问该远端。
@@ -17,6 +27,8 @@
 - GitHub live 场景级：`live.github-create-push-clone-fetch`。
 - 命令级：引用完整 `libra <subcommand>` 调用、退出码、关键 stdout/stderr 断言和执行目录。
 - 不用 Cargo 测试目标名作为本计划的唯一引用；本计划关心用户可执行的 `libra` 行为。
+
+**runner 落地原则**：正式 runner / plan consistency check 用独立 Rust 工具实现（推荐 `tools/integration-runner/`），显式 `cargo run --manifest-path ...` 调用；不得注册到根 `Cargo.toml [[test]]`，不得混入当前 `tests/` 集成测试体系。场景注册以 `docs/development/integration-scenarios.yaml`（结构化清单）为主要事实来源，MD 仅作为人类可读的可执行文档与示例；check-plan 必须同时验证 yaml 清单完整性 + MD 对应章节存在 + §2.3 矩阵覆盖 + 断言强化模式。
 
 **常用命令**：
 
@@ -75,6 +87,12 @@ gh repo view "$REPO" --json nameWithOwner,sshUrl,url
 - **完整矩阵**：仅在 PR 改动触达对应命令组、或准备提交前由 runner / 长时间手工执行。
 - 所有执行必须严格使用 §3.3.1 的 `libra()`（含 `TMPDIR` + 智能 `SAFE_PATH`）；第 4 章内联 wrapper 若与 §3.3.1 不一致，以 §3.3.1 为准并必须先修正文档/runner。
 
+**Agent 生成计划时的硬边界**：
+- 第一批任务只能实现 `tools/integration-runner/`、`check-plan`（含 yaml 加载 + MD 交叉校验）、`list`、`run --only`、Wave 0 preflight 和 3 个 smoke 场景（R0-R2）；不得承诺一次性自动化全部 §4 场景。
+- 必须把 `BASELINE_GAP-INTEG-*` 当作 backlog，而不是已完成能力；任何 PR Test Plan 中的集成计划一致性结果在 `check-plan` 完整落地（能对 yaml+MD+registry 做有意义校验）前只能写 `not_available` 或 `blocked_by BASELINE_GAP-INTEG-008`。
+- Agent 产出的 issue/任务必须以“可单独运行并验证的垂直切片”（R0/R1/R2...）为单位，不能按模块名大包拆分。新增场景必须包含 yaml 登记 + MD 章节。
+- Scope 里必须显式包含 `integration-scenarios.yaml` 当场景元数据或列表变化时。
+
 ---
 
 ## 1. 现状基线
@@ -87,7 +105,7 @@ gh repo view "$REPO" --json nameWithOwner,sshUrl,url
 | 本地仓库状态 | 已存在 | `.libra/libra.db`、`.libra/objects`、工作区文件 |
 | 文档一致性检查 | 已落地（去脚本化） | Code UI 路由 ↔ `docs/commands/code-control.md` 覆盖检查在 `tests/compat/matrix_alignment.rs::docs_consistency_covers_code_ui_router_matrix`；仓库无 `scripts/` 目录 |
 | 兼容矩阵一致性检查 | 已落地（去脚本化） | `COMPATIBILITY.md` ↔ `src/cli.rs::Commands` 漂移检查在 `tests/compat/matrix_alignment.rs::compatibility_matrix_matches_cli_commands`；CI 以 `cargo test --test compat_matrix_alignment` 运行 |
-| 集成计划自检脚本 | 缺口 | 集成计划场景清单的自动一致性校验仍未落地（一直未实现，非脚本移除）；见 BASELINE_GAP-INTEG-008 |
+| 集成计划自检工具 | 部分落地（结构化） | `docs/development/integration-scenarios.yaml` 已成为 runner / check-plan 的主要事实来源（场景 ID、wave、gh_required 等）；`check-plan` 子命令 + 解析 yaml + 交叉验证 MD 章节 + §2.3 矩阵的完整实现仍属 BASELINE_GAP-INTEG-008 跟踪项（未落地前 PR 只能写 `not_available`）。compat_matrix_alignment 已去脚本化落地。 |
 | GitHub CLI 操作面 | 外部前置条件 | Wave 3 使用 `gh auth status`、`gh repo create`、`gh repo view`、`gh api`、`gh repo delete` |
 | 覆盖矩阵 + 安全清单 | 本次改进新增 | §2.3 命令覆盖矩阵 + §3.6 安全自检清单（重点解决覆盖完整性与测试环境安全问题） |
 
@@ -139,7 +157,7 @@ gh repo view "$REPO" --json nameWithOwner,sshUrl,url
 - `symbolic-ref` 仅支持 HEAD（其他符号引用因 SQLite 存储被拒绝）。
 - 这些必须出现在对应场景的负向步骤或专用小节中；新增故意差异时必须同步矩阵备注 + 断言。
 
-**与 tests/INDEX.md 关系**：Cargo 集成测试（Wave 1/2）提供 L1 确定性保障；本计划的黑盒 CLI 场景是用户视角的补充门。未来应通过一个集成计划一致性检查（自包含 Rust 测试或 CI 步骤，仿照 `tests/compat/matrix_alignment.rs` 的去脚本化做法，而非新建 `scripts/`）保持引用一致；该检查未落地前按 BASELINE_GAP-INTEG-008 记录为未自动校验。
+**与 tests/INDEX.md 关系**：Cargo 集成测试（Wave 1/2）提供 L1 确定性保障；本计划的黑盒 CLI 场景是用户视角的补充门，必须与当前 `tests/` 体系分开维护。`tests/INDEX.md` 只索引 Cargo `--test` 目标，不是本计划的场景 registry；若它与实际 `tests/*.rs` 暂时存在漂移，也不应影响本计划 runner 的场景清单。未来的集成计划一致性检查应落在独立 Rust runner/tool 的 `check-plan` 子命令中，CI 可显式运行该工具，但**不得注册到根 `Cargo.toml [[test]]`、不得进入 `cargo test --all` 默认测试集、不得写入 `tests/INDEX.md`**；该检查未落地前按 BASELINE_GAP-INTEG-008 记录为未自动校验。
 
 **断言强化标准（Assertion Strengthening Standard）**：为确保 Agent 可解析性、安全隔离验证和 Git 兼容性，所有场景最终应逐步纳入以下可执行断言模式（已在 `cli.commit-status-log`、`cli.cross-cutting-flags`、`cli.tag-basic` 等场景示范）：
 - 成功路径：至少一个 `--json`（或 `--machine`）调用 + `python3 -c "import json; d=...; assert d['ok'] is True; assert 'data' in d"`（ndjson 场景用逐行解析）。
@@ -147,7 +165,7 @@ gh repo view "$REPO" --json nameWithOwner,sshUrl,url
 - 状态一致性：关键 mutating 操作后执行 `libra fsck --connectivity-only`（0 退出）或 `libra --json show-ref --heads` 验证 refs 健康。
 - 隔离验证：涉及 config/vault/global 的场景，操作后用隔离 `LIBRA_CONFIG_GLOBAL_DB` 或 HOME 执行 `libra config --global list` 验证无本场景残留（或显式检查文件不存在）。
 - 故意差异：COMPATIBILITY.md 中的 intentionally-different 行为必须有正面 `test` / `grep` / JSON 断言（例如 worktree remove 后目录仍存在、push 拒绝本地文件 remote）。
-- 冲突/历史场景：冲突标记（`<<<<<<<`）、`libra --json status` 中 `data.merge_state.conflicted_paths[]` 非空、--continue 后该字段缺失或为空必须可脚本断言；不得引用 Git-only 顶层 `ls-files`。
+- 冲突/历史场景：冲突标记（`<<<<<<<`）、`libra --json status` 中 `data.merge_state.conflicted_paths[]` 非空、--continue 后该字段缺失或为空必须可自动断言；不得引用 Git-only 顶层 `ls-files`。
 - 所有断言必须在 `libra()` 包装下执行，且使用 `$RUN_ROOT` 下的文件/输出，避免依赖主机状态。
 
 本标准随 runner 落地将逐步自动化。当前 PR 贡献新场景时至少应包含 JSON envelope + 1 个 LBR- 错误验证 + fsck。
@@ -160,6 +178,31 @@ gh repo view "$REPO" --json nameWithOwner,sshUrl,url
 - `cli.cross-cutting-flags`（先前已强化错误 JSON）
 
 其余场景（config/*、init/* 变体、push-local-file-remote-rejected、clone 系列、schema、verify-pack、sha256、open、Wave 3 live.github-* 等）请对照本标准逐一补充相同模式的断言。目标：每个场景的“断言”部分最终都包含可直接在 `libra()` 下执行的 python/shell 检查，而非仅描述性文字。
+
+### 2.4 Scenario Registry（结构化清单）
+
+**双文件模型**（本次改进引入，用于提升 Agent 可落地性和长期可维护性）：
+
+- `docs/development/integration-scenarios.yaml`：**机器可读的事实来源**（registry）。包含全部 `cli.*` / `live.github-*` 的 id、wave、group、purpose、gh_required、requires_git、key_assertion_categories 等。runner 的 `list`、`check-plan`、`run --waves` 必须以本文件为准。
+- `docs/development/integration-test-plan.md`：**人类可读 + 可执行文档**。每个场景的完整最小步骤（bash 代码块）、负向步骤、补充可执行断言、参数覆盖表、故意差异验证、详细 rationale 都保留在这里。MD 中的 `### `<id>`` 标题 + SCENARIO= 行必须与 yaml 一致。
+
+**为什么不只用 MD**：大段 Markdown 虽然对人工复现极佳，但让 `check-plan` 可靠提取 38+ 场景 ID、wave 归属、gh 要求等元数据容易脆弱（正则/节标题漂移、代码块格式变化）。结构化 yaml 让 Agent 生成计划、runner 注册、CI 门控都更确定；MD 继续承担“规范 + 示例”的角色。
+
+**添加/修改场景时的契约**（同步更新三处）：
+1. 在 `integration-scenarios.yaml` 新增/修改条目（必须填写 wave、gh_required、key_assertion_categories）。
+2. 在 MD §4 对应 Wave 下新增或更新 `### `cli.xxx`` 完整章节（必须包含规范 §3.3.1 `libra()` 模板 + 至少 JSON + fsck + LBR- + 隔离验证的补充断言）。
+3. 若触达新命令或 compat 语义，同步更新 §2.3 覆盖矩阵 + 运行 `cargo test --test compat_matrix_alignment`。
+4. 在 runner 落地后，对应 slice 的 registry.rs / scenarios/ 模块也要注册该 id（check-plan 会交叉校验）。
+
+`check-plan` 的最小职责（R0 必须实现）：
+- 加载 yaml，产出所有 id 列表（按 wave 分组）。
+- 解析 MD，确认每个 yaml id 都存在对应 `### `<id>`` 标题，且标题下有可执行的 `libra()` / `gitfix()` 代码块。
+- 交叉检查 §2.3 表格中“主要场景 ID”列引用的 id 都在 yaml 里。
+- 报告“文档定义但 runner 未实现”的 id 列表（与 registry.rs 里的已实现子集对比）。
+- 验证 yaml 里 gh_required=true 的场景只出现在 Wave 3。
+- 扫描 MD 里所有具体 `SCENARIO=` 赋值行与 yaml id 集合是否一致；忽略 §3.3.1 模板中的占位 `cli.example-unique-id`，其他漂移必须失败。
+
+yaml 是唯一“新增场景必须先编辑”的文件；MD 是配套的丰富说明。两者都必须提交。
 
 ---
 
@@ -192,7 +235,7 @@ command -v gh     # Wave 3 需要
 cargo test --test compat_matrix_alignment
 ```
 
-通过标准：`target/debug/libra` 存在且可执行；`--version` 和 `--help` 退出码为 0；格式、lint 通过；**`git` 与 `ssh` 可在 §3.3.1 收窄后的 `PATH` 中解析到**（否则按 §3.3.0 追加其所在目录，或把依赖 git/ssh 的场景标记 skip 并记录原因，而不是当作 libra 行为失败）；`compat_matrix_alignment` 测试通过（兼容矩阵与 Code UI docs 一致性的去脚本化检查）；集成计划场景清单的自动一致性校验仍未落地，按 BASELINE_GAP-INTEG-008 记录为缺口而不是假装已验证。
+通过标准：`target/debug/libra` 存在且可执行；`--version` 和 `--help` 退出码为 0；格式、lint 通过；**`git` 与 `ssh` 可在 §3.3.1 收窄后的 `PATH` 中解析到**（否则按 §3.3.0 追加其所在目录，或把依赖 git/ssh 的场景标记 skip 并记录原因，而不是当作 libra 行为失败）；`compat_matrix_alignment` 测试通过（兼容矩阵与 Code UI docs 一致性的去脚本化检查）；`integration-scenarios.yaml` 存在且包含所有当前 Wave 场景（人工或未来 check-plan 验证）；完整自动一致性校验（yaml + MD + runner registry）仍按 BASELINE_GAP-INTEG-008 记录为未完全落地。
 
 ### 3.2 CLI 场景执行约束
 
@@ -380,6 +423,104 @@ libra config set user.name "Test User"
 
 清理 `$RUN_ROOT` 前必须先离开该目录；否则当前 shell 的 cwd 会变成已删除目录，后续相对路径命令可能产生误导性失败。
 
+### 3.3.3 Rust runner 实现边界与目录结构
+
+正式落地时，runner 的核心功能应使用 Rust 开发，但它不是 Cargo 集成测试。它是一个独立开发工具，职责是编排黑盒 CLI 场景、隔离环境、记录日志、生成报告和做计划一致性检查；被测对象始终是同一个编译后的 `libra` 二进制。
+
+#### Runner 架构决策
+
+runner **不得**把 Markdown 代码块当作执行源。MD 里的 bash 片段服务于人工复现和 reviewer 阅读；正式执行必须来自 Rust typed scenario registry。原因：
+
+1. Markdown 代码块包含 wrapper 函数、注释、`cd` 状态、负向 `!`、多行 heredoc、trap 和人工说明，解析为可靠 Step model 的复杂度接近重新实现 shell。
+2. 直接执行文档片段会让安全边界依赖文本格式，容易绕过 `env_clear()`、日志脱敏、失败分类和 cleanup guard。
+3. Agent 生成计划需要稳定的任务边界：yaml 定义“有哪些场景”，Rust registry 定义“如何执行”，MD 定义“为什么和如何人工复现”。三者由 `check-plan` 校验一致，而不是让 MD 成为唯一可执行程序。
+
+因此正式 runner 的职责划分是：
+
+- `integration-scenarios.yaml`：场景清单事实来源，提供 id、wave、requires_git、gh_required、断言类别等元数据。
+- `tools/integration-runner/src/registry.rs` + `scenarios/*`：typed Step / Assertion 实现来源，执行时只调用编译后的 `libra` 二进制。
+- `integration-test-plan.md`：人工可读规范、bash 复现参考、参数覆盖表、review 协议和 gap 记录。
+- `check-plan`：校验 yaml id、MD 章节/`SCENARIO=`、§2.3 矩阵引用、Rust registry 已实现子集、Wave 3/gh 规则和断言类别，不负责执行 Markdown。
+
+#### Agent 可执行落地切片（Implementation Slices）
+
+为了让 Agent 能稳定生成计划并分批实现，runner 必须按以下垂直切片交付。每个切片都要能独立验证，不能只提交未接入的模型类型或空 registry。
+
+| Slice | 交付内容 | 最小场景 | 验证命令 | 完成标准 |
+|---|---|---|---|---|
+| R0：工具骨架 | `tools/integration-runner/` crate、CLI 解析、`--help`、`list`、`check-plan`；**必须加载 `docs/development/integration-scenarios.yaml` 作为场景清单事实来源**，能解析 yaml + 交叉验证 MD 对应章节 | 无 | `cargo run --manifest-path tools/integration-runner/Cargo.toml -- --help`；`cargo run --manifest-path tools/integration-runner/Cargo.toml -- list` | 不进入根 `Cargo.toml [[test]]`；`list` 必须输出 yaml 里的全部 id（含 wave）；`check-plan` 必须报告“yaml 定义但 MD 缺章节”或“MD 有场景但 yaml 未登记”，而不是静默通过 |
+| R1：Wave 0 preflight | 二进制定位/构建、`env_clear()` 白名单环境、SAFE_PATH git/ssh 解析、RUN_ROOT 创建、日志目录 | `wave0.build-and-help`（runner 内部 preflight，不是 §4 CLI 场景） | `cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --waves 0` | 产出 `report.json`、`summary.md`、`results.ndjson`；失败时包含命令、退出码、stderr tail |
+| R2：最小 CLI smoke | Step/Assertion 模型、typed Rust registry、`run --only`、JSON 断言、stderr/LBR 断言、fsck 断言 | `cli.init-basic`、`cli.config-basic-kv`、`cli.commit-status-log` | `cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --only cli.init-basic,cli.config-basic-kv,cli.commit-status-log` | 三个场景全走编译后的 `target/debug/libra`；无裸 `git`；所有命令日志脱敏 |
+| R3：本地协议与对象 | `gitfix()` 等价 fixture、文件断言、ref/object 断言、env-skip 分类 | `cli.object-readback`、`cli.clone-fetch-pull-local`、`cli.push-local-file-remote-rejected` | `cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --waves 2 --only ...` | git 缺失时为 `env-skip`；本地 file remote push 拒绝有正向断言 |
+| R4：Wave 1 批量迁移 | 逐批迁移 §4.1 场景，保持每批 ≤5 个场景 | 按命令组拆分 | `run --waves 1` 的已注册子集 | `check-plan` 能区分“yaml/MD 已定义但未迁移”和“runner 已覆盖” |
+| R5：Wave 3 live | `run-live`、`gh` preflight、GitHub repo 自动创建/查询/删除、cleanup guard、Wave 3 脱敏扫描 | `live.github-create-push-clone-fetch` | `cargo run --manifest-path tools/integration-runner/Cargo.toml -- run-live --only live.github-create-push-clone-fetch` | 无删除权限时 block；成功/失败都记录 cleanup 状态；不输出 token |
+
+Agent 生成实现计划时，默认只规划下一到两个 slice。若要求“补全集成测试 runner”，也必须拆成上述 slices 并先落 R0-R2；R3 以后按改动风险或 reviewer 要求追加。
+
+#### Agent 任务输入/输出契约
+
+给 Agent 派发本计划相关任务时，推荐使用以下输入格式，避免把本文件误读成一次性大改：
+
+```text
+Goal: implement integration runner slice <R0|R1|R2|...>
+Scope: only tools/integration-runner/** and docs/development/integration-scenarios.yaml + docs/development/integration-test-plan.md if contract or scenario metadata changes
+Must not: add root Cargo.toml [[test]], modify tests/INDEX.md for runner scenarios, call libra internals directly, use cargo test target names as runner scenarios
+Required scenarios: <scenario ids from yaml>
+Verification: <exact cargo run --manifest-path ... commands>
+Expected report fields: report.json, summary.md, failures.md, results.ndjson
+Registry contract: runner must treat integration-scenarios.yaml as the list of truth for `list` and wave selection; check-plan must validate yaml vs MD headings vs implemented registry keys
+```
+
+Agent 输出必须包含：变更文件、已实现 slice、已注册场景、运行命令与结果、未完成的 `BASELINE_GAP-INTEG-*`。如果只完成 R0/R1，不得声称 Wave 1/2 默认门已自动化。
+
+推荐目录结构：
+
+```text
+tools/integration-runner/
+  Cargo.toml              # 独立工具 crate；不加入根 Cargo.toml [[test]]
+  README.md
+  src/
+    main.rs               # CLI 入口：run / list / check-plan / plan-waves / run-live
+    lib.rs                # 共享类型与模块导出
+    cli.rs                # runner 自身的参数解析
+    model.rs              # Scenario / Step / Assertion / ExpectedExit / Wave
+    registry.rs           # 场景实现注册（keyed by id）；清单事实来源是运行时加载的 integration-scenarios.yaml
+    scenarios/
+      mod.rs
+      wave1.rs            # 无网络 CLI 核心版本管理场景
+      wave2.rs            # 存储、schema、本地协议场景
+      wave3_github.rs     # GitHub live 场景；只由显式 run-live 调用
+    runner.rs             # 调度、串行/并发控制、失败分类
+    command.rs            # std::process::Command 封装；env_clear + 白名单 env 隔离
+    env.rs                # RUN_ROOT、SAFE_PATH、libra()/gitfix() 等价环境模型
+    preflight.rs          # cargo build、git/ssh/gh 检查、二进制定位
+    assertions.rs         # stdout/stderr/JSON/fsck/ref/file 断言
+    fixtures.rs           # 本地 Git fixture 与仓库初始化工具
+    report.rs             # results.ndjson / report.json / summary.md / failures.md / rerun-failed.txt
+    redaction.rs          # secret 扫描、脱敏、leak-blocked
+    plan_check.rs         # 加载 integration-scenarios.yaml，交叉校验 MD 章节、§2.3 矩阵、runner 已实现子集、gh_required 规则等
+    wave_select.rs        # 路径 -> 建议 wave 映射
+    github.rs             # gh repo create/view/api/delete 生命周期
+```
+
+调用约定：
+
+```bash
+# 显式运行，不进入 cargo test --all，也不注册到根 Cargo.toml [[test]]
+cargo run --manifest-path tools/integration-runner/Cargo.toml -- check-plan
+cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --waves 0,1,2
+cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --only cli.commit-status-log
+cargo run --manifest-path tools/integration-runner/Cargo.toml -- run-live --only live.github-create-push-clone-fetch
+```
+
+工程边界：
+
+1. `tools/integration-runner/` 与 `tests/` 分开；不要新增 `tests/integration_runner*.rs`，不要把 `plan_check` 注册成 `[[test]]`。
+2. 根 `Cargo.toml` 不新增 runner 的 `[[test]]` 条目；如 CI 需要门控，使用显式 `cargo run --manifest-path tools/integration-runner/Cargo.toml -- check-plan` 或 `run` 步骤。
+3. runner 可以有自己的 `Cargo.toml` 和依赖，但不应把主 crate 的内部模块当库直接调用；它通过进程执行 `target/debug/libra`，保持黑盒边界。
+4. shell 代码块仍可作为场景文档和人工复现示例；正式 runner 中的核心执行、日志、脱敏、报告、计划检查和 GitHub cleanup 逻辑必须在 Rust 中实现。
+5. 若未来需要复用 runner 逻辑，优先在 `tools/integration-runner/src/lib.rs` 内抽模块，不把这些 helper 混入 `src/` 生产代码或现有 `tests/command/` helper。
+
 ### 3.4 GitHub live 场景执行约束
 
 每个 Wave 3 场景必须遵守：
@@ -423,7 +564,7 @@ grep -rolE \
 **Wave 3 GitHub 安全（必须）**：
 - [ ] 运行前 `gh auth status --active --hostname github.com` 通过
 - [ ] 仅用 `gh repo create --private` 创建 `libra-integ-*` 临时私有仓库
-- [ ] 远端 URL 来自 `gh repo view --json sshUrl`（或有记录的 HTTPS 认证源）
+- [ ] 远端 URL来自 `gh repo view --json sshUrl`（或有记录的 HTTPS 认证源）
 - [ ] 若依赖 `SSH_AUTH_SOCK`，PR/Test Plan 明确记录使用的是主机 SSH agent；若不依赖，则显式清空并使用测试专用认证来源
 - [ ] 所有 `gh` 操作 + `libra` 操作的日志不输出 secret
 - [ ] 使用 `trap 'gh repo delete "$REPO" --yes' EXIT` 或等价强制清理
@@ -451,7 +592,7 @@ Wave 0 始终默认执行，下表只列额外需要跑的 CLI 场景 wave。
 | `src/internal/db.rs`、`src/internal/db/**`、`sql/**`、`src/internal/model/**` | 2 | 1，若 CLI 输出变化 |
 | `Cargo.toml`、`Cargo.lock`、`build.rs` | 0, 1, 2 | 确认 `libra` 二进制仍可构建和执行 |
 | `docs/**`、`README.md`、`COMPATIBILITY.md` | 0 | 1，若改动命令/兼容矩阵语义；同步 §2.3 矩阵 |
-| `tests/**` | 对应 wave | 只在其影响 CLI 场景或辅助脚本时纳入 |
+| `tests/**` | 对应 wave | 只在其影响 CLI 场景或 runner 辅助逻辑时纳入 |
 | `src/command/{clone,fetch,pull,push,remote,ls_remote}.rs` | 1, 2 | 3，若行为需要真实 GitHub 远端确认 |
 | `src/command/{lfs,fsck,cat_file,verify_pack,symbolic_ref,shortlog,describe,open}.rs` | 1 | 2 |
 
@@ -559,7 +700,25 @@ libra config --global get test.scope
 最小步骤：
 
 ```bash
-cd "$RUN_DIR/config-repo"
+SCENARIO="cli.config-set-input-and-encryption"
+RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
+mkdir -p "$RUN_DIR"
+cd "$RUN_DIR"
+libra() {
+  env -i \
+    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
+    USERPROFILE="$RUN_ROOT/home" \
+    HOME="$RUN_ROOT/home" \
+    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
+    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
+    TMPDIR="$RUN_ROOT/tmp" \
+    LIBRA_TEST=1 \
+    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
+    LANG=C LC_ALL=C \
+    "$BINARY" "$@"
+}
+libra init config-repo
+cd config-repo
 
 libra config set --add remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
 libra config set --add remote.origin.fetch "+refs/tags/*:refs/tags/*"
@@ -601,11 +760,31 @@ cd "$RUN_DIR/config-repo"
 最小步骤：
 
 ```bash
-cd "$RUN_DIR/config-repo"
+SCENARIO="cli.config-get-default-and-patterns"
+RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
+mkdir -p "$RUN_DIR"
+cd "$RUN_DIR"
+libra() {
+  env -i \
+    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
+    USERPROFILE="$RUN_ROOT/home" \
+    HOME="$RUN_ROOT/home" \
+    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
+    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
+    TMPDIR="$RUN_ROOT/tmp" \
+    LIBRA_TEST=1 \
+    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
+    LANG=C LC_ALL=C \
+    "$BINARY" "$@"
+}
+libra init config-repo
+cd config-repo
 
 libra config set user.name "Pattern User"
 libra config set user.email "pattern@example.invalid"
 libra config set core.editor vim
+libra config set --add remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+libra config set --add remote.origin.fetch "+refs/tags/*:refs/tags/*"
 
 libra config get user.name
 libra config --get user.name
@@ -632,7 +811,27 @@ libra config --get-all remote.origin.fetch
 最小步骤：
 
 ```bash
-cd "$RUN_DIR/config-repo"
+SCENARIO="cli.config-list-variants"
+RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
+mkdir -p "$RUN_DIR"
+cd "$RUN_DIR"
+libra() {
+  env -i \
+    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
+    USERPROFILE="$RUN_ROOT/home" \
+    HOME="$RUN_ROOT/home" \
+    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
+    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
+    TMPDIR="$RUN_ROOT/tmp" \
+    LIBRA_TEST=1 \
+    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
+    LANG=C LC_ALL=C \
+    "$BINARY" "$@"
+}
+libra init config-repo
+cd config-repo
+libra config set user.name "List User"
+libra config set user.email "list@example.invalid"
 
 libra config list
 libra config -l
@@ -661,7 +860,25 @@ libra config list --gpg-keys
 最小步骤：
 
 ```bash
-cd "$RUN_DIR/config-repo"
+SCENARIO="cli.config-unset-compat-flags"
+RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
+mkdir -p "$RUN_DIR"
+cd "$RUN_DIR"
+libra() {
+  env -i \
+    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
+    USERPROFILE="$RUN_ROOT/home" \
+    HOME="$RUN_ROOT/home" \
+    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
+    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
+    TMPDIR="$RUN_ROOT/tmp" \
+    LIBRA_TEST=1 \
+    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
+    LANG=C LC_ALL=C \
+    "$BINARY" "$@"
+}
+libra init config-repo
+cd config-repo
 
 libra config set temp.single value
 libra config --unset temp.single
@@ -820,7 +1037,27 @@ cd "$RUN_DIR/keygen-repo"
 最小步骤：
 
 ```bash
-cd "$RUN_DIR/config-repo"
+SCENARIO="cli.config-git-compat-mode"
+RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
+mkdir -p "$RUN_DIR"
+cd "$RUN_DIR"
+libra() {
+  env -i \
+    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
+    USERPROFILE="$RUN_ROOT/home" \
+    HOME="$RUN_ROOT/home" \
+    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
+    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
+    TMPDIR="$RUN_ROOT/tmp" \
+    LIBRA_TEST=1 \
+    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
+    LANG=C LC_ALL=C \
+    "$BINARY" "$@"
+}
+libra init config-repo
+cd config-repo
+libra config set --add remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+libra config set --add remote.origin.fetch "+refs/tags/*:refs/tags/*"
 
 libra config user.compat value-from-positional
 libra config --get user.compat
@@ -834,7 +1071,6 @@ libra config --unset user.compat
 libra config --unset-all remote.origin.fetch
 libra config --get -d fallback missing.compat
 libra config --get --default fallback-long missing.compat.long
-libra config --import
 ```
 
 负向步骤：
@@ -845,7 +1081,7 @@ libra config --import
 ! libra config --import user.name
 ```
 
-断言：位置参数 `key valuepattern` 的默认模式等价于 set；`--get` / `--get-all` / `--get-regexp` / `--list` / `-l` / `--show-origin` / `--add` / `--unset` / `--unset-all` / `--import` / `-d` / `--default` 均至少有一个直接 invocation 覆盖；`--default` 只能与 get 类模式组合；不含 section 的 key 非 0 退出并对 `init` / `clone` 给出“这是顶层命令”的提示。
+断言：位置参数 `key valuepattern` 的默认模式等价于 set；`--get` / `--get-all` / `--get-regexp` / `--list` / `-l` / `--show-origin` / `--add` / `--unset` / `--unset-all` / `-d` / `--default` 均至少有一个直接 invocation 覆盖；`--default` 只能与 get 类模式组合；不含 section 的 key 非 0 退出并对 `init` / `clone` 给出“这是顶层命令”的提示。`--import` 的正向导入路径依赖系统 `git`，由 `cli.config-import-path-edit` 覆盖；本场景只保留 `--import <key>` 的参数拒绝路径，避免把普通 compat 场景误标为 `requires_git`。
 
 补充可执行断言：
 - `libra --json config --get user.compat` 必须 `ok:true`，且 `data.value == "value-from-positional"`。
@@ -1824,7 +2060,7 @@ libra switch rebase-topic
 printf 'rebase\n' > rebase.txt
 libra add rebase.txt
 libra commit -m "test: rebase topic"
-libra switch topic
+libra switch rebase-topic
 libra rebase main
 libra log --oneline -n 1
 test -f rebase.txt
@@ -1858,7 +2094,7 @@ cd "$RUN_DIR/history-edit-repo"
 ! libra revert no-such-commit
 ```
 
-断言：fast-forward merge 后 HEAD 等于目标提交；三方无冲突 merge 产生可观察 merge 结果并保留双方文件；`rebase main` 把 topic 提交重放到新 base 且文件存在；`cherry-pick <commit>` 在当前分支生成等价修改；`revert <commit>` 创建反向提交并移除被 revert 的文件；缺失目标、无 merge/rebase 会话的 continue/abort 和非法 commit 必须失败且不破坏当前分支。
+断言：fast-forward merge 后 HEAD 等于目标提交；三方无冲突 merge 产生可观察 merge 结果并保留双方文件；`rebase main` 把 topic 提交重放到新 base 且文件存在；`cherry-pick <commit>` 在当前分支生成等价修改；`revert <commit>` 创建反向提交并撤销目标修改；缺失目标、无 merge/rebase 会话的 continue/abort 和非法 commit 必须失败且不破坏当前分支。
 
 补充可执行断言：
 - 每次主要操作后执行 `libra fsck --connectivity-only` 必须 0 退出。
@@ -1933,16 +2169,9 @@ cd "$RUN_DIR/merge-conflict-repo"
 
 断言：`merge side` 在同一文件产生冲突，工作区出现冲突标记；解决冲突并 `add` 后 `merge --continue` 成功完成合并提交；合并后 `log` 可见 merge commit，`shared.txt` 内容为解决后的文本；无 merge 会话时 `merge --continue` / `merge --abort` 必须失败且不破坏当前分支状态。
 
-补充可执行断言（merge 冲突场景）：
-- `merge side` 必须以非 0 退出进入冲突状态，且 `merge-conflict.err` 包含 "conflict"、"merge" 或 LBR- 相关错误文本。
-- 冲突后 `libra --json status` 必须可解析出 `data.merge_state.conflicted_paths[]`，且包含 `shared.txt`。
-- `merge --continue` 成功后 `libra --json status` 显示 `data.is_clean == true`，且 `data.merge_state` 缺失或 `conflicted_paths` 为空。
-- `libra fsck` 在 --continue / --abort 后必须通过。
-- 负向 merge --continue 无会话时错误必须包含可识别文本（"no merge" 或 LBR- 相关）。
-
 补充可执行断言（冲突场景核心）：
 - 冲突后 `libra --json status` 必须显示 `data.merge_state.conflicted_paths[]` 非空。
-- `merge --continue` 成功后 `libra --json status` 显示 index 干净（`data.is_clean == true`，无 `merge_state.conflicted_paths` 条目）。
+- `merge --continue` 成功后 `libra --json status` 显示 `data.is_clean == true`，且 `data.merge_state` 缺失或 `conflicted_paths` 为空。
 - `libra fsck` 在 continue/abort 后必须通过。
 - 负向 continue/abort 的错误必须是可识别的 "no merge in progress" 类（捕获 stderr 验证包含 "merge" 或 LBR-CONFLICT 相关）。
 
@@ -3041,10 +3270,13 @@ Wave 3 覆盖需要 GitHub 真实远端确认的 clone/fetch/pull/push/remote/ls
 最小步骤：
 
 ```bash
+SCENARIO="live.github-create-push-clone-fetch"
 BINARY="$(pwd)/target/debug/libra"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 RUN_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/libra-integ-$RUN_ID.XXXXXX")"
-mkdir -p "$RUN_ROOT"/{home,xdg-config,xdg-cache,repos,fixtures,logs,artifacts}
+mkdir -p "$RUN_ROOT"/{home,xdg-config,xdg-cache,repos,fixtures,logs,artifacts,tmp}
+RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
+mkdir -p "$RUN_DIR"
 OWNER="$(gh api user --jq '.login')"
 REPO="$OWNER/libra-integ-$RUN_ID"
 
@@ -3080,7 +3312,7 @@ trap 'gh repo delete "$REPO" --yes' EXIT
 REMOTE_URL="$(gh repo view "$REPO" --json sshUrl --jq '.sshUrl')"
 gh repo view "$REPO" --json nameWithOwner,isPrivate,isEmpty,url,sshUrl
 
-cd "$RUN_ROOT/repos"
+cd "$RUN_DIR"
 libra init source
 cd source
 libra config set user.name "Libra GitHub Integration"
@@ -3121,19 +3353,19 @@ test "$NON_FF_STATUS" -ne 0
 libra push --force origin main
 test "$(gh api "repos/$REPO/git/ref/heads/main" --jq '.object.sha')" = "$FORCED_MAIN"
 
-cd "$RUN_ROOT/repos"
+cd "$RUN_DIR"
 libra clone "$REMOTE_URL" cloned
 cd cloned
 libra log --oneline
 grep 'forced rewrite' README.md
 
-cd "$RUN_ROOT/repos/source"
+cd "$RUN_DIR/source"
 printf 'second commit\n' >> README.md
 libra add README.md
 libra commit -m "test: github second commit"
 libra push origin main
 
-cd "$RUN_ROOT/repos/cloned"
+cd "$RUN_DIR/cloned"
 libra fetch origin
 libra pull origin main
 grep 'second commit' README.md
@@ -3158,10 +3390,10 @@ grep 'second commit' README.md
 通过标准：真实 GitHub 仓库创建、push、远端 ref 查询、clone、fetch/pull 和删除全部成功。若失败是认证、权限、GitHub 服务或本机网络问题，报告必须区分环境失败与 Libra 行为失败。
 
 补充可执行断言（Wave 3 最高价值场景）：
-- 每个 `libra` 操作（init、push、clone、fetch、pull）均使用完整隔离 `libra()` wrapper（含 TMPDIR + SAFE_PATH）。
+- 每个 `libra` 操作（init、push、clone、fetch、pull）均使用完整隔离 `libra()` wrapper 或 Rust runner 中等价的 `env_clear()` 白名单环境（含 TMPDIR + SAFE_PATH）。
 - 关键步骤后执行 `libra --json log -n 1` 并验证 `ok:true` + 提交存在。
 - `gh api` 查询与 `libra show-ref` 结果必须一致（至少覆盖 main、tag、删除后的 feature ref、force push 后 main）。
-- 强制要求 trap + `gh repo delete --yes`，失败时明确记录 `cleanup_required`。
+- 强制要求 Rust cleanup guard（或人工执行时的 trap）调用 `gh repo delete --yes`，失败时明确记录 `cleanup_required`。
 - 整个 Wave 3 运行日志必须通过 §3.6 脱敏自检（无 token/PAT/私钥）。
 - 推荐在 runner 中捕获 `gh api` 返回的 sha 与本地 `libra rev-parse` 比对。
 
@@ -3222,32 +3454,34 @@ grep 'second commit' README.md
 
 `pass` / `skip` / `env-skip` 记录的 `failure` 为 `null`；`skip`/`env-skip` 必填 `skip_reason`。所有字符串入文件前先过 §3.6 脱敏自检。
 
-**自动捕获机制（让“失败命令 + 错误信息”可机器获取）**：每个场景在独立子 shell 里以 `set -Eeo pipefail` + `ERR` trap 执行；trap 用 `$BASH_COMMAND` 抓到正是失败的那条命令，配合场景 stderr 尾部即可生成上面的 `failure`：
+**自动捕获机制（让“失败命令 + 错误信息”可机器获取）**：正式 runner 使用 Rust typed step model，而不是把 Markdown 代码块或 bash trap 当作核心执行逻辑。每个 `Step` 都声明 cwd、argv、环境类型（libra/gitfix/basic）、期望退出码和断言；runner 用 `std::process::Command::env_clear()` 执行，逐条落盘 stdout/stderr/exit，并在第一条不符合期望的 step 上生成 `failure`：
 
-```bash
-# runner 核心：单场景执行 + 失败捕获（$BASH_COMMAND = 失败命令；! libra ... 的预期失败不触发）
-run_scenario() {
-  sid="$1"; fn="$2"; wave="$3"          # fn 为封装好该场景步骤的 bash 函数
-  sdir="$RUN_ROOT/logs/$sid"; mkdir -p "$sdir"
-  (
-    set -Eeo pipefail
-    trap 'rc=$?; printf "%s\n" "$BASH_COMMAND" >"'"$sdir"'/fail.cmd"; echo "$rc" >"'"$sdir"'/fail.exit"' ERR
-    "$fn"
-  ) >"$sdir/scenario.out" 2>"$sdir/scenario.err"
-  rc=$?
-  if [ "$rc" -eq 0 ]; then
-    status=pass; failcmd=""; failexit=0
-  else
-    status=fail
-    failcmd="$(cat "$sdir/fail.cmd" 2>/dev/null)"      # 失败命令
-    failexit="$(cat "$sdir/fail.exit" 2>/dev/null || echo "$rc")"
-  fi
-  emit_ndjson "$sid" "$wave" "$status" "$failcmd" "$failexit" \
-    "$(tail -n 20 "$sdir/scenario.err")"                # stderr 尾部 → stderr_tail
+```rust
+fn run_step(ctx: &ScenarioContext, step: &Step) -> StepResult {
+    let output = Command::new(step.executable(ctx))
+        .args(&step.argv)
+        .current_dir(&step.cwd)
+        .env_clear()
+        .envs(ctx.env_for(step.environment))
+        .output()?;
+
+    write_command_logs(ctx, step, &output)?;
+
+    let code = output.status.code().unwrap_or(128);
+    if !step.expected_exit.matches(code) {
+        return StepResult::fail(
+            step.display_command(),
+            code,
+            step.expected_exit.to_string(),
+            stderr_tail(&output.stderr, 20),
+        );
+    }
+    
+    run_assertions(ctx, step, &output)
 }
 ```
 
-要点：`set -E` 让 `ERR` trap 继承进场景函数；`! libra …` 这类**预期失败**被 `set -e` 视为成功、不触发 trap，因此负向步骤不会误报；而 `test -f X` / `grep` 这类断言失败会真实触发，正是我们要记的 `fail`。
+要点：负向命令不靠 `! libra ...` 表达，而是显式建模为 `ExpectedExit::NonZero` 或 `ExpectedExit::Code(n)`；文件、JSON、stderr、ref、fsck 等断言也作为 Rust `Assertion` 执行。文档里的 bash 代码块仍用于人工复现和场景语义说明；迁移期若临时使用 shell 子进程封装旧场景，也必须通过同等 `env_clear()` 白名单环境和日志/脱敏/失败分类约束，最终收敛到 §3.3.3 的 typed Rust runner。
 
 ### 5.4 命令行易读汇总（L1）
 
@@ -3313,7 +3547,7 @@ RUN_ROOT（已保留供复现）：/tmp/libra-integ-20260601T1530Z-48213.Ab12Cd
 
 - `summary.md` — 人读总表：commit / 平台 / 二进制路径 / 每场景 status / `RUN_ROOT` 清理状态 / 每个 fail 的失败命令首行 + 复现命令 / Wave 3 `gh` cleanup 状态。
 - `failures.md` — **调试交接专用**：只含 `fail` 场景，每条给“失败命令 + 退出码 + stderr 尾部 + cwd + 复现命令 + `log_dir`”，是把现场移交给下一步 debug（人或 agent）的最小充分集。无 `fail` 时写 `no failures`。
-- `rerun-failed.txt` — 每行一个失败场景 ID，供下一轮 `runner --only "$(paste -sd, rerun-failed.txt)"` 只重跑失败项。
+- `rerun-failed.txt` — 每行一个失败场景 ID，供下一轮 `cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --only "$(paste -sd, rerun-failed.txt)"` 只重跑失败项。
 - 分 wave 原始日志（沿用旧契约）：`wave0-build.log` / `wave1-cli-core.log` / `wave2-cli-storage-protocol.log` / `wave3-github-live.log`（未运行写 skip/block 原因）。
 
 ### 5.6 退出码与 CI 对接
@@ -3352,24 +3586,25 @@ runner 进程退出码：`0` = 无 `fail`（`skip`/`env-skip` 不算失败）；
 ### BASELINE_GAP-INTEG-001：CLI 场景 runner 未落地
 
 - 现状：本计划定义了应执行的 CLI 黑盒场景，但仓库尚未提供统一 runner 来自动记录命令、退出码、输出和断言。
-- 需要补充：一个本机脚本编译 `libra`，创建隔离临时仓库，按场景执行 `libra <cmd>`，并**严格产出 §5 输出契约**——L1 实时行、L2 `results.ndjson`、L3 `report.json` + `summary.md` + `failures.md` + `rerun-failed.txt`；用 §5.3 的 `set -Eeo pipefail` + `ERR` trap 机制捕获失败命令与 stderr 尾部；退出码遵循 §5.6。
-- 约束：runner 只能驱动编译后的 `libra` 命令；不得把 Cargo `--test` 目标重新包装成默认集成门；所有写盘产物先过 §3.6 脱敏自检。
+- 需要补充：一个独立 Rust runner（推荐 `tools/integration-runner/`，见 §3.3.3）编译或定位 `libra`，创建隔离临时仓库，按场景执行 `libra <cmd>`，并**严格产出 §5 输出契约**——L1 实时行、L2 `results.ndjson`、L3 `report.json` + `summary.md` + `failures.md` + `rerun-failed.txt`；用 Rust `std::process::Command` + `env_clear()` + 白名单环境捕获失败命令、退出码与 stderr 尾部；退出码遵循 §5.6。
+- 约束：runner 只能驱动编译后的 `libra` 命令；不得把 Cargo `--test` 目标重新包装成默认集成门；不得注册到根 `Cargo.toml [[test]]` 或写入 `tests/INDEX.md`；所有写盘产物先过 §3.6 脱敏自检。
 
 ### BASELINE_GAP-INTEG-002：CLI 场景清单自动校验不足
 
-- 现状：集成计划场景清单的自动一致性校验仍未落地；本计划已经转向 CLI 场景 ID，因此暂无自动校验场景清单与未来 runner 的一致性。仓库已无 `scripts/` 目录，新增校验应是自包含 Rust 测试或 CI 步骤（仿 `tests/compat/matrix_alignment.rs`），而非 `scripts/*.sh`。
-- 需要补充：校验逻辑应扫描本文件中的 `cli.*` 场景 ID，确保 runner 覆盖同名场景，并确保默认 Wave 中没有 Cargo `--test` 目标。
+- 现状：runner registry 是否覆盖 `integration-scenarios.yaml` 中全部 `cli.*` / `live.*` 场景 ID 的自动校验未落地。更全面的 yaml + MD + runner 三方一致性由 **INTEG-008** 覆盖；本 gap 只聚焦"runner registry 缺少已定义场景"这一单一漂移。
+- 需要补充：`check-plan` 在加载 yaml 后，对比 registry.rs 中已注册的 key，产出"文档已定义但 runner 未实现"的 id 列表。同时校验默认 Wave 中不包含 Cargo `--test` 目标。
+- 约束：`check-plan` 可由 CI 显式执行，但不得进入 `cargo test --all` 默认测试集，不写入 `tests/INDEX.md`。三方一致性（yaml ↔ MD ↔ 矩阵）由 INTEG-008 负责。
 
-### BASELINE_GAP-INTEG-003：Path -> Wave 自动选择脚本未落地
+### BASELINE_GAP-INTEG-003：Path -> Wave 自动选择工具未落地
 
 - 现状：§3.5 仍靠作者手动对照。
-- 需要补充：一个本机脚本读取改动路径，输出建议 CLI wave 集合。
-- 约束：脚本只输出版本管理 CLI wave；不得引入交互界面、agent runtime、provider、publish 或云服务 wave。
+- 需要补充：独立 Rust runner 的 `plan-waves` 子命令读取改动路径，输出建议 CLI wave 集合。
+- 约束：该命令只输出版本管理 CLI wave；不得引入交互界面、agent runtime、provider、publish 或云服务 wave。
 
 ### BASELINE_GAP-INTEG-004：GitHub live 场景 runner 与清理保护未落地
 
 - 现状：Wave 3 已定义 `gh` 驱动的 GitHub 临时仓库测试流程，但仓库尚未提供自动 runner 来统一执行 preflight、仓库创建、日志脱敏、失败保留和 `gh repo delete` 清理。
-- 需要补充：一个 live runner，执行 `gh auth status`、创建临时私有仓库、运行 `live.github-create-push-clone-fetch`、用 `gh api` 断言远端 ref，并在 `EXIT` 路径强制清理。
+- 需要补充：一个 live runner，执行 `gh auth status`、创建临时私有仓库、运行 `live.github-create-push-clone-fetch`、用 `gh api` 断言远端 ref，并通过 Rust cleanup guard（人工执行时可用 shell trap）强制清理。
 - 约束：runner 不得输出 token，不得复用人工仓库，不得在 cleanup 能力不足时创建 GitHub 仓库。
 
 ### BASELINE_GAP-INTEG-005：版本管理命令黑盒场景覆盖不完整
@@ -3381,9 +3616,9 @@ runner 进程退出码：`0` = 无 `fail`（`skip`/`env-skip` 不算失败）；
 
 ### BASELINE_GAP-INTEG-008：集成计划一致性检查未落地
 
-- 现状：兼容矩阵漂移与 Code UI docs 一致性检查已**去脚本化**、落地为 `tests/compat/matrix_alignment.rs`（随 `cargo test --all` 运行；CI 另以 `cargo test --test compat_matrix_alignment` 单独 gate）。**仅剩**集成计划场景清单（`cli.*` / `live.github-*` ID ↔ 本文件/未来 runner）的自动一致性校验尚未实现；仓库已无 `scripts/` 目录。
-- 需要补充：一个自包含检查（Rust 测试或 CI 步骤，**非 `scripts/*.sh`**），至少校验本文件 §2.3 矩阵与 `src/cli.rs` / `COMPATIBILITY.md` 一致（顶层命令部分已由 `compat_matrix_alignment` 覆盖）、默认 Wave 不含 Cargo `--test` 门、所有 `cli.*` / `live.github-*` 场景 ID 可被 runner 或文档解析。
-- 约束：该检查未落地前，PR/Test Plan 只能把集成计划一致性标为 `not_available` 或 `blocked_by BASELINE_GAP-INTEG-008`，不得声称已通过；不得为此新建 `scripts/` 目录。
+- 现状：兼容矩阵漂移与 Code UI docs 一致性检查已**去脚本化**、落地为 `tests/compat/matrix_alignment.rs`。`docs/development/integration-scenarios.yaml` 已作为结构化 registry 引入（所有 cli.* / live.* ID、wave、gh_required 等元数据集中管理）；MD 仍保留完整可执行示例。**check-plan 子命令的完整实现**（加载 yaml、解析 MD 对应章节、与 runner 内部 registry 交叉校验、报告漂移、验证断言模式、gh 规则等）尚未落地；目前仅人工或半自动维护一致性。
+- 需要补充：独立 Rust runner/tool 的 `check-plan` 子命令（**非 `scripts/*.sh`，非根 `Cargo.toml [[test]]`**）。最小功能：加载 integration-scenarios.yaml 作为清单来源；确认每个 id 在 MD 有 `### `id`` 章节且含规范 wrapper；交叉验证 §2.3 矩阵引用的场景 ID；能区分“文档已定义但 runner 未实现”的 id；Wave 3 场景必须有 gh lifecycle 要求。顶层命令部分已由 compat_matrix_alignment 覆盖。
+- 约束：该检查未落地前，PR/Test Plan 只能把集成计划一致性标为 `not_available` 或 `blocked_by BASELINE_GAP-INTEG-008`，不得声称已通过；不得为此新建 `scripts/` 目录，不得把该检查加入根 `Cargo.toml` 或 `tests/INDEX.md`。新增场景必须同时编辑 yaml + MD 对应章节，否则 check-plan（落地后）会失败。
 
 ### BASELINE_GAP-INTEG-009：深水区远端语义与全局 flag 边界
 
@@ -3454,19 +3689,21 @@ quarantined_at = "<YYYY-MM-DD>"
 - 修复后必须从 quarantine 移除并在 PR 描述说明。
 - quarantine 校验应确保每条 `scenario` 能解析到现有 CLI 场景。
 
-### 8.4 本计划自检（去脚本化）
+### 8.4 本计划自检（独立 Rust 工具）
 
-集成计划一致性检查（BASELINE_GAP-INTEG-008，落地为自包含 Rust 测试或 CI 步骤，**不新建 `scripts/`**）应逐步覆盖：
+集成计划一致性检查（BASELINE_GAP-INTEG-008）应落地为独立 Rust runner/tool 的 `check-plan` 子命令。CI 可以显式运行该工具，但它**不注册到根 `Cargo.toml [[test]]`，不进入 `cargo test --all` 默认测试集，不写入 `tests/INDEX.md`，不新建 `scripts/`**。该检查应逐步覆盖：
 
 1. 本计划默认 Wave 中不包含 Cargo `--test <name>` 集成门。
 2. 本计划里所有 `--features <flag>` 出现在 `Cargo.toml [features]`。
 3. 本计划没有把明确排除的测试类别写进默认 Wave 0/1/2。
-4. CLI runner 落地后，本计划里所有 `cli.<scenario-id>` 都被 runner 覆盖。
-5. GitHub live runner 落地后，本计划里所有 `live.github-*` 场景都被 runner 覆盖，并校验包含 `gh repo create` 与 `gh repo delete`。
-6. quarantine 文件里每条 CLI / live 场景 ID 可解析为现有场景。
-7. **错误 JSON 契约**：关键失败路径在 `--json`/`--machine` 下必须产出 `ok:false` + `LBR-*` 稳定码 + category/hints 的可解析 envelope（已在 `cli.cross-cutting-flags` 基线覆盖）。
-8. **故意差异防护**：COMPATIBILITY.md 中 `intentionally-different` 条目在对应场景中有正向断言（非仅文档声明）。
-9. **git fixture 隔离**：所有使用 `git` 的场景都定义并调用 `gitfix()` 包装（与 `libra()` 对称），无裸 `git` 调用。
+4. CLI runner 落地后，本计划里所有 `cli.<scenario-id>` 都被 runner registry 覆盖（runner 内部 key 必须与 integration-scenarios.yaml 一致）。
+5. GitHub live runner 落地后，本计划里所有 `live.github-*` 场景都被 runner registry 覆盖，并校验包含 `gh repo create` 与 `gh repo delete`。
+6. quarantine 文件里每条 CLI / live 场景 ID 可解析为现有场景（必须在 yaml 里存在）。
+7. `integration-scenarios.yaml` 与 MD §4 章节标题、SCENARIO= 行、§2.3 矩阵引用的场景 ID 三者一致（check-plan 核心职责）。
+8. yaml 里 gh_required=true 的只出现在 Wave 3；requires_git 场景在 runner preflight 能正确处理 env-skip。
+9. **错误 JSON 契约**：关键失败路径在 `--json`/`--machine` 下必须产出 `ok:false` + `LBR-*` 稳定码 + category/hints 的可解析 envelope（已在 `cli.cross-cutting-flags` 基线覆盖）。
+10. **故意差异防护**：COMPATIBILITY.md 中 `intentionally-different` 条目在对应场景中有正向断言（非仅文档声明）。
+11. **git fixture 隔离**：所有使用 `git` 的场景都定义并调用 `gitfix()` 包装（与 `libra()` 对称），无裸 `git` 调用。
 
 ---
 
@@ -3474,10 +3711,11 @@ quarantined_at = "<YYYY-MM-DD>"
 
 1. **新增命令或修改公共表面**（`src/cli.rs` / `src/command/*.rs`）：必须同步更新 §2.3 覆盖矩阵，并在相应 Wave 补充至少一个 `cli.<cmd>-smoke` 黑盒场景（含参数表 + 负向用例），全部使用 §3.3.1 规范模板。
 2. 新增版本管理集成测试时，必须把 `libra <cmd>` 场景补到本计划相应 Wave，并在 CLI runner 落地后同步 runner 清单。
-3. 删除/重命名场景 ID 时，必须同步更新本计划、CLI runner、集成计划一致性检查（BASELINE_GAP-INTEG-008）和 quarantine 文件。
+3. 删除/重命名场景 ID 时，必须同步更新 `integration-scenarios.yaml`、本计划 MD 对应章节、§2.3 矩阵、CLI runner registry、集成计划一致性检查（BASELINE_GAP-INTEG-008）和 quarantine 文件。新增场景必须先在 yaml 登记 id + wave + 元数据，再补充 MD 详细章节。
 4. 新增默认阻断测试必须能在本机无密钥、无外部账号、无交互界面的环境中确定性运行。
 5. 未实现能力必须用 `BASELINE_GAP-*` 标记，不允许写成默认可执行步骤。
 6. 若某测试需要真实网络、真实云资源或外部凭据，不得加入本计划的默认 wave。
 7. 需要 GitHub 真实远端的版本管理测试必须进入 Wave 3，仓库创建、查询、API 断言和删除必须使用 `gh`。
 8. 所有示例代码块与 runner 实现必须通过 §3.6 安全自检清单；CI / 人工 review 发现违规时阻断合并。
 9. §2.3 矩阵、COMPATIBILITY.md 与 `src/cli.rs` 三者必须保持一致；改动任一者需运行 `cargo test --test compat_matrix_alignment`（顶层命令漂移检查）并更新本计划。
+10. `integration-scenarios.yaml` 是场景存在性的唯一登记点；任何对场景列表、wave 归属、gh_required 的修改必须先编辑 yaml，再同步 MD 章节和 runner 实现。check-plan（落地后）将以此为准强制一致性。
