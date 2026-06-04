@@ -1146,7 +1146,7 @@ fn parse_shallow_since(input: &str) -> Result<i64, String> {
 /// 129 via `classify_parse_error`; this function only covers the range/format
 /// checks clap cannot express. All failures here are usage errors (exit 129).
 fn validate_clone_args(args: &CloneArgs) -> CliResult<()> {
-    if args.remote_repo.starts_with("libra+cloud://")
+    if is_cloud_source(&args.remote_repo)
         && (args.shallow_since.is_some()
             || !args.shallow_exclude.is_empty()
             || args.reject_shallow
@@ -1575,7 +1575,7 @@ async fn execute_clone_inner(
 ) -> Result<CloneOutput, (CloneError, Option<String>)> {
     // Intercept Cloudflare publish sources before generic remote discovery.
     // `libra+cloud://` is a Libra D1/R2 restore source, not a Git transport.
-    if args.remote_repo.starts_with("libra+cloud://") {
+    if is_cloud_source(&args.remote_repo) {
         let source =
             parse_cloud_publish_source(&args.remote_repo).map_err(|error| (error, None))?;
         validate_cloud_clone_option_compatibility(args).map_err(|error| (error, None))?;
@@ -3246,12 +3246,44 @@ fn clone_config_local_target() -> LocalIdentityTarget<'static> {
     }
 }
 
+/// Case-insensitive check for a `libra+cloud://` source. URL schemes are
+/// case-insensitive (RFC 3986), so `LIBRA+CLOUD://…` must route to the cloud
+/// parser/redactor too, not fall through to generic Git discovery.
+fn is_cloud_source(remote_repo: &str) -> bool {
+    const PREFIX: &str = "libra+cloud://";
+    remote_repo
+        .get(..PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(PREFIX))
+}
+
+/// Strip a `userinfo@` authority component from a URL-like string textually,
+/// for inputs that `Url::parse` rejects (so the value can still be made safe).
+fn strip_authority_userinfo(raw: &str) -> String {
+    let Some(scheme_end) = raw.find("://") else {
+        return raw.to_string();
+    };
+    let auth_start = scheme_end + 3;
+    let rest = &raw[auth_start..];
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..auth_end];
+    match authority.rfind('@') {
+        Some(at) => format!(
+            "{}{}{}",
+            &raw[..auth_start],
+            &authority[at + 1..],
+            &rest[auth_end..]
+        ),
+        None => raw.to_string(),
+    }
+}
+
 /// Redact **all** userinfo from a `libra+cloud://` source URL before it is
 /// stored or surfaced. Unlike [`fetch::redact_url_credentials`] (which keeps a
 /// bare SSH-style username such as `git@host`), userinfo is never meaningful for
 /// cloud sources — cloud credentials come from config/vault — so a bare token
 /// embedded as a username-only component (`libra+cloud://token@host/slug`) must
-/// also be stripped.
+/// also be stripped. Malformed URLs that `Url::parse` rejects are stripped
+/// textually so a bare token can never survive.
 fn redact_cloud_source_url(raw: &str) -> String {
     match Url::parse(raw) {
         Ok(mut url) => {
@@ -3261,8 +3293,8 @@ fn redact_cloud_source_url(raw: &str) -> String {
             }
             url.to_string()
         }
-        // Not a parseable URL: fall back to the general redactor.
-        Err(_) => fetch::redact_url_credentials(raw),
+        // Not a parseable URL: strip any userinfo authority textually.
+        Err(_) => strip_authority_userinfo(raw),
     }
 }
 
@@ -4142,6 +4174,22 @@ mod tests {
         // No userinfo: unchanged shape.
         let plain = redact_cloud_source_url("libra+cloud://host/slug");
         assert!(plain.contains("host") && plain.contains("slug"));
+
+        // Malformed URL (Url::parse rejects): userinfo is still stripped textually.
+        let malformed = redact_cloud_source_url("libra+cloud://token@[::1/slug");
+        assert!(
+            !malformed.contains("token") && !malformed.contains('@'),
+            "malformed-URL userinfo must be stripped, got {malformed}"
+        );
+    }
+
+    #[test]
+    fn is_cloud_source_is_case_insensitive() {
+        assert!(is_cloud_source("libra+cloud://host/slug"));
+        assert!(is_cloud_source("LIBRA+CLOUD://host/slug"));
+        assert!(is_cloud_source("Libra+Cloud://token@host/slug"));
+        assert!(!is_cloud_source("https://host/slug"));
+        assert!(!is_cloud_source("libra+cloud"));
     }
 
     #[test]
