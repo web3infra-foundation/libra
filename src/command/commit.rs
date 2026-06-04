@@ -2028,19 +2028,25 @@ mod test {
         let args = CommitArgs::try_parse_from(["commit", "--conventional", "-m", "init"]);
         assert!(args.is_ok());
 
+        // Since Batch 0 removed the clap `required_unless_present_any` on
+        // message/file, a bare `commit` parses; the message is resolved at
+        // runtime (editor/template) and an empty result errors there, not here.
         let args = CommitArgs::try_parse_from(["commit", "--conventional"]);
-        assert!(args.is_err(), "conventional should require message");
+        assert!(args.is_ok(), "message is now resolved at runtime");
 
         let args = CommitArgs::try_parse_from(["commit"]);
-        assert!(args.is_err(), "message is required");
+        assert!(
+            args.is_ok(),
+            "bare commit parses; editor resolves the message"
+        );
 
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend"]);
         assert!(args.is_ok());
-        //failed
         let args = CommitArgs::try_parse_from(["commit", "--amend", "--no-edit"]);
         assert!(args.is_ok());
+        // Batch 0 relaxed `--no-edit` to work outside `--amend`.
         let args = CommitArgs::try_parse_from(["commit", "--no-edit"]);
-        assert!(args.is_err(), "--no-edit requires --amend");
+        assert!(args.is_ok(), "--no-edit no longer requires --amend");
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--allow-empty", "--amend"]);
         assert!(args.is_ok());
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "-s"]);
@@ -2059,16 +2065,12 @@ mod test {
         assert!(args.is_ok());
         assert!(args.unwrap().all);
 
+        // Batch 0 also dropped `--no-edit`'s conflict with --message/--file, so
+        // `--no-edit` may now carry an explicit message (suppressing the editor).
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend", "--no-edit"]);
-        assert!(
-            args.is_err(),
-            "--no-edit conflicts with --message and --file"
-        );
+        assert!(args.is_ok(), "--no-edit may coexist with --message");
         let args = CommitArgs::try_parse_from(["commit", "-F", "init", "--amend", "--no-edit"]);
-        assert!(
-            args.is_err(),
-            "--no-edit conflicts with --message and --file"
-        );
+        assert!(args.is_ok(), "--no-edit may coexist with --file");
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend", "--signoff"]);
         assert!(args.is_ok());
         let args = args.unwrap();
@@ -2112,6 +2114,40 @@ mod test {
             "--amend",
         ]);
         assert!(args.is_ok(), "--author should work with --amend");
+
+        // Batch 2 autosquash / dry-run conflict rules.
+        assert!(
+            CommitArgs::try_parse_from(["commit", "--fixup", "HEAD"]).is_ok(),
+            "--fixup parses on its own"
+        );
+        assert!(
+            CommitArgs::try_parse_from(["commit", "--fixup", "HEAD", "-m", "x"]).is_err(),
+            "--fixup conflicts with --message"
+        );
+        assert!(
+            CommitArgs::try_parse_from(["commit", "--amend", "--fixup", "HEAD"]).is_err(),
+            "--fixup conflicts with --amend"
+        );
+        assert!(
+            CommitArgs::try_parse_from(["commit", "--fixup", "HEAD", "--squash", "HEAD"]).is_err(),
+            "--fixup conflicts with --squash"
+        );
+        assert!(
+            CommitArgs::try_parse_from(["commit", "--squash", "HEAD", "-m", "body"]).is_ok(),
+            "--squash accepts -m as the body"
+        );
+        assert!(
+            CommitArgs::try_parse_from(["commit", "--porcelain", "-m", "x"]).is_err(),
+            "--porcelain requires --dry-run"
+        );
+        assert!(
+            CommitArgs::try_parse_from(["commit", "--dry-run", "--porcelain"]).is_ok(),
+            "--porcelain is valid with --dry-run"
+        );
+        assert!(
+            CommitArgs::try_parse_from(["commit", "-v", "-m", "x"]).is_ok(),
+            "--verbose parses with a message"
+        );
     }
 
     #[test]
