@@ -298,6 +298,9 @@ async fn test_config_get_all_with_default() {
 
     // set the current working directory to the temporary path
     let _guard = test::ChangeDirGuard::new(temp_path.path());
+    let global_db_dir = tempdir().unwrap();
+    let _scoped =
+        ScopedConfigPathGuard::new(&global_db_dir.path().join("global_config_get_all.db"));
 
     let result = exec_async(vec!["config", "--get-all", "-d", "erasernoob", "user.name"]).await;
     assert!(result.is_ok());

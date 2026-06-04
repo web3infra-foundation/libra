@@ -4550,10 +4550,7 @@ mod tests {
                             name: "submit_task_complete".to_string(),
                             arguments: serde_json::json!({
                                 "result": "pass",
-                                "summary": "implementation done",
-                                "evidence": [
-                                    {"command": "cargo test", "exit_code": 0}
-                                ]
+                                "summary": "implementation done"
                             }),
                         },
                     })],
