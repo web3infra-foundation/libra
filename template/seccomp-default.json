@@ -1,28 +1,4 @@
 {
-  "_comment": [
-    "Recommended baseline seccomp BPF policy for `libra code` Linux sandbox.",
-    "",
-    "Compile with seccompiler:",
-    "  seccompiler-bin --target-arch \"$(uname -m)\" \\",
-    "      --input-file template/seccomp-default.json \\",
-    "      --output-file ~/.libra/seccomp.bpf",
-    "  export LIBRA_SECCOMP_POLICY=\"$HOME/.libra/seccomp.bpf\"",
-    "",
-    "See docs/sandbox-seccomp.md for the full how-to, precedence rules,",
-    "and architecture caveats (x86_64 vs aarch64 syscall numbers diverge).",
-    "",
-    "Policy intent (sandbox.md §7 G6): kill the worst sandbox-escape and",
-    "kernel-manipulation vectors; let everything else run so normal AI",
-    "agent workloads (cargo, pytest, npm, shell pipelines) remain",
-    "unaffected. Tune the syscalls list for your environment — adding",
-    "more denies tightens the sandbox but risks breaking legitimate",
-    "tools that rely on namespace / ptrace primitives (e.g. some",
-    "container build tools, debuggers, profilers).",
-    "",
-    "This file is JSON-with-comments only at the top level (the",
-    "`_comment` key is ignored by seccompiler's deserialiser); the",
-    "policy body below uses the strict seccompiler v0.4+ schema."
-  ],
   "default_action": "allow",
   "filter": [
     {
