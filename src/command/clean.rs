@@ -52,10 +52,14 @@ pub struct CleanArgs {
     pub exclude: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 struct CleanOutput {
     dry_run: bool,
     removed: Vec<String>,
+    /// Paths that could not be removed (tolerant cleanup). Back-compatible:
+    /// omitted from the JSON envelope when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    failed: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -103,17 +107,38 @@ pub async fn execute_safe(args: CleanArgs, output: &OutputConfig) -> CliResult<(
 
     preflight(&args, output).await.map_err(clean_cli_error)?;
 
-    let clean_output = run_clean(args).map_err(clean_cli_error)?;
+    let clean_output = run_clean(args, output.quiet).map_err(clean_cli_error)?;
+
+    // Scheme A: emit the success listing first, then signal a non-zero exit when
+    // some removals failed. Human and JSON modes diverge so neither double-renders.
+    let failure_count = clean_output.failed.len();
+    let first_failed = clean_output.failed.first().cloned();
 
     if output.is_json() {
         emit_json_data("clean", &clean_output, output)?;
-    } else if !output.quiet {
-        for path in &clean_output.removed {
-            if clean_output.dry_run {
-                println!("Would remove {path}");
-            } else {
-                println!("Removing {path}");
+        if failure_count > 0 {
+            // The failure detail is carried by the success envelope's `failed`
+            // field; exit 128 without a second (error) envelope.
+            return Err(CliError::silent_exit(128));
+        }
+    } else {
+        if !output.quiet {
+            for path in &clean_output.removed {
+                if clean_output.dry_run {
+                    println!("Would remove {path}");
+                } else {
+                    println!("Removing {path}");
+                }
             }
+        }
+        if failure_count > 0 {
+            let path = first_failed.unwrap_or_default();
+            let detail = if failure_count == 1 {
+                "removal failed".to_string()
+            } else {
+                format!("removal failed ({failure_count} paths)")
+            };
+            return Err(clean_cli_error(CleanError::RemoveFile { path, detail }));
         }
     }
 
@@ -168,17 +193,14 @@ async fn preflight(args: &CleanArgs, output: &OutputConfig) -> Result<(), CleanE
     Ok(())
 }
 
-fn run_clean(args: CleanArgs) -> Result<CleanOutput, CleanError> {
+fn run_clean(args: CleanArgs, quiet: bool) -> Result<CleanOutput, CleanError> {
     // Mode validation (missing-mode / -x+-X / -i+--json / -i+-n) is performed once
     // in `preflight`; `run_clean` assumes the arguments have already been vetted.
 
     // Interactive selection is wired in a later batch; until the loop exists,
     // `-i` performs no removal (a safe no-op) so it can never silently delete.
     if args.interactive {
-        return Ok(CleanOutput {
-            dry_run: args.dry_run,
-            removed: Vec::new(),
-        });
+        return Ok(CleanOutput::default());
     }
 
     let index_path = path::index();
@@ -224,12 +246,32 @@ fn run_clean(args: CleanArgs) -> Result<CleanOutput, CleanError> {
         }
     }
 
+    // Nested-repository protection: a directory whose direct children include
+    // `.git` or `.libra` is an independent repository. Without a second `-f`
+    // (`force >= 2`), it (and every file under it) is pruned so a stray `clean`
+    // never wipes out an unrelated checkout. This guards BOTH the file-level
+    // candidates above and the `-d` directory candidates below.
+    let force_double = args.force >= 2;
+    let nested_roots = find_nested_repo_roots()?;
+    if !force_double && !nested_roots.is_empty() {
+        untracked.retain(|p| !nested_roots.iter().any(|root| p.starts_with(root)));
+        if !quiet {
+            for root in &nested_roots {
+                eprintln!("Skipping repository {}", root.display());
+            }
+        }
+    }
+
     // If -d, also find untracked directories
     if args.directories {
         let untracked_dirs = find_untracked_dirs(&index, policy)?;
         for dir in untracked_dirs {
             // Skip the root directory (empty path)
             if dir.as_os_str().is_empty() {
+                continue;
+            }
+            // Skip nested repositories unless `-ff` was given.
+            if !force_double && nested_roots.iter().any(|root| dir.starts_with(root)) {
                 continue;
             }
             // Remove any files that are inside this directory from the untracked list
@@ -256,7 +298,7 @@ fn run_clean(args: CleanArgs) -> Result<CleanOutput, CleanError> {
     if untracked.is_empty() {
         return Ok(CleanOutput {
             dry_run: args.dry_run,
-            removed: Vec::new(),
+            ..Default::default()
         });
     }
 
@@ -267,40 +309,86 @@ fn run_clean(args: CleanArgs) -> Result<CleanOutput, CleanError> {
                 .iter()
                 .map(|path| path.display().to_string())
                 .collect(),
+            ..Default::default()
         });
     }
 
     let workdir = fs::canonicalize(util::working_dir())
         .map_err(|e| CleanError::ResolveWorkdir(e.to_string()))?;
     let mut removed = Vec::new();
+    let mut failed = Vec::new();
     for path in untracked {
         let abs_path = util::workdir_to_absolute(&path);
-        if abs_path.exists() {
-            let resolved = fs::canonicalize(&abs_path).map_err(|e| CleanError::ResolvePath {
-                path: abs_path.display().to_string(),
-                detail: e.to_string(),
-            })?;
-            if !resolved.starts_with(&workdir) {
-                return Err(CleanError::OutsideWorkdir(abs_path.display().to_string()));
+        if !abs_path.exists() {
+            continue;
+        }
+        let resolved = fs::canonicalize(&abs_path).map_err(|e| CleanError::ResolvePath {
+            path: abs_path.display().to_string(),
+            detail: e.to_string(),
+        })?;
+        // The workdir-escape check stays fatal: it indicates a symlink/traversal
+        // attack, not a per-file permission hiccup.
+        if !resolved.starts_with(&workdir) {
+            return Err(CleanError::OutsideWorkdir(abs_path.display().to_string()));
+        }
+        // Tolerant removal: a per-path failure (e.g. read-only file) is recorded
+        // and warned about, then cleanup continues with the remaining paths.
+        let outcome = if abs_path.is_dir() {
+            fs::remove_dir_all(&abs_path)
+        } else {
+            fs::remove_file(&abs_path)
+        };
+        match outcome {
+            Ok(()) => removed.push(path.display().to_string()),
+            Err(error) => {
+                if !quiet {
+                    eprintln!("warning: failed to remove {}: {error}", path.display());
+                }
+                failed.push(path.display().to_string());
             }
-            if abs_path.is_dir() {
-                fs::remove_dir_all(&abs_path).map_err(|e| CleanError::RemoveFile {
-                    path: abs_path.display().to_string(),
-                    detail: e.to_string(),
-                })?;
-            } else {
-                fs::remove_file(&abs_path).map_err(|e| CleanError::RemoveFile {
-                    path: abs_path.display().to_string(),
-                    detail: e.to_string(),
-                })?;
-            }
-            removed.push(path.display().to_string());
         }
     }
     Ok(CleanOutput {
         dry_run: false,
         removed,
+        failed,
     })
+}
+
+/// Find nested repository roots inside the working tree: directories whose
+/// direct children include a `.git` or `.libra` folder. Such a directory is an
+/// independent repository and is pruned (not recursed) here. The working-tree
+/// root itself is never reported (it owns the current repo's `.libra`).
+fn find_nested_repo_roots() -> Result<Vec<PathBuf>, CleanError> {
+    let workdir = util::working_dir();
+    let mut roots = Vec::new();
+
+    fn walk(dir: &Path, workdir: &Path, roots: &mut Vec<PathBuf>) -> Result<(), CleanError> {
+        let entries = fs::read_dir(dir).map_err(|e| CleanError::ScanUntracked(e.to_string()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| CleanError::ScanUntracked(e.to_string()))?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = path.file_name().unwrap_or_default();
+            if name == ".git" || name == util::ROOT_DIR {
+                continue;
+            }
+            if path.join(".git").exists() || path.join(util::ROOT_DIR).exists() {
+                if let Ok(relative) = path.strip_prefix(workdir) {
+                    roots.push(relative.to_path_buf());
+                }
+                // Prune: do not descend into a nested repository.
+                continue;
+            }
+            walk(&path, workdir, roots)?;
+        }
+        Ok(())
+    }
+
+    walk(&workdir, &workdir, &mut roots)?;
+    Ok(roots)
 }
 
 /// Find untracked directories based on the ignore policy.

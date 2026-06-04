@@ -899,3 +899,150 @@ fn test_clean_missing_mode_blocks_without_force() {
     );
     assert!(p.join("untracked.txt").exists(), "nothing removed");
 }
+
+// ── Batch 1: nested-repository protection + tolerant removal ──
+
+/// Lay down a nested repo `sub_repo/` (marked by `marker` = ".git" or ".libra")
+/// containing a `README.md`, in the given repo's worktree.
+fn make_nested_repo(repo: &std::path::Path, marker: &str) {
+    std::fs::create_dir_all(repo.join("sub_repo").join(marker)).unwrap();
+    std::fs::write(repo.join("sub_repo").join("README.md"), "nested\n").unwrap();
+}
+
+/// `-fd` skips a nested `.git` repo and warns on stderr (single force).
+#[test]
+fn test_clean_skips_nested_git_without_double_force() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    make_nested_repo(p, ".git");
+    let out = run_libra_command(&["clean", "-fd"], p);
+    assert_cli_success(&out, "clean -fd");
+    assert!(p.join("sub_repo").exists(), "nested repo preserved");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Skipping repository sub_repo"),
+        "stderr: {stderr}"
+    );
+}
+
+/// `-fd` skips a nested `.libra` repo and warns on stderr.
+#[test]
+fn test_clean_skips_nested_libra_without_double_force() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    make_nested_repo(p, ".libra");
+    let out = run_libra_command(&["clean", "-fd"], p);
+    assert_cli_success(&out, "clean -fd");
+    assert!(p.join("sub_repo").exists(), "nested repo preserved");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("Skipping repository sub_repo"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Even WITHOUT `-d`, a nested repo's working-tree files are protected from
+/// single-force `clean`; `-ff` removes them.
+#[test]
+fn test_clean_protects_nested_repo_files_without_dir_flag() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    make_nested_repo(p, ".git");
+    // `-f` (no -d): the nested README must survive.
+    assert_cli_success(&run_libra_command(&["clean", "-f"], p), "clean -f");
+    assert!(
+        p.join("sub_repo/README.md").exists(),
+        "nested file protected under single force"
+    );
+    // `-ff` removes the nested working-tree files.
+    assert_cli_success(&run_libra_command(&["clean", "-ff"], p), "clean -ff");
+    assert!(
+        !p.join("sub_repo/README.md").exists(),
+        "nested file removed under double force"
+    );
+}
+
+/// `-ffd` removes the whole nested repo.
+#[test]
+fn test_clean_removes_nested_repo_with_double_force() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    make_nested_repo(p, ".git");
+    assert_cli_success(&run_libra_command(&["clean", "-ffd"], p), "clean -ffd");
+    assert!(
+        !p.join("sub_repo").exists(),
+        "nested repo removed under -ff"
+    );
+}
+
+/// `-nd` (dry-run) does not list a nested repo without double force.
+#[test]
+fn test_clean_dry_run_excludes_nested_without_double_force() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    make_nested_repo(p, ".git");
+    let out = run_libra_command(&["clean", "-nd"], p);
+    assert_cli_success(&out, "clean -nd");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("sub_repo"),
+        "nested repo must not be listed: {stdout}"
+    );
+    // `-nd -ff` DOES list it.
+    let out2 = run_libra_command(&["clean", "-nd", "-ff"], p);
+    assert!(
+        String::from_utf8_lossy(&out2.stdout).contains("sub_repo"),
+        "nested repo listed under -ff"
+    );
+}
+
+/// `--quiet` suppresses the "Skipping repository" warning.
+#[test]
+fn test_clean_quiet_suppresses_skip_warning() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    make_nested_repo(p, ".git");
+    let out = run_libra_command(&["clean", "-fd", "--quiet"], p);
+    assert_cli_success(&out, "clean -fd --quiet");
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("Skipping repository"),
+        "quiet must suppress the skip warning: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(p.join("sub_repo").exists(), "still preserved");
+}
+
+/// A per-file removal failure is tolerated: other files are removed, a warning
+/// is printed, and the command exits 128.
+#[cfg(unix)]
+#[test]
+fn test_clean_tolerant_removal_continues_after_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    if skip_permission_denied_test_if_root("test_clean_tolerant_removal_continues_after_failure") {
+        return;
+    }
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("free.txt"), "removable\n").unwrap();
+    std::fs::create_dir_all(p.join("locked")).unwrap();
+    std::fs::write(p.join("locked/file.txt"), "stuck\n").unwrap();
+    // Read-only parent dir → unlink of the file inside fails.
+    std::fs::set_permissions(p.join("locked"), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let out = run_libra_command(&["clean", "-f"], p);
+
+    // Restore perms so the TempDir can be cleaned up.
+    let _ = std::fs::set_permissions(p.join("locked"), std::fs::Permissions::from_mode(0o755));
+
+    assert_eq!(out.status.code(), Some(128), "partial failure → exit 128");
+    assert!(
+        !p.join("free.txt").exists(),
+        "removable file still cleaned despite the failure"
+    );
+    assert!(p.join("locked/file.txt").exists(), "locked file remains");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("warning: failed to remove"),
+        "stderr should warn: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
