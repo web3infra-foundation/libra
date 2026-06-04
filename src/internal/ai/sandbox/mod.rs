@@ -1803,13 +1803,17 @@ fn locate_bwrap_binary_for_prefer_strict() -> Option<PathBuf> {
         return None;
     }
 
-    let path_env = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_env) {
-        let candidate = dir.join("bwrap");
-        if is_executable_file(&candidate) {
-            return Some(candidate);
+    #[cfg(not(test))]
+    {
+        let path_env = std::env::var_os("PATH")?;
+        for dir in std::env::split_paths(&path_env) {
+            let candidate = dir.join("bwrap");
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
         }
     }
+
     None
 }
 
@@ -2480,18 +2484,31 @@ mod tests {
     #[cfg_attr(target_os = "linux", serial)]
     #[test]
     fn seccomp_policy_env_resolves_path_only_when_non_empty() {
-        // SAFETY: test-only env mutation.
         let prior = std::env::var_os(SANDBOX_SECCOMP_POLICY_ENV);
-        let _policy = match prior {
-            Some(value) => Some(ScopedEnvVar::set(SANDBOX_SECCOMP_POLICY_ENV, value)),
-            None => {
-                // SAFETY: test-only env cleanup before running the assertion.
+
+        struct EnvRestore {
+            key: &'static str,
+            value: Option<std::ffi::OsString>,
+        }
+
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
                 unsafe {
-                    std::env::remove_var(SANDBOX_SECCOMP_POLICY_ENV);
+                    if let Some(value) = &self.value {
+                        std::env::set_var(self.key, value);
+                    } else {
+                        std::env::remove_var(self.key);
+                    }
                 }
-                None
             }
+        }
+
+        let _restore = EnvRestore {
+            key: SANDBOX_SECCOMP_POLICY_ENV,
+            value: prior,
         };
+
+        // SAFETY: test-only env mutation; restored by `_restore`.
         unsafe {
             std::env::remove_var(SANDBOX_SECCOMP_POLICY_ENV);
         }
