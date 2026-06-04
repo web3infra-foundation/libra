@@ -27,7 +27,7 @@ use tokio::{io::AsyncWriteExt, process::Command, sync::Mutex};
 use url::Url;
 
 use super::{
-    DiscoveryResult, FetchStream, ProtocolClient, generate_upload_pack_content,
+    DiscoveryResult, FetchStream, ProtocolClient, ShallowOptions, generate_upload_pack_content,
     parse_discovered_references,
 };
 use crate::{
@@ -358,11 +358,11 @@ impl LocalClient {
         have: &[String],
         want: &[String],
         shallow: &[String],
-        depth: Option<usize>,
+        options: &ShallowOptions,
     ) -> Result<FetchStream, IoError> {
         match self.source_type {
             RepoType::GitRepo => {
-                let body = generate_upload_pack_content(have, want, shallow, depth);
+                let body = generate_upload_pack_content(have, want, shallow, options);
                 let mut child = Command::new("git-upload-pack");
                 child.arg("--stateless-rpc");
                 child.arg(&self.repo_path);
@@ -406,7 +406,7 @@ impl LocalClient {
 
                     let mut reachable_commits = Vec::new();
                     for branch_hash in want {
-                        let commits = get_reachable_commits(branch_hash.to_string(), depth)
+                        let commits = get_reachable_commits(branch_hash.to_string(), options.depth)
                             .await
                             .map_err(|error| {
                                 IoError::other(format!(
@@ -754,7 +754,10 @@ mod tests {
 
         let want = vec![head];
         let have = Vec::new();
-        let stream = client.fetch_objects(&have, &want, &[], None).await.unwrap();
+        let stream = client
+            .fetch_objects(&have, &want, &[], &ShallowOptions::default())
+            .await
+            .unwrap();
         let mut reader = StreamReader::new(stream);
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
@@ -768,7 +771,10 @@ mod tests {
 
         let client = LocalClient::from_path(repo_dir.path()).unwrap();
         let want = vec!["not-a-valid-hash".to_string()];
-        let error = match client.fetch_objects(&[], &want, &[], None).await {
+        let error = match client
+            .fetch_objects(&[], &want, &[], &ShallowOptions::default())
+            .await
+        {
             Ok(_) => panic!("invalid want should fail instead of returning an empty pack"),
             Err(error) => error,
         };
