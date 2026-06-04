@@ -162,6 +162,31 @@ libra clone --reference-if-able /srv/mirror/repo git@github.com:user/repo.git
 libra clone --dissociate --reference /srv/mirror/repo git@github.com:user/repo.git
 ```
 
+### `-l, --local` / `--no-hardlinks`
+
+从**本地**仓库克隆时，直接复用其对象而非重新传输：`--local` 把源的松散对象与 pack 文件硬链接进新克隆（共享 inode），跨文件系统或指定 `--no-hardlinks` 时回退为复制。符号链接对象源会被拒绝（退出码 128）。若源不是本地仓库，该标志会被忽略并给出警告。
+
+```bash
+libra clone -l /srv/repos/project.git my-project
+libra clone -l --no-hardlinks /srv/repos/project.git my-project
+```
+
+### `-s, --shared`
+
+通过**复制语义**复用本地源仓库的对象（不写 `info/alternates`，与 Libra 中 `--reference` 一致）。由于 Libra 的对象读取没有 alternates 回退，这与 Git 的 alternates 共享有意不同。
+
+```bash
+libra clone -s /srv/repos/project.git my-project
+```
+
+### `-j, --jobs <n>`
+
+**Libra 扩展（RESERVED 预留）。** 校验到 1..=16 范围（0 或 >16 退出 129）并保留，但当前是 no-op——Libra 的传输是串行的，没有下游消费者。Git 的 `clone --jobs` 控制 submodule 并行获取，Libra 不支持 submodule，故该名称为未来的传输并发上限预留。
+
+```bash
+libra clone --jobs 4 git@github.com:user/repo.git
+```
+
 ## 常用命令
 
 ```bash

@@ -226,6 +226,40 @@ JSON) — it never leaves a dangling alternates reference. Requires `--reference
 libra clone --dissociate --reference /srv/mirror/repo git@github.com:user/repo.git
 ```
 
+### `-l, --local` / `--no-hardlinks`
+
+When cloning from a **local** repository, reuse its objects directly instead of re-transferring
+them: `--local` hardlinks the source's loose objects and pack files into the new clone (sharing
+inodes), falling back to a copy across filesystems or when `--no-hardlinks` is given. Symlinked
+object sources are rejected (exit 128). If the source is not a local repository, the flag is
+ignored with a warning.
+
+```bash
+libra clone -l /srv/repos/project.git my-project
+libra clone -l --no-hardlinks /srv/repos/project.git my-project
+```
+
+### `-s, --shared`
+
+Reuse a local source repository's objects via **copy semantics** (no `info/alternates` borrow,
+same as `--reference`/`--shared` elsewhere in Libra). Intentionally different from Git's
+alternates-sharing because Libra's object reader has no alternates fallback.
+
+```bash
+libra clone -s /srv/repos/project.git my-project
+```
+
+### `-j, --jobs <n>`
+
+**Libra extension (reserved).** Validated to the range 1..=16 (0 or >16 exit 129) and retained,
+but currently a no-op — Libra's transport is serial and there is no downstream consumer. Git's
+`clone --jobs` controls submodule fetches, which Libra does not support, so the name is reserved
+for a future transport-concurrency cap.
+
+```bash
+libra clone --jobs 4 git@github.com:user/repo.git
+```
+
 ## Common Commands
 
 ```bash

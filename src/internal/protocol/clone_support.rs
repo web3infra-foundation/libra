@@ -112,6 +112,39 @@ fn copy_dir_recursive(
     dest: &Path,
     copied: &mut usize,
 ) -> Result<(), CloneSupportError> {
+    let mut report = LinkReport::default();
+    reuse_dir_recursive(src, dest, false, &mut report)?;
+    *copied += report.copied;
+    Ok(())
+}
+
+/// Outcome of [`link_objects`]: how many files were hardlinked versus copied
+/// (e.g. when a cross-filesystem hardlink fell back to a copy).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LinkReport {
+    pub hardlinked: usize,
+    pub copied: usize,
+}
+
+/// Hardlink every loose object and pack file from `src_objects` into
+/// `dest_objects`, falling back to a copy when a hardlink is not possible (for
+/// example across filesystems). Same security guards as [`copy_objects`].
+pub fn link_objects(
+    src_objects: &Path,
+    dest_objects: &Path,
+) -> Result<LinkReport, CloneSupportError> {
+    fs::create_dir_all(dest_objects)?;
+    let mut report = LinkReport::default();
+    reuse_dir_recursive(src_objects, dest_objects, true, &mut report)?;
+    Ok(report)
+}
+
+fn reuse_dir_recursive(
+    src: &Path,
+    dest: &Path,
+    hardlink: bool,
+    report: &mut LinkReport,
+) -> Result<(), CloneSupportError> {
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
@@ -125,12 +158,24 @@ fn copy_dir_recursive(
         let dest_path = dest.join(entry.file_name());
         if file_type.is_dir() {
             fs::create_dir_all(&dest_path)?;
-            copy_dir_recursive(&src_path, &dest_path, copied)?;
+            reuse_dir_recursive(&src_path, &dest_path, hardlink, report)?;
         } else if file_type.is_file() {
             // Content-addressed: an existing destination file is the same object.
-            if !dest_path.exists() {
+            if dest_path.exists() {
+                continue;
+            }
+            if hardlink {
+                match fs::hard_link(&src_path, &dest_path) {
+                    Ok(()) => report.hardlinked += 1,
+                    Err(_) => {
+                        // Cross-filesystem (EXDEV) or unsupported — fall back to copy.
+                        fs::copy(&src_path, &dest_path)?;
+                        report.copied += 1;
+                    }
+                }
+            } else {
                 fs::copy(&src_path, &dest_path)?;
-                *copied += 1;
+                report.copied += 1;
             }
         }
     }
@@ -199,6 +244,31 @@ mod tests {
         // Re-copy is idempotent: existing content-addressed files are skipped.
         let copied_again = copy_objects(&src_objects, &dest_objects).unwrap();
         assert_eq!(copied_again, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn link_objects_hardlinks_same_filesystem() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src_objects = dir.path().join("src-objects");
+        fs::create_dir_all(src_objects.join("pack")).unwrap();
+        fs::write(src_objects.join("pack").join("pack-1.pack"), b"PACK").unwrap();
+
+        let dest_objects = dir.path().join("dest-objects");
+        let report = link_objects(&src_objects, &dest_objects).unwrap();
+        assert_eq!(report.hardlinked, 1);
+        assert_eq!(report.copied, 0);
+
+        // Hardlinked files share an inode with the source.
+        let src_ino = fs::metadata(src_objects.join("pack").join("pack-1.pack"))
+            .unwrap()
+            .ino();
+        let dest_ino = fs::metadata(dest_objects.join("pack").join("pack-1.pack"))
+            .unwrap()
+            .ino();
+        assert_eq!(src_ino, dest_ino, "hardlinked object must share an inode");
     }
 
     #[cfg(unix)]

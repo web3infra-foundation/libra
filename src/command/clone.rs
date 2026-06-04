@@ -101,7 +101,9 @@ const CLOUD_CLONE_D1_API_BASE_URL_ENV: &str = "LIBRA_D1_API_BASE_URL";
     libra clone --no-checkout <url>                       Clone without checking out the working tree\n    \
     libra clone --mirror <url>                            Mirror clone (bare, all refs)\n    \
     libra clone --reference /path/to/repo <url>           Copy objects from a local reference repository\n    \
-    libra clone --dissociate --reference /repo <url>      Reference, then ensure no borrow dependency")]
+    libra clone --dissociate --reference /repo <url>      Reference, then ensure no borrow dependency\n    \
+    libra clone --filter blob:none --no-checkout <url>    Partial clone (omit blob contents)\n    \
+    libra clone -l /path/to/local-repo dest               Local clone, hardlinking objects")]
 pub struct CloneArgs {
     /// The remote repository location to clone from, usually a URL with HTTPS or SSH
     pub remote_repo: String,
@@ -176,6 +178,29 @@ pub struct CloneArgs {
     /// no-op beyond reporting `dissociated = true`). Requires `--reference`.
     #[clap(long)]
     pub dissociate: bool,
+
+    /// Number of parallel transfer jobs. RESERVED: validated to 1..=16 and kept,
+    /// but currently a no-op — Libra's transport is serial and there is no
+    /// downstream consumer. (Git's `clone --jobs` controls submodule fetches,
+    /// which Libra does not support, so the flag is reserved for a future
+    /// transport-concurrency cap.)
+    #[clap(short = 'j', long, value_name = "n")]
+    pub jobs: Option<usize>,
+
+    /// Optimize a clone from a local repository by hardlinking its objects
+    /// (falls back to copying across filesystems or with --no-hardlinks).
+    /// Symlinked object sources are rejected for security.
+    #[clap(short = 'l', long)]
+    pub local: bool,
+
+    /// With --local, copy objects instead of hardlinking them.
+    #[clap(long)]
+    pub no_hardlinks: bool,
+
+    /// Reuse a local source repository's objects via copy semantics (no
+    /// alternates dependency); same security guards as --reference.
+    #[clap(short = 's', long)]
+    pub shared: bool,
 }
 
 const REPO_MARKERS: &[&str] = &["description", "libra.db", "info/exclude", "objects"];
@@ -1041,12 +1066,16 @@ fn validate_clone_args(args: &CloneArgs) -> CliResult<()> {
             || args.mirror
             || args.reference.is_some()
             || args.reference_if_able.is_some()
-            || args.dissociate)
+            || args.dissociate
+            || args.local
+            || args.shared
+            || args.no_hardlinks
+            || args.jobs.is_some())
     {
         return Err(CliError::command_usage(
             "shaping flags (--shallow-since/--shallow-exclude/--reject-shallow/--no-single-branch/\
-             --origin/--no-checkout/--mirror/--reference/--reference-if-able/--dissociate) are not \
-             supported with cloud (libra+cloud://) sources",
+             --origin/--no-checkout/--mirror/--reference/--reference-if-able/--dissociate/--local/\
+             --shared/--no-hardlinks/--jobs) are not supported with cloud (libra+cloud://) sources",
         )
         .with_stable_code(StableErrorCode::CliInvalidArguments)
         .with_hint(
@@ -1059,6 +1088,13 @@ fn validate_clone_args(args: &CloneArgs) -> CliResult<()> {
             "--dissociate requires --reference or --reference-if-able",
         )
         .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+
+    if let Some(jobs) = args.jobs
+        && (jobs == 0 || jobs > 16)
+    {
+        return Err(CliError::command_usage("--jobs must be between 1 and 16")
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
     }
 
     if let Some(since) = &args.shallow_since {
@@ -1157,6 +1193,56 @@ fn copy_reference_objects(reference: &str, if_able: bool) -> Result<Option<Strin
     clone_support::copy_objects(&src_objects, &dest_objects)
         .map_err(|error| map_clone_support_error(reference, error))?;
     Ok(Some(canonical.display().to_string()))
+}
+
+/// Resolve a clone source to a local repository path when it is one, supporting
+/// `file://` URLs and bare filesystem paths. Returns `None` for non-local
+/// schemes (`http(s)://`, `ssh://`, `git@…`) or paths that do not exist.
+fn resolve_local_source_repo(remote_repo: &str) -> Option<PathBuf> {
+    let trimmed = remote_repo.trim_end_matches('/');
+    let candidate = if let Some(rest) = trimmed.strip_prefix("file://") {
+        rest.to_string()
+    } else if trimmed.contains("://") || is_scp_like_remote(trimmed) {
+        return None;
+    } else {
+        trimmed.to_string()
+    };
+    let path = PathBuf::from(candidate);
+    path.exists().then_some(path)
+}
+
+/// Heuristic for SCP-style SSH specs (`git@host:path`) which are not local paths.
+fn is_scp_like_remote(spec: &str) -> bool {
+    // A `host:path` form with no scheme and a colon before any slash.
+    match (spec.find(':'), spec.find('/')) {
+        (Some(colon), Some(slash)) => colon < slash && !spec.starts_with('/'),
+        (Some(_), None) => !spec.starts_with('/'),
+        _ => false,
+    }
+}
+
+/// Reuse a local source repository's objects for `--local`/`--shared`. `--local`
+/// hardlinks (falling back to copy across filesystems or with `--no-hardlinks`);
+/// `--shared` copies. Returns an optional warning when the source is not local.
+fn reuse_local_source_objects(args: &CloneArgs) -> Result<Option<String>, CloneError> {
+    let Some(source) = resolve_local_source_repo(&args.remote_repo) else {
+        return Ok(Some(
+            "--local/--shared ignored: the clone source is not a local repository".to_string(),
+        ));
+    };
+    let canonical = clone_support::check_local_security(&source)
+        .map_err(|error| map_clone_support_error(&args.remote_repo, error))?;
+    let src_objects = clone_support::resolve_reference_objects_dir(&canonical)
+        .map_err(|error| map_clone_support_error(&args.remote_repo, error))?;
+    let dest_objects = path::objects();
+    if args.local && !args.no_hardlinks {
+        clone_support::link_objects(&src_objects, &dest_objects)
+            .map_err(|error| map_clone_support_error(&args.remote_repo, error))?;
+    } else {
+        clone_support::copy_objects(&src_objects, &dest_objects)
+            .map_err(|error| map_clone_support_error(&args.remote_repo, error))?;
+    }
+    Ok(None)
 }
 
 fn display_home_relative(path: &str) -> String {
@@ -3081,6 +3167,13 @@ async fn clone_into_destination(
     } else {
         None
     };
+
+    // --- Local source object reuse (`--local`/`--shared`) ---
+    if (args.local || args.shared)
+        && let Some(warning) = reuse_local_source_objects(args)?
+    {
+        reference_warnings.push(warning);
+    }
 
     // --- Step 5: Fetch objects ---
     if !output.quiet && !output.is_json() {

@@ -2397,3 +2397,214 @@ fn cloud_source_rejects_reference() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Batch 3a — jobs / local / no-hardlinks / shared
+// ---------------------------------------------------------------------------
+
+/// `--local` hardlinks the source's objects: a destination loose object shares
+/// an inode with the source, and the clone passes fsck.
+#[cfg(unix)]
+#[test]
+fn local_clone_hardlinks_objects() {
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-local");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "-l",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--local clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Find a loose object in the source and check the destination shares its inode.
+    let src_objects = remote.join("objects");
+    let mut linked = false;
+    for top in fs::read_dir(&src_objects).unwrap().flatten() {
+        let name = top.file_name();
+        let name = name.to_string_lossy();
+        if name == "pack" || name == "info" || name.len() != 2 {
+            continue;
+        }
+        for obj in fs::read_dir(top.path()).unwrap().flatten() {
+            let rel = format!("{}/{}", name, obj.file_name().to_string_lossy());
+            let dest_obj = dest.join(".libra").join("objects").join(&rel);
+            if dest_obj.exists() {
+                let src_ino = fs::metadata(obj.path()).unwrap().ino();
+                let dest_ino = fs::metadata(&dest_obj).unwrap().ino();
+                assert_eq!(src_ino, dest_ino, "--local object should be hardlinked");
+                linked = true;
+            }
+        }
+    }
+    assert!(linked, "expected at least one hardlinked loose object");
+
+    let fsck = run_libra(&["fsck"], &dest);
+    assert_eq!(fsck.status.code(), Some(0), "fsck must pass after --local");
+}
+
+/// `--shared` copies the source's objects (no alternates dependency) and passes fsck.
+#[test]
+fn shared_clone_copies_objects_no_alternates() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-shared");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "-s",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--shared clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !dest
+            .join(".libra")
+            .join("objects")
+            .join("info")
+            .join("alternates")
+            .exists(),
+        "--shared must not write info/alternates"
+    );
+    let fsck = run_libra(&["fsck"], &dest);
+    assert_eq!(fsck.status.code(), Some(0), "fsck must pass after --shared");
+}
+
+/// `--jobs` is strictly range-checked (1..=16); 0 and >16 exit 129.
+#[test]
+fn jobs_out_of_range_exits_129() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+
+    for bad in ["0", "17", "99"] {
+        let dest = temp.path().join(format!("clone-jobs-{bad}"));
+        let output = run_libra(
+            &[
+                "clone",
+                "--jobs",
+                bad,
+                remote.to_str().unwrap(),
+                dest.to_str().unwrap(),
+            ],
+            temp.path(),
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(129),
+            "--jobs {bad} must exit 129: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// `--jobs 16` is accepted (boundary), `--jobs 17` is rejected.
+#[test]
+fn jobs_boundary_16_ok_17_rejected() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+
+    let ok = run_libra(
+        &[
+            "clone",
+            "--jobs",
+            "16",
+            remote.to_str().unwrap(),
+            temp.path().join("clone-jobs-16").to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        ok.status.code(),
+        Some(0),
+        "--jobs 16 must be accepted: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+
+    let rejected = run_libra(
+        &[
+            "clone",
+            "--jobs",
+            "17",
+            remote.to_str().unwrap(),
+            temp.path().join("clone-jobs-17").to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        rejected.status.code(),
+        Some(129),
+        "--jobs 17 must be rejected"
+    );
+}
+
+/// A symlinked local object source is rejected for `--local` (exit 128).
+#[cfg(unix)]
+#[test]
+fn local_clone_rejects_symlink_object_source() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let link = temp.path().join("src-link");
+    symlink(&remote, &link).unwrap();
+    let dest = temp.path().join("clone-local-symlink");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "-l",
+            link.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "symlinked --local source must be rejected with 128: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Cloud sources reject `--local`, `--shared`, and `--jobs` (exit 129).
+#[test]
+fn cloud_source_rejects_local_shared_jobs() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("restored-local");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--shared",
+            "libra+cloud://code.example.com/kepler-ledger",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "cloud source must reject --shared: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
