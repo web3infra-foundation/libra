@@ -3009,3 +3009,30 @@ fn clone_documentation_and_help_sync() {
         );
     }
 }
+
+/// Credentials in a malformed/invalid URL are redacted from the error reason
+/// (not just the discovery error), covering the spec-classification path.
+#[test]
+fn credentials_redacted_in_malformed_url_error() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("clone-malformed");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "file://user:MalformedSecret@nohost/repo",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_ne!(output.status.code(), Some(0), "malformed URL must fail");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !combined.contains("MalformedSecret"),
+        "credentials must be redacted from malformed-URL errors, got: {combined}"
+    );
+}

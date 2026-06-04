@@ -81,22 +81,28 @@ pub fn check_local_security(path: &Path) -> Result<PathBuf, CloneSupportError> {
 
 /// Resolve the object directory of a reference repository, supporting libra
 /// (`.libra/objects`), bare (`objects`), and git working-tree (`.git/objects`)
-/// layouts. `reference` should already be canonical (see [`check_local_security`]).
-/// A symlinked object directory is rejected so the security guard cannot be
-/// bypassed by pointing the object root itself at another location.
+/// layouts. `reference` **must** already be canonical (see [`check_local_security`]).
+///
+/// Each candidate is canonicalized and required to remain **inside** the
+/// canonical reference root, so neither the `objects` directory itself nor any
+/// intermediate component (`.libra`, `.git`) can be a symlink that escapes the
+/// validated source — closing the symlink-bypass hole.
 pub fn resolve_reference_objects_dir(reference: &Path) -> Result<PathBuf, CloneSupportError> {
     for candidate in [
         reference.join(".libra").join("objects"),
         reference.join("objects"),
         reference.join(".git").join("objects"),
     ] {
-        match fs::symlink_metadata(&candidate) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(CloneSupportError::Symlink(candidate));
-            }
-            Ok(metadata) if metadata.is_dir() => return Ok(candidate),
-            _ => continue,
+        if !candidate.is_dir() {
+            continue;
         }
+        let canonical = fs::canonicalize(&candidate)?;
+        if !canonical.starts_with(reference) {
+            // A symlinked component routed the object directory outside the
+            // validated source root.
+            return Err(CloneSupportError::Symlink(candidate));
+        }
+        return Ok(canonical);
     }
     Err(CloneSupportError::NotARepository(reference.to_path_buf()))
 }
@@ -207,26 +213,31 @@ mod tests {
     #[test]
     fn resolve_objects_dir_prefers_libra_layout() {
         let dir = tempfile::tempdir().unwrap();
-        let objects = dir.path().join(".libra").join("objects");
+        // The reference must be canonical (production canonicalizes via
+        // `check_local_security`); tempdirs may live under a symlinked root.
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let objects = root.join(".libra").join("objects");
         fs::create_dir_all(&objects).unwrap();
-        let resolved = resolve_reference_objects_dir(dir.path()).unwrap();
+        let resolved = resolve_reference_objects_dir(&root).unwrap();
         assert_eq!(resolved, objects);
     }
 
     #[test]
     fn resolve_objects_dir_supports_bare_and_git_layouts() {
         let bare = tempfile::tempdir().unwrap();
-        fs::create_dir_all(bare.path().join("objects")).unwrap();
+        let bare_root = fs::canonicalize(bare.path()).unwrap();
+        fs::create_dir_all(bare_root.join("objects")).unwrap();
         assert_eq!(
-            resolve_reference_objects_dir(bare.path()).unwrap(),
-            bare.path().join("objects")
+            resolve_reference_objects_dir(&bare_root).unwrap(),
+            bare_root.join("objects")
         );
 
         let git = tempfile::tempdir().unwrap();
-        fs::create_dir_all(git.path().join(".git").join("objects")).unwrap();
+        let git_root = fs::canonicalize(git.path()).unwrap();
+        fs::create_dir_all(git_root.join(".git").join("objects")).unwrap();
         assert_eq!(
-            resolve_reference_objects_dir(git.path()).unwrap(),
-            git.path().join(".git").join("objects")
+            resolve_reference_objects_dir(&git_root).unwrap(),
+            git_root.join(".git").join("objects")
         );
     }
 

@@ -498,6 +498,11 @@ pub enum CloneError {
     PartialCloneMissingBlob { filter: String },
     #[error("the remote does not support partial clone filtering (--filter '{filter}')")]
     FilterNotSupported { filter: String },
+    #[error("the remote does not advertise the '{capability}' capability required for {feature}")]
+    ServerCapabilityMissing {
+        feature: &'static str,
+        capability: &'static str,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -892,6 +897,12 @@ impl From<CloneError> for CliError {
                 .with_hint(
                     "the server must advertise the `filter` capability \
                      (`uploadpack.allowFilter`); omit --filter or use a server that supports it",
+                ),
+            CloneError::ServerCapabilityMissing { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_hint(
+                    "the remote does not support this shallow request; use a server that \
+                     advertises it, or omit the flag",
                 ),
         }
     }
@@ -1627,25 +1638,47 @@ async fn execute_clone_inner(
         .await
         .map_err(|source| (CloneError::DiscoverRemote { source }, None))?;
 
-    // --- Fail-fast: --filter against a server that advertised capabilities but
-    // not `filter` ---. When the remote advertises a capability set (HTTP/SSH
-    // git servers) that omits `filter`, reject up front with a clear error
-    // instead of a confusing "filtering capability not negotiated" failure mid
-    // fetch. Local transports advertise no capabilities (empty set), so the
-    // request is still attempted there.
-    if let Some(filter) = &args.filter
-        && !discovery.capabilities.is_empty()
-        && !discovery
-            .capabilities
-            .iter()
-            .any(|cap| cap == "filter" || cap.starts_with("filter"))
-    {
-        return Err((
-            CloneError::FilterNotSupported {
-                filter: filter.clone(),
-            },
-            None,
-        ));
+    // --- Fail-fast: requested upload-pack extensions the server did not
+    // advertise ---. When the remote advertises a capability set (HTTP/SSH git
+    // servers) that omits a requested extension, reject up front with a clear
+    // error instead of a confusing mid-fetch protocol failure. Local transports
+    // advertise no capabilities (empty set), so requests are still attempted
+    // there (the upload-pack process validates them directly).
+    if !discovery.capabilities.is_empty() {
+        let advertises = |capability: &str| {
+            discovery
+                .capabilities
+                .iter()
+                .any(|cap| cap == capability || cap.starts_with(&format!("{capability}=")))
+        };
+        if let Some(filter) = &args.filter
+            && !advertises("filter")
+        {
+            return Err((
+                CloneError::FilterNotSupported {
+                    filter: filter.clone(),
+                },
+                None,
+            ));
+        }
+        if args.shallow_since.is_some() && !advertises("deepen-since") {
+            return Err((
+                CloneError::ServerCapabilityMissing {
+                    feature: "--shallow-since",
+                    capability: "deepen-since",
+                },
+                None,
+            ));
+        }
+        if !args.shallow_exclude.is_empty() && !advertises("deepen-not") {
+            return Err((
+                CloneError::ServerCapabilityMissing {
+                    feature: "--shallow-exclude",
+                    capability: "deepen-not",
+                },
+                None,
+            ));
+        }
     }
 
     // --- Step 3: Destination pre-checks ---
@@ -1866,7 +1899,10 @@ async fn clone_cloud_publish_into_destination(
     restore_cloud_publish_ai_objects(source, restore_plan, r2_storage, &local_storage, &db_conn)
         .await?;
 
-    configure_cloud_publish_checkout(source, restore_plan, &args.remote_repo).await?;
+    // Redact any credentials before persisting/surfacing the cloud source URL
+    // (config_kv and JSON/human output are non-vault, user-visible surfaces).
+    let redacted_remote = fetch::redact_url_credentials(&args.remote_repo);
+    configure_cloud_publish_checkout(source, restore_plan, &redacted_remote).await?;
 
     if !output.quiet && !output.is_json() {
         eprintln!("Checking out working copy ...");
@@ -1899,7 +1935,7 @@ async fn clone_cloud_publish_into_destination(
     Ok(CloneOutput {
         path: local_path.to_string_lossy().into_owned(),
         bare: false,
-        remote_url: args.remote_repo.clone(),
+        remote_url: redacted_remote,
         branch: cloud_checkout_branch_name(&restore_plan.checkout),
         object_format,
         repo_id: init_output.repo_id,

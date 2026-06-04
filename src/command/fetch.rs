@@ -937,10 +937,13 @@ pub(crate) async fn discover_remote_with_name(
 ) -> Result<(RemoteClient, DiscoveryResult), FetchError> {
     let remote_client =
         RemoteClient::from_spec_with_remote(remote_spec, remote_name).map_err(|message| {
-            let (kind, reason) = classify_remote_spec_error(remote_spec, &message);
+            // Classify against a credential-redacted spec so neither the `spec`
+            // field nor the `reason` string (which may interpolate the spec for
+            // malformed URLs) can leak a token/password.
+            let redacted_spec = redact_url_credentials(remote_spec);
+            let (kind, reason) = classify_remote_spec_error(&redacted_spec, &message);
             FetchError::InvalidRemoteSpec {
-                // Redact credentials so a token/password never reaches error output.
-                spec: redact_url_credentials(remote_spec),
+                spec: redacted_spec,
                 kind,
                 reason,
             }
@@ -982,10 +985,16 @@ fn classify_remote_spec_error(remote_spec: &str, message: &str) -> (RemoteSpecEr
     }
     let lower = message.to_ascii_lowercase();
     if lower.contains("unsupported") && lower.contains("scheme") {
+        // The scheme-only message carries no userinfo.
         return (RemoteSpecErrorKind::UnsupportedScheme, message.to_string());
     }
-    // Default to MalformedUrl for other spec errors (bad syntax, etc.)
-    (RemoteSpecErrorKind::MalformedUrl, message.to_string())
+    // Default to MalformedUrl. The raw `message` may interpolate the original
+    // spec (e.g. "invalid file url: file://user:pass@host/…"), so build the
+    // reason from the already-redacted `remote_spec` instead of the raw message.
+    (
+        RemoteSpecErrorKind::MalformedUrl,
+        format!("'{remote_spec}' is not a valid remote URL or local path"),
+    )
 }
 
 pub(crate) fn normalize_branch_ref(branch: &str) -> String {
