@@ -32,7 +32,7 @@ EXAMPLES:
     libra open --print-only                               Print the resolved URL without opening the browser
     libra open origin --print-only                        Print a specific remote's URL without opening the browser";
 
-#[derive(Parser, Debug, Clone)]
+#[derive(Parser, Debug, Clone, Default)]
 #[command(after_help = OPEN_EXAMPLES)]
 pub struct OpenArgs {
     /// Remote name (e.g. `origin`) or a direct URL. Omit to auto-detect from the current branch's upstream
