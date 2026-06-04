@@ -6,9 +6,8 @@
 
 use std::{
     collections::HashMap,
-    env, fs, io,
+    fs, io,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -361,10 +360,12 @@ fn fuse_data_root() -> PathBuf {
     util::storage_path().join("worktrees-fuse")
 }
 
+#[cfg(target_os = "macos")]
 struct DirGuard {
     old_dir: PathBuf,
 }
 
+#[cfg(target_os = "macos")]
 impl DirGuard {
     fn change_to(new_dir: &Path) -> io::Result<Self> {
         let old_dir = env::current_dir()?;
@@ -373,6 +374,7 @@ impl DirGuard {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for DirGuard {
     fn drop(&mut self) {
         let _ = env::set_current_dir(&self.old_dir);
@@ -578,6 +580,8 @@ fn spawn_macos_fuse_daemon(
     privileged: bool,
     allow_other: bool,
 ) -> io::Result<()> {
+    use std::process::{Command, Stdio};
+    use std::env;
     let lower_dir = lower_dirs
         .first()
         .ok_or_else(|| io::Error::other("macOS FUSE daemon requires a lower layer"))?;
@@ -685,12 +689,12 @@ async fn add_fuse_worktree(
     let id = Uuid::new_v4().simple().to_string();
     let data_dir = fuse_data_root().join(id);
     let upper_dir = data_dir.join("upper");
-    let lower_dir = data_dir.join("lower");
+    let _lower_dir = data_dir.join("lower");
     fs::create_dir_all(&upper_dir)?;
 
     #[cfg(target_os = "macos")]
     {
-        fs::create_dir_all(&lower_dir)?;
+        fs::create_dir_all(&_lower_dir)?;
         if let Err(err) = populate_macos_fuse_upper_dir(&upper_dir, &checkout_branch).await {
             let _ = fs::remove_dir_all(&data_dir);
             if created_target {
@@ -701,7 +705,7 @@ async fn add_fuse_worktree(
     }
 
     #[cfg(target_os = "macos")]
-    let lower_dirs = vec![lower_dir.clone()];
+    let lower_dirs = vec![_lower_dir.clone()];
     #[cfg(not(target_os = "macos"))]
     let lower_dirs = vec![canonicalize_like_worktree(util::working_dir())?];
 
