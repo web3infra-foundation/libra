@@ -221,6 +221,10 @@ struct CherryPickOpts {
     keep_redundant_commits: bool,
     #[serde(default)]
     gpg_sign: bool,
+    /// Mainline parent for merge-commit picks; applies to every commit in the
+    /// `-m <n>` invocation, so it must survive a conflict + resume.
+    #[serde(default)]
+    mainline: Option<usize>,
 }
 
 impl CherryPickOpts {
@@ -233,13 +237,15 @@ impl CherryPickOpts {
             allow_empty_message: args.allow_empty_message,
             keep_redundant_commits: args.keep_redundant_commits,
             gpg_sign: args.gpg_sign,
+            mainline: args.mainline,
         }
     }
 
     /// Rebuild a minimal [`CherryPickArgs`] carrying just these options (used to
-    /// re-run the commit-assembly path during `--continue`/`--skip`). All
-    /// commit-shaping modifiers (including `-S`) must round-trip so resumed
-    /// commits keep the same shape — e.g. a `-S` sequence stays signed.
+    /// re-run the commit-assembly path during `--continue`/`--skip`). EVERY
+    /// commit-shaping modifier must round-trip so resumed commits keep the same
+    /// shape — e.g. a `-S` sequence stays signed and a `-m <n>` sequence keeps
+    /// applying later merge commits along the chosen parent.
     fn into_args(self) -> CherryPickArgs {
         CherryPickArgs {
             append_source: self.append_source,
@@ -249,6 +255,7 @@ impl CherryPickOpts {
             allow_empty_message: self.allow_empty_message,
             keep_redundant_commits: self.keep_redundant_commits,
             gpg_sign: self.gpg_sign,
+            mainline: self.mainline,
             ..Default::default()
         }
     }
@@ -1823,5 +1830,37 @@ mod tests {
             CherryPickError::SaveFailed("ignored".to_string()).stable_code(),
             StableErrorCode::IoWriteFailed,
         );
+    }
+
+    /// Every commit-shaping modifier must round-trip through `CherryPickOpts`
+    /// serde (the `cherry_pick_state.opts_json` blob), so a conflict + resume
+    /// replays the rest of the sequence with the same options. Guards against
+    /// silently dropping a flag (e.g. `-S` producing unsigned commits, or `-m`
+    /// failing a later merge commit) on `--continue`/`--skip`.
+    #[test]
+    fn cherry_pick_opts_round_trip_preserves_all_modifiers() {
+        let args = CherryPickArgs {
+            append_source: true,
+            signoff: true,
+            edit: true,
+            allow_empty: true,
+            allow_empty_message: true,
+            keep_redundant_commits: true,
+            gpg_sign: true,
+            mainline: Some(2),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&CherryPickOpts::from_args(&args)).unwrap();
+        let rebuilt = serde_json::from_str::<CherryPickOpts>(&json)
+            .unwrap()
+            .into_args();
+        assert!(rebuilt.append_source);
+        assert!(rebuilt.signoff);
+        assert!(rebuilt.edit);
+        assert!(rebuilt.allow_empty);
+        assert!(rebuilt.allow_empty_message);
+        assert!(rebuilt.keep_redundant_commits);
+        assert!(rebuilt.gpg_sign);
+        assert_eq!(rebuilt.mainline, Some(2));
     }
 }
