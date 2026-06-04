@@ -198,3 +198,105 @@ fn test_describe_invalid_reference_returns_cli_invalid_target() {
     assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-003");
 }
+
+#[test]
+fn test_describe_no_tags_lightweight_only_errors() {
+    let repo = create_committed_repo_via_cli();
+
+    // A lightweight tag is ignored without `--tags`, so there is nothing to
+    // describe → RepoStateInvalid (128).
+    let tag_output = run_libra_command(&["tag", "v-light"], repo.path());
+    assert_cli_success(&tag_output, "failed to create lightweight tag");
+
+    let output = run_libra_command(&["describe"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+}
+
+#[test]
+fn test_describe_no_tags_no_always_errors() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["describe"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+}
+
+#[test]
+fn test_describe_exact_match_with_distance_errors() {
+    let repo = create_committed_repo_via_cli();
+
+    let tag_output = run_libra_command(&["tag", "-m", "Release v1.0", "v1.0"], repo.path());
+    assert_cli_success(&tag_output, "failed to create tag");
+
+    // Advance one commit so HEAD is distance 1 from the tag.
+    std::fs::write(repo.path().join("tracked.txt"), "tracked\nnext\n")
+        .expect("failed to update tracked file");
+    let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert_cli_success(&add_output, "failed to stage updated tracked file");
+    let commit_output = run_libra_command(&["commit", "-m", "next", "--no-verify"], repo.path());
+    assert_cli_success(&commit_output, "failed to create second commit");
+
+    let output = run_libra_command(&["describe", "--exact-match"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "exact-match at distance>0 should fail with 128: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+}
+
+#[test]
+fn test_describe_exact_match_at_tag_succeeds() {
+    let repo = create_committed_repo_via_cli();
+
+    let tag_output = run_libra_command(&["tag", "-m", "Release v1.0", "v1.0"], repo.path());
+    assert_cli_success(&tag_output, "failed to create tag");
+
+    let output = run_libra_command(&["describe", "--exact-match", "--json"], repo.path());
+    assert_cli_success(&output, "exact-match at the tag should succeed");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["result"], "v1.0");
+    assert_eq!(json["data"]["distance"], 0);
+}
+
+#[test]
+fn test_describe_first_parent_json_succeeds() {
+    // First-parent traversal on a linear history reduces to the normal walk.
+    let repo = create_committed_repo_via_cli();
+
+    let tag_output = run_libra_command(&["tag", "-m", "Release v1.0", "v1.0"], repo.path());
+    assert_cli_success(&tag_output, "failed to create tag");
+
+    std::fs::write(repo.path().join("tracked.txt"), "tracked\nnext\n")
+        .expect("failed to update tracked file");
+    let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert_cli_success(&add_output, "failed to stage updated tracked file");
+    let commit_output = run_libra_command(&["commit", "-m", "next", "--no-verify"], repo.path());
+    assert_cli_success(&commit_output, "failed to create second commit");
+
+    let output = run_libra_command(&["describe", "--first-parent", "--json"], repo.path());
+    assert_cli_success(&output, "describe --first-parent --json should succeed");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["tag"], "v1.0");
+    assert_eq!(json["data"]["distance"], 1);
+}
+
+#[test]
+fn test_describe_negative_abbrev_rejected_by_clap() {
+    let repo = create_committed_repo_via_cli();
+
+    // `--abbrev=-1` cannot parse as `usize`; clap rejects it. Libra maps clap
+    // parse errors to 129 (classify_parse_error), not clap's native 2.
+    let output = run_libra_command(&["describe", "--abbrev=-1"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "negative --abbrev should be rejected at parse time: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

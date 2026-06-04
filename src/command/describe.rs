@@ -25,6 +25,8 @@ EXAMPLES:
     libra describe --always         Fall back to abbreviated commit hash when no tag matches
     libra describe HEAD~1           Describe a specific commit-ish (hash, ref, or HEAD~N)
     libra describe --abbrev 12      Use 12 hex digits instead of the default 7 in the hash portion
+    libra describe --exact-match    Only succeed when a tag points at the commit exactly
+    libra describe --first-parent   Follow only the first parent of merge commits
     libra describe --json           Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -44,7 +46,20 @@ pub struct DescribeArgs {
     /// Show an abbreviated commit hash when no tag can describe the target.
     #[clap(long)]
     pub always: bool,
+
+    /// Only describe the target when a tag points at it exactly (distance 0)
+    #[clap(long = "exact-match")]
+    pub exact_match: bool,
+
+    /// Follow only the first parent of merge commits when walking history
+    #[clap(long = "first-parent")]
+    pub first_parent: bool,
 }
+
+/// Maximum number of commits the describe walk visits before failing. Guards
+/// against unbounded traversal (and OOM) on very deep histories; when the cap is
+/// hit without `--always`, the command fails with [`DescribeError::TraversalLimitExceeded`].
+const MAX_WALK: usize = 10_000;
 
 // Entry in tag lookup map
 struct TagInfo {
@@ -78,6 +93,10 @@ enum DescribeError {
     LoadCommit { commit_id: String, detail: String },
     #[error("no names found, cannot describe anything")]
     NoNamesFound,
+    #[error(
+        "history too deep: walked more than {limit} commits; pass --always or narrow the range"
+    )]
+    TraversalLimitExceeded { limit: usize },
 }
 
 impl From<CommitBaseError> for DescribeError {
@@ -153,56 +172,127 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
         }
     }
 
-    // 3. Search for  the closest tag using BFS (to find the shortest distance)
-    let mut queue = VecDeque::new();
-    let mut visited = HashSet::new();
+    // 3. `--exact-match` short-circuits: only a distance-0 tag describes the
+    //    target; anything else is a (run-time) failure, matching Git.
+    if args.exact_match {
+        return match tag_map.get(&start_hash) {
+            Some(tag_info) => Ok(describe_output(
+                input,
+                resolved_commit,
+                &tag_info.name,
+                0,
+                abbrev,
+            )),
+            None => Err(DescribeError::NoNamesFound),
+        };
+    }
 
-    // Queue storage format: (current_commit_hash, distance_from_start)
-    queue.push_back((start_hash, 0));
-    visited.insert(start_hash);
+    // 4. Search for the closest tag using a bounded BFS. The commit loader is
+    //    injected so the walk can be unit-tested against an in-memory graph.
+    let load = |hash: &ObjectHash| -> Result<Vec<ObjectHash>, DescribeError> {
+        let commit = load_object::<Commit>(hash).map_err(|error| DescribeError::LoadCommit {
+            commit_id: hash.to_string(),
+            detail: error.to_string(),
+        })?;
+        Ok(commit.parent_commit_ids)
+    };
+
+    match find_nearest_tag(start_hash, &tag_map, args.first_parent, MAX_WALK, load) {
+        Ok(Some((tag_name, dist))) => Ok(describe_output(
+            input,
+            resolved_commit,
+            &tag_name,
+            dist,
+            abbrev,
+        )),
+        Ok(None) => {
+            if args.always {
+                Ok(always_output(input, resolved_commit, abbrev))
+            } else {
+                Err(DescribeError::NoNamesFound)
+            }
+        }
+        // A traversal-cap hit still honors `--always` (abbreviated fallback);
+        // without it, surface the dedicated deep-history error.
+        Err(DescribeError::TraversalLimitExceeded { limit }) => {
+            if args.always {
+                Ok(always_output(input, resolved_commit, abbrev))
+            } else {
+                Err(DescribeError::TraversalLimitExceeded { limit })
+            }
+        }
+        Err(other) => Err(other),
+    }
+}
+
+/// Walk the commit DAG breadth-first from `start`, returning the nearest tag
+/// (name + shortest topological distance) or `None` when none is reachable.
+///
+/// `load` returns the parent hashes of a commit; injecting it keeps this walker
+/// unit-testable against a small in-memory graph (no real object store). The
+/// already-existing `visited` set deduplicates diamond merges, and the walk
+/// aborts with [`DescribeError::TraversalLimitExceeded`] once it has visited
+/// `max_walk` commits without a hit. With `first_parent`, only the first parent
+/// of each commit is followed.
+fn find_nearest_tag<F>(
+    start: ObjectHash,
+    tag_map: &HashMap<ObjectHash, TagInfo>,
+    first_parent: bool,
+    max_walk: usize,
+    mut load: F,
+) -> Result<Option<(String, usize)>, DescribeError>
+where
+    F: FnMut(&ObjectHash) -> Result<Vec<ObjectHash>, DescribeError>,
+{
+    let mut queue: VecDeque<(ObjectHash, usize)> = VecDeque::new();
+    let mut visited: HashSet<ObjectHash> = HashSet::new();
+    let mut walked = 0usize;
+
+    queue.push_back((start, 0));
+    visited.insert(start);
 
     while let Some((curr_hash, dist)) = queue.pop_front() {
-        // Check if current commit has a matching tag
         if let Some(tag_info) = tag_map.get(&curr_hash) {
-            return Ok(describe_output(
-                input.clone(),
-                resolved_commit.clone(),
-                &tag_info.name,
-                dist,
-                abbrev,
-            ));
+            return Ok(Some((tag_info.name.clone(), dist)));
         }
 
-        // Load commit to find parents
-        let commit =
-            load_object::<Commit>(&curr_hash).map_err(|error| DescribeError::LoadCommit {
-                commit_id: curr_hash.to_string(),
-                detail: error.to_string(),
-            })?;
+        walked += 1;
+        if walked > max_walk {
+            return Err(DescribeError::TraversalLimitExceeded { limit: max_walk });
+        }
 
-        for parent_id_str in commit.parent_commit_ids {
-            if !visited.contains(&parent_id_str) {
-                visited.insert(parent_id_str);
-                queue.push_back((parent_id_str, dist + 1));
+        let parents = load(&curr_hash)?;
+        if first_parent {
+            if let Some(parent) = parents.first().copied()
+                && visited.insert(parent)
+            {
+                queue.push_back((parent, dist + 1));
+            }
+        } else {
+            for parent in parents {
+                if visited.insert(parent) {
+                    queue.push_back((parent, dist + 1));
+                }
             }
         }
     }
 
-    if args.always {
-        let abbreviated = abbreviate_hash(&resolved_commit, abbrev);
-        return Ok(DescribeOutput {
-            input,
-            resolved_commit,
-            result: abbreviated.clone(),
-            tag: None,
-            distance: None,
-            abbreviated_commit: Some(abbreviated),
-            exact_match: false,
-            used_always: true,
-        });
-    }
+    Ok(None)
+}
 
-    Err(DescribeError::NoNamesFound)
+/// Build the `--always` abbreviated-hash fallback output.
+fn always_output(input: String, resolved_commit: String, abbrev: usize) -> DescribeOutput {
+    let abbreviated = abbreviate_hash(&resolved_commit, abbrev);
+    DescribeOutput {
+        input,
+        resolved_commit,
+        result: abbreviated.clone(),
+        tag: None,
+        distance: None,
+        abbreviated_commit: Some(abbreviated),
+        exact_match: false,
+        used_always: true,
+    }
 }
 
 // Formats the output string based on Git's describe rules.
@@ -278,11 +368,16 @@ fn describe_cli_error(error: DescribeError) -> CliError {
             CliError::fatal(format!("failed to load commit '{commit_id}': {detail}"))
                 .with_stable_code(StableErrorCode::RepoCorrupt)
         }
+        DescribeError::TraversalLimitExceeded { .. } => CliError::fatal(error.to_string())
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+            .with_hint("history is very deep; pass '--always' for an abbreviated hash or narrow the range."),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
     use super::*;
 
     /// Pin the `Display` format for every variant of [`DescribeError`].
@@ -319,6 +414,122 @@ mod tests {
         assert_eq!(
             DescribeError::NoNamesFound.to_string(),
             "no names found, cannot describe anything",
+        );
+        assert_eq!(
+            DescribeError::TraversalLimitExceeded { limit: 10_000 }.to_string(),
+            "history too deep: walked more than 10000 commits; pass --always or narrow the range",
+        );
+    }
+
+    /// Build a distinct in-memory commit hash for graph-shaped unit tests.
+    /// SHA-1 (20-byte) is forced so `from_bytes` matches the active hash kind.
+    fn test_hash(seed: u8) -> ObjectHash {
+        ObjectHash::from_bytes(&[seed; 20]).expect("20-byte SHA-1 hash is valid")
+    }
+
+    fn tag_at(hash: ObjectHash, name: &str) -> HashMap<ObjectHash, TagInfo> {
+        let mut map = HashMap::new();
+        map.insert(
+            hash,
+            TagInfo {
+                name: name.to_string(),
+                is_annotated: true,
+            },
+        );
+        map
+    }
+
+    /// A diamond history A→{B,C}→D must load the shared ancestor D exactly once,
+    /// proving the `visited` set deduplicates merge re-convergence.
+    #[test]
+    fn test_find_nearest_tag_visited_dedups_diamond() {
+        let _guard = set_hash_kind_for_test(HashKind::Sha1);
+        let (a, b, c, d) = (test_hash(1), test_hash(2), test_hash(3), test_hash(4));
+        // a (start) → b, c ; b → d ; c → d ; d tagged "base".
+        let graph: HashMap<ObjectHash, Vec<ObjectHash>> =
+            HashMap::from([(a, vec![b, c]), (b, vec![d]), (c, vec![d]), (d, vec![])]);
+        let tag_map = tag_at(d, "base");
+
+        let mut load_counts: HashMap<ObjectHash, usize> = HashMap::new();
+        let result = find_nearest_tag(a, &tag_map, false, 100, |hash| {
+            *load_counts.entry(*hash).or_insert(0) += 1;
+            Ok(graph.get(hash).cloned().unwrap_or_default())
+        })
+        .expect("walk should succeed");
+
+        assert_eq!(result, Some(("base".to_string(), 2)));
+        // D is reachable via both B and C, but must be loaded at most once.
+        assert!(
+            load_counts.get(&d).copied().unwrap_or(0) <= 1,
+            "shared ancestor D should not be loaded more than once: {load_counts:?}"
+        );
+    }
+
+    /// A graph deeper than `max_walk` with no reachable tag aborts with
+    /// `TraversalLimitExceeded` rather than walking the whole history.
+    #[test]
+    fn test_find_nearest_tag_traversal_cap() {
+        let _guard = set_hash_kind_for_test(HashKind::Sha1);
+        // A linear chain 1→2→3→4→5 with no tags; cap the walk at 3.
+        let chain: Vec<ObjectHash> = (1..=5).map(test_hash).collect();
+        let mut graph: HashMap<ObjectHash, Vec<ObjectHash>> = HashMap::new();
+        for pair in chain.windows(2) {
+            graph.insert(pair[0], vec![pair[1]]);
+        }
+        graph.insert(chain[4], vec![]);
+        let empty_tags: HashMap<ObjectHash, TagInfo> = HashMap::new();
+
+        let result = find_nearest_tag(chain[0], &empty_tags, false, 3, |hash| {
+            Ok(graph.get(hash).cloned().unwrap_or_default())
+        });
+
+        assert!(
+            matches!(
+                result,
+                Err(DescribeError::TraversalLimitExceeded { limit: 3 })
+            ),
+            "expected TraversalLimitExceeded, got {result:?}"
+        );
+    }
+
+    /// `--first-parent` must ignore the second parent of a merge commit: from a
+    /// merge M with parents [P1, P2], only P1's chain is followed.
+    #[test]
+    fn test_find_nearest_tag_first_parent_skips_second_parent() {
+        let _guard = set_hash_kind_for_test(HashKind::Sha1);
+        let (m, p1, p2) = (test_hash(10), test_hash(11), test_hash(12));
+        // M → [P1, P2]; P1 tagged "first", P2 tagged "second".
+        let graph: HashMap<ObjectHash, Vec<ObjectHash>> =
+            HashMap::from([(m, vec![p1, p2]), (p1, vec![]), (p2, vec![])]);
+        let mut tag_map = HashMap::new();
+        tag_map.insert(
+            p1,
+            TagInfo {
+                name: "first".to_string(),
+                is_annotated: true,
+            },
+        );
+        tag_map.insert(
+            p2,
+            TagInfo {
+                name: "second".to_string(),
+                is_annotated: true,
+            },
+        );
+
+        let mut visited_second = false;
+        let result = find_nearest_tag(m, &tag_map, true, 100, |hash| {
+            if *hash == p2 {
+                visited_second = true;
+            }
+            Ok(graph.get(hash).cloned().unwrap_or_default())
+        })
+        .expect("walk should succeed");
+
+        assert_eq!(result, Some(("first".to_string(), 1)));
+        assert!(
+            !visited_second,
+            "--first-parent must not visit the second parent"
         );
     }
 }
