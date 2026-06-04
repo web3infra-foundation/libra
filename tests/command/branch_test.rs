@@ -343,6 +343,7 @@ async fn test_branch() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(commit_args).await;
     let first_commit_id = Branch::find_branch_result("main", None)
@@ -363,6 +364,7 @@ async fn test_branch() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(commit_args).await;
     let second_commit_id = Branch::find_branch_result("main", None)
@@ -520,6 +522,7 @@ async fn test_create_branch_from_remote() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(args).await;
     let hash = Head::current_commit().await.unwrap();
@@ -776,6 +779,7 @@ async fn test_invalid_branch_name() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(args).await;
 
@@ -813,6 +817,7 @@ async fn test_branch_rename() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(args).await;
     let commit_id_1 = Head::current_commit().await.unwrap();
@@ -928,6 +933,7 @@ async fn test_rename_current_branch() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(args).await;
     let commit_id = Head::current_commit().await.unwrap();
@@ -1033,6 +1039,7 @@ async fn test_rename_to_existing_branch() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(args).await;
 
@@ -1168,6 +1175,7 @@ async fn test_list_all_branches() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(args).await;
 
@@ -1288,6 +1296,7 @@ async fn test_branch_delete_safe() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(commit_args).await;
 
@@ -1343,6 +1352,7 @@ async fn test_branch_delete_safe() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(commit_args).await;
 
@@ -1509,6 +1519,7 @@ async fn test_branch_contains_commit_filter() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
 
     // ================================================================
@@ -2713,6 +2724,7 @@ async fn test_branch_copy_migrates_config_tracking() {
         all: false,
         no_verify: true,
         author: None,
+        ..Default::default()
     })
     .await;
     execute(BranchArgs {
@@ -2787,6 +2799,7 @@ async fn test_branch_copy_migrates_reflog_when_present() {
         all: false,
         no_verify: true,
         author: None,
+        ..Default::default()
     })
     .await;
     execute(BranchArgs {
@@ -2873,6 +2886,7 @@ async fn test_branch_copy_no_reflog_is_noop() {
         all: false,
         no_verify: true,
         author: None,
+        ..Default::default()
     })
     .await;
     execute(BranchArgs {
@@ -2966,6 +2980,7 @@ async fn test_branch_rename_migrates_config_and_updates_head() {
         all: false,
         no_verify: true,
         author: None,
+        ..Default::default()
     })
     .await;
     // Create + switch to a renamable (non-locked) current branch.
@@ -3576,6 +3591,7 @@ async fn test_branch_copy_succeeds_without_reflog_table() {
         all: false,
         no_verify: true,
         author: None,
+        ..Default::default()
     })
     .await;
     execute(BranchArgs {

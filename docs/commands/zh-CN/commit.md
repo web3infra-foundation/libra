@@ -45,12 +45,37 @@ libra commit --amend
 libra commit --amend -m "Updated message"
 ```
 
+### `-e, --edit`
+
+打开配置的编辑器编辑提交消息，即使已通过 `-m`/`-F`/`-t` 或 `--amend` 提供了消息（提供的消息作为编辑器初始内容）。与 `--no-edit` 冲突。
+
+```bash
+libra commit -e -m "wip: refine later"
+```
+
 ### `--no-edit`
 
-与 `--amend` 一起使用时，复用原提交消息，不提示修改。与 `-m` 和 `-F` 冲突。
+不打开编辑器；按原样使用提供的/模板/被修订的消息。与 `--amend` 一起使用时复用原提交消息。与 Git 较窄的行为不同，Libra 允许 `--no-edit` 在 `--amend` 之外使用，并可与 `-m`/`-F`/`-t` 共存（仅抑制编辑器）。裸 `libra commit --no-edit` 且无任何消息来源时以空消息错误中止。
 
 ```bash
 libra commit --amend --no-edit
+libra commit --no-edit -m "use this exactly"
+```
+
+### `--cleanup <MODE>`
+
+控制提交消息在提交前如何清理（对标 `git commit --cleanup`）。模式：`strip`（删除 `#` 注释行、行尾空白、首尾空行）、`whitespace`（仅 trim，保留 `#` 行）、`verbatim`（不改动）、`scissors`（在 `# ----- >8 -----` 剪切线处截断后再按 `whitespace`）、`default`（经编辑器时同 `strip`，否则同 `whitespace`）。未知模式为解析错误（退出 129）。
+
+```bash
+libra commit --cleanup=verbatim -m "#1234 keep this literal"
+```
+
+### `-t, --template <FILE>`
+
+使用 `<FILE>` 的内容作为初始提交消息（作为编辑器种子，或在 `--no-edit` 下直接使用）。未提供 `-t` 时，`commit.template` 配置提供相同行为。模板文件缺失/不可读时报出可读错误。
+
+```bash
+libra commit -t .commit-template.txt
 ```
 
 ### `--conventional`
@@ -314,8 +339,8 @@ Git 没有内置提交消息格式验证；团队依赖 commitlint、husky 或 C
 
 ## 兼容性说明
 
-- Libra 不打开编辑器进行交互式消息编写；始终需要 `-m` 或 `-F`（`--amend --no-edit` 除外）
+- 未提供消息且未给 `--no-edit` 时，Libra 打开编辑器（`$GIT_EDITOR` → `core.editor` → `$VISUAL` → `$EDITOR` → `vi`）；在非 TTY 且未配置编辑器时报错而非挂起
 - jj 没有带暂存的传统 `commit` 命令；`jj commit` 会完成 working copy commit
 - 不支持 `--fixup` 和 `--squash`；使用 `libra rebase -i` 进行提交重组
 - Vault signing 替代 Git 的 `commit.gpgsign` 和 `user.signingkey` 配置
-- 不支持用于剥离注释的 `--cleanup` 模式；消息按原样使用
+- 支持 `--cleanup` 模式（`strip`/`whitespace`/`verbatim`/`scissors`/`default`）；不支持 `--allow-empty-message`

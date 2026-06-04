@@ -714,6 +714,7 @@ async fn test_basic_rebase() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -742,6 +743,7 @@ async fn test_basic_rebase() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -780,6 +782,7 @@ async fn test_basic_rebase() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -808,6 +811,7 @@ async fn test_basic_rebase() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -845,6 +849,7 @@ async fn test_basic_rebase() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -939,6 +944,7 @@ async fn test_rebase_preserves_untracked_files() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -976,6 +982,7 @@ async fn test_rebase_preserves_untracked_files() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1013,6 +1020,7 @@ async fn test_rebase_preserves_untracked_files() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1082,6 +1090,7 @@ async fn test_rebase_already_up_to_date() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1110,6 +1119,7 @@ async fn test_rebase_already_up_to_date() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1169,6 +1179,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1206,6 +1217,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1243,6 +1255,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1337,6 +1350,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1373,6 +1387,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
     let orig_head = Head::current_commit().await.expect("expected feature HEAD");
@@ -1410,6 +1425,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
     let master_head = Head::current_commit().await.expect("expected master HEAD");
@@ -1526,6 +1542,7 @@ async fn test_rebase_continue_no_rebase() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1574,6 +1591,7 @@ async fn test_rebase_skip_no_rebase() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1624,6 +1642,7 @@ async fn test_rebase_with_conflict_and_abort() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1665,6 +1684,7 @@ async fn test_rebase_with_conflict_and_abort() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1702,6 +1722,7 @@ async fn test_rebase_with_conflict_and_abort() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1815,6 +1836,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1851,6 +1873,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1887,6 +1910,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1976,6 +2000,7 @@ async fn test_rebase_with_conflict_and_skip() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -2018,6 +2043,7 @@ async fn test_rebase_with_conflict_and_skip() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -2051,6 +2077,7 @@ async fn test_rebase_with_conflict_and_skip() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -2088,6 +2115,7 @@ async fn test_rebase_with_conflict_and_skip() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -2172,6 +2200,7 @@ async fn test_rebase_with_conflict_and_continue() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -2213,6 +2242,7 @@ async fn test_rebase_with_conflict_and_continue() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -2250,6 +2280,7 @@ async fn test_rebase_with_conflict_and_continue() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -2371,6 +2402,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -2409,6 +2441,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -2442,6 +2475,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -2471,6 +2505,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -2508,6 +2543,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -2609,6 +2645,7 @@ async fn test_rebase_state_persistence() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -2646,6 +2683,7 @@ async fn test_rebase_state_persistence() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -2683,6 +2721,7 @@ async fn test_rebase_state_persistence() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -2785,6 +2824,7 @@ async fn test_rebase_fast_forward_branch_behind() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -2831,6 +2871,7 @@ async fn test_rebase_fast_forward_branch_behind() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -2903,6 +2944,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -2949,6 +2991,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -3022,6 +3065,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -3068,6 +3112,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -3141,6 +3186,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -3178,6 +3224,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -3215,6 +3262,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -3295,6 +3343,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -3333,6 +3382,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -3370,6 +3420,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -3448,6 +3499,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -3486,6 +3538,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -3503,6 +3556,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         all: true,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -3540,6 +3594,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -3617,6 +3672,7 @@ async fn test_rebase_continue_requires_resolution() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -3654,6 +3710,7 @@ async fn test_rebase_continue_requires_resolution() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -3691,6 +3748,7 @@ async fn test_rebase_continue_requires_resolution() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 

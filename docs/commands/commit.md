@@ -54,13 +54,48 @@ libra commit --amend
 libra commit --amend -m "Updated message"
 ```
 
+### `-e, --edit`
+
+Open the configured editor to edit the commit message, even when a message is already
+supplied via `-m`/`-F`/`-t` or reused from `--amend`. The supplied message becomes the
+editor's initial content. Conflicts with `--no-edit`.
+
+```bash
+libra commit -e -m "wip: refine later"
+```
+
 ### `--no-edit`
 
-When used with `--amend`, reuse the message from the original commit without prompting for
-changes. Conflicts with `-m` and `-F`.
+Do not launch the editor; use the supplied/template/amended message as-is. With `--amend`
+it reuses the original commit's message. Unlike Git's narrower behavior, Libra allows
+`--no-edit` outside `--amend` and alongside `-m`/`-F`/`-t` (it simply suppresses the editor).
+A bare `libra commit --no-edit` with no message source aborts with an empty-message error.
 
 ```bash
 libra commit --amend --no-edit
+libra commit --no-edit -m "use this exactly"
+```
+
+### `--cleanup <MODE>`
+
+Control how the commit message is cleaned before committing (mirrors `git commit --cleanup`).
+Modes: `strip` (drop `#` comment lines, trailing whitespace, leading/trailing blanks),
+`whitespace` (trim only, keep `#` lines), `verbatim` (no changes), `scissors` (truncate at the
+`# ----- >8 -----` cut line then apply `whitespace`), and `default` (`strip` when an editor was
+used, `whitespace` otherwise). An unknown mode is a parse error (exit 129).
+
+```bash
+libra commit --cleanup=verbatim -m "#1234 keep this literal"
+```
+
+### `-t, --template <FILE>`
+
+Use the contents of `<FILE>` as the initial commit message (seeds the editor, or — with
+`--no-edit` — is used directly). The `commit.template` config provides the same behavior when
+no `-t` is given. A missing/unreadable template file produces a readable error.
+
+```bash
+libra commit -t .commit-template.txt
 ```
 
 ### `--conventional`
@@ -350,8 +385,8 @@ Every `CommitError` variant maps to an explicit `StableErrorCode`.
 
 ## Compatibility Notes
 
-- Libra does not open an editor for interactive message composition; `-m` or `-F` is always required (except with `--amend --no-edit`)
+- Libra opens an editor (`$GIT_EDITOR` → `core.editor` → `$VISUAL` → `$EDITOR` → `vi`) when no message is supplied and `--no-edit` is not given; in a non-TTY with no editor configured it errors instead of hanging
 - jj does not have a traditional `commit` command with staging; `jj commit` finalizes the working copy commit
 - `--fixup` and `--squash` are not supported; use `libra rebase -i` for commit restructuring
 - Vault signing replaces Git's `commit.gpgsign` and `user.signingkey` configuration
-- `--cleanup` mode for comment stripping is not supported; messages are used as-is
+- `--cleanup` modes (`strip`/`whitespace`/`verbatim`/`scissors`/`default`) are supported; `--allow-empty-message` is not

@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashSet,
-    io::Write,
+    io::{IsTerminal, Write},
     path::PathBuf,
     process::{Command, Stdio},
     str::FromStr,
@@ -65,23 +65,43 @@ pub const COMMIT_EXAMPLES: &str = "\
 EXAMPLES:
     libra commit -m 'Add new feature'                Create a commit with message
     libra commit -m 'feat: add login' --conventional Validate conventional commit format
+    libra commit                                     Write the message in your editor
+    libra commit -e -m 'wip'                         Open the editor seeded with a message
     libra commit --amend                             Amend the last commit
     libra commit --amend --no-edit                   Amend without changing the message
     libra commit -a -m 'Fix typo'                    Auto-stage tracked changes and commit
     libra commit -F message.txt                      Read commit message from file
+    libra commit -t template.txt                     Seed the message from a template file
+    libra commit --cleanup=verbatim -m '#keep'       Keep comment lines verbatim
     libra commit -s -m 'Add feature'                 Add Signed-off-by trailer
     libra commit --allow-empty -m 'Trigger CI'       Create an empty commit
     libra commit --json -m 'Add feature'             Structured JSON output for agents";
 
+/// Commit-message cleanup mode, mirroring `git commit --cleanup=<mode>`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum CleanupMode {
+    /// Strip leading/trailing empty lines, trailing whitespace, and `#` comment lines.
+    Strip,
+    /// Only trim trailing whitespace and leading/trailing empty lines (keeps `#` lines).
+    Whitespace,
+    /// Do not change the message at all.
+    Verbatim,
+    /// Truncate at the scissors line (`# ----- >8 -----`), then apply `whitespace`.
+    Scissors,
+    /// `strip` when an editor was used, `whitespace` otherwise.
+    #[default]
+    Default,
+}
+
 #[derive(Parser, Debug, Default)]
 #[command(after_help = COMMIT_EXAMPLES)]
 pub struct CommitArgs {
-    /// Commit message body (required unless --file or --no-edit is given)
-    #[arg(short, long, required_unless_present_any(["file", "no_edit"]))]
+    /// Commit message body
+    #[arg(short, long)]
     pub message: Option<String>,
 
     /// read message from file
-    #[arg(short = 'F', long, required_unless_present_any(["message", "no_edit"]))]
+    #[arg(short = 'F', long)]
     pub file: Option<String>,
 
     /// allow commit with empty index
@@ -96,9 +116,22 @@ pub struct CommitArgs {
     #[arg(long)]
     pub amend: bool,
 
-    /// use the message from the original commit when amending
-    #[arg(long, requires = "amend",conflicts_with_all(["message", "file"]))]
+    /// Force launching the editor to edit the message, even when one is supplied
+    #[arg(short = 'e', long, conflicts_with = "no_edit")]
+    pub edit: bool,
+
+    /// Do not launch the editor; use the supplied/template/amended message as-is
+    #[arg(long)]
     pub no_edit: bool,
+
+    /// How to clean up the commit message before committing
+    #[arg(long, value_enum, default_value_t = CleanupMode::Default)]
+    pub cleanup: CleanupMode,
+
+    /// Use the contents of <file> as the initial commit message
+    #[arg(short = 't', long, value_name = "file")]
+    pub template: Option<String>,
+
     /// add signed-off-by line at the end of the commit message
     #[arg(short = 's', long)]
     pub signoff: bool,
@@ -182,6 +215,14 @@ pub enum CommitError {
 
     #[error("failed to calculate staged changes: {0}")]
     StagedChanges(String),
+
+    #[error("commit message editor failed: {0}")]
+    EditorFailed(String),
+
+    #[error(
+        "cannot open an editor for the commit message without a terminal; provide a message with -m/-F or use --no-edit"
+    )]
+    NoEditorAvailable,
 }
 
 impl From<CommitError> for CliError {
@@ -246,6 +287,12 @@ impl From<CommitError> for CliError {
             CommitError::StagedChanges(..) => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::RepoCorrupt)
                 .with_hint("failed to compute staged changes"),
+            CommitError::EditorFailed(..) => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("set $EDITOR / core.editor, or provide the message with -m/-F"),
+            CommitError::NoEditorAvailable => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("provide a message with -m/-F, or run in a terminal with an editor"),
         }
     }
 }
@@ -412,6 +459,208 @@ fn first_message_line(message: &str) -> String {
 /// Pure execution entry point. Receives `&OutputConfig` only for hook I/O
 /// control (human mode: inherit, JSON/machine mode: piped). Does NOT render
 /// output — returns [`CommitOutput`] on success for the caller to render.
+/// The scissors cut-line marker (`# ------ >8 ------`). Any line that begins
+/// with `# ` and contains the ` >8 ` token is treated as a cut line, matching
+/// Git's `wt_status_truncate_message_at_cut_line` semantics.
+const SCISSORS_TOKEN: &str = " >8 ";
+
+/// Clean a commit message according to `mode`. `edited` selects the behaviour of
+/// [`CleanupMode::Default`] (`strip` after an editor, `whitespace` otherwise).
+fn cleanup_message(message: &str, mode: CleanupMode, edited: bool) -> String {
+    let effective = match mode {
+        CleanupMode::Default if edited => CleanupMode::Strip,
+        CleanupMode::Default => CleanupMode::Whitespace,
+        other => other,
+    };
+
+    if effective == CleanupMode::Verbatim {
+        return message.to_string();
+    }
+
+    // `scissors` truncates at the first cut line, then applies `whitespace`.
+    let body = if effective == CleanupMode::Scissors {
+        let mut kept = Vec::new();
+        for line in message.lines() {
+            if line.starts_with("# ") && line.contains(SCISSORS_TOKEN) {
+                break;
+            }
+            kept.push(line);
+        }
+        kept.join("\n")
+    } else {
+        message.to_string()
+    };
+
+    let strip_comments = effective == CleanupMode::Strip;
+    let mut cleaned: Vec<&str> = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim_end();
+        if strip_comments && trimmed.starts_with('#') {
+            continue;
+        }
+        cleaned.push(trimmed);
+    }
+    // Collapse runs of blank lines and drop leading/trailing blanks.
+    let mut result: Vec<&str> = Vec::new();
+    let mut pending_blank = false;
+    for line in cleaned {
+        if line.is_empty() {
+            if !result.is_empty() {
+                pending_blank = true;
+            }
+            continue;
+        }
+        if pending_blank {
+            result.push("");
+            pending_blank = false;
+        }
+        result.push(line);
+    }
+    result.join("\n")
+}
+
+/// Resolve an **explicitly configured** editor command, in Git's precedence
+/// order: `$GIT_EDITOR` → `core.editor` → `$VISUAL` → `$EDITOR`. Returns `None`
+/// when nothing is configured (the caller falls back to `vi` only on a TTY).
+async fn resolve_explicit_editor() -> Option<String> {
+    for var in ["GIT_EDITOR"] {
+        if let Ok(value) = std::env::var(var)
+            && !value.trim().is_empty()
+        {
+            return Some(value);
+        }
+    }
+    if let Ok(Some(value)) =
+        read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "core.editor").await
+        && !value.trim().is_empty()
+    {
+        return Some(value);
+    }
+    for var in ["VISUAL", "EDITOR"] {
+        if let Ok(value) = std::env::var(var)
+            && !value.trim().is_empty()
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Launch the editor on a temp file pre-filled with `initial_content`, returning
+/// the edited contents. The editor command is split on whitespace into argv
+/// (program + leading args) and the file path is appended as the last argument;
+/// it is **never** wrapped in a shell, preventing command injection.
+fn edit_commit_message(initial_content: &str, editor_cmd: &str) -> Result<String, CommitError> {
+    let temp_dir = tempfile::tempdir()
+        .map_err(|e| CommitError::EditorFailed(format!("failed to create temp dir: {e}")))?;
+    let file_path = temp_dir.path().join("COMMIT_EDITMSG");
+    std::fs::write(&file_path, initial_content)
+        .map_err(|e| CommitError::EditorFailed(format!("failed to write edit file: {e}")))?;
+
+    let parts: Vec<&str> = editor_cmd.split_whitespace().collect();
+    let Some((program, leading_args)) = parts.split_first() else {
+        return Err(CommitError::EditorFailed(
+            "empty editor command".to_string(),
+        ));
+    };
+    let mut command = Command::new(program);
+    command.args(leading_args).arg(&file_path);
+    let status = command
+        .status()
+        .map_err(|e| CommitError::EditorFailed(format!("failed to start editor: {e}")))?;
+    if !status.success() {
+        return Err(CommitError::EditorFailed(format!(
+            "editor exited with status {}",
+            status.code().unwrap_or(-1)
+        )));
+    }
+
+    std::fs::read_to_string(&file_path)
+        .map_err(|e| CommitError::EditorFailed(format!("failed to read edit file: {e}")))
+    // `temp_dir` (TempDir) drops here, removing COMMIT_EDITMSG (RAII cleanup).
+}
+
+/// Read the initial message content from `-t/--template` or `commit.template`.
+async fn load_template_content(args: &CommitArgs) -> Result<Option<String>, CommitError> {
+    let template_path = match &args.template {
+        Some(path) => Some(path.clone()),
+        None => read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "commit.template")
+            .await
+            .ok()
+            .flatten(),
+    };
+    match template_path {
+        Some(path) => {
+            let content =
+                std::fs::read_to_string(&path).map_err(|e| CommitError::MessageFileRead {
+                    path,
+                    detail: e.to_string(),
+                })?;
+            Ok(Some(content))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Resolve the final, cleaned commit message from all sources (explicit `-m`/
+/// `-F`, `-t`/`commit.template`, an editor, or the amended parent message),
+/// applying the configured `--cleanup` mode. Returns the cleaned message body
+/// **without** the signoff trailer (which is appended by the caller).
+async fn resolve_commit_message(
+    args: &CommitArgs,
+    amend_parent_message: Option<&str>,
+) -> Result<String, CommitError> {
+    let has_explicit_message = args.message.is_some() || args.file.is_some();
+
+    // 1. Initial content (precedence: -m > -F > template > amend-parent > empty).
+    let mut content = if let Some(msg) = &args.message {
+        msg.clone()
+    } else if let Some(file_path) = &args.file {
+        tokio::fs::read_to_string(file_path)
+            .await
+            .map_err(|e| CommitError::MessageFileRead {
+                path: file_path.clone(),
+                detail: e.to_string(),
+            })?
+    } else if let Some(template) = load_template_content(args).await? {
+        template
+    } else if let Some(parent) = amend_parent_message {
+        parent.to_string()
+    } else {
+        String::new()
+    };
+
+    // 2. Decide whether to launch the editor.
+    //    --edit forces it; --no-edit suppresses it; otherwise it runs only when
+    //    no explicit message was supplied.
+    let launch_editor = if args.edit {
+        true
+    } else if args.no_edit {
+        false
+    } else {
+        !has_explicit_message
+    };
+
+    let mut edited = false;
+    if launch_editor {
+        // An explicitly configured editor runs even without a TTY (e.g. a CI
+        // script editor); the `vi` fallback requires a terminal or we would hang.
+        let editor = match resolve_explicit_editor().await {
+            Some(editor) => editor,
+            None => {
+                if !std::io::stdin().is_terminal() {
+                    return Err(CommitError::NoEditorAvailable);
+                }
+                "vi".to_string()
+            }
+        };
+        content = edit_commit_message(&content, &editor)?;
+        edited = true;
+    }
+
+    Ok(cleanup_message(&content, args.cleanup, edited))
+}
+
 pub async fn run_commit(
     args: CommitArgs,
     output: &OutputConfig,
@@ -454,29 +703,41 @@ pub async fn run_commit(
         run_pre_commit_hook(output)?;
     }
 
-    // Resolve commit message
-    let message = match (args.message, args.file) {
-        (Some(msg), _) => msg,
-        (None, Some(file_path)) => tokio::fs::read_to_string(&file_path).await.map_err(|e| {
-            CommitError::MessageFileRead {
-                path: file_path,
+    // Resolve parents and amend context before resolving the message: the
+    // amended parent's message seeds the editor / is reused with --no-edit.
+    let parents_commit_ids = get_parents_ids().await;
+    let (effective_parents, amend_parent_message) = if is_amend {
+        if parents_commit_ids.is_empty() {
+            return Err(CommitError::NoCommitToAmend);
+        }
+        if parents_commit_ids.len() > 1 {
+            return Err(CommitError::AmendUnsupported);
+        }
+        let parent_commit = load_object::<Commit>(&parents_commit_ids[0]).map_err(|e| {
+            CommitError::ParentCommitLoad {
+                commit_id: parents_commit_ids[0].to_string(),
                 detail: e.to_string(),
             }
-        })?,
-        (None, None) => {
-            if !args.no_edit {
-                return Err(CommitError::EmptyMessage);
-            }
-            // --no-edit with --amend: message comes from parent commit below
-            String::new()
-        }
+        })?;
+        (
+            parent_commit.parent_commit_ids.clone(),
+            Some(parent_commit.message.clone()),
+        )
+    } else {
+        (parents_commit_ids, None)
     };
+
+    // Resolve the cleaned commit message from all sources (editor/template/...).
+    let message = resolve_commit_message(&args, amend_parent_message.as_deref()).await?;
+
+    // A message that is empty after cleanup aborts the commit (Git parity).
+    // `--allow-empty` permits an empty tree, not an empty message.
+    if message.trim().is_empty() {
+        return Err(CommitError::EmptyMessage);
+    }
 
     // Create tree
     let tree = create_tree(&index, &storage, "".into()).await?;
-
-    // Resolve parent commits
-    let parents_commit_ids = get_parents_ids().await;
 
     // Create author and committer signatures
     let (author, committer, committer_identity) =
@@ -492,84 +753,6 @@ pub async fn run_commit(
         None
     };
 
-    // Amend path
-    if is_amend {
-        if parents_commit_ids.is_empty() {
-            return Err(CommitError::NoCommitToAmend);
-        }
-        if parents_commit_ids.len() > 1 {
-            return Err(CommitError::AmendUnsupported);
-        }
-        let parent_commit = load_object::<Commit>(&parents_commit_ids[0]).map_err(|e| {
-            CommitError::ParentCommitLoad {
-                commit_id: parents_commit_ids[0].to_string(),
-                detail: e.to_string(),
-            }
-        })?;
-        let grandpa_commit_id = parent_commit.parent_commit_ids;
-
-        let final_message = if args.no_edit {
-            parent_commit.message.clone()
-        } else {
-            message.clone()
-        };
-
-        let commit_message = match &signoff_line {
-            Some(line) => format!("{final_message}\n\n{line}"),
-            None => final_message.clone(),
-        };
-
-        // Conventional commit validation
-        if is_conventional
-            && !skip_conventional_check
-            && !check_conventional_commits_message(&commit_message)
-        {
-            return Err(CommitError::ConventionalCommit(
-                "commit message does not follow conventional commits".to_string(),
-            ));
-        }
-
-        let gpg_sig = vault_sign_commit(
-            &tree.id,
-            &grandpa_commit_id,
-            &author,
-            &committer,
-            &commit_message,
-            false,
-        )
-        .await?;
-
-        let commit = Commit::new(
-            author,
-            committer,
-            tree.id,
-            grandpa_commit_id,
-            &format_commit_msg(&commit_message, gpg_sig.as_deref()),
-        );
-
-        // INVARIANT: persist the commit object before moving HEAD so a crash
-        // after ref update never points the branch at a missing object.
-        save_commit_object(&storage, &commit)?;
-        update_head_and_reflog(&commit.id.to_string(), &commit_message).await?;
-
-        let conventional_result = if is_conventional && !skip_conventional_check {
-            Some(true)
-        } else {
-            None
-        };
-        return Ok(build_commit_output(
-            &commit,
-            &commit_message,
-            &staged_changes,
-            is_amend,
-            is_signoff,
-            conventional_result,
-            gpg_sig.is_some(),
-        )
-        .await);
-    }
-
-    // Normal (non-amend) path
     let commit_message = match &signoff_line {
         Some(line) => format!("{message}\n\n{line}"),
         None => message.clone(),
@@ -587,7 +770,7 @@ pub async fn run_commit(
 
     let gpg_sig = vault_sign_commit(
         &tree.id,
-        &parents_commit_ids,
+        &effective_parents,
         &author,
         &committer,
         &commit_message,
@@ -599,7 +782,7 @@ pub async fn run_commit(
         author,
         committer,
         tree.id,
-        parents_commit_ids,
+        effective_parents,
         &format_commit_msg(&commit_message, gpg_sig.as_deref()),
     );
 
@@ -1124,6 +1307,49 @@ mod test {
         assert!(err.message().contains("nothing to commit"));
     }
 
+    #[test]
+    fn cleanup_strip_drops_comment_lines() {
+        let msg = "subject\n\n# a comment\nbody  \n\n";
+        let out = cleanup_message(msg, CleanupMode::Strip, true);
+        assert_eq!(out, "subject\n\nbody");
+        assert!(!out.contains('#'));
+    }
+
+    #[test]
+    fn cleanup_whitespace_keeps_comments_trims_trailing() {
+        let msg = "subject\n# keep me\ntrailing   ";
+        let out = cleanup_message(msg, CleanupMode::Whitespace, false);
+        assert_eq!(out, "subject\n# keep me\ntrailing");
+        assert!(out.contains("# keep me"));
+    }
+
+    #[test]
+    fn cleanup_verbatim_keeps_everything() {
+        let msg = "subject\n# comment\n\n\nbody   \n";
+        let out = cleanup_message(msg, CleanupMode::Verbatim, true);
+        assert_eq!(out, msg);
+    }
+
+    #[test]
+    fn cleanup_scissors_truncates_at_cut_line() {
+        let msg = "subject\nbody\n# ------------------------ >8 ------------------------\ndiff --git a b\n+x";
+        let out = cleanup_message(msg, CleanupMode::Scissors, true);
+        assert_eq!(out, "subject\nbody");
+        assert!(!out.contains("diff --git"));
+    }
+
+    #[test]
+    fn cleanup_default_strips_when_edited_keeps_comments_otherwise() {
+        let msg = "subject\n# comment";
+        // Edited → strip (drops comments).
+        assert_eq!(cleanup_message(msg, CleanupMode::Default, true), "subject");
+        // Not edited → whitespace (keeps comments).
+        assert_eq!(
+            cleanup_message(msg, CleanupMode::Default, false),
+            "subject\n# comment"
+        );
+    }
+
     /// Pin the `Display` format for the static-message and direct-message
     /// variants of [`CommitError`]. These strings are used as the
     /// `CliError` message via `From<CommitError> for CliError` and
@@ -1453,6 +1679,7 @@ mod test {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         fn message_and_file_are_none(args: &CommitArgs) -> Option<String> {
             match (&args.message, &args.file) {
@@ -1608,6 +1835,7 @@ mod test {
             disable_pre: false,
             all: false,
             author: None,
+            ..Default::default()
         };
 
         let commit_message_with_verify = if args_with_verify.signoff {
