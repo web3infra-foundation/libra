@@ -97,7 +97,7 @@ pub fn load_object<T>(hash: &ObjectHash) -> Result<T, GitError>
 where
     T: ObjectTrait,
 {
-    let storage = util::objects_storage();
+    let storage = util::try_objects_storage().map_err(GitError::IOError)?;
     let data = storage.get(hash)?;
     T::from_bytes(&data.to_vec(), *hash)
 }

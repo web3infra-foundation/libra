@@ -121,6 +121,81 @@ libra clone --shallow-exclude refs/tags/v1.0.0 git@github.com:user/repo.git
 libra clone --reject-shallow git@github.com:user/repo.git
 ```
 
+### `-o, --origin <name>`
+
+用 `<name>` 代替 `origin` 作为被跟踪的远程名。远程 URL、fetch refspec 与 `branch.<branch>.remote` 配置都会记录在该名称下。`libra+cloud://` 恢复会拒绝它。
+
+```bash
+libra clone -o upstream git@github.com:user/repo.git
+```
+
+### `-n, --no-checkout`
+
+克隆后不检出 HEAD。元数据、refs 与 config 仍会写入；仅跳过工作树检出（以及依赖它的 `.gitignore` → `.libraignore` 转换）。`libra+cloud://` 恢复会拒绝它。
+
+```bash
+libra clone --no-checkout git@github.com:user/repo.git
+```
+
+### `--mirror`
+
+建立源仓库的镜像。隐含 `--bare`，克隆所有分支与标签，映射全部 ref（`+refs/*:refs/*`）；远程会记录 `mirror = true`。`libra+cloud://` 恢复会拒绝它。
+
+```bash
+libra clone --mirror git@github.com:user/repo.git
+```
+
+### `--reference <repo>` / `--reference-if-able <repo>`
+
+复用**本地**参考仓库的对象以减少工作量。**与 Git 有意不同**：由于 Libra 的对象读取没有 `info/alternates` 回退，这两个标志采用**复制语义**——把参考仓库的对象复制到新克隆的分层存储，克隆不携带任何长期 alternates 依赖（不写 `info/alternates`）。源必须是真实（非符号链接）的本地 libra 或 git 仓库；符号链接源会以退出码 128 拒绝，路径长度上限为 4 KiB。`--reference-if-able` 在路径不存在时降级为普通克隆并给出警告，而 `--reference` 会失败。`libra+cloud://` 会拒绝二者。
+
+```bash
+libra clone --reference /srv/mirror/repo git@github.com:user/repo.git
+libra clone --reference-if-able /srv/mirror/repo git@github.com:user/repo.git
+```
+
+### `--dissociate`
+
+确保克隆对参考没有借用依赖。在默认复制语义下对象本就完全本地，因此该标志只是确认这一状态（JSON 中报告 `dissociated = true`）——绝不会留下悬空的 alternates 引用。需要 `--reference` 或 `--reference-if-able`；单独使用是用法错误（退出码 129）。
+
+```bash
+libra clone --dissociate --reference /srv/mirror/repo git@github.com:user/repo.git
+```
+
+### `-l, --local` / `--no-hardlinks`
+
+从**本地**仓库克隆时，直接复用其对象而非重新传输：`--local` 把源的松散对象与 pack 文件硬链接进新克隆（共享 inode），跨文件系统或指定 `--no-hardlinks` 时回退为复制。符号链接对象源会被拒绝（退出码 128）。若源不是本地仓库，该标志会被忽略并给出警告。
+
+```bash
+libra clone -l /srv/repos/project.git my-project
+libra clone -l --no-hardlinks /srv/repos/project.git my-project
+```
+
+### `-s, --shared`
+
+通过**复制语义**复用本地源仓库的对象（不写 `info/alternates`，与 Libra 中 `--reference` 一致）。由于 Libra 的对象读取没有 alternates 回退，这与 Git 的 alternates 共享有意不同。
+
+```bash
+libra clone -s /srv/repos/project.git my-project
+```
+
+### `-j, --jobs <n>`
+
+**Libra 扩展（RESERVED 预留）。** 校验到 1..=16 范围（0 或 >16 退出 129）并保留，但当前是 no-op——Libra 的传输是串行的，没有下游消费者。Git 的 `clone --jobs` 控制 submodule 并行获取，Libra 不支持 submodule，故该名称为未来的传输并发上限预留。
+
+```bash
+libra clone --jobs 4 git@github.com:user/repo.git
+```
+
+### `--filter <spec>`
+
+部分克隆：请求远程省略匹配 `<spec>` 的对象以减少传输。支持的 spec（白名单；未知 spec 退出 129，超长 spec 受 4 KiB 上限限制）：`blob:none`、`blob:limit=<n>[kmg]`、`tree:<depth>`。克隆会记录 promisor 配置（`remote.<name>.promisor = true`、`remote.<name>.partialclonefilter = <spec>`），但**不**做按需补取缺失对象。由于非裸默认检出需要 blob 内容，请将 `--filter` 与 `--no-checkout` 或 `--bare` 搭配；否则在命中被过滤的 blob 时检出会以清晰的部分克隆诊断失败（退出码 128）。需要服务端允许过滤（`uploadpack.allowFilter`）。`libra+cloud://` 会拒绝它。
+
+```bash
+libra clone --filter=blob:none --no-checkout git@github.com:user/repo.git
+libra clone --filter=tree:0 --bare git@github.com:user/repo.git
+```
+
 ## 常用命令
 
 ```bash

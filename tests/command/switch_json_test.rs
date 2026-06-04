@@ -175,6 +175,11 @@ fn json_schema_has_all_fields() {
 #[serial]
 async fn json_switch_track_has_tracking_fields() {
     let repo = create_committed_repo_via_cli();
+    let remote = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&remote, "remote add origin");
     let _guard = ChangeDirGuard::new(repo.path());
 
     let head = Head::current_commit().await.unwrap();

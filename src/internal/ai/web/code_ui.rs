@@ -1690,10 +1690,7 @@ mod tests {
     /// `(code, status)` set against the source-of-truth table.
     #[test]
     fn code_ui_error_code_listing_matches_authoritative_doc() {
-        let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("docs/automation/local-tui-control.md");
-        let doc =
-            std::fs::read_to_string(&doc_path).expect("read docs/automation/local-tui-control.md");
+        let doc = include_str!("../../../../docs/automation/local-tui-control.md");
         let mut doc_pairs: Vec<(String, u16)> = Vec::new();
         for line in doc.lines() {
             // Markdown table rows look like `| \`CODE\` | 403 | gate description |`.

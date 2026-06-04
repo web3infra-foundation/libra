@@ -86,6 +86,12 @@ fn base_libra_command(args: &[&str], cwd: &Path) -> Command {
     command
 }
 
+/// Build a Libra command with the same isolated process environment as
+/// [`run_libra_command`], leaving arguments for the caller to append.
+fn libra_command(cwd: &Path) -> Command {
+    base_libra_command(&[], cwd)
+}
+
 /// Run the Libra binary with an isolated HOME so host config never leaks into tests.
 fn run_libra_command(args: &[&str], cwd: &Path) -> Output {
     base_libra_command(args, cwd)

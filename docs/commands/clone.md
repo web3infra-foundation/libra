@@ -170,6 +170,112 @@ during fetch.
 libra clone --reject-shallow git@github.com:user/repo.git
 ```
 
+### `-o, --origin <name>`
+
+Use `<name>` instead of `origin` for the tracked remote. The remote URL, fetch refspec, and
+`branch.<branch>.remote` configuration are all recorded under this name. `libra+cloud://`
+restore rejects it.
+
+```bash
+libra clone -o upstream git@github.com:user/repo.git
+```
+
+### `-n, --no-checkout`
+
+Do not check out HEAD after the clone. Metadata, refs, and config are still written; only
+the working-tree checkout (and the `.gitignore` → `.libraignore` conversion that depends on
+it) is skipped. `libra+cloud://` restore rejects it.
+
+```bash
+libra clone --no-checkout git@github.com:user/repo.git
+```
+
+### `--mirror`
+
+Set up a mirror of the source repository. Implies `--bare` and clones all branches and tags,
+mapping every ref (`+refs/*:refs/*`); the remote is recorded with `mirror = true`. `libra+cloud://`
+restore rejects it.
+
+```bash
+libra clone --mirror git@github.com:user/repo.git
+```
+
+### `--reference <repo>` / `--reference-if-able <repo>`
+
+Reuse objects from a **local** reference repository to reduce work. **Intentionally different
+from Git**: because Libra's object reader has no `info/alternates` fallback, these flags use
+**copy semantics** — the reference's objects are copied into the new clone's tiered storage and
+the clone carries no long-term alternates dependency (no `info/alternates` is written). The source
+must be a real (non-symlink) local libra or git repository; a symlinked source is rejected with
+exit 128, and the path is length-capped at 4 KiB. `--reference-if-able` degrades to a normal clone
+with a warning when the path does not exist, whereas `--reference` fails. `libra+cloud://` rejects both.
+
+```bash
+libra clone --reference /srv/mirror/repo git@github.com:user/repo.git
+libra clone --reference-if-able /srv/mirror/repo git@github.com:user/repo.git
+```
+
+### `--dissociate`
+
+Ensure the clone has no borrow dependency on the reference. With the default copy semantics the
+objects are already fully local, so this confirms that state (reported as `dissociated = true` in
+JSON) — it never leaves a dangling alternates reference. Requires `--reference` or
+`--reference-if-able`; using it alone is a usage error (exit 129).
+
+```bash
+libra clone --dissociate --reference /srv/mirror/repo git@github.com:user/repo.git
+```
+
+### `-l, --local` / `--no-hardlinks`
+
+When cloning from a **local** repository, reuse its objects directly instead of re-transferring
+them: `--local` hardlinks the source's loose objects and pack files into the new clone (sharing
+inodes), falling back to a copy across filesystems or when `--no-hardlinks` is given. Symlinked
+object sources are rejected (exit 128). If the source is not a local repository, the flag is
+ignored with a warning.
+
+```bash
+libra clone -l /srv/repos/project.git my-project
+libra clone -l --no-hardlinks /srv/repos/project.git my-project
+```
+
+### `-s, --shared`
+
+Reuse a local source repository's objects via **copy semantics** (no `info/alternates` borrow,
+same as `--reference`/`--shared` elsewhere in Libra). Intentionally different from Git's
+alternates-sharing because Libra's object reader has no alternates fallback.
+
+```bash
+libra clone -s /srv/repos/project.git my-project
+```
+
+### `-j, --jobs <n>`
+
+**Libra extension (reserved).** Validated to the range 1..=16 (0 or >16 exit 129) and retained,
+but currently a no-op — Libra's transport is serial and there is no downstream consumer. Git's
+`clone --jobs` controls submodule fetches, which Libra does not support, so the name is reserved
+for a future transport-concurrency cap.
+
+```bash
+libra clone --jobs 4 git@github.com:user/repo.git
+```
+
+### `--filter <spec>`
+
+Partial clone: ask the remote to omit objects matching `<spec>` to reduce transfer. Supported
+specs (whitelist; unknown specs exit 129, over-long specs are 4 KiB-capped): `blob:none`,
+`blob:limit=<n>[kmg]`, and `tree:<depth>`. The clone records promisor config
+(`remote.<name>.promisor = true`, `remote.<name>.partialclonefilter = <spec>`) but does **not**
+lazily backfill missing objects. Because a non-bare default checkout needs blob contents, pair
+`--filter` with `--no-checkout` or `--bare`; otherwise the checkout fails with a clear
+partial-clone diagnostic (exit 128) when it hits a filtered-out blob. Requires the server to
+allow filtering (`uploadpack.allowFilter`). `libra+cloud://` rejects it.
+
+```bash
+libra clone --filter=blob:none --no-checkout git@github.com:user/repo.git
+libra clone --filter=tree:0 --bare git@github.com:user/repo.git
+```
+
 ## Common Commands
 
 ```bash
