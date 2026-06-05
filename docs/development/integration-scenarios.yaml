@@ -14,7 +14,7 @@
 #        (+ _parameter-tables.md when adding cross-command flag matrices)
 #     3. If it affects command coverage, update the matrix table in §2.3 of the md
 #        and run `cargo test --test compat_matrix_alignment`
-#     4. Later: add the implementation slice in the runner's registry.rs / scenarios/
+#     4. Add/update the implementation in the runner's registry.rs and scenarios/<id>.rs
 #
 # This dual (structured manifest + rich md) design makes the plan practical for
 # Agent-generated incremental implementation plans while keeping human-readable

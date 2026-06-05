@@ -173,10 +173,11 @@ relevant source entry above.
 
 ## Maintenance
 
-- Every new `tests/<name>.rs` must add a row here in the same PR (enforced by
-  §10 of `docs/development/integration-test-plan.md`).
-- Renames must update both this index and the plan. An automated integration-plan
-  consistency check is still aspirational (tracked as `BASELINE_GAP-INTEG-008` in
-  `docs/development/integration-test-plan.md`); until it lands, keep the index and
-  plan in sync by hand.
+- Every new `tests/<name>.rs` must add a row here in the same PR. Black-box CLI
+  runner scenarios under `tools/integration-runner/` are not Cargo `--test`
+  targets and must not be added to this index.
+- Renames must update both this index and the relevant plan/docs. The black-box
+  CLI integration-plan consistency gate is `cargo run --manifest-path
+  tools/integration-runner/Cargo.toml -- check-plan`; keep Cargo test indexing and
+  runner scenario indexing separate.
 - TODO rows are tracked as `BASELINE_GAP-INTEG-007` — the index pass.

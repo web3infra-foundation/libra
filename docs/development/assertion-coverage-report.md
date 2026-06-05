@@ -8,27 +8,27 @@
 
 ## Executive Summary
 
-The integration test plan has undergone a comprehensive assertion-strengthening pass. All **36** defined scenarios (`cli.*` + `live.*`) now contain explicit **"补充可执行断言"** sections with machine-verifiable checks.
+The integration test plan has undergone a comprehensive assertion-strengthening pass. All **37** defined scenarios (`cli.*` + `live.*`) now contain explicit **"补充可执行断言"** sections with machine-verifiable checks and Rust runner implementations.
 
 ### Key Highlights
 
 | Metric                        | Value | Status     |
 |-------------------------------|-------|------------|
-| Total scenarios               | 36    | Complete   |
-| With `补充可执行断言` block   | 36    | 100%       |
-| With `--json` / machine checks| 36    | 100%       |
+| Total scenarios               | 37    | Complete   |
+| With `补充可执行断言` block   | 37    | 100%       |
+| With `--json` / machine checks| 37    | 100%       |
 | With `fsck` verification      | 25    | 69%        |
 | With `LBR-` stable error codes| 18    | 50%        |
-| With explicit isolation checks| 36    | 100%       |
+| With explicit isolation checks| 37    | 100%       |
 
-The plan is now in a strong position for both human review and future automated runner implementation.
+The plan is now in a strong position for human review and automated black-box runner enforcement.
 
 ---
 
 ## Overall Statistics
 
-- **Total defined scenarios**: 36
-- **Scenarios with strengthened executable assertions**: 36 (100%)
+- **Total defined scenarios**: 37
+- **Scenarios with strengthened executable assertions**: 37 (100%)
 - **Document growth during campaign**: ~1,800 → 3,353 lines (significant addition of concrete checks)
 
 All scenarios now follow the **Assertion Strengthening Standard** defined in §2.3 of the plan:
@@ -69,7 +69,7 @@ All scenarios now follow the **Assertion Strengthening Standard** defined in §2
 **Status**: Solid. LFS local behavior and `open` (no-launch) JSON contract are well covered.
 
 ### 6. Remote & Protocol (4 scenarios)
-- `cli.clone-fetch-pull-local`, `cli.fetch-depth-local`, `cli.push-local-remote`, `live.github-create-push-clone-fetch`
+- `cli.clone-fetch-pull-local`, `cli.fetch-depth-local`, `cli.push-local-file-remote-rejected`, `live.github-create-push-clone-fetch`
 
 **Status**: Very strong for local protocol. Wave 3 (real GitHub) has good safety + interop assertions but remains the most environment-dependent.
 
@@ -84,11 +84,11 @@ All scenarios now follow the **Assertion Strengthening Standard** defined in §2
 
 | Assertion Type                    | Coverage | Notes |
 |-----------------------------------|----------|-------|
-| JSON envelope (`ok`, `data`)      | 36/36    | Universal |
+| JSON envelope (`ok`, `data`)      | 37/37    | Universal |
 | `--machine` / ndjson validation   | High     | Especially in cross-cutting |
 | `fsck --connectivity-only`        | 25/36    | Core mutation paths prioritized |
 | Explicit `LBR-*` error expectations | 18/36  | Growing; still room in older scenarios |
-| Isolation (HOME / global DB)      | 36/36    | Now a baseline requirement |
+| Isolation (HOME / global DB)      | 37/37    | Now a baseline requirement |
 | Intentional difference guards     | Good     | Worktree, push local-file rejection, etc. |
 | Negative path + error message     | Very Good| Most scenarios now require specific text or code |
 
@@ -97,17 +97,17 @@ All scenarios now follow the **Assertion Strengthening Standard** defined in §2
 ## Recommendations & Next Steps
 
 ### Immediate
-1. **Runner Implementation** (BASELINE_GAP-INTEG-001) — The plan is now ready for a real runner. The consistent structure makes parsing straightforward.
-2. **Conflict Resolution Deep Paths** — Areas like full merge/rebase conflict `--continue` with actual resolution steps and index state assertions remain relatively light.
-3. **LBR- Code Expansion** — Increase explicit `LBR-*` expectations in older config and init scenarios.
+1. **Runner Maintenance** — Keep `integration-scenarios.yaml`, each `<id>.md`, and `tools/integration-runner/src/scenarios/<id>.rs` in lockstep; `check-plan` is the required consistency gate.
+2. **Conflict Resolution Deep Paths** — Areas like full `pull --rebase` conflict paths and remote shallow semantics remain deep-water follow-ups outside the default deterministic gate.
+3. **LBR- Code Expansion** — Increase explicit `LBR-*` expectations in older config and init scenarios where they add actionable coverage.
 
 ### Medium Term
-- Add a lightweight automated linter that enforces the presence of "补充可执行断言" + at least one JSON + one fsck (where relevant).
+- Extend `check-plan` beyond source-verifiable signal checks into deeper semantic checks for advisory categories where practical.
 - Create a "Minimum Viable Smoke" subset (8–10 scenarios) for fast local verification.
 - Consider adding a small number of `libra --json` negative error envelope structure checks across more scenarios.
 
 ### Long Term
-- When the runner exists, feed its output back into this report (or a generated HTML dashboard).
+- Feed runner output back into this report (or a generated HTML dashboard).
 - Evolve the standard to require structured output for more commands (e.g., `ls-files --json`, `show-ref --json` where supported).
 
 ---
@@ -134,4 +134,3 @@ Update this report whenever a new scenario is added or a major assertion campaig
 ---
 
 **Status**: The black-box CLI assertion surface of the integration test plan is now considered **mature and runner-ready**.
-

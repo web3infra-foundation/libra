@@ -13,6 +13,7 @@ pub(crate) type ScenarioFn = fn(&mut ScenarioCtx<'_>) -> Result<()>;
 /// 3. Add `("cli.xxx", scenario_xxx),` to `scenario_registry()` below.
 ///
 /// `check-plan` and the run dispatcher both derive *only* from this registry. There are no other match arms or const lists to keep in sync.
+/// Keep this one-file-per-scenario layout: when a command's behavior changes, edit the owner scenario file instead of adding command-specific branches here.
 pub(crate) fn scenario_registry() -> &'static [(&'static str, ScenarioFn)] {
     static REG: &[(&str, ScenarioFn)] = &[
         ("cli.init-basic", scenario_init_basic),

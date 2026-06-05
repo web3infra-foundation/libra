@@ -82,14 +82,14 @@ gh repo view "$REPO" --json nameWithOwner,sshUrl,url
 4. 默认 Wave 0/1/2 不要求任何密钥、外部账号、真实公网服务或真实云资源。
 5. Wave 3 是显式的 GitHub live 场景：必须先确认 `gh auth status` 通过，必须创建临时私有仓库，必须在结束时用 `gh repo delete <owner/repo> --yes` 清理；不得使用 GitHub 网页 UI、手写 REST 脚本或在日志中输出 token。
 
-**人工执行可行性指引**（runner 落地前）：
+**人工执行可行性指引**（runner 已落地；用于快速复现或调试单场景）：
 - **最小冒烟子集**（人工快速验证，~15-20 分钟）：Wave 0 全 + `cli.init-basic`、`cli.config-basic-kv`、`cli.commit-status-log`、`cli.branch-switch-checkout`、`cli.cross-cutting-flags`、`cli.object-readback`、`cli.stash-bisect-worktree`、`cli.clone-fetch-pull-local`（本地 remote）。
 - **完整矩阵**：仅在 PR 改动触达对应命令组、或准备提交前由 runner / 长时间手工执行。
 - 所有执行必须严格使用 §3.3.1 的 `libra()`（含 `TMPDIR` + 智能 `SAFE_PATH`）；第 4 章内联 wrapper 若与 §3.3.1 不一致，以 §3.3.1 为准并必须先修正文档/runner。
 
 **Agent 生成计划时的硬边界**：
-- 第一批任务已实现 `tools/integration-runner/`、`check-plan`（含 yaml 加载 + MD 交叉校验）、`list`、`run --only`、Wave 0 preflight 和 3 个 smoke 场景（R0-R2）；后续仍不得承诺一次性自动化全部 §4 场景。
-- 必须把未完成的 `BASELINE_GAP-INTEG-*` 当作 backlog，而不是已完成能力；当前 `check-plan` 可用于 yaml+MD+矩阵+runner 已实现子集的一致性结果，但不能代表 Wave 1/2 全矩阵已自动执行。
+- R0-R5 已实现：`tools/integration-runner/`、`check-plan`、`list`、`run --only`、Wave 0 preflight、Wave 1/2 默认门和 Wave 3 live 场景均已落地；后续只能按新增/修改场景的垂直切片推进，不得用大包改动绕过 `check-plan`。
+- 必须把未完成的 `BASELINE_GAP-INTEG-*` 当作 backlog，而不是已完成能力；当前 `check-plan` 可用于 yaml+MD+矩阵+runner registry + assertion-category gate 的一致性结果，`run --waves 0,1,2` 是默认黑盒执行门。
 - Agent 产出的 issue/任务必须以“可单独运行并验证的垂直切片”（R0/R1/R2...）为单位，不能按模块名大包拆分。新增场景必须包含 yaml 登记 + MD 章节。
 - Scope 里必须显式包含 `integration-scenarios.yaml` 当场景元数据或列表变化时。
 
@@ -157,7 +157,7 @@ gh repo view "$REPO" --json nameWithOwner,sshUrl,url
 - `symbolic-ref` 仅支持 HEAD（其他符号引用因 SQLite 存储被拒绝）。
 - 这些必须出现在对应场景的负向步骤或专用小节中；新增故意差异时必须同步矩阵备注 + 断言。
 
-**与 tests/INDEX.md 关系**：Cargo 集成测试（Wave 1/2）提供 L1 确定性保障；本计划的黑盒 CLI 场景是用户视角的补充门，必须与当前 `tests/` 体系分开维护。`tests/INDEX.md` 只索引 Cargo `--test` 目标，不是本计划的场景 registry；若它与实际 `tests/*.rs` 暂时存在漂移，也不应影响本计划 runner 的场景清单。未来的集成计划一致性检查应落在独立 Rust runner/tool 的 `check-plan` 子命令中，CI 可显式运行该工具，但**不得注册到根 `Cargo.toml [[test]]`、不得进入 `cargo test --all` 默认测试集、不得写入 `tests/INDEX.md`**；该检查未落地前按 BASELINE_GAP-INTEG-008 记录为未自动校验。
+**与 tests/INDEX.md 关系**：Cargo 集成测试（Wave 1/2）提供 L1 确定性保障；本计划的黑盒 CLI 场景是用户视角的补充门，必须与当前 `tests/` 体系分开维护。`tests/INDEX.md` 只索引 Cargo `--test` 目标，不是本计划的场景 registry；若它与实际 `tests/*.rs` 暂时存在漂移，也不应影响本计划 runner 的场景清单。集成计划一致性检查已落在独立 Rust runner/tool 的 `check-plan` 子命令中，CI 可显式运行该工具，但**不得注册到根 `Cargo.toml [[test]]`、不得进入 `cargo test --all` 默认测试集、不得写入 `tests/INDEX.md`**。
 
 **断言强化标准（Assertion Strengthening Standard）**：为确保 Agent 可解析性、安全隔离验证和 Git 兼容性，所有场景最终应逐步纳入以下可执行断言模式（已在 `cli.commit-status-log`、`cli.cross-cutting-flags`、`cli.tag-basic` 等场景示范）：
 - 成功路径：至少一个 `--json`（或 `--machine`）调用 + `python3 -c "import json; d=...; assert d['ok'] is True; assert 'data' in d"`（ndjson 场景用逐行解析）。
@@ -881,7 +881,7 @@ runner 进程退出码：`0` = 无 `fail`（`skip`/`env-skip` 不算失败）；
 
 以下能力不写成默认可执行步骤，只登记为后续工程任务。
 
-### BASELINE_GAP-INTEG-001：CLI 场景 runner 仅落地 R0-R2（+ 垂直迁移进展）
+### BASELINE_GAP-INTEG-001：CLI 场景 runner 基础设施已落地
 
 - 现状：R0-R5 全部切片已落地。`tools/integration-runner/` 提供 list、check-plan（含收敛 gate）、Wave0 preflight、完整隔离执行（env_clear + SAFE_PATH + SSH_AUTH_SOCK + gitfix + gh 带 host-auth 的 ctx.gh + 原始 secret 泄漏前置检查 + 报告 §5 契约）、37/37 场景的 Rust typed 实现（含 Wave 3 的 run-live + GhRepoCleanupGuard + delete_repo scope 预检）。`run --waves 0,1,2` 与 `run-live --only live.github-create-push-clone-fetch` 均可产出完整可归档报告。check-plan 强制 yaml/MD/矩阵/registry 一致 + 短形式收敛。
 - 需要补充：可选的 plan-waves（BASELINE_GAP-INTEG-003）、并发执行、key_assertion_categories 更深语义扫描（当前结构 gate 已覆盖主要类别）。深水区语义（pull --rebase 真分叉、fetch --depth 真实远端对等、更多 pack corpus、--force-with-lease、warning=9 确定源）仍按 GAP-005/009 跟踪，不属于 runner 基础设施。
@@ -899,7 +899,7 @@ runner 进程退出码：`0` = 无 `fail`（`skip`/`env-skip` 不算失败）；
 - 需要补充：独立 Rust runner 的 `plan-waves` 子命令读取改动路径，输出建议 CLI wave 集合。
 - 约束：该命令只输出版本管理 CLI wave；不得引入交互界面、agent runtime、provider、publish 或云服务 wave。
 
-### BASELINE_GAP-INTEG-004：GitHub live 场景 runner 与清理保护未落地
+### BASELINE_GAP-INTEG-004：GitHub live 场景 runner 与清理保护已落地
 
 - 现状：已落地。`run-live` 子命令 + gh 预检（auth + delete_repo scope 探针）+ ctx.gh（host env，不清空）+ GhRepoCleanupGuard（Drop 兜底 + disarm on explicit success delete）+ 原始 secret 泄漏前置阻断 + 报告中 cleanup 状态记录。`live.github-create-push-clone-fetch` 已注册并实现完整步骤 + gh api 比对 + json 断言 + 隔离。无 delete 权限时 preflight 直接 skip（不创建仓库），满足“若无删除权限不启动”。
 - 约束：Wave 3 仅按需（触达远端语义时）；runner 绝不输出 token；cleanup 失败时报告 `cleanup_required` 并保留 run_root。
