@@ -1606,6 +1606,20 @@ pub struct GraphState {
     columns: Vec<Option<ObjectHash>>,
 }
 
+/// Returns the rotating color used for graph `column` (mirrors how `git log
+/// --graph` tints each branch line differently).
+fn graph_column_color(column: usize) -> colored::Color {
+    const PALETTE: [colored::Color; 6] = [
+        colored::Color::Red,
+        colored::Color::Green,
+        colored::Color::Yellow,
+        colored::Color::Blue,
+        colored::Color::Magenta,
+        colored::Color::Cyan,
+    ];
+    PALETTE[column % PALETTE.len()]
+}
+
 impl GraphState {
     /// Creates a new, empty `GraphState` for rendering a commit graph.
     pub fn new() -> Self {
@@ -1631,12 +1645,20 @@ impl GraphState {
 
         let mut prefix = String::new();
 
+        // Each branch column is drawn in a rotating color; this is a no-op
+        // unless the global `--color` setting enables it (the `colored` crate
+        // suppresses ANSI for `--color=never`/non-TTY), so the plain ASCII
+        // layout is byte-identical when color is off.
+        let glyph = |ch: &str, column: usize| ch.color(graph_column_color(column)).to_string();
+
         if let Some(pos) = self.columns.iter().position(|&c| c == Some(commit_id)) {
             for (i, col) in self.columns.iter().enumerate() {
                 if i == pos {
-                    prefix.push_str("* ");
+                    prefix.push_str(&glyph("*", i));
+                    prefix.push(' ');
                 } else if col.is_some() {
-                    prefix.push_str("| ");
+                    prefix.push_str(&glyph("|", i));
+                    prefix.push(' ');
                 } else {
                     prefix.push_str("  ");
                 }
@@ -1655,9 +1677,11 @@ impl GraphState {
             }
         } else {
             self.columns.insert(0, None);
-            prefix.push_str("* ");
-            for _ in 1..self.columns.len() {
-                prefix.push_str("| ");
+            prefix.push_str(&glyph("*", 0));
+            prefix.push(' ');
+            for i in 1..self.columns.len() {
+                prefix.push_str(&glyph("|", i));
+                prefix.push(' ');
             }
 
             if !parent_ids.is_empty() {

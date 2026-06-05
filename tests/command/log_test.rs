@@ -2357,3 +2357,37 @@ fn test_rev_range_json_total() {
     );
     assert_eq!(commits[0]["subject"], "feature work");
 }
+
+#[test]
+fn test_graph_color_respects_flag() {
+    let repo = create_committed_repo_via_cli();
+    let never = run_libra_command(
+        &["log", "--graph", "--color=never", "--oneline"],
+        repo.path(),
+    );
+    assert!(
+        never.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&never.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&never.stdout).contains('\u{1b}'),
+        "--color=never must render a plain graph: {:?}",
+        String::from_utf8_lossy(&never.stdout)
+    );
+
+    let always = run_libra_command(
+        &["log", "--graph", "--color=always", "--oneline"],
+        repo.path(),
+    );
+    assert!(
+        always.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&always.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&always.stdout).contains('\u{1b}'),
+        "--color=always must color the graph: {:?}",
+        String::from_utf8_lossy(&always.stdout)
+    );
+}

@@ -267,11 +267,14 @@ libra log --no-decorate
 ### `--graph`
 
 Draw a text-based graphical representation of the commit history, showing branching and
-merging visually.
+merging visually. Each branch column is drawn in a rotating color, honoring the global
+`--color=<auto|always|never>` flag (and `NO_COLOR`); colors are disabled automatically when
+output is not a terminal. (Octopus-merge connector lines are not yet rendered.)
 
 ```bash
 libra log --graph
 libra log --oneline --graph
+libra --color=always log --graph   # force-colored graph
 ```
 
 ### `[PATHS...]`
@@ -428,7 +431,7 @@ flag only affects the human rendering layer.
 | Custom format | `git log --pretty=<fmt>` | `jj log -T <template>` | `libra log --pretty <fmt>` |
 | Decorate refs | `git log --decorate` | Always shown | `libra log --decorate` |
 | No decorate | `git log --no-decorate` | N/A | `libra log --no-decorate` |
-| Graph view | `git log --graph` | `jj log` (default has graph) | `libra log --graph` |
+| Graph view | `git log --graph` | `jj log` (default has graph) | `libra log --graph` (per-column color via `--color`) |
 | All refs | `git log --all` | `jj log -r 'all()'` | N/A (not yet implemented) |
 | Branches only | `git log --branches` | `jj log -r 'branches()'` | N/A |
 | Remotes only | `git log --remotes` | `jj log -r 'remote_branches()'` | N/A |
