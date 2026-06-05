@@ -2523,28 +2523,11 @@ fn content_similarity(a: &MergeTreeEntry, b: &MergeTreeEntry) -> Result<f64, Pul
     }
     let a_data = load_merge_blob(a.hash)?.data;
     let b_data = load_merge_blob(b.hash)?.data;
-    if is_binary_blob(&a_data) || is_binary_blob(&b_data) {
-        return Ok(0.0);
-    }
-    let a_lines = bytes_to_lines(&a_data);
-    let b_lines = bytes_to_lines(&b_data);
-    if a_lines.is_empty() && b_lines.is_empty() {
-        return Ok(1.0);
-    }
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for line in &a_lines {
-        *counts.entry(line.as_str()).or_default() += 1;
-    }
-    let mut common = 0usize;
-    for line in &b_lines {
-        if let Some(count) = counts.get_mut(line.as_str())
-            && *count > 0
-        {
-            *count -= 1;
-            common += 1;
-        }
-    }
-    Ok((2.0 * common as f64) / (a_lines.len() + b_lines.len()) as f64)
+    // The binary check, empty-input handling and multiset Sørensen–Dice formula
+    // live in the shared helper so `diff`'s rename detection cannot drift.
+    Ok(crate::utils::blob_similarity::blob_line_similarity(
+        &a_data, &b_data,
+    ))
 }
 
 fn count_item_map_changes(

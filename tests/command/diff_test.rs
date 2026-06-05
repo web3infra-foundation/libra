@@ -1213,3 +1213,263 @@ fn diff_myers_still_fail_closed_lbr_cli_002() {
     let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-CLI-002");
 }
+
+// ----- Wave 1: rename / copy detection -----
+
+/// Commit a fresh file so a later rename diffs against it.
+fn commit_file(repo: &tempfile::TempDir, name: &str, content: &str) {
+    fs::write(repo.path().join(name), content).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", name], repo.path()),
+        "stage new file",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "add file", "--no-verify"], repo.path()),
+        "commit new file",
+    );
+}
+
+fn renamed_entry(json: &serde_json::Value) -> Option<&serde_json::Value> {
+    json["data"]["files"]
+        .as_array()?
+        .iter()
+        .find(|f| f["status"] == "renamed")
+}
+
+#[test]
+fn diff_rename_detected_with_small_edit() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "orig.txt", "l1\nl2\nl3\nl4\n");
+    fs::remove_file(repo.path().join("orig.txt")).unwrap();
+    fs::write(repo.path().join("new.txt"), "l1\nl2\nl3\nCHANGED\n").unwrap();
+
+    let output = run_libra_command(&["--json", "diff", "-M"], repo.path());
+    assert_cli_success(&output, "diff -M");
+    let json = parse_json_stdout(&output);
+    let renamed = renamed_entry(&json).expect("a renamed entry");
+    assert_eq!(renamed["path"], "new.txt");
+    assert_eq!(renamed["old_path"], "orig.txt");
+}
+
+#[test]
+fn diff_exact_rename_uses_hash_fast_path() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "orig.txt", "alpha\nbeta\ngamma\n");
+    fs::remove_file(repo.path().join("orig.txt")).unwrap();
+    fs::write(repo.path().join("new.txt"), "alpha\nbeta\ngamma\n").unwrap();
+
+    let output = run_libra_command(&["--json", "diff", "-M"], repo.path());
+    assert_cli_success(&output, "diff -M exact");
+    let json = parse_json_stdout(&output);
+    let renamed = renamed_entry(&json).expect("a renamed entry");
+    assert_eq!(renamed["similarity"], 100);
+    assert_eq!(
+        renamed["hunks"].as_array().map(|h| h.len()),
+        Some(0),
+        "an exact rename has no hunk body"
+    );
+
+    // Human output carries the similarity header but no @@ hunk.
+    let human = run_libra_command(&["diff", "-M"], repo.path());
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(stdout.contains("similarity index 100%"), "stdout={stdout}");
+    assert!(stdout.contains("rename from orig.txt"), "stdout={stdout}");
+    assert!(stdout.contains("rename to new.txt"), "stdout={stdout}");
+    assert!(!stdout.contains("@@"), "pure rename has no hunk: {stdout}");
+}
+
+#[test]
+fn diff_no_renames_forces_add_delete() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "orig.txt", "alpha\nbeta\ngamma\n");
+    fs::remove_file(repo.path().join("orig.txt")).unwrap();
+    fs::write(repo.path().join("new.txt"), "alpha\nbeta\ngamma\n").unwrap();
+
+    let output = run_libra_command(&["--json", "diff", "--no-renames"], repo.path());
+    assert_cli_success(&output, "diff --no-renames");
+    let json = parse_json_stdout(&output);
+    let statuses: Vec<String> = json["data"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["status"].as_str().unwrap().to_string())
+        .collect();
+    assert!(statuses.contains(&"added".to_string()), "{statuses:?}");
+    assert!(statuses.contains(&"deleted".to_string()), "{statuses:?}");
+    assert!(!statuses.contains(&"renamed".to_string()), "{statuses:?}");
+}
+
+#[test]
+fn diff_default_without_flag_does_not_detect_rename() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "orig.txt", "alpha\nbeta\ngamma\n");
+    fs::remove_file(repo.path().join("orig.txt")).unwrap();
+    fs::write(repo.path().join("new.txt"), "alpha\nbeta\ngamma\n").unwrap();
+
+    // No -M and no config => libra keeps the add/delete pair (off by default).
+    let output = run_libra_command(&["--json", "diff"], repo.path());
+    assert_cli_success(&output, "diff default");
+    let json = parse_json_stdout(&output);
+    assert!(
+        renamed_entry(&json).is_none(),
+        "default diff must not rename"
+    );
+}
+
+#[test]
+fn diff_rename_threshold_percent_respected() {
+    let repo = create_committed_repo_via_cli();
+    // 3 of 6 lines change => ~50% similar; -M80% must NOT pair them.
+    commit_file(&repo, "orig.txt", "l1\nl2\nl3\nl4\nl5\nl6\n");
+    fs::remove_file(repo.path().join("orig.txt")).unwrap();
+    fs::write(repo.path().join("new.txt"), "l1\nl2\nl3\nX4\nX5\nX6\n").unwrap();
+
+    let output = run_libra_command(&["--json", "diff", "--find-renames=80%"], repo.path());
+    assert_cli_success(&output, "diff -M80%");
+    let json = parse_json_stdout(&output);
+    assert!(
+        renamed_entry(&json).is_none(),
+        "50%-similar files must not pair at -M80%"
+    );
+}
+
+#[test]
+fn diff_rename_threshold_bare_number_means_percent() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "orig.txt", "l1\nl2\nl3\nl4\n");
+    fs::remove_file(repo.path().join("orig.txt")).unwrap();
+    fs::write(repo.path().join("new.txt"), "l1\nl2\nl3\nCHANGED\n").unwrap();
+
+    // 75% similar: -M80 (== -M80%) rejects, -M70 accepts.
+    let strict = run_libra_command(&["--json", "diff", "--find-renames=80"], repo.path());
+    assert!(renamed_entry(&parse_json_stdout(&strict)).is_none());
+    let loose = run_libra_command(&["--json", "diff", "--find-renames=70"], repo.path());
+    assert!(renamed_entry(&parse_json_stdout(&loose)).is_some());
+}
+
+#[test]
+fn diff_config_renames_false_disables() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "orig.txt", "alpha\nbeta\ngamma\n");
+    fs::remove_file(repo.path().join("orig.txt")).unwrap();
+    fs::write(repo.path().join("new.txt"), "alpha\nbeta\ngamma\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "diff.renames", "false"], repo.path()),
+        "set diff.renames=false",
+    );
+
+    let output = run_libra_command(&["--json", "diff", "-M"], repo.path());
+    assert_cli_success(&output, "diff -M with renames disabled");
+    // Explicit -M overrides config off.
+    assert!(
+        renamed_entry(&parse_json_stdout(&output)).is_some(),
+        "explicit -M should still detect renames"
+    );
+
+    // Config true enables without a flag.
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "diff.renames", "true"], repo.path()),
+        "set diff.renames=true",
+    );
+    let output = run_libra_command(&["--json", "diff"], repo.path());
+    assert!(
+        renamed_entry(&parse_json_stdout(&output)).is_some(),
+        "diff.renames=true should enable detection without a flag"
+    );
+}
+
+#[test]
+fn diff_copy_detection_basic() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "src.txt", "one\ntwo\nthree\nfour\n");
+    // Modify the source and add a near-identical copy.
+    fs::write(repo.path().join("src.txt"), "one\ntwo\nthree\nFOUR\n").unwrap();
+    fs::write(repo.path().join("copy.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+
+    let output = run_libra_command(&["--json", "diff", "-C"], repo.path());
+    assert_cli_success(&output, "diff -C");
+    let json = parse_json_stdout(&output);
+    let copied = json["data"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["status"] == "copied")
+        .expect("a copied entry");
+    assert_eq!(copied["path"], "copy.txt");
+    assert_eq!(copied["old_path"], "src.txt");
+    // The copy source is NOT consumed: src.txt still shows as modified.
+    assert!(
+        json["data"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"] == "src.txt" && f["status"] == "modified"),
+        "copy source remains independently in the diff"
+    );
+}
+
+#[test]
+fn diff_rename_limit_cutoff_warns() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "a.txt", "alpha\nbeta\ngamma\ndelta\n");
+    commit_file(&repo, "b.txt", "uno\ndos\ntres\ncuatro\n");
+    // Delete both and add two near-but-not-exact copies (forces inexact stage).
+    fs::remove_file(repo.path().join("a.txt")).unwrap();
+    fs::remove_file(repo.path().join("b.txt")).unwrap();
+    fs::write(repo.path().join("a2.txt"), "alpha\nbeta\ngamma\nDELTA\n").unwrap();
+    fs::write(repo.path().join("b2.txt"), "uno\ndos\ntres\nCUATRO\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "diff.renameLimit", "1"], repo.path()),
+        "set diff.renameLimit=1",
+    );
+
+    let output = run_libra_command(&["diff", "-M"], repo.path());
+    assert_cli_success(&output, "diff -M over rename limit");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("rename detection was skipped"),
+        "expected a rename-limit warning: {stderr}"
+    );
+}
+
+#[test]
+fn diff_binary_rename_by_hash() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("orig.bin"), [0u8, 1, 2, 3, 0, 9]).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "orig.bin"], repo.path()),
+        "stage binary",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "bin", "--no-verify"], repo.path()),
+        "commit binary",
+    );
+    fs::remove_file(repo.path().join("orig.bin")).unwrap();
+    fs::write(repo.path().join("moved.bin"), [0u8, 1, 2, 3, 0, 9]).unwrap();
+
+    let output = run_libra_command(&["--json", "diff", "-M"], repo.path());
+    assert_cli_success(&output, "diff -M binary");
+    let json = parse_json_stdout(&output);
+    let renamed = renamed_entry(&json).expect("binary rename by hash");
+    assert_eq!(renamed["path"], "moved.bin");
+    assert_eq!(renamed["similarity"], 100);
+}
+
+#[cfg(unix)]
+#[test]
+fn diff_rename_header_includes_mode_change() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "orig.sh", "echo hi\nline2\nline3\n");
+    fs::remove_file(repo.path().join("orig.sh")).unwrap();
+    let new = repo.path().join("new.sh");
+    fs::write(&new, "echo hi\nline2\nline3\n").unwrap();
+    fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = run_libra_command(&["diff", "-M"], repo.path());
+    assert_cli_success(&output, "diff -M mode change");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("old mode 100644"), "stdout={stdout}");
+    assert!(stdout.contains("new mode 100755"), "stdout={stdout}");
+    assert!(stdout.contains("rename from orig.sh"), "stdout={stdout}");
+}

@@ -19,7 +19,12 @@ use git_internal::{
     hash::ObjectHash,
     internal::{
         index::{Index, IndexEntry, Time},
-        object::{blob::Blob, commit::Commit, tree::Tree, types::ObjectType},
+        object::{
+            blob::Blob,
+            commit::Commit,
+            tree::{Tree, TreeItemMode},
+            types::ObjectType,
+        },
         pack::utils::calculate_object_hash,
     },
 };
@@ -118,6 +123,20 @@ pub struct DiffArgs {
     /// still written, unlike `--quiet`).
     #[clap(long = "exit-code")]
     pub exit_code: bool,
+
+    /// Detect renames. An optional similarity threshold may be attached
+    /// (`-M80`, `-M80%`, `--find-renames=80%`); the default is 50%.
+    #[clap(short = 'M', long = "find-renames", value_name = "N", num_args = 0..=1, require_equals = true)]
+    pub find_renames: Option<Option<String>>,
+
+    /// Detect copies (basic). An optional similarity threshold may be attached
+    /// (`-C80`, `--find-copies=80%`); the default is 50%.
+    #[clap(short = 'C', long = "find-copies", value_name = "N", num_args = 0..=1, require_equals = true)]
+    pub find_copies: Option<Option<String>>,
+
+    /// Disable rename (and copy) detection, even if enabled by config.
+    #[clap(long = "no-renames")]
+    pub no_renames: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -136,6 +155,23 @@ pub struct DiffFileStat {
     pub insertions: usize,
     pub deletions: usize,
     pub hunks: Vec<DiffHunk>,
+    /// Source path for `renamed` / `copied` entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+    /// Similarity percentage (0–100) for `renamed` / `copied` entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<u32>,
+    /// File mode on the old/new side (octal, e.g. `0o100644`), surfaced for
+    /// rename mode-change headers and `--raw`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_mode: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_mode: Option<u32>,
+    /// Full object id on the old/new side (populated for `--raw`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_sha: Option<String>,
     #[serde(skip_serializing)]
     raw_diff: String,
 }
@@ -286,6 +322,11 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
     let ws = WsMode::from_args(args);
     let use_native = ws != WsMode::None || args.ignore_blank_lines || context != DEFAULT_CONTEXT;
 
+    // Snapshot per-side path→hash maps before the blobs are consumed by the diff
+    // backend; rename/copy detection (below) needs them afterwards.
+    let old_map: HashMap<PathBuf, ObjectHash> = old_side.blobs.iter().cloned().collect();
+    let new_map: HashMap<PathBuf, ObjectHash> = new_side.blobs.iter().cloned().collect();
+
     let worktree_entries = new_side.worktree_entries.clone();
     let worktree_cache = RefCell::new(HashMap::<ObjectHash, Vec<u8>>::new());
     let repo_cache = RefCell::new(HashMap::<ObjectHash, Vec<u8>>::new());
@@ -345,7 +386,28 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
         return Err(err);
     }
 
-    let files: Vec<DiffFileStat> = diff_output.iter().map(parse_diff_item).collect();
+    let mut files: Vec<DiffFileStat> = diff_output.iter().map(parse_diff_item).collect();
+
+    // Rename / copy detection (Wave 1): rewrites added/deleted pairs into
+    // `renamed` / `copied` entries when content is similar enough.
+    if let Some(opts) = resolve_rename_options(args).await {
+        detect_renames_and_copies(
+            &mut files,
+            &old_map,
+            &new_map,
+            &old_side.modes,
+            &new_side.modes,
+            context,
+            ws,
+            args.ignore_blank_lines,
+            &opts,
+            &read,
+        );
+        if let Some(err) = load_error.borrow_mut().take() {
+            return Err(err);
+        }
+    }
+
     let total_insertions = files.iter().map(|file| file.insertions).sum();
     let total_deletions = files.iter().map(|file| file.deletions).sum();
     let files_changed = files.len();
@@ -365,30 +427,55 @@ struct DiffSide {
     label: String,
     blobs: Vec<(PathBuf, ObjectHash)>,
     worktree_entries: HashMap<PathBuf, ObjectHash>,
+    /// File mode (octal `u32`) per path on this side, used for rename
+    /// mode-change headers and `--raw`.
+    modes: HashMap<PathBuf, u32>,
+}
+
+/// Convert a git tree item mode to the octal `u32` representation Git writes in
+/// diff headers (`100644`, `100755`, `120000`, …).
+fn tree_item_mode_to_u32(mode: TreeItemMode) -> u32 {
+    match mode {
+        TreeItemMode::Blob => 0o100644,
+        TreeItemMode::BlobExecutable => 0o100755,
+        TreeItemMode::Link => 0o120000,
+        TreeItemMode::Tree => 0o040000,
+        TreeItemMode::Commit => 0o160000,
+    }
 }
 
 /// diff needs to print hashes even if the files have not been staged yet.
 /// This helper maps workdir paths to blob ids while applying the shared ignore policy.
+type BlobsAndModes = (Vec<(PathBuf, ObjectHash)>, HashMap<PathBuf, u32>);
+
 fn get_files_blobs(
     files: &[PathBuf],
     index: &Index,
     policy: IgnorePolicy,
-) -> Result<Vec<(PathBuf, ObjectHash)>, DiffError> {
-    files
-        .iter()
-        .filter(|path| !ignore::should_ignore(path, policy, index))
-        .map(|p| {
-            if let Some(hash) = index_hash_if_worktree_stat_matches(p, index) {
-                return Ok((p.to_owned(), hash));
-            }
-            let path = util::workdir_to_absolute(p);
-            let data = std::fs::read(&path).map_err(|e| DiffError::FileRead {
-                path: path.display().to_string(),
+) -> Result<BlobsAndModes, DiffError> {
+    let mut blobs = Vec::new();
+    let mut modes = HashMap::new();
+    for p in files {
+        if ignore::should_ignore(p, policy, index) {
+            continue;
+        }
+        let absolute = util::workdir_to_absolute(p);
+        let mode = std::fs::symlink_metadata(&absolute)
+            .map(|m| index_mode_from_metadata(&m))
+            .unwrap_or(0o100644);
+        let hash = if let Some(hash) = index_hash_if_worktree_stat_matches(p, index) {
+            hash
+        } else {
+            let data = std::fs::read(&absolute).map_err(|e| DiffError::FileRead {
+                path: absolute.display().to_string(),
                 detail: e.to_string(),
             })?;
-            Ok((p.to_owned(), calculate_object_hash(ObjectType::Blob, &data)))
-        })
-        .collect()
+            calculate_object_hash(ObjectType::Blob, &data)
+        };
+        modes.insert(p.to_owned(), mode);
+        blobs.push((p.to_owned(), hash));
+    }
+    Ok((blobs, modes))
 }
 
 fn index_hash_if_worktree_stat_matches(path: &Path, index: &Index) -> Option<ObjectHash> {
@@ -523,13 +610,18 @@ fn get_worktree_diff_files(index: &Index) -> Result<Vec<PathBuf>, DiffError> {
 /// Unlike `get_files_blobs`, this uses the hash already recorded in the index
 /// rather than reading the current file on disk, which is essential for
 /// producing a correct working-directory diff (index vs working tree).
-fn get_index_blobs(index: &Index, policy: IgnorePolicy) -> Vec<(PathBuf, ObjectHash)> {
-    index
-        .tracked_entries(0)
-        .iter()
-        .filter(|entry| !ignore::should_ignore(&PathBuf::from(&entry.name), policy, index))
-        .map(|entry| (PathBuf::from(&entry.name), entry.hash))
-        .collect()
+fn get_index_blobs(index: &Index, policy: IgnorePolicy) -> BlobsAndModes {
+    let mut blobs = Vec::new();
+    let mut modes = HashMap::new();
+    for entry in index.tracked_entries(0).iter() {
+        let path = PathBuf::from(&entry.name);
+        if ignore::should_ignore(&path, policy, index) {
+            continue;
+        }
+        modes.insert(path.clone(), entry.mode);
+        blobs.push((path, entry.hash));
+    }
+    (blobs, modes)
 }
 
 async fn resolve_diff_side(
@@ -542,54 +634,64 @@ async fn resolve_diff_side(
         let commit_hash = get_target_commit(source)
             .await
             .map_err(|_| DiffError::InvalidRevision(source.clone()))?;
+        let (blobs, modes) = get_commit_blobs(&commit_hash).await?;
         return Ok(DiffSide {
             label: source.clone(),
-            blobs: get_commit_blobs(&commit_hash).await?,
+            blobs,
             worktree_entries: HashMap::new(),
+            modes,
         });
     }
 
     if is_new {
         if staged {
+            let (blobs, modes) = get_index_blobs(index, IgnorePolicy::Respect);
             Ok(DiffSide {
                 label: "index".to_string(),
-                blobs: get_index_blobs(index, IgnorePolicy::Respect),
+                blobs,
                 worktree_entries: HashMap::new(),
+                modes,
             })
         } else {
             let files = get_worktree_diff_files(index)?;
-            let blobs = get_files_blobs(&files, index, IgnorePolicy::Respect)?;
+            let (blobs, modes) = get_files_blobs(&files, index, IgnorePolicy::Respect)?;
             Ok(DiffSide {
                 label: "working tree".to_string(),
                 worktree_entries: blobs.iter().cloned().collect(),
                 blobs,
+                modes,
             })
         }
     } else if staged {
         match Head::current_commit().await {
-            Some(commit_hash) => Ok(DiffSide {
-                label: "HEAD".to_string(),
-                blobs: get_commit_blobs(&commit_hash).await?,
-                worktree_entries: HashMap::new(),
-            }),
+            Some(commit_hash) => {
+                let (blobs, modes) = get_commit_blobs(&commit_hash).await?;
+                Ok(DiffSide {
+                    label: "HEAD".to_string(),
+                    blobs,
+                    worktree_entries: HashMap::new(),
+                    modes,
+                })
+            }
             None => Ok(DiffSide {
                 label: "HEAD".to_string(),
                 blobs: Vec::new(),
                 worktree_entries: HashMap::new(),
+                modes: HashMap::new(),
             }),
         }
     } else {
+        let (blobs, modes) = get_index_blobs(index, IgnorePolicy::Respect);
         Ok(DiffSide {
             label: "index".to_string(),
-            blobs: get_index_blobs(index, IgnorePolicy::Respect),
+            blobs,
             worktree_entries: HashMap::new(),
+            modes,
         })
     }
 }
 
-async fn get_commit_blobs(
-    commit_hash: &ObjectHash,
-) -> Result<Vec<(PathBuf, ObjectHash)>, DiffError> {
+async fn get_commit_blobs(commit_hash: &ObjectHash) -> Result<BlobsAndModes, DiffError> {
     let commit = load_object::<Commit>(commit_hash).map_err(|e| DiffError::ObjectLoad {
         kind: "commit",
         object_id: commit_hash.to_string(),
@@ -600,7 +702,13 @@ async fn get_commit_blobs(
         object_id: commit.tree_id.to_string(),
         detail: e.to_string(),
     })?;
-    Ok(tree.get_plain_items())
+    let mut blobs = Vec::new();
+    let mut modes = HashMap::new();
+    for (path, hash, mode) in tree.get_plain_items_with_mode() {
+        modes.insert(path.clone(), tree_item_mode_to_u32(mode));
+        blobs.push((path, hash));
+    }
+    Ok((blobs, modes))
 }
 
 fn load_repo_blob_content(hash: &ObjectHash) -> Result<Vec<u8>, DiffError> {
@@ -1150,6 +1258,426 @@ fn path_is_sub_of(path: &Path, parent: &Path) -> bool {
     }
 }
 
+// ----- Rename / copy detection (Wave 1) -----
+
+/// Default rename/copy similarity threshold (50%), matching Git.
+const DEFAULT_RENAME_THRESHOLD: f64 = 0.5;
+/// Default `diff.renameLimit` (deleted × added product cap), matching Git.
+const DEFAULT_RENAME_LIMIT: usize = 1000;
+
+/// `diff.renames` config value (not a plain bool — Git accepts copy/copies).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenamesConfig {
+    Off,
+    Renames,
+    Copies,
+}
+
+/// Resolved rename/copy detection parameters for a single diff run.
+struct RenameOptions {
+    rename_threshold: f64,
+    copy_threshold: Option<f64>,
+    rename_limit: usize,
+}
+
+/// A matched rename/copy: which source entry, the similarity, and whether it is
+/// a copy (source preserved) rather than a rename (source consumed).
+struct RenameMatch {
+    source_index: usize,
+    similarity: f64,
+    is_copy: bool,
+}
+
+/// Parse a similarity flag value: `-M`/absent value → default 50%; `80`/`80%`
+/// → 0.80; a dotted value like `0.8` (no `%`) is treated as an already-fractional
+/// threshold. Unparseable values fall back to the default.
+fn parse_similarity(flag: &Option<String>) -> f64 {
+    match flag {
+        None => DEFAULT_RENAME_THRESHOLD,
+        Some(s) => {
+            let trimmed = s.trim();
+            let had_percent = trimmed.ends_with('%');
+            let core = trimmed.strip_suffix('%').unwrap_or(trimmed);
+            match core.parse::<f64>() {
+                Ok(n) if core.contains('.') && !had_percent => n.clamp(0.0, 1.0),
+                Ok(n) => (n / 100.0).clamp(0.0, 1.0),
+                Err(_) => DEFAULT_RENAME_THRESHOLD,
+            }
+        }
+    }
+}
+
+async fn read_renames_config() -> RenamesConfig {
+    match ConfigKv::get("diff.renames").await {
+        Ok(Some(entry)) => match entry.value.trim().to_ascii_lowercase().as_str() {
+            "false" | "no" | "off" | "0" => RenamesConfig::Off,
+            "copy" | "copies" => RenamesConfig::Copies,
+            "true" | "yes" | "on" | "1" => RenamesConfig::Renames,
+            // Unrecognized values fall back to rename detection, matching Git.
+            _ => RenamesConfig::Renames,
+        },
+        // Absent config keeps detection off so default `libra diff` is unchanged.
+        _ => RenamesConfig::Off,
+    }
+}
+
+async fn read_rename_limit() -> usize {
+    match ConfigKv::get("diff.renameLimit").await {
+        Ok(Some(entry)) => entry
+            .value
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_RENAME_LIMIT),
+        _ => DEFAULT_RENAME_LIMIT,
+    }
+}
+
+/// Resolve whether rename/copy detection runs, and with what thresholds. Returns
+/// `None` when detection is disabled (`--no-renames`, or no flag and config off).
+async fn resolve_rename_options(args: &DiffArgs) -> Option<RenameOptions> {
+    if args.no_renames {
+        return None;
+    }
+    let config = read_renames_config().await;
+    let renames_on = args.find_renames.is_some()
+        || args.find_copies.is_some()
+        || matches!(config, RenamesConfig::Renames | RenamesConfig::Copies);
+    if !renames_on {
+        return None;
+    }
+
+    let rename_threshold = args
+        .find_renames
+        .as_ref()
+        .map(parse_similarity)
+        .unwrap_or(DEFAULT_RENAME_THRESHOLD);
+    let copy_threshold = if let Some(flag) = &args.find_copies {
+        Some(parse_similarity(flag))
+    } else if matches!(config, RenamesConfig::Copies) {
+        Some(DEFAULT_RENAME_THRESHOLD)
+    } else {
+        None
+    };
+
+    Some(RenameOptions {
+        rename_threshold,
+        copy_threshold,
+        rename_limit: read_rename_limit().await,
+    })
+}
+
+/// Rewrite `files` in place, turning added/deleted pairs into `renamed` entries
+/// (and added/source pairs into `copied` entries) when content is similar enough.
+#[allow(clippy::too_many_arguments)]
+fn detect_renames_and_copies(
+    files: &mut Vec<DiffFileStat>,
+    old_map: &HashMap<PathBuf, ObjectHash>,
+    new_map: &HashMap<PathBuf, ObjectHash>,
+    old_modes: &HashMap<PathBuf, u32>,
+    new_modes: &HashMap<PathBuf, u32>,
+    context: usize,
+    ws: WsMode,
+    ignore_blank_lines: bool,
+    opts: &RenameOptions,
+    read: &dyn Fn(&PathBuf, &ObjectHash) -> Vec<u8>,
+) {
+    let added: Vec<usize> = files
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.status == "added")
+        .map(|(i, _)| i)
+        .collect();
+    let deleted: Vec<usize> = files
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.status == "deleted")
+        .map(|(i, _)| i)
+        .collect();
+    if added.is_empty() {
+        return;
+    }
+
+    let old_hash_of = |idx: usize| -> Option<ObjectHash> {
+        old_map.get(&PathBuf::from(&files[idx].path)).copied()
+    };
+    let new_hash_of = |idx: usize| -> Option<ObjectHash> {
+        new_map.get(&PathBuf::from(&files[idx].path)).copied()
+    };
+    let old_content = |idx: usize| -> Vec<u8> {
+        let path = PathBuf::from(&files[idx].path);
+        match old_map.get(&path) {
+            Some(h) => read(&path, h),
+            None => Vec::new(),
+        }
+    };
+    let new_content = |idx: usize| -> Vec<u8> {
+        let path = PathBuf::from(&files[idx].path);
+        match new_map.get(&path) {
+            Some(h) => read(&path, h),
+            None => Vec::new(),
+        }
+    };
+
+    let mut matches: HashMap<usize, RenameMatch> = HashMap::new();
+    let mut consumed_deleted: HashSet<usize> = HashSet::new();
+
+    // Stage 1: exact-hash renames (O(N), no similarity computation).
+    for &ai in &added {
+        let Some(a_hash) = new_hash_of(ai) else {
+            continue;
+        };
+        for &di in &deleted {
+            if consumed_deleted.contains(&di) {
+                continue;
+            }
+            if old_hash_of(di) == Some(a_hash) {
+                consumed_deleted.insert(di);
+                matches.insert(
+                    ai,
+                    RenameMatch {
+                        source_index: di,
+                        similarity: 1.0,
+                        is_copy: false,
+                    },
+                );
+                break;
+            }
+        }
+    }
+
+    // Stage 2: similarity renames, bounded by `diff.renameLimit`.
+    let unmatched_added: Vec<usize> = added
+        .iter()
+        .copied()
+        .filter(|ai| !matches.contains_key(ai))
+        .collect();
+    let unconsumed_deleted: Vec<usize> = deleted
+        .iter()
+        .copied()
+        .filter(|di| !consumed_deleted.contains(di))
+        .collect();
+    if !unmatched_added.is_empty() && !unconsumed_deleted.is_empty() {
+        if unmatched_added
+            .len()
+            .saturating_mul(unconsumed_deleted.len())
+            > opts.rename_limit
+        {
+            crate::utils::error::emit_warning(format!(
+                "inexact rename detection was skipped due to too many files (limit {}); set diff.renameLimit higher to enable it",
+                opts.rename_limit
+            ));
+        } else {
+            for &ai in &unmatched_added {
+                let a_content = new_content(ai);
+                let mut best: Option<(usize, f64)> = None;
+                for &di in &unconsumed_deleted {
+                    if consumed_deleted.contains(&di) {
+                        continue;
+                    }
+                    let sim = crate::utils::blob_similarity::blob_line_similarity(
+                        &old_content(di),
+                        &a_content,
+                    );
+                    if sim >= opts.rename_threshold
+                        && best.is_none_or(|(_, best_sim)| sim > best_sim)
+                    {
+                        best = Some((di, sim));
+                    }
+                }
+                if let Some((di, sim)) = best {
+                    consumed_deleted.insert(di);
+                    matches.insert(
+                        ai,
+                        RenameMatch {
+                            source_index: di,
+                            similarity: sim,
+                            is_copy: false,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    // Stage 3: copy detection — copy source pool = modified/deleted old-side files.
+    if let Some(copy_threshold) = opts.copy_threshold {
+        let sources: Vec<usize> = files
+            .iter()
+            .enumerate()
+            .filter(|(i, f)| {
+                (f.status == "modified" || f.status == "deleted") && !consumed_deleted.contains(i)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let still_unmatched: Vec<usize> = added
+            .iter()
+            .copied()
+            .filter(|ai| !matches.contains_key(ai))
+            .collect();
+        if !still_unmatched.is_empty()
+            && !sources.is_empty()
+            && still_unmatched.len().saturating_mul(sources.len()) <= opts.rename_limit
+        {
+            for &ai in &still_unmatched {
+                let a_content = new_content(ai);
+                let mut best: Option<(usize, f64)> = None;
+                for &si in &sources {
+                    let sim = crate::utils::blob_similarity::blob_line_similarity(
+                        &old_content(si),
+                        &a_content,
+                    );
+                    if sim >= copy_threshold && best.is_none_or(|(_, best_sim)| sim > best_sim) {
+                        best = Some((si, sim));
+                    }
+                }
+                if let Some((si, sim)) = best {
+                    matches.insert(
+                        ai,
+                        RenameMatch {
+                            source_index: si,
+                            similarity: sim,
+                            is_copy: true,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    if matches.is_empty() {
+        return;
+    }
+
+    // Rebuild the file list: drop consumed deletes, rewrite matched adds.
+    let mut rebuilt: Vec<DiffFileStat> = Vec::with_capacity(files.len());
+    for (i, file) in files.iter().enumerate() {
+        if consumed_deleted.contains(&i) {
+            continue;
+        }
+        if let Some(m) = matches.get(&i) {
+            let source_path = files[m.source_index].path.clone();
+            rebuilt.push(build_rename_entry(
+                file.path.clone(),
+                source_path,
+                m,
+                old_map,
+                new_map,
+                old_modes,
+                new_modes,
+                context,
+                ws,
+                ignore_blank_lines,
+                read,
+            ));
+        } else {
+            rebuilt.push(file.clone());
+        }
+    }
+    *files = rebuilt;
+}
+
+/// Render a single `renamed` / `copied` entry, including the similarity header,
+/// optional mode-change lines, and a content diff body when the blobs differ.
+#[allow(clippy::too_many_arguments)]
+fn build_rename_entry(
+    new_path: String,
+    old_path: String,
+    m: &RenameMatch,
+    old_map: &HashMap<PathBuf, ObjectHash>,
+    new_map: &HashMap<PathBuf, ObjectHash>,
+    old_modes: &HashMap<PathBuf, u32>,
+    new_modes: &HashMap<PathBuf, u32>,
+    context: usize,
+    ws: WsMode,
+    ignore_blank_lines: bool,
+    read: &dyn Fn(&PathBuf, &ObjectHash) -> Vec<u8>,
+) -> DiffFileStat {
+    let old_pb = PathBuf::from(&old_path);
+    let new_pb = PathBuf::from(&new_path);
+    let old_hash = old_map.get(&old_pb).copied();
+    let new_hash = new_map.get(&new_pb).copied();
+    let old_mode = old_modes.get(&old_pb).copied();
+    let new_mode = new_modes.get(&new_pb).copied();
+    let sim_pct = (m.similarity * 100.0).round() as u32;
+    let verb = if m.is_copy { "copy" } else { "rename" };
+
+    let mut raw = String::new();
+    let _ = writeln!(raw, "diff --git a/{old_path} b/{new_path}");
+    if let (Some(om), Some(nm)) = (old_mode, new_mode)
+        && om != nm
+    {
+        let _ = writeln!(raw, "old mode {om:o}");
+        let _ = writeln!(raw, "new mode {nm:o}");
+    }
+    let _ = writeln!(raw, "similarity index {sim_pct}%");
+    let _ = writeln!(raw, "{verb} from {old_path}");
+    let _ = writeln!(raw, "{verb} to {new_path}");
+
+    let mut hunks = Vec::new();
+    let mut insertions = 0;
+    let mut deletions = 0;
+
+    if old_hash != new_hash {
+        let old_bytes = old_hash.map(|h| read(&old_pb, &h)).unwrap_or_default();
+        let new_bytes = new_hash.map(|h| read(&new_pb, &h)).unwrap_or_default();
+        match (
+            std::str::from_utf8(&old_bytes),
+            std::str::from_utf8(&new_bytes),
+        ) {
+            (Ok(old_text), Ok(new_text)) => {
+                let body = compute_unified_diff_native(
+                    old_text,
+                    new_text,
+                    context,
+                    ws,
+                    ignore_blank_lines,
+                );
+                if !body.is_empty() {
+                    let _ = writeln!(
+                        raw,
+                        "index {}..{} 100644",
+                        short_hash_native(old_hash.as_ref()),
+                        short_hash_native(new_hash.as_ref())
+                    );
+                    let _ = writeln!(raw, "--- a/{old_path}");
+                    let _ = writeln!(raw, "+++ b/{new_path}");
+                    raw.push_str(&body);
+                    hunks = parse_diff_hunks(&body);
+                    let counts = count_hunk_line_changes(&body);
+                    insertions = counts.0;
+                    deletions = counts.1;
+                }
+            }
+            _ => {
+                let _ = writeln!(
+                    raw,
+                    "index {}..{} 100644",
+                    short_hash_native(old_hash.as_ref()),
+                    short_hash_native(new_hash.as_ref())
+                );
+                let _ = writeln!(raw, "Binary files differ");
+            }
+        }
+    }
+
+    DiffFileStat {
+        path: new_path,
+        status: if m.is_copy { "copied" } else { "renamed" }.to_string(),
+        insertions,
+        deletions,
+        hunks,
+        old_path: Some(old_path),
+        similarity: Some(sim_pct),
+        old_mode,
+        new_mode,
+        old_sha: old_hash.map(|h| h.to_string()),
+        new_sha: new_hash.map(|h| h.to_string()),
+        raw_diff: raw,
+    }
+}
+
 fn render_diff_output(
     args: &DiffArgs,
     result: &DiffOutput,
@@ -1242,6 +1770,8 @@ fn diff_status_letter(status: &str) -> &'static str {
     match status {
         "added" => "A",
         "deleted" => "D",
+        "renamed" => "R",
+        "copied" => "C",
         _ => "M",
     }
 }
@@ -1275,6 +1805,9 @@ pub async fn staged_diff_text() -> String {
         ignore_blank_lines: false,
         unified: None,
         exit_code: false,
+        find_renames: None,
+        find_copies: None,
+        no_renames: false,
     };
     match run_diff(&args).await {
         Ok(result) => format_unified_diff(&result),
@@ -1334,6 +1867,12 @@ fn parse_diff_item(item: &git_internal::diff::DiffItem) -> DiffFileStat {
         insertions,
         deletions,
         hunks: parse_diff_hunks(&item.data),
+        old_path: None,
+        similarity: None,
+        old_mode: None,
+        new_mode: None,
+        old_sha: None,
+        new_sha: None,
         raw_diff: item.data.clone(),
     }
 }
@@ -1692,14 +2231,14 @@ mod test {
         fs::File::create("not_ignore").unwrap();
 
         let index = Index::load(path::index()).unwrap();
-        let blob = get_files_blobs(
+        let (blobs, _modes) = get_files_blobs(
             &[PathBuf::from("should_ignore"), PathBuf::from("not_ignore")],
             &index,
             IgnorePolicy::Respect,
         )
         .unwrap();
-        assert_eq!(blob.len(), 1);
-        assert_eq!(blob[0].0, PathBuf::from("not_ignore"));
+        assert_eq!(blobs.len(), 1);
+        assert_eq!(blobs[0].0, PathBuf::from("not_ignore"));
     }
 
     #[tokio::test]
@@ -1722,7 +2261,7 @@ mod test {
                 .unwrap(),
         );
 
-        let blobs = get_files_blobs(
+        let (blobs, _modes) = get_files_blobs(
             &[PathBuf::from("tracked.txt")],
             &index,
             IgnorePolicy::Respect,

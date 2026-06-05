@@ -5,6 +5,7 @@ pub mod error;
 pub mod fuse;
 pub mod output;
 
+pub mod blob_similarity;
 pub mod client_storage;
 pub mod convert;
 pub mod d1_client;
