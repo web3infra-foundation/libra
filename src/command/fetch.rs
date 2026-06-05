@@ -537,6 +537,11 @@ pub struct FetchArgs {
     /// any refs, reflog, or shallow metadata.
     #[clap(long = "dry-run")]
     pub dry_run: bool,
+
+    /// Append fetched ref records to `.libra/FETCH_HEAD` instead of overwriting
+    /// it. Long-only: `-a` is reserved for `--all` (Git's `-a` is `--append`).
+    #[clap(long)]
+    pub append: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -827,7 +832,13 @@ pub async fn execute_safe(args: FetchArgs, output: &OutputConfig) -> CliResult<(
         );
     }
     let porcelain = args.porcelain;
+    let dry_run = args.dry_run;
+    let append = args.append;
     let result = run_fetch(args, output).await?;
+    // FETCH_HEAD records the fetched refs; `--dry-run` writes nothing.
+    if !dry_run {
+        write_fetch_head(&result, append).map_err(CliError::from)?;
+    }
     if porcelain {
         render_fetch_porcelain(&result, output)
     } else {
@@ -899,6 +910,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         shallow_exclude,
         prune,
         dry_run,
+        append: _,
     } = args;
 
     // `--prune` is enabled by the flag or the `fetch.prune` config (flag wins).
@@ -2016,6 +2028,77 @@ fn write_shallow_boundaries(boundaries: &BTreeSet<String>) -> Result<(), FetchEr
     Ok(())
 }
 
+fn fetch_head_path() -> Result<PathBuf, FetchError> {
+    util::try_get_storage_path(None)
+        .map(|storage| storage.join("FETCH_HEAD"))
+        .map_err(|source| FetchError::LocalState {
+            message: format!("failed to locate repository storage for FETCH_HEAD: {source}"),
+        })
+}
+
+/// Render the `FETCH_HEAD` body: one `<oid>\t<not-for-merge>\t<desc>` line per
+/// fetched ref. Libra fetch never designates a merge target (merge with
+/// `libra pull`), so every line is marked `not-for-merge`.
+fn format_fetch_head(result: &FetchOutput) -> String {
+    let mut lines = Vec::new();
+    for remote in &result.remotes {
+        let tracking_prefix = format!("refs/remotes/{}/", remote.remote);
+        for update in &remote.refs_updated {
+            let branch = update
+                .remote_ref
+                .strip_prefix(&tracking_prefix)
+                .unwrap_or(&update.remote_ref);
+            lines.push(format!(
+                "{}\tnot-for-merge\tbranch '{}' of {}",
+                update.new_oid, branch, remote.url
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Write (or, with `append`, accumulate into) `.libra/FETCH_HEAD` via an atomic
+/// temp-file + rename, owner-only on Unix.
+fn write_fetch_head(result: &FetchOutput, append: bool) -> Result<(), FetchError> {
+    let path = fetch_head_path()?;
+    let body = format_fetch_head(result);
+
+    let mut content = String::new();
+    if append && let Ok(existing) = fs::read_to_string(&path) {
+        content.push_str(&existing);
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+    }
+    if !body.is_empty() {
+        content.push_str(&body);
+        content.push('\n');
+    }
+
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, &content).map_err(|source| FetchError::LocalState {
+        message: format!(
+            "failed to write FETCH_HEAD temp '{}': {source}",
+            tmp.display()
+        ),
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)).map_err(|source| {
+            FetchError::LocalState {
+                message: format!("failed to set permissions on FETCH_HEAD: {source}"),
+            }
+        })?;
+    }
+    fs::rename(&tmp, &path).map_err(|source| FetchError::LocalState {
+        message: format!(
+            "failed to finalize FETCH_HEAD '{}': {source}",
+            path.display()
+        ),
+    })
+}
+
 fn apply_shallow_updates(shallow: &[String], unshallow: &[String]) -> Result<(), FetchError> {
     if shallow.is_empty() && unshallow.is_empty() {
         return Ok(());
@@ -2416,6 +2499,36 @@ mod tests {
                 "c".repeat(40)
             ),
             "new ref uses `*` and an all-zero old object id"
+        );
+    }
+
+    #[test]
+    fn format_fetch_head_marks_not_for_merge() {
+        use super::{FetchOutput, FetchRefUpdate, FetchRepositoryResult, format_fetch_head};
+
+        let output = FetchOutput {
+            all: false,
+            requested_remote: Some("origin".to_string()),
+            refspec: None,
+            remotes: vec![FetchRepositoryResult {
+                remote: "origin".to_string(),
+                url: "https://example.com/x.git".to_string(),
+                objects_fetched: 1,
+                pruned: Vec::new(),
+                refs_updated: vec![FetchRefUpdate {
+                    remote_ref: "refs/remotes/origin/main".to_string(),
+                    old_oid: None,
+                    new_oid: "a".repeat(40),
+                }],
+            }],
+        };
+
+        assert_eq!(
+            format_fetch_head(&output),
+            format!(
+                "{}\tnot-for-merge\tbranch 'main' of https://example.com/x.git",
+                "a".repeat(40)
+            )
         );
     }
 

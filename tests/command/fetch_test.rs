@@ -1302,3 +1302,87 @@ async fn test_fetch_dry_run_makes_no_ref_writes() {
         "dry-run must not advance the tracking ref"
     );
 }
+
+/// `fetch` writes `.libra/FETCH_HEAD` by default; `--append` accumulates rather
+/// than overwriting.
+#[tokio::test]
+#[serial]
+async fn test_fetch_writes_and_appends_fetch_head() {
+    let temp = tempdir().expect("temp root");
+    let remote_dir = temp.path().join("remote.git");
+    let work_dir = temp.path().join("work");
+
+    let git = |dir: Option<&Path>, args: &[&str]| {
+        let mut cmd = Command::new("git");
+        if let Some(d) = dir {
+            cmd.current_dir(d);
+        }
+        assert!(
+            cmd.args(args).status().expect("git command").success(),
+            "git {args:?} failed"
+        );
+    };
+
+    git(None, &["init", "--bare", remote_dir.to_str().unwrap()]);
+    git(None, &["init", work_dir.to_str().unwrap()]);
+    git(Some(&work_dir), &["config", "user.name", "Libra Tester"]);
+    git(
+        Some(&work_dir),
+        &["config", "user.email", "tester@example.com"],
+    );
+    fs::write(work_dir.join("a.txt"), "one").expect("write");
+    git(Some(&work_dir), &["add", "a.txt"]);
+    git(Some(&work_dir), &["commit", "-m", "c1"]);
+    let current = String::from_utf8(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .expect("rev-parse")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_string();
+    git(
+        Some(&work_dir),
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+    );
+    git(
+        Some(&work_dir),
+        &["push", "origin", &format!("HEAD:refs/heads/{current}")],
+    );
+
+    let repo_dir = temp.path().join("libra_repo");
+    fs::create_dir_all(&repo_dir).expect("repo dir");
+    setup_with_new_libra_in(&repo_dir).await;
+    let remote_path = remote_dir.to_str().unwrap().to_string();
+    {
+        let _guard = ChangeDirGuard::new(&repo_dir);
+        ConfigKv::set("remote.origin.url", &remote_path, false)
+            .await
+            .unwrap();
+    }
+
+    // Default fetch writes FETCH_HEAD with the fetched branch line.
+    let first = run_libra_command(&["fetch", "origin"], &repo_dir);
+    assert_cli_success(&first, "fetch writes FETCH_HEAD");
+    let fetch_head_path = repo_dir.join(".libra").join("FETCH_HEAD");
+    let contents = fs::read_to_string(&fetch_head_path).expect("FETCH_HEAD written");
+    assert!(
+        contents.contains("not-for-merge") && contents.contains(&format!("branch '{current}' of")),
+        "FETCH_HEAD should record the fetched branch: {contents:?}"
+    );
+    let first_line_count = contents.lines().count();
+
+    // A re-fetch with --append must not shrink FETCH_HEAD (appends, never
+    // truncates), even when nothing changed.
+    let again = run_libra_command(&["fetch", "origin", "--append"], &repo_dir);
+    assert_cli_success(&again, "fetch --append");
+    let appended = fs::read_to_string(&fetch_head_path).expect("FETCH_HEAD still present");
+    assert!(
+        appended.lines().count() >= first_line_count,
+        "--append must not truncate FETCH_HEAD: before={first_line_count}, after={}",
+        appended.lines().count()
+    );
+}
