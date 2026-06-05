@@ -1018,25 +1018,18 @@ fn test_lfs_invalid_flag_clap_error() {
 }
 
 #[test]
-fn test_lfs_deferred_subcommands_parse_not_clap_error() {
+fn test_lfs_prune_checkout_parse_not_clap_error() {
     let repo = init_temp_repo();
-    // prune/checkout parse successfully but are not yet implemented: they
-    // dispatch and return a typed "not yet implemented" error (exit 128) — never
-    // a clap error (exit 2). (`push`/`fetch` are implemented and tested separately.)
+    // prune/checkout parse successfully on a fresh repo and exit 0 (no objects to
+    // prune, no pointers to restore) — never a clap error (exit 2).
     for args in [vec!["lfs", "prune"], vec!["lfs", "checkout"]] {
         let output = libra_command(repo.path())
             .args(&args)
             .output()
             .unwrap_or_else(|e| panic!("failed to run libra {args:?}: {e}"));
-        assert_ne!(
-            output.status.code(),
-            Some(2),
-            "`{args:?}` should parse (not a clap error), stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("not yet implemented"),
-            "`{args:?}` should dispatch to the not-implemented stub, stderr: {}",
+            output.status.success(),
+            "`{args:?}` should succeed on a fresh repo, stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -1510,5 +1503,292 @@ async fn test_lfs_push_json_output() {
         Some(1),
         "pushed_oids should list the uploaded object, stdout: {}",
         String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+// ── LFS prune + checkout (lfs-improvement-plan Batch 2) ──
+
+/// Read the committed LFS object's oid (the single entity under objects/).
+fn committed_lfs_oid(repo: &Path) -> String {
+    let entity = find_single_lfs_entity(repo).expect("an LFS entity should exist");
+    entity.file_name().unwrap().to_string_lossy().into_owned()
+}
+
+/// Write a fake LFS object with the given (already valid 64-hex) oid + content
+/// into the sharded cache, returning its path.
+fn create_fake_lfs_object(repo: &Path, oid: &str, content: &[u8]) -> std::path::PathBuf {
+    let path = lfs_entity_path(repo, oid);
+    fs::create_dir_all(path.parent().unwrap()).expect("create object dirs");
+    fs::write(&path, content).expect("write fake object");
+    path
+}
+
+fn lfs_pointer_text(oid: &str, size: usize) -> String {
+    format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {size}\n")
+}
+
+#[test]
+fn test_lfs_prune_removes_unreachable_objects() {
+    let repo = init_temp_repo();
+    let oid = "a".repeat(64);
+    let path = create_fake_lfs_object(repo.path(), &oid, b"unreachable junk");
+
+    let output = libra_command(repo.path())
+        .args(["lfs", "prune"])
+        .output()
+        .expect("failed to run lfs prune");
+    assert!(
+        output.status.success(),
+        "prune should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!path.exists(), "unreachable object should be pruned");
+}
+
+#[test]
+fn test_lfs_prune_keeps_main_branch_objects() {
+    let repo = init_temp_repo();
+    commit_lfs_file(repo.path(), "big.bin", b"REACHABLE-via-main-branch-content");
+    let oid = committed_lfs_oid(repo.path());
+
+    let output = libra_command(repo.path())
+        .args(["lfs", "prune"])
+        .output()
+        .expect("failed to run lfs prune");
+    assert!(output.status.success());
+    assert!(
+        lfs_entity_path(repo.path(), &oid).exists(),
+        "object reachable from main must be kept"
+    );
+}
+
+#[test]
+fn test_lfs_prune_keeps_staged_uncommitted_objects() {
+    let repo = init_temp_repo();
+    run_libra_ok(repo.path(), &["lfs", "track", "*.bin"]);
+    fs::write(repo.path().join("staged.bin"), b"STAGED-not-committed").unwrap();
+    run_libra_ok(repo.path(), &["add", ".libra_attributes", "staged.bin"]);
+    // No commit — the object is referenced only by the index.
+    let oid = committed_lfs_oid(repo.path());
+
+    let output = libra_command(repo.path())
+        .args(["lfs", "prune"])
+        .output()
+        .expect("failed to run lfs prune");
+    assert!(output.status.success());
+    assert!(
+        lfs_entity_path(repo.path(), &oid).exists(),
+        "staged-but-uncommitted object must be kept (index reachability)"
+    );
+}
+
+#[test]
+fn test_lfs_prune_dry_run_no_delete() {
+    let repo = init_temp_repo();
+    let oid = "b".repeat(64);
+    let path = create_fake_lfs_object(repo.path(), &oid, b"junk for dry-run");
+
+    let output = libra_command(repo.path())
+        .args(["lfs", "prune", "--dry-run"])
+        .output()
+        .expect("failed to run lfs prune --dry-run");
+    assert!(output.status.success());
+    assert!(path.exists(), "--dry-run must not delete anything");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("Would prune"),
+        "dry-run should report what would be pruned, stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn test_lfs_prune_reports_count_and_size() {
+    let repo = init_temp_repo();
+    create_fake_lfs_object(repo.path(), &"c".repeat(64), &vec![0u8; 2048]);
+
+    let output = libra_command(repo.path())
+        .args(["lfs", "prune"])
+        .output()
+        .expect("failed to run lfs prune");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Pruned 1 files"),
+        "expected count in summary, stdout: {stdout}"
+    );
+}
+
+#[test]
+fn test_lfs_prune_json_output() {
+    let repo = init_temp_repo();
+    let oid = "d".repeat(64);
+    create_fake_lfs_object(repo.path(), &oid, &vec![7u8; 512]);
+
+    let output = libra_command(repo.path())
+        .args(["--json", "lfs", "prune"])
+        .output()
+        .expect("failed to run --json lfs prune");
+    assert!(output.status.success());
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("prune stdout should be a JSON envelope");
+    assert_eq!(json["data"]["action"], "prune");
+    assert_eq!(json["data"]["pruned_files"][0], oid);
+    assert_eq!(json["data"]["size_freed"].as_u64(), Some(512));
+}
+
+#[test]
+fn test_lfs_prune_skips_malformed_cache_entry() {
+    let repo = init_temp_repo();
+    // A non-hex, wrong-length file name must be skipped (no panic, no delete).
+    let bad_dir = repo.path().join(".libra/lfs/objects/zz/zz");
+    fs::create_dir_all(&bad_dir).unwrap();
+    let bad_file = bad_dir.join("not-a-valid-oid");
+    fs::write(&bad_file, b"keep me").unwrap();
+
+    let output = libra_command(repo.path())
+        .args(["lfs", "prune"])
+        .output()
+        .expect("failed to run lfs prune");
+    assert!(
+        output.status.success(),
+        "prune must not panic on malformed entries: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        bad_file.exists(),
+        "malformed cache entry must not be deleted"
+    );
+}
+
+#[test]
+fn test_lfs_checkout_restores_pointer_to_entity() {
+    let repo = init_temp_repo();
+    let content = b"CHECKOUT-RESTORE-CONTENT-1234567890".to_vec();
+    commit_lfs_file(repo.path(), "big.bin", &content);
+    let oid = committed_lfs_oid(repo.path());
+
+    // Replace the worktree file with its pointer text.
+    let pointer = lfs_pointer_text(&oid, content.len());
+    fs::write(repo.path().join("big.bin"), &pointer).unwrap();
+
+    let output = libra_command(repo.path())
+        .args(["lfs", "checkout"])
+        .output()
+        .expect("failed to run lfs checkout");
+    assert!(
+        output.status.success(),
+        "checkout should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(repo.path().join("big.bin")).unwrap(),
+        content,
+        "checkout must restore the pointer to full content"
+    );
+}
+
+#[test]
+fn test_lfs_checkout_skips_non_pointer() {
+    let repo = init_temp_repo();
+    let content = b"REAL-CONTENT-not-a-pointer".to_vec();
+    commit_lfs_file(repo.path(), "big.bin", &content);
+    // Worktree still holds the real content (a non-pointer); checkout skips it.
+
+    let output = libra_command(repo.path())
+        .args(["lfs", "checkout"])
+        .output()
+        .expect("failed to run lfs checkout");
+    assert!(output.status.success());
+    assert_eq!(
+        fs::read(repo.path().join("big.bin")).unwrap(),
+        content,
+        "an already-materialized file must not be touched"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("No LFS pointer files to restore"),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn test_lfs_checkout_missing_cache_keeps_pointer() {
+    let repo = init_temp_repo();
+    let content = b"MISSING-CACHE-CONTENT-abcdef".to_vec();
+    commit_lfs_file(repo.path(), "big.bin", &content);
+    let oid = committed_lfs_oid(repo.path());
+
+    // Make the worktree a pointer, then delete the cache entity.
+    let pointer = lfs_pointer_text(&oid, content.len());
+    fs::write(repo.path().join("big.bin"), &pointer).unwrap();
+    fs::remove_file(lfs_entity_path(repo.path(), &oid)).unwrap();
+
+    let output = libra_command(repo.path())
+        .args(["lfs", "checkout"])
+        .output()
+        .expect("failed to run lfs checkout");
+    assert!(
+        output.status.success(),
+        "missing cache must not be a fatal error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Pointer is left untouched (still the pointer text).
+    assert_eq!(
+        fs::read(repo.path().join("big.bin")).unwrap(),
+        pointer.as_bytes(),
+        "pointer must be preserved when the cache object is missing"
+    );
+}
+
+#[test]
+fn test_lfs_checkout_path_filter() {
+    let repo = init_temp_repo();
+    run_libra_ok(repo.path(), &["lfs", "track", "*.bin"]);
+    run_libra_ok(repo.path(), &["config", "user.name", "Tester"]);
+    run_libra_ok(repo.path(), &["config", "user.email", "tester@example.com"]);
+    let c1 = b"FIRST-FILE-CONTENT-111".to_vec();
+    let c2 = b"SECOND-FILE-CONTENT-222".to_vec();
+    fs::write(repo.path().join("one.bin"), &c1).unwrap();
+    fs::write(repo.path().join("two.bin"), &c2).unwrap();
+    run_libra_ok(
+        repo.path(),
+        &["add", ".libra_attributes", "one.bin", "two.bin"],
+    );
+    run_libra_ok(repo.path(), &["commit", "-m", "two lfs files"]);
+
+    // Both worktree files become pointers.
+    let lfs_sha = |content: &[u8]| -> String {
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(content).unwrap();
+        libra::utils::lfs::calc_lfs_file_hash(tmp.path()).unwrap()
+    };
+    fs::write(
+        repo.path().join("one.bin"),
+        lfs_pointer_text(&lfs_sha(&c1), c1.len()),
+    )
+    .unwrap();
+    fs::write(
+        repo.path().join("two.bin"),
+        lfs_pointer_text(&lfs_sha(&c2), c2.len()),
+    )
+    .unwrap();
+
+    // Restore only one.bin.
+    let output = libra_command(repo.path())
+        .args(["lfs", "checkout", "one.bin"])
+        .output()
+        .expect("failed to run lfs checkout one.bin");
+    assert!(output.status.success());
+    assert_eq!(
+        fs::read(repo.path().join("one.bin")).unwrap(),
+        c1,
+        "filtered file should be restored"
+    );
+    assert!(
+        fs::read_to_string(repo.path().join("two.bin"))
+            .unwrap()
+            .starts_with("version https://"),
+        "non-filtered file must remain a pointer"
     );
 }

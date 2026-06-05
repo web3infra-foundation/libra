@@ -8,6 +8,7 @@ use std::{
     io,
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::Path,
+    str::FromStr,
 };
 
 use clap::Subcommand;
@@ -20,6 +21,7 @@ use git_internal::{
     },
 };
 use reqwest::StatusCode;
+use sea_orm::EntityTrait;
 
 use crate::{
     command::{
@@ -27,8 +29,12 @@ use crate::{
         load_object, status,
     },
     internal::{
+        branch::Branch,
+        db::get_db_conn_instance,
         head::Head,
+        model::reflog,
         protocol::lfs_client::{LFSClient, LockListError},
+        tag::{self, TagObject},
     },
     lfs_structs::LockListQuery,
     utils::{
@@ -427,9 +433,196 @@ async fn run_lfs(cmd: LfsCmds, output: &OutputConfig) -> CliResult<LfsOutput> {
         // behaviour is not yet available.
         LfsCmds::Fetch { remote, refs } => run_lfs_fetch(remote, refs, output).await,
         LfsCmds::Push { remote, refs } => run_lfs_push(remote, refs, output).await,
-        LfsCmds::Prune { .. } => Err(lfs_unsupported("prune")),
-        LfsCmds::Checkout { .. } => Err(lfs_unsupported("checkout")),
+        LfsCmds::Prune { dry_run } => run_lfs_prune(dry_run).await,
+        LfsCmds::Checkout { path } => run_lfs_checkout(path).await,
     }
+}
+
+/// Collects every LFS OID that must be kept locally: those referenced by any
+/// reachable commit (branch tips, tags, HEAD, and reflog OIDs — the BFS handles
+/// ancestry) plus those staged in the current index. Staging coverage prevents
+/// `prune` from deleting an object the user has `add`ed but not yet committed.
+async fn collect_reachable_lfs_oids() -> CliResult<HashSet<String>> {
+    let mut roots: Vec<ObjectHash> = Vec::new();
+
+    if let Some(head) = Head::current_commit().await {
+        roots.push(head);
+    }
+    for branch in Branch::list_branches_best_effort(None).await {
+        roots.push(branch.commit);
+    }
+    if let Ok(tags) = tag::list().await {
+        for tag in tags {
+            if let TagObject::Commit(commit) = &tag.object {
+                roots.push(commit.id);
+            }
+        }
+    }
+    // Reflog OIDs keep objects reachable only through the reflog (e.g. after a
+    // `reset`). Unparseable/zero OIDs are skipped here and unreadable commits are
+    // tolerated by the scanner.
+    let db = get_db_conn_instance().await;
+    if let Ok(entries) = reflog::Entity::find().all(&db).await {
+        for entry in entries {
+            for raw in [entry.old_oid, entry.new_oid] {
+                if let Ok(hash) = ObjectHash::from_str(&raw) {
+                    roots.push(hash);
+                }
+            }
+        }
+    }
+
+    let mut oids: HashSet<String> = scan_lfs_pointers(&roots)
+        .await?
+        .into_iter()
+        .map(|pointer| pointer.oid)
+        .collect();
+    oids.extend(index_lfs_oids()?);
+    Ok(oids)
+}
+
+/// Returns the OIDs of LFS pointer blobs currently staged in the index.
+fn index_lfs_oids() -> CliResult<HashSet<String>> {
+    let index = Index::load(path::index())
+        .map_err(|e| CliError::io(format!("failed to load index: {e}")))?;
+    let storage = util::objects_storage();
+    let mut oids = HashSet::new();
+    for entry in index.tracked_entries(0) {
+        let path_abs = util::workdir_to_absolute(&entry.name);
+        if !lfs::is_lfs_tracked(&path_abs) {
+            continue;
+        }
+        if let Ok(data) = storage.get(&entry.hash)
+            && let Some((oid, _)) = lfs::parse_pointer_data(&data)
+        {
+            oids.insert(oid);
+        }
+    }
+    Ok(oids)
+}
+
+/// `libra lfs prune [-n/--dry-run]` — delete local LFS objects not referenced by
+/// any reachable ref or the index. Malformed cache entries are skipped (never
+/// deleted, never panicked on), and individual removal failures degrade to a
+/// warning so one stuck file does not abort the sweep.
+async fn run_lfs_prune(dry_run: bool) -> CliResult<LfsOutput> {
+    let reachable = collect_reachable_lfs_oids().await?;
+    let objects_dir = util::storage_path().join("lfs/objects");
+
+    let mut pruned_files = Vec::new();
+    let mut size_freed: u64 = 0;
+    let mut stack = vec![objects_dir];
+    while let Some(dir) = stack.pop() {
+        let read_dir = match std::fs::read_dir(&dir) {
+            Ok(read_dir) => read_dir,
+            Err(_) => continue,
+        };
+        for entry in read_dir.flatten() {
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                stack.push(entry_path);
+                continue;
+            }
+            let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            // Only well-formed 64-char hex OIDs are candidates: skipping malformed
+            // names avoids `lfs_object_path`'s slice panic and never deletes a
+            // non-object file.
+            if name.len() != 64 || !name.bytes().all(|b| b.is_ascii_hexdigit()) {
+                tracing::warn!(file = %entry_path.display(), "skipping malformed LFS cache entry");
+                continue;
+            }
+            if reachable.contains(name) {
+                continue;
+            }
+            let entry_size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            if dry_run {
+                pruned_files.push(name.to_string());
+                size_freed += entry_size;
+            } else {
+                match std::fs::remove_file(&entry_path) {
+                    Ok(()) => {
+                        pruned_files.push(name.to_string());
+                        size_freed += entry_size;
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "warning: failed to remove LFS object {}: {e}",
+                            entry_path.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+    pruned_files.sort();
+
+    Ok(LfsOutput {
+        action: "prune".to_string(),
+        pruned_files,
+        size_freed,
+        dry_run,
+        ..LfsOutput::default()
+    })
+}
+
+/// `libra lfs checkout [<path>...]` — restore working-tree pointer files to their
+/// full LFS object content from the local cache. Files already materialized (not
+/// pointers) are skipped; a missing cache object leaves the pointer untouched
+/// with a notice. The cache object's hash is verified before it overwrites the
+/// working-tree file.
+async fn run_lfs_checkout(paths: Vec<String>) -> CliResult<LfsOutput> {
+    let filter: HashSet<String> = paths.into_iter().collect();
+    let index = Index::load(path::index())
+        .map_err(|e| CliError::io(format!("failed to load index: {e}")))?;
+
+    let mut restored_paths = Vec::new();
+    for entry in index.tracked_entries(0) {
+        if !filter.is_empty() && !filter.contains(&entry.name) {
+            continue;
+        }
+        let path_abs = util::workdir_to_absolute(&entry.name);
+        if !lfs::is_lfs_tracked(&path_abs) {
+            continue;
+        }
+        // Only restore files that are currently pointer files in the worktree.
+        let Ok((oid, _size)) = lfs::parse_pointer_file(&path_abs) else {
+            continue;
+        };
+        let cache_path = lfs::lfs_object_path(&oid);
+        if !cache_path.exists() {
+            eprintln!(
+                "warning: LFS object {oid} for '{}' is not in the local cache; \
+                 run `libra lfs fetch` first",
+                entry.name
+            );
+            continue;
+        }
+        // Verify the cache entity matches its OID before overwriting the pointer.
+        match lfs::calc_lfs_file_hash(&cache_path) {
+            Ok(hash) if hash == oid => {
+                std::fs::copy(&cache_path, &path_abs).map_err(|e| {
+                    CliError::io(format!("failed to restore '{}': {e}", entry.name))
+                })?;
+                restored_paths.push(entry.name.clone());
+            }
+            _ => {
+                return Err(CliError::io(format!(
+                    "cached LFS object {oid} failed hash verification; refusing to restore '{}'",
+                    entry.name
+                ))
+                .with_stable_code(StableErrorCode::RepoCorrupt));
+            }
+        }
+    }
+    restored_paths.sort();
+
+    Ok(LfsOutput {
+        action: "checkout".to_string(),
+        restored_paths,
+        ..LfsOutput::default()
+    })
 }
 
 /// `libra lfs push [<remote>] [<ref>...]` — upload the LFS objects referenced by
@@ -547,8 +740,12 @@ async fn scan_lfs_pointers(start_commits: &[ObjectHash]) -> CliResult<Vec<Scanne
         if !visited.insert(commit_id) {
             continue;
         }
-        let commit = load_object::<Commit>(&commit_id)
-            .map_err(|e| CliError::io(format!("failed to load commit {commit_id}: {e}")))?;
+        // Tolerate unreadable roots (e.g. zero/old reflog OIDs passed by prune):
+        // skip rather than abort the whole scan. A commit that loads is expected
+        // to have a readable tree, so that stays strict below.
+        let Ok(commit) = load_object::<Commit>(&commit_id) else {
+            continue;
+        };
         for parent in &commit.parent_commit_ids {
             if !visited.contains(parent) {
                 queue.push_back(*parent);
@@ -741,14 +938,6 @@ async fn run_lfs_fetch(
     })
 }
 
-/// Builds the typed error returned by LFS subcommands whose CLI surface exists
-/// but whose behaviour is not yet implemented.
-fn lfs_unsupported(subcommand: &str) -> CliError {
-    CliError::fatal(format!("libra lfs {subcommand} is not yet implemented"))
-        .with_stable_code(StableErrorCode::Unsupported)
-        .with_hint("this subcommand is planned; track progress in the LFS improvement plan.")
-}
-
 fn render_lfs_output(result: &LfsOutput, output: &OutputConfig) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("lfs", result, output);
@@ -841,6 +1030,22 @@ fn render_lfs_output(result: &LfsOutput, output: &OutputConfig) -> CliResult<()>
                 println!("No LFS objects to push");
             } else {
                 println!("Pushed {} LFS object(s)", result.pushed_oids.len());
+            }
+        }
+        "prune" => {
+            let verb = if result.dry_run {
+                "Would prune"
+            } else {
+                "Pruned"
+            };
+            let size = util::auto_unit_bytes(result.size_freed);
+            println!("{verb} {} files ({size:.2})", result.pruned_files.len());
+        }
+        "checkout" => {
+            if result.restored_paths.is_empty() {
+                println!("No LFS pointer files to restore");
+            } else {
+                println!("Restored {} LFS file(s)", result.restored_paths.len());
             }
         }
         "lock" => {
@@ -1195,12 +1400,5 @@ mod tests {
     fn test_lfs_install_uninstall_parse() {
         assert!(matches!(parse_lfs(&["install"]), LfsCmds::Install));
         assert!(matches!(parse_lfs(&["uninstall"]), LfsCmds::Uninstall));
-    }
-
-    #[test]
-    fn lfs_unsupported_maps_to_unsupported_code() {
-        let err = lfs_unsupported("push");
-        assert_eq!(err.stable_code(), StableErrorCode::Unsupported);
-        assert!(err.message().contains("push is not yet implemented"));
     }
 }

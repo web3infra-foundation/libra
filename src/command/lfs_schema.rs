@@ -29,6 +29,18 @@ pub struct LfsOutput {
     /// additive field — omitted from JSON when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pushed_oids: Vec<String>,
+    /// OIDs pruned (or, with `--dry-run`, would be pruned) by `libra lfs prune`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pruned_files: Vec<String>,
+    /// Bytes freed by `libra lfs prune` (or that would be freed with `--dry-run`).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub size_freed: u64,
+    /// `true` when a `prune` ran in `--dry-run` mode (nothing was deleted).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Working-tree paths restored from the local LFS cache by `libra lfs checkout`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restored_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,4 +66,8 @@ pub struct LfsUploadSummary {
 
 const fn is_false(value: &bool) -> bool {
     !*value
+}
+
+const fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
