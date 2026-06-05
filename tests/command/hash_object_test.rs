@@ -339,3 +339,66 @@ async fn hash_object_json_object_type_reflects_resolved_type() {
     let json = parse_json_stdout(&output);
     assert_eq!(json["data"]["object_type"], "commit");
 }
+
+/// `--path` sets the reported source label for `--stdin` input.
+#[tokio::test]
+async fn hash_object_path_flag_used_as_source_label() {
+    let repo = tempfile::tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command_with_stdin(
+        &[
+            "--json=compact",
+            "hash-object",
+            "--stdin",
+            "--path",
+            "foo.txt",
+        ],
+        repo.path(),
+        "hello",
+    );
+    assert_cli_success(&output, "hash-object --stdin --path should succeed");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["objects"][0]["source"], "foo.txt");
+}
+
+/// `--no-filters` is a no-op: content is hashed verbatim (no CRLF conversion).
+#[tokio::test]
+async fn hash_object_no_filters_is_noop() {
+    let repo = tempfile::tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+
+    let plain =
+        run_libra_command_with_stdin(&["hash-object", "--stdin"], repo.path(), "a\r\nb\r\n");
+    let filtered = run_libra_command_with_stdin(
+        &["hash-object", "--stdin", "--no-filters"],
+        repo.path(),
+        "a\r\nb\r\n",
+    );
+    assert_cli_success(&plain, "plain stdin hash");
+    assert_cli_success(&filtered, "--no-filters stdin hash");
+    assert_eq!(
+        String::from_utf8_lossy(&plain.stdout),
+        String::from_utf8_lossy(&filtered.stdout),
+        "--no-filters must not change the hash"
+    );
+}
+
+/// `--path` conflicts with `--no-filters` and `--stdin-paths` at parse time.
+#[tokio::test]
+async fn hash_object_path_conflicts_are_rejected() {
+    let repo = tempfile::tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+
+    for argv in [
+        vec!["hash-object", "--stdin", "--path", "f.txt", "--no-filters"],
+        vec!["hash-object", "--stdin-paths", "--path", "f.txt"],
+    ] {
+        let output = run_libra_command(&argv, repo.path());
+        assert_eq!(
+            output.status.code(),
+            Some(129),
+            "conflicting --path usage {argv:?} should be rejected"
+        );
+    }
+}

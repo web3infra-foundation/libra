@@ -62,6 +62,17 @@ pub struct HashObjectArgs {
     #[arg(long)]
     pub literally: bool,
 
+    /// Use the given path as the source label for `--stdin` input. Libra has no
+    /// gitattributes/filter infrastructure, so this only affects the reported
+    /// source name, not the content.
+    #[arg(long = "path", value_name = "FILE", conflicts_with_all = ["no_filters", "stdin_paths"])]
+    pub path: Option<PathBuf>,
+
+    /// Accepted for Git compatibility but a no-op: Libra applies no clean/smudge
+    /// or CRLF filters, so content is always hashed verbatim.
+    #[arg(long = "no-filters")]
+    pub no_filters: bool,
+
     /// File paths to hash
     #[arg(
         value_name = "PATH",
@@ -130,10 +141,18 @@ fn resolve_object_type(value: &str) -> CliResult<ObjectType> {
     }
 }
 
+/// The source label for `--stdin` input: the `--path` value when given, else `-`.
+fn stdin_source_label(args: &HashObjectArgs) -> String {
+    args.path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
 fn hash_objects(args: &HashObjectArgs, object_type: ObjectType) -> CliResult<HashObjectOutput> {
     let objects = if args.stdin {
         vec![hash_one_source(
-            "-",
+            stdin_source_label(args),
             read_stdin()?,
             args.write,
             object_type,
@@ -170,7 +189,13 @@ fn hash_objects_streaming(
     let mut writer = stdout.lock();
 
     if args.stdin {
-        let entry = hash_one_source("-", read_stdin()?, args.write, object_type, args.literally)?;
+        let entry = hash_one_source(
+            stdin_source_label(args),
+            read_stdin()?,
+            args.write,
+            object_type,
+            args.literally,
+        )?;
         write_hash_line(&mut writer, &entry.oid)?;
         return Ok(());
     }
