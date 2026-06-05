@@ -229,6 +229,7 @@ pub(crate) async fn run_pull(
         false,
         false,
         false,
+        Vec::new(),
         &child_output,
     )
     .await

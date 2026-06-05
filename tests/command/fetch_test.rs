@@ -1716,6 +1716,78 @@ async fn test_fetch_update_shallow_accepts_flag() {
     );
 }
 
+/// `--refmap` overrides where fetched branches are stored under
+/// `refs/remotes/<remote>/`.
+#[tokio::test]
+#[serial]
+async fn test_fetch_refmap_maps_to_custom_tracking_ref() {
+    let (_temp_root, repo_dir, current_branch, pushed_commit) =
+        setup_local_fetch_cli_fixture().await;
+
+    let output = run_libra_command(
+        &[
+            "--json",
+            "fetch",
+            "origin",
+            "--refmap",
+            "refs/heads/*:refs/remotes/origin/mirror/*",
+        ],
+        &repo_dir,
+    );
+    assert_cli_success(&output, "fetch origin --refmap");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["remotes"][0]["refs_updated"][0]["remote_ref"],
+        format!("refs/remotes/origin/mirror/{current_branch}")
+    );
+    assert_eq!(
+        json["data"]["remotes"][0]["refs_updated"][0]["new_oid"],
+        pushed_commit
+    );
+
+    let show = run_libra_command(&["show-ref"], &repo_dir);
+    let refs = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        refs.contains(&format!("refs/remotes/origin/mirror/{current_branch}")),
+        "custom --refmap tracking ref should be stored: {refs}"
+    );
+}
+
+/// A `--refmap` entry over the 256-byte cap is rejected with exit 129.
+#[tokio::test]
+#[serial]
+async fn test_fetch_refmap_over_256_bytes_rejected() {
+    let (_temp_root, repo_dir, _branch, _commit) = setup_local_fetch_cli_fixture().await;
+
+    let long = format!("refs/heads/*:refs/remotes/origin/{}", "a".repeat(300));
+    let output = run_libra_command(&["fetch", "origin", "--refmap", &long], &repo_dir);
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "an over-long --refmap entry must exit 129: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A `--refmap` destination outside `refs/remotes/<remote>/` is rejected (129).
+#[tokio::test]
+#[serial]
+async fn test_fetch_refmap_dst_outside_remote_rejected() {
+    let (_temp_root, repo_dir, _branch, _commit) = setup_local_fetch_cli_fixture().await;
+
+    let output = run_libra_command(
+        &["fetch", "origin", "--refmap", "refs/heads/*:refs/heads/*"],
+        &repo_dir,
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "a --refmap destination outside refs/remotes/<remote>/ must exit 129: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// `--atomic` is accepted and a normal fetch still succeeds, updating the
 /// remote-tracking ref (per-remote ref updates are already transactional).
 #[tokio::test]

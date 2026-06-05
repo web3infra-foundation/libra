@@ -582,6 +582,13 @@ pub struct FetchArgs {
     /// downloaded for that remote is removed so nothing partial is left behind.
     #[clap(long)]
     pub atomic: bool,
+
+    /// Override where fetched refs are stored, as `<src>:<dst>` (repeatable; a
+    /// trailing `*` is a glob). The destination must live under
+    /// `refs/remotes/<remote>/`. Requires an explicit remote (not `--all`); each
+    /// entry is capped at 256 bytes.
+    #[clap(long = "refmap", value_name = "REFSPEC")]
+    pub refmap: Vec<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -976,7 +983,17 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         force,
         update_shallow,
         atomic,
+        refmap,
     } = args;
+
+    // `--refmap` rewrites a single remote's tracking destinations, so it needs an
+    // explicit remote and cannot be combined with `--all`.
+    if !refmap.is_empty() && all {
+        return Err(CliError::command_usage(
+            "--refmap requires an explicit remote and cannot be combined with --all",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
 
     // `--prune` is enabled by the flag or the `fetch.prune` config (flag wins).
     let prune = prune || read_fetch_prune_config().await;
@@ -1022,6 +1039,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
                     force,
                     update_shallow,
                     atomic,
+                    Vec::new(),
                     output,
                 )
                 .await
@@ -1076,6 +1094,10 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         );
     }
 
+    // Validate `--refmap` now that the remote name is known (256-byte cap,
+    // well-formed `<src>:<dst>`, destination under `refs/remotes/<remote>/`).
+    let refmap_rules = parse_refmap_rules(&refmap, &remote_config.name)?;
+
     let result = fetch_repository_with_result(
         remote_config,
         refspec.clone(),
@@ -1089,6 +1111,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         force,
         update_shallow,
         atomic,
+        refmap_rules,
         output,
     )
     .await
@@ -1338,6 +1361,7 @@ pub async fn fetch_repository_safe(
         false,
         false,
         false,
+        Vec::new(),
         output,
     )
     .await
@@ -1413,6 +1437,78 @@ async fn resolve_tag_mode(remote_name: &str, tags_flag: bool, no_tags_flag: bool
     }
 }
 
+/// Largest accepted `--refmap` entry, a ReDoS guard against pathological globs.
+const REFMAP_MAX_LEN: usize = 256;
+
+/// A parsed `--refmap` rule: `<src>:<dst>` where either side may end with `*`
+/// (a glob whose captured suffix is carried across).
+#[derive(Debug, Clone)]
+pub(crate) struct RefmapRule {
+    src: String,
+    dst: String,
+}
+
+/// Parse and validate `--refmap` entries for `remote_name`. Each must be at most
+/// [`REFMAP_MAX_LEN`] bytes, a well-formed `<src>:<dst>` with non-empty sides,
+/// and a destination under `refs/remotes/<remote>/`. Violations are usage errors
+/// (exit 129).
+fn parse_refmap_rules(entries: &[String], remote_name: &str) -> CliResult<Vec<RefmapRule>> {
+    let dst_root = format!("refs/remotes/{remote_name}/");
+    let mut rules = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if entry.len() > REFMAP_MAX_LEN {
+            return Err(CliError::command_usage(format!(
+                "--refmap entry exceeds {REFMAP_MAX_LEN} bytes ({} bytes)",
+                entry.len()
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+        }
+        let (src, dst) = entry.split_once(':').ok_or_else(|| {
+            CliError::command_usage(format!("--refmap '{entry}' must be '<src>:<dst>'"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?;
+        if src.is_empty() || dst.is_empty() {
+            return Err(CliError::command_usage(format!(
+                "--refmap '{entry}' has an empty source or destination"
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+        }
+        if !dst.starts_with(&dst_root) {
+            return Err(CliError::command_usage(format!(
+                "--refmap destination '{dst}' must be under '{dst_root}'"
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+        }
+        rules.push(RefmapRule {
+            src: src.to_string(),
+            dst: dst.to_string(),
+        });
+    }
+    Ok(rules)
+}
+
+/// Map a fetched ref to its local destination using the first matching rule. A
+/// trailing `*` on both sides is a glob: the suffix captured from `src` is
+/// appended to the `dst` prefix. Returns `None` when no rule matches (the caller
+/// then uses the default `refs/remotes/<remote>/*` mapping).
+fn apply_refmap_rules(rules: &[RefmapRule], ref_name: &str) -> Option<String> {
+    for rule in rules {
+        match (rule.src.strip_suffix('*'), rule.dst.strip_suffix('*')) {
+            (Some(src_prefix), Some(dst_prefix)) => {
+                if let Some(rest) = ref_name.strip_prefix(src_prefix) {
+                    return Some(format!("{dst_prefix}{rest}"));
+                }
+            }
+            _ => {
+                if rule.src == ref_name {
+                    return Some(rule.dst.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn fetch_repository_with_result(
     remote_config: RemoteConfig,
@@ -1427,6 +1523,7 @@ pub(crate) async fn fetch_repository_with_result(
     force: bool,
     update_shallow: bool,
     atomic: bool,
+    refmap_rules: Vec<RefmapRule>,
     output: &OutputConfig,
 ) -> Result<FetchRepositoryResult, FetchError> {
     let (remote_client, discovery) =
@@ -1506,7 +1603,8 @@ pub(crate) async fn fetch_repository_with_result(
     // discovered refs and return before downloading any pack or writing anything
     // (no `.pack`/`.idx`, no shallow update, no ref/reflog writes, no FETCH_HEAD).
     if dry_run {
-        let mut refs_updated = compute_fetch_ref_preview(&remote_config, &refs).await?;
+        let mut refs_updated =
+            compute_fetch_ref_preview(&remote_config, &refs, &refmap_rules).await?;
         refs_updated.extend(preview_tag_updates(&tag_candidates, force).await?);
         let pruned = if prune {
             let remote_branch_names =
@@ -1611,6 +1709,7 @@ pub(crate) async fn fetch_repository_with_result(
         branch,
         &tag_candidates,
         force,
+        &refmap_rules,
     )
     .await
     {
@@ -2368,10 +2467,14 @@ fn apply_shallow_updates(shallow: &[String], unshallow: &[String]) -> Result<(),
 async fn compute_fetch_ref_preview(
     remote_config: &RemoteConfig,
     refs: &[DiscRef],
+    refmap_rules: &[RefmapRule],
 ) -> Result<Vec<FetchRefUpdate>, FetchError> {
     let mut updates = Vec::new();
     for reference in refs {
-        let full_ref_name = if let Some(branch_name) = reference._ref.strip_prefix("refs/heads/") {
+        let full_ref_name = if let Some(mapped) = apply_refmap_rules(refmap_rules, &reference._ref)
+        {
+            mapped
+        } else if let Some(branch_name) = reference._ref.strip_prefix("refs/heads/") {
             format!("refs/remotes/{}/{}", remote_config.name, branch_name)
         } else if let Some(mr_name) = reference._ref.strip_prefix("refs/mr/") {
             format!("refs/remotes/{}/mr/{}", remote_config.name, mr_name)
@@ -2441,6 +2544,7 @@ async fn preview_tag_updates(
     Ok(updates)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn update_references(
     remote_config: &RemoteConfig,
     refs: &[DiscRef],
@@ -2449,18 +2553,24 @@ async fn update_references(
     branch: Option<String>,
     tags_to_import: &[TagCandidate],
     force: bool,
+    refmap_rules: &[RefmapRule],
 ) -> Result<Vec<FetchRefUpdate>, FetchError> {
     let db = get_db_conn_instance().await;
     let remote_config = remote_config.clone();
     let refs = refs.to_vec();
     let ref_heads = ref_heads.to_vec();
     let tags_to_import = tags_to_import.to_vec();
+    let refmap_rules = refmap_rules.to_vec();
     db.transaction(|txn| {
         Box::pin(async move {
             let mut updates = Vec::new();
             for reference in &refs {
                 let full_ref_name: String;
-                if let Some(branch_name) = reference._ref.strip_prefix("refs/heads/") {
+                if let Some(mapped) = apply_refmap_rules(&refmap_rules, &reference._ref) {
+                    // `--refmap` overrides the destination; validated to sit under
+                    // `refs/remotes/<remote>/`, so the tracking scope is unchanged.
+                    full_ref_name = mapped;
+                } else if let Some(branch_name) = reference._ref.strip_prefix("refs/heads/") {
                     full_ref_name = format!("refs/remotes/{}/{}", remote_config.name, branch_name);
                 } else if let Some(mr_name) = reference._ref.strip_prefix("refs/mr/") {
                     full_ref_name = format!("refs/remotes/{}/mr/{}", remote_config.name, mr_name);
@@ -2907,6 +3017,45 @@ mod tests {
             !idx.exists(),
             "pack index should be removed on atomic rollback"
         );
+    }
+
+    #[test]
+    fn parse_refmap_rules_validates_entries() {
+        use super::parse_refmap_rules;
+
+        let rules = parse_refmap_rules(
+            &["refs/heads/*:refs/remotes/origin/mirror/*".to_string()],
+            "origin",
+        )
+        .expect("a well-formed refmap into the remote namespace parses");
+        assert_eq!(rules.len(), 1);
+
+        // Missing the `:` separator.
+        assert!(parse_refmap_rules(&["refs/heads/*".to_string()], "origin").is_err());
+        // Destination outside `refs/remotes/<remote>/`.
+        assert!(parse_refmap_rules(&["refs/heads/*:refs/heads/*".to_string()], "origin").is_err());
+        // Empty source or destination.
+        assert!(parse_refmap_rules(&[":refs/remotes/origin/x".to_string()], "origin").is_err());
+        // Over the byte cap.
+        let huge = format!("refs/heads/*:refs/remotes/origin/{}", "a".repeat(300));
+        assert!(parse_refmap_rules(&[huge], "origin").is_err());
+    }
+
+    #[test]
+    fn apply_refmap_rules_substitutes_glob_suffix() {
+        use super::{apply_refmap_rules, parse_refmap_rules};
+
+        let rules = parse_refmap_rules(
+            &["refs/heads/*:refs/remotes/origin/mirror/*".to_string()],
+            "origin",
+        )
+        .unwrap();
+        assert_eq!(
+            apply_refmap_rules(&rules, "refs/heads/main").as_deref(),
+            Some("refs/remotes/origin/mirror/main")
+        );
+        // A ref not matching any rule falls through to the default mapping.
+        assert_eq!(apply_refmap_rules(&rules, "refs/tags/v1").as_deref(), None);
     }
 
     #[test]
