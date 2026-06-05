@@ -226,6 +226,7 @@ const FSCK_AFTER_HELP: &str = "EXAMPLES:
     libra fsck --root                   Print root commit ids in the report
     libra fsck --tags                   Print tag ids in the report
     libra fsck --connectivity-only      Skip blob content checks; verify graph only
+    libra fsck --no-full                Verify only loose objects (skip packfiles)
     libra fsck <object-id>              Verify a single object by id";
 
 /// Verify repository integrity by checking objects, refs, and index
@@ -279,6 +280,15 @@ pub struct FsckArgs {
     /// Only check connectivity, not object contents
     #[arg(long)]
     pub connectivity_only: bool,
+
+    /// Also verify objects stored in packfiles (default). Accepted explicitly;
+    /// pass `--no-full` to restrict the check to loose objects.
+    #[arg(long, conflicts_with = "no_full")]
+    pub full: bool,
+
+    /// Restrict the check to loose objects, skipping packed objects.
+    #[arg(long)]
+    pub no_full: bool,
 }
 
 impl FsckArgs {
@@ -294,6 +304,12 @@ impl FsckArgs {
             None => true, // default
             Some(s) => s != "false" && s != "no" && s != "0",
         }
+    }
+
+    /// Returns whether packed objects should be enumerated and verified.
+    /// `--full` is the default; `--no-full` restricts the check to loose objects.
+    fn full_enabled(&self) -> bool {
+        !self.no_full
     }
 }
 
@@ -395,14 +411,25 @@ fn try_parse_loose_object(dir_name: &str, sub_path: &std::path::Path) -> Option<
     parse_object_hash(&full_hash)
 }
 
-/// List all object hashes in storage
-fn list_all_objects_in_storage(storage: &ClientStorage) -> io::Result<Vec<ObjectHash>> {
+/// List the object hashes stored in a single pack index (`.idx`, v1 or v2),
+/// reusing `verify_pack`'s validated index reader. A malformed/truncated index
+/// surfaces as `io::ErrorKind::InvalidData`.
+fn list_objects_in_pack_idx(idx_path: &std::path::Path) -> io::Result<Vec<ObjectHash>> {
+    let bytes = fs::read(idx_path)?;
+    super::verify_pack::parse_index_object_hashes(&bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+/// List all object hashes in storage. Loose objects are always enumerated; when
+/// `full` is set, packed objects from every `objects/pack/*.idx` are merged in
+/// (deduplicated against loose objects that may also be packed).
+fn list_all_objects_in_storage(storage: &ClientStorage, full: bool) -> io::Result<Vec<ObjectHash>> {
     let objects_dir = storage.base_path();
     if !objects_dir.exists() {
         return Ok(Vec::new());
     }
 
-    let mut hashes = Vec::new();
+    let mut hashes: HashSet<ObjectHash> = HashSet::new();
     for entry in fs::read_dir(objects_dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -412,6 +439,8 @@ fn list_all_objects_in_storage(storage: &ClientStorage) -> io::Result<Vec<Object
         let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
+        // The `pack/` directory has a 4-char name, so it is skipped here and
+        // handled separately below.
         if dir_name.len() != 2 {
             continue;
         }
@@ -422,12 +451,26 @@ fn list_all_objects_in_storage(storage: &ClientStorage) -> io::Result<Vec<Object
             if sub_path.is_file()
                 && let Some(hash) = try_parse_loose_object(dir_name, &sub_path)
             {
-                hashes.push(hash);
+                hashes.insert(hash);
             }
         }
     }
 
-    Ok(hashes)
+    if full {
+        let pack_dir = objects_dir.join("pack");
+        if pack_dir.exists() {
+            for entry in fs::read_dir(&pack_dir)? {
+                let path = entry?.path();
+                if path.is_file() && path.extension().is_some_and(|ext| ext == "idx") {
+                    for hash in list_objects_in_pack_idx(&path)? {
+                        hashes.insert(hash);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(hashes.into_iter().collect())
 }
 
 async fn check_single_object(object_id: &str, storage: &ClientStorage) -> CliResult<FsckResult> {
@@ -484,8 +527,8 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         has_errors: false,
     };
 
-    // Get all object hashes
-    let all_hashes = list_all_objects_in_storage(storage)
+    // Get all object hashes (loose + packed unless `--no-full`)
+    let all_hashes = list_all_objects_in_storage(storage, args.full_enabled())
         .map_err(|e| CliError::fatal(format!("failed to list objects: {}", e)))?;
 
     // Stage 1: Check all 256 object directories
@@ -538,12 +581,13 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         args.no_reflogs,
         args.dangling_enabled(),
         args.lost_found,
+        args.full_enabled(),
     )
     .await?;
 
     // Stage 9: Report root commits
     if args.root {
-        find_and_report_roots(storage).await?;
+        find_and_report_roots(storage, args.full_enabled()).await?;
     }
 
     // Stage 10: Report tagged commits
@@ -924,11 +968,14 @@ impl ReachabilityContext {
 }
 
 /// Collect all starting points for reachability analysis
-async fn collect_reachability_context(storage: &ClientStorage) -> CliResult<ReachabilityContext> {
+async fn collect_reachability_context(
+    storage: &ClientStorage,
+    full: bool,
+) -> CliResult<ReachabilityContext> {
     let mut ctx = ReachabilityContext::new();
 
     // Collect all objects in storage
-    ctx.all_objects = list_all_objects_in_storage(storage)
+    ctx.all_objects = list_all_objects_in_storage(storage, full)
         .map_err(|e| CliError::fatal(format!("failed to list objects: {}", e)))?
         .into_iter()
         .collect();
@@ -1053,8 +1100,9 @@ async fn find_dangling_unreachable(
     no_reflogs: bool,
     dangling: bool,
     lost_found: bool,
+    full: bool,
 ) -> CliResult<()> {
-    let ctx = collect_reachability_context(storage).await?;
+    let ctx = collect_reachability_context(storage, full).await?;
 
     // --lost-found implies --no-reflogs for dangling detection (matching git fsck behavior)
     let effective_no_reflogs = no_reflogs || lost_found;
@@ -1113,10 +1161,10 @@ async fn find_dangling_unreachable(
 }
 
 /// Find and report root commits (commits with no parents)
-async fn find_and_report_roots(storage: &ClientStorage) -> CliResult<()> {
+async fn find_and_report_roots(storage: &ClientStorage, full: bool) -> CliResult<()> {
     use git_internal::internal::object::commit::Commit;
 
-    let all_hashes = list_all_objects_in_storage(storage)
+    let all_hashes = list_all_objects_in_storage(storage, full)
         .map_err(|e| CliError::fatal(format!("failed to list objects: {}", e)))?;
 
     for hash in all_hashes {
@@ -1817,6 +1865,20 @@ fn validate_index_entry(
 #[cfg(test)]
 mod tests {
     use super::{FsckMsgId, tag_parse_error_msg_id};
+
+    #[test]
+    fn list_objects_in_pack_idx_rejects_malformed_index() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let idx = dir.path().join("bad.idx");
+        std::fs::write(&idx, b"not a valid pack index").expect("write garbage idx");
+
+        let error = super::list_objects_in_pack_idx(&idx).expect_err("malformed idx must error");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::InvalidData,
+            "a malformed pack index should surface as InvalidData"
+        );
+    }
 
     #[test]
     fn tag_parse_error_msg_id_keeps_object_type_errors_specific() {

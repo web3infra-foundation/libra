@@ -128,6 +128,19 @@ Still detects missing objects referenced by commits, trees, or refs.
 libra fsck --connectivity-only
 ```
 
+### `--full` / `--no-full`
+
+`--full` (the default) verifies objects stored in packfiles in addition to loose
+objects. Each `.libra/objects/pack/*.idx` (index version 1 and 2) is parsed with
+the same validated reader used by `verify-pack`, and the listed objects are
+deduplicated against loose objects before verification.
+
+Use `--no-full` to restrict the check to loose objects, skipping packfiles:
+
+```bash
+libra fsck --no-full
+```
+
 ## Examples
 
 ```bash

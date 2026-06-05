@@ -745,3 +745,78 @@ fn test_fsck_broken_tag_reference() {
         combined
     );
 }
+
+/// Path to the committed pack fixtures used by `verify-pack`/`fsck` tests.
+fn packs_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/packs")
+}
+
+/// Initialise an empty libra repo and install the `small-sha1` pack fixture
+/// (with a freshly built v1 index) into its object store, so the repo's only
+/// objects are packed ones.
+fn repo_with_only_packed_objects() -> tempfile::TempDir {
+    let repo = tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+
+    let pack_dir = repo.path().join(".libra/objects/pack");
+    fs::create_dir_all(&pack_dir).expect("create objects/pack dir");
+    let pack_dst = pack_dir.join("small-sha1.pack");
+    fs::copy(packs_dir().join("small-sha1.pack"), &pack_dst).expect("copy pack fixture");
+
+    let output = run_libra_command(
+        &[
+            "index-pack",
+            pack_dst.to_str().expect("pack path utf8"),
+            "--index-version",
+            "1",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&output, "index-pack should build the fixture idx");
+    repo
+}
+
+/// `fsck --full` (the default) enumerates and verifies packed objects: the
+/// connectivity pass reports a non-zero object count.
+#[test]
+#[serial]
+fn test_fsck_full_verifies_packed_objects() {
+    let repo = repo_with_only_packed_objects();
+
+    let output = run_libra_command(&["fsck", "--full", "--verbose"], repo.path());
+    // Dangling packed objects keep the exit code at 0.
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Checking connectivity (")
+            && !stdout.contains("Checking connectivity (0 objects)"),
+        "fsck --full should verify packed objects: {stdout}"
+    );
+}
+
+/// `fsck --no-full` restricts the check to loose objects, so a repo whose only
+/// objects are packed reports zero objects to verify.
+#[test]
+#[serial]
+fn test_fsck_no_full_skips_packed_objects() {
+    let repo = repo_with_only_packed_objects();
+
+    let output = run_libra_command(&["fsck", "--no-full", "--verbose"], repo.path());
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Checking connectivity (0 objects)"),
+        "fsck --no-full should skip packed objects: {stdout}"
+    );
+}
+
+/// `fsck --full` on a repo with no `objects/pack/` directory succeeds (exit 0).
+#[test]
+#[serial]
+fn test_fsck_full_empty_repo() {
+    let repo = tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["fsck", "--full"], repo.path());
+    assert_eq!(output.status.code(), Some(0));
+}
