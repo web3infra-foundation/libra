@@ -22,13 +22,19 @@
 - JSON / machine 输出
 - 显式错误码
 - remote 缺失 hint
+- **分支 / 提交 / issue / PR deep-link 子模式**（`-b`/`-c`/`--issue`/`--pr`，互斥）——
+  由 `.omo/plans/open-improvement-plan.md` **决策反转**，从下方「本批非目标」移入。
+- **forge-specific deep link 与多平台模板**（github/gitlab/gitea/bitbucket 路径差异，
+  `open.platform` / `open.template.<kind>` 本地配置）——同一计划落地，在现有 `web_url`
+  基础上向后兼容追加 `target_type` / `platform` 字段（additive schema）。
 
-**后续维护目标：**
-- 如后续支持 forge-specific deep link，可在现有 `web_url` 上向后兼容扩展字段
+**决策反转来源：** 上述两项原为本文档「本批非目标 / 后续维护目标」，现由
+`.omo/plans/open-improvement-plan.md`（§五 决策账本「决策反转」行）正式纳入实现范围，
+并同步更新 `docs/commands/open.md` 与 `COMPATIBILITY.md` 的 `open` 行。
 
 **本批非目标：**
 - 不检测浏览器是否真正完成打开
-- 不引入 PR / issue deep-link 子模式
+- 全局（local→global）配置级联仍为后续 `partial`（本批仅读 local 仓库配置）
 
 ## 验证方式
 

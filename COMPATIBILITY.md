@@ -66,7 +66,7 @@ batch document.
 | revert | supported | |
 | remote | supported | |
 | hash-object | partial | Hashing for `-t blob`/`commit`/`tree`/`tag` (files, `--stdin`, `--stdin-paths`), `-w` writes any of those object types, and `--literally` skips format validation. Without `--literally`, malformed commit/tree/tag input is rejected (exit 128) via command-layer header/binary checks (no parser panics). An unsupported `-t <type>` is a usage error (exit 129; intentionally-different from Git's 128). `--path` (a source label for `--stdin`, conflicts with `--no-filters`/`--stdin-paths`) and `--no-filters` (a no-op) are accepted; actual clean/smudge and CRLF filters are not implemented (Libra has no gitattributes/filter infrastructure). |
-| open | supported | |
+| open | supported | Libra extension (no `git open`). Resolves a remote/URL to a browsable web URL and launches the OS browser. Deep-link target flags `-b`/`--branch`, `-c`/`--commit`, `--issue[=<id>]`, `--pr[=<id>]` (mutually exclusive); multi-platform path assembly (github/gitlab/gitea/bitbucket) auto-detected from host and overridable via `open.platform` / `open.template.<kind>` local config; ref components are whitelist-validated (malicious input rejected with `LBR-CLI-003`); a missing launcher binary exits `0` with a manual-copy hint. JSON gains additive `target_type`/`platform` fields |
 | config | supported | vault-backed; partial Git config parity with documented intentional differences (see [docs/commands/config.md](docs/commands/config.md) Git Config Compatibility Matrix) |
 | db | intentionally-different | Libra repository database schema inspection/upgrade extension, not a Git command |
 | reflog | supported | |
