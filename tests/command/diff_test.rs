@@ -1455,6 +1455,51 @@ fn diff_binary_rename_by_hash() {
     assert_eq!(renamed["similarity"], 100);
 }
 
+#[test]
+fn diff_native_path_treats_nul_byte_content_as_binary() {
+    let repo = create_committed_repo_via_cli();
+    // A NUL byte is valid UTF-8 but Git treats such content as binary.
+    commit_file(&repo, "data.bin", "a\u{0}b\nx\ny\n");
+    fs::write(repo.path().join("data.bin"), "a\u{0}c\nx\ny\n").unwrap();
+    // `-w` forces the native generator, which must detect the NUL byte.
+    let output = run_libra_command(&["diff", "-w"], repo.path());
+    assert_cli_success(&output, "diff -w nul");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Binary files differ"),
+        "NUL-byte content must be treated as binary: {stdout:?}"
+    );
+}
+
+#[test]
+fn diff_copy_source_can_be_a_renamed_delete() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "a.txt", "one\ntwo\nthree\nfour\n");
+    // a.txt is deleted and reappears as b.txt (rename) and c.txt (copy).
+    fs::remove_file(repo.path().join("a.txt")).unwrap();
+    fs::write(repo.path().join("b.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+    fs::write(repo.path().join("c.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+
+    let output = run_libra_command(&["--json", "diff", "-M", "-C"], repo.path());
+    assert_cli_success(&output, "diff -M -C");
+    let json = parse_json_stdout(&output);
+    let files = json["data"]["files"].as_array().unwrap();
+    let renamed: Vec<_> = files.iter().filter(|f| f["status"] == "renamed").collect();
+    let copied: Vec<_> = files.iter().filter(|f| f["status"] == "copied").collect();
+    assert_eq!(renamed.len(), 1, "exactly one rename: {files:?}");
+    assert_eq!(
+        copied.len(),
+        1,
+        "the renamed-away delete is still a valid copy source: {files:?}"
+    );
+    assert_eq!(renamed[0]["old_path"], "a.txt");
+    assert_eq!(copied[0]["old_path"], "a.txt");
+    assert!(
+        !files.iter().any(|f| f["status"] == "deleted"),
+        "the consumed source must not also appear as a deletion: {files:?}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn diff_rename_header_includes_mode_change() {

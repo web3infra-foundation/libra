@@ -222,6 +222,8 @@ pub(crate) async fn run_pull(
         false,
         crate::internal::protocol::ShallowOptions::default(),
         false,
+        false,
+        false,
         &child_output,
     )
     .await
