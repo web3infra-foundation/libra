@@ -366,7 +366,19 @@ mod tests {
     #[test]
     fn resolve_agent_slugs_expands_empty_to_stable() {
         let resolved = resolve_agent_slugs(&[]).expect("empty resolves cleanly");
-        assert_eq!(resolved, vec!["claude-code", "gemini"]);
+        // All seven external agents now carry a hook installer.
+        assert_eq!(
+            resolved,
+            vec![
+                "claude-code",
+                "gemini",
+                "cursor",
+                "codex",
+                "copilot",
+                "factory-ai",
+                "opencode"
+            ]
+        );
     }
 
     #[test]
