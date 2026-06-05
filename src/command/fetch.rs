@@ -937,9 +937,13 @@ pub(crate) async fn discover_remote_with_name(
 ) -> Result<(RemoteClient, DiscoveryResult), FetchError> {
     let remote_client =
         RemoteClient::from_spec_with_remote(remote_spec, remote_name).map_err(|message| {
-            let (kind, reason) = classify_remote_spec_error(remote_spec, &message);
+            // Classify against a credential-redacted spec so neither the `spec`
+            // field nor the `reason` string (which may interpolate the spec for
+            // malformed URLs) can leak a token/password.
+            let redacted_spec = redact_url_credentials(remote_spec);
+            let (kind, reason) = classify_remote_spec_error(&redacted_spec, &message);
             FetchError::InvalidRemoteSpec {
-                spec: remote_spec.to_string(),
+                spec: redacted_spec,
                 kind,
                 reason,
             }
@@ -948,7 +952,8 @@ pub(crate) async fn discover_remote_with_name(
         .discovery_reference(UploadPack)
         .await
         .map_err(|source| FetchError::Discovery {
-            remote: remote_spec.to_string(),
+            // Redact credentials so a token/password never reaches error output.
+            remote: redact_url_credentials(remote_spec),
             source,
         })?;
     Ok((remote_client, discovery))
@@ -980,10 +985,16 @@ fn classify_remote_spec_error(remote_spec: &str, message: &str) -> (RemoteSpecEr
     }
     let lower = message.to_ascii_lowercase();
     if lower.contains("unsupported") && lower.contains("scheme") {
+        // The scheme-only message carries no userinfo.
         return (RemoteSpecErrorKind::UnsupportedScheme, message.to_string());
     }
-    // Default to MalformedUrl for other spec errors (bad syntax, etc.)
-    (RemoteSpecErrorKind::MalformedUrl, message.to_string())
+    // Default to MalformedUrl. The raw `message` may interpolate the original
+    // spec (e.g. "invalid file url: file://user:pass@host/…"), so build the
+    // reason from the already-redacted `remote_spec` instead of the raw message.
+    (
+        RemoteSpecErrorKind::MalformedUrl,
+        format!("'{remote_spec}' is not a valid remote URL or local path"),
+    )
 }
 
 pub(crate) fn normalize_branch_ref(branch: &str) -> String {
@@ -1145,7 +1156,8 @@ pub(crate) async fn fetch_repository_with_result(
         .fetch_objects(&have, &want, &shallow_boundary_oids, &shallow)
         .await
         .map_err(|source| FetchError::FetchObjects {
-            remote: remote_config.url.clone(),
+            // Redact credentials so a token/password never reaches error output.
+            remote: redact_url_credentials(&remote_config.url),
             source,
         })?;
 
@@ -2042,6 +2054,15 @@ async fn read_pkt_line(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<(usi
     let len = read_hex_4(reader).await?;
     if len == 0 {
         return Ok((0, Vec::new()));
+    }
+    // Reject malformed/short lengths (1..=3) before subtracting the 4-byte
+    // header, so a hostile server cannot underflow the length into a huge
+    // allocation. (`0001`/`0002`/`0003` are not valid data frames here.)
+    if len < 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid pkt-line length {len}"),
+        ));
     }
     let mut data = vec![0u8; (len - 4) as usize];
     reader.read_exact(&mut data).await?;

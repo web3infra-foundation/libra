@@ -19,7 +19,7 @@ use git_internal::{
     hash::{ObjectHash, get_hash_kind},
 };
 use object_store::{aws::AmazonS3Builder, local::LocalFileSystem};
-use sea_orm::{DatabaseConnection, DatabaseTransaction};
+use sea_orm::{DatabaseConnection, DatabaseTransaction, DbErr, TransactionTrait};
 use serde::Serialize;
 use url::Url;
 
@@ -140,9 +140,10 @@ pub struct CloneArgs {
     pub shallow_since: Option<String>,
 
     /// Create a shallow clone with history excluding commits reachable from the
-    /// given ref or revision. May be combined with `--depth`.
+    /// given ref or revision. May be combined with `--depth` and repeated to
+    /// exclude multiple refs (one `deepen-not` per value).
     #[clap(long, value_name = "revision")]
-    pub shallow_exclude: Option<String>,
+    pub shallow_exclude: Vec<String>,
 
     /// Fail if the source repository is a shallow repository.
     #[clap(long)]
@@ -157,8 +158,9 @@ pub struct CloneArgs {
     #[clap(short = 'n', long = "no-checkout")]
     pub no_checkout: bool,
 
-    /// Set up a mirror of the source repository. Implies `--bare` and maps all
-    /// refs (`+refs/*:refs/*`); the remote is recorded with `mirror = true`.
+    /// Set up a mirror of the source repository. Implies `--bare`, records the
+    /// `+refs/*:refs/*` refspec and `mirror = true`, and clones all branch heads.
+    /// Partial: tags/exact-`refs/*` mirroring is not yet implemented.
     #[clap(long)]
     pub mirror: bool,
 
@@ -494,6 +496,13 @@ pub enum CloneError {
          blob contents were intentionally omitted"
     )]
     PartialCloneMissingBlob { filter: String },
+    #[error("the remote does not support partial clone filtering (--filter '{filter}')")]
+    FilterNotSupported { filter: String },
+    #[error("the remote does not advertise the '{capability}' capability required for {feature}")]
+    ServerCapabilityMissing {
+        feature: &'static str,
+        capability: &'static str,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -536,6 +545,8 @@ impl From<CloneError> for CliError {
             CloneError::RemoteBranchNotFound { ref branch } => CliError::fatal(format!(
                 "remote branch '{branch}' not found in upstream origin"
             ))
+            // Intentionally fatal (exit 128) to match `git clone -b <missing>`,
+            // which exits 128 for a missing remote branch.
             .with_stable_code(StableErrorCode::RepoStateInvalid)
             .with_hint(
                 "use `-b <branch>` to specify an existing branch, or omit to use remote HEAD",
@@ -883,6 +894,18 @@ impl From<CloneError> for CliError {
                     "re-clone with --no-checkout or --bare, or run 'libra fetch' to backfill the \
                      filtered objects before checking out",
                 ),
+            CloneError::FilterNotSupported { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_hint(
+                    "the server must advertise the `filter` capability \
+                     (`uploadpack.allowFilter`); omit --filter or use a server that supports it",
+                ),
+            CloneError::ServerCapabilityMissing { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_hint(
+                    "the remote does not support this shallow request; use a server that \
+                     advertises it, or omit the flag",
+                ),
         }
     }
 }
@@ -1123,9 +1146,9 @@ fn parse_shallow_since(input: &str) -> Result<i64, String> {
 /// 129 via `classify_parse_error`; this function only covers the range/format
 /// checks clap cannot express. All failures here are usage errors (exit 129).
 fn validate_clone_args(args: &CloneArgs) -> CliResult<()> {
-    if args.remote_repo.starts_with("libra+cloud://")
+    if is_cloud_source(&args.remote_repo)
         && (args.shallow_since.is_some()
-            || args.shallow_exclude.is_some()
+            || !args.shallow_exclude.is_empty()
             || args.reject_shallow
             || args.no_single_branch
             || args.origin.is_some()
@@ -1156,6 +1179,19 @@ fn validate_clone_args(args: &CloneArgs) -> CliResult<()> {
         validate_filter_spec(filter).map_err(|message| {
             CliError::command_usage(message).with_stable_code(StableErrorCode::CliInvalidArguments)
         })?;
+    }
+
+    // Bound and sanitize each `--shallow-exclude` value: it is written verbatim
+    // into a `deepen-not <ref>` upload-pack frame, so control characters (NUL /
+    // CR / LF) could otherwise inject extra protocol frames.
+    for exclude in &args.shallow_exclude {
+        if exclude.is_empty() || exclude.len() > 256 || exclude.chars().any(|c| c.is_control()) {
+            return Err(CliError::command_usage(
+                "--shallow-exclude value must be a non-empty ref/revision \
+                 (≤256 bytes, no control characters)",
+            )
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+        }
     }
 
     if args.dissociate && args.reference.is_none() && args.reference_if_able.is_none() {
@@ -1194,7 +1230,7 @@ fn clone_shallow_options(args: &CloneArgs) -> Result<ShallowOptions, CloneError>
         })?),
         None => None,
     };
-    let deepen_not = args.shallow_exclude.clone().into_iter().collect::<Vec<_>>();
+    let deepen_not = args.shallow_exclude.clone();
     Ok(ShallowOptions {
         depth: args.depth,
         deepen_since,
@@ -1539,7 +1575,7 @@ async fn execute_clone_inner(
 ) -> Result<CloneOutput, (CloneError, Option<String>)> {
     // Intercept Cloudflare publish sources before generic remote discovery.
     // `libra+cloud://` is a Libra D1/R2 restore source, not a Git transport.
-    if args.remote_repo.starts_with("libra+cloud://") {
+    if is_cloud_source(&args.remote_repo) {
         let source =
             parse_cloud_publish_source(&args.remote_repo).map_err(|error| (error, None))?;
         validate_cloud_clone_option_compatibility(args).map_err(|error| (error, None))?;
@@ -1570,7 +1606,7 @@ async fn execute_clone_inner(
     if args.reject_shallow && source_is_shallow(&args.remote_repo) {
         return Err((
             CloneError::RejectedShallowSource {
-                repo: args.remote_repo.clone(),
+                repo: fetch::redact_url_credentials(&args.remote_repo),
             },
             None,
         ));
@@ -1605,12 +1641,60 @@ async fn execute_clone_inner(
 
     // --- Step 2: Remote discovery ---
     if !output.quiet && !output.is_json() {
-        eprintln!("Connecting to {} ...", args.remote_repo);
+        // Redact credentials from the displayed URL (the raw URL is still used
+        // for the actual connection).
+        eprintln!(
+            "Connecting to {} ...",
+            fetch::redact_url_credentials(&args.remote_repo)
+        );
     }
 
     let (remote_client, discovery) = fetch::discover_remote(&remote_repo)
         .await
         .map_err(|source| (CloneError::DiscoverRemote { source }, None))?;
+
+    // --- Fail-fast: requested upload-pack extensions the server did not
+    // advertise ---. When the remote advertises a capability set (HTTP/SSH git
+    // servers) that omits a requested extension, reject up front with a clear
+    // error instead of a confusing mid-fetch protocol failure. Local transports
+    // advertise no capabilities (empty set), so requests are still attempted
+    // there (the upload-pack process validates them directly).
+    if !discovery.capabilities.is_empty() {
+        let advertises = |capability: &str| {
+            discovery
+                .capabilities
+                .iter()
+                .any(|cap| cap == capability || cap.starts_with(&format!("{capability}=")))
+        };
+        if let Some(filter) = &args.filter
+            && !advertises("filter")
+        {
+            return Err((
+                CloneError::FilterNotSupported {
+                    filter: filter.clone(),
+                },
+                None,
+            ));
+        }
+        if args.shallow_since.is_some() && !advertises("deepen-since") {
+            return Err((
+                CloneError::ServerCapabilityMissing {
+                    feature: "--shallow-since",
+                    capability: "deepen-since",
+                },
+                None,
+            ));
+        }
+        if !args.shallow_exclude.is_empty() && !advertises("deepen-not") {
+            return Err((
+                CloneError::ServerCapabilityMissing {
+                    feature: "--shallow-exclude",
+                    capability: "deepen-not",
+                },
+                None,
+            ));
+        }
+    }
 
     // --- Step 3: Destination pre-checks ---
     if metadata_root.exists() && contains_initialized_repo(&metadata_root) {
@@ -1830,7 +1914,10 @@ async fn clone_cloud_publish_into_destination(
     restore_cloud_publish_ai_objects(source, restore_plan, r2_storage, &local_storage, &db_conn)
         .await?;
 
-    configure_cloud_publish_checkout(source, restore_plan, &args.remote_repo).await?;
+    // Redact all userinfo before persisting/surfacing the cloud source URL
+    // (config_kv and JSON/human output are non-vault, user-visible surfaces).
+    let redacted_remote = redact_cloud_source_url(&args.remote_repo);
+    configure_cloud_publish_checkout(source, restore_plan, &redacted_remote).await?;
 
     if !output.quiet && !output.is_json() {
         eprintln!("Checking out working copy ...");
@@ -1863,7 +1950,7 @@ async fn clone_cloud_publish_into_destination(
     Ok(CloneOutput {
         path: local_path.to_string_lossy().into_owned(),
         bare: false,
-        remote_url: args.remote_repo.clone(),
+        remote_url: redacted_remote,
         branch: cloud_checkout_branch_name(&restore_plan.checkout),
         object_format,
         repo_id: init_output.repo_id,
@@ -2428,6 +2515,16 @@ async fn configure_cloud_publish_checkout(
     )?;
 
     let db = get_db_conn_instance().await;
+    let cfg_domain = source.clone_domain.clone();
+    let cfg_target = site_target_label(source, &restore_plan.site);
+    // Map a config-write failure to a typed checkout-setup error instead of
+    // silently discarding it (a partially-written remote/cloud config otherwise
+    // leaves the clone reporting success while unusable).
+    let on_cfg_err = move |error: anyhow::Error| CloneError::CloudPublishCheckoutSetupFailed {
+        domain: cfg_domain.clone(),
+        target: cfg_target.clone(),
+        message: format!("failed to write clone config: {error}"),
+    };
     if let Some(branch_name) = cloud_checkout_branch_name(&restore_plan.checkout) {
         Branch::update_branch_with_conn(&db, &branch_name, &selected_commit.to_string(), None)
             .await
@@ -2445,8 +2542,12 @@ async fn configure_cloud_publish_checkout(
             })?;
 
         let merge_ref = format!("refs/heads/{branch_name}");
-        let _ = ConfigKv::set(&format!("branch.{branch_name}.merge"), &merge_ref, false).await;
-        let _ = ConfigKv::set(&format!("branch.{branch_name}.remote"), "origin", false).await;
+        ConfigKv::set(&format!("branch.{branch_name}.merge"), &merge_ref, false)
+            .await
+            .map_err(&on_cfg_err)?;
+        ConfigKv::set(&format!("branch.{branch_name}.remote"), "origin", false)
+            .await
+            .map_err(&on_cfg_err)?;
     } else {
         Head::update_result_with_conn(&db, Head::Detached(selected_commit), None)
             .await
@@ -2457,37 +2558,54 @@ async fn configure_cloud_publish_checkout(
             })?;
     }
 
-    let _ = ConfigKv::set("remote.origin.url", remote_url, false).await;
-    let _ = ConfigKv::set("remote.origin.type", "libra+cloud", false).await;
-    let _ = ConfigKv::set("cloud.origin.clone_domain", &source.clone_domain, false).await;
-    let _ = ConfigKv::set("cloud.origin.site_id", &restore_plan.site.site_id, false).await;
-    let _ = ConfigKv::set("cloud.origin.repo_id", &restore_plan.site.repo_id, false).await;
-    let _ = ConfigKv::set(
+    ConfigKv::set("remote.origin.url", remote_url, false)
+        .await
+        .map_err(&on_cfg_err)?;
+    ConfigKv::set("remote.origin.type", "libra+cloud", false)
+        .await
+        .map_err(&on_cfg_err)?;
+    ConfigKv::set("cloud.origin.clone_domain", &source.clone_domain, false)
+        .await
+        .map_err(&on_cfg_err)?;
+    ConfigKv::set("cloud.origin.site_id", &restore_plan.site.site_id, false)
+        .await
+        .map_err(&on_cfg_err)?;
+    ConfigKv::set("cloud.origin.repo_id", &restore_plan.site.repo_id, false)
+        .await
+        .map_err(&on_cfg_err)?;
+    ConfigKv::set(
         "cloud.origin.repository_name",
         &restore_plan.repository.name,
         false,
     )
-    .await;
-    let _ = ConfigKv::set("cloud.origin.slug", &restore_plan.site.slug, false).await;
-    let _ = ConfigKv::set(
+    .await
+    .map_err(&on_cfg_err)?;
+    ConfigKv::set("cloud.origin.slug", &restore_plan.site.slug, false)
+        .await
+        .map_err(&on_cfg_err)?;
+    ConfigKv::set(
         "cloud.origin.revision_status",
         &restore_plan.revision.status,
         false,
     )
-    .await;
-    let _ = ConfigKv::set(
+    .await
+    .map_err(&on_cfg_err)?;
+    ConfigKv::set(
         "cloud.origin.revision_oid",
         &restore_plan.checkout.revision_oid,
         false,
     )
-    .await;
+    .await
+    .map_err(&on_cfg_err)?;
 
     Ok(())
 }
 
 fn parse_cloud_publish_source(input: &str) -> Result<CloudPublishSource, CloneError> {
     let url = Url::parse(input).map_err(|source| CloneError::InvalidCloudPublishSource {
-        input: input.to_string(),
+        // Redact any embedded credentials (including username-only tokens)
+        // before the URL reaches error output.
+        input: redact_cloud_source_url(input),
         reason: format!("URL parse failed: {source}"),
     })?;
     if url.scheme() != "libra+cloud" {
@@ -3128,9 +3246,63 @@ fn clone_config_local_target() -> LocalIdentityTarget<'static> {
     }
 }
 
+/// Case-insensitive check for a `libra+cloud://` source. URL schemes are
+/// case-insensitive (RFC 3986), so `LIBRA+CLOUD://…` must route to the cloud
+/// parser/redactor too, not fall through to generic Git discovery.
+fn is_cloud_source(remote_repo: &str) -> bool {
+    const PREFIX: &str = "libra+cloud://";
+    remote_repo
+        .get(..PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(PREFIX))
+}
+
+/// Strip a `userinfo@` authority component from a URL-like string textually,
+/// for inputs that `Url::parse` rejects (so the value can still be made safe).
+fn strip_authority_userinfo(raw: &str) -> String {
+    let Some(scheme_end) = raw.find("://") else {
+        return raw.to_string();
+    };
+    let auth_start = scheme_end + 3;
+    let rest = &raw[auth_start..];
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..auth_end];
+    match authority.rfind('@') {
+        Some(at) => format!(
+            "{}{}{}",
+            &raw[..auth_start],
+            &authority[at + 1..],
+            &rest[auth_end..]
+        ),
+        None => raw.to_string(),
+    }
+}
+
+/// Redact **all** userinfo from a `libra+cloud://` source URL before it is
+/// stored or surfaced. Unlike [`fetch::redact_url_credentials`] (which keeps a
+/// bare SSH-style username such as `git@host`), userinfo is never meaningful for
+/// cloud sources — cloud credentials come from config/vault — so a bare token
+/// embedded as a username-only component (`libra+cloud://token@host/slug`) must
+/// also be stripped. Malformed URLs that `Url::parse` rejects are stripped
+/// textually so a bare token can never survive.
+fn redact_cloud_source_url(raw: &str) -> String {
+    match Url::parse(raw) {
+        Ok(mut url) => {
+            if !url.username().is_empty() || url.password().is_some() {
+                let _ = url.set_username("");
+                let _ = url.set_password(None);
+            }
+            url.to_string()
+        }
+        // Not a parseable URL: strip any userinfo authority textually.
+        Err(_) => strip_authority_userinfo(raw),
+    }
+}
+
 fn invalid_cloud_source(input: &str, reason: &str) -> CloneError {
     CloneError::InvalidCloudPublishSource {
-        input: input.to_string(),
+        // Redact any embedded credentials (including username-only tokens)
+        // before the URL reaches error output.
+        input: redact_cloud_source_url(input),
         reason: reason.to_string(),
     }
 }
@@ -3303,7 +3475,7 @@ async fn clone_into_destination(
             .map_err(|source| CloneError::FetchFailed { source })?;
         if !boundaries.is_empty() {
             return Err(CloneError::RejectedShallowSource {
-                repo: remote_url.to_string(),
+                repo: fetch::redact_url_credentials(remote_url),
             });
         }
     }
@@ -3328,6 +3500,7 @@ async fn clone_into_destination(
         remote_config.clone(),
         args.branch.clone(),
         checkout_worktree,
+        args.mirror,
     )
     .await
     .map_err(|error| match error {
@@ -3370,7 +3543,8 @@ async fn clone_into_destination(
     Ok(CloneOutput {
         path: local_path.to_string_lossy().into_owned(),
         bare,
-        remote_url: remote_url.to_string(),
+        // Redact any credentials before surfacing the URL in JSON / human output.
+        remote_url: fetch::redact_url_credentials(remote_url),
         branch: setup_result.branch_name,
         object_format,
         repo_id: init_output.repo_id,
@@ -3378,7 +3552,7 @@ async fn clone_into_destination(
         ssh_key_detected: init_output.ssh_key_detected,
         shallow: args.depth.is_some()
             || args.shallow_since.is_some()
-            || args.shallow_exclude.is_some(),
+            || !args.shallow_exclude.is_empty(),
         warnings,
         gitignore_converted,
         source_kind: None,
@@ -3409,9 +3583,21 @@ pub(crate) async fn setup_repository(
     remote_config: RemoteConfig,
     specified_branch: Option<String>,
     checkout_worktree: bool,
+    mirror: bool,
 ) -> Result<SetupResult, CloneError> {
     let db = get_db_conn_instance().await;
     let remote_head = Head::remote_current_with_conn(&db, &remote_config.name).await;
+
+    // Persist a credential-redacted URL (the live transport already used the raw
+    // URL for discovery/fetch); config_kv is non-vault storage, so a token or
+    // password must never be written there or into the reflog.
+    let redacted_url = fetch::redact_url_credentials(&remote_config.url);
+    // `--mirror` maps every ref; an ordinary clone maps only branch heads.
+    let fetch_refspec = if mirror {
+        "+refs/*:refs/*".to_string()
+    } else {
+        format!("+refs/heads/*:refs/remotes/{}/*", remote_config.name)
+    };
 
     let branch_to_checkout = match specified_branch {
         Some(branch_name) => Some(branch_name),
@@ -3435,7 +3621,7 @@ pub(crate) async fn setup_repository(
         })?;
 
         let action = ReflogAction::Clone {
-            from: remote_config.url.clone(),
+            from: redacted_url.clone(),
         };
         let context = ReflogContext {
             old_oid: ObjectHash::zero_str(get_hash_kind()).to_string(),
@@ -3443,8 +3629,9 @@ pub(crate) async fn setup_repository(
             action,
         };
 
-        // Clone the branch name before moving it into the closure.
+        // Clone the values that move into the transaction closure.
         let branch_name_for_result = branch_name.clone();
+        let remote_name = remote_config.name.clone();
         with_reflog(
             context,
             move |txn: &DatabaseTransaction| {
@@ -3458,28 +3645,52 @@ pub(crate) async fn setup_repository(
                     .await?;
                     Head::update_with_conn(txn, Head::Branch(branch_name.to_owned()), None).await;
 
-                    let merge_ref = format!("refs/heads/{}", branch_name);
-                    let _ = ConfigKv::set_with_conn(
+                    // Config writes propagate (`?`) so any failure rolls back the
+                    // whole reflog transaction — all-or-nothing metadata.
+                    let to_db_err = |error: anyhow::Error| DbErr::Custom(error.to_string());
+                    let merge_ref = format!("refs/heads/{branch_name}");
+                    ConfigKv::set_with_conn(
                         txn,
-                        &format!("branch.{}.merge", branch_name),
+                        &format!("branch.{branch_name}.merge"),
                         &merge_ref,
                         false,
                     )
-                    .await;
-                    let _ = ConfigKv::set_with_conn(
+                    .await
+                    .map_err(to_db_err)?;
+                    ConfigKv::set_with_conn(
                         txn,
-                        &format!("branch.{}.remote", branch_name),
-                        &remote_config.name,
+                        &format!("branch.{branch_name}.remote"),
+                        &remote_name,
                         false,
                     )
-                    .await;
-                    let _ = ConfigKv::set_with_conn(
+                    .await
+                    .map_err(to_db_err)?;
+                    ConfigKv::set_with_conn(
                         txn,
-                        &format!("remote.{}.url", remote_config.name),
-                        &remote_config.url,
+                        &format!("remote.{remote_name}.url"),
+                        &redacted_url,
                         false,
                     )
-                    .await;
+                    .await
+                    .map_err(to_db_err)?;
+                    ConfigKv::set_with_conn(
+                        txn,
+                        &format!("remote.{remote_name}.fetch"),
+                        &fetch_refspec,
+                        false,
+                    )
+                    .await
+                    .map_err(to_db_err)?;
+                    if mirror {
+                        ConfigKv::set_with_conn(
+                            txn,
+                            &format!("remote.{remote_name}.mirror"),
+                            "true",
+                            false,
+                        )
+                        .await
+                        .map_err(to_db_err)?;
+                    }
                     Ok(())
                 })
             },
@@ -3505,22 +3716,46 @@ pub(crate) async fn setup_repository(
             branch_name: Some(branch_name_for_result),
         })
     } else {
-        let _ = ConfigKv::set(
+        // Empty remote / no advertised branch: write only the remote URL and
+        // fetch refspec, inside a single transaction (all-or-nothing). No
+        // synthetic `branch.*` is written — there is no known branch to track.
+        let txn = db.begin().await.map_err(|error| CloneError::SetupFailed {
+            message: error.to_string(),
+        })?;
+        let to_setup_err = |error: anyhow::Error| CloneError::SetupFailed {
+            message: error.to_string(),
+        };
+        ConfigKv::set_with_conn(
+            &txn,
             &format!("remote.{}.url", remote_config.name),
-            &remote_config.url,
+            &redacted_url,
             false,
         )
-        .await;
-
-        let default_branch = "main";
-        let merge_ref = format!("refs/heads/{}", default_branch);
-        let _ = ConfigKv::set(&format!("branch.{default_branch}.merge"), &merge_ref, false).await;
-        let _ = ConfigKv::set(
-            &format!("branch.{default_branch}.remote"),
-            &remote_config.name,
+        .await
+        .map_err(to_setup_err)?;
+        ConfigKv::set_with_conn(
+            &txn,
+            &format!("remote.{}.fetch", remote_config.name),
+            &fetch_refspec,
             false,
         )
-        .await;
+        .await
+        .map_err(to_setup_err)?;
+        if mirror {
+            ConfigKv::set_with_conn(
+                &txn,
+                &format!("remote.{}.mirror", remote_config.name),
+                "true",
+                false,
+            )
+            .await
+            .map_err(to_setup_err)?;
+        }
+        txn.commit()
+            .await
+            .map_err(|error| CloneError::SetupFailed {
+                message: error.to_string(),
+            })?;
 
         Ok(SetupResult { branch_name: None })
     }
@@ -3916,6 +4151,45 @@ mod tests {
     fn validate_filter_spec_length_capped() {
         let long = format!("blob:limit={}", "9".repeat(FILTER_SPEC_MAX_LEN));
         assert!(validate_filter_spec(&long).is_err());
+    }
+
+    #[test]
+    fn redact_cloud_source_url_strips_all_userinfo() {
+        for raw in [
+            "libra+cloud://token@host/slug",
+            "libra+cloud://user:secret@host/slug",
+        ] {
+            let redacted = redact_cloud_source_url(raw);
+            assert!(
+                !redacted.contains("token")
+                    && !redacted.contains("secret")
+                    && !redacted.contains('@'),
+                "userinfo must be stripped from {raw}, got {redacted}"
+            );
+            assert!(
+                redacted.contains("host"),
+                "host must be preserved: {redacted}"
+            );
+        }
+        // No userinfo: unchanged shape.
+        let plain = redact_cloud_source_url("libra+cloud://host/slug");
+        assert!(plain.contains("host") && plain.contains("slug"));
+
+        // Malformed URL (Url::parse rejects): userinfo is still stripped textually.
+        let malformed = redact_cloud_source_url("libra+cloud://token@[::1/slug");
+        assert!(
+            !malformed.contains("token") && !malformed.contains('@'),
+            "malformed-URL userinfo must be stripped, got {malformed}"
+        );
+    }
+
+    #[test]
+    fn is_cloud_source_is_case_insensitive() {
+        assert!(is_cloud_source("libra+cloud://host/slug"));
+        assert!(is_cloud_source("LIBRA+CLOUD://host/slug"));
+        assert!(is_cloud_source("Libra+Cloud://token@host/slug"));
+        assert!(!is_cloud_source("https://host/slug"));
+        assert!(!is_cloud_source("libra+cloud"));
     }
 
     #[test]

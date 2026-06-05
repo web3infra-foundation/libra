@@ -455,6 +455,7 @@ async fn test_basic_diff() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -520,6 +521,7 @@ async fn test_diff_staged() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -610,6 +612,7 @@ async fn test_diff_between_commits() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -644,6 +647,7 @@ async fn test_diff_between_commits() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -719,6 +723,7 @@ async fn test_diff_with_pathspec() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -792,6 +797,7 @@ async fn test_diff_output_to_file() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -860,6 +866,7 @@ async fn test_diff_algorithms() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -918,5 +925,844 @@ async fn test_diff_algorithms() {
     assert!(
         !myers_min_file.exists(),
         "unsupported MyersMinimal should not write a default diff to the output file"
+    );
+}
+
+// ----- Wave 0: whitespace ignore, -U context, --exit-code -----
+
+/// Commit `content` to `tracked.txt` so a later worktree edit diffs against it.
+fn commit_tracked(repo: &tempfile::TempDir, content: &str) {
+    fs::write(repo.path().join("tracked.txt"), content).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "tracked.txt"], repo.path()),
+        "stage tracked base",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], repo.path()),
+        "commit tracked base",
+    );
+}
+
+#[test]
+fn diff_ignore_all_space_suppresses_whitespace_only_changes() {
+    let repo = create_committed_repo_via_cli();
+    // Base tracked.txt is "tracked\n"; the worktree only adds surrounding spaces.
+    fs::write(repo.path().join("tracked.txt"), "   tracked   \n").unwrap();
+    let output = run_libra_command(&["--json", "diff", "-w"], repo.path());
+    assert_cli_success(&output, "diff -w");
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["files_changed"], 0,
+        "whitespace-only change must be ignored by -w"
+    );
+}
+
+#[test]
+fn diff_ignore_space_change_collapses_runs() {
+    let repo = create_committed_repo_via_cli();
+    commit_tracked(&repo, "a b c\n");
+    fs::write(repo.path().join("tracked.txt"), "a    b    c\n").unwrap();
+    let output = run_libra_command(&["--json", "diff", "-b"], repo.path());
+    assert_cli_success(&output, "diff -b");
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["files_changed"], 0,
+        "whitespace-run-only change must be ignored by -b"
+    );
+}
+
+#[test]
+fn diff_ignore_blank_lines_skips_blank_only_hunks() {
+    let repo = create_committed_repo_via_cli();
+    commit_tracked(&repo, "alpha\nbeta\n");
+    fs::write(repo.path().join("tracked.txt"), "alpha\n\nbeta\n").unwrap();
+    let output = run_libra_command(&["--json", "diff", "--ignore-blank-lines"], repo.path());
+    assert_cli_success(&output, "diff --ignore-blank-lines");
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["files_changed"], 0,
+        "blank-only insertion must be ignored"
+    );
+}
+
+#[test]
+fn diff_unified_context_default_is_three() {
+    let repo = create_committed_repo_via_cli();
+    commit_tracked(&repo, "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\n");
+    fs::write(
+        repo.path().join("tracked.txt"),
+        "l1\nl2\nl3\nl4\nL5\nl6\nl7\nl8\nl9\n",
+    )
+    .unwrap();
+    let output = run_libra_command(&["diff"], repo.path());
+    assert_cli_success(&output, "default diff");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("@@ -2,7 +2,7 @@"),
+        "default context should be 3: {stdout}"
+    );
+}
+
+#[test]
+fn diff_context_config_sets_default() {
+    let repo = create_committed_repo_via_cli();
+    commit_tracked(&repo, "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\n");
+    fs::write(
+        repo.path().join("tracked.txt"),
+        "l1\nl2\nl3\nl4\nL5\nl6\nl7\nl8\nl9\n",
+    )
+    .unwrap();
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "diff.context", "5"], repo.path()),
+        "set diff.context",
+    );
+    let output = run_libra_command(&["diff"], repo.path());
+    assert_cli_success(&output, "diff with diff.context=5");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("@@ -1,9 +1,9 @@"),
+        "diff.context=5 should widen context: {stdout}"
+    );
+
+    // Explicit -U overrides the config value.
+    let output = run_libra_command(&["diff", "-U2"], repo.path());
+    assert_cli_success(&output, "diff -U2");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("@@ -3,5 +3,5 @@"),
+        "-U2 should override diff.context: {stdout}"
+    );
+}
+
+#[test]
+fn diff_context_config_invalid_value_errors() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(
+            &["config", "set", "diff.context", "notanumber"],
+            repo.path(),
+        ),
+        "set invalid diff.context",
+    );
+    let output = run_libra_command(&["diff"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "invalid diff.context should be a usage error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+#[test]
+fn diff_unified_zero_context_emits_only_changed_lines() {
+    let repo = create_committed_repo_via_cli();
+    commit_tracked(&repo, "l1\nl2\nl3\nl4\nl5\n");
+    fs::write(repo.path().join("tracked.txt"), "l1\nl2\nL3\nl4\nl5\n").unwrap();
+    let output = run_libra_command(&["diff", "-U0"], repo.path());
+    assert_cli_success(&output, "diff -U0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("@@ -3,1 +3,1 @@"),
+        "zero-context header: {stdout}"
+    );
+    let context_lines = stdout
+        .lines()
+        .filter(|l| l.starts_with(' ') && !l.starts_with("@@"))
+        .count();
+    assert_eq!(context_lines, 0, "no context lines at -U0: {stdout}");
+}
+
+#[test]
+fn diff_exit_code_flag_returns_1_when_changes() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let output = run_libra_command(&["diff", "--exit-code"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "exit-code with changes should be 1: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.stdout.is_empty(),
+        "--exit-code still renders the diff body"
+    );
+}
+
+#[test]
+fn diff_exit_code_flag_returns_0_when_no_changes() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["diff", "--exit-code"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "exit-code without changes should be 0"
+    );
+}
+
+#[test]
+fn diff_json_exit_code_returns_1_when_changes() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let output = run_libra_command(&["--json", "diff", "--exit-code"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "json --exit-code with changes should be 1"
+    );
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["files_changed"], 1,
+        "JSON envelope is still emitted under --exit-code"
+    );
+}
+
+#[test]
+fn diff_output_file_exit_code_returns_1_when_changes() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let out_file = repo.path().join("diff.out");
+    let output = run_libra_command(
+        &[
+            "diff",
+            "--exit-code",
+            "--output",
+            out_file.to_str().unwrap(),
+        ],
+        repo.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "--exit-code --output with changes should be 1"
+    );
+    assert!(
+        out_file.exists(),
+        "diff body was written to the output file"
+    );
+}
+
+#[test]
+fn diff_quiet_returns_1_when_changes_no_stdout() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let output = run_libra_command(&["diff", "-q"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "quiet with changes should be 1"
+    );
+    assert!(output.stdout.is_empty(), "quiet suppresses stdout");
+}
+
+#[test]
+fn diff_default_returns_0_even_with_changes() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let output = run_libra_command(&["diff"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "default diff exits 0 even with changes"
+    );
+}
+
+#[test]
+fn diff_binary_change_emits_binary_files_differ() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), [0u8, 159, 146, 150]).unwrap();
+    let output = run_libra_command(&["diff", "--exit-code"], repo.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Binary files differ"),
+        "binary change should report Binary files differ: {stdout}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "--exit-code still triggers on a binary change"
+    );
+}
+
+#[test]
+fn diff_preprocess_does_not_mutate_blob() {
+    let repo = create_committed_repo_via_cli();
+    let content = "   tracked   \n";
+    fs::write(repo.path().join("tracked.txt"), content).unwrap();
+    let output = run_libra_command(&["diff", "-w"], repo.path());
+    assert_cli_success(&output, "diff -w");
+    // The worktree file must be byte-for-byte unchanged after a -w comparison.
+    let after = fs::read_to_string(repo.path().join("tracked.txt")).unwrap();
+    assert_eq!(after, content, "-w preprocessing must not rewrite the file");
+}
+
+#[test]
+fn diff_myers_still_fail_closed_lbr_cli_002() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let output = run_libra_command(&["diff", "--algorithm", "myers"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "--algorithm=myers must remain fail-closed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+// ----- Wave 1: rename / copy detection -----
+
+/// Commit a fresh file so a later rename diffs against it.
+fn commit_file(repo: &tempfile::TempDir, name: &str, content: &str) {
+    fs::write(repo.path().join(name), content).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", name], repo.path()),
+        "stage new file",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "add file", "--no-verify"], repo.path()),
+        "commit new file",
+    );
+}
+
+fn renamed_entry(json: &serde_json::Value) -> Option<&serde_json::Value> {
+    json["data"]["files"]
+        .as_array()?
+        .iter()
+        .find(|f| f["status"] == "renamed")
+}
+
+#[test]
+fn diff_rename_detected_with_small_edit() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "orig.txt", "l1\nl2\nl3\nl4\n");
+    fs::remove_file(repo.path().join("orig.txt")).unwrap();
+    fs::write(repo.path().join("new.txt"), "l1\nl2\nl3\nCHANGED\n").unwrap();
+
+    let output = run_libra_command(&["--json", "diff", "-M"], repo.path());
+    assert_cli_success(&output, "diff -M");
+    let json = parse_json_stdout(&output);
+    let renamed = renamed_entry(&json).expect("a renamed entry");
+    assert_eq!(renamed["path"], "new.txt");
+    assert_eq!(renamed["old_path"], "orig.txt");
+}
+
+#[test]
+fn diff_exact_rename_uses_hash_fast_path() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "orig.txt", "alpha\nbeta\ngamma\n");
+    fs::remove_file(repo.path().join("orig.txt")).unwrap();
+    fs::write(repo.path().join("new.txt"), "alpha\nbeta\ngamma\n").unwrap();
+
+    let output = run_libra_command(&["--json", "diff", "-M"], repo.path());
+    assert_cli_success(&output, "diff -M exact");
+    let json = parse_json_stdout(&output);
+    let renamed = renamed_entry(&json).expect("a renamed entry");
+    assert_eq!(renamed["similarity"], 100);
+    assert_eq!(
+        renamed["hunks"].as_array().map(|h| h.len()),
+        Some(0),
+        "an exact rename has no hunk body"
+    );
+
+    // Human output carries the similarity header but no @@ hunk.
+    let human = run_libra_command(&["diff", "-M"], repo.path());
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(stdout.contains("similarity index 100%"), "stdout={stdout}");
+    assert!(stdout.contains("rename from orig.txt"), "stdout={stdout}");
+    assert!(stdout.contains("rename to new.txt"), "stdout={stdout}");
+    assert!(!stdout.contains("@@"), "pure rename has no hunk: {stdout}");
+}
+
+#[test]
+fn diff_no_renames_forces_add_delete() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "orig.txt", "alpha\nbeta\ngamma\n");
+    fs::remove_file(repo.path().join("orig.txt")).unwrap();
+    fs::write(repo.path().join("new.txt"), "alpha\nbeta\ngamma\n").unwrap();
+
+    let output = run_libra_command(&["--json", "diff", "--no-renames"], repo.path());
+    assert_cli_success(&output, "diff --no-renames");
+    let json = parse_json_stdout(&output);
+    let statuses: Vec<String> = json["data"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["status"].as_str().unwrap().to_string())
+        .collect();
+    assert!(statuses.contains(&"added".to_string()), "{statuses:?}");
+    assert!(statuses.contains(&"deleted".to_string()), "{statuses:?}");
+    assert!(!statuses.contains(&"renamed".to_string()), "{statuses:?}");
+}
+
+#[test]
+fn diff_default_without_flag_does_not_detect_rename() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "orig.txt", "alpha\nbeta\ngamma\n");
+    fs::remove_file(repo.path().join("orig.txt")).unwrap();
+    fs::write(repo.path().join("new.txt"), "alpha\nbeta\ngamma\n").unwrap();
+
+    // No -M and no config => libra keeps the add/delete pair (off by default).
+    let output = run_libra_command(&["--json", "diff"], repo.path());
+    assert_cli_success(&output, "diff default");
+    let json = parse_json_stdout(&output);
+    assert!(
+        renamed_entry(&json).is_none(),
+        "default diff must not rename"
+    );
+}
+
+#[test]
+fn diff_rename_threshold_percent_respected() {
+    let repo = create_committed_repo_via_cli();
+    // 3 of 6 lines change => ~50% similar; -M80% must NOT pair them.
+    commit_file(&repo, "orig.txt", "l1\nl2\nl3\nl4\nl5\nl6\n");
+    fs::remove_file(repo.path().join("orig.txt")).unwrap();
+    fs::write(repo.path().join("new.txt"), "l1\nl2\nl3\nX4\nX5\nX6\n").unwrap();
+
+    let output = run_libra_command(&["--json", "diff", "--find-renames=80%"], repo.path());
+    assert_cli_success(&output, "diff -M80%");
+    let json = parse_json_stdout(&output);
+    assert!(
+        renamed_entry(&json).is_none(),
+        "50%-similar files must not pair at -M80%"
+    );
+}
+
+#[test]
+fn diff_rename_threshold_bare_number_means_percent() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "orig.txt", "l1\nl2\nl3\nl4\n");
+    fs::remove_file(repo.path().join("orig.txt")).unwrap();
+    fs::write(repo.path().join("new.txt"), "l1\nl2\nl3\nCHANGED\n").unwrap();
+
+    // 75% similar: -M80 (== -M80%) rejects, -M70 accepts.
+    let strict = run_libra_command(&["--json", "diff", "--find-renames=80"], repo.path());
+    assert!(renamed_entry(&parse_json_stdout(&strict)).is_none());
+    let loose = run_libra_command(&["--json", "diff", "--find-renames=70"], repo.path());
+    assert!(renamed_entry(&parse_json_stdout(&loose)).is_some());
+}
+
+#[test]
+fn diff_config_renames_false_disables() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "orig.txt", "alpha\nbeta\ngamma\n");
+    fs::remove_file(repo.path().join("orig.txt")).unwrap();
+    fs::write(repo.path().join("new.txt"), "alpha\nbeta\ngamma\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "diff.renames", "false"], repo.path()),
+        "set diff.renames=false",
+    );
+
+    let output = run_libra_command(&["--json", "diff", "-M"], repo.path());
+    assert_cli_success(&output, "diff -M with renames disabled");
+    // Explicit -M overrides config off.
+    assert!(
+        renamed_entry(&parse_json_stdout(&output)).is_some(),
+        "explicit -M should still detect renames"
+    );
+
+    // Config true enables without a flag.
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "diff.renames", "true"], repo.path()),
+        "set diff.renames=true",
+    );
+    let output = run_libra_command(&["--json", "diff"], repo.path());
+    assert!(
+        renamed_entry(&parse_json_stdout(&output)).is_some(),
+        "diff.renames=true should enable detection without a flag"
+    );
+}
+
+#[test]
+fn diff_copy_detection_basic() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "src.txt", "one\ntwo\nthree\nfour\n");
+    // Modify the source and add a near-identical copy.
+    fs::write(repo.path().join("src.txt"), "one\ntwo\nthree\nFOUR\n").unwrap();
+    fs::write(repo.path().join("copy.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+
+    let output = run_libra_command(&["--json", "diff", "-C"], repo.path());
+    assert_cli_success(&output, "diff -C");
+    let json = parse_json_stdout(&output);
+    let copied = json["data"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["status"] == "copied")
+        .expect("a copied entry");
+    assert_eq!(copied["path"], "copy.txt");
+    assert_eq!(copied["old_path"], "src.txt");
+    // The copy source is NOT consumed: src.txt still shows as modified.
+    assert!(
+        json["data"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"] == "src.txt" && f["status"] == "modified"),
+        "copy source remains independently in the diff"
+    );
+}
+
+#[test]
+fn diff_rename_limit_cutoff_warns() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "a.txt", "alpha\nbeta\ngamma\ndelta\n");
+    commit_file(&repo, "b.txt", "uno\ndos\ntres\ncuatro\n");
+    // Delete both and add two near-but-not-exact copies (forces inexact stage).
+    fs::remove_file(repo.path().join("a.txt")).unwrap();
+    fs::remove_file(repo.path().join("b.txt")).unwrap();
+    fs::write(repo.path().join("a2.txt"), "alpha\nbeta\ngamma\nDELTA\n").unwrap();
+    fs::write(repo.path().join("b2.txt"), "uno\ndos\ntres\nCUATRO\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "diff.renameLimit", "1"], repo.path()),
+        "set diff.renameLimit=1",
+    );
+
+    let output = run_libra_command(&["diff", "-M"], repo.path());
+    assert_cli_success(&output, "diff -M over rename limit");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("rename detection was skipped"),
+        "expected a rename-limit warning: {stderr}"
+    );
+}
+
+#[test]
+fn diff_binary_rename_by_hash() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("orig.bin"), [0u8, 1, 2, 3, 0, 9]).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "orig.bin"], repo.path()),
+        "stage binary",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "bin", "--no-verify"], repo.path()),
+        "commit binary",
+    );
+    fs::remove_file(repo.path().join("orig.bin")).unwrap();
+    fs::write(repo.path().join("moved.bin"), [0u8, 1, 2, 3, 0, 9]).unwrap();
+
+    let output = run_libra_command(&["--json", "diff", "-M"], repo.path());
+    assert_cli_success(&output, "diff -M binary");
+    let json = parse_json_stdout(&output);
+    let renamed = renamed_entry(&json).expect("binary rename by hash");
+    assert_eq!(renamed["path"], "moved.bin");
+    assert_eq!(renamed["similarity"], 100);
+}
+
+#[cfg(unix)]
+#[test]
+fn diff_rename_header_includes_mode_change() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "orig.sh", "echo hi\nline2\nline3\n");
+    fs::remove_file(repo.path().join("orig.sh")).unwrap();
+    let new = repo.path().join("new.sh");
+    fs::write(&new, "echo hi\nline2\nline3\n").unwrap();
+    fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = run_libra_command(&["diff", "-M"], repo.path());
+    assert_cli_success(&output, "diff -M mode change");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("old mode 100644"), "stdout={stdout}");
+    assert!(stdout.contains("new mode 100755"), "stdout={stdout}");
+    assert!(stdout.contains("rename from orig.sh"), "stdout={stdout}");
+}
+
+// ----- Wave 2a: --raw, --relative, diff.noPrefix -----
+
+/// Create `src/a.txt` and `b.txt`, commit them, then modify both in the worktree.
+fn setup_subdir_repo() -> tempfile::TempDir {
+    let repo = create_committed_repo_via_cli();
+    fs::create_dir_all(repo.path().join("src")).unwrap();
+    fs::write(repo.path().join("src/a.txt"), "a\n").unwrap();
+    fs::write(repo.path().join("b.txt"), "b\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "src/a.txt", "b.txt"], repo.path()),
+        "stage subdir fixture",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "subdir base", "--no-verify"], repo.path()),
+        "commit subdir fixture",
+    );
+    repo
+}
+
+#[test]
+fn diff_raw_format_matches_git() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let output = run_libra_command(&["diff", "--raw"], repo.path());
+    assert_cli_success(&output, "diff --raw");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().find(|l| l.ends_with("tracked.txt")).unwrap();
+    let parts: Vec<&str> = line.splitn(5, ' ').collect();
+    assert_eq!(parts[0], ":100644", "raw old mode: {line}");
+    assert_eq!(parts[1], "100644", "raw new mode: {line}");
+    assert_eq!(parts[2].len(), 7, "abbreviated old sha: {line}");
+    assert_eq!(parts[3].len(), 7, "abbreviated new sha: {line}");
+    assert_eq!(parts[4], "M\ttracked.txt", "status + path: {line}");
+}
+
+#[test]
+fn diff_raw_rename_emits_two_paths() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "orig.txt", "alpha\nbeta\ngamma\n");
+    fs::remove_file(repo.path().join("orig.txt")).unwrap();
+    fs::write(repo.path().join("new.txt"), "alpha\nbeta\ngamma\n").unwrap();
+
+    let output = run_libra_command(&["diff", "-M", "--raw"], repo.path());
+    assert_cli_success(&output, "diff -M --raw");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|l| l.contains("R100"))
+        .expect("a rename raw line");
+    assert!(
+        line.ends_with("R100\torig.txt\tnew.txt"),
+        "rename raw line must carry both paths: {line}"
+    );
+}
+
+#[test]
+fn diff_relative_filters_to_subdir() {
+    let repo = setup_subdir_repo();
+    fs::write(repo.path().join("src/a.txt"), "a2\n").unwrap();
+    fs::write(repo.path().join("b.txt"), "b2\n").unwrap();
+
+    let output = run_libra_command(&["--json", "diff", "--relative=src"], repo.path());
+    assert_cli_success(&output, "diff --relative=src");
+    let json = parse_json_stdout(&output);
+    let files = json["data"]["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "only src/ files survive: {files:?}");
+    assert_eq!(files[0]["path"], "a.txt", "prefix is stripped");
+}
+
+#[test]
+fn diff_relative_strips_prefix() {
+    let repo = setup_subdir_repo();
+    fs::write(repo.path().join("src/a.txt"), "a2\n").unwrap();
+
+    let output = run_libra_command(&["diff", "--relative=src"], repo.path());
+    assert_cli_success(&output, "diff --relative=src unified");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("diff --git a/a.txt b/a.txt"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("--- a/a.txt"), "stdout={stdout}");
+    assert!(
+        !stdout.contains("src/a.txt"),
+        "prefix must be stripped: {stdout}"
+    );
+}
+
+#[test]
+fn diff_relative_combines_with_name_only() {
+    let repo = setup_subdir_repo();
+    fs::write(repo.path().join("src/a.txt"), "a2\n").unwrap();
+    fs::write(repo.path().join("b.txt"), "b2\n").unwrap();
+
+    let output = run_libra_command(&["diff", "--relative=src", "--name-only"], repo.path());
+    assert_cli_success(&output, "diff --relative --name-only");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "a.txt");
+}
+
+#[test]
+fn diff_relative_excludes_outside_files_from_count() {
+    let repo = setup_subdir_repo();
+    // Only the file OUTSIDE src/ changes.
+    fs::write(repo.path().join("b.txt"), "b2\n").unwrap();
+
+    let output = run_libra_command(&["diff", "--relative=src", "--exit-code"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "outside-subtree change must not count under --relative: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn diff_relative_rejects_traversal() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let output = run_libra_command(&["diff", "--relative=../escape"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "traversal must be rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+#[test]
+fn diff_noprefix_config_omits_ab_prefix() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "diff.noPrefix", "true"], repo.path()),
+        "set diff.noPrefix",
+    );
+
+    let output = run_libra_command(&["diff"], repo.path());
+    assert_cli_success(&output, "diff with noPrefix");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("diff --git tracked.txt tracked.txt"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("--- tracked.txt"), "stdout={stdout}");
+    assert!(stdout.contains("+++ tracked.txt"), "stdout={stdout}");
+    assert!(!stdout.contains("a/tracked.txt"), "no a/ prefix: {stdout}");
+}
+
+#[test]
+fn diff_output_format_precedence() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+
+    // --raw beats --stat.
+    let raw = run_libra_command(&["diff", "--raw", "--stat"], repo.path());
+    assert!(
+        String::from_utf8_lossy(&raw.stdout).contains(":100644"),
+        "--raw should win over --stat"
+    );
+
+    // --json envelope is orthogonal and wins over human formats.
+    let json = run_libra_command(&["--json", "diff", "--stat"], repo.path());
+    let parsed = parse_json_stdout(&json);
+    assert_eq!(parsed["command"], "diff");
+    assert_eq!(parsed["data"]["files_changed"], 1);
+}
+
+// ----- Wave 2b: --word-diff -----
+
+#[test]
+fn diff_word_diff_plain_markers() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "w.txt", "alpha beta gamma\n");
+    fs::write(repo.path().join("w.txt"), "alpha BETA gamma\n").unwrap();
+
+    let output = run_libra_command(&["diff", "--word-diff=plain"], repo.path());
+    assert_cli_success(&output, "diff --word-diff=plain");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[-beta-]"), "deletion marker: {stdout}");
+    assert!(stdout.contains("{+BETA+}"), "insertion marker: {stdout}");
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "plain mode has no ANSI: {stdout:?}"
+    );
+}
+
+#[test]
+fn diff_word_diff_color_has_ansi() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "w.txt", "alpha beta gamma\n");
+    fs::write(repo.path().join("w.txt"), "alpha BETA gamma\n").unwrap();
+
+    let output = run_libra_command(&["diff", "--word-diff=color"], repo.path());
+    assert_cli_success(&output, "diff --word-diff=color");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains('\u{1b}'),
+        "color mode emits ANSI: {stdout:?}"
+    );
+}
+
+#[test]
+fn diff_word_diff_regex_over_4kib_rejected() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let long = "a".repeat(4097);
+    let output = run_libra_command(&["diff", "--word-diff-regex", &long], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "over-long --word-diff-regex must be a usage error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+#[test]
+fn diff_word_regex_config_override() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "w.txt", "x foo-bar y\n");
+    fs::write(repo.path().join("w.txt"), "x foo-baz y\n").unwrap();
+    // Treat hyphenated identifiers as a single word so the whole token is marked.
+    assert_cli_success(
+        &run_libra_command(
+            &["config", "set", "diff.wordRegex", r"[\w-]+|\s+|[^\w\s]"],
+            repo.path(),
+        ),
+        "set diff.wordRegex",
+    );
+
+    let output = run_libra_command(&["diff", "--word-diff=plain"], repo.path());
+    assert_cli_success(&output, "diff --word-diff with custom regex");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[-foo-bar-]"),
+        "custom word regex should mark the whole hyphenated token: {stdout}"
+    );
+}
+
+#[test]
+fn diff_function_context_expands_hunk() {
+    let repo = create_committed_repo_via_cli();
+    let base = "fn alpha() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    let d = 4;\n    let e = 5;\n    return a;\n}\n";
+    let modified = "fn alpha() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    let d = 40;\n    let e = 5;\n    return a;\n}\n";
+    commit_file(&repo, "code.rs", base);
+    fs::write(repo.path().join("code.rs"), modified).unwrap();
+
+    // Default context (3) is too narrow to reach the `fn alpha` header.
+    let default = run_libra_command(&["diff"], repo.path());
+    assert_cli_success(&default, "default diff");
+    assert!(
+        !String::from_utf8_lossy(&default.stdout).contains("fn alpha"),
+        "default context must not reach the function header"
+    );
+
+    // -W expands the hunk to the whole function.
+    let wide = run_libra_command(&["diff", "-W"], repo.path());
+    assert_cli_success(&wide, "diff -W");
+    let stdout = String::from_utf8_lossy(&wide.stdout);
+    assert!(
+        stdout.contains("fn alpha() {"),
+        "-W shows the function header: {stdout}"
+    );
+    assert!(stdout.contains("-    let d = 4;"), "{stdout}");
+    assert!(stdout.contains("+    let d = 40;"), "{stdout}");
+}
+
+#[test]
+fn diff_word_diff_large_file_falls_back() {
+    let repo = create_committed_repo_via_cli();
+    // ~12 MB across 1000 lines (well under git-internal's 10k-line marker, but
+    // over the 10 MB word-diff cap).
+    let base: String = (0..1000)
+        .map(|_| format!("{}\n", "a".repeat(6000)))
+        .collect();
+    let modified: String = (0..1000)
+        .map(|_| format!("{}\n", "b".repeat(6000)))
+        .collect();
+    commit_file(&repo, "big.txt", &base);
+    fs::write(repo.path().join("big.txt"), &modified).unwrap();
+
+    let output = run_libra_command(&["diff", "--word-diff=plain"], repo.path());
+    assert_cli_success(&output, "diff --word-diff large file");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("word-diff skipped"),
+        "large file should warn and fall back: {stderr}"
     );
 }

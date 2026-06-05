@@ -2788,3 +2788,276 @@ fn cloud_source_rejects_filter() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Batch 4 — precise remote/branch config write + credential redaction
+// ---------------------------------------------------------------------------
+
+/// A normal clone writes the branch-heads fetch refspec for the remote.
+#[test]
+fn clone_writes_fetch_refspec() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-refspec");
+
+    let output = run_libra(
+        &["clone", remote.to_str().unwrap(), dest.to_str().unwrap()],
+        temp.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    let fetch = run_libra(&["config", "--get", "remote.origin.fetch"], &dest);
+    assert_eq!(
+        String::from_utf8_lossy(&fetch.stdout).trim(),
+        "+refs/heads/*:refs/remotes/origin/*",
+    );
+}
+
+/// `--mirror` writes the all-refs refspec and `remote.<name>.mirror = true`.
+#[test]
+fn mirror_writes_full_refspec_and_mirror_flag() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("mirror-refspec.git");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--mirror",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--mirror clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let fetch = run_libra(&["config", "--get", "remote.origin.fetch"], &dest);
+    assert_eq!(
+        String::from_utf8_lossy(&fetch.stdout).trim(),
+        "+refs/*:refs/*"
+    );
+    let mirror = run_libra(&["config", "--get", "remote.origin.mirror"], &dest);
+    assert_eq!(String::from_utf8_lossy(&mirror.stdout).trim(), "true");
+}
+
+/// `-o/--origin` records the fetch refspec under the custom remote name.
+#[test]
+fn origin_name_used_in_remote_fetch_config() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-origin-fetch");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "-o",
+            "upstream",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    let fetch = run_libra(&["config", "--get", "remote.upstream.fetch"], &dest);
+    assert_eq!(
+        String::from_utf8_lossy(&fetch.stdout).trim(),
+        "+refs/heads/*:refs/remotes/upstream/*",
+    );
+}
+
+/// An empty remote writes `remote.<name>.url` + `remote.<name>.fetch` but no
+/// synthetic `branch.*` tracking config.
+#[test]
+fn empty_remote_writes_remote_config_no_branch_tracking() {
+    let temp = tempdir().unwrap();
+    let remote = create_empty_remote(temp.path());
+    let dest = temp.path().join("clone-empty-cfg");
+
+    let output = run_libra(
+        &["clone", remote.to_str().unwrap(), dest.to_str().unwrap()],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "empty clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let url = run_libra(&["config", "--get", "remote.origin.url"], &dest);
+    assert_eq!(url.status.code(), Some(0), "remote.origin.url must be set");
+    let fetch = run_libra(&["config", "--get", "remote.origin.fetch"], &dest);
+    assert_eq!(
+        String::from_utf8_lossy(&fetch.stdout).trim(),
+        "+refs/heads/*:refs/remotes/origin/*",
+    );
+    // No synthetic branch tracking is written for an empty remote.
+    let branch_remote = run_libra(&["config", "--get", "branch.main.remote"], &dest);
+    assert_ne!(
+        branch_remote.status.code(),
+        Some(0),
+        "empty clone must not write branch.main.remote, got: {}",
+        String::from_utf8_lossy(&branch_remote.stdout)
+    );
+}
+
+/// The first reflog entry after a clone is `clone: from <url>`.
+#[test]
+fn reflog_first_entry_is_clone_from() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-reflog");
+
+    let output = run_libra(
+        &["clone", remote.to_str().unwrap(), dest.to_str().unwrap()],
+        temp.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    let reflog = run_libra(&["reflog", "show"], &dest);
+    let stdout = String::from_utf8_lossy(&reflog.stdout);
+    assert!(
+        stdout.contains("clone: from"),
+        "reflog should record 'clone: from <url>', got: {stdout}"
+    );
+}
+
+/// Credentials embedded in a clone URL are redacted from all output faces
+/// (stdout, stderr, JSON) when discovery fails.
+#[test]
+fn credentials_redacted_in_error_output() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("clone-cred");
+
+    // 127.0.0.1:1 refuses immediately; the embedded password must never appear.
+    let output = run_libra(
+        &[
+            "clone",
+            "https://user:SuperSecretToken@127.0.0.1:1/repo.git",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "bad-credential clone should fail with 128"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !combined.contains("SuperSecretToken"),
+        "credentials must be redacted from all output, got: {combined}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Batch 5 — documentation / help sync contract
+// ---------------------------------------------------------------------------
+
+/// Every implemented clone flag must appear in `clone --help` and in both the
+/// English and Chinese command docs, keeping the surface, help, and docs in sync.
+#[test]
+fn clone_documentation_and_help_sync() {
+    use clap::CommandFactory;
+
+    let root = env!("CARGO_MANIFEST_DIR");
+    let doc_en = fs::read_to_string(format!("{root}/docs/commands/clone.md"))
+        .expect("docs/commands/clone.md must exist");
+    let doc_zh = fs::read_to_string(format!("{root}/docs/commands/zh-CN/clone.md"))
+        .expect("docs/commands/zh-CN/clone.md must exist");
+    let help = libra::command::clone::CloneArgs::command()
+        .render_long_help()
+        .to_string();
+
+    let expected_flags = [
+        "--depth",
+        "--shallow-since",
+        "--shallow-exclude",
+        "--reject-shallow",
+        "--no-single-branch",
+        "--origin",
+        "--no-checkout",
+        "--mirror",
+        "--reference",
+        "--reference-if-able",
+        "--dissociate",
+        "--local",
+        "--no-hardlinks",
+        "--shared",
+        "--jobs",
+        "--filter",
+    ];
+    for flag in expected_flags {
+        assert!(help.contains(flag), "clone --help is missing {flag}");
+        assert!(
+            doc_en.contains(flag),
+            "docs/commands/clone.md is missing {flag}"
+        );
+        assert!(
+            doc_zh.contains(flag),
+            "docs/commands/zh-CN/clone.md is missing {flag}"
+        );
+    }
+}
+
+/// `--shallow-exclude` values are validated against control characters so they
+/// cannot inject extra `deepen-not` upload-pack frames (exit 129).
+#[test]
+fn shallow_exclude_rejects_control_chars() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("clone-ctrl");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--shallow-exclude",
+            "refs/heads/x\nrefs/heads/y",
+            "file:///definitely/not/here",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "control characters in --shallow-exclude must be rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Credentials in a malformed/invalid URL are redacted from the error reason
+/// (not just the discovery error), covering the spec-classification path.
+#[test]
+fn credentials_redacted_in_malformed_url_error() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("clone-malformed");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "file://user:MalformedSecret@nohost/repo",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_ne!(output.status.code(), Some(0), "malformed URL must fail");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !combined.contains("MalformedSecret"),
+        "credentials must be redacted from malformed-URL errors, got: {combined}"
+    );
+}

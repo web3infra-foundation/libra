@@ -47,6 +47,7 @@ async fn add_and_commit(message: &str, pathspec: Vec<String>) {
             no_verify: true,
             author: None,
             file: None,
+            ..Default::default()
         },
         &OutputConfig::default(),
     )

@@ -12,7 +12,10 @@
 //! output (`tree <hash>`, tree entries `mode blob <hash>\t<name>`); these
 //! parsers must therefore stay in sync with the cat-file pretty-printer.
 
-use std::io::{Read, Write};
+use std::{
+    io::{Read, Write},
+    process::Command,
+};
 
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use git_internal::internal::object::{

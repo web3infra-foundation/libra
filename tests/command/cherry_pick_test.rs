@@ -68,6 +68,7 @@ async fn test_basic_cherry_pick() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
     println!("C1: Created common ancestor.");
@@ -109,6 +110,7 @@ async fn test_basic_cherry_pick() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
     println!("C2: Added feature_a.txt on feature branch.");
@@ -144,6 +146,7 @@ async fn test_basic_cherry_pick() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
     println!("C3: Added feature_b.txt on feature branch.");
@@ -283,6 +286,7 @@ async fn test_cherry_pick_with_commit() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -320,6 +324,7 @@ async fn test_cherry_pick_with_commit() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -404,6 +409,7 @@ async fn test_cherry_pick_multiple_commits() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -442,6 +448,7 @@ async fn test_cherry_pick_multiple_commits() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
     let commit1 = Head::current_commit().await.expect("Should have commit1");
@@ -472,6 +479,7 @@ async fn test_cherry_pick_multiple_commits() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
     let commit2 = Head::current_commit().await.expect("Should have commit2");
@@ -677,6 +685,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -713,6 +722,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
     let feature_commit = Head::current_commit().await.expect("need feature commit");
