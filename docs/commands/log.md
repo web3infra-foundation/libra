@@ -174,6 +174,26 @@ libra log --first-parent
 libra log --merges --first-parent
 ```
 
+### `-S <STRING>` / `-G <REGEX>` (pickaxe)
+
+Search history by content change. These two have **different semantics**, matching `git log`:
+
+- **`-S <string>`** shows commits where the **number of occurrences** of the literal
+  `string` changed between a file's parent-side and child-side *full content*. A change
+  that leaves the count the same (e.g. editing the same line elsewhere) does **not** match.
+- **`-G <regex>`** shows commits where any **added or removed diff line** matches the regex
+  (occurrence counts are irrelevant). `-G` patterns share the regex `--grep` rules (4 KiB
+  cap; an invalid pattern fails with `LBR-CLI-002`, exit 129).
+
+`-S` and `-G` are mutually exclusive, combine with pathspec (AND), and a load/diff failure
+on a corrupt object surfaces as `LBR-REPO-002` (exit 128) rather than skipping the commit.
+
+```bash
+libra log -S secret_key            # commits that add/remove an occurrence of secret_key
+libra log -G 'TODO\(.*\)'          # commits that touch a line matching the regex
+libra log -S api_token -- src/     # scope the search to a path
+```
+
 ### `--pretty <FORMAT>`
 
 Custom pretty-print format string. A bare template, `format:<template>`, and
@@ -395,6 +415,8 @@ flag only affects the human rendering layer.
 | Revision range | `git log A..B` | `jj log -r 'A..B'` | N/A (not yet implemented) |
 | Grep message | `git log --grep=<pat>` | Revset `description()` | `libra log --grep <regex>` (regex; `-i` for case-insensitive) |
 | Committer filter | `git log --committer=<pat>` | N/A | `libra log --committer <pat>` |
+| Pickaxe (string count) | `git log -S<string>` | N/A | `libra log -S <string>` |
+| Pickaxe (diff-line regex) | `git log -G<regex>` | N/A | `libra log -G <regex>` |
 | Path filter | `git log -- <paths>` | N/A (use revset) | `libra log -- <paths>` |
 | Reverse order | `git log --reverse` | `jj log --reversed` | N/A |
 | Merge commits only | `git log --merges` | N/A | `libra log --merges` (also `--no-merges`/`--min-parents`/`--max-parents`) |

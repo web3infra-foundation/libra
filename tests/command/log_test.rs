@@ -2109,3 +2109,124 @@ fn test_log_filters_json_total() {
         "total must equal filtered count: {json}"
     );
 }
+
+// ── pickaxe -S / -G content filters (log-improvement-plan Batch 3) ──
+
+/// Build f.txt history demonstrating the -S vs -G distinction:
+/// base("x") -> C1 add debug_flag=1 -> C2 change to debug_flag=2 -> C3 remove it.
+/// -S debug_flag matches C1 (0->1) and C3 (1->0) but NOT C2 (1->1, count unchanged).
+/// -G debug_flag matches C1, C2, C3 (each has a +/- line containing debug_flag).
+fn pickaxe_repo() -> tempfile::TempDir {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    log_commit(repo.path(), "f.txt", "x\n", "base");
+    log_commit(repo.path(), "f.txt", "x\ndebug_flag=1\n", "add flag");
+    log_commit(repo.path(), "f.txt", "x\ndebug_flag=2\n", "change flag");
+    log_commit(repo.path(), "f.txt", "x\n", "remove flag");
+    repo
+}
+
+#[test]
+fn test_pickaxe_string() {
+    let repo = pickaxe_repo();
+    let out = run_libra_command(&["log", "-S", "debug_flag", "--oneline"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("add flag"),
+        "-S must match the count 0->1 commit: {stdout}"
+    );
+    assert!(
+        stdout.contains("remove flag"),
+        "-S must match the count 1->0 commit: {stdout}"
+    );
+    assert!(
+        !stdout.contains("change flag"),
+        "-S must NOT match a count-unchanged (1->1) edit: {stdout}"
+    );
+    assert!(
+        !stdout.contains("base"),
+        "-S must not match the base commit: {stdout}"
+    );
+}
+
+#[test]
+fn test_pickaxe_regex() {
+    let repo = pickaxe_repo();
+    let out = run_libra_command(&["log", "-G", "debug_[a-z]+", "--oneline"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // -G matches every commit whose +/- diff lines contain a debug_* token.
+    assert!(stdout.contains("add flag"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("change flag"),
+        "-G must match the line-changing commit (unlike -S): {stdout}"
+    );
+    assert!(stdout.contains("remove flag"), "stdout: {stdout}");
+    assert!(!stdout.contains("base"), "stdout: {stdout}");
+}
+
+#[test]
+fn test_pickaxe_string_no_match_exits_zero() {
+    let repo = pickaxe_repo();
+    let out = run_libra_command(
+        &["log", "-S", "nonexistent_token", "--oneline"],
+        repo.path(),
+    );
+    assert!(out.status.success(), "no-match -S should exit 0");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+        "no-match -S should print nothing: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn test_pickaxe_regex_invalid() {
+    let repo = pickaxe_repo();
+    let out = run_libra_command(&["log", "-G", "(unbalanced"], repo.path());
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "invalid -G regex must exit 129, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("LBR-CLI-002"));
+}
+
+#[test]
+fn test_pickaxe_string_with_pathspec() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    log_commit(repo.path(), "a.txt", "x\n", "base a");
+    // The debug_flag change is in a.txt only.
+    log_commit(repo.path(), "a.txt", "x\ndebug_flag\n", "add flag to a");
+    // An unrelated commit on b.txt.
+    log_commit(repo.path(), "b.txt", "hello\n", "add b");
+
+    // -S restricted to b.txt must NOT match the a.txt change (pathspec AND).
+    let out = run_libra_command(
+        &["log", "-S", "debug_flag", "--oneline", "--", "b.txt"],
+        repo.path(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("add flag to a"),
+        "pathspec must scope pickaxe: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}

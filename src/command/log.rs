@@ -29,6 +29,7 @@ use crate::{
         log::{
             date_parser::parse_date,
             formatter::{CommitFormatter, FormatContext, FormatType},
+            pickaxe,
         },
         tag::{self, TagObject},
     },
@@ -198,6 +199,12 @@ pub struct LogArgs {
     /// Follow only the first parent of each merge commit when walking history
     #[clap(long)]
     pub first_parent: bool,
+    /// Pickaxe: show commits that change the number of occurrences of the literal STRING
+    #[clap(short = 'S', value_name = "STRING", conflicts_with = "pickaxe_regex")]
+    pub pickaxe_string: Option<String>,
+    /// Show commits with an added or removed line matching the REGEX
+    #[clap(short = 'G', value_name = "REGEX")]
+    pub pickaxe_regex: Option<String>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -255,6 +262,15 @@ pub struct LogOutput {
     pub total: Option<usize>,
 }
 
+/// A pickaxe content filter (`-S` / `-G`). The two have different semantics, so
+/// they are distinct variants (see [`pickaxe`]).
+enum Pickaxe {
+    /// `-S`: literal-string occurrence-count difference across full blobs.
+    String(Vec<u8>),
+    /// `-G`: regex match against added/removed diff lines.
+    Regex(Regex),
+}
+
 struct CommitFilter {
     author: Option<String>,
     committer: Option<String>,
@@ -267,6 +283,9 @@ struct CommitFilter {
     /// When set, only commits whose OID is in this set (the first-parent chain
     /// from HEAD) pass. `None` means no `--first-parent` restriction.
     first_parents: Option<HashSet<String>>,
+    /// `-S`/`-G` content filter (requires a per-commit diff; checked in the
+    /// async [`CommitFilter::matches`] path).
+    pickaxe: Option<Pickaxe>,
 }
 
 /// Effective minimum parent count: explicit `--min-parents`, else `2` when
@@ -340,6 +359,7 @@ impl CommitFilter {
         min_parents: Option<usize>,
         max_parents: Option<usize>,
         first_parents: Option<HashSet<String>>,
+        pickaxe: Option<Pickaxe>,
     ) -> Self {
         Self {
             author: author.map(|s| s.to_lowercase()),
@@ -351,6 +371,7 @@ impl CommitFilter {
             min_parents,
             max_parents,
             first_parents,
+            pickaxe,
         }
     }
 
@@ -432,6 +453,20 @@ impl CommitFilter {
         }
     }
 
+    /// Pickaxe (`-S`/`-G`) predicate. Requires a per-commit diff, so it runs in
+    /// the async path. Object-load/diff failures surface as `RepoCorrupt` (128)
+    /// rather than silently excluding the commit; only a clean "no match"
+    /// excludes it.
+    fn matches_pickaxe(&self, commit: &Commit) -> Result<bool, CliError> {
+        let Some(pickaxe) = &self.pickaxe else {
+            return Ok(true);
+        };
+        match pickaxe {
+            Pickaxe::String(needle) => commit_pickaxe_string(commit, needle, &self.paths),
+            Pickaxe::Regex(re) => commit_pickaxe_regex(commit, re, &self.paths),
+        }
+    }
+
     async fn matches(
         &self,
         commit: &Commit,
@@ -441,8 +476,108 @@ impl CommitFilter {
             return Ok(false);
         }
 
-        self.matches_paths(commit, cached_changes).await
+        if !self.matches_paths(commit, cached_changes).await? {
+            return Ok(false);
+        }
+
+        self.matches_pickaxe(commit)
     }
+}
+
+/// Builds the optional pickaxe filter from `--S`/`-G`, compiling the `-G` regex
+/// up front (4 KiB cap, `LBR-CLI-002` on failure) so an invalid pattern fails
+/// before any history traversal.
+fn build_pickaxe(args: &LogArgs) -> CliResult<Option<Pickaxe>> {
+    if let Some(string) = &args.pickaxe_string {
+        Ok(Some(Pickaxe::String(string.clone().into_bytes())))
+    } else if let Some(pattern) = &args.pickaxe_regex {
+        Ok(Some(Pickaxe::Regex(compile_grep_regex(pattern, false)?)))
+    } else {
+        Ok(None)
+    }
+}
+
+/// A list of `(path, blob-oid)` entries for one tree snapshot.
+type BlobList = Vec<(PathBuf, ObjectHash)>;
+
+/// Loads a commit's child-side and first-parent-side blob lists
+/// (`(path, oid)`), mirroring `get_changed_files_for_commit`'s tree loading.
+fn load_commit_blob_vecs(commit: &Commit) -> Result<(BlobList, BlobList), CliError> {
+    let tree = load_object::<Tree>(&commit.tree_id)
+        .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
+    let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
+
+    let shallow_boundaries = crate::command::fetch::read_shallow_boundaries().unwrap_or_default();
+    let has_parents = !commit.parent_commit_ids.is_empty()
+        && !shallow_boundaries.contains(&commit.id.to_string());
+
+    let old_blobs: Vec<(PathBuf, ObjectHash)> = if has_parents {
+        let parent = &commit.parent_commit_ids[0];
+        let parent_commit = load_object::<Commit>(parent)
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
+        let parent_tree = load_object::<Tree>(&parent_commit.tree_id)
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load parent tree: {e}")))?;
+        parent_tree.get_plain_items()
+    } else {
+        Vec::new()
+    };
+
+    Ok((old_blobs, new_blobs))
+}
+
+fn pickaxe_path_in_scope(path: &std::path::Path, filters: &[PathBuf]) -> bool {
+    filters.is_empty() || filters.iter().any(|filter| util::is_sub_path(path, filter))
+}
+
+/// `-S`: a commit matches when some changed (in-scope) file has a different
+/// **occurrence count** of `needle` between its parent-side and child-side full
+/// blob. Unchanged files (and changes that leave the count equal) do not match.
+fn commit_pickaxe_string(
+    commit: &Commit,
+    needle: &[u8],
+    paths: &[PathBuf],
+) -> Result<bool, CliError> {
+    let (old_blobs, new_blobs) = load_commit_blob_vecs(commit)?;
+    let old_map: HashMap<PathBuf, ObjectHash> = old_blobs.into_iter().collect();
+    let new_map: HashMap<PathBuf, ObjectHash> = new_blobs.into_iter().collect();
+
+    let mut considered: HashSet<&PathBuf> = HashSet::new();
+    considered.extend(old_map.keys());
+    considered.extend(new_map.keys());
+
+    for path in considered {
+        if !pickaxe_path_in_scope(path, paths) {
+            continue;
+        }
+        let old_oid = old_map.get(path);
+        let new_oid = new_map.get(path);
+        if old_oid == new_oid {
+            // File unchanged (same blob): occurrence count is identical.
+            continue;
+        }
+        let old_count = match old_oid {
+            Some(hash) => pickaxe::count_occurrences(&load_commit_blob_content(hash)?, needle),
+            None => 0,
+        };
+        let new_count = match new_oid {
+            Some(hash) => pickaxe::count_occurrences(&load_commit_blob_content(hash)?, needle),
+            None => 0,
+        };
+        if old_count != new_count {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// `-G`: a commit matches when any added/removed diff line (within scope) of any
+/// changed file matches `re`.
+fn commit_pickaxe_regex(commit: &Commit, re: &Regex, paths: &[PathBuf]) -> Result<bool, CliError> {
+    let (old_blobs, new_blobs) = load_commit_blob_vecs(commit)?;
+    let diffs = build_commit_diff_items(old_blobs, new_blobs, paths.to_vec())?;
+    Ok(diffs
+        .iter()
+        .any(|item| pickaxe::diff_line_matches(&item.data, re)))
 }
 
 fn str_to_decorate_option(s: &str) -> Result<DecorateOptions, String> {
@@ -612,6 +747,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         .as_deref()
         .map(|p| compile_grep_regex(p, args.regexp_ignore_case))
         .transpose()?;
+    let pickaxe = build_pickaxe(&args)?;
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let commit_hash = current_head_commit.to_string();
@@ -636,6 +772,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         effective_min_parents(&args),
         effective_max_parents(&args),
         first_parents,
+        pickaxe,
     );
 
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
@@ -831,6 +968,7 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
         .as_deref()
         .map(|p| compile_grep_regex(p, args.regexp_ignore_case))
         .transpose()?;
+    let pickaxe = build_pickaxe(args)?;
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let commit_hash = current_head_commit.to_string();
@@ -852,6 +990,7 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
         effective_min_parents(args),
         effective_max_parents(args),
         first_parents,
+        pickaxe,
     );
 
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
@@ -1567,6 +1706,7 @@ mod tests {
             Some(1_766_000_000),
             Some(1_766_200_000),
             Vec::new(),
+            None,
             None,
             None,
             None,
