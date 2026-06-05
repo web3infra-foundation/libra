@@ -52,7 +52,8 @@
 |---------|------|----------------|
 | 迁移 `2026050303_agent_capture` + 注册表 | ✅ | `builtin_migrations()`（[migration.rs:532](../../src/internal/db/migration.rs)）现共 **9** 条（…→`2026060401`）；`tests/agent_capture_migration_test.rs` 覆盖 fresh / legacy / up→down→up |
 | 适配层 trait（核心 + 能力） | ✅ | [adapter.rs](../../src/internal/ai/observed_agents/adapter.rs)：`ObservedAgent` + `ObservedAgentHooks` + `TranscriptTruncator` + `TranscriptChunker` |
-| 7-Agent 矩阵 | ✅（越界） | Phase 4.4 已把 Cursor/Codex/OpenCode/Copilot/FactoryAi 由 preview **提升为 stable**（[builtin/stable_promoted.rs](../../src/internal/ai/observed_agents/builtin/stable_promoted.rs)，`read_transcript` 真实读盘）；`PREVIEW_SPECS` 现为空、`is_preview()` 恒 `false`（见 §5.2 订正） |
+| 7-Agent 矩阵（read_transcript） | ✅（越界） | Phase 4.4 已把 Cursor/Codex/OpenCode/Copilot/FactoryAi 由 preview **提升为 stable**（[builtin/stable_promoted.rs](../../src/internal/ai/observed_agents/builtin/stable_promoted.rs)，`read_transcript` 真实读盘）；`PREVIEW_SPECS` 现为空、`is_preview()` 恒 `false`（见 §5.2 订正） |
+| 5 promoted adapter 的 `HookProvider`（自动 hook 安装） | ⏳ | **手动捕获可用**；缺自动 hook 安装——这 5 个无 `HookProvider`，`enable` 仍只装 claude/gemini。5 种机制形态各异（Go 端 342–483 行/个，含 merge 幂等），且无真实 agent 不可端到端验证，刻意未仓促移植；**完整实装契约见 §2.1 订正表**（专属文件 vs merge、subagent-hook declined） |
 | `RedactedBytes` 编译契约 + Redactor | ✅ | [redaction.rs](../../src/internal/ai/observed_agents/redaction.rs)：`pub(crate)` 构造 + 两个 `compile_fail` doctest；25+ 高置信规则、幂等、误报回归 |
 | Hook 摄入参数化 `HookTarget` | ✅ | [runtime.rs](../../src/internal/ai/hooks/runtime.rs) `process_hook_event_with_target`，旧 API 1:1 包装；`AgentTraces` 路径强制脱敏 + upsert + checkpoint，经 `libra agent hooks <agent> …` 触发 |
 | Checkpoint commit 生成 | ✅ | `metadata.json`（BTreeMap → 天然 canonical-sorted）+ `transcript/<provider>` blob + `Libra-*` trailer + CAS 追加 `agent-traces` + `agent_checkpoint` 行；`tree/` 工作树快照**刻意不做**（避免把 gitignored 机密带入 R2-同步的 agent-traces，rewind 从 `parent_commit` 恢复）、`events.jsonl` 对 agent 捕获 N/A（事件落 SQLite）——见 §7.1 订正 |
@@ -83,7 +84,19 @@
 ### 2.1 目标（v1）
 
 1. 接入 **Claude Code、Gemini** 两种外部 Agent 并持久化其原始 transcript；其余 5 种（Cursor、Codex、OpenCode、GitHub Copilot CLI、Factory AI Droid）在 v1 注册为 **preview**，CLI 可见但走存根实现。
-   > **2026-06-05 订正**：Phase 4.4 已将这 5 个 preview adapter **提升为 stable**（`builtin/stable_promoted.rs`，`read_transcript` 按 `AgentSessionCtx.transcript_path` 真实读盘，16 MiB 上限），`PREVIEW_SPECS` 现为空、`is_preview()` 恒 `false`。但这 5 个仅 ClaudeCode/Gemini 之外**没有 `HookProvider`**，故 `libra agent enable <slug>` 仍只为 claude-code/gemini 安装 hook（其余按"无 HookProvider"跳过）；per-agent hook 安装与 `TranscriptTruncator` 仍属 v2。
+   > **2026-06-05 订正**：Phase 4.4 已将这 5 个 preview adapter **提升为 stable**（`builtin/stable_promoted.rs`，`read_transcript` 按 `AgentSessionCtx.transcript_path` 真实读盘，16 MiB 上限），`PREVIEW_SPECS` 现为空、`is_preview()` 恒 `false`。这意味着**手动捕获已可用**（用户把 libra 指向 transcript 即可）；**仍缺的只是自动 hook 安装**——这 5 个在 ClaudeCode/Gemini 之外**没有 `HookProvider`**，故 `libra agent enable <slug>` 仍只为 claude-code/gemini 安装 hook（其余按"无 HookProvider"跳过；[`command/agent/mod.rs`](../../src/command/agent/mod.rs) `STABLE_AGENT_SLUGS` 与 `provider_for_slug`）。
+   >
+   > **为何 v2 / 实装契约（已 ground-truth 核对 EntireIO Go `cmd/entire/cli/agent/<a>/hooks.go`）**：5 个 agent 的 hook 机制**形态各异**，逐个需独立的 settings 安装器（Go 端各 342–483 行，含 read-merge-write 幂等 + uninstall 保留他人 hook 的逻辑），且**无法在缺少这 5 个真实 agent 的环境中端到端验证**（写错 merge 会污染用户配置、写错 shape 会静默不触发）。故本轮**刻意不仓促移植 ~2000 行不可验证安装器**；下表是实装契约，可据此逐个落地（每个：新 `providers/<a>/{mod,parser,settings}.rs` 实现 `HookProvider` + `find_provider`/`STABLE_AGENT_SLUGS` 注册 + `agent hooks <slug>` 子命令 + 单测断言生成的配置匹配 Go 形态）：
+   >
+   > | agent | 配置文件 | 形态 | 安全性 | 备注 |
+   > |-------|---------|------|--------|------|
+   > | Copilot CLI | `.github/hooks/entire.json` | libra **专属文件** | 覆写安全（非 merge） | 最易落地：写/删整文件 + 存在性检查 |
+   > | OpenCode | `.opencode/plugins/libra.ts` | libra **专属 TS 插件**（`include_str!` 模板，把 `entire hooks opencode` 换成 libra 二进制 + `agent hooks opencode`） | 覆写安全 | 机制不同（TS 插件回调，非 JSON envelope）；`template/opencode_plugin.ts` 新增 |
+   > | Codex | `.codex/hooks.json` | Claude-matcher shape（PascalCase `SessionStart`/`UserPromptSubmit`/`PostToolUse`/`Stop`） | 需 **merge**（保留用户既有 hook） | 可复用 claude `settings.rs` 的 merge 思路 |
+   > | Cursor | `.cursor/hooks.json` | `{version:1,hooks:{...}}`，**camelCase** key（`sessionStart`/`beforeSubmitPrompt`/`stop`/`preCompact`；`subagentStart`/`subagentStop` 无 libra 映射→不装） | 需 **merge** | drop `ModelUpdate`（Cursor 无） |
+   > | Factory AI Droid | `.factory/settings.json` | Claude-matcher shape | 需 **merge**（与用户 factory 设置共存） | 暴露 model+compaction hook |
+   >
+   > **跨 agent 取舍（已定）**：subagent 生命周期 hook（Cursor `subagentStart/Stop`、Copilot `subagentStop`）在 libra `LifecycleEventKind`/`ProviderHookCommand` **无对应 kind**，故**不安装**（或映射到 `TurnEnd`）——列为明确 declined-feature，矩阵不宣称 100% parity。`ModelUpdate`/`Compaction` 覆盖不均（仅 Gemini/Factory 暴露）。per-agent `TranscriptTruncator`（Cursor 为 SQLite，非 JSONL，截断非平凡）同属此 v2 批次。
 2. 保持 `refs/libra/intent` / `ai_session` / `libra code` 行为完全不变。
 3. v1 强调**可观测**：可追踪会话、可查看 checkpoint 列表、可提取 transcript 快照。
 4. v1 引入 EntireIO 风格的 Subagent（子代理）级联追踪元数据（仅记录 `parent_session_id`），实际嵌套语义随各 adapter 的 `SubagentExtractor` 后续补全。
