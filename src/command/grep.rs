@@ -153,6 +153,15 @@ pub struct GrepArgs {
     /// `-A <NUM> -B <NUM>`; `-A`/`-B` take precedence for their side).
     #[clap(short = 'C', long = "context", value_name = "NUM")]
     context: Option<usize>,
+
+    /// Process binary files as if they were text (do not skip them). The file
+    /// size limit still applies.
+    #[clap(short = 'a', long = "text")]
+    text: bool,
+
+    /// Silently skip binary files without printing a warning.
+    #[clap(short = 'I')]
+    ignore_binary: bool,
 }
 
 impl GrepArgs {
@@ -383,11 +392,15 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
             }
         };
 
-        if is_binary(&content) {
-            warnings.push(GrepWarning {
-                path: search_file.path.display().to_string(),
-                message: "skipped binary file".to_string(),
-            });
+        // `-a`/`--text` forces binary files to be searched as text; otherwise a
+        // binary file is skipped (silently under `-I`, with a warning by default).
+        if is_binary(&content) && !args.text {
+            if !args.ignore_binary {
+                warnings.push(GrepWarning {
+                    path: search_file.path.display().to_string(),
+                    message: "skipped binary file".to_string(),
+                });
+            }
             continue;
         }
 

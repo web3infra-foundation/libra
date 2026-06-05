@@ -40,6 +40,8 @@ When stdout is a terminal, output is sent through a pager. In JSON mode, structu
 | After context | `-A` | `--after-context <NUM>` | Show `NUM` lines of trailing context after each match (text output). |
 | Before context | `-B` | `--before-context <NUM>` | Show `NUM` lines of leading context before each match (text output). |
 | Context | `-C` | `--context <NUM>` | Show `NUM` lines of context on both sides (equivalent to `-A NUM -B NUM`; `-A`/`-B` override their side). |
+| Text | `-a` | `--text` | Process binary files as if they were text instead of skipping them (the file-size limit still applies). |
+| Ignore binary | `-I` | | Silently skip binary files without printing a warning. |
 | Pathspec | | positional (trailing) | Restrict search to files matching the given paths. |
 | Tree | | `--tree <REVISION>` | Search in the specified revision or commit tree instead of the working tree. |
 | Cached | | `--cached` | Search in the index (staging area) instead of the working tree. |

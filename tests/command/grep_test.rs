@@ -804,3 +804,68 @@ async fn test_grep_context_json_renders_without_error() {
     );
     assert_eq!(matches[0]["line"], "match");
 }
+
+/// By default a binary file is skipped with a warning (and so produces no match).
+#[tokio::test]
+#[serial]
+async fn test_grep_binary_skipped_by_default_with_warning() {
+    let repo = tempdir().expect("repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("bin.dat", b"prefix\x00needle\n").expect("write binary file");
+    add_and_commit("add binary", vec!["bin.dat".to_string()]).await;
+
+    let output = run_libra_command(&["grep", "needle", "bin.dat"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "binary skip means no match"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("skipped binary file"),
+        "default should warn about the skipped binary file"
+    );
+}
+
+/// `-a`/`--text` forces a binary file to be searched as text.
+#[tokio::test]
+#[serial]
+async fn test_grep_text_flag_forces_binary_search() {
+    let repo = tempdir().expect("repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("bin.dat", b"prefix\x00needle\n").expect("write binary file");
+    add_and_commit("add binary", vec!["bin.dat".to_string()]).await;
+
+    let output = run_libra_command(&["grep", "-a", "needle", "bin.dat"], repo.path());
+    assert_eq!(output.status.code(), Some(0), "-a should find the match");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("needle"),
+        "-a should print the matching line"
+    );
+}
+
+/// `-I` silently skips binary files (no warning).
+#[tokio::test]
+#[serial]
+async fn test_grep_capital_i_silently_skips_binary() {
+    let repo = tempdir().expect("repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("bin.dat", b"prefix\x00needle\n").expect("write binary file");
+    add_and_commit("add binary", vec!["bin.dat".to_string()]).await;
+
+    let output = run_libra_command(&["grep", "-I", "needle", "bin.dat"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "binary skip means no match"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("skipped binary file"),
+        "-I must not print a binary-skip warning"
+    );
+}
