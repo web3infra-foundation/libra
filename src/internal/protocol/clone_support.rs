@@ -81,18 +81,40 @@ pub fn check_local_security(path: &Path) -> Result<PathBuf, CloneSupportError> {
 
 /// Resolve the object directory of a reference repository, supporting libra
 /// (`.libra/objects`), bare (`objects`), and git working-tree (`.git/objects`)
-/// layouts. `reference` should already be canonical (see [`check_local_security`]).
+/// layouts. `reference` **must** already be canonical (see [`check_local_security`]).
+///
+/// Each candidate is canonicalized and required to remain **inside** the
+/// canonical reference root, so neither the `objects` directory itself nor any
+/// intermediate component (`.libra`, `.git`) can be a symlink that escapes the
+/// validated source — closing the symlink-bypass hole.
 pub fn resolve_reference_objects_dir(reference: &Path) -> Result<PathBuf, CloneSupportError> {
     for candidate in [
         reference.join(".libra").join("objects"),
         reference.join("objects"),
         reference.join(".git").join("objects"),
     ] {
-        if candidate.is_dir() {
-            return Ok(candidate);
+        if !candidate.is_dir() {
+            continue;
         }
+        let canonical = fs::canonicalize(&candidate)?;
+        if !canonical.starts_with(reference) {
+            // A symlinked component routed the object directory outside the
+            // validated source root.
+            return Err(CloneSupportError::Symlink(candidate));
+        }
+        return Ok(canonical);
     }
     Err(CloneSupportError::NotARepository(reference.to_path_buf()))
+}
+
+/// Reject a symlinked object-source root before any copy/hardlink walk.
+fn reject_symlinked_root(src_objects: &Path) -> Result<(), CloneSupportError> {
+    if let Ok(metadata) = fs::symlink_metadata(src_objects)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(CloneSupportError::Symlink(src_objects.to_path_buf()));
+    }
+    Ok(())
 }
 
 /// Copy every loose object and pack file from `src_objects` into `dest_objects`,
@@ -101,6 +123,7 @@ pub fn resolve_reference_objects_dir(reference: &Path) -> Result<PathBuf, CloneS
 /// are left intact (objects are content-addressed, so a same-named file is the
 /// same object). Returns the number of files copied.
 pub fn copy_objects(src_objects: &Path, dest_objects: &Path) -> Result<usize, CloneSupportError> {
+    reject_symlinked_root(src_objects)?;
     fs::create_dir_all(dest_objects)?;
     let mut copied = 0usize;
     copy_dir_recursive(src_objects, dest_objects, &mut copied)?;
@@ -111,6 +134,40 @@ fn copy_dir_recursive(
     src: &Path,
     dest: &Path,
     copied: &mut usize,
+) -> Result<(), CloneSupportError> {
+    let mut report = LinkReport::default();
+    reuse_dir_recursive(src, dest, false, &mut report)?;
+    *copied += report.copied;
+    Ok(())
+}
+
+/// Outcome of [`link_objects`]: how many files were hardlinked versus copied
+/// (e.g. when a cross-filesystem hardlink fell back to a copy).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LinkReport {
+    pub hardlinked: usize,
+    pub copied: usize,
+}
+
+/// Hardlink every loose object and pack file from `src_objects` into
+/// `dest_objects`, falling back to a copy when a hardlink is not possible (for
+/// example across filesystems). Same security guards as [`copy_objects`].
+pub fn link_objects(
+    src_objects: &Path,
+    dest_objects: &Path,
+) -> Result<LinkReport, CloneSupportError> {
+    reject_symlinked_root(src_objects)?;
+    fs::create_dir_all(dest_objects)?;
+    let mut report = LinkReport::default();
+    reuse_dir_recursive(src_objects, dest_objects, true, &mut report)?;
+    Ok(report)
+}
+
+fn reuse_dir_recursive(
+    src: &Path,
+    dest: &Path,
+    hardlink: bool,
+    report: &mut LinkReport,
 ) -> Result<(), CloneSupportError> {
     for entry in fs::read_dir(src)? {
         let entry = entry?;
@@ -125,12 +182,24 @@ fn copy_dir_recursive(
         let dest_path = dest.join(entry.file_name());
         if file_type.is_dir() {
             fs::create_dir_all(&dest_path)?;
-            copy_dir_recursive(&src_path, &dest_path, copied)?;
+            reuse_dir_recursive(&src_path, &dest_path, hardlink, report)?;
         } else if file_type.is_file() {
             // Content-addressed: an existing destination file is the same object.
-            if !dest_path.exists() {
+            if dest_path.exists() {
+                continue;
+            }
+            if hardlink {
+                match fs::hard_link(&src_path, &dest_path) {
+                    Ok(()) => report.hardlinked += 1,
+                    Err(_) => {
+                        // Cross-filesystem (EXDEV) or unsupported — fall back to copy.
+                        fs::copy(&src_path, &dest_path)?;
+                        report.copied += 1;
+                    }
+                }
+            } else {
                 fs::copy(&src_path, &dest_path)?;
-                *copied += 1;
+                report.copied += 1;
             }
         }
     }
@@ -144,26 +213,31 @@ mod tests {
     #[test]
     fn resolve_objects_dir_prefers_libra_layout() {
         let dir = tempfile::tempdir().unwrap();
-        let objects = dir.path().join(".libra").join("objects");
+        // The reference must be canonical (production canonicalizes via
+        // `check_local_security`); tempdirs may live under a symlinked root.
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let objects = root.join(".libra").join("objects");
         fs::create_dir_all(&objects).unwrap();
-        let resolved = resolve_reference_objects_dir(dir.path()).unwrap();
+        let resolved = resolve_reference_objects_dir(&root).unwrap();
         assert_eq!(resolved, objects);
     }
 
     #[test]
     fn resolve_objects_dir_supports_bare_and_git_layouts() {
         let bare = tempfile::tempdir().unwrap();
-        fs::create_dir_all(bare.path().join("objects")).unwrap();
+        let bare_root = fs::canonicalize(bare.path()).unwrap();
+        fs::create_dir_all(bare_root.join("objects")).unwrap();
         assert_eq!(
-            resolve_reference_objects_dir(bare.path()).unwrap(),
-            bare.path().join("objects")
+            resolve_reference_objects_dir(&bare_root).unwrap(),
+            bare_root.join("objects")
         );
 
         let git = tempfile::tempdir().unwrap();
-        fs::create_dir_all(git.path().join(".git").join("objects")).unwrap();
+        let git_root = fs::canonicalize(git.path()).unwrap();
+        fs::create_dir_all(git_root.join(".git").join("objects")).unwrap();
         assert_eq!(
-            resolve_reference_objects_dir(git.path()).unwrap(),
-            git.path().join(".git").join("objects")
+            resolve_reference_objects_dir(&git_root).unwrap(),
+            git_root.join(".git").join("objects")
         );
     }
 
@@ -199,6 +273,66 @@ mod tests {
         // Re-copy is idempotent: existing content-addressed files are skipped.
         let copied_again = copy_objects(&src_objects, &dest_objects).unwrap();
         assert_eq!(copied_again, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn link_objects_hardlinks_same_filesystem() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src_objects = dir.path().join("src-objects");
+        fs::create_dir_all(src_objects.join("pack")).unwrap();
+        fs::write(src_objects.join("pack").join("pack-1.pack"), b"PACK").unwrap();
+
+        let dest_objects = dir.path().join("dest-objects");
+        let report = link_objects(&src_objects, &dest_objects).unwrap();
+        assert_eq!(report.hardlinked, 1);
+        assert_eq!(report.copied, 0);
+
+        // Hardlinked files share an inode with the source.
+        let src_ino = fs::metadata(src_objects.join("pack").join("pack-1.pack"))
+            .unwrap()
+            .ino();
+        let dest_ino = fs::metadata(dest_objects.join("pack").join("pack-1.pack"))
+            .unwrap()
+            .ino();
+        assert_eq!(src_ino, dest_ino, "hardlinked object must share an inode");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_objects_dir_rejects_symlinked_objects_root() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let real_objects = dir.path().join("real-objects");
+        fs::create_dir_all(&real_objects).unwrap();
+        // `<repo>/.libra/objects` is a symlink pointing elsewhere.
+        fs::create_dir_all(dir.path().join("repo").join(".libra")).unwrap();
+        symlink(
+            &real_objects,
+            dir.path().join("repo").join(".libra").join("objects"),
+        )
+        .unwrap();
+        assert!(matches!(
+            resolve_reference_objects_dir(&dir.path().join("repo")),
+            Err(CloneSupportError::Symlink(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_objects_rejects_symlinked_root() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir_all(&real).unwrap();
+        let link = dir.path().join("link-objects");
+        symlink(&real, &link).unwrap();
+        assert!(matches!(
+            copy_objects(&link, &dir.path().join("dest")),
+            Err(CloneSupportError::Symlink(_))
+        ));
     }
 
     #[cfg(unix)]

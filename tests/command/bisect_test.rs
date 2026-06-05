@@ -113,6 +113,7 @@ async fn create_linear_commits(count: usize) -> Vec<String> {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         })
         .await;
 

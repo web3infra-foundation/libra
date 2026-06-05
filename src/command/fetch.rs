@@ -31,6 +31,7 @@ use crate::{
         config::{ConfigKv, ConfigKvEntry, RemoteConfig},
         db::get_db_conn_instance,
         head::Head,
+        log::date_parser::parse_date,
         protocol::{
             DiscRef, DiscoveryResult, FetchStream, ProtocolClient, ShallowOptions,
             git_client::GitClient,
@@ -58,6 +59,10 @@ EXAMPLES:
     libra fetch --all                      Fetch every configured remote
     libra fetch origin --depth 1           Shallow fetch (latest commit only)
     libra fetch --all --depth 3            Shallow fetch across all remotes
+    libra fetch origin --unshallow         Convert a shallow clone to full history
+    libra fetch origin --prune             Drop tracking refs deleted on the remote
+    libra fetch origin --dry-run           Preview updates without fetching objects
+    libra fetch origin --porcelain         Machine-readable per-ref output
     libra --json fetch origin              Structured JSON output for agents";
 
 pub(crate) enum RemoteClient {
@@ -497,6 +502,50 @@ pub struct FetchArgs {
     /// history, then removing the `.libra/shallow` boundary file.
     #[clap(long, conflicts_with = "depth")]
     pub unshallow: bool,
+
+    /// Declined: Libra does not manage submodules with the stock Git layout.
+    /// Declared (rather than left unknown) so any value yields a friendly usage
+    /// error (exit 129) instead of a clap parse error (exit 2).
+    #[clap(long = "recurse-submodules", value_name = "MODE", num_args = 0..=1, require_equals = true)]
+    pub recurse_submodules: Option<Option<String>>,
+
+    /// Print a machine-readable, single-space-separated line per ref update:
+    /// `<flag> <old-oid> <new-oid> <local-ref>`. Mutually exclusive with `--json`.
+    #[clap(long)]
+    pub porcelain: bool,
+
+    /// Deepen or shape shallow history to commits more recent than <date>
+    /// (`deepen-since`). Accepts the date formats `libra log --since` understands.
+    #[clap(
+        long = "shallow-since",
+        value_name = "DATE",
+        conflicts_with = "unshallow"
+    )]
+    pub shallow_since: Option<String>,
+
+    /// Deepen or shape shallow history to exclude commits reachable from <ref>
+    /// (`deepen-not`); repeatable.
+    #[clap(
+        long = "shallow-exclude",
+        value_name = "REF",
+        conflicts_with = "unshallow"
+    )]
+    pub shallow_exclude: Vec<String>,
+
+    /// After fetching, delete local `refs/remotes/<remote>/*` tracking branches
+    /// that no longer exist on the remote. Can also be enabled via `fetch.prune`.
+    #[clap(long, short = 'p')]
+    pub prune: bool,
+
+    /// Show what would be fetched/pruned without downloading objects or writing
+    /// any refs, reflog, or shallow metadata.
+    #[clap(long = "dry-run")]
+    pub dry_run: bool,
+
+    /// Append fetched ref records to `.libra/FETCH_HEAD` instead of overwriting
+    /// it. Long-only: `-a` is reserved for `--all` (Git's `-a` is `--append`).
+    #[clap(long)]
+    pub append: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -512,6 +561,10 @@ pub struct FetchRepositoryResult {
     pub url: String,
     pub refs_updated: Vec<FetchRefUpdate>,
     pub objects_fetched: usize,
+    /// Local `refs/remotes/<remote>/*` tracking branches removed by `--prune`
+    /// (full ref names). Empty unless pruning ran.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pruned: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -763,8 +816,86 @@ pub async fn execute(args: FetchArgs) {
 /// authentication/network/pack negotiation fails, object writes fail, or
 /// remote-tracking refs cannot be updated.
 pub async fn execute_safe(args: FetchArgs, output: &OutputConfig) -> CliResult<()> {
+    // `--recurse-submodules` is declared only so it produces a friendly usage
+    // error (129) rather than a clap "unknown argument" (2).
+    if args.recurse_submodules.is_some() {
+        return Err(CliError::command_usage(
+            "libra fetch does not support submodule recursion",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+        .with_hint(
+            "Libra does not manage submodules with the stock Git layout; fetch them as separate repositories",
+        ));
+    }
+    // `--porcelain` and `--json` are both machine formats; `--json` is a global
+    // flag so this exclusion is enforced here (usage error 129), not by clap.
+    if args.porcelain && output.is_json() {
+        return Err(
+            CliError::command_usage("--porcelain and --json are mutually exclusive")
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+        );
+    }
+    let porcelain = args.porcelain;
+    let dry_run = args.dry_run;
+    let append = args.append;
     let result = run_fetch(args, output).await?;
-    render_fetch_output(&result, output)
+    // FETCH_HEAD records the fetched refs; `--dry-run` writes nothing.
+    if !dry_run {
+        write_fetch_head(&result, append).map_err(CliError::from)?;
+    }
+    if porcelain {
+        render_fetch_porcelain(&result, output)
+    } else {
+        render_fetch_output(&result, output)
+    }
+}
+
+/// Render Git's `--porcelain` format: one `<flag> <old-oid> <new-oid>
+/// <local-ref>` line per ref update, single-space separated, with no human
+/// summary columns.
+fn render_fetch_porcelain(result: &FetchOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.quiet {
+        return Ok(());
+    }
+    let rendered = format_fetch_porcelain(result);
+    if rendered.is_empty() {
+        return Ok(());
+    }
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+    writeln!(writer, "{rendered}")
+        .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))
+}
+
+fn format_fetch_porcelain(result: &FetchOutput) -> String {
+    let mut lines = Vec::new();
+    for remote in &result.remotes {
+        for update in &remote.refs_updated {
+            let (flag, old_oid) = match &update.old_oid {
+                // New ref: space-flag is reserved for fast-forward; new refs use
+                // `*` with an all-zero old object id sized to the hash kind.
+                None => ('*', "0".repeat(update.new_oid.len())),
+                Some(old) => (' ', old.clone()),
+            };
+            lines.push(format!(
+                "{flag} {old_oid} {} {}",
+                update.new_oid, update.remote_ref
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Whether `fetch.prune` is configured truthy, providing the default for
+/// `--prune` when the flag is absent.
+async fn read_fetch_prune_config() -> bool {
+    matches!(
+        ConfigKv::get("fetch.prune").await,
+        Ok(Some(entry)) if matches!(
+            entry.value.trim().to_ascii_lowercase().as_str(),
+            "true" | "yes" | "on" | "1"
+        )
+    )
 }
 
 async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOutput> {
@@ -777,9 +908,29 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         depth,
         deepen,
         unshallow,
+        recurse_submodules: _,
+        porcelain: _,
+        shallow_since,
+        shallow_exclude,
+        prune,
+        dry_run,
+        append: _,
     } = args;
 
-    let shallow = build_fetch_shallow_options(depth, deepen, unshallow);
+    // `--prune` is enabled by the flag or the `fetch.prune` config (flag wins).
+    let prune = prune || read_fetch_prune_config().await;
+
+    // `--shallow-since` is parsed at the command layer so an unparseable date is
+    // a usage error (129) rather than a deep protocol failure.
+    let deepen_since = match &shallow_since {
+        Some(date) => Some(parse_date(date).map_err(|error| {
+            CliError::command_usage(format!("invalid --shallow-since date '{date}': {error}"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?),
+        None => None,
+    };
+    let shallow =
+        build_fetch_shallow_options(depth, deepen, unshallow, deepen_since, shallow_exclude);
 
     if all {
         let remotes = ConfigKv::all_remote_configs().await.map_err(|error| {
@@ -796,6 +947,8 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
                     false,
                     shallow.clone(),
                     unshallow,
+                    prune,
+                    dry_run,
                     output,
                 )
                 .await
@@ -848,6 +1001,8 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         false,
         shallow,
         unshallow,
+        prune,
+        dry_run,
         output,
     )
     .await
@@ -890,7 +1045,7 @@ fn render_fetch_output(result: &FetchOutput, output: &OutputConfig) -> CliResult
         writeln!(writer, "From {}", remote.url)
             .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
 
-        if remote.refs_updated.is_empty() {
+        if remote.refs_updated.is_empty() && remote.pruned.is_empty() {
             writeln!(writer, "Already up to date with '{}'", remote.remote)
                 .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
             continue;
@@ -915,6 +1070,14 @@ fn render_fetch_output(result: &FetchOutput, output: &OutputConfig) -> CliResult
             }
         }
 
+        for pruned_ref in &remote.pruned {
+            let ref_name = pruned_ref
+                .strip_prefix("refs/remotes/")
+                .unwrap_or(pruned_ref);
+            writeln!(writer, " - [deleted]         (none)     -> {ref_name}")
+                .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
+        }
+
         writeln!(writer, " {} objects fetched", remote.objects_fetched)
             .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
     }
@@ -937,9 +1100,13 @@ pub(crate) async fn discover_remote_with_name(
 ) -> Result<(RemoteClient, DiscoveryResult), FetchError> {
     let remote_client =
         RemoteClient::from_spec_with_remote(remote_spec, remote_name).map_err(|message| {
-            let (kind, reason) = classify_remote_spec_error(remote_spec, &message);
+            // Classify against a credential-redacted spec so neither the `spec`
+            // field nor the `reason` string (which may interpolate the spec for
+            // malformed URLs) can leak a token/password.
+            let redacted_spec = redact_url_credentials(remote_spec);
+            let (kind, reason) = classify_remote_spec_error(&redacted_spec, &message);
             FetchError::InvalidRemoteSpec {
-                spec: remote_spec.to_string(),
+                spec: redacted_spec,
                 kind,
                 reason,
             }
@@ -948,7 +1115,8 @@ pub(crate) async fn discover_remote_with_name(
         .discovery_reference(UploadPack)
         .await
         .map_err(|source| FetchError::Discovery {
-            remote: remote_spec.to_string(),
+            // Redact credentials so a token/password never reaches error output.
+            remote: redact_url_credentials(remote_spec),
             source,
         })?;
     Ok((remote_client, discovery))
@@ -980,10 +1148,16 @@ fn classify_remote_spec_error(remote_spec: &str, message: &str) -> (RemoteSpecEr
     }
     let lower = message.to_ascii_lowercase();
     if lower.contains("unsupported") && lower.contains("scheme") {
+        // The scheme-only message carries no userinfo.
         return (RemoteSpecErrorKind::UnsupportedScheme, message.to_string());
     }
-    // Default to MalformedUrl for other spec errors (bad syntax, etc.)
-    (RemoteSpecErrorKind::MalformedUrl, message.to_string())
+    // Default to MalformedUrl. The raw `message` may interpolate the original
+    // spec (e.g. "invalid file url: file://user:pass@host/…"), so build the
+    // reason from the already-redacted `remote_spec` instead of the raw message.
+    (
+        RemoteSpecErrorKind::MalformedUrl,
+        format!("'{remote_spec}' is not a valid remote URL or local path"),
+    )
 }
 
 pub(crate) fn normalize_branch_ref(branch: &str) -> String {
@@ -1042,13 +1216,20 @@ pub(crate) fn build_fetch_shallow_options(
     depth: Option<usize>,
     deepen: Option<usize>,
     unshallow: bool,
+    deepen_since: Option<i64>,
+    deepen_not: Vec<String>,
 ) -> ShallowOptions {
     let effective_depth = if unshallow {
         Some(UNSHALLOW_DEPTH)
     } else {
         deepen.or(depth)
     };
-    ShallowOptions::from_depth(effective_depth)
+    ShallowOptions {
+        depth: effective_depth,
+        deepen_since,
+        deepen_not,
+        filter: None,
+    }
 }
 
 pub async fn fetch_repository_safe(
@@ -1058,17 +1239,29 @@ pub async fn fetch_repository_safe(
     shallow: ShallowOptions,
     output: &OutputConfig,
 ) -> Result<(), FetchError> {
-    fetch_repository_with_result(remote_config, branch, single_branch, shallow, false, output)
-        .await
-        .map(|_| ())
+    fetch_repository_with_result(
+        remote_config,
+        branch,
+        single_branch,
+        shallow,
+        false,
+        false,
+        false,
+        output,
+    )
+    .await
+    .map(|_| ())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn fetch_repository_with_result(
     remote_config: RemoteConfig,
     branch: Option<String>,
     single_branch: bool,
     shallow: ShallowOptions,
     unshallow: bool,
+    prune: bool,
+    dry_run: bool,
     output: &OutputConfig,
 ) -> Result<FetchRepositoryResult, FetchError> {
     let (remote_client, discovery) =
@@ -1103,6 +1296,7 @@ pub(crate) async fn fetch_repository_with_result(
             url: normalized_url,
             refs_updated: Vec::new(),
             objects_fetched: 0,
+            pruned: Vec::new(),
         });
     }
 
@@ -1132,6 +1326,38 @@ pub(crate) async fn fetch_repository_with_result(
         refs.retain(|reference| reference._ref == normalized);
     }
 
+    // `--dry-run`: compute the would-be ref updates (and prune list) from the
+    // discovered refs and return before downloading any pack or writing anything
+    // (no `.pack`/`.idx`, no shallow update, no ref/reflog writes, no FETCH_HEAD).
+    if dry_run {
+        let refs_updated = compute_fetch_ref_preview(&remote_config, &refs).await?;
+        let pruned = if prune {
+            let remote_branch_names =
+                crate::command::remote::collect_remote_branch_names(&discovery.refs);
+            crate::command::remote::prune_stale_tracking_branches(
+                &remote_config.name,
+                &remote_branch_names,
+                true,
+            )
+            .await
+            .map_err(|error| FetchError::LocalState {
+                message: format!("failed to preview prune: {error}"),
+            })?
+            .into_iter()
+            .map(|entry| entry.remote_ref)
+            .collect()
+        } else {
+            Vec::new()
+        };
+        return Ok(FetchRepositoryResult {
+            remote: remote_config.name,
+            url: normalized_url,
+            refs_updated,
+            objects_fetched: 0,
+            pruned,
+        });
+    }
+
     let mut want = refs
         .iter()
         .map(|reference| reference._hash.clone())
@@ -1145,7 +1371,8 @@ pub(crate) async fn fetch_repository_with_result(
         .fetch_objects(&have, &want, &shallow_boundary_oids, &shallow)
         .await
         .map_err(|source| FetchError::FetchObjects {
-            remote: remote_config.url.clone(),
+            // Redact credentials so a token/password never reaches error output.
+            remote: redact_url_credentials(&remote_config.url),
             source,
         })?;
 
@@ -1186,11 +1413,35 @@ pub(crate) async fn fetch_repository_with_result(
 
     let refs_updated =
         update_references(&remote_config, &refs, &ref_heads, remote_head, branch).await?;
+
+    // `--prune` removes local tracking branches whose remote counterpart is gone;
+    // it compares against the remote's advertised refs (`discovery.refs`), never
+    // the locally-filtered set, and never touches `refs/heads/*`.
+    let pruned = if prune {
+        let remote_branch_names =
+            crate::command::remote::collect_remote_branch_names(&discovery.refs);
+        crate::command::remote::prune_stale_tracking_branches(
+            &remote_config.name,
+            &remote_branch_names,
+            false,
+        )
+        .await
+        .map_err(|error| FetchError::LocalState {
+            message: format!("failed to prune stale remote-tracking branches: {error}"),
+        })?
+        .into_iter()
+        .map(|entry| entry.remote_ref)
+        .collect()
+    } else {
+        Vec::new()
+    };
+
     Ok(FetchRepositoryResult {
         remote: remote_config.name,
         url: normalized_url,
         refs_updated,
         objects_fetched,
+        pruned,
     })
 }
 
@@ -1762,6 +2013,93 @@ fn write_shallow_boundaries(boundaries: &BTreeSet<String>) -> Result<(), FetchEr
             "failed to write shallow metadata '{}': {source}",
             path.display()
         ),
+    })?;
+
+    // The shallow boundary file records repository history limits; keep it owner
+    // read/write only on Unix (Windows has no comparable mode bits to set).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|source| {
+            FetchError::LocalState {
+                message: format!(
+                    "failed to set permissions on shallow metadata '{}': {source}",
+                    path.display()
+                ),
+            }
+        })?;
+    }
+    Ok(())
+}
+
+fn fetch_head_path() -> Result<PathBuf, FetchError> {
+    util::try_get_storage_path(None)
+        .map(|storage| storage.join("FETCH_HEAD"))
+        .map_err(|source| FetchError::LocalState {
+            message: format!("failed to locate repository storage for FETCH_HEAD: {source}"),
+        })
+}
+
+/// Render the `FETCH_HEAD` body: one `<oid>\t<not-for-merge>\t<desc>` line per
+/// fetched ref. Libra fetch never designates a merge target (merge with
+/// `libra pull`), so every line is marked `not-for-merge`.
+fn format_fetch_head(result: &FetchOutput) -> String {
+    let mut lines = Vec::new();
+    for remote in &result.remotes {
+        let tracking_prefix = format!("refs/remotes/{}/", remote.remote);
+        for update in &remote.refs_updated {
+            let branch = update
+                .remote_ref
+                .strip_prefix(&tracking_prefix)
+                .unwrap_or(&update.remote_ref);
+            lines.push(format!(
+                "{}\tnot-for-merge\tbranch '{}' of {}",
+                update.new_oid, branch, remote.url
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Write (or, with `append`, accumulate into) `.libra/FETCH_HEAD` via an atomic
+/// temp-file + rename, owner-only on Unix.
+fn write_fetch_head(result: &FetchOutput, append: bool) -> Result<(), FetchError> {
+    let path = fetch_head_path()?;
+    let body = format_fetch_head(result);
+
+    let mut content = String::new();
+    if append && let Ok(existing) = fs::read_to_string(&path) {
+        content.push_str(&existing);
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+    }
+    if !body.is_empty() {
+        content.push_str(&body);
+        content.push('\n');
+    }
+
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, &content).map_err(|source| FetchError::LocalState {
+        message: format!(
+            "failed to write FETCH_HEAD temp '{}': {source}",
+            tmp.display()
+        ),
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)).map_err(|source| {
+            FetchError::LocalState {
+                message: format!("failed to set permissions on FETCH_HEAD: {source}"),
+            }
+        })?;
+    }
+    fs::rename(&tmp, &path).map_err(|source| FetchError::LocalState {
+        message: format!(
+            "failed to finalize FETCH_HEAD '{}': {source}",
+            path.display()
+        ),
     })
 }
 
@@ -1784,6 +2122,43 @@ fn apply_shallow_updates(shallow: &[String], unshallow: &[String]) -> Result<(),
         boundaries.remove(oid);
     }
     write_shallow_boundaries(&boundaries)
+}
+
+/// Read-only counterpart of [`update_references`] for `--dry-run`: report the
+/// ref updates the discovered refs would produce, without any database writes.
+async fn compute_fetch_ref_preview(
+    remote_config: &RemoteConfig,
+    refs: &[DiscRef],
+) -> Result<Vec<FetchRefUpdate>, FetchError> {
+    let mut updates = Vec::new();
+    for reference in refs {
+        let full_ref_name = if let Some(branch_name) = reference._ref.strip_prefix("refs/heads/") {
+            format!("refs/remotes/{}/{}", remote_config.name, branch_name)
+        } else if let Some(mr_name) = reference._ref.strip_prefix("refs/mr/") {
+            format!("refs/remotes/{}/mr/{}", remote_config.name, mr_name)
+        } else {
+            continue;
+        };
+
+        let old_oid = Branch::find_branch_result(&full_ref_name, Some(&remote_config.name))
+            .await
+            .map_err(|error| FetchError::UpdateRefs {
+                message: format!(
+                    "failed to inspect existing remote-tracking ref '{full_ref_name}': {error}"
+                ),
+            })?
+            .map(|branch| branch.commit.to_string());
+
+        if old_oid.as_deref() == Some(reference._hash.as_str()) {
+            continue;
+        }
+        updates.push(FetchRefUpdate {
+            remote_ref: full_ref_name,
+            old_oid,
+            new_oid: reference._hash.clone(),
+        });
+    }
+    Ok(updates)
 }
 
 async fn update_references(
@@ -2043,6 +2418,15 @@ async fn read_pkt_line(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<(usi
     if len == 0 {
         return Ok((0, Vec::new()));
     }
+    // Reject malformed/short lengths (1..=3) before subtracting the 4-byte
+    // header, so a hostile server cannot underflow the length into a huge
+    // allocation. (`0001`/`0002`/`0003` are not valid data frames here.)
+    if len < 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid pkt-line length {len}"),
+        ));
+    }
     let mut data = vec![0u8; (len - 4) as usize];
     reader.read_exact(&mut data).await?;
     Ok((len as usize, data))
@@ -2070,6 +2454,125 @@ mod tests {
         internal::protocol::FetchStream,
         utils::{output::OutputConfig, test::ScopedEnvVar},
     };
+
+    #[test]
+    fn format_fetch_porcelain_layout_is_space_separated() {
+        use super::{FetchOutput, FetchRefUpdate, FetchRepositoryResult, format_fetch_porcelain};
+
+        let output = FetchOutput {
+            all: false,
+            requested_remote: Some("origin".to_string()),
+            refspec: None,
+            remotes: vec![FetchRepositoryResult {
+                remote: "origin".to_string(),
+                url: "https://example.com/x.git".to_string(),
+                objects_fetched: 2,
+                refs_updated: vec![
+                    FetchRefUpdate {
+                        remote_ref: "refs/remotes/origin/main".to_string(),
+                        old_oid: Some("a".repeat(40)),
+                        new_oid: "b".repeat(40),
+                    },
+                    FetchRefUpdate {
+                        remote_ref: "refs/remotes/origin/dev".to_string(),
+                        old_oid: None,
+                        new_oid: "c".repeat(40),
+                    },
+                ],
+                pruned: Vec::new(),
+            }],
+        };
+
+        let rendered = format_fetch_porcelain(&output);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            format!(
+                "  {} {} refs/remotes/origin/main",
+                "a".repeat(40),
+                "b".repeat(40)
+            ),
+            "fast-forward uses a space flag, then the column separator (two leading spaces)"
+        );
+        assert_eq!(
+            lines[1],
+            format!(
+                "* {} {} refs/remotes/origin/dev",
+                "0".repeat(40),
+                "c".repeat(40)
+            ),
+            "new ref uses `*` and an all-zero old object id"
+        );
+    }
+
+    #[test]
+    fn format_fetch_head_marks_not_for_merge() {
+        use super::{FetchOutput, FetchRefUpdate, FetchRepositoryResult, format_fetch_head};
+
+        let output = FetchOutput {
+            all: false,
+            requested_remote: Some("origin".to_string()),
+            refspec: None,
+            remotes: vec![FetchRepositoryResult {
+                remote: "origin".to_string(),
+                url: "https://example.com/x.git".to_string(),
+                objects_fetched: 1,
+                pruned: Vec::new(),
+                refs_updated: vec![FetchRefUpdate {
+                    remote_ref: "refs/remotes/origin/main".to_string(),
+                    old_oid: None,
+                    new_oid: "a".repeat(40),
+                }],
+            }],
+        };
+
+        assert_eq!(
+            format_fetch_head(&output),
+            format!(
+                "{}\tnot-for-merge\tbranch 'main' of https://example.com/x.git",
+                "a".repeat(40)
+            )
+        );
+    }
+
+    #[test]
+    fn build_fetch_shallow_options_wires_since_and_exclude() {
+        let opts = super::build_fetch_shallow_options(
+            None,
+            None,
+            false,
+            Some(1_700_000_000),
+            vec!["v1.0".to_string()],
+        );
+        assert_eq!(opts.deepen_since, Some(1_700_000_000));
+        assert_eq!(opts.deepen_not, vec!["v1.0".to_string()]);
+        assert_eq!(opts.depth, None);
+
+        // `--unshallow` still overrides everything to the max-depth request.
+        let unshallow = super::build_fetch_shallow_options(None, None, true, None, vec![]);
+        assert_eq!(unshallow.depth, Some(super::UNSHALLOW_DEPTH));
+    }
+
+    /// The `.libra/shallow` boundary file must be owner read/write only on Unix.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn write_shallow_boundaries_sets_0600_permissions() {
+        use std::{collections::BTreeSet, os::unix::fs::PermissionsExt};
+
+        let temp = tempdir().unwrap();
+        crate::utils::test::setup_with_new_libra_in(temp.path()).await;
+        let _guard = crate::utils::test::ChangeDirGuard::new(temp.path());
+
+        let mut boundaries = BTreeSet::new();
+        boundaries.insert("a".repeat(40));
+        super::write_shallow_boundaries(&boundaries).expect("write shallow boundaries");
+
+        let path = super::shallow_file_path().expect("resolve shallow path");
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "shallow metadata must be 0o600");
+    }
 
     /// Pin the `Display` format for the static-message and direct-message
     /// variants of [`FetchError`]. These strings are used as the

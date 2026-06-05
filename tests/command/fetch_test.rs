@@ -1048,3 +1048,341 @@ async fn test_fetch_shallow_then_shallow_is_idempotent() {
     let second = run_libra_command(&["fetch", "origin", "--depth", "1"], &repo_dir);
     assert_cli_success(&second, "second fetch --depth 1 after shallow");
 }
+
+/// `--recurse-submodules` is declared only to produce a friendly usage error
+/// (exit 129) instead of a clap "unknown argument" (exit 2).
+#[test]
+fn test_fetch_recurse_submodules_declined_exits_129() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["fetch", "--recurse-submodules=no"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "declined flag must exit 129: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("submodule recursion"),
+        "stderr should explain the decline: {stderr}"
+    );
+}
+
+/// `--porcelain` and `--json` are both machine formats and must not combine
+/// (a usage error, exit 129).
+#[test]
+fn test_fetch_porcelain_json_mutually_exclusive_exits_129() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["--json", "fetch", "--porcelain"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "--porcelain + --json must be a usage error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// An unparseable `--shallow-since` date is a usage error (129), caught at the
+/// command layer before any network activity.
+#[test]
+fn test_fetch_shallow_since_invalid_date_exits_129() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(
+        &["fetch", "origin", "--shallow-since=definitely-not-a-date"],
+        repo.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "invalid --shallow-since must be a usage error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// End-to-end `fetch --prune`: a remote-tracking branch whose remote counterpart
+/// was deleted is removed locally; live branches and `refs/heads/*` are kept.
+#[tokio::test]
+#[serial]
+async fn test_fetch_prune_removes_stale_remote_tracking() {
+    let temp = tempdir().expect("temp root");
+    let remote_dir = temp.path().join("remote.git");
+    let work_dir = temp.path().join("work");
+
+    let git = |dir: Option<&Path>, args: &[&str]| {
+        let mut cmd = Command::new("git");
+        if let Some(d) = dir {
+            cmd.current_dir(d);
+        }
+        assert!(
+            cmd.args(args).status().expect("git command").success(),
+            "git {args:?} failed"
+        );
+    };
+
+    git(None, &["init", "--bare", remote_dir.to_str().unwrap()]);
+    git(None, &["init", work_dir.to_str().unwrap()]);
+    git(Some(&work_dir), &["config", "user.name", "Libra Tester"]);
+    git(
+        Some(&work_dir),
+        &["config", "user.email", "tester@example.com"],
+    );
+    fs::write(work_dir.join("README.md"), "hello").expect("write README");
+    git(Some(&work_dir), &["add", "README.md"]);
+    git(Some(&work_dir), &["commit", "-m", "initial"]);
+    // Push two branches: main (the current branch) and feature.
+    let current = String::from_utf8(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .expect("rev-parse")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_string();
+    git(
+        Some(&work_dir),
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+    );
+    git(
+        Some(&work_dir),
+        &["push", "origin", &format!("HEAD:refs/heads/{current}")],
+    );
+    git(
+        Some(&work_dir),
+        &["push", "origin", "HEAD:refs/heads/feature"],
+    );
+
+    // Fetch into a fresh Libra repo so both tracking branches exist.
+    let repo_dir = temp.path().join("libra_repo");
+    fs::create_dir_all(&repo_dir).expect("repo dir");
+    setup_with_new_libra_in(&repo_dir).await;
+    let _guard = ChangeDirGuard::new(&repo_dir);
+    let remote_path = remote_dir.to_str().unwrap().to_string();
+    ConfigKv::set("remote.origin.url", &remote_path, false)
+        .await
+        .unwrap();
+    fetch::fetch_repository(
+        RemoteConfig {
+            name: "origin".to_string(),
+            url: remote_path.clone(),
+        },
+        None,
+        false,
+        None,
+    )
+    .await;
+
+    assert!(
+        Branch::find_branch_result("refs/remotes/origin/feature", Some("origin"))
+            .await
+            .expect("query feature")
+            .is_some(),
+        "feature tracking branch must exist before prune"
+    );
+
+    // Delete `feature` on the remote, then prune.
+    git(
+        Some(&remote_dir),
+        &["update-ref", "-d", "refs/heads/feature"],
+    );
+    let output = run_libra_command(&["fetch", "origin", "--prune"], &repo_dir);
+    assert_cli_success(&output, "fetch --prune");
+
+    assert!(
+        Branch::find_branch_result("refs/remotes/origin/feature", Some("origin"))
+            .await
+            .expect("query feature after prune")
+            .is_none(),
+        "stale feature tracking branch must be pruned"
+    );
+    assert!(
+        Branch::find_branch_result(&format!("refs/remotes/origin/{current}"), Some("origin"))
+            .await
+            .expect("query main after prune")
+            .is_some(),
+        "live tracking branch must survive prune"
+    );
+}
+
+/// `fetch --dry-run` previews ref updates without writing them: the local
+/// tracking ref stays at its old commit even though the remote advanced.
+#[tokio::test]
+#[serial]
+async fn test_fetch_dry_run_makes_no_ref_writes() {
+    let temp = tempdir().expect("temp root");
+    let remote_dir = temp.path().join("remote.git");
+    let work_dir = temp.path().join("work");
+
+    let git = |dir: Option<&Path>, args: &[&str]| {
+        let mut cmd = Command::new("git");
+        if let Some(d) = dir {
+            cmd.current_dir(d);
+        }
+        assert!(
+            cmd.args(args).status().expect("git command").success(),
+            "git {args:?} failed"
+        );
+    };
+    let git_out = |dir: &Path, args: &[&str]| -> String {
+        String::from_utf8(
+            Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git output")
+                .stdout,
+        )
+        .expect("utf8")
+        .trim()
+        .to_string()
+    };
+
+    git(None, &["init", "--bare", remote_dir.to_str().unwrap()]);
+    git(None, &["init", work_dir.to_str().unwrap()]);
+    git(Some(&work_dir), &["config", "user.name", "Libra Tester"]);
+    git(
+        Some(&work_dir),
+        &["config", "user.email", "tester@example.com"],
+    );
+    fs::write(work_dir.join("a.txt"), "one").expect("write");
+    git(Some(&work_dir), &["add", "a.txt"]);
+    git(Some(&work_dir), &["commit", "-m", "c1"]);
+    let current = git_out(&work_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    git(
+        Some(&work_dir),
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+    );
+    git(
+        Some(&work_dir),
+        &["push", "origin", &format!("HEAD:refs/heads/{current}")],
+    );
+
+    let repo_dir = temp.path().join("libra_repo");
+    fs::create_dir_all(&repo_dir).expect("repo dir");
+    setup_with_new_libra_in(&repo_dir).await;
+    let _guard = ChangeDirGuard::new(&repo_dir);
+    let remote_path = remote_dir.to_str().unwrap().to_string();
+    ConfigKv::set("remote.origin.url", &remote_path, false)
+        .await
+        .unwrap();
+    fetch::fetch_repository(
+        RemoteConfig {
+            name: "origin".to_string(),
+            url: remote_path.clone(),
+        },
+        None,
+        false,
+        None,
+    )
+    .await;
+    let commit1 = git_out(&work_dir, &["rev-parse", "HEAD"]);
+
+    // Advance the remote.
+    fs::write(work_dir.join("a.txt"), "two").expect("write");
+    git(Some(&work_dir), &["add", "a.txt"]);
+    git(Some(&work_dir), &["commit", "-m", "c2"]);
+    git(
+        Some(&work_dir),
+        &["push", "origin", &format!("HEAD:refs/heads/{current}")],
+    );
+
+    // Dry-run must not move the tracking ref.
+    let output = run_libra_command(&["fetch", "origin", "--dry-run"], &repo_dir);
+    assert_cli_success(&output, "fetch --dry-run");
+    let tracked =
+        Branch::find_branch_result(&format!("refs/remotes/origin/{current}"), Some("origin"))
+            .await
+            .expect("query tracking")
+            .expect("tracking exists");
+    assert_eq!(
+        tracked.commit.to_string(),
+        commit1,
+        "dry-run must not advance the tracking ref"
+    );
+}
+
+/// `fetch` writes `.libra/FETCH_HEAD` by default; `--append` accumulates rather
+/// than overwriting.
+#[tokio::test]
+#[serial]
+async fn test_fetch_writes_and_appends_fetch_head() {
+    let temp = tempdir().expect("temp root");
+    let remote_dir = temp.path().join("remote.git");
+    let work_dir = temp.path().join("work");
+
+    let git = |dir: Option<&Path>, args: &[&str]| {
+        let mut cmd = Command::new("git");
+        if let Some(d) = dir {
+            cmd.current_dir(d);
+        }
+        assert!(
+            cmd.args(args).status().expect("git command").success(),
+            "git {args:?} failed"
+        );
+    };
+
+    git(None, &["init", "--bare", remote_dir.to_str().unwrap()]);
+    git(None, &["init", work_dir.to_str().unwrap()]);
+    git(Some(&work_dir), &["config", "user.name", "Libra Tester"]);
+    git(
+        Some(&work_dir),
+        &["config", "user.email", "tester@example.com"],
+    );
+    fs::write(work_dir.join("a.txt"), "one").expect("write");
+    git(Some(&work_dir), &["add", "a.txt"]);
+    git(Some(&work_dir), &["commit", "-m", "c1"]);
+    let current = String::from_utf8(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .expect("rev-parse")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_string();
+    git(
+        Some(&work_dir),
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+    );
+    git(
+        Some(&work_dir),
+        &["push", "origin", &format!("HEAD:refs/heads/{current}")],
+    );
+
+    let repo_dir = temp.path().join("libra_repo");
+    fs::create_dir_all(&repo_dir).expect("repo dir");
+    setup_with_new_libra_in(&repo_dir).await;
+    let remote_path = remote_dir.to_str().unwrap().to_string();
+    {
+        let _guard = ChangeDirGuard::new(&repo_dir);
+        ConfigKv::set("remote.origin.url", &remote_path, false)
+            .await
+            .unwrap();
+    }
+
+    // Default fetch writes FETCH_HEAD with the fetched branch line.
+    let first = run_libra_command(&["fetch", "origin"], &repo_dir);
+    assert_cli_success(&first, "fetch writes FETCH_HEAD");
+    let fetch_head_path = repo_dir.join(".libra").join("FETCH_HEAD");
+    let contents = fs::read_to_string(&fetch_head_path).expect("FETCH_HEAD written");
+    assert!(
+        contents.contains("not-for-merge") && contents.contains(&format!("branch '{current}' of")),
+        "FETCH_HEAD should record the fetched branch: {contents:?}"
+    );
+    let first_line_count = contents.lines().count();
+
+    // A re-fetch with --append must not shrink FETCH_HEAD (appends, never
+    // truncates), even when nothing changed.
+    let again = run_libra_command(&["fetch", "origin", "--append"], &repo_dir);
+    assert_cli_success(&again, "fetch --append");
+    let appended = fs::read_to_string(&fetch_head_path).expect("FETCH_HEAD still present");
+    assert!(
+        appended.lines().count() >= first_line_count,
+        "--append must not truncate FETCH_HEAD: before={first_line_count}, after={}",
+        appended.lines().count()
+    );
+}

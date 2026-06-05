@@ -2397,3 +2397,667 @@ fn cloud_source_rejects_reference() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Batch 3a — jobs / local / no-hardlinks / shared
+// ---------------------------------------------------------------------------
+
+/// `--local` hardlinks the source's objects: a destination loose object shares
+/// an inode with the source, and the clone passes fsck.
+#[cfg(unix)]
+#[test]
+fn local_clone_hardlinks_objects() {
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-local");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "-l",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--local clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Find a loose object in the source and check the destination shares its inode.
+    let src_objects = remote.join("objects");
+    let mut linked = false;
+    for top in fs::read_dir(&src_objects).unwrap().flatten() {
+        let name = top.file_name();
+        let name = name.to_string_lossy();
+        if name == "pack" || name == "info" || name.len() != 2 {
+            continue;
+        }
+        for obj in fs::read_dir(top.path()).unwrap().flatten() {
+            let rel = format!("{}/{}", name, obj.file_name().to_string_lossy());
+            let dest_obj = dest.join(".libra").join("objects").join(&rel);
+            if dest_obj.exists() {
+                let src_ino = fs::metadata(obj.path()).unwrap().ino();
+                let dest_ino = fs::metadata(&dest_obj).unwrap().ino();
+                assert_eq!(src_ino, dest_ino, "--local object should be hardlinked");
+                linked = true;
+            }
+        }
+    }
+    assert!(linked, "expected at least one hardlinked loose object");
+
+    let fsck = run_libra(&["fsck"], &dest);
+    assert_eq!(fsck.status.code(), Some(0), "fsck must pass after --local");
+}
+
+/// `--shared` copies the source's objects (no alternates dependency) and passes fsck.
+#[test]
+fn shared_clone_copies_objects_no_alternates() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-shared");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "-s",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--shared clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !dest
+            .join(".libra")
+            .join("objects")
+            .join("info")
+            .join("alternates")
+            .exists(),
+        "--shared must not write info/alternates"
+    );
+    let fsck = run_libra(&["fsck"], &dest);
+    assert_eq!(fsck.status.code(), Some(0), "fsck must pass after --shared");
+}
+
+/// `--jobs` is strictly range-checked (1..=16); 0 and >16 exit 129.
+#[test]
+fn jobs_out_of_range_exits_129() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+
+    for bad in ["0", "17", "99"] {
+        let dest = temp.path().join(format!("clone-jobs-{bad}"));
+        let output = run_libra(
+            &[
+                "clone",
+                "--jobs",
+                bad,
+                remote.to_str().unwrap(),
+                dest.to_str().unwrap(),
+            ],
+            temp.path(),
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(129),
+            "--jobs {bad} must exit 129: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// `--jobs 16` is accepted (boundary), `--jobs 17` is rejected.
+#[test]
+fn jobs_boundary_16_ok_17_rejected() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+
+    let ok = run_libra(
+        &[
+            "clone",
+            "--jobs",
+            "16",
+            remote.to_str().unwrap(),
+            temp.path().join("clone-jobs-16").to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        ok.status.code(),
+        Some(0),
+        "--jobs 16 must be accepted: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+
+    let rejected = run_libra(
+        &[
+            "clone",
+            "--jobs",
+            "17",
+            remote.to_str().unwrap(),
+            temp.path().join("clone-jobs-17").to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        rejected.status.code(),
+        Some(129),
+        "--jobs 17 must be rejected"
+    );
+}
+
+/// A symlinked local object source is rejected for `--local` (exit 128).
+#[cfg(unix)]
+#[test]
+fn local_clone_rejects_symlink_object_source() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let link = temp.path().join("src-link");
+    symlink(&remote, &link).unwrap();
+    let dest = temp.path().join("clone-local-symlink");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "-l",
+            link.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "symlinked --local source must be rejected with 128: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Cloud sources reject `--local`, `--shared`, and `--jobs` (exit 129).
+#[test]
+fn cloud_source_rejects_local_shared_jobs() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("restored-local");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--shared",
+            "libra+cloud://code.example.com/kepler-ledger",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "cloud source must reject --shared: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Batch 3b — filter (partial clone)
+// ---------------------------------------------------------------------------
+
+/// Enable server-side partial-clone filtering on a bare git source so libra's
+/// `--filter` request is honored by `git-upload-pack`.
+fn enable_filter_support(remote: &Path) {
+    assert!(
+        run_git(&["config", "uploadpack.allowFilter", "true"], remote)
+            .status
+            .success()
+    );
+}
+
+/// `--filter=blob:none --no-checkout` succeeds and records promisor config.
+#[test]
+fn filter_clone_sets_promisor_config() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    enable_filter_support(&remote);
+    let dest = temp.path().join("clone-filter");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--filter=blob:none",
+            "--no-checkout",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--filter --no-checkout clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let promisor = run_libra(&["config", "--get", "remote.origin.promisor"], &dest);
+    assert_eq!(String::from_utf8_lossy(&promisor.stdout).trim(), "true");
+    let spec = run_libra(
+        &["config", "--get", "remote.origin.partialclonefilter"],
+        &dest,
+    );
+    assert_eq!(String::from_utf8_lossy(&spec.stdout).trim(), "blob:none");
+}
+
+/// Unknown `--filter` specs are rejected by validation (exit 129).
+#[test]
+fn filter_spec_whitelist_rejects_unknown_exits_129() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("clone-filter-bad");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--filter=weird:thing",
+            "file:///definitely/not/here",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "unknown --filter spec must exit 129: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// An over-long `--filter` spec is rejected (4 KiB cap, exit 129).
+#[test]
+fn filter_spec_length_capped_4kib() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("clone-filter-long");
+    let long = format!("blob:limit={}", "9".repeat(5000));
+
+    let output = run_libra(
+        &[
+            "clone",
+            &format!("--filter={long}"),
+            "file:///definitely/not/here",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "over-long --filter spec must exit 129: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `--json` reports `filter_spec` for a partial clone.
+#[test]
+fn filter_clone_json_schema() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    enable_filter_support(&remote);
+    let dest = temp.path().join("clone-filter-json");
+
+    let output = run_libra(
+        &[
+            "--json",
+            "clone",
+            "--filter=blob:none",
+            "--bare",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--filter --bare clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    assert_eq!(json["data"]["filter_spec"], "blob:none");
+    assert_eq!(json["data"]["bare"], true);
+}
+
+/// A non-bare default checkout of a partial clone hits a filtered-out blob and
+/// fails with a clear partial-clone diagnostic (exit 128).
+#[test]
+fn partial_clone_missing_blob_gives_clear_hint() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    enable_filter_support(&remote);
+    let dest = temp.path().join("clone-filter-checkout");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--filter=blob:none",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "non-bare partial clone checkout must fail with 128: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("partial clone"),
+        "expected a partial-clone diagnostic, got: {stderr}"
+    );
+}
+
+/// Cloud sources reject `--filter` (exit 129).
+#[test]
+fn cloud_source_rejects_filter() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("restored-filter");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--filter=blob:none",
+            "libra+cloud://code.example.com/kepler-ledger",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "cloud source must reject --filter: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Batch 4 — precise remote/branch config write + credential redaction
+// ---------------------------------------------------------------------------
+
+/// A normal clone writes the branch-heads fetch refspec for the remote.
+#[test]
+fn clone_writes_fetch_refspec() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-refspec");
+
+    let output = run_libra(
+        &["clone", remote.to_str().unwrap(), dest.to_str().unwrap()],
+        temp.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    let fetch = run_libra(&["config", "--get", "remote.origin.fetch"], &dest);
+    assert_eq!(
+        String::from_utf8_lossy(&fetch.stdout).trim(),
+        "+refs/heads/*:refs/remotes/origin/*",
+    );
+}
+
+/// `--mirror` writes the all-refs refspec and `remote.<name>.mirror = true`.
+#[test]
+fn mirror_writes_full_refspec_and_mirror_flag() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("mirror-refspec.git");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--mirror",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--mirror clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let fetch = run_libra(&["config", "--get", "remote.origin.fetch"], &dest);
+    assert_eq!(
+        String::from_utf8_lossy(&fetch.stdout).trim(),
+        "+refs/*:refs/*"
+    );
+    let mirror = run_libra(&["config", "--get", "remote.origin.mirror"], &dest);
+    assert_eq!(String::from_utf8_lossy(&mirror.stdout).trim(), "true");
+}
+
+/// `-o/--origin` records the fetch refspec under the custom remote name.
+#[test]
+fn origin_name_used_in_remote_fetch_config() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-origin-fetch");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "-o",
+            "upstream",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    let fetch = run_libra(&["config", "--get", "remote.upstream.fetch"], &dest);
+    assert_eq!(
+        String::from_utf8_lossy(&fetch.stdout).trim(),
+        "+refs/heads/*:refs/remotes/upstream/*",
+    );
+}
+
+/// An empty remote writes `remote.<name>.url` + `remote.<name>.fetch` but no
+/// synthetic `branch.*` tracking config.
+#[test]
+fn empty_remote_writes_remote_config_no_branch_tracking() {
+    let temp = tempdir().unwrap();
+    let remote = create_empty_remote(temp.path());
+    let dest = temp.path().join("clone-empty-cfg");
+
+    let output = run_libra(
+        &["clone", remote.to_str().unwrap(), dest.to_str().unwrap()],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "empty clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let url = run_libra(&["config", "--get", "remote.origin.url"], &dest);
+    assert_eq!(url.status.code(), Some(0), "remote.origin.url must be set");
+    let fetch = run_libra(&["config", "--get", "remote.origin.fetch"], &dest);
+    assert_eq!(
+        String::from_utf8_lossy(&fetch.stdout).trim(),
+        "+refs/heads/*:refs/remotes/origin/*",
+    );
+    // No synthetic branch tracking is written for an empty remote.
+    let branch_remote = run_libra(&["config", "--get", "branch.main.remote"], &dest);
+    assert_ne!(
+        branch_remote.status.code(),
+        Some(0),
+        "empty clone must not write branch.main.remote, got: {}",
+        String::from_utf8_lossy(&branch_remote.stdout)
+    );
+}
+
+/// The first reflog entry after a clone is `clone: from <url>`.
+#[test]
+fn reflog_first_entry_is_clone_from() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-reflog");
+
+    let output = run_libra(
+        &["clone", remote.to_str().unwrap(), dest.to_str().unwrap()],
+        temp.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    let reflog = run_libra(&["reflog", "show"], &dest);
+    let stdout = String::from_utf8_lossy(&reflog.stdout);
+    assert!(
+        stdout.contains("clone: from"),
+        "reflog should record 'clone: from <url>', got: {stdout}"
+    );
+}
+
+/// Credentials embedded in a clone URL are redacted from all output faces
+/// (stdout, stderr, JSON) when discovery fails.
+#[test]
+fn credentials_redacted_in_error_output() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("clone-cred");
+
+    // 127.0.0.1:1 refuses immediately; the embedded password must never appear.
+    let output = run_libra(
+        &[
+            "clone",
+            "https://user:SuperSecretToken@127.0.0.1:1/repo.git",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "bad-credential clone should fail with 128"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !combined.contains("SuperSecretToken"),
+        "credentials must be redacted from all output, got: {combined}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Batch 5 — documentation / help sync contract
+// ---------------------------------------------------------------------------
+
+/// Every implemented clone flag must appear in `clone --help` and in both the
+/// English and Chinese command docs, keeping the surface, help, and docs in sync.
+#[test]
+fn clone_documentation_and_help_sync() {
+    use clap::CommandFactory;
+
+    let root = env!("CARGO_MANIFEST_DIR");
+    let doc_en = fs::read_to_string(format!("{root}/docs/commands/clone.md"))
+        .expect("docs/commands/clone.md must exist");
+    let doc_zh = fs::read_to_string(format!("{root}/docs/commands/zh-CN/clone.md"))
+        .expect("docs/commands/zh-CN/clone.md must exist");
+    let help = libra::command::clone::CloneArgs::command()
+        .render_long_help()
+        .to_string();
+
+    let expected_flags = [
+        "--depth",
+        "--shallow-since",
+        "--shallow-exclude",
+        "--reject-shallow",
+        "--no-single-branch",
+        "--origin",
+        "--no-checkout",
+        "--mirror",
+        "--reference",
+        "--reference-if-able",
+        "--dissociate",
+        "--local",
+        "--no-hardlinks",
+        "--shared",
+        "--jobs",
+        "--filter",
+    ];
+    for flag in expected_flags {
+        assert!(help.contains(flag), "clone --help is missing {flag}");
+        assert!(
+            doc_en.contains(flag),
+            "docs/commands/clone.md is missing {flag}"
+        );
+        assert!(
+            doc_zh.contains(flag),
+            "docs/commands/zh-CN/clone.md is missing {flag}"
+        );
+    }
+}
+
+/// `--shallow-exclude` values are validated against control characters so they
+/// cannot inject extra `deepen-not` upload-pack frames (exit 129).
+#[test]
+fn shallow_exclude_rejects_control_chars() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("clone-ctrl");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--shallow-exclude",
+            "refs/heads/x\nrefs/heads/y",
+            "file:///definitely/not/here",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "control characters in --shallow-exclude must be rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Credentials in a malformed/invalid URL are redacted from the error reason
+/// (not just the discovery error), covering the spec-classification path.
+#[test]
+fn credentials_redacted_in_malformed_url_error() {
+    let temp = tempdir().unwrap();
+    let dest = temp.path().join("clone-malformed");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "file://user:MalformedSecret@nohost/repo",
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_ne!(output.status.code(), Some(0), "malformed URL must fail");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !combined.contains("MalformedSecret"),
+        "credentials must be redacted from malformed-URL errors, got: {combined}"
+    );
+}

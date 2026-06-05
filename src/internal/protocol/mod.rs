@@ -194,12 +194,14 @@ pub fn parse_discovered_references(
     })
 }
 
-/// Advanced shallow-clone negotiation parameters carried alongside the existing
-/// `shallow` boundary set. Models the three Git upload-pack deepen requests:
+/// Upload-pack request shaping options carried alongside the existing `shallow`
+/// boundary set. Models the three Git deepen requests plus the partial-clone
+/// object filter:
 ///
 /// - [`depth`](Self::depth) → `deepen <n>` (`--depth N` / `--deepen N`)
 /// - [`deepen_since`](Self::deepen_since) → `deepen-since <unix>` (`--shallow-since`)
 /// - [`deepen_not`](Self::deepen_not) → one `deepen-not <ref>` per entry (`--shallow-exclude`)
+/// - [`filter`](Self::filter) → `filter <spec>` (`--filter`, partial clone)
 ///
 /// Git accepts `--depth` combined with `--shallow-since`/`--shallow-exclude`, so
 /// these are layered into the request rather than treated as mutually exclusive.
@@ -212,6 +214,9 @@ pub struct ShallowOptions {
     pub deepen_since: Option<i64>,
     /// Exclude history reachable from these refs/revisions (`deepen-not <ref>`).
     pub deepen_not: Vec<String>,
+    /// Partial-clone object filter spec (`filter <spec>`); requires the server to
+    /// advertise `filter` (`uploadpack.allowFilter`).
+    pub filter: Option<String>,
 }
 
 impl ShallowOptions {
@@ -223,7 +228,8 @@ impl ShallowOptions {
         }
     }
 
-    /// Whether any shallow-shaping request is present.
+    /// Whether any shallow-shaping request is present. Note: a partial-clone
+    /// `filter` alone does not introduce a shallow boundary section.
     pub fn is_requested(&self) -> bool {
         self.depth.is_some() || self.deepen_since.is_some() || !self.deepen_not.is_empty()
     }
@@ -250,6 +256,11 @@ pub fn generate_upload_pack_content(
     }
     if !options.deepen_not.is_empty() {
         capability.push("deepen-not");
+    }
+    // Partial-clone `filter <spec>` is only honored when the `filter` capability
+    // is advertised on the first `want` line (and the server allows filtering).
+    if options.filter.is_some() {
+        capability.push("filter");
     }
     let capability = capability.join(" ");
     for w in want {
@@ -286,6 +297,11 @@ pub fn generate_upload_pack_content(
         }
     } else if let Some(d) = options.depth {
         add_pkt_line_string(&mut buf, format!("deepen {d}\n").to_string());
+    }
+
+    // Partial-clone object filter request (after deepen lines, before the flush).
+    if let Some(spec) = &options.filter {
+        add_pkt_line_string(&mut buf, format!("filter {spec}\n").to_string());
     }
 
     buf.extend(b"0000");
@@ -345,6 +361,7 @@ mod test {
             depth: Some(2),
             deepen_since: Some(1_704_067_200),
             deepen_not: vec!["refs/tags/v1".to_string(), "refs/heads/legacy".to_string()],
+            ..ShallowOptions::default()
         };
         let content = render(&want, &[], &opts);
         assert!(
@@ -363,5 +380,26 @@ mod test {
         assert!(!content.contains("deepen"));
         assert!(content.contains("done\n"));
         assert!(!ShallowOptions::default().is_requested());
+    }
+
+    #[test]
+    fn upload_pack_emits_filter_capability_and_frame() {
+        let want = vec!["a".repeat(40)];
+        let opts = ShallowOptions {
+            filter: Some("blob:none".to_string()),
+            ..ShallowOptions::default()
+        };
+        let content = render(&want, &[], &opts);
+        // The first want line must advertise the `filter` capability and a
+        // `filter blob:none` command must be sent.
+        assert!(
+            content.contains("filter") && content.contains("filter blob:none\n"),
+            "filter capability + frame must be present: {content}"
+        );
+        // A bare filter request introduces no shallow section.
+        assert!(
+            !opts.is_requested(),
+            "filter alone is not a shallow request"
+        );
     }
 }

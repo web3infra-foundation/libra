@@ -34,8 +34,31 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | Name status | | `--name-status` | Show changed file names with a status letter (A/D/M). |
 | Numstat | | `--numstat` | Show insertion/deletion counts in a machine-friendly tab-separated format. |
 | Stat | | `--stat` | Show a diffstat summary with +/- bar graph. |
+| Raw | | `--raw` | Emit Git's raw format (`:<old-mode> <new-mode> <old-sha> <new-sha> <status>\t<path>`; renames/copies emit `R<score>`/`C<score>` and both paths). |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Suppress stdout; exit code 1 if differences exist, 0 otherwise. When combined with `--output`, the file is still written. |
+| Exit code | | `--exit-code` | Exit 1 if there are differences (still printing the diff), 0 otherwise. |
+| Ignore space change | `-b` | `--ignore-space-change` | Ignore trailing whitespace and treat runs of whitespace as a single space when comparing. |
+| Ignore all space | `-w` | `--ignore-all-space` | Ignore all whitespace when comparing lines. |
+| Ignore blank lines | | `--ignore-blank-lines` | Ignore changes whose lines are all blank. |
+| Unified context | `-U` | `--unified <N>` | Show `<N>` lines of context. Priority: `-U` > `diff.context` > 3. |
+| Find renames | `-M` | `--find-renames[=<n>]` | Detect renames at an optional similarity threshold (`-M80`, `-M80%`; default 50%). |
+| Find copies | `-C` | `--find-copies[=<n>]` | Detect basic copies (source = a modified/deleted file). |
+| No renames | | `--no-renames` | Disable rename/copy detection even if enabled by config. |
+| Relative | | `--relative[=<path>]` | Restrict the diff to a subdirectory and show paths relative to it. |
+| Word diff | | `--word-diff[=<mode>]` | Word-level diff. `plain` (default) uses `[-del-]`/`{+add+}`; `color` uses ANSI. |
+| Word diff regex | | `--word-diff-regex <re>` | Word boundary regex (max 4096 bytes; also `diff.wordRegex`). |
+| Function context | `-W` | `--function-context` | Expand each hunk's context to the surrounding function boundaries. |
+
+### Configuration
+
+| Key | Type | Default | Effect |
+|-----|------|---------|--------|
+| `diff.context` | integer | `3` | Default unified context when `-U` is not given (a non-numeric value is a usage error). |
+| `diff.renames` | `false`/`true`/`copy`/`copies` | off (Libra default) | Enable rename (`true`) or rename+copy (`copy`/`copies`) detection without a flag. |
+| `diff.renameLimit` | integer | `1000` | Skip inexact rename/copy detection when `deleted × added` exceeds this (warns). |
+| `diff.wordRegex` | regex | built-in | Word boundary for `--word-diff`. |
+| `diff.noPrefix` | bool | `false` | Omit the `a/`/`b/` path prefixes in unified output. |
 
 ### Option Details
 
@@ -116,6 +139,25 @@ libra diff --stat src/
 # Save diff to a file
 libra diff --output my.patch
 
+# Ignore whitespace; widen context to 5 lines
+libra diff -w -U5
+
+# Exit 1 if there are differences (for scripts/CI)
+libra diff --exit-code
+
+# Detect renames and copies
+libra diff -M -C
+
+# Restrict to a subdirectory, paths relative to it
+libra diff --relative=src
+
+# Word-level diff and raw machine format
+libra diff --word-diff=plain
+libra diff --raw
+
+# Expand hunks to whole functions
+libra diff -W
+
 # JSON output for agents
 libra --json diff --staged
 ```
@@ -192,9 +234,15 @@ Git supports both `--staged` and `--cached` as synonyms. This duplication serves
 
 Allowing `--new` without `--old` would create an ambiguous comparison (new compared to what?). Requiring `--old` when `--new` is specified makes the comparison explicit and predictable. For the common case of comparing against HEAD, use `--staged` instead.
 
-### Why no `--word-diff` or `--color-words`?
+### `--word-diff` color is intentionally different
 
-These Git options provide alternative diff presentations that are useful for prose but rarely needed for code. Libra focuses on the unified diff format that is universally understood by tools and AI agents. Word-level diffing can be added as a future enhancement if demand warrants it.
+`--word-diff=plain` matches Git's `[-del-]`/`{+add+}` markers exactly. `--word-diff=color` reuses Libra's own colour stack, so the ANSI escape sequences are not guaranteed to be byte-identical to Git's — scripts should depend on `--word-diff=plain` (or `--raw`/`--numstat`), not on the colour encoding.
+
+### Deferred and fail-closed surface
+
+- `--cc` / `--combined` (multi-parent merge diffs) are **deferred**: Libra has no multi-parent diff engine yet, so the flag is not exposed rather than producing wrong output.
+- `.gitattributes` diff drivers and `diff.mnemonicprefix` are **deferred**.
+- `--algorithm=myers` / `myersMinimal` are **unsupported** and fail closed with `LBR-CLI-002`; only `histogram` validates (backed by git-internal's Myers implementation — the label does not switch backends).
 
 ## Parameter Comparison: Libra vs Git vs jj
 
@@ -211,16 +259,22 @@ These Git options provide alternative diff presentations that are useful for pro
 | Numeric stats | `--numstat` | `--numstat` | `--stat` (combined) |
 | Stat summary | `--stat` | `--stat` | `--stat` |
 | Summary | Not supported | `--summary` | `--summary` |
-| Word diff | Not supported | `--word-diff` / `--color-words` | N/A |
-| Binary diff | Not supported | `--binary` | N/A |
-| Context lines | Not supported | `-U<n>` / `--unified=<n>` | `--context <n>` |
-| Ignore whitespace | Not supported | `-w` / `--ignore-all-space` | N/A |
+| Raw format | `--raw` | `--raw` | N/A |
+| Word diff | `--word-diff[=plain\|color]` (color intentionally-different) | `--word-diff` / `--color-words` | N/A |
+| Binary diff | `Binary files differ` marker | `--binary` | N/A |
+| Context lines | `-U<n>` / `--unified` / `diff.context` | `-U<n>` / `--unified=<n>` | `--context <n>` |
+| Function context | `-W` / `--function-context` | `-W` / `--function-context` | N/A |
+| Ignore whitespace | `-w` / `-b` / `--ignore-blank-lines` | `-w` / `--ignore-all-space` | N/A |
+| Relative subtree | `--relative[=<path>]` | `--relative` | N/A |
 | Color | Auto (terminal detection) | `--color` / `--no-color` | `--color` / `--no-color` |
+| No prefix | `diff.noPrefix` config | `--no-prefix` / `diff.noPrefix` | N/A |
 | External diff tool | Not supported | `--ext-diff` / `--no-ext-diff` | `--tool <name>` |
 | Quiet (exit code only) | `--quiet` | `--quiet` | N/A |
+| Exit code | `--exit-code` | `--exit-code` | N/A |
 | JSON output | `--json` | Not supported | N/A |
-| Rename detection | Not supported | `-M` / `--find-renames` | Automatic |
-| Copy detection | Not supported | `-C` / `--find-copies` | N/A |
+| Rename detection | `-M` / `--find-renames` / `diff.renames` | `-M` / `--find-renames` | Automatic |
+| Copy detection | `-C` / `--find-copies` (basic) | `-C` / `--find-copies` | N/A |
+| Combined (`--cc`) | Deferred | `--cc` / `--combined` | N/A |
 | Three-dot diff | Not supported | `<A>...<B>` (merge base) | N/A |
 
 ## Error Handling

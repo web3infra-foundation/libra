@@ -7,6 +7,16 @@
 
 ## 0. TL;DR
 
+**完整性结论**：本计划作为“人工黑盒执行规范”和“runner 的需求说明”已可落地（覆盖矩阵、隔离安全模型、37 个具体场景 + 参数表 + 断言强化标准 + 输出契约 + PR/Review 协议 + 维护规则均已定义）。R0-R5 切片已全部落地：`tools/integration-runner/` 独立 crate、`list`、`check-plan`（yaml+MD+矩阵+registry 三方一致 + 收敛短形式 gate）、Wave 0 preflight、隔离 env_clear + SAFE_PATH + gitfix + gh 探针、37/37 场景（含 Wave 3 live 的 `run-live` + GhRepoCleanupGuard + delete_repo scope 预检 + 脱敏自检）的 typed Rust 执行 + 报告产出；`run --waves 0,1,2` / `run-live --only live.*` 均可执行并满足 §5 契约。check-plan 是稳定的一致性门（CI 可显式调用）。
+
+场景登记使用 `docs/development/integration-scenarios.yaml`（元数据）+ `docs/development/integration-scenarios/<id>.md`（按场景拆分的可执行步骤与断言）+ 本文件（计划总则与 §2.3 矩阵）。`check-plan` 校验 yaml ↔ 拆分 MD ↔ runner registry 一致。
+
+本次核查修正了 Agent 落地风险：每个 yaml 场景都必须在 MD 中有匹配的 `### <id>` 标题和 `SCENARIO=<id>` 代码块；config 子场景不得复用前一个场景的 `$RUN_DIR/config-repo`；`config --import` 的正向路径只放在显式 `requires_git` 的 `cli.config-import-path-edit` 场景中。
+
+Agent 仍**不得**把 Wave 1/2 全矩阵一次性作为首个实现任务；必须按 §3.3.3 的 R0-R5 切片分批交付，每批可独立验证。
+
+**推荐落地方式**：R0-R2 切片（骨架 + check-plan + 隔离运行时 + 初始 smoke）已实现；当前通过 R3+ 垂直迁移已覆盖 37/37 场景。Agent 必须按 §3.3.3 切片分批交付，每批独立可 `cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --only <ids>` + `check-plan` 全绿，产出 §5 报告，并保持黑盒边界（只执行编译后的 `libra`）。
+
 **默认阻断门**：Wave 0 编译产物可用 + Wave 1 CLI 核心版本管理场景全绿 + Wave 2 CLI 兼容/存储场景全绿。
 
 **GitHub 真实远端门**：当改动触达 `clone`、`fetch`、`pull`、`push`、`remote`、`ls-remote` 或协议层真实远端语义时，额外执行 Wave 3。Wave 3 必须用 `gh` 创建临时 GitHub 仓库，并用 `gh` 查询和删除该仓库；`libra` 只作为被测 VCS 命令访问该远端。
@@ -17,6 +27,8 @@
 - GitHub live 场景级：`live.github-create-push-clone-fetch`。
 - 命令级：引用完整 `libra <subcommand>` 调用、退出码、关键 stdout/stderr 断言和执行目录。
 - 不用 Cargo 测试目标名作为本计划的唯一引用；本计划关心用户可执行的 `libra` 行为。
+
+**runner 落地原则**：正式 runner / plan consistency check 用独立 Rust 工具实现（当前为 `tools/integration-runner/`），显式 `cargo run --manifest-path ...` 调用；不得注册到根 `Cargo.toml [[test]]`，不得混入当前 `tests/` 集成测试体系。场景注册以 `docs/development/integration-scenarios.yaml`（结构化清单）为主要事实来源，MD 仅作为人类可读的可执行文档与示例；当前 `check-plan` 已验证 yaml 清单、MD 章节/`SCENARIO=`、§2.3 矩阵引用、Wave 3 gh 规则和已实现子集，断言强化模式的深度校验仍随 R3+ 逐步补齐。
 
 **常用命令**：
 
@@ -75,6 +87,12 @@ gh repo view "$REPO" --json nameWithOwner,sshUrl,url
 - **完整矩阵**：仅在 PR 改动触达对应命令组、或准备提交前由 runner / 长时间手工执行。
 - 所有执行必须严格使用 §3.3.1 的 `libra()`（含 `TMPDIR` + 智能 `SAFE_PATH`）；第 4 章内联 wrapper 若与 §3.3.1 不一致，以 §3.3.1 为准并必须先修正文档/runner。
 
+**Agent 生成计划时的硬边界**：
+- 第一批任务已实现 `tools/integration-runner/`、`check-plan`（含 yaml 加载 + MD 交叉校验）、`list`、`run --only`、Wave 0 preflight 和 3 个 smoke 场景（R0-R2）；后续仍不得承诺一次性自动化全部 §4 场景。
+- 必须把未完成的 `BASELINE_GAP-INTEG-*` 当作 backlog，而不是已完成能力；当前 `check-plan` 可用于 yaml+MD+矩阵+runner 已实现子集的一致性结果，但不能代表 Wave 1/2 全矩阵已自动执行。
+- Agent 产出的 issue/任务必须以“可单独运行并验证的垂直切片”（R0/R1/R2...）为单位，不能按模块名大包拆分。新增场景必须包含 yaml 登记 + MD 章节。
+- Scope 里必须显式包含 `integration-scenarios.yaml` 当场景元数据或列表变化时。
+
 ---
 
 ## 1. 现状基线
@@ -87,7 +105,7 @@ gh repo view "$REPO" --json nameWithOwner,sshUrl,url
 | 本地仓库状态 | 已存在 | `.libra/libra.db`、`.libra/objects`、工作区文件 |
 | 文档一致性检查 | 已落地（去脚本化） | Code UI 路由 ↔ `docs/commands/code-control.md` 覆盖检查在 `tests/compat/matrix_alignment.rs::docs_consistency_covers_code_ui_router_matrix`；仓库无 `scripts/` 目录 |
 | 兼容矩阵一致性检查 | 已落地（去脚本化） | `COMPATIBILITY.md` ↔ `src/cli.rs::Commands` 漂移检查在 `tests/compat/matrix_alignment.rs::compatibility_matrix_matches_cli_commands`；CI 以 `cargo test --test compat_matrix_alignment` 运行 |
-| 集成计划自检脚本 | 缺口 | 集成计划场景清单的自动一致性校验仍未落地（一直未实现，非脚本移除）；见 BASELINE_GAP-INTEG-008 |
+| 集成计划自检工具 | R0-R5 + 37/37 场景已落地 | `docs/development/integration-scenarios.yaml` 是 runner / check-plan 的**唯一事实来源**（id、wave、gh_required、key_assertion_categories 等）；`tools/integration-runner` 提供 `check-plan`（结构一致性 + gh 规则 + 矩阵引用 + implemented 子集收敛 gate）和可执行 `run --only` / `run-live --only`，产出 §5 report。当前 37 个场景均有完整 Rust typed 实现 + 断言；compat_matrix_alignment 已去脚本化落地。 |
 | GitHub CLI 操作面 | 外部前置条件 | Wave 3 使用 `gh auth status`、`gh repo create`、`gh repo view`、`gh api`、`gh repo delete` |
 | 覆盖矩阵 + 安全清单 | 本次改进新增 | §2.3 命令覆盖矩阵 + §3.6 安全自检清单（重点解决覆盖完整性与测试环境安全问题） |
 
@@ -139,7 +157,7 @@ gh repo view "$REPO" --json nameWithOwner,sshUrl,url
 - `symbolic-ref` 仅支持 HEAD（其他符号引用因 SQLite 存储被拒绝）。
 - 这些必须出现在对应场景的负向步骤或专用小节中；新增故意差异时必须同步矩阵备注 + 断言。
 
-**与 tests/INDEX.md 关系**：Cargo 集成测试（Wave 1/2）提供 L1 确定性保障；本计划的黑盒 CLI 场景是用户视角的补充门。未来应通过一个集成计划一致性检查（自包含 Rust 测试或 CI 步骤，仿照 `tests/compat/matrix_alignment.rs` 的去脚本化做法，而非新建 `scripts/`）保持引用一致；该检查未落地前按 BASELINE_GAP-INTEG-008 记录为未自动校验。
+**与 tests/INDEX.md 关系**：Cargo 集成测试（Wave 1/2）提供 L1 确定性保障；本计划的黑盒 CLI 场景是用户视角的补充门，必须与当前 `tests/` 体系分开维护。`tests/INDEX.md` 只索引 Cargo `--test` 目标，不是本计划的场景 registry；若它与实际 `tests/*.rs` 暂时存在漂移，也不应影响本计划 runner 的场景清单。未来的集成计划一致性检查应落在独立 Rust runner/tool 的 `check-plan` 子命令中，CI 可显式运行该工具，但**不得注册到根 `Cargo.toml [[test]]`、不得进入 `cargo test --all` 默认测试集、不得写入 `tests/INDEX.md`**；该检查未落地前按 BASELINE_GAP-INTEG-008 记录为未自动校验。
 
 **断言强化标准（Assertion Strengthening Standard）**：为确保 Agent 可解析性、安全隔离验证和 Git 兼容性，所有场景最终应逐步纳入以下可执行断言模式（已在 `cli.commit-status-log`、`cli.cross-cutting-flags`、`cli.tag-basic` 等场景示范）：
 - 成功路径：至少一个 `--json`（或 `--machine`）调用 + `python3 -c "import json; d=...; assert d['ok'] is True; assert 'data' in d"`（ndjson 场景用逐行解析）。
@@ -147,7 +165,7 @@ gh repo view "$REPO" --json nameWithOwner,sshUrl,url
 - 状态一致性：关键 mutating 操作后执行 `libra fsck --connectivity-only`（0 退出）或 `libra --json show-ref --heads` 验证 refs 健康。
 - 隔离验证：涉及 config/vault/global 的场景，操作后用隔离 `LIBRA_CONFIG_GLOBAL_DB` 或 HOME 执行 `libra config --global list` 验证无本场景残留（或显式检查文件不存在）。
 - 故意差异：COMPATIBILITY.md 中的 intentionally-different 行为必须有正面 `test` / `grep` / JSON 断言（例如 worktree remove 后目录仍存在、push 拒绝本地文件 remote）。
-- 冲突/历史场景：冲突标记（`<<<<<<<`）、`libra --json status` 中 `data.merge_state.conflicted_paths[]` 非空、--continue 后该字段缺失或为空必须可脚本断言；不得引用 Git-only 顶层 `ls-files`。
+- 冲突/历史场景：冲突标记（`<<<<<<<`）、`libra --json status` 中 `data.merge_state.conflicted_paths[]` 非空、--continue 后该字段缺失或为空必须可自动断言；不得引用 Git-only 顶层 `ls-files`。
 - 所有断言必须在 `libra()` 包装下执行，且使用 `$RUN_ROOT` 下的文件/输出，避免依赖主机状态。
 
 本标准随 runner 落地将逐步自动化。当前 PR 贡献新场景时至少应包含 JSON envelope + 1 个 LBR- 错误验证 + fsck。
@@ -160,6 +178,26 @@ gh repo view "$REPO" --json nameWithOwner,sshUrl,url
 - `cli.cross-cutting-flags`（先前已强化错误 JSON）
 
 其余场景（config/*、init/* 变体、push-local-file-remote-rejected、clone 系列、schema、verify-pack、sha256、open、Wave 3 live.github-* 等）请对照本标准逐一补充相同模式的断言。目标：每个场景的“断言”部分最终都包含可直接在 `libra()` 下执行的 python/shell 检查，而非仅描述性文字。
+
+### 2.4 Scenario Registry（结构化清单）
+
+**三文件模型**（yaml 元数据 + 按场景拆分的可执行文档 + 计划总则）：
+
+- `docs/development/integration-scenarios.yaml`：**机器可读的事实来源**（registry）。包含全部 `cli.*` / `live.github-*` 的 id、wave、group、purpose、gh_required、requires_git、key_assertion_categories 等。runner 的 `list`、`check-plan`、`run --waves` 必须以本文件为准。
+- `docs/development/integration-scenarios/<id>.md`：**按场景拆分的可执行文档**（每个 id 一份）。必须包含 `### `<id>`` 标题、`SCENARIO="<id>"` 代码块、步骤与断言；跨命令参数矩阵在 [`integration-scenarios/_parameter-tables.md`](integration-scenarios/_parameter-tables.md)。索引见 [`integration-scenarios/README.md`](integration-scenarios/README.md)。
+- `docs/development/integration-test-plan.md`：**计划总则**（范围、§2.3 覆盖矩阵、§3 隔离与安全、§5 报告契约、PR 协议、BASELINE_GAP）。§4 仅保留 Wave 索引，不再内联 37 份场景正文。
+
+**添加/修改场景时的契约**（必须同步更新，见 §0 的完整 "Agent 添加/迁移场景的落地 checklist"）：
+1. **必须先**在 `integration-scenarios.yaml` 新增/修改条目（必须填写 wave、gh_required、requires_git、key_assertion_categories、doc_section=id）。
+2. 新增或更新 `docs/development/integration-scenarios/<id>.md`（短形式步骤 + 覆盖 key_assertion_categories 的补充断言；禁止无收敛说明的长 `libra() {` 块）。
+3. 若触达新命令或 compat 语义，同步更新 §2.3 覆盖矩阵 + `COMPATIBILITY.md` + `docs/commands/<cmd>.md` + 运行 `cargo test --test compat_matrix_alignment`。
+4. **必须**在 `tools/integration-runner/src/registry.rs` 的 `scenario_registry()` 增加条目，并在 `tools/integration-runner/src/scenarios/<id>.rs` 实现 `scenario_*`（见 §3.3.3）。
+5. 任何 PR 必须让 `check-plan` 全绿 + `run --only <id>`（或批）全绿，并按 §8.1 填写 Test Plan。
+
+`check-plan` 职责：
+- 加载 yaml；扫描 `integration-scenarios/*.md`（`cli.*` / `live.*`）确认标题与 `SCENARIO=` 与 yaml 一致。
+- 交叉检查 §2.3 矩阵引用的场景 id；对比 `scenario_registry()` 已实现子集。
+- 验证 gh_required 仅出现在 Wave 3；已实现场景的 MD 须为短形式收敛。
 
 ---
 
@@ -192,7 +230,7 @@ command -v gh     # Wave 3 需要
 cargo test --test compat_matrix_alignment
 ```
 
-通过标准：`target/debug/libra` 存在且可执行；`--version` 和 `--help` 退出码为 0；格式、lint 通过；**`git` 与 `ssh` 可在 §3.3.1 收窄后的 `PATH` 中解析到**（否则按 §3.3.0 追加其所在目录，或把依赖 git/ssh 的场景标记 skip 并记录原因，而不是当作 libra 行为失败）；`compat_matrix_alignment` 测试通过（兼容矩阵与 Code UI docs 一致性的去脚本化检查）；集成计划场景清单的自动一致性校验仍未落地，按 BASELINE_GAP-INTEG-008 记录为缺口而不是假装已验证。
+通过标准：`target/debug/libra` 存在且可执行；`--version` 和 `--help` 退出码为 0；格式、lint 通过；**`git` 与 `ssh` 可在 §3.3.1 收窄后的 `PATH` 中解析到**（否则按 §3.3.0 追加其所在目录，或把依赖 git/ssh 的场景标记 skip 并记录原因，而不是当作 libra 行为失败）；`compat_matrix_alignment` 测试通过（兼容矩阵与 Code UI docs 一致性的去脚本化检查）；`integration-scenarios.yaml` 存在且包含所有当前 Wave 场景；`cargo run --manifest-path tools/integration-runner/Cargo.toml -- check-plan` 通过 yaml + MD + 矩阵 + runner 已实现子集一致性检查。
 
 ### 3.2 CLI 场景执行约束
 
@@ -331,7 +369,52 @@ libra config set user.name "Test User"
 # 成功可 rm -rf "$RUN_ROOT"
 ```
 
-> **关于 §4 的内联 `libra()` 包装**：第 4 章保留了若干可复制的 `libra()` 包装函数；它们必须与本模板语义一致：`PATH` 只能来自 `SAFE_PATH` 或安全默认值，必须显式注入 `TMPDIR="$RUN_ROOT/tmp"`，并且必须继续使用 `env -i` 白名单环境。runner 落地后应把这些副本收敛到同一份 prelude（见 BASELINE_GAP-INTEG-001），避免 N 份副本各自漂移。
+**手动执行 prelude（每轮 RUN_ROOT 复制一次）** — 已与 §3.3.1 模板完全一致，后续 §4 场景不再重复粘贴长 wrapper：
+
+```bash
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+RUN_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/libra-integ-$RUN_ID.XXXXXX")"
+mkdir -p "$RUN_ROOT"/{home,xdg-config,xdg-cache,repos,fixtures,logs,artifacts,tmp}
+BINARY="$(pwd)/target/debug/libra"
+
+SAFE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+for t in git ssh; do
+  b="$(command -v $t || true)"
+  case ":$SAFE_PATH:" in *":$(dirname "${b:-/usr/bin/$t}"):"*) ;; *)
+    [ -n "$b" ] && SAFE_PATH="$SAFE_PATH:$(dirname "$b")" ;; esac
+done
+
+libra() {
+  env -i PATH="$SAFE_PATH" HOME="$RUN_ROOT/home" USERPROFILE="$RUN_ROOT/home" \
+    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
+    TMPDIR="$RUN_ROOT/tmp" LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
+    LIBRA_TEST=1 LANG=C LC_ALL=C "$BINARY" "$@"
+}
+gitfix() {
+  env -i PATH="$SAFE_PATH" HOME="$RUN_ROOT/home" USERPROFILE="$RUN_ROOT/home" \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null TMPDIR="$RUN_ROOT/tmp" \
+    GIT_AUTHOR_NAME="Libra Fixture" GIT_AUTHOR_EMAIL="fixture@example.invalid" \
+    GIT_COMMITTER_NAME="Libra Fixture" GIT_COMMITTER_EMAIL="fixture@example.invalid" \
+    LANG=C LC_ALL=C git "$@"
+}
+```
+
+> **收敛后的 §4 编写规范（进一步收敛，2026-06 更新）**：为消除几十处重复 wrapper 造成的漂移风险和维护负担，§4 场景现在**只保留 SCENARIO / RUN_DIR / 特有命令 + 断言**。公共的 RUN_ROOT 创建、SAFE_PATH 解析（含 git/ssh）、`libra()` 和 `gitfix()` 定义全部收敛到本节 §3.3.1 的**单一规范模板**（Canonical Safe Invocation）。
+当前所有 Rust registry 中实现的场景（~36 个，live.github 除外） 的 MD 章节均已收敛为短形式；check-plan 中的 convergence gate 会在新增 Rust 实现时强制 MD 也使用短形式（否则失败）。
+>
+> **人工执行时**：在每个 RUN_ROOT 开头复制一次 §3.3.1 的“标准前置 + SAFE_PATH + libra() + gitfix()”块（或直接复制下面“手动执行 prelude（每轮一次）”）。之后每个场景只需写本场景的 SCENARIO / RUN_DIR / mkdir/cd + 命令（不要重复长 wrapper）。示例（用真实 id 替换占位）：
+> ```bash
+> SCENARIO="PLACEHOLDER-USE-REAL-CLI-ID"   # 实际使用时替换为真实 "cli.config-..." 等（必须与 yaml 一致）
+> RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
+> mkdir -p "$RUN_DIR"
+> cd "$RUN_DIR"
+> # 直接使用已定义的 libra() / gitfix()
+> libra init ...
+> ...
+> ```
+> 所有场景的 wrapper 都必须与 §3.3.1 模板**语义一致**（env -i + 白名单 + TMPDIR + SAFE_PATH git/ssh 感知）。runner 完全不解析 MD 里的 wrapper，它有自己的 Rust 隔离实现（见 tools/integration-runner）。
+>
+> 这直接落实了 BASELINE_GAP-INTEG-001 的“收敛 N 份副本”的要求，也让 Agent 生成计划时只需关注场景特有逻辑，而非重复粘贴 15 行 env。
 
 **违规示例（严禁出现在本计划或 runner 中）**：
 - 裸 `mktemp` + 直接 `"$BINARY" cmd`（无 `env -i` + HOME/XDG/LIBRA_* 隔离）
@@ -380,6 +463,116 @@ libra config set user.name "Test User"
 
 清理 `$RUN_ROOT` 前必须先离开该目录；否则当前 shell 的 cwd 会变成已删除目录，后续相对路径命令可能产生误导性失败。
 
+### 3.3.3 Rust runner 实现边界与目录结构
+
+正式落地时，runner 的核心功能应使用 Rust 开发，但它不是 Cargo 集成测试。它是一个独立开发工具，职责是编排黑盒 CLI 场景、隔离环境、记录日志、生成报告和做计划一致性检查；被测对象始终是同一个编译后的 `libra` 二进制。
+
+#### Runner 架构决策
+
+runner **不得**把 Markdown 代码块当作执行源。MD 里的 bash 片段服务于人工复现和 reviewer 阅读；正式执行必须来自 Rust typed scenario registry。原因：
+
+1. Markdown 代码块包含 wrapper 函数、注释、`cd` 状态、负向 `!`、多行 heredoc、trap 和人工说明，解析为可靠 Step model 的复杂度接近重新实现 shell。
+2. 直接执行文档片段会让安全边界依赖文本格式，容易绕过 `env_clear()`、日志脱敏、失败分类和 cleanup guard。
+3. Agent 生成计划需要稳定的任务边界：yaml 定义“有哪些场景”，Rust registry 定义“如何执行”，MD 定义“为什么和如何人工复现”。三者由 `check-plan` 校验一致，而不是让 MD 成为唯一可执行程序。
+
+因此正式 runner 的职责划分是：
+
+- `integration-scenarios.yaml`：场景清单事实来源，提供 id、wave、requires_git、gh_required、断言类别等元数据。
+- `tools/integration-runner/src/registry.rs` + `scenarios/*`：typed Step / Assertion 实现来源，执行时只调用编译后的 `libra` 二进制。
+- `integration-test-plan.md`：人工可读规范、bash 复现参考、参数覆盖表、review 协议和 gap 记录。
+- `check-plan`：校验 yaml id、MD 章节/`SCENARIO=`、§2.3 矩阵引用、Rust registry 已实现子集、Wave 3/gh 规则和断言类别，不负责执行 Markdown。
+
+#### Agent 可执行落地切片（Implementation Slices）
+
+为了让 Agent 能稳定生成计划并分批实现，runner 必须按以下垂直切片交付。每个切片都要能独立验证，不能只提交未接入的模型类型或空 registry。
+
+| Slice | 交付内容 | 最小场景 | 验证命令 | 完成标准 |
+|---|---|---|---|---|
+| R0：工具骨架 | `tools/integration-runner/` crate、CLI 解析、`--help`、`list`、`check-plan`；**必须加载 `docs/development/integration-scenarios.yaml` 作为场景清单事实来源**，能解析 yaml + 交叉验证 MD 对应章节 | 无 | `cargo run --manifest-path tools/integration-runner/Cargo.toml -- --help`；`cargo run --manifest-path tools/integration-runner/Cargo.toml -- list` | 不进入根 `Cargo.toml [[test]]`；`list` 必须输出 yaml 里的全部 id（含 wave）；`check-plan` 必须报告“yaml 定义但 MD 缺章节”或“MD 有场景但 yaml 未登记”，而不是静默通过 |
+| R1：Wave 0 preflight | 二进制定位/构建、`env_clear()` 白名单环境、SAFE_PATH git/ssh 解析、RUN_ROOT 创建、日志目录 | `wave0.build-and-help`（runner 内部 preflight，不是 §4 CLI 场景） | `cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --waves 0` | 产出 `report.json`、`summary.md`、`results.ndjson`；失败时包含命令、退出码、stderr tail |
+| R2：最小 CLI smoke | Step/Assertion 模型、typed Rust registry、`run --only`、JSON 断言、stderr/LBR 断言、fsck 断言 | `cli.init-basic`、`cli.config-basic-kv`、`cli.commit-status-log` | `cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --only cli.init-basic,cli.config-basic-kv,cli.commit-status-log` | 三个场景全走编译后的 `target/debug/libra`；无裸 `git`；所有命令日志脱敏 |
+| R3：本地协议与对象 | `gitfix()` 等价 fixture、文件断言、ref/object 断言、env-skip 分类 | `cli.object-readback`、`cli.clone-fetch-pull-local`、`cli.push-local-file-remote-rejected` | `cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --waves 2 --only ...` | git 缺失时为 `env-skip`；本地 file remote push 拒绝有正向断言 |
+| R4：Wave 1 批量迁移 | 逐批迁移 §4.1 场景，保持每批 ≤5 个场景 | 按命令组拆分 | `run --waves 1` 的已注册子集 | `check-plan` 能区分“yaml/MD 已定义但未迁移”和“runner 已覆盖” |
+| R5：Wave 3 live | `run-live`、`gh` preflight（含 delete_repo scope）、GitHub repo 自动创建/查询/删除、Rust GhRepoCleanupGuard + disarm、ctx.gh（host auth）、Wave 3 脱敏前置 + 报告 cleanup 字段 | `live.github-create-push-clone-fetch` | `cargo run --manifest-path tools/integration-runner/Cargo.toml -- run-live --only live.github-create-push-clone-fetch` | 无 delete_repo scope 时 preflight 直接 skip（不创建）；成功/失败均记录 cleanup 状态；绝不输出 token；guard 兜底 delete |
+
+Agent 生成实现计划时，默认只规划下一到两个 slice。若要求“补全集成测试 runner”，也必须拆成上述 slices 并先落 R0-R2；R3 以后按改动风险或 reviewer 要求追加。
+
+#### Agent 任务输入/输出契约
+
+给 Agent 派发本计划相关任务时，推荐使用以下输入格式，避免把本文件误读成一次性大改：
+
+```text
+Goal: implement integration runner slice <R0|R1|R2|...>
+Scope: only tools/integration-runner/** and docs/development/integration-scenarios.yaml + docs/development/integration-test-plan.md if contract or scenario metadata changes
+Must not: add root Cargo.toml [[test]], modify tests/INDEX.md for runner scenarios, call libra internals directly, use cargo test target names as runner scenarios
+Required scenarios: <scenario ids from yaml>
+Verification: <exact cargo run --manifest-path ... commands>
+Expected report fields: report.json, summary.md, failures.md, results.ndjson
+Registry contract: runner must treat integration-scenarios.yaml as the list of truth for `list` and wave selection; check-plan must validate yaml vs MD headings vs implemented registry keys
+```
+
+Agent 输出必须包含：变更文件、已实现 slice、已注册场景、运行命令与结果、未完成的 `BASELINE_GAP-INTEG-*`。如果只完成 R0/R1，不得声称 Wave 1/2 默认门已自动化。
+
+**Agent 添加/迁移场景的落地 checklist（必须严格遵守，否则 check-plan 或 run 会失败）**：
+1. **先编辑事实来源**：在 `docs/development/integration-scenarios.yaml` 新增/修改条目（必须包含 id、wave、group、purpose、gh_required、requires_git、key_assertion_categories、doc_section=id）。
+2. **同步 MD 人类文档**：在 `docs/development/integration-scenarios/<id>.md` 添加/更新 `### `<id>`` 完整章节，必须包含：
+   - 以 `SCENARIO=...` 形式出现的场景 ID 赋值行（必须与 yaml id 精确一致；实际 bash 代码块中使用真实 "cli.xxx"）
+   - 遵循 §3.3.1 的 `libra()` / `gitfix()` 规范模板（env -i + SAFE_PATH + TMPDIR）
+   - 最小步骤 + 负向步骤
+   - 至少覆盖该场景 key_assertion_categories 的“补充可执行断言”（JSON envelope + fsck + LBR-/negative + 隔离验证等；参见 §2.3 标准和 cli.commit-status-log 示范）
+   - 参数覆盖表（如适用）
+3. **如触达新命令或 compat 语义**：同步更新 §2.3 覆盖矩阵 + 运行 `cargo test --test compat_matrix_alignment`。
+4. **实现 Rust 执行（单一注册点，已模块化）**：只在 `tools/integration-runner/src/registry.rs` 的 `scenario_registry()` 数组里增加一行 `("cli.xxx", scenario_xxx),`，并在 `tools/integration-runner/src/scenarios/<sanitized-id>.rs` 实现对应的 `pub(crate) fn scenario_xxx(ctx: &mut ScenarioCtx) -> Result<()> { ... }`。
+   - 使用 `ctx.command` / `ctx.gitfix` / `ctx.command_with_stdin` + `assert_json_ok` 等 helper。
+   - 必须实际触发该 id 在 yaml 里声明的 `key_assertion_categories`（断言强化标准）。
+   - 旧的“三个注册点”（const + match + fn）已收敛为 registry 数组 + fn 实现。
+5. **MD 场景文档使用短形式（进一步收敛）**：新增/修改的 `docs/development/integration-scenarios/<id>.md` 必须使用短形式（只写 SCENARIO + RUN_DIR + mkdir/cd + 特有命令/断言），不要重复粘贴长 `libra()` wrapper 或 RUN_ROOT 创建。长 wrapper 只存在于 prelude 块和少量示范场景中。
+6. **验证**：
+   - `cargo run --manifest-path tools/integration-runner/Cargo.toml -- check-plan` 必须 0 退出。
+   - `cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --only <new-id>[,...]` 全绿 + 报告符合 §5。
+   - 产出物不得含 secret，隔离正确。
+7. **PR Test Plan stanza** 必须按 §8.1 列出受影响场景 + results + commit sha。
+
+**当前 Rust 注册点（已进一步收敛，单一站点）**：
+- 唯一站点是 `tools/integration-runner/src/registry.rs::scenario_registry()` 返回的 static 数组（包含所有 `("cli.xxx", ...)` + live.*）。添加新场景只需在此数组加一行 + 在 `src/scenarios/*.rs` 实现对应 fn。
+- check-plan（implemented 集合）和 run/run-live 调度都只读取这个 registry。
+- runner 入口已经拆分：`main.rs` 只负责 clap dispatch；`manifest.rs`/`plan.rs` 负责清单与收敛检查；`runner/` 负责执行上下文、普通 run 与 live run；`scenarios/` 每个场景一个文件。
+- 另见上方 checklist 第4点和 runner 源码里的 `scenario_registry()` 注释。
+
+当前目录结构：
+
+```text
+tools/integration-runner/
+  Cargo.toml              # 独立工具 crate；不加入根 Cargo.toml [[test]]
+  README.md
+  src/
+    main.rs               # CLI parse + 子命令 dispatch
+    cli.rs                # clap 命令面
+    manifest.rs           # integration-scenarios.yaml 读取
+    plan.rs               # check-plan 收敛 gate
+    registry.rs           # 唯一 scenario_registry() 实现清单
+    runner/               # run/run-live 调度、ScenarioCtx、报告和命令执行 harness
+    scenarios/            # 每个 scenario_* 一个文件，shared.rs 放共享 fixture helper
+```
+
+调用约定：
+
+```bash
+# 显式运行，不进入 cargo test --all，也不注册到根 Cargo.toml [[test]]
+cargo run --manifest-path tools/integration-runner/Cargo.toml -- check-plan
+cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --waves 0,1,2
+cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --only cli.commit-status-log
+cargo run --manifest-path tools/integration-runner/Cargo.toml -- run-live --only live.github-create-push-clone-fetch
+```
+
+工程边界：
+
+1. `tools/integration-runner/` 与 `tests/` 分开；不要新增 `tests/integration_runner*.rs`，不要把 `plan_check` 注册成 `[[test]]`。
+2. 根 `Cargo.toml` 不新增 runner 的 `[[test]]` 条目；如 CI 需要门控，使用显式 `cargo run --manifest-path tools/integration-runner/Cargo.toml -- check-plan` 或 `run` 步骤。
+3. runner 可以有自己的 `Cargo.toml` 和依赖，但不应把主 crate 的内部模块当库直接调用；它通过进程执行 `target/debug/libra`，保持黑盒边界。
+4. shell 代码块仍可作为场景文档和人工复现示例；正式 runner 中的核心执行、日志、脱敏、报告、计划检查和 GitHub cleanup 逻辑必须在 Rust 中实现。
+5. 若未来需要复用 runner 逻辑，优先在 `tools/integration-runner/src/lib.rs` 内抽模块，不把这些 helper 混入 `src/` 生产代码或现有 `tests/command/` helper。
+
 ### 3.4 GitHub live 场景执行约束
 
 每个 Wave 3 场景必须遵守：
@@ -423,7 +616,7 @@ grep -rolE \
 **Wave 3 GitHub 安全（必须）**：
 - [ ] 运行前 `gh auth status --active --hostname github.com` 通过
 - [ ] 仅用 `gh repo create --private` 创建 `libra-integ-*` 临时私有仓库
-- [ ] 远端 URL 来自 `gh repo view --json sshUrl`（或有记录的 HTTPS 认证源）
+- [ ] 远端 URL来自 `gh repo view --json sshUrl`（或有记录的 HTTPS 认证源）
 - [ ] 若依赖 `SSH_AUTH_SOCK`，PR/Test Plan 明确记录使用的是主机 SSH agent；若不依赖，则显式清空并使用测试专用认证来源
 - [ ] 所有 `gh` 操作 + `libra` 操作的日志不输出 secret
 - [ ] 使用 `trap 'gh repo delete "$REPO" --yes' EXIT` 或等价强制清理
@@ -451,7 +644,7 @@ Wave 0 始终默认执行，下表只列额外需要跑的 CLI 场景 wave。
 | `src/internal/db.rs`、`src/internal/db/**`、`sql/**`、`src/internal/model/**` | 2 | 1，若 CLI 输出变化 |
 | `Cargo.toml`、`Cargo.lock`、`build.rs` | 0, 1, 2 | 确认 `libra` 二进制仍可构建和执行 |
 | `docs/**`、`README.md`、`COMPATIBILITY.md` | 0 | 1，若改动命令/兼容矩阵语义；同步 §2.3 矩阵 |
-| `tests/**` | 对应 wave | 只在其影响 CLI 场景或辅助脚本时纳入 |
+| `tests/**` | 对应 wave | 只在其影响 CLI 场景或 runner 辅助逻辑时纳入 |
 | `src/command/{clone,fetch,pull,push,remote,ls_remote}.rs` | 1, 2 | 3，若行为需要真实 GitHub 远端确认 |
 | `src/command/{lfs,fsck,cat_file,verify_pack,symbolic_ref,shortlog,describe,open}.rs` | 1 | 2 |
 
@@ -459,2713 +652,22 @@ Wave 0 始终默认执行，下表只列额外需要跑的 CLI 场景 wave。
 
 ## 4. 执行波次
 
+> **按场景拆分**：每个 `cli.*` / `live.*` 的可执行步骤、断言与负向用例在 [`integration-scenarios/`](integration-scenarios/README.md) 下独立成文（`integration-scenarios/<id>.md`）。本节只保留 Wave 结构与索引；`check-plan` 扫描该目录而非本文件内联章节。
+
 Wave 1 覆盖单仓库、无网络、无外部服务的核心版本管理闭环。
 
-### `cli.config-basic-kv`
+### 4.1 Wave 1：CLI 核心版本管理场景（必跑）
 
-目的：覆盖 `config set/get/list/unset` 子命令、位置参数 `key`、位置参数 `value`，以及默认 local scope。
+完整步骤与断言见 [`integration-scenarios/README.md#wave-1`](integration-scenarios/README.md#wave-1)。参数覆盖表见 [`integration-scenarios/_parameter-tables.md`](integration-scenarios/_parameter-tables.md)。
 
-最小步骤：
+### 4.2 Wave 2：CLI 存储、schema 与本地协议场景（必跑）
 
-```bash
-SCENARIO="cli.config-basic-kv"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init config-repo
-cd config-repo
+完整步骤与断言见 [`integration-scenarios/README.md#wave-2`](integration-scenarios/README.md#wave-2)。
 
-libra config set user.name "Libra Config Test"
-libra config get user.name
-libra config list
-libra config unset user.name
-! libra config get user.name
-libra config get --default fallback user.name
-```
+### 4.3 Wave 3：GitHub 真实远端场景（按需运行）
 
-断言：`set` 后 `get` 输出设置值；`list` 包含 `user.name=Libra Config Test` 或等价 key/value 输出；`unset` 后普通 `get` 按缺失语义非 0 或无值，带 `--default` 返回 fallback。
+完整步骤与断言见 [`integration-scenarios/README.md#wave-3`](integration-scenarios/README.md#wave-3)。执行约束仍遵守 §3.4 与 §3.6。
 
-补充可执行断言（config 家族基础模式）：
-- `libra --json config get user.name` 必须返回 `ok:true`，且 `data.value == "Libra Config Test"`。
-- `libra --json config list` 解析验证 `data.entries[]` 或等价结构包含本场景设置的 key。
-- unset 后 `libra config get --default fallback user.name` 必须输出 fallback 且退出码 0。
-- 整个场景操作后，用隔离 `LIBRA_CONFIG_GLOBAL_DB` 执行 `libra config --global list` 不得残留本场景的 user.name（严格隔离验证）。
-- 负向 `libra config get 不存在的key` 必须非 0，可选捕获 stderr 验证错误文本或 LBR- 码。
-
-### `cli.config-scopes`
-
-目的：覆盖 `--local`、`--global`、`--system` scope flags。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.config-scopes"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-mkdir -p isolated-home
-libra init scope-a
-libra init scope-b
-
-cd "$RUN_DIR/scope-a"
-libra config --local set test.scope local-a
-libra config --global set test.scope global-value
-libra config --local get test.scope
-libra config --global get test.scope
-
-cd "$RUN_DIR/scope-b"
-libra config --global get test.scope
-! libra config --local get test.scope
-! libra config --system list
-```
-
-断言：local key 只在当前 repo 可见；global key 在隔离 HOME 下跨 repo 可见；`--system` 当前为移除/拒绝路径，必须非 0 退出并给出不支持或不可用的明确错误；场景不得写入真实用户全局配置。
-
-补充可执行断言：
-- 使用隔离 global DB 验证 `--global set` 后在另一个 repo 中 `libra config --global get` 可见，而 `--local` 不可见。
-- `! libra config --system list` 的 stderr 必须包含 "不支持" / "system" 或对应 LBR- 错误标识。
-- 操作后用隔离 HOME + global DB 再次 `libra config --global list` 验证只有本场景设置的 global key，无其他污染。
-
-### `cli.config-set-input-and-encryption`
-
-目的：覆盖 `set` 子命令的 `--add`、`--encrypt`、`--plaintext`、`--stdin` 参数，以及敏感 key 的保护输入行为。
-
-最小步骤：
-
-```bash
-cd "$RUN_DIR/config-repo"
-
-libra config set --add remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
-libra config set --add remote.origin.fetch "+refs/tags/*:refs/tags/*"
-libra config get --all remote.origin.fetch
-
-printf 'stdin-value\n' | libra config set --stdin custom.stdin
-libra config get custom.stdin
-
-libra config set --encrypt custom.secret "s3cr3t"
-libra config get custom.secret
-libra config get --reveal custom.secret
-
-libra config set --plaintext custom.plain "plain-value"
-libra config get custom.plain
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR/config-repo"
-! libra config set --encrypt --plaintext custom.bad value
-! libra config set --stdin custom.bad value
-! libra config set --plaintext vault.env.TEST_SECRET value
-```
-
-断言：`--add` 允许同 key 多值，`get --all` 能看到全部值；`--stdin` 去掉末尾换行并保存；`--encrypt` 默认 `get` 不泄露明文，`get --reveal` 才输出明文；`--plaintext` 保存普通明文；互斥/非法组合必须非 0 退出且不写入坏状态。
-
-补充可执行断言：
-- `libra --json config get --all remote.origin.fetch` 必须返回 `ok:true`，且 `data.entries[]` 长度 ≥2。
-- `--encrypt` 后普通 `libra --json config get custom.secret` 必须成功但不返回明文（或返回 masked）；加 `--reveal` 才返回真实值。
-- `--stdin` 后验证值不带末尾换行（`libra config get | wc -l` 验证）。
-- 非法组合（如 `--encrypt --plaintext`）必须非 0，且不写入任何配置。
-- 操作后用隔离 global DB 验证无泄露。
-
-### `cli.config-get-default-and-patterns`
-
-目的：覆盖 `get` 子命令的 `--all`、`--reveal`、`--regexp`、`-d/--default`，以及 Git 兼容隐藏 flag `--get`、`--get-all`、`--get-regexp`。
-
-最小步骤：
-
-```bash
-cd "$RUN_DIR/config-repo"
-
-libra config set user.name "Pattern User"
-libra config set user.email "pattern@example.invalid"
-libra config set core.editor vim
-
-libra config get user.name
-libra config --get user.name
-libra config get --default fallback missing.key
-libra config get -d fallback-short missing.short
-libra config get --regexp '^user\\.'
-libra config --get-regexp '^user\\.'
-libra config --get-all remote.origin.fetch
-```
-
-断言：普通 get 与 `--get` 输出一致；缺失 key 带 default 时退出码为 0 并输出 fallback；regexp 只输出匹配 key；`--get-all` 覆盖多值 key。隐藏 flag 是兼容 invocation 覆盖，不要求出现在 `config --help`。
-
-补充可执行断言（Agent 非常常用）：
-- `libra --json config get --default fallback missing.key` 必须 `ok:true`，且 `data.value == "fallback"`、`data.default_applied == true`。
-- `libra --json config --get-regexp '^user\.'` 返回 `data.entries[]`，所有 entry 的 `key` 以 `user.` 开头。
-- 普通 `libra --json config get user.name` 与 `libra --json config --get user.name` 结果等价。
-- 非法 `--default` 与非 get 组合必须失败。
-- 验证 `--json` 输出结构稳定（"ok", "data" 字段存在）。
-
-### `cli.config-list-variants`
-
-目的：覆盖 `list` 子命令的 `--name-only`、`--show-origin`、`--vault`、`--ssh-keys`、`--gpg-keys`，以及 Git 兼容 `--list` / `-l` / `--show-origin`。
-
-最小步骤：
-
-```bash
-cd "$RUN_DIR/config-repo"
-
-libra config list
-libra config -l
-libra config --list
-libra config list --name-only
-libra config list --show-origin
-libra config --list --show-origin
-libra config list --vault
-libra config list --ssh-keys
-libra config list --gpg-keys
-```
-
-断言：三种 list 入口均成功；`--name-only` 只输出 key 名；`--show-origin` 输出 scope/origin 信息；vault/ssh/gpg 专项列表在无记录时输出明确空状态，在已有记录时只输出公钥或 key 名称，不输出私钥、root token 或 unseal key。
-
-补充可执行断言：
-- `libra --json config list --name-only` 返回 `data.entries[]`，所有 entry 只暴露 `key`，`value` 为空或不存在。
-- `libra --json config list --show-origin` 每个条目包含 origin/scope 信息。
-- `libra --json config list --vault`（无 vault 记录时）成功且 data 为空或明确空状态。
-- `libra config list --ssh-keys` / `--gpg-keys` 输出不得包含私钥材料。
-- 操作后用隔离 global DB 验证无全局污染。
-
-### `cli.config-unset-compat-flags`
-
-目的：覆盖 `unset --all` 子命令参数，以及 Git 兼容隐藏 flag `--unset`、`--unset-all`。
-
-最小步骤：
-
-```bash
-cd "$RUN_DIR/config-repo"
-
-libra config set temp.single value
-libra config --unset temp.single
-! libra config get temp.single
-
-libra config set --add temp.multi one
-libra config set --add temp.multi two
-libra config unset --all temp.multi
-! libra config get --all temp.multi
-
-libra config set --add temp.legacy one
-libra config set --add temp.legacy two
-libra config --unset-all temp.legacy
-! libra config --get-all temp.legacy
-```
-
-断言：单值 unset 和 all unset 都能通过后续 get 观察到删除效果；legacy hidden flags 直接 invocation 可用，但不要求 help 展示。
-
-补充可执行断言：
-- `libra --json config set temp.single value && libra --json config --unset temp.single` 后 `libra --json config get temp.single` 必须非 0 或 data 为空。
-- 多值场景：`--unset-all` 后 `--json get --all` 返回空列表。
-- 验证 legacy `--unset-all` 与现代 `unset --all` 行为等价。
-- 操作全程使用隔离 global DB。
-
-### `cli.config-import-path-edit`
-
-目的：覆盖 `import`、`path`、`edit` 子命令，以及 Git 兼容隐藏 flag `--import`。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.config-import-path-edit"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-# Dynamic git bin resolution
-SAFE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-GIT_BIN="$(command -v git || true)"
-case ":$SAFE_PATH:" in *":$(dirname "${GIT_BIN:-/usr/bin/git}"):"*) ;; *)
-  [ -n "$GIT_BIN" ] && SAFE_PATH="$SAFE_PATH:$(dirname "$GIT_BIN")" ;; esac
-
-gitfix() {
-  env -i PATH="$SAFE_PATH" HOME="$RUN_ROOT/home" \
-    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-    TMPDIR="$RUN_ROOT/tmp" LANG=C LC_ALL=C git "$@"
-}
-libra() {
-  env -i \
-    PATH="$SAFE_PATH" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-mkdir git-config-source
-cd git-config-source
-gitfix init
-gitfix config user.name "Imported Git User"
-gitfix config user.email "imported@example.invalid"
-
-libra init libra-import-target
-cd libra-import-target
-libra config import
-libra config get user.name
-libra config get user.email
-libra config path
-
-cd "$RUN_DIR/git-config-source"
-libra init libra-import-legacy
-cd libra-import-legacy
-libra config --import
-
-! libra config edit
-```
-
-断言：`config import` / `--import` 从 Git config 导入当前 scope 可接受的配置项，不接受任意文件路径作为参数；`path` 输出当前 scope 的 config DB 路径且路径存在；`edit` 当前因 SQLite 存储不支持文本编辑，必须非 0 退出并提示使用 `set/unset/list`。
-
-补充可执行断言：
-- `libra --json config path` 成功且 data.path 指向 .libra/libra.db 或 global DB。
-- `libra --json config import` 成功后，`libra --json config get user.name` 返回从 Git fixture 导入的值。
-- `! libra config edit` 必须非 0，stderr 包含 "set/unset/list" 或等价提示。
-- 验证 import 只导入当前 scope 可接受的 key。
-
-### `cli.config-key-generation`
-
-目的：覆盖 `generate-ssh-key --remote <NAME>` 和 `generate-gpg-key --name <NAME> --email <EMAIL> --usage <KIND>`。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.config-key-generation"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-mkdir -p keygen-home
-libra init keygen-repo
-cd keygen-repo
-libra config set user.name "Keygen User"
-libra config set user.email "keygen@example.invalid"
-libra remote add origin git@example.invalid:owner/repo.git
-
-libra config generate-ssh-key --remote origin
-libra config get vault.ssh.origin.pubkey
-
-libra config generate-gpg-key --name "Signing User" --email "signing@example.invalid" --usage signing
-libra config get vault.gpg.pubkey
-libra config get vault.signing
-
-libra config generate-gpg-key --name "Encrypt User" --email "encrypt@example.invalid" --usage encrypt
-libra config get vault.gpg.encrypt.pubkey
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR/keygen-repo"
-! libra config --global generate-ssh-key --remote origin
-! libra config generate-ssh-key --remote bad.name
-! libra config generate-ssh-key --remote no-such-remote
-! libra config --global generate-gpg-key --name Bad --email bad@example.invalid
-! libra config generate-gpg-key --usage archive
-```
-
-断言：SSH key 生成要求 remote 存在且 remote 名只含 `[a-zA-Z0-9_-]`；生成后 public key 可通过 config 读取，private key 只以 vault-encrypted config key 存在且不得出现在日志中；GPG signing usage 写入 `vault.gpg.pubkey` 并启用 `vault.signing`，encrypt usage 写入 `vault.gpg.encrypt.pubkey`；global key generation 和非法 usage 必须失败且无本地副作用。
-
-补充可执行断言（安全关键场景）：
-- 生成 SSH key 后，`libra --json config get vault.ssh.origin.pubkey` 必须 `ok:true` 且包含公钥内容。
-- 生成 GPG signing key 后，`libra --json config get vault.signing` 必须显示启用状态。
-- 验证 private key 绝不泄露：`libra config list --vault` 输出中不得出现私钥材料（仅 pubkey 或 key 名称）。
-- 负向 `--global generate-ssh-key` 必须非 0，且错误提示隔离要求。
-- 非法 usage（如 archive）必须失败，stderr 包含 "usage" 相关错误或 LBR- 码。
-- 操作全程使用隔离 HOME + global DB，结束后验证真实用户 vault 未被触碰（通过检查隔离环境外无新 key）。
-
-### `cli.config-git-compat-mode`
-
-目的：集中覆盖 `ConfigArgs` 上的 Git 兼容隐藏 flag 与位置参数翻译路径。
-
-最小步骤：
-
-```bash
-cd "$RUN_DIR/config-repo"
-
-libra config user.compat value-from-positional
-libra config --get user.compat
-libra config --add user.compat second-value
-libra config --get-all user.compat
-libra config --get-regexp '^user\\.'
-libra config --list
-libra config -l
-libra config --list --show-origin
-libra config --unset user.compat
-libra config --unset-all remote.origin.fetch
-libra config --get -d fallback missing.compat
-libra config --get --default fallback-long missing.compat.long
-libra config --import
-```
-
-负向步骤：
-
-```bash
-! libra config --default fallback user.bad-default value
-! libra config init value
-! libra config --import user.name
-```
-
-断言：位置参数 `key valuepattern` 的默认模式等价于 set；`--get` / `--get-all` / `--get-regexp` / `--list` / `-l` / `--show-origin` / `--add` / `--unset` / `--unset-all` / `--import` / `-d` / `--default` 均至少有一个直接 invocation 覆盖；`--default` 只能与 get 类模式组合；不含 section 的 key 非 0 退出并对 `init` / `clone` 给出“这是顶层命令”的提示。
-
-补充可执行断言：
-- `libra --json config --get user.compat` 必须 `ok:true`，且 `data.value == "value-from-positional"`。
-- `libra --json config --get-all user.compat` 必须返回 `data.entries[]`，且包含 `value-from-positional` 与 `second-value`。
-- `libra --json config --list --show-origin` 必须返回 `data.entries[]`，每条包含 key/value 与 origin 或 scope 字段。
-- `libra config --get --default fallback-long missing.compat.long` 必须输出 fallback-long 且退出码为 0。
-- 负向 `--default` 非 get 模式、`config init value`、`--import user.name` 均必须非 0，stderr 包含可识别错误文本或 LBR- 稳定码。
-
-### `cli.init-basic`
-
-目的：验证 `libra init` 的默认初始化路径创建可用普通仓库，并作为所有 init 参数矩阵的最小基线。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.init-basic"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-
-libra init repo
-test -f repo/.libra/libra.db
-test -d repo/.libra/objects
-cd repo
-libra status
-libra db status
-libra fsck --connectivity-only
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR"
-! libra init repo
-```
-
-断言：初始化命令退出码为 0；`.libra/libra.db` 和对象目录存在；`status`、`db status`、`fsck --connectivity-only` 可在新仓库中执行；重复初始化同一路径必须非 0 或明确提示已有仓库，且不得破坏既有 `.libra` 布局。
-
-补充可执行断言：
-- `libra --json status` 必须返回 `ok:true`，且 `data.head.type == "branch"`、`data.head.name` 指向初始分支。
-- `libra --json db status` 必须返回 `ok:true`，且 `data.current_version` / `data.latest_version` / `data.state` 可解析。
-- 重复 init 失败时 stderr 必须包含已有仓库/目标路径相关错误或 LBR- 稳定码。
-
-### `cli.init-directory-and-quiet`
-
-目的：覆盖位置参数 `DIRECTORY`、短参数 `-q` 和长参数 `--quiet`。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.init-directory-and-quiet"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-
-libra init nested/repo
-test -f nested/repo/.libra/libra.db
-test -d nested/repo/.libra/objects
-cd nested/repo
-libra status
-
-cd "$RUN_DIR"
-libra init -q quiet-short >quiet-short.out 2>quiet-short.err
-libra init --quiet quiet-long >quiet-long.out 2>quiet-long.err
-test -f quiet-short/.libra/libra.db
-test -f quiet-long/.libra/libra.db
-```
-
-断言：`DIRECTORY` 可创建不存在的嵌套目录；`-q` / `--quiet` 退出码为 0；quiet 模式不输出普通初始化 banner，但错误仍应写入 stderr；quiet 仓库进入目录后 `status` 可执行。
-
-补充可执行断言：
-- `libra --json init -q quiet-json-repo` 成功（ok:true），且 `test -f quiet-json-repo/.libra/libra.db`。
-- quiet 模式下 stdout 为空（或极小），但 stderr 可包含初始化信息。
-- 操作后 `libra fsck --connectivity-only` 在 quiet 仓库中通过。
-- 所有 init 使用隔离 LIBRA_CONFIG_GLOBAL_DB，结束后验证无全局污染。
-
-### `cli.init-branch-and-format-options`
-
-目的：覆盖 `-b <branch>`、`--initial-branch <branch>`、`--object-format <format>` 和 `--ref-format <format>`。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.init-branch-and-format-options"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init -b develop init-branch-short
-cd init-branch-short
-libra branch
-libra status
-
-cd "$RUN_DIR"
-libra init --initial-branch trunk init-branch-long
-cd init-branch-long
-libra branch
-
-cd "$RUN_DIR"
-libra init --object-format sha1 object-sha1
-cd object-sha1
-libra config get core.objectformat
-
-cd "$RUN_DIR"
-libra init --object-format sha256 object-sha256
-cd object-sha256
-libra config get core.objectformat
-
-cd "$RUN_DIR"
-libra init --ref-format strict ref-strict
-cd ref-strict
-libra config get core.initrefformat
-
-cd "$RUN_DIR"
-libra init --ref-format filesystem ref-filesystem
-cd ref-filesystem
-libra config get core.initrefformat
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR"
-! libra init --object-format sha265 bad-object-format
-! libra init --ref-format unknown bad-ref-format
-! libra init -b "bad branch" bad-branch-name
-```
-
-断言：短/长 initial branch 参数都能通过 `branch` 或等价公开命令观察到初始分支；`core.objectformat` 分别为 `sha1` / `sha256`；`core.initrefformat` 分别为 `strict` / `filesystem`；非法 object/ref format 或非法分支名必须非 0 退出，并给出可理解的参数错误或修复提示。
-
-补充可执行断言（对象格式与 ref 格式关键）：
-- `libra --json config get core.objectformat` 在 sha256 仓库中验证值为 "sha256"。
-- `libra --json init --object-format sha256 sha256-json` 成功后用 `libra --json cat-file -p HEAD` 验证对象 ID 格式（64 位 hex）。
-- 非法 `--object-format sha265` 的错误必须非 0，且包含 "unsupported object format" 或 LBR- 相关标识（捕获 stderr 验证）。
-- 所有 init 后立即 `libra fsck --connectivity-only` 通过。
-
-### `cli.init-bare-and-shared`
-
-目的：覆盖 `--bare` 与 `--shared <MODE>`。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.init-bare-and-shared"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init --bare bare-repo
-test -f bare-repo/libra.db
-test -d bare-repo/objects
-test ! -e bare-repo/.libra
-cd bare-repo
-! libra status
-
-cd "$RUN_DIR"
-libra init --shared false shared-false
-libra init --shared true shared-true
-libra init --shared umask shared-umask
-libra init --shared group shared-group
-libra init --shared all shared-all
-libra init --shared world shared-world
-libra init --shared everybody shared-everybody
-libra init --shared 0770 shared-octal
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR"
-! libra init --shared invalid shared-invalid
-! libra init --shared 8888 shared-bad-octal
-```
-
-断言：bare 仓库把 `libra.db` 和 `objects` 放在目标目录本身，不创建普通工作区 `.libra/`；普通工作区命令在 bare 仓库中应按当前 CLI 语义失败或提示不适用；所有支持的 shared mode 退出码为 0；非法 shared mode 非 0 退出并列出支持值。Unix 平台可补充检查 shared 仓库文件权限；跨平台默认只要求 CLI 可观察仓库状态正确。
-
-补充可执行断言：
-- bare repo 后 `test -f bare-repo/libra.db && test ! -e bare-repo/.libra`。
-- 在 bare repo 中 `libra status` 必须非 0。
-- 所有合法 --shared 模式创建后，`libra db --json status` 成功，且 `data.current_version` / `data.latest_version` 可解析。
-- 非法 --shared 值（invalid、8888）的错误必须非 0，且 stderr 列出支持的 mode。
-- 操作后在 shared 仓库执行 `libra fsck --connectivity-only` 通过。
-
-### `cli.init-template`
-
-目的：覆盖 `--template <template-directory>`。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.init-template"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-mkdir -p template/info template/hooks template/custom
-printf 'ignored-by-template\n' > template/info/exclude
-printf '#!/bin/sh\nexit 0\n' > template/hooks/pre-commit.sh
-printf 'sentinel\n' > template/custom/sentinel.txt
-
-libra init --template template templated-repo
-test -f templated-repo/.libra/info/exclude
-test -f templated-repo/.libra/hooks/pre-commit.sh
-test -f templated-repo/.libra/custom/sentinel.txt
-cd templated-repo
-libra status
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR"
-! libra init --template missing-template bad-template-repo
-```
-
-断言：模板目录内容被复制到目标仓库的 Libra 存储根；模板不会阻止 `objects/pack`、`objects/info`、`libra.db` 等必要布局创建；不存在或非目录 template 路径必须失败并在错误中标明路径。
-
-补充可执行断言：
-- 模板中的文件（exclude、pre-commit.sh、sentinel.txt）必须出现在 `templated-repo/.libra/` 对应位置。
-- `libra --json init --template template templated-json` 成功后验证 `ok:true`。
-- 缺失 template 目录时错误必须非 0，stderr 包含路径。
-- 转换后的仓库 `libra fsck --connectivity-only` 通过。
-
-### `cli.init-from-git-repository`
-
-目的：覆盖 `--from-git-repository <path>`，验证本地 Git 仓库转换为 Libra 仓库的 CLI 可观察行为。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.init-from-git-repository"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-# Dynamic git bin resolution
-SAFE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-GIT_BIN="$(command -v git || true)"
-case ":$SAFE_PATH:" in *":$(dirname "${GIT_BIN:-/usr/bin/git}"):"*) ;; *)
-  [ -n "$GIT_BIN" ] && SAFE_PATH="$SAFE_PATH:$(dirname "$GIT_BIN")" ;; esac
-
-gitfix() {
-  env -i PATH="$SAFE_PATH" HOME="$RUN_ROOT/home" \
-    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-    TMPDIR="$RUN_ROOT/tmp" LANG=C LC_ALL=C git "$@"
-}
-libra() {
-  env -i \
-    PATH="$SAFE_PATH" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-mkdir git-source
-cd git-source
-gitfix init
-gitfix config user.name "Git Fixture"
-gitfix config user.email "git-fixture@example.invalid"
-printf 'from git\n' > README.md
-gitfix add README.md
-gitfix commit -m "fixture: initial"
-
-cd "$RUN_DIR"
-libra init --from-git-repository git-source converted
-cd converted
-libra status
-libra log --oneline
-test -f README.md
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR"
-! libra init --from-git-repository missing-source converted-missing
-```
-
-断言：转换后的 Libra 仓库可执行 `status` 和 `log`；至少一个来自 Git fixture 的文件、提交或 ref 可通过 `libra` 命令观察；缺失 source 路径非 0 退出并提示有效 Git 仓库要求。这里的 Git 仓库只作为本地 fixture，不进入 GitHub live 语义。
-
-补充可执行断言：
-- 转换后 `libra --json status` 和 `libra --json log -n 1` 均 `ok:true`，且 `data.commits[]` 非空。
-- `test -f converted/README.md` 且内容与 Git fixture 一致。
-- 转换后的仓库 `libra fsck --connectivity-only` 通过。
-- 缺失 source 时错误必须非 0，包含 "valid Git repository" 或等价提示。
-- 使用 gitfix() 创建的 fixture 必须严格隔离（无主机 GIT_* 污染）。
-
-### `cli.init-vault`
-
-目的：覆盖 `--vault <bool>`，并验证默认 vault 行为与显式关闭行为。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.init-vault"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-mkdir -p home-vault home-no-vault
-
-libra init --vault true vault-repo
-cd vault-repo
-test -f .libra/vault.db
-libra config get vault.signing
-
-cd "$RUN_DIR"
-libra init --vault false no-vault-repo
-cd no-vault-repo
-test ! -f .libra/vault.db
-libra config get vault.signing
-```
-
-断言：`--vault true` 创建 repo-local `vault.db` 并使 `vault.signing` 可通过 `config get` 观察；`--vault false` 不创建 `vault.db`，`vault.signing` 为关闭值；场景必须隔离 `HOME`，不得读写开发者真实 `~/.libra/vault-keys`。
-
-补充可执行断言（安全关键）：
-- `--vault true` 后 `test -f .libra/vault.db` 且 `libra --json config get vault.signing` 成功。
-- `--vault false` 后 `test ! -f .libra/vault.db`。
-- 使用隔离 HOME 执行后，验证真实 `~/.libra/vault-keys`（或 global vault）未被创建/修改。
-- `libra --json config get vault.signing` 在 false 情况下返回关闭值。
-- 操作后 `libra fsck` 通过。
-
-### `libra init` 参数覆盖表
-
-| 参数 | 场景 ID | 关键断言 |
-|---|---|---|
-| `DIRECTORY` | `cli.init-directory-and-quiet` | 目标目录和 `.libra/libra.db` 被创建 |
-| `-q` / `--quiet` | `cli.init-directory-and-quiet` | 成功但不输出普通 banner |
-| `-b` / `--initial-branch` | `cli.init-branch-and-format-options` | 初始分支可通过公开命令观察 |
-| `--object-format` | `cli.init-branch-and-format-options` | `core.objectformat` 为 `sha1` / `sha256`，非法值失败 |
-| `--ref-format` | `cli.init-branch-and-format-options` | `core.initrefformat` 为 `strict` / `filesystem`，非法值失败 |
-| `--bare` | `cli.init-bare-and-shared` | 存储根为目标目录本身，无普通 `.libra/` 工作区布局 |
-| `--shared` | `cli.init-bare-and-shared` | 支持值成功，非法值失败并提示支持值 |
-| `--template` | `cli.init-template` | 模板内容复制到 Libra 存储根，缺失路径失败 |
-| `--from-git-repository` | `cli.init-from-git-repository` | 本地 Git fixture 的文件/提交/ref 可通过 Libra CLI 观察 |
-| `--vault` | `cli.init-vault` | `vault.db` 与 `vault.signing` 状态符合显式 bool |
-
-### `cli.commit-status-log`
-
-目的：覆盖 `status`、`add`、`commit`、`log` 的最小提交闭环，以及脚本常用输出格式、自动暂存、消息来源和失败路径。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.commit-status-log"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init history-repo
-cd history-repo
-
-libra config set user.name "Libra Test"
-libra config set user.email "libra-test@example.invalid"
-
-printf 'hello\n' > hello.txt
-libra status --short
-libra add --dry-run hello.txt
-libra add hello.txt
-libra status --porcelain
-libra commit -m "test: initial commit"
-libra status --exit-code
-libra log --oneline
-libra log -n 1 --name-status --grep "initial" --author "Libra Test"
-
-printf 'from file\n' > message.txt
-printf 'tracked\n' > tracked.txt
-libra add tracked.txt
-libra commit -F message.txt --signoff
-
-printf 'tracked update\n' >> tracked.txt
-libra commit -a -m "test: auto stage tracked update"
-libra commit --allow-empty -m "test: empty marker"
-libra commit --amend --no-edit
-libra log --stat -n 3
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR/history-repo"
-! libra commit -m "test: no staged changes"
-! libra commit --conventional -m "not conventional"
-
-printf 'dirty\n' > dirty.txt
-! libra status --exit-code
-rm dirty.txt
-```
-
-断言：`add --dry-run` 不写入 index；`add` 后 `status --porcelain` 能看到 staged 文件；`commit -m` / `commit -F` / `commit -a` / `commit --allow-empty` / `commit --amend --no-edit` 均按预期创建或更新提交；`status --exit-code` 在干净工作区退出码为 0、在 dirty 工作区非 0；`log --oneline`、`log --name-status`、`log --stat` 能观察到对应提交、作者、消息和文件变化；缺少 staged change 或 conventional 校验失败必须非 0 且不产生新提交。
-
-补充可执行断言（本场景为基础，推荐所有后续场景复用模式）：
-- 每次 commit 后立即 `libra --json status` + python 断言 `ok:true` 且 data 反映干净或 dirty 状态。
-- `libra --json log -n 3` 验证 `data.commits[]` 非空，commit 包含 hash/subject 或等价消息字段，且作者匹配配置的 user.name。
-- 关键 commit 后执行 `libra fsck --connectivity-only` 必须 0 退出。
-- 负向 conventional commit 失败的 stderr 必须包含 "conventional" 或对应 LBR- 错误码（通过 `2>&1 | cat` 捕获验证）。
-- `libra --json commit --allow-empty -m "json empty"` 成功后验证 envelope + 新 commit 在 `libra --json log -n 1` 中出现。
-- 操作全程使用隔离的 `LIBRA_CONFIG_GLOBAL_DB`，结束后用该 DB 执行 `libra config list --global` 不得残留本场景的临时 key。
-
-### `libra status/add/commit/log` 参数覆盖表
-
-| 参数或子命令 | 场景 ID | 关键断言 |
-|---|---|---|
-| `status` | `cli.commit-status-log` | 默认状态可执行，干净/dirty 状态可观察 |
-| `status --short` | `cli.commit-status-log` | untracked 或 staged path 以短格式出现 |
-| `status --porcelain` | `cli.commit-status-log` | 输出适合脚本断言的机器可读状态 |
-| `status --exit-code` | `cli.commit-status-log` | 干净为 0，dirty 为非 0 |
-| `add <pathspec>` | `cli.commit-status-log` | 指定文件被加入 index 并可由 status 观察 |
-| `add --dry-run` | `cli.commit-status-log` | 预览输出不改变 index |
-| `commit -m` | `cli.commit-status-log` | 提交消息进入 log |
-| `commit -F` | `cli.commit-status-log` | 从文件读取提交消息 |
-| `commit -a` | `cli.commit-status-log` | 已跟踪文件修改被自动暂存并提交 |
-| `commit --allow-empty` | `cli.commit-status-log` | 空提交成功并出现在 log 中 |
-| `commit --amend --no-edit` | `cli.commit-status-log` | 最后一个提交被替换且消息复用 |
-| `commit --conventional` | `cli.commit-status-log` | 非 conventional 消息失败且不写入提交 |
-| `commit --signoff` | `cli.commit-status-log` | 提交消息包含 Signed-off-by trailer |
-| `log --oneline` | `cli.commit-status-log` | 输出短 hash 和提交主题 |
-| `log -n` | `cli.commit-status-log` | 输出数量受限制 |
-| `log --author` / `--grep` | `cli.commit-status-log` | 只返回匹配作者或消息的提交 |
-| `log --name-status` / `--stat` | `cli.commit-status-log` | 文件变化摘要可观察 |
-
-### `cli.branch-switch-checkout`
-
-目的：覆盖 `branch`、`switch`、`checkout` 的分支创建、切换、detached HEAD、兼容 alias、分支重命名/删除和路径恢复行为。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.branch-switch-checkout"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init branch-repo
-cd branch-repo
-
-libra config set user.name "Libra Branch Test"
-libra config set user.email "branch@example.invalid"
-printf 'base\n' > base.txt
-libra add base.txt
-libra commit -m "test: branch base"
-
-libra branch --show-current
-libra branch feature/cli-smoke
-libra branch feature/from-main main
-libra branch --list
-libra switch feature/cli-smoke
-printf 'feature\n' > feature.txt
-libra add feature.txt
-libra commit -m "test: feature branch"
-libra checkout main
-libra checkout -b compat-checkout
-libra checkout main
-libra switch -c switch-created main
-libra switch main
-
-BASE_COMMIT="$(libra rev-parse HEAD)"
-libra switch --detach "$BASE_COMMIT"
-libra rev-parse --abbrev-ref HEAD
-libra switch main
-
-libra branch -m feature/from-main feature/renamed
-libra branch -d feature/renamed
-libra branch -D feature/cli-smoke
-
-printf 'dirty\n' > base.txt
-libra checkout -- base.txt
-grep 'base' base.txt
-libra branch
-
-# Verify branch list JSON output
-libra --json branch --list >branch-list.json
-python3 -c "import json; d=json.load(open('branch-list.json')); assert d['ok'] is True; assert isinstance(d['data'].get('branches'), list)"
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR/branch-repo"
-! libra branch "bad branch"
-! libra switch no-such-branch
-! libra checkout no-such-branch
-! libra branch -d no-such-branch
-```
-
-断言：`branch --show-current` 输出当前分支；从 HEAD 和指定 base 创建分支成功；`switch` / `checkout` 都能切换到已存在分支；`checkout -b` 与 `switch -c` 都能创建并切换分支；detached HEAD 下 `rev-parse --abbrev-ref HEAD` 输出 detached 语义或 `HEAD`；`branch -m` 后旧名消失、新名可列出；安全删除已合并分支成功，强制删除未合并分支成功；`checkout -- <path>` 能恢复工作区文件；非法分支名、缺失分支或缺失删除目标必须非 0 退出并保留现有分支状态。
-
-补充可执行断言：
-- 关键分支操作后 `libra --json branch --list` 解析验证新分支出现。
-- detached 后 `libra symbolic-ref HEAD` 必须失败（或输出 "HEAD" 且非 ref），这是 Libra/Git 符号引用限制的验证点。
-- `libra --json switch main` 成功后验证 `ok:true`。
-- 所有分支操作后 `libra fsck` 通过；删除分支后 `libra --json show-ref --heads` 的 `data.entries[]` 不再包含已删分支。
-
-### `libra branch/switch/checkout` 参数覆盖表
-
-| 参数或子命令 | 场景 ID | 关键断言 |
-|---|---|---|
-| `branch <name>` | `cli.branch-switch-checkout` | 从 HEAD 创建本地分支 |
-| `branch <name> <commit>` | `cli.branch-switch-checkout` | 从指定 base 创建分支 |
-| `branch --list` | `cli.branch-switch-checkout` | 已创建分支可列出 |
-| `branch --show-current` | `cli.branch-switch-checkout` | 当前分支名可观察 |
-| `branch -m <old> <new>` | `cli.branch-switch-checkout` | 分支重命名后新名可用、旧名不可用 |
-| `branch -d` / `branch -D` | `cli.branch-switch-checkout` | 安全删除和强制删除路径均覆盖 |
-| `switch <branch>` | `cli.branch-switch-checkout` | 切换到现有分支 |
-| `switch -c <branch> <start>` | `cli.branch-switch-checkout` | 创建并切换到新分支 |
-| `switch --detach <commit>` | `cli.branch-switch-checkout` | HEAD 进入 detached 状态 |
-| `checkout <branch>` | `cli.branch-switch-checkout` | 兼容分支切换路径可用 |
-| `checkout -b <branch>` | `cli.branch-switch-checkout` | 兼容创建并切换路径可用 |
-| `checkout -- <pathspec>` | `cli.branch-switch-checkout` | 路径恢复行为可观察 |
-
-### `cli.restore-reset-diff`
-
-目的：覆盖 `diff`、`restore`、`reset` 的工作区修改、staged 修改、路径级恢复、HEAD 移动和输出格式。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.restore-reset-diff"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init restore-repo
-cd restore-repo
-
-libra config set user.name "Libra Restore Test"
-libra config set user.email "restore@example.invalid"
-mkdir -p src
-printf 'one\n' > src/app.txt
-libra add src/app.txt
-libra commit -m "test: restore base"
-
-printf 'two\n' > src/app.txt
-libra diff src/app.txt
-libra diff --name-only
-libra diff --stat
-libra add src/app.txt
-libra diff --staged
-libra diff --staged --name-status
-libra restore --staged src/app.txt
-libra status --short
-libra restore --worktree src/app.txt
-grep 'one' src/app.txt
-
-printf 'two\n' > src/app.txt
-libra add src/app.txt
-libra reset HEAD -- src/app.txt
-libra status --short
-libra add src/app.txt
-libra commit -m "test: restore second"
-SECOND_COMMIT="$(libra rev-parse HEAD)"
-libra diff --old HEAD~1 --new "$SECOND_COMMIT" --numstat
-libra reset --soft HEAD~1
-libra status --short
-libra reset --mixed HEAD
-libra restore --worktree src/app.txt
-grep 'one' src/app.txt
-
-printf 'three\n' > src/app.txt
-libra add src/app.txt
-libra commit -m "test: restore third"
-libra reset --hard HEAD~1
-grep 'one' src/app.txt
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR/restore-repo"
-! libra restore --source no-such-revision src/app.txt
-! libra reset no-such-revision
-! libra diff --old no-such-revision --new HEAD
-```
-
-断言：unstaged diff、staged diff、name-only、name-status、numstat 和 stat 输出都能反映同一修改；`restore --staged` 只取消暂存，不丢弃工作区修改；`restore --worktree` 恢复工作区内容；路径级 `reset HEAD -- <path>` 只影响 index；`reset --soft` 保留 index/工作区变化，`reset --mixed` 重置 index，`reset --hard` 重置 HEAD/index/工作区；无效 revision 必须失败且不改变当前 HEAD。
-
-补充可执行断言：
-- `libra --json diff --staged` 和 `libra --json diff` 必须返回结构化数据（files 或 changes）。
-- 关键 reset/restore 后 `libra --json status` 验证状态正确（staged / unstaged）。
-- 每次重置后 `libra fsck --connectivity-only` 通过。
-- `libra --json reset --hard HEAD~1` 成功后验证 HEAD 回退且工作区文件恢复。
-- 负向 `libra restore --source no-such-rev` 必须非 0，stderr 包含错误路径或 LBR- 标识。
-
-### `libra diff/restore/reset` 参数覆盖表
-
-| 参数或子命令 | 场景 ID | 关键断言 |
-|---|---|---|
-| `diff <pathspec>` | `cli.restore-reset-diff` | unstaged 工作区修改可见 |
-| `diff --staged` | `cli.restore-reset-diff` | staged 修改可见 |
-| `diff --old --new` | `cli.restore-reset-diff` | 两个 revision 间差异可见 |
-| `diff --name-only` / `--name-status` | `cli.restore-reset-diff` | 文件名和状态摘要可用于脚本断言 |
-| `diff --stat` / `--numstat` | `cli.restore-reset-diff` | 文件级统计输出可见 |
-| `restore --staged <path>` | `cli.restore-reset-diff` | index 恢复到 HEAD，工作区保持修改 |
-| `restore --worktree <path>` | `cli.restore-reset-diff` | 工作区文件恢复到 index 或 source 内容 |
-| `restore --source <rev>` | `cli.restore-reset-diff` | source revision 不存在时失败且不改写文件 |
-| `reset HEAD -- <path>` | `cli.restore-reset-diff` | 路径级 reset 只取消暂存 |
-| `reset --soft` | `cli.restore-reset-diff` | 只移动 HEAD，保留 index/工作区 |
-| `reset --mixed` | `cli.restore-reset-diff` | 移动 HEAD 并重置 index |
-| `reset --hard` | `cli.restore-reset-diff` | HEAD、index、工作区全部回到目标 revision |
-
-### `cli.stash-bisect-worktree`
-
-目的：覆盖兼容性差异较大的 `stash`、`bisect`、`worktree` 命令面，重点验证状态保存/恢复、二分会话状态和 Libra worktree remove 默认保留目录的差异语义。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.stash-bisect-worktree"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init workflow-repo
-cd workflow-repo
-
-libra config set user.name "Libra Workflow Test"
-libra config set user.email "workflow@example.invalid"
-printf '0\n' > number.txt
-libra add number.txt
-libra commit -m "test: workflow base"
-
-printf 'stash change\n' >> number.txt
-libra stash push -m "wip: tracked change"
-libra stash list
-libra stash show
-libra stash apply
-libra status --short
-libra restore --worktree number.txt
-libra stash pop
-libra status --short
-
-# Test stash branch (checkout new branch and apply stash)
-printf 'stash branch change\n' >> number.txt
-libra stash push -m "wip: stash branch"
-libra stash branch stash-branch-test
-libra branch --show-current | grep -q 'stash-branch-test'
-libra switch main
-libra branch -D stash-branch-test
-
-libra stash clear --force
-libra stash list
-
-GOOD_COMMIT="$(libra rev-parse HEAD)"
-printf '1\n' > number.txt
-libra add number.txt
-libra commit -m "test: bisect middle"
-printf '2\n' > number.txt
-libra add number.txt
-libra commit -m "test: bisect bad"
-BAD_COMMIT="$(libra rev-parse HEAD)"
-libra bisect start "$BAD_COMMIT" --good "$GOOD_COMMIT"
-libra bisect view
-libra bisect bad
-libra bisect good "$GOOD_COMMIT"
-libra bisect log
-libra bisect reset
-
-# Test bisect skip
-libra bisect start "$BAD_COMMIT" --good "$GOOD_COMMIT"
-libra bisect skip
-libra bisect reset
-
-libra worktree add "$RUN_ROOT/repos/workflow-linked"
-libra worktree list
-libra worktree lock "$RUN_ROOT/repos/workflow-linked" --reason "integration smoke"
-libra worktree list
-libra worktree unlock "$RUN_ROOT/repos/workflow-linked"
-libra worktree move "$RUN_ROOT/repos/workflow-linked" "$RUN_ROOT/repos/workflow-moved"
-libra worktree remove "$RUN_ROOT/repos/workflow-moved"
-test -d "$RUN_ROOT/repos/workflow-moved"
-libra worktree prune
-
-# Test worktree remove --delete-dir
-libra worktree add "$RUN_ROOT/repos/workflow-to-delete"
-libra worktree remove --delete-dir "$RUN_ROOT/repos/workflow-to-delete"
-test ! -d "$RUN_ROOT/repos/workflow-to-delete"
-
-# Verify JSON outputs for AI Agent readability
-libra --json stash list >stash-list.json
-python3 -c "import json; d=json.load(open('stash-list.json')); assert d['ok'] is True; assert isinstance(d['data'].get('entries') or d['data'].get('stashes') or [], list)"
-libra --json worktree list >worktree-list.json
-python3 -c "import json; d=json.load(open('worktree-list.json')); assert d['ok'] is True; assert isinstance(d['data'].get('worktrees') or d['data'].get('entries') or [], list)"
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR/workflow-repo"
-! libra stash pop stash@{999}
-! libra bisect bad no-such-revision
-! libra worktree remove "$RUN_ROOT/repos/no-such-worktree"
-```
-
-断言：`stash push` 保存 tracked 修改并清理工作区；`stash list` / `stash show` 能观察 stash 条目；`stash apply` 保留 stash，`stash pop` 应用并删除 stash；`stash clear --force` 清空列表；`bisect start <bad> --good <good>` 建立会话，`view` / `log` 能观察状态，`bad` / `good <rev>` 推进会话，`reset` 恢复原始 HEAD；`worktree add` 注册 linked worktree，`list` 显示路径，`lock --reason` / `unlock` 更新锁状态，`move` 更新路径，`remove` 默认只注销登记且保留目录，`prune` 可执行；非法 stash ref、非法 revision 和缺失 worktree 必须失败且不破坏已有仓库状态。
-
-补充可执行断言（故意差异重点场景）：
-- `libra worktree remove <path>` 后 `test -d <path>` 必须仍存在（Libra 故意保留目录，不像 Git 默认删除）。
-- `libra --json stash list` 验证 `ok:true` 且 `data.entries[]` 或 `data.stashes[]` 可解析。
-- 每次 stash/bisect/worktree 操作后 `libra fsck --connectivity-only` 必须 0 退出。
-- `worktree remove` 后的 `libra --json worktree list` 不再包含该 worktree。
-- 负向 `worktree remove` 不存在路径的错误必须非 0，stderr 包含路径。
-- 验证 `--delete-dir` 模式真正删除目录：`libra worktree remove --delete-dir <path> && test ! -d <path>`。
-
-### `libra stash/bisect/worktree` 参数覆盖表
-
-| 参数或子命令 | 场景 ID | 关键断言 |
-|---|---|---|
-| `stash push -m` | `cli.stash-bisect-worktree` | tracked 修改被保存，消息可在列表中观察 |
-| `stash list` / `stash show` | `cli.stash-bisect-worktree` | stash 条目和文件级摘要可观察 |
-| `stash apply` | `cli.stash-bisect-worktree` | 修改恢复但 stash 条目保留 |
-| `stash pop` | `cli.stash-bisect-worktree` | 修改恢复且 stash 条目删除 |
-| `stash clear --force` | `cli.stash-bisect-worktree` | 非交互清空 stash 列表 |
-| `bisect start <bad> --good <good>` | `cli.stash-bisect-worktree` | 二分边界可初始化 |
-| `bisect bad` / `bisect good <rev>` | `cli.stash-bisect-worktree` | 会话状态推进并可由 log/view 观察 |
-| `bisect log` / `bisect view` | `cli.stash-bisect-worktree` | 当前会话和候选状态可输出 |
-| `bisect reset` | `cli.stash-bisect-worktree` | 结束会话并恢复原 HEAD |
-| `worktree add <path>` | `cli.stash-bisect-worktree` | linked worktree 被创建并登记 |
-| `worktree list` | `cli.stash-bisect-worktree` | 主 worktree 和 linked worktree 均可列出 |
-| `worktree lock --reason` / `unlock` | `cli.stash-bisect-worktree` | 锁状态和 reason 可观察并可解除 |
-| `worktree move <src> <dest>` | `cli.stash-bisect-worktree` | 登记路径和目录路径同步移动 |
-| `worktree remove <path>` | `cli.stash-bisect-worktree` | 默认注销登记但保留目录 |
-| `worktree prune` | `cli.stash-bisect-worktree` | 清理 stale 登记路径可执行 |
-
-### `cli.tag-basic`
-
-目的：覆盖 `tag` 创建（轻量/附注）、列表、强制更新、删除、ref 指向和 describe 依赖的 tag 可见性。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.tag-basic"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init tag-repo
-cd tag-repo
-libra config set user.name "Libra Tag Test"
-libra config set user.email "tag@example.invalid"
-printf 'tag base\n' > tag.txt
-libra add tag.txt
-libra commit -m "test: tag base"
-BASE_COMMIT="$(libra rev-parse HEAD)"
-
-libra tag v0.1.0
-libra tag -m "release v0.2.0" v0.2.0
-libra tag -l
-libra tag -l -n 1
-libra rev-parse v0.1.0
-libra describe --tags --always HEAD
-libra --json tag -l >tags.json
-python3 -c "import json; d=json.load(open('tags.json')); assert d['ok'] is True; assert isinstance(d['data'].get('tags'), list)"
-
-printf 'tag update\n' >> tag.txt
-libra add tag.txt
-libra commit -m "test: tag update"
-libra tag -f v0.1.0
-test "$(libra rev-parse v0.1.0)" != "$BASE_COMMIT"
-libra tag -d v0.1.0
-! libra rev-parse v0.1.0
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR/tag-repo"
-! libra tag
-! libra tag v0.2.0
-! libra tag -d no-such-tag
-```
-
-断言：轻量 tag 与 annotated tag 均可创建并被 `rev-parse` 解析；`tag -l` / `tag -l -n` 可观察 tag 名称和注释摘要；`describe --tags --always` 能使用可达 tag 描述 HEAD；`tag -f` 可更新现有 tag 指向（新提交 != BASE）；`tag -d` 删除后原名不可解析；缺少 tag 名、重复创建和删除缺失 tag 必须非 0 退出且不影响已有 tag。
-
-补充可执行断言（使用 `libra()` + python）：
-- `libra --json tag -l` 必须返回 `ok:true`，且 `data.tags[]` 包含 v0.2.0。
-- 负向错误必须包含稳定错误信息或 LBR- 码（通过 stderr 捕获验证）。
-- 操作后 `libra fsck --connectivity-only` 必须成功（0 退出）。
-- 全局 DB 隔离：本场景操作后，用隔离的全局 DB 执行 `libra config --global list` 不得看到本场景的 user.name（除非显式 --global）。
-
-### `cli.merge-rebase-cherry-revert-smoke`
-
-目的：覆盖 `merge`（fast-forward 与三方无冲突 merge）、`rebase`、`cherry-pick`、`revert` 的最小可观察闭环，以及 `--continue` / `--abort` 无会话失败路径。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.merge-rebase-cherry-revert-smoke"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init history-edit-repo
-cd history-edit-repo
-libra config set user.name "Libra History Edit Test"
-libra config set user.email "history-edit@example.invalid"
-
-printf 'base\n' > base.txt
-libra add base.txt
-libra commit -m "test: history-edit base"
-
-libra branch ff-target
-libra switch ff-target
-printf 'ff\n' > ff.txt
-libra add ff.txt
-libra commit -m "test: fast-forward target"
-FF_COMMIT="$(libra rev-parse HEAD)"
-libra switch main
-libra merge ff-target
-test "$(libra rev-parse HEAD)" = "$FF_COMMIT"
-
-libra branch merge-side main
-libra switch merge-side
-printf 'side\n' > side.txt
-libra add side.txt
-libra commit -m "test: merge side"
-libra switch main
-printf 'main\n' > main.txt
-libra add main.txt
-libra commit -m "test: merge main"
-libra merge merge-side
-libra log --oneline -n 1
-test -f side.txt
-
-libra branch rebase-topic main~1
-libra switch rebase-topic
-printf 'rebase\n' > rebase.txt
-libra add rebase.txt
-libra commit -m "test: rebase topic"
-libra switch topic
-libra rebase main
-libra log --oneline -n 1
-test -f rebase.txt
-
-libra switch main
-libra branch pick-source
-libra switch pick-source
-printf 'pick\n' > pick.txt
-libra add pick.txt
-libra commit -m "test: cherry source"
-PICK_COMMIT="$(libra rev-parse HEAD)"
-libra switch main
-libra cherry-pick "$PICK_COMMIT"
-test -f pick.txt
-
-REVERT_TARGET="$(libra rev-parse HEAD)"
-libra revert "$REVERT_TARGET"
-test ! -f pick.txt
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR/history-edit-repo"
-! libra merge no-such-branch
-! libra merge --continue
-! libra merge --abort
-! libra rebase no-such-branch
-! libra rebase --continue
-! libra cherry-pick no-such-commit
-! libra revert no-such-commit
-```
-
-断言：fast-forward merge 后 HEAD 等于目标提交；三方无冲突 merge 产生可观察 merge 结果并保留双方文件；`rebase main` 把 topic 提交重放到新 base 且文件存在；`cherry-pick <commit>` 在当前分支生成等价修改；`revert <commit>` 创建反向提交并移除被 revert 的文件；缺失目标、无 merge/rebase 会话的 continue/abort 和非法 commit 必须失败且不破坏当前分支。
-
-补充可执行断言：
-- 每次主要操作后执行 `libra fsck --connectivity-only` 必须 0 退出。
-- `libra --json log -n 1` 验证 merge commit 有 2 个 parent（对于非 ff merge）。
-- 负向步骤必须产生非 0 退出，且 stderr 包含 "not a" / "no such" 或 LBR- 相关错误标识（通过捕获验证）。
-- `libra --json show-ref --heads` 验证 `data.entries[]` 中的分支状态在 rebase/cherry 后一致。
-
-### `cli.merge-conflict-continue`
-
-目的：覆盖 `merge` 产生冲突后的 `--continue` / `--abort` 成功路径。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.merge-conflict-continue"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init merge-conflict-repo
-cd merge-conflict-repo
-libra config set user.name "Libra Merge Conflict Test"
-libra config set user.email "merge-conflict@example.invalid"
-
-printf 'base line\n' > shared.txt
-libra add shared.txt
-libra commit -m "test: merge conflict base"
-
-libra branch side
-libra switch side
-printf 'side change\n' > shared.txt
-libra add shared.txt
-libra commit -m "test: side change"
-
-libra switch main
-printf 'main change\n' > shared.txt
-libra add shared.txt
-libra commit -m "test: main change"
-
-set +e
-libra merge side >merge-conflict.out 2>merge-conflict.err
-MERGE_STATUS=$?
-set -e
-test "$MERGE_STATUS" -ne 0
-grep '<<<<<<<' shared.txt
-printf 'resolved merge\n' > shared.txt
-libra add shared.txt
-libra merge --continue
-libra log --oneline -n 1
-grep 'resolved merge' shared.txt
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR/merge-conflict-repo"
-! libra merge --continue
-! libra merge --abort
-```
-
-断言：`merge side` 在同一文件产生冲突，工作区出现冲突标记；解决冲突并 `add` 后 `merge --continue` 成功完成合并提交；合并后 `log` 可见 merge commit，`shared.txt` 内容为解决后的文本；无 merge 会话时 `merge --continue` / `merge --abort` 必须失败且不破坏当前分支状态。
-
-补充可执行断言（merge 冲突场景）：
-- `merge side` 必须以非 0 退出进入冲突状态，且 `merge-conflict.err` 包含 "conflict"、"merge" 或 LBR- 相关错误文本。
-- 冲突后 `libra --json status` 必须可解析出 `data.merge_state.conflicted_paths[]`，且包含 `shared.txt`。
-- `merge --continue` 成功后 `libra --json status` 显示 `data.is_clean == true`，且 `data.merge_state` 缺失或 `conflicted_paths` 为空。
-- `libra fsck` 在 --continue / --abort 后必须通过。
-- 负向 merge --continue 无会话时错误必须包含可识别文本（"no merge" 或 LBR- 相关）。
-
-补充可执行断言（冲突场景核心）：
-- 冲突后 `libra --json status` 必须显示 `data.merge_state.conflicted_paths[]` 非空。
-- `merge --continue` 成功后 `libra --json status` 显示 index 干净（`data.is_clean == true`，无 `merge_state.conflicted_paths` 条目）。
-- `libra fsck` 在 continue/abort 后必须通过。
-- 负向 continue/abort 的错误必须是可识别的 "no merge in progress" 类（捕获 stderr 验证包含 "merge" 或 LBR-CONFLICT 相关）。
-
-### `cli.rebase-conflict-continue`
-
-目的：覆盖 `rebase` 产生冲突后的 `--continue` / `--abort` / `--skip` 成功路径。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.rebase-conflict-continue"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init rebase-conflict-repo
-cd rebase-conflict-repo
-libra config set user.name "Libra Rebase Conflict Test"
-libra config set user.email "rebase-conflict@example.invalid"
-
-printf 'base line\n' > shared.txt
-libra add shared.txt
-libra commit -m "test: rebase conflict base"
-
-libra branch topic
-libra switch topic
-printf 'topic change\n' > shared.txt
-libra add shared.txt
-libra commit -m "test: topic change"
-
-libra switch main
-printf 'main change\n' > shared.txt
-libra add shared.txt
-libra commit -m "test: main change"
-
-libra switch topic
-set +e
-libra rebase main >rebase-conflict.out 2>rebase-conflict.err
-REBASE_STATUS=$?
-set -e
-test "$REBASE_STATUS" -ne 0
-grep '<<<<<<<' shared.txt
-printf 'resolved rebase\n' > shared.txt
-libra add shared.txt
-libra rebase --continue
-libra log --oneline -n 1
-grep 'resolved rebase' shared.txt
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR/rebase-conflict-repo"
-! libra rebase --continue
-! libra rebase --abort
-```
-
-断言：`rebase main` 在 topic 提交与 main 修改同一文件时产生冲突，工作区出现冲突标记；解决冲突并 `add` 后 `rebase --continue` 成功完成重放；重放后 `log` 可见 topic 提交在 main 之上，`shared.txt` 内容为解决后的文本；无 rebase 会话时 `rebase --continue` / `rebase --abort` 必须失败且不破坏当前分支状态。
-
-补充可执行断言（rebase 冲突）：
-- 冲突后 `libra --json status` 可解析 `data.merge_state.conflicted_paths[]`，且包含 `shared.txt`。
-- `rebase --continue` 成功后 `libra --json status` 显示 `data.is_clean == true`，且 `data.merge_state` 缺失或 `conflicted_paths` 为空。
-- `libra fsck` 在 rebase --continue/--abort 后通过。
-- 负向 rebase --continue 无会话错误必须可识别（stderr 捕获验证 "rebase" 或 LBR-）。
-
-### `cli.grep-blame-describe-shortlog`
-
-目的：覆盖 history inspection 剩余命令：`grep`、`blame`、`describe`、`shortlog` 的常用参数和失败路径。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.grep-blame-describe-shortlog"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init inspect-repo
-cd inspect-repo
-libra config set user.name "Libra Inspect Test"
-libra config set user.email "inspect@example.invalid"
-mkdir -p docs src
-printf 'Alpha\nBeta\n' > docs/guide.txt
-printf 'fn main() { println!("alpha"); }\n' > src/main.rs
-libra add docs/guide.txt src/main.rs
-libra commit -m "feat: add inspect files"
-libra tag -m "inspect release" v1.0.0
-printf 'Gamma\n' >> docs/guide.txt
-libra add docs/guide.txt
-libra commit -m "fix: update guide"
-
-libra grep Alpha docs
-libra grep -F 'println!("alpha")' src
-libra grep -i gamma docs/guide.txt
-libra grep -n -e Alpha -e Gamma docs/guide.txt
-libra grep -c Alpha docs/guide.txt
-libra grep -l alpha src
-libra grep --tree HEAD~1 Alpha docs/guide.txt
-printf 'Gamma\n' > patterns.txt
-libra grep -f patterns.txt docs/guide.txt
-libra blame docs/guide.txt
-libra blame -L 1,2 docs/guide.txt HEAD
-libra describe --tags HEAD
-libra describe --always --abbrev 12 HEAD
-libra shortlog
-libra shortlog -s
-libra shortlog -n
-
-# Verify JSON outputs for AI Agent readability
-libra --json grep Alpha docs >grep.json
-python3 -c "import json; d=json.load(open('grep.json')); assert d['ok'] is True; assert 'matches' in d['data'] or isinstance(d['data'].get('matches'), list)"
-libra --json blame docs/guide.txt >blame.json
-python3 -c "import json; d=json.load(open('blame.json')); assert d['ok'] is True; assert 'lines' in d['data'] or isinstance(d['data'].get('lines'), list)"
-libra --json describe --tags HEAD >describe.json
-python3 -c "import json; d=json.load(open('describe.json')); assert d['ok'] is True; assert 'resolved_commit' in d['data'] or 'result' in d['data']"
-libra --json shortlog >shortlog.json
-python3 -c "import json; d=json.load(open('shortlog.json')); assert d['ok'] is True; assert 'authors' in d['data'] or isinstance(d['data'].get('authors'), list)"
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR/inspect-repo"
-! libra grep no-such-pattern docs/guide.txt
-! libra grep --tree no-such-revision Alpha docs/guide.txt
-! libra blame -L bad docs/guide.txt
-! libra blame missing.txt
-! libra describe no-such-revision
-```
-
-断言：`grep` 可在工作区、指定 pathspec、pattern file 和历史 tree 中匹配内容，`-F` / `-i` / `-n` / `-c` / `-l` 输出可用于脚本断言；`blame` 输出每行作者和提交信息，`-L` 限制行范围；`describe --tags` 使用可达 tag，`--always --abbrev` 在需要时输出短 hash；`shortlog` 默认、summary 和排序模式都能按作者汇总；无匹配 grep、非法 revision、非法 blame 范围、缺失文件必须失败且不改变仓库。
-
-补充可执行断言：
-- `libra --json grep Alpha docs` 必须 `ok:true` 且 `data.matches[]` 可解析。
-- `libra --json blame -L 1,1 docs/guide.txt` 验证结构包含 author / commit 信息。
-- `libra --json describe --tags` 成功且包含 tag 信息。
-- `libra --json shortlog` 返回按作者汇总的结构。
-- 负向 `libra grep` 无匹配 或 `libra blame` 非法范围必须非 0，stderr 包含可识别错误（可选 LBR-）。
-
-### `cli.clean-rm-mv-lfs-basic`
-
-目的：覆盖工作树管理剩余命令 `clean`、`rm`、`mv` 和本地确定性的 `lfs track/untrack/ls-files` 行为；远端 LFS lock API 不进入默认 Wave。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.clean-rm-mv-lfs-basic"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init worktree-tools-repo
-cd worktree-tools-repo
-libra config set user.name "Libra Worktree Tools Test"
-libra config set user.email "worktree-tools@example.invalid"
-mkdir -p docs assets tmp ignored
-printf 'keep\n' > docs/keep.txt
-printf 'move\n' > docs/move.txt
-printf 'remove\n' > docs/remove.txt
-libra add docs/keep.txt docs/move.txt docs/remove.txt
-libra commit -m "test: worktree tools base"
-
-libra mv docs/move.txt docs/moved.txt
-libra status --short
-libra commit -a -m "test: move tracked file"
-
-libra rm docs/remove.txt
-libra status --short
-libra commit -m "test: remove tracked file"
-
-printf 'scratch\n' > tmp/scratch.log
-libra clean -n tmp/scratch.log
-test -f tmp/scratch.log
-libra clean -f tmp/scratch.log
-test ! -f tmp/scratch.log
-printf 'dir scratch\n' > tmp/dir-file.txt
-libra clean -fd tmp
-test ! -e tmp
-
-printf '*.ignored\n' > .libraignore
-printf 'ignored\n' > ignored/file.ignored
-libra clean -nX
-libra clean -fX
-test ! -f ignored/file.ignored
-
-libra lfs track '*.bin'
-libra lfs track
-printf 'large payload\n' > assets/blob.bin
-libra add .libra_attributes assets/blob.bin
-libra commit -m "test: lfs tracked file"
-libra lfs ls-files
-libra lfs ls-files --long --size
-libra lfs ls-files --name-only
-libra lfs untrack '*.bin'
-libra lfs track
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR/worktree-tools-repo"
-! libra clean
-! libra clean -xX
-! libra rm no-such-file.txt
-! libra mv no-such-source.txt docs/dest.txt
-! libra lfs lock assets/blob.bin
-```
-
-断言：`mv` 同时更新工作区路径和 index 状态；`rm` 删除 tracked 文件并可提交；`clean -n` 不删除、`clean -f` 删除文件、`clean -fd` 删除目录、`clean -fX` 只删除 ignored 文件；`lfs track` 写入 `.libra_attributes`，无参数可列出 pattern；tracked 大文件提交后可由 `lfs ls-files` 三种格式观察；`lfs untrack` 移除 pattern；缺少 `-f/-n`、互斥 clean flag、缺失 rm/mv 源必须失败；`lfs lock` 在无远端 LFS 服务/认证时必须失败且不得泄露凭据。`lfs untrack` 对缺失 pattern 当前可能是幂等空删除，不作为负向断言。
-
-补充可执行断言：
-- `libra --json lfs ls-files` 返回 `ok:true`；无 LFS tracked 文件时 `data.files` 可缺失（当前 `LfsOutput.files` 为空会被省略），有 tracked 文件时 `data.files[]` 必须可解析。
-- 验证 `.libra_attributes` 内容包含 `*.bin`（`grep` 或 `cat` 后 python 检查）。
-- `libra --json status --porcelain` 在 mv/rm 后可解析且显示正确 staged 状态。
-- 操作后 `libra fsck --connectivity-only` 通过。
-- 全局隔离：本场景的 `.libraignore` 和 LFS pattern 不得通过隔离 HOME 的全局 config 泄露到其他场景。
-
-### `cli.reflog-symbolic-ref`
-
-目的：覆盖 `reflog` 与 `symbolic-ref` 的用户可观察 ref 日志和符号引用行为。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.reflog-symbolic-ref"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init ref-log-repo
-cd ref-log-repo
-libra config set user.name "Libra Reflog Test"
-libra config set user.email "reflog@example.invalid"
-printf 'one\n' > ref.txt
-libra add ref.txt
-libra commit -m "test: reflog one"
-libra branch feature/ref-log
-libra switch feature/ref-log
-printf 'two\n' >> ref.txt
-libra add ref.txt
-libra commit -m "test: reflog two"
-
-libra reflog show
-libra reflog show HEAD
-libra reflog show --stat
-libra reflog show --pretty oneline
-libra reflog exists HEAD
-libra symbolic-ref HEAD
-libra symbolic-ref --short HEAD
-libra symbolic-ref HEAD refs/heads/main
-libra symbolic-ref --short HEAD
-libra symbolic-ref HEAD refs/heads/feature/ref-log
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR/ref-log-repo"
-! libra reflog show refs/heads/no-such-branch
-! libra reflog exists refs/heads/no-such-branch
-! libra symbolic-ref refs/heads/bad
-! libra symbolic-ref HEAD refs/tags/not-a-branch
-```
-
-断言：`reflog show` 能观察 commit、branch switch 或 HEAD 更新记录；`--stat` / `--pretty oneline` 输出可用于脚本断言；`reflog exists HEAD` 可用于脚本探测；`symbolic-ref HEAD` 和 `--short` 输出当前分支；`symbolic-ref HEAD refs/heads/<branch>` 可切换 HEAD 的符号目标并被后续读取观察；`reflog exists` 对缺失 ref 必须失败，非 HEAD 名称和非法 symbolic-ref 目标必须失败。注意 `reflog show <missing>` 当前可能返回空列表而非失败，不能作为负向断言，只能断言输出为空或 `count=0`。
-
-补充可执行断言：
-- `libra --json reflog show` 验证 `ok:true`，且 entries 中至少包含 "commit:" 或 "checkout:" 条目，并包含本场景创建的提交消息。
-- `libra --json symbolic-ref HEAD` 验证 `ok:true`，且 data 中的 ref 输出为 "refs/heads/..."。
-- 非法 symbolic-ref 目标的失败必须包含稳定错误（LBR- 或 "not a branch" 类消息）。
-- 操作前后 `libra --json show-ref --heads` 验证 `data.entries[]` 一致性（无意外丢失）。
-
-### `cli.open-smoke`
-
-目的：覆盖 `open` 命令的最小可观察行为，但避免默认 Wave 在 CI/headless 环境中真的打开浏览器或系统应用。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.open-smoke"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init open-repo
-cd open-repo
-libra remote add origin git@github.com:example/open-repo.git
-libra --json open >open-default.json
-libra --json open origin >open-origin.json
-python3 -c "import json; d=json.load(open('open-default.json')); assert d['ok'] is True; assert d['data']['launched'] is False; assert 'web_url' in d['data']"
-python3 -c "import json; d=json.load(open('open-origin.json')); assert d['ok'] is True; assert d['data']['launched'] is False; assert 'web_url' in d['data']"
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR/open-repo"
-! libra --json open no-such-remote
-```
-
-断言：全局 `--json` 模式输出包含 `remote`、`remote_url`、`web_url` 和 `launched=false`，不启动外部程序；指定 remote 可解析托管页面 URL；缺失 remote 或不安全 URL 必须失败。默认 Wave 严禁运行会真实启动浏览器/系统应用的裸 `libra open`。
-
-补充可执行断言：
-- 已有 JSON 断言保持；额外验证 `libra --json open no-such-remote` 的错误 envelope 包含 `ok:false` + LBR- 码或 "no such remote"。
-- 验证即使 remote URL 非法，`launched=false` 且无副作用（无浏览器进程）。
-- 操作后 `libra fsck` 通过。
-
-### `libra tag/history-inspection/worktree-tools/ref-log` 参数覆盖表
-
-| 参数或子命令 | 场景 ID | 关键断言 |
-|---|---|---|
-| `tag <name>` / `tag -m <msg>` | `cli.tag-basic` | 轻量和 annotated tag 均可创建、列出、解析 |
-| `tag -l` / `tag -l -n` / `tag -f` / `tag -d` | `cli.tag-basic` | 列表、注释摘要、强制更新和删除路径覆盖 |
-| `merge <branch>` | `cli.merge-rebase-cherry-revert-smoke` | fast-forward 与三方无冲突 merge 均可观察 |
-| `merge --continue` / `--abort` | `cli.merge-rebase-cherry-revert-smoke` | 无会话时明确失败；冲突续跑场景另行补充 |
-| `rebase <upstream>` | `cli.merge-rebase-cherry-revert-smoke` | topic 提交重放到新 base |
-| `rebase --continue` | `cli.merge-rebase-cherry-revert-smoke` | 无会话时明确失败；冲突续跑场景另行补充 |
-| `cherry-pick <commit>` | `cli.merge-rebase-cherry-revert-smoke` | 指定提交修改被重放到当前分支 |
-| `revert <commit>` | `cli.merge-rebase-cherry-revert-smoke` | 创建反向提交并撤销目标修改 |
-| `grep` / `grep -F/-i/-n/-c/-l/-e/-f/--tree` | `cli.grep-blame-describe-shortlog` | 工作区、pathspec、pattern file 和历史 tree 搜索可观察 |
-| `blame` / `blame -L` | `cli.grep-blame-describe-shortlog` | 行级作者、提交和范围限制可观察 |
-| `describe --tags/--always/--abbrev` | `cli.grep-blame-describe-shortlog` | tag 描述和 hash fallback 可观察 |
-| `shortlog` / `shortlog -s` / `shortlog -n` | `cli.grep-blame-describe-shortlog` | 作者汇总和排序可观察 |
-| `clean -n/-f/-fd/-fX` | `cli.clean-rm-mv-lfs-basic` | dry-run、文件删除、目录删除、ignored-only 删除覆盖 |
-| `rm <path>` | `cli.clean-rm-mv-lfs-basic` | tracked 文件从工作区和 index 移除 |
-| `mv <src> <dst>` | `cli.clean-rm-mv-lfs-basic` | tracked 文件移动并更新 index |
-| `lfs track/untrack/ls-files` | `cli.clean-rm-mv-lfs-basic` | `.libra_attributes` pattern 和 LFS tracked 文件列表可观察 |
-| `reflog show` / `reflog show --stat` / `reflog exists` | `cli.reflog-symbolic-ref` | HEAD/ref 更新记录可读，exists 可脚本探测 |
-| `symbolic-ref` / `symbolic-ref --short` / `symbolic-ref HEAD <target>` | `cli.reflog-symbolic-ref` | HEAD 符号引用读写可观察 |
-| `--json open` | `cli.open-smoke` | 只输出 URL 和 `launched=false`，不启动外部程序 |
-
-### `cli.cross-cutting-flags`
-
-目的：集中覆盖 `src/cli.rs` 根结构（`Cli`）上的全局 flag —— `--json`(`-J`)/`--machine`/`--quiet`(`-q`)/`--color`/`--no-color`/`--progress`/`--exit-code-on-warning`，断言其语义本身，而不是依赖各功能场景顺带触发。本场景的内联 `libra()` 已对齐 §3.3.1 更新后的规范（含 `TMPDIR` 与 git/ssh 感知 `SAFE_PATH`），可作为其他场景收敛的样板。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.cross-cutting-flags"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-SAFE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-libra() {
-  env -i \
-    PATH="$SAFE_PATH" \
-    HOME="$RUN_ROOT/home" \
-    USERPROFILE="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LIBRA_TEST=1 \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init flags-repo
-cd flags-repo
-libra config set user.name "Libra Flags Test"
-libra config set user.email "flags@example.invalid"
-printf 'flag\n' > flag.txt
-libra add flag.txt
-libra commit -m "test: flags base"
-
-# --json / -J：stdout 是可解析 JSON envelope（需要 PATH 上的解析器时用 python3，否则仅断言非空）
-libra --json status >status.json
-libra -J status >status.short.json
-libra --json=compact log >log.compact.json
-libra --json=ndjson log >log.ndjson
-python3 -c "import json; d=json.load(open('status.json')); assert d['ok'] is True; assert 'data' in d; assert 'untracked' in d['data']"
-python3 -c "import json; d=json.load(open('status.short.json')); assert d['ok'] is True; assert 'data' in d"
-python3 -c "import json; d=json.load(open('log.compact.json')); assert d['ok'] is True; assert isinstance(d['data'].get('commits'), list)"
-python3 -c "import json; lines=[json.loads(l) for l in open('log.ndjson')]; assert len(lines) > 0; assert 'hash' in lines[0] or 'id' in lines[0]"
-
-# --quiet：抑制主结果 stdout，但命令仍成功
-libra --quiet status >quiet.out
-test ! -s quiet.out
-
-# --machine：蕴含 ndjson + no-pager + color=never + quiet
-libra --machine status >machine.out
-
-# --color=never / --no-color：stdout 不含 ANSI 转义序列
-libra --color=never log >log.nocolor
-libra --no-color log >log.nocolor2
-! grep -q "$(printf '\033')" log.nocolor
-
-# --progress=none：长操作不打印进度
-libra --progress none status >/dev/null
-
-# --exit-code-on-warning：无 warning 时不得改变成功命令退出码
-# warning 时退出码 9 需要先固化确定性 warning 源，当前按 BASELINE_GAP-INTEG-009 跟踪。
-libra --exit-code-on-warning status
-
-# 错误 JSON 形态（Agent 关键契约）：--json 模式下失败也必须在 stderr 产出 ok:false + LBR-* 稳定码
-! libra --json cat-file -p 0000000000000000000000000000000000000000 2>err.json || true
-python3 -c "
-import json, sys
-data = open('err.json').read().strip()
-if data:
-    try:
-        j = json.loads(data)
-        assert j.get('ok') is False
-        assert 'error_code' in j and j['error_code'].startswith('LBR-')
-        assert 'category' in j and 'message' in j
-        assert 'hints' in j or 'details' in j
-    except Exception as e:
-        print('JSON error envelope parse failed:', e, file=sys.stderr)
-        sys.exit(1)
-"
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR/flags-repo"
-! libra --json=bogus status
-! libra --color=plaid log
-# 无 warning 时 --exit-code-on-warning 不应改变退出码
-libra --exit-code-on-warning status
-```
-
-断言：`--json`/`-J` 输出可被 JSON 解析（或至少非空且为单一 envelope）；`--json=compact`/`=ndjson` 切换布局；`--quiet` 使主结果 stdout 为空但退出码 0；`--machine` 等价于 ndjson+no-pager+color=never+quiet 的组合（参见 `src/cli.rs` 中 `--machine` 的文档化语义）；`--color=never`/`--no-color` 去除 ANSI 转义；`--progress none` 不打印进度；`--exit-code-on-warning` 在无 warning 时退出码为 0；非法 `--json`/`--color` 值必须非 0 退出并提示可选值。warning 时退出码 9 暂不进入默认 Wave，按 BASELINE_GAP-INTEG-009 要求先识别无密钥、可复现 warning 源。
-
-补充可执行断言（Agent 契约核心场景）：
-- `libra --json status > s.json && python3 -c "import json; d=json.load(open('s.json')); assert d['ok'] is True; assert 'data' in d"`
-- `libra --machine status > m.out && python3 -c "import json; [json.loads(l) for l in open('m.out')]"` （验证 ndjson 可解析）
-- `libra --quiet status > q.out && test ! -s q.out`
-- `libra --exit-code-on-warning status` 在无 warning 时退出码必须为 0。
-- 非法 `--json=bogus` 必须非 0，且错误 envelope 包含 LBR-CLI-002 或等价。
-- 验证 `--progress json` 在 JSON 模式下输出 NDJSON progress 到 stderr。
-- 额外：`libra --json --exit-code-on-warning status` 在干净状态下退出码为 0；warning=9 组合行为只在 BASELINE_GAP-INTEG-009 的确定性 warning 源落地后启用。
-
-通过标准：全部场景退出码和断言通过，无未解释 skip/fail。`merge --continue` / `rebase --continue` 的冲突续跑成功路径由 `cli.merge-conflict-continue` / `cli.rebase-conflict-continue` 覆盖；LFS 远端 lock API、真实浏览器/系统 open 行为不进入默认 Wave，必要时登记独立 follow-up。
-
-## 4.2 Wave 2：CLI 存储、schema 与本地协议场景（必跑）
-
-Wave 2 覆盖需要跨仓库、本地 remote 或底层存储可观察结果的功能，但仍只通过 `libra` 命令驱动。
-
-### `cli.schema-upgrade-observable`
-
-目的：验证新建仓库的 SQLite schema 可被 CLI 正常使用。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.schema-upgrade-observable"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init schema-repo
-cd schema-repo
-
-libra db status
-libra db --json status >db-status.json
-python3 -c "import json; d=json.load(open('db-status.json')); assert d['ok'] is True; assert 'current_version' in d['data']; assert 'latest_version' in d['data']; assert 'state' in d['data']"
-libra db upgrade
-libra db status
-
-libra config set user.name "Libra Schema Test"
-libra config set user.email "schema@example.invalid"
-printf 'schema\n' > schema.txt
-libra add schema.txt
-libra commit -m "test: schema usable after status"
-libra log --oneline -n 1
-libra fsck --connectivity-only
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_ROOT/repos"
-mkdir not-a-repo
-cd not-a-repo
-! libra db status
-! libra db upgrade
-```
-
-断言：`db status` 只读取 schema 状态并退出码为 0；`db --json status` 输出 current/latest/state 等结构化字段或等价 schema 状态；`db upgrade` 对已是当前版本的仓库应成功且幂等；升级/状态检查后提交闭环和 `fsck --connectivity-only` 不触发 migration 或 schema 错误；非仓库目录中的 `db status` / `db upgrade` 必须失败并提示缺少 Libra 仓库。
-
-补充可执行断言：
-- `libra --json db status` 必须 `ok:true`，`data.current_version == data.latest_version` 且 `data.state` 为兼容状态。
-- 非仓库目录执行 `libra db status` 必须非 0，stderr 包含 "not a libra repository" 或 LBR-REPO-001。
-- 操作后 `libra fsck --connectivity-only` 必须 0 退出。
-- 验证 schema 升级幂等：连续两次 `libra db upgrade` 均成功且无副作用。
-
-### `cli.clone-fetch-pull-local`
-
-目的：验证本地路径 Git remote 的 `clone`、`remote`、`ls-remote`、`fetch`、`pull` 行为，不访问公网，并覆盖本地 Git 仓库互操作性。注意 `push` 当前故意拒绝本地 file remote，因此本场景通过隔离 `gitfix()` 直接推进 Git fixture，不使用 `libra push` 搭 fixture。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.clone-fetch-pull-local"
-REMOTE_DIR="$RUN_ROOT/fixtures/$SCENARIO/git-source"
-CLONE_DIR="$RUN_ROOT/repos/$SCENARIO/clone"
-mkdir -p "$(dirname "$REMOTE_DIR")" "$(dirname "$CLONE_DIR")"
-SAFE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-GIT_BIN="$(command -v git || true)"
-case ":$SAFE_PATH:" in *":$(dirname "${GIT_BIN:-/usr/bin/git}"):"*) ;; *)
-  [ -n "$GIT_BIN" ] && SAFE_PATH="$SAFE_PATH:$(dirname "$GIT_BIN")" ;; esac
-gitfix() {
-  env -i \
-    PATH="$SAFE_PATH" \
-    HOME="$RUN_ROOT/home" USERPROFILE="$RUN_ROOT/home" \
-    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-    TMPDIR="$RUN_ROOT/tmp" \
-    GIT_AUTHOR_NAME="Libra Fixture" GIT_AUTHOR_EMAIL="fixture@example.invalid" \
-    GIT_COMMITTER_NAME="Libra Fixture" GIT_COMMITTER_EMAIL="fixture@example.invalid" \
-    LANG=C LC_ALL=C \
-    git "$@"
-}
-libra() {
-  env -i \
-    PATH="$SAFE_PATH" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-
-mkdir -p "$REMOTE_DIR"
-cd "$REMOTE_DIR"
-gitfix init -b main
-gitfix config user.name "Libra Remote Seed"
-gitfix config user.email "remote-seed@example.invalid"
-printf 'first\n' > README.md
-gitfix add README.md
-gitfix commit -m "test: seed remote"
-
-libra ls-remote "$REMOTE_DIR"
-libra ls-remote --heads "$REMOTE_DIR" main
-libra clone "$REMOTE_DIR" "$CLONE_DIR"
-cd "$CLONE_DIR"
-libra remote -v
-libra remote get-url origin
-libra remote add mirror "$REMOTE_DIR"
-libra remote get-url mirror
-libra config set user.name "Libra Clone Local"
-libra config set user.email "clone-local@example.invalid"
-libra log --oneline
-grep 'first' README.md
-
-cd "$REMOTE_DIR"
-printf 'second\n' >> README.md
-gitfix add README.md
-gitfix commit -m "test: second remote commit"
-
-cd "$CLONE_DIR"
-libra fetch origin main
-libra fetch --all
-libra show-ref --heads
-libra pull --ff-only origin main
-grep 'second' README.md
-
-# pull --rebase：clone 端先造一个本地提交，再让 source 推进 upstream，
-# rebase 把本地提交重放到 upstream 新提交之上（改不同文件，确定性无冲突）
-printf 'local only\n' > clone-local.txt
-libra add clone-local.txt
-libra commit -m "test: clone local commit"
-cd "$REMOTE_DIR"
-printf 'third\n' >> README.md
-gitfix add README.md
-gitfix commit -m "test: third remote commit"
-cd "$CLONE_DIR"
-libra pull --rebase origin main
-grep 'third' README.md
-test -f clone-local.txt
-```
-
-补充步骤：
-
-```bash
-cd "$RUN_ROOT/repos/$SCENARIO"
-libra clone --bare "$REMOTE_DIR" bare-clone.git
-test -f bare-clone.git/libra.db
-
-libra clone --single-branch -b main "$REMOTE_DIR" single-branch
-cd single-branch
-libra branch --show-current
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_ROOT/repos/$SCENARIO/clone"
-! libra fetch origin no-such-branch
-! libra pull --ff-only origin no-such-branch
-! libra clone "$RUN_ROOT/fixtures/$SCENARIO/missing.git" "$RUN_ROOT/repos/$SCENARIO/missing-clone"
-
-# Verify clone/fetch/pull JSON output format
-cd "$RUN_DIR"
-libra --json clone "$REMOTE_DIR" "$RUN_ROOT/repos/$SCENARIO/clone-json" >clone.json
-python3 -c "import json; d=json.load(open('clone.json')); assert d['ok'] is True; assert 'data' in d"
-cd "$RUN_ROOT/repos/$SCENARIO/clone-json"
-libra --json fetch origin >fetch.json
-python3 -c "import json; d=json.load(open('fetch.json')); assert d['ok'] is True; assert 'data' in d"
-libra --json pull --ff-only origin main >pull.json
-python3 -c "import json; d=json.load(open('pull.json')); assert d['ok'] is True; assert 'data' in d"
-```
-
-断言：隔离 `gitfix()` 创建的本地 Git 仓库可作为 clone/fetch/pull remote；`remote add`、`remote -v`、`remote get-url` 能观察本地路径 URL；`ls-remote` 可看到 `refs/heads/main`；普通 clone 后文件和 log 可见；Git fixture 新提交后，clone 仓库通过 `fetch`、`fetch --all` 和 `pull --ff-only` 能看到新增提交；**`pull --rebase` 把 clone 端本地提交重放到 upstream 新提交之上——`README.md` 含 upstream 的 `third`，本地 `clone-local.txt` 仍在**；`clone --bare` 生成 Libra bare 布局（可观察到 `libra.db`）；`clone --single-branch -b main` 只检出指定分支；缺失 remote 或缺失 ref 必须非 0 退出且不创建半成品仓库或损坏当前 clone。
-
-补充可执行断言：
-- `libra --json clone "$REMOTE_DIR" clone-json` 成功后 `ok:true`，并验证 `libra --json log -n 1` 结构。
-- 每次 fetch/pull 后 `libra fsck --connectivity-only` 通过。
-- `libra --json ls-remote --heads` 返回结构化 refs 列表。
-- 负向 `libra fetch origin no-such` 必须非 0，stderr 包含 "couldn't find remote ref" 或对应 LBR-NET 错误。
-- 验证 `pull --rebase` 成功后，本地提交历史被重放（通过 `libra --json log -n 5` 的 `data.commits[]` 顺序观察）。
-
-### `cli.fetch-depth-local`
-
-目的：验证本地路径 Git source 上的 `clone --depth` shallow 基本语义。该场景不使用 `push`，因为当前 `push` 故意拒绝本地 file remote。当前实现若在本场景暴露 `LBR-REPO-002 object not found`，应记录为 shallow clone 对象闭包实现缺口，而不是把场景改回本地 push fixture。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.fetch-depth-local"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-SAFE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-GIT_BIN="$(command -v git || true)"
-case ":$SAFE_PATH:" in *":$(dirname "${GIT_BIN:-/usr/bin/git}"):"*) ;; *)
-  [ -n "$GIT_BIN" ] && SAFE_PATH="$SAFE_PATH:$(dirname "$GIT_BIN")" ;; esac
-gitfix() {
-  env -i \
-    PATH="$SAFE_PATH" \
-    HOME="$RUN_ROOT/home" USERPROFILE="$RUN_ROOT/home" \
-    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-    TMPDIR="$RUN_ROOT/tmp" \
-    GIT_AUTHOR_NAME="Libra Fixture" GIT_AUTHOR_EMAIL="fixture@example.invalid" \
-    GIT_COMMITTER_NAME="Libra Fixture" GIT_COMMITTER_EMAIL="fixture@example.invalid" \
-    LANG=C LC_ALL=C \
-    git "$@"
-}
-libra() {
-  env -i \
-    PATH="$SAFE_PATH" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-
-REMOTE_DIR="$RUN_ROOT/fixtures/$SCENARIO/git-source"
-mkdir -p "$(dirname "$REMOTE_DIR")"
-
-mkdir -p "$REMOTE_DIR"
-cd "$REMOTE_DIR"
-gitfix init -b main
-gitfix config user.name "Libra Depth Test"
-gitfix config user.email "depth@example.invalid"
-printf 'first\n' > a.txt
-gitfix add a.txt
-gitfix commit -m "test: first"
-printf 'second\n' > a.txt
-gitfix add a.txt
-gitfix commit -m "test: second"
-printf 'third\n' > a.txt
-gitfix add a.txt
-gitfix commit -m "test: third"
-
-cd "$RUN_DIR"
-libra clone --depth 1 "$REMOTE_DIR" shallow-clone
-cd shallow-clone
-libra log --oneline | wc -l | grep -q '^1$'
-test -f a.txt
-grep 'third' a.txt
-
-cd "$RUN_DIR"
-libra clone --depth 2 "$REMOTE_DIR" shallow-clone-2
-cd shallow-clone-2
-libra log --oneline | wc -l | grep -q '^2$'
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR"
-! libra clone --depth 0 "$REMOTE_DIR" "$RUN_ROOT/repos/$SCENARIO/bad-depth"
-```
-
-断言：`clone --depth 1` 只获取最新提交，`log` 数量为 1，但工作区文件内容是最新的；`clone --depth 2` 获取 2 个提交；非法 depth（如 0）必须非 0 退出。本地 Git fixture shallow 语义可作为基本功能验证，与真实远端的深度对等性差异另由 BASELINE_GAP-INTEG-009 跟踪。
-
-补充可执行断言：
-- `libra --json clone --depth 1 "$REMOTE_DIR" shallow1` 成功；进入 `shallow1` 后运行 `libra --json log -n 10 >log.json`，用 python 断言 `len(data.commits) == 1`。
-- shallow clone 后 `libra --json rev-list HEAD` 返回 `data.total` 和 `data.commits[]`，数量与 depth 预期一致。
-- 非法 `--depth 0` 错误必须非 0。
-- shallow clone 后执行 `libra fsck --connectivity-only` 必须通过。
-
-### `cli.push-local-file-remote-rejected`
-
-目的：验证 `push` 对本地 file remote 的故意差异：本地路径 remote 可用于 `clone`/`fetch`/`pull` fixture，但 `push` 当前只支持网络 remote，必须拒绝本地 file remote。真实 push/refspec/tag/force/mirror 成功路径放到 Wave 3 GitHub 场景。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.push-local-file-remote-rejected"
-REMOTE_DIR="$RUN_ROOT/fixtures/$SCENARIO/remote.git"
-WORK_DIR="$RUN_ROOT/repos/$SCENARIO/work"
-mkdir -p "$(dirname "$REMOTE_DIR")" "$(dirname "$WORK_DIR")"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-
-libra init --bare "$REMOTE_DIR"
-libra init "$WORK_DIR"
-cd "$WORK_DIR"
-libra config set user.name "Libra Push Rejection Test"
-libra config set user.email "push-reject@example.invalid"
-printf 'push\n' > push.txt
-libra add push.txt
-libra commit -m "test: push rejection base"
-libra remote add origin "$REMOTE_DIR"
-libra remote set-url --push origin "$REMOTE_DIR"
-libra remote get-url --all origin
-
-expect_local_push_rejected() {
-  name="$1"
-  shift
-  set +e
-  libra --json=compact push "$@" >"$name.out" 2>"$name.err"
-  status=$?
-  set -e
-  test "$status" -ne 0
-  python3 - "$name.err" <<'PY'
-import json, sys
-raw = open(sys.argv[1]).read().strip()
-payload = json.loads(raw)
-assert payload["ok"] is False
-assert payload["error_code"] == "LBR-CLI-003"
-assert "local file" in payload["message"] or "local file repositories" in payload["message"]
-PY
-}
-
-expect_local_push_rejected push-main origin main
-expect_local_push_rejected push-dry-run --dry-run origin main
-expect_local_push_rejected push-force --force origin main
-expect_local_push_rejected push-tags --tags origin
-expect_local_push_rejected push-mirror --mirror --dry-run origin
-```
-
-断言：本地 file remote 已存在且可作为 remote URL 存储；`push origin main`、`push --dry-run origin main`、`push --force origin main`、`push --tags origin`、`push --mirror --dry-run origin` 都必须非 0 退出；`--json=compact` 的 stderr 错误 envelope 必须包含 `ok:false`、`error_code == "LBR-CLI-003"` 和本地 file remote 不支持的可操作提示；失败不得写入 remote refs 或修改本地 HEAD。
-
-补充可执行断言：
-- 每个本地 file remote push 失败后执行 `libra fsck --connectivity-only`，确认本地源仓库仍健康。
-- `libra --json remote get-url --all origin` 仍能返回本地路径，证明失败点是 push 传输策略而非 remote 配置丢失。
-- 若未来实现支持本地 file remote push，必须把本场景改成正向闭环，并同步更新 COMPATIBILITY.md / declined note。
-
-### `cli.object-readback`
-
-目的：验证通过 CLI 写入的 commit/tree/blob/ref 能通过 CLI plumbing 和 history inspection 命令读回，覆盖 `rev-parse`、`rev-list`、`show`、`show-ref`、`cat-file`、`hash-object`、`fsck`。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.object-readback"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    USERPROFILE="$RUN_ROOT/home" \
-    HOME="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_TEST=1 \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init object-repo
-cd object-repo
-
-libra config set user.name "Libra Object Test"
-libra config set user.email "object@example.invalid"
-mkdir -p docs src
-printf 'object root\n' > README.md
-printf 'object docs\n' > docs/guide.md
-printf 'fn main() {}\n' > src/main.rs
-libra add README.md docs/guide.md src/main.rs
-libra commit -m "test: object readback"
-
-HEAD_ID="$(libra rev-parse HEAD)"
-libra rev-parse --short HEAD
-libra rev-parse --show-toplevel
-libra rev-list HEAD
-libra show --no-patch HEAD
-libra show --stat HEAD
-libra show HEAD:docs/guide.md
-libra show-ref --head
-libra show-ref --heads
-libra cat-file -t "$HEAD_ID"
-libra cat-file -s "$HEAD_ID"
-libra cat-file -p "$HEAD_ID"
-libra cat-file -e "$HEAD_ID"
-
-printf 'loose blob\n' > loose.txt
-BLOB_ID="$(libra hash-object -w loose.txt)"
-libra cat-file -t "$BLOB_ID"
-libra cat-file -p "$BLOB_ID"
-printf 'stdin blob\n' | libra hash-object --stdin
-printf 'README.md\ndocs/guide.md\n' | libra hash-object --stdin-paths
-
-libra fsck
-libra fsck --connectivity-only
-libra fsck "$HEAD_ID"
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR/object-repo"
-! libra rev-parse no-such-revision
-! libra show HEAD:no-such-path
-! libra cat-file -p no-such-object
-! libra hash-object missing-file.txt
-! libra fsck no-such-object
-```
-
-断言：`rev-parse HEAD` 输出可传递给 `cat-file`、`fsck` 等后续命令；`rev-list HEAD` 至少包含当前提交；`show --no-patch` / `show --stat` 能读回 commit 元数据和变更统计；`show HEAD:<path>` 输出内容必须与提交前文件内容一致；`show-ref --head` / `--heads` 能列出 HEAD 和本地分支；`cat-file -t/-s/-p/-e` 分别返回类型、大小、内容和存在性；`hash-object -w` 写入的 loose blob 可由 `cat-file` 读回；`hash-object --stdin` / `--stdin-paths` 可计算输入内容或路径列表；`fsck` 和 `fsck --connectivity-only` 在健康仓库中退出码为 0；缺失 revision、path、object 或 file 必须失败且不写入新对象。
-
-补充可执行断言（plumbing 场景重点）：
-- `libra --json cat-file -p $HEAD_ID` 必须 `ok:true` 且 data 中的 commit 结构包含 `object_type == "commit"`、`tree`、`parents[]`、`message`。
-- `libra --json rev-list HEAD` 返回 `data.commits[]` 与 `data.total`，每个 commit 元素为 hash 字符串。
-- 所有对象操作后 `libra fsck` 必须通过；写入 blob 后 `libra --json cat-file -t $BLOB_ID` 验证类型为 "blob"。
-- 负向 cat-file / rev-parse 错误必须返回 LBR- 码（通过 JSON error envelope 或 stderr 捕获）。
-
-### `cli.sha256-object-readback`
-
-目的：验证 `--object-format sha256` 仓库不仅 `core.objectformat` 正确，还能走完整“提交→对象读回”闭环。这覆盖 `src/cli.rs` 的 hash-kind preflight（按仓库 `core.objectformat` 调 `set_hash_kind`）的端到端正确性；`cli.init-branch-and-format-options` 只验证了 config 键，未验证 sha256 对象真正可写可读。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.sha256-object-readback"
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-SAFE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-libra() {
-  env -i \
-    PATH="$SAFE_PATH" \
-    HOME="$RUN_ROOT/home" \
-    USERPROFILE="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LIBRA_TEST=1 \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init --object-format sha256 sha256-repo
-cd sha256-repo
-libra config get core.objectformat
-libra config set user.name "Libra Sha256 Test"
-libra config set user.email "sha256@example.invalid"
-printf 'sha256 payload\n' > payload.txt
-libra add payload.txt
-libra commit -m "test: sha256 commit"
-
-HEAD_ID="$(libra rev-parse HEAD)"
-test "${#HEAD_ID}" -eq 64          # sha256 对象 id 为 64 位 hex（sha1 为 40 位）
-libra cat-file -t "$HEAD_ID"
-libra cat-file -p "$HEAD_ID"
-libra show --stat HEAD
-libra log --oneline -n 1
-libra fsck --connectivity-only
-
-BLOB_ID="$(libra hash-object -w payload.txt)"
-test "${#BLOB_ID}" -eq 64
-libra cat-file -p "$BLOB_ID"
-```
-
-断言：`core.objectformat` 为 `sha256`；commit 与 blob 的对象 id 均为 64 位 hex，证明 hash-kind preflight 正确按仓库格式 pin（而非默认 sha1）；`cat-file -t/-p`、`show --stat`、`log --oneline`、`fsck --connectivity-only`、`hash-object -w` 在 sha256 仓库全部成功且写入对象可读回；与默认 sha1 的 `cli.object-readback` 形成对照。
-
-补充可执行断言：
-- `libra --json config get core.objectformat` 验证值为 "sha256"。
-- `libra --json cat-file -p HEAD` 成功且 commit ID 为 64 字符 hex。
-- 写入 blob 后 `libra --json cat-file -t $BLOB_ID` 返回 "blob"。
-- 全流程 `libra fsck --connectivity-only` 通过。
-
-### `cli.verify-pack-smoke`
-
-目的：覆盖 `verify-pack` 对 `.idx` / `.pack` 成对文件的黑盒验证，避免 Maintenance 矩阵把 pack 验证误归入 `fsck` 或 `cat-file` 覆盖。
-
-最小步骤：
-
-```bash
-SCENARIO="cli.verify-pack-smoke"
-REPO_ROOT="$PWD"   # 记录 libra 仓库根目录（Wave 0 执行目录），供后续复制 fixture
-RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
-mkdir -p "$RUN_DIR"
-cd "$RUN_DIR"
-libra() {
-  env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    HOME="$RUN_ROOT/home" \
-    USERPROFILE="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LIBRA_TEST=1 \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-libra init pack-source
-cd pack-source
-libra config set user.name "Libra Pack Test"
-libra config set user.email "pack@example.invalid"
-printf 'pack one\n' > one.txt
-printf 'pack two\n' > two.txt
-libra add one.txt two.txt
-libra commit -m "test: pack source"
-
-# verify-pack 需要 pack+idx 成对输入；用仓库内固定 pack fixture 并通过隐藏
-# index-pack 生成 idx，避免读取开发者真实 .git/.libra pack 目录。
-mkdir -p "$RUN_ROOT/fixtures/$SCENARIO"
-PACK_FILE="$RUN_ROOT/fixtures/$SCENARIO/small-sha1.pack"
-PACK_IDX="$RUN_ROOT/fixtures/$SCENARIO/small-sha1.idx"
-cp "$REPO_ROOT/tests/data/packs/small-sha1.pack" "$PACK_FILE"
-libra index-pack "$PACK_FILE" -o "$PACK_IDX"
-test -f "$PACK_IDX"
-libra verify-pack "$PACK_IDX"
-libra verify-pack --pack "$PACK_FILE" "$PACK_IDX"
-libra verify-pack -v "$PACK_IDX"
-libra verify-pack -s "$PACK_IDX"
-libra --json verify-pack "$PACK_IDX" >verifypack.json
-python3 -c "import json; d=json.load(open('verifypack.json')); assert d['ok'] is True; assert d['data']['verified'] is True; assert 'objects' in d['data']"
-```
-
-负向步骤：
-
-```bash
-cd "$RUN_DIR/pack-source"
-! libra verify-pack "$RUN_ROOT/fixtures/$SCENARIO/missing.idx"
-cp "$PACK_IDX" "$RUN_ROOT/fixtures/$SCENARIO/corrupt.idx"
-printf 'corrupt' >> "$RUN_ROOT/fixtures/$SCENARIO/corrupt.idx"
-! libra verify-pack "$RUN_ROOT/fixtures/$SCENARIO/corrupt.idx"
-```
-
-断言：`index-pack` 仅作为隐藏内部 fixture 生成器使用；`verify-pack` 默认从 idx sibling 推导 `.pack` 路径；`--pack` 显式路径可验证同一 pack；`-v` 输出对象 hash/offset；`-s` 输出统计摘要；`--json` 输出 `verified=true`、object count、pack/index hash 等结构化字段；缺失或损坏 idx 必须失败且错误包含受影响路径。fixture 来源固定为仓库内 `tests/data/packs/small-sha1.pack` 复制到 `$RUN_ROOT/fixtures/$SCENARIO/`，不得读取开发者真实 `.git/objects/pack` 或 `.libra/objects/pack`。
-
-补充可执行断言：
-- `libra --json verify-pack "$PACK_IDX"` 必须 `ok:true`；单 idx 时 `data.verified == true`，多 idx 时 `data.packs[].verified` 全为 true。
-- 损坏 idx 场景 `libra verify-pack corrupt.idx` 必须非 0，stderr 包含路径或 corrupt 信息。
-- 操作后在生成 pack 的仓库执行 `libra fsck` 通过。
-- 验证 `--json` 输出包含 "objects" 数组。
-
-### `libra db/remote/object` 覆盖表
-
-| 参数或子命令 | 场景 ID | 关键断言 |
-|---|---|---|
-| `db status` / `db --json status` | `cli.schema-upgrade-observable` | schema 状态可读且结构化输出可用于断言 |
-| `db upgrade` | `cli.schema-upgrade-observable` | 当前 schema 下幂等成功，非仓库失败 |
-| `clone <remote> <path>` | `cli.clone-fetch-pull-local` | 本地 remote 可 clone，文件和 log 可见 |
-| `clone --bare` | `cli.clone-fetch-pull-local` | bare clone 使用 bare 布局 |
-| `clone --single-branch -b <branch>` | `cli.clone-fetch-pull-local` | 指定分支被检出 |
-| `remote add` / `remote -v` / `remote get-url` | `cli.clone-fetch-pull-local`、`cli.push-local-file-remote-rejected` | remote URL 可写入、列出和读取 |
-| `remote set-url --push` | `cli.push-local-file-remote-rejected` | push URL 可设置并由 get-url 观察 |
-| `ls-remote` / `ls-remote --heads` | `cli.clone-fetch-pull-local` | 本地 remote refs 可查询 |
-| `fetch <remote> <refspec>` | `cli.clone-fetch-pull-local` | fetched ref/object 可由 show-ref 或 pull 观察 |
-| `fetch --all` | `cli.clone-fetch-pull-local` | 所有已配置 remote 被刷新 |
-| `pull --ff-only <remote> <refspec>` | `cli.clone-fetch-pull-local` | fast-forward 后工作区包含远端新增内容 |
-| `pull --rebase <remote> <refspec>` | `cli.clone-fetch-pull-local` | 本地提交重放到 upstream 新提交之上 |
-| `push <local-path> ...` | `cli.push-local-file-remote-rejected` | 本地 file remote push 被拒绝并返回 LBR-CLI-003 |
-| `push --dry-run` | `live.github-create-push-clone-fetch` | 真实网络 remote 上预览更新但远端 ref 不变 |
-| `push -u <remote> <refspec>` | `live.github-create-push-clone-fetch` | 写入远端并设置 upstream |
-| `push <src>:<dst>` | `live.github-create-push-clone-fetch` | 指定目标 ref 被创建 |
-| `push --tags` | `live.github-create-push-clone-fetch` | 本地 tag refs 推送到远端 |
-| `push --mirror` | `live.github-create-push-clone-fetch` | 镜像同步只作用于临时 GitHub 仓库 |
-| `push --force <remote> <ref>` | `live.github-create-push-clone-fetch` | 非快进改写被普通 push 拒绝、被 --force 覆盖 |
-| `push <remote> :<dst>` | `live.github-create-push-clone-fetch` | 远端 ref 被删除 |
-| `rev-parse` / `rev-list` | `cli.object-readback` | revision 可解析且祖先列表可读 |
-| `show` / `show <rev>:<path>` | `cli.object-readback` | commit 元数据、统计和文件内容可读回 |
-| `show-ref` | `cli.object-readback`、`cli.clone-fetch-pull-local` | HEAD、heads、tags refs 可观察 |
-| `cat-file -t/-s/-p/-e` | `cli.object-readback` | 对象类型、大小、内容和存在性可验证 |
-| `hash-object -w` / `--stdin` / `--stdin-paths` | `cli.object-readback` | 文件、stdin 和路径列表可计算 blob id，写入对象可读回 |
-| `fsck` / `fsck --connectivity-only` | `cli.object-readback`、`cli.schema-upgrade-observable` | 健康仓库完整性检查通过 |
-| `verify-pack` / `verify-pack --pack` / `-v` / `-s` | `cli.verify-pack-smoke` | pack/index 成对验证、对象列表和统计输出可观察 |
-| `init --object-format sha256` 端到端 | `cli.sha256-object-readback` | sha256 仓库对象 id 为 64 位 hex 且可提交/读回 |
-
-通过标准：全部场景 green。Wave 2 只覆盖版本管理相关的 schema、本地 protocol/client 和对象读写行为；不得要求真实云凭据。
-
-## 4.3 Wave 3：GitHub 真实远端场景（按需运行）
-
-Wave 3 覆盖需要 GitHub 真实远端确认的 clone/fetch/pull/push/remote/ls-remote 行为。它不是默认无凭据阻断门，但一旦某次改动声明触达真实远端语义，就必须运行或给出明确 skip/block 原因。
-
-### `live.github-create-push-clone-fetch`
-
-目的：验证 `libra` 能和通过 `gh` 创建的 GitHub 临时仓库完成真实远端闭环。
-
-前置条件：
-
-1. `gh auth status --active --hostname github.com` 退出码为 0。
-2. 当前账号有创建私有仓库和删除测试仓库权限；若没有删除权限，不启动场景。
-3. 本机具备 Libra 访问所选远端 URL 的认证能力。默认使用 `sshUrl`，因此需要 GitHub 已配置可用 SSH key；HTTPS 只在 Libra 明确配置了可记录、可隐藏的认证来源时使用。
-
-最小步骤：
-
-```bash
-BINARY="$(pwd)/target/debug/libra"
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-RUN_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/libra-integ-$RUN_ID.XXXXXX")"
-mkdir -p "$RUN_ROOT"/{home,xdg-config,xdg-cache,repos,fixtures,logs,artifacts}
-OWNER="$(gh api user --jq '.login')"
-REPO="$OWNER/libra-integ-$RUN_ID"
-
-# Dynamic git and ssh bin resolution
-SAFE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-GIT_BIN="$(command -v git || true)"
-case ":$SAFE_PATH:" in *":$(dirname "${GIT_BIN:-/usr/bin/git}"):"*) ;; *)
-  [ -n "$GIT_BIN" ] && SAFE_PATH="$SAFE_PATH:$(dirname "$GIT_BIN")" ;; esac
-SSH_BIN="$(command -v ssh || true)"
-case ":$SAFE_PATH:" in *":$(dirname "${SSH_BIN:-/usr/bin/ssh}"):"*) ;; *)
-  [ -n "$SSH_BIN" ] && SAFE_PATH="$SAFE_PATH:$(dirname "$SSH_BIN")" ;; esac
-
-libra() {
-  env -i \
-    PATH="$SAFE_PATH" \
-    HOME="$RUN_ROOT/home" \
-    USERPROFILE="$RUN_ROOT/home" \
-    XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
-    XDG_CACHE_HOME="$RUN_ROOT/xdg-cache" \
-    TMPDIR="$RUN_ROOT/tmp" \
-    LIBRA_CONFIG_GLOBAL_DB="$RUN_ROOT/home/.libra/config.db" \
-    LIBRA_TEST=1 \
-    SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-}" \
-    LANG=C LC_ALL=C \
-    "$BINARY" "$@"
-}
-
-gh auth status --active --hostname github.com
-gh repo create "$REPO" --private --disable-issues --disable-wiki \
-  --description "Temporary Libra integration test $RUN_ID"
-trap 'gh repo delete "$REPO" --yes' EXIT
-
-REMOTE_URL="$(gh repo view "$REPO" --json sshUrl --jq '.sshUrl')"
-gh repo view "$REPO" --json nameWithOwner,isPrivate,isEmpty,url,sshUrl
-
-cd "$RUN_ROOT/repos"
-libra init source
-cd source
-libra config set user.name "Libra GitHub Integration"
-libra config set user.email "libra-integration@example.invalid"
-printf 'github remote\n' > README.md
-libra add README.md
-libra commit -m "test: github integration"
-libra remote add origin "$REMOTE_URL"
-libra push --dry-run origin main
-libra push -u origin main
-
-REMOTE_MAIN_SHA="$(gh api "repos/$REPO/git/ref/heads/main" --jq '.object.sha')"
-test "$REMOTE_MAIN_SHA" = "$(libra rev-parse HEAD)"
-
-libra branch feature/live main
-libra switch feature/live
-printf 'feature branch\n' > feature.txt
-libra add feature.txt
-libra commit -m "test: github feature branch"
-libra push origin feature/live:feature/pushed
-libra tag v-live-smoke
-libra push --tags origin
-gh api "repos/$REPO/git/ref/tags/v-live-smoke" --jq '.object.sha' >/dev/null
-libra push origin :feature/pushed
-libra push --mirror --dry-run origin
-libra push --mirror origin
-
-libra switch main
-printf 'forced rewrite\n' >> README.md
-libra add README.md
-libra commit --amend --no-edit
-FORCED_MAIN="$(libra rev-parse HEAD)"
-set +e
-libra push origin main >non-ff.out 2>non-ff.err
-NON_FF_STATUS=$?
-set -e
-test "$NON_FF_STATUS" -ne 0
-libra push --force origin main
-test "$(gh api "repos/$REPO/git/ref/heads/main" --jq '.object.sha')" = "$FORCED_MAIN"
-
-cd "$RUN_ROOT/repos"
-libra clone "$REMOTE_URL" cloned
-cd cloned
-libra log --oneline
-grep 'forced rewrite' README.md
-
-cd "$RUN_ROOT/repos/source"
-printf 'second commit\n' >> README.md
-libra add README.md
-libra commit -m "test: github second commit"
-libra push origin main
-
-cd "$RUN_ROOT/repos/cloned"
-libra fetch origin
-libra pull origin main
-grep 'second commit' README.md
-```
-
-断言：
-
-1. `gh repo create` 创建的是当前账号名下的临时私有仓库，`gh repo view` 可查询到 `nameWithOwner`、`isPrivate`、`sshUrl`。
-2. `libra remote add`、`push --dry-run origin main`、`push -u origin main`、refspec push、tag push、delete refspec、`push --mirror --dry-run`、`push --mirror`、`push --force`、`clone`、`fetch`、`pull` 均退出码为 0。
-3. `gh api repos/<owner>/<repo>/git/ref/heads/main` 能看到被推送的 `main` ref，且 normal push 在非快进 rewrite 后必须失败、`push --force` 后远端 main 才更新到 `FORCED_MAIN`。
-4. clone 后 `log --oneline` 能看到首次/force 后提交；pull 后工作区能看到第二次提交内容。
-5. 日志不得包含 GitHub token、PAT、SSH 私钥、`gh auth token` 输出或带明文凭据的 URL。
-6. 场景结束后 `gh repo delete "$REPO" --yes` 成功；失败时报告 `cleanup_required` 并列出仓库名。
-
-补充可执行断言（Wave 3 最高价值）：
-- 关键步骤后执行 `libra --json log -n 1` 并验证 `ok:true`。
-- `gh api` 返回的 sha 与本地 `libra rev-parse HEAD` 一致（initial push 与 force push 后都 capture 比对）。
-- 整个运行使用完整隔离 `libra()`（含 TMPDIR + SAFE_PATH + LIBRA_TEST）。
-- 强制要求 `trap 'gh repo delete ... --yes' EXIT` 且 cleanup 状态明确记录。
-- 推荐验证 `libra --json show-ref --heads` 在 clone 后可解析。
-
-通过标准：真实 GitHub 仓库创建、push、远端 ref 查询、clone、fetch/pull 和删除全部成功。若失败是认证、权限、GitHub 服务或本机网络问题，报告必须区分环境失败与 Libra 行为失败。
-
-补充可执行断言（Wave 3 最高价值场景）：
-- 每个 `libra` 操作（init、push、clone、fetch、pull）均使用完整隔离 `libra()` wrapper（含 TMPDIR + SAFE_PATH）。
-- 关键步骤后执行 `libra --json log -n 1` 并验证 `ok:true` + 提交存在。
-- `gh api` 查询与 `libra show-ref` 结果必须一致（至少覆盖 main、tag、删除后的 feature ref、force push 后 main）。
-- 强制要求 trap + `gh repo delete --yes`，失败时明确记录 `cleanup_required`。
-- 整个 Wave 3 运行日志必须通过 §3.6 脱敏自检（无 token/PAT/私钥）。
-- 推荐在 runner 中捕获 `gh api` 返回的 sha 与本地 `libra rev-parse` 比对。
-
----
 
 ## 5. 输出方案与测试报告（Output & Reporting）
 
@@ -3222,32 +724,34 @@ grep 'second commit' README.md
 
 `pass` / `skip` / `env-skip` 记录的 `failure` 为 `null`；`skip`/`env-skip` 必填 `skip_reason`。所有字符串入文件前先过 §3.6 脱敏自检。
 
-**自动捕获机制（让“失败命令 + 错误信息”可机器获取）**：每个场景在独立子 shell 里以 `set -Eeo pipefail` + `ERR` trap 执行；trap 用 `$BASH_COMMAND` 抓到正是失败的那条命令，配合场景 stderr 尾部即可生成上面的 `failure`：
+**自动捕获机制（让“失败命令 + 错误信息”可机器获取）**：正式 runner 使用 Rust typed step model，而不是把 Markdown 代码块或 bash trap 当作核心执行逻辑。每个 `Step` 都声明 cwd、argv、环境类型（libra/gitfix/basic）、期望退出码和断言；runner 用 `std::process::Command::env_clear()` 执行，逐条落盘 stdout/stderr/exit，并在第一条不符合期望的 step 上生成 `failure`：
 
-```bash
-# runner 核心：单场景执行 + 失败捕获（$BASH_COMMAND = 失败命令；! libra ... 的预期失败不触发）
-run_scenario() {
-  sid="$1"; fn="$2"; wave="$3"          # fn 为封装好该场景步骤的 bash 函数
-  sdir="$RUN_ROOT/logs/$sid"; mkdir -p "$sdir"
-  (
-    set -Eeo pipefail
-    trap 'rc=$?; printf "%s\n" "$BASH_COMMAND" >"'"$sdir"'/fail.cmd"; echo "$rc" >"'"$sdir"'/fail.exit"' ERR
-    "$fn"
-  ) >"$sdir/scenario.out" 2>"$sdir/scenario.err"
-  rc=$?
-  if [ "$rc" -eq 0 ]; then
-    status=pass; failcmd=""; failexit=0
-  else
-    status=fail
-    failcmd="$(cat "$sdir/fail.cmd" 2>/dev/null)"      # 失败命令
-    failexit="$(cat "$sdir/fail.exit" 2>/dev/null || echo "$rc")"
-  fi
-  emit_ndjson "$sid" "$wave" "$status" "$failcmd" "$failexit" \
-    "$(tail -n 20 "$sdir/scenario.err")"                # stderr 尾部 → stderr_tail
+```rust
+fn run_step(ctx: &ScenarioContext, step: &Step) -> StepResult {
+    let output = Command::new(step.executable(ctx))
+        .args(&step.argv)
+        .current_dir(&step.cwd)
+        .env_clear()
+        .envs(ctx.env_for(step.environment))
+        .output()?;
+
+    write_command_logs(ctx, step, &output)?;
+
+    let code = output.status.code().unwrap_or(128);
+    if !step.expected_exit.matches(code) {
+        return StepResult::fail(
+            step.display_command(),
+            code,
+            step.expected_exit.to_string(),
+            stderr_tail(&output.stderr, 20),
+        );
+    }
+    
+    run_assertions(ctx, step, &output)
 }
 ```
 
-要点：`set -E` 让 `ERR` trap 继承进场景函数；`! libra …` 这类**预期失败**被 `set -e` 视为成功、不触发 trap，因此负向步骤不会误报；而 `test -f X` / `grep` 这类断言失败会真实触发，正是我们要记的 `fail`。
+要点：负向命令不靠 `! libra ...` 表达，而是显式建模为 `ExpectedExit::NonZero` 或 `ExpectedExit::Code(n)`；文件、JSON、stderr、ref、fsck 等断言也作为 Rust `Assertion` 执行。文档里的 bash 代码块仍用于人工复现和场景语义说明；迁移期若临时使用 shell 子进程封装旧场景，也必须通过同等 `env_clear()` 白名单环境和日志/脱敏/失败分类约束，最终收敛到 §3.3.3 的 typed Rust runner。
 
 ### 5.4 命令行易读汇总（L1）
 
@@ -3313,7 +817,7 @@ RUN_ROOT（已保留供复现）：/tmp/libra-integ-20260601T1530Z-48213.Ab12Cd
 
 - `summary.md` — 人读总表：commit / 平台 / 二进制路径 / 每场景 status / `RUN_ROOT` 清理状态 / 每个 fail 的失败命令首行 + 复现命令 / Wave 3 `gh` cleanup 状态。
 - `failures.md` — **调试交接专用**：只含 `fail` 场景，每条给“失败命令 + 退出码 + stderr 尾部 + cwd + 复现命令 + `log_dir`”，是把现场移交给下一步 debug（人或 agent）的最小充分集。无 `fail` 时写 `no failures`。
-- `rerun-failed.txt` — 每行一个失败场景 ID，供下一轮 `runner --only "$(paste -sd, rerun-failed.txt)"` 只重跑失败项。
+- `rerun-failed.txt` — 每行一个失败场景 ID，供下一轮 `cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --only "$(paste -sd, rerun-failed.txt)"` 只重跑失败项。
 - 分 wave 原始日志（沿用旧契约）：`wave0-build.log` / `wave1-cli-core.log` / `wave2-cli-storage-protocol.log` / `wave3-github-live.log`（未运行写 skip/block 原因）。
 
 ### 5.6 退出码与 CI 对接
@@ -3321,6 +825,33 @@ RUN_ROOT（已保留供复现）：/tmp/libra-integ-20260601T1530Z-48213.Ab12Cd
 runner 进程退出码：`0` = 无 `fail`（`skip`/`env-skip` 不算失败）；`1` = 至少一个 `fail`；`2` = 前置/编译失败（Wave 0 未过）。CI 以退出码门控，以 `report.json.totals.fail == 0` 复核，并把 `failures.md` 贴进失败 job 摘要。**`env-skip` 不得让 CI 变绿掩盖问题**：当某 wave 因环境缺失被整体 `env-skip` 时，runner 退出码仍为 0 但必须在 stdout 和 `summary.md` 顶部高亮 `WARN: <wave> env-skipped (<reason>)`，由 reviewer 判断是否可接受。
 
 报告中所有 URL / 路径 / 命令在写盘前都必须通过 §3.6 的脱敏自检；命中即标记该 run 为 `redaction_self_check: "leak-blocked"` 并拒绝归档。
+
+### 5.7 实现现状：runner 实际产出的报告 schema（Implemented report schema）
+
+§5.1–§5.6 描述输出契约的完整设计模型；本节记录 `tools/integration-runner` **当前实际产出**的字段形态（事实来源为 `tools/integration-runner/src/runner/types.rs` 与 `support.rs::write_report`），保证文档与代码一致。runner 在每轮结束写盘下列文件：`report.json`、`results.ndjson`、`summary.md`、`failures.md`、`rerun-failed.txt`，以及 `logs/<scenario-id>/<seq>.{cmd,stdout,stderr,exit}`、`artifacts/`。
+
+`report.json`（聚合，实际字段）：
+
+```json
+{
+  "generated_at": "2026-06-05T01:39:13.700114+00:00",
+  "platform": "macos-aarch64",
+  "run_root": "/tmp/.../libra-integ-XXXX",
+  "binary": "/abs/path/target/debug/libra",
+  "redaction_self_check": "clean",
+  "totals": { "pass": 37, "fail": 0, "skip": 0, "env_skip": 0, "block": 0 },
+  "passed": 37,
+  "failed": 0,
+  "skipped": 0,
+  "results": [ /* 每场景一条 ScenarioResult */ ]
+}
+```
+
+`results.ndjson`：每场景一行 `ScenarioResult` JSON，字段为 `id`、`wave`、`status`、`duration_ms`、`run_dir`、`commands[]`（每条 `seq`/`command`/`cwd`/`exit_code`/`success`/`stdout_log`/`stderr_log`/`stderr_tail`）、`error`（失败信息，pass 时 `null`）、`cleanup`（仅 Wave 3：`deleted <repo>` / `cleanup_required <repo>` / `null`）。`report.json.results` 与本文件内容一致。
+
+**状态词映射（实现 vs §5.1 设计）**：runner 当前发出的 `status` 字符串为 `passed` / `failed` / `skipped`，分别对应 §5.1 的 `pass` / `fail` / `skip`；`env-skip` 与 `block` 暂统一记为 `skipped`（计数留在 `totals.env_skip` / `totals.block`，当前恒 0）。`redaction_self_check` 为 `clean`：写盘前每条命令的原始 stdout/stderr 都过 `ensure_no_secret_leak`，命中即中止该场景（不产出泄漏报告），故已产出的 report 恒为 leak-clean。退出码语义见 §5.6（`passed/failed/skipped` 计数即 §5.6 的门控来源；`failed==0` 时退出 0）。
+
+**仍待对齐设计模型的字段**（按 BASELINE_GAP 跟踪，非阻断）：`run_id` / `commit` / `started_at` / `finished_at` / `waves_run` / `run_root_state` 以及 `env-skip` vs `block` 的独立状态区分尚未发出；新增这些字段时只能向 `Report` / `ScenarioResult` 追加（serialize-only，向后兼容），并同步本节。
 
 ---
 
@@ -3349,28 +880,28 @@ runner 进程退出码：`0` = 无 `fail`（`skip`/`env-skip` 不算失败）；
 
 以下能力不写成默认可执行步骤，只登记为后续工程任务。
 
-### BASELINE_GAP-INTEG-001：CLI 场景 runner 未落地
+### BASELINE_GAP-INTEG-001：CLI 场景 runner 仅落地 R0-R2（+ 垂直迁移进展）
 
-- 现状：本计划定义了应执行的 CLI 黑盒场景，但仓库尚未提供统一 runner 来自动记录命令、退出码、输出和断言。
-- 需要补充：一个本机脚本编译 `libra`，创建隔离临时仓库，按场景执行 `libra <cmd>`，并**严格产出 §5 输出契约**——L1 实时行、L2 `results.ndjson`、L3 `report.json` + `summary.md` + `failures.md` + `rerun-failed.txt`；用 §5.3 的 `set -Eeo pipefail` + `ERR` trap 机制捕获失败命令与 stderr 尾部；退出码遵循 §5.6。
-- 约束：runner 只能驱动编译后的 `libra` 命令；不得把 Cargo `--test` 目标重新包装成默认集成门；所有写盘产物先过 §3.6 脱敏自检。
+- 现状：R0-R5 全部切片已落地。`tools/integration-runner/` 提供 list、check-plan（含收敛 gate）、Wave0 preflight、完整隔离执行（env_clear + SAFE_PATH + SSH_AUTH_SOCK + gitfix + gh 带 host-auth 的 ctx.gh + 原始 secret 泄漏前置检查 + 报告 §5 契约）、37/37 场景的 Rust typed 实现（含 Wave 3 的 run-live + GhRepoCleanupGuard + delete_repo scope 预检）。`run --waves 0,1,2` 与 `run-live --only live.github-create-push-clone-fetch` 均可产出完整可归档报告。check-plan 强制 yaml/MD/矩阵/registry 一致 + 短形式收敛。
+- 需要补充：可选的 plan-waves（BASELINE_GAP-INTEG-003）、并发执行、key_assertion_categories 更深语义扫描（当前结构 gate 已覆盖主要类别）。深水区语义（pull --rebase 真分叉、fetch --depth 真实远端对等、更多 pack corpus、--force-with-lease、warning=9 确定源）仍按 GAP-005/009 跟踪，不属于 runner 基础设施。
+- 约束：runner 始终黑盒驱动 `target/debug/libra`（或 --binary）；不得注册到根 Cargo / tests/INDEX；写盘先过 §3.6 脱敏；任何变更必须使 check-plan + 对应 run/run-live 全绿。
 
 ### BASELINE_GAP-INTEG-002：CLI 场景清单自动校验不足
 
-- 现状：集成计划场景清单的自动一致性校验仍未落地；本计划已经转向 CLI 场景 ID，因此暂无自动校验场景清单与未来 runner 的一致性。仓库已无 `scripts/` 目录，新增校验应是自包含 Rust 测试或 CI 步骤（仿 `tests/compat/matrix_alignment.rs`），而非 `scripts/*.sh`。
-- 需要补充：校验逻辑应扫描本文件中的 `cli.*` 场景 ID，确保 runner 覆盖同名场景，并确保默认 Wave 中没有 Cargo `--test` 目标。
+- 现状：`check-plan` 已加载 yaml，并对比 runner 已实现 key，产出"文档已定义但 runner 未实现"的 id 列表（当前 0 个）。runner 已拆成 `registry.rs` + `runner/` + `scenarios/*.rs`，三方一致性 gate 继续由 **INTEG-008** 覆盖；本 gap 后续只跟踪断言类别覆盖深度。
+- 需要补充：未来 check-plan 可增加对 key_assertion_categories 的启发式扫描（例如 fn 体内是否调用了对应 assert_* / gitfix / json 验证路径），而非仅结构校验。
+- 约束：`check-plan` 可由 CI 显式执行，但不得进入 `cargo test --all` 默认测试集，不写入 `tests/INDEX.md`。三方一致性（yaml ↔ MD ↔ 矩阵）由 INTEG-008 负责。Agent 实现的 scenario fn 必须实际触发其 yaml 条目声明的 categories。
 
-### BASELINE_GAP-INTEG-003：Path -> Wave 自动选择脚本未落地
+### BASELINE_GAP-INTEG-003：Path -> Wave 自动选择工具未落地
 
 - 现状：§3.5 仍靠作者手动对照。
-- 需要补充：一个本机脚本读取改动路径，输出建议 CLI wave 集合。
-- 约束：脚本只输出版本管理 CLI wave；不得引入交互界面、agent runtime、provider、publish 或云服务 wave。
+- 需要补充：独立 Rust runner 的 `plan-waves` 子命令读取改动路径，输出建议 CLI wave 集合。
+- 约束：该命令只输出版本管理 CLI wave；不得引入交互界面、agent runtime、provider、publish 或云服务 wave。
 
 ### BASELINE_GAP-INTEG-004：GitHub live 场景 runner 与清理保护未落地
 
-- 现状：Wave 3 已定义 `gh` 驱动的 GitHub 临时仓库测试流程，但仓库尚未提供自动 runner 来统一执行 preflight、仓库创建、日志脱敏、失败保留和 `gh repo delete` 清理。
-- 需要补充：一个 live runner，执行 `gh auth status`、创建临时私有仓库、运行 `live.github-create-push-clone-fetch`、用 `gh api` 断言远端 ref，并在 `EXIT` 路径强制清理。
-- 约束：runner 不得输出 token，不得复用人工仓库，不得在 cleanup 能力不足时创建 GitHub 仓库。
+- 现状：已落地。`run-live` 子命令 + gh 预检（auth + delete_repo scope 探针）+ ctx.gh（host env，不清空）+ GhRepoCleanupGuard（Drop 兜底 + disarm on explicit success delete）+ 原始 secret 泄漏前置阻断 + 报告中 cleanup 状态记录。`live.github-create-push-clone-fetch` 已注册并实现完整步骤 + gh api 比对 + json 断言 + 隔离。无 delete 权限时 preflight 直接 skip（不创建仓库），满足“若无删除权限不启动”。
+- 约束：Wave 3 仅按需（触达远端语义时）；runner 绝不输出 token；cleanup 失败时报告 `cleanup_required` 并保留 run_root。
 
 ### BASELINE_GAP-INTEG-005：版本管理命令黑盒场景覆盖不完整
 
@@ -3379,11 +910,11 @@ runner 进程退出码：`0` = 无 `fail`（`skip`/`env-skip` 不算失败）；
 - 约束：任何新增场景必须是可在本机无密钥确定性复现的 `libra <cmd>` 黑盒；不得引入 live AI/cloud。
 - 跟踪：§2.3 矩阵 + 对应 Wave 场景 + PR Test Plan 清单。
 
-### BASELINE_GAP-INTEG-008：集成计划一致性检查未落地
+### BASELINE_GAP-INTEG-008：集成计划一致性检查已落地基础版
 
-- 现状：兼容矩阵漂移与 Code UI docs 一致性检查已**去脚本化**、落地为 `tests/compat/matrix_alignment.rs`（随 `cargo test --all` 运行；CI 另以 `cargo test --test compat_matrix_alignment` 单独 gate）。**仅剩**集成计划场景清单（`cli.*` / `live.github-*` ID ↔ 本文件/未来 runner）的自动一致性校验尚未实现；仓库已无 `scripts/` 目录。
-- 需要补充：一个自包含检查（Rust 测试或 CI 步骤，**非 `scripts/*.sh`**），至少校验本文件 §2.3 矩阵与 `src/cli.rs` / `COMPATIBILITY.md` 一致（顶层命令部分已由 `compat_matrix_alignment` 覆盖）、默认 Wave 不含 Cargo `--test` 门、所有 `cli.*` / `live.github-*` 场景 ID 可被 runner 或文档解析。
-- 约束：该检查未落地前，PR/Test Plan 只能把集成计划一致性标为 `not_available` 或 `blocked_by BASELINE_GAP-INTEG-008`，不得声称已通过；不得为此新建 `scripts/` 目录。
+- 现状：兼容矩阵与 Code UI docs 在 `tests/compat/matrix_alignment.rs`。`check-plan` 加载 yaml，扫描 `docs/development/integration-scenarios/<id>.md`，交叉验证 §2.3 矩阵与 `scenario_registry()`（当前 37/37 已实现）。CI 在 compat-offline-core 显式运行 `check-plan`。
+- 需要补充：随 R3+ 补齐更深的断言强化模式校验（例如扫描/要求每个场景 fn 实际包含其 key_assertion_categories 对应的可执行断言如 JSON envelope + fsck + LBR- + 隔离 + gitfix_isolation 等），以及 quarantine / exit-code 细节检查。计划未来 CI 显式运行 check-plan 作为兼容门之一。
+- 约束：不得为此新建 `scripts/` 目录，不得把该检查加入根 `Cargo.toml` 或 `tests/INDEX.md`。新增场景必须同时编辑 yaml + MD（短形式）+ runner `scenario_registry()` 数组，否则 `check-plan` 会失败或 run 会 skip。Agent 任务必须把 yaml 当 list of record。
 
 ### BASELINE_GAP-INTEG-009：深水区远端语义与全局 flag 边界
 
@@ -3454,30 +985,33 @@ quarantined_at = "<YYYY-MM-DD>"
 - 修复后必须从 quarantine 移除并在 PR 描述说明。
 - quarantine 校验应确保每条 `scenario` 能解析到现有 CLI 场景。
 
-### 8.4 本计划自检（去脚本化）
+### 8.4 本计划自检（独立 Rust 工具）
 
-集成计划一致性检查（BASELINE_GAP-INTEG-008，落地为自包含 Rust 测试或 CI 步骤，**不新建 `scripts/`**）应逐步覆盖：
+集成计划一致性检查（BASELINE_GAP-INTEG-008）应落地为独立 Rust runner/tool 的 `check-plan` 子命令。CI 可以显式运行该工具，但它**不注册到根 `Cargo.toml [[test]]`，不进入 `cargo test --all` 默认测试集，不写入 `tests/INDEX.md`，不新建 `scripts/`**。该检查应逐步覆盖：
 
 1. 本计划默认 Wave 中不包含 Cargo `--test <name>` 集成门。
 2. 本计划里所有 `--features <flag>` 出现在 `Cargo.toml [features]`。
 3. 本计划没有把明确排除的测试类别写进默认 Wave 0/1/2。
-4. CLI runner 落地后，本计划里所有 `cli.<scenario-id>` 都被 runner 覆盖。
-5. GitHub live runner 落地后，本计划里所有 `live.github-*` 场景都被 runner 覆盖，并校验包含 `gh repo create` 与 `gh repo delete`。
-6. quarantine 文件里每条 CLI / live 场景 ID 可解析为现有场景。
-7. **错误 JSON 契约**：关键失败路径在 `--json`/`--machine` 下必须产出 `ok:false` + `LBR-*` 稳定码 + category/hints 的可解析 envelope（已在 `cli.cross-cutting-flags` 基线覆盖）。
-8. **故意差异防护**：COMPATIBILITY.md 中 `intentionally-different` 条目在对应场景中有正向断言（非仅文档声明）。
-9. **git fixture 隔离**：所有使用 `git` 的场景都定义并调用 `gitfix()` 包装（与 `libra()` 对称），无裸 `git` 调用。
+4. CLI runner 落地后，本计划里所有 `cli.<scenario-id>` 都被 runner registry 覆盖（runner 内部 key 必须与 integration-scenarios.yaml 一致）。
+5. GitHub live runner 落地后，本计划里所有 `live.github-*` 场景都被 runner registry 覆盖，并校验包含 `gh repo create` 与 `gh repo delete`。
+6. quarantine 文件里每条 CLI / live 场景 ID 可解析为现有场景（必须在 yaml 里存在）。
+7. `integration-scenarios.yaml` 与 `integration-scenarios/<id>.md`、§2.3 矩阵引用的场景 ID 三者一致（check-plan 核心职责）。
+8. yaml 里 gh_required=true 的只出现在 Wave 3；requires_git 场景在 runner preflight 能正确处理 env-skip。
+9. **错误 JSON 契约**：关键失败路径在 `--json`/`--machine` 下必须产出 `ok:false` + `LBR-*` 稳定码 + category/hints 的可解析 envelope（已在 `cli.cross-cutting-flags` 基线覆盖）。
+10. **故意差异防护**：COMPATIBILITY.md 中 `intentionally-different` 条目在对应场景中有正向断言（非仅文档声明）。
+11. **git fixture 隔离**：所有使用 `git` 的场景都定义并调用 `gitfix()` 包装（与 `libra()` 对称），无裸 `git` 调用。
 
 ---
 
 ## 9. 维护规则
 
-1. **新增命令或修改公共表面**（`src/cli.rs` / `src/command/*.rs`）：必须同步更新 §2.3 覆盖矩阵，并在相应 Wave 补充至少一个 `cli.<cmd>-smoke` 黑盒场景（含参数表 + 负向用例），全部使用 §3.3.1 规范模板。
+1. **新增命令或修改公共表面**（`src/cli.rs` / `src/command/*.rs`）：必须同步更新 §2.3 覆盖矩阵，并在相应 Wave 补充至少一个 `cli.<cmd>-smoke` 黑盒场景（含参数表 + 负向用例），全部使用 §3.3.1 规范模板。**改动既有 Git 兼容命令时**，先在 [`integration-scenarios/README.md` 的「命令 → 场景映射」](integration-scenarios/README.md#命令--场景映射command--scenario-map) 查到该命令的 owner 场景，同步更新对应 `<id>.md` + yaml + `tools/integration-runner/src/scenarios/<file>` + `docs/commands/<cmd>.md`，再跑 `check-plan` + `run --only <owner-id>`。新增命令必须在该映射表新增一行——不得让任何 Git 兼容命令无 owner 场景。
 2. 新增版本管理集成测试时，必须把 `libra <cmd>` 场景补到本计划相应 Wave，并在 CLI runner 落地后同步 runner 清单。
-3. 删除/重命名场景 ID 时，必须同步更新本计划、CLI runner、集成计划一致性检查（BASELINE_GAP-INTEG-008）和 quarantine 文件。
+3. 删除/重命名场景 ID 时，必须同步更新 `integration-scenarios.yaml`、`integration-scenarios/<id>.md`（及 README 索引）、§2.3 矩阵、runner `registry.rs` + `scenarios/*.rs`、quarantine 文件。新增场景必须先在 yaml 登记，再新增对应 `<id>.md` 与 runner 实现。
 4. 新增默认阻断测试必须能在本机无密钥、无外部账号、无交互界面的环境中确定性运行。
 5. 未实现能力必须用 `BASELINE_GAP-*` 标记，不允许写成默认可执行步骤。
 6. 若某测试需要真实网络、真实云资源或外部凭据，不得加入本计划的默认 wave。
 7. 需要 GitHub 真实远端的版本管理测试必须进入 Wave 3，仓库创建、查询、API 断言和删除必须使用 `gh`。
 8. 所有示例代码块与 runner 实现必须通过 §3.6 安全自检清单；CI / 人工 review 发现违规时阻断合并。
 9. §2.3 矩阵、COMPATIBILITY.md 与 `src/cli.rs` 三者必须保持一致；改动任一者需运行 `cargo test --test compat_matrix_alignment`（顶层命令漂移检查）并更新本计划。
+10. `integration-scenarios.yaml` 是场景存在性的唯一登记点；任何对场景列表、wave 归属、gh_required 的修改必须先编辑 yaml，再同步 `integration-scenarios/<id>.md` 与 runner 实现。`check-plan` 强制 yaml ↔ 拆分 MD ↔ registry 一致。
