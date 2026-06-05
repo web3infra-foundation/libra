@@ -55,7 +55,7 @@
 | 7-Agent 矩阵 | ✅（越界） | Phase 4.4 已把 Cursor/Codex/OpenCode/Copilot/FactoryAi 由 preview **提升为 stable**（[builtin/stable_promoted.rs](../../src/internal/ai/observed_agents/builtin/stable_promoted.rs)，`read_transcript` 真实读盘）；`PREVIEW_SPECS` 现为空、`is_preview()` 恒 `false`（见 §5.2 订正） |
 | `RedactedBytes` 编译契约 + Redactor | ✅ | [redaction.rs](../../src/internal/ai/observed_agents/redaction.rs)：`pub(crate)` 构造 + 两个 `compile_fail` doctest；25+ 高置信规则、幂等、误报回归 |
 | Hook 摄入参数化 `HookTarget` | ✅ | [runtime.rs](../../src/internal/ai/hooks/runtime.rs) `process_hook_event_with_target`，旧 API 1:1 包装；`AgentTraces` 路径强制脱敏 + upsert + checkpoint，经 `libra agent hooks <agent> …` 触发 |
-| Checkpoint commit 生成 | 🟡 | 已写 `metadata.json` + `transcript/<provider>` blob、`Libra-*` trailer、CAS 追加 `agent-traces`、`agent_checkpoint` 行；**v1 未做工作树快照 / `protected_dirs` 排除 / `events.jsonl` / canonical-sorted JSON**（见 §7.1 订正） |
+| Checkpoint commit 生成 | ✅ | `metadata.json`（BTreeMap → 天然 canonical-sorted）+ `transcript/<provider>` blob + `Libra-*` trailer + CAS 追加 `agent-traces` + `agent_checkpoint` 行；`tree/` 工作树快照**刻意不做**（避免把 gitignored 机密带入 R2-同步的 agent-traces，rewind 从 `parent_commit` 恢复）、`events.jsonl` 对 agent 捕获 N/A（事件落 SQLite）——见 §7.1 订正 |
 | Checkpoint scope 三态 | ✅ | 三态均有生产侧产生点：`committed`（TurnEnd/SessionEnd）、`subagent`（`PostToolUse[Task]`）、`temporary`（`PostToolUse[TodoWrite]`，`clean` 移除）；`checkpoint_scope_for_tool` + 参数化 `write_checkpoint`，仅 Task/TodoWrite 产生 checkpoint 避免泛滥（见 §7.2 订正） |
 | `checkpoint show` | ✅ | metadata + **transcript 字节长度 + tree 摘要**（2026-06-05 补齐：[checkpoint.rs](../../src/command/agent/checkpoint.rs) `summarize_checkpoint_tree`） |
 | `checkpoint rewind` dry-run/apply | ✅ | 恢复工作树到 `parent_commit`；Claude Code 截断本地 transcript，其它 kind 明确告警 |
@@ -435,12 +435,11 @@ async fn process_hook_event_with_target(
 6. **追加 commit** 到 `refs/libra/agent-traces`：commit message 含 `Libra-*` trailer；`HistoryManager::create_append_commit` + `update_ref_if_matches` 处理 CAS
 7. **插 `agent_checkpoint`**：`scope`、`traces_commit`、`tree_oid`、`metadata_blob_oid`
 
-> **2026-06-05 订正（以代码为准）**：实际生产路径（[runtime.rs](../../src/internal/ai/hooks/runtime.rs) `write_committed_checkpoint` → [history.rs](../../src/internal/ai/history.rs) `append_checkpoint_commit`）落地了第 3/5/6/7 步，但**简化了第 1/2/4 步**：
-> - **无工作树快照**：checkpoint tree 只含 `metadata.json` + `transcript/<provider>`，**不调用 `build_tree_recursive`、不排除 `protected_dirs()`、不写 `tree/` 子树**。因此 `rewind --apply` 恢复的是 checkpoint 的 **`parent_commit`**（摄入时的用户分支 HEAD），而非"agent 中间工作态"。`protected_dirs()` 由 `rewind`/`clean` 的安全语义消费，而非 checkpoint writer。
-> - **`events.jsonl` 永远为 `None`**（第 4 步未接线）。
-> - metadata 用 `serde_json::to_vec_pretty`（保持插入序），**非 canonical-sorted JSON**。
+> **2026-06-05 订正（以代码为准）**：实际生产路径（[runtime.rs](../../src/internal/ai/hooks/runtime.rs) `write_checkpoint` → [history.rs](../../src/internal/ai/history.rs) `append_checkpoint_commit`）落地了第 3/5/6/7 步，三态 scope 也已接线（§7.2）。对第 1/2/4 步的现状逐项核对：
+> - **canonical JSON 已满足**：metadata 用 `serde_json::to_vec_pretty(&Value)`，而本仓 `serde_json` **未启用 `preserve_order`**（无 `indexmap`），故底层为 `BTreeMap`、键按字典序输出——即天然 canonical-sorted、字节稳定。无需额外排序代码。
+> - **`tree/` 工作树快照：刻意不做（安全取舍，非缺口）**。`refs/libra/agent-traces` 经 §14.3 自动同步到 R2；把任意工作树字节快照进该 ref 会有把 `.env` 等 gitignored 机密带入持久层的 P0 风险。`rewind --apply` 本就从 checkpoint 的 **`parent_commit`**（摄入时用户分支 HEAD，已受版本控制+脱敏约束）恢复工作树，不依赖 `tree/` 快照；审计需求由 `parent_commit` + 脱敏后的 `transcript/<provider>` 满足。`protected_dirs()` 由 `rewind`/`clean` 的安全语义消费。本文 §3.3/§7.1 将 `tree/` 标注为"可选"，此处据安全考量明确**不实装**。
+> - **`events.jsonl`：对外部 Agent 捕获不适用（N/A）**。Agent 捕获路径不写 `SessionStore` JSONL（事件落 SQLite `agent_session` + `redaction_report`），故无 JSONL 可挂载；`append_checkpoint_commit` 的 `events_jsonl` 形参保留但恒传 `None`。事件流的等价信息已在 `agent_session` 行与 transcript blob 中。
 > - `checkpoint show` 现已补齐 transcript **字节长度** + tree 摘要（§7.3 / §1.3）。
-> 工作树快照 + `protected_dirs` 排除 + canonical JSON 是 v2 候选。
 
 ### 7.2 Temporary vs Committed
 
@@ -719,7 +718,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 > - #6 🟡 `concurrent_active` 标志 ✅；但 `AgentTraces` 路径**不取 `SessionStore` 锁**（并发以 `agent-traces` CAS + UPSERT 幂等兜底），"5s 锁超时恢复"仅 `AiIntent` 路径具备。
 > - #7 ✅ CAS 重试（`HISTORY_HEAD_CONFLICT_MAX_RETRIES`）已就绪。
 > - #8 ✅（2026-06-05 补齐）`doctor` 现报告 **stuck 会话**（active 且 6h 无事件 → 多半 agent 未发 SessionEnd）；真正"未捕获 session"无 DB 行、无法计数，以 stuck 检测作为等价信号。
-> - #9 ✅（2026-06-05 补齐）`worktree_id` 现按 cwd 落库 + `session list --worktree` 过滤；"DB 必须在 `--git-common-dir`"这一存储架构子项仍为 v2。
+> - #9 ✅（2026-06-05 全部满足）`worktree_id` 按 cwd 落库 + `session list --worktree` 过滤；**"DB 必须在 `--git-common-dir`"这一子项结构上已满足**：libra worktree 的 `<wt>/.libra` 是指向主 `.libra` 的**符号链接**，`util::try_get_storage_path` 经 `fs::canonicalize`（[util.rs](../../src/utils/util.rs)）解析到唯一物理目录，DB 连接缓存按规范化路径键控（[db.rs](../../src/internal/db.rs)），故所有 worktree 的 `agent_session` 写入同一共享 `libra.db`。无需 `git rev-parse --git-common-dir`（libra 无独立 per-worktree gitdir，符号链接目标即单一真相源）。
 > - #10 ✅ rewind 默认 dry-run；`--apply` 仅 Claude Code 截断，其它 kind 告警。
 > - #11 ✅ `session show --extract-transcript` 物化 transcript（从最近 checkpoint 的 Git tree 解析）。
 > - #12 ⏳ 借鉴 `agent_run/event.rs` 的 unknown-safe 模式；当前 metadata.json 为普通 JSON，未针对未来事件做 `Unknown(Value)` 兜底（低优先）。
@@ -776,7 +775,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 4. ✅ 5 个 preview adapter → stable —— 已实现（Phase 4.4，[builtin/stable_promoted.rs](../../src/internal/ai/observed_agents/builtin/stable_promoted.rs)）
 5. ✅ 外部 `libra-agent-<name>` 二进制 RPC 支持（与 EntireIO 对等）—— 已实现（[observed_agents/rpc.rs](../../src/internal/ai/observed_agents/rpc.rs) + `libra agent rpc list/invoke`）
 
-**仍属后续（Phase 3+/v2）**：完整 gitleaks/熵/PII/JSON-aware/config-mode 脱敏（§8 订正）、非 Claude `TranscriptTruncator`（上 #1）、生产侧 `temporary`/`subagent` checkpoint 产生点（§7.2 订正）、checkpoint 工作树快照 + canonical JSON（§7.1 订正）、`agent_session` DB 落于 `--git-common-dir`（§13#9）、`AgentTraces` 路径会话文件锁（§13#6）。
+**已补齐（2026-06-05 本轮）**：分层脱敏（熵/通用 URI/DB-DSN/bounded-KV/placeholder/JSON-aware/config-mode，§8 订正）、Gemini `TranscriptTruncator`（§14.4#1）、生产侧三态 checkpoint 产生点（§7.2 订正）、`AgentTraces` 会话文件锁（§13#6）、canonical JSON（BTreeMap 天然满足）+ `agent_session` 共享 DB（符号链接，§13#9）均落地。**仍属后续（Phase 3+/v2）**：gitleaks 260+ 全规则矩阵与 PII address（§8）、Cursor(SQLite)/Codex/OpenCode/Copilot/FactoryAi 的 per-format `TranscriptTruncator`（§14.4#1）、这 5 个 promoted adapter 的 `HookProvider`（§2.1 订正，`enable` 仍只装 claude/gemini hook）、`subagent` checkpoint 的完整嵌套子会话关联（§7.2）。
 
 ---
 
@@ -906,4 +905,4 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
   - **越界落地**：Phase 4 的外部 RPC（`rpc.rs` + `libra agent rpc`）、派生 ToolCallRecord（`derived.rs` + `session derive-tool-calls`）、`session promote --as-intent`、5 个 preview adapter **提升为 stable**（`builtin/stable_promoted.rs`）均已实现（§2.1 / §5.2 / §9 / §14.4 订正）。
   - **行为订正**：`agent_session.state` 机将 `TurnEnd` 映射为 `stopped`（回合间空闲）而非"active 保持"，且被回归测试 pin 住（§6.3）；checkpoint commit 未做工作树快照 / `protected_dirs` 排除 / `events.jsonl` / canonical JSON（§7.1）；生产仅产生 `committed` scope（§7.2）；`o_type='agent_transcript'` 仅用于统计/枚举、云同步不按其过滤（§1.3 / §10）；`SessionStore` 仅 `agent` 分目录、`code` 仍在根（§11.5）；`storage.rs` / `registry.rs` 从未创建、DAO SQL 内联（§16）；`redaction_contract_test` 用 `compile_fail` doctest 而非 trybuild（§16）。
   - **本次补齐的功能**：① `checkpoint show` 增加 transcript 字节长度 + tree 摘要（§7.3）；② `doctor` 增加 stuck 会话检测（§13#8）；③ `worktree_id` 按 cwd 解析落库 + `session list --worktree` 过滤（§3.4 / §13#9）；④ 清理两处过期/误导性 doc 注释（`HookTarget`、`command/agent/mod.rs`）。新增测试：`tests/command/agent_session_test.rs` + `agent_checkpoint_test.rs::…show_reports_tree_summary…` + runtime `resolve_worktree_id` 单测；`cargo +nightly fmt`、`cargo clippy --all-targets --all-features -D warnings`、相关 `cargo test` 全绿。
-  - **仍属后续**：完整 gitleaks/熵/PII/JSON-aware/config-mode 脱敏（§8）、非 Claude `TranscriptTruncator`（§14.4#1）、生产侧 `temporary`/`subagent` checkpoint 产生点（§7.2）、checkpoint 工作树快照（§7.1）、`agent_session` DB 落于 `--git-common-dir` 与 `AgentTraces` 路径会话文件锁（§13#6/#9）。
+  - **仍属后续**：gitleaks 260+ 全规则矩阵与 PII address（§8）、Cursor/Codex/OpenCode/Copilot/FactoryAi 的 per-format `TranscriptTruncator` 与 `HookProvider`（§14.4#1 / §2.1）、`subagent` checkpoint 的完整嵌套子会话关联（§7.2）。`tree/` 工作树快照按安全取舍刻意不做（§7.1）。
