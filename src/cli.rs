@@ -32,7 +32,7 @@ const ROOT_AFTER_HELP: &str = "\
 Command Groups:
   Repository Setup        init, clone, config
   Working Tree            status, add, rm, mv, restore, clean, stash, lfs, worktree
-  History Inspection      log, shortlog, show, show-ref, ls-remote, diff, grep, blame, describe
+  History Inspection      log, shortlog, show, show-ref, ls-remote, ls-tree, diff, grep, blame, describe
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent, package
@@ -327,6 +327,8 @@ enum Commands {
     ShowRef(command::show_ref::ShowRefArgs),
     #[command(about = "List references in a remote repository")]
     LsRemote(command::ls_remote::LsRemoteArgs),
+    #[command(about = "List the contents of a tree object")]
+    LsTree(command::ls_tree::LsTreeArgs),
     #[command(about = "Read or update the symbolic HEAD ref")]
     SymbolicRef(command::symbolic_ref::SymbolicRefArgs),
     #[command(about = "Parse and normalize revision names and repository paths")]
@@ -1209,6 +1211,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
         Commands::ShowRef(cmd_args) => command::show_ref::execute_safe(cmd_args, &output).await?,
         Commands::LsRemote(cmd_args) => command::ls_remote::execute_safe(cmd_args, &output).await?,
+        Commands::LsTree(cmd_args) => command::ls_tree::execute_safe(cmd_args, &output).await?,
         Commands::SymbolicRef(cmd_args) => {
             command::symbolic_ref::execute_safe(cmd_args, &output).await?
         }
