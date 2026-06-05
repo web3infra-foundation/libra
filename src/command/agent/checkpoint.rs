@@ -412,12 +412,12 @@ async fn truncate_agent_transcript_for_checkpoint(
 /// `transcript_truncation_supported` flag matches what `--apply` will
 /// actually do.
 ///
-/// Codex round-3 follow-up: this now considers BOTH conditions —
-/// `agent_kind == "claude_code"` AND a non-empty `transcript_path`
-/// in `metadata_json`. Previously a Claude Code session whose
-/// `metadata_json` lacked `transcript_path` would report `supported:
-/// true` but apply would short-circuit to `SkippedNoPath`,
-/// contradicting the dry-run preview.
+/// Codex round-3 follow-up: this now considers BOTH conditions — the
+/// adapter registry exposes a `TranscriptTruncator` for `agent_kind`
+/// AND `metadata_json` has a non-empty `transcript_path`. Previously a
+/// supported session whose `metadata_json` lacked `transcript_path`
+/// would report `supported: true` but apply would short-circuit to
+/// `SkippedNoPath`, contradicting the dry-run preview.
 async fn lookup_truncation_support(
     conn: &sea_orm::DatabaseConnection,
     checkpoint_id: &str,
@@ -532,8 +532,8 @@ async fn truncate_agent_transcript_for_checkpoint_with_conn(
     //   * `AgentKind::from_db_str` fails for unknown tags (schema
     //     mismatch — unsupported kind for this row).
     //   * `truncator_for` returns `None` for kinds whose adapter
-    //     doesn't implement `TranscriptTruncator` (the six non-Claude
-    //     kinds today). Adding a second truncator implementation is a
+    //     doesn't implement `TranscriptTruncator` (Factory AI Droid
+    //     today). Adding another truncator implementation is a
     //     single-arm change in `observed_agents::mod.rs::truncator_for`
     //     and the new kind is dispatched here automatically.
     use crate::internal::ai::observed_agents::{AgentKind, truncator_for};
@@ -1004,12 +1004,12 @@ mod tests {
         })
         .to_string();
 
-        // Claude Code + transcript_path → supported.
-        for (idx, (kind, meta)) in [
-            ("claude_code", path_meta.as_str()), // supported
-            ("claude_code", "{}"),               // skipped (no path)
-            ("cursor", path_meta.as_str()),      // skipped (kind)
-            ("cursor", "{}"),                    // skipped (both)
+        for (idx, (kind, meta, expected)) in [
+            ("claude_code", path_meta.as_str(), true),
+            ("gemini", path_meta.as_str(), true),
+            ("cursor", path_meta.as_str(), true),
+            ("cursor", "{}", false),
+            ("factory_ai", path_meta.as_str(), false),
         ]
         .iter()
         .enumerate()
@@ -1046,16 +1046,14 @@ mod tests {
             let supported = super::lookup_truncation_support(&conn, &checkpoint_id)
                 .await
                 .unwrap();
-            let expected = idx == 0;
             assert_eq!(
-                supported, expected,
+                supported, *expected,
                 "case {idx} (kind={kind}, meta={meta}) supported={supported}, expected={expected}"
             );
         }
     }
 
-    /// When `agent_kind` isn't `claude_code` (e.g. preview adapters that
-    /// have no truncator yet), the helper must report
+    /// When `agent_kind` has no truncator, the helper must report
     /// `SkippedUnsupportedKind` so the operator knows the transcript
     /// was deliberately not touched.
     #[tokio::test]
@@ -1074,7 +1072,7 @@ mod tests {
             "INSERT INTO agent_session (
                 session_id, agent_kind, provider_session_id, state, working_dir,
                 metadata_json, redaction_report, started_at, last_event_at
-             ) VALUES ('s-3', 'cursor', 'p-3', 'stopped', '/tmp', ?, '{}', 0, 0)",
+             ) VALUES ('s-3', 'factory_ai', 'p-3', 'stopped', '/tmp', ?, '{}', 0, 0)",
             [metadata_json.into()],
         ))
         .await
@@ -1094,7 +1092,7 @@ mod tests {
             super::truncate_agent_transcript_for_checkpoint_with_conn(&conn, "cp-3").await;
         match outcome {
             super::TranscriptTruncationOutcome::SkippedUnsupportedKind { agent_kind } => {
-                assert_eq!(agent_kind, "cursor");
+                assert_eq!(agent_kind, "factory_ai");
             }
             other => panic!("expected SkippedUnsupportedKind, got {:?}", other.as_json()),
         }
