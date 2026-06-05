@@ -45,6 +45,7 @@ When stdout is a terminal, output is sent through a pager. In JSON mode, structu
 | Heading | | `--heading` / `--no-heading` | Print each file name once as a header above its matches and drop the inline prefix. `--no-heading` (the default) overrides `--heading`. |
 | Break | | `--break` | Print a blank line between the matches of different files. |
 | Null | `-z` | `--null` | Use NUL (`\0`) field separators. Match/count records stay newline-terminated; `-l`/`-L` paths are NUL-terminated with no trailing newline. Disables colorized output. |
+| No index | | `--no-index` | Search files on the filesystem (current directory and below) without requiring a repository. Never descends into `.libra`/`.git` and does not follow symlinks. Conflicts with `--cached`/`--tree`. |
 | Pathspec | | positional (trailing) | Restrict search to files matching the given paths. |
 | Tree | | `--tree <REVISION>` | Search in the specified revision or commit tree instead of the working tree. |
 | Cached | | `--cached` | Search in the index (staging area) instead of the working tree. |

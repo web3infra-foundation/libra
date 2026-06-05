@@ -974,3 +974,93 @@ async fn test_grep_null_file_list_nul_terminated() {
         "-z -l should NUL-terminate paths with no trailing newline"
     );
 }
+
+/// `--no-index` searches the filesystem without requiring a repository.
+#[test]
+#[serial]
+fn test_grep_no_index_runs_outside_repo() {
+    let dir = tempdir().expect("dir");
+    // No `libra init`: there is no repository here.
+    fs::write(dir.path().join("plain.txt"), "needle here\n").expect("write file");
+
+    let output = run_libra_command(&["grep", "--no-index", "needle"], dir.path());
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--no-index should work without a repo, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("needle"));
+}
+
+/// `--no-index` never descends into the `.libra` metadata directory.
+#[tokio::test]
+#[serial]
+async fn test_grep_no_index_prunes_libra_dir() {
+    let dir = tempdir().expect("dir");
+    test::setup_with_new_libra_in(dir.path()).await;
+    fs::write(dir.path().join(".libra/marker.txt"), "prunemarker\n").expect("marker in .libra");
+    fs::write(dir.path().join("outside.txt"), "prunemarker\n").expect("marker outside");
+
+    let output = run_libra_command(&["grep", "--no-index", "prunemarker"], dir.path());
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("outside.txt"),
+        "should find the marker outside .libra: {stdout}"
+    );
+    assert!(
+        !stdout.contains(".libra"),
+        ".libra must be pruned from --no-index: {stdout}"
+    );
+}
+
+/// `--no-index` restricts the walk to the given pathspec.
+#[test]
+#[serial]
+fn test_grep_no_index_respects_pathspec() {
+    let dir = tempdir().expect("dir");
+    fs::create_dir(dir.path().join("sub")).expect("mkdir sub");
+    fs::write(dir.path().join("sub/in.txt"), "needle\n").expect("write in");
+    fs::write(dir.path().join("out.txt"), "needle\n").expect("write out");
+
+    let output = run_libra_command(&["grep", "--no-index", "needle", "sub"], dir.path());
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("sub"),
+        "should match inside the pathspec: {stdout}"
+    );
+    assert!(
+        !stdout.contains("out.txt"),
+        "pathspec should exclude out.txt: {stdout}"
+    );
+}
+
+/// Conflicting search-scope flags are rejected at parse time. Libra surfaces
+/// clap usage errors as `LBR-CLI-002` with exit code 129.
+#[test]
+#[serial]
+fn test_grep_conflicting_scope_flags_rejected() {
+    let dir = tempdir().expect("dir");
+    fs::write(dir.path().join("f.txt"), "x\n").expect("write file");
+
+    for pair in [
+        ["--no-index", "--cached"],
+        ["--no-index", "--tree"],
+        ["--cached", "--tree"],
+    ] {
+        let mut argv = vec!["grep"];
+        argv.extend_from_slice(&pair);
+        if pair.contains(&"--tree") {
+            argv.push("HEAD");
+        }
+        argv.push("x");
+        let output = run_libra_command(&argv, dir.path());
+        assert_eq!(
+            output.status.code(),
+            Some(129),
+            "conflicting scope flags {pair:?} should be rejected as a usage error"
+        );
+    }
+}

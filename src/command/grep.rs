@@ -120,7 +120,7 @@ pub struct GrepArgs {
     tree: Option<String>,
 
     /// Search within tracked files in the index (staging area) instead of the working tree.
-    #[clap(long)]
+    #[clap(long, conflicts_with = "tree")]
     cached: bool,
 
     /// Use extended regular expressions. Accepted as an alias: Libra's default
@@ -181,6 +181,12 @@ pub struct GrepArgs {
     /// are NUL-terminated with no trailing newline. Disables colorized output.
     #[clap(short = 'z', long = "null")]
     null: bool,
+
+    /// Search files on the filesystem (the current directory and below) without
+    /// requiring a libra repository. The `.libra`/`.git` directories are never
+    /// searched and symbolic links are not followed.
+    #[clap(long = "no-index", conflicts_with_all = ["cached", "tree"])]
+    pub(crate) no_index: bool,
 }
 
 impl GrepArgs {
@@ -213,11 +219,15 @@ pub struct GrepMatch {
 }
 
 /// Internal representation of a file to search, with optional blob hash for tree/index searches.
+#[derive(Default)]
 struct SearchFile {
-    /// Relative path from working directory root.
+    /// Relative path from working directory root (or current directory for `--no-index`).
     path: PathBuf,
     /// Blob hash for tree/index searches (None for working tree searches).
     blob_hash: Option<git_internal::hash::ObjectHash>,
+    /// When true (`--no-index`), the path is resolved against the current
+    /// directory instead of the repository working tree (which may not exist).
+    from_filesystem: bool,
 }
 
 /// Aggregated count result for a file (used with --count).
@@ -315,7 +325,10 @@ pub async fn execute_safe(args: GrepArgs, output: &OutputConfig) -> CliResult<()
         .with_stable_code(StableErrorCode::CliInvalidArguments));
     }
 
-    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    // `--no-index` searches the filesystem directly and does not require a repo.
+    if !args.no_index {
+        util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    }
 
     let result = run_grep(&args).await?;
     let has_selected_results = has_selected_results(&args, &result);
@@ -672,7 +685,10 @@ fn escape_regex(s: &str) -> String {
 
 /// Get the list of files to search, respecting pathspec and ignore rules.
 async fn get_search_files(args: &GrepArgs) -> CliResult<Vec<SearchFile>> {
-    if let Some(tree_ref) = &args.tree {
+    if args.no_index {
+        // Search the filesystem directly, no repository required.
+        get_no_index_files(&args.pathspec)
+    } else if let Some(tree_ref) = &args.tree {
         // Search in a specific tree/commit
         get_tree_files(tree_ref, &args.pathspec).await
     } else if args.cached {
@@ -682,6 +698,64 @@ async fn get_search_files(args: &GrepArgs) -> CliResult<Vec<SearchFile>> {
         // Search in working tree
         get_working_tree_files(&args.pathspec)
     }
+}
+
+/// List filesystem files for `--no-index`: walk the current directory, never
+/// descending into `.libra`/`.git` and never following symlinks, then keep the
+/// files matching the (relative-path) pathspec. Paths are reported relative to
+/// the current directory.
+fn get_no_index_files(pathspec: &[String]) -> CliResult<Vec<SearchFile>> {
+    use walkdir::WalkDir;
+
+    let root = std::env::current_dir().map_err(|error| {
+        CliError::fatal(format!("failed to resolve the current directory: {error}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+
+    let mut files: Vec<SearchFile> = WalkDir::new(&root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            // Prune the repository's private metadata directories.
+            if entry.file_type().is_dir() {
+                let name = entry.file_name().to_string_lossy();
+                name != util::ROOT_DIR && name != ".git"
+            } else {
+                true
+            }
+        })
+        .filter_map(Result::ok)
+        // Regular files only — symlinks are not followed, directories skipped.
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| {
+            entry
+                .path()
+                .strip_prefix(&root)
+                .unwrap_or_else(|_| entry.path())
+                .to_path_buf()
+        })
+        .filter(|path| no_index_pathspec_matches(path, pathspec))
+        .map(|path| SearchFile {
+            path,
+            blob_hash: None,
+            from_filesystem: true,
+        })
+        .collect();
+
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
+}
+
+/// Whether a relative path is selected by a `--no-index` pathspec (prefix match).
+/// An empty pathspec selects everything.
+fn no_index_pathspec_matches(path: &std::path::Path, pathspec: &[String]) -> bool {
+    if pathspec.is_empty() {
+        return true;
+    }
+    let display = path.to_string_lossy();
+    pathspec
+        .iter()
+        .any(|spec| path.starts_with(spec) || display.starts_with(spec.as_str()))
 }
 
 async fn get_tree_files(tree_ref: &str, pathspec: &[String]) -> CliResult<Vec<SearchFile>> {
@@ -717,6 +791,7 @@ async fn get_tree_files(tree_ref: &str, pathspec: &[String]) -> CliResult<Vec<Se
             .map(|(path, blob_hash)| SearchFile {
                 path,
                 blob_hash: Some(blob_hash),
+                ..Default::default()
             })
             .collect()
     } else {
@@ -726,6 +801,7 @@ async fn get_tree_files(tree_ref: &str, pathspec: &[String]) -> CliResult<Vec<Se
             .map(|(path, blob_hash)| SearchFile {
                 path,
                 blob_hash: Some(blob_hash),
+                ..Default::default()
             })
             .collect()
     };
@@ -777,6 +853,7 @@ fn tracked_files_from_index(
         .map(|entry| SearchFile {
             path: PathBuf::from(&entry.name),
             blob_hash: include_blob_hash.then_some(entry.hash),
+            ..Default::default()
         })
         .collect()
 }
@@ -791,8 +868,15 @@ async fn read_file_content(search_file: &SearchFile) -> Result<Vec<u8>, GrepRead
             .map_err(|e| GrepReadError::Fatal(format!("failed to load blob: {}", e)))?;
         blob.data
     } else {
-        // Read from working tree
-        let abs_path = util::workdir_to_absolute(&search_file.path);
+        // Read from the filesystem: `--no-index` paths resolve against the
+        // current directory (no repository), others against the working tree.
+        let abs_path = if search_file.from_filesystem {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(&search_file.path))
+                .unwrap_or_else(|_| search_file.path.clone())
+        } else {
+            util::workdir_to_absolute(&search_file.path)
+        };
 
         let metadata = std::fs::symlink_metadata(&abs_path)
             .map_err(|e| GrepReadError::Skippable(format!("failed to stat file: {}", e)))?;
