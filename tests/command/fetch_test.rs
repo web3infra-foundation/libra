@@ -1081,3 +1081,20 @@ fn test_fetch_porcelain_json_mutually_exclusive_exits_129() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// An unparseable `--shallow-since` date is a usage error (129), caught at the
+/// command layer before any network activity.
+#[test]
+fn test_fetch_shallow_since_invalid_date_exits_129() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(
+        &["fetch", "origin", "--shallow-since=definitely-not-a-date"],
+        repo.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "invalid --shallow-since must be a usage error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

@@ -31,6 +31,7 @@ use crate::{
         config::{ConfigKv, ConfigKvEntry, RemoteConfig},
         db::get_db_conn_instance,
         head::Head,
+        log::date_parser::parse_date,
         protocol::{
             DiscRef, DiscoveryResult, FetchStream, ProtocolClient, ShallowOptions,
             git_client::GitClient,
@@ -508,6 +509,24 @@ pub struct FetchArgs {
     /// `<flag> <old-oid> <new-oid> <local-ref>`. Mutually exclusive with `--json`.
     #[clap(long)]
     pub porcelain: bool,
+
+    /// Deepen or shape shallow history to commits more recent than <date>
+    /// (`deepen-since`). Accepts the date formats `libra log --since` understands.
+    #[clap(
+        long = "shallow-since",
+        value_name = "DATE",
+        conflicts_with = "unshallow"
+    )]
+    pub shallow_since: Option<String>,
+
+    /// Deepen or shape shallow history to exclude commits reachable from <ref>
+    /// (`deepen-not`); repeatable.
+    #[clap(
+        long = "shallow-exclude",
+        value_name = "REF",
+        conflicts_with = "unshallow"
+    )]
+    pub shallow_exclude: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -850,9 +869,21 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         unshallow,
         recurse_submodules: _,
         porcelain: _,
+        shallow_since,
+        shallow_exclude,
     } = args;
 
-    let shallow = build_fetch_shallow_options(depth, deepen, unshallow);
+    // `--shallow-since` is parsed at the command layer so an unparseable date is
+    // a usage error (129) rather than a deep protocol failure.
+    let deepen_since = match &shallow_since {
+        Some(date) => Some(parse_date(date).map_err(|error| {
+            CliError::command_usage(format!("invalid --shallow-since date '{date}': {error}"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?),
+        None => None,
+    };
+    let shallow =
+        build_fetch_shallow_options(depth, deepen, unshallow, deepen_since, shallow_exclude);
 
     if all {
         let remotes = ConfigKv::all_remote_configs().await.map_err(|error| {
@@ -1126,13 +1157,20 @@ pub(crate) fn build_fetch_shallow_options(
     depth: Option<usize>,
     deepen: Option<usize>,
     unshallow: bool,
+    deepen_since: Option<i64>,
+    deepen_not: Vec<String>,
 ) -> ShallowOptions {
     let effective_depth = if unshallow {
         Some(UNSHALLOW_DEPTH)
     } else {
         deepen.or(depth)
     };
-    ShallowOptions::from_depth(effective_depth)
+    ShallowOptions {
+        depth: effective_depth,
+        deepen_since,
+        deepen_not,
+        filter: None,
+    }
 }
 
 pub async fn fetch_repository_safe(
@@ -2229,6 +2267,24 @@ mod tests {
             ),
             "new ref uses `*` and an all-zero old object id"
         );
+    }
+
+    #[test]
+    fn build_fetch_shallow_options_wires_since_and_exclude() {
+        let opts = super::build_fetch_shallow_options(
+            None,
+            None,
+            false,
+            Some(1_700_000_000),
+            vec!["v1.0".to_string()],
+        );
+        assert_eq!(opts.deepen_since, Some(1_700_000_000));
+        assert_eq!(opts.deepen_not, vec!["v1.0".to_string()]);
+        assert_eq!(opts.depth, None);
+
+        // `--unshallow` still overrides everything to the max-depth request.
+        let unshallow = super::build_fetch_shallow_options(None, None, true, None, vec![]);
+        assert_eq!(unshallow.depth, Some(super::UNSHALLOW_DEPTH));
     }
 
     /// The `.libra/shallow` boundary file must be owner read/write only on Unix.
