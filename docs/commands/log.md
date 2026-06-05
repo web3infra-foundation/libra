@@ -127,6 +127,53 @@ Show commits older than the specified date.
 libra log --until 2026-03-01
 ```
 
+### `--committer <PATTERN>`
+
+Filter commits to those whose committer name or email matches the given pattern
+(case-insensitive substring), symmetric with `--author`.
+
+```bash
+libra log --committer alice
+```
+
+### `--grep <PATTERN>` / `-i`, `--regexp-ignore-case`
+
+Filter commits whose message matches the given **regular expression** (regex crate
+syntax, case-sensitive by default). `^`/`$` match at line boundaries within the
+commit message (so `^fix` matches the subject and `^Signed-off-by` matches a footer).
+Add `-i` / `--regexp-ignore-case` for case-insensitive matching. Patterns are capped
+at 4 KiB; an invalid or oversized pattern fails fast with `LBR-CLI-002` (exit 129).
+
+> This is an intentional difference from older Libra behavior: `--grep` was previously
+> a plain substring match. A plain pattern (e.g. `fix`) still behaves as a literal.
+
+```bash
+libra log --grep '^fix'
+libra log --grep 'CVE-\d{4}' -i
+```
+
+### `--merges` / `--no-merges` / `--min-parents <N>` / `--max-parents <N>`
+
+Filter by parent count. `--merges` shows only merge commits (≥ 2 parents, an alias for
+`--min-parents=2`); `--no-merges` shows only non-merge commits (an alias for
+`--max-parents=1`). `--min-parents`/`--max-parents` set explicit bounds.
+
+```bash
+libra log --merges
+libra log --no-merges
+libra log --max-parents=1
+```
+
+### `--first-parent`
+
+When walking history, follow only the first parent of each merge commit, so the output
+stays on the mainline and never descends into merged side branches.
+
+```bash
+libra log --first-parent
+libra log --merges --first-parent
+```
+
 ### `--pretty <FORMAT>`
 
 Custom pretty-print format string. A bare template, `format:<template>`, and
@@ -346,11 +393,12 @@ flag only affects the human rendering layer.
 | Branches only | `git log --branches` | `jj log -r 'branches()'` | N/A |
 | Remotes only | `git log --remotes` | `jj log -r 'remote_branches()'` | N/A |
 | Revision range | `git log A..B` | `jj log -r 'A..B'` | N/A (not yet implemented) |
-| Grep message | `git log --grep=<pat>` | Revset `description()` | N/A |
+| Grep message | `git log --grep=<pat>` | Revset `description()` | `libra log --grep <regex>` (regex; `-i` for case-insensitive) |
+| Committer filter | `git log --committer=<pat>` | N/A | `libra log --committer <pat>` |
 | Path filter | `git log -- <paths>` | N/A (use revset) | `libra log -- <paths>` |
 | Reverse order | `git log --reverse` | `jj log --reversed` | N/A |
-| Merge commits only | `git log --merges` | N/A | N/A |
-| First parent only | `git log --first-parent` | N/A | N/A |
+| Merge commits only | `git log --merges` | N/A | `libra log --merges` (also `--no-merges`/`--min-parents`/`--max-parents`) |
+| First parent only | `git log --first-parent` | N/A | `libra log --first-parent` |
 | Structured JSON output | N/A | N/A | `--json` / `--machine` |
 | Error hints | Minimal | Minimal | Every error type has an actionable hint |
 
@@ -371,6 +419,6 @@ flag only affects the human rendering layer.
 - `--all`, `--branches`, and `--remotes` are not yet implemented; log walks from HEAD only
 - Revision range syntax (`A..B`, `A...B`) is not yet supported; use `-n` and `--since`/`--until` for scoping
 - jj's log uses a template language (`-T`) for formatting; Libra uses Git-compatible `--pretty` format strings
-- `--grep` for message filtering is not yet implemented
+- `--grep` uses regular-expression matching (a semantic change from the earlier substring match); `^`/`$` are line anchors and `-i` enables case-insensitive matching
 - `--reverse` for chronological order is not yet implemented
 - In JSON mode, `files` contains structured change summaries; patch text is never included in JSON output

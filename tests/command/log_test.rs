@@ -1837,3 +1837,275 @@ fn test_pretty_format_in_json_is_noop() {
     assert_eq!(json["command"], "log");
     assert_eq!(json["data"]["commits"][0]["subject"], "base");
 }
+
+// ── log filter alignment: regex grep, committer, parents, first-parent
+//    (log-improvement-plan Batch 2) ──
+
+/// Make a commit touching `file` with `content` and message `msg`.
+fn log_commit(repo: &std::path::Path, file: &str, content: &str, msg: &str) {
+    fs::write(repo.join(file), content).expect("write file");
+    let add = run_libra_command(&["add", file], repo);
+    assert!(
+        add.status.success(),
+        "add {file} failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let commit = run_libra_command(&["commit", "-m", msg, "--no-verify"], repo);
+    assert!(
+        commit.status.success(),
+        "commit '{msg}' failed: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+}
+
+#[test]
+fn test_log_grep_regex_matches() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    log_commit(repo.path(), "a.txt", "a", "fix: alpha bug");
+    log_commit(repo.path(), "b.txt", "b", "feat: beta feature");
+
+    // Anchored regex: only the message starting with "fix" matches.
+    let out = run_libra_command(&["log", "--grep", "^fix", "--oneline"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("fix: alpha bug"), "stdout: {stdout}");
+    assert!(!stdout.contains("feat: beta feature"), "stdout: {stdout}");
+}
+
+#[test]
+fn test_log_grep_ignore_case() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    log_commit(repo.path(), "a.txt", "a", "feat: lower case");
+
+    // Without -i, uppercase pattern does not match; with -i it does.
+    let sensitive = run_libra_command(&["log", "--grep", "FEAT", "--oneline"], repo.path());
+    assert!(sensitive.status.success());
+    assert!(
+        !String::from_utf8_lossy(&sensitive.stdout).contains("feat: lower case"),
+        "case-sensitive grep must not match"
+    );
+
+    let insensitive = run_libra_command(&["log", "--grep", "FEAT", "-i", "--oneline"], repo.path());
+    assert!(insensitive.status.success());
+    assert!(
+        String::from_utf8_lossy(&insensitive.stdout).contains("feat: lower case"),
+        "case-insensitive grep must match"
+    );
+}
+
+#[test]
+fn test_log_grep_regex_invalid() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    log_commit(repo.path(), "a.txt", "a", "fix: bug");
+
+    let out = run_libra_command(&["log", "--grep", "(unbalanced"], repo.path());
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "invalid regex must exit 129, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("LBR-CLI-002"),
+        "expected LBR-CLI-002, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn test_log_grep_regex_too_long() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    log_commit(repo.path(), "a.txt", "a", "fix: bug");
+
+    let huge = "a".repeat(5000);
+    let out = run_libra_command(&["log", "--grep", &huge], repo.path());
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "oversized regex must exit 129, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("LBR-CLI-002"));
+}
+
+#[test]
+fn test_log_committer_filter() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    // First committer: alice.
+    run_libra_command(&["config", "user.name", "Alice"], repo.path());
+    run_libra_command(&["config", "user.email", "alice@example.com"], repo.path());
+    log_commit(repo.path(), "a.txt", "a", "alice work");
+    // Second committer: bob.
+    run_libra_command(&["config", "user.name", "Bob"], repo.path());
+    run_libra_command(&["config", "user.email", "bob@example.com"], repo.path());
+    log_commit(repo.path(), "b.txt", "b", "bob work");
+
+    let out = run_libra_command(&["log", "--committer", "alice", "--oneline"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("alice work"), "stdout: {stdout}");
+    assert!(!stdout.contains("bob work"), "stdout: {stdout}");
+}
+
+/// Build a repo with a real merge commit. main: root -> A; feature: root -> B;
+/// then main merges feature, producing a 2-parent commit. Returns the repo.
+fn log_repo_with_merge() -> tempfile::TempDir {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    log_commit(repo.path(), "root.txt", "root", "root commit");
+
+    let branch = run_libra_command(&["branch", "feature"], repo.path());
+    assert!(
+        branch.status.success(),
+        "branch: {}",
+        String::from_utf8_lossy(&branch.stderr)
+    );
+
+    // Advance main.
+    log_commit(repo.path(), "main.txt", "main", "on main");
+
+    // Advance feature.
+    let sw = run_libra_command(&["switch", "feature"], repo.path());
+    assert!(
+        sw.status.success(),
+        "switch feature: {}",
+        String::from_utf8_lossy(&sw.stderr)
+    );
+    log_commit(repo.path(), "feat.txt", "feat", "on feature");
+
+    // Merge feature into main (true merge — histories diverged).
+    let sw_main = run_libra_command(&["switch", "main"], repo.path());
+    assert!(
+        sw_main.status.success(),
+        "switch main: {}",
+        String::from_utf8_lossy(&sw_main.stderr)
+    );
+    let merge = run_libra_command(&["merge", "feature", "-m", "merge feature"], repo.path());
+    assert!(
+        merge.status.success(),
+        "merge: {}",
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    repo
+}
+
+#[test]
+fn test_log_merges_and_no_merges() {
+    let repo = log_repo_with_merge();
+
+    let merges = run_libra_command(&["log", "--merges", "--oneline"], repo.path());
+    assert!(
+        merges.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&merges.stderr)
+    );
+    let mstdout = String::from_utf8_lossy(&merges.stdout);
+    assert!(
+        mstdout.contains("merge feature"),
+        "--merges should show the merge: {mstdout}"
+    );
+    assert!(
+        !mstdout.contains("on main"),
+        "--merges should hide non-merges: {mstdout}"
+    );
+
+    let no_merges = run_libra_command(&["log", "--no-merges", "--oneline"], repo.path());
+    assert!(no_merges.status.success());
+    let nstdout = String::from_utf8_lossy(&no_merges.stdout);
+    assert!(
+        !nstdout.contains("merge feature"),
+        "--no-merges should hide the merge: {nstdout}"
+    );
+    assert!(
+        nstdout.contains("on main"),
+        "--no-merges should show non-merges: {nstdout}"
+    );
+}
+
+#[test]
+fn test_log_min_max_parents() {
+    let repo = log_repo_with_merge();
+
+    // --min-parents=2 is equivalent to --merges.
+    let min2 = run_libra_command(&["log", "--min-parents", "2", "--oneline"], repo.path());
+    assert!(min2.status.success());
+    let s = String::from_utf8_lossy(&min2.stdout);
+    assert!(
+        s.contains("merge feature") && !s.contains("on main"),
+        "min-parents=2: {s}"
+    );
+
+    // --max-parents=1 is equivalent to --no-merges.
+    let max1 = run_libra_command(&["log", "--max-parents", "1", "--oneline"], repo.path());
+    assert!(max1.status.success());
+    let s = String::from_utf8_lossy(&max1.stdout);
+    assert!(
+        !s.contains("merge feature") && s.contains("on main"),
+        "max-parents=1: {s}"
+    );
+}
+
+#[test]
+fn test_log_first_parent() {
+    let repo = log_repo_with_merge();
+
+    // First-parent walk from the merge follows main (root -> on main -> merge),
+    // never entering the feature side ("on feature").
+    let out = run_libra_command(&["log", "--first-parent", "--oneline"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("merge feature"), "stdout: {stdout}");
+    assert!(stdout.contains("on main"), "stdout: {stdout}");
+    assert!(
+        !stdout.contains("on feature"),
+        "first-parent must skip the merged branch: {stdout}"
+    );
+}
+
+#[test]
+fn test_log_filters_json_total() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    log_commit(repo.path(), "a.txt", "a", "fix: one");
+    log_commit(repo.path(), "b.txt", "b", "feat: two");
+    log_commit(repo.path(), "c.txt", "c", "fix: three");
+
+    let out = run_libra_command(&["--json", "log", "--grep", "^fix"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = parse_json_stdout(&out);
+    let commits = json["data"]["commits"].as_array().expect("commits array");
+    assert_eq!(commits.len(), 2, "two fix commits expected: {json}");
+    // total reflects the filtered scope when no -n is given.
+    assert_eq!(
+        json["data"]["total"].as_u64(),
+        Some(2),
+        "total must equal filtered count: {json}"
+    );
+}

@@ -16,6 +16,7 @@ use git_internal::{
     hash::ObjectHash,
     internal::object::{blob::Blob, commit::Commit, tree::Tree},
 };
+use regex::{Regex, RegexBuilder};
 use serde::Serialize;
 
 use crate::{
@@ -23,7 +24,7 @@ use crate::{
     common_utils::parse_commit_msg,
     internal::{
         branch::{Branch, BranchStoreError},
-        config::ConfigKv,
+        config::{ConfigKv, validate_config_regex_pattern},
         head::Head,
         log::{
             date_parser::parse_date,
@@ -46,7 +47,8 @@ EXAMPLES:
     libra log --oneline --graph            Show a compact commit graph
     libra log --author alice                Filter commits by author (case-insensitive substring)
     libra log --since 24h --until 1h       Time-window filter (relative or RFC3339)
-    libra log --grep 'fix(' -n 20          Filter commits by message substring
+    libra log --grep '^fix' -n 20          Filter commits by message (regex)
+    libra log --merges --first-parent      Show merge commits along the first-parent line
     libra log --name-status src/           Show changed files under src/
     libra --json log -n 1                  Structured JSON output for agents";
 
@@ -172,9 +174,30 @@ pub struct LogArgs {
     #[clap(value_name = "PATHS", num_args = 0..)]
     pathspec: Vec<String>,
 
-    /// Filter commits whose message contains PATTERN (case-sensitive substring match)
+    /// Filter commits whose message matches PATTERN (regular expression, case-sensitive by default)
     #[clap(long, value_name = "PATTERN")]
     pub grep: Option<String>,
+    /// Match the `--grep` pattern case-insensitively
+    #[clap(short = 'i', long = "regexp-ignore-case")]
+    pub regexp_ignore_case: bool,
+    /// Filter commits by committer name or email (case-insensitive substring match)
+    #[clap(long, value_name = "PATTERN")]
+    pub committer: Option<String>,
+    /// Show only merge commits (two or more parents); alias for `--min-parents=2`
+    #[clap(long)]
+    pub merges: bool,
+    /// Show only non-merge commits (fewer than two parents); alias for `--max-parents=1`
+    #[clap(long = "no-merges")]
+    pub no_merges: bool,
+    /// Show only commits with at least N parents
+    #[clap(long, value_name = "N")]
+    pub min_parents: Option<usize>,
+    /// Show only commits with at most N parents
+    #[clap(long, value_name = "N")]
+    pub max_parents: Option<usize>,
+    /// Follow only the first parent of each merge commit when walking history
+    #[clap(long)]
+    pub first_parent: bool,
 }
 
 #[derive(PartialEq, Debug)]
@@ -234,26 +257,100 @@ pub struct LogOutput {
 
 struct CommitFilter {
     author: Option<String>,
+    committer: Option<String>,
     since: Option<i64>,
     until: Option<i64>,
     paths: Vec<PathBuf>,
-    grep: Option<String>,
+    grep: Option<Regex>,
+    min_parents: Option<usize>,
+    max_parents: Option<usize>,
+    /// When set, only commits whose OID is in this set (the first-parent chain
+    /// from HEAD) pass. `None` means no `--first-parent` restriction.
+    first_parents: Option<HashSet<String>>,
+}
+
+/// Effective minimum parent count: explicit `--min-parents`, else `2` when
+/// `--merges` is set (git treats `--merges` as `--min-parents=2`).
+fn effective_min_parents(args: &LogArgs) -> Option<usize> {
+    args.min_parents.or(args.merges.then_some(2))
+}
+
+/// Effective maximum parent count: explicit `--max-parents`, else `1` when
+/// `--no-merges` is set (git treats `--no-merges` as `--max-parents=1`).
+fn effective_max_parents(args: &LogArgs) -> Option<usize> {
+    args.max_parents.or(args.no_merges.then_some(1))
+}
+
+/// Compiles a `--grep` pattern into a [`Regex`], enforcing the shared 4 KiB
+/// pattern-length cap and mapping every failure to `LBR-CLI-002` (exit 129),
+/// mirroring `libra grep`.
+fn compile_grep_regex(pattern: &str, ignore_case: bool) -> CliResult<Regex> {
+    validate_config_regex_pattern(pattern).map_err(|e| {
+        CliError::command_usage(format!("invalid --grep pattern: {e}"))
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+    })?;
+    RegexBuilder::new(pattern)
+        .case_insensitive(ignore_case)
+        // Match `^`/`$` at line boundaries within the multi-line commit message,
+        // like `git log --grep` (so e.g. `^fix` matches the subject line and
+        // `^Signed-off-by` matches a footer).
+        .multi_line(true)
+        .build()
+        .map_err(|e| {
+            CliError::command_usage(format!("invalid --grep regex '{pattern}': {e}"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })
+}
+
+/// Builds the set of commit OIDs on the first-parent chain from `head`, using
+/// the already-loaded reachable `commits` to look up each commit's first parent.
+fn first_parent_oids(head: &ObjectHash, commits: &[Commit]) -> HashSet<String> {
+    let first_parent: HashMap<String, Option<String>> = commits
+        .iter()
+        .map(|c| {
+            (
+                c.id.to_string(),
+                c.parent_commit_ids.first().map(|p| p.to_string()),
+            )
+        })
+        .collect();
+
+    let mut chain = HashSet::new();
+    let mut current = Some(head.to_string());
+    while let Some(oid) = current {
+        if !chain.insert(oid.clone()) {
+            break; // cycle guard
+        }
+        current = first_parent.get(&oid).cloned().flatten();
+    }
+    chain
 }
 
 impl CommitFilter {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         author: Option<String>,
+        committer: Option<String>,
         since: Option<i64>,
         until: Option<i64>,
         paths: Vec<PathBuf>,
-        grep: Option<String>,
+        // Pre-compiled so the regex failure (the only fallible part) happens
+        // *before* history traversal — see the call sites.
+        grep: Option<Regex>,
+        min_parents: Option<usize>,
+        max_parents: Option<usize>,
+        first_parents: Option<HashSet<String>>,
     ) -> Self {
         Self {
             author: author.map(|s| s.to_lowercase()),
+            committer: committer.map(|s| s.to_lowercase()),
             since,
             until,
             paths,
             grep,
+            min_parents,
+            max_parents,
+            first_parents,
         }
     }
 
@@ -265,6 +362,17 @@ impl CommitFilter {
                 commit.author.email.to_lowercase()
             );
             if !author.contains(author_filter) {
+                return false;
+            }
+        }
+
+        if let Some(committer_filter) = &self.committer {
+            let committer = format!(
+                "{} <{}>",
+                commit.committer.name.to_lowercase(),
+                commit.committer.email.to_lowercase()
+            );
+            if !committer.contains(committer_filter) {
                 return false;
             }
         }
@@ -281,9 +389,26 @@ impl CommitFilter {
             return false;
         }
 
+        let parent_count = commit.parent_commit_ids.len();
+        if let Some(min) = self.min_parents
+            && parent_count < min
+        {
+            return false;
+        }
+        if let Some(max) = self.max_parents
+            && parent_count > max
+        {
+            return false;
+        }
+
+        if let Some(chain) = &self.first_parents
+            && !chain.contains(&commit.id.to_string())
+        {
+            return false;
+        }
+
         if let Some(pattern) = &self.grep
-            && !pattern.is_empty()
-            && !commit.message.contains(pattern.as_str())
+            && !pattern.is_match(&commit.message)
         {
             return false;
         }
@@ -393,6 +518,8 @@ pub async fn get_reachable_commits(
         ObjectHash::from_str(&commit_hash).map_err(|_| log_invalid_object_error(&commit_hash))?;
     queue.push_back((initial_hash, 0)); // (commit_id, current_depth)
 
+    let shallow_boundaries = crate::command::fetch::read_shallow_boundaries().unwrap_or_default();
+
     while let Some((commit_id, current_depth)) = queue.pop_front() {
         // If we've already seen this commit, skip it
         if !commit_set.insert(commit_id) {
@@ -410,9 +537,11 @@ pub async fn get_reachable_commits(
             continue;
         }
 
-        // Add parent commits to the queue with incremented depth
-        for parent_commit_id in &commit.parent_commit_ids {
-            queue.push_back((*parent_commit_id, current_depth + 1));
+        // Add parent commits to the queue with incremented depth (if not a shallow boundary)
+        if !shallow_boundaries.contains(&commit_id.to_string()) {
+            for parent_commit_id in &commit.parent_commit_ids {
+                queue.push_back((*parent_commit_id, current_depth + 1));
+            }
         }
 
         // Add the current commit to the result list
@@ -476,13 +605,13 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     let since = args.since.as_deref().map(parse_date_arg).transpose()?;
     let until = args.until.as_deref().map(parse_date_arg).transpose()?;
     let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
-    let filter = CommitFilter::new(
-        args.author.clone(),
-        since,
-        until,
-        path_filters.clone(),
-        args.grep.clone(),
-    );
+    // Compile `--grep` before any traversal so an invalid/oversized pattern
+    // fails fast (`LBR-CLI-002`) instead of after loading the whole history.
+    let grep = args
+        .grep
+        .as_deref()
+        .map(|p| compile_grep_regex(p, args.regexp_ignore_case))
+        .transpose()?;
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let commit_hash = current_head_commit.to_string();
@@ -491,6 +620,23 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     // newest first
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
     let default_abbrev = util::get_min_unique_hash_length(&reachable_commits).max(7);
+
+    // `--first-parent` restricts to the first-parent chain (computed from the
+    // already-loaded history so the shared `get_reachable_commits` is untouched).
+    let first_parents = args
+        .first_parent
+        .then(|| first_parent_oids(&current_head_commit, &reachable_commits));
+    let filter = CommitFilter::new(
+        args.author.clone(),
+        args.committer.clone(),
+        since,
+        until,
+        path_filters.clone(),
+        grep,
+        effective_min_parents(&args),
+        effective_max_parents(&args),
+        first_parents,
+    );
 
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
     let reuse_changed_files = name_only || name_status;
@@ -680,13 +826,11 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     let since = args.since.as_deref().map(parse_date_arg).transpose()?;
     let until = args.until.as_deref().map(parse_date_arg).transpose()?;
     let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
-    let filter = CommitFilter::new(
-        args.author.clone(),
-        since,
-        until,
-        path_filters.clone(),
-        args.grep.clone(),
-    );
+    let grep = args
+        .grep
+        .as_deref()
+        .map(|p| compile_grep_regex(p, args.regexp_ignore_case))
+        .transpose()?;
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let commit_hash = current_head_commit.to_string();
@@ -694,6 +838,21 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     let mut reachable_commits = get_reachable_commits(commit_hash, None).await?;
     // newest first
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
+
+    let first_parents = args
+        .first_parent
+        .then(|| first_parent_oids(&current_head_commit, &reachable_commits));
+    let filter = CommitFilter::new(
+        args.author.clone(),
+        args.committer.clone(),
+        since,
+        until,
+        path_filters.clone(),
+        grep,
+        effective_min_parents(args),
+        effective_max_parents(args),
+        first_parents,
+    );
 
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
     let include_total = args.number.is_none();
@@ -920,7 +1079,11 @@ pub(crate) async fn get_changed_files_for_commit(
         .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
     let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
 
-    let old_blobs: Vec<(PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
+    let shallow_boundaries = crate::command::fetch::read_shallow_boundaries().unwrap_or_default();
+    let has_parents = !commit.parent_commit_ids.is_empty()
+        && !shallow_boundaries.contains(&commit.id.to_string());
+
+    let old_blobs: Vec<(PathBuf, ObjectHash)> = if has_parents {
         let parent = &commit.parent_commit_ids[0];
         let parent_commit = load_object::<Commit>(parent)
             .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
@@ -1025,7 +1188,11 @@ pub async fn compute_commit_stat(
         .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
     let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
 
-    let old_blobs: Vec<(PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
+    let shallow_boundaries = crate::command::fetch::read_shallow_boundaries().unwrap_or_default();
+    let has_parents = !commit.parent_commit_ids.is_empty()
+        && !shallow_boundaries.contains(&commit.id.to_string());
+
+    let old_blobs: Vec<(PathBuf, ObjectHash)> = if has_parents {
         let parent = &commit.parent_commit_ids[0];
         let parent_commit = load_object::<Commit>(parent)
             .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
@@ -1251,8 +1418,12 @@ pub(crate) async fn generate_diff(
         .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
     let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
 
+    let shallow_boundaries = crate::command::fetch::read_shallow_boundaries().unwrap_or_default();
+    let has_parents = !commit.parent_commit_ids.is_empty()
+        && !shallow_boundaries.contains(&commit.id.to_string());
+
     // old_blobs from first parent if exists
-    let old_blobs: Vec<(PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
+    let old_blobs: Vec<(PathBuf, ObjectHash)> = if has_parents {
         let parent = &commit.parent_commit_ids[0];
         let parent_commit = load_object::<Commit>(parent)
             .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
@@ -1392,9 +1563,13 @@ mod tests {
 
         let filter = CommitFilter::new(
             Some("lvy".to_string()),
+            None,
             Some(1_766_000_000),
             Some(1_766_200_000),
             Vec::new(),
+            None,
+            None,
+            None,
             None,
         );
 
