@@ -690,3 +690,117 @@ async fn test_grep_perl_regexp_is_declined() {
         "grep -P should explain it is unsupported"
     );
 }
+
+/// `-C <n>` emits both leading and trailing context, using `:` for match lines,
+/// `-` for context lines, and `--` between non-contiguous groups.
+#[tokio::test]
+#[serial]
+async fn test_grep_combined_context_emits_both_sides() {
+    let repo = tempdir().expect("repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("lines", "1\n2\nmatch\n4\n5\n6\nmatch\n8\n").expect("write file");
+    add_and_commit("add lines", vec!["lines".to_string()]).await;
+
+    let output = run_libra_command(&["grep", "-n", "-C", "1", "match", "lines"], repo.path());
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "lines-2-2\nlines:3:match\nlines-4-4\n--\nlines-6-6\nlines:7:match\nlines-8-8\n",
+        "context output should use `:`/`-`/`--` separators"
+    );
+}
+
+/// `-A <n>` emits only trailing context lines.
+#[tokio::test]
+#[serial]
+async fn test_grep_after_context_emits_trailing_lines() {
+    let repo = tempdir().expect("repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("lines", "1\nmatch\n3\n4\n5\n").expect("write file");
+    add_and_commit("add lines", vec!["lines".to_string()]).await;
+
+    let output = run_libra_command(&["grep", "-n", "-A", "2", "match", "lines"], repo.path());
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "lines:2:match\nlines-3-3\nlines-4-4\n",
+        "-A should emit trailing context only"
+    );
+}
+
+/// `-B <n>` emits only leading context lines.
+#[tokio::test]
+#[serial]
+async fn test_grep_before_context_emits_leading_lines() {
+    let repo = tempdir().expect("repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("lines", "1\n2\n3\nmatch\n5\n").expect("write file");
+    add_and_commit("add lines", vec!["lines".to_string()]).await;
+
+    let output = run_libra_command(&["grep", "-n", "-B", "1", "match", "lines"], repo.path());
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "lines-3-3\nlines:4:match\n",
+        "-B should emit leading context only"
+    );
+}
+
+/// Overlapping context windows merge into one group (no `--` separator).
+#[tokio::test]
+#[serial]
+async fn test_grep_context_overlap_omits_separator() {
+    let repo = tempdir().expect("repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("lines", "a\nb\nmatch\nd\nmatch\nf\n").expect("write file");
+    add_and_commit("add lines", vec!["lines".to_string()]).await;
+
+    let output = run_libra_command(&["grep", "-n", "-C", "1", "match", "lines"], repo.path());
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("--"),
+        "overlapping windows must not emit a group separator: {stdout}"
+    );
+    assert_eq!(
+        stdout, "lines-2-b\nlines:3:match\nlines-4-d\nlines:5:match\nlines-6-f\n",
+        "overlapping windows should render as one group"
+    );
+}
+
+/// Combining `-A/-B/-C` with `--json` leaves the JSON schema unchanged: matches
+/// are present and no context lines pollute the matches array.
+#[tokio::test]
+#[serial]
+async fn test_grep_context_json_renders_without_error() {
+    let repo = tempdir().expect("repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("lines", "1\nmatch\n3\n").expect("write file");
+    add_and_commit("add lines", vec!["lines".to_string()]).await;
+
+    let output = run_libra_command(
+        &["--json=compact", "grep", "-A", "1", "match", "lines"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "grep --json with context should succeed");
+    let json = parse_json_stdout(&output);
+    let matches = json["data"]["matches"]
+        .as_array()
+        .expect("expected matches array");
+    assert_eq!(
+        matches.len(),
+        1,
+        "only the match line should appear in JSON"
+    );
+    assert_eq!(matches[0]["line"], "match");
+}

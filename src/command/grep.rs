@@ -50,6 +50,7 @@ EXAMPLES:
     libra grep -c 'unsafe' src/           Per-file match counts
     libra grep -l 'unwrap()' src/         Just the filenames that have matches
     libra grep -e 'TODO' -e 'FIXME'       Match either of multiple regexps
+    libra grep -C 2 'panic' src/          Show 2 lines of context around each match
     libra grep --cached 'TODO'            Search files staged in the index instead of the worktree
     libra grep --tree HEAD~5 'TODO'       Search files inside a historical revision
     libra grep --json 'TODO'              Structured JSON output for agents";
@@ -139,6 +140,29 @@ pub struct GrepArgs {
     /// silently mis-matching.
     #[clap(short = 'P', long = "perl-regexp")]
     perl_regexp: bool,
+
+    /// Show `<NUM>` lines of trailing context after each match.
+    #[clap(short = 'A', long = "after-context", value_name = "NUM")]
+    after_context: Option<usize>,
+
+    /// Show `<NUM>` lines of leading context before each match.
+    #[clap(short = 'B', long = "before-context", value_name = "NUM")]
+    before_context: Option<usize>,
+
+    /// Show `<NUM>` lines of context before and after each match (equivalent to
+    /// `-A <NUM> -B <NUM>`; `-A`/`-B` take precedence for their side).
+    #[clap(short = 'C', long = "context", value_name = "NUM")]
+    context: Option<usize>,
+}
+
+impl GrepArgs {
+    /// Resolve the effective (before, after) context line counts. `-A`/`-B`
+    /// override `-C` for their respective side.
+    fn context_counts(&self) -> (usize, usize) {
+        let before = self.before_context.or(self.context).unwrap_or(0);
+        let after = self.after_context.or(self.context).unwrap_or(0);
+        (before, after)
+    }
 }
 
 /// A single grep match result.
@@ -180,6 +204,31 @@ pub struct GrepWarning {
     pub message: String,
 }
 
+/// Whether a context output line is itself a match or surrounding context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextLineKind {
+    Match,
+    Context,
+}
+
+/// A single rendered line in `-A`/`-B`/`-C` context mode.
+#[derive(Debug, Clone)]
+struct ContextOutputLine {
+    kind: ContextLineKind,
+    line_number: usize,
+    content: String,
+    /// Byte offset of the first match, only set for match lines with `-b`.
+    byte_offset: Option<usize>,
+}
+
+/// Per-file context output: groups of consecutive lines, rendered with a `--`
+/// separator between non-contiguous groups (text output only).
+#[derive(Debug, Clone)]
+struct FileContextOutput {
+    path: String,
+    groups: Vec<Vec<ContextOutputLine>>,
+}
+
 /// Output structure for JSON mode.
 #[derive(Debug, Clone, Serialize)]
 pub struct GrepOutput {
@@ -208,6 +257,10 @@ pub struct GrepOutput {
     /// Warnings about skipped or unreadable files.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub warnings: Vec<GrepWarning>,
+    /// Per-file context blocks for `-A`/`-B`/`-C` text rendering. Never
+    /// serialized: the JSON/NDJSON schema is unchanged by context flags.
+    #[serde(skip)]
+    context_output: Option<Vec<FileContextOutput>>,
 }
 
 pub async fn execute(args: GrepArgs) {
@@ -305,6 +358,9 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
     let mut warnings: Vec<GrepWarning> = Vec::new();
     let mut total_matches = 0usize;
     let mut matched_file_count = 0usize;
+    let (before_context, after_context) = args.context_counts();
+    let context_requested = before_context > 0 || after_context > 0;
+    let mut context_blocks: Vec<FileContextOutput> = Vec::new();
 
     for search_file in &files {
         let path_str = search_file.path.display().to_string();
@@ -364,13 +420,33 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
                     count: file_matches.len(),
                 });
             } else {
-                for (line_num, line, byte_off) in file_matches {
+                let display_path = search_file.path.display().to_string();
+                for (line_num, line, byte_off) in &file_matches {
                     matches.push(GrepMatch {
-                        path: search_file.path.display().to_string(),
-                        line_number: line_num,
-                        line,
-                        byte_offset: args.byte_offset.then_some(byte_off),
+                        path: display_path.clone(),
+                        line_number: *line_num,
+                        line: line.clone(),
+                        byte_offset: args.byte_offset.then_some(*byte_off),
                     });
+                }
+                if context_requested {
+                    let all_lines: Vec<String> = String::from_utf8_lossy(&content)
+                        .lines()
+                        .map(str::to_string)
+                        .collect();
+                    let groups = build_context_groups(
+                        &all_lines,
+                        &file_matches,
+                        before_context,
+                        after_context,
+                        args,
+                    );
+                    if !groups.is_empty() {
+                        context_blocks.push(FileContextOutput {
+                            path: display_path,
+                            groups,
+                        });
+                    }
                 }
             }
             total_matches += match_count;
@@ -392,7 +468,65 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
         files_with_matches: args.files_with_matches.then_some(files_with_matches),
         files_without_matches: args.files_without_matches.then_some(files_without_matches),
         warnings,
+        context_output: context_requested.then_some(context_blocks),
     })
+}
+
+/// Group a file's matches into context blocks. Each match contributes a window
+/// of `[line-before, line+after]`; overlapping or adjacent windows merge into one
+/// group, while gaps start a new group (rendered with a `--` separator). Match
+/// lines are tagged so they render with `:` (and may highlight); surrounding
+/// lines render with `-` and are never highlighted.
+fn build_context_groups(
+    lines: &[String],
+    file_matches: &[(usize, String, usize)],
+    before: usize,
+    after: usize,
+    args: &GrepArgs,
+) -> Vec<Vec<ContextOutputLine>> {
+    use std::collections::HashMap;
+
+    let matched: HashMap<usize, usize> = file_matches
+        .iter()
+        .map(|(line_num, _, byte_off)| (*line_num, *byte_off))
+        .collect();
+    let mut sorted: Vec<usize> = matched.keys().copied().collect();
+    sorted.sort_unstable();
+
+    let mut groups: Vec<Vec<ContextOutputLine>> = Vec::new();
+    let mut current: Vec<ContextOutputLine> = Vec::new();
+    let mut last_emitted = 0usize; // 1-based line number last pushed into `current`
+
+    for line_num in sorted {
+        let start = line_num.saturating_sub(before).max(1);
+        let end = (line_num + after).min(lines.len());
+        if !current.is_empty() && start > last_emitted + 1 {
+            groups.push(std::mem::take(&mut current));
+        }
+        let from = if current.is_empty() {
+            start
+        } else {
+            start.max(last_emitted + 1)
+        };
+        for l in from..=end {
+            let byte_off = matched.get(&l).copied();
+            current.push(ContextOutputLine {
+                kind: if byte_off.is_some() {
+                    ContextLineKind::Match
+                } else {
+                    ContextLineKind::Context
+                },
+                line_number: l,
+                content: lines.get(l - 1).cloned().unwrap_or_default(),
+                byte_offset: byte_off.filter(|_| args.byte_offset),
+            });
+        }
+        last_emitted = end.max(last_emitted);
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    groups
 }
 
 fn collect_patterns(args: &GrepArgs) -> CliResult<Vec<String>> {
@@ -814,6 +948,8 @@ fn render_grep_output(
         for count in result.counts.as_ref().unwrap_or(&Vec::new()) {
             pager.write_line(&format!("{}:{}", count.path, count.count))?;
         }
+    } else if let Some(context_output) = &result.context_output {
+        render_context_output(&mut pager, context_output, args, matcher.as_ref())?;
     } else {
         // Regular match output with optional highlighting
         for match_item in result.matches.as_ref().unwrap_or(&Vec::new()) {
@@ -844,6 +980,61 @@ fn render_grep_output(
 
     pager.finish()?;
     Ok(())
+}
+
+/// Render `-A`/`-B`/`-C` context output: each group's lines, with a `--`
+/// separator line between non-contiguous groups (across the whole output).
+fn render_context_output(
+    pager: &mut Pager,
+    context_output: &[FileContextOutput],
+    args: &GrepArgs,
+    matcher: Option<&regex::Regex>,
+) -> CliResult<()> {
+    let mut first_group = true;
+    for file_output in context_output {
+        for group in &file_output.groups {
+            if !first_group {
+                pager.write_line("--")?;
+            }
+            first_group = false;
+            for line in group {
+                pager.write_line(&render_context_line(&file_output.path, line, args, matcher))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Format a single context-mode line: match lines use `:` separators (and may be
+/// highlighted), context lines use `-` separators and are never highlighted.
+fn render_context_line(
+    path: &str,
+    line: &ContextOutputLine,
+    args: &GrepArgs,
+    matcher: Option<&regex::Regex>,
+) -> String {
+    let is_match = line.kind == ContextLineKind::Match;
+    let sep = if is_match { ':' } else { '-' };
+    let content = if is_match {
+        matcher
+            .filter(|_| !args.invert_match)
+            .map(|m| colorize_match(&line.content, m))
+            .unwrap_or_else(|| line.content.clone())
+    } else {
+        line.content.clone()
+    };
+
+    if is_match && args.byte_offset {
+        format!(
+            "{path}{sep}{}{sep}{}{sep}{content}",
+            line.line_number,
+            line.byte_offset.unwrap_or(0)
+        )
+    } else if args.line_number {
+        format!("{path}{sep}{}{sep}{content}", line.line_number)
+    } else {
+        format!("{path}{sep}{content}")
+    }
 }
 
 /// Colorize matching portions of a line using the actual matcher spans.
