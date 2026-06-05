@@ -1473,3 +1473,172 @@ fn diff_rename_header_includes_mode_change() {
     assert!(stdout.contains("new mode 100755"), "stdout={stdout}");
     assert!(stdout.contains("rename from orig.sh"), "stdout={stdout}");
 }
+
+// ----- Wave 2a: --raw, --relative, diff.noPrefix -----
+
+/// Create `src/a.txt` and `b.txt`, commit them, then modify both in the worktree.
+fn setup_subdir_repo() -> tempfile::TempDir {
+    let repo = create_committed_repo_via_cli();
+    fs::create_dir_all(repo.path().join("src")).unwrap();
+    fs::write(repo.path().join("src/a.txt"), "a\n").unwrap();
+    fs::write(repo.path().join("b.txt"), "b\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "src/a.txt", "b.txt"], repo.path()),
+        "stage subdir fixture",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "subdir base", "--no-verify"], repo.path()),
+        "commit subdir fixture",
+    );
+    repo
+}
+
+#[test]
+fn diff_raw_format_matches_git() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let output = run_libra_command(&["diff", "--raw"], repo.path());
+    assert_cli_success(&output, "diff --raw");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().find(|l| l.ends_with("tracked.txt")).unwrap();
+    let parts: Vec<&str> = line.splitn(5, ' ').collect();
+    assert_eq!(parts[0], ":100644", "raw old mode: {line}");
+    assert_eq!(parts[1], "100644", "raw new mode: {line}");
+    assert_eq!(parts[2].len(), 7, "abbreviated old sha: {line}");
+    assert_eq!(parts[3].len(), 7, "abbreviated new sha: {line}");
+    assert_eq!(parts[4], "M\ttracked.txt", "status + path: {line}");
+}
+
+#[test]
+fn diff_raw_rename_emits_two_paths() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "orig.txt", "alpha\nbeta\ngamma\n");
+    fs::remove_file(repo.path().join("orig.txt")).unwrap();
+    fs::write(repo.path().join("new.txt"), "alpha\nbeta\ngamma\n").unwrap();
+
+    let output = run_libra_command(&["diff", "-M", "--raw"], repo.path());
+    assert_cli_success(&output, "diff -M --raw");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|l| l.contains("R100"))
+        .expect("a rename raw line");
+    assert!(
+        line.ends_with("R100\torig.txt\tnew.txt"),
+        "rename raw line must carry both paths: {line}"
+    );
+}
+
+#[test]
+fn diff_relative_filters_to_subdir() {
+    let repo = setup_subdir_repo();
+    fs::write(repo.path().join("src/a.txt"), "a2\n").unwrap();
+    fs::write(repo.path().join("b.txt"), "b2\n").unwrap();
+
+    let output = run_libra_command(&["--json", "diff", "--relative=src"], repo.path());
+    assert_cli_success(&output, "diff --relative=src");
+    let json = parse_json_stdout(&output);
+    let files = json["data"]["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "only src/ files survive: {files:?}");
+    assert_eq!(files[0]["path"], "a.txt", "prefix is stripped");
+}
+
+#[test]
+fn diff_relative_strips_prefix() {
+    let repo = setup_subdir_repo();
+    fs::write(repo.path().join("src/a.txt"), "a2\n").unwrap();
+
+    let output = run_libra_command(&["diff", "--relative=src"], repo.path());
+    assert_cli_success(&output, "diff --relative=src unified");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("diff --git a/a.txt b/a.txt"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("--- a/a.txt"), "stdout={stdout}");
+    assert!(
+        !stdout.contains("src/a.txt"),
+        "prefix must be stripped: {stdout}"
+    );
+}
+
+#[test]
+fn diff_relative_combines_with_name_only() {
+    let repo = setup_subdir_repo();
+    fs::write(repo.path().join("src/a.txt"), "a2\n").unwrap();
+    fs::write(repo.path().join("b.txt"), "b2\n").unwrap();
+
+    let output = run_libra_command(&["diff", "--relative=src", "--name-only"], repo.path());
+    assert_cli_success(&output, "diff --relative --name-only");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "a.txt");
+}
+
+#[test]
+fn diff_relative_excludes_outside_files_from_count() {
+    let repo = setup_subdir_repo();
+    // Only the file OUTSIDE src/ changes.
+    fs::write(repo.path().join("b.txt"), "b2\n").unwrap();
+
+    let output = run_libra_command(&["diff", "--relative=src", "--exit-code"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "outside-subtree change must not count under --relative: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn diff_relative_rejects_traversal() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let output = run_libra_command(&["diff", "--relative=../escape"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "traversal must be rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+#[test]
+fn diff_noprefix_config_omits_ab_prefix() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "diff.noPrefix", "true"], repo.path()),
+        "set diff.noPrefix",
+    );
+
+    let output = run_libra_command(&["diff"], repo.path());
+    assert_cli_success(&output, "diff with noPrefix");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("diff --git tracked.txt tracked.txt"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("--- tracked.txt"), "stdout={stdout}");
+    assert!(stdout.contains("+++ tracked.txt"), "stdout={stdout}");
+    assert!(!stdout.contains("a/tracked.txt"), "no a/ prefix: {stdout}");
+}
+
+#[test]
+fn diff_output_format_precedence() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+
+    // --raw beats --stat.
+    let raw = run_libra_command(&["diff", "--raw", "--stat"], repo.path());
+    assert!(
+        String::from_utf8_lossy(&raw.stdout).contains(":100644"),
+        "--raw should win over --stat"
+    );
+
+    // --json envelope is orthogonal and wins over human formats.
+    let json = run_libra_command(&["--json", "diff", "--stat"], repo.path());
+    let parsed = parse_json_stdout(&json);
+    assert_eq!(parsed["command"], "diff");
+    assert_eq!(parsed["data"]["files_changed"], 1);
+}

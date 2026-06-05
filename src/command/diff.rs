@@ -137,6 +137,15 @@ pub struct DiffArgs {
     /// Disable rename (and copy) detection, even if enabled by config.
     #[clap(long = "no-renames")]
     pub no_renames: bool,
+
+    /// Restrict the diff to a subdirectory and show paths relative to it. With
+    /// no value, the current working directory (relative to the repo) is used.
+    #[clap(long = "relative", value_name = "PATH", num_args = 0..=1, require_equals = true)]
+    pub relative: Option<Option<String>>,
+
+    /// Output the diff in Git's raw format.
+    #[clap(long = "raw")]
+    pub raw: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -220,6 +229,9 @@ enum DiffError {
 
     #[error("invalid value '{value}' for '{key}': expected a non-negative integer")]
     InvalidConfig { key: String, value: String },
+
+    #[error("{0}")]
+    InvalidArgument(String),
 }
 
 impl From<DiffError> for CliError {
@@ -253,6 +265,9 @@ impl From<DiffError> for CliError {
             DiffError::InvalidConfig { .. } => CliError::fatal(message)
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
                 .with_hint("set the config value to a non-negative integer"),
+            DiffError::InvalidArgument(_) => {
+                CliError::fatal(message).with_stable_code(StableErrorCode::CliInvalidArguments)
+            }
         }
     }
 }
@@ -407,6 +422,22 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
             return Err(err);
         }
     }
+
+    // Populate full sha/mode for plain entries (renames/copies already carry
+    // them) so `--raw` has complete per-file metadata.
+    enrich_file_metadata(
+        &mut files,
+        &old_map,
+        &new_map,
+        &old_side.modes,
+        &new_side.modes,
+    );
+
+    // `--relative` filters the diff to a subdirectory (before counts) and strips
+    // that prefix from every displayed path; `diff.noPrefix` drops `a/`/`b/`.
+    let relative_base = resolve_relative_base(args)?;
+    let no_prefix = read_no_prefix_config().await;
+    apply_path_display_transforms(&mut files, relative_base.as_deref(), no_prefix);
 
     let total_insertions = files.iter().map(|file| file.insertions).sum();
     let total_deletions = files.iter().map(|file| file.deletions).sum();
@@ -1678,6 +1709,179 @@ fn build_rename_entry(
     }
 }
 
+// ----- Wave 2: --raw metadata, --relative, diff.noPrefix -----
+
+/// Fill `old_sha`/`new_sha`/`old_mode`/`new_mode` for plain entries (renames and
+/// copies already carry them) so `--raw` has full per-file metadata.
+fn enrich_file_metadata(
+    files: &mut [DiffFileStat],
+    old_map: &HashMap<PathBuf, ObjectHash>,
+    new_map: &HashMap<PathBuf, ObjectHash>,
+    old_modes: &HashMap<PathBuf, u32>,
+    new_modes: &HashMap<PathBuf, u32>,
+) {
+    for file in files.iter_mut() {
+        if file.old_sha.is_some()
+            || file.new_sha.is_some()
+            || file.old_mode.is_some()
+            || file.new_mode.is_some()
+        {
+            continue;
+        }
+        let path = PathBuf::from(&file.path);
+        file.old_sha = old_map.get(&path).map(|h| h.to_string());
+        file.new_sha = new_map.get(&path).map(|h| h.to_string());
+        file.old_mode = old_modes.get(&path).copied();
+        file.new_mode = new_modes.get(&path).copied();
+    }
+}
+
+/// Resolve `--relative` to a repo-root-relative directory (empty string for the
+/// repo root), or `None` when the flag is absent. A path escaping the repository
+/// is a usage error (129).
+fn resolve_relative_base(args: &DiffArgs) -> Result<Option<String>, DiffError> {
+    let raw = match &args.relative {
+        None => return Ok(None),
+        Some(None) => ".".to_string(),
+        Some(Some(p)) => p.clone(),
+    };
+    let workdir_rel = util::to_workdir_path(&raw);
+    if workdir_rel
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(DiffError::InvalidArgument(format!(
+            "--relative path '{raw}' is outside the repository"
+        )));
+    }
+    let base = workdir_rel.to_string_lossy().trim_matches('/').to_string();
+    Ok(Some(if base == "." { String::new() } else { base }))
+}
+
+async fn read_no_prefix_config() -> bool {
+    matches!(
+        ConfigKv::get("diff.noPrefix").await,
+        Ok(Some(entry)) if matches!(
+            entry.value.trim().to_ascii_lowercase().as_str(),
+            "true" | "yes" | "on" | "1"
+        )
+    )
+}
+
+/// Apply `--relative` (filter to a subtree, then strip its prefix from every
+/// displayed path) and `diff.noPrefix` (drop `a/`/`b/`) across file fields and
+/// the unified-diff header lines.
+fn apply_path_display_transforms(
+    files: &mut Vec<DiffFileStat>,
+    relative_base: Option<&str>,
+    no_prefix: bool,
+) {
+    let active_base = relative_base.filter(|b| !b.is_empty());
+
+    if let Some(base) = active_base {
+        let prefix = format!("{base}/");
+        files.retain(|f| f.path == base || f.path.starts_with(&prefix));
+    }
+
+    if active_base.is_none() && !no_prefix {
+        return;
+    }
+
+    for file in files.iter_mut() {
+        if let Some(base) = active_base {
+            let prefix = format!("{base}/");
+            if let Some(rest) = file.path.strip_prefix(&prefix) {
+                file.path = rest.to_string();
+            }
+            if let Some(old) = &file.old_path
+                && let Some(rest) = old.strip_prefix(&prefix)
+            {
+                file.old_path = Some(rest.to_string());
+            }
+        }
+        file.raw_diff = transform_diff_header_paths(&file.raw_diff, active_base, no_prefix);
+    }
+}
+
+/// Rewrite the path tokens in a unified diff's header lines (everything before
+/// the first `@@`), leaving the hunk body untouched.
+fn transform_diff_header_paths(
+    raw_diff: &str,
+    relative_base: Option<&str>,
+    no_prefix: bool,
+) -> String {
+    let trailing_nl = raw_diff.ends_with('\n');
+    let mut in_body = false;
+    let mut lines: Vec<String> = Vec::new();
+    for line in raw_diff.lines() {
+        if line.starts_with("@@ ") {
+            in_body = true;
+        }
+        if in_body {
+            lines.push(line.to_string());
+        } else {
+            lines.push(transform_header_line(line, relative_base, no_prefix));
+        }
+    }
+    let mut out = lines.join("\n");
+    if trailing_nl {
+        out.push('\n');
+    }
+    out
+}
+
+fn transform_header_line(line: &str, relative_base: Option<&str>, no_prefix: bool) -> String {
+    if let Some(rest) = line.strip_prefix("diff --git ") {
+        if let Some(idx) = rest.find(" b/") {
+            let left = transform_path_token(&rest[..idx], relative_base, no_prefix);
+            let right = transform_path_token(&rest[idx + 1..], relative_base, no_prefix);
+            return format!("diff --git {left} {right}");
+        }
+        return line.to_string();
+    }
+    for kw in ["--- ", "+++ "] {
+        if let Some(rest) = line.strip_prefix(kw) {
+            return format!(
+                "{kw}{}",
+                transform_path_token(rest, relative_base, no_prefix)
+            );
+        }
+    }
+    for kw in ["rename from ", "rename to ", "copy from ", "copy to "] {
+        if let Some(rest) = line.strip_prefix(kw) {
+            return format!(
+                "{kw}{}",
+                transform_path_token(rest, relative_base, no_prefix)
+            );
+        }
+    }
+    line.to_string()
+}
+
+/// Transform a single path token (`a/src/x`, `b/src/x`, `src/x`, or `/dev/null`)
+/// by stripping the `--relative` base and/or the `a/`/`b/` prefix.
+fn transform_path_token(token: &str, relative_base: Option<&str>, no_prefix: bool) -> String {
+    if token == "/dev/null" {
+        return token.to_string();
+    }
+    let (side, inner) = if let Some(rest) = token.strip_prefix("a/") {
+        ("a/", rest)
+    } else if let Some(rest) = token.strip_prefix("b/") {
+        ("b/", rest)
+    } else {
+        ("", token)
+    };
+    let stripped = match relative_base {
+        Some(base) if !base.is_empty() => inner.strip_prefix(&format!("{base}/")).unwrap_or(inner),
+        _ => inner,
+    };
+    if no_prefix {
+        stripped.to_string()
+    } else {
+        format!("{side}{stripped}")
+    }
+}
+
 fn render_diff_output(
     args: &DiffArgs,
     result: &DiffOutput,
@@ -1737,32 +1941,114 @@ fn finish_with_exit_status(code: i32) -> CliResult<()> {
 }
 
 /// Select and render the human-facing diff text for the active output format.
+/// The mutually exclusive human output formats, decided centrally so flag
+/// precedence is explicit rather than implied by an `if` chain's order.
+enum OutputKind {
+    Unified,
+    Stat,
+    NameOnly,
+    NameStatus,
+    NumStat,
+    Raw,
+}
+
+fn select_output_kind(args: &DiffArgs) -> OutputKind {
+    if args.raw {
+        OutputKind::Raw
+    } else if args.name_only {
+        OutputKind::NameOnly
+    } else if args.name_status {
+        OutputKind::NameStatus
+    } else if args.numstat {
+        OutputKind::NumStat
+    } else if args.stat {
+        OutputKind::Stat
+    } else {
+        OutputKind::Unified
+    }
+}
+
 fn render_diff_text(args: &DiffArgs, result: &DiffOutput) -> String {
-    if args.name_only {
-        result
+    match select_output_kind(args) {
+        OutputKind::Raw => format_raw_diff(result),
+        OutputKind::NameOnly => result
             .files
             .iter()
             .map(|file| file.path.clone())
             .collect::<Vec<_>>()
-            .join("\n")
-    } else if args.name_status {
-        result
+            .join("\n"),
+        OutputKind::NameStatus => result
             .files
             .iter()
-            .map(|file| format!("{}\t{}", diff_status_letter(&file.status), file.path))
+            .map(format_name_status_line)
             .collect::<Vec<_>>()
-            .join("\n")
-    } else if args.numstat {
-        result
+            .join("\n"),
+        OutputKind::NumStat => result
             .files
             .iter()
             .map(|file| format!("{}\t{}\t{}", file.insertions, file.deletions, file.path))
             .collect::<Vec<_>>()
-            .join("\n")
-    } else if args.stat {
-        format_diff_stat_output(result)
-    } else {
-        format_unified_diff(result)
+            .join("\n"),
+        OutputKind::Stat => format_diff_stat_output(result),
+        OutputKind::Unified => format_unified_diff(result),
+    }
+}
+
+fn format_name_status_line(file: &DiffFileStat) -> String {
+    match file.status.as_str() {
+        "renamed" | "copied" => format!(
+            "{}{}\t{}\t{}",
+            diff_status_letter(&file.status),
+            file.similarity
+                .map(|s| format!("{s:03}"))
+                .unwrap_or_default(),
+            file.old_path.clone().unwrap_or_default(),
+            file.path
+        ),
+        _ => format!("{}\t{}", diff_status_letter(&file.status), file.path),
+    }
+}
+
+/// Render Git's `--raw` format. Modes are octal; object ids are abbreviated to
+/// 7 hex chars (zeros when absent). Renames/copies emit `R<score>`/`C<score>`
+/// and both old and new paths.
+fn format_raw_diff(result: &DiffOutput) -> String {
+    result
+        .files
+        .iter()
+        .map(format_raw_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_raw_line(file: &DiffFileStat) -> String {
+    let old_mode = file
+        .old_mode
+        .map_or_else(|| "000000".to_string(), |m| format!("{m:o}"));
+    let new_mode = file
+        .new_mode
+        .map_or_else(|| "000000".to_string(), |m| format!("{m:o}"));
+    let old_sha = abbreviate_raw_sha(file.old_sha.as_deref());
+    let new_sha = abbreviate_raw_sha(file.new_sha.as_deref());
+    let head = format!(":{old_mode} {new_mode} {old_sha} {new_sha} ");
+    match file.status.as_str() {
+        "renamed" | "copied" => format!(
+            "{head}{}{:03}\t{}\t{}",
+            diff_status_letter(&file.status),
+            file.similarity.unwrap_or(100),
+            file.old_path.clone().unwrap_or_default(),
+            file.path
+        ),
+        "added" => format!("{head}A\t{}", file.path),
+        "deleted" => format!("{head}D\t{}", file.path),
+        _ => format!("{head}M\t{}", file.path),
+    }
+}
+
+fn abbreviate_raw_sha(sha: Option<&str>) -> String {
+    match sha {
+        Some(s) => s.chars().take(7).collect(),
+        None => "0".repeat(7),
     }
 }
 
@@ -1808,6 +2094,8 @@ pub async fn staged_diff_text() -> String {
         find_renames: None,
         find_copies: None,
         no_renames: false,
+        relative: None,
+        raw: false,
     };
     match run_diff(&args).await {
         Ok(result) => format_unified_diff(&result),
