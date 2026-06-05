@@ -326,3 +326,122 @@ fn ls_remote_json_reports_entries() {
         "expected refs/heads/main in entries: {json}"
     );
 }
+
+// ── --get-url (offline) + --exit-code (ls-remote-improvement-plan) ──
+
+#[test]
+fn ls_remote_get_url_passthrough_direct_url() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = run_libra_command(
+        &["ls-remote", "--get-url", "https://example.com/repo.git"],
+        dir.path(),
+    );
+    assert_cli_success(&output, "get-url direct URL");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "https://example.com/repo.git"
+    );
+}
+
+#[test]
+fn ls_remote_get_url_redacts_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = run_libra_command(
+        &[
+            "ls-remote",
+            "--get-url",
+            "https://user:pass@example.com/repo.git",
+        ],
+        dir.path(),
+    );
+    assert_cli_success(&output, "get-url redaction");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), "https://example.com/repo.git");
+    assert!(
+        !stdout.contains("pass"),
+        "credentials must be redacted: {stdout}"
+    );
+}
+
+#[test]
+fn ls_remote_get_url_prints_configured_remote_url() {
+    let repo = tempfile::tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    let add = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&add, "remote add");
+
+    let output = run_libra_command(&["ls-remote", "--get-url", "origin"], repo.path());
+    assert_cli_success(&output, "get-url configured remote");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "https://example.com/repo.git"
+    );
+}
+
+#[test]
+fn ls_remote_get_url_unknown_token_prints_verbatim() {
+    let dir = tempfile::tempdir().unwrap();
+    // An unconfigured, non-URL token is echoed verbatim and exits 0 (git parity).
+    let output = run_libra_command(&["ls-remote", "--get-url", "nonexist"], dir.path());
+    assert_cli_success(&output, "get-url unknown token");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "nonexist");
+}
+
+#[test]
+fn ls_remote_get_url_json_emits_url_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = run_libra_command(
+        &[
+            "--json",
+            "ls-remote",
+            "--get-url",
+            "https://example.com/repo.git",
+        ],
+        dir.path(),
+    );
+    assert_cli_success(&output, "get-url json");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("get-url --json should emit a JSON envelope");
+    assert_eq!(json["command"], "ls-remote");
+    assert_eq!(json["data"]["url"], "https://example.com/repo.git");
+    // The minimal payload carries only `url` (no entries array).
+    assert!(json["data"]["entries"].is_null());
+}
+
+#[test]
+fn ls_remote_exit_code_no_match_returns_2() {
+    // A local remote with refs, but a pattern that matches nothing + --exit-code.
+    let remote = tempfile::tempdir().unwrap();
+    let init = run_libra_command(&["init"], remote.path());
+    assert_cli_success(&init, "init remote");
+    configure_identity_via_cli(remote.path());
+    std::fs::write(remote.path().join("f.txt"), "x\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], remote.path()), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], remote.path()),
+        "commit",
+    );
+    let remote_path = remote.path().to_string_lossy().to_string();
+
+    let outside = tempfile::tempdir().unwrap();
+    let output = run_libra_command(
+        &[
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            &remote_path,
+            "no-such-branch",
+        ],
+        outside.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "--exit-code with no matches must exit 2"
+    );
+    assert!(output.stdout.is_empty(), "exit-2 must keep stdout empty");
+    assert!(output.stderr.is_empty(), "exit-2 must keep stderr empty");
+}

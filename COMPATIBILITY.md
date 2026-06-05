@@ -44,7 +44,7 @@ batch document.
 | shortlog | supported | |
 | show | supported | |
 | show-ref | supported | |
-| ls-remote | supported | |
+| ls-remote | partial | `--heads`/`--tags`/`--refs`/patterns + `--exit-code` (silent exit 2 on no match) supported; `--symref` supported for HTTP/SSH/git remotes but intentionally-different for local paths (Libra's local discovery advertises no capabilities, so no `ref:` lines); `--get-url` partial (offline + credential-redacted, no `url.*.insteadOf` rewriting); `--sort` partial (`refname`/`version:refname` subset; other for-each-ref keys → `LBR-CLI-002`); `-o`/`--server-option` partial (parsed, not forwarded); `--upload-pack`/`-b`/per-command `-q`/default `<repository>` unsupported |
 | symbolic-ref | partial | Supports local `HEAD` only; other symbolic refs are rejected because Libra stores refs in SQLite |
 | branch | partial | SQLite-backed refs (reference table, not `.git/refs`). List filters `--contains`/`--no-contains`/`--merged`/`--no-merged`/`--points-at` and `--ignore-case` sort supported; upstream set (`-u`) / unset (`--unset-upstream`) with tracking shown in list; copy (`-c`/`-C`) and transaction-hardened rename with config + conditional reflog migration; `--edit-description` supported; `-f`/`--force` resets existing create/copy targets (locked branches always refused); `--create-reflog` accepted-but-no-op (no per-branch reflog). `--track`/`--no-track` declined (intentionally-different — use `libra switch --track` or `-u`); `--sort`/`--format` unsupported (accepted-but-ignored, use `--json`). Locked branches (main/intent/agent-traces) are protected from destructive ops (intentionally-different) |
 | tag | supported | |
