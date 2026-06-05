@@ -16,7 +16,7 @@
 - CLI smoke: `cargo run -- <cmd>`.
 - Web embed check: `pnpm --dir web install --frozen-lockfile && pnpm --dir web lint && pnpm --dir web build`, then assert no static-export drift with `git status --porcelain -- web/out` (must be empty; the compat-web-check CI job inlines this check).
 - Worker checks from `worker/`: `pnpm lint`, `pnpm test`, `pnpm test:miniflare`, `pnpm build`; e2e uses `pnpm e2e:serve` on `127.0.0.1:3127` plus `pnpm e2e`.
-- CI-required consistency checks (de-scripted — there is no `scripts/` dir): run `cargo test --test compat_matrix_alignment`, which covers both the `COMPATIBILITY.md` ↔ `src/cli.rs::Commands` drift check and the `docs/commands/code-control.md` ↔ Code UI router coverage check; `web/out` drift is the inline `git status --porcelain -- web/out` in the compat-web-check job. An integration-plan consistency check is still aspirational in its full automated form (see `docs/development/integration-test-plan.md` BASELINE_GAP-INTEG-008 and the new `docs/development/integration-scenarios.yaml` structured registry). The MD + yaml together are the spec for the future independent `tools/integration-runner/` + `check-plan`. Agent tasks must treat yaml as the list of record and keep it + MD + runner in sync; do not claim automated consistency until the runner tool lands.
+- CI-required consistency checks (de-scripted — there is no `scripts/` dir): `cargo test --test compat_matrix_alignment` (`COMPATIBILITY.md` ↔ `src/cli.rs::Commands`, Code UI docs); `web/out` drift in compat-web-check; **`cargo run --manifest-path tools/integration-runner/Cargo.toml -- check-plan`** (yaml ↔ `docs/development/integration-scenarios/<id>.md` ↔ §2.3 matrix ↔ runner registry). Black-box Git-compat CLI gates: `cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --waves 0,1,2` (and `run-live` when touching real remotes). See `docs/development/integration-test-plan.md`.
 
 ## Build and generated-output quirks
 - `build.rs` runs `pnpm install --frozen-lockfile` and `pnpm run build` in `web/` unless `LIBRA_SKIP_WEB_BUILD=1`; skipped builds create a stub `web/out/index.html`.
@@ -34,8 +34,16 @@
 - Use `tempfile::tempdir()` plus `utils::test::ChangeDirGuard`; CLI-level tests should use helpers in `tests/command/mod.rs` so `HOME`, `XDG_CONFIG_HOME`, `LIBRA_CONFIG_GLOBAL_DB`, `LANG`, and `LC_ALL` are isolated.
 - Mark tests `#[serial]` if they mutate process cwd, global env, shared ports, config DBs, or other global state.
 
+## Black-box CLI integration tests (Git-compatible commands)
+- **Not** `cargo test --test <target>`: user-facing gates run compiled `target/debug/libra` in isolated temp repos via `tools/integration-runner/` (separate crate; never root `[[test]]` / `tests/INDEX.md`).
+- **Registry**: `docs/development/integration-scenarios.yaml` (metadata). **Per-scenario docs**: `docs/development/integration-scenarios/<id>.md` (steps/assertions). **Plan**: `docs/development/integration-test-plan.md` (matrix, isolation, PR protocol). **Implementation**: `tools/integration-runner/src/scenarios/<id>.rs` + `registry.rs`.
+- **When changing a Git-compat command** (`src/cli.rs`, `src/command/<name>.rs`, protocol/storage affecting CLI output) you MUST keep the integration test scheme and command docs in sync. Look up the command's owner scenario in the [Command → Scenario Map](docs/development/integration-scenarios/README.md#命令--场景映射command--scenario-map), then update: `COMPATIBILITY.md`, the §2.3 matrix in the plan, `docs/commands/<name>.md`, the owner `integration-scenarios/<id>.md` + yaml (if flags/semantics change), runner scenario(s) in `tools/integration-runner/src/scenarios/<file>`, `tests/command/` if needed — then `check-plan` and `run --only <owner-scenario-ids>` must both pass. No Git-compat command may exist without an owner scenario; a new command must add a map row + at least one `cli.<cmd>-smoke` scenario.
+- **New command**: yaml entry → `<id>.md` → `scenario_*` in runner → at least one smoke scenario; matrix row in plan §2.3.
+- **Rename/delete scenario**: yaml + delete/rename `<id>.md` + registry + `scenarios/*.rs` + quarantine entries.
+- Wave 3 (`live.github-*`) only when changing `clone`/`fetch`/`pull`/`push`/`remote` real-remote semantics; requires `gh` and cleanup.
+
 ## Public-surface change checklist
-- New or changed command: update `src/cli.rs`, the matching `src/command/<name>.rs`, `COMPATIBILITY.md`, command docs under `docs/commands/`, tests under `tests/command/`, and `tests/INDEX.md`.
+- New or changed command: update `src/cli.rs`, `src/command/<name>.rs`, `COMPATIBILITY.md`, `docs/commands/<name>.md`, `tests/command/`, `tests/INDEX.md`, and the black-box items above (yaml + `integration-scenarios/<id>.md` + runner when behavior is user-visible).
 - Every visible command/help surface must render examples (`pub const <CMD>_EXAMPLES` wired through clap `after_help`) and every `docs/commands/<name>.md` page needs `## Examples` or `## Common Commands`.
 - New stable error codes in `src/utils/error.rs` must be documented in `docs/error-codes.md`; `libra help error-codes` includes that doc at compile time.
 - If changing compatibility semantics, run `cargo test --test compat_matrix_alignment` and update declined/intentional notes under `docs/improvement/compatibility/` when relevant.

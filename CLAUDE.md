@@ -143,7 +143,7 @@ All PRs must pass these jobs on the `[self-hosted]` runner pool:
 2. **compat-clippy** — `cargo clippy --all-targets --all-features -- -D warnings` (with `LIBRA_SKIP_WEB_BUILD=1`)
 3. **compat-web-check** — `pnpm --dir web lint` + `pnpm --dir web build`, then an inline `git status --porcelain -- web/out` drift check so `web/out/` cannot drift from `WebAssets`
 4. **compat-redundancy** — directory-shape check on `third-party/rust/crates`
-5. **compat-offline-core** — `cargo test --test compat_matrix_alignment` (the `COMPATIBILITY.md` ↔ `src/cli.rs::Commands` drift check, self-contained Rust — there is no `scripts/` dir) + `cargo test --all` + a second pass with `--features test-provider` for the TUI automation matrices (`code_ui_scenarios`, `harness_self_test`, `code_codex_default_tui_test`, `code_ui_remote_lease_matrix`, `code_ui_remote_sse_matrix`) under `--test-threads=1`
+5. **compat-offline-core** — `cargo test --test compat_matrix_alignment` + `cargo run --manifest-path tools/integration-runner/Cargo.toml -- check-plan` + `cargo test --all` + TUI automation matrices under `--features test-provider` and `--test-threads=1`
 6. **compat-network-remotes** — `cargo test --features test-network --test network_remotes_test`
 
 Additional workflows: `codeql.yml` (security analysis), `model-generation-nightly.yml` (nightly model-generation matrix), `release.yml` (release pipeline).
@@ -159,6 +159,22 @@ Libra tests are organised into three layers — `cargo test --all` runs L1 only;
 | **L3 — Live Services** | Real AI API keys (`DEEPSEEK_API_KEY`, `MOONSHOT_API_KEY`, …) or cloud credentials (`LIBRA_D1_*`, `LIBRA_STORAGE_*`, `LIBRA_TEST_S3_*`) | Set the relevant env vars |
 
 Gate L2 / L3 tests with the small `env_var_is_set(name) -> bool` helper (see e.g. [`tests/cloud_storage_backup_test.rs:30`](tests/cloud_storage_backup_test.rs)) followed by an early `eprintln!("skipped (...)")` return when a required var is unset — missing vars print "skipped", never fail. Copy `.env.test.example` → `.env.test` and `source` it before running the full suite (the `export` prefix is required).
+
+## Black-box CLI integration tests (Git-compatible `libra` commands)
+
+Separate from Cargo `--test` targets: compiled `libra` in isolated temp repos, driven by [`tools/integration-runner/`](tools/integration-runner/).
+
+| Artifact | Role |
+|----------|------|
+| [`docs/development/integration-scenarios.yaml`](docs/development/integration-scenarios.yaml) | Scenario registry (wave, gh_required, assertion categories) |
+| [`docs/development/integration-scenarios/<id>.md`](docs/development/integration-scenarios/) | Per-scenario steps/assertions (edit the file for the command you change) |
+| [`docs/development/integration-test-plan.md`](docs/development/integration-test-plan.md) | Coverage matrix §2.3, isolation §3, PR Test Plan §8 |
+| `tools/integration-runner/src/scenarios/<id>.rs` + [`registry.rs`](tools/integration-runner/src/registry.rs) | Automated execution |
+| [`docs/development/integration-scenarios/README.md` Command → Scenario Map](docs/development/integration-scenarios/README.md#命令--场景映射command--scenario-map) | Which scenario owns each Git-compat command (use to find what to update) |
+
+**Changing a Git-compat command** — changing any Git-compat command obliges you to keep the integration test scheme **and** the command docs in sync. First find the command's owner scenario in the [Command → Scenario Map](docs/development/integration-scenarios/README.md#命令--场景映射command--scenario-map), then sync, in order: `src/cli.rs` + `src/command/<name>.rs` → `COMPATIBILITY.md` → `docs/commands/<name>.md` → plan §2.3 matrix → owner `integration-scenarios/<id>.md` + yaml → runner scenario(s) → `tests/command/` as needed → `cargo test --test compat_matrix_alignment` → `cargo run --manifest-path tools/integration-runner/Cargo.toml -- check-plan` → `run --only <owner-ids>` (add `run-live` for real-remote changes). A new Git-compat command must add a map row + at least one `cli.<cmd>-smoke` scenario; none may go uncovered.
+
+**Commands**: `check-plan`; `run --waves 0,1,2`; `run --only cli.<id>`; `run-live --only live.*` (needs `gh`). Not part of `cargo test --all`.
 
 ## Coding Conventions
 
