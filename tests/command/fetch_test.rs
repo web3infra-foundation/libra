@@ -1205,3 +1205,100 @@ async fn test_fetch_prune_removes_stale_remote_tracking() {
         "live tracking branch must survive prune"
     );
 }
+
+/// `fetch --dry-run` previews ref updates without writing them: the local
+/// tracking ref stays at its old commit even though the remote advanced.
+#[tokio::test]
+#[serial]
+async fn test_fetch_dry_run_makes_no_ref_writes() {
+    let temp = tempdir().expect("temp root");
+    let remote_dir = temp.path().join("remote.git");
+    let work_dir = temp.path().join("work");
+
+    let git = |dir: Option<&Path>, args: &[&str]| {
+        let mut cmd = Command::new("git");
+        if let Some(d) = dir {
+            cmd.current_dir(d);
+        }
+        assert!(
+            cmd.args(args).status().expect("git command").success(),
+            "git {args:?} failed"
+        );
+    };
+    let git_out = |dir: &Path, args: &[&str]| -> String {
+        String::from_utf8(
+            Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git output")
+                .stdout,
+        )
+        .expect("utf8")
+        .trim()
+        .to_string()
+    };
+
+    git(None, &["init", "--bare", remote_dir.to_str().unwrap()]);
+    git(None, &["init", work_dir.to_str().unwrap()]);
+    git(Some(&work_dir), &["config", "user.name", "Libra Tester"]);
+    git(
+        Some(&work_dir),
+        &["config", "user.email", "tester@example.com"],
+    );
+    fs::write(work_dir.join("a.txt"), "one").expect("write");
+    git(Some(&work_dir), &["add", "a.txt"]);
+    git(Some(&work_dir), &["commit", "-m", "c1"]);
+    let current = git_out(&work_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    git(
+        Some(&work_dir),
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+    );
+    git(
+        Some(&work_dir),
+        &["push", "origin", &format!("HEAD:refs/heads/{current}")],
+    );
+
+    let repo_dir = temp.path().join("libra_repo");
+    fs::create_dir_all(&repo_dir).expect("repo dir");
+    setup_with_new_libra_in(&repo_dir).await;
+    let _guard = ChangeDirGuard::new(&repo_dir);
+    let remote_path = remote_dir.to_str().unwrap().to_string();
+    ConfigKv::set("remote.origin.url", &remote_path, false)
+        .await
+        .unwrap();
+    fetch::fetch_repository(
+        RemoteConfig {
+            name: "origin".to_string(),
+            url: remote_path.clone(),
+        },
+        None,
+        false,
+        None,
+    )
+    .await;
+    let commit1 = git_out(&work_dir, &["rev-parse", "HEAD"]);
+
+    // Advance the remote.
+    fs::write(work_dir.join("a.txt"), "two").expect("write");
+    git(Some(&work_dir), &["add", "a.txt"]);
+    git(Some(&work_dir), &["commit", "-m", "c2"]);
+    git(
+        Some(&work_dir),
+        &["push", "origin", &format!("HEAD:refs/heads/{current}")],
+    );
+
+    // Dry-run must not move the tracking ref.
+    let output = run_libra_command(&["fetch", "origin", "--dry-run"], &repo_dir);
+    assert_cli_success(&output, "fetch --dry-run");
+    let tracked =
+        Branch::find_branch_result(&format!("refs/remotes/origin/{current}"), Some("origin"))
+            .await
+            .expect("query tracking")
+            .expect("tracking exists");
+    assert_eq!(
+        tracked.commit.to_string(),
+        commit1,
+        "dry-run must not advance the tracking ref"
+    );
+}

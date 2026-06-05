@@ -532,6 +532,11 @@ pub struct FetchArgs {
     /// that no longer exist on the remote. Can also be enabled via `fetch.prune`.
     #[clap(long, short = 'p')]
     pub prune: bool,
+
+    /// Show what would be fetched/pruned without downloading objects or writing
+    /// any refs, reflog, or shallow metadata.
+    #[clap(long = "dry-run")]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -893,6 +898,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         shallow_since,
         shallow_exclude,
         prune,
+        dry_run,
     } = args;
 
     // `--prune` is enabled by the flag or the `fetch.prune` config (flag wins).
@@ -926,6 +932,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
                     shallow.clone(),
                     unshallow,
                     prune,
+                    dry_run,
                     output,
                 )
                 .await
@@ -979,6 +986,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         shallow,
         unshallow,
         prune,
+        dry_run,
         output,
     )
     .await
@@ -1222,6 +1230,7 @@ pub async fn fetch_repository_safe(
         shallow,
         false,
         false,
+        false,
         output,
     )
     .await
@@ -1236,6 +1245,7 @@ pub(crate) async fn fetch_repository_with_result(
     shallow: ShallowOptions,
     unshallow: bool,
     prune: bool,
+    dry_run: bool,
     output: &OutputConfig,
 ) -> Result<FetchRepositoryResult, FetchError> {
     let (remote_client, discovery) =
@@ -1298,6 +1308,38 @@ pub(crate) async fn fetch_repository_with_result(
     {
         let normalized = normalize_branch_ref(branch_name);
         refs.retain(|reference| reference._ref == normalized);
+    }
+
+    // `--dry-run`: compute the would-be ref updates (and prune list) from the
+    // discovered refs and return before downloading any pack or writing anything
+    // (no `.pack`/`.idx`, no shallow update, no ref/reflog writes, no FETCH_HEAD).
+    if dry_run {
+        let refs_updated = compute_fetch_ref_preview(&remote_config, &refs).await?;
+        let pruned = if prune {
+            let remote_branch_names =
+                crate::command::remote::collect_remote_branch_names(&discovery.refs);
+            crate::command::remote::prune_stale_tracking_branches(
+                &remote_config.name,
+                &remote_branch_names,
+                true,
+            )
+            .await
+            .map_err(|error| FetchError::LocalState {
+                message: format!("failed to preview prune: {error}"),
+            })?
+            .into_iter()
+            .map(|entry| entry.remote_ref)
+            .collect()
+        } else {
+            Vec::new()
+        };
+        return Ok(FetchRepositoryResult {
+            remote: remote_config.name,
+            url: normalized_url,
+            refs_updated,
+            objects_fetched: 0,
+            pruned,
+        });
     }
 
     let mut want = refs
@@ -1993,6 +2035,43 @@ fn apply_shallow_updates(shallow: &[String], unshallow: &[String]) -> Result<(),
         boundaries.remove(oid);
     }
     write_shallow_boundaries(&boundaries)
+}
+
+/// Read-only counterpart of [`update_references`] for `--dry-run`: report the
+/// ref updates the discovered refs would produce, without any database writes.
+async fn compute_fetch_ref_preview(
+    remote_config: &RemoteConfig,
+    refs: &[DiscRef],
+) -> Result<Vec<FetchRefUpdate>, FetchError> {
+    let mut updates = Vec::new();
+    for reference in refs {
+        let full_ref_name = if let Some(branch_name) = reference._ref.strip_prefix("refs/heads/") {
+            format!("refs/remotes/{}/{}", remote_config.name, branch_name)
+        } else if let Some(mr_name) = reference._ref.strip_prefix("refs/mr/") {
+            format!("refs/remotes/{}/mr/{}", remote_config.name, mr_name)
+        } else {
+            continue;
+        };
+
+        let old_oid = Branch::find_branch_result(&full_ref_name, Some(&remote_config.name))
+            .await
+            .map_err(|error| FetchError::UpdateRefs {
+                message: format!(
+                    "failed to inspect existing remote-tracking ref '{full_ref_name}': {error}"
+                ),
+            })?
+            .map(|branch| branch.commit.to_string());
+
+        if old_oid.as_deref() == Some(reference._hash.as_str()) {
+            continue;
+        }
+        updates.push(FetchRefUpdate {
+            remote_ref: full_ref_name,
+            old_oid,
+            new_oid: reference._hash.clone(),
+        });
+    }
+    Ok(updates)
 }
 
 async fn update_references(
