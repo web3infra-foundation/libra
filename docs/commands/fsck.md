@@ -87,8 +87,9 @@ libra fsck --verbose --name-objects
 ### `--lost-found`
 
 Write dangling/unreachable objects to `.libra/lost-found/` directory:
-- `lost-found/commit/<hash>`: For commit and tree objects (stores hash)
-- `lost-found/other/<hash>`: For blob objects (stores actual content)
+- `lost-found/commit/<hash>`: for commit objects (stores the object id)
+- `lost-found/other/<hash>`: for every other object — blobs store their raw
+  content, while trees and unknown-type objects store the object id
 
 This option implies `--no-reflogs` for dangling detection, matching `git fsck --lost-found` behavior.
 
@@ -192,13 +193,15 @@ libra fsck abc123def456...
 
 ### Diagnostic Messages (stdout)
 
-Diagnostic messages are printed to stdout and do NOT cause non-zero exit codes:
+These messages are printed to **stdout** (to keep stderr free of diagnostics),
+but only `dangling`/`unreachable` are informational. `missing`/`hash mismatch`
+are integrity failures and still cause a non-zero exit:
 
 ```text
-missing <type> <object-id>
-hash mismatch <type> <object-id>
-dangling <type> <object-id>
-unreachable <type> <object-id>
+dangling <type> <object-id>       # informational — exit 0
+unreachable <type> <object-id>    # informational — exit 0
+missing <type> <object-id>        # integrity failure — exit 1
+hash mismatch <type> <object-id>  # integrity failure — exit 1
 ```
 
 ### Error Messages (stderr)
@@ -236,12 +239,14 @@ missing commit 6678874f0d5b658ae5c88b04020c64219f51f743
 | Exit Code | Meaning |
 | --------- | ------- |
 | 0 | All checks passed, or only dangling/unreachable objects found (informational) |
-| 1 | Errors found: hash mismatch, invalid format, missing objects, broken refs, index corruption |
-| 1 | Fatal error: not a repository, invalid object ID, database error |
+| 1 | Integrity errors: hash mismatch, invalid format, missing objects, broken refs, index corruption, reflog entries pointing at missing objects, and `--strict` violations |
+| 128 | Fatal error: not a repository, database error, lost-found write failure, or a malformed pack `.idx` |
+| 129 | Usage error: an invalid object ID or unknown flag |
 
-**Note**: 
-- `dangling` and `unreachable` are informational only and do NOT cause non-zero exit codes.
-- `missing`, `hash_mismatch`, and format errors cause exit code 1.
+**Note**:
+- `dangling` and `unreachable` are informational only and do NOT cause a non-zero exit code.
+- `missing` and `hash mismatch` print to stdout but DO cause exit code 1.
+- Index corruption and reflog entries that point at missing objects cause exit code 1 (aligned with `git fsck`).
 
 ## Implementation Details
 

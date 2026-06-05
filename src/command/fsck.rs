@@ -889,7 +889,7 @@ async fn check_reflogs(
             && !storage.exist(&_hash)
         {
             result.reflog_issues += 1;
-            report(FsckMsgId::Missing, "unknown", &entry.old_oid);
+            result.has_errors |= report(FsckMsgId::Missing, "unknown", &entry.old_oid);
         }
 
         if !is_null_oid(&entry.new_oid)
@@ -897,7 +897,7 @@ async fn check_reflogs(
             && !storage.exist(&_hash)
         {
             result.reflog_issues += 1;
-            report(FsckMsgId::Missing, "unknown", &entry.new_oid);
+            result.has_errors |= report(FsckMsgId::Missing, "unknown", &entry.new_oid);
         }
     }
     Ok(())
@@ -912,8 +912,13 @@ fn check_index(storage: &ClientStorage, result: &mut FsckResult, verbose: bool) 
     let index_result = check_index_file(storage)?;
     result.index_valid = index_result.valid;
 
-    if !index_result.valid && result.overall_status == CheckStatus::Ok {
-        result.overall_status = CheckStatus::InvalidFormat;
+    if !index_result.valid {
+        // Index corruption is a real integrity error: surface it as a non-zero
+        // exit (aligning with `git fsck`), not just a status downgrade.
+        result.has_errors = true;
+        if result.overall_status == CheckStatus::Ok {
+            result.overall_status = CheckStatus::InvalidFormat;
+        }
     }
     Ok(())
 }

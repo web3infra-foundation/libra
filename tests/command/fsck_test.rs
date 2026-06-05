@@ -963,3 +963,103 @@ fn test_strict_tree_unsorted() {
     );
     assert_eq!(strict.status.code(), Some(1));
 }
+
+/// A corrupt index file is an integrity error and exits non-zero (1), aligned
+/// with `git fsck`.
+#[test]
+#[serial]
+fn test_fsck_index_corruption_exits_nonzero() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join(".libra/index"), b"not a valid index").expect("corrupt index");
+
+    let output = run_libra_command(&["fsck"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a corrupt index should exit 1, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("index corruption"),
+        "should report index corruption: {combined}"
+    );
+}
+
+/// A dangling commit alone is informational and keeps the exit code at 0.
+#[test]
+#[serial]
+fn test_fsck_dangling_commit_exits_zero() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("f2.txt"), "second\n").unwrap();
+    run_libra_command(&["add", "f2.txt"], repo.path());
+    run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    let log = run_libra_command(&["log", "--pretty=%H"], repo.path());
+    let log_out = String::from_utf8_lossy(&log.stdout);
+    let first = log_out.lines().nth(1).unwrap().trim();
+    run_libra_command(&["reset", "--hard", first], repo.path());
+
+    let output = run_libra_command(&["fsck", "--no-reflogs"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a dangling commit must stay exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `--lost-found` stages a dangling commit under `lost-found/commit/` (its id)
+/// and a dangling blob under `lost-found/other/` (its raw content).
+#[test]
+#[serial]
+fn test_lost_found_writes_dangling() {
+    let repo = create_committed_repo_via_cli();
+
+    // A dangling blob written directly into the object store.
+    fs::write(repo.path().join("loose.txt"), "dangling blob content\n").unwrap();
+    let ho = run_libra_command(&["hash-object", "-w", "loose.txt"], repo.path());
+    assert_cli_success(&ho, "hash-object -w");
+    let blob_hash = String::from_utf8_lossy(&ho.stdout).trim().to_string();
+
+    // A dangling commit (committed, then HEAD reset back).
+    fs::write(repo.path().join("f2.txt"), "second\n").unwrap();
+    run_libra_command(&["add", "f2.txt"], repo.path());
+    run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    let log = run_libra_command(&["log", "--pretty=%H"], repo.path());
+    let log_out = String::from_utf8_lossy(&log.stdout);
+    let dangling_commit = log_out.lines().next().unwrap().trim().to_string();
+    let first = log_out.lines().nth(1).unwrap().trim().to_string();
+    run_libra_command(&["reset", "--hard", &first], repo.path());
+
+    let output = run_libra_command(&["fsck", "--lost-found"], repo.path());
+    assert!(
+        output.status.code() == Some(0) || output.status.code() == Some(1),
+        "fsck --lost-found should finish, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let commit_path = repo
+        .path()
+        .join(".libra/lost-found/commit")
+        .join(&dangling_commit);
+    assert!(
+        commit_path.exists(),
+        "dangling commit should be staged under lost-found/commit/: {commit_path:?}"
+    );
+
+    let blob_path = repo.path().join(".libra/lost-found/other").join(&blob_hash);
+    assert!(
+        blob_path.exists(),
+        "dangling blob should be staged under lost-found/other/: {blob_path:?}"
+    );
+    let staged = fs::read(&blob_path).expect("read staged blob");
+    assert_eq!(
+        staged, b"dangling blob content\n",
+        "staged blob should contain the raw content"
+    );
+}
