@@ -36,12 +36,13 @@ use crate::{
 /// `--help` examples shown in `libra lfs --help` output (attached in
 /// `src/cli.rs` via `after_help` on the `Lfs` subcommand).
 ///
-/// `lfs` exposes six sub-commands: `track` (read/add attributes patterns),
-/// `untrack`, `ls-files`, and the three lock-server flows (`locks`,
-/// `lock`, `unlock`). The banner pins the canonical invocation per
-/// sub-command plus a JSON variant so users can map intent to invocation
-/// without reading the design doc. Cross-cutting `--help` EXAMPLES
-/// rollout per `docs/improvement/README.md` item B.
+/// `lfs` exposes the attribute flows (`track`/`untrack`/`ls-files`), the three
+/// lock-server flows (`locks`/`lock`/`unlock`), the `install`/`uninstall`
+/// compatibility no-ops, and the object-sync flows (`push`/`fetch`/`prune`/
+/// `checkout`). The banner pins the canonical invocation per sub-command plus a
+/// JSON variant so users can map intent to invocation without reading the design
+/// doc. Cross-cutting `--help` EXAMPLES rollout per `docs/improvement/README.md`
+/// item B.
 pub const LFS_EXAMPLES: &str = "\
 EXAMPLES:
     libra lfs track                       List currently tracked LFS attribute patterns
@@ -53,6 +54,11 @@ EXAMPLES:
     libra lfs lock build/output.bin       Acquire a remote lock on a file
     libra lfs unlock build/output.bin     Release a lock you own
     libra lfs unlock --force --id <id>    Force-release a lock owned by someone else
+    libra lfs install                     No-op compatibility shim (built-in LFS, no filters)
+    libra lfs push origin main            Push LFS objects on local refs to a remote
+    libra lfs fetch origin main           Fetch LFS objects for remote-tracking refs
+    libra lfs prune --dry-run             Preview unreferenced local LFS objects to delete
+    libra lfs checkout                    Restore pointer files to full LFS content
     libra lfs --json ls-files             Structured JSON output for agents";
 
 /// [Docs](https://github.com/git-lfs/git-lfs/tree/main/docs/man)
@@ -107,6 +113,40 @@ pub enum LfsCmds {
         /// Show only the lfs tracked file names.
         #[clap(long, short)]
         name_only: bool,
+    },
+    /// No-op compatibility shim: Libra has built-in LFS, so no global filter is installed
+    Install,
+    /// No-op compatibility shim: built-in LFS has no global filter to remove
+    Uninstall,
+    /// Push LFS objects referenced by local refs to the remote
+    Push {
+        /// Remote name (first positional). Defaults to the current branch upstream when omitted
+        remote: Option<String>,
+        /// Local refs to scan (remaining positionals). Defaults to the current HEAD branch.
+        /// To push by ref the remote must be given first: `libra lfs push <remote> <ref>...`
+        #[clap(value_name = "REF")]
+        refs: Vec<String>,
+    },
+    /// Fetch LFS objects referenced by remote-tracking refs from the remote
+    Fetch {
+        /// Remote name (first positional). Defaults to the current branch upstream when omitted
+        remote: Option<String>,
+        /// Remote-tracking refs to scan (remaining positionals). Defaults to the current branch's
+        /// upstream ref. To fetch by ref the remote must be given first: `libra lfs fetch <remote> <ref>...`
+        #[clap(value_name = "REF")]
+        refs: Vec<String>,
+    },
+    /// Delete local LFS objects not referenced by any reachable ref, the index, or worktree pointers
+    Prune {
+        /// Show what would be deleted without removing anything
+        #[clap(long, short = 'n')]
+        dry_run: bool,
+    },
+    /// Restore working-tree pointer files to full LFS object content from the local cache
+    Checkout {
+        /// Optional paths to restore (defaults to all LFS-tracked pointer files)
+        #[clap(value_name = "PATH")]
+        path: Vec<String>,
     },
 }
 
@@ -360,7 +400,35 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
                 ..LfsOutput::default()
             })
         }
+        // `git lfs install`/`uninstall` configure global smudge/clean filters and
+        // pre-push hooks. Libra has built-in LFS (it matches `.libra_attributes`
+        // directly and needs no filters), so these are intentional no-ops that
+        // exit 0 — preventing automation that calls `git lfs install` from
+        // breaking. See decision D5 in `docs/improvement/compatibility/declined.md`.
+        LfsCmds::Install => Ok(LfsOutput {
+            action: "install".to_string(),
+            ..LfsOutput::default()
+        }),
+        LfsCmds::Uninstall => Ok(LfsOutput {
+            action: "uninstall".to_string(),
+            ..LfsOutput::default()
+        }),
+        // Implemented in later batches of `.omo/plans/lfs-improvement-plan.md`:
+        // the CLI surface parses now so automation can target it, but the
+        // behaviour is not yet available.
+        LfsCmds::Push { .. } => Err(lfs_unsupported("push")),
+        LfsCmds::Fetch { .. } => Err(lfs_unsupported("fetch")),
+        LfsCmds::Prune { .. } => Err(lfs_unsupported("prune")),
+        LfsCmds::Checkout { .. } => Err(lfs_unsupported("checkout")),
     }
+}
+
+/// Builds the typed error returned by LFS subcommands whose CLI surface exists
+/// but whose behaviour is not yet implemented.
+fn lfs_unsupported(subcommand: &str) -> CliError {
+    CliError::fatal(format!("libra lfs {subcommand} is not yet implemented"))
+        .with_stable_code(StableErrorCode::Unsupported)
+        .with_hint("this subcommand is planned; track progress in the LFS improvement plan.")
 }
 
 fn render_lfs_output(result: &LfsOutput, output: &OutputConfig) -> CliResult<()> {
@@ -434,6 +502,14 @@ fn render_lfs_output(result: &LfsOutput, output: &OutputConfig) -> CliResult<()>
                     );
                 }
             }
+        }
+        "install" => {
+            println!(
+                "Libra uses native built-in LFS support; no global filter installation is needed."
+            );
+        }
+        "uninstall" => {
+            println!("Libra LFS uses built-in support; nothing to uninstall (no-op).");
         }
         "lock" => {
             if let Some(path) = &result.path {
@@ -678,5 +754,121 @@ mod tests {
 
         let on_disk = lfs::extract_lfs_patterns(&path).expect("extract");
         assert!(on_disk.is_empty(), "expected empty, got {on_disk:?}");
+    }
+
+    /// Thin clap wrapper so the `LfsCmds` subcommand can be parsed in isolation
+    /// to verify positional-argument bindings (remote / refs / path / flags).
+    #[derive(clap::Parser, Debug)]
+    struct LfsCmdWrapper {
+        #[command(subcommand)]
+        cmd: LfsCmds,
+    }
+
+    fn parse_lfs(args: &[&str]) -> LfsCmds {
+        use clap::Parser;
+        let mut full = vec!["lfs"];
+        full.extend_from_slice(args);
+        LfsCmdWrapper::try_parse_from(full)
+            .expect("LfsCmds should parse")
+            .cmd
+    }
+
+    #[test]
+    fn test_lfs_push_parses_no_args() {
+        match parse_lfs(&["push"]) {
+            LfsCmds::Push { remote, refs } => {
+                assert_eq!(remote, None);
+                assert!(refs.is_empty());
+            }
+            other => panic!("expected Push, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_lfs_push_parses_remote_and_refs() {
+        // First positional binds to `remote`; the rest are `refs`.
+        match parse_lfs(&["push", "origin", "main"]) {
+            LfsCmds::Push { remote, refs } => {
+                assert_eq!(remote.as_deref(), Some("origin"));
+                assert_eq!(refs, vec!["main".to_string()]);
+            }
+            other => panic!("expected Push, got {other:?}"),
+        }
+        match parse_lfs(&["push", "origin", "main", "feature"]) {
+            LfsCmds::Push { remote, refs } => {
+                assert_eq!(remote.as_deref(), Some("origin"));
+                assert_eq!(refs, vec!["main".to_string(), "feature".to_string()]);
+            }
+            other => panic!("expected Push, got {other:?}"),
+        }
+        // A lone positional is the remote, NOT a ref.
+        match parse_lfs(&["push", "main"]) {
+            LfsCmds::Push { remote, refs } => {
+                assert_eq!(remote.as_deref(), Some("main"));
+                assert!(refs.is_empty());
+            }
+            other => panic!("expected Push, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_lfs_fetch_parses_remote_and_refs() {
+        match parse_lfs(&["fetch"]) {
+            LfsCmds::Fetch { remote, refs } => {
+                assert_eq!(remote, None);
+                assert!(refs.is_empty());
+            }
+            other => panic!("expected Fetch, got {other:?}"),
+        }
+        match parse_lfs(&["fetch", "origin", "main"]) {
+            LfsCmds::Fetch { remote, refs } => {
+                assert_eq!(remote.as_deref(), Some("origin"));
+                assert_eq!(refs, vec!["main".to_string()]);
+            }
+            other => panic!("expected Fetch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_lfs_prune_parses() {
+        match parse_lfs(&["prune"]) {
+            LfsCmds::Prune { dry_run } => assert!(!dry_run),
+            other => panic!("expected Prune, got {other:?}"),
+        }
+        match parse_lfs(&["prune", "--dry-run"]) {
+            LfsCmds::Prune { dry_run } => assert!(dry_run),
+            other => panic!("expected Prune, got {other:?}"),
+        }
+        match parse_lfs(&["prune", "-n"]) {
+            LfsCmds::Prune { dry_run } => assert!(dry_run),
+            other => panic!("expected Prune, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_lfs_checkout_parses() {
+        match parse_lfs(&["checkout"]) {
+            LfsCmds::Checkout { path } => assert!(path.is_empty()),
+            other => panic!("expected Checkout, got {other:?}"),
+        }
+        match parse_lfs(&["checkout", "a/b.bin", "c.psd"]) {
+            LfsCmds::Checkout { path } => {
+                assert_eq!(path, vec!["a/b.bin".to_string(), "c.psd".to_string()]);
+            }
+            other => panic!("expected Checkout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_lfs_install_uninstall_parse() {
+        assert!(matches!(parse_lfs(&["install"]), LfsCmds::Install));
+        assert!(matches!(parse_lfs(&["uninstall"]), LfsCmds::Uninstall));
+    }
+
+    #[test]
+    fn lfs_unsupported_maps_to_unsupported_code() {
+        let err = lfs_unsupported("push");
+        assert_eq!(err.stable_code(), StableErrorCode::Unsupported);
+        assert!(err.message().contains("push is not yet implemented"));
     }
 }

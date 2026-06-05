@@ -894,11 +894,154 @@ fn test_lfs_help_lists_examples_banner() {
         "libra lfs lock build/output.bin",
         "libra lfs unlock build/output.bin",
         "libra lfs unlock --force",
+        "libra lfs install",
+        "libra lfs push origin main",
+        "libra lfs fetch origin main",
+        "libra lfs prune --dry-run",
+        "libra lfs checkout",
         "libra lfs --json ls-files",
     ] {
         assert!(
             stdout.contains(invocation),
             "lfs --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}
+
+// ── LFS push/fetch/prune/checkout/install CLI structure (lfs-improvement-plan Batch 0) ──
+
+#[test]
+fn test_lfs_install_noop_exits_zero() {
+    let repo = init_temp_repo();
+    let output = libra_command(repo.path())
+        .args(["lfs", "install"])
+        .output()
+        .expect("failed to run libra lfs install");
+    assert!(
+        output.status.success(),
+        "lfs install should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("native built-in LFS"),
+        "expected built-in LFS notice, stdout: {stdout}"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "install should not write to stderr, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_lfs_uninstall_noop_exits_zero() {
+    let repo = init_temp_repo();
+    let output = libra_command(repo.path())
+        .args(["lfs", "uninstall"])
+        .output()
+        .expect("failed to run libra lfs uninstall");
+    assert!(
+        output.status.success(),
+        "lfs uninstall should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("nothing to uninstall"),
+        "expected uninstall no-op notice, stdout: {stdout}"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "uninstall should not write stderr"
+    );
+}
+
+#[test]
+fn test_lfs_install_json_action() {
+    let repo = init_temp_repo();
+    for (sub, action) in [("install", "install"), ("uninstall", "uninstall")] {
+        let output = libra_command(repo.path())
+            .args(["--json", "lfs", sub])
+            .output()
+            .expect("failed to run libra --json lfs <sub>");
+        assert!(
+            output.status.success(),
+            "lfs {sub} --json should exit 0, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .expect("stdout should be a single JSON envelope");
+        assert_eq!(json["command"], "lfs");
+        assert_eq!(json["data"]["action"], action);
+    }
+}
+
+#[test]
+fn test_lfs_help_lists_new_subcommands() {
+    let repo = tempfile::tempdir().expect("tempdir");
+    let output = libra_command(repo.path())
+        .args(["lfs", "--help"])
+        .output()
+        .expect("failed to run libra lfs --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for sub in ["install", "uninstall", "push", "fetch", "prune", "checkout"] {
+        assert!(
+            stdout.contains(sub),
+            "lfs --help should list `{sub}` subcommand, stdout: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn test_lfs_invalid_flag_clap_error() {
+    let repo = init_temp_repo();
+    let output = libra_command(repo.path())
+        .args(["lfs", "push", "--invalid-flag"])
+        .output()
+        .expect("failed to run libra lfs push --invalid-flag");
+    // Libra intercepts clap parse errors and remaps them to the stable
+    // `LBR-CLI-002` (CliInvalidArguments) surface, which exits 129 (not clap's
+    // raw 2). The error text still carries the clap "unexpected argument" line.
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "unknown flag should map to LBR-CLI-002 (exit 129), stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("LBR-CLI-002") && stderr.contains("unexpected argument"),
+        "expected clap-arg error remapped to LBR-CLI-002, stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_lfs_deferred_subcommands_parse_not_clap_error() {
+    let repo = init_temp_repo();
+    // push/fetch/prune/checkout parse successfully (they dispatch and return a
+    // typed "not yet implemented" error, exit 128 — never a clap error, exit 2).
+    for args in [
+        vec!["lfs", "push"],
+        vec!["lfs", "fetch"],
+        vec!["lfs", "prune"],
+        vec!["lfs", "checkout"],
+    ] {
+        let output = libra_command(repo.path())
+            .args(&args)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run libra {args:?}: {e}"));
+        assert_ne!(
+            output.status.code(),
+            Some(2),
+            "`{args:?}` should parse (not a clap error), stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("not yet implemented"),
+            "`{args:?}` should dispatch to the not-implemented stub, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 }
