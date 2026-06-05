@@ -3,15 +3,15 @@
 # This is the **source of truth** for the set of cli.* and live.* scenarios
 # used by the integration runner (tools/integration-runner) and check-plan.
 #
-# - The detailed executable documentation, bash repro snippets, parameter
-#   tables, and narrative live in docs/development/integration-test-plan.md
-#   under matching `### `<id>`` headings.
+# - Per-scenario executable docs: docs/development/integration-scenarios/<id>.md
+#   (one file per id; index in integration-scenarios/README.md).
+# - Plan matrix, isolation, PR protocol: integration-test-plan.md (§2–§3, §8–§9).
 # - Wave membership, gh requirement, and high-level metadata live here.
 # - check-plan (and the runner's registry) MUST load this file.
 # - When adding/removing/renaming a scenario:
 #     1. Edit this yaml (add id, wave, purpose, etc.)
-#     2. Add or update the corresponding ### `id` section + steps + assertions
-#        + parameter table in integration-test-plan.md
+#     2. Add or update docs/development/integration-scenarios/<id>.md
+#        (+ _parameter-tables.md when adding cross-command flag matrices)
 #     3. If it affects command coverage, update the matrix table in §2.3 of the md
 #        and run `cargo test --test compat_matrix_alignment`
 #     4. Later: add the implementation slice in the runner's registry.rs / scenarios/
