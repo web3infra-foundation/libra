@@ -570,6 +570,27 @@ pub(crate) async fn ingest_agent_traces_payload(
         other => other,
     };
 
+    // Serialise the read-then-write critical section (concurrent-active COUNT
+    // → UPSERT → checkpoint commit) for a single agent session under a
+    // SessionStore file lock (entire.md §6.3 / §13#6). The lock id carries a
+    // `.traces` suffix so it is a DIFFERENT file from the AiIntent path's
+    // `sessions/agent/<id>.lock`, ruling out a self-deadlock if both
+    // `libra hooks <p>` and `libra agent hooks <p>` ever fire in one process
+    // tree. Held to end of function via RAII. Skipped when `repo_path` is None
+    // (the unit-test path) so those tests stay lock-free and deterministic.
+    let _traces_lock = match repo_path {
+        Some(repo) => {
+            let store = SessionStore::from_storage_path_with_subdir(repo, "agent");
+            Some(store.lock_session(&format!("{session_id}.traces")).with_context(|| {
+                format!(
+                    "failed to acquire agent-traces session lock for '{}'",
+                    redact_session_id(&session_id)
+                )
+            })?)
+        }
+        None => None,
+    };
+
     let new_state = match event.kind {
         LifecycleEventKind::SessionStart => "active",
         LifecycleEventKind::SessionEnd | LifecycleEventKind::TurnEnd => "stopped",
@@ -640,25 +661,40 @@ pub(crate) async fn ingest_agent_traces_payload(
     .await
     .with_context(|| format!("failed to upsert agent_session for command '{command}'"))?;
 
-    // Materialise committed checkpoints at durable agent boundaries. SessionEnd
-    // captures the final snapshot; TurnEnd captures recoverable per-turn state.
-    if matches!(
-        event.kind,
-        LifecycleEventKind::SessionEnd | LifecycleEventKind::TurnEnd
-    ) && let Some(repo) = repo_path
-    {
-        write_committed_checkpoint(
-            conn,
-            repo,
-            &session_id,
-            &envelope,
-            agent_kind,
-            event.prompt.as_deref(),
-            &redaction_report_json,
-            &all_matches,
-            now,
-        )
-        .await?;
+    // Materialise checkpoints at agent boundaries (entire.md §6.3 / §7.1–7.2):
+    //  - `committed` on SessionEnd / TurnEnd — durable per-turn / final snapshot;
+    //  - `subagent` on PostToolUse[Task] — sub-agent spawn (nested run);
+    //  - `temporary` on PostToolUse[TodoWrite] — transient point, later removed
+    //    from the agent-traces history by `libra agent clean`.
+    // Only Task / TodoWrite produce a per-tool-call checkpoint, so the history
+    // is never flooded with a commit per Read/Edit.
+    if let Some(repo) = repo_path {
+        let scope = match event.kind {
+            LifecycleEventKind::SessionEnd | LifecycleEventKind::TurnEnd => {
+                Some(crate::internal::ai::history::CheckpointScope::Committed)
+            }
+            LifecycleEventKind::ToolUse => event
+                .tool_name
+                .as_deref()
+                .and_then(checkpoint_scope_for_tool),
+            _ => None,
+        };
+        if let Some(scope) = scope {
+            write_checkpoint(
+                conn,
+                repo,
+                &session_id,
+                &envelope,
+                agent_kind,
+                scope,
+                None,
+                event.prompt.as_deref(),
+                &redaction_report_json,
+                &all_matches,
+                now,
+            )
+            .await?;
+        }
     }
 
     Ok(())
@@ -791,16 +827,36 @@ async fn read_bool_config(conn: &sea_orm::DatabaseConnection, key: &str) -> bool
         .unwrap_or(false)
 }
 
+/// Map a `PostToolUse` tool name onto the checkpoint scope it should
+/// materialise (entire.md §6.3 / §7.2). Only the two sub-agent / task-list
+/// tools produce a checkpoint per tool call — every other tool returns `None`
+/// so the agent-traces history is not flooded with a commit per Read/Edit:
+/// - `Task` (sub-agent spawn) → [`CheckpointScope::Subagent`]
+/// - `TodoWrite` (task-list update) → [`CheckpointScope::Temporary`] (cleaned
+///   by `libra agent clean`)
+fn checkpoint_scope_for_tool(
+    tool_name: &str,
+) -> Option<crate::internal::ai::history::CheckpointScope> {
+    use crate::internal::ai::history::CheckpointScope;
+    match tool_name {
+        "Task" => Some(CheckpointScope::Subagent),
+        "TodoWrite" => Some(CheckpointScope::Temporary),
+        _ => None,
+    }
+}
+
 // The checkpoint producer threads several independent, already-redacted
 // inputs (session id, envelope, agent kind, redaction artefacts, timestamp);
 // bundling them into a struct would not improve clarity at the single call site.
 #[allow(clippy::too_many_arguments)]
-async fn write_committed_checkpoint(
+async fn write_checkpoint(
     conn: &sea_orm::DatabaseConnection,
     repo_path: &std::path::Path,
     libra_session_id: &str,
     envelope: &SessionHookEnvelope,
     agent_kind: &str,
+    scope: crate::internal::ai::history::CheckpointScope,
+    tool_use_id: Option<&str>,
     redacted_prompt: Option<&str>,
     redaction_report_json: &str,
     redaction_matches: &[crate::internal::ai::observed_agents::RedactionMatch],
@@ -808,16 +864,18 @@ async fn write_committed_checkpoint(
 ) -> Result<()> {
     use sea_orm::{ConnectionTrait, Statement};
 
-    use crate::internal::ai::history::{CheckpointCommitParams, CheckpointScope, HistoryManager};
+    use crate::internal::ai::history::{CheckpointCommitParams, HistoryManager};
 
+    let scope_str = scope.as_str();
     // Build a minimal metadata.json. Phase 2 keeps the schema small; later
-    // phases extend with model_info, tool_use_id, subagent links, etc.
+    // phases extend with model_info and richer subagent links.
     let metadata = serde_json::json!({
         "schema_version": 1,
         "checkpoint_id": null, // filled in below once we have the UUID
         "session_id": libra_session_id,
         "agent_kind": agent_kind,
-        "scope": "committed",
+        "scope": scope_str,
+        "tool_use_id": tool_use_id,
         "provider_session_id": envelope.session_id,
         "working_dir": envelope.cwd,
         "redaction_report": serde_json::from_str::<serde_json::Value>(redaction_report_json)
@@ -888,8 +946,8 @@ async fn write_committed_checkpoint(
             session_id: libra_session_id,
             agent_kind,
             parent_commit: parent_commit.as_deref(),
-            scope: CheckpointScope::Committed,
-            tool_use_id: None,
+            scope,
+            tool_use_id,
             metadata_json: &metadata_bytes,
             transcript_redacted: &transcript_redacted,
             provider_name,
@@ -899,19 +957,22 @@ async fn write_committed_checkpoint(
         .context("failed to append checkpoint commit on agent-traces")?;
 
     let parent_commit_value: sea_orm::Value = parent_commit.clone().into();
+    let tool_use_id_value: sea_orm::Value = tool_use_id.map(str::to_string).into();
     conn.execute(Statement::from_sql_and_values(
         conn.get_database_backend(),
         "INSERT INTO agent_checkpoint (
             checkpoint_id, session_id, scope, parent_commit, tree_oid,
-            metadata_blob_oid, traces_commit, created_at
-         ) VALUES (?, ?, 'committed', ?, ?, ?, ?, ?)",
+            metadata_blob_oid, traces_commit, tool_use_id, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             checkpoint_id.into(),
             libra_session_id.into(),
+            scope_str.into(),
             parent_commit_value,
             written.tree_oid.to_string().into(),
             written.metadata_blob_oid.to_string().into(),
             written.commit_hash.to_string().into(),
+            tool_use_id_value,
             now.into(),
         ],
     ))
@@ -1888,6 +1949,65 @@ mod tests {
             err.to_string()
                 .contains("agent_session table does not exist"),
             "unexpected error: {err}"
+        );
+    }
+
+    /// entire.md §6.3 / §7.2: `PostToolUse` events produce scoped checkpoints
+    /// for the two sub-agent / task-list tools — `Task` → `subagent`,
+    /// `TodoWrite` → `temporary` — while ordinary tools (e.g. `Read`) produce
+    /// no checkpoint, so the agent-traces history is not flooded.
+    #[tokio::test]
+    async fn ingest_tool_use_produces_subagent_and_temporary_checkpoints() {
+        let (dir, conn) = ingest_fresh_conn().await;
+        let repo_path = dir.path().to_path_buf();
+
+        let start = ingest_envelope("SessionStart", "S-tool", json!({}));
+        ingest_agent_traces_payload(
+            &start,
+            super::super::provider::ProviderHookCommand::SessionStart,
+            LifecycleEventKind::SessionStart,
+            claude_provider(),
+            &conn,
+            Some(&repo_path),
+        )
+        .await
+        .expect("start ok");
+
+        for tool in ["Task", "TodoWrite", "Read"] {
+            let payload = ingest_envelope("PostToolUse", "S-tool", json!({ "tool_name": tool }));
+            ingest_agent_traces_payload(
+                &payload,
+                super::super::provider::ProviderHookCommand::ToolUse,
+                LifecycleEventKind::ToolUse,
+                claude_provider(),
+                &conn,
+                Some(&repo_path),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("PostToolUse[{tool}] ingest must succeed: {e}"));
+        }
+
+        let backend = conn.get_database_backend();
+        let rows = conn
+            .query_all(Statement::from_sql_and_values(
+                backend,
+                "SELECT scope FROM agent_checkpoint WHERE session_id = \
+                 (SELECT session_id FROM agent_session WHERE provider_session_id = 'S-tool' LIMIT 1) \
+                 ORDER BY created_at",
+                [],
+            ))
+            .await
+            .expect("checkpoint query");
+        let mut scopes: Vec<String> = rows
+            .iter()
+            .map(|r| r.try_get_by::<String, _>("scope").unwrap())
+            .collect();
+        scopes.sort();
+        // Task → subagent, TodoWrite → temporary; Read produced none.
+        assert_eq!(
+            scopes,
+            vec!["subagent".to_string(), "temporary".to_string()],
+            "expected exactly the Task(subagent) + TodoWrite(temporary) checkpoints; got {scopes:?}"
         );
     }
 

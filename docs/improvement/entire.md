@@ -56,7 +56,7 @@
 | `RedactedBytes` 编译契约 + Redactor | ✅ | [redaction.rs](../../src/internal/ai/observed_agents/redaction.rs)：`pub(crate)` 构造 + 两个 `compile_fail` doctest；25+ 高置信规则、幂等、误报回归 |
 | Hook 摄入参数化 `HookTarget` | ✅ | [runtime.rs](../../src/internal/ai/hooks/runtime.rs) `process_hook_event_with_target`，旧 API 1:1 包装；`AgentTraces` 路径强制脱敏 + upsert + checkpoint，经 `libra agent hooks <agent> …` 触发 |
 | Checkpoint commit 生成 | 🟡 | 已写 `metadata.json` + `transcript/<provider>` blob、`Libra-*` trailer、CAS 追加 `agent-traces`、`agent_checkpoint` 行；**v1 未做工作树快照 / `protected_dirs` 排除 / `events.jsonl` / canonical-sorted JSON**（见 §7.1 订正） |
-| Checkpoint scope 三态 | 🟡 | 生产只产生 `committed`；`temporary` / `subagent` 仅存在于 schema + `clean` 路径 + 测试夹具（见 §7.2 订正） |
+| Checkpoint scope 三态 | ✅ | 三态均有生产侧产生点：`committed`（TurnEnd/SessionEnd）、`subagent`（`PostToolUse[Task]`）、`temporary`（`PostToolUse[TodoWrite]`，`clean` 移除）；`checkpoint_scope_for_tool` + 参数化 `write_checkpoint`，仅 Task/TodoWrite 产生 checkpoint 避免泛滥（见 §7.2 订正） |
 | `checkpoint show` | ✅ | metadata + **transcript 字节长度 + tree 摘要**（2026-06-05 补齐：[checkpoint.rs](../../src/command/agent/checkpoint.rs) `summarize_checkpoint_tree`） |
 | `checkpoint rewind` dry-run/apply | ✅ | 恢复工作树到 `parent_commit`；Claude Code 截断本地 transcript，其它 kind 明确告警 |
 | `clean [--all]` | ✅ | stopped-only、删 `temporary` 行、重写 `agent-traces` orphan tip |
@@ -70,7 +70,7 @@
 | **Phase 4** 派生 ToolCallRecord | ✅（越界） | [derived.rs](../../src/internal/ai/observed_agents/derived.rs) + `session derive-tool-calls` |
 | **Phase 4** 跨体系 promote | ✅（越界） | `session promote --as-intent`（→ `refs/libra/intent`） |
 | 资源隔离（SessionStore 子目录） | 🟡 | `agent` 用 `sessions/agent/`；`libra code` 仍用 `sessions/` 根（目标"避免锁冲突"已达成，见 §11.5 订正） |
-| 会话文件锁（agent 路径） | ⏳ | `AgentTraces` 路径不取 `lock_session`；并发以 `agent-traces` CAS + UPSERT 幂等 + `concurrent_active` 标志兜底（见 §13#6 订正） |
+| 会话文件锁（agent 路径） | ✅ | `ingest_agent_traces_payload` 在 `Some(repo_path)` 下取 `SessionStore` 文件锁（`sessions/agent/<id>.traces` 锁，与 AiIntent 的 `.lock` 不同名以避免自死锁），覆盖 concurrent-check → UPSERT → checkpoint 临界区；`None`（单测）路径无锁、确定性（见 §13#6 订正） |
 | 熵 / 通用 URI / DB-DSN / bounded-KV / placeholder / JSON-aware / config-mode 脱敏 | ✅ | 分层引擎落地（[redaction.rs](../../src/internal/ai/observed_agents/redaction.rs)）：Shannon 熵、任意-scheme credential-URI、JDBC/DSN/semicolon 连接串、vendor-前缀 K/V、placeholder 白名单、`redact_jsonl` 字段跳过、`RedactionMode redact\|warn\|off` + `agent.redaction.*` 配置；55 单测全绿；§8.3 transcript blob 恒强制脱敏（见 §8 订正） |
 | gitleaks 260+ 全规则矩阵 / PII address | ⏳ | 当前以 25+ 高置信规则近似 betterleaks（不引入第三方依赖）；PII 仅 email/phone，address 留作后续 |
 | 非 Claude `TranscriptTruncator` | 🟡 | **Gemini 已落地**（[builtin/gemini.rs](../../src/internal/ai/observed_agents/builtin/gemini.rs)：解析单 JSON 文档、按 `messages[].timestamp` 截断、保留无时间戳消息；`truncator_for` 现为 `{ClaudeCode, Gemini}`）；Cursor(SQLite)/Codex/OpenCode/Copilot/FactoryAi 仍待 per-format 截断 |
@@ -448,7 +448,7 @@ async fn process_hook_event_with_target(
 - **`scope='committed'`**：`TurnEnd`/`SessionEnd`，长期保留
 - **`scope='subagent'`**：子 Agent 嵌套，关联到 `parent_checkpoint_id` 与 `subagent_session_id`
 
-> **2026-06-05 订正（以代码为准）**：生产路径目前**只产生 `committed`** checkpoint（`TurnEnd`/`SessionEnd`）。`temporary` / `subagent` 已在 schema、`clean` 删除路径、以及测试夹具中完整存在，但**没有生产侧的产生点**（`ToolUse`/`PostTool[Task]` 暂不创建 checkpoint）。因此 `clean` 的"移除 temporary"逻辑已就绪、可被测试覆盖，但常态运行下无 temporary 可清。接线 `ToolUse → subagent/temporary` 是 v2 工作。
+> **2026-06-05 订正（生产侧产生点已落地）**：三态 checkpoint 均有生产路径。`write_checkpoint`（原 `write_committed_checkpoint`）现接 `scope: CheckpointScope` 参数；`ingest_agent_traces_payload` 在 `Some(repo_path)` 下按事件分派：`TurnEnd`/`SessionEnd → committed`；`PostToolUse` 经 `checkpoint_scope_for_tool(tool_name)` 把 `Task → subagent`、`TodoWrite → temporary`，其它工具不产生 checkpoint（避免每次 Read/Edit 都落一个 commit）。`agent_checkpoint.tool_use_id` 列随之写入（metadata 也带 `tool_use_id`/`scope`）。回归：`ingest_tool_use_produces_subagent_and_temporary_checkpoints`。**仍属后续**：`subagent` checkpoint 的完整 `parent_checkpoint_id`/`subagent_session_id` 关联与嵌套子会话 transcript 解析（EntireIO 的 pre-task marker + 文件 diff 机制），当前只记录 scope 与 tool_use_id。
 
 ### 7.3 Rewind（v1 dry-run / read-only）
 
