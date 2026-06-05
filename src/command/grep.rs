@@ -121,6 +121,24 @@ pub struct GrepArgs {
     /// Search within tracked files in the index (staging area) instead of the working tree.
     #[clap(long)]
     cached: bool,
+
+    /// Use extended regular expressions. Accepted as an alias: Libra's default
+    /// engine (the Rust `regex` crate) is already ERE-style, so this does not
+    /// change matching behavior.
+    #[clap(short = 'E', long = "extended-regexp")]
+    extended_regexp: bool,
+
+    /// Use basic regular expressions. Accepted as an alias: Libra does not ship a
+    /// separate BRE engine, so patterns are still interpreted with the default
+    /// `regex` syntax (which may differ from Git's strict BRE dialect).
+    #[clap(short = 'G', long = "basic-regexp")]
+    basic_regexp: bool,
+
+    /// Use Perl-compatible regular expressions. Declined: the default linear-time
+    /// engine has no backreferences/lookaround, so this fails fast rather than
+    /// silently mis-matching.
+    #[clap(short = 'P', long = "perl-regexp")]
+    perl_regexp: bool,
 }
 
 /// A single grep match result.
@@ -201,6 +219,16 @@ pub async fn execute(args: GrepArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Searches for pattern matches in tracked files.
 pub async fn execute_safe(args: GrepArgs, output: &OutputConfig) -> CliResult<()> {
+    // `-P`/`--perl-regexp` is declined up front (before any repo work) so it
+    // always fails fast with a usage error rather than silently mis-matching.
+    if args.perl_regexp {
+        return Err(CliError::command_usage(
+            "Perl-compatible regular expressions (-P/--perl-regexp) are not supported; \
+             use the default regex syntax",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     let result = run_grep(&args).await?;

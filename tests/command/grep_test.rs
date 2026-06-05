@@ -639,3 +639,54 @@ fn test_grep_help_lists_examples_banner() {
         );
     }
 }
+
+/// `-E`/`--extended-regexp` and `-G`/`--basic-regexp` are accepted as aliases:
+/// they match the same lines as the default engine.
+#[tokio::test]
+#[serial]
+async fn test_grep_extended_basic_regexp_are_aliases() {
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("f.txt", "alpha\nbeta\ngamma\n").expect("write file");
+    add_and_commit("add f", vec!["f.txt".to_string()]).await;
+
+    for flag in ["-E", "-G"] {
+        let output = run_libra_command(&["grep", flag, "be.a", "f.txt"], repo.path());
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "grep {flag} should match like the default engine, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("beta"),
+            "grep {flag} should find the matching line"
+        );
+    }
+}
+
+/// `-P`/`--perl-regexp` is declined with a usage error (exit 129).
+#[tokio::test]
+#[serial]
+async fn test_grep_perl_regexp_is_declined() {
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("f.txt", "hello\n").expect("write file");
+    add_and_commit("add f", vec!["f.txt".to_string()]).await;
+
+    let output = run_libra_command(&["grep", "-P", "hel+o", "f.txt"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "grep -P should be declined with exit 129, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not supported"),
+        "grep -P should explain it is unsupported"
+    );
+}

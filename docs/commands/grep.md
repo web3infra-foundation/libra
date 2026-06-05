@@ -40,6 +40,9 @@ When stdout is a terminal, output is sent through a pager. In JSON mode, structu
 | Pathspec | | positional (trailing) | Restrict search to files matching the given paths. |
 | Tree | | `--tree <REVISION>` | Search in the specified revision or commit tree instead of the working tree. |
 | Cached | | `--cached` | Search in the index (staging area) instead of the working tree. |
+| Extended regexp | `-E` | `--extended-regexp` | Accepted as an alias. The default engine is already ERE-style, so this does not change matching behavior. |
+| Basic regexp | `-G` | `--basic-regexp` | Accepted as an alias. Libra has no separate BRE engine; patterns keep the default `regex` syntax, which may differ from Git's strict BRE dialect. |
+| Perl regexp | `-P` | `--perl-regexp` | **Declined.** The linear-time engine has no backreferences/lookaround; passing `-P` fails fast with a usage error (exit 129) rather than silently mis-matching. |
 
 ### Option Details
 
@@ -373,8 +376,8 @@ jj does not have a built-in grep command. Users are expected to use external too
 | Revision search | `--tree <REVISION>` | `<revision>` (positional) | N/A |
 | Index search | `--cached` | `--cached` | N/A |
 | Context lines | Not supported | `-C` / `-A` / `-B` | N/A |
-| Extended regexp | Not supported | `-E` / `--extended-regexp` | N/A |
-| Perl regexp | Not supported | `-P` / `--perl-regexp` | N/A |
+| Extended/basic regexp | Accepted as aliases (`-E` / `-G`) | `-E` / `-G` | N/A |
+| Perl regexp | Declined (exit 129) | `-P` / `--perl-regexp` | N/A |
 | Show function | Not supported | `-p` / `--show-function` | N/A |
 | Max depth | Not supported | `--max-depth` | N/A |
 | Threads | Not supported | `--threads` | N/A |
@@ -389,7 +392,8 @@ Note: jj does not have a built-in grep command. Users rely on external tools lik
 |----------|-----------------|------|
 | Not a libra repository | `LBR-REPO-001` | 128 |
 | No pattern provided (and no `-e` or `-f`) | Clap argument error | 2 |
-| Invalid regex pattern | `LBR-CLI-003` (CliInvalidTarget) | 129 |
+| Invalid regex pattern | `LBR-CLI-002` (CliInvalidArguments) | 129 |
+| `-P` / `--perl-regexp` (declined) | `LBR-CLI-002` (CliInvalidArguments) | 129 |
 | Revision not found (`--tree`) | `LBR-CLI-003` (CliInvalidTarget) | 129 |
 | No matches found | `LBR-CLI-003` (CliInvalidTarget) | 129 |
 | Failed to read file (non-fatal) | Warning in output, file skipped | 0 |
