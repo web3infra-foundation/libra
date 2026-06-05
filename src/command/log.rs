@@ -38,7 +38,7 @@ use crate::{
         object_ext::TreeExt,
         output::{OutputConfig, emit_json_data},
         pager::Pager,
-        util,
+        util::{self, CommitBaseError},
     },
 };
 
@@ -286,6 +286,154 @@ struct CommitFilter {
     /// `-S`/`-G` content filter (requires a per-commit diff; checked in the
     /// async [`CommitFilter::matches`] path).
     pickaxe: Option<Pickaxe>,
+}
+
+/// A positional revision-range expression (only parsed when explicit range/
+/// exclude syntax is present among the positionals).
+enum RevRange {
+    /// `^A B` / `A..B`: `union(reachable(positives)) - union(reachable(negatives))`.
+    Include {
+        positives: Vec<String>,
+        negatives: Vec<String>,
+    },
+    /// `A...B`: commits reachable from exactly one of `A`, `B` (symmetric difference).
+    Symmetric { a: String, b: String },
+}
+
+/// Returns whether any positional token uses explicit revision-range/exclude
+/// syntax (`..`, `...`, or a leading `^`). Bare tokens never trigger this, so
+/// pathspec-only invocations keep their existing behavior.
+fn has_rev_range_syntax(tokens: &[String]) -> bool {
+    tokens
+        .iter()
+        .any(|token| token.contains("..") || token.starts_with('^'))
+}
+
+/// An empty range endpoint defaults to `HEAD` (so `..B` and `A..` work).
+fn rev_endpoint(token: &str) -> String {
+    if token.is_empty() {
+        "HEAD".to_string()
+    } else {
+        token.to_string()
+    }
+}
+
+fn rev_range_unsupported(token: &str) -> CliError {
+    CliError::command_usage(format!(
+        "unsupported revision range expression '{token}': `A...B` must be the only argument"
+    ))
+    .with_stable_code(StableErrorCode::CliInvalidArguments)
+}
+
+/// Parses the positional tokens into a [`RevRange`]. The symmetric form
+/// `A...B` must stand alone; otherwise tokens combine as positive refs, `^X`
+/// exclusions, and `A..B` (negative `A`, positive `B`).
+fn parse_rev_range(tokens: &[String]) -> CliResult<RevRange> {
+    if tokens.len() == 1
+        && let Some((a, b)) = tokens[0].split_once("...")
+    {
+        return Ok(RevRange::Symmetric {
+            a: rev_endpoint(a),
+            b: rev_endpoint(b),
+        });
+    }
+
+    let mut positives = Vec::new();
+    let mut negatives = Vec::new();
+    for token in tokens {
+        if token.contains("...") {
+            return Err(rev_range_unsupported(token));
+        } else if let Some((a, b)) = token.split_once("..") {
+            negatives.push(rev_endpoint(a));
+            positives.push(rev_endpoint(b));
+        } else if let Some(rest) = token.strip_prefix('^') {
+            negatives.push(rest.to_string());
+        } else {
+            positives.push(token.clone());
+        }
+    }
+    if positives.is_empty() {
+        // `^A` with no positive ref defaults the positive side to HEAD.
+        positives.push("HEAD".to_string());
+    }
+    Ok(RevRange::Include {
+        positives,
+        negatives,
+    })
+}
+
+/// Maps a revision-resolution failure to a `libra log` CLI error (mirrors
+/// `rev-list`): unknown refs are `CliInvalidTarget` (exit 129).
+fn log_rev_target_error(spec: &str, error: CommitBaseError) -> CliError {
+    match error {
+        CommitBaseError::HeadUnborn => CliError::failure(format!(
+            "not a valid object name: '{spec}' (HEAD does not point to a commit)"
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidTarget)
+        .with_hint("create a commit before resolving HEAD."),
+        CommitBaseError::InvalidReference(detail) => {
+            CliError::failure(format!("not a valid object name: '{spec}' ({detail})"))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+        }
+        CommitBaseError::ReadFailure(detail) => {
+            CliError::fatal(format!("failed to resolve '{spec}': {detail}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        CommitBaseError::CorruptReference(detail) => {
+            CliError::fatal(format!("failed to resolve '{spec}': {detail}"))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+        }
+    }
+}
+
+/// Resolves `spec` and returns the commits reachable from it.
+async fn reachable_commits_for_spec(spec: &str) -> CliResult<Vec<Commit>> {
+    let commit = util::get_commit_base_typed(spec)
+        .await
+        .map_err(|e| log_rev_target_error(spec, e))?;
+    get_reachable_commits(commit.to_string(), None).await
+}
+
+/// Computes the commit set selected by a [`RevRange`].
+async fn resolve_rev_range(range: &RevRange) -> CliResult<Vec<Commit>> {
+    match range {
+        RevRange::Symmetric { a, b } => {
+            let ra = reachable_commits_for_spec(a).await?;
+            let rb = reachable_commits_for_spec(b).await?;
+            let a_oids: HashSet<String> = ra.iter().map(|c| c.id.to_string()).collect();
+            let b_oids: HashSet<String> = rb.iter().map(|c| c.id.to_string()).collect();
+            let mut out: HashMap<String, Commit> = HashMap::new();
+            for commit in ra.into_iter().chain(rb) {
+                let oid = commit.id.to_string();
+                // Reachable from exactly one side.
+                if a_oids.contains(&oid) ^ b_oids.contains(&oid) {
+                    out.entry(oid).or_insert(commit);
+                }
+            }
+            Ok(out.into_values().collect())
+        }
+        RevRange::Include {
+            positives,
+            negatives,
+        } => {
+            let mut excluded: HashSet<String> = HashSet::new();
+            for negative in negatives {
+                for commit in reachable_commits_for_spec(negative).await? {
+                    excluded.insert(commit.id.to_string());
+                }
+            }
+            let mut included: HashMap<String, Commit> = HashMap::new();
+            for positive in positives {
+                for commit in reachable_commits_for_spec(positive).await? {
+                    let oid = commit.id.to_string();
+                    if !excluded.contains(&oid) {
+                        included.entry(oid).or_insert(commit);
+                    }
+                }
+            }
+            Ok(included.into_values().collect())
+        }
+    }
 }
 
 /// Effective minimum parent count: explicit `--min-parents`, else `2` when
@@ -739,7 +887,14 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
 
     let since = args.since.as_deref().map(parse_date_arg).transpose()?;
     let until = args.until.as_deref().map(parse_date_arg).transpose()?;
-    let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
+    // When explicit range syntax (`A..B`, `A...B`, `^X`) is present the
+    // positionals are revisions, not pathspec.
+    let is_range = has_rev_range_syntax(&args.pathspec);
+    let path_filters: Vec<PathBuf> = if is_range {
+        Vec::new()
+    } else {
+        args.pathspec.iter().map(util::to_workdir_path).collect()
+    };
     // Compile `--grep` before any traversal so an invalid/oversized pattern
     // fails fast (`LBR-CLI-002`) instead of after loading the whole history.
     let grep = args
@@ -748,19 +903,25 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         .map(|p| compile_grep_regex(p, args.regexp_ignore_case))
         .transpose()?;
     let pickaxe = build_pickaxe(&args)?;
+    let rev_range = is_range
+        .then(|| parse_rev_range(&args.pathspec))
+        .transpose()?;
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let commit_hash = current_head_commit.to_string();
 
-    let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None).await?;
+    let mut reachable_commits = match &rev_range {
+        Some(range) => resolve_rev_range(range).await?,
+        None => get_reachable_commits(commit_hash.clone(), None).await?,
+    };
     // newest first
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
     let default_abbrev = util::get_min_unique_hash_length(&reachable_commits).max(7);
 
     // `--first-parent` restricts to the first-parent chain (computed from the
     // already-loaded history so the shared `get_reachable_commits` is untouched).
-    let first_parents = args
-        .first_parent
+    // It is anchored at HEAD, so it is skipped for an explicit revision range.
+    let first_parents = (args.first_parent && !is_range)
         .then(|| first_parent_oids(&current_head_commit, &reachable_commits));
     let filter = CommitFilter::new(
         args.author.clone(),
@@ -962,23 +1123,33 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
 async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     let since = args.since.as_deref().map(parse_date_arg).transpose()?;
     let until = args.until.as_deref().map(parse_date_arg).transpose()?;
-    let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
+    let is_range = has_rev_range_syntax(&args.pathspec);
+    let path_filters: Vec<PathBuf> = if is_range {
+        Vec::new()
+    } else {
+        args.pathspec.iter().map(util::to_workdir_path).collect()
+    };
     let grep = args
         .grep
         .as_deref()
         .map(|p| compile_grep_regex(p, args.regexp_ignore_case))
         .transpose()?;
     let pickaxe = build_pickaxe(args)?;
+    let rev_range = is_range
+        .then(|| parse_rev_range(&args.pathspec))
+        .transpose()?;
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let commit_hash = current_head_commit.to_string();
 
-    let mut reachable_commits = get_reachable_commits(commit_hash, None).await?;
+    let mut reachable_commits = match &rev_range {
+        Some(range) => resolve_rev_range(range).await?,
+        None => get_reachable_commits(commit_hash, None).await?,
+    };
     // newest first
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
 
-    let first_parents = args
-        .first_parent
+    let first_parents = (args.first_parent && !is_range)
         .then(|| first_parent_oids(&current_head_commit, &reachable_commits));
     let filter = CommitFilter::new(
         args.author.clone(),

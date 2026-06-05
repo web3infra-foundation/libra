@@ -7,15 +7,35 @@ Show commit history.
 ## Synopsis
 
 ```
-libra log [OPTIONS] [-- PATHS...]
+libra log [OPTIONS] [<revision-range>] [-- PATHS...]
 ```
 
 ## Description
 
 `libra log` displays the commit history starting from the current HEAD. It supports multiple
 output formats including oneline, custom pretty-print, graph visualization, and structured
-JSON. Commits can be filtered by author, date range, and file paths. Diff output (`--patch`,
-`--stat`, `--name-only`, `--name-status`) can be limited to specific paths.
+JSON. Commits can be filtered by author, committer, date range, message (regex), parent count,
+content (pickaxe), and file paths. Diff output (`--patch`, `--stat`, `--name-only`,
+`--name-status`) can be limited to specific paths.
+
+### Revision ranges
+
+When a positional uses explicit range/exclude syntax it selects a commit set instead of HEAD:
+
+- `A..B` — commits reachable from `B` but not from `A` (`..B` and `A..` default the empty side
+  to `HEAD`).
+- `^A B` — equivalent to `A..B`; `^X` excludes everything reachable from `X`.
+- `A...B` — the symmetric difference: commits reachable from exactly one of `A`, `B`.
+
+An unresolvable endpoint fails with `LBR-CLI-003` (exit 129) and prints nothing. Bare positional
+tokens with no range syntax are treated as pathspec (unchanged). `--first-parent` is anchored at
+HEAD and is not applied to an explicit range.
+
+```bash
+libra log main..feature
+libra log ^main feature
+libra log v1.0...v2.0
+```
 
 Human mode preserves the current `--oneline`, `--graph`, `--pretty`, `--stat`, `--patch`, and
 related output styles. `--quiet` suppresses human output but still validates the requested
@@ -412,7 +432,7 @@ flag only affects the human rendering layer.
 | All refs | `git log --all` | `jj log -r 'all()'` | N/A (not yet implemented) |
 | Branches only | `git log --branches` | `jj log -r 'branches()'` | N/A |
 | Remotes only | `git log --remotes` | `jj log -r 'remote_branches()'` | N/A |
-| Revision range | `git log A..B` | `jj log -r 'A..B'` | N/A (not yet implemented) |
+| Revision range | `git log A..B` | `jj log -r 'A..B'` | `libra log A..B` / `A...B` / `^A B` |
 | Grep message | `git log --grep=<pat>` | Revset `description()` | `libra log --grep <regex>` (regex; `-i` for case-insensitive) |
 | Committer filter | `git log --committer=<pat>` | N/A | `libra log --committer <pat>` |
 | Pickaxe (string count) | `git log -S<string>` | N/A | `libra log -S <string>` |
@@ -438,8 +458,8 @@ flag only affects the human rendering layer.
 
 ## Compatibility Notes
 
-- `--all`, `--branches`, and `--remotes` are not yet implemented; log walks from HEAD only
-- Revision range syntax (`A..B`, `A...B`) is not yet supported; use `-n` and `--since`/`--until` for scoping
+- `--all`, `--branches`, and `--remotes` are not yet implemented; without a revision range, log walks from HEAD only
+- Revision range syntax (`A..B`, `A...B`, `^A B`) is supported; mixing a range with a pathspec in the same invocation (e.g. `A..B -- path`) is not yet supported
 - jj's log uses a template language (`-T`) for formatting; Libra uses Git-compatible `--pretty` format strings
 - `--grep` uses regular-expression matching (a semantic change from the earlier substring match); `^`/`$` are line anchors and `-i` enables case-insensitive matching
 - `--reverse` for chronological order is not yet implemented

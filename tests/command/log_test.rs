@@ -2230,3 +2230,130 @@ fn test_pickaxe_string_with_pathspec() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+// ── revision range A..B / A...B / ^A B (log-improvement-plan Batch 4, part 1) ──
+
+/// Build base -> diverge into main("main work") and feature("feature work").
+fn rev_range_repo() -> tempfile::TempDir {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    log_commit(repo.path(), "base.txt", "base", "base");
+    let branch = run_libra_command(&["branch", "feature"], repo.path());
+    assert!(
+        branch.status.success(),
+        "branch: {}",
+        String::from_utf8_lossy(&branch.stderr)
+    );
+    log_commit(repo.path(), "m.txt", "m", "main work");
+    let sw = run_libra_command(&["switch", "feature"], repo.path());
+    assert!(
+        sw.status.success(),
+        "switch: {}",
+        String::from_utf8_lossy(&sw.stderr)
+    );
+    log_commit(repo.path(), "f.txt", "f", "feature work");
+    repo
+}
+
+#[test]
+fn test_rev_range_two_dot() {
+    let repo = rev_range_repo();
+    let out = run_libra_command(&["log", "main..feature", "--oneline"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("feature work"),
+        "A..B must include B-only commits: {stdout}"
+    );
+    assert!(
+        !stdout.contains("main work"),
+        "A..B must exclude A-side commits: {stdout}"
+    );
+    assert!(
+        !stdout.contains("base"),
+        "A..B must exclude the common ancestor: {stdout}"
+    );
+}
+
+#[test]
+fn test_rev_range_caret() {
+    let repo = rev_range_repo();
+    // `^main feature` is equivalent to `main..feature`.
+    let out = run_libra_command(&["log", "^main", "feature", "--oneline"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("feature work"), "stdout: {stdout}");
+    assert!(!stdout.contains("main work"), "stdout: {stdout}");
+    assert!(!stdout.contains("base"), "stdout: {stdout}");
+}
+
+#[test]
+fn test_rev_range_three_dot() {
+    let repo = rev_range_repo();
+    // Symmetric difference: commits reachable from exactly one side.
+    let out = run_libra_command(&["log", "main...feature", "--oneline"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("feature work"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("main work"),
+        "A...B must include A-only commits too: {stdout}"
+    );
+    assert!(
+        !stdout.contains("base"),
+        "the common ancestor is reachable from both: {stdout}"
+    );
+}
+
+#[test]
+fn test_rev_range_bad_ref() {
+    let repo = rev_range_repo();
+    let out = run_libra_command(&["log", "nonexist..HEAD"], repo.path());
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "an unknown range endpoint must exit 129, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("LBR-CLI-003"),
+        "expected CliInvalidTarget, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "stdout must stay clean on a bad range ref"
+    );
+}
+
+#[test]
+fn test_rev_range_json_total() {
+    let repo = rev_range_repo();
+    let out = run_libra_command(&["--json", "log", "main..feature"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = parse_json_stdout(&out);
+    let commits = json["data"]["commits"].as_array().expect("commits");
+    assert_eq!(
+        commits.len(),
+        1,
+        "main..feature has exactly one commit: {json}"
+    );
+    assert_eq!(commits[0]["subject"], "feature work");
+}
