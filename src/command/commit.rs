@@ -543,6 +543,21 @@ async fn create_commit_signatures(
     Ok((author, committer, committer_identity))
 }
 
+/// Resolve the current user's committer [`Signature`] (name + email, stamped
+/// "now"). Exposed for `rebase`, whose replay preserves each commit's original
+/// author but re-stamps a fresh committer with the current identity (instead of
+/// the `git-internal` default `mega <admin@mega.org>` placeholder).
+pub(crate) async fn current_committer_signature() -> Result<Signature, String> {
+    let identity = resolve_committer_identity()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Signature::new(
+        SignatureType::Committer,
+        identity.name,
+        identity.email,
+    ))
+}
+
 fn first_message_line(message: &str) -> String {
     message.lines().next().unwrap_or("").trim().to_string()
 }
