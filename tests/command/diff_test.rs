@@ -1717,6 +1717,34 @@ fn diff_word_regex_config_override() {
 }
 
 #[test]
+fn diff_function_context_expands_hunk() {
+    let repo = create_committed_repo_via_cli();
+    let base = "fn alpha() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    let d = 4;\n    let e = 5;\n    return a;\n}\n";
+    let modified = "fn alpha() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    let d = 40;\n    let e = 5;\n    return a;\n}\n";
+    commit_file(&repo, "code.rs", base);
+    fs::write(repo.path().join("code.rs"), modified).unwrap();
+
+    // Default context (3) is too narrow to reach the `fn alpha` header.
+    let default = run_libra_command(&["diff"], repo.path());
+    assert_cli_success(&default, "default diff");
+    assert!(
+        !String::from_utf8_lossy(&default.stdout).contains("fn alpha"),
+        "default context must not reach the function header"
+    );
+
+    // -W expands the hunk to the whole function.
+    let wide = run_libra_command(&["diff", "-W"], repo.path());
+    assert_cli_success(&wide, "diff -W");
+    let stdout = String::from_utf8_lossy(&wide.stdout);
+    assert!(
+        stdout.contains("fn alpha() {"),
+        "-W shows the function header: {stdout}"
+    );
+    assert!(stdout.contains("-    let d = 4;"), "{stdout}");
+    assert!(stdout.contains("+    let d = 40;"), "{stdout}");
+}
+
+#[test]
 fn diff_word_diff_large_file_falls_back() {
     let repo = create_committed_repo_via_cli();
     // ~12 MB across 1000 lines (well under git-internal's 10k-line marker, but

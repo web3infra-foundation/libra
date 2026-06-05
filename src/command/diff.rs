@@ -154,6 +154,10 @@ pub struct DiffArgs {
     /// Regex describing what a word is for `--word-diff` (max 4096 bytes).
     #[clap(long = "word-diff-regex", value_name = "REGEX")]
     pub word_diff_regex: Option<String>,
+
+    /// Expand each hunk's context to the surrounding function boundaries.
+    #[clap(short = 'W', long = "function-context")]
+    pub function_context: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -357,7 +361,12 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
     // whitespace-comparison mode before choosing a diff backend.
     let context = resolve_diff_context(args).await?;
     let ws = WsMode::from_args(args);
-    let use_native = ws != WsMode::None || args.ignore_blank_lines || context != DEFAULT_CONTEXT;
+    // `-W` needs whole-file access to find function boundaries, so it also forces
+    // the libra-native generator.
+    let use_native = ws != WsMode::None
+        || args.ignore_blank_lines
+        || args.function_context
+        || context != DEFAULT_CONTEXT;
 
     // Snapshot per-side path→hash maps before the blobs are consumed by the diff
     // backend; rename/copy detection (below) needs them afterwards.
@@ -414,6 +423,7 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
             context,
             ws,
             args.ignore_blank_lines,
+            args.function_context,
             &read,
         )
     } else {
@@ -1159,6 +1169,180 @@ fn flush_native_hunk<'a>(
     eq_run.clear();
 }
 
+// ----- Wave 2: -W / --function-context -----
+
+/// Heuristic for a function/section header (Git's default funcname): a line
+/// whose first byte is a letter or `_` — declarations start at column 0, bodies
+/// are indented.
+fn is_function_header(line: &str) -> bool {
+    matches!(line.bytes().next(), Some(b) if b.is_ascii_alphabetic() || b == b'_')
+}
+
+/// Upper bound on how far `-W` expands a single block, so a missing header can't
+/// pull in an unbounded amount of context.
+const MAX_FUNCTION_CONTEXT: usize = 400;
+
+/// `-W` body: expand every change's context to the enclosing function block
+/// (nearest preceding header line through just before the next header), merging
+/// overlapping blocks.
+fn compute_function_context_diff(old_text: &str, new_text: &str, ws: WsMode) -> String {
+    use similar::{Algorithm, ChangeTag, TextDiff};
+
+    let old_tokens = tokenize_lines(old_text);
+    let new_tokens = tokenize_lines(new_text);
+    let old_render: Vec<&str> = old_tokens
+        .iter()
+        .map(|t| t.trim_end_matches(['\r', '\n']))
+        .collect();
+    let new_render: Vec<&str> = new_tokens
+        .iter()
+        .map(|t| t.trim_end_matches(['\r', '\n']))
+        .collect();
+    let make_key = |token: &str, render: &str| -> String {
+        match ws {
+            WsMode::None => token.to_string(),
+            _ => normalize_line(render, ws).into_owned(),
+        }
+    };
+    let old_keys: Vec<String> = old_tokens
+        .iter()
+        .zip(&old_render)
+        .map(|(t, r)| make_key(t, r))
+        .collect();
+    let new_keys: Vec<String> = new_tokens
+        .iter()
+        .zip(&new_render)
+        .map(|(t, r)| make_key(t, r))
+        .collect();
+    let old_key_refs: Vec<&str> = old_keys.iter().map(String::as_str).collect();
+    let new_key_refs: Vec<&str> = new_keys.iter().map(String::as_str).collect();
+    let diff = TextDiff::configure()
+        .algorithm(Algorithm::Myers)
+        .diff_slices(&old_key_refs, &new_key_refs);
+
+    let mut entries: Vec<EditLine> = Vec::new();
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Equal => {
+                let oi = change.old_index().unwrap_or(0);
+                let ni = change.new_index().unwrap_or(0);
+                entries.push(EditLine::Context(oi + 1, ni + 1, new_render[ni]));
+            }
+            ChangeTag::Delete => {
+                let oi = change.old_index().unwrap_or(0);
+                entries.push(EditLine::Delete(oi + 1, old_render[oi]));
+            }
+            ChangeTag::Insert => {
+                let ni = change.new_index().unwrap_or(0);
+                entries.push(EditLine::Insert(ni + 1, new_render[ni]));
+            }
+        }
+    }
+    if entries.is_empty() {
+        return String::new();
+    }
+
+    let n = entries.len();
+    let is_change = |e: &EditLine| matches!(e, EditLine::Delete(..) | EditLine::Insert(..));
+    let header_at =
+        |idx: usize| matches!(entries[idx], EditLine::Context(_, _, t) if is_function_header(t));
+
+    let mut blocks: Vec<(usize, usize)> = Vec::new();
+    for (i, entry) in entries.iter().enumerate() {
+        if !is_change(entry) {
+            continue;
+        }
+        let mut start = i;
+        let mut steps = 0;
+        while start > 0 {
+            if header_at(start) {
+                break;
+            }
+            start -= 1;
+            steps += 1;
+            if steps >= MAX_FUNCTION_CONTEXT {
+                break;
+            }
+        }
+        let mut end = i + 1;
+        let mut steps = 0;
+        while end < n {
+            if header_at(end) {
+                break;
+            }
+            end += 1;
+            steps += 1;
+            if steps >= MAX_FUNCTION_CONTEXT {
+                break;
+            }
+        }
+        blocks.push((start, end));
+    }
+
+    blocks.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in blocks {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+
+    let mut out = String::new();
+    for (start, end) in merged {
+        write_hunk_from_entries(&mut out, &entries[start..end]);
+    }
+    out
+}
+
+/// Write one hunk (header + lines) for a contiguous slice of edit entries.
+fn write_hunk_from_entries(out: &mut String, hunk: &[EditLine]) {
+    let mut old_first = None;
+    let mut old_count = 0usize;
+    let mut new_first = None;
+    let mut new_count = 0usize;
+    for entry in hunk {
+        match *entry {
+            EditLine::Context(o, n, _) => {
+                old_first.get_or_insert(o);
+                old_count += 1;
+                new_first.get_or_insert(n);
+                new_count += 1;
+            }
+            EditLine::Delete(o, _) => {
+                old_first.get_or_insert(o);
+                old_count += 1;
+            }
+            EditLine::Insert(n, _) => {
+                new_first.get_or_insert(n);
+                new_count += 1;
+            }
+        }
+    }
+    if old_count == 0 && new_count == 0 {
+        return;
+    }
+    let old_start = old_first.unwrap_or(1);
+    let new_start = new_first.unwrap_or(1);
+    let _ = writeln!(
+        out,
+        "@@ -{old_start},{old_count} +{new_start},{new_count} @@"
+    );
+    for entry in hunk {
+        match *entry {
+            EditLine::Context(_, _, txt) => {
+                let _ = writeln!(out, " {txt}");
+            }
+            EditLine::Delete(_, txt) => {
+                let _ = writeln!(out, "-{txt}");
+            }
+            EditLine::Insert(_, txt) => {
+                let _ = writeln!(out, "+{txt}");
+            }
+        }
+    }
+}
+
 /// Shorten an object hash to 7 hex chars (or 7 zeros when absent), matching the
 /// `index` line format git-internal writes.
 fn short_hash_native(hash: Option<&ObjectHash>) -> String {
@@ -1182,6 +1366,7 @@ fn native_diff_for_file(
     context: usize,
     ws: WsMode,
     ignore_blank_lines: bool,
+    function_context: bool,
 ) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "diff --git a/{} b/{}", file.display(), file.display());
@@ -1214,13 +1399,12 @@ fn native_diff_for_file(
             };
             let _ = writeln!(out, "--- {old_pref}");
             let _ = writeln!(out, "+++ {new_pref}");
-            out.push_str(&compute_unified_diff_native(
-                old_text,
-                new_text,
-                context,
-                ws,
-                ignore_blank_lines,
-            ));
+            let body = if function_context {
+                compute_function_context_diff(old_text, new_text, ws)
+            } else {
+                compute_unified_diff_native(old_text, new_text, context, ws, ignore_blank_lines)
+            };
+            out.push_str(&body);
         }
         _ => {
             let _ = writeln!(out, "Binary files differ");
@@ -1242,6 +1426,7 @@ fn native_diff(
     context: usize,
     ws: WsMode,
     ignore_blank_lines: bool,
+    function_context: bool,
     read_content: &dyn Fn(&PathBuf, &ObjectHash) -> Vec<u8>,
 ) -> Vec<git_internal::diff::DiffItem> {
     let old_map: HashMap<&PathBuf, &ObjectHash> = old_blobs.iter().map(|(p, h)| (p, h)).collect();
@@ -1289,6 +1474,7 @@ fn native_diff(
             context,
             ws,
             ignore_blank_lines,
+            function_context,
         );
 
         // A pure modify whose differences were all normalized away (whitespace
@@ -2281,6 +2467,7 @@ pub async fn staged_diff_text() -> String {
         raw: false,
         word_diff: None,
         word_diff_regex: None,
+        function_context: false,
     };
     match run_diff(&args).await {
         Ok(result) => format_unified_diff(&result),
@@ -2537,6 +2724,7 @@ mod test {
                 DEFAULT_CONTEXT,
                 WsMode::None,
                 false,
+                false,
             );
             assert_eq!(
                 native_out, git_internal_out,
@@ -2586,6 +2774,28 @@ mod test {
     fn native_ignore_blank_lines_drops_blank_only_hunk() {
         let out = compute_unified_diff_native("a\nb\n", "a\n\nb\n", 3, WsMode::None, true);
         assert!(!out.contains("@@"), "blank-only insertion ignored: {out:?}");
+    }
+
+    #[test]
+    fn native_function_context_expands_to_enclosing_function() {
+        let old = "fn alpha() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    let d = 4;\n    return a;\n}\nfn beta() {\n    let z = 0;\n}\n";
+        let new = "fn alpha() {\n    let a = 1;\n    let b = 2;\n    let c = 30;\n    let d = 4;\n    return a;\n}\nfn beta() {\n    let z = 0;\n}\n";
+        let out = compute_function_context_diff(old, new, WsMode::None);
+        assert!(
+            out.contains(" fn alpha() {"),
+            "header expands into context: {out}"
+        );
+        assert!(out.contains("-    let c = 3;"), "{out}");
+        assert!(out.contains("+    let c = 30;"), "{out}");
+        assert!(
+            out.contains(" }"),
+            "closing brace stays in the block: {out}"
+        );
+        // beta is a separate, unchanged function and must not be pulled in.
+        assert!(
+            !out.contains("let z = 0;"),
+            "untouched function excluded: {out}"
+        );
     }
 
     struct ColorOverrideReset;
