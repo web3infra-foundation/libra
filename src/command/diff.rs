@@ -49,6 +49,14 @@ EXAMPLES:
     libra diff --staged                     Compare HEAD against the index
     libra diff --old HEAD~1 --new HEAD      Compare two revisions
     libra diff --stat src/                  Show diff statistics under src/
+    libra diff -w                           Ignore all whitespace changes
+    libra diff -U5                          Show 5 lines of context (or diff.context)
+    libra diff --exit-code                  Exit 1 if there are differences
+    libra diff -M                           Detect renames (-C also detects copies)
+    libra diff --relative=src               Diff only src/, with paths relative to it
+    libra diff --word-diff=plain            Inline word-level diff markers
+    libra diff --raw                        Machine-readable raw format
+    libra diff -W                           Expand hunks to whole functions
     libra --json diff --staged              Structured JSON output for agents";
 
 #[derive(Parser, Debug)]

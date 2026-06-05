@@ -60,7 +60,7 @@ batch document.
 | push | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected — intentional (see [docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push](docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push)) |
 | fetch | supported | `--depth`, `--deepen`, and `--unshallow` public flags |
 | pull | partial | fetch + fast-forward/three-way merge supported; `--ff-only` and `--rebase` (`-r`) strategy flags exposed; `--squash` deferred |
-| diff | supported | |
+| diff | partial | `--old`/`--new`/`--staged`, pathspec, `--stat`/`--numstat`/`--name-only`/`--name-status`/`--raw`, `-b`/`-w`/`--ignore-blank-lines`, `-U<n>`/`diff.context`, `--exit-code`, `-M`/`-C`/`--no-renames`/`diff.renames`/`diff.renameLimit`, `--relative`, `--word-diff[=plain]`/`--word-diff-regex`/`diff.wordRegex`, `-W`/`--function-context`, `diff.noPrefix`, and `--json`/`--machine` (Libra extension) supported. `--word-diff=color` is intentionally-different (Libra colour codes). `--cc`/`--combined`, `.gitattributes` diff drivers, and `diff.mnemonicprefix` are deferred. `--algorithm=myers`/`myersMinimal` is unsupported (fail-closed `LBR-CLI-002`; only `histogram` validates, backed by git-internal's Myers). |
 | grep | supported | |
 | blame | supported | `-L` ranges, `--json`/`--machine`, and display flags `-l`/`-t`/`-f`/`-n`/`-s`/`-e`/`-w` supported; `--porcelain`/`-p` supported; `-M`/`-C` partial (flags parsed but cross-file move/copy detection is not implemented — blame still walks this file) |
 | revert | supported | |
