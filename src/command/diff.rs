@@ -146,6 +146,14 @@ pub struct DiffArgs {
     /// Output the diff in Git's raw format.
     #[clap(long = "raw")]
     pub raw: bool,
+
+    /// Show a word-level diff. Mode is `plain` (default) or `color`.
+    #[clap(long = "word-diff", value_name = "MODE", num_args = 0..=1, require_equals = true)]
+    pub word_diff: Option<Option<String>>,
+
+    /// Regex describing what a word is for `--word-diff` (max 4096 bytes).
+    #[clap(long = "word-diff-regex", value_name = "REGEX")]
+    pub word_diff_regex: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -283,6 +291,7 @@ pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()
         return Err(CliError::from(DiffError::NotInRepo));
     }
     validate_diff_algorithm(&args).map_err(CliError::from)?;
+    validate_diff_word_diff_regex(&args).map_err(CliError::from)?;
     emit_worktree_scan_progress(&args, output);
     let result = run_diff(&args).await.map_err(CliError::from)?;
     render_diff_output(&args, &result, output)
@@ -293,6 +302,19 @@ fn validate_diff_algorithm(args: &DiffArgs) -> Result<(), DiffError> {
         "histogram" => Ok(()),
         unsupported => Err(DiffError::UnsupportedAlgorithm(unsupported.to_string())),
     }
+}
+
+/// `--word-diff-regex` is bounded here (not by clap) so an over-long pattern maps
+/// to a usage error (129) rather than a clap parse error (exit 2).
+fn validate_diff_word_diff_regex(args: &DiffArgs) -> Result<(), DiffError> {
+    if let Some(re) = &args.word_diff_regex
+        && re.len() > 4096
+    {
+        return Err(DiffError::InvalidArgument(
+            "--word-diff-regex must be at most 4096 bytes".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn emit_worktree_scan_progress(args: &DiffArgs, output: &OutputConfig) {
@@ -438,6 +460,12 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
     let relative_base = resolve_relative_base(args)?;
     let no_prefix = read_no_prefix_config().await;
     apply_path_display_transforms(&mut files, relative_base.as_deref(), no_prefix);
+
+    // `--word-diff` rewrites unified hunk bodies into inline `[-del-]`/`{+add+}`
+    // (or ANSI-color) markers; it is a submode of the unified format.
+    if args.word_diff.is_some() {
+        apply_word_diff(&mut files, args).await;
+    }
 
     let total_insertions = files.iter().map(|file| file.insertions).sum();
     let total_deletions = files.iter().map(|file| file.deletions).sum();
@@ -1882,6 +1910,161 @@ fn transform_path_token(token: &str, relative_base: Option<&str>, no_prefix: boo
     }
 }
 
+// ----- Wave 2: --word-diff -----
+
+/// Default word boundary: a run of word chars, a run of whitespace, or a single
+/// other character (matches Git's default and covers the whole string).
+const DEFAULT_WORD_REGEX: &str = r"\w+|\s+|[^\w\s]";
+/// Files larger than this skip word tokenization and keep the line diff.
+const WORD_DIFF_MAX_BYTES: usize = 10 * 1024 * 1024;
+
+/// Rewrite each file's unified hunk body into a word-level diff. Files above
+/// [`WORD_DIFF_MAX_BYTES`] fall back to the line diff with a warning.
+async fn apply_word_diff(files: &mut [DiffFileStat], args: &DiffArgs) {
+    let color = matches!(
+        args.word_diff.as_ref().and_then(|m| m.as_deref()),
+        Some("color")
+    );
+    let pattern = resolve_word_regex(args).await;
+    let re = match regex::Regex::new(&pattern).or_else(|_| regex::Regex::new(DEFAULT_WORD_REGEX)) {
+        Ok(re) => re,
+        // Even the default failed to compile (not expected); leave the line diff.
+        Err(_) => return,
+    };
+
+    for file in files.iter_mut() {
+        if file.raw_diff.len() > WORD_DIFF_MAX_BYTES {
+            crate::utils::error::emit_warning(format!(
+                "word-diff skipped for '{}' (larger than {WORD_DIFF_MAX_BYTES} bytes); showing line diff",
+                file.path
+            ));
+            continue;
+        }
+        file.raw_diff = apply_word_diff_to_raw(&file.raw_diff, &re, color);
+    }
+}
+
+async fn resolve_word_regex(args: &DiffArgs) -> String {
+    if let Some(re) = &args.word_diff_regex {
+        return re.clone();
+    }
+    if let Ok(Some(entry)) = ConfigKv::get("diff.wordRegex").await {
+        let value = entry.value.trim();
+        if !value.is_empty() {
+            return value.to_string();
+        }
+    }
+    DEFAULT_WORD_REGEX.to_string()
+}
+
+/// Convert a single file's unified diff body into the word-diff rendering,
+/// merging each run of deletions/insertions into one inline change.
+fn apply_word_diff_to_raw(raw_diff: &str, re: &regex::Regex, color: bool) -> String {
+    let trailing_nl = raw_diff.ends_with('\n');
+    let mut out: Vec<String> = Vec::new();
+    let mut del: Vec<&str> = Vec::new();
+    let mut ins: Vec<&str> = Vec::new();
+    let mut in_body = false;
+
+    for line in raw_diff.lines() {
+        if line.starts_with("@@ ") {
+            flush_word_change(&mut out, &mut del, &mut ins, re, color);
+            out.push(line.to_string());
+            in_body = true;
+            continue;
+        }
+        if !in_body {
+            out.push(line.to_string());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix(' ') {
+            flush_word_change(&mut out, &mut del, &mut ins, re, color);
+            out.push(rest.to_string());
+        } else if let Some(rest) = line.strip_prefix('-') {
+            del.push(rest);
+        } else if let Some(rest) = line.strip_prefix('+') {
+            ins.push(rest);
+        } else {
+            flush_word_change(&mut out, &mut del, &mut ins, re, color);
+            out.push(line.to_string());
+        }
+    }
+    flush_word_change(&mut out, &mut del, &mut ins, re, color);
+
+    let mut joined = out.join("\n");
+    if trailing_nl {
+        joined.push('\n');
+    }
+    joined
+}
+
+fn flush_word_change<'a>(
+    out: &mut Vec<String>,
+    del: &mut Vec<&'a str>,
+    ins: &mut Vec<&'a str>,
+    re: &regex::Regex,
+    color: bool,
+) {
+    if del.is_empty() && ins.is_empty() {
+        return;
+    }
+    out.push(word_diff_segment(
+        &del.join("\n"),
+        &ins.join("\n"),
+        re,
+        color,
+    ));
+    del.clear();
+    ins.clear();
+}
+
+/// Word-level diff of one change region, with deleted/inserted runs wrapped in
+/// `[-...-]`/`{+...+}` (plain) or red/green ANSI (color).
+fn word_diff_segment(old_text: &str, new_text: &str, re: &regex::Regex, color: bool) -> String {
+    use similar::{Algorithm, ChangeTag, TextDiff};
+
+    let old_words: Vec<&str> = re.find_iter(old_text).map(|m| m.as_str()).collect();
+    let new_words: Vec<&str> = re.find_iter(new_text).map(|m| m.as_str()).collect();
+    let diff = TextDiff::configure()
+        .algorithm(Algorithm::Myers)
+        .diff_slices(&old_words, &new_words);
+
+    let mut out = String::new();
+    let mut del = String::new();
+    let mut ins = String::new();
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Equal => {
+                flush_word_markers(&mut out, &mut del, &mut ins, color);
+                out.push_str(change.value());
+            }
+            ChangeTag::Delete => del.push_str(change.value()),
+            ChangeTag::Insert => ins.push_str(change.value()),
+        }
+    }
+    flush_word_markers(&mut out, &mut del, &mut ins, color);
+    out
+}
+
+fn flush_word_markers(out: &mut String, del: &mut String, ins: &mut String, color: bool) {
+    if !del.is_empty() {
+        if color {
+            out.push_str(&format!("\x1b[31m{del}\x1b[0m"));
+        } else {
+            out.push_str(&format!("[-{del}-]"));
+        }
+        del.clear();
+    }
+    if !ins.is_empty() {
+        if color {
+            out.push_str(&format!("\x1b[32m{ins}\x1b[0m"));
+        } else {
+            out.push_str(&format!("{{+{ins}+}}"));
+        }
+        ins.clear();
+    }
+}
+
 fn render_diff_output(
     args: &DiffArgs,
     result: &DiffOutput,
@@ -2096,6 +2279,8 @@ pub async fn staged_diff_text() -> String {
         no_renames: false,
         relative: None,
         raw: false,
+        word_diff: None,
+        word_diff_regex: None,
     };
     match run_diff(&args).await {
         Ok(result) => format_unified_diff(&result),

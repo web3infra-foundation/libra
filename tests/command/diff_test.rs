@@ -1642,3 +1642,99 @@ fn diff_output_format_precedence() {
     assert_eq!(parsed["command"], "diff");
     assert_eq!(parsed["data"]["files_changed"], 1);
 }
+
+// ----- Wave 2b: --word-diff -----
+
+#[test]
+fn diff_word_diff_plain_markers() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "w.txt", "alpha beta gamma\n");
+    fs::write(repo.path().join("w.txt"), "alpha BETA gamma\n").unwrap();
+
+    let output = run_libra_command(&["diff", "--word-diff=plain"], repo.path());
+    assert_cli_success(&output, "diff --word-diff=plain");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[-beta-]"), "deletion marker: {stdout}");
+    assert!(stdout.contains("{+BETA+}"), "insertion marker: {stdout}");
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "plain mode has no ANSI: {stdout:?}"
+    );
+}
+
+#[test]
+fn diff_word_diff_color_has_ansi() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "w.txt", "alpha beta gamma\n");
+    fs::write(repo.path().join("w.txt"), "alpha BETA gamma\n").unwrap();
+
+    let output = run_libra_command(&["diff", "--word-diff=color"], repo.path());
+    assert_cli_success(&output, "diff --word-diff=color");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains('\u{1b}'),
+        "color mode emits ANSI: {stdout:?}"
+    );
+}
+
+#[test]
+fn diff_word_diff_regex_over_4kib_rejected() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let long = "a".repeat(4097);
+    let output = run_libra_command(&["diff", "--word-diff-regex", &long], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "over-long --word-diff-regex must be a usage error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+#[test]
+fn diff_word_regex_config_override() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "w.txt", "x foo-bar y\n");
+    fs::write(repo.path().join("w.txt"), "x foo-baz y\n").unwrap();
+    // Treat hyphenated identifiers as a single word so the whole token is marked.
+    assert_cli_success(
+        &run_libra_command(
+            &["config", "set", "diff.wordRegex", r"[\w-]+|\s+|[^\w\s]"],
+            repo.path(),
+        ),
+        "set diff.wordRegex",
+    );
+
+    let output = run_libra_command(&["diff", "--word-diff=plain"], repo.path());
+    assert_cli_success(&output, "diff --word-diff with custom regex");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[-foo-bar-]"),
+        "custom word regex should mark the whole hyphenated token: {stdout}"
+    );
+}
+
+#[test]
+fn diff_word_diff_large_file_falls_back() {
+    let repo = create_committed_repo_via_cli();
+    // ~12 MB across 1000 lines (well under git-internal's 10k-line marker, but
+    // over the 10 MB word-diff cap).
+    let base: String = (0..1000)
+        .map(|_| format!("{}\n", "a".repeat(6000)))
+        .collect();
+    let modified: String = (0..1000)
+        .map(|_| format!("{}\n", "b".repeat(6000)))
+        .collect();
+    commit_file(&repo, "big.txt", &base);
+    fs::write(repo.path().join("big.txt"), &modified).unwrap();
+
+    let output = run_libra_command(&["diff", "--word-diff=plain"], repo.path());
+    assert_cli_success(&output, "diff --word-diff large file");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("word-diff skipped"),
+        "large file should warn and fall back: {stderr}"
+    );
+}
