@@ -3,8 +3,10 @@
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::{
+    borrow::Cow,
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
+    fmt::Write as _,
     io::{self, IsTerminal},
     path::{Path, PathBuf},
     rc::Rc,
@@ -25,7 +27,7 @@ use serde::Serialize;
 
 use crate::{
     command::{get_target_commit, load_object},
-    internal::head::Head,
+    internal::{config::ConfigKv, head::Head},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         ignore::{self, IgnorePolicy},
@@ -92,6 +94,30 @@ pub struct DiffArgs {
     /// Show diff statistics
     #[clap(long)]
     pub stat: bool,
+
+    /// Ignore changes in the amount of whitespace (trailing whitespace and runs
+    /// of whitespace are treated as a single space for comparison).
+    #[clap(short = 'b', long = "ignore-space-change")]
+    pub ignore_space_change: bool,
+
+    /// Ignore all whitespace when comparing lines.
+    #[clap(short = 'w', long = "ignore-all-space")]
+    pub ignore_all_space: bool,
+
+    /// Ignore changes whose lines are all blank.
+    #[clap(long = "ignore-blank-lines")]
+    pub ignore_blank_lines: bool,
+
+    /// Generate diffs with <n> lines of context (default 3, or `diff.context`).
+    // No `default_value`: it must stay `None` when omitted so `diff.context`
+    // can supply the default. Priority is `-U` > `diff.context` > 3.
+    #[clap(short = 'U', long = "unified", value_name = "N")]
+    pub unified: Option<usize>,
+
+    /// Exit with status 1 if there are differences, 0 otherwise (output is
+    /// still written, unlike `--quiet`).
+    #[clap(long = "exit-code")]
+    pub exit_code: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -155,6 +181,9 @@ enum DiffError {
         "diff --algorithm={0} is not supported yet; only --algorithm=histogram is currently implemented"
     )]
     UnsupportedAlgorithm(String),
+
+    #[error("invalid value '{value}' for '{key}': expected a non-negative integer")]
+    InvalidConfig { key: String, value: String },
 }
 
 impl From<DiffError> for CliError {
@@ -185,6 +214,9 @@ impl From<DiffError> for CliError {
                 .with_hint(
                     "omit --algorithm or use --algorithm=histogram until alternate diff backends are available",
                 ),
+            DiffError::InvalidConfig { .. } => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("set the config value to a non-negative integer"),
         }
     }
 }
@@ -247,12 +279,19 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
     let new_side = resolve_diff_side(&args.new, args.staged, true, &index).await?;
 
     let paths: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
+
+    // Resolve the unified-context radius (`-U` > `diff.context` > 3) and the
+    // whitespace-comparison mode before choosing a diff backend.
+    let context = resolve_diff_context(args).await?;
+    let ws = WsMode::from_args(args);
+    let use_native = ws != WsMode::None || args.ignore_blank_lines || context != DEFAULT_CONTEXT;
+
     let worktree_entries = new_side.worktree_entries.clone();
     let worktree_cache = RefCell::new(HashMap::<ObjectHash, Vec<u8>>::new());
     let repo_cache = RefCell::new(HashMap::<ObjectHash, Vec<u8>>::new());
     let load_error = Rc::new(RefCell::new(None::<DiffError>));
     let load_error_for_read = Rc::clone(&load_error);
-    let diff_output = Diff::diff(old_side.blobs, new_side.blobs, paths, move |path, hash| {
+    let read = move |path: &PathBuf, hash: &ObjectHash| -> Vec<u8> {
         if worktree_entries.get(path) == Some(hash) {
             if let Some(data) = worktree_cache.borrow().get(hash).cloned() {
                 return data;
@@ -284,7 +323,24 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
                 }
             }
         }
-    });
+    };
+
+    // Default path (context 3, no whitespace handling) stays on git-internal's
+    // `Diff::diff` so output is byte-identical to the established baseline; the
+    // libra-native generator only runs when a Wave-0 feature is requested.
+    let diff_output = if use_native {
+        native_diff(
+            &old_side.blobs,
+            &new_side.blobs,
+            &paths,
+            context,
+            ws,
+            args.ignore_blank_lines,
+            &read,
+        )
+    } else {
+        Diff::diff(old_side.blobs, new_side.blobs, paths, &read)
+    };
     if let Some(err) = load_error.borrow_mut().take() {
         return Err(err);
     }
@@ -571,26 +627,590 @@ fn record_diff_content_error(slot: &Rc<RefCell<Option<DiffError>>>, error: DiffE
     }
 }
 
+/// Default unified-diff context radius, matching Git and git-internal.
+const DEFAULT_CONTEXT: usize = 3;
+
+/// Safety cap mirroring git-internal: pathological inputs are rendered as a
+/// large-file marker rather than diffed line-by-line.
+const NATIVE_MAX_DIFF_LINES: usize = 10_000;
+
+/// Whitespace-comparison mode selected by `-b` / `-w`. It only affects how two
+/// lines are judged equal; rendered hunk lines always use original content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WsMode {
+    None,
+    /// `-b`: ignore trailing whitespace and collapse internal whitespace runs.
+    SpaceChange,
+    /// `-w`: ignore all whitespace.
+    AllSpace,
+}
+
+impl WsMode {
+    fn from_args(args: &DiffArgs) -> Self {
+        // `-w` is the stronger rule and wins when both are supplied (matches Git).
+        if args.ignore_all_space {
+            WsMode::AllSpace
+        } else if args.ignore_space_change {
+            WsMode::SpaceChange
+        } else {
+            WsMode::None
+        }
+    }
+}
+
+/// Resolve the unified-context radius: explicit `-U<n>` wins, then `diff.context`
+/// config, then the built-in default of 3. A non-numeric `diff.context` is a
+/// usage error (129), matching Git's `bad numeric config value`.
+async fn resolve_diff_context(args: &DiffArgs) -> Result<usize, DiffError> {
+    if let Some(n) = args.unified {
+        return Ok(n);
+    }
+    match ConfigKv::get("diff.context").await {
+        Ok(Some(entry)) => {
+            entry
+                .value
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| DiffError::InvalidConfig {
+                    key: "diff.context".to_string(),
+                    value: entry.value.clone(),
+                })
+        }
+        _ => Ok(DEFAULT_CONTEXT),
+    }
+}
+
+/// Exit status for `--exit-code` / `--quiet`: 1 when there are differences, else
+/// 0. The diff body is still rendered (the caller decides whether to suppress
+/// stdout for `--quiet`); this value is the command's semantic exit code, not an
+/// error in the 9/128/129 family.
+fn diff_exit_status(result: &DiffOutput, exit_code: bool, quiet: bool) -> i32 {
+    if (exit_code || quiet) && result.files_changed > 0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Normalize a line for whitespace-insensitive comparison. The result is only a
+/// comparison key; the original line text is what gets rendered.
+fn normalize_line(line: &str, ws: WsMode) -> Cow<'_, str> {
+    match ws {
+        WsMode::None => Cow::Borrowed(line),
+        WsMode::AllSpace => Cow::Owned(line.chars().filter(|c| !c.is_whitespace()).collect()),
+        WsMode::SpaceChange => {
+            let trimmed = line.trim_end();
+            let mut result = String::with_capacity(trimmed.len());
+            let mut last_was_space = false;
+            for c in trimmed.chars() {
+                if c.is_whitespace() {
+                    if !last_was_space {
+                        result.push(' ');
+                        last_was_space = true;
+                    }
+                } else {
+                    result.push(c);
+                    last_was_space = false;
+                }
+            }
+            Cow::Owned(result)
+        }
+    }
+}
+
+/// Split text into lines, keeping each line's trailing newline. This matches
+/// `similar`'s line tokenizer so the no-whitespace path produces the same Myers
+/// edit script (and therefore the same output) as git-internal's `Diff::diff`.
+fn tokenize_lines(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, &b) in text.as_bytes().iter().enumerate() {
+        if b == b'\n' {
+            out.push(&text[start..=i]);
+            start = i + 1;
+        }
+    }
+    if start < text.len() {
+        out.push(&text[start..]);
+    }
+    out
+}
+
+/// One physical diff line while a hunk is being assembled. Text is the original
+/// (newline-trimmed) content; line numbers are 1-based.
+#[derive(Debug, Clone, Copy)]
+enum EditLine<'a> {
+    Context(usize, usize, &'a str),
+    Delete(usize, &'a str),
+    Insert(usize, &'a str),
+}
+
+/// Compute a single file's unified-diff body with a configurable context radius,
+/// whitespace-insensitive comparison and optional blank-line ignoring. Ported
+/// from git-internal's streaming hunk algorithm so the no-whitespace, context-3
+/// path is byte-identical; comparison uses normalized keys while rendering uses
+/// the original lines.
+fn compute_unified_diff_native(
+    old_text: &str,
+    new_text: &str,
+    context: usize,
+    ws: WsMode,
+    ignore_blank_lines: bool,
+) -> String {
+    use similar::{Algorithm, ChangeTag, TextDiff};
+
+    let old_tokens = tokenize_lines(old_text);
+    let new_tokens = tokenize_lines(new_text);
+    let old_render: Vec<&str> = old_tokens
+        .iter()
+        .map(|t| t.trim_end_matches(['\r', '\n']))
+        .collect();
+    let new_render: Vec<&str> = new_tokens
+        .iter()
+        .map(|t| t.trim_end_matches(['\r', '\n']))
+        .collect();
+
+    // Comparison keys: keep the raw token (with newline) when not ignoring
+    // whitespace so the Myers result matches git-internal exactly; otherwise key
+    // on the normalized, newline-trimmed line.
+    let make_key = |token: &str, render: &str| -> String {
+        match ws {
+            WsMode::None => token.to_string(),
+            _ => normalize_line(render, ws).into_owned(),
+        }
+    };
+    let old_keys: Vec<String> = old_tokens
+        .iter()
+        .zip(&old_render)
+        .map(|(t, r)| make_key(t, r))
+        .collect();
+    let new_keys: Vec<String> = new_tokens
+        .iter()
+        .zip(&new_render)
+        .map(|(t, r)| make_key(t, r))
+        .collect();
+    let old_key_refs: Vec<&str> = old_keys.iter().map(String::as_str).collect();
+    let new_key_refs: Vec<&str> = new_keys.iter().map(String::as_str).collect();
+
+    let diff = TextDiff::configure()
+        .algorithm(Algorithm::Myers)
+        .diff_slices(&old_key_refs, &new_key_refs);
+
+    let mut out = String::new();
+    let mut prefix_ctx: VecDeque<EditLine> = VecDeque::with_capacity(context);
+    let mut cur_hunk: Vec<EditLine> = Vec::new();
+    let mut eq_run: Vec<EditLine> = Vec::new();
+    let mut in_hunk = false;
+    let mut last_old_seen = 0usize;
+    let mut last_new_seen = 0usize;
+
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Equal => {
+                let oi = change.old_index().unwrap_or(0);
+                let ni = change.new_index().unwrap_or(0);
+                last_old_seen = oi + 1;
+                last_new_seen = ni + 1;
+                let entry = EditLine::Context(oi + 1, ni + 1, new_render[ni]);
+                if in_hunk {
+                    eq_run.push(entry);
+                    if eq_run.len() > context * 2 {
+                        flush_native_hunk(
+                            &mut out,
+                            &mut cur_hunk,
+                            &mut eq_run,
+                            &mut prefix_ctx,
+                            context,
+                            &mut last_old_seen,
+                            &mut last_new_seen,
+                            ignore_blank_lines,
+                        );
+                        in_hunk = false;
+                    }
+                } else if context > 0 {
+                    if prefix_ctx.len() == context {
+                        prefix_ctx.pop_front();
+                    }
+                    prefix_ctx.push_back(entry);
+                }
+            }
+            ChangeTag::Delete => {
+                let oi = change.old_index().unwrap_or(0);
+                let entry = EditLine::Delete(oi + 1, old_render[oi]);
+                if !in_hunk {
+                    cur_hunk.extend(prefix_ctx.iter().copied());
+                    prefix_ctx.clear();
+                    in_hunk = true;
+                }
+                if !eq_run.is_empty() {
+                    cur_hunk.append(&mut eq_run);
+                }
+                cur_hunk.push(entry);
+            }
+            ChangeTag::Insert => {
+                let ni = change.new_index().unwrap_or(0);
+                let entry = EditLine::Insert(ni + 1, new_render[ni]);
+                if !in_hunk {
+                    cur_hunk.extend(prefix_ctx.iter().copied());
+                    prefix_ctx.clear();
+                    in_hunk = true;
+                }
+                if !eq_run.is_empty() {
+                    cur_hunk.append(&mut eq_run);
+                }
+                cur_hunk.push(entry);
+            }
+        }
+    }
+
+    if in_hunk {
+        flush_native_hunk(
+            &mut out,
+            &mut cur_hunk,
+            &mut eq_run,
+            &mut prefix_ctx,
+            context,
+            &mut last_old_seen,
+            &mut last_new_seen,
+            ignore_blank_lines,
+        );
+    }
+
+    out
+}
+
+/// Emit one assembled hunk, trimming trailing context to `context` lines and
+/// (when `ignore_blank_lines`) dropping hunks whose every changed line is blank.
+#[allow(clippy::too_many_arguments)]
+fn flush_native_hunk<'a>(
+    out: &mut String,
+    cur_hunk: &mut Vec<EditLine<'a>>,
+    eq_run: &mut Vec<EditLine<'a>>,
+    prefix_ctx: &mut VecDeque<EditLine<'a>>,
+    context: usize,
+    last_old_seen: &mut usize,
+    last_new_seen: &mut usize,
+    ignore_blank_lines: bool,
+) {
+    let trail_to_take = eq_run.len().min(context);
+    for entry in eq_run.iter().take(trail_to_take) {
+        cur_hunk.push(*entry);
+    }
+
+    if ignore_blank_lines {
+        let only_blank_changes = cur_hunk.iter().all(|e| match e {
+            EditLine::Delete(_, txt) | EditLine::Insert(_, txt) => txt.trim().is_empty(),
+            EditLine::Context(..) => true,
+        });
+        let has_change = cur_hunk
+            .iter()
+            .any(|e| matches!(e, EditLine::Delete(..) | EditLine::Insert(..)));
+        if has_change && only_blank_changes {
+            prefix_ctx.clear();
+            if context > 0 {
+                let keep_start = eq_run.len().saturating_sub(context);
+                for entry in eq_run.iter().skip(keep_start) {
+                    prefix_ctx.push_back(*entry);
+                }
+            }
+            cur_hunk.clear();
+            eq_run.clear();
+            return;
+        }
+    }
+
+    let mut old_first: Option<usize> = None;
+    let mut old_count = 0usize;
+    let mut new_first: Option<usize> = None;
+    let mut new_count = 0usize;
+    for e in cur_hunk.iter() {
+        match *e {
+            EditLine::Context(o, n, _) => {
+                if old_first.is_none() {
+                    old_first = Some(o);
+                }
+                old_count += 1;
+                if new_first.is_none() {
+                    new_first = Some(n);
+                }
+                new_count += 1;
+            }
+            EditLine::Delete(o, _) => {
+                if old_first.is_none() {
+                    old_first = Some(o);
+                }
+                old_count += 1;
+            }
+            EditLine::Insert(n, _) => {
+                if new_first.is_none() {
+                    new_first = Some(n);
+                }
+                new_count += 1;
+            }
+        }
+    }
+
+    if old_count == 0 && new_count == 0 {
+        cur_hunk.clear();
+        eq_run.clear();
+        return;
+    }
+
+    let old_start = old_first.unwrap_or(*last_old_seen + 1);
+    let new_start = new_first.unwrap_or(*last_new_seen + 1);
+    let _ = writeln!(
+        out,
+        "@@ -{old_start},{old_count} +{new_start},{new_count} @@"
+    );
+
+    for &e in cur_hunk.iter() {
+        match e {
+            EditLine::Context(o, n, txt) => {
+                let _ = writeln!(out, " {txt}");
+                *last_old_seen = (*last_old_seen).max(o);
+                *last_new_seen = (*last_new_seen).max(n);
+            }
+            EditLine::Delete(o, txt) => {
+                let _ = writeln!(out, "-{txt}");
+                *last_old_seen = (*last_old_seen).max(o);
+            }
+            EditLine::Insert(n, txt) => {
+                let _ = writeln!(out, "+{txt}");
+                *last_new_seen = (*last_new_seen).max(n);
+            }
+        }
+    }
+
+    prefix_ctx.clear();
+    if context > 0 {
+        let keep_start = eq_run.len().saturating_sub(context);
+        for entry in eq_run.iter().skip(keep_start) {
+            prefix_ctx.push_back(*entry);
+        }
+    }
+    cur_hunk.clear();
+    eq_run.clear();
+}
+
+/// Shorten an object hash to 7 hex chars (or 7 zeros when absent), matching the
+/// `index` line format git-internal writes.
+fn short_hash_native(hash: Option<&ObjectHash>) -> String {
+    hash.map(|h| {
+        let hex = h.to_string();
+        let take = 7.min(hex.len());
+        hex[..take].to_string()
+    })
+    .unwrap_or_else(|| "0".repeat(7))
+}
+
+/// Render one file's full unified diff (headers + body) using the native
+/// generator, mirroring git-internal's `diff_for_file_preloaded` layout.
+#[allow(clippy::too_many_arguments)]
+fn native_diff_for_file(
+    file: &Path,
+    old_hash: Option<&ObjectHash>,
+    new_hash: Option<&ObjectHash>,
+    old_bytes: &[u8],
+    new_bytes: &[u8],
+    context: usize,
+    ws: WsMode,
+    ignore_blank_lines: bool,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "diff --git a/{} b/{}", file.display(), file.display());
+    if old_hash.is_none() {
+        let _ = writeln!(out, "new file mode 100644");
+    } else if new_hash.is_none() {
+        let _ = writeln!(out, "deleted file mode 100644");
+    }
+    let _ = writeln!(
+        out,
+        "index {}..{} 100644",
+        short_hash_native(old_hash),
+        short_hash_native(new_hash)
+    );
+
+    match (
+        std::str::from_utf8(old_bytes),
+        std::str::from_utf8(new_bytes),
+    ) {
+        (Ok(old_text), Ok(new_text)) => {
+            let (old_pref, new_pref) = if old_text.is_empty() {
+                ("/dev/null".to_string(), format!("b/{}", file.display()))
+            } else if new_text.is_empty() {
+                (format!("a/{}", file.display()), "/dev/null".to_string())
+            } else {
+                (
+                    format!("a/{}", file.display()),
+                    format!("b/{}", file.display()),
+                )
+            };
+            let _ = writeln!(out, "--- {old_pref}");
+            let _ = writeln!(out, "+++ {new_pref}");
+            out.push_str(&compute_unified_diff_native(
+                old_text,
+                new_text,
+                context,
+                ws,
+                ignore_blank_lines,
+            ));
+        }
+        _ => {
+            let _ = writeln!(out, "Binary files differ");
+        }
+    }
+    out
+}
+
+/// libra-native counterpart to `Diff::diff`: pairs old/new blobs by path, applies
+/// the pathspec filter, and renders each differing file with a configurable
+/// context radius and whitespace handling. Files whose only differences are
+/// normalized away (whitespace/blank-line) produce no hunk and are dropped from
+/// the result so counts and `--exit-code` stay accurate.
+#[allow(clippy::too_many_arguments)]
+fn native_diff(
+    old_blobs: &[(PathBuf, ObjectHash)],
+    new_blobs: &[(PathBuf, ObjectHash)],
+    filter: &[PathBuf],
+    context: usize,
+    ws: WsMode,
+    ignore_blank_lines: bool,
+    read_content: &dyn Fn(&PathBuf, &ObjectHash) -> Vec<u8>,
+) -> Vec<git_internal::diff::DiffItem> {
+    let old_map: HashMap<&PathBuf, &ObjectHash> = old_blobs.iter().map(|(p, h)| (p, h)).collect();
+    let new_map: HashMap<&PathBuf, &ObjectHash> = new_blobs.iter().map(|(p, h)| (p, h)).collect();
+
+    let mut files: Vec<&PathBuf> = old_map.keys().chain(new_map.keys()).copied().collect();
+    files.sort();
+    files.dedup();
+
+    let mut results = Vec::new();
+    for file in files {
+        if !filter.is_empty() && !filter.iter().any(|p| path_is_sub_of(file, p)) {
+            continue;
+        }
+        let old_hash = old_map.get(file).copied();
+        let new_hash = new_map.get(file).copied();
+        if old_hash == new_hash {
+            continue;
+        }
+
+        let old_bytes = old_hash.map_or_else(Vec::new, |h| read_content(file, h));
+        let new_bytes = new_hash.map_or_else(Vec::new, |h| read_content(file, h));
+
+        let old_lines = String::from_utf8_lossy(&old_bytes).lines().count();
+        let new_lines = String::from_utf8_lossy(&new_bytes).lines().count();
+        if old_lines + new_lines > NATIVE_MAX_DIFF_LINES {
+            results.push(git_internal::diff::DiffItem {
+                path: file.to_string_lossy().to_string(),
+                data: format!(
+                    "<LargeFile>{}:{}:{}</LargeFile>\n",
+                    file.display(),
+                    old_lines + new_lines,
+                    NATIVE_MAX_DIFF_LINES
+                ),
+            });
+            continue;
+        }
+
+        let data = native_diff_for_file(
+            file,
+            old_hash,
+            new_hash,
+            &old_bytes,
+            &new_bytes,
+            context,
+            ws,
+            ignore_blank_lines,
+        );
+
+        // A pure modify whose differences were all normalized away (whitespace
+        // or blank-line) yields no hunk; drop it so it does not count as changed.
+        let has_hunk = data.contains("@@ ");
+        let is_add_or_delete = old_hash.is_none() || new_hash.is_none();
+        let is_binary = data.contains("Binary files differ");
+        if !has_hunk && !is_add_or_delete && !is_binary {
+            continue;
+        }
+        results.push(git_internal::diff::DiffItem {
+            path: file.to_string_lossy().to_string(),
+            data,
+        });
+    }
+    results
+}
+
+/// Whether `path` lies under `parent` once both are absolutized, matching
+/// git-internal's pathspec containment check.
+fn path_is_sub_of(path: &Path, parent: &Path) -> bool {
+    use path_absolutize::Absolutize;
+    match (path.absolutize(), parent.absolutize()) {
+        (Ok(p), Ok(par)) => p.starts_with(par),
+        _ => false,
+    }
+}
+
 fn render_diff_output(
     args: &DiffArgs,
     result: &DiffOutput,
     output: &OutputConfig,
 ) -> CliResult<()> {
     if output.is_json() {
-        return emit_json_data("diff", result, output);
+        emit_json_data("diff", result, output)?;
+        // On the structured path the JSON body is the result, so only an explicit
+        // `--exit-code` signals via the exit code; `--machine` implies `--quiet`
+        // but must not, on its own, turn the exit code non-zero.
+        return finish_with_exit_status(diff_exit_status(result, args.exit_code, false));
     }
 
-    if output.quiet && args.output.is_none() {
-        return if result.files_changed > 0 {
-            Err(CliError::silent_exit(1))
+    // For human output, `--quiet` doubles as an exit-code signal alongside the
+    // explicit `--exit-code` flag.
+    let exit_status = diff_exit_status(result, args.exit_code, output.quiet);
+    let rendered = render_diff_text(args, result);
+
+    // --output writes are an explicit side-effect and must be honored even when
+    // --quiet is set (quiet only suppresses stdout, not file writes).
+    if let Some(path) = &args.output {
+        std::fs::write(path, rendered.as_bytes())
+            .map_err(|e| DiffError::OutputWrite {
+                path: path.clone(),
+                detail: e.to_string(),
+            })
+            .map_err(CliError::from)?;
+        return finish_with_exit_status(exit_status);
+    }
+
+    // --quiet suppresses stdout entirely; only the exit status is observable.
+    if output.quiet {
+        return finish_with_exit_status(exit_status);
+    }
+
+    if !rendered.is_empty() {
+        let mut pager = Pager::with_config(output)?;
+        let rendered = if args.name_only || args.name_status || args.numstat || args.stat {
+            rendered
         } else {
-            Ok(())
+            maybe_colorize_diff(&rendered, io::stdout().is_terminal())
         };
+        pager.write_str(&format!("{rendered}\n"))?;
+        pager.finish()?;
     }
+    finish_with_exit_status(exit_status)
+}
 
-    // --output writes are an explicit side-effect and must be honored even
-    // when --quiet is set (quiet only suppresses stdout, not file writes).
-    let rendered = if args.name_only {
+/// Translate a diff semantic exit code into a `CliResult`: a non-zero code maps
+/// to a silent exit so the rendered diff is preserved on stdout.
+fn finish_with_exit_status(code: i32) -> CliResult<()> {
+    if code != 0 {
+        Err(CliError::silent_exit(code))
+    } else {
+        Ok(())
+    }
+}
+
+/// Select and render the human-facing diff text for the active output format.
+fn render_diff_text(args: &DiffArgs, result: &DiffOutput) -> String {
+    if args.name_only {
         result
             .files
             .iter()
@@ -615,40 +1235,7 @@ fn render_diff_output(
         format_diff_stat_output(result)
     } else {
         format_unified_diff(result)
-    };
-
-    if let Some(path) = &args.output {
-        std::fs::write(path, rendered.as_bytes())
-            .map_err(|e| DiffError::OutputWrite {
-                path: path.clone(),
-                detail: e.to_string(),
-            })
-            .map_err(CliError::from)?;
-        if output.quiet && result.files_changed > 0 {
-            return Err(CliError::silent_exit(1));
-        }
-        return Ok(());
     }
-
-    if output.quiet {
-        if result.files_changed > 0 {
-            return Err(CliError::silent_exit(1));
-        }
-        return Ok(());
-    }
-
-    if rendered.is_empty() {
-        return Ok(());
-    }
-    let mut pager = Pager::with_config(output)?;
-    let rendered = if args.name_only || args.name_status || args.numstat || args.stat {
-        rendered
-    } else {
-        maybe_colorize_diff(&rendered, io::stdout().is_terminal())
-    };
-    pager.write_str(&format!("{rendered}\n"))?;
-    pager.finish()?;
-    Ok(())
 }
 
 fn diff_status_letter(status: &str) -> &'static str {
@@ -683,6 +1270,11 @@ pub async fn staged_diff_text() -> String {
         name_status: false,
         numstat: false,
         stat: false,
+        ignore_space_change: false,
+        ignore_all_space: false,
+        ignore_blank_lines: false,
+        unified: None,
+        exit_code: false,
     };
     match run_diff(&args).await {
         Ok(result) => format_unified_diff(&result),
@@ -881,6 +1473,108 @@ mod test {
 
     use super::*;
     use crate::utils::test;
+
+    /// The native generator at context 3 with no whitespace handling must be
+    /// byte-identical to git-internal's `Diff::diff`, so switching backends per
+    /// feature flag never changes the default diff output.
+    #[test]
+    #[serial]
+    fn native_diff_matches_git_internal_at_context_3() {
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+        let _guard = set_hash_kind_for_test(HashKind::Sha256);
+
+        let cases: &[(&str, &str)] = &[
+            ("a\nb\nc\n", "a\nB\nc\nd\n"),
+            (
+                "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\n",
+                "l1\nl2\nl3\nl4\nL5\nl6\nl7\nl8\nl9\n",
+            ),
+            ("", "x\ny\n"),
+            ("x\ny\n", ""),
+            (
+                "one\ntwo\nthree\nfour\nfive\n",
+                "one\nthree\nfour\nfive\nsix\n",
+            ),
+            ("trailing\nno newline", "trailing\nno newline!"),
+        ];
+        let file = PathBuf::from("f.txt");
+        for (old, new) in cases {
+            let old_bytes = old.as_bytes().to_vec();
+            let new_bytes = new.as_bytes().to_vec();
+            let old_hash = calculate_object_hash(ObjectType::Blob, &old_bytes);
+            let new_hash = calculate_object_hash(ObjectType::Blob, &new_bytes);
+
+            let mut old_map = HashMap::new();
+            let mut new_map = HashMap::new();
+            old_map.insert(file.clone(), old_hash);
+            new_map.insert(file.clone(), new_hash);
+            let mut store = HashMap::new();
+            store.insert(old_hash, old_bytes.clone());
+            store.insert(new_hash, new_bytes.clone());
+            let reader = |_: &PathBuf, h: &ObjectHash| -> Vec<u8> {
+                store.get(h).cloned().unwrap_or_default()
+            };
+
+            let git_internal_out = Diff::diff_for_file_string(&file, &old_map, &new_map, &reader);
+            let native_out = native_diff_for_file(
+                file.as_path(),
+                Some(&old_hash),
+                Some(&new_hash),
+                &old_bytes,
+                &new_bytes,
+                DEFAULT_CONTEXT,
+                WsMode::None,
+                false,
+            );
+            assert_eq!(
+                native_out, git_internal_out,
+                "native diff diverged from git-internal for old={old:?} new={new:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_zero_context_emits_only_changed_lines() {
+        let out = compute_unified_diff_native(
+            "l1\nl2\nl3\nl4\nl5\n",
+            "l1\nl2\nL3\nl4\nl5\n",
+            0,
+            WsMode::None,
+            false,
+        );
+        assert!(out.contains("@@ -3,1 +3,1 @@"), "header mismatch: {out:?}");
+        assert_eq!(
+            out.lines().filter(|l| l.starts_with(' ')).count(),
+            0,
+            "context lines should be absent at -U0: {out:?}"
+        );
+        assert!(out.contains("-l3") && out.contains("+L3"), "out={out:?}");
+    }
+
+    #[test]
+    fn native_ignore_all_space_drops_whitespace_only_change() {
+        let out = compute_unified_diff_native("a b\n", "a    b\n", 3, WsMode::AllSpace, false);
+        assert!(
+            out.is_empty(),
+            "whitespace-only change should be empty: {out:?}"
+        );
+    }
+
+    #[test]
+    fn native_ignore_space_change_collapses_runs() {
+        let out =
+            compute_unified_diff_native("a b c\n", "a   b   c \n", 3, WsMode::SpaceChange, false);
+        assert!(
+            out.is_empty(),
+            "space-change-only diff should be empty: {out:?}"
+        );
+    }
+
+    #[test]
+    fn native_ignore_blank_lines_drops_blank_only_hunk() {
+        let out = compute_unified_diff_native("a\nb\n", "a\n\nb\n", 3, WsMode::None, true);
+        assert!(!out.contains("@@"), "blank-only insertion ignored: {out:?}");
+    }
 
     struct ColorOverrideReset;
 

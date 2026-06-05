@@ -927,3 +927,289 @@ async fn test_diff_algorithms() {
         "unsupported MyersMinimal should not write a default diff to the output file"
     );
 }
+
+// ----- Wave 0: whitespace ignore, -U context, --exit-code -----
+
+/// Commit `content` to `tracked.txt` so a later worktree edit diffs against it.
+fn commit_tracked(repo: &tempfile::TempDir, content: &str) {
+    fs::write(repo.path().join("tracked.txt"), content).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "tracked.txt"], repo.path()),
+        "stage tracked base",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], repo.path()),
+        "commit tracked base",
+    );
+}
+
+#[test]
+fn diff_ignore_all_space_suppresses_whitespace_only_changes() {
+    let repo = create_committed_repo_via_cli();
+    // Base tracked.txt is "tracked\n"; the worktree only adds surrounding spaces.
+    fs::write(repo.path().join("tracked.txt"), "   tracked   \n").unwrap();
+    let output = run_libra_command(&["--json", "diff", "-w"], repo.path());
+    assert_cli_success(&output, "diff -w");
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["files_changed"], 0,
+        "whitespace-only change must be ignored by -w"
+    );
+}
+
+#[test]
+fn diff_ignore_space_change_collapses_runs() {
+    let repo = create_committed_repo_via_cli();
+    commit_tracked(&repo, "a b c\n");
+    fs::write(repo.path().join("tracked.txt"), "a    b    c\n").unwrap();
+    let output = run_libra_command(&["--json", "diff", "-b"], repo.path());
+    assert_cli_success(&output, "diff -b");
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["files_changed"], 0,
+        "whitespace-run-only change must be ignored by -b"
+    );
+}
+
+#[test]
+fn diff_ignore_blank_lines_skips_blank_only_hunks() {
+    let repo = create_committed_repo_via_cli();
+    commit_tracked(&repo, "alpha\nbeta\n");
+    fs::write(repo.path().join("tracked.txt"), "alpha\n\nbeta\n").unwrap();
+    let output = run_libra_command(&["--json", "diff", "--ignore-blank-lines"], repo.path());
+    assert_cli_success(&output, "diff --ignore-blank-lines");
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["files_changed"], 0,
+        "blank-only insertion must be ignored"
+    );
+}
+
+#[test]
+fn diff_unified_context_default_is_three() {
+    let repo = create_committed_repo_via_cli();
+    commit_tracked(&repo, "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\n");
+    fs::write(
+        repo.path().join("tracked.txt"),
+        "l1\nl2\nl3\nl4\nL5\nl6\nl7\nl8\nl9\n",
+    )
+    .unwrap();
+    let output = run_libra_command(&["diff"], repo.path());
+    assert_cli_success(&output, "default diff");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("@@ -2,7 +2,7 @@"),
+        "default context should be 3: {stdout}"
+    );
+}
+
+#[test]
+fn diff_context_config_sets_default() {
+    let repo = create_committed_repo_via_cli();
+    commit_tracked(&repo, "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\n");
+    fs::write(
+        repo.path().join("tracked.txt"),
+        "l1\nl2\nl3\nl4\nL5\nl6\nl7\nl8\nl9\n",
+    )
+    .unwrap();
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "diff.context", "5"], repo.path()),
+        "set diff.context",
+    );
+    let output = run_libra_command(&["diff"], repo.path());
+    assert_cli_success(&output, "diff with diff.context=5");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("@@ -1,9 +1,9 @@"),
+        "diff.context=5 should widen context: {stdout}"
+    );
+
+    // Explicit -U overrides the config value.
+    let output = run_libra_command(&["diff", "-U2"], repo.path());
+    assert_cli_success(&output, "diff -U2");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("@@ -3,5 +3,5 @@"),
+        "-U2 should override diff.context: {stdout}"
+    );
+}
+
+#[test]
+fn diff_context_config_invalid_value_errors() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(
+            &["config", "set", "diff.context", "notanumber"],
+            repo.path(),
+        ),
+        "set invalid diff.context",
+    );
+    let output = run_libra_command(&["diff"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "invalid diff.context should be a usage error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+#[test]
+fn diff_unified_zero_context_emits_only_changed_lines() {
+    let repo = create_committed_repo_via_cli();
+    commit_tracked(&repo, "l1\nl2\nl3\nl4\nl5\n");
+    fs::write(repo.path().join("tracked.txt"), "l1\nl2\nL3\nl4\nl5\n").unwrap();
+    let output = run_libra_command(&["diff", "-U0"], repo.path());
+    assert_cli_success(&output, "diff -U0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("@@ -3,1 +3,1 @@"),
+        "zero-context header: {stdout}"
+    );
+    let context_lines = stdout
+        .lines()
+        .filter(|l| l.starts_with(' ') && !l.starts_with("@@"))
+        .count();
+    assert_eq!(context_lines, 0, "no context lines at -U0: {stdout}");
+}
+
+#[test]
+fn diff_exit_code_flag_returns_1_when_changes() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let output = run_libra_command(&["diff", "--exit-code"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "exit-code with changes should be 1: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.stdout.is_empty(),
+        "--exit-code still renders the diff body"
+    );
+}
+
+#[test]
+fn diff_exit_code_flag_returns_0_when_no_changes() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["diff", "--exit-code"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "exit-code without changes should be 0"
+    );
+}
+
+#[test]
+fn diff_json_exit_code_returns_1_when_changes() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let output = run_libra_command(&["--json", "diff", "--exit-code"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "json --exit-code with changes should be 1"
+    );
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["files_changed"], 1,
+        "JSON envelope is still emitted under --exit-code"
+    );
+}
+
+#[test]
+fn diff_output_file_exit_code_returns_1_when_changes() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let out_file = repo.path().join("diff.out");
+    let output = run_libra_command(
+        &[
+            "diff",
+            "--exit-code",
+            "--output",
+            out_file.to_str().unwrap(),
+        ],
+        repo.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "--exit-code --output with changes should be 1"
+    );
+    assert!(
+        out_file.exists(),
+        "diff body was written to the output file"
+    );
+}
+
+#[test]
+fn diff_quiet_returns_1_when_changes_no_stdout() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let output = run_libra_command(&["diff", "-q"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "quiet with changes should be 1"
+    );
+    assert!(output.stdout.is_empty(), "quiet suppresses stdout");
+}
+
+#[test]
+fn diff_default_returns_0_even_with_changes() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let output = run_libra_command(&["diff"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "default diff exits 0 even with changes"
+    );
+}
+
+#[test]
+fn diff_binary_change_emits_binary_files_differ() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), [0u8, 159, 146, 150]).unwrap();
+    let output = run_libra_command(&["diff", "--exit-code"], repo.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Binary files differ"),
+        "binary change should report Binary files differ: {stdout}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "--exit-code still triggers on a binary change"
+    );
+}
+
+#[test]
+fn diff_preprocess_does_not_mutate_blob() {
+    let repo = create_committed_repo_via_cli();
+    let content = "   tracked   \n";
+    fs::write(repo.path().join("tracked.txt"), content).unwrap();
+    let output = run_libra_command(&["diff", "-w"], repo.path());
+    assert_cli_success(&output, "diff -w");
+    // The worktree file must be byte-for-byte unchanged after a -w comparison.
+    let after = fs::read_to_string(repo.path().join("tracked.txt")).unwrap();
+    assert_eq!(after, content, "-w preprocessing must not rewrite the file");
+}
+
+#[test]
+fn diff_myers_still_fail_closed_lbr_cli_002() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let output = run_libra_command(&["diff", "--algorithm", "myers"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "--algorithm=myers must remain fail-closed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
