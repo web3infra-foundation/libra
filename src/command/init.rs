@@ -271,8 +271,23 @@ pub struct InitArgs {
     #[clap(long, short = 'q', required = false)]
     pub quiet: bool,
 
-    /// Filesystem sharing mode for the repository (placeholder — see `git init --shared`)
-    #[clap(long, required = false, value_name = "MODE")]
+    /// Filesystem sharing mode for the repository (Git's `--shared[=<mode>]`).
+    ///
+    /// Bare `--shared` defaults to `group`. With a value, use the `=` form:
+    /// `--shared=<mode>` where `<mode>` is `umask`/`false`, `group`/`true`,
+    /// `all`/`world`/`everybody`, or a 4-digit octal such as `0660`. The
+    /// canonical mode is persisted to `core.sharedRepository` and the `.libra/`
+    /// content tree is made group/world-shareable on Unix (no-op on Windows,
+    /// where permissions follow NTFS ACLs). The vault and the `.libra/` root
+    /// directory entry stay owner-only writable to protect signing keys.
+    #[clap(
+        long,
+        required = false,
+        value_name = "MODE",
+        num_args = 0..=1,
+        default_missing_value = "group",
+        require_equals = true
+    )]
     pub shared: Option<String>,
 
     /// Object hash algorithm: `sha1` (default) or `sha256`
@@ -518,7 +533,14 @@ async fn run_init_internal(
     // vault setup run; those later stages persist their durable state through
     // this connection/path and assume schema bootstrap has completed.
     let conn = create_database_connection(&database_path).await?;
-    let repo_id = init_config(&conn, args.bare, &object_format, &ref_format).await?;
+    let repo_id = init_config(
+        &conn,
+        args.bare,
+        &object_format,
+        &ref_format,
+        args.shared.as_deref(),
+    )
+    .await?;
 
     progress.emit("Setting up refs ...");
     // INVARIANT: refs are initialized after core config so HEAD/branch rows are
@@ -527,9 +549,6 @@ async fn run_init_internal(
     initialize_refs(&conn, &initial_branch_name).await?;
 
     set_dir_hidden(&root_dir)?;
-    if let Some(shared_mode) = args.shared.as_deref() {
-        apply_shared(&root_dir, shared_mode)?;
-    }
 
     let mut warnings = Vec::new();
     if !args.bare {
@@ -573,6 +592,14 @@ async fn run_init_internal(
         init_vault_for_repo(&root_dir, &database_path).await?;
     } else {
         set_vault_signing_value(&database_path, false).await?;
+    }
+
+    // Apply `--shared` permissions last so the chmod covers the fully populated
+    // layout — including `vault.db` (forced back to owner-only `0o600`), any
+    // objects/refs copied during `--from-git-repository` conversion, and the
+    // seeded skills — and the `.libra/` root entry can be locked owner-only.
+    if let Some(shared_mode) = args.shared.as_deref() {
+        apply_shared(&root_dir, shared_mode)?;
     }
 
     set_hash_kind(match object_format.as_str() {
@@ -781,15 +808,71 @@ fn validate_shared_mode(shared_mode: Option<&str>) -> Result<(), InitError> {
     }
 }
 
+/// Canonicalizes a validated `--shared` mode into the value persisted to
+/// `core.sharedRepository`, mirroring Git's normalization so that
+/// `libra config get core.sharedRepository` reads back a stable name.
+///
+/// Aliases collapse as: `false`/`umask` → `umask`, `true`/`group` → `group`,
+/// `all`/`world`/`everybody` → `all`. A 4-digit octal mode (e.g. `0660`) is
+/// returned verbatim. The single source of truth for this mapping is the
+/// canonicalization table in `.omo/plans/init-improvement-plan.md` (Batch 1).
+fn canonical_shared_value(mode: &str) -> String {
+    match mode {
+        "false" | "umask" => "umask".to_string(),
+        "true" | "group" => "group".to_string(),
+        "all" | "world" | "everybody" => "all".to_string(),
+        other => other.to_string(),
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
 fn apply_shared(root_dir: &Path, shared_mode: &str) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    fn set_recursive(dir: &Path, mode: u32) -> io::Result<()> {
-        for entry in walkdir::WalkDir::new(dir) {
+    // Vault files must never be exposed to group/world by `--shared`; they are
+    // forced to owner-only `0o600` so other users cannot read signing keys even
+    // though the SQLite backend creates `vault.db` with the process umask.
+    fn is_vault_file(path: &Path) -> bool {
+        matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("vault.db") | Some("vault.db-wal") | Some("vault.db-shm")
+        )
+    }
+
+    // Directories must stay searchable wherever they are readable, otherwise an
+    // octal mode such as `0660` (no execute bits) would strip the search bit and
+    // break traversal of the layout. Mirrors Git's `adjust_shared_perm`, which
+    // copies each read bit into the matching execute bit for directories.
+    fn dir_mode(mode: u32) -> u32 {
+        mode | ((mode & 0o444) >> 2)
+    }
+
+    // Applies `content_mode` to everything under `root_dir`, with these rules:
+    //   * directories propagate read→execute so the tree stays traversable;
+    //   * the `root_dir` entry keeps an owner-only-writable mode (group and world
+    //     write bits cleared) so other users cannot unlink/replace the vault file
+    //     from the repository root even when the content tree is group-shared;
+    //   * vault files are forced to `0o600` regardless of the shared mode.
+    // Symlinks are skipped to avoid TOCTOU/permission escapes.
+    fn set_recursive(root_dir: &Path, content_mode: u32) -> io::Result<()> {
+        // Root is a directory: searchable, but with group/world write stripped.
+        let root_mode = dir_mode(content_mode) & !0o022;
+        for entry in walkdir::WalkDir::new(root_dir).follow_links(false) {
             let entry = entry?;
             let path = entry.path();
-            let metadata = fs::metadata(path)?;
+            if entry.file_type().is_symlink() {
+                continue;
+            }
+            let mode = if is_vault_file(path) {
+                0o600
+            } else if path == root_dir {
+                root_mode
+            } else if entry.file_type().is_dir() {
+                dir_mode(content_mode)
+            } else {
+                content_mode
+            };
+            let metadata = fs::symlink_metadata(path)?;
             let mut perms = metadata.permissions();
             perms.set_mode(mode);
             fs::set_permissions(path, perms)?;
@@ -984,6 +1067,7 @@ async fn init_config(
     is_bare: bool,
     object_format: &str,
     ref_format: &RefFormat,
+    shared_mode: Option<&str>,
 ) -> Result<String, DbErr> {
     let txn = conn.begin().await?;
 
@@ -1021,6 +1105,21 @@ async fn init_config(
     ConfigKv::set_with_conn(&txn, "libra.repoid", &repo_id, false)
         .await
         .map_err(|error| DbErr::Custom(error.to_string()))?;
+
+    // Persist the canonical `--shared` mode so Git-compatible tooling and a
+    // later `libra config get core.sharedRepository` can observe the setting.
+    // `umask`/`false` still records `umask` (no permission change), matching
+    // Git's `core.sharedRepository=umask` default semantics.
+    if let Some(mode) = shared_mode {
+        ConfigKv::set_with_conn(
+            &txn,
+            "core.sharedRepository",
+            &canonical_shared_value(mode),
+            false,
+        )
+        .await
+        .map_err(|error| DbErr::Custom(error.to_string()))?;
+    }
 
     txn.commit().await?;
     Ok(repo_id)
@@ -1343,5 +1442,68 @@ mod tests {
 
         let content = std::fs::read_to_string(&skill_path).expect("read");
         assert_eq!(content, "MY CUSTOM SKILL\n---\nnever overwrite");
+    }
+
+    #[test]
+    fn canonical_shared_value_collapses_aliases() {
+        use super::canonical_shared_value;
+        assert_eq!(canonical_shared_value("false"), "umask");
+        assert_eq!(canonical_shared_value("umask"), "umask");
+        assert_eq!(canonical_shared_value("true"), "group");
+        assert_eq!(canonical_shared_value("group"), "group");
+        assert_eq!(canonical_shared_value("all"), "all");
+        assert_eq!(canonical_shared_value("world"), "all");
+        assert_eq!(canonical_shared_value("everybody"), "all");
+        // 4-digit octal modes are recorded verbatim.
+        assert_eq!(canonical_shared_value("0660"), "0660");
+        assert_eq!(canonical_shared_value("0777"), "0777");
+    }
+
+    /// `apply_shared` must not modify the permissions of symlink entries inside
+    /// the layout (it skips them to avoid TOCTOU/permission escapes), and it
+    /// must keep the `.libra/` root entry owner-only writable while making the
+    /// content tree group-shareable.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn apply_shared_skips_symlinks_and_protects_root() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path().join(".libra");
+        let content_dir = root.join("objects");
+        std::fs::create_dir_all(&content_dir).expect("mkdir objects");
+
+        // An outside file the symlink will point at; its mode must be unchanged.
+        let outside = tmp.path().join("outside.txt");
+        std::fs::write(&outside, b"secret").expect("write outside");
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod outside");
+
+        // A symlink inside the layout pointing at the outside file.
+        std::os::unix::fs::symlink(&outside, root.join("link")).expect("symlink");
+
+        super::apply_shared(&root, "group").expect("apply_shared group");
+
+        let mode = |p: &std::path::Path| {
+            std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o7777
+        };
+        // Root entry: owner-only writable (no group/world write bits).
+        assert_eq!(
+            mode(&root) & 0o022,
+            0,
+            ".libra root must stay owner-only writable"
+        );
+        // Content subtree: group-writable.
+        assert_eq!(
+            mode(&content_dir) & 0o020,
+            0o020,
+            "content dir must be group-writable under shared=group"
+        );
+        // The symlink target's mode must be untouched (symlink skipped).
+        assert_eq!(
+            mode(&outside) & 0o777,
+            0o600,
+            "apply_shared must not chmod through a symlink"
+        );
     }
 }

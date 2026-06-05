@@ -416,3 +416,246 @@ fn init_vault_true_ignores_commit_use_config_only_strictness() {
         "expected vault key generation progress, got: {stderr}"
     );
 }
+
+// ── `--shared` persistence + vault isolation (init-improvement-plan Batch 1) ──
+
+#[cfg(not(target_os = "windows"))]
+fn mode_bits(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    fs::symlink_metadata(path)
+        .unwrap_or_else(|error| panic!("failed to stat {}: {error}", path.display()))
+        .permissions()
+        .mode()
+        & 0o7777
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn test_shared_group_content_writable() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    let output = run_libra_command(&["init", "--shared=group", "--vault", "false"], &repo);
+    assert_cli_success(&output, "init --shared=group");
+
+    let libra = repo.join(".libra");
+    assert_eq!(
+        mode_bits(&libra.join("objects")) & 0o020,
+        0o020,
+        "objects must be group-writable under --shared=group"
+    );
+    assert_eq!(
+        mode_bits(&libra) & 0o022,
+        0,
+        ".libra root must stay owner-only writable to protect the vault"
+    );
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn test_shared_vault_isolated() {
+    for mode in ["group", "all"] {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        let output = run_libra_command(&["init", &format!("--shared={mode}")], &repo);
+        assert_cli_success(&output, &format!("init --shared={mode} with vault"));
+
+        let libra = repo.join(".libra");
+        let vault = libra.join("vault.db");
+        assert!(
+            vault.exists(),
+            "vault.db must exist with default --vault under --shared={mode}"
+        );
+        assert_eq!(
+            mode_bits(&vault) & 0o777,
+            0o600,
+            "vault.db must be 0o600 under --shared={mode}"
+        );
+        assert_eq!(
+            mode_bits(&libra) & 0o022,
+            0,
+            ".libra root must stay owner-only writable under --shared={mode}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_shared_writes_core_sharedrepository() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    let output = run_libra_command(&["init", "--shared=group", "--vault", "false"], &repo);
+    assert_cli_success(&output, "init --shared=group");
+
+    let conn = open_repo_conn(&repo, false).await;
+    assert_eq!(
+        config_value(&conn, "core.sharedRepository")
+            .await
+            .as_deref(),
+        Some("group"),
+        "core.sharedRepository must be persisted for --shared=group"
+    );
+}
+
+#[tokio::test]
+async fn test_shared_value_canonicalization() {
+    let cases = [
+        ("true", "group"),
+        ("world", "all"),
+        ("everybody", "all"),
+        ("umask", "umask"),
+        ("false", "umask"),
+        ("0660", "0660"),
+    ];
+
+    for (input, expected) in cases {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        let output = run_libra_command(
+            &["init", &format!("--shared={input}"), "--vault", "false"],
+            &repo,
+        );
+        assert_cli_success(&output, &format!("init --shared={input}"));
+
+        let conn = open_repo_conn(&repo, false).await;
+        assert_eq!(
+            config_value(&conn, "core.sharedRepository")
+                .await
+                .as_deref(),
+            Some(expected),
+            "--shared={input} should canonicalize core.sharedRepository to {expected}"
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
+async fn test_shared_no_value_defaults_group() {
+    let temp = tempdir().unwrap();
+
+    // Bare `--shared` followed by a positional directory: with `require_equals`,
+    // the directory is parsed as `repo_directory` (not swallowed as the value)
+    // and the shared mode defaults to `group`.
+    let output = run_libra_command(
+        &["init", "--shared", "sub", "--vault", "false"],
+        temp.path(),
+    );
+    assert_cli_success(&output, "init --shared sub");
+
+    let repo = temp.path().join("sub");
+    assert!(
+        repo.join(".libra").exists(),
+        "positional `sub` must be parsed as repo_directory, not the --shared value"
+    );
+
+    let conn = open_repo_conn(&repo, false).await;
+    assert_eq!(
+        config_value(&conn, "core.sharedRepository")
+            .await
+            .as_deref(),
+        Some("group"),
+        "bare --shared must default to group"
+    );
+    assert_eq!(
+        mode_bits(&repo.join(".libra").join("objects")) & 0o020,
+        0o020,
+        "bare --shared must group-share content like --shared=group"
+    );
+
+    // The explicit `=` form for a sibling repo records the requested mode.
+    let output2 = run_libra_command(
+        &["init", "--shared=all", "--vault", "false", "sub2"],
+        temp.path(),
+    );
+    assert_cli_success(&output2, "init --shared=all sub2");
+    let conn2 = open_repo_conn(&temp.path().join("sub2"), false).await;
+    assert_eq!(
+        config_value(&conn2, "core.sharedRepository")
+            .await
+            .as_deref(),
+        Some("all"),
+        "--shared=all must record core.sharedRepository=all"
+    );
+}
+
+#[test]
+fn test_shared_config_get_roundtrip() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    let output = run_libra_command(&["init", "--shared=group", "--vault", "false"], &repo);
+    assert_cli_success(&output, "init --shared=group");
+
+    let get = run_libra_command(&["config", "get", "core.sharedRepository"], &repo);
+    assert_cli_success(&get, "config get core.sharedRepository");
+    assert_eq!(
+        String::from_utf8_lossy(&get.stdout).trim(),
+        "group",
+        "config get must read back the canonical shared mode"
+    );
+}
+
+#[test]
+fn test_shared_invalid_mode_exit_129() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    let output = run_libra_command(&["init", "--shared=invalid", "--vault", "false"], &repo);
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "invalid --shared mode must exit 129"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid shared mode"),
+        "expected invalid-mode message, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("LBR-CLI-002"),
+        "expected CLI invalid-arguments code, got: {stderr}"
+    );
+    assert!(
+        !repo.join(".libra").exists(),
+        "no .libra layout may be created before the early validation failure"
+    );
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn test_shared_bare_repo() {
+    let temp = tempdir().unwrap();
+    let output = run_libra_command(
+        &[
+            "init",
+            "--bare",
+            "--shared=group",
+            "--vault",
+            "false",
+            "repo.git",
+        ],
+        temp.path(),
+    );
+    assert_cli_success(&output, "init --bare --shared=group");
+
+    let bare = temp.path().join("repo.git");
+    assert_eq!(
+        mode_bits(&bare) & 0o022,
+        0,
+        "bare storage root must stay owner-only writable"
+    );
+    assert_eq!(
+        mode_bits(&bare.join("objects")) & 0o020,
+        0o020,
+        "bare objects must be group-writable under --shared=group"
+    );
+}
