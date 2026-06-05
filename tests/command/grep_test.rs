@@ -869,3 +869,108 @@ async fn test_grep_capital_i_silently_skips_binary() {
         "-I must not print a binary-skip warning"
     );
 }
+
+/// `--heading` prints the file name once as a header and drops the inline prefix.
+#[tokio::test]
+#[serial]
+async fn test_grep_heading_prints_filename_header() {
+    let repo = tempdir().expect("repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("a.txt", "match\nsecond match\n").expect("write file");
+    add_and_commit("add a", vec!["a.txt".to_string()]).await;
+
+    let output = run_libra_command(&["grep", "--heading", "-n", "match", "a.txt"], repo.path());
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "a.txt\n1:match\n2:second match\n",
+        "--heading should print a header line and drop the inline prefix"
+    );
+}
+
+/// `--no-heading` overrides `--heading`, restoring the inline file-name prefix.
+#[tokio::test]
+#[serial]
+async fn test_grep_no_heading_overrides_heading() {
+    let repo = tempdir().expect("repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("a.txt", "match\n").expect("write file");
+    add_and_commit("add a", vec!["a.txt".to_string()]).await;
+
+    let output = run_libra_command(
+        &["grep", "--heading", "--no-heading", "-n", "match", "a.txt"],
+        repo.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "a.txt:1:match\n",
+        "--no-heading should override --heading"
+    );
+}
+
+/// `--break` inserts a blank line between the matches of different files.
+#[tokio::test]
+#[serial]
+async fn test_grep_break_inserts_blank_line_between_files() {
+    let repo = tempdir().expect("repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("a.txt", "match\n").expect("write a");
+    fs::write("b.txt", "match\n").expect("write b");
+    add_and_commit("add files", vec!["a.txt".to_string(), "b.txt".to_string()]).await;
+
+    let output = run_libra_command(&["grep", "--break", "match"], repo.path());
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("match\n\n"),
+        "--break should put a blank line between files: {stdout:?}"
+    );
+    assert!(stdout.contains("a.txt:match") && stdout.contains("b.txt:match"));
+}
+
+/// `-z`/`--null` uses NUL field separators while keeping records newline-terminated.
+#[tokio::test]
+#[serial]
+async fn test_grep_null_uses_nul_separators() {
+    let repo = tempdir().expect("repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("a.txt", "match\n").expect("write file");
+    add_and_commit("add a", vec!["a.txt".to_string()]).await;
+
+    let output = run_libra_command(&["grep", "-z", "-n", "match", "a.txt"], repo.path());
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "a.txt\u{0}1\u{0}match\n",
+        "-z should use NUL field separators and a newline record terminator"
+    );
+}
+
+/// `-z` with `-l` NUL-terminates each path and emits no trailing newline.
+#[tokio::test]
+#[serial]
+async fn test_grep_null_file_list_nul_terminated() {
+    let repo = tempdir().expect("repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("a.txt", "match\n").expect("write file");
+    add_and_commit("add a", vec!["a.txt".to_string()]).await;
+
+    let output = run_libra_command(&["grep", "-z", "-l", "match", "a.txt"], repo.path());
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "a.txt\u{0}",
+        "-z -l should NUL-terminate paths with no trailing newline"
+    );
+}

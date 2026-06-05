@@ -162,6 +162,25 @@ pub struct GrepArgs {
     /// Silently skip binary files without printing a warning.
     #[clap(short = 'I')]
     ignore_binary: bool,
+
+    /// Print each file name once as a heading above its matches, and drop the
+    /// inline file-name prefix from the match lines.
+    #[clap(long, overrides_with = "no_heading")]
+    heading: bool,
+
+    /// Disable file-name headings (the default). Overrides `--heading`.
+    #[clap(long = "no-heading", overrides_with = "heading")]
+    no_heading: bool,
+
+    /// Print an empty line between the matches of different files.
+    #[clap(long = "break")]
+    break_between: bool,
+
+    /// Use NUL (`\0`) byte separators between output fields, for safe machine
+    /// consumption. Match/count records stay newline-terminated; `-l`/`-L` paths
+    /// are NUL-terminated with no trailing newline. Disables colorized output.
+    #[clap(short = 'z', long = "null")]
+    null: bool,
 }
 
 impl GrepArgs {
@@ -171,6 +190,11 @@ impl GrepArgs {
         let before = self.before_context.or(self.context).unwrap_or(0);
         let after = self.after_context.or(self.context).unwrap_or(0);
         (before, after)
+    }
+
+    /// The field separator between output columns (`\0` under `-z`, else `:`).
+    fn field_separator(&self) -> char {
+        if self.null { '\0' } else { ':' }
     }
 }
 
@@ -944,54 +968,107 @@ fn render_grep_output(
     }
 
     let mut pager = Pager::with_config(output)?;
-    let should_color = std::io::stdout().is_terminal() && !output.is_json();
+    // `-z` output is meant for machine consumption, so colorization is disabled.
+    let should_color = std::io::stdout().is_terminal() && !output.is_json() && !args.null;
     let matcher = should_color
         .then(|| build_matcher(&result.patterns, args))
         .transpose()?;
 
     if args.files_with_matches {
-        for file in result.files_with_matches.as_ref().unwrap_or(&Vec::new()) {
-            pager.write_line(file)?;
-        }
+        render_file_list(
+            &mut pager,
+            result.files_with_matches.as_ref().unwrap_or(&Vec::new()),
+            args,
+        )?;
     } else if args.files_without_matches {
-        for file in result.files_without_matches.as_ref().unwrap_or(&Vec::new()) {
-            pager.write_line(file)?;
-        }
+        render_file_list(
+            &mut pager,
+            result.files_without_matches.as_ref().unwrap_or(&Vec::new()),
+            args,
+        )?;
     } else if args.count {
+        let sep = args.field_separator();
         for count in result.counts.as_ref().unwrap_or(&Vec::new()) {
-            pager.write_line(&format!("{}:{}", count.path, count.count))?;
+            pager.write_line(&format!("{}{sep}{}", count.path, count.count))?;
         }
     } else if let Some(context_output) = &result.context_output {
         render_context_output(&mut pager, context_output, args, matcher.as_ref())?;
     } else {
-        // Regular match output with optional highlighting
-        for match_item in result.matches.as_ref().unwrap_or(&Vec::new()) {
-            let line = if let Some(matcher) = matcher.as_ref().filter(|_| !args.invert_match) {
-                colorize_match(&match_item.line, matcher)
-            } else {
-                match_item.line.clone()
-            };
-
-            if args.byte_offset {
-                pager.write_line(&format!(
-                    "{}:{}:{}:{}",
-                    match_item.path,
-                    match_item.line_number,
-                    match_item.byte_offset.unwrap_or(0),
-                    line
-                ))?;
-            } else if args.line_number {
-                pager.write_line(&format!(
-                    "{}:{}:{}",
-                    match_item.path, match_item.line_number, line
-                ))?;
-            } else {
-                pager.write_line(&format!("{}:{}", match_item.path, line))?;
-            }
-        }
+        render_matches(
+            &mut pager,
+            result.matches.as_ref().unwrap_or(&Vec::new()),
+            args,
+            matcher.as_ref(),
+        )?;
     }
 
     pager.finish()?;
+    Ok(())
+}
+
+/// Render an `-l`/`-L` file list. Under `-z` each path is NUL-terminated with no
+/// trailing newline; otherwise one path per line.
+fn render_file_list(pager: &mut Pager, files: &[String], args: &GrepArgs) -> CliResult<()> {
+    for file in files {
+        if args.null {
+            pager.write_str(&format!("{file}\0"))?;
+        } else {
+            pager.write_line(file)?;
+        }
+    }
+    Ok(())
+}
+
+/// Render ordinary match lines, honoring `--heading` (file-name header lines with
+/// no inline prefix), `--break` (blank line between files), and `-z` (NUL field
+/// separators; records stay newline-terminated).
+fn render_matches(
+    pager: &mut Pager,
+    matches: &[GrepMatch],
+    args: &GrepArgs,
+    matcher: Option<&regex::Regex>,
+) -> CliResult<()> {
+    let sep = args.field_separator();
+    let heading = args.heading;
+    let mut current_file: Option<&str> = None;
+
+    for item in matches {
+        let is_new_file = current_file != Some(item.path.as_str());
+        if is_new_file {
+            if current_file.is_some() && args.break_between {
+                pager.write_line("")?;
+            }
+            if heading {
+                // The heading line always ends with a newline, even under `-z`.
+                pager.write_line(&item.path)?;
+            }
+            current_file = Some(item.path.as_str());
+        }
+
+        let body = matcher
+            .filter(|_| !args.invert_match)
+            .map(|m| colorize_match(&item.line, m))
+            .unwrap_or_else(|| item.line.clone());
+
+        // The path prefix is dropped in heading mode.
+        let prefix = if heading {
+            String::new()
+        } else {
+            format!("{}{sep}", item.path)
+        };
+
+        if args.byte_offset {
+            pager.write_line(&format!(
+                "{prefix}{}{sep}{}{sep}{body}",
+                item.line_number,
+                item.byte_offset.unwrap_or(0)
+            ))?;
+        } else if args.line_number {
+            pager.write_line(&format!("{prefix}{}{sep}{body}", item.line_number))?;
+        } else {
+            pager.write_line(&format!("{prefix}{body}"))?;
+        }
+    }
     Ok(())
 }
 
