@@ -212,10 +212,19 @@ pub async fn execute_safe(args: AgentArgs, output: &OutputConfig) -> CliResult<(
     }
 }
 
-/// Set of stable agent slugs whose `HookProvider` is fully installable today.
-/// Phase 1 only ships Claude Code and Gemini stable; everything else is
-/// preview and surfaces as a clear "not yet" rather than a silent no-op.
-const STABLE_AGENT_SLUGS: &[&str] = &["claude-code", "gemini"];
+/// Set of stable agent slugs whose `HookProvider` is fully installable. All
+/// seven external agents now ship a hook installer (Claude/Gemini bespoke;
+/// Cursor/Codex/Copilot/Factory/OpenCode via the shared promoted providers),
+/// so `libra agent enable` with no args wires up every one.
+const STABLE_AGENT_SLUGS: &[&str] = &[
+    "claude-code",
+    "gemini",
+    "cursor",
+    "codex",
+    "copilot",
+    "factory-ai",
+    "opencode",
+];
 
 fn enable_agents(agents: &[String], output: &OutputConfig) -> CliResult<()> {
     install_or_uninstall(agents, output, true)

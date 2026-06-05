@@ -495,15 +495,25 @@ pub(crate) async fn ingest_agent_traces_payload(
         serde_json::from_str(stdin).map_err(|err| anyhow!("invalid hook JSON payload: {err}"))?;
     validate_session_hook_envelope(&envelope, MAX_TRANSCRIPT_PATH_BYTES)?;
 
-    let mut event = provider.parse_hook_event(&envelope.hook_event_name, &envelope)?;
-    if event.kind != expected_kind {
-        bail!(
-            "hook event kind mismatch: expected '{}', got '{}' from hook_event_name '{}'",
-            expected_kind,
-            event.kind,
-            envelope.hook_event_name
-        );
-    }
+    let mut event = if provider.subcommand_is_authoritative() {
+        // Libra authored this agent's hook config, so the invoked subcommand
+        // (which produced `expected_kind`) is the source of truth. The promoted
+        // external agents send heterogeneous or absent stdin `hook_event_name`s,
+        // so deriving the kind from the name would be unreliable; we still
+        // extract the optional payload fields generically from the envelope.
+        super::lifecycle::build_lifecycle_event(expected_kind, &envelope)
+    } else {
+        let event = provider.parse_hook_event(&envelope.hook_event_name, &envelope)?;
+        if event.kind != expected_kind {
+            bail!(
+                "hook event kind mismatch: expected '{}', got '{}' from hook_event_name '{}'",
+                expected_kind,
+                event.kind,
+                envelope.hook_event_name
+            );
+        }
+        event
+    };
 
     // Redact free-form text fields before they get anywhere near durable
     // storage. We aggregate the per-field reports into a single JSON document
