@@ -59,6 +59,10 @@ EXAMPLES:
     libra fetch --all                      Fetch every configured remote
     libra fetch origin --depth 1           Shallow fetch (latest commit only)
     libra fetch --all --depth 3            Shallow fetch across all remotes
+    libra fetch origin --unshallow         Convert a shallow clone to full history
+    libra fetch origin --prune             Drop tracking refs deleted on the remote
+    libra fetch origin --dry-run           Preview updates without fetching objects
+    libra fetch origin --porcelain         Machine-readable per-ref output
     libra --json fetch origin              Structured JSON output for agents";
 
 pub(crate) enum RemoteClient {
