@@ -558,6 +558,11 @@ async fn run_lfs_prune(dry_run: bool) -> CliResult<LfsOutput> {
     }
     pruned_files.sort();
 
+    // Tidy up sharding directories (`objects/<a>/<b>/`) left empty by deletions.
+    if !dry_run && !pruned_files.is_empty() {
+        remove_empty_subdirs(&util::storage_path().join("lfs/objects"));
+    }
+
     Ok(LfsOutput {
         action: "prune".to_string(),
         pruned_files,
@@ -565,6 +570,22 @@ async fn run_lfs_prune(dry_run: bool) -> CliResult<LfsOutput> {
         dry_run,
         ..LfsOutput::default()
     })
+}
+
+/// Recursively removes empty subdirectories of `dir` (bottom-up), leaving `dir`
+/// itself in place. Used to clean up empty LFS sharding directories after prune.
+fn remove_empty_subdirs(dir: &Path) {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            remove_empty_subdirs(&path);
+            // Succeeds only when the directory is now empty.
+            let _ = std::fs::remove_dir(&path);
+        }
+    }
 }
 
 /// `libra lfs checkout [<path>...]` — restore working-tree pointer files to their

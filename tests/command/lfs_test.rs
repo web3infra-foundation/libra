@@ -1792,3 +1792,26 @@ fn test_lfs_checkout_path_filter() {
         "non-filtered file must remain a pointer"
     );
 }
+
+#[test]
+fn test_lfs_prune_cleans_empty_oid_dirs() {
+    let repo = init_temp_repo();
+    let oid = "e".repeat(64);
+    let path = create_fake_lfs_object(repo.path(), &oid, b"junk to prune");
+    let shard_b = path.parent().unwrap().to_path_buf(); // objects/ee/ee
+    let shard_a = shard_b.parent().unwrap().to_path_buf(); // objects/ee
+
+    let output = libra_command(repo.path())
+        .args(["lfs", "prune"])
+        .output()
+        .expect("failed to run lfs prune");
+    assert!(output.status.success());
+    assert!(!path.exists(), "object should be pruned");
+    assert!(!shard_b.exists(), "empty leaf shard dir should be removed");
+    assert!(
+        !shard_a.exists(),
+        "empty parent shard dir should be removed"
+    );
+    // The objects root itself is preserved.
+    assert!(repo.path().join(".libra/lfs/objects").exists());
+}
