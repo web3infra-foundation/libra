@@ -228,6 +228,7 @@ pub(crate) async fn run_pull(
         false,
         false,
         false,
+        false,
         &child_output,
     )
     .await

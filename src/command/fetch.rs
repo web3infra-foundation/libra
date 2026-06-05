@@ -576,6 +576,12 @@ pub struct FetchArgs {
     /// (history deepening) are always applied regardless of this flag.
     #[clap(long = "update-shallow")]
     pub update_shallow: bool,
+
+    /// Use an atomic transaction to update refs: a remote's ref updates already
+    /// commit together or not at all (per-remote), and on rollback the pack
+    /// downloaded for that remote is removed so nothing partial is left behind.
+    #[clap(long)]
+    pub atomic: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -969,6 +975,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         no_tags,
         force,
         update_shallow,
+        atomic,
     } = args;
 
     // `--prune` is enabled by the flag or the `fetch.prune` config (flag wins).
@@ -1014,6 +1021,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
                     no_tags,
                     force,
                     update_shallow,
+                    atomic,
                     output,
                 )
                 .await
@@ -1080,6 +1088,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         no_tags,
         force,
         update_shallow,
+        atomic,
         output,
     )
     .await
@@ -1328,6 +1337,7 @@ pub async fn fetch_repository_safe(
         false,
         false,
         false,
+        false,
         output,
     )
     .await
@@ -1416,6 +1426,7 @@ pub(crate) async fn fetch_repository_with_result(
     no_tags_flag: bool,
     force: bool,
     update_shallow: bool,
+    atomic: bool,
     output: &OutputConfig,
 ) -> Result<FetchRepositoryResult, FetchError> {
     let (remote_client, discovery) =
@@ -1559,6 +1570,8 @@ pub(crate) async fn fetch_repository_with_result(
         read_fetch_stream(&mut result_stream, output, &task, shallow_requested).await?;
     let objects_fetched = pack_object_count(&fetch_data.pack_data);
     let pack_file = write_pack_and_index(&fetch_data.pack_data)?;
+    // Keep the pack path so an `--atomic` ref-transaction rollback can remove it.
+    let atomic_pack = if atomic { pack_file.clone() } else { None };
     if let Some(pack_file) = pack_file {
         let index_version = match get_hash_kind() {
             HashKind::Sha1 => None,
@@ -1590,7 +1603,7 @@ pub(crate) async fn fetch_repository_with_result(
         write_shallow_boundaries(&BTreeSet::new())?;
     }
 
-    let refs_updated = update_references(
+    let refs_updated = match update_references(
         &remote_config,
         &refs,
         &ref_heads,
@@ -1599,7 +1612,19 @@ pub(crate) async fn fetch_repository_with_result(
         &tag_candidates,
         force,
     )
-    .await?;
+    .await
+    {
+        Ok(updates) => updates,
+        Err(error) => {
+            // `--atomic`: the per-remote ref transaction already rolled back, so
+            // remove the pack/index downloaded for this fetch to leave no
+            // partial state behind.
+            if let Some(pack_file) = &atomic_pack {
+                cleanup_pack_files(pack_file);
+            }
+            return Err(error);
+        }
+    };
 
     // `--prune` removes local tracking branches whose remote counterpart is gone;
     // it compares against the remote's advertised refs (`discovery.refs`), never
@@ -2308,6 +2333,15 @@ fn accept_new_shallow(
     }
 }
 
+/// Remove a freshly-written pack and its `.idx` after an `--atomic` fetch's ref
+/// transaction rolls back, so a failed atomic fetch leaves no partial state.
+/// Best-effort: a missing file or removal error is ignored (the pack is
+/// unreferenced regardless).
+fn cleanup_pack_files(pack_file: &str) {
+    let _ = std::fs::remove_file(pack_file);
+    let _ = std::fs::remove_file(pack_file.replace(".pack", ".idx"));
+}
+
 fn apply_shallow_updates(shallow: &[String], unshallow: &[String]) -> Result<(), FetchError> {
     if shallow.is_empty() && unshallow.is_empty() {
         return Ok(());
@@ -2852,6 +2886,26 @@ mod tests {
                 "{}\tnot-for-merge\tbranch 'main' of https://example.com/x.git",
                 "a".repeat(40)
             )
+        );
+    }
+
+    #[test]
+    fn cleanup_pack_files_removes_pack_and_index() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pack = dir.path().join("pack-abc.pack");
+        let idx = dir.path().join("pack-abc.idx");
+        std::fs::write(&pack, b"pack").expect("write pack");
+        std::fs::write(&idx, b"idx").expect("write idx");
+
+        super::cleanup_pack_files(pack.to_str().unwrap());
+
+        assert!(
+            !pack.exists(),
+            "pack file should be removed on atomic rollback"
+        );
+        assert!(
+            !idx.exists(),
+            "pack index should be removed on atomic rollback"
         );
     }
 

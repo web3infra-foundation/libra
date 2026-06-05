@@ -1715,3 +1715,25 @@ async fn test_fetch_update_shallow_accepts_flag() {
         "fetching a non-shallow remote must not create a shallow boundary file"
     );
 }
+
+/// `--atomic` is accepted and a normal fetch still succeeds, updating the
+/// remote-tracking ref (per-remote ref updates are already transactional).
+#[tokio::test]
+#[serial]
+async fn test_fetch_atomic_accepts_flag() {
+    let (_temp_root, repo_dir, current_branch, pushed_commit) =
+        setup_local_fetch_cli_fixture().await;
+
+    let output = run_libra_command(&["--json", "fetch", "origin", "--atomic"], &repo_dir);
+    assert_cli_success(&output, "fetch origin --atomic");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["remotes"][0]["refs_updated"][0]["remote_ref"],
+        format!("refs/remotes/origin/{current_branch}")
+    );
+    assert_eq!(
+        json["data"]["remotes"][0]["refs_updated"][0]["new_oid"],
+        pushed_commit
+    );
+}
