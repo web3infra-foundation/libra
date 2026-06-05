@@ -78,6 +78,10 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
         bail!("pulled README did not contain second commit content: {readme}");
     }
     ctx.command(&["fsck", "--connectivity-only"], clone_dir.clone(), true)?;
+    assert_json_ok(
+        &ctx.command(&["--json", "log", "--oneline"], clone_dir.clone(), true)?,
+        "log",
+    )?;
 
     let bad_fetch = ctx.command(
         &["fetch", "origin", "no-such-branch"],

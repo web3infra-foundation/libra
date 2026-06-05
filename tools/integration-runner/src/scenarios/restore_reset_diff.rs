@@ -26,6 +26,12 @@ pub(crate) fn scenario_restore_reset_diff(ctx: &mut ScenarioCtx<'_>) -> Result<(
     ctx.command(&["reset", "--soft", "HEAD~1"], repo.clone(), true)?;
     ctx.command(&["reset", "--mixed", "HEAD"], repo.clone(), true)?;
     ctx.command(&["reset", "--hard", "HEAD"], repo.clone(), true)?;
+    assert_json_ok(
+        &ctx.command(&["--json", "diff"], repo.clone(), true)?,
+        "diff",
+    )?;
+    let bad_restore = ctx.command(&["restore", "nonexistent.txt"], repo.clone(), false)?;
+    assert_lbr_or_text(&bad_restore, "pathspec")?;
     ctx.command(&["fsck", "--connectivity-only"], repo, true)?;
     Ok(())
 }

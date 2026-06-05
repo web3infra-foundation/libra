@@ -73,6 +73,14 @@ pub(crate) fn scenario_config_set_input_and_encryption(ctx: &mut ScenarioCtx<'_>
     )?;
     let plain = ctx.command(&["config", "get", "custom.plain"], repo.clone(), true)?;
     assert_stdout_contains(&plain, "plain-value")?;
+    assert_json_ok(
+        &ctx.command(
+            &["--json", "config", "get", "custom.plain"],
+            repo.clone(),
+            true,
+        )?,
+        "config",
+    )?;
     let bad_combo = ctx.command(
         &[
             "config",

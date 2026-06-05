@@ -9,6 +9,45 @@ use regex::Regex;
 
 use crate::{manifest::load_manifest, registry::scenario_registry};
 
+/// Maps a scenario id to its Rust source stem under
+/// `tools/integration-runner/src/scenarios/`. `cli.*` ids drop the `cli.`
+/// prefix; `live.*` ids keep `live`. Dots and hyphens become underscores,
+/// matching the module names declared in `scenarios/mod.rs`
+/// (e.g. `cli.init-basic` -> `init_basic`,
+/// `live.github-create-push-clone-fetch` -> `live_github_create_push_clone_fetch`).
+fn scenario_module(id: &str) -> String {
+    id.strip_prefix("cli.")
+        .unwrap_or(id)
+        .replace(['.', '-'], "_")
+}
+
+/// Source-level signal substrings for the *heuristically verifiable* assertion
+/// categories (compared case-insensitively; ANY match satisfies the category).
+///
+/// Categories not listed here are advisory — they are enforced by the runner's
+/// isolation harness (`global_db_isolation`, `no_secret_leak`) or are semantic
+/// (`vault_isolation`, `intentional_difference`) — so check-plan does not gate
+/// them from source. See plan §2.4 and BASELINE_GAP-INTEG-002/008.
+fn source_verifiable_signals(category: &str) -> Option<&'static [&'static str]> {
+    Some(match category {
+        "json_envelope" => &[
+            "assert_json_ok",
+            "assert_json_error_code",
+            "--json",
+            "--machine",
+        ],
+        "fsck" => &["fsck"],
+        "gitfix_isolation" => &["gitfix"],
+        "negative_exit" => &[", false)", "assert_json_error_code", "assert_lbr_or_text"],
+        "lbr_error" => &["assert_lbr_or_text", "assert_json_error_code", "lbr-"],
+        "conflict_markers" => &["<<<<<<<", "conflict"],
+        "gh_lifecycle" => &["ctx.gh", ".gh("],
+        "cleanup_guard" => &["ghrepocleanupguard"],
+        "file_exists" => &["ensure_file", ".exists()", ".join("],
+        _ => return None,
+    })
+}
+
 /// Per-scenario markdown under `docs/development/integration-scenarios/<id>.md`.
 fn load_scenario_docs(repo_root: &Path) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
     let scenarios_dir = repo_root.join("docs/development/integration-scenarios");
@@ -88,6 +127,49 @@ pub(crate) fn check_plan(repo_root: &Path) -> Result<()> {
             failures.push(format!(
                 "Rust-implemented scenario {id} MD still contains long libra() wrapper without convergence note (must use short form per §0 checklist and §3.3.1)"
             ));
+        }
+    }
+
+    // Assertion-category coverage heuristic (BASELINE_GAP-INTEG-002/008): every
+    // declared *source-verifiable* key_assertion_category must leave a detectable
+    // signal in the scenario's Rust implementation, so a scenario cannot claim a
+    // category it never exercises. This is what keeps the integration scheme in
+    // sync when a Git-compat command changes: if a strengthened assertion (JSON
+    // envelope, fsck, negative LBR- path, ...) is dropped, check-plan fails.
+    let scenarios_src = repo_root.join("tools/integration-runner/src/scenarios");
+    let mut category_checks = 0usize;
+    for scenario in &manifest.scenarios {
+        if !implemented.contains(scenario.id.as_str()) {
+            continue;
+        }
+        let module = scenario_module(&scenario.id);
+        let src_path = scenarios_src.join(format!("{module}.rs"));
+        let src = match fs::read_to_string(&src_path) {
+            Ok(src) => src.to_lowercase(),
+            Err(_) => {
+                failures.push(format!(
+                    "implemented scenario {} has no source file {}",
+                    scenario.id,
+                    src_path.display()
+                ));
+                continue;
+            }
+        };
+        for category in &scenario.key_assertion_categories {
+            let Some(signals) = source_verifiable_signals(category) else {
+                continue; // advisory category, not gated from source
+            };
+            category_checks += 1;
+            if !signals
+                .iter()
+                .any(|signal| src.contains(&signal.to_lowercase()))
+            {
+                failures.push(format!(
+                    "scenario {} declares key_assertion_category `{category}` but {module}.rs shows no matching assertion (expected one of: {})",
+                    scenario.id,
+                    signals.join(", ")
+                ));
+            }
         }
     }
 
@@ -174,6 +256,7 @@ pub(crate) fn check_plan(repo_root: &Path) -> Result<()> {
     println!("md_scenario_blocks={}", md_scenarios.len());
     println!("matrix_refs={}", matrix_refs.len());
     println!("implemented={}", implemented.len());
+    println!("assertion_category_checks={category_checks}");
     println!("documented_but_not_implemented={}", not_implemented.len());
     for id in not_implemented {
         println!("not_implemented {id}");

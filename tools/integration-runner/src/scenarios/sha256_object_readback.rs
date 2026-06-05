@@ -37,6 +37,10 @@ pub(crate) fn scenario_sha256_object_readback(ctx: &mut ScenarioCtx<'_>) -> Resu
         &ctx.command(&["show", "HEAD:sha.txt"], repo.clone(), true)?,
         "sha256",
     )?;
+    assert_json_ok(
+        &ctx.command(&["--json", "log", "--oneline"], repo.clone(), true)?,
+        "log",
+    )?;
     ctx.command(&["fsck", "--connectivity-only"], repo, true)?;
     Ok(())
 }

@@ -34,6 +34,17 @@
 #   gh_lifecycle       : gh repo create/view/api/delete covered
 #   cleanup_guard      : trap/guard ensures gh repo delete on exit
 #   file_exists        : filesystem state assertions (repo dir, objects, db)
+#
+# check-plan ENFORCES the *source-verifiable* categories (json_envelope, fsck,
+# gitfix_isolation, negative_exit, lbr_error, conflict_markers, gh_lifecycle,
+# cleanup_guard, file_exists): a scenario declaring one MUST leave a matching
+# assertion signal in tools/integration-runner/src/scenarios/<id>.rs (e.g.
+# assert_json_ok/--json, fsck, ctx.gitfix, a `, false)` negative call,
+# assert_lbr_or_text, <<<<<<<, ctx.gh, GhRepoCleanupGuard, ensure_file/.join),
+# or check-plan fails. The remaining categories (global_db_isolation,
+# vault_isolation, no_secret_leak, intentional_difference) are advisory: they
+# are guaranteed by the runner's env-isolation / redaction harness, not gated
+# from source. So declaring a category is a promise that check-plan verifies.
 
 version: 1
 last_updated: "2026-06"   # keep in sync with major doc edits

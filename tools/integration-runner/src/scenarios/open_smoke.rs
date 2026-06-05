@@ -9,5 +9,7 @@ pub(crate) fn scenario_open_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
     assert_json_ok(&output, "open")?;
     let output = ctx.command(&["--json", "open", "origin"], repo.clone(), true)?;
     assert_json_ok(&output, "open")?;
+    let bad_open = ctx.command(&["open", "nonexistent-remote"], repo.clone(), false)?;
+    assert_lbr_or_text(&bad_open, "invalid")?;
     Ok(())
 }

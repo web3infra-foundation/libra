@@ -10,6 +10,14 @@ pub(crate) fn scenario_config_basic_kv(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     )?;
     let get = ctx.command(&["config", "get", "user.name"], repo.clone(), true)?;
     assert_stdout_contains(&get, "Libra Config Test")?;
+    assert_json_ok(
+        &ctx.command(
+            &["--json", "config", "get", "user.name"],
+            repo.clone(),
+            true,
+        )?,
+        "config",
+    )?;
     let list = ctx.command(&["config", "list"], repo.clone(), true)?;
     assert_stdout_contains(&list, "user.name")?;
     ctx.command(&["config", "unset", "user.name"], repo.clone(), true)?;
