@@ -1098,3 +1098,110 @@ fn test_fetch_shallow_since_invalid_date_exits_129() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// End-to-end `fetch --prune`: a remote-tracking branch whose remote counterpart
+/// was deleted is removed locally; live branches and `refs/heads/*` are kept.
+#[tokio::test]
+#[serial]
+async fn test_fetch_prune_removes_stale_remote_tracking() {
+    let temp = tempdir().expect("temp root");
+    let remote_dir = temp.path().join("remote.git");
+    let work_dir = temp.path().join("work");
+
+    let git = |dir: Option<&Path>, args: &[&str]| {
+        let mut cmd = Command::new("git");
+        if let Some(d) = dir {
+            cmd.current_dir(d);
+        }
+        assert!(
+            cmd.args(args).status().expect("git command").success(),
+            "git {args:?} failed"
+        );
+    };
+
+    git(None, &["init", "--bare", remote_dir.to_str().unwrap()]);
+    git(None, &["init", work_dir.to_str().unwrap()]);
+    git(Some(&work_dir), &["config", "user.name", "Libra Tester"]);
+    git(
+        Some(&work_dir),
+        &["config", "user.email", "tester@example.com"],
+    );
+    fs::write(work_dir.join("README.md"), "hello").expect("write README");
+    git(Some(&work_dir), &["add", "README.md"]);
+    git(Some(&work_dir), &["commit", "-m", "initial"]);
+    // Push two branches: main (the current branch) and feature.
+    let current = String::from_utf8(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .expect("rev-parse")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_string();
+    git(
+        Some(&work_dir),
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+    );
+    git(
+        Some(&work_dir),
+        &["push", "origin", &format!("HEAD:refs/heads/{current}")],
+    );
+    git(
+        Some(&work_dir),
+        &["push", "origin", "HEAD:refs/heads/feature"],
+    );
+
+    // Fetch into a fresh Libra repo so both tracking branches exist.
+    let repo_dir = temp.path().join("libra_repo");
+    fs::create_dir_all(&repo_dir).expect("repo dir");
+    setup_with_new_libra_in(&repo_dir).await;
+    let _guard = ChangeDirGuard::new(&repo_dir);
+    let remote_path = remote_dir.to_str().unwrap().to_string();
+    ConfigKv::set("remote.origin.url", &remote_path, false)
+        .await
+        .unwrap();
+    fetch::fetch_repository(
+        RemoteConfig {
+            name: "origin".to_string(),
+            url: remote_path.clone(),
+        },
+        None,
+        false,
+        None,
+    )
+    .await;
+
+    assert!(
+        Branch::find_branch_result("refs/remotes/origin/feature", Some("origin"))
+            .await
+            .expect("query feature")
+            .is_some(),
+        "feature tracking branch must exist before prune"
+    );
+
+    // Delete `feature` on the remote, then prune.
+    git(
+        Some(&remote_dir),
+        &["update-ref", "-d", "refs/heads/feature"],
+    );
+    let output = run_libra_command(&["fetch", "origin", "--prune"], &repo_dir);
+    assert_cli_success(&output, "fetch --prune");
+
+    assert!(
+        Branch::find_branch_result("refs/remotes/origin/feature", Some("origin"))
+            .await
+            .expect("query feature after prune")
+            .is_none(),
+        "stale feature tracking branch must be pruned"
+    );
+    assert!(
+        Branch::find_branch_result(&format!("refs/remotes/origin/{current}"), Some("origin"))
+            .await
+            .expect("query main after prune")
+            .is_some(),
+        "live tracking branch must survive prune"
+    );
+}

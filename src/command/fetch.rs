@@ -527,6 +527,11 @@ pub struct FetchArgs {
         conflicts_with = "unshallow"
     )]
     pub shallow_exclude: Vec<String>,
+
+    /// After fetching, delete local `refs/remotes/<remote>/*` tracking branches
+    /// that no longer exist on the remote. Can also be enabled via `fetch.prune`.
+    #[clap(long, short = 'p')]
+    pub prune: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -542,6 +547,10 @@ pub struct FetchRepositoryResult {
     pub url: String,
     pub refs_updated: Vec<FetchRefUpdate>,
     pub objects_fetched: usize,
+    /// Local `refs/remotes/<remote>/*` tracking branches removed by `--prune`
+    /// (full ref names). Empty unless pruning ran.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pruned: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -857,6 +866,18 @@ fn format_fetch_porcelain(result: &FetchOutput) -> String {
     lines.join("\n")
 }
 
+/// Whether `fetch.prune` is configured truthy, providing the default for
+/// `--prune` when the flag is absent.
+async fn read_fetch_prune_config() -> bool {
+    matches!(
+        ConfigKv::get("fetch.prune").await,
+        Ok(Some(entry)) if matches!(
+            entry.value.trim().to_ascii_lowercase().as_str(),
+            "true" | "yes" | "on" | "1"
+        )
+    )
+}
+
 async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOutput> {
     tracing::debug!("`fetch` args: {:?}", args);
 
@@ -871,7 +892,11 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         porcelain: _,
         shallow_since,
         shallow_exclude,
+        prune,
     } = args;
+
+    // `--prune` is enabled by the flag or the `fetch.prune` config (flag wins).
+    let prune = prune || read_fetch_prune_config().await;
 
     // `--shallow-since` is parsed at the command layer so an unparseable date is
     // a usage error (129) rather than a deep protocol failure.
@@ -900,6 +925,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
                     false,
                     shallow.clone(),
                     unshallow,
+                    prune,
                     output,
                 )
                 .await
@@ -952,6 +978,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         false,
         shallow,
         unshallow,
+        prune,
         output,
     )
     .await
@@ -994,7 +1021,7 @@ fn render_fetch_output(result: &FetchOutput, output: &OutputConfig) -> CliResult
         writeln!(writer, "From {}", remote.url)
             .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
 
-        if remote.refs_updated.is_empty() {
+        if remote.refs_updated.is_empty() && remote.pruned.is_empty() {
             writeln!(writer, "Already up to date with '{}'", remote.remote)
                 .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
             continue;
@@ -1017,6 +1044,14 @@ fn render_fetch_output(result: &FetchOutput, output: &OutputConfig) -> CliResult
                     )?;
                 }
             }
+        }
+
+        for pruned_ref in &remote.pruned {
+            let ref_name = pruned_ref
+                .strip_prefix("refs/remotes/")
+                .unwrap_or(pruned_ref);
+            writeln!(writer, " - [deleted]         (none)     -> {ref_name}")
+                .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
         }
 
         writeln!(writer, " {} objects fetched", remote.objects_fetched)
@@ -1180,17 +1215,27 @@ pub async fn fetch_repository_safe(
     shallow: ShallowOptions,
     output: &OutputConfig,
 ) -> Result<(), FetchError> {
-    fetch_repository_with_result(remote_config, branch, single_branch, shallow, false, output)
-        .await
-        .map(|_| ())
+    fetch_repository_with_result(
+        remote_config,
+        branch,
+        single_branch,
+        shallow,
+        false,
+        false,
+        output,
+    )
+    .await
+    .map(|_| ())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn fetch_repository_with_result(
     remote_config: RemoteConfig,
     branch: Option<String>,
     single_branch: bool,
     shallow: ShallowOptions,
     unshallow: bool,
+    prune: bool,
     output: &OutputConfig,
 ) -> Result<FetchRepositoryResult, FetchError> {
     let (remote_client, discovery) =
@@ -1225,6 +1270,7 @@ pub(crate) async fn fetch_repository_with_result(
             url: normalized_url,
             refs_updated: Vec::new(),
             objects_fetched: 0,
+            pruned: Vec::new(),
         });
     }
 
@@ -1309,11 +1355,35 @@ pub(crate) async fn fetch_repository_with_result(
 
     let refs_updated =
         update_references(&remote_config, &refs, &ref_heads, remote_head, branch).await?;
+
+    // `--prune` removes local tracking branches whose remote counterpart is gone;
+    // it compares against the remote's advertised refs (`discovery.refs`), never
+    // the locally-filtered set, and never touches `refs/heads/*`.
+    let pruned = if prune {
+        let remote_branch_names =
+            crate::command::remote::collect_remote_branch_names(&discovery.refs);
+        crate::command::remote::prune_stale_tracking_branches(
+            &remote_config.name,
+            &remote_branch_names,
+            false,
+        )
+        .await
+        .map_err(|error| FetchError::LocalState {
+            message: format!("failed to prune stale remote-tracking branches: {error}"),
+        })?
+        .into_iter()
+        .map(|entry| entry.remote_ref)
+        .collect()
+    } else {
+        Vec::new()
+    };
+
     Ok(FetchRepositoryResult {
         remote: remote_config.name,
         url: normalized_url,
         refs_updated,
         objects_fetched,
+        pruned,
     })
 }
 
@@ -2243,6 +2313,7 @@ mod tests {
                         new_oid: "c".repeat(40),
                     },
                 ],
+                pruned: Vec::new(),
             }],
         };
 
