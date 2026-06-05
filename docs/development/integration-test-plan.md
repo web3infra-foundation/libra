@@ -835,6 +835,13 @@ runner 进程退出码：`0` = 无 `fail`（`skip`/`env-skip` 不算失败）；
 
 ```json
 {
+  "run_id": "20260605T013913Z-12345",
+  "commit": "a1b2c3d",
+  "started_at": "2026-06-05T01:39:13.123456+00:00",
+  "finished_at": "2026-06-05T01:39:19.654321+00:00",
+  "waves_run": [0, 1],
+  "wave3_cleanup": "not_run",
+  "run_root_state": "preserved",
   "generated_at": "2026-06-05T01:39:13.700114+00:00",
   "platform": "macos-aarch64",
   "run_root": "/tmp/.../libra-integ-XXXX",
@@ -844,7 +851,8 @@ runner 进程退出码：`0` = 无 `fail`（`skip`/`env-skip` 不算失败）；
   "passed": 37,
   "failed": 0,
   "skipped": 0,
-  "results": [ /* 每场景一条 ScenarioResult */ ]
+  "results": [ /* 每场景一条 ScenarioResult */ ],
+  "scenarios": [ /* 同 results（设计模型对齐别名，兼容并存） */ ]
 }
 ```
 
@@ -852,7 +860,7 @@ runner 进程退出码：`0` = 无 `fail`（`skip`/`env-skip` 不算失败）；
 
 **状态词映射（实现 vs §5.1 设计）**：runner 当前发出的 `status` 字符串为 `passed` / `failed` / `skipped`，分别对应 §5.1 的 `pass` / `fail` / `skip`；`env-skip` 与 `block` 暂统一记为 `skipped`（计数留在 `totals.env_skip` / `totals.block`，当前恒 0）。`redaction_self_check` 为 `clean`：写盘前每条命令的原始 stdout/stderr 都过 `ensure_no_secret_leak`，命中即中止该场景（不产出泄漏报告），故已产出的 report 恒为 leak-clean。退出码语义见 §5.6（`passed/failed/skipped` 计数即 §5.6 的门控来源；`failed==0` 时退出 0）。
 
-**仍待对齐设计模型的字段**（按 BASELINE_GAP 跟踪，非阻断）：`run_id` / `commit` / `started_at` / `finished_at` / `waves_run` / `run_root_state` 以及 `env-skip` vs `block` 的独立状态区分尚未发出；新增这些字段时只能向 `Report` / `ScenarioResult` 追加（serialize-only，向后兼容），并同步本节。
+**仍待对齐设计模型的字段**（按 BASELINE_GAP 跟踪，非阻断）：`run_id` / `commit` / `started_at` / `finished_at` / `waves_run` / `run_root_state` / `wave3_cleanup` 以及 `env-skip` vs `block` 的独立状态区分和 advisory 类别更深语义已部分对齐（见 BASELINE_GAP-INTEG-002）。2026-06 对齐工作（仅 tools/integration-runner/** + plan.md；README/yaml 无漂移故未动）已向 `Report` 追加（serialize-only）以上字段（+ `scenarios` 别名），在 `write_report` / normal/live / RunContext / summary 中填充；`get_source_commit` 安全调用（带 GIT_* 隔离，不清空 runner 自身 PATH）。`run_root_state` 当前恒为 "preserved"（runner 始终 .keep() 目录，报告与日志同在其中）；`wave3_cleanup` 由 live 场景的 cleanup 聚合推导（现通过 guard arm 后立即 set_cleanup("cleanup_required") 使错误路径真正携带）。更新了 §5.7 示例 schema。`env-skip`/`block` 计数仍走 totals，状态词映射为 `skipped`（与实现现状一致）。详见 runner/types.rs、support.rs（含 derive_wave3_cleanup + tests）、util.rs（含 make_run_metadata + tests）、normal.rs/live.rs（含 ctx 注释）、scenarios/live_*.rs 及跨 harness 的 §3.3.1/§3.6 引用。同步本节完成。报告契约与元数据路径的执行覆盖仅来自 `run`/`run-live` 样本（runner crate 此前无 `#[test]`；check-plan 仅静态）。wave3_cleanup "deleted"/"cleanup_required" 分支的完整覆盖需 live L3；get_source_commit 成功路径需非-/Volumes 可发现 git 树。详见 BASELINE_GAP 及新增的 cfg(test) 用例。
 
 ---
 

@@ -9,7 +9,9 @@ use anyhow::{Context, Result, bail};
 use super::{
     dispatch::{run_scenario, run_wave0, skip_result},
     types::RunContext,
-    util::{ensure_binary, find_on_host_path, parse_only, parse_waves, safe_path},
+    util::{
+        ensure_binary, find_on_host_path, make_run_metadata, parse_only, parse_waves, safe_path,
+    },
 };
 use crate::{manifest::load_manifest, registry::scenario_registry, support::write_report};
 
@@ -26,6 +28,12 @@ pub(crate) fn run(
     let binary = binary.unwrap_or_else(|| repo_root.join("target/debug/libra"));
     ensure_binary(repo_root, &binary)?;
 
+    // Isolation and safety per integration-test-plan.md §3.3.1 (canonical template:
+    // env -i + SAFE_PATH + TMPDIR + LIBRA_CONFIG_GLOBAL_DB + LIBRA_TEST + LANG=C) and §3.6
+    // (self-check list: no host HOME leak, gitfix for all git fixtures, redaction pre-write,
+    // no secrets in logs, cwd per-scenario under RUN_ROOT, success cwd-out before any rm).
+    // All `libra`/`gitfix`/`gh` calls in ScenarioCtx go through env_clear + whitelist.
+    // check-plan + runner together enforce the §2.4 assertion category contract.
     let run_root = tempfile::Builder::new()
         .prefix("libra-integ-")
         .tempdir()
@@ -43,13 +51,25 @@ pub(crate) fn run(
     ] {
         fs::create_dir_all(run_root.join(dir)).with_context(|| format!("create {dir}"))?;
     }
+
+    // Capture run metadata *early* (before any scenario dispatch) for §5 report alignment.
+    // Uses shared helper to dedupe now+pid formatting (addresses dupe capture across 3 sites).
+    // run_id per plan §3.3.1 example. commit safe query from repo_root (outside test isolation).
+    // run_root moved (no .clone()) into ctx.
+    let (run_id, commit, started_at, waves_run) =
+        make_run_metadata(repo_root, selected_waves.iter().copied().collect());
+
     let safe_path = safe_path();
     let results_path = run_root.join("results.ndjson");
     let ctx = RunContext {
-        run_root: run_root.clone(),
+        run_root, // move (was clone; fixes unnecessary PathBuf clone into RunContext)
         binary,
         safe_path,
         results_path,
+        run_id,
+        commit,
+        started_at,
+        waves_run,
     };
 
     let mut results = Vec::new();
