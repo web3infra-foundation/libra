@@ -503,6 +503,11 @@ pub struct FetchArgs {
     /// error (exit 129) instead of a clap parse error (exit 2).
     #[clap(long = "recurse-submodules", value_name = "MODE", num_args = 0..=1, require_equals = true)]
     pub recurse_submodules: Option<Option<String>>,
+
+    /// Print a machine-readable, single-space-separated line per ref update:
+    /// `<flag> <old-oid> <new-oid> <local-ref>`. Mutually exclusive with `--json`.
+    #[clap(long)]
+    pub porcelain: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -780,8 +785,57 @@ pub async fn execute_safe(args: FetchArgs, output: &OutputConfig) -> CliResult<(
             "Libra does not manage submodules with the stock Git layout; fetch them as separate repositories",
         ));
     }
+    // `--porcelain` and `--json` are both machine formats; `--json` is a global
+    // flag so this exclusion is enforced here (usage error 129), not by clap.
+    if args.porcelain && output.is_json() {
+        return Err(
+            CliError::command_usage("--porcelain and --json are mutually exclusive")
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+        );
+    }
+    let porcelain = args.porcelain;
     let result = run_fetch(args, output).await?;
-    render_fetch_output(&result, output)
+    if porcelain {
+        render_fetch_porcelain(&result, output)
+    } else {
+        render_fetch_output(&result, output)
+    }
+}
+
+/// Render Git's `--porcelain` format: one `<flag> <old-oid> <new-oid>
+/// <local-ref>` line per ref update, single-space separated, with no human
+/// summary columns.
+fn render_fetch_porcelain(result: &FetchOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.quiet {
+        return Ok(());
+    }
+    let rendered = format_fetch_porcelain(result);
+    if rendered.is_empty() {
+        return Ok(());
+    }
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+    writeln!(writer, "{rendered}")
+        .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))
+}
+
+fn format_fetch_porcelain(result: &FetchOutput) -> String {
+    let mut lines = Vec::new();
+    for remote in &result.remotes {
+        for update in &remote.refs_updated {
+            let (flag, old_oid) = match &update.old_oid {
+                // New ref: space-flag is reserved for fast-forward; new refs use
+                // `*` with an all-zero old object id sized to the hash kind.
+                None => ('*', "0".repeat(update.new_oid.len())),
+                Some(old) => (' ', old.clone()),
+            };
+            lines.push(format!(
+                "{flag} {old_oid} {} {}",
+                update.new_oid, update.remote_ref
+            ));
+        }
+    }
+    lines.join("\n")
 }
 
 async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOutput> {
@@ -795,6 +849,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         deepen,
         unshallow,
         recurse_submodules: _,
+        porcelain: _,
     } = args;
 
     let shallow = build_fetch_shallow_options(depth, deepen, unshallow);
@@ -2125,6 +2180,56 @@ mod tests {
         internal::protocol::FetchStream,
         utils::{output::OutputConfig, test::ScopedEnvVar},
     };
+
+    #[test]
+    fn format_fetch_porcelain_layout_is_space_separated() {
+        use super::{FetchOutput, FetchRefUpdate, FetchRepositoryResult, format_fetch_porcelain};
+
+        let output = FetchOutput {
+            all: false,
+            requested_remote: Some("origin".to_string()),
+            refspec: None,
+            remotes: vec![FetchRepositoryResult {
+                remote: "origin".to_string(),
+                url: "https://example.com/x.git".to_string(),
+                objects_fetched: 2,
+                refs_updated: vec![
+                    FetchRefUpdate {
+                        remote_ref: "refs/remotes/origin/main".to_string(),
+                        old_oid: Some("a".repeat(40)),
+                        new_oid: "b".repeat(40),
+                    },
+                    FetchRefUpdate {
+                        remote_ref: "refs/remotes/origin/dev".to_string(),
+                        old_oid: None,
+                        new_oid: "c".repeat(40),
+                    },
+                ],
+            }],
+        };
+
+        let rendered = format_fetch_porcelain(&output);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            format!(
+                "  {} {} refs/remotes/origin/main",
+                "a".repeat(40),
+                "b".repeat(40)
+            ),
+            "fast-forward uses a space flag, then the column separator (two leading spaces)"
+        );
+        assert_eq!(
+            lines[1],
+            format!(
+                "* {} {} refs/remotes/origin/dev",
+                "0".repeat(40),
+                "c".repeat(40)
+            ),
+            "new ref uses `*` and an all-zero old object id"
+        );
+    }
 
     /// The `.libra/shallow` boundary file must be owner read/write only on Unix.
     #[cfg(unix)]

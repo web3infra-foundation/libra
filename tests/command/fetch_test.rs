@@ -1067,3 +1067,17 @@ fn test_fetch_recurse_submodules_declined_exits_129() {
         "stderr should explain the decline: {stderr}"
     );
 }
+
+/// `--porcelain` and `--json` are both machine formats and must not combine
+/// (a usage error, exit 129).
+#[test]
+fn test_fetch_porcelain_json_mutually_exclusive_exits_129() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["--json", "fetch", "--porcelain"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "--porcelain + --json must be a usage error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
