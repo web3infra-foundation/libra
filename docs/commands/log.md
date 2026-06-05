@@ -129,13 +129,36 @@ libra log --until 2026-03-01
 
 ### `--pretty <FORMAT>`
 
-Custom pretty-print format string. Supports placeholders like `%h` (short hash), `%s`
-(subject), `%an` (author name), `%ae` (author email), `%ad` (author date), etc.
+Custom pretty-print format string. A bare template, `format:<template>`, and
+`tformat:<template>` are all accepted; `tformat:` appends a trailing newline to each
+commit's output. Unknown `%`-escapes are preserved literally.
+
+Supported placeholders:
+
+| Placeholder | Expands to |
+|-------------|------------|
+| `%H` / `%h` | Full / abbreviated commit hash |
+| `%T` / `%t` | Full / abbreviated tree hash |
+| `%P` / `%p` | Full / abbreviated parent hashes (space-separated; empty for a root commit) |
+| `%s` / `%f` | Subject line / sanitized subject (spaces → `-`) |
+| `%b` / `%B` | Message body (subject stripped) / raw body |
+| `%an` / `%ae` / `%ad` | Author name / email / date |
+| `%cn` / `%ce` / `%cd` | Committer name / email / date |
+| `%d` | Ref decorations |
+| `%n` | A newline |
+| `%x<HH>` | The byte for the two hex digits (e.g. `%x09` → tab, `%x20` → space) |
 
 ```bash
 libra log --pretty="%h - %s (%an)"
 libra log --pretty="format:%H %s"
+libra log --pretty="tformat:%h%x09%s"   # hash <tab> subject, one per line
 ```
+
+Abbreviated hashes (`%h`/`%t`/`%p`) follow `--abbrev-commit` / `--no-abbrev-commit`.
+The abbreviation length never slices a multi-byte boundary, and every placeholder degrades
+safely (root commits, empty bodies, and malformed `%x` escapes never error). Under
+`--json` / `--machine`, `--pretty` is a no-op — the structured schema is unchanged.
+Note: Git's `--log-size` is not implemented; passing it is rejected by the argument parser.
 
 ### `--decorate[=<style>]`
 

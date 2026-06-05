@@ -1799,3 +1799,41 @@ async fn test_log_grep_filtering() {
     let commit_count = count_commit_lines(&stdout);
     assert_eq!(commit_count, 1);
 }
+
+// ── Custom pretty-format placeholders (log-improvement-plan Batch 1) ──
+
+#[test]
+fn test_pretty_format_full_hash_cli() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["log", "-n", "1", "--pretty=format:%H"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(
+        hash.len(),
+        40,
+        "expected a 40-char SHA-1 hash, got: {hash:?}"
+    );
+    assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+#[test]
+fn test_pretty_format_in_json_is_noop() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(
+        &["--json", "log", "-n", "1", "--pretty=format:%H"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Under --json the pretty template is a no-op: the schema is unchanged.
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "log");
+    assert_eq!(json["data"]["commits"][0]["subject"], "base");
+}
