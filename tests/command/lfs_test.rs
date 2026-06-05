@@ -7,7 +7,7 @@ use std::{fs, path::Path, process::Command};
 use axum::{
     Json, Router,
     http::StatusCode,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -1020,14 +1020,10 @@ fn test_lfs_invalid_flag_clap_error() {
 #[test]
 fn test_lfs_deferred_subcommands_parse_not_clap_error() {
     let repo = init_temp_repo();
-    // push/prune/checkout parse successfully but are not yet implemented: they
+    // prune/checkout parse successfully but are not yet implemented: they
     // dispatch and return a typed "not yet implemented" error (exit 128) — never
-    // a clap error (exit 2). (`fetch` is implemented and tested separately.)
-    for args in [
-        vec!["lfs", "push"],
-        vec!["lfs", "prune"],
-        vec!["lfs", "checkout"],
-    ] {
+    // a clap error (exit 2). (`push`/`fetch` are implemented and tested separately.)
+    for args in [vec!["lfs", "prune"], vec!["lfs", "checkout"]] {
         let output = libra_command(repo.path())
             .args(&args)
             .output()
@@ -1290,5 +1286,229 @@ async fn test_lfs_fetch_checksum_mismatch_rolls_back() {
     assert!(
         !entity.with_file_name(format!("{oid}.tmp")).exists(),
         "the temp file must be removed on checksum mismatch"
+    );
+}
+
+/// Spawn a mock LFS server that accepts the upload batch protocol: it answers
+/// `objects/batch` with an upload action, returns an empty lock list from
+/// `locks/verify`, and accepts the object PUT.
+async fn spawn_lfs_upload_mock() -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind mock LFS listener");
+    let addr = listener
+        .local_addr()
+        .expect("failed to read mock LFS bound address");
+    let upload_href = format!("http://{addr}/upload");
+    let app = Router::new()
+        .route(
+            "/objects/batch",
+            post(move |body: Json<serde_json::Value>| {
+                let href = upload_href.clone();
+                async move {
+                    let oid = body.0["objects"][0]["oid"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    let size = body.0["objects"][0]["size"].as_i64().unwrap_or(0);
+                    Json(json!({
+                        "objects": [{
+                            "oid": oid,
+                            "size": size,
+                            "actions": {
+                                "upload": {
+                                    "href": href,
+                                    "header": {},
+                                    "expires_at": "2099-01-01T00:00:00Z"
+                                }
+                            }
+                        }]
+                    }))
+                }
+            }),
+        )
+        // `verify_locks` always parses the body, so return a valid empty list.
+        .route(
+            "/locks/verify",
+            post(|| async { Json(json!({"ours": [], "theirs": [], "next_cursor": ""})) }),
+        )
+        // Drain the uploaded body and accept it.
+        .route(
+            "/upload",
+            put(|_body: axum::body::Bytes| async { StatusCode::OK }),
+        );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    addr
+}
+
+#[test]
+fn test_lfs_push_noop_when_no_pointers() {
+    let repo = init_temp_repo();
+    run_libra_ok(repo.path(), &["config", "user.name", "Tester"]);
+    run_libra_ok(repo.path(), &["config", "user.email", "tester@example.com"]);
+    fs::write(repo.path().join("readme.txt"), "plain content").expect("write file");
+    run_libra_ok(repo.path(), &["add", "readme.txt"]);
+    run_libra_ok(repo.path(), &["commit", "-m", "non-lfs commit"]);
+
+    // No remote is configured and none is needed: with no LFS pointers, push is
+    // a pure no-op and never contacts a server.
+    let output = libra_command(repo.path())
+        .args(["lfs", "push"])
+        .output()
+        .expect("failed to run lfs push");
+    assert!(
+        output.status.success(),
+        "push no-op should exit 0: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("No LFS objects to push"),
+        "expected no-op notice, stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn test_lfs_push_rejects_non_current_branch() {
+    let repo = init_temp_repo();
+    run_libra_ok(repo.path(), &["config", "user.name", "Tester"]);
+    run_libra_ok(repo.path(), &["config", "user.email", "tester@example.com"]);
+    fs::write(repo.path().join("a.txt"), "x").expect("write file");
+    run_libra_ok(repo.path(), &["add", "a.txt"]);
+    run_libra_ok(repo.path(), &["commit", "-m", "commit"]);
+
+    // The current branch is `main`; pushing a different branch is rejected.
+    let output = libra_command(repo.path())
+        .args(["lfs", "push", "origin", "feature"])
+        .output()
+        .expect("failed to run lfs push");
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "non-current-branch push should map to LBR-CLI-003 (exit 129), stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("only the current branch"),
+        "expected current-branch-only error, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_push_missing_local_object_errors() {
+    let addr = spawn_lfs_upload_mock().await;
+    let repo = init_repo_with_mock_remote(&format!("http://{addr}"));
+    let repo_path = repo.path().to_path_buf();
+
+    let setup_path = repo_path.clone();
+    tokio::task::spawn_blocking(move || {
+        commit_lfs_file(&setup_path, "big.bin", b"PUSH-CONTENT-missing-case");
+        let entity = find_single_lfs_entity(&setup_path).expect("entity should exist after add");
+        fs::remove_file(&entity).expect("delete entity to simulate missing object");
+    })
+    .await
+    .expect("setup join failed");
+
+    let push_path = repo_path.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        libra_command(&push_path)
+            .args(["lfs", "push", "origin"])
+            .output()
+            .expect("failed to run lfs push origin")
+    })
+    .await
+    .expect("push join failed");
+
+    assert!(
+        !output.status.success(),
+        "push must fail when a referenced object is missing locally, stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("missing from the local cache"),
+        "expected missing-object error, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_push_uploads_to_mock_server() {
+    let addr = spawn_lfs_upload_mock().await;
+    let repo = init_repo_with_mock_remote(&format!("http://{addr}"));
+    let repo_path = repo.path().to_path_buf();
+
+    let setup_path = repo_path.clone();
+    tokio::task::spawn_blocking(move || {
+        commit_lfs_file(
+            &setup_path,
+            "big.bin",
+            b"PUSH-CONTENT-upload-abcdef-1234567890",
+        );
+    })
+    .await
+    .expect("setup join failed");
+
+    let push_path = repo_path.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        libra_command(&push_path)
+            .args(["lfs", "push", "origin"])
+            .output()
+            .expect("failed to run lfs push origin")
+    })
+    .await
+    .expect("push join failed");
+
+    assert!(
+        output.status.success(),
+        "push should upload to the mock server: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("Pushed 1 LFS object"),
+        "expected push summary, stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_push_json_output() {
+    let addr = spawn_lfs_upload_mock().await;
+    let repo = init_repo_with_mock_remote(&format!("http://{addr}"));
+    let repo_path = repo.path().to_path_buf();
+
+    let setup_path = repo_path.clone();
+    tokio::task::spawn_blocking(move || {
+        commit_lfs_file(&setup_path, "big.bin", b"PUSH-JSON-CONTENT-0987654321");
+    })
+    .await
+    .expect("setup join failed");
+
+    let push_path = repo_path.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        libra_command(&push_path)
+            .args(["--json", "lfs", "push", "origin"])
+            .output()
+            .expect("failed to run --json lfs push origin")
+    })
+    .await
+    .expect("push join failed");
+
+    assert!(
+        output.status.success(),
+        "push --json should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("push stdout should be a single JSON envelope");
+    assert_eq!(json["command"], "lfs");
+    assert_eq!(json["data"]["action"], "push");
+    assert_eq!(
+        json["data"]["pushed_oids"].as_array().map(|a| a.len()),
+        Some(1),
+        "pushed_oids should list the uploaded object, stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
 }

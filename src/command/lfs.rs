@@ -16,6 +16,7 @@ use git_internal::{
     internal::{
         index::Index,
         object::{blob::Blob, commit::Commit, tree::Tree},
+        pack::entry::Entry,
     },
 };
 use reqwest::StatusCode;
@@ -425,18 +426,106 @@ async fn run_lfs(cmd: LfsCmds, output: &OutputConfig) -> CliResult<LfsOutput> {
         // the CLI surface parses now so automation can target it, but the
         // behaviour is not yet available.
         LfsCmds::Fetch { remote, refs } => run_lfs_fetch(remote, refs, output).await,
-        LfsCmds::Push { .. } => Err(lfs_unsupported("push")),
+        LfsCmds::Push { remote, refs } => run_lfs_push(remote, refs, output).await,
         LfsCmds::Prune { .. } => Err(lfs_unsupported("prune")),
         LfsCmds::Checkout { .. } => Err(lfs_unsupported("checkout")),
     }
 }
 
-/// A deduplicated LFS pointer (`oid` + `size`) discovered by the commit-graph
-/// scanner.
+/// `libra lfs push [<remote>] [<ref>...]` — upload the LFS objects referenced by
+/// the current branch to the remote.
+///
+/// Scope (lfs-improvement-plan Batch 1, option b): push always operates on the
+/// **current HEAD branch**, because `LFSClient::push_objects` verifies locks
+/// using the current refspec and index. Explicit refs that are not the current
+/// branch are rejected rather than uploaded with a mismatched lock-verify
+/// context.
+async fn run_lfs_push(
+    remote: Option<String>,
+    refs: Vec<String>,
+    output: &OutputConfig,
+) -> CliResult<LfsOutput> {
+    let current_branch = match Head::current().await {
+        Head::Branch(name) => name,
+        Head::Detached(_) => {
+            return Err(CliError::fatal(
+                "libra lfs push requires a branch checkout (HEAD is detached)",
+            )
+            .with_stable_code(StableErrorCode::RepoStateInvalid));
+        }
+    };
+
+    // Only the current branch is supported (see scope note above).
+    for name in &refs {
+        let bare = name.strip_prefix("refs/heads/").unwrap_or(name);
+        if bare != current_branch {
+            return Err(CliError::fatal(format!(
+                "libra lfs push currently supports only the current branch ('{current_branch}'); \
+                 '{name}' is not the current branch"
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidTarget)
+            .with_hint(
+                "switch to the branch you want to push, then run `libra lfs push <remote>`",
+            ));
+        }
+    }
+
+    // Unborn branch (no commits): nothing to push, no network.
+    let Some(head_commit) = Head::current_commit().await else {
+        return Ok(LfsOutput {
+            action: "push".to_string(),
+            ..LfsOutput::default()
+        });
+    };
+
+    let pointers = scan_lfs_pointers(&[head_commit]).await?;
+    if pointers.is_empty() {
+        return Ok(LfsOutput {
+            action: "push".to_string(),
+            ..LfsOutput::default()
+        });
+    }
+
+    // Every referenced object must be present locally; load its pointer blob as
+    // an `Entry` for `push_objects` (which re-parses, re-checks, and verifies
+    // locks). A missing local object is a hard error — never a silent skip.
+    let mut entries = Vec::new();
+    for pointer in &pointers {
+        if !lfs::lfs_object_path(&pointer.oid).exists() {
+            return Err(CliError::fatal(format!(
+                "LFS object {} is missing from the local cache; cannot push",
+                pointer.oid
+            ))
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+            .with_hint("run `libra lfs fetch` or restore the object before pushing."));
+        }
+        let blob = load_object::<Blob>(&pointer.blob_hash)
+            .map_err(|e| CliError::io(format!("failed to load LFS pointer blob: {e}")))?;
+        entries.push(Entry::from(blob));
+    }
+
+    let quiet = output.is_json();
+    let client = lfs_client_for_remote(remote.as_deref()).await?;
+    client.push_objects(&entries, quiet).await.map_err(|e| {
+        CliError::network(e.to_string()).with_stable_code(StableErrorCode::NetworkUnavailable)
+    })?;
+
+    let pushed_oids = pointers.iter().map(|p| p.oid.clone()).collect();
+    Ok(LfsOutput {
+        action: "push".to_string(),
+        pushed_oids,
+        ..LfsOutput::default()
+    })
+}
+
+/// A deduplicated LFS pointer discovered by the commit-graph scanner. `oid` and
+/// `size` drive fetch; `blob_hash` (the pointer blob's object id) lets push load
+/// the pointer `Entry` to hand to `LFSClient::push_objects`.
 #[derive(Debug, Clone)]
 struct ScannedPointer {
     oid: String,
     size: u64,
+    blob_hash: ObjectHash,
 }
 
 /// Scans the commit graph reachable from `start_commits` (BFS) and returns the
@@ -496,9 +585,11 @@ async fn scan_lfs_pointers(start_commits: &[ObjectHash]) -> CliResult<Vec<Scanne
             let blob = load_object::<Blob>(blob_hash)
                 .map_err(|e| CliError::io(format!("failed to load blob {blob_hash}: {e}")))?;
             if let Some((oid, size)) = lfs::parse_pointer_data(&blob.data) {
-                found
-                    .entry(oid.clone())
-                    .or_insert(ScannedPointer { oid, size });
+                found.entry(oid.clone()).or_insert(ScannedPointer {
+                    oid,
+                    size,
+                    blob_hash: *blob_hash,
+                });
             }
         }
     }
@@ -743,6 +834,13 @@ fn render_lfs_output(result: &LfsOutput, output: &OutputConfig) -> CliResult<()>
                 println!("No missing LFS objects to fetch");
             } else {
                 println!("Fetched {} LFS object(s)", result.fetched_oids.len());
+            }
+        }
+        "push" => {
+            if result.pushed_oids.is_empty() {
+                println!("No LFS objects to push");
+            } else {
+                println!("Pushed {} LFS object(s)", result.pushed_oids.len());
             }
         }
         "lock" => {

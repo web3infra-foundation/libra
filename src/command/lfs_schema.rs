@@ -25,6 +25,10 @@ pub struct LfsOutput {
     /// additive field — omitted from JSON when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fetched_oids: Vec<String>,
+    /// OIDs pushed to the remote by `libra lfs push`. Backward-compatible
+    /// additive field — omitted from JSON when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pushed_oids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -175,7 +175,11 @@ impl LFSClient {
     }
 
     /// push LFS objects to remote server
-    pub async fn push_objects<'a, I>(&self, objs: I) -> Result<usize, LfsPushError>
+    ///
+    /// When `quiet` is true the human progress lines this method (and the
+    /// `upload_object` it calls) writes to stdout are suppressed, so callers
+    /// rendering structured `--json`/`--machine` output keep stdout clean.
+    pub async fn push_objects<'a, I>(&self, objs: I, quiet: bool) -> Result<usize, LfsPushError>
     where
         I: IntoIterator<Item = &'a Entry>,
     {
@@ -266,7 +270,7 @@ impl LFSClient {
                         lfs::get_oid_by_path(&l.path).is_some_and(|oid| oids.contains(&oid))
                     })
                     .collect::<Vec<_>>();
-                if !ours.is_empty() {
+                if !ours.is_empty() && !quiet {
                     println!("The following files are locked by you, consider unlocking them:");
                     for lock in ours {
                         println!("  - {}", lock.path);
@@ -333,16 +337,23 @@ impl LFSClient {
         let mut uploaded = 0;
         for obj in resp.objects {
             let file_path = lfs::lfs_object_path(&obj.oid);
-            if self.upload_object(obj, &file_path).await? {
+            if self.upload_object(obj, &file_path, quiet).await? {
                 uploaded += 1;
             }
         }
-        println!("LFS objects push completed.");
+        if !quiet {
+            println!("LFS objects push completed.");
+        }
         Ok(uploaded)
     }
 
     /// push LFS object to remote server, didn't need local lfs storage
-    pub async fn push_object(&self, oid: &str, file: &Path) -> Result<bool, LfsPushError> {
+    pub async fn push_object(
+        &self,
+        oid: &str,
+        file: &Path,
+        quiet: bool,
+    ) -> Result<bool, LfsPushError> {
         let batch_request = BatchRequest {
             operation: Operation::Upload,
             transfers: vec![lfs::LFS_TRANSFER_API.to_string()],
@@ -404,8 +415,10 @@ impl LFSClient {
             .into_iter()
             .next()
             .expect("LFS batch response had exactly one object (checked above)");
-        let uploaded = self.upload_object(obj, file).await?;
-        println!("LFS objects push completed.");
+        let uploaded = self.upload_object(obj, file, quiet).await?;
+        if !quiet {
+            println!("LFS objects push completed.");
+        }
         Ok(uploaded)
     }
 
@@ -414,6 +427,7 @@ impl LFSClient {
         &self,
         object: ResponseObject,
         file: &Path,
+        quiet: bool,
     ) -> Result<bool, LfsPushError> {
         let oid = object.oid.clone();
         if let Some(err) = object.error {
@@ -431,7 +445,9 @@ impl LFSClient {
                 detail: "remote did not provide an upload action".to_string(),
             })?;
 
-            println!("Uploading LFS file: {}", object.oid);
+            if !quiet {
+                println!("Uploading LFS file: {}", object.oid);
+            }
             let content_len = tokio::fs::metadata(file)
                 .await
                 .map_err(|e| LfsPushError {
@@ -484,7 +500,9 @@ impl LFSClient {
                     detail: format!("upload request failed with status {status}: {message}"),
                 });
             }
-            println!("Uploaded.");
+            if !quiet {
+                println!("Uploaded.");
+            }
             Ok(true)
         } else {
             tracing::debug!("LFS file {} already exists on remote server", object.oid);
@@ -1047,7 +1065,7 @@ mod tests {
         let oid = lfs::calc_lfs_file_hash(&test_file).unwrap();
 
         // Test push
-        match client.push_object(&oid, &test_file).await {
+        match client.push_object(&oid, &test_file, false).await {
             Ok(_) => println!("Pushed successfully."),
             Err(err) => eprintln!("Push failed: {err:?}"),
         }
@@ -1367,7 +1385,7 @@ mod tests {
         let base_url = format!("http://{addr}/");
         let client = test_lfs_client(&base_url);
         let err = client
-            .push_object("deadbeef", &file_path)
+            .push_object("deadbeef", &file_path, false)
             .await
             .expect_err("empty objects array should be rejected by push_object");
         assert!(
@@ -1411,7 +1429,7 @@ mod tests {
         let base_url = format!("http://{addr}/");
         let client = test_lfs_client(&base_url);
         let err = client
-            .push_object(test_oid, &file_path)
+            .push_object(test_oid, &file_path, false)
             .await
             .expect_err("missing upload action should surface a typed LfsPushError");
         assert!(

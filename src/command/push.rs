@@ -749,15 +749,14 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             detail: e.to_string(),
         })?;
         let lfs_client = LFSClient::from_url(&url);
-        lfs_files_uploaded =
-            lfs_client
-                .push_objects(&objs)
-                .await
-                .map_err(|error| PushError::LfsUploadFailed {
-                    path: error.path.unwrap_or_else(|| "(unknown)".to_string()),
-                    oid: error.oid.unwrap_or_else(|| "(unknown)".to_string()),
-                    detail: error.detail,
-                })?;
+        lfs_files_uploaded = lfs_client
+            .push_objects(&objs, false)
+            .await
+            .map_err(|error| PushError::LfsUploadFailed {
+                path: error.path.unwrap_or_else(|| "(unknown)".to_string()),
+                oid: error.oid.unwrap_or_else(|| "(unknown)".to_string()),
+                detail: error.detail,
+            })?;
     }
 
     let mut pack_data = Vec::new();
