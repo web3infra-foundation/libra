@@ -312,6 +312,7 @@ mod init_test;
 mod lfs_test;
 mod log_test;
 mod ls_remote_test;
+mod ls_tree_test;
 mod merge_test;
 mod mv_test;
 mod open_test;
