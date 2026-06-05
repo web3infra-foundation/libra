@@ -1020,11 +1020,11 @@ fn test_lfs_invalid_flag_clap_error() {
 #[test]
 fn test_lfs_deferred_subcommands_parse_not_clap_error() {
     let repo = init_temp_repo();
-    // push/fetch/prune/checkout parse successfully (they dispatch and return a
-    // typed "not yet implemented" error, exit 128 — never a clap error, exit 2).
+    // push/prune/checkout parse successfully but are not yet implemented: they
+    // dispatch and return a typed "not yet implemented" error (exit 128) — never
+    // a clap error (exit 2). (`fetch` is implemented and tested separately.)
     for args in [
         vec!["lfs", "push"],
-        vec!["lfs", "fetch"],
         vec!["lfs", "prune"],
         vec!["lfs", "checkout"],
     ] {
@@ -1044,4 +1044,251 @@ fn test_lfs_deferred_subcommands_parse_not_clap_error() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+// ── LFS commit-graph scanner + fetch (lfs-improvement-plan Batch 1) ──
+
+fn run_libra_ok(repo: &Path, args: &[&str]) {
+    let out = libra_command(repo)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run libra {args:?}: {e}"));
+    assert!(
+        out.status.success(),
+        "`libra {args:?}` failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Track `*.bin`, write `content` to `name`, then add+commit it (with the
+/// `.libra_attributes` file) so the commit tree carries the LFS pointer.
+fn commit_lfs_file(repo: &Path, name: &str, content: &[u8]) {
+    run_libra_ok(repo, &["lfs", "track", "*.bin"]);
+    fs::write(repo.join(name), content).expect("write lfs file");
+    run_libra_ok(repo, &["config", "user.name", "Tester"]);
+    run_libra_ok(repo, &["config", "user.email", "tester@example.com"]);
+    run_libra_ok(repo, &["add", ".libra_attributes", name]);
+    run_libra_ok(repo, &["commit", "-m", "add lfs file"]);
+}
+
+fn lfs_entity_path(repo: &Path, oid: &str) -> std::path::PathBuf {
+    repo.join(".libra/lfs/objects")
+        .join(&oid[..2])
+        .join(&oid[2..4])
+        .join(oid)
+}
+
+/// Find the single LFS entity (64-char hex filename) under `.libra/lfs/objects`.
+fn find_single_lfs_entity(repo: &Path) -> Option<std::path::PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        if let Ok(rd) = fs::read_dir(dir) {
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.len() == 64 && n.bytes().all(|b| b.is_ascii_hexdigit()))
+                {
+                    out.push(path);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&repo.join(".libra/lfs/objects"), &mut out);
+    out.into_iter().next()
+}
+
+/// Spawn a mock LFS server that answers the download batch protocol and serves
+/// `served` bytes for the object (use the real content for success, or tampered
+/// bytes to exercise checksum failure).
+async fn spawn_lfs_download_mock(served: Vec<u8>) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind mock LFS listener");
+    let addr = listener
+        .local_addr()
+        .expect("failed to read mock LFS bound address");
+    let href = format!("http://{addr}/dl");
+    let app = Router::new()
+        .route(
+            "/objects/batch",
+            post(move |body: Json<serde_json::Value>| {
+                let href = href.clone();
+                async move {
+                    let oid = body.0["objects"][0]["oid"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    let size = body.0["objects"][0]["size"].as_i64().unwrap_or(0);
+                    Json(json!({
+                        "objects": [{
+                            "oid": oid,
+                            "size": size,
+                            "actions": {
+                                "download": {
+                                    "href": href,
+                                    "header": {},
+                                    "expires_at": "2099-01-01T00:00:00Z"
+                                }
+                            }
+                        }]
+                    }))
+                }
+            }),
+        )
+        // The chunk API probe must 404 so the client falls back to a single GET.
+        .route("/dl/chunks", get(|| async { StatusCode::NOT_FOUND }))
+        .route(
+            "/dl",
+            get(move || {
+                let body = served.clone();
+                async move { body }
+            }),
+        );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    addr
+}
+
+#[test]
+fn test_lfs_fetch_noop_when_no_objects() {
+    let repo = init_temp_repo();
+    let output = libra_command(repo.path())
+        .args(["lfs", "fetch"])
+        .output()
+        .expect("failed to run lfs fetch");
+    assert!(
+        output.status.success(),
+        "fetch no-op should exit 0: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("No missing LFS objects"),
+        "expected no-op notice, stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn test_lfs_fetch_json_clean_stdout() {
+    let repo = init_temp_repo();
+    let output = libra_command(repo.path())
+        .args(["--json", "lfs", "fetch"])
+        .output()
+        .expect("failed to run --json lfs fetch");
+    assert!(
+        output.status.success(),
+        "fetch --json should exit 0: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("fetch stdout should be a single JSON envelope");
+    assert_eq!(json["command"], "lfs");
+    assert_eq!(json["data"]["action"], "fetch");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_fetch_downloads_missing_object() {
+    let content = b"LFS-ENTITY-CONTENT-for-fetch-test-1234567890".to_vec();
+    let addr = spawn_lfs_download_mock(content.clone()).await;
+    let repo = init_repo_with_mock_remote(&format!("http://{addr}"));
+    let repo_path = repo.path().to_path_buf();
+
+    // Commit an LFS file, then delete its local entity to simulate a missing
+    // object that `fetch` must restore from the remote.
+    let setup_path = repo_path.clone();
+    let setup_content = content.clone();
+    let oid = tokio::task::spawn_blocking(move || {
+        commit_lfs_file(&setup_path, "big.bin", &setup_content);
+        let entity = find_single_lfs_entity(&setup_path).expect("entity should exist after add");
+        let oid = entity.file_name().unwrap().to_string_lossy().into_owned();
+        fs::remove_file(&entity).expect("delete entity to simulate missing object");
+        oid
+    })
+    .await
+    .expect("setup join failed");
+
+    let fetch_path = repo_path.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        libra_command(&fetch_path)
+            .args(["lfs", "fetch", "origin"])
+            .output()
+            .expect("failed to run lfs fetch origin")
+    })
+    .await
+    .expect("fetch join failed");
+
+    assert!(
+        output.status.success(),
+        "fetch should restore the object: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let entity = lfs_entity_path(repo.path(), &oid);
+    assert!(
+        entity.exists(),
+        "fetch must restore the LFS entity at {}",
+        entity.display()
+    );
+    assert_eq!(
+        fs::read(&entity).expect("read restored entity"),
+        content,
+        "restored entity content must match the original"
+    );
+    // No leftover temp file.
+    assert!(
+        !entity.with_file_name(format!("{oid}.tmp")).exists(),
+        "fetch must not leave a .tmp file behind"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_fetch_checksum_mismatch_rolls_back() {
+    let content = b"GENUINE-LFS-CONTENT-abcdefghijklmnop".to_vec();
+    // The mock serves tampered bytes whose SHA256 will not match the pointer oid.
+    let addr = spawn_lfs_download_mock(b"TAMPERED-BYTES-do-not-match-oid".to_vec()).await;
+    let repo = init_repo_with_mock_remote(&format!("http://{addr}"));
+    let repo_path = repo.path().to_path_buf();
+
+    let setup_path = repo_path.clone();
+    let setup_content = content.clone();
+    let oid = tokio::task::spawn_blocking(move || {
+        commit_lfs_file(&setup_path, "big.bin", &setup_content);
+        let entity = find_single_lfs_entity(&setup_path).expect("entity should exist after add");
+        let oid = entity.file_name().unwrap().to_string_lossy().into_owned();
+        fs::remove_file(&entity).expect("delete entity");
+        oid
+    })
+    .await
+    .expect("setup join failed");
+
+    let fetch_path = repo_path.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        libra_command(&fetch_path)
+            .args(["lfs", "fetch", "origin"])
+            .output()
+            .expect("failed to run lfs fetch origin")
+    })
+    .await
+    .expect("fetch join failed");
+
+    // A checksum mismatch must fail the fetch and never corrupt the object store.
+    assert!(
+        !output.status.success(),
+        "fetch should fail on checksum mismatch, stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let entity = lfs_entity_path(repo.path(), &oid);
+    assert!(
+        !entity.exists(),
+        "no corrupt entity may be stored on checksum mismatch"
+    );
+    assert!(
+        !entity.with_file_name(format!("{oid}.tmp")).exists(),
+        "the temp file must be removed on checksum mismatch"
+    );
 }

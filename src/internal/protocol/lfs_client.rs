@@ -137,6 +137,25 @@ impl LFSClient {
                      `libra branch --set-upstream-to <remote>/<branch>`"
                 )
             })?;
+        Self::from_remote_url(url)
+    }
+
+    /// Construct an LFS client for an explicitly named remote, reading
+    /// `remote.<remote>.url` from config.
+    ///
+    /// Unlike [`new`](Self::new)/[`get`](Self::get), this never falls back to the
+    /// current-branch upstream, so an explicit `libra lfs push <remote>` /
+    /// `fetch <remote>` always targets the requested remote. When the remote is
+    /// unknown, [`ConfigKv::get_remote_url`] returns Git's
+    /// `No URL configured for remote '<remote>'` error, which propagates here.
+    pub async fn new_from_remote(remote: &str) -> anyhow::Result<Self> {
+        let url = ConfigKv::get_remote_url(remote).await?;
+        Self::from_remote_url(url)
+    }
+
+    /// Build a client from a raw remote URL string (shared by [`new`](Self::new)
+    /// and [`new_from_remote`](Self::new_from_remote)).
+    fn from_remote_url(url: String) -> anyhow::Result<Self> {
         // generate_lfs_server_url converts SCP-style SSH URLs (git@host:user/repo.git)
         // to valid HTTPS URLs, so we pass the raw remote string directly instead of
         // going through Url::parse which rejects SCP format with RelativeUrlWithoutBase.
@@ -502,6 +521,11 @@ impl LFSClient {
             &mut (dyn FnMut(f64) -> anyhow::Result<()> + Send), // progress callback
             f64,                                                // step
         )>,
+        // When true, suppress the human progress lines that this method writes to
+        // stdout (e.g. `Downloading LFS file: …`). Callers rendering structured
+        // `--json`/`--machine` output pass `true` so stdout carries only the JSON
+        // envelope; stderr diagnostics (404/checksum warnings) are unaffected.
+        quiet: bool,
     ) -> anyhow::Result<()> {
         let batch_request = BatchRequest {
             operation: Operation::Download,
@@ -613,18 +637,22 @@ impl LFSClient {
                 .await?;
             let file_len = file.metadata().await?.len();
             if file_len > size {
-                println!("Local file size is larger than remote, truncate to 0.");
+                if !quiet {
+                    println!("Local file size is larger than remote, truncate to 0.");
+                }
                 file.set_len(0).await?; // clear
                 file.seek(tokio::io::SeekFrom::Start(0)).await?;
             } else if file_len > 0 {
                 let chunk_size = chunk_size as u64;
                 got_parts = file_len / chunk_size;
                 let file_offset = got_parts * chunk_size;
-                println!(
-                    "Resume download from offset: {}, part: {}",
-                    file_offset,
-                    got_parts + 1
-                );
+                if !quiet {
+                    println!(
+                        "Resume download from offset: {}, part: {}",
+                        file_offset,
+                        got_parts + 1
+                    );
+                }
                 file.set_len(file_offset).await?; // truncate
                 Self::update_file_checksum(&mut file, &mut checksum).await?; // resume checksum
                 file.seek(tokio::io::SeekFrom::End(0)).await?;
@@ -632,14 +660,16 @@ impl LFSClient {
             file
         };
 
-        println!("Downloading LFS file: {oid}");
+        if !quiet {
+            println!("Downloading LFS file: {oid}");
+        }
         let parts = links.len();
         let mut downloaded: u64 = file.metadata().await?.len();
         let mut last_progress = 0.0;
         let start_part = got_parts as usize;
         for link in links.iter().skip(start_part) {
             got_parts += 1;
-            if is_chunked {
+            if is_chunked && !quiet {
                 println!("- part: {got_parts}/{parts}");
             }
 
@@ -691,7 +721,9 @@ impl LFSClient {
         }
         let checksum = hex::encode(checksum.finish().as_ref());
         if checksum == oid {
-            println!("Downloaded.");
+            if !quiet {
+                println!("Downloaded.");
+            }
             Ok(())
         } else {
             eprintln!(
@@ -1061,7 +1093,7 @@ mod tests {
         let out_path = tmp_dir.path().join("test_lfs_file");
 
         let result = client
-            .download_object(test_oid, test_size, &out_path, None)
+            .download_object(test_oid, test_size, &out_path, None, false)
             .await;
 
         assert!(
@@ -1296,7 +1328,7 @@ mod tests {
         let client = test_lfs_client(&base_url);
 
         let err = client
-            .download_object(test_oid, 4, &out_path, None)
+            .download_object(test_oid, 4, &out_path, None, false)
             .await
             .expect_err("missing download action should surface a typed error");
         let msg = err.to_string();

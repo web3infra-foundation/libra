@@ -3,6 +3,7 @@
 //! LFS 子命令，用于身份验证、批量协商、锁管理和与标准工作流集成媒体存储。
 
 use std::{
+    collections::{HashMap, HashSet, VecDeque},
     fs::{File, OpenOptions},
     io,
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
@@ -10,13 +11,19 @@ use std::{
 };
 
 use clap::Subcommand;
-use git_internal::internal::index::Index;
+use git_internal::{
+    hash::ObjectHash,
+    internal::{
+        index::Index,
+        object::{blob::Blob, commit::Commit, tree::Tree},
+    },
+};
 use reqwest::StatusCode;
 
 use crate::{
     command::{
         lfs_schema::{LfsFileOutput, LfsOutput},
-        status,
+        load_object, status,
     },
     internal::{
         head::Head,
@@ -26,6 +33,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         lfs,
+        object_ext::TreeExt,
         output::{OutputConfig, emit_json_data},
         path,
         path_ext::PathExt,
@@ -156,11 +164,11 @@ pub async fn execute(cmd: LfsCmds) -> CliResult<()> {
 
 pub async fn execute_safe(cmd: LfsCmds, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
-    let result = run_lfs(cmd).await?;
+    let result = run_lfs(cmd, output).await?;
     render_lfs_output(&result, output)
 }
 
-async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
+async fn run_lfs(cmd: LfsCmds, output: &OutputConfig) -> CliResult<LfsOutput> {
     // TODO: attributes file should be created in current dir, NOT root dir
     let attr_path = path::attributes().to_string_or_panic();
     match cmd {
@@ -416,11 +424,230 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
         // Implemented in later batches of `.omo/plans/lfs-improvement-plan.md`:
         // the CLI surface parses now so automation can target it, but the
         // behaviour is not yet available.
+        LfsCmds::Fetch { remote, refs } => run_lfs_fetch(remote, refs, output).await,
         LfsCmds::Push { .. } => Err(lfs_unsupported("push")),
-        LfsCmds::Fetch { .. } => Err(lfs_unsupported("fetch")),
         LfsCmds::Prune { .. } => Err(lfs_unsupported("prune")),
         LfsCmds::Checkout { .. } => Err(lfs_unsupported("checkout")),
     }
+}
+
+/// A deduplicated LFS pointer (`oid` + `size`) discovered by the commit-graph
+/// scanner.
+#[derive(Debug, Clone)]
+struct ScannedPointer {
+    oid: String,
+    size: u64,
+}
+
+/// Scans the commit graph reachable from `start_commits` (BFS) and returns the
+/// deduplicated LFS pointers referenced by any reachable commit.
+///
+/// Each commit is judged with its **own** root `.libra_attributes` (parsed from
+/// the blob in that commit's tree) rather than the working tree's cached
+/// patterns, so historical LFS rules are honoured. Subtree objects are loaded to
+/// enumerate paths, but only blobs on LFS-matched paths are read to parse their
+/// pointer data — non-matching blob content is never loaded.
+async fn scan_lfs_pointers(start_commits: &[ObjectHash]) -> CliResult<Vec<ScannedPointer>> {
+    const ATTRIBUTES_NAME: &str = ".libra_attributes";
+
+    let mut visited: HashSet<ObjectHash> = HashSet::new();
+    let mut queue: VecDeque<ObjectHash> = start_commits.iter().copied().collect();
+    let mut found: HashMap<String, ScannedPointer> = HashMap::new();
+
+    while let Some(commit_id) = queue.pop_front() {
+        if !visited.insert(commit_id) {
+            continue;
+        }
+        let commit = load_object::<Commit>(&commit_id)
+            .map_err(|e| CliError::io(format!("failed to load commit {commit_id}: {e}")))?;
+        for parent in &commit.parent_commit_ids {
+            if !visited.contains(parent) {
+                queue.push_back(*parent);
+            }
+        }
+
+        let tree = load_object::<Tree>(&commit.tree_id)
+            .map_err(|e| CliError::io(format!("failed to load tree {}: {e}", commit.tree_id)))?;
+        let items = tree.get_plain_items();
+
+        // Read this commit's own root `.libra_attributes`, if present.
+        let Some(attr_hash) = items
+            .iter()
+            .find_map(|(path, hash)| (path.as_os_str() == ATTRIBUTES_NAME).then_some(*hash))
+        else {
+            continue;
+        };
+        let attr_blob = load_object::<Blob>(&attr_hash)
+            .map_err(|e| CliError::io(format!("failed to load {ATTRIBUTES_NAME}: {e}")))?;
+        let patterns = lfs::parse_lfs_patterns_from_bytes(&attr_blob.data);
+        if patterns.is_empty() {
+            continue;
+        }
+
+        for (path, blob_hash) in &items {
+            if path.as_os_str() == ATTRIBUTES_NAME {
+                continue;
+            }
+            // Match historical paths structurally against this commit's patterns.
+            let abs = util::working_dir().join(path);
+            if !lfs::path_matches_lfs_patterns(&abs, &patterns) {
+                continue;
+            }
+            let blob = load_object::<Blob>(blob_hash)
+                .map_err(|e| CliError::io(format!("failed to load blob {blob_hash}: {e}")))?;
+            if let Some((oid, size)) = lfs::parse_pointer_data(&blob.data) {
+                found
+                    .entry(oid.clone())
+                    .or_insert(ScannedPointer { oid, size });
+            }
+        }
+    }
+
+    let mut pointers: Vec<ScannedPointer> = found.into_values().collect();
+    pointers.sort_by(|a, b| a.oid.cmp(&b.oid));
+    Ok(pointers)
+}
+
+/// Builds an LFS client for an explicit remote, or the current branch upstream
+/// when `remote` is `None`. Client construction reads config only (no network);
+/// failures (e.g. unknown remote) map to a fatal network-class error.
+async fn lfs_client_for_remote(remote: Option<&str>) -> CliResult<LFSClient> {
+    let client = match remote {
+        Some(remote) => LFSClient::new_from_remote(remote).await,
+        None => LFSClient::new().await,
+    };
+    client.map_err(|e| {
+        CliError::fatal(e.to_string()).with_stable_code(StableErrorCode::NetworkUnavailable)
+    })
+}
+
+/// Resolves the start commits for a `fetch` from the requested refs.
+///
+/// With no refs, defaults to the current branch tip. For each given ref the
+/// remote-tracking ref (`<remote>/<ref>`) is preferred, falling back to a local
+/// ref of the same name (with a stderr note).
+async fn resolve_fetch_commits(
+    remote: Option<&str>,
+    refs: &[String],
+) -> CliResult<Vec<ObjectHash>> {
+    if refs.is_empty() {
+        return Ok(Head::current_commit().await.into_iter().collect());
+    }
+
+    let remote = remote.unwrap_or("origin");
+    let mut commits = Vec::new();
+    for name in refs {
+        let tracking = format!("{remote}/{name}");
+        match util::get_commit_base_typed(&tracking).await {
+            Ok(hash) => commits.push(hash),
+            Err(_) => match util::get_commit_base_typed(name).await {
+                Ok(hash) => {
+                    eprintln!(
+                        "warning: no remote-tracking ref '{tracking}', scanning local '{name}'"
+                    );
+                    commits.push(hash);
+                }
+                Err(e) => {
+                    return Err(
+                        CliError::fatal(format!("could not resolve ref '{name}': {e}"))
+                            .with_stable_code(StableErrorCode::CliInvalidTarget),
+                    );
+                }
+            },
+        }
+    }
+    Ok(commits)
+}
+
+/// `libra lfs fetch [<remote>] [<ref>...]` — download LFS objects referenced by
+/// the requested (remote-tracking) refs that are missing from the local cache.
+async fn run_lfs_fetch(
+    remote: Option<String>,
+    refs: Vec<String>,
+    output: &OutputConfig,
+) -> CliResult<LfsOutput> {
+    let start_commits = resolve_fetch_commits(remote.as_deref(), &refs).await?;
+    let pointers = scan_lfs_pointers(&start_commits).await?;
+
+    // Only objects missing from the local cache need a download. If none are
+    // missing, fetch is a pure no-op — no remote contact required.
+    let missing: Vec<&ScannedPointer> = pointers
+        .iter()
+        .filter(|p| !lfs::lfs_object_path(&p.oid).exists())
+        .collect();
+    if missing.is_empty() {
+        return Ok(LfsOutput {
+            action: "fetch".to_string(),
+            ..LfsOutput::default()
+        });
+    }
+
+    // Suppress download progress on stdout when emitting structured output so
+    // the JSON/machine envelope is the only thing on stdout.
+    let quiet = output.is_json();
+    let client = lfs_client_for_remote(remote.as_deref()).await?;
+
+    let mut fetched_oids = Vec::new();
+    for pointer in missing {
+        let final_path = lfs::lfs_object_path(&pointer.oid);
+        // `download_object` writes the file but does NOT create the two-level
+        // sharding parent (`objects/<a>/<b>/`); create it first.
+        let Some(parent) = final_path.parent() else {
+            return Err(CliError::io(format!(
+                "invalid LFS object path for oid {}",
+                pointer.oid
+            )));
+        };
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| CliError::io(format!("failed to create LFS object directory: {e}")))?;
+        let tmp_path = parent.join(format!("{}.tmp", pointer.oid));
+
+        // A transport/checksum failure must never leave a partial `.tmp` behind
+        // or corrupt the OID path: clean up and surface a network error.
+        if let Err(e) = client
+            .download_object(&pointer.oid, pointer.size, &tmp_path, None, quiet)
+            .await
+        {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(CliError::network(format!(
+                "failed to download LFS object {}: {e}",
+                pointer.oid
+            ))
+            .with_stable_code(StableErrorCode::NetworkUnavailable));
+        }
+
+        // `download_object` returns Ok even when the remote 404s (it writes a
+        // pointer to the target), so verify the entity hash independently before
+        // promoting `.tmp` to the final OID path.
+        match lfs::calc_lfs_file_hash(&tmp_path) {
+            Ok(hash) if hash == pointer.oid => {
+                tokio::fs::rename(&tmp_path, &final_path)
+                    .await
+                    .map_err(|e| {
+                        CliError::io(format!("failed to store LFS object {}: {e}", pointer.oid))
+                    })?;
+                fetched_oids.push(pointer.oid.clone());
+            }
+            _ => {
+                // Not a real entity (e.g. remote 404 wrote a pointer): drop the
+                // temp file and leave the object reported as still missing.
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                if !quiet {
+                    eprintln!(
+                        "warning: LFS object {} unavailable on the remote; skipped",
+                        pointer.oid
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(LfsOutput {
+        action: "fetch".to_string(),
+        fetched_oids,
+        ..LfsOutput::default()
+    })
 }
 
 /// Builds the typed error returned by LFS subcommands whose CLI surface exists
@@ -510,6 +737,13 @@ fn render_lfs_output(result: &LfsOutput, output: &OutputConfig) -> CliResult<()>
         }
         "uninstall" => {
             println!("Libra LFS uses built-in support; nothing to uninstall (no-op).");
+        }
+        "fetch" => {
+            if result.fetched_oids.is_empty() {
+                println!("No missing LFS objects to fetch");
+            } else {
+                println!("Fetched {} LFS object(s)", result.fetched_oids.len());
+            }
         }
         "lock" => {
             if let Some(path) = &result.path {
