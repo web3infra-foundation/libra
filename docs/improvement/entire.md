@@ -401,11 +401,48 @@ async fn process_hook_event_with_target(
 
 ### 6.4 Hook 配置安装
 
-`libra agent enable --agent claude-code` 调 `ObservedAgentHooks::install_hooks`，写出形如：
+当前实现的 Hook 安装入口是 `libra agent enable [--agent <slug>]`（见 [command/agent/mod.rs](../../src/command/agent/mod.rs)）。无 `--agent` 时只遍历 `STABLE_AGENT_SLUGS = ["claude-code", "gemini"]`；Cursor/Codex/OpenCode/Copilot/Factory AI Droid 虽然已有 stable `ObservedAgent`，但当前没有注册 `HookProvider`，所以安装/卸载阶段会跳过并打印"no HookProvider registered"。
+
+安装流程按代码实际路径是：
+
+1. CLI 把 slug 解析为 `AgentKind`，再映射到 `HookProvider` 注册名：`claude-code → claude`，`gemini → gemini`；注册表在 [hooks/providers/mod.rs](../../src/internal/ai/hooks/providers/mod.rs)，目前只返回 `ClaudeProvider` / `GeminiProvider`。
+2. `install_agent_hooks()` 取当前正在运行的 `libra` 二进制路径（`std::env::current_exe()`），构造 `ProviderInstallOptions`：
+   - `hook_command_prefix = "agent hooks <slug>"`，让安装出的 hook 走 `refs/libra/agent-traces`；
+   - `fail_safe_shell = true`，所有命令尾部追加 `|| true`，保证 Libra hook 失败不会打断外部 Agent 自己的会话；
+   - `timeout_secs = None`，由 provider 使用自己的默认值。
+3. provider installer 定位当前 Libra 仓库根目录（`resolve_project_root()`），读取/创建 provider 原生 JSON 配置，保留未知字段和用户已有 hook，仅 upsert Libra 管理的条目，最后通过临时文件 + rename 原子写回（[hooks/setup.rs](../../src/internal/ai/hooks/setup.rs)）。
+
+Claude Code 写入 `.claude/settings.json`。它按 `CLAUDE_HOOK_FORWARD_MAP` 给 5 个事件加 matcher-less command hook，默认 timeout 为 10 秒：
+
+| Claude 事件 | Libra 子命令 |
+|-------------|--------------|
+| `SessionStart` | `session-start` |
+| `UserPromptSubmit` | `prompt` |
+| `PostToolUse` | `tool-use` |
+| `Stop` | `stop` |
+| `SessionEnd` | `session-end` |
+
+写出的命令形如：
+
 ```json
 {"hooks": {"Stop": [{"command": "libra agent hooks claude-code stop || true"}]}}
 ```
-`|| true` 作为硬不变量保证 Libra 不可用时**永不破坏 Agent 自身**。可选 ship `libra-hook-shim` no-op 二进制覆盖纯 JSON hook 配置场景（不允许 shell 拼接的）。
+
+Gemini CLI 写入 `.gemini/settings.json`。installer 会确保 `hooksConfig.enabled = true`，并为下列事件插入名为 `libra-*` 的 command hook；`AfterTool` 使用 matcher `"*"`，Gemini provider 不支持 timeout：
+
+| Gemini 事件 | Libra 子命令 |
+|-------------|--------------|
+| `SessionStart` | `session-start` |
+| `BeforeAgent` | `prompt` |
+| `AfterTool` | `tool-use` |
+| `AfterAgent` | `stop` |
+| `SessionEnd` | `session-end` |
+| `BeforeModel` | `model-update` |
+| `PreCompress` | `compaction` |
+
+外部 Agent 触发这些配置后会执行 hidden 入口 `libra agent hooks <agent> <subcommand>`（[command/agent/hooks.rs](../../src/command/agent/hooks.rs)）。该入口把子命令转成 `ProviderHookCommand`，再调用 `process_hook_event_with_target(..., HookTarget::AgentTraces)`，完成 envelope 解析、脱敏、`agent_session` upsert 和 checkpoint 写入。历史兼容入口 `libra hooks <provider> <subcommand>` 仍存在，但目标是 `HookTarget::AiIntent`；`libra agent enable` 明确安装新的 `agent hooks <agent>` 入口。
+
+卸载路径是 `libra agent disable [--agent <slug>]`：Claude 按命令后缀识别并删除 Libra 管理的 hook；Gemini 删除 `name` 以 `libra-` 开头的 hook。两者都保留用户其它配置和非 Libra hook。
 
 ---
 
