@@ -1064,3 +1064,80 @@ fn test_grep_conflicting_scope_flags_rejected() {
         );
     }
 }
+
+/// `--untracked` searches untracked files in addition to tracked ones.
+#[tokio::test]
+#[serial]
+async fn test_grep_untracked_searches_untracked_files() {
+    let repo = tempdir().expect("repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("tracked.txt", "needle\n").expect("write tracked");
+    add_and_commit("add tracked", vec!["tracked.txt".to_string()]).await;
+    fs::write("untracked.txt", "needle\n").expect("write untracked");
+
+    // Default search only sees the tracked file.
+    let default = run_libra_command(&["--json=compact", "grep", "needle"], repo.path());
+    let default_paths = json_match_paths(&default);
+    assert!(default_paths.contains(&"tracked.txt".to_string()));
+    assert!(!default_paths.contains(&"untracked.txt".to_string()));
+
+    // `--untracked` also sees the untracked file.
+    let output = run_libra_command(
+        &["--json=compact", "grep", "--untracked", "needle"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "grep --untracked should succeed");
+    let paths = json_match_paths(&output);
+    assert!(
+        paths.contains(&"tracked.txt".to_string()),
+        "tracked file should match: {paths:?}"
+    );
+    assert!(
+        paths.contains(&"untracked.txt".to_string()),
+        "untracked file should match: {paths:?}"
+    );
+}
+
+/// `--untracked` excludes files matched by `.libraignore`.
+#[tokio::test]
+#[serial]
+async fn test_grep_untracked_respects_libraignore() {
+    let repo = tempdir().expect("repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write(".libraignore", "ignored.txt\n").expect("write libraignore");
+    fs::write("ignored.txt", "needle\n").expect("write ignored");
+    fs::write("visible.txt", "needle\n").expect("write visible");
+
+    let output = run_libra_command(
+        &["--json=compact", "grep", "--untracked", "needle"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "grep --untracked should succeed");
+    let paths = json_match_paths(&output);
+    assert!(
+        paths.contains(&"visible.txt".to_string()),
+        "non-ignored untracked file should match: {paths:?}"
+    );
+    assert!(
+        !paths.contains(&"ignored.txt".to_string()),
+        "ignored untracked file must be excluded: {paths:?}"
+    );
+}
+
+/// Collect the `path` of each match in a `--json` grep output.
+fn json_match_paths(output: &std::process::Output) -> Vec<String> {
+    let json = parse_json_stdout(output);
+    json["data"]["matches"]
+        .as_array()
+        .map(|matches| {
+            matches
+                .iter()
+                .filter_map(|m| m["path"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}

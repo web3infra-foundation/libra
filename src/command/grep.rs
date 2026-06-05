@@ -185,8 +185,13 @@ pub struct GrepArgs {
     /// Search files on the filesystem (the current directory and below) without
     /// requiring a libra repository. The `.libra`/`.git` directories are never
     /// searched and symbolic links are not followed.
-    #[clap(long = "no-index", conflicts_with_all = ["cached", "tree"])]
+    #[clap(long = "no-index", conflicts_with_all = ["cached", "tree", "untracked"])]
     pub(crate) no_index: bool,
+
+    /// Also search untracked files (those not in the index and not excluded by
+    /// `.libraignore`), in addition to tracked files.
+    #[clap(long, conflicts_with_all = ["cached", "tree"])]
+    untracked: bool,
 }
 
 impl GrepArgs {
@@ -694,10 +699,37 @@ async fn get_search_files(args: &GrepArgs) -> CliResult<Vec<SearchFile>> {
     } else if args.cached {
         // Search in index (staged files)
         get_index_files(&args.pathspec)
+    } else if args.untracked {
+        // Search tracked plus untracked (non-ignored) working-tree files
+        get_tracked_and_untracked_files(&args.pathspec)
     } else {
         // Search in working tree
         get_working_tree_files(&args.pathspec)
     }
+}
+
+/// List tracked working-tree files plus untracked files that are not excluded by
+/// `.libraignore` (for `--untracked`).
+fn get_tracked_and_untracked_files(pathspec: &[String]) -> CliResult<Vec<SearchFile>> {
+    let index = load_index()?;
+    let path_filters: Vec<PathBuf> = pathspec.iter().map(util::to_workdir_path).collect();
+
+    let mut files = tracked_files_from_index(&index, &path_filters, false);
+
+    let untracked = crate::utils::worktree::untracked_workdir_paths(&index).map_err(|error| {
+        CliError::fatal(format!("failed to list untracked files: {error}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    for path in untracked {
+        if path_filters.is_empty() || path_filters.iter().any(|f| util::is_sub_path(&path, f)) {
+            files.push(SearchFile {
+                path,
+                blob_hash: None,
+                from_filesystem: false,
+            });
+        }
+    }
+    Ok(files)
 }
 
 /// List filesystem files for `--no-index`: walk the current directory, never
