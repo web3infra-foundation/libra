@@ -240,6 +240,7 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
             args.all,
             args.first_parent,
             args.always,
+            args.exact_match,
             &matchers,
             &excluders,
         )
@@ -375,6 +376,7 @@ async fn run_contains(
     include_all: bool,
     first_parent: bool,
     always: bool,
+    exact_match: bool,
     matchers: &[wax::Glob<'_>],
     excluders: &[wax::Glob<'_>],
 ) -> Result<DescribeOutput, DescribeError> {
@@ -411,7 +413,12 @@ async fn run_contains(
     }
 
     match best {
+        // `--exact-match` requires a ref that points directly at the target (offset
+        // 0); any positive offset is a run-time failure, matching the non-`--contains`
+        // exact-match path (which returns `NoNamesFound` without honoring `--always`).
+        Some((distance, _)) if exact_match && distance > 0 => Err(DescribeError::NoNamesFound),
         Some((distance, tip)) => Ok(contains_output(input, resolved_commit, tip, distance)),
+        None if exact_match => Err(DescribeError::NoNamesFound),
         None if always => Ok(always_output(input, resolved_commit, abbrev)),
         None if cap_hit => Err(DescribeError::TraversalLimitExceeded { limit: MAX_WALK }),
         None => Err(DescribeError::NoNamesFound),

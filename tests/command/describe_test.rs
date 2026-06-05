@@ -629,6 +629,59 @@ fn test_describe_contains_includes_lightweight_tag_by_default() {
     assert_eq!(json["data"]["contains_offset"], 1);
 }
 
+/// `--contains --exact-match` requires the containing ref to point directly at the
+/// target (offset 0); a positive offset is a run-time failure (128), matching the
+/// non-`--contains` exact-match path and Git.
+#[test]
+fn test_describe_contains_exact_match_nonzero_offset_fails() {
+    let repo = create_committed_repo_via_cli(); // C1
+    advance_commit(&repo, "two\n"); // C2 (HEAD)
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "rel", "v1.0"], repo.path()),
+        "tag v1.0",
+    );
+
+    // v1.0 (at C2) contains HEAD~1 (= C1) at distance 1, so exact-match must reject it.
+    let output = run_libra_command(
+        &["describe", "--contains", "--exact-match", "HEAD~1"],
+        repo.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "--contains --exact-match at offset>0 should fail with 128: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+}
+
+/// `--contains --exact-match` succeeds when a ref points directly at the target,
+/// emitting the bare ref name with no `~N` suffix.
+#[test]
+fn test_describe_contains_exact_match_offset_zero_succeeds() {
+    let repo = create_committed_repo_via_cli(); // C1
+    advance_commit(&repo, "two\n"); // C2 (HEAD)
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "rel", "v1.0"], repo.path()),
+        "tag v1.0",
+    );
+
+    // v1.0 points directly at HEAD (offset 0), so exact-match succeeds.
+    let output = run_libra_command(
+        &["describe", "--contains", "--exact-match", "HEAD", "--json"],
+        repo.path(),
+    );
+    assert_cli_success(
+        &output,
+        "describe --contains --exact-match at the ref should succeed",
+    );
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["result"], "v1.0");
+    assert_eq!(json["data"]["contains_offset"], 0);
+    assert_eq!(json["data"]["exact_match"], true);
+}
+
 /// `--candidates=N` (N>=1) still returns the topologically nearest tag.
 #[test]
 fn test_describe_candidates_limit_picks_nearest() {
