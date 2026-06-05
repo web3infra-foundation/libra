@@ -1463,3 +1463,219 @@ fn test_remote_help_lists_examples_banner() {
         );
     }
 }
+
+// ── set-branches / set-head ───────────────────────────────────────────────
+
+async fn add_origin() {
+    remote::execute(RemoteCmds::Add {
+        name: "origin".into(),
+        url: "https://example.com/repo.git".into(),
+    })
+    .await;
+}
+
+async fn fetch_refspecs() -> Vec<String> {
+    ConfigKv::get_all("remote.origin.fetch")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.value)
+        .collect()
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_set_branches_overwrites() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    add_origin().await;
+
+    remote::execute_safe(
+        RemoteCmds::SetBranches {
+            add: false,
+            name: "origin".into(),
+            branches: vec!["main".into()],
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .expect("set-branches main");
+
+    assert_eq!(
+        fetch_refspecs().await,
+        vec!["+refs/heads/main:refs/remotes/origin/main".to_string()]
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_set_branches_add_appends() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    add_origin().await;
+
+    let out = OutputConfig::default();
+    remote::execute_safe(
+        RemoteCmds::SetBranches {
+            add: false,
+            name: "origin".into(),
+            branches: vec!["main".into()],
+        },
+        &out,
+    )
+    .await
+    .expect("set-branches main");
+    remote::execute_safe(
+        RemoteCmds::SetBranches {
+            add: true,
+            name: "origin".into(),
+            branches: vec!["dev".into()],
+        },
+        &out,
+    )
+    .await
+    .expect("set-branches --add dev");
+
+    let specs = fetch_refspecs().await;
+    assert_eq!(specs.len(), 2, "specs: {specs:?}");
+    assert!(specs.contains(&"+refs/heads/main:refs/remotes/origin/main".to_string()));
+    assert!(specs.contains(&"+refs/heads/dev:refs/remotes/origin/dev".to_string()));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_set_branches_unknown_remote_errors() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    let error = remote::execute_safe(
+        RemoteCmds::SetBranches {
+            add: false,
+            name: "ghost".into(),
+            branches: vec!["main".into()],
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .expect_err("unknown remote should error");
+    assert_eq!(error.stable_code(), StableErrorCode::CliInvalidTarget);
+    assert_eq!(error.exit_code(), 129);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_set_branches_invalid_branch_rejected() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    add_origin().await;
+
+    let error = remote::execute_safe(
+        RemoteCmds::SetBranches {
+            add: false,
+            name: "origin".into(),
+            branches: vec!["a..b".into()],
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .expect_err("invalid branch name should error");
+    assert_eq!(error.exit_code(), 129);
+    assert!(error.message().contains("invalid branch name"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_set_head_delete_idempotent() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    add_origin().await;
+
+    // Deleting a non-existent remote HEAD is a successful no-op, twice.
+    for _ in 0..2 {
+        remote::execute_safe(
+            RemoteCmds::SetHead {
+                auto: false,
+                delete: true,
+                name: "origin".into(),
+                branch: None,
+            },
+            &OutputConfig::default(),
+        )
+        .await
+        .expect("set-head -d should be idempotent");
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_set_head_missing_branch_errors() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    add_origin().await;
+
+    let error = remote::execute_safe(
+        RemoteCmds::SetHead {
+            auto: false,
+            delete: false,
+            name: "origin".into(),
+            branch: Some("nope".into()),
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .expect_err("missing tracking branch should error");
+    assert_eq!(error.stable_code(), StableErrorCode::CliInvalidTarget);
+    assert_eq!(error.exit_code(), 129);
+    assert!(error.message().contains("no such remote-tracking branch"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_set_head_auto_deferred() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    add_origin().await;
+
+    let error = remote::execute_safe(
+        RemoteCmds::SetHead {
+            auto: true,
+            delete: false,
+            name: "origin".into(),
+            branch: None,
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .expect_err("--auto is deferred");
+    assert_eq!(error.exit_code(), 129);
+    assert!(error.message().contains("not yet supported"));
+}
+
+#[test]
+fn test_remote_set_branches_json_schema() {
+    let repo = create_committed_repo_via_cli();
+    let add = run_libra_command(
+        &["remote", "add", "origin", "git@github.com:o/r.git"],
+        repo.path(),
+    );
+    assert_cli_success(&add, "remote add origin");
+
+    let output = run_libra_command(
+        &["--json", "remote", "set-branches", "origin", "main"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "json set-branches");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "remote");
+    assert_eq!(json["data"]["action"], "set-branches");
+    assert_eq!(json["data"]["added"], false);
+    let specs = json["data"]["fetch_refspecs"].as_array().expect("refspecs");
+    assert_eq!(specs.len(), 1);
+}
