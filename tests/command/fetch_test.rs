@@ -1686,3 +1686,32 @@ async fn test_fetch_force_clobbers_existing_tag() {
         "the old tag target should be replaced by --force: {annotated}"
     );
 }
+
+/// `--update-shallow` is accepted and a normal (non-shallow) fetch still
+/// succeeds, updating the remote-tracking ref without creating a shallow file.
+#[tokio::test]
+#[serial]
+async fn test_fetch_update_shallow_accepts_flag() {
+    let (_temp_root, repo_dir, current_branch, pushed_commit) =
+        setup_local_fetch_cli_fixture().await;
+
+    let output = run_libra_command(
+        &["--json", "fetch", "origin", "--update-shallow"],
+        &repo_dir,
+    );
+    assert_cli_success(&output, "fetch origin --update-shallow");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["remotes"][0]["refs_updated"][0]["remote_ref"],
+        format!("refs/remotes/origin/{current_branch}")
+    );
+    assert_eq!(
+        json["data"]["remotes"][0]["refs_updated"][0]["new_oid"],
+        pushed_commit
+    );
+    assert!(
+        !repo_dir.join(".libra/shallow").exists(),
+        "fetching a non-shallow remote must not create a shallow boundary file"
+    );
+}

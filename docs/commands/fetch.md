@@ -43,6 +43,7 @@ are loaded automatically when configured via `vault.ssh.<remote>.privkey`.
 | `-t`, `--tags` | Import every advertised tag into the global `refs/tags/*` namespace, pulling each tag's object into the pack. Overrides `remote.<name>.tagOpt`. Existing local tags are preserved (immutable without `--force`). | `libra fetch origin --tags` |
 | `--no-tags` | Import no tags, overriding `remote.<name>.tagOpt`. Long-only (Git's `-n` short form is intentionally not exposed). | `libra fetch origin --no-tags` |
 | `-f`, `--force` | Allow non-fast-forward updates: overwrite an existing local tag with the remote's value (tags are otherwise immutable). Forced updates render with the porcelain `+` flag. Remote-tracking refs always update regardless. | `libra fetch origin --tags --force` |
+| `--update-shallow` | Accept new shallow boundaries advertised by a shallow remote even when no shallow operation was requested and the repository is not already shallow. Boundary removals (history deepening) always apply. | `libra fetch origin --update-shallow` |
 | `--json` | Emit structured JSON envelope to stdout (global flag). | `libra --json fetch origin` |
 | `--machine` | Compact single-line JSON; suppresses progress (global flag). | `libra --machine fetch origin` |
 | `--progress none` | Suppress NDJSON progress events on stderr in JSON mode. | `libra --json fetch origin --progress none` |

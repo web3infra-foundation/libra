@@ -569,6 +569,13 @@ pub struct FetchArgs {
     /// always updated regardless of this flag.
     #[clap(long, short = 'f')]
     pub force: bool,
+
+    /// Accept new shallow boundaries advertised by a shallow remote even when no
+    /// shallow operation (`--depth`/`--shallow-since`/`--shallow-exclude`) was
+    /// requested and the repository is not already shallow. Boundary removals
+    /// (history deepening) are always applied regardless of this flag.
+    #[clap(long = "update-shallow")]
+    pub update_shallow: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -961,6 +968,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         tags,
         no_tags,
         force,
+        update_shallow,
     } = args;
 
     // `--prune` is enabled by the flag or the `fetch.prune` config (flag wins).
@@ -1005,6 +1013,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
                     tags,
                     no_tags,
                     force,
+                    update_shallow,
                     output,
                 )
                 .await
@@ -1070,6 +1079,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         tags,
         no_tags,
         force,
+        update_shallow,
         output,
     )
     .await
@@ -1317,6 +1327,7 @@ pub async fn fetch_repository_safe(
         false,
         false,
         false,
+        false,
         output,
     )
     .await
@@ -1404,6 +1415,7 @@ pub(crate) async fn fetch_repository_with_result(
     tags_flag: bool,
     no_tags_flag: bool,
     force: bool,
+    update_shallow: bool,
     output: &OutputConfig,
 ) -> Result<FetchRepositoryResult, FetchError> {
     let (remote_client, discovery) =
@@ -1565,7 +1577,13 @@ pub(crate) async fn fetch_repository_with_result(
                 })?,
         }
     }
-    apply_shallow_updates(&fetch_data.shallow, &fetch_data.unshallow)?;
+    // New shallow boundaries (a shallow remote cutting our history) are only
+    // accepted when a shallow operation was requested, the repository is already
+    // shallow (`shallow_requested` covers both), or `--update-shallow` is set.
+    // Boundary removals (history deepening / unshallow) always apply.
+    let accepted_shallow =
+        accept_new_shallow(&fetch_data.shallow, update_shallow, shallow_requested);
+    apply_shallow_updates(accepted_shallow, &fetch_data.unshallow)?;
     if unshallow {
         // `--unshallow` requests the complete history; once the pack is written,
         // drop every shallow boundary so the repository is no longer shallow.
@@ -2272,6 +2290,24 @@ fn write_fetch_head(result: &FetchOutput, append: bool) -> Result<(), FetchError
     })
 }
 
+/// Decide whether newly-advertised shallow boundaries should be applied. They
+/// are accepted only when a shallow operation was requested or the repository is
+/// already shallow (`shallow_requested`), or `--update-shallow` (`update_shallow`)
+/// was passed; otherwise a plain fetch from a shallow remote leaves the local
+/// repository unshallow. Boundary *removals* are handled separately and always
+/// apply.
+fn accept_new_shallow(
+    advertised: &[String],
+    update_shallow: bool,
+    shallow_requested: bool,
+) -> &[String] {
+    if update_shallow || shallow_requested {
+        advertised
+    } else {
+        &[]
+    }
+}
+
 fn apply_shallow_updates(shallow: &[String], unshallow: &[String]) -> Result<(), FetchError> {
     if shallow.is_empty() && unshallow.is_empty() {
         return Ok(());
@@ -2816,6 +2852,25 @@ mod tests {
                 "{}\tnot-for-merge\tbranch 'main' of https://example.com/x.git",
                 "a".repeat(40)
             )
+        );
+    }
+
+    #[test]
+    fn accept_new_shallow_gates_on_request_or_flag() {
+        let advertised = vec!["a".repeat(40)];
+        assert!(
+            super::accept_new_shallow(&advertised, false, false).is_empty(),
+            "a plain fetch (no shallow op, no flag) drops newly-advertised shallow roots"
+        );
+        assert_eq!(
+            super::accept_new_shallow(&advertised, true, false),
+            advertised.as_slice(),
+            "--update-shallow accepts new shallow roots"
+        );
+        assert_eq!(
+            super::accept_new_shallow(&advertised, false, true),
+            advertised.as_slice(),
+            "a requested shallow operation accepts new shallow roots"
         );
     }
 
