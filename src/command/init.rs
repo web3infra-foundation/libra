@@ -38,7 +38,8 @@ const EXAMPLES: &str = r#"EXAMPLES:
     libra init -b develop                      Use 'develop' as initial branch
     libra init --from-git-repository ../old    Convert from existing Git repo
     libra init --vault false                   Skip vault / GPG setup
-    libra init --object-format sha256          Use SHA-256 hashing"#;
+    libra init --object-format sha256          Use SHA-256 hashing
+    libra init --shared=group                  Share the repo with your Unix group"#;
 
 // NOTE: `src/command/init.rs` lines 3-20 are a protected merge-conflict block in this workspace.
 // The imports inside that block must stay as-is. To avoid `unused_imports` warnings without
