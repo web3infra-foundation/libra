@@ -39,6 +39,7 @@ are loaded automatically when configured via `vault.ssh.<remote>.privkey`.
 | `--dry-run` | Preview ref updates and prunes without downloading objects or writing any refs/reflog/shallow/FETCH_HEAD. | `libra fetch origin --dry-run` |
 | `--porcelain` | Print one machine-readable `<flag> <old-oid> <new-oid> <local-ref>` line per ref update. Mutually exclusive with `--json` (usage error). | `libra fetch origin --porcelain` |
 | `--append` | Append fetched ref records to `.libra/FETCH_HEAD` instead of overwriting. Long-only (`-a` is `--all`). | `libra fetch origin --append` |
+| `-v`, `--verbose` | Announce the remote (name and credential-redacted URL) being contacted on stderr before connecting; leaves the stdout result contract unchanged. | `libra fetch origin -v` |
 | `--json` | Emit structured JSON envelope to stdout (global flag). | `libra --json fetch origin` |
 | `--machine` | Compact single-line JSON; suppresses progress (global flag). | `libra --machine fetch origin` |
 | `--progress none` | Suppress NDJSON progress events on stderr in JSON mode. | `libra --json fetch origin --progress none` |

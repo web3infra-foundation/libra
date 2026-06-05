@@ -1386,3 +1386,27 @@ async fn test_fetch_writes_and_appends_fetch_head() {
         appended.lines().count()
     );
 }
+
+/// `--verbose`/`-v` announces the remote being contacted on stderr (printed
+/// before the connection is attempted, so a bad URL still shows it).
+#[tokio::test]
+#[serial]
+async fn test_fetch_verbose_announces_remote_on_stderr() {
+    let temp = tempdir().expect("temp root");
+    let repo_dir = temp.path().join("repo");
+    fs::create_dir_all(&repo_dir).expect("repo dir");
+    setup_with_new_libra_in(&repo_dir).await;
+    {
+        let _guard = ChangeDirGuard::new(&repo_dir);
+        ConfigKv::set("remote.origin.url", "/nonexistent/remote.git", false)
+            .await
+            .unwrap();
+    }
+
+    let output = run_libra_command(&["fetch", "origin", "-v"], &repo_dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Fetching origin from /nonexistent/remote.git"),
+        "verbose must announce the remote on stderr: {stderr}"
+    );
+}

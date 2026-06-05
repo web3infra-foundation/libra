@@ -546,6 +546,11 @@ pub struct FetchArgs {
     /// it. Long-only: `-a` is reserved for `--all` (Git's `-a` is `--append`).
     #[clap(long)]
     pub append: bool,
+
+    /// Print extra diagnostics (the remote being contacted) to stderr, leaving
+    /// the stdout result contract unchanged.
+    #[clap(long, short = 'v')]
+    pub verbose: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -915,6 +920,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         prune,
         dry_run,
         append: _,
+        verbose,
     } = args;
 
     // `--prune` is enabled by the flag or the `fetch.prune` config (flag wins).
@@ -940,6 +946,13 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
 
         let mut results = Vec::with_capacity(remotes.len());
         for remote in remotes {
+            if verbose {
+                eprintln!(
+                    "Fetching {} from {}",
+                    remote.name,
+                    redact_url_credentials(&remote.url)
+                );
+            }
             results.push(
                 fetch_repository_with_result(
                     remote,
@@ -994,6 +1007,14 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
                 .with_stable_code(StableErrorCode::CliInvalidTarget)
                 .with_hint("use 'libra remote -v' to inspect configured remotes")
         })?;
+
+    if verbose {
+        eprintln!(
+            "Fetching {} from {}",
+            remote_config.name,
+            redact_url_credentials(&remote_config.url)
+        );
+    }
 
     let result = fetch_repository_with_result(
         remote_config,
