@@ -497,6 +497,12 @@ pub struct FetchArgs {
     /// history, then removing the `.libra/shallow` boundary file.
     #[clap(long, conflicts_with = "depth")]
     pub unshallow: bool,
+
+    /// Declined: Libra does not manage submodules with the stock Git layout.
+    /// Declared (rather than left unknown) so any value yields a friendly usage
+    /// error (exit 129) instead of a clap parse error (exit 2).
+    #[clap(long = "recurse-submodules", value_name = "MODE", num_args = 0..=1, require_equals = true)]
+    pub recurse_submodules: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -763,6 +769,17 @@ pub async fn execute(args: FetchArgs) {
 /// authentication/network/pack negotiation fails, object writes fail, or
 /// remote-tracking refs cannot be updated.
 pub async fn execute_safe(args: FetchArgs, output: &OutputConfig) -> CliResult<()> {
+    // `--recurse-submodules` is declared only so it produces a friendly usage
+    // error (129) rather than a clap "unknown argument" (2).
+    if args.recurse_submodules.is_some() {
+        return Err(CliError::command_usage(
+            "libra fetch does not support submodule recursion",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+        .with_hint(
+            "Libra does not manage submodules with the stock Git layout; fetch them as separate repositories",
+        ));
+    }
     let result = run_fetch(args, output).await?;
     render_fetch_output(&result, output)
 }
@@ -777,6 +794,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         depth,
         deepen,
         unshallow,
+        recurse_submodules: _,
     } = args;
 
     let shallow = build_fetch_shallow_options(depth, deepen, unshallow);
@@ -1774,7 +1792,23 @@ fn write_shallow_boundaries(boundaries: &BTreeSet<String>) -> Result<(), FetchEr
             "failed to write shallow metadata '{}': {source}",
             path.display()
         ),
-    })
+    })?;
+
+    // The shallow boundary file records repository history limits; keep it owner
+    // read/write only on Unix (Windows has no comparable mode bits to set).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|source| {
+            FetchError::LocalState {
+                message: format!(
+                    "failed to set permissions on shallow metadata '{}': {source}",
+                    path.display()
+                ),
+            }
+        })?;
+    }
+    Ok(())
 }
 
 fn apply_shallow_updates(shallow: &[String], unshallow: &[String]) -> Result<(), FetchError> {
@@ -2091,6 +2125,26 @@ mod tests {
         internal::protocol::FetchStream,
         utils::{output::OutputConfig, test::ScopedEnvVar},
     };
+
+    /// The `.libra/shallow` boundary file must be owner read/write only on Unix.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn write_shallow_boundaries_sets_0600_permissions() {
+        use std::{collections::BTreeSet, os::unix::fs::PermissionsExt};
+
+        let temp = tempdir().unwrap();
+        crate::utils::test::setup_with_new_libra_in(temp.path()).await;
+        let _guard = crate::utils::test::ChangeDirGuard::new(temp.path());
+
+        let mut boundaries = BTreeSet::new();
+        boundaries.insert("a".repeat(40));
+        super::write_shallow_boundaries(&boundaries).expect("write shallow boundaries");
+
+        let path = super::shallow_file_path().expect("resolve shallow path");
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "shallow metadata must be 0o600");
+    }
 
     /// Pin the `Display` format for the static-message and direct-message
     /// variants of [`FetchError`]. These strings are used as the

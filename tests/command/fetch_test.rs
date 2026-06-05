@@ -1048,3 +1048,22 @@ async fn test_fetch_shallow_then_shallow_is_idempotent() {
     let second = run_libra_command(&["fetch", "origin", "--depth", "1"], &repo_dir);
     assert_cli_success(&second, "second fetch --depth 1 after shallow");
 }
+
+/// `--recurse-submodules` is declared only to produce a friendly usage error
+/// (exit 129) instead of a clap "unknown argument" (exit 2).
+#[test]
+fn test_fetch_recurse_submodules_declined_exits_129() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["fetch", "--recurse-submodules=no"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "declined flag must exit 129: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("submodule recursion"),
+        "stderr should explain the decline: {stderr}"
+    );
+}
