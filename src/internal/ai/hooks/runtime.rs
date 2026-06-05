@@ -73,10 +73,11 @@ pub const AI_SESSION_SCHEMA: &str = "libra.ai_session.v2";
 ///
 /// - [`HookTarget::AiIntent`] — the canonical `refs/libra/intent` writer used
 ///   by `libra code` and the existing Claude/Gemini hook configs.
-/// - [`HookTarget::AgentTraces`] — the new external-Agent capture writer
-///   that lives on `refs/libra/agent-traces`. **Phase 1 stub**: the variant
-///   exists for API surface stability, but the runtime currently rejects it
-///   with a clear "not yet wired" message; Phase 2 lands the actual writer.
+/// - [`HookTarget::AgentTraces`] — the external-Agent capture writer that
+///   lives on `refs/libra/agent-traces`. Wired since Phase 2: the runtime
+///   redacts the transcript, upserts `agent_session`, and on
+///   `TurnEnd`/`SessionEnd` appends a committed checkpoint commit (see
+///   [`ingest_agent_traces`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookTarget {
     AiIntent,
@@ -480,7 +481,7 @@ pub(crate) async fn ingest_agent_traces_payload(
 ) -> Result<()> {
     use sea_orm::{ConnectionTrait, Statement};
 
-    use crate::internal::ai::observed_agents::{RedactionMatch, Redactor};
+    use crate::internal::ai::observed_agents::RedactionMatch;
 
     if payload.len() > MAX_STDIN_BYTES {
         bail!("hook input exceeds {MAX_STDIN_BYTES} bytes");
@@ -509,7 +510,11 @@ pub(crate) async fn ingest_agent_traces_payload(
     // that lands in `agent_session.redaction_report` so the persisted row is
     // observably scrubbed (Codex round-3 review: "assert observable redaction
     // outcome").
-    let redactor = Redactor::new_default();
+    // The session-row field redactor honours `[agent.redaction] mode` (§8.4):
+    // `warn`/`off` change whether prompt/tool_input bytes are replaced in the
+    // persisted row, NOT whether the transcript BLOB is scrubbed — that blob is
+    // force-redacted unconditionally below (§8.3 P0 contract).
+    let redactor = build_configured_redactor(conn).await;
     let mut all_matches: Vec<RedactionMatch> = Vec::new();
     let mut bytes_scanned: usize = 0;
     let mut bytes_redacted: usize = 0;
@@ -522,7 +527,9 @@ pub(crate) async fn ingest_agent_traces_payload(
     }
     if let Some(input) = event.tool_input.take() {
         let serialized = serde_json::to_vec(&input).unwrap_or_default();
-        let (redacted, report) = redactor.redact(&serialized);
+        // tool_input is JSON — use the JSON-aware path so structural fields
+        // (*id / file_path / cwd …) and image objects are never corrupted.
+        let (redacted, report) = redactor.redact_jsonl(&serialized);
         event.tool_input = serde_json::from_slice(redacted.bytes()).ok();
         bytes_scanned += report.bytes_scanned;
         bytes_redacted += report.bytes_redacted;
@@ -586,16 +593,21 @@ pub(crate) async fn ingest_agent_traces_payload(
         false
     };
     let metadata_json = build_agent_session_metadata_json(&envelope, concurrent_active);
+    // Resolve the worktree the session ran in so `libra agent session list
+    // --worktree <id>` can partition a shared catalog (entire.md §3.4 /
+    // §13 risk #9). NULL when the cwd is outside any libra workspace.
+    let worktree_id = resolve_worktree_id(&envelope.cwd);
     let upsert_sql = "
         INSERT INTO agent_session (
-            session_id, agent_kind, provider_session_id, state, working_dir,
+            session_id, agent_kind, provider_session_id, state, working_dir, worktree_id,
             metadata_json, redaction_report, started_at, last_event_at, stopped_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(agent_kind, provider_session_id) DO UPDATE SET
             state = excluded.state,
             last_event_at = excluded.last_event_at,
             redaction_report = excluded.redaction_report,
+            worktree_id = COALESCE(excluded.worktree_id, agent_session.worktree_id),
             stopped_at = CASE WHEN excluded.state = 'stopped' THEN excluded.last_event_at
                               ELSE agent_session.stopped_at END,
             metadata_json = CASE
@@ -617,6 +629,7 @@ pub(crate) async fn ingest_agent_traces_payload(
             envelope.session_id.clone().into(),
             new_state.into(),
             envelope.cwd.clone().into(),
+            worktree_id.into(),
             metadata_json.into(),
             redaction_report_json.clone().into(),
             now.into(),
@@ -681,6 +694,29 @@ fn build_agent_session_metadata_json(
     serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string())
 }
 
+/// Resolve a stable worktree identifier for a captured session's working
+/// directory: the name of the nearest ancestor directory that hosts a
+/// `.libra` storage root (i.e. the worktree root). For the primary worktree
+/// this is the repository directory name; for a `libra worktree add`-created
+/// linked worktree it is that worktree's directory name.
+///
+/// Returns `None` when the cwd is empty or no ancestor hosts a `.libra` root
+/// (e.g. the session ran outside any libra workspace) so the column stays
+/// NULL rather than recording a misleading guess. The `COALESCE` in the
+/// upsert keeps a previously-resolved id if a later event can't resolve one.
+fn resolve_worktree_id(cwd: &str) -> Option<String> {
+    if cwd.is_empty() {
+        return None;
+    }
+    let mut dir = std::path::Path::new(cwd);
+    loop {
+        if dir.join(crate::utils::util::ROOT_DIR).exists() {
+            return dir.file_name().map(|n| n.to_string_lossy().into_owned());
+        }
+        dir = dir.parent()?;
+    }
+}
+
 async fn has_concurrent_active_session(
     conn: &sea_orm::DatabaseConnection,
     agent_kind: &str,
@@ -713,6 +749,51 @@ async fn has_concurrent_active_session(
 /// corresponding `agent_checkpoint` row. Errors are surfaced verbatim — a
 /// failure here means the hook ingest cannot acknowledge a clean checkpoint
 /// boundary to the caller.
+#[allow(clippy::too_many_arguments)]
+/// Build the field-redaction [`Redactor`] from `[agent.redaction]` config
+/// (entire.md §8.4). Reads `agent.redaction.mode` (default `redact`) and the
+/// opt-in `agent.redaction.pii.*` switches from `config_kv`. Any read error or
+/// unknown value falls back to the safe default so a misconfigured key can
+/// never silently disable redaction.
+async fn build_configured_redactor(
+    conn: &sea_orm::DatabaseConnection,
+) -> crate::internal::ai::observed_agents::Redactor {
+    use crate::internal::ai::observed_agents::{PiiConfig, RedactionMode, Redactor};
+    use crate::internal::config::ConfigKv;
+
+    let mode = ConfigKv::get_with_conn(conn, "agent.redaction.mode")
+        .await
+        .ok()
+        .flatten()
+        .map(|e| RedactionMode::from_config_str(&e.value))
+        .unwrap_or_default();
+    let pii = PiiConfig {
+        enabled: read_bool_config(conn, "agent.redaction.pii.enabled").await,
+        email: read_bool_config(conn, "agent.redaction.pii.email").await,
+        phone: read_bool_config(conn, "agent.redaction.pii.phone").await,
+    };
+    Redactor::new_default().with_mode(mode).with_pii(pii)
+}
+
+/// Read a boolean `config_kv` value, defaulting to `false` on absence/error.
+async fn read_bool_config(conn: &sea_orm::DatabaseConnection, key: &str) -> bool {
+    use crate::internal::config::ConfigKv;
+    ConfigKv::get_with_conn(conn, key)
+        .await
+        .ok()
+        .flatten()
+        .map(|e| {
+            matches!(
+                e.value.trim().to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+// The checkpoint producer threads several independent, already-redacted
+// inputs (session id, envelope, agent kind, redaction artefacts, timestamp);
+// bundling them into a struct would not improve clarity at the single call site.
 #[allow(clippy::too_many_arguments)]
 async fn write_committed_checkpoint(
     conn: &sea_orm::DatabaseConnection,
@@ -849,9 +930,7 @@ fn build_checkpoint_transcript_redacted(
     redacted_prompt: Option<&str>,
     metadata: &mut serde_json::Value,
 ) -> crate::internal::ai::observed_agents::RedactedBytes {
-    use crate::internal::ai::observed_agents::{
-        AgentKind, AgentSessionCtx, RedactedBytes, Redactor, agent_for,
-    };
+    use crate::internal::ai::observed_agents::{AgentKind, AgentSessionCtx, Redactor, agent_for};
 
     let Some(kind) = AgentKind::from_db_str(agent_kind) else {
         if let Some(obj) = metadata.as_object_mut() {
@@ -860,7 +939,11 @@ fn build_checkpoint_transcript_redacted(
                 serde_json::Value::String("fallback_prompt_unknown_agent_kind".to_string()),
             );
         }
-        return RedactedBytes::new_unchecked(redacted_prompt.unwrap_or("").as_bytes().to_vec());
+        // §8.3 P0: force-redact even the prompt fallback so a `warn`/`off`
+        // field-redaction mode can never push raw bytes onto agent-traces.
+        return Redactor::new_default()
+            .redact(redacted_prompt.unwrap_or("").as_bytes())
+            .0;
     };
     let ctx = AgentSessionCtx {
         session_id: build_ai_session_id(
@@ -877,7 +960,10 @@ fn build_checkpoint_transcript_redacted(
     let agent = agent_for(kind);
     match agent.read_transcript(&ctx) {
         Ok(Some(raw)) => {
-            let (redacted, report) = Redactor::new_default().redact(&raw);
+            // Agent transcripts are JSONL — use the JSON-aware path. Always
+            // force-redact (new_default = RedactionMode::Redact) regardless of
+            // the configured field-redaction mode (§8.3 P0).
+            let (redacted, report) = Redactor::new_default().redact_jsonl(&raw);
             if let Some(obj) = metadata.as_object_mut() {
                 obj.insert(
                     "transcript_source".to_string(),
@@ -897,7 +983,10 @@ fn build_checkpoint_transcript_redacted(
                     serde_json::Value::String("fallback_prompt".to_string()),
                 );
             }
-            RedactedBytes::new_unchecked(redacted_prompt.unwrap_or("").as_bytes().to_vec())
+            // §8.3 P0: force-redact the prompt fallback unconditionally.
+            Redactor::new_default()
+                .redact(redacted_prompt.unwrap_or("").as_bytes())
+                .0
         }
     }
 }
@@ -1279,6 +1368,38 @@ mod tests {
 
     use super::*;
     use crate::internal::ai::hooks::providers::{claude_provider, gemini_provider};
+
+    /// `resolve_worktree_id` returns the name of the nearest ancestor that
+    /// hosts a `.libra` storage root, whether the cwd is the worktree root or
+    /// a nested subdirectory of it. entire.md §3.4 / §13 risk #9.
+    #[test]
+    fn resolve_worktree_id_uses_libra_root_directory_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wt_root = tmp.path().join("my-worktree");
+        std::fs::create_dir_all(wt_root.join(crate::utils::util::ROOT_DIR)).unwrap();
+        let nested = wt_root.join("src").join("deep");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(
+            resolve_worktree_id(&nested.to_string_lossy()),
+            Some("my-worktree".to_string()),
+        );
+        assert_eq!(
+            resolve_worktree_id(&wt_root.to_string_lossy()),
+            Some("my-worktree".to_string()),
+        );
+    }
+
+    /// No `.libra` root in the ancestry — and the empty string — yield `None`
+    /// so the `worktree_id` column stays NULL rather than recording a guess.
+    #[test]
+    fn resolve_worktree_id_returns_none_outside_workspace() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plain = tmp.path().join("no-libra-here");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(resolve_worktree_id(&plain.to_string_lossy()), None);
+        assert_eq!(resolve_worktree_id(""), None);
+    }
 
     // Scenario: pushing many keys past the cap evicts the oldest, never exceeding
     // `MAX_PROCESSED_EVENT_KEYS`.

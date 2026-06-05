@@ -42,7 +42,8 @@ pub use builtin::{
 pub use derived::derive_tool_call_records;
 pub use preview::{PREVIEW_SPECS, PreviewAgent, PreviewSpec, is_preview, preview_spec_for};
 pub use redaction::{
-    RedactedBytes, RedactedSink, RedactionMatch, RedactionReport, RedactionRule, Redactor,
+    PiiConfig, RedactedBytes, RedactedSink, RedactionMatch, RedactionMode, RedactionReport,
+    RedactionRule, Redactor,
 };
 pub use rpc::{
     RPC_BINARY_PREFIX, RPC_DEFAULT_TIMEOUT, RpcAgent, RpcAgentBinary, RpcError, RpcRequest,
@@ -91,12 +92,14 @@ pub fn agent_for(kind: AgentKind) -> &'static dyn ObservedAgent {
 /// capability.
 ///
 /// Companion to [`agent_for`] for the
-/// `libra agent checkpoint rewind --apply` dispatch path. As of
-/// v0.17.677 only [`ClaudeCodeObservedAgent`] implements the
-/// truncator trait — the other six kinds return `None` so the caller
-/// can branch cleanly without inspecting the source-of-truth match.
+/// `libra agent checkpoint rewind --apply` dispatch path. As of the
+/// entire.md §14.4 phase-4 work, [`ClaudeCodeObservedAgent`] (JSONL,
+/// per-line `timestamp`) and [`GeminiObservedAgent`] (single JSON doc,
+/// `messages[].timestamp`) implement the truncator trait; the remaining
+/// kinds return `None` so the caller can branch cleanly without
+/// inspecting the source-of-truth match.
 ///
-/// Adding a second truncator capability is a two-step process:
+/// Adding a further truncator capability is a two-step process:
 /// 1. Implement `TranscriptTruncator` on the adapter struct.
 /// 2. Add a `match` arm here returning `Some(&STATIC_INSTANCE)`.
 ///
@@ -106,12 +109,13 @@ pub fn agent_for(kind: AgentKind) -> &'static dyn ObservedAgent {
 /// "adapter exists but its truncator isn't wired" bug class.
 pub fn truncator_for(kind: AgentKind) -> Option<&'static dyn TranscriptTruncator> {
     static CLAUDE_CODE_TRUNCATOR: ClaudeCodeObservedAgent = ClaudeCodeObservedAgent::new();
+    static GEMINI_TRUNCATOR: GeminiObservedAgent = GeminiObservedAgent::new();
 
     match kind {
         AgentKind::ClaudeCode => Some(&CLAUDE_CODE_TRUNCATOR),
+        AgentKind::Gemini => Some(&GEMINI_TRUNCATOR),
         AgentKind::Cursor
         | AgentKind::Codex
-        | AgentKind::Gemini
         | AgentKind::OpenCode
         | AgentKind::Copilot
         | AgentKind::FactoryAi => None,
@@ -167,17 +171,18 @@ mod registry_tests {
     /// `truncator_for` is the optional-capability companion to
     /// `agent_for`. It returns `Some(&dyn TranscriptTruncator)` for
     /// kinds whose adapter implements `TranscriptTruncator`, `None`
-    /// otherwise. Today only `ClaudeCode` qualifies; the other six
-    /// kinds must return `None`. Pin the per-kind expectation so a
-    /// future second truncator implementation lands a passing arm
-    /// here (and a refactor that drops the ClaudeCode arm fails the
-    /// test rather than silently disabling
+    /// otherwise. `ClaudeCode` (JSONL) and `Gemini` (single JSON doc)
+    /// qualify; the remaining five kinds must return `None`. Pin the
+    /// per-kind expectation so a future truncator implementation lands a
+    /// passing arm here (and a refactor that drops an existing arm fails
+    /// the test rather than silently disabling
     /// `libra agent checkpoint rewind --apply`).
     #[test]
-    fn truncator_for_returns_some_only_for_claude_code_today() {
+    fn truncator_for_returns_some_for_claude_and_gemini() {
         for kind in AgentKind::all() {
             let truncator = truncator_for(*kind);
-            let should_have_truncator = matches!(*kind, AgentKind::ClaudeCode);
+            let should_have_truncator =
+                matches!(*kind, AgentKind::ClaudeCode | AgentKind::Gemini);
             assert_eq!(
                 truncator.is_some(),
                 should_have_truncator,

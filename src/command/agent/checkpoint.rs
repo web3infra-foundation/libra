@@ -122,7 +122,14 @@ async fn show(args: CheckpointShowArgs, output: &OutputConfig) -> CliResult<()> 
             // path resolution fails (e.g. running from outside any libra
             // repo), fall back to the row-only render rather than erroring.
             let metadata = load_metadata_blob(&payload.metadata_blob_oid).ok();
-            emit_one(&payload, metadata.as_deref(), output)
+            // Best-effort tree summary: walk the checkpoint commit's root
+            // tree to surface its leaf blobs (metadata.json,
+            // transcript/<provider>, optional events/<provider>.jsonl) plus
+            // the redacted transcript's byte length, per entire.md §7.3
+            // ("metadata + transcript 长度 + tree 摘要"). Swallow errors so
+            // running outside a workspace still renders the row.
+            let tree_summary = summarize_checkpoint_tree(&payload.tree_oid).ok();
+            emit_one(&payload, metadata.as_deref(), tree_summary.as_ref(), output)
         }
         None => Err(CliError::fatal(format!(
             "no checkpoint matches id '{}'",
@@ -668,6 +675,73 @@ fn build_rewind_plan(commit_oid: &ObjectHash) -> Result<RewindPlan, anyhow::Erro
     Ok(RewindPlan { restore, delete })
 }
 
+/// One leaf blob in a checkpoint commit's tree.
+#[derive(Debug, Serialize)]
+struct CheckpointTreeEntry {
+    /// Full path within the checkpoint commit tree, e.g.
+    /// `checkpoint/<ab>/<rest>/transcript/claude_code`.
+    path: String,
+    /// Blob size in bytes.
+    size: usize,
+}
+
+/// Summary of a checkpoint commit's tree contents — the per-checkpoint
+/// `metadata.json`, the redacted `transcript/<provider>` blob, and any
+/// `events/<provider>.jsonl` — surfaced by `checkpoint show` per
+/// entire.md §7.3 ("metadata + transcript 长度 + tree 摘要").
+#[derive(Debug, Serialize)]
+struct CheckpointTreeSummary {
+    entries: Vec<CheckpointTreeEntry>,
+    /// Byte length of the redacted transcript blob (the entry whose parent
+    /// directory is `transcript`), if the tree carries one.
+    transcript_bytes: Option<usize>,
+}
+
+/// Walk a checkpoint commit's root tree (`tree_oid`) and summarise the leaf
+/// blobs it carries plus the redacted transcript's byte length.
+///
+/// Best-effort: returns `Err` when not inside a libra workspace or when the
+/// objects cannot be read, so `checkpoint show` falls back to a row-only
+/// render rather than failing. The transcript blob lives at
+/// `checkpoint/<ab>/<rest>/transcript/<provider>` (see
+/// `HistoryManager::append_checkpoint_commit`), so it is identified by a
+/// parent directory named `transcript`.
+fn summarize_checkpoint_tree(tree_oid: &str) -> Result<CheckpointTreeSummary, anyhow::Error> {
+    use std::path::Path;
+
+    let oid = ObjectHash::from_str(tree_oid)
+        .map_err(|e| anyhow::anyhow!("invalid tree_oid '{tree_oid}': {e}"))?;
+    let tree: Tree = load_object(&oid)
+        .map_err(|e| anyhow::anyhow!("failed to load checkpoint tree {tree_oid}: {e}"))?;
+    let storage = util::try_get_storage_path(None)
+        .map_err(|e| anyhow::anyhow!("not in a libra repository: {e}"))?;
+
+    let items = tree.get_plain_items();
+    let mut entries = Vec::with_capacity(items.len());
+    let mut transcript_bytes = None;
+    for (path, hash) in &items {
+        let size = read_git_object(&storage, hash)
+            .map_err(|e| anyhow::anyhow!("failed to read blob {hash}: {e}"))?
+            .len();
+        if path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "transcript")
+        {
+            transcript_bytes = Some(size);
+        }
+        entries.push(CheckpointTreeEntry {
+            path: path.display().to_string(),
+            size,
+        });
+    }
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(CheckpointTreeSummary {
+        entries,
+        transcript_bytes,
+    })
+}
+
 fn load_metadata_blob(oid: &str) -> Result<String, CliError> {
     let hash = ObjectHash::from_str(oid)
         .map_err(|e| CliError::fatal(format!("invalid metadata_blob_oid '{oid}': {e}")))?;
@@ -709,6 +783,7 @@ fn emit_list(rows: &[CheckpointRow], output: &OutputConfig) -> CliResult<()> {
 fn emit_one(
     row: &CheckpointRow,
     metadata_blob: Option<&str>,
+    tree: Option<&CheckpointTreeSummary>,
     output: &OutputConfig,
 ) -> CliResult<()> {
     if output.is_json() {
@@ -720,6 +795,8 @@ fn emit_one(
         let payload = serde_json::json!({
             "checkpoint": row,
             "metadata": metadata_json,
+            "tree": tree,
+            "transcript_bytes": tree.and_then(|t| t.transcript_bytes),
         });
         return emit_json_data("agent_checkpoint", &payload, output);
     }
@@ -738,6 +815,18 @@ fn emit_one(
     println!("metadata_blob_oid : {}", row.metadata_blob_oid);
     println!("traces_commit     : {}", row.traces_commit);
     println!("created_at        : {}", row.created_at);
+    if let Some(tree) = tree {
+        match tree.transcript_bytes {
+            Some(n) => println!("transcript_bytes  : {n}"),
+            None => println!("transcript_bytes  : (no transcript entry in tree)"),
+        }
+        println!("tree summary ({} entr{}):", tree.entries.len(), {
+            if tree.entries.len() == 1 { "y" } else { "ies" }
+        });
+        for e in &tree.entries {
+            println!("  {:>10}  {}", e.size, e.path);
+        }
+    }
     if let Some(metadata) = metadata_blob {
         println!("---");
         println!("metadata.json:");

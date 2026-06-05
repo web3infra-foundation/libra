@@ -1,10 +1,12 @@
 //! Top-level `libra agent` command surface.
 //!
-//! The Phase 1 cut implements parsing, the read-only `status` subcommand, and
-//! stub handlers for the rest of the CLI surface so users can discover the
-//! shape via `libra agent --help`. Subsequent phases fill in checkpoint /
-//! session / hook routing on top of this scaffold; see
-//! `docs/improvement/entire.md` section 9.
+//! All sub-commands are fully implemented and do real work: `status`,
+//! `enable`/`disable` (hook install/uninstall), `session`
+//! (list/show/stop/resume/promote/derive-tool-calls), `checkpoint`
+//! (list/show/rewind), `clean`, `doctor`, `push`, the hidden `hooks`
+//! ingestion entry point, and the external `rpc` bridge. See
+//! `docs/improvement/entire.md` section 9 for the surface and the phase
+//! history.
 
 use clap::{Args, Subcommand};
 
