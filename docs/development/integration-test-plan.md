@@ -7,7 +7,7 @@
 
 ## 0. TL;DR
 
-**完整性结论**：本计划作为“人工黑盒执行规范”和“runner 的需求说明”已可落地（覆盖矩阵、隔离安全模型、37 个具体场景 + 参数表 + 断言强化标准 + 输出契约 + PR/Review 协议 + 维护规则均已定义）。R0-R5 切片已全部落地：`tools/integration-runner/` 独立 crate、`list`、`check-plan`（yaml+MD+矩阵+registry 三方一致 + 收敛短形式 gate）、Wave 0 preflight、隔离 env_clear + SAFE_PATH + gitfix + gh 探针、37/37 场景（含 Wave 3 live 的 `run-live` + GhRepoCleanupGuard + delete_repo scope 预检 + 脱敏自检）的 typed Rust 执行 + 报告产出；`run --waves 0,1,2` / `run-live --only live.*` 均可执行并满足 §5 契约。check-plan 是稳定的一致性门（CI 可显式调用）。
+**完整性结论**：本计划作为“人工黑盒执行规范”和“runner 的需求说明”已可落地（覆盖矩阵、隔离安全模型、37 个具体场景 + 参数表 + 断言强化标准 + 输出契约 + PR/Review 协议 + 维护规则均已定义）。R0-R5 切片已全部落地：`tools/integration-runner/` 独立 crate、`list`、`check-plan`（yaml+MD+矩阵+registry 三方一致 + 收敛短形式 gate）、Wave 0 preflight、隔离 env_clear + SAFE_PATH + gitfix + gh 探针、37/37 场景（含 Wave 3 live 的 `run-live` + GhRepoCleanupGuard + delete_repo scope 预检 + 脱敏自检）的 typed Rust 执行 + 报告产出；`run --waves 0,1,2` / `run-live --only live.*` 均可执行并满足 §5 契约。check-plan 是稳定的一致性门，`run --waves 0,1,2` 是默认黑盒执行门（两者均在 CI 的 compat-offline-core 显式调用）。
 
 场景登记使用 `docs/development/integration-scenarios.yaml`（元数据）+ `docs/development/integration-scenarios/<id>.md`（按场景拆分的可执行步骤与断言）+ 本文件（计划总则与 §2.3 矩阵）。`check-plan` 校验 yaml ↔ 拆分 MD ↔ runner registry 一致。
 
@@ -921,7 +921,7 @@ runner 进程退出码：`0` = 无 `fail`（`skip`/`env-skip` 不算失败）；
 
 ### BASELINE_GAP-INTEG-008：集成计划一致性检查已落地基础版
 
-- 现状：兼容矩阵与 Code UI docs 在 `tests/compat/matrix_alignment.rs`。`check-plan` 加载 yaml，扫描 `docs/development/integration-scenarios/<id>.md`，交叉验证 §2.3 矩阵与 `scenario_registry()`（当前 37/37 已实现）。CI 在 compat-offline-core 显式运行 `check-plan`。**断言强化模式校验已落地基础版**：`check-plan` 现在对每个已实现场景启发式校验其 source-verifiable `key_assertion_categories`（JSON envelope / fsck / negative LBR- / conflict / gitfix_isolation / gh_lifecycle / cleanup_guard / file_exists）是否在 `scenarios/<id>.rs` 留有断言信号（落实 §8.4 第 9、11 项的 fn 级证据），缺失即失败。
+- 现状：兼容矩阵与 Code UI docs 在 `tests/compat/matrix_alignment.rs`。`check-plan` 加载 yaml，扫描 `docs/development/integration-scenarios/<id>.md`，交叉验证 §2.3 矩阵与 `scenario_registry()`（当前 37/37 已实现）。CI 在 compat-offline-core 显式运行 `check-plan` 以及 `run --waves 0,1,2`（默认黑盒执行门）。**断言强化模式校验已落地基础版**：`check-plan` 现在对每个已实现场景启发式校验其 source-verifiable `key_assertion_categories`（JSON envelope / fsck / negative LBR- / conflict / gitfix_isolation / gh_lifecycle / cleanup_guard / file_exists）是否在 `scenarios/<id>.rs` 留有断言信号（落实 §8.4 第 9、11 项的 fn 级证据），缺失即失败。
 - 需要补充：quarantine / exit-code 细节检查，以及 advisory 类别（global_db_isolation / vault_isolation / intentional_difference）的更深语义校验。计划未来 CI 显式运行 check-plan 作为兼容门之一。
 - 约束：不得为此新建 `scripts/` 目录，不得把该检查加入根 `Cargo.toml` 或 `tests/INDEX.md`。新增场景必须同时编辑 yaml + MD（短形式）+ runner `scenario_registry()` 数组，否则 `check-plan` 会失败或 run 会 skip。Agent 任务必须把 yaml 当 list of record。
 

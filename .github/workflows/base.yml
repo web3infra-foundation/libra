@@ -199,6 +199,19 @@ jobs:
         # lives in tests/compat/matrix_alignment.rs (also runs in `cargo test --all`).
         run: cargo test --test compat_matrix_alignment
 
+      - name: Check black-box CLI integration plan consistency
+        run: cargo run --manifest-path tools/integration-runner/Cargo.toml -- check-plan
+
+      - name: Run black-box CLI integration tests (waves 0,1,2)
+        # Per docs/development/integration-test-plan.md, `run --waves 0,1,2` is the
+        # default black-box execution gate for the Git-compat command surface.
+        # It must be invoked explicitly via the independent runner crate (never as
+        # a Cargo [[test]] target). Produces §5 report artifacts (report.json, summary.md,
+        # results.ndjson, per-scenario logs) under the runner's temp RUN_ROOT.
+        # Exit code: 0 = no failures, 1 = at least one fail, 2 = preflight/build fail.
+        # env-skip cases are reported but do not fail the gate.
+        run: cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --waves 0,1,2
+
       - name: Run tests (L1 + L2 + L3)
         env:
           LIBRA_TEST_GITHUB_TOKEN: ${{ secrets.LIBRA_TEST_GITHUB_TOKEN }}
