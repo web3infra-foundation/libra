@@ -455,6 +455,7 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
             context,
             ws,
             args.ignore_blank_lines,
+            args.function_context,
             &opts,
             &read,
         );
@@ -1390,11 +1391,8 @@ fn native_diff_for_file(
         short_hash_native(new_hash)
     );
 
-    match (
-        std::str::from_utf8(old_bytes),
-        std::str::from_utf8(new_bytes),
-    ) {
-        (Ok(old_text), Ok(new_text)) => {
+    match text_pair(old_bytes, new_bytes) {
+        Some((old_text, new_text)) => {
             let (old_pref, new_pref) = if old_text.is_empty() {
                 ("/dev/null".to_string(), format!("b/{}", file.display()))
             } else if new_text.is_empty() {
@@ -1414,11 +1412,30 @@ fn native_diff_for_file(
             };
             out.push_str(&body);
         }
-        _ => {
+        None => {
             let _ = writeln!(out, "Binary files differ");
         }
     }
     out
+}
+
+/// Treat content as binary when either side contains a NUL byte in its first
+/// 8 KiB (matching Git) or is not valid UTF-8; otherwise return the two texts.
+fn text_pair<'a>(old_bytes: &'a [u8], new_bytes: &'a [u8]) -> Option<(&'a str, &'a str)> {
+    if is_binary_content(old_bytes) || is_binary_content(new_bytes) {
+        return None;
+    }
+    match (
+        std::str::from_utf8(old_bytes),
+        std::str::from_utf8(new_bytes),
+    ) {
+        (Ok(old_text), Ok(new_text)) => Some((old_text, new_text)),
+        _ => None,
+    }
+}
+
+fn is_binary_content(bytes: &[u8]) -> bool {
+    bytes.iter().take(8192).any(|&b| b == 0)
 }
 
 /// libra-native counterpart to `Diff::diff`: pairs old/new blobs by path, applies
@@ -1633,6 +1650,7 @@ fn detect_renames_and_copies(
     context: usize,
     ws: WsMode,
     ignore_blank_lines: bool,
+    function_context: bool,
     opts: &RenameOptions,
     read: &dyn Fn(&PathBuf, &ObjectHash) -> Vec<u8>,
 ) {
@@ -1755,13 +1773,15 @@ fn detect_renames_and_copies(
     }
 
     // Stage 3: copy detection — copy source pool = modified/deleted old-side files.
+    // A delete already consumed as a rename source is still a valid copy source
+    // (its old-side content existed and may be copied), so `consumed_deleted` is
+    // intentionally not excluded here — only the copy match itself is
+    // non-consuming.
     if let Some(copy_threshold) = opts.copy_threshold {
         let sources: Vec<usize> = files
             .iter()
             .enumerate()
-            .filter(|(i, f)| {
-                (f.status == "modified" || f.status == "deleted") && !consumed_deleted.contains(i)
-            })
+            .filter(|(_, f)| f.status == "modified" || f.status == "deleted")
             .map(|(i, _)| i)
             .collect();
         let still_unmatched: Vec<usize> = added
@@ -1822,6 +1842,7 @@ fn detect_renames_and_copies(
                 context,
                 ws,
                 ignore_blank_lines,
+                function_context,
                 read,
             ));
         } else {
@@ -1845,6 +1866,7 @@ fn build_rename_entry(
     context: usize,
     ws: WsMode,
     ignore_blank_lines: bool,
+    function_context: bool,
     read: &dyn Fn(&PathBuf, &ObjectHash) -> Vec<u8>,
 ) -> DiffFileStat {
     let old_pb = PathBuf::from(&old_path);
@@ -1875,18 +1897,13 @@ fn build_rename_entry(
     if old_hash != new_hash {
         let old_bytes = old_hash.map(|h| read(&old_pb, &h)).unwrap_or_default();
         let new_bytes = new_hash.map(|h| read(&new_pb, &h)).unwrap_or_default();
-        match (
-            std::str::from_utf8(&old_bytes),
-            std::str::from_utf8(&new_bytes),
-        ) {
-            (Ok(old_text), Ok(new_text)) => {
-                let body = compute_unified_diff_native(
-                    old_text,
-                    new_text,
-                    context,
-                    ws,
-                    ignore_blank_lines,
-                );
+        match text_pair(&old_bytes, &new_bytes) {
+            Some((old_text, new_text)) => {
+                let body = if function_context {
+                    compute_function_context_diff(old_text, new_text, ws)
+                } else {
+                    compute_unified_diff_native(old_text, new_text, context, ws, ignore_blank_lines)
+                };
                 if !body.is_empty() {
                     let _ = writeln!(
                         raw,
@@ -1903,7 +1920,7 @@ fn build_rename_entry(
                     deletions = counts.1;
                 }
             }
-            _ => {
+            None => {
                 let _ = writeln!(
                     raw,
                     "index {}..{} 100644",
