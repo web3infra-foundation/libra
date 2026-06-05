@@ -207,6 +207,17 @@ pub async fn create(
     })
 }
 
+/// The result of importing a single fetched tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagImportOutcome {
+    /// A new tag ref was created.
+    Created,
+    /// An existing tag was force-updated; carries its previous target.
+    Updated { previous: Option<String> },
+    /// An existing tag was preserved (not forced) and left untouched.
+    Preserved,
+}
+
 /// Persist a tag fetched from a remote (`full_ref_name` is the fully-qualified
 /// `refs/tags/<name>`) pointing at `target` (a tag-object hash for annotated
 /// tags, or the commit hash for lightweight ones), reusing the caller's
@@ -214,20 +225,23 @@ pub async fn create(
 ///
 /// Tags are immutable by default: when one already exists locally it is left
 /// untouched unless `force` is set, mirroring `git fetch`'s tag-clobbering
-/// policy. Returns `true` when the ref was written (created or force-updated)
-/// and `false` when an existing tag was preserved.
+/// policy.
 ///
 /// # Arguments
 /// * `db` - Any active connection or transaction implementing `ConnectionTrait`.
 /// * `full_ref_name` - Fully-qualified ref, e.g. `refs/tags/v1.0`.
 /// * `target` - Object hash the tag should point at.
 /// * `force` - Overwrite an existing tag instead of preserving it.
+///
+/// # Returns
+/// A [`TagImportOutcome`] describing whether the tag was created, force-updated
+/// (with its previous target), or preserved.
 pub async fn import_fetched_tag_with_conn<C>(
     db: &C,
     full_ref_name: &str,
     target: &str,
     force: bool,
-) -> Result<bool, DbErr>
+) -> Result<TagImportOutcome, DbErr>
 where
     C: ConnectionTrait,
 {
@@ -240,12 +254,13 @@ where
     match existing {
         Some(model) => {
             if !force {
-                return Ok(false);
+                return Ok(TagImportOutcome::Preserved);
             }
+            let previous = model.commit.clone();
             let mut active: reference::ActiveModel = model.into();
             active.commit = Set(Some(target.to_owned()));
             active.update(db).await?;
-            Ok(true)
+            Ok(TagImportOutcome::Updated { previous })
         }
         None => {
             reference::ActiveModel {
@@ -257,7 +272,7 @@ where
             }
             .insert(db)
             .await?;
-            Ok(true)
+            Ok(TagImportOutcome::Created)
         }
     }
 }

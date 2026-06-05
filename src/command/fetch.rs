@@ -563,6 +563,16 @@ pub struct FetchArgs {
     /// Git's `-n` short form is intentionally not exposed (it stays free).
     #[clap(long = "no-tags")]
     pub no_tags: bool,
+
+    /// Allow non-fast-forward updates: overwrite an existing local tag with the
+    /// remote's value (tags are otherwise immutable). Remote-tracking refs are
+    /// always updated regardless of this flag.
+    #[clap(long, short = 'f')]
+    pub force: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -570,6 +580,10 @@ pub struct FetchRefUpdate {
     pub remote_ref: String,
     pub old_oid: Option<String>,
     pub new_oid: String,
+    /// True when this update overwrote a non-fast-forward target that required
+    /// `--force` (currently a clobbered existing tag); drives the porcelain `+`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub forced: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -888,11 +902,22 @@ fn format_fetch_porcelain(result: &FetchOutput) -> String {
     let mut lines = Vec::new();
     for remote in &result.remotes {
         for update in &remote.refs_updated {
-            let (flag, old_oid) = match &update.old_oid {
-                // New ref: space-flag is reserved for fast-forward; new refs use
-                // `*` with an all-zero old object id sized to the hash kind.
-                None => ('*', "0".repeat(update.new_oid.len())),
-                Some(old) => (' ', old.clone()),
+            let (flag, old_oid) = if update.forced {
+                // Forced (non-fast-forward) update, e.g. a `--force` tag clobber.
+                (
+                    '+',
+                    update
+                        .old_oid
+                        .clone()
+                        .unwrap_or_else(|| "0".repeat(update.new_oid.len())),
+                )
+            } else {
+                match &update.old_oid {
+                    // New ref: space-flag is reserved for fast-forward; new refs
+                    // use `*` with an all-zero old object id sized to the hash kind.
+                    None => ('*', "0".repeat(update.new_oid.len())),
+                    Some(old) => (' ', old.clone()),
+                }
             };
             lines.push(format!(
                 "{flag} {old_oid} {} {}",
@@ -935,6 +960,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         verbose,
         tags,
         no_tags,
+        force,
     } = args;
 
     // `--prune` is enabled by the flag or the `fetch.prune` config (flag wins).
@@ -978,6 +1004,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
                     dry_run,
                     tags,
                     no_tags,
+                    force,
                     output,
                 )
                 .await
@@ -1042,6 +1069,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         dry_run,
         tags,
         no_tags,
+        force,
         output,
     )
     .await
@@ -1288,6 +1316,7 @@ pub async fn fetch_repository_safe(
         false,
         false,
         false,
+        false,
         output,
     )
     .await
@@ -1374,6 +1403,7 @@ pub(crate) async fn fetch_repository_with_result(
     dry_run: bool,
     tags_flag: bool,
     no_tags_flag: bool,
+    force: bool,
     output: &OutputConfig,
 ) -> Result<FetchRepositoryResult, FetchError> {
     let (remote_client, discovery) =
@@ -1454,7 +1484,7 @@ pub(crate) async fn fetch_repository_with_result(
     // (no `.pack`/`.idx`, no shallow update, no ref/reflog writes, no FETCH_HEAD).
     if dry_run {
         let mut refs_updated = compute_fetch_ref_preview(&remote_config, &refs).await?;
-        refs_updated.extend(preview_tag_updates(&tag_candidates).await?);
+        refs_updated.extend(preview_tag_updates(&tag_candidates, force).await?);
         let pruned = if prune {
             let remote_branch_names =
                 crate::command::remote::collect_remote_branch_names(&discovery.refs);
@@ -1549,6 +1579,7 @@ pub(crate) async fn fetch_repository_with_result(
         remote_head,
         branch,
         &tag_candidates,
+        force,
     )
     .await?;
 
@@ -2294,16 +2325,18 @@ async fn compute_fetch_ref_preview(
             remote_ref: full_ref_name,
             old_oid,
             new_oid: reference._hash.clone(),
+            forced: false,
         });
     }
     Ok(updates)
 }
 
-/// Compute the would-be tag imports for `--dry-run`: each candidate whose local
-/// tag does not yet exist (existing tags are immutable by default and would be
-/// preserved). The previewed object id is the tag's advertised hash.
+/// Compute the would-be tag imports for `--dry-run`. A candidate whose local
+/// tag does not exist previews as a new ref; an existing tag is skipped unless
+/// `force` is set, in which case it previews as a forced (clobbering) update.
 async fn preview_tag_updates(
     candidates: &[TagCandidate],
+    force: bool,
 ) -> Result<Vec<FetchRefUpdate>, FetchError> {
     let mut updates = Vec::new();
     for candidate in candidates {
@@ -2311,23 +2344,29 @@ async fn preview_tag_updates(
             .ref_name
             .strip_prefix("refs/tags/")
             .unwrap_or(&candidate.ref_name);
-        let exists = crate::internal::tag::find_tag_ref(short)
+        let existing = crate::internal::tag::find_tag_ref(short)
             .await
             .map_err(|error| FetchError::UpdateRefs {
                 message: format!(
                     "failed to inspect existing tag '{}': {error}",
                     candidate.ref_name
                 ),
-            })?
-            .is_some();
-        if exists {
-            continue;
+            })?;
+        match existing {
+            Some(_) if !force => continue,
+            Some(tag_ref) => updates.push(FetchRefUpdate {
+                remote_ref: candidate.ref_name.clone(),
+                old_oid: tag_ref.target,
+                new_oid: candidate.object_hash.clone(),
+                forced: true,
+            }),
+            None => updates.push(FetchRefUpdate {
+                remote_ref: candidate.ref_name.clone(),
+                old_oid: None,
+                new_oid: candidate.object_hash.clone(),
+                forced: false,
+            }),
         }
-        updates.push(FetchRefUpdate {
-            remote_ref: candidate.ref_name.clone(),
-            old_oid: None,
-            new_oid: candidate.object_hash.clone(),
-        });
     }
     Ok(updates)
 }
@@ -2339,6 +2378,7 @@ async fn update_references(
     remote_head: Option<DiscRef>,
     branch: Option<String>,
     tags_to_import: &[TagCandidate],
+    force: bool,
 ) -> Result<Vec<FetchRefUpdate>, FetchError> {
     let db = get_db_conn_instance().await;
     let remote_config = remote_config.clone();
@@ -2410,30 +2450,44 @@ async fn update_references(
                     remote_ref: full_ref_name,
                     old_oid,
                     new_oid: reference._hash.clone(),
+                    forced: false,
                 });
             }
 
             // Import fetched tags into the global `refs/tags/*` namespace, in
             // the same transaction so a failure rolls back the whole batch.
             // Tags are immutable by default: an existing local tag is preserved
-            // (force-update over an existing tag is deferred to a later flag).
+            // unless `--force` is given, in which case it is clobbered and the
+            // update is flagged as forced (porcelain `+`).
             for tag in &tags_to_import {
-                let wrote = crate::internal::tag::import_fetched_tag_with_conn(
+                let outcome = crate::internal::tag::import_fetched_tag_with_conn(
                     txn,
                     &tag.ref_name,
                     &tag.object_hash,
-                    false,
+                    force,
                 )
                 .await
                 .map_err(|source| FetchError::UpdateRefs {
                     message: format!("failed to persist fetched tag '{}': {source}", tag.ref_name),
                 })?;
-                if wrote {
-                    updates.push(FetchRefUpdate {
-                        remote_ref: tag.ref_name.clone(),
-                        old_oid: None,
-                        new_oid: tag.object_hash.clone(),
-                    });
+                match outcome {
+                    crate::internal::tag::TagImportOutcome::Created => {
+                        updates.push(FetchRefUpdate {
+                            remote_ref: tag.ref_name.clone(),
+                            old_oid: None,
+                            new_oid: tag.object_hash.clone(),
+                            forced: false,
+                        });
+                    }
+                    crate::internal::tag::TagImportOutcome::Updated { previous } => {
+                        updates.push(FetchRefUpdate {
+                            remote_ref: tag.ref_name.clone(),
+                            old_oid: previous,
+                            new_oid: tag.object_hash.clone(),
+                            forced: true,
+                        });
+                    }
+                    crate::internal::tag::TagImportOutcome::Preserved => {}
                 }
             }
 
@@ -2669,11 +2723,13 @@ mod tests {
                         remote_ref: "refs/remotes/origin/main".to_string(),
                         old_oid: Some("a".repeat(40)),
                         new_oid: "b".repeat(40),
+                        forced: false,
                     },
                     FetchRefUpdate {
                         remote_ref: "refs/remotes/origin/dev".to_string(),
                         old_oid: None,
                         new_oid: "c".repeat(40),
+                        forced: false,
                     },
                 ],
                 pruned: Vec::new(),
@@ -2704,6 +2760,35 @@ mod tests {
     }
 
     #[test]
+    fn format_fetch_porcelain_marks_forced_update_with_plus() {
+        use super::{FetchOutput, FetchRefUpdate, FetchRepositoryResult, format_fetch_porcelain};
+
+        let output = FetchOutput {
+            all: false,
+            requested_remote: Some("origin".to_string()),
+            refspec: None,
+            remotes: vec![FetchRepositoryResult {
+                remote: "origin".to_string(),
+                url: "https://example.com/x.git".to_string(),
+                objects_fetched: 1,
+                refs_updated: vec![FetchRefUpdate {
+                    remote_ref: "refs/tags/v1.0".to_string(),
+                    old_oid: Some("a".repeat(40)),
+                    new_oid: "b".repeat(40),
+                    forced: true,
+                }],
+                pruned: Vec::new(),
+            }],
+        };
+
+        assert_eq!(
+            format_fetch_porcelain(&output),
+            format!("+ {} {} refs/tags/v1.0", "a".repeat(40), "b".repeat(40)),
+            "a forced (clobbering) update uses the `+` flag with the previous oid"
+        );
+    }
+
+    #[test]
     fn format_fetch_head_marks_not_for_merge() {
         use super::{FetchOutput, FetchRefUpdate, FetchRepositoryResult, format_fetch_head};
 
@@ -2720,6 +2805,7 @@ mod tests {
                     remote_ref: "refs/remotes/origin/main".to_string(),
                     old_oid: None,
                     new_oid: "a".repeat(40),
+                    forced: false,
                 }],
             }],
         };

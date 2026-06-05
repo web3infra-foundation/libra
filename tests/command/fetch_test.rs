@@ -1637,3 +1637,52 @@ async fn test_fetch_existing_tag_not_clobbered_without_force() {
         "existing tag must not move to the remote's new target: {annotated}"
     );
 }
+
+/// `--force` overwrites an existing local tag when the remote moved it (tags
+/// are immutable only without `--force`).
+#[tokio::test]
+#[serial]
+async fn test_fetch_force_clobbers_existing_tag() {
+    let fixture = setup_fetch_fixture_with_tags().await;
+
+    // First fetch imports the annotated tag at its original target.
+    let first = run_libra_command(&["fetch", "origin", "--tags"], &fixture.repo_dir);
+    assert_cli_success(&first, "fetch origin --tags (first)");
+
+    // Move the annotated tag on the remote to a brand-new commit.
+    fs::write(fixture.work_dir.join("CHANGE.md"), "second").expect("failed to write change");
+    git_in(&fixture.work_dir, &["add", "CHANGE.md"]);
+    git_in(&fixture.work_dir, &["commit", "-m", "second commit"]);
+    git_in(
+        &fixture.work_dir,
+        &["tag", "-f", "-a", "annotated-tag", "-m", "moved"],
+    );
+    let moved_target = git_out(&fixture.work_dir, &["rev-parse", "refs/tags/annotated-tag"]);
+    assert_ne!(
+        moved_target, fixture.annotated_target,
+        "the remote tag should have moved to a new object"
+    );
+    git_in(
+        &fixture.work_dir,
+        &["push", "-f", "origin", "refs/tags/annotated-tag"],
+    );
+
+    // With --force, the second fetch clobbers the existing local tag.
+    let second = run_libra_command(&["fetch", "origin", "--tags", "--force"], &fixture.repo_dir);
+    assert_cli_success(&second, "fetch origin --tags --force");
+
+    let show = run_libra_command(&["show-ref", "--tags"], &fixture.repo_dir);
+    let refs = String::from_utf8_lossy(&show.stdout);
+    let annotated = refs
+        .lines()
+        .find(|line| line.contains("refs/tags/annotated-tag"))
+        .unwrap_or_else(|| panic!("annotated tag missing after forced fetch: {refs}"));
+    assert!(
+        annotated.contains(&moved_target),
+        "--force should clobber the tag to the remote's new target: {annotated}"
+    );
+    assert!(
+        !annotated.contains(&fixture.annotated_target),
+        "the old tag target should be replaced by --force: {annotated}"
+    );
+}
