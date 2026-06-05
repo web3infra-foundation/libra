@@ -4,6 +4,10 @@
 
 ### Added
 
+- **`libra ls-tree`**: partial Git-compatible tree inspection command for
+  listing commit/tree contents with default Git-style output, recursive
+  traversal, tree-only and long modes, NUL records, path-only/object-only
+  output, object ID abbreviation, path prefix filters, and structured JSON.
 - **Cross-cutting `--help` EXAMPLES rollout (v0.17.812..v0.17.836, sealed
   v0.17.837)**: every visible command in `src/cli.rs::Commands` now ends
   its `--help` output with an `EXAMPLES:` section listing the canonical
