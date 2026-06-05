@@ -551,6 +551,18 @@ pub struct FetchArgs {
     /// the stdout result contract unchanged.
     #[clap(long, short = 'v')]
     pub verbose: bool,
+
+    /// Fetch all tags from the remote into the global `refs/tags/*` namespace
+    /// (in addition to branches), pulling each tag's object into the pack.
+    /// Overrides the `remote.<name>.tagOpt` configuration. Existing local tags
+    /// are preserved (tags are immutable by default).
+    #[clap(long, short = 't', conflicts_with = "no_tags")]
+    pub tags: bool,
+
+    /// Do not import any tags, overriding `remote.<name>.tagOpt`. Long-only:
+    /// Git's `-n` short form is intentionally not exposed (it stays free).
+    #[clap(long = "no-tags")]
+    pub no_tags: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -921,6 +933,8 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         dry_run,
         append: _,
         verbose,
+        tags,
+        no_tags,
     } = args;
 
     // `--prune` is enabled by the flag or the `fetch.prune` config (flag wins).
@@ -962,6 +976,8 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
                     unshallow,
                     prune,
                     dry_run,
+                    tags,
+                    no_tags,
                     output,
                 )
                 .await
@@ -1024,6 +1040,8 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         unshallow,
         prune,
         dry_run,
+        tags,
+        no_tags,
         output,
     )
     .await
@@ -1268,10 +1286,81 @@ pub async fn fetch_repository_safe(
         false,
         false,
         false,
+        false,
+        false,
         output,
     )
     .await
     .map(|_| ())
+}
+
+/// How `fetch` should treat the remote's tags. Git's auto-follow default — a
+/// second negotiation round that pulls the objects of tags pointing at
+/// already-fetched commits — is deferred; the current default imports no tags
+/// unless `--tags`/`-t` (or `remote.<name>.tagOpt = --tags`) asks for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TagFetchMode {
+    /// Import no tags (the default and `--no-tags`).
+    None,
+    /// Import every advertised tag, pulling each tag object into the pack.
+    All,
+}
+
+/// A remote tag advertised during ref discovery that fetch may import.
+#[derive(Debug, Clone)]
+struct TagCandidate {
+    /// Fully-qualified local ref name, e.g. `refs/tags/v1.0`.
+    ref_name: String,
+    /// Advertised object hash: the tag-object hash for an annotated tag, or the
+    /// commit hash for a lightweight tag. This is both the `want` to request and
+    /// the target the local tag ref is written to (matching `libra tag`).
+    object_hash: String,
+}
+
+/// Collect importable tag candidates from the advertised refs, dropping the
+/// peeled `refs/tags/<name>^{}` companions (whose target is reached through the
+/// annotated tag object itself).
+fn collect_tag_candidates(refs: &[DiscRef]) -> Vec<TagCandidate> {
+    refs.iter()
+        .filter(|reference| {
+            reference._ref.starts_with("refs/tags/") && !reference._ref.ends_with("^{}")
+        })
+        .map(|reference| TagCandidate {
+            ref_name: reference._ref.clone(),
+            object_hash: reference._hash.clone(),
+        })
+        .collect()
+}
+
+/// Read `remote.<name>.tagOpt`, tolerating either the Git-canonical lowercase
+/// `tagopt` key or a verbatim `tagOpt` spelling.
+async fn read_remote_tagopt(remote_name: &str) -> Option<String> {
+    for key in [
+        format!("remote.{remote_name}.tagopt"),
+        format!("remote.{remote_name}.tagOpt"),
+    ] {
+        if let Ok(Some(entry)) = ConfigKv::get(&key).await {
+            return Some(entry.value);
+        }
+    }
+    None
+}
+
+/// Resolve the effective tag-import behavior for a remote: an explicit
+/// `--no-tags`/`--tags` flag wins, otherwise `remote.<name>.tagOpt` (`--tags` /
+/// `--no-tags`) applies, otherwise the default imports no tags.
+async fn resolve_tag_mode(remote_name: &str, tags_flag: bool, no_tags_flag: bool) -> TagFetchMode {
+    if no_tags_flag {
+        return TagFetchMode::None;
+    }
+    if tags_flag {
+        return TagFetchMode::All;
+    }
+    match read_remote_tagopt(remote_name).await.as_deref() {
+        Some("--tags") => TagFetchMode::All,
+        // `--no-tags` or any unrecognised value imports no tags.
+        _ => TagFetchMode::None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1283,6 +1372,8 @@ pub(crate) async fn fetch_repository_with_result(
     unshallow: bool,
     prune: bool,
     dry_run: bool,
+    tags_flag: bool,
+    no_tags_flag: bool,
     output: &OutputConfig,
 ) -> Result<FetchRepositoryResult, FetchError> {
     let (remote_client, discovery) =
@@ -1331,11 +1422,22 @@ pub(crate) async fn fetch_repository_with_result(
         .cloned()
         .collect::<Vec<_>>();
 
+    // Resolve how tags should be imported (CLI flag > `remote.<name>.tagOpt` >
+    // default of none) and capture the advertised tag candidates *before* the
+    // ref set is narrowed to branches below — tags live in the global
+    // `refs/tags/*` namespace, not under `refs/remotes/<remote>/*`.
+    let tag_mode = resolve_tag_mode(&remote_config.name, tags_flag, no_tags_flag).await;
+    let tag_candidates = match tag_mode {
+        TagFetchMode::None => Vec::new(),
+        TagFetchMode::All => collect_tag_candidates(&discovery.refs),
+    };
+
     // Only request refs we will actually persist as remote-tracking refs.
     // `update_references` saves `refs/heads/*` and `refs/mr/*`; asking for
     // anything else (HEAD symref, `refs/pull/*`, `refs/tags/*`) makes the
     // server include unreachable objects that the next fetch's `have` cannot
-    // cover, which forces the same pack to be re-downloaded every time.
+    // cover, which forces the same pack to be re-downloaded every time. Tags
+    // are requested explicitly via `tag_candidates` when `--tags` is set.
     refs.retain(|reference| {
         reference._ref.starts_with("refs/heads/") || reference._ref.starts_with("refs/mr/")
     });
@@ -1351,7 +1453,8 @@ pub(crate) async fn fetch_repository_with_result(
     // discovered refs and return before downloading any pack or writing anything
     // (no `.pack`/`.idx`, no shallow update, no ref/reflog writes, no FETCH_HEAD).
     if dry_run {
-        let refs_updated = compute_fetch_ref_preview(&remote_config, &refs).await?;
+        let mut refs_updated = compute_fetch_ref_preview(&remote_config, &refs).await?;
+        refs_updated.extend(preview_tag_updates(&tag_candidates).await?);
         let pruned = if prune {
             let remote_branch_names =
                 crate::command::remote::collect_remote_branch_names(&discovery.refs);
@@ -1383,6 +1486,13 @@ pub(crate) async fn fetch_repository_with_result(
         .iter()
         .map(|reference| reference._hash.clone())
         .collect::<Vec<_>>();
+    // `--tags` pulls each advertised tag object into the pack so the imported
+    // `refs/tags/*` always resolve to present objects.
+    want.extend(
+        tag_candidates
+            .iter()
+            .map(|candidate| candidate.object_hash.clone()),
+    );
     want.sort();
     want.dedup();
     let have = current_have_safe().await?;
@@ -1432,8 +1542,15 @@ pub(crate) async fn fetch_repository_with_result(
         write_shallow_boundaries(&BTreeSet::new())?;
     }
 
-    let refs_updated =
-        update_references(&remote_config, &refs, &ref_heads, remote_head, branch).await?;
+    let refs_updated = update_references(
+        &remote_config,
+        &refs,
+        &ref_heads,
+        remote_head,
+        branch,
+        &tag_candidates,
+    )
+    .await?;
 
     // `--prune` removes local tracking branches whose remote counterpart is gone;
     // it compares against the remote's advertised refs (`discovery.refs`), never
@@ -2182,17 +2299,52 @@ async fn compute_fetch_ref_preview(
     Ok(updates)
 }
 
+/// Compute the would-be tag imports for `--dry-run`: each candidate whose local
+/// tag does not yet exist (existing tags are immutable by default and would be
+/// preserved). The previewed object id is the tag's advertised hash.
+async fn preview_tag_updates(
+    candidates: &[TagCandidate],
+) -> Result<Vec<FetchRefUpdate>, FetchError> {
+    let mut updates = Vec::new();
+    for candidate in candidates {
+        let short = candidate
+            .ref_name
+            .strip_prefix("refs/tags/")
+            .unwrap_or(&candidate.ref_name);
+        let exists = crate::internal::tag::find_tag_ref(short)
+            .await
+            .map_err(|error| FetchError::UpdateRefs {
+                message: format!(
+                    "failed to inspect existing tag '{}': {error}",
+                    candidate.ref_name
+                ),
+            })?
+            .is_some();
+        if exists {
+            continue;
+        }
+        updates.push(FetchRefUpdate {
+            remote_ref: candidate.ref_name.clone(),
+            old_oid: None,
+            new_oid: candidate.object_hash.clone(),
+        });
+    }
+    Ok(updates)
+}
+
 async fn update_references(
     remote_config: &RemoteConfig,
     refs: &[DiscRef],
     ref_heads: &[DiscRef],
     remote_head: Option<DiscRef>,
     branch: Option<String>,
+    tags_to_import: &[TagCandidate],
 ) -> Result<Vec<FetchRefUpdate>, FetchError> {
     let db = get_db_conn_instance().await;
     let remote_config = remote_config.clone();
     let refs = refs.to_vec();
     let ref_heads = ref_heads.to_vec();
+    let tags_to_import = tags_to_import.to_vec();
     db.transaction(|txn| {
         Box::pin(async move {
             let mut updates = Vec::new();
@@ -2259,6 +2411,30 @@ async fn update_references(
                     old_oid,
                     new_oid: reference._hash.clone(),
                 });
+            }
+
+            // Import fetched tags into the global `refs/tags/*` namespace, in
+            // the same transaction so a failure rolls back the whole batch.
+            // Tags are immutable by default: an existing local tag is preserved
+            // (force-update over an existing tag is deferred to a later flag).
+            for tag in &tags_to_import {
+                let wrote = crate::internal::tag::import_fetched_tag_with_conn(
+                    txn,
+                    &tag.ref_name,
+                    &tag.object_hash,
+                    false,
+                )
+                .await
+                .map_err(|source| FetchError::UpdateRefs {
+                    message: format!("failed to persist fetched tag '{}': {source}", tag.ref_name),
+                })?;
+                if wrote {
+                    updates.push(FetchRefUpdate {
+                        remote_ref: tag.ref_name.clone(),
+                        old_oid: None,
+                        new_oid: tag.object_hash.clone(),
+                    });
+                }
             }
 
             // Determine the remote default branch.

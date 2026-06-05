@@ -15,7 +15,9 @@ use git_internal::{
         types::ObjectType,
     },
 };
-use sea_orm::{ActiveModelTrait, ColumnTrait, DbErr, EntityTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, Set,
+};
 
 use crate::{
     command::load_object,
@@ -203,6 +205,61 @@ pub async fn create(
         annotated: create_message.is_some(),
         message: create_message,
     })
+}
+
+/// Persist a tag fetched from a remote (`full_ref_name` is the fully-qualified
+/// `refs/tags/<name>`) pointing at `target` (a tag-object hash for annotated
+/// tags, or the commit hash for lightweight ones), reusing the caller's
+/// transaction so the write participates in the surrounding fetch ref update.
+///
+/// Tags are immutable by default: when one already exists locally it is left
+/// untouched unless `force` is set, mirroring `git fetch`'s tag-clobbering
+/// policy. Returns `true` when the ref was written (created or force-updated)
+/// and `false` when an existing tag was preserved.
+///
+/// # Arguments
+/// * `db` - Any active connection or transaction implementing `ConnectionTrait`.
+/// * `full_ref_name` - Fully-qualified ref, e.g. `refs/tags/v1.0`.
+/// * `target` - Object hash the tag should point at.
+/// * `force` - Overwrite an existing tag instead of preserving it.
+pub async fn import_fetched_tag_with_conn<C>(
+    db: &C,
+    full_ref_name: &str,
+    target: &str,
+    force: bool,
+) -> Result<bool, DbErr>
+where
+    C: ConnectionTrait,
+{
+    let existing = reference::Entity::find()
+        .filter(reference::Column::Name.eq(full_ref_name))
+        .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
+        .one(db)
+        .await?;
+
+    match existing {
+        Some(model) => {
+            if !force {
+                return Ok(false);
+            }
+            let mut active: reference::ActiveModel = model.into();
+            active.commit = Set(Some(target.to_owned()));
+            active.update(db).await?;
+            Ok(true)
+        }
+        None => {
+            reference::ActiveModel {
+                name: Set(Some(full_ref_name.to_owned())),
+                kind: Set(reference::ConfigKind::Tag),
+                commit: Set(Some(target.to_owned())),
+                remote: Set(None),
+                ..Default::default()
+            }
+            .insert(db)
+            .await?;
+            Ok(true)
+        }
+    }
 }
 
 /// Typed failures from [`list`]. Lets callers distinguish a transient SQLite

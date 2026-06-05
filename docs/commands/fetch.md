@@ -40,6 +40,8 @@ are loaded automatically when configured via `vault.ssh.<remote>.privkey`.
 | `--porcelain` | Print one machine-readable `<flag> <old-oid> <new-oid> <local-ref>` line per ref update. Mutually exclusive with `--json` (usage error). | `libra fetch origin --porcelain` |
 | `--append` | Append fetched ref records to `.libra/FETCH_HEAD` instead of overwriting. Long-only (`-a` is `--all`). | `libra fetch origin --append` |
 | `-v`, `--verbose` | Announce the remote (name and credential-redacted URL) being contacted on stderr before connecting; leaves the stdout result contract unchanged. | `libra fetch origin -v` |
+| `-t`, `--tags` | Import every advertised tag into the global `refs/tags/*` namespace, pulling each tag's object into the pack. Overrides `remote.<name>.tagOpt`. Existing local tags are preserved (immutable without `--force`). | `libra fetch origin --tags` |
+| `--no-tags` | Import no tags, overriding `remote.<name>.tagOpt`. Long-only (Git's `-n` short form is intentionally not exposed). | `libra fetch origin --no-tags` |
 | `--json` | Emit structured JSON envelope to stdout (global flag). | `libra --json fetch origin` |
 | `--machine` | Compact single-line JSON; suppresses progress (global flag). | `libra --machine fetch origin` |
 | `--progress none` | Suppress NDJSON progress events on stderr in JSON mode. | `libra --json fetch origin --progress none` |
