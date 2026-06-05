@@ -58,7 +58,7 @@ fn _touch_conflict_imports() {
     fn _needs_transaction_trait<T: TransactionTrait>() {}
 }
 
-use crate::utils::ignore;
+use crate::{internal::head::Head, utils::ignore};
 
 const MAX_BRANCH_NAME_LENGTH: usize = 255;
 const LOCK_SUFFIX: &str = ".lock";
@@ -246,6 +246,11 @@ pub struct InitOutput {
     pub converted_from: Option<String>,
     pub ssh_key_detected: Option<String>,
     pub warnings: Vec<String>,
+    /// Non-serialized: drives the human banner (`Initialized empty ...` vs
+    /// `Reinitialized existing ...`) without changing the `--json`/`--machine`
+    /// schema, which is identical for first init and safe re-init.
+    #[serde(skip)]
+    pub reinitialized: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -404,11 +409,15 @@ fn render_init_result(result: &InitOutput, output: &OutputConfig) -> CliResult<(
         return Ok(());
     }
 
-    let repo_type = if result.bare { " bare" } else { "" };
-    println!(
-        "Initialized empty{repo_type} Libra repository in {}",
-        result.path
-    );
+    if result.reinitialized {
+        println!("Reinitialized existing Libra repository in {}", result.path);
+    } else {
+        let repo_type = if result.bare { " bare" } else { "" };
+        println!(
+            "Initialized empty{repo_type} Libra repository in {}",
+            result.path
+        );
+    }
     println!("  branch: {}", result.initial_branch);
     println!(
         "  signing: {}",
@@ -514,9 +523,19 @@ async fn run_init_internal(
     validate_shared_mode(args.shared.as_deref())?;
 
     if is_reinit(&target_dir, args.bare) {
-        return Err(InitError::AlreadyInitialized {
-            path: root_dir.clone(),
-        });
+        // An existing repository is safely re-initialized (template top-up,
+        // `core.sharedRepository`/permission refresh) rather than rejected — but
+        // only when no destructive conflict is requested. Identity/refs/vault
+        // are preserved; see `run_reinit`.
+        return run_reinit(
+            &root_dir,
+            &args,
+            &object_format,
+            &ref_format,
+            template_dir.as_deref(),
+            progress,
+        )
+        .await;
     }
 
     if target_dir.exists() {
@@ -624,6 +643,218 @@ async fn run_init_internal(
         converted_from,
         ssh_key_detected: detect_system_ssh_key(),
         warnings,
+        reinitialized: false,
+    })
+}
+
+/// Reads a single `config_kv` value, mapping storage failures to [`InitError`].
+async fn read_config_value(conn: &DbConn, key: &str) -> Result<Option<String>, InitError> {
+    ConfigKv::get_with_conn(conn, key)
+        .await
+        .map(|entry| entry.map(|entry| entry.value))
+        .map_err(|error| InitError::Database(DbErr::Custom(error.to_string())))
+}
+
+/// Installs `contents` at `dest` only when `dest` does not already exist, writing
+/// through a sibling temporary file and an atomic `rename` so a crash mid-write
+/// never leaves a half-written template. Returns `true` when a file was created.
+///
+/// `mode` (Unix only) is applied to the temporary file before the rename so the
+/// published file already carries the requested permissions.
+fn install_missing_file(dest: &Path, contents: &[u8], mode: Option<u32>) -> io::Result<bool> {
+    if dest.exists() {
+        return Ok(false);
+    }
+    let parent = dest.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "template destination has no parent directory",
+        )
+    })?;
+    let file_name = dest
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "template destination has no file name",
+            )
+        })?;
+    let tmp = parent.join(format!(".{file_name}.libra-tmp"));
+    fs::write(&tmp, contents)?;
+    #[cfg(not(target_os = "windows"))]
+    if let Some(mode) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(target_os = "windows")]
+    let _ = mode;
+    if let Err(error) = fs::rename(&tmp, dest) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+    Ok(true)
+}
+
+/// Tops up a repository layout for re-initialization: ensures the structural
+/// directories exist and installs any **missing** template files, never
+/// overwriting user-modified hooks or excludes.
+fn topup_repository_layout(root_dir: &Path, template_dir: Option<&Path>) -> io::Result<()> {
+    for dir in ["info", "hooks", "objects/pack", "objects/info"] {
+        fs::create_dir_all(root_dir.join(dir))?;
+    }
+
+    if let Some(template_dir) = template_dir {
+        // `copy_template` already skips destinations that already exist.
+        return copy_template(template_dir, root_dir);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    let hook_mode = Some(0o755);
+    #[cfg(target_os = "windows")]
+    let hook_mode = None;
+
+    install_missing_file(
+        &root_dir.join("info/exclude"),
+        include_str!("../../template/exclude").as_bytes(),
+        None,
+    )?;
+    install_missing_file(
+        &root_dir.join("hooks").join("pre-commit.sh"),
+        include_str!("../../template/pre-commit.sh").as_bytes(),
+        hook_mode,
+    )?;
+    install_missing_file(
+        &root_dir.join("hooks").join("pre-commit.ps1"),
+        include_str!("../../template/pre-commit.ps1").as_bytes(),
+        None,
+    )?;
+    Ok(())
+}
+
+/// Safely re-initializes an existing Libra repository.
+///
+/// Contract (see `.omo/plans/init-improvement-plan.md` Batch 2):
+/// - Opens — never recreates — the existing database; preserves `libra.repoid`,
+///   `vault.db`, and existing refs/HEAD (no `initialize_refs`/vault re-seed).
+/// - Rejects destructive conflicts *before any disk mutation*: an explicit
+///   `--object-format`/`--ref-format` that disagrees with the stored value
+///   fails with `InvalidArgument` (exit 129). Omitted formats are inherited and
+///   never treated as a conflict.
+/// - Otherwise performs only additive, idempotent updates: missing template
+///   top-up, then `core.sharedRepository` upsert (single transaction), then
+///   `apply_shared` permission refresh.
+async fn run_reinit(
+    root_dir: &Path,
+    args: &InitArgs,
+    requested_object_format: &str,
+    requested_ref_format: &RefFormat,
+    template_dir: Option<&Path>,
+    progress: &InitProgress,
+) -> Result<InitOutput, InitError> {
+    let database_path = root_dir.join(DATABASE);
+    let conn = get_db_conn_instance_for_path(&database_path)
+        .await
+        .map_err(InitError::Io)?;
+
+    // ── Step 1: validate conflicts first; no disk mutation on failure ──
+    let existing_object_format = read_config_value(&conn, "core.objectformat")
+        .await?
+        .unwrap_or_else(|| "sha1".to_string());
+    if args.object_format.is_some() && requested_object_format != existing_object_format {
+        return Err(invalid_argument(
+            format!(
+                "cannot reinitialize with object format '{requested_object_format}': existing repository uses '{existing_object_format}'"
+            ),
+            Some("omit --object-format to reuse the existing object format.".to_string()),
+        ));
+    }
+
+    let existing_ref_format = read_config_value(&conn, "core.initrefformat")
+        .await?
+        .unwrap_or_else(|| RefFormat::Strict.as_str().to_string());
+    if args.ref_format.is_some() && requested_ref_format.as_str() != existing_ref_format {
+        return Err(invalid_argument(
+            format!(
+                "cannot reinitialize with ref format '{}': existing repository uses '{existing_ref_format}'",
+                requested_ref_format.as_str()
+            ),
+            Some("omit --ref-format to reuse the existing ref format.".to_string()),
+        ));
+    }
+
+    // ── Step 2: template top-up (additive, atomic, never overwrites users) ──
+    progress.emit("Reinitializing existing repository ...");
+    topup_repository_layout(root_dir, template_dir)?;
+
+    // ── Step 3: config update in a single transaction (DB written last) ──
+    if let Some(mode) = args.shared.as_deref() {
+        let txn = conn.begin().await.map_err(InitError::Database)?;
+        ConfigKv::set_with_conn(
+            &txn,
+            "core.sharedRepository",
+            &canonical_shared_value(mode),
+            false,
+        )
+        .await
+        .map_err(|error| InitError::Database(DbErr::Custom(error.to_string())))?;
+        txn.commit().await.map_err(InitError::Database)?;
+
+        // ── Step 4: permission refresh after the DB commit (idempotent) ──
+        apply_shared(root_dir, mode)?;
+    }
+
+    // Echo the existing (inherited) repository identity. `--initial-branch` is
+    // intentionally not applied on re-init: HEAD is never clobbered.
+    let repo_id = read_config_value(&conn, "libra.repoid")
+        .await?
+        .unwrap_or_default();
+    let vault_signing = read_config_value(&conn, "vault.signing")
+        .await?
+        .map(|value| value == "true")
+        .unwrap_or(false);
+    let initial_branch = match Head::current_result_with_conn(&conn).await {
+        Ok(Head::Branch(name)) => name,
+        _ => DEFAULT_BRANCH.to_string(),
+    };
+
+    let mut warnings = Vec::new();
+    if let Some(requested) = args.initial_branch.as_deref()
+        && requested != initial_branch
+    {
+        warnings.push(format!(
+            "ignored --initial-branch '{requested}': HEAD already points to '{initial_branch}'"
+        ));
+    }
+    if args.from_git_repository.is_some() {
+        warnings.push(
+            "ignored --from-git-repository: cannot convert into an existing repository".to_string(),
+        );
+    }
+
+    set_hash_kind(match existing_object_format.as_str() {
+        "sha256" => HashKind::Sha256,
+        _ => HashKind::Sha1,
+    });
+
+    let path = root_dir
+        .canonicalize()
+        .unwrap_or_else(|_| root_dir.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+
+    Ok(InitOutput {
+        path,
+        bare: args.bare,
+        initial_branch,
+        object_format: existing_object_format,
+        ref_format: existing_ref_format,
+        repo_id,
+        vault_signing,
+        converted_from: None,
+        ssh_key_detected: detect_system_ssh_key(),
+        warnings,
+        reinitialized: true,
     })
 }
 

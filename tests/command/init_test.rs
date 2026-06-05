@@ -319,8 +319,29 @@ async fn init_target_repo_does_not_inherit_local_identity_from_current_repo() {
     );
 }
 
+// ── Safe re-initialization (init-improvement-plan Batch 2) ──
+
 #[test]
-fn init_bare_reinit_returns_repo_state_invalid() {
+fn test_reinit_success_message_exit_0() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false"], &repo),
+        "first init",
+    );
+    let second = run_libra_command(&["init", "--vault", "false"], &repo);
+    assert_eq!(second.status.code(), Some(0), "re-init must exit 0");
+    assert!(
+        String::from_utf8_lossy(&second.stdout).contains("Reinitialized existing Libra repository"),
+        "expected reinit banner, got: {}",
+        String::from_utf8_lossy(&second.stdout)
+    );
+}
+
+#[test]
+fn init_bare_reinit_succeeds() {
     let temp = tempdir().unwrap();
 
     let first = run_libra_command(
@@ -331,44 +352,244 @@ fn init_bare_reinit_returns_repo_state_invalid() {
 
     let bare_repo = temp.path().join("repo.git");
     let second = run_libra_command(&["init", "--bare", "--vault", "false"], &bare_repo);
-    assert_eq!(second.status.code(), Some(128));
-
-    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert_cli_success(&second, "bare re-init");
     assert!(
-        stderr.contains("repository already initialized"),
-        "expected reinit failure, got: {stderr}"
-    );
-    assert!(
-        stderr.contains("LBR-REPO-003"),
-        "expected stable repo-state code, got: {stderr}"
+        String::from_utf8_lossy(&second.stdout).contains("Reinitialized existing Libra repository"),
+        "expected bare reinit banner, got: {}",
+        String::from_utf8_lossy(&second.stdout)
     );
 }
 
-#[test]
-fn init_worktree_reinit_returns_repo_state_invalid() {
+#[tokio::test]
+async fn test_reinit_repoid_preserved() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
 
-    let first = run_libra_command(&["init", "--vault", "false"], &repo);
-    assert_cli_success(&first, "initial worktree init");
+    assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false"], &repo),
+        "first init",
+    );
+    let id1 = {
+        let conn = open_repo_conn(&repo, false).await;
+        config_value(&conn, "libra.repoid").await
+    };
+    assert!(id1.is_some(), "first init must record libra.repoid");
 
+    assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false"], &repo),
+        "re-init",
+    );
+    let id2 = {
+        let conn = open_repo_conn(&repo, false).await;
+        config_value(&conn, "libra.repoid").await
+    };
+    assert_eq!(id1, id2, "libra.repoid must be preserved across re-init");
+}
+
+#[test]
+fn test_reinit_vault_db_untouched() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    // Default --vault creates vault.db.
+    assert_cli_success(
+        &run_libra_command(&["init"], &repo),
+        "first init with vault",
+    );
+    let vault = repo.join(".libra").join("vault.db");
+    assert!(vault.exists(), "first init must create vault.db");
+    let before = fs::read(&vault).unwrap();
+
+    assert_cli_success(&run_libra_command(&["init"], &repo), "re-init");
+    let after = fs::read(&vault).unwrap();
+    assert_eq!(before, after, "re-init must not touch vault.db");
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
+async fn test_reinit_shared_update() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false"], &repo),
+        "first init",
+    );
+    let second = run_libra_command(&["init", "--shared=all", "--vault", "false"], &repo);
+    assert_cli_success(&second, "re-init --shared=all");
+
+    let conn = open_repo_conn(&repo, false).await;
+    assert_eq!(
+        config_value(&conn, "core.sharedRepository")
+            .await
+            .as_deref(),
+        Some("all"),
+        "re-init must update core.sharedRepository"
+    );
+
+    let libra = repo.join(".libra");
+    assert_eq!(
+        mode_bits(&libra.join("objects")) & 0o002,
+        0o002,
+        "content must become world-writable under --shared=all on re-init"
+    );
+    assert_eq!(
+        mode_bits(&libra) & 0o022,
+        0,
+        ".libra root must stay owner-only writable after re-init"
+    );
+}
+
+#[test]
+fn test_reinit_adds_missing_template() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false"], &repo),
+        "first init",
+    );
+    let exclude = repo.join(".libra").join("info").join("exclude");
+    assert!(exclude.exists(), "first init must install info/exclude");
+    fs::remove_file(&exclude).unwrap();
+
+    assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false"], &repo),
+        "re-init",
+    );
+    assert!(
+        exclude.exists(),
+        "re-init must restore the missing info/exclude template"
+    );
+}
+
+#[test]
+fn test_reinit_keeps_user_modified_hook() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false"], &repo),
+        "first init",
+    );
+    let hook = repo.join(".libra").join("hooks").join("pre-commit.sh");
+    fs::write(&hook, "#!/bin/sh\necho custom\n").unwrap();
+
+    assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false"], &repo),
+        "re-init",
+    );
+    assert_eq!(
+        fs::read_to_string(&hook).unwrap(),
+        "#!/bin/sh\necho custom\n",
+        "re-init must not overwrite a user-modified hook"
+    );
+}
+
+#[tokio::test]
+async fn test_reinit_object_format_conflict() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    assert_cli_success(
+        &run_libra_command(
+            &["init", "--object-format", "sha256", "--vault", "false"],
+            &repo,
+        ),
+        "sha256 init",
+    );
+
+    // (a) An explicit conflicting object format is rejected without mutation.
+    let conflict = run_libra_command(
+        &["init", "--object-format", "sha1", "--vault", "false"],
+        &repo,
+    );
+    assert_eq!(
+        conflict.status.code(),
+        Some(129),
+        "explicit object-format conflict must exit 129"
+    );
+    let stderr = String::from_utf8_lossy(&conflict.stderr);
+    assert!(
+        stderr.contains("cannot reinitialize with object format"),
+        "expected object-format conflict message, got: {stderr}"
+    );
+    {
+        let conn = open_repo_conn(&repo, false).await;
+        assert_eq!(
+            config_value(&conn, "core.objectformat").await.as_deref(),
+            Some("sha256"),
+            "conflict must not change the stored object format"
+        );
+    }
+
+    // (b) Omitting --object-format inherits the existing sha256 (no conflict).
+    let ok = run_libra_command(&["init", "--vault", "false"], &repo);
+    assert_cli_success(&ok, "omit object-format re-init");
+    assert!(
+        String::from_utf8_lossy(&ok.stdout).contains("Reinitialized existing Libra repository"),
+        "inherited-format re-init must succeed"
+    );
+}
+
+#[test]
+fn test_reinit_initial_branch_no_clobber() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false"], &repo),
+        "first init (main)",
+    );
+
+    let second = run_libra_command(&["init", "-b", "develop", "--vault", "false"], &repo);
+    assert_cli_success(&second, "re-init -b develop");
+    assert!(
+        String::from_utf8_lossy(&second.stderr).contains("ignored --initial-branch 'develop'"),
+        "re-init must warn that --initial-branch is ignored, got: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    // HEAD must still point at the original branch.
+    let head = run_libra_command(&["symbolic-ref", "HEAD"], &repo);
+    assert_cli_success(&head, "symbolic-ref HEAD");
+    assert!(
+        String::from_utf8_lossy(&head.stdout).contains("refs/heads/main"),
+        "HEAD must still point to main, got: {}",
+        String::from_utf8_lossy(&head.stdout)
+    );
+}
+
+#[test]
+fn test_reinit_no_db_lock() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false"], &repo),
+        "first init",
+    );
     let second = run_libra_command(&["init", "--vault", "false"], &repo);
-    assert_eq!(second.status.code(), Some(128));
+    assert_cli_success(&second, "re-init");
+    assert!(
+        !String::from_utf8_lossy(&second.stderr)
+            .to_lowercase()
+            .contains("database is locked"),
+        "re-init must not leave a db lock, got: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
 
-    let stderr = String::from_utf8_lossy(&second.stderr);
-    assert!(
-        stderr.contains("repository already initialized"),
-        "expected worktree reinit failure, got: {stderr}"
-    );
-    assert!(
-        stderr.contains("remove .libra/ to reinitialize."),
-        "expected worktree reinit hint, got: {stderr}"
-    );
-    assert!(
-        stderr.contains("LBR-REPO-003"),
-        "expected stable repo-state code, got: {stderr}"
-    );
+    // A subsequent command must connect cleanly.
+    let status = run_libra_command(&["status", "--short"], &repo);
+    assert_cli_success(&status, "status after re-init");
 }
 
 #[test]
