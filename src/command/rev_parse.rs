@@ -34,6 +34,7 @@ EXAMPLES:
     libra rev-parse main~3              Resolve any revision spec to a full hash
     libra rev-parse --short HEAD        Print a non-ambiguous short hash
     libra rev-parse --abbrev-ref HEAD   Print the branch name (or HEAD when detached)
+    libra rev-parse --verify HEAD       Assert HEAD resolves to one object (exit 128 if not)
     libra rev-parse --show-toplevel     Print the absolute path of the repository root
     libra rev-parse --json HEAD         Structured JSON output for agents";
 
@@ -49,8 +50,18 @@ pub struct RevParseArgs {
     pub abbrev_ref: bool,
 
     /// Show the absolute path of the top-level working tree.
-    #[clap(long = "show-toplevel", conflicts_with_all = ["abbrev_ref", "short", "spec"])]
+    #[clap(long = "show-toplevel", conflicts_with_all = ["abbrev_ref", "short", "spec", "verify"])]
     pub show_toplevel: bool,
+
+    /// Verify that the single argument resolves to one object and print it;
+    /// otherwise fail (exit 128, or exit 1 under global `--quiet`). May be
+    /// combined with `--short`.
+    #[clap(long, conflicts_with_all = ["abbrev_ref"])]
+    pub verify: bool,
+
+    /// Revision to use when no positional SPEC is given (Git's `--default`).
+    #[clap(long, value_name = "SPEC")]
+    pub default: Option<String>,
 
     /// Revision to parse. Defaults to HEAD when omitted.
     #[clap(value_name = "SPEC")]
@@ -74,7 +85,7 @@ pub async fn execute_safe(args: RevParseArgs, output: &OutputConfig) -> CliResul
     if !args.show_toplevel {
         util::require_repo().map_err(|_| CliError::repo_not_found())?;
     }
-    let result = resolve_rev_parse(&args).await?;
+    let result = resolve_rev_parse(&args, output.quiet).await?;
 
     if output.is_json() {
         emit_json_data("rev-parse", &result, output)
@@ -98,7 +109,7 @@ fn write_rev_parse_output<W: Write>(writer: &mut W, value: &str) -> CliResult<()
     }
 }
 
-async fn resolve_rev_parse(args: &RevParseArgs) -> CliResult<RevParseOutput> {
+async fn resolve_rev_parse(args: &RevParseArgs, quiet: bool) -> CliResult<RevParseOutput> {
     if args.show_toplevel {
         let workdir = resolve_show_toplevel_path().await?;
         return Ok(RevParseOutput {
@@ -108,20 +119,44 @@ async fn resolve_rev_parse(args: &RevParseArgs) -> CliResult<RevParseOutput> {
         });
     }
 
-    let spec = args.spec.as_deref().unwrap_or("HEAD");
+    // `--default <SPEC>` supplies the revision when no positional spec is given
+    // (Git semantics). Without either, revision modes fall back to HEAD.
+    let resolved_spec: Option<String> = args.spec.clone().or_else(|| args.default.clone());
 
-    if args.abbrev_ref {
-        let value = resolve_abbrev_ref(spec).await?;
+    // `--verify`: the argument must resolve to exactly one object, otherwise
+    // fail with Git's plumbing exit codes — 128 normally, or 1 under `--quiet`
+    // (silent). Unlike the default path it never falls back to HEAD.
+    if args.verify {
+        let spec = resolved_spec.ok_or_else(|| verify_failure(quiet))?;
+        let commit = util::get_commit_base_typed(&spec)
+            .await
+            .map_err(|_| verify_failure(quiet))?;
+        let value = if args.short {
+            resolve_short_commit(&commit).await?
+        } else {
+            commit.to_string()
+        };
         return Ok(RevParseOutput {
-            mode: "abbrev_ref",
-            input: Some(spec.to_string()),
+            mode: "verify",
+            input: Some(spec),
             value,
         });
     }
 
-    let commit = util::get_commit_base_typed(spec)
+    let spec = resolved_spec.unwrap_or_else(|| "HEAD".to_string());
+
+    if args.abbrev_ref {
+        let value = resolve_abbrev_ref(&spec).await?;
+        return Ok(RevParseOutput {
+            mode: "abbrev_ref",
+            input: Some(spec),
+            value,
+        });
+    }
+
+    let commit = util::get_commit_base_typed(&spec)
         .await
-        .map_err(|err| rev_parse_target_error(spec, err))?;
+        .map_err(|err| rev_parse_target_error(&spec, err))?;
     let value = if args.short {
         resolve_short_commit(&commit).await?
     } else {
@@ -130,9 +165,21 @@ async fn resolve_rev_parse(args: &RevParseArgs) -> CliResult<RevParseOutput> {
 
     Ok(RevParseOutput {
         mode: if args.short { "short" } else { "resolve" },
-        input: Some(spec.to_string()),
+        input: Some(spec),
         value,
     })
+}
+
+/// Build the error for a failed `--verify`: silent exit 1 under global
+/// `--quiet` (Git's `rev-parse --verify -q` behavior), otherwise a fatal
+/// `Needed a single revision` (exit 128).
+fn verify_failure(quiet: bool) -> CliError {
+    if quiet {
+        CliError::silent_exit(1)
+    } else {
+        CliError::fatal("Needed a single revision")
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+    }
 }
 
 async fn resolve_abbrev_ref(spec: &str) -> CliResult<String> {
@@ -380,6 +427,50 @@ mod tests {
     fn test_rev_parse_args_show_toplevel() {
         let args = RevParseArgs::try_parse_from(["rev-parse", "--show-toplevel"]).unwrap();
         assert!(args.show_toplevel);
+    }
+
+    #[test]
+    fn test_rev_parse_args_verify_and_default() {
+        let args = RevParseArgs::try_parse_from(["rev-parse", "--verify", "HEAD"]).unwrap();
+        assert!(args.verify);
+        assert_eq!(args.spec.as_deref(), Some("HEAD"));
+
+        let args =
+            RevParseArgs::try_parse_from(["rev-parse", "--verify", "--default", "HEAD"]).unwrap();
+        assert!(args.verify);
+        assert!(args.spec.is_none());
+        assert_eq!(args.default.as_deref(), Some("HEAD"));
+    }
+
+    #[test]
+    fn test_rev_parse_args_verify_allows_short() {
+        let args =
+            RevParseArgs::try_parse_from(["rev-parse", "--verify", "--short", "HEAD"]).unwrap();
+        assert!(args.verify);
+        assert!(args.short);
+    }
+
+    #[test]
+    fn test_rev_parse_args_verify_conflicts_with_abbrev_ref() {
+        let err = RevParseArgs::try_parse_from(["rev-parse", "--verify", "--abbrev-ref", "HEAD"])
+            .expect_err("--verify should reject --abbrev-ref");
+        assert!(
+            err.to_string().contains("cannot be used with"),
+            "unexpected clap error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_verify_failure_quiet_is_silent_exit_1() {
+        let err = super::verify_failure(true);
+        assert_eq!(err.exit_code(), 1);
+    }
+
+    #[test]
+    fn test_verify_failure_loud_is_fatal_128() {
+        let err = super::verify_failure(false);
+        assert_eq!(err.stable_code(), StableErrorCode::RepoStateInvalid);
+        assert_eq!(err.exit_code(), 128);
     }
 
     #[test]
