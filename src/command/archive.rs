@@ -2,7 +2,7 @@
 
 use std::{
     fs::File,
-    io::{BufWriter, Write},
+    io::{BufWriter, Cursor, Seek, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -317,6 +317,85 @@ fn write_tar_bz2_archive<W: Write>(
     write_tar_archive(entries, prefix, bz)
 }
 
+/// Determine external Unix attributes for a zip entry.
+fn zip_unix_mode(mode: &TreeItemMode) -> u32 {
+    match mode {
+        TreeItemMode::BlobExecutable => 0o100755,
+        TreeItemMode::Link => 0o120000,
+        _ => 0o100644,
+    }
+}
+
+/// Write a zip archive of the given entries to `writer`.
+fn write_zip_archive<W: Write + Seek>(
+    entries: &[ArchiveEntry],
+    prefix: Option<&Path>,
+    writer: W,
+) -> Result<(), CliError> {
+    let mut archive = zip::ZipWriter::new(writer);
+    let options =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    for entry in entries {
+        let archive_path = apply_prefix(prefix, &entry.path);
+        let path = archive_path
+            .to_str()
+            .ok_or_else(|| {
+                CliError::fatal(format!(
+                    "archive path '{}' is not valid UTF-8",
+                    archive_path.display()
+                ))
+                .with_stable_code(StableErrorCode::IoWriteFailed)
+            })?
+            .to_string();
+        let data = load_blob_content(&entry.hash)?;
+
+        if entry.mode == TreeItemMode::Link {
+            let link_target = String::from_utf8(data).map_err(|error| {
+                CliError::fatal(format!(
+                    "symlink target for '{}' is not valid UTF-8: {error}",
+                    archive_path.display()
+                ))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+            })?;
+            archive
+                .add_symlink(path, link_target, options)
+                .map_err(|error| {
+                    CliError::fatal(format!(
+                        "failed to add symlink '{}': {error}",
+                        archive_path.display()
+                    ))
+                    .with_stable_code(StableErrorCode::IoWriteFailed)
+                })?;
+            continue;
+        }
+
+        archive
+            .start_file(path, options.unix_permissions(zip_unix_mode(&entry.mode)))
+            .map_err(|error| {
+                CliError::fatal(format!(
+                    "failed to create zip entry '{}': {error}",
+                    archive_path.display()
+                ))
+                .with_stable_code(StableErrorCode::IoWriteFailed)
+            })?;
+        archive.write_all(&data).map_err(|error| {
+            CliError::fatal(format!(
+                "failed to write zip entry '{}': {error}",
+                archive_path.display()
+            ))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+        })?;
+    }
+
+    archive.finish().map_err(|error| {
+        CliError::fatal(format!("failed to finalize zip archive: {error}"))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+    })?;
+
+    Ok(())
+}
+
 /// Open the output destination: either a file path or stdout.
 fn open_output(path: Option<&str>) -> Result<Box<dyn Write>, CliError> {
     match path {
@@ -351,16 +430,26 @@ fn create_archive(
             let writer = open_output(output)?;
             write_tar_bz2_archive(entries, prefix, writer)
         }
-        ArchiveFormat::Zip => Err(CliError::failure(format!(
-            "archive format '{format:?}' is not implemented yet"
-        ))
-        .with_stable_code(StableErrorCode::Unsupported)),
+        ArchiveFormat::Zip => {
+            let mut buffer = Cursor::new(Vec::new());
+            write_zip_archive(entries, prefix, &mut buffer)?;
+
+            let mut writer = open_output(output)?;
+            writer.write_all(&buffer.into_inner()).map_err(|error| {
+                CliError::fatal(format!("failed to write zip output: {error}"))
+                    .with_stable_code(StableErrorCode::IoWriteFailed)
+            })?;
+            writer.flush().map_err(|error| {
+                CliError::fatal(format!("failed to flush zip output: {error}"))
+                    .with_stable_code(StableErrorCode::IoWriteFailed)
+            })
+        }
     }
 }
 
 /// # Side Effects
 ///
-/// Reads commit, tree, and blob objects from the local object store. Writes tar
+/// Reads commit, tree, and blob objects from the local object store. Writes
 /// archive bytes to stdout or the requested output file.
 ///
 /// # Errors
@@ -368,7 +457,6 @@ fn create_archive(
 /// Returns `CliInvalidArguments` for unsupported formats or unsafe prefixes.
 /// Returns `CliInvalidTarget` when the tree-ish cannot be resolved.
 /// Returns `RepoCorrupt` when referenced commit or tree objects cannot be read.
-/// Returns `Unsupported` for zip archives until a later commit.
 pub async fn execute_safe(args: ArchiveArgs, _output: &OutputConfig) -> CliResult<()> {
     let format = ArchiveFormat::parse_strict(&args.format).map_err(|message| {
         CliError::command_usage(message).with_stable_code(StableErrorCode::CliInvalidArguments)
@@ -541,5 +629,21 @@ mod tests {
         write_tar_bz2_archive(&[], None, &mut buf).expect("empty tar.bz2 should finalize");
 
         assert!(buf.starts_with(b"BZh"));
+    }
+
+    #[test]
+    fn zip_unix_mode_maps_supported_file_modes() {
+        assert_eq!(zip_unix_mode(&TreeItemMode::Blob), 0o100644);
+        assert_eq!(zip_unix_mode(&TreeItemMode::BlobExecutable), 0o100755);
+        assert_eq!(zip_unix_mode(&TreeItemMode::Link), 0o120000);
+    }
+
+    #[test]
+    fn write_zip_archive_accepts_empty_entries() {
+        let mut buf = Cursor::new(Vec::new());
+
+        write_zip_archive(&[], None, &mut buf).expect("empty zip should finalize");
+
+        assert!(buf.into_inner().starts_with(b"PK"));
     }
 }
