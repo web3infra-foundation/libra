@@ -335,7 +335,10 @@ fn collect_one_filter(
     match entry.mode {
         TreeItemMode::Tree => {
             if args.tree_only {
-                entries.push(entry);
+                entries.push(entry.clone());
+                if args.recursive {
+                    collect_tree_contents(subtree, &entry.path, args, entries)?;
+                }
             } else if args.recursive {
                 if args.show_trees {
                     entries.push(entry.clone());

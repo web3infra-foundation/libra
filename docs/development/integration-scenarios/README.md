@@ -30,6 +30,7 @@
 | History | `show` | `cli.object-readback` |
 | History | `show-ref` | `cli.object-readback`、`cli.clone-fetch-pull-local` |
 | History | `ls-remote` | `cli.clone-fetch-pull-local` |
+| History | `ls-tree` | `cli.ls-tree-smoke` |
 | History | `diff` | `cli.restore-reset-diff` |
 | History | `grep` | `cli.grep-blame-describe-shortlog` |
 | History | `blame` | `cli.grep-blame-describe-shortlog` |
@@ -102,6 +103,7 @@
 - [`cli.fetch-depth-local`](cli.fetch-depth-local.md)
 - [`cli.push-local-file-remote-rejected`](cli.push-local-file-remote-rejected.md)
 - [`cli.object-readback`](cli.object-readback.md)
+- [`cli.ls-tree-smoke`](cli.ls-tree-smoke.md)
 - [`cli.sha256-object-readback`](cli.sha256-object-readback.md)
 - [`cli.verify-pack-smoke`](cli.verify-pack-smoke.md)
 

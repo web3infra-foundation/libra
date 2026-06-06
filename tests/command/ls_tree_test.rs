@@ -2,7 +2,7 @@
 //!
 //! **Layer:** L1 — deterministic local repositories, no network.
 
-use std::{fs, path::Path};
+use std::fs;
 
 use git_internal::{
     hash::ObjectHash,
@@ -206,6 +206,21 @@ fn ls_tree_d_on_directory_outputs_entry_only() {
 
     assert!(stdout.contains("\tsrc\n"));
     assert!(!stdout.contains("src/lib.rs"));
+}
+
+#[test]
+#[serial]
+fn ls_tree_d_recursive_path_lists_nested_tree_entries() {
+    let repo = setup_ls_tree_repo();
+
+    let output = run_libra_command(&["ls-tree", "-d", "-r", "HEAD", "src"], repo.path());
+    assert_cli_success(&output, "ls-tree -d -r HEAD src should succeed");
+    let stdout = stdout_string(&output);
+
+    assert!(stdout.contains("\tsrc\n"));
+    assert!(stdout.contains("\tsrc/nested\n"));
+    assert!(!stdout.contains("src/lib.rs"));
+    assert!(!stdout.contains("src/nested/deep.txt"));
 }
 
 #[test]
@@ -476,10 +491,8 @@ fn ls_tree_empty_tree_hash_outputs_nothing() {
 
 #[test]
 fn ls_tree_help_lists_examples_banner() {
-    let output = run_libra_command(
-        &["ls-tree", "--help"],
-        Path::new(env!("CARGO_MANIFEST_DIR")),
-    );
+    let cwd = tempdir().expect("create help cwd");
+    let output = run_libra_command(&["ls-tree", "--help"], cwd.path());
     assert_cli_success(&output, "ls-tree --help should succeed");
 
     assert!(stdout_string(&output).contains("EXAMPLES:"));
