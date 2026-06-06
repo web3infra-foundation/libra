@@ -195,6 +195,25 @@ fn archive_rejects_invalid_format() {
 }
 
 #[test]
+fn archive_rejects_empty_format() {
+    let repo = create_archive_test_repo();
+
+    let output = run_libra_command(&["archive", "--format="], repo.path());
+
+    assert!(
+        !output.status.success(),
+        "archive should reject an empty format"
+    );
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report.message.contains("unknown archive format"),
+        "unexpected empty format error message: {}",
+        report.message
+    );
+}
+
+#[test]
 fn archive_rejects_archive_slip_prefix() {
     let repo = create_archive_test_repo();
 
@@ -227,6 +246,20 @@ fn archive_rejects_output_in_missing_directory() {
     );
     let (_, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-IO-002");
+}
+
+#[test]
+fn archive_outside_repository_reports_repo_not_found() {
+    let temp = tempdir().expect("failed to create non-repository archive test directory");
+
+    let output = run_libra_command(&["archive"], temp.path());
+
+    assert!(
+        !output.status.success(),
+        "archive should fail outside a repository"
+    );
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-001");
 }
 
 #[test]
@@ -341,6 +374,55 @@ fn archive_short_format_flag_writes_zip() {
 
     assert_cli_success(&output, "archive -f zip");
     assert!(is_zip(&output.stdout), "expected zip output from -f zip");
+}
+
+#[test]
+fn archive_help_mentions_archive_options() {
+    let repo = create_archive_test_repo();
+
+    let output = run_libra_command(&["archive", "--help"], repo.path());
+
+    assert_cli_success(&output, "archive --help");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--format"), "help should mention --format");
+    assert!(stdout.contains("--output"), "help should mention --output");
+    assert!(stdout.contains("--prefix"), "help should mention --prefix");
+}
+
+#[test]
+fn archive_preserves_subdirectory_paths() {
+    let repo = create_archive_test_repo();
+    let out = repo.path().join("dirs.tar");
+    let out_str = out.to_str().expect("archive output path should be UTF-8");
+
+    let output = run_libra_command(&["archive", "-o", out_str], repo.path());
+
+    assert_cli_success(&output, "archive subdirectories");
+    let text = String::from_utf8_lossy(&read_bytes(&out)).to_string();
+    assert!(text.contains("README.md"), "tar should contain root file");
+    assert!(
+        text.contains("src/main.rs"),
+        "tar should contain nested source file"
+    );
+}
+
+#[test]
+fn archive_prefix_accepts_trailing_slash() {
+    let repo = create_archive_test_repo();
+    let out = repo.path().join("prefixed-slash.tar");
+    let out_str = out.to_str().expect("archive output path should be UTF-8");
+
+    let output = run_libra_command(
+        &["archive", "-o", out_str, "--prefix", "release/"],
+        repo.path(),
+    );
+
+    assert_cli_success(&output, "archive prefix with trailing slash");
+    let text = String::from_utf8_lossy(&read_bytes(&out)).to_string();
+    assert!(
+        text.contains("release/README.md"),
+        "tar should contain prefix with trailing slash"
+    );
 }
 
 #[test]
