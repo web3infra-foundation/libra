@@ -6,7 +6,11 @@ use std::{fs, path::Path};
 
 use git_internal::{
     hash::ObjectHash,
-    internal::object::{tree::Tree, types::ObjectType},
+    internal::object::{
+        blob::Blob,
+        tree::{Tree, TreeItem, TreeItemMode},
+        types::ObjectType,
+    },
 };
 
 use super::*;
@@ -26,7 +30,7 @@ fn setup_ls_tree_repo() -> tempfile::TempDir {
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::os::unix::fs::PermissionsExt;
 
         let mut permissions = fs::metadata(repo.path().join("script.sh"))
             .expect("script metadata")
@@ -34,10 +38,9 @@ fn setup_ls_tree_repo() -> tempfile::TempDir {
         permissions.set_mode(0o755);
         fs::set_permissions(repo.path().join("script.sh"), permissions)
             .expect("set executable bit");
-        symlink("README.md", repo.path().join("readme-link")).expect("create symlink");
     }
 
-    let mut add_args = vec![
+    let add_args = vec![
         "add",
         ".libraignore",
         "README.md",
@@ -47,8 +50,6 @@ fn setup_ls_tree_repo() -> tempfile::TempDir {
         "中文.txt",
         "script.sh",
     ];
-    #[cfg(unix)]
-    add_args.push("readme-link");
     let output = run_libra_command(&add_args, repo.path());
     assert_cli_success(&output, "failed to add ls-tree fixture files");
 
@@ -323,8 +324,21 @@ fn ls_tree_reports_executable_file_mode() {
 #[serial]
 fn ls_tree_reports_symlink_as_blob_mode() {
     let repo = setup_ls_tree_repo();
+    let _guard = ChangeDirGuard::new(repo.path());
+    let link_blob = Blob::from_content("README.md");
+    save_object(&link_blob, &link_blob.id).expect("save symlink blob");
+    let tree = Tree::from_tree_items(vec![TreeItem::new(
+        TreeItemMode::Link,
+        link_blob.id,
+        "readme-link".to_string(),
+    )])
+    .expect("build symlink tree");
+    save_object(&tree, &tree.id).expect("save symlink tree");
 
-    let output = run_libra_command(&["ls-tree", "HEAD", "readme-link"], repo.path());
+    let output = run_libra_command(
+        &["ls-tree", &tree.id.to_string(), "readme-link"],
+        repo.path(),
+    );
     assert_cli_success(&output, "ls-tree symlink should succeed");
 
     assert!(stdout_string(&output).starts_with("120000 blob "));
