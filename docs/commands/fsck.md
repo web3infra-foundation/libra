@@ -142,6 +142,15 @@ Use `--no-full` to restrict the check to loose objects, skipping packfiles:
 libra fsck --no-full
 ```
 
+Independently of `--full` / `--no-full`, fsck always runs a **pack-integrity
+stage**: every `.libra/objects/pack/*.idx` is validated in-process by
+`verify-pack` (no subprocess is forked). A corrupt or unreadable pack is
+reported to stderr and makes fsck exit `1` — matching `git fsck` — but does not
+abort the remaining packs, so a multi-pack repository surfaces every faulty
+pack in one run. fsck only reports here; it never deletes, rewrites, or repairs
+a faulty pack. (`--no-full` only narrows *object enumeration* to loose objects;
+it does not disable pack-integrity checking.)
+
 ### `--strict`
 
 Apply additional format and graph checks (these are reported as errors, so they
@@ -264,6 +273,7 @@ The fsck command performs checks in the following order:
 8. **Reachability analysis**: Identify dangling and unreachable objects via BFS
 9. **Root commit report**: (with `--root`) List commits with no parents
 10. **Tag report**: (with `--tags`) List tagged commits
+11. **Pack integrity**: Validate each `objects/pack/*.idx` in-process via `verify-pack`; a corrupt/unreadable pack exits 1 without aborting the rest
 
 ### Object Types
 

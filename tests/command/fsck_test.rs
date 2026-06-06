@@ -1063,3 +1063,154 @@ fn test_lost_found_writes_dangling() {
         "staged blob should contain the raw content"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Pack integrity tests (Stage 11 — reuses verify-pack in-process)
+// ---------------------------------------------------------------------------
+
+/// Directory holding the committed pack fixtures.
+fn fsck_packs_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/packs")
+}
+
+/// Copy a SHA-1 pack fixture (matched by `prefix`) into the repo's object pack
+/// directory and build its `.idx` in place. Returns the in-repo `.idx` and
+/// `.pack` paths.
+fn install_pack_fixture(
+    repo: &std::path::Path,
+    prefix: &str,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let pack_src = fs::read_dir(fsck_packs_dir())
+        .expect("read packs dir")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(prefix) && name.ends_with(".pack"))
+        })
+        .unwrap_or_else(|| panic!("pack fixture with prefix {prefix:?} not found"));
+
+    let pack_dir = repo.join(".libra/objects/pack");
+    fs::create_dir_all(&pack_dir).expect("create pack dir");
+    let pack_dst = pack_dir.join(pack_src.file_name().expect("fixture file name"));
+    fs::copy(&pack_src, &pack_dst).expect("copy pack fixture");
+
+    let output = run_libra_command(
+        &[
+            "index-pack",
+            pack_dst.to_str().expect("pack path utf-8"),
+            "--index-version",
+            "2",
+        ],
+        repo,
+    );
+    assert_cli_success(&output, "index-pack should build the fixture idx");
+    (pack_dst.with_extension("idx"), pack_dst)
+}
+
+/// Flip the final byte of a pack `.idx` so its trailing self-checksum no
+/// longer matches the recomputed hash. verify-pack rejects this during index
+/// parsing — before any pack decode — so the fsck pack stage surfaces a clean
+/// `pack index v2 checksum mismatch` rather than relying on the decoder.
+fn corrupt_index_checksum(idx_path: &std::path::Path) {
+    let mut bytes = fs::read(idx_path).expect("read idx");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xFF;
+    fs::write(idx_path, bytes).expect("write corrupted idx");
+}
+
+#[test]
+#[serial]
+/// A healthy pack passes the fsck pack-integrity stage; fsck still exits 0.
+fn fsck_reports_ok_with_healthy_pack() {
+    let repo = create_committed_repo_via_cli();
+    let (_idx, _pack) = install_pack_fixture(repo.path(), "small-sha1");
+
+    let output = run_libra_command(&["fsck"], repo.path());
+    assert!(
+        output.status.success(),
+        "fsck should pass with a healthy pack, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[serial]
+/// A corrupt pack index is detected by the pack-integrity stage and makes
+/// fsck exit 1 (matching `git fsck`). `--no-full` keeps object enumeration to
+/// loose objects so the pack stage is the only failing one (under default
+/// `--full`, a structurally broken index instead surfaces during enumeration).
+fn fsck_detects_corrupt_pack() {
+    let repo = create_committed_repo_via_cli();
+    let (idx, _pack) = install_pack_fixture(repo.path(), "small-sha1");
+    corrupt_index_checksum(&idx);
+
+    let output = run_libra_command(&["fsck", "--no-full"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "corrupt pack index should make fsck exit 1, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stem = idx
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .expect("idx stem utf-8");
+    assert!(
+        stderr.contains(stem) && stderr.contains("checksum mismatch"),
+        "stderr should name the corrupt pack ({stem}) and the checksum diagnostic, got: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+/// fsck keeps checking after the first corrupt pack: with two bad packs, both
+/// are reported (proving the loop does not abort on the first failure).
+fn fsck_continues_after_corrupt_pack() {
+    let repo = create_committed_repo_via_cli();
+    let (idx_a, _pack_a) = install_pack_fixture(repo.path(), "small-sha1");
+    let (idx_b, _pack_b) = install_pack_fixture(repo.path(), "ref-delta-sha1");
+    corrupt_index_checksum(&idx_a);
+    corrupt_index_checksum(&idx_b);
+
+    let output = run_libra_command(&["fsck", "--no-full"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "two corrupt packs should make fsck exit 1, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for idx in [&idx_a, &idx_b] {
+        let stem = idx
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("idx stem utf-8");
+        assert!(
+            stderr.contains(stem),
+            "fsck should report both corrupt packs; missing {stem} in: {stderr}"
+        );
+    }
+}
+
+#[test]
+#[serial]
+/// With no packfiles present the pack-integrity stage is a silent no-op and
+/// emits no spurious pack error.
+fn fsck_skips_when_no_pack_files() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["fsck"], repo.path());
+    assert!(
+        output.status.success(),
+        "fsck on a pack-less repo should pass, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("pack verification failed"),
+        "pack-less repo must not report pack errors, got: {stderr}"
+    );
+}
