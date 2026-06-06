@@ -120,3 +120,91 @@ fn archive_applies_prefix_to_tar_paths() {
         "tar should contain prefixed source path"
     );
 }
+
+#[test]
+fn archive_empty_repo_reports_invalid_target() {
+    let repo = tempdir().expect("failed to create empty archive test repository");
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["archive"], repo.path());
+
+    assert!(
+        !output.status.success(),
+        "archive should fail without commits"
+    );
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        report.message.contains("failed to resolve"),
+        "unexpected empty repo message: {}",
+        report.message
+    );
+}
+
+#[test]
+fn archive_rejects_invalid_treeish() {
+    let repo = create_archive_test_repo();
+
+    let output = run_libra_command(&["archive", "nonexistent-branch"], repo.path());
+
+    assert!(
+        !output.status.success(),
+        "archive should reject an unknown tree-ish"
+    );
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+}
+
+#[test]
+fn archive_rejects_invalid_format() {
+    let repo = create_archive_test_repo();
+
+    let output = run_libra_command(&["archive", "--format=bogus"], repo.path());
+
+    assert!(
+        !output.status.success(),
+        "archive should reject unknown formats"
+    );
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report.message.contains("unknown archive format"),
+        "unexpected format error message: {}",
+        report.message
+    );
+}
+
+#[test]
+fn archive_rejects_archive_slip_prefix() {
+    let repo = create_archive_test_repo();
+
+    let output = run_libra_command(&["archive", "--prefix", "../release"], repo.path());
+
+    assert!(
+        !output.status.success(),
+        "archive should reject parent-directory prefixes"
+    );
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report.message.contains("invalid archive prefix"),
+        "unexpected prefix error message: {}",
+        report.message
+    );
+}
+
+#[test]
+fn archive_rejects_output_in_missing_directory() {
+    let repo = create_archive_test_repo();
+    let out = repo.path().join("missing").join("out.tar");
+    let out_str = out.to_str().expect("archive output path should be UTF-8");
+
+    let output = run_libra_command(&["archive", "-o", out_str], repo.path());
+
+    assert!(
+        !output.status.success(),
+        "archive should fail when output parent directory is missing"
+    );
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-IO-002");
+}
