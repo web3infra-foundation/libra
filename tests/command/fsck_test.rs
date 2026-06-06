@@ -4,6 +4,17 @@
 
 use std::fs;
 
+use git_internal::{
+    hash::{HashKind, ObjectHash, set_hash_kind_for_test},
+    internal::object::{
+        ObjectTrait,
+        commit::Commit,
+        signature::{Signature, SignatureType},
+        tree::{Tree, TreeItem, TreeItemMode},
+        types::ObjectType,
+    },
+};
+use libra::utils::client_storage::ClientStorage;
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -743,5 +754,312 @@ fn test_fsck_broken_tag_reference() {
             || output.status.success(),
         "should handle broken tag reference, got: {}",
         combined
+    );
+}
+
+/// Path to the committed pack fixtures used by `verify-pack`/`fsck` tests.
+fn packs_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/packs")
+}
+
+/// Initialise an empty libra repo and install the `small-sha1` pack fixture
+/// (with a freshly built v1 index) into its object store, so the repo's only
+/// objects are packed ones.
+fn repo_with_only_packed_objects() -> tempfile::TempDir {
+    let repo = tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+
+    let pack_dir = repo.path().join(".libra/objects/pack");
+    fs::create_dir_all(&pack_dir).expect("create objects/pack dir");
+    let pack_dst = pack_dir.join("small-sha1.pack");
+    fs::copy(packs_dir().join("small-sha1.pack"), &pack_dst).expect("copy pack fixture");
+
+    let output = run_libra_command(
+        &[
+            "index-pack",
+            pack_dst.to_str().expect("pack path utf8"),
+            "--index-version",
+            "1",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&output, "index-pack should build the fixture idx");
+    repo
+}
+
+/// `fsck --full` (the default) enumerates and verifies packed objects: the
+/// connectivity pass reports a non-zero object count.
+#[test]
+#[serial]
+fn test_fsck_full_verifies_packed_objects() {
+    let repo = repo_with_only_packed_objects();
+
+    let output = run_libra_command(&["fsck", "--full", "--verbose"], repo.path());
+    // Dangling packed objects keep the exit code at 0.
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Checking connectivity (")
+            && !stdout.contains("Checking connectivity (0 objects)"),
+        "fsck --full should verify packed objects: {stdout}"
+    );
+}
+
+/// `fsck --no-full` restricts the check to loose objects, so a repo whose only
+/// objects are packed reports zero objects to verify.
+#[test]
+#[serial]
+fn test_fsck_no_full_skips_packed_objects() {
+    let repo = repo_with_only_packed_objects();
+
+    let output = run_libra_command(&["fsck", "--no-full", "--verbose"], repo.path());
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Checking connectivity (0 objects)"),
+        "fsck --no-full should skip packed objects: {stdout}"
+    );
+}
+
+/// `fsck --full` on a repo with no `objects/pack/` directory succeeds (exit 0).
+#[test]
+#[serial]
+fn test_fsck_full_empty_repo() {
+    let repo = tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["fsck", "--full"], repo.path());
+    assert_eq!(output.status.code(), Some(0));
+}
+
+/// Build a signature with a fixed name/timestamp but caller-chosen email and
+/// timezone (so `--strict` checks can be exercised).
+fn strict_signature(email: &str, tz: &str, ty: SignatureType) -> Signature {
+    Signature {
+        signature_type: ty,
+        name: "Test".to_string(),
+        email: email.to_string(),
+        timestamp: 1_700_000_000,
+        timezone: tz.to_string(),
+    }
+}
+
+/// Store an in-process commit with the given author/committer email and
+/// timezone into the repo's object store, returning its object id (hex).
+fn store_strict_commit(repo: &std::path::Path, email: &str, tz: &str) -> String {
+    let _kind = set_hash_kind_for_test(HashKind::Sha1);
+    let storage = ClientStorage::init(repo.join(".libra/objects"));
+    let commit = Commit::new(
+        strict_signature(email, tz, SignatureType::Author),
+        strict_signature(email, tz, SignatureType::Committer),
+        ObjectHash::default(),
+        vec![],
+        "strict fixture",
+    );
+    storage
+        .put(
+            &commit.id,
+            &commit.to_data().expect("serialize commit"),
+            ObjectType::Commit,
+        )
+        .expect("store commit");
+    commit.id.to_string()
+}
+
+/// `--strict` flags a commit whose author/committer email lacks `@`; the default
+/// (non-strict) check does not.
+#[test]
+#[serial]
+fn test_strict_commit_bad_email() {
+    let repo = tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+    let id = store_strict_commit(repo.path(), "noatsign", "+0000");
+
+    let plain = run_libra_command(&["fsck", &id], repo.path());
+    assert!(
+        !String::from_utf8_lossy(&plain.stderr).contains("bad email"),
+        "non-strict fsck must not flag email format"
+    );
+
+    let strict = run_libra_command(&["fsck", "--strict", &id], repo.path());
+    let stderr = String::from_utf8_lossy(&strict.stderr);
+    assert!(
+        stderr.contains("bad email"),
+        "strict must flag a missing @: {stderr}"
+    );
+    assert_eq!(strict.status.code(), Some(1));
+}
+
+/// `--strict` flags a commit whose timezone is out of range; the default check
+/// does not.
+#[test]
+#[serial]
+fn test_strict_commit_bad_timezone() {
+    let repo = tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+    let id = store_strict_commit(repo.path(), "test@example.com", "+9900");
+
+    let plain = run_libra_command(&["fsck", &id], repo.path());
+    assert!(
+        !String::from_utf8_lossy(&plain.stderr).contains("bad timezone"),
+        "non-strict fsck must not flag the timezone"
+    );
+
+    let strict = run_libra_command(&["fsck", "--strict", &id], repo.path());
+    let stderr = String::from_utf8_lossy(&strict.stderr);
+    assert!(
+        stderr.contains("bad timezone"),
+        "strict must flag a bad timezone: {stderr}"
+    );
+    assert_eq!(strict.status.code(), Some(1));
+}
+
+/// `--strict` flags a tree whose entries are not in Git's canonical sort order;
+/// the default check does not.
+#[test]
+#[serial]
+fn test_strict_tree_unsorted() {
+    let repo = tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+
+    let id = {
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let storage = ClientStorage::init(repo.path().join(".libra/objects"));
+        // Deliberately out of order: "b" precedes "a".
+        let items = vec![
+            TreeItem {
+                mode: TreeItemMode::Blob,
+                id: ObjectHash::from_bytes(&[0x22; 20]).unwrap(),
+                name: "b".to_string(),
+            },
+            TreeItem {
+                mode: TreeItemMode::Blob,
+                id: ObjectHash::from_bytes(&[0x11; 20]).unwrap(),
+                name: "a".to_string(),
+            },
+        ];
+        let tree = Tree::from_tree_items(items).expect("build tree");
+        storage
+            .put(
+                &tree.id,
+                &tree.to_data().expect("serialize tree"),
+                ObjectType::Tree,
+            )
+            .expect("store tree");
+        tree.id.to_string()
+    };
+
+    let plain = run_libra_command(&["fsck", &id], repo.path());
+    assert!(
+        !String::from_utf8_lossy(&plain.stderr).contains("tree not sorted"),
+        "non-strict fsck must not flag tree ordering"
+    );
+
+    let strict = run_libra_command(&["fsck", "--strict", &id], repo.path());
+    let stderr = String::from_utf8_lossy(&strict.stderr);
+    assert!(
+        stderr.contains("tree not sorted"),
+        "strict must flag an unsorted tree: {stderr}"
+    );
+    assert_eq!(strict.status.code(), Some(1));
+}
+
+/// A corrupt index file is an integrity error and exits non-zero (1), aligned
+/// with `git fsck`.
+#[test]
+#[serial]
+fn test_fsck_index_corruption_exits_nonzero() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join(".libra/index"), b"not a valid index").expect("corrupt index");
+
+    let output = run_libra_command(&["fsck"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a corrupt index should exit 1, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("index corruption"),
+        "should report index corruption: {combined}"
+    );
+}
+
+/// A dangling commit alone is informational and keeps the exit code at 0.
+#[test]
+#[serial]
+fn test_fsck_dangling_commit_exits_zero() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("f2.txt"), "second\n").unwrap();
+    run_libra_command(&["add", "f2.txt"], repo.path());
+    run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    let log = run_libra_command(&["log", "--pretty=%H"], repo.path());
+    let log_out = String::from_utf8_lossy(&log.stdout);
+    let first = log_out.lines().nth(1).unwrap().trim();
+    run_libra_command(&["reset", "--hard", first], repo.path());
+
+    let output = run_libra_command(&["fsck", "--no-reflogs"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a dangling commit must stay exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `--lost-found` stages a dangling commit under `lost-found/commit/` (its id)
+/// and a dangling blob under `lost-found/other/` (its raw content).
+#[test]
+#[serial]
+fn test_lost_found_writes_dangling() {
+    let repo = create_committed_repo_via_cli();
+
+    // A dangling blob written directly into the object store.
+    fs::write(repo.path().join("loose.txt"), "dangling blob content\n").unwrap();
+    let ho = run_libra_command(&["hash-object", "-w", "loose.txt"], repo.path());
+    assert_cli_success(&ho, "hash-object -w");
+    let blob_hash = String::from_utf8_lossy(&ho.stdout).trim().to_string();
+
+    // A dangling commit (committed, then HEAD reset back).
+    fs::write(repo.path().join("f2.txt"), "second\n").unwrap();
+    run_libra_command(&["add", "f2.txt"], repo.path());
+    run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    let log = run_libra_command(&["log", "--pretty=%H"], repo.path());
+    let log_out = String::from_utf8_lossy(&log.stdout);
+    let dangling_commit = log_out.lines().next().unwrap().trim().to_string();
+    let first = log_out.lines().nth(1).unwrap().trim().to_string();
+    run_libra_command(&["reset", "--hard", &first], repo.path());
+
+    let output = run_libra_command(&["fsck", "--lost-found"], repo.path());
+    assert!(
+        output.status.code() == Some(0) || output.status.code() == Some(1),
+        "fsck --lost-found should finish, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let commit_path = repo
+        .path()
+        .join(".libra/lost-found/commit")
+        .join(&dangling_commit);
+    assert!(
+        commit_path.exists(),
+        "dangling commit should be staged under lost-found/commit/: {commit_path:?}"
+    );
+
+    let blob_path = repo.path().join(".libra/lost-found/other").join(&blob_hash);
+    assert!(
+        blob_path.exists(),
+        "dangling blob should be staged under lost-found/other/: {blob_path:?}"
+    );
+    let staged = fs::read(&blob_path).expect("read staged blob");
+    assert_eq!(
+        staged, b"dangling blob content\n",
+        "staged blob should contain the raw content"
     );
 }

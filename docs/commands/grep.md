@@ -37,9 +37,22 @@ When stdout is a terminal, output is sent through a pager. In JSON mode, structu
 | Word regexp | `-w` | `--word-regexp` | Match only lines where the pattern forms a complete word (surrounded by word boundaries). |
 | Invert match | `-v` | `--invert-match` | Select non-matching lines instead of matching lines. |
 | Byte offset | `-b` | `--byte-offset` | Show the 0-based byte offset of the first match on each line. |
+| After context | `-A` | `--after-context <NUM>` | Show `NUM` lines of trailing context after each match (text output). |
+| Before context | `-B` | `--before-context <NUM>` | Show `NUM` lines of leading context before each match (text output). |
+| Context | `-C` | `--context <NUM>` | Show `NUM` lines of context on both sides (equivalent to `-A NUM -B NUM`; `-A`/`-B` override their side). |
+| Text | `-a` | `--text` | Process binary files as if they were text instead of skipping them (the file-size limit still applies). |
+| Ignore binary | `-I` | | Silently skip binary files without printing a warning. |
+| Heading | | `--heading` / `--no-heading` | Print each file name once as a header above its matches and drop the inline prefix. `--no-heading` (the default) overrides `--heading`. |
+| Break | | `--break` | Print a blank line between the matches of different files. |
+| Null | `-z` | `--null` | Use NUL (`\0`) field separators. Match/count records stay newline-terminated; `-l`/`-L` paths are NUL-terminated with no trailing newline. Disables colorized output. |
+| No index | | `--no-index` | Search files on the filesystem (current directory and below) without requiring a repository. Never descends into `.libra`/`.git` and does not follow symlinks. Conflicts with `--cached`/`--tree`/`--untracked`. |
+| Untracked | | `--untracked` | Also search untracked files (those not in the index and not excluded by `.libraignore`), in addition to tracked files. Conflicts with `--cached`/`--tree`. |
 | Pathspec | | positional (trailing) | Restrict search to files matching the given paths. |
 | Tree | | `--tree <REVISION>` | Search in the specified revision or commit tree instead of the working tree. |
 | Cached | | `--cached` | Search in the index (staging area) instead of the working tree. |
+| Extended regexp | `-E` | `--extended-regexp` | Accepted as an alias. The default engine is already ERE-style, so this does not change matching behavior. |
+| Basic regexp | `-G` | `--basic-regexp` | Accepted as an alias. Libra has no separate BRE engine; patterns keep the default `regex` syntax, which may differ from Git's strict BRE dialect. |
+| Perl regexp | `-P` | `--perl-regexp` | **Declined.** The linear-time engine has no backreferences/lookaround; passing `-P` fails fast with a usage error (exit 129) rather than silently mis-matching. |
 
 ### Option Details
 
@@ -372,9 +385,9 @@ jj does not have a built-in grep command. Users are expected to use external too
 | Pathspec | Trailing positional | Trailing positional | N/A |
 | Revision search | `--tree <REVISION>` | `<revision>` (positional) | N/A |
 | Index search | `--cached` | `--cached` | N/A |
-| Context lines | Not supported | `-C` / `-A` / `-B` | N/A |
-| Extended regexp | Not supported | `-E` / `--extended-regexp` | N/A |
-| Perl regexp | Not supported | `-P` / `--perl-regexp` | N/A |
+| Context lines | `-C` / `-A` / `-B` (match `:`, context `-`, groups `--`) | `-C` / `-A` / `-B` | N/A |
+| Extended/basic regexp | Accepted as aliases (`-E` / `-G`) | `-E` / `-G` | N/A |
+| Perl regexp | Declined (exit 129) | `-P` / `--perl-regexp` | N/A |
 | Show function | Not supported | `-p` / `--show-function` | N/A |
 | Max depth | Not supported | `--max-depth` | N/A |
 | Threads | Not supported | `--threads` | N/A |
@@ -389,7 +402,8 @@ Note: jj does not have a built-in grep command. Users rely on external tools lik
 |----------|-----------------|------|
 | Not a libra repository | `LBR-REPO-001` | 128 |
 | No pattern provided (and no `-e` or `-f`) | Clap argument error | 2 |
-| Invalid regex pattern | `LBR-CLI-003` (CliInvalidTarget) | 129 |
+| Invalid regex pattern | `LBR-CLI-002` (CliInvalidArguments) | 129 |
+| `-P` / `--perl-regexp` (declined) | `LBR-CLI-002` (CliInvalidArguments) | 129 |
 | Revision not found (`--tree`) | `LBR-CLI-003` (CliInvalidTarget) | 129 |
 | No matches found | `LBR-CLI-003` (CliInvalidTarget) | 129 |
 | Failed to read file (non-fatal) | Warning in output, file skipped | 0 |

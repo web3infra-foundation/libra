@@ -1,6 +1,7 @@
 # `libra agent`
 
-Manage external-agent capture for tools such as Claude Code and Gemini.
+Manage external-agent capture for Claude Code, Gemini, Cursor, Codex,
+GitHub Copilot CLI, Factory AI Droid, and OpenCode.
 
 ## Synopsis
 
@@ -22,9 +23,25 @@ libra agent rpc <subcommand>
 removes provider hooks, reports captured session/checkpoint state, exposes
 read-only diagnostics, and can push `refs/libra/agent-traces` to a remote.
 
-Stable installable agents currently include `claude-code` and `gemini`. Preview
-adapters are discoverable in code but are skipped by install/uninstall until
-their hook installation path is implemented.
+All seven external agents are stable and hook-installable: `claude-code`,
+`gemini`, `cursor`, `codex`, `copilot`, `factory-ai`, and `opencode`. Running
+`libra agent enable` with no `--agent` flags installs hooks for every one.
+Each agent's hooks are written into that agent's own config so its lifecycle
+events forward to `libra agent hooks <agent> <event>`:
+
+| Agent | Hook config file | Format |
+|-------|------------------|--------|
+| `claude-code` | `.claude/settings.json` | matcher groups |
+| `gemini` | `~/.gemini/settings.json` | shell hooks |
+| `cursor` | `.cursor/hooks.json` | per-event command arrays |
+| `codex` | `.codex/hooks.json` | matcher groups |
+| `copilot` | `.github/hooks/libra.json` | per-event command arrays |
+| `factory-ai` | `.factory/settings.json` | matcher groups |
+| `opencode` | `.opencode/plugins/libra.ts` | generated TypeScript plugin |
+
+Installs are idempotent and preserve any non-Libra hooks already present;
+`disable` removes only Libra-managed entries. Every installed command is
+suffixed with `|| true` so a Libra hiccup never breaks the host agent.
 
 ## Subcommands
 
@@ -103,7 +120,7 @@ libra agent checkpoint list
 # Show a single checkpoint by id
 libra agent checkpoint show <id>
 
-# Replay a checkpoint as a JSONL transcript
+# Preview (default) or --apply a working-tree rewind for a checkpoint
 libra agent checkpoint rewind <id>
 
 # Drop temporary checkpoints from the most recent stopped session
@@ -139,7 +156,17 @@ CLI surface stay in sync (cross-cutting `--help` EXAMPLES rollout, see
 
 - The top-level `agent hooks` entry is hidden and intended for hook configs
   installed by `libra agent enable`; users normally do not call it directly.
-- `checkpoint rewind --apply` restores working-tree files only; the agent's own
-  transcript file is not rewritten.
+- `checkpoint rewind --apply` restores working-tree files to the checkpoint's
+  parent commit. For agents with a `TranscriptTruncator` (currently Claude Code
+  and Gemini) it also truncates the agent's local transcript back to the
+  checkpoint boundary; for the remaining agents the working tree is restored but
+  the transcript is left untouched and a notice is printed.
+- Captured transcripts are redacted before they are written to
+  `refs/libra/agent-traces`. The redactor layers static secret-prefix rules,
+  Shannon-entropy detection, connection-string / credential key-value
+  detection, and JSON-aware field skipping; opt-in PII detection and the
+  behaviour mode are configured under `[agent.redaction]` in `.libra/config`
+  (`mode = redact | warn | off`, default `redact`; `pii.email` / `pii.phone`).
+  The full transcript blob is always force-redacted regardless of `mode`.
 - Hook and capture diagnostics are best-effort and are designed to report
   actionable installation state rather than silently ignoring missing providers.

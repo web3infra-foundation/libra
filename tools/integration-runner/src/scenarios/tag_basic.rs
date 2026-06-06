@@ -20,6 +20,10 @@ pub(crate) fn scenario_tag_basic(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
         &ctx.command(&["rev-parse", "v1.1.0"], repo.clone(), false)?,
         "not found",
     )?;
+    assert_json_ok(
+        &ctx.command(&["--json", "tag", "-l"], repo.clone(), true)?,
+        "tag",
+    )?;
     ctx.command(&["fsck", "--connectivity-only"], repo, true)?;
     Ok(())
 }

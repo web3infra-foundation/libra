@@ -33,6 +33,19 @@ are loaded automatically when configured via `vault.ssh.<remote>.privkey`.
 | `--depth <N>` | Limit fetching to the specified number of commits from the tip of each remote branch (shallow fetch). Public stable flag. | `libra fetch origin --depth 1` |
 | `--deepen <N>` | Deepen the history of a shallow repository by `N` commits beyond the current boundary. Conflicts with `--unshallow`. | `libra fetch origin --deepen 10` |
 | `--unshallow` | Convert a shallow repository into a complete one by fetching all missing history, then removing the `.libra/shallow` boundary file. Conflicts with `--depth`. | `libra fetch origin --unshallow` |
+| `--shallow-since <DATE>` | Shape shallow history to commits more recent than `<DATE>` (`deepen-since`). Conflicts with `--unshallow`. | `libra fetch origin --shallow-since=2024-01-01` |
+| `--shallow-exclude <REF>` | Shape shallow history to exclude commits reachable from `<REF>` (`deepen-not`); repeatable. Conflicts with `--unshallow`. | `libra fetch origin --shallow-exclude=v1.0` |
+| `--prune` / `-p` | After fetching, delete local `refs/remotes/<remote>/*` tracking branches that no longer exist on the remote (never touches `refs/heads/*`). Also enabled by `fetch.prune`. | `libra fetch origin --prune` |
+| `--dry-run` | Preview ref updates and prunes without downloading objects or writing any refs/reflog/shallow/FETCH_HEAD. | `libra fetch origin --dry-run` |
+| `--porcelain` | Print one machine-readable `<flag> <old-oid> <new-oid> <local-ref>` line per ref update. Mutually exclusive with `--json` (usage error). | `libra fetch origin --porcelain` |
+| `--append` | Append fetched ref records to `.libra/FETCH_HEAD` instead of overwriting. Long-only (`-a` is `--all`). | `libra fetch origin --append` |
+| `-v`, `--verbose` | Announce the remote (name and credential-redacted URL) being contacted on stderr before connecting; leaves the stdout result contract unchanged. | `libra fetch origin -v` |
+| `-t`, `--tags` | Import every advertised tag into the global `refs/tags/*` namespace, pulling each tag's object into the pack. Overrides `remote.<name>.tagOpt`. Existing local tags are preserved (immutable without `--force`). | `libra fetch origin --tags` |
+| `--no-tags` | Import no tags, overriding `remote.<name>.tagOpt`. Long-only (Git's `-n` short form is intentionally not exposed). | `libra fetch origin --no-tags` |
+| `-f`, `--force` | Allow non-fast-forward updates: overwrite an existing local tag with the remote's value (tags are otherwise immutable). Forced updates render with the porcelain `+` flag. Remote-tracking refs always update regardless. | `libra fetch origin --tags --force` |
+| `--update-shallow` | Accept new shallow boundaries advertised by a shallow remote even when no shallow operation was requested and the repository is not already shallow. Boundary removals (history deepening) always apply. | `libra fetch origin --update-shallow` |
+| `--atomic` | Update a remote's refs atomically: they already commit together (one transaction per remote), and on rollback the pack downloaded for that remote is removed so no partial state is left. | `libra fetch origin --atomic` |
+| `--refmap <src:dst>` | Override where fetched refs are stored (repeatable; a trailing `*` is a glob). The destination must be under `refs/remotes/<remote>/`; entries are capped at 256 bytes and require an explicit remote (not `--all`). | `libra fetch origin --refmap "refs/heads/*:refs/remotes/origin/mirror/*"` |
 | `--json` | Emit structured JSON envelope to stdout (global flag). | `libra --json fetch origin` |
 | `--machine` | Compact single-line JSON; suppresses progress (global flag). | `libra --machine fetch origin` |
 | `--progress none` | Suppress NDJSON progress events on stderr in JSON mode. | `libra --json fetch origin --progress none` |
@@ -152,15 +165,14 @@ Example (already up to date):
 
 ## Design Rationale
 
-### Why no --prune by default?
+### Pruning: opt-in via `--prune` or `fetch.prune`
 
-Git added `fetch.prune = true` as a recommended default because stale remote-tracking
-refs accumulate silently. Libra chose not to prune by default for two reasons: (1) pruning
-requires an additional round-trip to enumerate the remote's current refs, adding latency to
-every fetch, and (2) in agent-driven workflows, stale tracking refs can serve as useful
-historical anchors for diffing against a previous remote state. When pruning is desired,
-`libra remote prune <name>` provides an explicit, auditable operation. This keeps `fetch`
-fast and predictable while giving users a deliberate pruning path.
+Stale remote-tracking refs accumulate silently. `libra fetch --prune` (or setting
+`fetch.prune = true`) removes local `refs/remotes/<remote>/*` tracking branches whose
+remote counterpart is gone, reusing the same comparison/deletion logic as the explicit
+`libra remote prune <name>` command (which remains available). Pruning is **opt-in**, not a
+default: it requires enumerating the remote's current refs and, in agent-driven workflows,
+stale tracking refs can serve as historical anchors. Pruning never touches `refs/heads/*`.
 
 ### Shallow fetch (`--depth`) is exposed as a stable flag
 

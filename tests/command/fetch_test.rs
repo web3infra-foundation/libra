@@ -6,9 +6,11 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    str::FromStr,
     time::Duration,
 };
 
+use git_internal::{hash::ObjectHash, internal::object::types::ObjectType};
 #[cfg(unix)]
 use libra::internal::vault;
 #[cfg(unix)]
@@ -19,7 +21,11 @@ use libra::{
         branch::Branch,
         config::{ConfigKv, RemoteConfig},
     },
-    utils::test::{ChangeDirGuard, setup_with_new_libra_in},
+    utils::{
+        client_storage::ClientStorage,
+        path,
+        test::{ChangeDirGuard, setup_with_new_libra_in},
+    },
 };
 use serial_test::serial;
 use tempfile::{TempDir, tempdir};
@@ -1384,5 +1390,422 @@ async fn test_fetch_writes_and_appends_fetch_head() {
         appended.lines().count() >= first_line_count,
         "--append must not truncate FETCH_HEAD: before={first_line_count}, after={}",
         appended.lines().count()
+    );
+}
+
+/// `--verbose`/`-v` announces the remote being contacted on stderr (printed
+/// before the connection is attempted, so a bad URL still shows it).
+#[tokio::test]
+#[serial]
+async fn test_fetch_verbose_announces_remote_on_stderr() {
+    let temp = tempdir().expect("temp root");
+    let repo_dir = temp.path().join("repo");
+    fs::create_dir_all(&repo_dir).expect("repo dir");
+    setup_with_new_libra_in(&repo_dir).await;
+    {
+        let _guard = ChangeDirGuard::new(&repo_dir);
+        ConfigKv::set("remote.origin.url", "/nonexistent/remote.git", false)
+            .await
+            .unwrap();
+    }
+
+    let output = run_libra_command(&["fetch", "origin", "-v"], &repo_dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Fetching origin from /nonexistent/remote.git"),
+        "verbose must announce the remote on stderr: {stderr}"
+    );
+}
+
+/// Run a `git` command in `cwd`, asserting it succeeds.
+fn git_in(cwd: &Path, args: &[&str]) {
+    assert!(
+        Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .status()
+            .unwrap_or_else(|error| panic!("git {args:?} failed to spawn: {error}"))
+            .success(),
+        "git {args:?} failed"
+    );
+}
+
+/// Run a `git` command in `cwd`, returning its trimmed stdout.
+fn git_out(cwd: &Path, args: &[&str]) -> String {
+    String::from_utf8(
+        Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap_or_else(|error| panic!("git {args:?} failed to spawn: {error}"))
+            .stdout,
+    )
+    .expect("git output not utf8")
+    .trim()
+    .to_string()
+}
+
+/// A local bare git remote carrying one branch plus a lightweight and an
+/// annotated tag, paired with a fresh Libra repo configured to fetch it.
+struct FetchTagFixture {
+    _temp_root: TempDir,
+    repo_dir: PathBuf,
+    work_dir: PathBuf,
+    /// The commit the lightweight tag points at (`refs/tags/lightweight-tag`).
+    lightweight_target: String,
+    /// The tag-object hash the annotated tag points at (`refs/tags/annotated-tag`).
+    annotated_target: String,
+}
+
+async fn setup_fetch_fixture_with_tags() -> FetchTagFixture {
+    let temp_root = tempdir().expect("failed to create temp root");
+    let remote_dir = temp_root.path().join("remote.git");
+    let work_dir = temp_root.path().join("workdir");
+    let repo_dir = temp_root.path().join("libra_repo");
+
+    git_in(
+        temp_root.path(),
+        &["init", "--bare", remote_dir.to_str().unwrap()],
+    );
+    git_in(temp_root.path(), &["init", work_dir.to_str().unwrap()]);
+    git_in(&work_dir, &["config", "user.name", "Libra Tester"]);
+    git_in(&work_dir, &["config", "user.email", "tester@example.com"]);
+    // Neutralise any host-global signing config so plain `git tag` stays
+    // lightweight and annotated tags are created without a GPG key.
+    git_in(&work_dir, &["config", "tag.gpgSign", "false"]);
+    git_in(&work_dir, &["config", "tag.forceSignAnnotated", "false"]);
+    git_in(&work_dir, &["config", "commit.gpgSign", "false"]);
+
+    fs::write(work_dir.join("README.md"), "hello libra").expect("failed to write README");
+    git_in(&work_dir, &["add", "README.md"]);
+    git_in(&work_dir, &["commit", "-m", "initial commit"]);
+    git_in(&work_dir, &["tag", "lightweight-tag"]);
+    git_in(
+        &work_dir,
+        &["tag", "-a", "annotated-tag", "-m", "annotated message"],
+    );
+
+    let current_branch = git_out(&work_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let lightweight_target = git_out(&work_dir, &["rev-parse", "refs/tags/lightweight-tag"]);
+    let annotated_target = git_out(&work_dir, &["rev-parse", "refs/tags/annotated-tag"]);
+
+    git_in(
+        &work_dir,
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+    );
+    git_in(
+        &work_dir,
+        &[
+            "push",
+            "origin",
+            &format!("HEAD:refs/heads/{current_branch}"),
+        ],
+    );
+    git_in(&work_dir, &["push", "origin", "--tags"]);
+
+    fs::create_dir_all(&repo_dir).expect("failed to create repo dir");
+    setup_with_new_libra_in(&repo_dir).await;
+    {
+        let _guard = ChangeDirGuard::new(&repo_dir);
+        ConfigKv::set("remote.origin.url", remote_dir.to_str().unwrap(), false)
+            .await
+            .unwrap();
+    }
+
+    FetchTagFixture {
+        _temp_root: temp_root,
+        repo_dir,
+        work_dir,
+        lightweight_target,
+        annotated_target,
+    }
+}
+
+/// `--tags` imports both lightweight and annotated tags into `refs/tags/*`,
+/// pulling the annotated tag's object into the local store.
+#[tokio::test]
+#[serial]
+async fn test_fetch_tags_imports_annotated_and_lightweight() {
+    let fixture = setup_fetch_fixture_with_tags().await;
+
+    let output = run_libra_command(&["fetch", "origin", "--tags"], &fixture.repo_dir);
+    assert_cli_success(&output, "fetch origin --tags");
+
+    let show = run_libra_command(&["show-ref", "--tags"], &fixture.repo_dir);
+    assert_cli_success(&show, "show-ref --tags");
+    let refs = String::from_utf8_lossy(&show.stdout);
+
+    let lightweight = refs
+        .lines()
+        .find(|line| line.contains("refs/tags/lightweight-tag"))
+        .unwrap_or_else(|| panic!("lightweight tag not imported: {refs}"));
+    assert!(
+        lightweight.contains(&fixture.lightweight_target),
+        "lightweight tag points at the wrong object: {lightweight}"
+    );
+
+    let annotated = refs
+        .lines()
+        .find(|line| line.contains("refs/tags/annotated-tag"))
+        .unwrap_or_else(|| panic!("annotated tag not imported: {refs}"));
+    assert!(
+        annotated.contains(&fixture.annotated_target),
+        "annotated tag points at the wrong object: {annotated}"
+    );
+
+    // The annotated tag's object itself must have been fetched into the local
+    // store (not just the ref written). Check the stored object type directly,
+    // since `cat-file -t` peels an annotated tag hash to its commit.
+    {
+        let _guard = ChangeDirGuard::new(&fixture.repo_dir);
+        let storage = ClientStorage::init(path::objects());
+        let hash =
+            ObjectHash::from_str(&fixture.annotated_target).expect("valid annotated tag hash");
+        let obj_type = storage
+            .get_object_type(&hash)
+            .expect("annotated tag object must be present in the local store");
+        assert_eq!(
+            obj_type,
+            ObjectType::Tag,
+            "fetched annotated tag should be stored as a tag object"
+        );
+    }
+}
+
+/// `--no-tags` imports no tags even when the remote advertises them.
+#[tokio::test]
+#[serial]
+async fn test_fetch_no_tags_skips_all_tags() {
+    let fixture = setup_fetch_fixture_with_tags().await;
+
+    let output = run_libra_command(&["fetch", "origin", "--no-tags"], &fixture.repo_dir);
+    assert_cli_success(&output, "fetch origin --no-tags");
+
+    let show = run_libra_command(&["show-ref", "--tags"], &fixture.repo_dir);
+    let refs = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        !refs.contains("refs/tags/"),
+        "--no-tags must not import any tag, got: {refs}"
+    );
+}
+
+/// An existing local tag is preserved on a subsequent `--tags` fetch even when
+/// the remote moved the tag (tags are immutable without `--force`).
+#[tokio::test]
+#[serial]
+async fn test_fetch_existing_tag_not_clobbered_without_force() {
+    let fixture = setup_fetch_fixture_with_tags().await;
+
+    // First fetch imports the annotated tag at its original target.
+    let first = run_libra_command(&["fetch", "origin", "--tags"], &fixture.repo_dir);
+    assert_cli_success(&first, "fetch origin --tags (first)");
+
+    // Move the annotated tag on the remote to a brand-new commit.
+    fs::write(fixture.work_dir.join("CHANGE.md"), "second").expect("failed to write change");
+    git_in(&fixture.work_dir, &["add", "CHANGE.md"]);
+    git_in(&fixture.work_dir, &["commit", "-m", "second commit"]);
+    git_in(
+        &fixture.work_dir,
+        &["tag", "-f", "-a", "annotated-tag", "-m", "moved"],
+    );
+    let moved_target = git_out(&fixture.work_dir, &["rev-parse", "refs/tags/annotated-tag"]);
+    assert_ne!(
+        moved_target, fixture.annotated_target,
+        "the remote tag should have moved to a new object"
+    );
+    git_in(
+        &fixture.work_dir,
+        &["push", "-f", "origin", "refs/tags/annotated-tag"],
+    );
+
+    // Second fetch must leave the existing local tag untouched.
+    let second = run_libra_command(&["fetch", "origin", "--tags"], &fixture.repo_dir);
+    assert_cli_success(&second, "fetch origin --tags (second)");
+
+    let show = run_libra_command(&["show-ref", "--tags"], &fixture.repo_dir);
+    let refs = String::from_utf8_lossy(&show.stdout);
+    let annotated = refs
+        .lines()
+        .find(|line| line.contains("refs/tags/annotated-tag"))
+        .unwrap_or_else(|| panic!("annotated tag missing after second fetch: {refs}"));
+    assert!(
+        annotated.contains(&fixture.annotated_target),
+        "existing tag must be preserved, not clobbered: {annotated}"
+    );
+    assert!(
+        !annotated.contains(&moved_target),
+        "existing tag must not move to the remote's new target: {annotated}"
+    );
+}
+
+/// `--force` overwrites an existing local tag when the remote moved it (tags
+/// are immutable only without `--force`).
+#[tokio::test]
+#[serial]
+async fn test_fetch_force_clobbers_existing_tag() {
+    let fixture = setup_fetch_fixture_with_tags().await;
+
+    // First fetch imports the annotated tag at its original target.
+    let first = run_libra_command(&["fetch", "origin", "--tags"], &fixture.repo_dir);
+    assert_cli_success(&first, "fetch origin --tags (first)");
+
+    // Move the annotated tag on the remote to a brand-new commit.
+    fs::write(fixture.work_dir.join("CHANGE.md"), "second").expect("failed to write change");
+    git_in(&fixture.work_dir, &["add", "CHANGE.md"]);
+    git_in(&fixture.work_dir, &["commit", "-m", "second commit"]);
+    git_in(
+        &fixture.work_dir,
+        &["tag", "-f", "-a", "annotated-tag", "-m", "moved"],
+    );
+    let moved_target = git_out(&fixture.work_dir, &["rev-parse", "refs/tags/annotated-tag"]);
+    assert_ne!(
+        moved_target, fixture.annotated_target,
+        "the remote tag should have moved to a new object"
+    );
+    git_in(
+        &fixture.work_dir,
+        &["push", "-f", "origin", "refs/tags/annotated-tag"],
+    );
+
+    // With --force, the second fetch clobbers the existing local tag.
+    let second = run_libra_command(&["fetch", "origin", "--tags", "--force"], &fixture.repo_dir);
+    assert_cli_success(&second, "fetch origin --tags --force");
+
+    let show = run_libra_command(&["show-ref", "--tags"], &fixture.repo_dir);
+    let refs = String::from_utf8_lossy(&show.stdout);
+    let annotated = refs
+        .lines()
+        .find(|line| line.contains("refs/tags/annotated-tag"))
+        .unwrap_or_else(|| panic!("annotated tag missing after forced fetch: {refs}"));
+    assert!(
+        annotated.contains(&moved_target),
+        "--force should clobber the tag to the remote's new target: {annotated}"
+    );
+    assert!(
+        !annotated.contains(&fixture.annotated_target),
+        "the old tag target should be replaced by --force: {annotated}"
+    );
+}
+
+/// `--update-shallow` is accepted and a normal (non-shallow) fetch still
+/// succeeds, updating the remote-tracking ref without creating a shallow file.
+#[tokio::test]
+#[serial]
+async fn test_fetch_update_shallow_accepts_flag() {
+    let (_temp_root, repo_dir, current_branch, pushed_commit) =
+        setup_local_fetch_cli_fixture().await;
+
+    let output = run_libra_command(
+        &["--json", "fetch", "origin", "--update-shallow"],
+        &repo_dir,
+    );
+    assert_cli_success(&output, "fetch origin --update-shallow");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["remotes"][0]["refs_updated"][0]["remote_ref"],
+        format!("refs/remotes/origin/{current_branch}")
+    );
+    assert_eq!(
+        json["data"]["remotes"][0]["refs_updated"][0]["new_oid"],
+        pushed_commit
+    );
+    assert!(
+        !repo_dir.join(".libra/shallow").exists(),
+        "fetching a non-shallow remote must not create a shallow boundary file"
+    );
+}
+
+/// `--refmap` overrides where fetched branches are stored under
+/// `refs/remotes/<remote>/`.
+#[tokio::test]
+#[serial]
+async fn test_fetch_refmap_maps_to_custom_tracking_ref() {
+    let (_temp_root, repo_dir, current_branch, pushed_commit) =
+        setup_local_fetch_cli_fixture().await;
+
+    let output = run_libra_command(
+        &[
+            "--json",
+            "fetch",
+            "origin",
+            "--refmap",
+            "refs/heads/*:refs/remotes/origin/mirror/*",
+        ],
+        &repo_dir,
+    );
+    assert_cli_success(&output, "fetch origin --refmap");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["remotes"][0]["refs_updated"][0]["remote_ref"],
+        format!("refs/remotes/origin/mirror/{current_branch}")
+    );
+    assert_eq!(
+        json["data"]["remotes"][0]["refs_updated"][0]["new_oid"],
+        pushed_commit
+    );
+
+    let show = run_libra_command(&["show-ref"], &repo_dir);
+    let refs = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        refs.contains(&format!("refs/remotes/origin/mirror/{current_branch}")),
+        "custom --refmap tracking ref should be stored: {refs}"
+    );
+}
+
+/// A `--refmap` entry over the 256-byte cap is rejected with exit 129.
+#[tokio::test]
+#[serial]
+async fn test_fetch_refmap_over_256_bytes_rejected() {
+    let (_temp_root, repo_dir, _branch, _commit) = setup_local_fetch_cli_fixture().await;
+
+    let long = format!("refs/heads/*:refs/remotes/origin/{}", "a".repeat(300));
+    let output = run_libra_command(&["fetch", "origin", "--refmap", &long], &repo_dir);
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "an over-long --refmap entry must exit 129: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A `--refmap` destination outside `refs/remotes/<remote>/` is rejected (129).
+#[tokio::test]
+#[serial]
+async fn test_fetch_refmap_dst_outside_remote_rejected() {
+    let (_temp_root, repo_dir, _branch, _commit) = setup_local_fetch_cli_fixture().await;
+
+    let output = run_libra_command(
+        &["fetch", "origin", "--refmap", "refs/heads/*:refs/heads/*"],
+        &repo_dir,
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "a --refmap destination outside refs/remotes/<remote>/ must exit 129: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `--atomic` is accepted and a normal fetch still succeeds, updating the
+/// remote-tracking ref (per-remote ref updates are already transactional).
+#[tokio::test]
+#[serial]
+async fn test_fetch_atomic_accepts_flag() {
+    let (_temp_root, repo_dir, current_branch, pushed_commit) =
+        setup_local_fetch_cli_fixture().await;
+
+    let output = run_libra_command(&["--json", "fetch", "origin", "--atomic"], &repo_dir);
+    assert_cli_success(&output, "fetch origin --atomic");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["remotes"][0]["refs_updated"][0]["remote_ref"],
+        format!("refs/remotes/origin/{current_branch}")
+    );
+    assert_eq!(
+        json["data"]["remotes"][0]["refs_updated"][0]["new_oid"],
+        pushed_commit
     );
 }

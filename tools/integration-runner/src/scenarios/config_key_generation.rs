@@ -38,6 +38,14 @@ pub(crate) fn scenario_config_key_generation(ctx: &mut ScenarioCtx<'_>) -> Resul
     assert_stdout_contains(&gpg_pub, "BEGIN PGP PUBLIC KEY BLOCK")?;
     let signing = ctx.command(&["config", "get", "vault.signing"], repo.clone(), true)?;
     assert_stdout_contains(&signing, "true")?;
+    assert_json_ok(
+        &ctx.command(
+            &["--json", "config", "get", "vault.signing"],
+            repo.clone(),
+            true,
+        )?,
+        "config",
+    )?;
     let duplicate_signing = ctx.command(
         &[
             "config",

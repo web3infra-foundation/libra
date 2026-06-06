@@ -34,6 +34,12 @@ pub(crate) fn scenario_clean_rm_mv_lfs_basic(ctx: &mut ScenarioCtx<'_>) -> Resul
     let lfs = ctx.command(&["lfs", "ls-files"], repo.clone(), true)?;
     assert_not_contains(&lfs, "PRIVATE KEY")?;
     ctx.command(&["lfs", "untrack", "*.bin"], repo.clone(), true)?;
+    assert_json_ok(
+        &ctx.command(&["--json", "status"], repo.clone(), true)?,
+        "status",
+    )?;
+    let bad_rm = ctx.command(&["rm", "nonexistent.txt"], repo.clone(), false)?;
+    assert_lbr_or_text(&bad_rm, "pathspec")?;
     ctx.command(&["fsck", "--connectivity-only"], repo, true)?;
     Ok(())
 }

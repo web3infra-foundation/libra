@@ -1,6 +1,6 @@
 //! Implements `ls-remote` to list refs advertised by a remote repository.
 
-use std::{io::Write, path::Path};
+use std::{collections::BTreeMap, io::Write, path::Path};
 
 use clap::Parser;
 use git_internal::errors::GitError;
@@ -27,6 +27,10 @@ EXAMPLES:
     libra ls-remote origin                          List all refs on a configured remote
     libra ls-remote https://example.com/repo.git    List all refs on a remote URL (no remote setup)
     libra ls-remote --heads origin main             List only branch heads matching `main`
+    libra ls-remote --get-url origin                Print the resolved remote URL (offline, no network)
+    libra ls-remote --symref origin                 Show what HEAD points to (ref: refs/heads/main)
+    libra ls-remote --sort=version:refname --tags origin   Sort tags by version
+    libra ls-remote --exit-code --heads origin topic       Exit 2 when no branch matches `topic`
     libra --json ls-remote --tags origin            Structured JSON output for agents (tags only)";
 
 #[derive(Parser, Debug)]
@@ -43,6 +47,26 @@ pub struct LsRemoteArgs {
     /// Do not show HEAD or peeled tag refs (refs ending in ^{})
     #[clap(long)]
     pub refs: bool,
+
+    /// Show the underlying ref a symbolic ref points to (e.g. `ref: refs/heads/main\tHEAD`)
+    #[clap(long)]
+    pub symref: bool,
+
+    /// Exit with status 2 when no matching refs are found (status 0 otherwise)
+    #[clap(long = "exit-code")]
+    pub exit_code: bool,
+
+    /// Print only the resolved remote URL and exit, without contacting the remote
+    #[clap(long = "get-url")]
+    pub get_url: bool,
+
+    /// Sort refs by key: `refname`, `-refname`, `version:refname` / `v:refname` (prefix `-` to reverse)
+    #[clap(long, value_name = "KEY")]
+    pub sort: Option<String>,
+
+    /// Transmit the given option to the server (accepted for compatibility; not yet forwarded)
+    #[clap(short = 'o', long = "server-option", value_name = "OPTION")]
+    pub server_option: Vec<String>,
 
     /// Remote name, URL, or local repository path
     pub repository: String,
@@ -66,6 +90,26 @@ struct LsRemoteOutput {
     refs_only: bool,
     patterns: Vec<String>,
     entries: Vec<LsRemoteEntry>,
+    /// Symbolic refs advertised by the remote (`--symref`); `HEAD` → `refs/heads/main`.
+    /// Omitted from JSON when empty so existing consumers are unaffected.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    symrefs: BTreeMap<String, String>,
+}
+
+/// Minimal `--get-url` payload (the JSON `data` carries only the resolved URL).
+#[derive(Debug, Clone, Serialize)]
+struct LsRemoteUrlOutput {
+    url: String,
+}
+
+/// Supported `--sort` keys (a subset of git's `for-each-ref` keys — ls-remote
+/// only has hash + refname, so object-metadata keys are unsupported).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortKey {
+    RefName,
+    RefNameDesc,
+    Version,
+    VersionDesc,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -78,6 +122,11 @@ enum LsRemoteError {
     InvalidPattern { pattern: String, reason: String },
     #[error("failed to discover references from '{remote}': {source}")]
     Discovery { remote: String, source: GitError },
+    #[error("invalid sort key '{key}'")]
+    InvalidSortKey { key: String },
+    /// `--exit-code` with no matching refs: a status-2 signal, not an error.
+    #[error("no matching refs")]
+    NoMatchingRefs,
 }
 
 impl From<LsRemoteError> for CliError {
@@ -103,11 +152,34 @@ impl From<LsRemoteError> for CliError {
                 _ => CliError::fatal(error.to_string())
                     .with_stable_code(StableErrorCode::NetworkProtocol),
             },
+            LsRemoteError::InvalidSortKey { .. } => CliError::command_usage(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("ls-remote only supports the refname / version:refname sort keys"),
+            // `--exit-code` with no matches is a Git-specific status-2 signal:
+            // stdout/stderr stay silent (see `git ls-remote --exit-code`).
+            LsRemoteError::NoMatchingRefs => CliError::silent_exit(2),
         }
     }
 }
 
 pub async fn execute_safe(args: LsRemoteArgs, output: &OutputConfig) -> CliResult<()> {
+    // `--get-url` is a purely offline lookup: resolve the URL via config/spec
+    // and print it without ever constructing a client or contacting the remote.
+    if args.get_url {
+        let (_, remote_url, _) = resolve_remote(&args.repository)
+            .await
+            .map_err(CliError::from)?;
+        let url = redact_url_credentials(&remote_url);
+        if output.is_json() {
+            return emit_json_data("ls-remote", &LsRemoteUrlOutput { url }, output);
+        }
+        if output.quiet {
+            return Ok(());
+        }
+        println!("{url}");
+        return Ok(());
+    }
+
     let data = run_ls_remote(args).await.map_err(CliError::from)?;
     render_ls_remote_output(&data, output)
 }
@@ -129,7 +201,7 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
             source: sanitize_discovery_error(source, &remote_url),
         })?;
     let patterns = compile_patterns(&args.patterns)?;
-    let entries = discovery
+    let mut entries: Vec<LsRemoteEntry> = discovery
         .refs
         .iter()
         .filter(|reference| include_reference(reference, &args, &patterns))
@@ -139,6 +211,28 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
         })
         .collect();
 
+    if let Some(key) = &args.sort {
+        let sort_key = parse_sort_key(key)?;
+        sort_entries(&mut entries, sort_key);
+    }
+
+    // Symref advertisements (`--symref`): a symref line is printed when its
+    // *name* (e.g. `HEAD`) passes the same `--heads`/`--tags`/pattern filter.
+    let symrefs = if args.symref {
+        parse_symrefs(&discovery.capabilities)
+            .into_iter()
+            .filter(|(name, _)| symref_name_included(name, &args, &patterns))
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+
+    // `--exit-code`: a successful handshake with no matching refs is a status-2
+    // signal. Symref-only matches still count as a match (git behavior).
+    if args.exit_code && entries.is_empty() && symrefs.is_empty() {
+        return Err(LsRemoteError::NoMatchingRefs);
+    }
+
     Ok(LsRemoteOutput {
         remote: visible_remote,
         url: visible_remote_url(&remote_url),
@@ -147,6 +241,7 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
         refs_only: args.refs,
         patterns: args.patterns,
         entries,
+        symrefs,
     })
 }
 
@@ -329,6 +424,12 @@ fn render_ls_remote_output(data: &LsRemoteOutput, output: &OutputConfig) -> CliR
     } else {
         let stdout = std::io::stdout();
         let mut writer = stdout.lock();
+        // Symref lines (`ref: <target>\t<name>`) print before the SHA rows.
+        for (name, target) in &data.symrefs {
+            writeln!(writer, "ref: {target}\t{name}").map_err(|error| {
+                CliError::io(format!("failed to write ls-remote output: {error}"))
+            })?;
+        }
         for entry in &data.entries {
             writeln!(writer, "{}\t{}", entry.hash, entry.refname).map_err(|error| {
                 CliError::io(format!("failed to write ls-remote output: {error}"))
@@ -338,18 +439,116 @@ fn render_ls_remote_output(data: &LsRemoteOutput, output: &OutputConfig) -> CliR
     }
 }
 
+/// Extracts `symref=<name>:<target>` advertisements from the discovered protocol
+/// capabilities. Each symref is already a separate space-split capability token;
+/// malformed entries (no `:`) are logged and skipped. A `BTreeMap` gives a
+/// deterministic order for output and tests.
+fn parse_symrefs(capabilities: &[String]) -> BTreeMap<String, String> {
+    let mut symrefs = BTreeMap::new();
+    for cap in capabilities {
+        let Some(spec) = cap.strip_prefix("symref=") else {
+            continue;
+        };
+        match spec.split_once(':') {
+            Some((name, target)) if !name.is_empty() && !target.is_empty() => {
+                symrefs.insert(name.to_string(), target.to_string());
+            }
+            _ => tracing::debug!(capability = %cap, "skipping malformed symref capability"),
+        }
+    }
+    symrefs
+}
+
+/// Whether a symref *name* (e.g. `HEAD`) passes the active `--heads`/`--tags`/
+/// pattern filters, deciding if its `ref:` line is printed (git semantics).
+fn symref_name_included(name: &str, args: &LsRemoteArgs, patterns: &[CompiledPattern]) -> bool {
+    let probe = DiscRef {
+        _hash: String::new(),
+        _ref: name.to_string(),
+    };
+    include_reference(&probe, args, patterns)
+}
+
+/// Parses a `--sort` key from the supported whitelist; anything else (including
+/// git keys ls-remote cannot honor, like `objectname`) is rejected with 129.
+fn parse_sort_key(key: &str) -> Result<SortKey, LsRemoteError> {
+    match key {
+        "refname" => Ok(SortKey::RefName),
+        "-refname" => Ok(SortKey::RefNameDesc),
+        "version:refname" | "v:refname" => Ok(SortKey::Version),
+        "-version:refname" | "-v:refname" => Ok(SortKey::VersionDesc),
+        other => Err(LsRemoteError::InvalidSortKey {
+            key: other.to_string(),
+        }),
+    }
+}
+
+/// Splits a refname into numeric and non-numeric segments for natural version
+/// ordering (digit runs compare numerically; everything else lexically).
+fn version_segments(refname: &str) -> Vec<(bool, String)> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut current_is_digit = false;
+    for ch in refname.chars() {
+        let is_digit = ch.is_ascii_digit();
+        if !current.is_empty() && is_digit != current_is_digit {
+            segments.push((current_is_digit, std::mem::take(&mut current)));
+        }
+        current_is_digit = is_digit;
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        segments.push((current_is_digit, current));
+    }
+    segments
+}
+
+fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let sa = version_segments(a);
+    let sb = version_segments(b);
+    for (seg_a, seg_b) in sa.iter().zip(sb.iter()) {
+        let ord = match (seg_a.0, seg_b.0) {
+            // Two numeric runs compare by value (without overflow via u128;
+            // fall back to string order for absurdly long digit runs).
+            (true, true) => match (seg_a.1.parse::<u128>(), seg_b.1.parse::<u128>()) {
+                (Ok(na), Ok(nb)) => na.cmp(&nb),
+                _ => seg_a.1.cmp(&seg_b.1),
+            },
+            (false, false) => seg_a.1.cmp(&seg_b.1),
+            // Numeric segments sort before alphabetic ones (e.g. `v1` < `vbeta`).
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    sa.len().cmp(&sb.len()).then_with(|| a.cmp(b))
+}
+
+fn sort_entries(entries: &mut [LsRemoteEntry], key: SortKey) {
+    match key {
+        SortKey::RefName => entries.sort_by(|a, b| a.refname.cmp(&b.refname)),
+        SortKey::RefNameDesc => entries.sort_by(|a, b| b.refname.cmp(&a.refname)),
+        SortKey::Version => entries.sort_by(|a, b| version_cmp(&a.refname, &b.refname)),
+        SortKey::VersionDesc => entries.sort_by(|a, b| version_cmp(&b.refname, &a.refname)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
+    use clap::Parser as _;
     use git_internal::errors::GitError;
     use serial_test::serial;
     use tempfile::tempdir;
 
     use super::{
-        CompiledPattern, LsRemoteArgs, LsRemoteError, include_reference, resolve_remote,
-        sanitize_discovery_error, sanitize_remote_error_reason, visible_remote_display,
-        visible_remote_url,
+        CompiledPattern, LsRemoteArgs, LsRemoteEntry, LsRemoteError, SortKey, include_reference,
+        parse_sort_key, parse_symrefs, resolve_remote, sanitize_discovery_error,
+        sanitize_remote_error_reason, sort_entries, visible_remote_display, visible_remote_url,
     };
     use crate::{
         internal::protocol::DiscRef,
@@ -418,6 +617,11 @@ mod tests {
             heads: false,
             tags: false,
             refs: true,
+            symref: false,
+            exit_code: false,
+            get_url: false,
+            sort: None,
+            server_option: vec![],
             repository: "origin".to_string(),
             patterns: vec![],
         };
@@ -436,6 +640,11 @@ mod tests {
             heads: true,
             tags: true,
             refs: false,
+            symref: false,
+            exit_code: false,
+            get_url: false,
+            sort: None,
+            server_option: vec![],
             repository: "origin".to_string(),
             patterns: vec![],
         };
@@ -555,5 +764,119 @@ mod tests {
         assert!(!sanitized.contains("user"));
         assert!(!sanitized.contains("secret"));
         assert!(sanitized.contains("https://example.invalid/repo.git"));
+    }
+
+    // ── symref / sort flag parsing + pure helpers ──
+
+    fn entry(refname: &str) -> LsRemoteEntry {
+        LsRemoteEntry {
+            hash: "1111111111111111111111111111111111111111".to_string(),
+            refname: refname.to_string(),
+        }
+    }
+
+    #[test]
+    fn parse_symrefs_single() {
+        let caps = vec!["symref=HEAD:refs/heads/main".to_string()];
+        let map = parse_symrefs(&caps);
+        assert_eq!(map.get("HEAD").map(String::as_str), Some("refs/heads/main"));
+    }
+
+    #[test]
+    fn parse_symrefs_multiple() {
+        let caps = vec![
+            "symref=HEAD:refs/heads/main".to_string(),
+            "symref=refs/heads/alias:refs/heads/real".to_string(),
+        ];
+        let map = parse_symrefs(&caps);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map["HEAD"], "refs/heads/main");
+        assert_eq!(map["refs/heads/alias"], "refs/heads/real");
+    }
+
+    #[test]
+    fn parse_symrefs_skips_malformed() {
+        // No colon → malformed, skipped without panic.
+        assert!(parse_symrefs(&["symref=HEAD".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn parse_symrefs_ignores_non_symref_caps() {
+        let caps = vec![
+            "object-format=sha1".to_string(),
+            "agent=git/2.0".to_string(),
+        ];
+        assert!(parse_symrefs(&caps).is_empty());
+    }
+
+    #[test]
+    fn parse_symrefs_empty_for_local() {
+        assert!(parse_symrefs(&[]).is_empty());
+    }
+
+    #[test]
+    fn parse_sort_key_whitelist() {
+        assert_eq!(parse_sort_key("refname").unwrap(), SortKey::RefName);
+        assert_eq!(parse_sort_key("-refname").unwrap(), SortKey::RefNameDesc);
+        assert_eq!(parse_sort_key("version:refname").unwrap(), SortKey::Version);
+        assert_eq!(parse_sort_key("v:refname").unwrap(), SortKey::Version);
+        assert_eq!(parse_sort_key("-v:refname").unwrap(), SortKey::VersionDesc);
+        assert!(matches!(
+            parse_sort_key("objectname"),
+            Err(LsRemoteError::InvalidSortKey { .. })
+        ));
+    }
+
+    #[test]
+    fn sort_entries_refname() {
+        let mut entries = vec![
+            entry("refs/tags/b"),
+            entry("refs/tags/a"),
+            entry("refs/tags/c"),
+        ];
+        sort_entries(&mut entries, SortKey::RefName);
+        let names: Vec<_> = entries.iter().map(|e| e.refname.as_str()).collect();
+        assert_eq!(names, ["refs/tags/a", "refs/tags/b", "refs/tags/c"]);
+
+        sort_entries(&mut entries, SortKey::RefNameDesc);
+        let names: Vec<_> = entries.iter().map(|e| e.refname.as_str()).collect();
+        assert_eq!(names, ["refs/tags/c", "refs/tags/b", "refs/tags/a"]);
+    }
+
+    #[test]
+    fn sort_entries_version_is_natural() {
+        let mut entries = vec![
+            entry("refs/tags/v1.10.0"),
+            entry("refs/tags/v1.2.0"),
+            entry("refs/tags/v1.9.0"),
+        ];
+        sort_entries(&mut entries, SortKey::Version);
+        let names: Vec<_> = entries.iter().map(|e| e.refname.as_str()).collect();
+        // 1.2 < 1.9 < 1.10 numerically (lexical order would wrongly put 1.10 first).
+        assert_eq!(
+            names,
+            ["refs/tags/v1.2.0", "refs/tags/v1.9.0", "refs/tags/v1.10.0"]
+        );
+    }
+
+    #[test]
+    fn ls_remote_new_flags_parse() {
+        let args = LsRemoteArgs::try_parse_from([
+            "ls-remote",
+            "--symref",
+            "--exit-code",
+            "--sort=refname",
+            "-o",
+            "opt1",
+            "--server-option",
+            "opt2",
+            "origin",
+        ])
+        .unwrap();
+        assert!(args.symref);
+        assert!(args.exit_code);
+        assert_eq!(args.sort.as_deref(), Some("refname"));
+        assert_eq!(args.server_option, vec!["opt1", "opt2"]);
+        assert_eq!(args.repository, "origin");
     }
 }

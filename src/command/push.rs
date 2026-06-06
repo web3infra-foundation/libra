@@ -81,6 +81,9 @@ EXAMPLES:
                                         Preview a mirror sync without writing
     libra push -u origin feature-x      Push and set upstream tracking
     libra push --force origin main      Force push (overwrites remote history)
+    libra push --force-with-lease origin main
+                                        Force push only if the remote still matches your tracking ref
+    libra push --porcelain origin main  Machine-readable per-ref status lines
     libra push --dry-run                Preview what would be pushed without sending
     libra push --json                   Structured JSON output for agents";
 
@@ -100,6 +103,28 @@ pub struct PushArgs {
     /// force push to remote repository
     #[clap(long, short = 'f')]
     pub force: bool,
+
+    /// Force the update only if the remote ref still matches the expected (lease) OID.
+    /// Forms: bare `--force-with-lease`, `=<refname>`, or `=<refname>:<expect>`
+    #[clap(long, num_args = 0..=1, require_equals = true, conflicts_with = "force")]
+    pub force_with_lease: Option<Option<String>>,
+
+    /// Accepted for `git push` compatibility; currently a no-op (the lease check
+    /// uses the remote-tracking ref OID only)
+    #[clap(long)]
+    pub force_if_includes: bool,
+
+    /// Accepted for compatibility; thin-pack encoding is not implemented (no-op)
+    #[clap(long, conflicts_with = "no_thin")]
+    pub thin: bool,
+
+    /// Accepted for compatibility; thin-pack encoding is not implemented (no-op)
+    #[clap(long = "no-thin", conflicts_with = "thin")]
+    pub no_thin: bool,
+
+    /// Machine-readable single-line-per-ref output; conflicts with `--json`/`--machine`
+    #[clap(long)]
+    pub porcelain: bool,
 
     /// Do everything except actually send the updates
     #[clap(long, short = 'n')]
@@ -123,6 +148,11 @@ impl PushArgs {
             refspecs,
             set_upstream: false,
             force: false,
+            force_with_lease: None,
+            force_if_includes: false,
+            thin: false,
+            no_thin: false,
+            porcelain: false,
             dry_run: false,
             tags: false,
             mirror: false,
@@ -445,8 +475,21 @@ pub async fn execute(args: PushArgs) {
 pub async fn execute_safe(args: PushArgs, output: &OutputConfig) -> CliResult<()> {
     validate_push_args(&args).map_err(CliError::from)?;
 
+    // `--porcelain` is mutually exclusive with any JSON mode. The global
+    // `--json`/`--machine` flags live on `Cli`, not `PushArgs`, so clap cannot
+    // express this — enforce it here (`is_json()` covers both, since `--machine`
+    // implies `--json=ndjson`).
+    if args.porcelain && output.is_json() {
+        return Err(CliError::command_usage(
+            "--porcelain cannot be combined with --json or --machine",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+        .with_hint("choose one machine-readable format: --porcelain or --json/--machine"));
+    }
+
+    let porcelain = args.porcelain;
     let result = run_push(args, output).await.map_err(CliError::from)?;
-    render_push_output(&result, output)?;
+    render_push_output(&result, output, porcelain)?;
     if !result.dry_run && !result.up_to_date && !result.updates.is_empty() {
         dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_PUSH).await;
     }
@@ -594,6 +637,10 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     let remote_refs = remote_ref_map(&discovery.refs);
 
     let mut warnings = Vec::new();
+    // `--force-with-lease` permits a non-fast-forward update into the plan; the
+    // lease check below is the real gate (so the plain non-ff rejection in
+    // `add_update_ref_plan` does not pre-empt it).
+    let effective_force = args.force || args.force_with_lease.is_some();
     let mut plans = if args.mirror {
         build_mirror_update_plan(&remote_refs, &mut warnings).await?
     } else {
@@ -611,7 +658,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
                 resolve_local_ref(&current_branch).await?,
                 tracked_ref,
                 &remote_refs,
-                args.force,
+                effective_force,
                 &mut warnings,
                 &mut seen_remote_refs,
                 &mut plans,
@@ -627,7 +674,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
                         local_ref,
                         remote_ref,
                         &remote_refs,
-                        args.force,
+                        effective_force,
                         &mut warnings,
                         &mut seen_remote_refs,
                         &mut plans,
@@ -648,7 +695,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         if args.tags {
             add_all_tag_update_plans(
                 &remote_refs,
-                args.force,
+                effective_force,
                 &mut warnings,
                 &mut seen_remote_refs,
                 &mut plans,
@@ -686,6 +733,17 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             upstream_set,
             warnings,
         });
+    }
+
+    // `--force-with-lease`: validate the lease against the server's advertised
+    // OIDs (from discovery) before collecting objects, encoding a pack, uploading
+    // LFS, or sending anything. A failed lease aborts with no remote/local change.
+    if let Some(lease) = parse_force_with_lease(&args.force_with_lease) {
+        if args.force_if_includes {
+            warnings.push(FORCE_IF_INCLUDES_NOOP_WARNING.to_string());
+        }
+        let tracking = collect_lease_tracking_oids(&repository, &plans).await;
+        validate_force_with_lease(&lease, &plans, &tracking)?;
     }
 
     let obj_result = collect_push_objects(&plans).await?;
@@ -749,15 +807,14 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             detail: e.to_string(),
         })?;
         let lfs_client = LFSClient::from_url(&url);
-        lfs_files_uploaded =
-            lfs_client
-                .push_objects(&objs)
-                .await
-                .map_err(|error| PushError::LfsUploadFailed {
-                    path: error.path.unwrap_or_else(|| "(unknown)".to_string()),
-                    oid: error.oid.unwrap_or_else(|| "(unknown)".to_string()),
-                    detail: error.detail,
-                })?;
+        lfs_files_uploaded = lfs_client
+            .push_objects(&objs, false)
+            .await
+            .map_err(|error| PushError::LfsUploadFailed {
+                path: error.path.unwrap_or_else(|| "(unknown)".to_string()),
+                oid: error.oid.unwrap_or_else(|| "(unknown)".to_string()),
+                detail: error.detail,
+            })?;
     }
 
     let mut pack_data = Vec::new();
@@ -1061,6 +1118,118 @@ async fn resolve_tag_ref(short_name: &str, original: &str) -> Result<ResolvedLoc
         oid,
         kind: LocalRefKind::Tag,
     })
+}
+
+/// One-time warning emitted when `--force-if-includes` is paired with
+/// `--force-with-lease` (the flag is accepted but not yet implemented).
+const FORCE_IF_INCLUDES_NOOP_WARNING: &str =
+    "--force-if-includes is accepted but currently a no-op; lease check uses tracking-ref OID only";
+
+/// Parsed `--force-with-lease[=<refname>[:<expect>]]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ForceWithLease {
+    /// Bare `--force-with-lease`: every pushed ref must still match its tracking ref.
+    All,
+    /// `--force-with-lease=<refname>`: only this ref must match its tracking ref.
+    Ref(String),
+    /// `--force-with-lease=<refname>:<expect>`: this ref must match an explicit OID.
+    Exact { refname: String, expect: String },
+}
+
+/// Decode the raw clap value into a [`ForceWithLease`] (None when the flag is absent).
+fn parse_force_with_lease(raw: &Option<Option<String>>) -> Option<ForceWithLease> {
+    match raw {
+        None => None,
+        Some(None) => Some(ForceWithLease::All),
+        Some(Some(spec)) => match spec.split_once(':') {
+            Some((refname, expect)) => Some(ForceWithLease::Exact {
+                refname: refname.to_string(),
+                expect: expect.to_string(),
+            }),
+            None => Some(ForceWithLease::Ref(spec.clone())),
+        },
+    }
+}
+
+/// Whether a full remote ref (`refs/heads/main`) is named by a lease `<refname>`
+/// (which may be short `main` or fully qualified `refs/heads/main`).
+fn lease_ref_matches(remote_ref: &str, name: &str) -> bool {
+    remote_ref == name
+        || remote_ref.strip_prefix("refs/heads/") == Some(name)
+        || remote_ref.strip_prefix("refs/tags/") == Some(name)
+}
+
+/// Lease OID equality, tolerant of an abbreviated `<expect>` value (git allows a
+/// short hash). `None` means the ref is absent on that side.
+fn lease_oid_matches(expected: Option<&str>, server: Option<&str>) -> bool {
+    match (expected, server) {
+        (None, None) => true,
+        (Some(expected), Some(server)) => {
+            server == expected || server.starts_with(expected) || expected.starts_with(server)
+        }
+        _ => false,
+    }
+}
+
+/// Validate the lease against the build plans: the server's currently-advertised
+/// OID (`plan.update.old_oid`) must equal the expected OID (the local tracking
+/// ref OID for `All`/`Ref`, or the explicit OID for `Exact`). A mismatch means
+/// the remote moved since we last saw it — reject before sending any pack.
+///
+/// `tracking` maps each plan's remote ref to its local tracking OID (or `None`).
+fn validate_force_with_lease(
+    lease: &ForceWithLease,
+    plans: &[RefUpdatePlan],
+    tracking: &HashMap<String, Option<String>>,
+) -> Result<(), PushError> {
+    for plan in plans {
+        let remote_ref = &plan.update.remote_ref;
+        let expected: Option<String> = match lease {
+            ForceWithLease::All => tracking.get(remote_ref).cloned().flatten(),
+            ForceWithLease::Ref(name) => {
+                if !lease_ref_matches(remote_ref, name) {
+                    continue;
+                }
+                tracking.get(remote_ref).cloned().flatten()
+            }
+            ForceWithLease::Exact { refname, expect } => {
+                if !lease_ref_matches(remote_ref, refname) {
+                    continue;
+                }
+                Some(expect.clone())
+            }
+        };
+        if !lease_oid_matches(expected.as_deref(), plan.update.old_oid.as_deref()) {
+            return Err(PushError::NonFastForward {
+                local_ref: plan.update.local_ref.clone(),
+                remote_ref: remote_ref.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Read each plan's local remote-tracking ref OID (`refs/remotes/<remote>/<branch>`),
+/// used as the expected value for `--force-with-lease` forms ① and ②.
+async fn collect_lease_tracking_oids(
+    repository: &str,
+    plans: &[RefUpdatePlan],
+) -> HashMap<String, Option<String>> {
+    let mut map = HashMap::new();
+    for plan in plans {
+        let tracking_oid = if let Some(branch) = plan.update.remote_ref.strip_prefix("refs/heads/")
+        {
+            Branch::find_branch_result(branch, Some(repository))
+                .await
+                .ok()
+                .flatten()
+                .map(|b| b.commit.to_string())
+        } else {
+            None
+        };
+        map.insert(plan.update.remote_ref.clone(), tracking_oid);
+    }
+    map
 }
 
 fn add_update_ref_plan(
@@ -1447,9 +1616,17 @@ async fn update_remote_tracking_refs(
 // ---------------------------------------------------------------------------
 
 /// Render push output according to OutputConfig (human / JSON / machine).
-fn render_push_output(result: &PushOutput, output: &OutputConfig) -> CliResult<()> {
+fn render_push_output(
+    result: &PushOutput,
+    output: &OutputConfig,
+    porcelain: bool,
+) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("push", result, output);
+    }
+
+    if porcelain {
+        return render_push_porcelain(result);
     }
 
     if result.up_to_date {
@@ -1590,6 +1767,64 @@ fn render_push_output(result: &PushOutput, output: &OutputConfig) -> CliResult<(
     }
 
     Ok(())
+}
+
+/// Render `git push --porcelain`-style output: a `To <url>` header (credential
+/// redacted) followed by one tab-separated line per ref
+/// (`<flag>\t<from>:<to>\t<summary>`). On the success path every ref was
+/// accepted, so rejected (`!`) lines never appear here — failures are reported
+/// on stderr via the typed error path.
+fn render_push_porcelain(result: &PushOutput) -> CliResult<()> {
+    let stdout = std::io::stdout();
+    let mut w = stdout.lock();
+    let url = crate::command::fetch::redact_url_credentials(&result.url);
+    writeln!(w, "To {url}")
+        .map_err(|e| CliError::io(format!("failed to write push output: {e}")))?;
+
+    for update in &result.updates {
+        let (flag, summary) = porcelain_ref_fields(update);
+        let from = if update.kind == PushRefUpdateKind::Delete {
+            ""
+        } else {
+            update.local_ref.as_str()
+        };
+        writeln!(w, "{flag}\t{from}:{}\t{summary}", update.remote_ref)
+            .map_err(|e| CliError::io(format!("failed to write push output: {e}")))?;
+    }
+
+    if result.updates.is_empty() {
+        writeln!(w, "Done")
+            .map_err(|e| CliError::io(format!("failed to write push output: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Compute the porcelain `(flag, summary)` for one ref update. Flags follow
+/// `git push --porcelain`: ` ` ok, `+` forced, `-` deleted, `*` new ref,
+/// `=` up-to-date.
+fn porcelain_ref_fields(update: &PushRefUpdate) -> (char, String) {
+    if update.kind == PushRefUpdateKind::Delete {
+        return ('-', "[deleted]".to_string());
+    }
+    match &update.old_oid {
+        None => {
+            let label = if update.remote_ref.starts_with("refs/tags/") {
+                "[new tag]"
+            } else {
+                "[new branch]"
+            };
+            ('*', label.to_string())
+        }
+        Some(old_oid) => {
+            let old_short = &old_oid[..7.min(old_oid.len())];
+            let new_short = &update.new_oid[..7.min(update.new_oid.len())];
+            if update.forced {
+                ('+', format!("{old_short}...{new_short} (forced update)"))
+            } else {
+                (' ', format!("{old_short}..{new_short}"))
+            }
+        }
+    }
 }
 
 /// Classify a transport-layer I/O error into a typed `PushError`.
@@ -2087,6 +2322,159 @@ mod test {
         }
     }
 
+    /// A plan whose server-advertised OID (`update.old_oid`) is controllable, for
+    /// force-with-lease unit tests.
+    fn lease_plan(remote_ref: &str, server_oid: Option<&str>) -> RefUpdatePlan {
+        let placeholder = ObjectHash::from_str("3333333333333333333333333333333333333333")
+            .expect("placeholder oid should parse");
+        RefUpdatePlan {
+            update: PushRefUpdate {
+                kind: PushRefUpdateKind::Update,
+                local_ref: remote_ref.to_string(),
+                remote_ref: remote_ref.to_string(),
+                old_oid: server_oid.map(str::to_string),
+                new_oid: "4444444444444444444444444444444444444444".to_string(),
+                forced: true,
+            },
+            old_oid: placeholder,
+            new_oid: None,
+            local_kind: Some(LocalRefKind::Branch),
+        }
+    }
+
+    #[test]
+    fn force_with_lease_parses_bare_ref_and_exact() {
+        assert_eq!(parse_force_with_lease(&None), None);
+        assert_eq!(
+            parse_force_with_lease(&Some(None)),
+            Some(ForceWithLease::All)
+        );
+        assert_eq!(
+            parse_force_with_lease(&Some(Some("main".to_string()))),
+            Some(ForceWithLease::Ref("main".to_string()))
+        );
+        assert_eq!(
+            parse_force_with_lease(&Some(Some("main:a1b2c3d".to_string()))),
+            Some(ForceWithLease::Exact {
+                refname: "main".to_string(),
+                expect: "a1b2c3d".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn force_with_lease_conflicts_with_force() {
+        use clap::Parser as _;
+        assert!(
+            PushArgs::try_parse_from(["push", "--force", "--force-with-lease", "origin", "main"])
+                .is_err(),
+            "--force and --force-with-lease must conflict at the clap layer"
+        );
+    }
+
+    #[test]
+    fn force_with_lease_does_not_swallow_positionals() {
+        use clap::Parser as _;
+        let args = PushArgs::try_parse_from(["push", "--force-with-lease", "origin", "main"])
+            .expect("bare --force-with-lease origin main should parse");
+        assert!(!args.force);
+        assert_eq!(args.force_with_lease, Some(None));
+        assert_eq!(args.repository.as_deref(), Some("origin"));
+        assert_eq!(args.refspecs, vec!["main".to_string()]);
+
+        let exact = PushArgs::try_parse_from(["push", "--force-with-lease=main:abc", "origin"])
+            .expect("--force-with-lease=main:abc origin should parse");
+        assert_eq!(exact.force_with_lease, Some(Some("main:abc".to_string())));
+        assert_eq!(exact.repository.as_deref(), Some("origin"));
+    }
+
+    #[test]
+    fn force_with_lease_all_matches_and_rejects() {
+        let mut tracking = HashMap::new();
+        tracking.insert("refs/heads/main".to_string(), Some("aaaa".to_string()));
+
+        // server still at the OID we last tracked → ok
+        let ok = vec![lease_plan("refs/heads/main", Some("aaaa"))];
+        assert!(validate_force_with_lease(&ForceWithLease::All, &ok, &tracking).is_ok());
+
+        // server moved on → reject
+        let moved = vec![lease_plan("refs/heads/main", Some("bbbb"))];
+        assert!(matches!(
+            validate_force_with_lease(&ForceWithLease::All, &moved, &tracking),
+            Err(PushError::NonFastForward { .. })
+        ));
+    }
+
+    #[test]
+    fn force_with_lease_exact_uses_expect_oid() {
+        let full = "abcdef1234567890abcdef1234567890abcdef12";
+        let plans = vec![lease_plan("refs/heads/main", Some(full))];
+        let tracking = HashMap::new(); // ignored for Exact
+
+        let good = ForceWithLease::Exact {
+            refname: "main".to_string(),
+            expect: "abcdef1".to_string(), // abbreviated, matches by prefix
+        };
+        assert!(validate_force_with_lease(&good, &plans, &tracking).is_ok());
+
+        let bad = ForceWithLease::Exact {
+            refname: "main".to_string(),
+            expect: "9999999".to_string(),
+        };
+        assert!(validate_force_with_lease(&bad, &plans, &tracking).is_err());
+    }
+
+    #[test]
+    fn force_with_lease_ref_only_checks_named_ref() {
+        // `main` would mismatch but is not named; only `dev` is checked.
+        let plans = vec![
+            lease_plan("refs/heads/main", Some("bbbb")),
+            lease_plan("refs/heads/dev", Some("dddd")),
+        ];
+        let mut tracking = HashMap::new();
+        tracking.insert("refs/heads/main".to_string(), Some("aaaa".to_string()));
+        tracking.insert("refs/heads/dev".to_string(), Some("dddd".to_string()));
+        assert!(
+            validate_force_with_lease(&ForceWithLease::Ref("dev".to_string()), &plans, &tracking)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn porcelain_ref_fields_flags() {
+        let new_branch = PushRefUpdate {
+            kind: PushRefUpdateKind::Update,
+            local_ref: "refs/heads/main".to_string(),
+            remote_ref: "refs/heads/main".to_string(),
+            old_oid: None,
+            new_oid: "2222222222222222222222222222222222222222".to_string(),
+            forced: false,
+        };
+        assert_eq!(porcelain_ref_fields(&new_branch).0, '*');
+
+        let forced = PushRefUpdate {
+            old_oid: Some("1111111111111111111111111111111111111111".to_string()),
+            forced: true,
+            ..new_branch.clone()
+        };
+        let (flag, summary) = porcelain_ref_fields(&forced);
+        assert_eq!(flag, '+');
+        assert!(summary.contains("forced update"));
+
+        let fast_forward = PushRefUpdate {
+            old_oid: Some("1111111111111111111111111111111111111111".to_string()),
+            forced: false,
+            ..new_branch.clone()
+        };
+        assert_eq!(porcelain_ref_fields(&fast_forward).0, ' ');
+
+        let deleted = PushRefUpdate {
+            kind: PushRefUpdateKind::Delete,
+            ..new_branch
+        };
+        assert_eq!(porcelain_ref_fields(&deleted).0, '-');
+    }
+
     fn receive_pack_response(lines: &[&str]) -> Bytes {
         let mut bytes = BytesMut::new();
         for line in lines {
@@ -2505,6 +2893,11 @@ mod test {
             refspecs: vec!["main".to_string()],
             set_upstream: false,
             force: false,
+            force_with_lease: None,
+            force_if_includes: false,
+            thin: false,
+            no_thin: false,
+            porcelain: false,
             dry_run: false,
             tags: false,
             mirror: false,

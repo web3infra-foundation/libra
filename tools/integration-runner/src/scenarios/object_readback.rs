@@ -61,6 +61,10 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     ctx.command(&["fsck"], repo.clone(), true)?;
     ctx.command(&["fsck", "--connectivity-only"], repo.clone(), true)?;
     ctx.command(&["fsck", &head_id], repo.clone(), true)?;
+    assert_json_ok(
+        &ctx.command(&["--json", "show-ref", "--heads"], repo.clone(), true)?,
+        "show-ref",
+    )?;
     let missing = ctx.command(&["cat-file", "-t", "deadbeef"], repo.clone(), false)?;
     assert_lbr_or_text(&missing, "object not found")?;
     Ok(())

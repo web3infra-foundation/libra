@@ -934,6 +934,9 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
                 utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error(None))?;
             Ok(CommandPreflight::repo_without_schema_guard(storage))
         }
+        // `grep --no-index` searches the filesystem directly, so it neither needs
+        // nor opens a repository.
+        Commands::Grep(args) if args.no_index => Ok(CommandPreflight::none()),
         _ => {
             let storage =
                 utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error(None))?;

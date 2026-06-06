@@ -9,6 +9,10 @@ pub(crate) fn scenario_stash_bisect_worktree(ctx: &mut ScenarioCtx<'_>) -> Resul
         &ctx.command(&["stash", "list"], repo.clone(), true)?,
         "save work",
     )?;
+    assert_json_ok(
+        &ctx.command(&["--json", "stash", "list"], repo.clone(), true)?,
+        "stash",
+    )?;
     ctx.command(&["stash", "apply"], repo.clone(), true)?;
     ctx.command(&["add", "tracked.txt"], repo.clone(), true)?;
     ctx.command(
@@ -17,6 +21,8 @@ pub(crate) fn scenario_stash_bisect_worktree(ctx: &mut ScenarioCtx<'_>) -> Resul
         true,
     )?;
     ctx.command(&["stash", "clear", "--force"], repo.clone(), true)?;
+    let empty_pop = ctx.command(&["stash", "pop"], repo.clone(), false)?;
+    assert_lbr_or_text(&empty_pop, "stash")?;
 
     ctx.command(&["bisect", "start"], repo.clone(), true)?;
     ctx.command(&["bisect", "bad"], repo.clone(), true)?;
@@ -35,5 +41,6 @@ pub(crate) fn scenario_stash_bisect_worktree(ctx: &mut ScenarioCtx<'_>) -> Resul
         bail!("worktree remove unexpectedly deleted directory by default");
     }
     ctx.command(&["worktree", "prune"], repo.clone(), true)?;
+    ctx.command(&["fsck", "--connectivity-only"], repo.clone(), true)?;
     Ok(())
 }

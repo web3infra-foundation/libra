@@ -2,15 +2,16 @@
 
 use std::io::Write;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use git_internal::errors::GitError;
 use serde::Serialize;
 
 use super::{fetch, merge, rebase};
 use crate::{
     internal::{
-        config::{ConfigKv, RemoteConfig},
+        config::{ConfigKv, LocalIdentityTarget, RemoteConfig, read_cascaded_config_value},
         head::Head,
+        protocol::ShallowOptions,
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -18,12 +19,42 @@ use crate::{
     },
 };
 
+/// Value of `--rebase[=<when>]` / `pull.rebase`.
+///
+/// `merges` and `interactive` are accepted as *values* (so the CLI surface
+/// matches Git) but rejected at runtime — the rebase engine only does linear
+/// rebase. `False` forces the merge path, overriding a `pull.rebase=true`
+/// config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RebaseChoice {
+    #[value(name = "true")]
+    True,
+    #[value(name = "false")]
+    False,
+    #[value(name = "merges")]
+    Merges,
+    #[value(name = "interactive")]
+    Interactive,
+}
+
+/// The integration path chosen after resolving CLI flags and `pull.rebase`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RebaseDecision {
+    Rebase,
+    Merge,
+}
+
 const PULL_EXAMPLES: &str = "\
 EXAMPLES:
     libra pull                             Pull from tracking remote
     libra pull origin main                 Pull specific branch from origin
     libra pull --ff-only                   Refuse to create a merge commit
+    libra pull --no-ff                     Always create a merge commit
     libra pull --rebase                    Rebase the current branch onto the upstream
+    libra pull --squash                    Stage a squashed merge without committing
+    libra pull --no-commit                 Merge but stop before creating the commit
+    libra pull --autostash                 Stash a dirty tree, merge, then restore it
+    libra pull --depth 1                   Shallow-fetch then integrate
     libra pull --json                      Structured JSON output for agents
     libra pull --quiet                     Suppress progress output
 
@@ -31,7 +62,10 @@ NOTES:
     By default pull uses the same merge engine as `libra merge`, including
     clean three-way merges and merge-state conflicts. Use --ff-only to reject
     divergent histories instead of creating a merge commit. Use --rebase to
-    replay local-only commits onto the upstream tip instead.";
+    replay local-only commits onto the upstream tip instead. --squash /
+    --no-commit / --ff / --no-ff / --autostash are forwarded to the merge
+    engine and may not be combined with --rebase. --rebase=merges and
+    --rebase=interactive are not supported (only linear rebase).";
 
 /// Fetch from a remote and integrate changes into the current branch.
 // EXAMPLES are wired via `#[command(after_help = PULL_EXAMPLES)]` and render
@@ -47,13 +81,57 @@ pub struct PullArgs {
     #[clap(requires("repository"))]
     refspec: Option<String>,
 
-    /// Rebase the current branch onto the upstream after fetching instead of merging
-    #[clap(long, short = 'r')]
-    rebase: bool,
+    /// Rebase the current branch onto the upstream after fetching instead of merging.
+    /// Accepts `--rebase=true|false|merges|interactive` (merges/interactive are not yet supported)
+    #[clap(
+        long,
+        short = 'r',
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "WHEN"
+    )]
+    rebase: Option<RebaseChoice>,
 
     /// Refuse to merge unless the upstream can be fast-forwarded
-    #[clap(long = "ff-only", conflicts_with = "rebase")]
+    #[clap(long = "ff-only", conflicts_with_all = ["ff", "no_ff"])]
     ff_only: bool,
+
+    /// Allow a fast-forward merge (clears --no-ff; overrides `pull.ff=false`)
+    #[clap(long, conflicts_with_all = ["no_ff", "ff_only"])]
+    ff: bool,
+
+    /// Always create a merge commit even when fast-forward is possible
+    #[clap(long = "no-ff", conflicts_with_all = ["ff", "ff_only"])]
+    no_ff: bool,
+
+    /// Stage a squashed merge result without recording a merge commit (merge path only)
+    #[clap(long)]
+    squash: bool,
+
+    /// Override a configured squash default back off (no-op when not squashing)
+    #[clap(long = "no-squash", conflicts_with = "squash")]
+    no_squash: bool,
+
+    /// Merge but stop before creating the merge commit (merge path only)
+    #[clap(long = "no-commit", conflicts_with = "commit")]
+    no_commit: bool,
+
+    /// Create the merge commit (overrides `merge.commit=false`; merge path only)
+    #[clap(long, conflicts_with = "no_commit")]
+    commit: bool,
+
+    /// Stash a dirty working tree before integrating, then restore it (merge path only)
+    #[clap(long, conflicts_with = "no_autostash")]
+    autostash: bool,
+
+    /// Do not autostash even when `merge.autoStash=true` is configured
+    #[clap(long = "no-autostash", conflicts_with = "autostash")]
+    no_autostash: bool,
+
+    /// Limit the fetch to the given number of commits from each tip (shallow fetch)
+    #[clap(long)]
+    depth: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -129,6 +207,15 @@ pub(crate) enum PullError {
     #[error("remote '{0}' not found")]
     RemoteNotFound(String),
 
+    #[error("--rebase={value} is not supported (only linear rebase is available)")]
+    UnsupportedRebaseStrategy { value: String },
+
+    #[error("{a} cannot be used with {b}")]
+    IncompatibleFlags { a: String, b: String },
+
+    #[error("invalid value for {key}: '{value}'")]
+    InvalidConfigValue { key: String, value: String },
+
     #[error("pull failed during fetch phase: {0}")]
     Fetch(#[source] fetch::FetchError),
 
@@ -159,6 +246,23 @@ impl From<PullError> for CliError {
                     .with_stable_code(StableErrorCode::CliInvalidTarget)
                     .with_hint("use 'libra remote -v' to see configured remotes")
             }
+            PullError::UnsupportedRebaseStrategy { value } => CliError::command_usage(format!(
+                "--rebase={value} is not supported (only linear rebase is available)"
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidTarget)
+            .with_hint("omit the strategy or use a plain '--rebase' for a linear rebase"),
+            PullError::IncompatibleFlags { a, b } => {
+                CliError::command_usage(format!("{a} cannot be used with {b}"))
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+                    .with_hint("remove one of the conflicting options and retry")
+            }
+            PullError::InvalidConfigValue { key, value } => {
+                CliError::command_usage(format!("invalid value for {key}: '{value}'"))
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+                    .with_hint(format!(
+                        "set a valid value with 'libra config {key} <value>'"
+                    ))
+            }
             PullError::Fetch(error) => map_fetch_error_to_cli(&error).with_detail("phase", "fetch"),
             PullError::Merge(error) => map_merge_error_to_cli(&error).with_detail("phase", "merge"),
             PullError::Rebase(error) => CliError::from(error).with_detail("phase", "rebase"),
@@ -171,8 +275,17 @@ impl PullArgs {
         Self {
             repository,
             refspec,
-            rebase: false,
+            rebase: None,
             ff_only: false,
+            ff: false,
+            no_ff: false,
+            squash: false,
+            no_squash: false,
+            no_commit: false,
+            commit: false,
+            autostash: false,
+            no_autostash: false,
+            depth: None,
         }
     }
 }
@@ -213,6 +326,61 @@ pub(crate) async fn run_pull(
     args: PullArgs,
     output: &OutputConfig,
 ) -> Result<PullOutput, PullError> {
+    // Early flag-compatibility gate (no repo / config / network needed): runs
+    // before repo preflight so an invalid flag combination is reported even
+    // outside a repository and never touches HEAD.
+    if let Some(choice) = args.rebase {
+        // An explicit unsupported rebase strategy is rejected up front.
+        match choice {
+            RebaseChoice::Merges => {
+                return Err(PullError::UnsupportedRebaseStrategy {
+                    value: "merges".to_string(),
+                });
+            }
+            RebaseChoice::Interactive => {
+                return Err(PullError::UnsupportedRebaseStrategy {
+                    value: "interactive".to_string(),
+                });
+            }
+            RebaseChoice::True | RebaseChoice::False => {}
+        }
+        // An explicit `--rebase` (anything but `--rebase=false`) cannot be
+        // combined with merge-only flags.
+        if choice != RebaseChoice::False
+            && let Some(flag) = first_conflicting_merge_flag(&args)
+        {
+            return Err(PullError::IncompatibleFlags {
+                a: "--rebase".to_string(),
+                b: flag.to_string(),
+            });
+        }
+    }
+
+    // Resolve the integration path (CLI `--rebase` wins over `pull.rebase`).
+    // Done before target resolution so an invalid strategy / flag combination
+    // is reported without needing tracking config and without any fetch.
+    let rebase_decision = resolve_pull_rebase(&args).await?;
+
+    // A config-driven rebase (`pull.rebase=true`, no CLI `--rebase`) combined
+    // with a merge-only flag is also rejected.
+    if rebase_decision == RebaseDecision::Rebase
+        && args.rebase.is_none()
+        && let Some(flag) = first_conflicting_merge_flag(&args)
+    {
+        return Err(PullError::IncompatibleFlags {
+            a: "pull.rebase".to_string(),
+            b: flag.to_string(),
+        });
+    }
+
+    // For the merge path, resolve every option and run the squash-combination
+    // guard *before* target resolution / fetch, so an invalid combination never
+    // reaches the network or the working tree.
+    let merge_plan = match rebase_decision {
+        RebaseDecision::Rebase => None,
+        RebaseDecision::Merge => Some(resolve_merge_plan(&args).await?),
+    };
+
     let target = resolve_pull_target(&args).await?;
     let child_output = child_output_for_pull(output);
 
@@ -220,10 +388,19 @@ pub(crate) async fn run_pull(
         target.remote_config.clone(),
         Some(target.remote_branch.clone()),
         false,
-        crate::internal::protocol::ShallowOptions::default(),
+        ShallowOptions {
+            depth: args.depth,
+            ..Default::default()
+        },
         false,
         false,
         false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        Vec::new(),
         &child_output,
     )
     .await
@@ -244,7 +421,7 @@ pub(crate) async fn run_pull(
         objects_fetched: fetch_result.objects_fetched,
     };
 
-    if args.rebase {
+    let Some(merge_plan) = merge_plan else {
         // Rebase resolves `<remote>/<branch>` through the same public ref
         // path used by `libra rebase`, so keep the human-readable upstream form.
         let rebase_summary = rebase::run_rebase_for_pull(&target.upstream)
@@ -267,14 +444,19 @@ pub(crate) async fn run_pull(
                 up_to_date,
             }),
         });
-    }
+    };
 
-    let merge_result = merge::run_merge_for_pull_with_options(
+    let merge_result = merge::run_merge_for_pull_with_autostash(
         &target.merge_target,
         &target.upstream,
         &child_output,
         merge::PullMergeOptions {
-            ff_only: args.ff_only,
+            ff_only: merge_plan.ff_only,
+            no_ff: merge_plan.no_ff,
+            ff_resolved: merge_plan.ff_resolved,
+            squash: args.squash,
+            no_commit: merge_plan.no_commit,
+            autostash: merge_plan.autostash,
             ..Default::default()
         },
     )
@@ -298,6 +480,200 @@ pub(crate) async fn run_pull(
         }),
         rebase: None,
     })
+}
+
+/// Resolved merge-path options (everything the merge engine needs), computed
+/// from CLI flags plus `pull.ff` / `merge.commit` / `merge.autoStash` config.
+struct MergePlan {
+    ff_only: bool,
+    no_ff: bool,
+    ff_resolved: bool,
+    no_commit: bool,
+    autostash: bool,
+}
+
+/// The merge-only flags that must not appear on the rebase path. `--no-squash`
+/// and `--no-autostash` are benign "off" defaults and are intentionally
+/// excluded.
+fn first_conflicting_merge_flag(args: &PullArgs) -> Option<&'static str> {
+    if args.squash {
+        Some("--squash")
+    } else if args.commit {
+        Some("--commit")
+    } else if args.no_commit {
+        Some("--no-commit")
+    } else if args.ff {
+        Some("--ff")
+    } else if args.no_ff {
+        Some("--no-ff")
+    } else if args.ff_only {
+        Some("--ff-only")
+    } else if args.autostash {
+        Some("--autostash")
+    } else {
+        None
+    }
+}
+
+/// Resolve the integration path. CLI `--rebase[=…]` wins over `pull.rebase`;
+/// `merges`/`interactive` (from either source) are rejected at runtime.
+async fn resolve_pull_rebase(args: &PullArgs) -> Result<RebaseDecision, PullError> {
+    if let Some(choice) = args.rebase {
+        return match choice {
+            RebaseChoice::True => Ok(RebaseDecision::Rebase),
+            RebaseChoice::False => Ok(RebaseDecision::Merge),
+            RebaseChoice::Merges => Err(PullError::UnsupportedRebaseStrategy {
+                value: "merges".to_string(),
+            }),
+            RebaseChoice::Interactive => Err(PullError::UnsupportedRebaseStrategy {
+                value: "interactive".to_string(),
+            }),
+        };
+    }
+
+    let Some(value) = read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "pull.rebase")
+        .await
+        .ok()
+        .flatten()
+    else {
+        return Ok(RebaseDecision::Merge);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Ok(RebaseDecision::Rebase),
+        "false" | "no" | "off" | "0" => Ok(RebaseDecision::Merge),
+        "merges" => Err(PullError::UnsupportedRebaseStrategy {
+            value: "merges".to_string(),
+        }),
+        "interactive" => Err(PullError::UnsupportedRebaseStrategy {
+            value: "interactive".to_string(),
+        }),
+        _ => Err(PullError::InvalidConfigValue {
+            key: "pull.rebase".to_string(),
+            value,
+        }),
+    }
+}
+
+/// Resolve the full merge plan and run the squash-combination guard on the
+/// *resolved* values (so `pull.ff=false` / `merge.autoStash=true` are caught,
+/// not just explicit flags).
+async fn resolve_merge_plan(args: &PullArgs) -> Result<MergePlan, PullError> {
+    let (ff_only, no_ff, ff_resolved) = resolve_pull_ff(args).await?;
+    let no_commit = resolve_pull_no_commit(args).await?;
+    let autostash = resolve_pull_autostash(args).await;
+
+    if args.squash {
+        if no_ff {
+            return Err(PullError::IncompatibleFlags {
+                a: "--squash".to_string(),
+                b: "no-fast-forward (--no-ff or pull.ff=false)".to_string(),
+            });
+        }
+        if args.commit {
+            return Err(PullError::IncompatibleFlags {
+                a: "--squash".to_string(),
+                b: "--commit".to_string(),
+            });
+        }
+        if autostash {
+            // A squash conflict saves no MergeState, so an autostash would be
+            // popped onto a conflicted tree with no `--continue` recovery point.
+            return Err(PullError::IncompatibleFlags {
+                a: "--squash".to_string(),
+                b: "autostash (--autostash or merge.autoStash=true)".to_string(),
+            });
+        }
+    }
+
+    Ok(MergePlan {
+        ff_only,
+        no_ff,
+        ff_resolved,
+        no_commit,
+        autostash,
+    })
+}
+
+/// Resolve fast-forward intent: `--ff-only` > `--no-ff` > `--ff` > `pull.ff`.
+/// Returns `(ff_only, no_ff, ff_resolved)`; `ff_resolved` is true once the CLI
+/// or `pull.ff` has decided, so the merge engine does not re-read `merge.ff`.
+async fn resolve_pull_ff(args: &PullArgs) -> Result<(bool, bool, bool), PullError> {
+    if args.ff_only {
+        return Ok((true, false, true));
+    }
+    if args.no_ff {
+        return Ok((false, true, true));
+    }
+    if args.ff {
+        return Ok((false, false, true));
+    }
+    let Some(value) = read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "pull.ff")
+        .await
+        .ok()
+        .flatten()
+    else {
+        // Neither CLI nor pull.ff set: let the merge engine fall back to merge.ff.
+        return Ok((false, false, false));
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "only" => Ok((true, false, true)),
+        "false" | "no" | "off" | "0" => Ok((false, true, true)),
+        "true" | "yes" | "on" | "1" => Ok((false, false, true)),
+        _ => Err(PullError::InvalidConfigValue {
+            key: "pull.ff".to_string(),
+            value,
+        }),
+    }
+}
+
+/// Resolve `--commit`/`--no-commit`, falling back to `merge.commit` (mirrors the
+/// merge command's `resolve_no_commit`).
+async fn resolve_pull_no_commit(args: &PullArgs) -> Result<bool, PullError> {
+    if args.commit {
+        return Ok(false);
+    }
+    if args.no_commit {
+        return Ok(true);
+    }
+    let Some(value) = read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.commit")
+        .await
+        .ok()
+        .flatten()
+    else {
+        return Ok(false);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Ok(false),
+        "false" | "no" | "off" | "0" => Ok(true),
+        _ => Err(PullError::InvalidConfigValue {
+            key: "merge.commit".to_string(),
+            value,
+        }),
+    }
+}
+
+/// Resolve `--autostash`/`--no-autostash`, falling back to `merge.autoStash`
+/// (default off). The merge engine never reads this key on the pull path, so
+/// pull must resolve the boolean itself (mirrors the merge command's
+/// `resolve_autostash`).
+async fn resolve_pull_autostash(args: &PullArgs) -> bool {
+    if args.no_autostash {
+        return false;
+    }
+    if args.autostash {
+        return true;
+    }
+    read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.autoStash")
+        .await
+        .ok()
+        .flatten()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "yes" | "on" | "1"
+            )
+        })
+        .unwrap_or(false)
 }
 
 async fn resolve_pull_target(args: &PullArgs) -> Result<ResolvedPullTarget, PullError> {
@@ -638,8 +1014,14 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
             .with_stable_code(StableErrorCode::ConflictOperationBlocked)
             .with_hint("run 'libra pull' without --ff-only to allow a merge commit")
             .with_hint("or run 'libra pull --rebase' to replay local commits"),
+        // A squash merge records no MergeState, so it cannot be resumed with
+        // `libra merge --continue` — the user stages the resolution and runs
+        // `libra commit` instead (matches the `libra merge --squash` contract).
+        merge::PullMergeError::SquashConflicts => CliError::failure(error.to_string())
+            .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+            .with_hint("resolve the conflicts, stage the result, then run 'libra commit'")
+            .with_hint("squash merges do not support 'libra merge --continue'"),
         merge::PullMergeError::Conflicts { .. }
-        | merge::PullMergeError::SquashConflicts
         | merge::PullMergeError::OctopusConflict { .. }
         | merge::PullMergeError::DirectoryFileConflict { .. }
         | merge::PullMergeError::DirtyWorktree
@@ -679,7 +1061,62 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser as _;
+
     use super::*;
+
+    #[test]
+    fn rebase_positional_args_not_swallowed() {
+        // `require_equals=true` keeps `origin`/`main` as positionals rather than
+        // letting `--rebase` consume `origin` as its optional value.
+        let args = PullArgs::try_parse_from(["pull", "--rebase", "origin", "main"])
+            .expect("--rebase origin main should parse");
+        assert_eq!(args.rebase, Some(RebaseChoice::True));
+        assert_eq!(args.repository.as_deref(), Some("origin"));
+        assert_eq!(args.refspec.as_deref(), Some("main"));
+
+        let short = PullArgs::try_parse_from(["pull", "-r", "origin", "main"])
+            .expect("-r origin main should parse");
+        assert_eq!(short.rebase, Some(RebaseChoice::True));
+        assert_eq!(short.repository.as_deref(), Some("origin"));
+        assert_eq!(short.refspec.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn rebase_value_variants_parse() {
+        assert_eq!(
+            PullArgs::try_parse_from(["pull", "--rebase=false"])
+                .unwrap()
+                .rebase,
+            Some(RebaseChoice::False)
+        );
+        // `merges`/`interactive` parse as values (rejected later at runtime).
+        assert_eq!(
+            PullArgs::try_parse_from(["pull", "--rebase=merges"])
+                .unwrap()
+                .rebase,
+            Some(RebaseChoice::Merges)
+        );
+        assert_eq!(
+            PullArgs::try_parse_from(["pull", "--rebase=interactive"])
+                .unwrap()
+                .rebase,
+            Some(RebaseChoice::Interactive)
+        );
+        // Absent flag is None (merge path).
+        assert_eq!(PullArgs::try_parse_from(["pull"]).unwrap().rebase, None);
+    }
+
+    #[test]
+    fn depth_and_merge_flags_parse() {
+        let args = PullArgs::try_parse_from(["pull", "--depth", "1", "--squash"])
+            .expect("--depth 1 --squash should parse");
+        assert_eq!(args.depth, Some(1));
+        assert!(args.squash);
+
+        let conflict = PullArgs::try_parse_from(["pull", "--ff", "--no-ff"]);
+        assert!(conflict.is_err(), "--ff and --no-ff are clap-conflicting");
+    }
 
     #[test]
     fn test_map_fetch_discovery_error_unauthorized_matches_clone() {

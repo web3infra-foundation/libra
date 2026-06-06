@@ -25,6 +25,10 @@ pub(crate) fn scenario_grep_blame_describe_shortlog(ctx: &mut ScenarioCtx<'_>) -
         &ctx.command(&["shortlog", "-s", "-n"], repo.clone(), true)?,
         "Libra",
     )?;
+    assert_json_ok(
+        &ctx.command(&["--json", "grep", "needle"], repo.clone(), true)?,
+        "grep",
+    )?;
     assert_lbr_or_text(
         &ctx.command(&["grep", "no-such-pattern"], repo, false)?,
         "not found",

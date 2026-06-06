@@ -534,3 +534,115 @@ fn test_reflog_help_lists_examples_banner() {
         );
     }
 }
+
+// ── reflog expire ─────────────────────────────────────────────────────────
+
+#[test]
+#[serial]
+fn test_reflog_expire_no_refs_exits_128() {
+    // Intentional difference from Git's silent no-op: an explicit error.
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["reflog", "expire"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+    let (stderr, _report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        stderr.contains("no reflog specified"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_reflog_expire_invalid_date_reports_cli_002() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(
+        &["reflog", "expire", "--all", "--expire=garbage"],
+        repo.path(),
+    );
+    assert_eq!(output.status.code(), Some(129));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(stderr.contains("invalid expire time"), "stderr: {stderr}");
+}
+
+#[test]
+#[serial]
+fn test_reflog_expire_all_dry_run_no_change() {
+    let repo = create_committed_repo_via_cli();
+
+    let before = run_libra_command(&["--json", "reflog", "show", "HEAD"], repo.path());
+    let before_count = parse_json_stdout(&before)["data"]["total_count"]
+        .as_u64()
+        .unwrap_or(0);
+    assert!(before_count >= 1, "fixture should have reflog entries");
+
+    // --expire=all marks everything, but --dry-run must not delete.
+    let dry = run_libra_command(
+        &["reflog", "expire", "--all", "--dry-run", "--expire=all"],
+        repo.path(),
+    );
+    assert_cli_success(&dry, "reflog expire --all --dry-run");
+
+    let after = run_libra_command(&["--json", "reflog", "show", "HEAD"], repo.path());
+    let after_count = parse_json_stdout(&after)["data"]["total_count"]
+        .as_u64()
+        .unwrap_or(0);
+    assert_eq!(before_count, after_count, "dry-run must not prune entries");
+}
+
+#[test]
+#[serial]
+fn test_reflog_expire_json_envelope_and_prunes() {
+    let repo = create_committed_repo_via_cli();
+
+    // Dry-run JSON envelope: each ref reports pruned > 0 under --expire=all.
+    let dry = run_libra_command(
+        &[
+            "--json",
+            "reflog",
+            "expire",
+            "--all",
+            "--dry-run",
+            "--expire=all",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&dry, "json reflog expire dry-run");
+    let json = parse_json_stdout(&dry);
+    assert_eq!(json["command"], "reflog.expire");
+    let data = json["data"].as_array().expect("expire data array");
+    assert!(!data.is_empty(), "expire should report at least one ref");
+    assert!(data.iter().all(|entry| entry["ref_name"].is_string()));
+    assert!(
+        data.iter()
+            .any(|entry| entry["pruned"].as_u64().unwrap_or(0) > 0),
+        "under --expire=all some ref should report pruned entries: {json}"
+    );
+
+    // Real prune, then a follow-up dry-run should find nothing left to prune.
+    let real = run_libra_command(&["reflog", "expire", "--all", "--expire=all"], repo.path());
+    assert_cli_success(&real, "reflog expire --all --expire=all");
+
+    let again = run_libra_command(
+        &[
+            "--json",
+            "reflog",
+            "expire",
+            "--all",
+            "--dry-run",
+            "--expire=all",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&again, "second dry-run");
+    let again_data = parse_json_stdout(&again)["data"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        again_data
+            .iter()
+            .all(|entry| entry["pruned"].as_u64().unwrap_or(0) == 0),
+        "after a real prune nothing should remain to prune"
+    );
+}

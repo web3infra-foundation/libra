@@ -273,6 +273,7 @@ mod agent_checkpoint_test;
 mod agent_clean_test;
 mod agent_help_test;
 mod agent_push_test;
+mod agent_session_test;
 mod automation_help_test;
 mod bisect_test;
 mod blame_test;
