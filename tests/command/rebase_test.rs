@@ -382,6 +382,82 @@ fn test_rebase_preserves_executable_mode_in_rewritten_commit() {
     );
 }
 
+#[test]
+fn test_rebase_replay_preserves_author_uses_current_committer() {
+    use git_internal::internal::object::commit::Commit;
+    use libra::{command::load_object, internal::head::Head};
+
+    let repo = tempdir().expect("failed to create temp repo");
+    let repo_path = repo.path();
+    init_repo_via_cli(repo_path);
+    configure_identity_via_cli(repo_path); // committer = Test User <test@example.com>
+
+    commit_file_via_cli(repo_path, ".libraignore", "", "Track ignore file");
+    commit_file_via_cli(repo_path, "base.txt", "base\n", "Base");
+
+    // Feature commit authored by someone other than the committer.
+    let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
+    assert_cli_success(&output, "failed to create feature branch");
+    fs::write(repo_path.join("feature.txt"), "feature\n").expect("write feature file");
+    assert_cli_success(
+        &run_libra_command(&["add", "feature.txt"], repo_path),
+        "stage feature file",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "commit",
+                "-m",
+                "Feature work",
+                "--author",
+                "Orig Author <orig@example.com>",
+            ],
+            repo_path,
+        ),
+        "commit feature with explicit author",
+    );
+
+    // Advance main so the rebase actually replays the feature commit.
+    assert_cli_success(
+        &run_libra_command(&["switch", "main"], repo_path),
+        "switch main",
+    );
+    commit_file_via_cli(repo_path, "main.txt", "main\n", "Main adds file");
+    assert_cli_success(
+        &run_libra_command(&["switch", "feature"], repo_path),
+        "switch feature",
+    );
+
+    assert_cli_success(
+        &run_libra_command(&["rebase", "main"], repo_path),
+        "rebase feature onto main",
+    );
+
+    let _guard = ChangeDirGuard::new(repo_path);
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let head = runtime
+        .block_on(Head::current_commit())
+        .expect("rebased HEAD");
+    let commit: Commit = load_object(&head).expect("load rebased commit");
+
+    assert_eq!(
+        commit.author.email, "orig@example.com",
+        "rebase must preserve the original commit author"
+    );
+    assert_eq!(
+        commit.committer.email, "test@example.com",
+        "rebase must stamp the current identity as the committer"
+    );
+    assert_ne!(
+        commit.author.email, "admin@mega.org",
+        "rebase must not reset author to the git-internal placeholder"
+    );
+    assert_ne!(
+        commit.committer.email, "admin@mega.org",
+        "rebase must not reset committer to the git-internal placeholder"
+    );
+}
+
 fn create_cli_rebase_fast_forward_repo() -> tempfile::TempDir {
     let repo = tempdir().expect("failed to create temp repo");
     let repo_path = repo.path();

@@ -2986,8 +2986,21 @@ async fn replay_commit_with_conflict_detection(
         Err(e) => return ReplayResult::internal(ReplayErrorKind::TreeCreate, e.to_string()),
     };
 
-    let new_commit =
-        Commit::from_tree_id(new_tree_id, vec![*new_parent_id], &commit_to_replay.message);
+    // Preserve the replayed commit's original author; stamp a fresh committer
+    // with the current identity (Git semantics). `Commit::from_tree_id` would
+    // otherwise reset both to the `git-internal` `mega <admin@mega.org>`
+    // placeholder, silently rewriting authorship.
+    let committer = match crate::command::commit::current_committer_signature().await {
+        Ok(sig) => sig,
+        Err(detail) => return ReplayResult::internal(ReplayErrorKind::CommitSave, detail),
+    };
+    let new_commit = Commit::new(
+        commit_to_replay.author.clone(),
+        committer,
+        new_tree_id,
+        vec![*new_parent_id],
+        &commit_to_replay.message,
+    );
 
     if let Err(e) = save_object(&new_commit, &new_commit.id) {
         return ReplayResult::internal(ReplayErrorKind::CommitSave, e.to_string());

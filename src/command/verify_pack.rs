@@ -246,6 +246,14 @@ fn parse_index(bytes: &[u8]) -> Result<ParsedIndex, String> {
     }
 }
 
+/// Parse a pack index (`.idx`, v1 or v2) and return the object hashes it lists,
+/// reusing the fully-validated [`parse_index`] reader. Used by `fsck --full` to
+/// enumerate packed objects without duplicating the index parser.
+pub(crate) fn parse_index_object_hashes(bytes: &[u8]) -> Result<Vec<ObjectHash>, String> {
+    let parsed = parse_index(bytes)?;
+    Ok(parsed.entries.iter().map(|entry| entry.hash).collect())
+}
+
 fn infer_idx_v2_hash_kind(bytes: &[u8]) -> Result<Option<HashKind>, String> {
     if !bytes.starts_with(&IDX_MAGIC) {
         return Ok(None);

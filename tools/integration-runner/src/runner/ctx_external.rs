@@ -23,6 +23,9 @@ impl<'a> ScenarioCtx<'a> {
         fs::create_dir_all(&scenario_log_dir)
             .with_context(|| format!("create log dir {}", scenario_log_dir.display()))?;
 
+        // gitfix() is the Rust equivalent of the §3.3.1 `gitfix()` bash wrapper (env_clear +
+        // GIT_CONFIG_NOSYSTEM + fixed author + no host GIT_*). Enforced by check-plan for
+        // any scenario declaring gitfix_isolation. Never use bare `git` in scenarios (§3.6).
         let mut cmd = Command::new("git");
         cmd.args(args)
             .current_dir(&cwd)
@@ -109,6 +112,7 @@ impl<'a> ScenarioCtx<'a> {
         // Do NOT env_clear: gh CLI auth lives in the caller's real HOME (~/.config/gh or
         // OS keychain). We inherit the runner's env (user's) so `gh auth status` / create work.
         // cwd is still forced for reproducibility. Outputs are logged + redacted.
+        // See §3.6 Wave 3 rules and GhRepoCleanupGuard (never logs tokens; scope preflight in live.rs).
         let output = Command::new("gh")
             .args(args)
             .current_dir(&cwd)

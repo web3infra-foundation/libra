@@ -34,6 +34,12 @@ pub(crate) fn scenario_merge_rebase_cherry_revert_smoke(ctx: &mut ScenarioCtx<'_
     ctx.command(&["cherry-pick", &topic_commit], repo.clone(), true)?;
     ensure_file(repo.join("topic.txt"))?;
     ctx.command(&["revert", "HEAD"], repo.clone(), true)?;
+    assert_json_ok(
+        &ctx.command(&["--json", "log", "--oneline"], repo.clone(), true)?,
+        "log",
+    )?;
+    let bad_merge = ctx.command(&["merge", "nonexistent-branch"], repo.clone(), false)?;
+    assert_lbr_or_text(&bad_merge, "merge")?;
     ctx.command(&["fsck", "--connectivity-only"], repo, true)?;
     Ok(())
 }

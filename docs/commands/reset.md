@@ -7,6 +7,7 @@ Move `HEAD` and reset the index or working tree depending on the selected mode.
 ```
 libra reset [<target>] [--soft | --mixed | --hard]
 libra reset [<target>] [--] <pathspec>...
+libra reset [<target>] --pathspec-from-file=<file> [--pathspec-file-nul]
 ```
 
 ## Description
@@ -30,6 +31,21 @@ The default target is `HEAD`, making `libra reset` (with no arguments) equivalen
 | | `--mixed` | | Move HEAD and reset index; keep working tree (default) |
 | | `--hard` | | Move HEAD, reset index, and restore working tree |
 | | `<pathspec>...` | positional (after `--`) | Specific files to reset in the index |
+| | `--pathspec-from-file` | `<file>` | Read pathspecs from a file (`-` for stdin) instead of the command line. Mutually exclusive with command-line pathspecs |
+| | `--pathspec-file-nul` | | Treat `--pathspec-from-file` input as NUL-separated rather than line-separated. No-op without `--pathspec-from-file` |
+| | `--no-refresh` | | Accepted for Git compatibility; a no-op in Libra (see below) |
+
+### Reading pathspecs from a file
+
+`--pathspec-from-file=<file>` reads the pathspec list from a file (or from stdin when `<file>` is `-`), which is convenient for un-staging a large or scripted set of paths. Items are newline-separated by default (a trailing `\r` is stripped so CRLF files work, and blank lines are ignored); with `--pathspec-file-nul` they are NUL-separated instead.
+
+Each item is taken **literally**. Unlike Git's default line mode, Libra does **not** perform C-style quoted-path decoding — a line such as `"a b.txt"` is interpreted as a path that literally contains the quote characters, not as `a b.txt`. For paths with special characters (spaces, newlines), use `--pathspec-file-nul` and emit the raw bytes. This matches Libra's existing literal handling of command-line pathspecs.
+
+Supplying both `--pathspec-from-file` and command-line pathspecs is a usage error (`LBR-CLI-002`). Every pathspec — from either source — is normalised relative to the working directory and rejected if it escapes the repository (`../` traversal → `LBR-CLI-002`).
+
+### Why `--no-refresh` is a no-op
+
+In Git, a `--mixed` reset refreshes the index stat cache afterwards, and `--no-refresh` skips that step. Libra's reset never refreshes the index (it has no stat-refresh pass), so `--no-refresh` has nothing to skip — it is accepted purely so scripts can pass it, and it has no effect. There is no `--refresh` counterpart.
 
 ### Flag examples
 
@@ -55,6 +71,12 @@ libra reset HEAD -- src/main.rs src/cli.rs
 # Reset specific files to a prior commit
 libra reset abc1234 -- path/to/file.rs
 
+# Un-stage a batch of paths listed in a file
+libra reset --pathspec-from-file=paths.txt
+
+# Un-stage NUL-separated paths piped on stdin
+printf 'a.txt\0b.txt' | libra reset --pathspec-from-file=- --pathspec-file-nul
+
 # JSON output for agents
 libra reset --json --hard HEAD~1
 ```
@@ -66,6 +88,7 @@ libra reset HEAD~1                    # Move HEAD and reset index to the previou
 libra reset --soft HEAD~2             # Move HEAD only, keep index and worktree
 libra reset --hard main               # Reset HEAD, index, and worktree to branch 'main'
 libra reset HEAD -- src/lib.rs        # Unstage a path back to HEAD
+libra reset --pathspec-from-file=paths.txt   # Unstage paths read from a file ('-' for stdin)
 libra reset --json --hard HEAD~1      # Structured JSON output for agents
 ```
 
@@ -165,10 +188,14 @@ Libra favors explicit, composable commands over implicit multi-step operations h
 | Un-stage files | `git reset HEAD -- <file>` | `libra reset HEAD -- <file>` | N/A (no staging area) |
 | Merge reset | `git reset --merge <target>` | Not supported | N/A |
 | Keep reset | `git reset --keep <target>` | Not supported | N/A |
+| Pathspec from file | `git reset --pathspec-from-file=<f>` | `libra reset --pathspec-from-file=<f>` (literal paths; no C-style quote decoding) | N/A |
+| Pathspec file NUL | `git reset --pathspec-file-nul` | `libra reset --pathspec-file-nul` | N/A |
+| Index refresh control | `git reset --[no-]refresh` | `--no-refresh` accepted as a no-op; no `--refresh` | N/A |
 | Default target | HEAD | HEAD | N/A |
 | Structured output | No | `--json` / `--machine` | `--template` |
 | Pathspec + soft | Allowed (un-stages) | Rejected (`LBR-CLI-002`) | N/A |
 | Pathspec + hard | Rejected | Rejected (`LBR-CLI-002`) | N/A |
+| Pathspec from file + CLI pathspec | Rejected | Rejected (`LBR-CLI-002`) | N/A |
 | Rollback on failure | No | Attempts index rollback | N/A (operation log undo) |
 
 ## Error Handling
@@ -190,4 +217,7 @@ Libra favors explicit, composable commands over implicit multi-step operations h
 | `--soft` with pathspecs | `LBR-CLI-002` | "--soft only moves HEAD; use --mixed to reset index for specific paths." |
 | `--hard` with pathspecs | `LBR-CLI-002` | "--hard updates the working tree; omit pathspecs or use --mixed for specific paths." |
 | Pathspec not matched | `LBR-CLI-003` | "check the path and try again." |
+| `--pathspec-from-file` with command-line pathspecs | `LBR-CLI-002` | "provide pathspecs either on the command line or via --pathspec-from-file, not both." |
+| Pathspec escapes the working directory | `LBR-CLI-002` | "pathspecs must stay within the repository working directory." |
+| Pathspec file/stdin read failure | `LBR-IO-001` | "check that the pathspec file exists and is readable." |
 | Rollback failure | (primary code) | (primary hint) |

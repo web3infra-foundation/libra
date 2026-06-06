@@ -39,6 +39,13 @@ are loaded automatically when configured via `vault.ssh.<remote>.privkey`.
 | `--dry-run` | Preview ref updates and prunes without downloading objects or writing any refs/reflog/shallow/FETCH_HEAD. | `libra fetch origin --dry-run` |
 | `--porcelain` | Print one machine-readable `<flag> <old-oid> <new-oid> <local-ref>` line per ref update. Mutually exclusive with `--json` (usage error). | `libra fetch origin --porcelain` |
 | `--append` | Append fetched ref records to `.libra/FETCH_HEAD` instead of overwriting. Long-only (`-a` is `--all`). | `libra fetch origin --append` |
+| `-v`, `--verbose` | Announce the remote (name and credential-redacted URL) being contacted on stderr before connecting; leaves the stdout result contract unchanged. | `libra fetch origin -v` |
+| `-t`, `--tags` | Import every advertised tag into the global `refs/tags/*` namespace, pulling each tag's object into the pack. Overrides `remote.<name>.tagOpt`. Existing local tags are preserved (immutable without `--force`). | `libra fetch origin --tags` |
+| `--no-tags` | Import no tags, overriding `remote.<name>.tagOpt`. Long-only (Git's `-n` short form is intentionally not exposed). | `libra fetch origin --no-tags` |
+| `-f`, `--force` | Allow non-fast-forward updates: overwrite an existing local tag with the remote's value (tags are otherwise immutable). Forced updates render with the porcelain `+` flag. Remote-tracking refs always update regardless. | `libra fetch origin --tags --force` |
+| `--update-shallow` | Accept new shallow boundaries advertised by a shallow remote even when no shallow operation was requested and the repository is not already shallow. Boundary removals (history deepening) always apply. | `libra fetch origin --update-shallow` |
+| `--atomic` | Update a remote's refs atomically: they already commit together (one transaction per remote), and on rollback the pack downloaded for that remote is removed so no partial state is left. | `libra fetch origin --atomic` |
+| `--refmap <src:dst>` | Override where fetched refs are stored (repeatable; a trailing `*` is a glob). The destination must be under `refs/remotes/<remote>/`; entries are capped at 256 bytes and require an explicit remote (not `--all`). | `libra fetch origin --refmap "refs/heads/*:refs/remotes/origin/mirror/*"` |
 | `--json` | Emit structured JSON envelope to stdout (global flag). | `libra --json fetch origin` |
 | `--machine` | Compact single-line JSON; suppresses progress (global flag). | `libra --machine fetch origin` |
 | `--progress none` | Suppress NDJSON progress events on stderr in JSON mode. | `libra --json fetch origin --progress none` |

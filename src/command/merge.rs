@@ -352,6 +352,11 @@ fn is_false(value: &bool) -> bool {
 pub(crate) struct PullMergeOptions {
     pub ff_only: bool,
     pub no_ff: bool,
+    /// Set by the `pull` path once it has resolved fast-forward intent from the
+    /// command line / `pull.ff`, so [`run_merge_for_pull_with_options`] does not
+    /// re-read `merge.ff` and clobber that decision. Defaults `false` for the
+    /// public `merge` command, preserving its existing `merge.ff` fallback.
+    pub ff_resolved: bool,
     pub squash: bool,
     pub no_commit: bool,
     pub allow_unrelated_histories: bool,
@@ -733,6 +738,9 @@ async fn merge_options_from_args(args: &MergeArgs) -> Result<PullMergeOptions, M
     Ok(PullMergeOptions {
         ff_only,
         no_ff,
+        // The `merge` command keeps its existing `merge.ff` fallback inside
+        // `run_merge_for_pull_with_options`; only the `pull` path pre-resolves.
+        ff_resolved: false,
         squash: args.squash,
         no_commit: resolve_no_commit(args).await?,
         allow_unrelated_histories: args.allow_unrelated_histories,
@@ -1001,7 +1009,7 @@ pub(crate) async fn run_merge_for_pull_with_options(
     output: &OutputConfig,
     mut options: PullMergeOptions,
 ) -> Result<PullMergeSummary, PullMergeError> {
-    if !options.ff_only && !options.no_ff {
+    if !options.ff_resolved && !options.ff_only && !options.no_ff {
         apply_merge_ff_config(&mut options.ff_only, &mut options.no_ff).await?;
     }
     if MergeState::load_optional_sync()
@@ -1117,6 +1125,25 @@ pub(crate) async fn run_merge_for_pull_with_options(
         options,
     )
     .await
+}
+
+/// Merge-owned autostash wrapper for the `pull` merge path. Mirrors the public
+/// `merge` command's `maybe_autostash_push` → merge → `finalize_autostash`
+/// sequence so a `libra pull --autostash` stashes a dirty tree before
+/// integration, pops it on success, and parks the stash OID in `MergeState`
+/// (for `--continue`/`--abort`) on conflict — without `pull.rs` ever touching
+/// the stash state machine. `options.autostash` decides whether anything is
+/// stashed; an autostash-off call is byte-identical to
+/// [`run_merge_for_pull_with_options`].
+pub(crate) async fn run_merge_for_pull_with_autostash(
+    target_ref: &str,
+    upstream: &str,
+    output: &OutputConfig,
+    options: PullMergeOptions,
+) -> Result<PullMergeSummary, PullMergeError> {
+    let stash_id = maybe_autostash_push(&options).await?;
+    let result = run_merge_for_pull_with_options(target_ref, upstream, output, options).await;
+    finalize_autostash(stash_id, result).await
 }
 
 async fn run_octopus_merge(
@@ -1961,6 +1988,7 @@ async fn apply_fast_forward_merge(
             staged: true,
             source: None, // `restore` without source defaults to HEAD, which is now correct.
             pathspec: vec![util::working_dir_string()],
+            ..Default::default()
         },
         &output.child_output_config(),
     )

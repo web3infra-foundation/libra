@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use super::{
     dispatch::{run_scenario, skip_result},
     types::RunContext,
-    util::{ensure_binary, find_on_host_path, parse_only, safe_path},
+    util::{ensure_binary, find_on_host_path, make_run_metadata, parse_only, safe_path},
 };
 use crate::{
     manifest::load_manifest,
@@ -81,6 +81,10 @@ pub(crate) fn run_live(
     let binary = binary.unwrap_or_else(|| repo_root.join("target/debug/libra"));
     ensure_binary(repo_root, &binary)?;
 
+    // Wave 3 uses same local isolation (§3.3.1) for `libra` as normal runs; gh calls
+    // intentionally inherit host auth (see ctx_external.rs) but never log tokens (§3.6).
+    // GhRepoCleanupGuard + explicit delete + preflight delete_repo scope probe enforce
+    // "if cannot cleanup, do not create" rule. See plan §3.4 / §3.6 / §5.
     let run_root = tempfile::Builder::new()
         .prefix("libra-integ-live-")
         .tempdir()
@@ -98,13 +102,22 @@ pub(crate) fn run_live(
     ] {
         fs::create_dir_all(run_root.join(dir)).with_context(|| format!("create {dir}"))?;
     }
+
+    // Capture run metadata *early* (before scenario dispatch) for §5 using shared helper
+    // (dedupes formatting across normal/live/skip). waves=[3] for live. run_root moved.
+    let (run_id, commit, started_at, waves_run) = make_run_metadata(repo_root, vec![3]);
+
     let safe_path = safe_path();
     let results_path = run_root.join("results.ndjson");
     let ctx = RunContext {
-        run_root: run_root.clone(),
+        run_root, // move (was clone)
         binary,
         safe_path,
         results_path,
+        run_id,
+        commit,
+        started_at,
+        waves_run,
     };
 
     let by_id: BTreeMap<_, _> = manifest
@@ -220,13 +233,21 @@ fn write_live_skip_report(
     let mut results = Vec::new();
     let run_root = tempfile::Builder::new()
         .prefix("libra-integ-live-skipped-")
-        .tempdir()?
+        .tempdir()
+        .context("create live skip run root")?
         .keep();
+    // Skip reports still emit full §5 shape using helper (run_id etc). run_root moved.
+    let results_path = run_root.join("results.ndjson");
+    let (run_id, commit, started_at, waves_run) = make_run_metadata(repo_root, vec![3]);
     let dummy_ctx = RunContext {
-        run_root: run_root.clone(),
+        run_root, // move (was clone)
         binary: binary.unwrap_or_else(|| repo_root.join("target/debug/libra")),
         safe_path: safe_path(),
-        results_path: run_root.join("results.ndjson"),
+        results_path,
+        run_id,
+        commit,
+        started_at,
+        waves_run,
     };
     for id in if selected.is_empty() {
         let m = load_manifest(repo_root)?;

@@ -41,6 +41,7 @@ async fn test_open_remote_origin() {
         open::OpenArgs {
             remote: Some("origin".to_string()),
             print_only: false,
+            ..Default::default()
         },
         &output,
     )
@@ -52,6 +53,7 @@ async fn test_open_remote_origin() {
         open::OpenArgs {
             remote: None,
             print_only: false,
+            ..Default::default()
         },
         &output,
     )
@@ -62,6 +64,7 @@ async fn test_open_remote_origin() {
         open::OpenArgs {
             remote: Some("nonexistent".to_string()),
             print_only: false,
+            ..Default::default()
         },
         &output,
     )
@@ -91,6 +94,7 @@ async fn test_open_no_remote() {
         open::OpenArgs {
             remote: None,
             print_only: false,
+            ..Default::default()
         },
         &output,
     )
@@ -267,6 +271,216 @@ fn test_open_json_output_transforms_explicit_ssh_url() {
         json["data"]["web_url"],
         "https://github.com/web3infra-foundation/libra"
     );
+    assert_eq!(json["data"]["launched"], false);
+}
+
+// ── Deep-link target flags (Batch 0) ─────────────────────────────────────
+
+/// Adds an `origin` remote pointing at the libra GitHub repo and returns the
+/// committed repo dir.
+fn repo_with_github_origin() -> tempfile::TempDir {
+    let repo = create_committed_repo_via_cli();
+    let add_remote = run_libra_command(
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:web3infra-foundation/libra.git",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&add_remote, "failed to add origin for open deep-link test");
+    repo
+}
+
+#[test]
+fn test_open_with_branch_flag() {
+    let repo = repo_with_github_origin();
+
+    let output = run_libra_command(&["open", "--json", "-b", "dev", "origin"], repo.path());
+    assert_cli_success(&output, "open --json -b dev origin should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["web_url"],
+        "https://github.com/web3infra-foundation/libra/tree/dev"
+    );
+    assert_eq!(json["data"]["target_type"], "branch");
+    assert_eq!(json["data"]["platform"], "github");
+    assert_eq!(json["data"]["launched"], false);
+}
+
+#[test]
+fn test_open_default_no_flag_opens_repo_root() {
+    let repo = repo_with_github_origin();
+
+    let output = run_libra_command(&["open", "--json", "origin"], repo.path());
+    assert_cli_success(&output, "open --json origin should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["web_url"],
+        "https://github.com/web3infra-foundation/libra"
+    );
+    assert_eq!(json["data"]["target_type"], "repo");
+    assert_eq!(json["data"]["platform"], "github");
+}
+
+#[test]
+fn test_open_issue_id_with_equals() {
+    let repo = repo_with_github_origin();
+
+    // `--issue=12` keeps `origin` as the positional remote.
+    let output = run_libra_command(&["open", "--json", "--issue=12", "origin"], repo.path());
+    assert_cli_success(&output, "open --issue=12 origin should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["remote"], "origin");
+    assert_eq!(json["data"]["target_type"], "issue");
+    assert_eq!(
+        json["data"]["web_url"],
+        "https://github.com/web3infra-foundation/libra/issues/12"
+    );
+}
+
+#[test]
+fn test_open_issue_list_no_id() {
+    let repo = repo_with_github_origin();
+
+    // `--issue` with no `=value` opens the list; `origin` stays the remote.
+    let output = run_libra_command(&["open", "--json", "--issue", "origin"], repo.path());
+    assert_cli_success(&output, "open --issue origin should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["remote"], "origin");
+    assert_eq!(json["data"]["target_type"], "issue");
+    assert_eq!(
+        json["data"]["web_url"],
+        "https://github.com/web3infra-foundation/libra/issues"
+    );
+}
+
+#[test]
+fn test_open_mutually_exclusive_flags_error() {
+    let repo = repo_with_github_origin();
+
+    let output = run_libra_command(
+        &["open", "-b", "main", "-c", "abcdef", "origin"],
+        repo.path(),
+    );
+    assert_eq!(output.status.code(), Some(129));
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+#[test]
+fn test_open_rejects_malicious_branch() {
+    let repo = repo_with_github_origin();
+
+    let output = run_libra_command(&["open", "-b", "main; rm -rf /", "origin"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        stderr.contains("unsafe or invalid"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+// ── Platform adaptation & config templates (Batch 1) ─────────────────────
+
+#[test]
+fn test_open_platform_override() {
+    let repo = repo_with_github_origin();
+
+    // Force GitLab style even though the host is github.com.
+    let set = run_libra_command(&["config", "open.platform", "gitlab"], repo.path());
+    assert_cli_success(&set, "config open.platform gitlab should succeed");
+
+    let output = run_libra_command(&["open", "--json", "-c", "a1b2c3d", "origin"], repo.path());
+    assert_cli_success(&output, "open commit with gitlab override should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["web_url"],
+        "https://github.com/web3infra-foundation/libra/-/commit/a1b2c3d"
+    );
+    assert_eq!(json["data"]["platform"], "gitlab");
+}
+
+#[test]
+fn test_open_local_platform_config_takes_effect() {
+    let repo = repo_with_github_origin();
+
+    let set = run_libra_command(&["config", "open.platform", "gitlab"], repo.path());
+    assert_cli_success(&set, "config open.platform gitlab should succeed");
+
+    let output = run_libra_command(&["open", "--json", "-b", "main", "origin"], repo.path());
+    assert_cli_success(
+        &output,
+        "open branch with local gitlab config should succeed",
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["web_url"],
+        "https://github.com/web3infra-foundation/libra/-/tree/main"
+    );
+    assert_eq!(json["data"]["platform"], "gitlab");
+}
+
+#[test]
+fn test_open_json_reports_platform() {
+    let repo = repo_with_github_origin();
+
+    let output = run_libra_command(&["open", "--json", "origin"], repo.path());
+    assert_cli_success(&output, "open --json should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["platform"], "github");
+}
+
+#[test]
+fn test_open_invalid_platform_warns_and_falls_back() {
+    let repo = repo_with_github_origin();
+
+    let set = run_libra_command(&["config", "open.platform", "nonsense"], repo.path());
+    assert_cli_success(&set, "config open.platform nonsense should succeed");
+
+    let output = run_libra_command(&["open", "--json", "-c", "a1b2c3d", "origin"], repo.path());
+    assert_cli_success(&output, "invalid platform should fall back, not crash");
+
+    let json = parse_json_stdout(&output);
+    // Falls back to host detection (github) — commit path is GitHub style.
+    assert_eq!(
+        json["data"]["web_url"],
+        "https://github.com/web3infra-foundation/libra/commit/a1b2c3d"
+    );
+    assert_eq!(json["data"]["platform"], "github");
+}
+
+#[test]
+fn test_open_outside_repo_direct_url_with_branch() {
+    // Non-repository directory: in_repo == false, so no local config is read.
+    let temp = tempdir().unwrap();
+
+    let output = run_libra_command(
+        &["open", "--json", "-b", "dev", "https://github.com/foo/bar"],
+        temp.path(),
+    );
+    assert_cli_success(
+        &output,
+        "open with direct URL outside a repo should succeed",
+    );
+
+    let json = parse_json_stdout(&output);
+    assert!(json["data"]["remote"].is_null());
+    assert_eq!(
+        json["data"]["web_url"],
+        "https://github.com/foo/bar/tree/dev"
+    );
+    assert_eq!(json["data"]["target_type"], "branch");
+    assert_eq!(json["data"]["platform"], "github");
     assert_eq!(json["data"]["launched"], false);
 }
 

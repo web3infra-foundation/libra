@@ -24,6 +24,9 @@ impl<'a> ScenarioCtx<'a> {
         fs::create_dir_all(&scenario_log_dir)
             .with_context(|| format!("create log dir {}", scenario_log_dir.display()))?;
 
+        // §3.3.1 canonical isolation (env_clear + exactly the whitelist in plan + TMPDIR
+        // to keep ssh/pack temps inside RUN_ROOT). Matches the bash `libra()` template.
+        // Every raw output is passed to ensure_no_secret_leak *before* any redact/write (§3.6).
         let mut cmd = Command::new(&self.run.binary);
         cmd.args(args)
             .current_dir(&cwd)
@@ -109,6 +112,7 @@ impl<'a> ScenarioCtx<'a> {
         fs::create_dir_all(&scenario_log_dir)
             .with_context(|| format!("create log dir {}", scenario_log_dir.display()))?;
 
+        // Same §3.3.1 / §3.6 isolation harness as `command` (see above).
         let mut cmd = Command::new(&self.run.binary);
         cmd.args(args)
             .current_dir(&cwd)

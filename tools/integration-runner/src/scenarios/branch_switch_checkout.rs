@@ -42,6 +42,8 @@ pub(crate) fn scenario_branch_switch_checkout(ctx: &mut ScenarioCtx<'_>) -> Resu
     )?;
     ctx.command(&["switch", "main"], repo.clone(), true)?;
     ctx.command(&["branch", "-D", "renamed-feature"], repo.clone(), true)?;
+    let bad_delete = ctx.command(&["branch", "-d", "nonexistent"], repo.clone(), false)?;
+    assert_lbr_or_text(&bad_delete, "not found")?;
     ctx.command(&["fsck", "--connectivity-only"], repo, true)?;
     Ok(())
 }

@@ -22,8 +22,11 @@ repository because it stores the object in the repository object database.
 | `<PATH>...` | | File paths to hash |
 | `--stdin` | | Read bytes from standard input instead of file paths |
 | `--stdin-paths` | | Read newline-delimited file paths from standard input |
-| `--write` | `-w` | Store the computed blob in the repository object database |
-| `--type <TYPE>` | `-t` | Object type to hash. Only `blob` is currently supported |
+| `--write` | `-w` | Store the computed object in the repository object database |
+| `--type <TYPE>` | `-t` | Object type to hash: `blob` (default), `commit`, `tree`, or `tag` |
+| `--literally` | | Hash the content as-is, without validating that it is a well-formed object of the given type |
+| `--path <FILE>` | | Use the given path as the source label for `--stdin` input (does not change the content; Libra has no attribute/filter lookup) |
+| `--no-filters` | | Accepted for compatibility but a no-op — Libra applies no clean/smudge or CRLF filters |
 | `--json` | | Emit a structured JSON envelope |
 | `--machine` | | Emit the same envelope as one compact JSON line |
 
@@ -90,14 +93,16 @@ Structured output:
 | Read from stdin | `--stdin` | `--stdin` | N/A |
 | Read paths from stdin | `--stdin-paths` | `--stdin-paths` | N/A |
 | Write object | `-w` / `--write` | `-w` | N/A |
-| Select object type | Only `blob` | `-t <type>` | N/A |
-| Path filters / attributes | Not supported | `--path`, filters | N/A |
-| Hash literally invalid objects | Not supported | `--literally` | N/A |
+| Select object type | `blob`/`commit`/`tree`/`tag` | `-t <type>` | N/A |
+| `--path` source label | Accepted (label only) | `--path` | N/A |
+| Clean/smudge & CRLF filters | `--no-filters` accepted as a no-op (no filter infrastructure) | filters | N/A |
+| Hash literally invalid objects | `--literally` | `--literally` | N/A |
 
 ## Errors
 
 | Condition | Stable code | Exit | Hint |
 |-----------|-------------|------|------|
-| Unsupported object type | `LBR-CLI-002` | 129 | `libra hash-object currently supports only blob objects` |
+| Unsupported object type | `LBR-CLI-002` | 129 | supported object types: blob, commit, tree, tag |
+| Malformed commit/tree/tag without `--literally` | `LBR-REPO-002` | 128 | pass `--literally` to hash the content as-is |
 | Input file cannot be read | `LBR-IO-001` | 128 | Verify the path exists and is readable |
 | Object cannot be written | `LBR-IO-002` | 128 | Check object storage permissions and disk space |

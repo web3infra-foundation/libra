@@ -88,5 +88,9 @@ pub(crate) fn scenario_config_git_compat_mode(ctx: &mut ScenarioCtx<'_>) -> Resu
     assert_lbr_or_text(&bad_top, "top-level")?;
     let bad_import_arg = ctx.command(&["config", "--import", "user.name"], repo.clone(), false)?;
     assert_lbr_or_text(&bad_import_arg, "import")?;
+    assert_json_ok(
+        &ctx.command(&["--json", "config", "list"], repo.clone(), true)?,
+        "config",
+    )?;
     Ok(())
 }

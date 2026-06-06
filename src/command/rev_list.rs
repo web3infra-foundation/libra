@@ -1,12 +1,19 @@
 //! Implements `rev-list` to enumerate commits reachable from a revision.
 
-use std::io::Write;
+use std::{
+    collections::{HashMap, HashSet},
+    io::Write,
+};
 
 use clap::Parser;
+use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
 use serde::Serialize;
 
 use crate::{
-    command::log,
+    command::{
+        log,
+        merge_base::{self, MergeBaseError},
+    },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
@@ -27,15 +34,55 @@ EXAMPLES:
     libra rev-list                  Walk ancestry from HEAD (one hash per line)
     libra rev-list main             Walk ancestry from refs/heads/main
     libra rev-list HEAD~5           Walk ancestry from a relative ref
+    libra rev-list main..HEAD       Commits reachable from HEAD but not main (range)
+    libra rev-list -n 10 HEAD       Limit output to the 10 newest commits
+    libra rev-list --count HEAD     Print only the count of reachable commits
     libra rev-list --json HEAD      Structured JSON output (input + commits[] + total)
     libra rev-list --quiet HEAD     Suppress stdout (use exit code as truthy probe)";
 
 #[derive(Parser, Debug)]
 #[command(after_help = REV_LIST_EXAMPLES)]
 pub struct RevListArgs {
-    /// Revision to list from. Defaults to HEAD when omitted.
+    /// Revisions to list from. Defaults to HEAD when omitted. Accepts multiple
+    /// specs, exclusions (`^<rev>`), and ranges (`A..B`, `A...B`).
     #[clap(value_name = "SPEC")]
-    pub spec: Option<String>,
+    pub specs: Vec<String>,
+
+    /// Limit the number of commits output (`-n`/`--max-count`).
+    #[clap(short = 'n', long = "max-count", value_name = "N")]
+    pub max_count: Option<usize>,
+
+    /// Skip the first N commits of the filtered output.
+    #[clap(long, value_name = "N")]
+    pub skip: Option<usize>,
+
+    /// Print only the count of commits, not the hashes.
+    #[clap(long)]
+    pub count: bool,
+
+    /// Show only merge commits (two or more parents).
+    #[clap(long, conflicts_with = "no_merges")]
+    pub merges: bool,
+
+    /// Show only non-merge commits (fewer than two parents).
+    #[clap(long)]
+    pub no_merges: bool,
+
+    /// Show only commits with at least N parents.
+    #[clap(long = "min-parents", value_name = "N")]
+    pub min_parents: Option<usize>,
+
+    /// Show only commits with at most N parents.
+    #[clap(long = "max-parents", value_name = "N")]
+    pub max_parents: Option<usize>,
+
+    /// Print parent hashes after each commit hash.
+    #[clap(long)]
+    pub parents: bool,
+
+    /// Prefix each line with the commit's Unix timestamp.
+    #[clap(long)]
+    pub timestamp: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,22 +100,61 @@ pub async fn execute(args: RevListArgs) -> Result<(), String> {
 
 pub async fn execute_safe(args: RevListArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
-    let result = resolve_rev_list(&args).await?;
+    let resolved = resolve_rev_list(&args).await?;
 
     if output.is_json() {
-        emit_json_data("rev-list", &result, output)
-    } else if output.quiet {
-        Ok(())
-    } else {
-        let stdout = std::io::stdout();
-        let mut writer = stdout.lock();
-        write_rev_list_output(&mut writer, &result.commits)
+        // JSON envelope always carries the bare commit-hash list (`--parents`
+        // /`--timestamp` only affect text rendering, and `--count` does not
+        // suppress the list in JSON mode), keeping the schema stable.
+        let commits: Vec<String> = resolved.commits.iter().map(|c| c.id.to_string()).collect();
+        let total = commits.len();
+        let result = RevListOutput {
+            input: resolved.input,
+            commits,
+            total,
+        };
+        return emit_json_data("rev-list", &result, output);
     }
+    if output.quiet {
+        return Ok(());
+    }
+    if args.count {
+        println!("{}", resolved.commits.len());
+        return Ok(());
+    }
+
+    let stdout = std::io::stdout();
+    let mut writer = stdout.lock();
+    write_rev_list_lines(&mut writer, &resolved.commits, args.parents, args.timestamp)
 }
 
-fn write_rev_list_output<W: Write>(writer: &mut W, commits: &[String]) -> CliResult<()> {
+/// Render one commit line honoring `--timestamp` (`<ts> <hash>`) and
+/// `--parents` (`<hash> <p1> <p2>…`); combined yields `<ts> <hash> <parents>`.
+fn format_rev_list_line(commit: &Commit, parents: bool, timestamp: bool) -> String {
+    let mut line = String::new();
+    if timestamp {
+        line.push_str(&commit.committer.timestamp.to_string());
+        line.push(' ');
+    }
+    line.push_str(&commit.id.to_string());
+    if parents {
+        for parent in &commit.parent_commit_ids {
+            line.push(' ');
+            line.push_str(&parent.to_string());
+        }
+    }
+    line
+}
+
+fn write_rev_list_lines<W: Write>(
+    writer: &mut W,
+    commits: &[Commit],
+    parents: bool,
+    timestamp: bool,
+) -> CliResult<()> {
     for commit in commits {
-        match writeln!(writer, "{commit}") {
+        let line = format_rev_list_line(commit, parents, timestamp);
+        match writeln!(writer, "{line}") {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
             Err(error) => {
@@ -82,25 +168,121 @@ fn write_rev_list_output<W: Write>(writer: &mut W, commits: &[String]) -> CliRes
     Ok(())
 }
 
-async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
-    let spec = args.spec.as_deref().unwrap_or("HEAD");
-    let commit = util::get_commit_base_typed(spec)
+/// Resolved rev-list output: the filtered, sorted, and sliced commit set plus
+/// the human-readable input label.
+struct ResolvedRevList {
+    input: String,
+    commits: Vec<Commit>,
+}
+
+/// Resolve a single endpoint of a spec (empty defaults to `HEAD`).
+async fn resolve_endpoint(endpoint: &str) -> CliResult<ObjectHash> {
+    let spec = if endpoint.is_empty() {
+        "HEAD"
+    } else {
+        endpoint
+    };
+    util::get_commit_base_typed(spec)
         .await
-        .map_err(|err| rev_list_target_error(spec, err))?;
-    let mut commits = log::get_reachable_commits(commit.to_string(), None).await?;
+        .map_err(|err| rev_list_target_error(spec, err))
+}
+
+/// Translate the `--merges`/`--no-merges`/`--min-parents`/`--max-parents`
+/// flags into an inclusive `(min, max)` parent-count window. `--merges` raises
+/// the floor to 2; `--no-merges` caps the ceiling at 1.
+fn parent_bounds(args: &RevListArgs) -> (usize, Option<usize>) {
+    let mut min = args.min_parents.unwrap_or(0);
+    if args.merges {
+        min = min.max(2);
+    }
+    let mut max = args.max_parents;
+    if args.no_merges {
+        max = Some(max.map_or(1, |existing| existing.min(1)));
+    }
+    (min, max)
+}
+
+fn map_merge_base_error(error: MergeBaseError) -> CliError {
+    // `find_best_merge_bases` only fails while loading an ancestor commit; the
+    // flattened `detail` cannot distinguish corruption from I/O, so classify
+    // conservatively as RepoCorrupt (matching `rev_list_target_error`).
+    CliError::fatal(format!("failed to compute symmetric range: {error}"))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+}
+
+async fn resolve_rev_list(args: &RevListArgs) -> CliResult<ResolvedRevList> {
+    let specs: Vec<String> = if args.specs.is_empty() {
+        vec!["HEAD".to_string()]
+    } else {
+        args.specs.clone()
+    };
+    let input = specs.join(" ");
+
+    // Desugar each spec into positive (included) and negative (excluded) tips:
+    //   ^A        → exclude A
+    //   A..B      → B, exclude A
+    //   A...B     → A, B, exclude every best merge base of A and B
+    //   A         → include A
+    let mut positive_tips: Vec<ObjectHash> = Vec::new();
+    let mut negative_tips: Vec<ObjectHash> = Vec::new();
+    for spec in &specs {
+        if let Some((lhs, rhs)) = spec.split_once("...") {
+            let a = resolve_endpoint(lhs).await?;
+            let b = resolve_endpoint(rhs).await?;
+            positive_tips.push(a);
+            positive_tips.push(b);
+            for base in merge_base::find_best_merge_bases(a, b).map_err(map_merge_base_error)? {
+                negative_tips.push(base);
+            }
+        } else if let Some((lhs, rhs)) = spec.split_once("..") {
+            negative_tips.push(resolve_endpoint(lhs).await?);
+            positive_tips.push(resolve_endpoint(rhs).await?);
+        } else if let Some(rest) = spec.strip_prefix('^') {
+            negative_tips.push(resolve_endpoint(rest).await?);
+        } else {
+            positive_tips.push(resolve_endpoint(spec).await?);
+        }
+    }
+
+    // Excluded = everything reachable from any negative tip.
+    let mut excluded: HashSet<ObjectHash> = HashSet::new();
+    for tip in &negative_tips {
+        for commit in log::get_reachable_commits(tip.to_string(), None).await? {
+            excluded.insert(commit.id);
+        }
+    }
+
+    // Included = everything reachable from a positive tip and not excluded.
+    let mut included: HashMap<ObjectHash, Commit> = HashMap::new();
+    for tip in &positive_tips {
+        for commit in log::get_reachable_commits(tip.to_string(), None).await? {
+            if excluded.contains(&commit.id) {
+                continue;
+            }
+            included.entry(commit.id).or_insert(commit);
+        }
+    }
+
+    let mut commits: Vec<Commit> = included.into_values().collect();
     sort_rev_list_commits(&mut commits);
 
-    let commits = commits
-        .into_iter()
-        .map(|commit| commit.id.to_string())
-        .collect::<Vec<_>>();
-    let total = commits.len();
+    // Parent-count predicate first, then skip/limit on the surviving stream so
+    // `--skip N` counts post-filter commits (matching Git).
+    let (min_parents, max_parents) = parent_bounds(args);
+    commits.retain(|commit| {
+        let n = commit.parent_commit_ids.len();
+        n >= min_parents && max_parents.is_none_or(|max| n <= max)
+    });
 
-    Ok(RevListOutput {
-        input: spec.to_string(),
-        commits,
-        total,
-    })
+    if let Some(skip) = args.skip {
+        let skip = skip.min(commits.len());
+        commits.drain(0..skip);
+    }
+    if let Some(max) = args.max_count {
+        commits.truncate(max);
+    }
+
+    Ok(ResolvedRevList { input, commits })
 }
 
 fn sort_rev_list_commits(commits: &mut [git_internal::internal::object::commit::Commit]) {
@@ -144,7 +326,10 @@ mod tests {
         },
     };
 
-    use super::{RevListArgs, sort_rev_list_commits, write_rev_list_output};
+    use super::{
+        RevListArgs, format_rev_list_line, parent_bounds, sort_rev_list_commits,
+        write_rev_list_lines,
+    };
     use crate::utils::error::StableErrorCode;
 
     struct FailingWriter {
@@ -190,13 +375,75 @@ mod tests {
     #[test]
     fn test_rev_list_args_default() {
         let args = RevListArgs::try_parse_from(["rev-list"]).unwrap();
-        assert!(args.spec.is_none());
+        assert!(args.specs.is_empty());
     }
 
     #[test]
     fn test_rev_list_args_with_spec() {
         let args = RevListArgs::try_parse_from(["rev-list", "HEAD~1"]).unwrap();
-        assert_eq!(args.spec.as_deref(), Some("HEAD~1"));
+        assert_eq!(args.specs, vec!["HEAD~1".to_string()]);
+    }
+
+    #[test]
+    fn test_rev_list_args_multi_spec() {
+        let args = RevListArgs::try_parse_from(["rev-list", "main", "^origin/main"]).unwrap();
+        assert_eq!(
+            args.specs,
+            vec!["main".to_string(), "^origin/main".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_rev_list_args_filter_flags() {
+        let args =
+            RevListArgs::try_parse_from(["rev-list", "-n", "3", "--skip", "1", "--count", "HEAD"])
+                .unwrap();
+        assert_eq!(args.max_count, Some(3));
+        assert_eq!(args.skip, Some(1));
+        assert!(args.count);
+        assert_eq!(args.specs, vec!["HEAD".to_string()]);
+    }
+
+    #[test]
+    fn test_rev_list_merges_conflicts_with_no_merges() {
+        let err = RevListArgs::try_parse_from(["rev-list", "--merges", "--no-merges", "HEAD"]);
+        assert!(err.is_err(), "--merges and --no-merges must conflict");
+    }
+
+    #[test]
+    fn test_parent_bounds_merges_and_no_merges() {
+        let merges = RevListArgs::try_parse_from(["rev-list", "--merges"]).unwrap();
+        assert_eq!(parent_bounds(&merges), (2, None));
+
+        let no_merges = RevListArgs::try_parse_from(["rev-list", "--no-merges"]).unwrap();
+        assert_eq!(parent_bounds(&no_merges), (0, Some(1)));
+
+        let explicit =
+            RevListArgs::try_parse_from(["rev-list", "--min-parents", "1", "--max-parents", "2"])
+                .unwrap();
+        assert_eq!(parent_bounds(&explicit), (1, Some(2)));
+    }
+
+    #[test]
+    fn test_format_rev_list_line_variants() {
+        let id = test_hash(0xab);
+        let parent = test_hash(0x01);
+        let mut commit = test_commit(id, 1234);
+        commit.parent_commit_ids = vec![parent];
+
+        assert_eq!(format_rev_list_line(&commit, false, false), id.to_string());
+        assert_eq!(
+            format_rev_list_line(&commit, true, false),
+            format!("{id} {parent}"),
+        );
+        assert_eq!(
+            format_rev_list_line(&commit, false, true),
+            format!("1234 {id}"),
+        );
+        assert_eq!(
+            format_rev_list_line(&commit, true, true),
+            format!("1234 {id} {parent}"),
+        );
     }
 
     #[test]
@@ -228,8 +475,9 @@ mod tests {
         let mut writer = FailingWriter {
             kind: io::ErrorKind::PermissionDenied,
         };
+        let commits = vec![test_commit(test_hash(0x01), 1)];
 
-        let error = write_rev_list_output(&mut writer, &["abc123".to_string()])
+        let error = write_rev_list_lines(&mut writer, &commits, false, false)
             .expect_err("write should fail");
 
         assert_eq!(error.stable_code(), StableErrorCode::IoWriteFailed);
@@ -240,8 +488,9 @@ mod tests {
         let mut writer = FailingWriter {
             kind: io::ErrorKind::BrokenPipe,
         };
+        let commits = vec![test_commit(test_hash(0x01), 1)];
 
-        write_rev_list_output(&mut writer, &["abc123".to_string()])
+        write_rev_list_lines(&mut writer, &commits, false, false)
             .expect("broken pipe should be ignored");
     }
 }

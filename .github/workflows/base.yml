@@ -13,14 +13,14 @@ concurrency:
 jobs:
   format:
     name: compat-rustfmt
-    runs-on: [self-hosted]
+    runs-on: libra-runner-set
 
     env:
       CARGO_TERM_COLOR: always
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           submodules: recursive
 
@@ -37,7 +37,7 @@ jobs:
     strategy:
       fail-fast: true
 
-    runs-on: [self-hosted]
+    runs-on: libra-runner-set
     env:
       CARGO_TERM_COLOR: always
       RUSTUP_TOOLCHAIN: stable
@@ -45,45 +45,25 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           submodules: recursive
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: "22"
-
-      - name: Enable pnpm
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.1.0 --activate
 
       - name: Run cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   web-check:
     name: compat-web-check
-    runs-on: [self-hosted]
+    runs-on: libra-runner-set
 
     env:
       CARGO_TERM_COLOR: always
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           submodules: recursive
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: "22"
-
-      - name: Enable pnpm
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.1.0 --activate
 
       # The Rust crate's `build.rs` skips the web build whenever
       # `LIBRA_SKIP_WEB_BUILD=1` (set on every other job for speed). This
@@ -111,11 +91,11 @@ jobs:
 
   redundancy:
     name: compat-redundancy
-    runs-on: [self-hosted]
+    runs-on: libra-runner-set
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           submodules: recursive
 
@@ -136,7 +116,7 @@ jobs:
   test:
     name: compat-offline-core
 
-    runs-on: [self-hosted]
+    runs-on: libra-runner-set
 
     env:
       CARGO_TERM_COLOR: always
@@ -147,57 +127,27 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           submodules: recursive
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: "22"
-
-      - name: Enable pnpm
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.1.0 --activate
-
-      - name: Ensure ripgrep is available
-        shell: bash
-        run: |
-          if command -v rg >/dev/null 2>&1; then
-            rg --version
-            exit 0
-          fi
-
-          if [ "$(id -u)" -eq 0 ]; then
-            SUDO=""
-          elif command -v sudo >/dev/null 2>&1; then
-            SUDO="sudo"
-          else
-            SUDO=""
-          fi
-
-          if command -v apt-get >/dev/null 2>&1; then
-            $SUDO apt-get update
-            $SUDO apt-get install -y ripgrep
-          elif command -v dnf >/dev/null 2>&1; then
-            $SUDO dnf install -y ripgrep
-          elif command -v yum >/dev/null 2>&1; then
-            $SUDO yum install -y ripgrep
-          elif command -v brew >/dev/null 2>&1; then
-            brew install ripgrep
-          else
-            cargo install ripgrep --locked
-            echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
-          fi
-
-          command -v rg
-          rg --version
 
       - name: Check compatibility matrix drift
         # De-scripted: the COMPATIBILITY.md ↔ src/cli.rs::Commands drift check now
         # lives in tests/compat/matrix_alignment.rs (also runs in `cargo test --all`).
         run: cargo test --test compat_matrix_alignment
+
+      - name: Check black-box CLI integration plan consistency
+        run: cargo run --manifest-path tools/integration-runner/Cargo.toml -- check-plan
+
+      - name: Run black-box CLI integration tests (waves 0,1,2)
+        # Per docs/development/integration-test-plan.md, `run --waves 0,1,2` is the
+        # default black-box execution gate for the Git-compat command surface.
+        # It must be invoked explicitly via the independent runner crate (never as
+        # a Cargo [[test]] target). Produces §5 report artifacts (report.json, summary.md,
+        # results.ndjson, per-scenario logs) under the runner's temp RUN_ROOT.
+        # Exit code: 0 = no failures, 1 = at least one fail, 2 = preflight/build fail.
+        # env-skip cases are reported but do not fail the gate.
+        run: cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --waves 0,1,2
 
       - name: Run tests (L1 + L2 + L3)
         env:
@@ -248,7 +198,7 @@ jobs:
 
   network-remotes:
     name: compat-network-remotes
-    runs-on: [self-hosted]
+    runs-on: libra-runner-set
 
     env:
       CARGO_TERM_COLOR: always
@@ -259,19 +209,9 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           submodules: recursive
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: "22"
-
-      - name: Enable pnpm
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.1.0 --activate
 
       # Network-only test layer (`test-network` feature gate). Tests requiring outbound
       # network but no secrets are surfaced through this job; tests requiring real

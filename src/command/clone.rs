@@ -1029,6 +1029,13 @@ fn map_checkout_error(source: RestoreError) -> CliError {
             "internal error: clone checkout attempted to write worktree while on locked branch '{name}'"
         ))
         .with_stable_code(StableErrorCode::RepoStateInvalid),
+        // A freshly cloned tree has no conflict stages, so a checkout cannot hit
+        // an unmerged path or a missing conflict stage. Surface a fatal
+        // diagnostic rather than panicking to keep the match exhaustive.
+        RestoreError::PathUnmerged(_) | RestoreError::MissingStageVersion { .. } => {
+            CliError::fatal("internal error: clone checkout encountered an unmerged path")
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+        }
     }
 }
 
@@ -1927,6 +1934,7 @@ async fn clone_cloud_publish_into_destination(
         staged: true,
         source: None,
         pathspec: vec![util::working_dir_string()],
+        ..Default::default()
     })
     .await
     .map_err(|source| CloneError::CheckoutFailed { source })?;
@@ -3707,6 +3715,7 @@ pub(crate) async fn setup_repository(
                 staged: true,
                 source: None,
                 pathspec: vec![util::working_dir_string()],
+                ..Default::default()
             })
             .await
             .map_err(|source| CloneError::CheckoutFailed { source })?;

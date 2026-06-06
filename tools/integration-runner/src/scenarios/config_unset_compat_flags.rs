@@ -54,5 +54,9 @@ pub(crate) fn scenario_config_unset_compat_flags(ctx: &mut ScenarioCtx<'_>) -> R
     if !stdout_trim(&missing_legacy).is_empty() {
         bail!("config --get-all temp.legacy returned values after --unset-all");
     }
+    assert_json_ok(
+        &ctx.command(&["--json", "config", "list"], repo.clone(), true)?,
+        "config",
+    )?;
     Ok(())
 }

@@ -42,7 +42,13 @@ pub(crate) fn scenario_live_github_create_push_clone_fetch(
     )?;
 
     // Arm the guard *immediately* after successful create. Drop will delete if we don't disarm.
+    // Mark "cleanup_required" immediately so that any subsequent bail (error path) will carry
+    // it in ScenarioResult.cleanup (via finish). On explicit success delete+disarm we overwrite
+    // with "deleted ...". This wires the guard arming to the wave3_cleanup aggregator and
+    // post-run WARNING (addresses the emission gap where failed live runs after create
+    // previously reported wave3_cleanup="not_run").
     let guard = GhRepoCleanupGuard::new(owner_repo.clone());
+    ctx.set_cleanup(&format!("cleanup_required {}", owner_repo));
 
     // Capture remote URL (prefer sshUrl for agent-based auth; plan allows recorded HTTPS)
     let view_ssh = ctx.gh(
