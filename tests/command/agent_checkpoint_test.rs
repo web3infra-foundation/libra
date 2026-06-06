@@ -1,17 +1,7 @@
 //! Integration coverage for `libra agent checkpoint` mutation paths.
 
-use std::{fs, path::Path, sync::Arc, time::Duration};
+use std::{fs, path::Path, time::Duration};
 
-use libra::{
-    internal::{
-        ai::{
-            history::{CheckpointCommitParams, CheckpointScope, HistoryManager},
-            observed_agents::Redactor,
-        },
-        branch::AGENT_TRACES_BRANCH,
-    },
-    utils::client_storage::ClientStorage,
-};
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, Statement, Value};
 use serial_test::serial;
 
@@ -59,125 +49,6 @@ async fn seed_checkpoint_for_parent(conn: &DatabaseConnection, checkpoint_id: &s
     ))
     .await
     .expect("insert agent_checkpoint");
-}
-
-/// Append a *real* committed checkpoint commit (real blobs + tree) and
-/// register its catalog row, returning the redacted transcript byte length so
-/// the caller can assert `checkpoint show` reports it. Mirrors the production
-/// `write_committed_checkpoint` layout: `metadata.json` blob +
-/// `transcript/<provider>` blob under `checkpoint/<id[:2]>/<id[2:]>/`.
-async fn seed_real_committed_checkpoint(
-    conn: &DatabaseConnection,
-    repo: &Path,
-    checkpoint_id: &str,
-    session_id: &str,
-) -> usize {
-    conn.execute(Statement::from_sql_and_values(
-        conn.get_database_backend(),
-        "INSERT INTO agent_session (
-            session_id, agent_kind, provider_session_id, state, working_dir,
-            metadata_json, redaction_report, started_at, last_event_at, stopped_at
-         ) VALUES (?, 'claude_code', ?, 'stopped', '/tmp/libra-agent-show-test',
-                   '{}', '{}', 10, 20, 30)",
-        vec![
-            Value::from(session_id),
-            Value::from(format!("provider-{session_id}")),
-        ],
-    ))
-    .await
-    .expect("insert agent_session");
-
-    let repo_path = repo.join(".libra");
-    let storage = Arc::new(ClientStorage::init(repo_path.join("objects")));
-    let history = HistoryManager::new_with_ref(
-        storage,
-        repo_path.clone(),
-        Arc::new(conn.clone()),
-        AGENT_TRACES_BRANCH,
-    );
-    let redactor = Redactor::new_default();
-    let (redacted, _) = redactor.redact(format!("transcript for {checkpoint_id}").as_bytes());
-    let transcript_len = redacted.len();
-    let metadata = format!(r#"{{"checkpoint_id":"{checkpoint_id}"}}"#);
-    let written = history
-        .append_checkpoint_commit(CheckpointCommitParams {
-            checkpoint_id,
-            session_id,
-            agent_kind: "claude_code",
-            parent_commit: None,
-            scope: CheckpointScope::Committed,
-            tool_use_id: None,
-            metadata_json: metadata.as_bytes(),
-            transcript_redacted: &redacted,
-            provider_name: "claude_code",
-            events_jsonl: None,
-        })
-        .await
-        .expect("append checkpoint commit");
-
-    conn.execute(Statement::from_sql_and_values(
-        conn.get_database_backend(),
-        "INSERT INTO agent_checkpoint (
-            checkpoint_id, session_id, scope, parent_commit, tree_oid,
-            metadata_blob_oid, traces_commit, created_at
-         ) VALUES (?, ?, 'committed', NULL, ?, ?, ?, 40)",
-        vec![
-            Value::from(checkpoint_id),
-            Value::from(session_id),
-            Value::from(written.tree_oid.to_string()),
-            Value::from(written.metadata_blob_oid.to_string()),
-            Value::from(written.commit_hash.to_string()),
-        ],
-    ))
-    .await
-    .expect("insert agent_checkpoint");
-
-    transcript_len
-}
-
-/// `checkpoint show --json` surfaces the redacted transcript byte length and a
-/// tree summary enumerating the checkpoint commit's leaf blobs
-/// (`metadata.json` + `transcript/<provider>`). Covers entire.md §7.3's
-/// "metadata + transcript 长度 + tree 摘要".
-#[tokio::test]
-#[serial]
-async fn agent_checkpoint_show_reports_tree_summary_and_transcript_bytes() {
-    let repo = create_committed_repo_via_cli();
-    let _guard = ChangeDirGuard::new(repo.path());
-    let conn = connect_repo_db(repo.path()).await;
-    let transcript_len =
-        seed_real_committed_checkpoint(&conn, repo.path(), "cp-show", "sess-show").await;
-
-    let output = run_libra_command(
-        &["--json", "agent", "checkpoint", "show", "cp-show"],
-        repo.path(),
-    );
-    assert_cli_success(&output, "agent checkpoint show --json");
-    let json = parse_json_stdout(&output);
-    assert_eq!(json["command"], "agent_checkpoint");
-
-    // transcript_bytes is surfaced both at the top level and inside `tree`.
-    assert_eq!(json["data"]["transcript_bytes"], transcript_len as u64);
-    assert_eq!(
-        json["data"]["tree"]["transcript_bytes"],
-        transcript_len as u64
-    );
-
-    let entries = json["data"]["tree"]["entries"]
-        .as_array()
-        .expect("tree.entries array");
-    assert!(
-        entries.iter().any(|e| e["path"]
-            .as_str()
-            .is_some_and(|p| p.ends_with("metadata.json"))),
-        "tree summary must list metadata.json, got {entries:?}"
-    );
-    assert!(
-        entries.iter().any(|e| e["path"]
-            .as_str()
-            .is_some_and(|p| p.ends_with("/transcript/claude_code"))),
-        "tree summary must list the transcript blob, got {entries:?}"
-    );
 }
 
 #[tokio::test]

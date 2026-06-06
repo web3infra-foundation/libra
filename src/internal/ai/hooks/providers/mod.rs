@@ -7,22 +7,11 @@
 
 pub mod claude;
 pub mod gemini;
-pub mod promoted;
 
 use super::provider::HookProvider;
 
 /// Provider names that ship with Libra. Used by CLI completion / help text.
-/// Names match `command::agent::provider_name_for` so `find_provider` resolves
-/// every stable agent slug.
-const SUPPORTED_PROVIDER_NAMES: &[&str] = &[
-    "claude",
-    "gemini",
-    "cursor",
-    "codex",
-    "copilot",
-    "factory-ai",
-    "opencode",
-];
+const SUPPORTED_PROVIDER_NAMES: &[&str] = &["claude", "gemini"];
 
 /// Singleton accessor for the Claude hook provider.
 pub fn claude_provider() -> &'static dyn HookProvider {
@@ -45,11 +34,6 @@ pub fn find_provider(provider_name: &str) -> Option<&'static dyn HookProvider> {
     match provider_name {
         "claude" => Some(claude_provider()),
         "gemini" => Some(gemini_provider()),
-        "cursor" => Some(&promoted::CURSOR_PROVIDER),
-        "codex" => Some(&promoted::CODEX_PROVIDER),
-        "copilot" => Some(&promoted::COPILOT_PROVIDER),
-        "factory-ai" => Some(&promoted::FACTORY_PROVIDER),
-        "opencode" => Some(&promoted::OPENCODE_PROVIDER),
         _ => None,
     }
 }
@@ -58,30 +42,19 @@ pub fn find_provider(provider_name: &str) -> Option<&'static dyn HookProvider> {
 mod tests {
     use super::*;
 
-    // Scenario: lookup succeeds for every registered provider (the two
-    // bespoke ones plus the five promoted external agents) and rejects
-    // anything else. Each provider's `provider_name` round-trips its key.
+    // Scenario: lookup succeeds for the two registered providers and rejects
+    // anything else.
     #[test]
     fn registry_finds_known_providers() {
-        for name in [
-            "claude",
-            "gemini",
-            "cursor",
-            "codex",
-            "copilot",
-            "factory-ai",
-            "opencode",
-        ] {
-            assert_eq!(
-                find_provider(name).map(HookProvider::provider_name),
-                Some(name),
-                "find_provider({name}) must resolve to a provider naming itself"
-            );
-        }
-        assert!(find_provider("unknown").is_none());
         assert_eq!(
-            supported_provider_names(),
-            &["claude", "gemini", "cursor", "codex", "copilot", "factory-ai", "opencode"]
+            find_provider("claude").map(HookProvider::provider_name),
+            Some("claude")
         );
+        assert_eq!(
+            find_provider("gemini").map(HookProvider::provider_name),
+            Some("gemini")
+        );
+        assert!(find_provider("unknown").is_none());
+        assert_eq!(supported_provider_names(), &["claude", "gemini"]);
     }
 }

@@ -1,11 +1,14 @@
 # 在 Libra 中集成 EntireIO 风格的"外部 Agent 会话捕获"能力
 
-> **文档定位**：把 EntireIO 的核心价值（把外部 Agent 的生命周期事件与原始 transcript 纳入版本控制）迁移到 Libra，在保留现有 `libra code` 行为不变的前提下，补齐"多外部 Agent、可恢复会话、可回放检查点、可追踪同步"的能力。
+> **文档定位**：把 EntireIO 的核心价值（把外部 Agent 的生命周期事件与原始 transcript 纳入版本控制）迁移到 Libra，在**不改变 `libra code` 写入 `refs/libra/intent` 的内容语义**的前提下，补齐"多外部 Agent、可恢复会话、可回放检查点、可追踪同步"的能力。（注：`libra code` 的**交互面形态**正在按 [../development/agent.md](../development/agent.md) 从 TUI 迁往 Web-only；本文不依赖该交互面，只依赖 intent-ref 的写入语义不变。）
 >
 > **与兄弟改进计划的边界**：
 > - [agent.md](agent.md)（Part A/B/C）：Libra 自身 Agent 子系统（`libra code` 内部运行时、Step 1/2 sub-agent、TUI Automation Control）。本文不重复。
+> - [../development/agent.md](../development/agent.md)：`libra code` 的 TUI→Web-only 迁移与 UI-neutral `AgentRuntime` 落地路线图。该计划会**删除 Code TUI、把 Web 作为唯一交互面**；本文据此**不依赖、也不扩展 TUI 作为捕获或展示面**（见 §11、§14 阶段 2 step 6）。
 > - [sandbox.md](sandbox.md)：工具执行边界与权限。本文与之正交。
 > - 本文：**外部 Agent 生命周期接入与会话对象化**。
+>
+> **术语消歧（跨文档）**：本文的"外部 Agent"指**被观测捕获的第三方编码 Agent**（Claude Code / Gemini / Cursor…），与 [../development/agent.md](../development/agent.md) 中"驱动 Libra 内部 runtime 的外部调度方/调用方"含义相反；本文的"checkpoint"指 `refs/libra/agent-traces` 上的 transcript 检查点，与 orchestrator 的 dagrs 执行 checkpoint 不同；本文的"session / `agent_session`"指外部 Agent 会话（表），与 `libra code` 内部 runtime session 不同。两者的表 / 类型 / ref / 命令命名空间均不重叠。
 
 > **改进原则（融合自前两轮迭代）**：
 > 1. **Lean v1**：仅 Claude + Gemini 上线，其余 5 个 Agent 在 v1 占位为 preview，v2 填充。
@@ -42,39 +45,7 @@
 | `builtin_migrations()` 历史上**用 inline SQL 字符串**，未走 `include_str!`（曾位于 migration.rs:499-540） | ✅ 已落地（v0.17.400）：`2026050301_automation_log` / `2026050302_agent_usage_stats` 已抽取到 `sql/migrations/2026050301_automation_log{,_down}.sql` 与 `2026050302_agent_usage_stats{,_down}.sql`，与 `2026050303_agent_capture` 起的后续迁移一致走 `include_str!`；[sql/migrations/README.md](../../sql/migrations/README.md) 注册表已同步标记两条 SQL 文件来源。当前 builtin_migrations 位于 migration.rs:532 |
 | [sql/migrations/README.md](../../sql/migrations/README.md) 仍写"4 位版本号 NNNN"，与现网 `2026050301` 不一致 | ✅ 已落地：README 已改为 `YYYYMMDDNN` 形式说明，并明确所有迁移走 `include_str!`（v0.17.400 起注册表的两条 inline 来源已抽取为文件） |
 | `is_locked_branch` 仅匹配 `DEFAULT_BRANCH \| INTENT_BRANCH`（曾位于 branch.rs:45） | ✅ 已落地：`AGENT_TRACES_BRANCH` 已加入 `is_locked_branch`（[branch.rs:51](../../src/internal/branch.rs)）；`branch`（create / delete / rename）、`switch`（create）已直接检查；`restore` 通过 [restore.rs:198-202](../../src/command/restore.rs) 调用 `is_locked_revision` 拒绝 `agent-traces` / `agent-traces~1` 等所有源 revision，`reset` 通过 [reset.rs:335](../../src/command/reset.rs) 同样拒绝 `agent-traces` / `agent-traces^` 等所有目标 revision。回归覆盖：[tests/command/restore_test.rs:305](../../tests/command/restore_test.rs)（`--source agent-traces~1`）+ [tests/command/reset_test.rs:207/339](../../tests/command/reset_test.rs) |
-| `tests/db_migration_test.rs` **硬编码** `vec![2026050301, 2026050302]` 与 `vec!["automation_log", "agent_usage_stats"]`（[lines 47-63, 68, 1040](../../tests/db_migration_test.rs)） | ✅ 已落地：注册表回归测试已扩展到**当前全部 9 条迁移**（`2026050301`..`2026060401`：automation_log / agent_usage_stats / **agent_capture** / agent_checkpoint_parent_nullable / approved_permission / agent_usage_stats_agent_name / source_call_log / source_call_log_agent_run_id / cherry_pick_state），`max_registered_version() == Some(2026060401)`；新增迁移仍需同步更新这三处断言 |
-
-### 1.3 实现状态总览（2026-06-05 全量核对）
-
-> **本节是"计划 ↔ 代码"对照的权威结论**，对 `/Volumes/Data/entireio/cli`（Go 参考实现）与 libra 最新代码逐项核对后给出。图例：✅ = 完整落地且有测试；🟡 = 核心已落地但与本文早期描述有差异（差异已在对应小节就地订正）；⏳ = 明确推迟到 v2/后续阶段。**实现已越过本文最初定义的 v1/v2 边界**——Phase 4（原"本次不做"）的外部 RPC、派生 ToolCallRecord、5 个 preview adapter 提升为 stable 均已落地。
-
-| 计划区域 | 状态 | 代码位置 / 说明 |
-|---------|------|----------------|
-| 迁移 `2026050303_agent_capture` + 注册表 | ✅ | `builtin_migrations()`（[migration.rs:532](../../src/internal/db/migration.rs)）现共 **9** 条（…→`2026060401`）；`tests/agent_capture_migration_test.rs` 覆盖 fresh / legacy / up→down→up |
-| 适配层 trait（核心 + 能力） | ✅ | [adapter.rs](../../src/internal/ai/observed_agents/adapter.rs)：`ObservedAgent` + `ObservedAgentHooks` + `TranscriptTruncator` + `TranscriptChunker` |
-| 7-Agent 矩阵 | ✅（越界） | Phase 4.4 已把 Cursor/Codex/OpenCode/Copilot/FactoryAi 由 preview **提升为 stable**（[builtin/stable_promoted.rs](../../src/internal/ai/observed_agents/builtin/stable_promoted.rs)，`read_transcript` 真实读盘）；`PREVIEW_SPECS` 现为空、`is_preview()` 恒 `false`（见 §5.2 订正） |
-| `RedactedBytes` 编译契约 + Redactor | ✅ | [redaction.rs](../../src/internal/ai/observed_agents/redaction.rs)：`pub(crate)` 构造 + 两个 `compile_fail` doctest；25+ 高置信规则、幂等、误报回归 |
-| Hook 摄入参数化 `HookTarget` | ✅ | [runtime.rs](../../src/internal/ai/hooks/runtime.rs) `process_hook_event_with_target`，旧 API 1:1 包装；`AgentTraces` 路径强制脱敏 + upsert + checkpoint，经 `libra agent hooks <agent> …` 触发 |
-| Checkpoint commit 生成 | 🟡 | 已写 `metadata.json` + `transcript/<provider>` blob、`Libra-*` trailer、CAS 追加 `agent-traces`、`agent_checkpoint` 行；**v1 未做工作树快照 / `protected_dirs` 排除 / `events.jsonl` / canonical-sorted JSON**（见 §7.1 订正） |
-| Checkpoint scope 三态 | 🟡 | 生产只产生 `committed`；`temporary` / `subagent` 仅存在于 schema + `clean` 路径 + 测试夹具（见 §7.2 订正） |
-| `checkpoint show` | ✅ | metadata + **transcript 字节长度 + tree 摘要**（2026-06-05 补齐：[checkpoint.rs](../../src/command/agent/checkpoint.rs) `summarize_checkpoint_tree`） |
-| `checkpoint rewind` dry-run/apply | ✅ | 恢复工作树到 `parent_commit`；Claude/Gemini/Cursor/Codex/OpenCode/Copilot 截断本地 transcript；Factory AI Droid 明确告警 |
-| `clean [--all]` | ✅ | stopped-only、删 `temporary` 行、重写 `agent-traces` orphan tip |
-| `doctor` | ✅ | hook 安装状态、孤儿 checkpoint、**stuck 会话检测**（2026-06-05 补齐，§13#8） |
-| `session list/show/stop/resume` + `--extract-transcript` | ✅ | [session.rs](../../src/command/agent/session.rs)；**新增 `--worktree` 过滤**（2026-06-05） |
-| `worktree_id` 落库 + 过滤 | ✅ | upsert 按 cwd 解析 worktree 根目录名落库（`runtime.rs::resolve_worktree_id`）；`session list --worktree`（§3.4 / §13#9） |
-| 云同步（R2 + D1） | ✅ | `o_type='agent_transcript'`（仅 transcript blob）；[cloud.rs](../../src/command/cloud.rs) `sync_agent_capture_tables` + `restore_agent_capture_from_d1`；[d1_client.rs](../../src/utils/d1_client.rs) ensure/upsert（见 §10.1 订正） |
-| `agent push` | ✅ | 固定 refspec `agent-traces:refs/libra/agent-traces`，不创建远端 `refs/heads/agent-traces` |
-| 分支保护 | ✅ | `is_locked_branch` + restore/reset/switch/checkout |
-| **Phase 4** 外部 RPC | ✅（越界） | [observed_agents/rpc.rs](../../src/internal/ai/observed_agents/rpc.rs) + [command/agent/rpc.rs](../../src/command/agent/rpc.rs)：`rpc list` / `rpc invoke` |
-| **Phase 4** 派生 ToolCallRecord | ✅（越界） | [derived.rs](../../src/internal/ai/observed_agents/derived.rs) + `session derive-tool-calls` |
-| **Phase 4** 跨体系 promote | ✅（越界） | `session promote --as-intent`（→ `refs/libra/intent`） |
-| 资源隔离（SessionStore 子目录） | 🟡 | `agent` 用 `sessions/agent/`；`libra code` 仍用 `sessions/` 根（目标"避免锁冲突"已达成，见 §11.5 订正） |
-| 会话文件锁（agent 路径） | ⏳ | `AgentTraces` 路径不取 `lock_session`；并发以 `agent-traces` CAS + UPSERT 幂等 + `concurrent_active` 标志兜底（见 §13#6 订正） |
-| 熵 / 通用 URI / DB-DSN / bounded-KV / placeholder / JSON-aware / config-mode 脱敏 | ✅ | 分层引擎落地（[redaction.rs](../../src/internal/ai/observed_agents/redaction.rs)）：Shannon 熵、任意-scheme credential-URI、JDBC/DSN/semicolon 连接串、vendor-前缀 K/V、placeholder 白名单、`redact_jsonl` 字段跳过、`RedactionMode redact\|warn\|off` + `agent.redaction.*` 配置；55 单测全绿；§8.3 transcript blob 恒强制脱敏（见 §8 订正） |
-| gitleaks 260+ 全规则矩阵 / PII address | ⏳ | 当前以 25+ 高置信规则近似 betterleaks（不引入第三方依赖）；PII 仅 email/phone，address 留作后续 |
-| 非 Claude `TranscriptTruncator` | 🟡 | **Gemini/Cursor/Codex/OpenCode/Copilot 已落地**（[builtin/gemini.rs](../../src/internal/ai/observed_agents/builtin/gemini.rs) + [stable_promoted_truncation.rs](../../src/internal/ai/observed_agents/builtin/stable_promoted_truncation.rs)；`truncator_for` 现为 `{ClaudeCode, Gemini, Cursor, Codex, OpenCode, Copilot}`）；Factory AI Droid 仍待稳定 transcript 时间边界 |
-| `storage.rs` / `registry.rs` 独立文件 | 🟡 | **从未创建**：`agent_session` / `agent_checkpoint` 的 SQL 内联在调用点（runtime.rs / command/agent/*），adapter 注册表为 `observed_agents::mod.rs::agent_for()`（见 §16 订正） |
+| `tests/db_migration_test.rs` **硬编码** `vec![2026050301, 2026050302]` 与 `vec!["automation_log", "agent_usage_stats"]`（[lines 47-63, 68, 1040](../../tests/db_migration_test.rs)） | ✅ 已落地：注册表回归测试已扩展到全部七个迁移（`2026050301`..`2026052301`，含 v0.17.800 source_call_log）；新增迁移仍需同步更新这三处断言 |
 
 ---
 
@@ -83,8 +54,7 @@
 ### 2.1 目标（v1）
 
 1. 接入 **Claude Code、Gemini** 两种外部 Agent 并持久化其原始 transcript；其余 5 种（Cursor、Codex、OpenCode、GitHub Copilot CLI、Factory AI Droid）在 v1 注册为 **preview**，CLI 可见但走存根实现。
-   > **2026-06-05 订正**：Phase 4.4 已将这 5 个 preview adapter **提升为 stable**（`builtin/stable_promoted.rs`，`read_transcript` 按 `AgentSessionCtx.transcript_path` 真实读盘，16 MiB 上限），`PREVIEW_SPECS` 现为空、`is_preview()` 恒 `false`。但这 5 个仅 ClaudeCode/Gemini 之外**没有 `HookProvider`**，故 `libra agent enable <slug>` 仍只为 claude-code/gemini 安装 hook（其余按"无 HookProvider"跳过）；per-agent hook 安装与 Factory AI Droid 的 `TranscriptTruncator` 仍属 v2。
-2. 保持 `refs/libra/intent` / `ai_session` / `libra code` 行为完全不变。
+2. 保持 `refs/libra/intent` / `ai_session` 的**写入内容语义**完全不变；不改变 `libra code` 当前对外行为（其 TUI→Web-only 交互面迁移由 [../development/agent.md](../development/agent.md) 负责，本文不依赖 TUI，也不依赖其交互面形态）。
 3. v1 强调**可观测**：可追踪会话、可查看 checkpoint 列表、可提取 transcript 快照。
 4. v1 引入 EntireIO 风格的 Subagent（子代理）级联追踪元数据（仅记录 `parent_session_id`），实际嵌套语义随各 adapter 的 `SubagentExtractor` 后续补全。
 5. 与 `subagent-scaffold` Cargo feature 无关；默认构建即可用。
@@ -95,7 +65,7 @@
 2. 不强制统一整库 transcript schema；保留 provider 原生格式（`jsonl/sqlite/markdown/binary`）的字节语义。
 3. **不建 `agent_session_event` 表**——`SessionStore` 的 JSONL 已承载事件流。
 4. **不建 shadow ref `refs/libra/agent-shadow/...`**——用 orphan commit 上的 `Libra-Scope: temporary` trailer 区分。
-5. **不承诺统一 transcript 覆写**——v1 只对已实现 `TranscriptTruncator` 的 Agent 执行本地 transcript 截断（当前为 Claude/Gemini/Cursor/Codex/OpenCode/Copilot）；其它 provider 仍只恢复工作树并打印明显 warning。
+5. **不承诺统一 transcript 覆写**——v1 只对已实现 `TranscriptTruncator` 的 Agent 执行本地 transcript 截断（当前为 Claude Code）；其它 provider 仍只恢复工作树并打印明显 warning。
 6. 不向 D1 同步全量 `agent_session_event`（事件流量大，v1 仅同步 session/checkpoint 摘要）。
 
 ---
@@ -195,7 +165,7 @@ CREATE INDEX IF NOT EXISTS `idx_agent_checkpoint_scope` ON `agent_checkpoint`(`s
 
 ### 3.5 与 `projection/` 模块的关系
 
-[projection/](../../src/internal/ai/projection/) 是 runtime projections 层，处理 `ai_thread`/`ai_index_*` 等结构化 AI 制品。本计划的 `agent_session` 与 `agent_checkpoint` 是**对等 sibling**，不进 projection 模块；通过可空 `agent_session.thread_id` 弱关联。（**2026-06-05 订正**：原文称这两表"独立放在 `observed_agents/storage.rs`"——该 DAO 模块从未创建，SQL 直接内联在 `hooks/runtime.rs` 与 `command/agent/*.rs` 调用点。）
+[projection/](../../src/internal/ai/projection/) 是 runtime projections 层，处理 `ai_thread`/`ai_index_*` 等结构化 AI 制品。本计划的 `agent_session` 与 `agent_checkpoint` 是**对等 sibling**——独立放在 `src/internal/ai/observed_agents/storage.rs`，不进 projection 模块；通过可空 `agent_session.thread_id` 弱关联。
 
 ### 3.6 与 `agent_run/` 模块的关系
 
@@ -397,52 +367,13 @@ async fn process_hook_event_with_target(
 | `TurnEnd`（Stop） | active 保持 | 创建 `scope='committed'` checkpoint：脱敏 transcript → 写 blob → 拼 commit → 追加到 `agent-traces` |
 | `SessionEnd` | `→ stopped` | 最终 committed checkpoint，关闭 `SessionStore` 并释放锁 |
 
-> **2026-06-05 订正（以代码为准）**：实际 `agent_session.state` 机（[runtime.rs](../../src/internal/ai/hooks/runtime.rs) 的 `new_state` match）将 **`TurnEnd` 也映射为 `stopped`**（回合间"空闲"），下一个 `TurnStart` 再回到 `active`，只有 `SessionEnd`/`TurnEnd` 写 `stopped_at`。这与上表"TurnEnd active 保持"不同，但**是有意设计且被回归测试 pin 住**（`runtime.rs` 的 "Stop/TurnEnd must create an intermediate checkpoint" 测试断言 `state=='stopped'`），并与独立的 `SessionPhase` live-status 模型（"TurnEnd parks at Stopped"）一致。语义：`active` = 回合进行中，`stopped` = 回合间空闲 / 会话结束。`clean` 只清 `stopped` 会话，因此该映射使"回合进行中的会话不会被误清"。**`ToolUse` 不创建 checkpoint**（`subagent`/`temporary` 生产侧未接线，见 §7.2）。`AgentTraces` 路径**不取 `lock_session`**（见 §13#6 订正）。
-
 ### 6.4 Hook 配置安装
 
-当前实现的 Hook 安装入口是 `libra agent enable [--agent <slug>]`（见 [command/agent/mod.rs](../../src/command/agent/mod.rs)）。无 `--agent` 时只遍历 `STABLE_AGENT_SLUGS = ["claude-code", "gemini"]`；Cursor/Codex/OpenCode/Copilot/Factory AI Droid 虽然已有 stable `ObservedAgent`，但当前没有注册 `HookProvider`，所以安装/卸载阶段会跳过并打印"no HookProvider registered"。
-
-安装流程按代码实际路径是：
-
-1. CLI 把 slug 解析为 `AgentKind`，再映射到 `HookProvider` 注册名：`claude-code → claude`，`gemini → gemini`；注册表在 [hooks/providers/mod.rs](../../src/internal/ai/hooks/providers/mod.rs)，目前只返回 `ClaudeProvider` / `GeminiProvider`。
-2. `install_agent_hooks()` 取当前正在运行的 `libra` 二进制路径（`std::env::current_exe()`），构造 `ProviderInstallOptions`：
-   - `hook_command_prefix = "agent hooks <slug>"`，让安装出的 hook 走 `refs/libra/agent-traces`；
-   - `fail_safe_shell = true`，所有命令尾部追加 `|| true`，保证 Libra hook 失败不会打断外部 Agent 自己的会话；
-   - `timeout_secs = None`，由 provider 使用自己的默认值。
-3. provider installer 定位当前 Libra 仓库根目录（`resolve_project_root()`），读取/创建 provider 原生 JSON 配置，保留未知字段和用户已有 hook，仅 upsert Libra 管理的条目，最后通过临时文件 + rename 原子写回（[hooks/setup.rs](../../src/internal/ai/hooks/setup.rs)）。
-
-Claude Code 写入 `.claude/settings.json`。它按 `CLAUDE_HOOK_FORWARD_MAP` 给 5 个事件加 matcher-less command hook，默认 timeout 为 10 秒：
-
-| Claude 事件 | Libra 子命令 |
-|-------------|--------------|
-| `SessionStart` | `session-start` |
-| `UserPromptSubmit` | `prompt` |
-| `PostToolUse` | `tool-use` |
-| `Stop` | `stop` |
-| `SessionEnd` | `session-end` |
-
-写出的命令形如：
-
+`libra agent enable --agent claude-code` 调 `ObservedAgentHooks::install_hooks`，写出形如：
 ```json
 {"hooks": {"Stop": [{"command": "libra agent hooks claude-code stop || true"}]}}
 ```
-
-Gemini CLI 写入 `.gemini/settings.json`。installer 会确保 `hooksConfig.enabled = true`，并为下列事件插入名为 `libra-*` 的 command hook；`AfterTool` 使用 matcher `"*"`，Gemini provider 不支持 timeout：
-
-| Gemini 事件 | Libra 子命令 |
-|-------------|--------------|
-| `SessionStart` | `session-start` |
-| `BeforeAgent` | `prompt` |
-| `AfterTool` | `tool-use` |
-| `AfterAgent` | `stop` |
-| `SessionEnd` | `session-end` |
-| `BeforeModel` | `model-update` |
-| `PreCompress` | `compaction` |
-
-外部 Agent 触发这些配置后会执行 hidden 入口 `libra agent hooks <agent> <subcommand>`（[command/agent/hooks.rs](../../src/command/agent/hooks.rs)）。该入口把子命令转成 `ProviderHookCommand`，再调用 `process_hook_event_with_target(..., HookTarget::AgentTraces)`，完成 envelope 解析、脱敏、`agent_session` upsert 和 checkpoint 写入。历史兼容入口 `libra hooks <provider> <subcommand>` 仍存在，但目标是 `HookTarget::AiIntent`；`libra agent enable` 明确安装新的 `agent hooks <agent>` 入口。
-
-卸载路径是 `libra agent disable [--agent <slug>]`：Claude 按命令后缀识别并删除 Libra 管理的 hook；Gemini 删除 `name` 以 `libra-` 开头的 hook。两者都保留用户其它配置和非 Libra hook。
+`|| true` 作为硬不变量保证 Libra 不可用时**永不破坏 Agent 自身**。可选 ship `libra-hook-shim` no-op 二进制覆盖纯 JSON hook 配置场景（不允许 shell 拼接的）。
 
 ---
 
@@ -472,26 +403,17 @@ Gemini CLI 写入 `.gemini/settings.json`。installer 会确保 `hooksConfig.ena
 6. **追加 commit** 到 `refs/libra/agent-traces`：commit message 含 `Libra-*` trailer；`HistoryManager::create_append_commit` + `update_ref_if_matches` 处理 CAS
 7. **插 `agent_checkpoint`**：`scope`、`traces_commit`、`tree_oid`、`metadata_blob_oid`
 
-> **2026-06-05 订正（以代码为准）**：实际生产路径（[runtime.rs](../../src/internal/ai/hooks/runtime.rs) `write_committed_checkpoint` → [history.rs](../../src/internal/ai/history.rs) `append_checkpoint_commit`）落地了第 3/5/6/7 步，但**简化了第 1/2/4 步**：
-> - **无工作树快照**：checkpoint tree 只含 `metadata.json` + `transcript/<provider>`，**不调用 `build_tree_recursive`、不排除 `protected_dirs()`、不写 `tree/` 子树**。因此 `rewind --apply` 恢复的是 checkpoint 的 **`parent_commit`**（摄入时的用户分支 HEAD），而非"agent 中间工作态"。`protected_dirs()` 由 `rewind`/`clean` 的安全语义消费，而非 checkpoint writer。
-> - **`events.jsonl` 永远为 `None`**（第 4 步未接线）。
-> - metadata 用 `serde_json::to_vec_pretty`（保持插入序），**非 canonical-sorted JSON**。
-> - `checkpoint show` 现已补齐 transcript **字节长度** + tree 摘要（§7.3 / §1.3）。
-> 工作树快照 + `protected_dirs` 排除 + canonical JSON 是 v2 候选。
-
 ### 7.2 Temporary vs Committed
 
 - **`scope='temporary'`**：`PostTool[Task]` 等临时点，commit message 也带 `Libra-Scope: temporary`，`libra agent clean` 会重写 `agent-traces` tip 移除（git gc 后自动回收 blob/tree）
 - **`scope='committed'`**：`TurnEnd`/`SessionEnd`，长期保留
 - **`scope='subagent'`**：子 Agent 嵌套，关联到 `parent_checkpoint_id` 与 `subagent_session_id`
 
-> **2026-06-05 订正（以代码为准）**：生产路径目前**只产生 `committed`** checkpoint（`TurnEnd`/`SessionEnd`）。`temporary` / `subagent` 已在 schema、`clean` 删除路径、以及测试夹具中完整存在，但**没有生产侧的产生点**（`ToolUse`/`PostTool[Task]` 暂不创建 checkpoint）。因此 `clean` 的"移除 temporary"逻辑已就绪、可被测试覆盖，但常态运行下无 temporary 可清。接线 `ToolUse → subagent/temporary` 是 v2 工作。
-
 ### 7.3 Rewind（v1 dry-run / read-only）
 
 - `libra agent checkpoint show <id>`：展示 metadata + transcript 长度 + tree 摘要
 - `libra agent checkpoint rewind <id> --dry-run`：默认 dry-run，打印将影响的文件列表
-- `libra agent checkpoint rewind <id> --apply`（不带 `--apply` 时拒绝执行）：恢复**工作树**（复用 `restore` 路径），HEAD 与 `refs/heads/*` 不动；若 checkpoint 属于 Claude/Gemini/Cursor/Codex/OpenCode/Copilot 且 `metadata_json.transcript_path` 可用，则把本地 transcript 截断到 checkpoint boundary；其它 agent kind 明确打印 warning 并保持 transcript 不变：
+- `libra agent checkpoint rewind <id> --apply`（不带 `--apply` 时拒绝执行）：恢复**工作树**（复用 `restore` 路径），HEAD 与 `refs/heads/*` 不动；若 checkpoint 属于 Claude Code 且 `metadata_json.transcript_path` 可用，则把本地 transcript 截断到 checkpoint boundary；其它 agent kind 明确打印 warning 并保持 transcript 不变：
   ```
   Note: agent_kind '<provider>' has no TranscriptTruncator adapter yet;
   the agent's local transcript was left untouched.
@@ -600,18 +522,6 @@ impl Redactor {
 - `agent_session.redaction_report`：累计的 JSON（按规则 id 计数 + 替换偏移摘要）
 - `metadata.json` blob：按 checkpoint 范围切片的 RedactionReport
 
-> **2026-06-05 订正（以代码为准，分层引擎已落地）**：[redaction.rs](../../src/internal/ai/observed_agents/redaction.rs) 现为**分层检测引擎**（参照 EntireIO `redact/redact.go`），`RedactedBytes` 编译契约 + 以下检测层全部落地并有单测覆盖（55 个单测全绿）：
-> - **Layer 1 静态规则**（25+ 高置信前缀规则，幂等、丰富误报回归、`compile_fail` doctest）；
-> - **Layer 2 熵检测**（§8.2 P1）：Shannon entropy > 4.5 + `[A-Za-z0-9+_=-]{10,}` 候选 + JSON-escape 守卫（`refine_entropy_span`），git SHA / UUID / 路径不误伤；
-> - **通用 credential-URI**：原固定 scheme 白名单已泛化为任意 scheme（`redis://:pass@`、自定义 scheme 均覆盖）；
-> - **Layer 3 DB 连接串**（§8.2 P1）：JDBC / keyword-DSN / semicolon-conn 三类，配 `has_secret` placeholder 感知门控（`<password>` 占位不误伤）；
-> - **Layer 4 bounded K/V**（§8.2 P2）：vendor 前缀 `dbPasswordKeyShape`，短值也命中、placeholder 白名单门控；
-> - **Layer 5 PII opt-in**（§8.2 P3，默认关）：email（含 noreply 白名单）+ phone，经 `PiiConfig`/`agent.redaction.pii.*` 开启；address 暂缺。
-> - **JSON-aware 替换**（`redact_jsonl`）：整体单 JSON 值或逐行 JSONL 解析，**跳过** `*id`/`*ids`/`filepath`/`cwd`/`path`/`signature` 字段与 `type:image`/`base64` 对象，仅替换 value 位置（`replace_keyed_json_value`），非 JSON 行回退标量脱敏。
-> - **`[agent.redaction] mode = redact|warn|off`**（§8.4）：`RedactionMode` 枚举 + `from_config_str`（未知值安全回退 `redact`）；runtime 经 `build_configured_redactor` 从 `config_kv` 读取 `agent.redaction.mode` 与 `pii.*`。
-> - **§8.3 P0 安全边界**：`mode` 只影响 `agent_session` 行的 prompt/tool_input 字段是否替换；写入 `refs/libra/agent-traces` 的**完整 transcript blob 与 prompt 回退恒为强制脱敏**（`build_checkpoint_transcript_redacted` 始终用 `RedactionMode::Redact` + `redact_jsonl`），`warn`/`off` 永远不能让未脱敏字节落入持久层。
-> 仍属后续：完整 gitleaks 260+ 规则矩阵（当前以 25+ 高置信规则近似，不引入 betterleaks 依赖）、PII address 检测。
-
 ---
 
 ## 9. CLI 命令面（v1）
@@ -624,25 +534,23 @@ libra agent
   enable [--agent <name> ...]            # 安装 hook，注册 agent
   disable [--agent <name> ...]           # 卸载 hook
   status                                 # 活跃会话计数 + 最近 checkpoint
-  session list [--agent <name>] [--state <s>] [--worktree <id>]   # --worktree 为 2026-06-05 新增
+  session list [--agent <name>] [--state <s>]
   session show <id> [--extract-transcript <path>]
   session stop <id>                      # 标记 metadata state=stopped
   session resume <id>                    # 标记 metadata state=active，不恢复 transcript 上下文
-  session promote <id> [--as-intent] [--prompt <text>] [--dry-run]  # Phase 4.2：提升到 refs/libra/intent（已实现）
-  session derive-tool-calls <id>         # Phase 4.3：从归一化事件派生 ToolCallRecord（已实现）
   checkpoint list [--session <id>]
-  checkpoint show <id>                   # metadata + transcript 字节长度 + tree 摘要
-  checkpoint rewind <id> [--dry-run|--apply]   # --apply 恢复工作树；有 TranscriptTruncator 的 agent 会按 checkpoint 截断 transcript
+  checkpoint show <id>                   # metadata + diff 摘要（合并自 explain）
+  checkpoint rewind <id> [--dry-run|--apply]   # --apply 恢复工作树；Claude Code transcript 会按 checkpoint 截断
   clean [--all]
-  doctor                                 # 诊断 hook 安装、stuck 会话、孤儿 checkpoint
+  doctor                                 # 诊断 hook 安装、stuck 状态、孤儿 checkpoint
   push [--remote <name>]                 # 推送 refs/libra/agent-traces
-  rpc list                               # Phase 4.5：发现 PATH 上的 libra-agent-<name> RPC 二进制（已实现）
-  rpc invoke <slug> <method> [--params <json>]   # Phase 4.5：调用单个 JSON-RPC 方法（已实现）
   hooks <agent> <subcommand>             # hidden；agent hooks 调用入口
 ```
 
-> **2026-06-05 订正**：原"v1 不实现"清单中的 `session promote --as-intent`（Phase 4.2）与外部 `libra-agent-<name>` RPC（Phase 4.5）**均已落地**，另新增 `session derive-tool-calls`（Phase 4.3）。`checkpoint explain` 仍按计划合并进 `checkpoint show`。仍未实现（v2）：
-> - Factory AI Droid 的 `checkpoint rewind --apply` transcript 截断（需 transcript 格式提供稳定时间边界）
+**v1 不实现**：
+- `session promote <id> --as-intent`（v2 跨体系提升）
+- `checkpoint explain <id>`（合并到 `checkpoint show`）
+- 非 Claude Code provider 的 `checkpoint rewind <id> --apply` transcript 截断（需各 provider 接 `TranscriptTruncator`）
 
 ### 9.1 初始化
 
@@ -680,9 +588,7 @@ if let Some(branch) = target_branch_name() {
 
 ### 10.1 自动入云
 
-Transcript blob、metadata blob、events blob 都走 `write_git_object` → `object_index` → 现有 [cloud.rs::run_cloud_sync](../../src/command/cloud.rs) 增量同步。零代码即得云备份。
-
-> **2026-06-05 订正**：`o_type='agent_transcript'` **仅打在 transcript blob 上**（metadata / events blob 用普通 `"blob"`，见 [history.rs](../../src/internal/ai/history.rs) `append_checkpoint_commit`）。云**同步不按 `o_type` 过滤**（只按 `is_synced`）；该 tag 仅用于 `cloud status` 的按类型统计与下游枚举（与本节"用于过滤"措辞不同）。
+Transcript blob、metadata blob、events blob 都走 `write_git_object` → `object_index` → 现有 [cloud.rs::run_cloud_sync](../../src/command/cloud.rs) 增量同步。**新增 `o_type='agent_transcript'`** 仅用于过滤与统计。零代码即得云备份。
 
 ### 10.2 D1 表同步
 
@@ -706,6 +612,11 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 3. `agent_session.thread_id` 在 v1 默认 NULL，除非显式 `promote`（v2）
 4. v1 不做跨模型转换；v2 可从 `agent_session` 反算 `ToolCallRecord` 回写到 `ai_thread`
 5. **资源隔离**：`SessionStore` 路径区分——`libra code` 用 `.libra/sessions/code/`，`libra agent` 用 `.libra/sessions/agent/`，避免文件锁冲突
+6. **`SessionEvent` schema 协调（跨文档硬约束）**：本文复用 `src/internal/ai/session/` 的 `SessionStore` JSONL 承载外部 Agent 事件流（§3.4 不另建 `agent_session_event` 表）。`SessionEvent` 类型的 **schema 主权属于** [../development/agent.md](../development/agent.md)（AG-01）——该计划会把它收紧为内部 runtime 契约（per-session 单调 `u64` 序号、snapshot = fold(events)、归一事件 envelope，并新增 `Workflow` variant）。据此约定：
+   - (a) 二者**仅通过 `code/` vs `agent/` 子目录隔离运行时实例与文件锁**，不共享同一 session 实例；
+   - (b) 外部 Agent 事件依赖 `SessionEvent` 保持 **serde 向后兼容 + unknown-event-safe**（`Unknown(Value)` 兜底，见 §13 风险 12）——AG-01 新增 variant 不得破坏旧 reader；
+   - (c) 若 AG-01 把 `SessionEvent` 收紧到"每条事件必须带 `turn_id`/`seq`"而**无法容纳外部 hook 生命周期事件**，则本文改用**独立 event 类型**，仅复用 `SessionStore` 的文件锁与恢复原语，不再复用 `SessionEvent` 枚举。
+   - 任何一方改动 `SessionEvent` schema 都须同步检查对方此节。
 
 ---
 
@@ -743,23 +654,9 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 | 7 | **CAS 风暴** | P1 | 模拟单 session 100 events/s 持续 60s，`agent-traces` 写入成功率 100%；必要时调整 `HISTORY_HEAD_CONFLICT_MAX_RETRIES`（现 32） |
 | 8 | **Hook 失败安全** | P1 | 集成测试：安装 hook 后 `mv $(which libra) /tmp` 卸载 libra，Claude Code 仍能完整跑完一个 session（`|| true` 吃错误）；libra 还原后 `libra agent doctor` 报告"未捕获的 session N 个" |
 | 9 | **多 worktree SQLite 共享** | P2 | `agent_session` 必须存于 `git rev-parse --git-common-dir` 对应的 SQLite；`worktree_id` 列允许 `list` 按需过滤；多 worktree 试跑 |
-| 10 | **v1 过度承诺 rewind** | P1 | `checkpoint rewind` 在 v1 默认 dry-run；`--apply` 只对已实现 `TranscriptTruncator` 的 Agent 改写 transcript（当前 Claude/Gemini/Cursor/Codex/OpenCode/Copilot），其它 agent kind 保持 transcript 不变并打印明显 warning |
+| 10 | **v1 过度承诺 rewind** | P1 | `checkpoint rewind` 在 v1 默认 dry-run；`--apply` 只对已实现 `TranscriptTruncator` 的 Agent 改写 transcript（当前 Claude Code），其它 agent kind 保持 transcript 不变并打印明显 warning |
 | 11 | **Cursor SQLite transcript 取查** | P2 | `libra agent session show --extract-transcript <path>` 把 SQLite blob 物化到指定路径，文档说明用 `sqlite3` 查看 |
 | 12 | **Unknown-event-safe envelope 兼容** | P2 | 老 reader 读包含未来虚构事件 `kind=future_event_xyz` 的 metadata.json，应落到 `Unknown(Value)` 分支不报错（与 [agent_run/event.rs](../../src/internal/ai/agent_run/event.rs) 对外承诺一致） |
-
-> **2026-06-05 验收状态**：
-> - #1 ✅ `RedactedBytes` 契约（compile-fail doctest）+ AKIA 回归。
-> - #2 ✅ Claude/Gemini hook 安装/调用幂等，旧入口不变。
-> - #3 ✅ 注册表断言已随迁移扩展（**当前到 `2026060401`**，非 #3 原文的 `2026050303`）；`tests/agent_capture_migration_test.rs` 覆盖 fresh/legacy/up-down-up。
-> - #4 🟡 transcript blob 超阈值入 R2 ✅；`clean` 重写 `agent-traces` ✅；但生产侧不产生 `temporary`（§7.2），故"移除 temporary"常态无对象。
-> - #5 ✅ restore/reset/switch/checkout 锁定回归绿。
-> - #6 🟡 `concurrent_active` 标志 ✅；但 `AgentTraces` 路径**不取 `SessionStore` 锁**（并发以 `agent-traces` CAS + UPSERT 幂等兜底），"5s 锁超时恢复"仅 `AiIntent` 路径具备。
-> - #7 ✅ CAS 重试（`HISTORY_HEAD_CONFLICT_MAX_RETRIES`）已就绪。
-> - #8 ✅（2026-06-05 补齐）`doctor` 现报告 **stuck 会话**（active 且 6h 无事件 → 多半 agent 未发 SessionEnd）；真正"未捕获 session"无 DB 行、无法计数，以 stuck 检测作为等价信号。
-> - #9 ✅（2026-06-05 补齐）`worktree_id` 现按 cwd 落库 + `session list --worktree` 过滤；"DB 必须在 `--git-common-dir`"这一存储架构子项仍为 v2。
-> - #10 ✅ rewind 默认 dry-run；`--apply` 仅已实现 `TranscriptTruncator` 的 kind 截断（当前 Claude/Gemini/Cursor/Codex/OpenCode/Copilot），其它 kind 告警。
-> - #11 ✅ `session show --extract-transcript` 物化 transcript（从最近 checkpoint 的 Git tree 解析）。
-> - #12 ⏳ 借鉴 `agent_run/event.rs` 的 unknown-safe 模式；当前 metadata.json 为普通 JSON，未针对未来事件做 `Unknown(Value)` 兜底（低优先）。
 
 ---
 
@@ -787,8 +684,8 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 2. **`agent_checkpoint` 表写入**：`scope` ∈ {temporary, committed}；`traces_commit` 指向 orphan commit；`tree_oid` / `metadata_blob_oid`
 3. **CLI**：实现 `libra agent session list/info/show/stop/resume`、`libra agent checkpoint list/show`、`libra agent doctor`、`libra agent push`（v0.17.1114：`agent push` 已接入 `refs/libra/agent-traces` 推送）
 4. **清理**：`libra agent clean`：v0.17.1115 已按 `state='stopped' AND scope='temporary'` 删除 SQLite catalog 行，且 `--all` 不再触碰 active session；v0.17.1117 已补齐 agent-traces rewrite，temporary checkpoint commit 会从可达链移除，保留 checkpoint 的 `traces_commit` / `tree_oid` 同步改写。
-5. **Rewind dry-run / apply**：`libra agent checkpoint rewind <id> --dry-run` 列出将影响的文件；`--apply` 调 `restore` 路径还原工作树，并在有 `TranscriptTruncator` 的 checkpoint 上截断本地 transcript；其它 agent kind 打印 transcript 不变更 warning
-6. **TUI/MCP 扩展（可选）**：在现有 [tui/](../../src/internal/tui/) 加一个最小 view 展示 `agent_session` 列表
+5. **Rewind dry-run / apply**：`libra agent checkpoint rewind <id> --dry-run` 列出将影响的文件；`--apply` 调 `restore` 路径还原工作树，并在 Claude Code checkpoint 上截断本地 transcript；其它 agent kind 打印 transcript 不变更 warning
+6. **会话列表展示面（可选）**：在 **Web Code UI**（[`src/internal/ai/web/`](../../src/internal/ai/web/)）暴露一个最小 `agent_session` 列表视图。**不要新增 TUI view**——Code TUI 将由 [../development/agent.md](../development/agent.md) 删除（Web 成为唯一交互面），新增 TUI view 会被一并孤立/移除；本文的展示面统一走 Web。
 
 **阶段 2 验收**：完整 Claude/Gemini session 能生成多个 checkpoint commit；`libra agent checkpoint list` 列出按时间排序；`git log refs/libra/agent-traces` 可读；`libra agent clean` 后 temporary commit 从 `agent-traces` 移除且 SQLite 索引同步清理。
 
@@ -803,17 +700,13 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 
 **阶段 3 验收**：脱敏对模拟矩阵的命中率 100%；7 个 agent 都能 `enable`（preview 有告警）；R2 + D1 凭据配置后 `libra cloud sync` 完成且远端可见；另一台机器 `libra cloud restore` 后 `libra agent session list` 能看到原 session。
 
-### 阶段 4（v2）
+### 阶段 4（v2，本次不做）
 
-> **2026-06-05 订正**：本阶段原标"本次不做"，但 2/3/4/5 项均已落地——本计划实现进度已越过原 v1/v2 边界。
-
-1. 🟡 非 Claude Code provider 的 `TranscriptTruncator` 实装 + `checkpoint rewind --apply` transcript 覆写 —— **Gemini/Cursor/Codex/OpenCode/Copilot 已落地**（`truncator_for` 现为 `{ClaudeCode, Gemini, Cursor, Codex, OpenCode, Copilot}`；Gemini 按单 JSON 文档 `messages[].timestamp` 截断，Cursor/Codex/Copilot 按 JSONL 顶层 `timestamp` 截断，OpenCode 按 `messages[].info.time.created` 截断）；Factory AI Droid 仍待稳定 transcript 时间边界
-2. ✅ `session promote <id> --as-intent` 跨体系提升 —— 已实现（[session.rs](../../src/command/agent/session.rs) `promote`）
-3. ✅ 从 `agent_session` 反算 `ToolCallRecord`（`session derive-tool-calls`）—— 已实现（[derived.rs](../../src/internal/ai/observed_agents/derived.rs)）
-4. ✅ 5 个 preview adapter → stable —— 已实现（Phase 4.4，[builtin/stable_promoted.rs](../../src/internal/ai/observed_agents/builtin/stable_promoted.rs)）
-5. ✅ 外部 `libra-agent-<name>` 二进制 RPC 支持（与 EntireIO 对等）—— 已实现（[observed_agents/rpc.rs](../../src/internal/ai/observed_agents/rpc.rs) + `libra agent rpc list/invoke`）
-
-**仍属后续（Phase 3+/v2）**：完整 gitleaks/熵/PII/JSON-aware/config-mode 脱敏（§8 订正）、Factory AI Droid `TranscriptTruncator`（上 #1）、生产侧 `temporary`/`subagent` checkpoint 产生点（§7.2 订正）、checkpoint 工作树快照 + canonical JSON（§7.1 订正）、`agent_session` DB 落于 `--git-common-dir`（§13#9）、`AgentTraces` 路径会话文件锁（§13#6）。
+1. 非 Claude Code provider 的 `TranscriptTruncator` 实装 + `checkpoint rewind --apply` transcript 覆写
+2. `session promote <id> --as-intent` 跨体系提升
+3. 从 `agent_session` 反算 `ToolCallRecord` 回写 `ai_thread`
+4. 5 个 preview adapter → stable
+5. 外部 `libra-agent-<name>` 二进制 RPC 支持（与 EntireIO 对等）
 
 ---
 
@@ -833,13 +726,6 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 ---
 
 ## 16. Phase 1 文件级落地清单（可执行）
-
-> **2026-06-05 订正（实际落地与本清单的差异）**：
-> - **`storage.rs` 从未创建**：`agent_session` / `agent_checkpoint` 没有独立 DAO 模块，SQL 直接内联在调用点（`hooks/runtime.rs` 的 upsert/insert、`command/agent/*.rs` 的查询）。§3.5 的 "独立放在 `observed_agents/storage.rs`" 描述同样作废。
-> - **`registry.rs` 从未创建**：adapter 查找是 `observed_agents::mod.rs::agent_for(AgentKind) -> &'static dyn ObservedAgent`（穷尽 match），preview 占位逻辑在 `preview.rs`（现为空）+ `builtin/stable_promoted.rs`。
-> - **preview 存根已被 `builtin/stable_promoted.rs` 取代**（Phase 4.4 提升为 stable）。
-> - **`tests/redaction_contract_test.rs` 非 trybuild**：编译期保证由 `RedactedBytes` 上的两个 `compile_fail` doctest 提供（功能等价）。
-> - 实际新增还包括：`observed_agents/{derived,preview,rpc}.rs`、`builtin/stable_promoted.rs`、`command/agent/{rpc}.rs`、`tests/command/agent_{checkpoint,clean,push,session,help}_test.rs`。
 
 ### 16.1 新增
 
@@ -884,7 +770,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 - `src/internal/ai/hooks/providers/{claude,gemini}/` 的现有 `HookProvider` 实现（仅在外面包 wrapper）
 - `refs/libra/intent` 写入路径与 `AI_REF` 常量
 - `sqlite_20260309_init.sql` / `sqlite_20260415_ai_runtime_contract.sql`
-- 现有 `libra code` / TUI / MCP 行为
+- 现有 `libra code` 对外行为与 `refs/libra/intent` 写入语义（其 TUI→Web-only 交互面迁移由 [../development/agent.md](../development/agent.md) 负责；本文**不依赖、也不扩展** TUI/MCP 作为捕获或展示面——展示面统一走 Web，见 §14 阶段 2 step 6）
 
 ---
 
@@ -939,9 +825,8 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
   - **Phase 1 文件级落地清单**：新增第 16 章，把抽象计划落到具体文件
   - **EntireIO 差异决策表**：第 15 章
   - **基线核对验证**：所有引用的现状（迁移版本、`is_locked_branch` 范围、`Commands` 枚举无 `Hooks`/`Agent`、`tests/db_migration_test.rs` 硬编码断言行号）已对仓库做 grep 验证
-- **2026-06-05（全量核对 + 补齐）**：对照 `/Volumes/Data/entireio/cli`（Go 参考实现）与 libra 最新代码逐项核对，新增 **§1.3 实现状态总览**（权威"计划 ↔ 代码"对照表），并就地订正多处与现状不符的描述：
-  - **越界落地**：Phase 4 的外部 RPC（`rpc.rs` + `libra agent rpc`）、派生 ToolCallRecord（`derived.rs` + `session derive-tool-calls`）、`session promote --as-intent`、5 个 preview adapter **提升为 stable**（`builtin/stable_promoted.rs`）均已实现（§2.1 / §5.2 / §9 / §14.4 订正）。
-  - **行为订正**：`agent_session.state` 机将 `TurnEnd` 映射为 `stopped`（回合间空闲）而非"active 保持"，且被回归测试 pin 住（§6.3）；checkpoint commit 未做工作树快照 / `protected_dirs` 排除 / `events.jsonl` / canonical JSON（§7.1）；生产仅产生 `committed` scope（§7.2）；`o_type='agent_transcript'` 仅用于统计/枚举、云同步不按其过滤（§1.3 / §10）；`SessionStore` 仅 `agent` 分目录、`code` 仍在根（§11.5）；`storage.rs` / `registry.rs` 从未创建、DAO SQL 内联（§16）；`redaction_contract_test` 用 `compile_fail` doctest 而非 trybuild（§16）。
-  - **本次补齐的功能**：① `checkpoint show` 增加 transcript 字节长度 + tree 摘要（§7.3）；② `doctor` 增加 stuck 会话检测（§13#8）；③ `worktree_id` 按 cwd 解析落库 + `session list --worktree` 过滤（§3.4 / §13#9）；④ 清理两处过期/误导性 doc 注释（`HookTarget`、`command/agent/mod.rs`）。新增测试：`tests/command/agent_session_test.rs` + `agent_checkpoint_test.rs::…show_reports_tree_summary…` + runtime `resolve_worktree_id` 单测；`cargo +nightly fmt`、`cargo clippy --all-targets --all-features -D warnings`、相关 `cargo test` 全绿。
-  - **本次继续补齐**：Gemini/Cursor/Codex/OpenCode/Copilot `TranscriptTruncator` 已接入 `truncator_for`，`checkpoint rewind --apply` 的 dry-run 支持判断与 apply 路径保持一致；Factory AI Droid 因 transcript 缺少稳定时间边界继续后置。
-  - **仍属后续**：完整 gitleaks/熵/PII/JSON-aware/config-mode 脱敏（§8）、Factory AI Droid `TranscriptTruncator`（§14.4#1）、生产侧 `temporary`/`subagent` checkpoint 产生点（§7.2）、checkpoint 工作树快照（§7.1）、`agent_session` DB 落于 `--git-common-dir` 与 `AgentTraces` 路径会话文件锁（§13#6/#9）。
+- **2026-06-05（与 dev/agent.md 对齐）**：消除与 [../development/agent.md](../development/agent.md)（`libra code` TUI→Web-only 迁移计划）的冲突假设——
+  - **TUI 冲突**：阶段 2 step 6 的可选会话列表视图从 TUI 改为 **Web Code UI**；§16.3「不动」边界与文档定位不再声称"TUI 行为不变",改为"不依赖、不扩展 TUI/MCP 作为捕获/展示面"
+  - **`SessionEvent` schema 协调**：§11 新增第 6 条,明确 `SessionEvent` schema 主权归 AG-01,本文依赖其向后兼容 + unknown-event-safe,并给出不可调和时改用独立 event 类型的退路
+  - **术语消歧**：文档头新增跨文档「外部 Agent / checkpoint / session」语义对照,避免与 dev/agent.md 同词反义
+  - **"完全不变"措辞收紧**：§2.1 改为"`refs/libra/intent` / `ai_session` **写入内容语义**不变",不再覆盖 `libra code` 交互面形态
