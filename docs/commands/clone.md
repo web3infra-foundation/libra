@@ -87,8 +87,12 @@ For `libra+cloud://`, the authority is the configured clone domain. The path mus
 either `/<slug>` or `/repo/<repo_id>`. Only one selector is allowed: `?ref=<branch|tag|full-ref>`
 or `?revision=<oid|latest>`.
 The first Cloudflare restore surface does not accept Git transport shaping flags:
-`--branch`, `--depth`, `--single-branch`, and `--bare` return `LBR-CLI-002`
-before clone-domain config lookup and before creating the destination directory.
+`--branch`, `--depth`, `--single-branch`, `--bare`, `--shallow-since`,
+`--shallow-exclude`, `--reject-shallow`, `--origin`, `--no-checkout`,
+`--mirror`, `--reference`, `--reference-if-able`, `--dissociate`, `--local`,
+`--shared`, `--no-hardlinks`, `--jobs`, and `--filter` return `LBR-CLI-002`
+or `LBR-CLI-003` before clone-domain config lookup and before creating the
+destination directory.
 Use `?ref=<branch|tag|full-ref>` on the source URL to select a checkout target.
 
 Required clone-domain config keys:
@@ -519,23 +523,29 @@ live transport.
 | Destination directory | `git clone <url> <dir>` | `jj git clone <url> <dir>` | `libra clone <url> <dir>` |
 | Specific branch | `-b` / `--branch` | `-b` / `--branch` (jj 0.17+) | `-b` / `--branch` |
 | Single branch | `--single-branch` | N/A | `--single-branch` |
+| All branches after single-branch default | `--no-single-branch` | N/A | `--no-single-branch` |
 | Bare clone | `--bare` | N/A | `--bare` |
 | Shallow clone (depth) | `--depth <n>` | N/A | `--depth <n>` |
-| Shallow since date | `--shallow-since=<date>` | N/A | N/A |
-| Shallow exclude | `--shallow-exclude=<rev>` | N/A | N/A |
-| Mirror clone | `--mirror` | N/A | N/A |
-| Reference repository | `--reference <repo>` | N/A | N/A |
-| Dissociate from reference | `--dissociate` | N/A | N/A |
-| No hardlinks | `--no-hardlinks` | N/A | N/A |
+| Shallow since date | `--shallow-since=<date>` | N/A | `--shallow-since <date>` |
+| Shallow exclude | `--shallow-exclude=<rev>` | N/A | `--shallow-exclude <rev>` |
+| Reject shallow source | `--reject-shallow` | N/A | `--reject-shallow` |
+| Custom remote name | `-o` / `--origin <name>` | N/A | `-o` / `--origin <name>` |
+| Mirror clone | `--mirror` | N/A | Partial: bare + mirror config; exact `refs/*` mirroring is deferred |
+| Reference repository | `--reference <repo>` / `--reference-if-able <repo>` | N/A | Copy semantics, no alternates borrow |
+| Dissociate from reference | `--dissociate` | N/A | Confirms the copy-semantics clone is fully local |
+| Local clone optimization | `-l` / `--local` | N/A | Hardlinks local objects when possible |
+| Shared clone | `-s` / `--shared` | N/A | Copy semantics, no alternates borrow |
+| No hardlinks | `--no-hardlinks` | N/A | Copies local objects |
+| Jobs | `-j` / `--jobs <n>` | N/A | Reserved/no-op, validates 1..=16 |
 | Recurse submodules | `--recurse-submodules` | N/A | N/A (no submodules) |
 | Shallow submodules | `--shallow-submodules` | N/A | N/A |
 | Separate git dir | `--separate-git-dir=<dir>` | N/A | N/A (removed) |
 | Template directory | `--template=<dir>` | N/A | N/A (handled by init internally) |
 | Quiet mode | `-q` / `--quiet` | `--quiet` | `--quiet` (global flag) |
 | Verbose / progress | `--progress` / `--verbose` | N/A | Phased stderr progress (default) |
-| No checkout | `-n` / `--no-checkout` | N/A | N/A (bare implies no checkout) |
+| No checkout | `-n` / `--no-checkout` | N/A | `-n` / `--no-checkout` |
 | Sparse checkout | `--sparse` | N/A | N/A |
-| Filter (partial clone) | `--filter=<spec>` | N/A | N/A |
+| Filter (partial clone) | `--filter=<spec>` | N/A | Partial: promisor config, no lazy backfill |
 | Bundle URI | `--bundle-uri=<uri>` | N/A | N/A |
 | Vault signing bootstrap | N/A | N/A | Always enabled (matches init) |
 | SSH key detection | N/A | N/A | Automatic detection + hint |
@@ -587,7 +597,10 @@ If checkout fails, the clone reports failure -- it does not silently succeed wit
 ## Compatibility Notes
 
 - `--recurse-submodules` is not supported; Libra does not implement submodules
-- `--mirror` and `--reference` are not supported
+- `--mirror` is partial: it implies bare and writes mirror config, but exact `refs/*` mirroring is deferred
+- `--reference`, `--reference-if-able`, `--shared`, and `--dissociate` use copy semantics and never create a long-term `info/alternates` dependency
+- `--filter` records promisor config but does not lazily backfill missing objects; use it with `--no-checkout` or `--bare`
+- `--jobs` is accepted as a reserved no-op after validating `1..=16`; transport remains serial
 - Clone always bootstraps vault signing; use `libra config` to disable after cloning if needed
 - The `--depth` value must be a positive integer; zero or negative values are rejected at parse time
-- `--no-checkout` is not available as a separate flag; use `--bare` for repositories without a working tree
+- `--no-checkout` is available when metadata should be written without materializing the working tree

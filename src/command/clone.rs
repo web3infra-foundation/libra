@@ -97,13 +97,14 @@ const CLOUD_CLONE_D1_API_BASE_URL_ENV: &str = "LIBRA_D1_API_BASE_URL";
     libra clone --shallow-since 2024-01-01 <url>          Shallow clone since a date\n    \
     libra clone --shallow-exclude refs/tags/v1 <url>      Shallow clone excluding a ref\n    \
     libra clone --reject-shallow <url>                    Fail if the source is shallow\n    \
-    libra clone -o upstream <url>                         Name the remote 'upstream' instead of 'origin'\n    \
+    libra clone --origin upstream <url>                   Name the remote 'upstream' instead of 'origin'\n    \
     libra clone --no-checkout <url>                       Clone without checking out the working tree\n    \
     libra clone --mirror <url>                            Mirror clone (bare, all refs)\n    \
-    libra clone --reference /path/to/repo <url>           Copy objects from a local reference repository\n    \
+    libra clone --reference-if-able /path/to/repo <url>   Copy objects from a local reference repository if present\n    \
     libra clone --dissociate --reference /repo <url>      Reference, then ensure no borrow dependency\n    \
     libra clone --filter blob:none --no-checkout <url>    Partial clone (omit blob contents)\n    \
-    libra clone -l /path/to/local-repo dest               Local clone, hardlinking objects")]
+    libra clone --local --no-hardlinks /local/repo dest   Local clone, copying objects instead of hardlinking\n    \
+    libra clone --shared --jobs 4 /local/repo dest        Shared local clone with reserved job count")]
 pub struct CloneArgs {
     /// The remote repository location to clone from, usually a URL with HTTPS or SSH
     pub remote_repo: String,
@@ -1146,6 +1147,25 @@ fn parse_shallow_since(input: &str) -> Result<i64, String> {
     })
 }
 
+fn validate_remote_name(name: &str) -> Result<(), String> {
+    let invalid = name.is_empty()
+        || name.len() > 255
+        || name.contains('/')
+        || name.starts_with("refs/")
+        || name.contains("..")
+        || name.contains("//")
+        || name.chars().any(|c| {
+            c.is_control() || c == ' ' || matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+        });
+    if invalid {
+        Err(format!(
+            "invalid remote name '{name}'; use a short name such as 'origin' or 'upstream'"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// Semantic argument validation that runs **before** any directory creation,
 /// database connection, remote discovery, or stdin consumption (fail-fast).
 ///
@@ -1184,6 +1204,12 @@ fn validate_clone_args(args: &CloneArgs) -> CliResult<()> {
 
     if let Some(filter) = &args.filter {
         validate_filter_spec(filter).map_err(|message| {
+            CliError::command_usage(message).with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?;
+    }
+
+    if let Some(origin) = &args.origin {
+        validate_remote_name(origin).map_err(|message| {
             CliError::command_usage(message).with_stable_code(StableErrorCode::CliInvalidArguments)
         })?;
     }
@@ -1312,28 +1338,6 @@ fn copy_reference_objects(reference: &str, if_able: bool) -> Result<Option<Strin
     clone_support::copy_objects(&src_objects, &dest_objects)
         .map_err(|error| map_clone_support_error(reference, error))?;
     Ok(Some(canonical.display().to_string()))
-}
-
-/// Record promisor-remote config for a partial clone (`--filter`). Mirrors Git's
-/// `remote.<name>.promisor = true` and `remote.<name>.partialclonefilter = <spec>`
-/// so a later `libra fetch` recognizes the repository as a partial clone. Stored
-/// via `config_kv` (no schema change).
-async fn write_promisor_config(remote_name: &str, filter: &str) -> Result<(), CloneError> {
-    ConfigKv::set(&format!("remote.{remote_name}.promisor"), "true", false)
-        .await
-        .map_err(|error| CloneError::SetupFailed {
-            message: format!("failed to write promisor config: {error}"),
-        })?;
-    ConfigKv::set(
-        &format!("remote.{remote_name}.partialclonefilter"),
-        filter,
-        false,
-    )
-    .await
-    .map_err(|error| CloneError::SetupFailed {
-        message: format!("failed to write partial-clone filter config: {error}"),
-    })?;
-    Ok(())
 }
 
 /// Resolve a clone source to a local repository path when it is one, supporting
@@ -3488,13 +3492,6 @@ async fn clone_into_destination(
         }
     }
 
-    // --- Partial clone: record promisor config before any checkout ---
-    // Written before the checkout so the repository is marked as a partial clone
-    // even if a non-bare checkout later fails on a filtered-out blob.
-    if let Some(filter) = &args.filter {
-        write_promisor_config(&origin_name, filter).await?;
-    }
-
     // --- Step 6–7: Configure repository + checkout ---
     if !output.quiet && !output.is_json() {
         eprintln!("Configuring repository ...");
@@ -3509,6 +3506,7 @@ async fn clone_into_destination(
         args.branch.clone(),
         checkout_worktree,
         args.mirror,
+        args.filter.clone(),
     )
     .await
     .map_err(|error| match error {
@@ -3592,6 +3590,7 @@ pub(crate) async fn setup_repository(
     specified_branch: Option<String>,
     checkout_worktree: bool,
     mirror: bool,
+    filter: Option<String>,
 ) -> Result<SetupResult, CloneError> {
     let db = get_db_conn_instance().await;
     let remote_head = Head::remote_current_with_conn(&db, &remote_config.name).await;
@@ -3640,6 +3639,7 @@ pub(crate) async fn setup_repository(
         // Clone the values that move into the transaction closure.
         let branch_name_for_result = branch_name.clone();
         let remote_name = remote_config.name.clone();
+        let filter_for_txn = filter.clone();
         with_reflog(
             context,
             move |txn: &DatabaseTransaction| {
@@ -3694,6 +3694,24 @@ pub(crate) async fn setup_repository(
                             txn,
                             &format!("remote.{remote_name}.mirror"),
                             "true",
+                            false,
+                        )
+                        .await
+                        .map_err(to_db_err)?;
+                    }
+                    if let Some(filter) = filter_for_txn.as_deref() {
+                        ConfigKv::set_with_conn(
+                            txn,
+                            &format!("remote.{remote_name}.promisor"),
+                            "true",
+                            false,
+                        )
+                        .await
+                        .map_err(to_db_err)?;
+                        ConfigKv::set_with_conn(
+                            txn,
+                            &format!("remote.{remote_name}.partialclonefilter"),
+                            filter,
                             false,
                         )
                         .await
@@ -3755,6 +3773,24 @@ pub(crate) async fn setup_repository(
                 &txn,
                 &format!("remote.{}.mirror", remote_config.name),
                 "true",
+                false,
+            )
+            .await
+            .map_err(to_setup_err)?;
+        }
+        if let Some(filter) = filter.as_deref() {
+            ConfigKv::set_with_conn(
+                &txn,
+                &format!("remote.{}.promisor", remote_config.name),
+                "true",
+                false,
+            )
+            .await
+            .map_err(to_setup_err)?;
+            ConfigKv::set_with_conn(
+                &txn,
+                &format!("remote.{}.partialclonefilter", remote_config.name),
+                filter,
                 false,
             )
             .await
@@ -4160,6 +4196,28 @@ mod tests {
     fn validate_filter_spec_length_capped() {
         let long = format!("blob:limit={}", "9".repeat(FILTER_SPEC_MAX_LEN));
         assert!(validate_filter_spec(&long).is_err());
+    }
+
+    #[test]
+    fn validate_remote_name_accepts_safe_config_and_ref_names() {
+        for ok in ["origin", "upstream", "corp.prod"] {
+            assert!(validate_remote_name(ok).is_ok(), "{ok} should be accepted");
+        }
+        for bad in [
+            "",
+            "refs/heads/main",
+            "bad/name",
+            "bad name",
+            "bad..name",
+            "bad\nname",
+            "bad:name",
+            "bad\\name",
+        ] {
+            assert!(
+                validate_remote_name(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
     }
 
     #[test]
