@@ -188,3 +188,16 @@ fn test_symbolic_ref_help_lists_examples_banner() {
         );
     }
 }
+
+#[test]
+#[serial]
+fn test_symbolic_ref_delete_is_rejected() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["symbolic-ref", "-d", "HEAD"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("deleting symbolic refs is not supported"),
+        "unexpected stderr: {stderr}"
+    );
+}

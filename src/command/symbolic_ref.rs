@@ -44,6 +44,11 @@ pub struct SymbolicRefArgs {
     #[clap(long)]
     pub short: bool,
 
+    /// Delete the symbolic ref (rejected: Libra stores refs in SQLite and HEAD
+    /// is its only symbolic ref).
+    #[clap(short = 'd', long)]
+    pub delete: bool,
+
     /// Symbolic ref to read or update. Libra currently supports HEAD.
     #[clap(value_name = "NAME")]
     pub name: Option<String>,
@@ -89,6 +94,16 @@ async fn run_symbolic_ref(
     args: &SymbolicRefArgs,
     quiet_detached_head_is_silent: bool,
 ) -> CliResult<SymbolicRefOutput> {
+    // `-d`/`--delete` is intentionally refused: Libra keeps refs in SQLite and
+    // HEAD is the only symbolic ref, so there is no deletable symbolic ref.
+    if args.delete {
+        return Err(CliError::failure(
+            "deleting symbolic refs is not supported: HEAD is Libra's only symbolic ref",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+        .with_hint("use 'libra switch <branch>' to repoint HEAD instead."));
+    }
+
     let name = args.name.as_deref().unwrap_or(HEAD_REF);
     validate_name(name)?;
 
