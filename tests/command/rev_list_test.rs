@@ -225,6 +225,9 @@ fn test_rev_list_help_lists_examples_banner() {
         "libra rev-list",
         "libra rev-list main",
         "libra rev-list HEAD~5",
+        "libra rev-list main..HEAD",
+        "libra rev-list -n 10 HEAD",
+        "libra rev-list --count HEAD",
         "libra rev-list --json HEAD",
         "libra rev-list --quiet HEAD",
     ] {
@@ -233,4 +236,210 @@ fn test_rev_list_help_lists_examples_banner() {
             "rev-list --help should include `{invocation}`, stdout: {stdout}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-spec, ranges (^, A..B, A...B), limits, parent filters, and format
+// flags. Black-box CLI tests over real branch/merge topologies.
+// ---------------------------------------------------------------------------
+
+fn commit_file_revlist(repo: &std::path::Path, file: &str, content: &str, msg: &str) {
+    std::fs::write(repo.join(file), content).expect("write file");
+    assert_cli_success(&run_libra_command(&["add", file], repo), "add file");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", msg, "--no-verify"], repo),
+        "commit file",
+    );
+}
+
+fn rev_parse_revlist(repo: &std::path::Path, rev: &str) -> String {
+    let out = run_libra_command(&["rev-parse", rev], repo);
+    assert_cli_success(&out, "rev-parse");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn rev_list_lines(repo: &std::path::Path, args: &[&str]) -> Vec<String> {
+    let mut full: Vec<&str> = vec!["rev-list"];
+    full.extend_from_slice(args);
+    let out = run_libra_command(&full, repo);
+    assert_cli_success(&out, "rev-list");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// main stays at the base commit; feature is two commits ahead.
+fn build_diverged_repo() -> tempfile::TempDir {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], p),
+        "branch feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], p),
+        "checkout feature",
+    );
+    commit_file_revlist(p, "f1.txt", "f1\n", "f1");
+    commit_file_revlist(p, "f2.txt", "f2\n", "f2");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], p),
+        "checkout main",
+    );
+    repo
+}
+
+/// HEAD is a 2-parent merge of feature into main.
+fn build_merge_repo() -> tempfile::TempDir {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], p),
+        "branch feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], p),
+        "checkout feature",
+    );
+    commit_file_revlist(p, "feature.txt", "feature\n", "feature");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], p),
+        "checkout main",
+    );
+    commit_file_revlist(p, "mainfile.txt", "main\n", "main change");
+    assert_cli_success(
+        &run_libra_command(&["merge", "feature"], p),
+        "merge feature",
+    );
+    repo
+}
+
+#[test]
+fn test_rev_list_excludes_with_caret() {
+    let repo = create_committed_repo_via_cli();
+    let lines = rev_list_lines(repo.path(), &["HEAD", "^HEAD"]);
+    assert!(lines.is_empty(), "HEAD ^HEAD must be empty, got {lines:?}");
+}
+
+#[test]
+fn test_rev_list_two_dot_range() {
+    let repo = build_diverged_repo();
+    let p = repo.path();
+    let lines = rev_list_lines(p, &["main..feature"]);
+    assert_eq!(
+        lines.len(),
+        2,
+        "main..feature = 2 feature-only commits: {lines:?}"
+    );
+    let f1 = rev_parse_revlist(p, "feature~1");
+    let f2 = rev_parse_revlist(p, "feature");
+    let base = rev_parse_revlist(p, "main");
+    assert!(lines.contains(&f1) && lines.contains(&f2));
+    assert!(!lines.contains(&base), "base must be excluded by ^main");
+}
+
+#[test]
+fn test_rev_list_three_dot_symmetric() {
+    let repo = build_diverged_repo();
+    let p = repo.path();
+    // main == merge base, so the symmetric difference is the feature-only set.
+    let lines = rev_list_lines(p, &["main...feature"]);
+    assert_eq!(
+        lines.len(),
+        2,
+        "main...feature symmetric difference: {lines:?}"
+    );
+}
+
+#[test]
+fn test_rev_list_multi_spec_union() {
+    let repo = build_diverged_repo();
+    let p = repo.path();
+    // feature reaches base+f1+f2 (3); main reaches base (1); union dedups to 3.
+    let lines = rev_list_lines(p, &["feature", "main"]);
+    assert_eq!(
+        lines.len(),
+        3,
+        "multi-spec union dedups the shared base: {lines:?}"
+    );
+}
+
+#[test]
+fn test_rev_list_max_count_and_skip() {
+    let repo = build_diverged_repo();
+    let p = repo.path();
+    assert_eq!(rev_list_lines(p, &["-n", "1", "feature"]).len(), 1);
+    let all = rev_list_lines(p, &["feature"]);
+    let skipped = rev_list_lines(p, &["--skip", "1", "feature"]);
+    assert_eq!(skipped.len(), all.len() - 1);
+    assert_eq!(skipped[0], all[1], "--skip 1 drops the newest commit");
+}
+
+#[test]
+fn test_rev_list_count_matches_line_count() {
+    let repo = build_diverged_repo();
+    let p = repo.path();
+    let all = rev_list_lines(p, &["feature"]);
+    let out = run_libra_command(&["rev-list", "--count", "feature"], p);
+    assert_cli_success(&out, "rev-list --count");
+    let count: usize = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .expect("count is a number");
+    assert_eq!(count, all.len());
+}
+
+#[test]
+fn test_rev_list_merges_and_no_merges() {
+    let repo = build_merge_repo();
+    let p = repo.path();
+    let merge = rev_parse_revlist(p, "HEAD");
+    assert_eq!(
+        rev_list_lines(p, &["--merges", "HEAD"]),
+        vec![merge.clone()],
+        "--merges keeps only the merge commit",
+    );
+    let no_merges = rev_list_lines(p, &["--no-merges", "HEAD"]);
+    assert!(
+        !no_merges.contains(&merge),
+        "--no-merges excludes the merge"
+    );
+    assert!(!no_merges.is_empty());
+    assert_eq!(
+        rev_list_lines(p, &["--min-parents", "2", "HEAD"]),
+        vec![merge],
+        "--min-parents 2 is equivalent to --merges",
+    );
+}
+
+#[test]
+fn test_rev_list_parents_and_timestamp_format() {
+    let repo = build_merge_repo();
+    let p = repo.path();
+    let merge = rev_parse_revlist(p, "HEAD");
+    let lines = rev_list_lines(p, &["--parents", "HEAD"]);
+    let merge_line = lines
+        .iter()
+        .find(|l| l.starts_with(&merge))
+        .expect("merge line present");
+    assert_eq!(
+        merge_line.split(' ').count(),
+        3,
+        "merge line is hash + 2 parents: {merge_line}",
+    );
+    for line in rev_list_lines(p, &["--timestamp", "HEAD"]) {
+        let first = line.split(' ').next().unwrap_or_default();
+        assert!(first.parse::<u64>().is_ok(), "timestamp prefix: {line}");
+    }
+}
+
+#[test]
+fn test_rev_list_merges_no_merges_conflict() {
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(
+        &["rev-list", "--merges", "--no-merges", "HEAD"],
+        repo.path(),
+    );
+    assert_eq!(out.status.code(), Some(129));
 }
