@@ -29,6 +29,7 @@ async fn test_execute_commit_with_empty_index_fail() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     let result = execute_safe(args, &OutputConfig::default()).await;
     assert!(result.is_err());
@@ -70,6 +71,7 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -86,6 +88,7 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         },
         &OutputConfig::default(),
     )
@@ -170,6 +173,7 @@ async fn test_execute_commit() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
 
@@ -209,6 +213,7 @@ async fn test_execute_commit() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
 
@@ -249,6 +254,7 @@ async fn test_execute_commit() {
             ignore_errors: false,
             refresh: false,
             force: false,
+            ..Default::default()
         };
         add::execute(args).await;
     }
@@ -266,6 +272,7 @@ async fn test_execute_commit() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
 
@@ -300,6 +307,7 @@ async fn test_execute_commit() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
 
@@ -339,6 +347,7 @@ async fn test_commit_with_all_flag_stages_tracked_changes() {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -354,6 +363,7 @@ async fn test_commit_with_all_flag_stages_tracked_changes() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -372,6 +382,7 @@ async fn test_commit_with_all_flag_stages_tracked_changes() {
         all: true,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -411,6 +422,7 @@ async fn test_commit_with_all_flag_records_deletions() {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -426,6 +438,7 @@ async fn test_commit_with_all_flag_records_deletions() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -444,6 +457,7 @@ async fn test_commit_with_all_flag_records_deletions() {
         all: true,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -508,6 +522,7 @@ async fn test_commit_sha256() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -524,6 +539,7 @@ async fn test_commit_sha256() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -548,6 +564,7 @@ async fn test_commit_sha256() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -594,6 +611,7 @@ async fn test_commit_with_custom_author() {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -610,6 +628,7 @@ async fn test_commit_with_custom_author() {
         all: false,
         no_verify: false,
         author: Some("Custom Author <custom@example.com>".to_string()),
+        ..Default::default()
     })
     .await;
 
@@ -659,6 +678,7 @@ async fn test_commit_amend_with_custom_author() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -680,6 +700,7 @@ async fn test_commit_amend_with_custom_author() {
         all: false,
         no_verify: false,
         author: Some("Amend Author <amend@example.com>".to_string()),
+        ..Default::default()
     })
     .await;
 
@@ -714,6 +735,7 @@ async fn test_commit_empty_working_tree() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
 
     let result = execute_safe(args, &OutputConfig::default()).await;
@@ -740,6 +762,7 @@ async fn test_commit_with_actual_changes() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(init_args).await;
 
@@ -755,6 +778,7 @@ async fn test_commit_with_actual_changes() {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     };
     add::execute(add_args).await;
 
@@ -770,6 +794,7 @@ async fn test_commit_with_actual_changes() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
 
     commit::execute(args).await;
@@ -795,6 +820,7 @@ async fn test_commit_amend_without_changes() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(init_args).await;
 
@@ -811,6 +837,7 @@ async fn test_commit_amend_without_changes() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
 
     // This should succeed even without staged changes
@@ -834,6 +861,7 @@ async fn test_commit_signoff_persists_trailer() {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -849,6 +877,7 @@ async fn test_commit_signoff_persists_trailer() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -883,6 +912,7 @@ async fn test_commit_amend_signoff_persists_trailer() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -898,6 +928,7 @@ async fn test_commit_amend_signoff_persists_trailer() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -938,6 +969,7 @@ async fn test_commit_amend_without_existing_commit_returns_repo_state_error() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         },
         &OutputConfig::default(),
     )
@@ -994,6 +1026,7 @@ async fn test_commit_without_identity_fails_by_default() {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -1010,6 +1043,7 @@ async fn test_commit_without_identity_fails_by_default() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         },
         &OutputConfig::default(),
     )

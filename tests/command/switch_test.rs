@@ -109,6 +109,11 @@ fn test_switch_json_create_output_reports_new_branch() {
 #[serial]
 async fn test_switch_json_track_output_stays_clean() {
     let repo = create_committed_repo_via_cli();
+    let remote = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&remote, "remote add origin");
     let _guard = ChangeDirGuard::new(repo.path());
 
     let head = Head::current_commit().await.unwrap();
@@ -141,6 +146,11 @@ async fn test_switch_json_track_output_stays_clean() {
 #[serial]
 async fn test_switch_track_human_output_keeps_tracking_message() {
     let repo = create_committed_repo_via_cli();
+    let remote = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&remote, "remote add origin");
     let _guard = ChangeDirGuard::new(repo.path());
 
     let head = Head::current_commit().await.unwrap();
@@ -207,6 +217,7 @@ async fn test_switch_function() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
     }
@@ -260,6 +271,7 @@ async fn test_switch_function() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
 
@@ -377,6 +389,11 @@ async fn test_switch_track_sets_upstream() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = ChangeDirGuard::new(temp_path.path());
+    let remote = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        temp_path.path(),
+    );
+    assert_cli_success(&remote, "remote add origin");
 
     let args = CommitArgs {
         message: Some("base".to_string()),
@@ -390,6 +407,7 @@ async fn test_switch_track_sets_upstream() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(args).await;
 
@@ -451,6 +469,7 @@ async fn test_detach_head_basic() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
     }
@@ -496,6 +515,7 @@ async fn test_detach_head_basic() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
     }

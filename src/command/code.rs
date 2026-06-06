@@ -3068,7 +3068,7 @@ where
     let source_pool = {
         let db_path = storage_root.join(DATABASE);
         let db_path_str = db_path.to_string_lossy();
-        match establish_connection(&db_path_str).await {
+        let pool = match establish_connection(&db_path_str).await {
             Ok(conn) => SourcePool::with_persistence(Arc::new(conn)),
             Err(err) => {
                 tracing::warn!(
@@ -3079,7 +3079,13 @@ where
                 );
                 SourcePool::new()
             }
-        }
+        };
+        // CEX-S2-14 (agent.md:1959): apply the configured per-slug source-call
+        // concurrency limit so concurrent sub-agents cannot overwhelm one
+        // backend. `0` (the default) leaves the pool unthrottled.
+        pool.with_source_concurrency_limit(
+            agents_config.multi_agent.source_concurrency_limit as usize,
+        )
     };
     if let Err(error) = register_builtin_mcp_source_from_project_config(
         &source_pool,
@@ -3133,6 +3139,11 @@ where
              dispatcher integration is a v0.17.783+ follow-up",
         );
     }
+    // CEX-S2-16 live fields: one registry instance, shared into the sub-agent
+    // child runner (the writer — records each child's current tool/file) and the
+    // App (the `/agents` pane reader), so an in-flight sub-agent's live activity
+    // is visible end-to-end.
+    let live_run_registry = crate::internal::ai::agent_run::LiveRunRegistry::new();
     if agents_config.sub_agents.enabled {
         match build_subagent_runtime_for_session(
             &agents_config,
@@ -3149,6 +3160,7 @@ where
             // so dispatched sub-agents inherit the parent's authority
             // rather than running unsandboxed (S2-INV-06).
             config.runtime_context.clone(),
+            live_run_registry.clone(),
         )
         .await
         {
@@ -3207,6 +3219,7 @@ where
             auto_classify_first_user_message,
             initial_goal: params.initial_goal.clone(),
             source_pool,
+            live_run_registry,
         },
     );
 
@@ -3441,6 +3454,8 @@ fn default_tui_runtime_context(
         }),
         file_history: None,
         max_output_bytes: None,
+        // Main-session TUI context — not a sub-agent run.
+        agent_run_id: None,
     }
 }
 
@@ -3634,6 +3649,90 @@ const fn cex_s2_12_subagent_concurrency_cap(_configured: u32) -> u32 {
     1
 }
 
+/// CEX-S2-16: dispatcher-side
+/// [`RunPatchStore`](crate::internal::ai::agent::runtime::RunPatchStore) that
+/// persists a successful sub-agent's workspace diff as a real `PatchSet` git
+/// object in the AI orphan branch (`libra/intent`), mirroring the
+/// orchestrator's `create_patchset` path. The returned object id is what the
+/// dispatcher records in the run's `AgentPatchSet` + `MergeCandidate`
+/// snapshot, so the MCP `merge-candidates/{id}` surface can resolve it.
+///
+/// Best-effort: every failure is surfaced as `Err(String)`, which the
+/// dispatcher logs and swallows — a failed capture never fails the run.
+struct OrphanBranchRunPatchStore {
+    storage: std::sync::Arc<dyn crate::utils::storage::Storage + Send + Sync>,
+    history: std::sync::Arc<HistoryManager>,
+}
+
+#[async_trait::async_trait]
+impl crate::internal::ai::agent::runtime::RunPatchStore for OrphanBranchRunPatchStore {
+    async fn persist_patchset(
+        &self,
+        run_id: uuid::Uuid,
+        touched: Vec<git_internal::internal::object::patchset::TouchedFile>,
+    ) -> Result<uuid::Uuid, String> {
+        use git_internal::internal::object::{patchset::PatchSet, types::ActorRef};
+
+        use crate::utils::storage_ext::StorageExt;
+
+        // Anchor the PatchSet at the current HEAD commit. An unborn branch
+        // (no commits yet) has no anchor — skip rather than fabricate one.
+        let base_commit = crate::internal::head::Head::current_commit_result_with_conn(
+            &self.history.database_connection(),
+        )
+        .await
+        .map_err(|err| format!("failed to resolve HEAD for sub-agent PatchSet: {err}"))?
+        .ok_or_else(|| {
+            "no base commit yet (unborn branch); skipping PatchSet capture".to_string()
+        })?;
+
+        // Normalize to the 64-char anchor `PatchSet`/`IntegrityHash` expects
+        // (a SHA-1 repo's 40-char HEAD is zero-padded), mirroring the
+        // orchestrator's `resolve_base_commit_anchor` path.
+        let anchor = crate::internal::ai::util::normalize_commit_anchor(&base_commit.to_string())
+            .map_err(|err| format!("failed to normalize base commit anchor: {err}"))?;
+        let actor = ActorRef::agent("libra-subagent")
+            .map_err(|err| format!("invalid PatchSet actor: {err}"))?;
+        let mut patchset = PatchSet::new(actor, run_id, &anchor)
+            .map_err(|err| format!("failed to build PatchSet: {err}"))?;
+        for file in touched {
+            patchset.add_touched(file);
+        }
+        self.storage
+            .put_tracked(&patchset, &self.history)
+            .await
+            .map_err(|err| format!("failed to persist PatchSet object: {err}"))?;
+        Ok(patchset.header().object_id())
+    }
+}
+
+/// Build the per-session sub-agent
+/// [`RunPatchStore`](crate::internal::ai::agent::runtime::RunPatchStore).
+/// Opens an auxiliary SQLite connection + object store rooted at the session's
+/// `.libra` dir (the same pattern as [`load_code_ui_projection_bundle`]); a
+/// build failure leaves the dispatcher's capture dormant rather than blocking
+/// session startup.
+async fn build_run_patch_store(
+    storage_root: &Path,
+) -> anyhow::Result<std::sync::Arc<dyn crate::internal::ai::agent::runtime::RunPatchStore>> {
+    let db_path = storage_root.join("libra.db");
+    let db_path = db_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("database path is not valid UTF-8"))?;
+    let db_conn = establish_connection(db_path).await?;
+    let storage: std::sync::Arc<dyn crate::utils::storage::Storage + Send + Sync> =
+        std::sync::Arc::new(LocalStorage::new(storage_root.join("objects")));
+    let history = std::sync::Arc::new(HistoryManager::new(
+        storage.clone(),
+        storage_root.to_path_buf(),
+        std::sync::Arc::new(db_conn),
+    ));
+    Ok(std::sync::Arc::new(OrphanBranchRunPatchStore {
+        storage,
+        history,
+    }))
+}
+
 /// Construct a [`SubAgentToolLoopRuntime`] from the libra-code
 /// session's resolved state. Called from the session bootstrap
 /// when `agents_config.sub_agents.enabled = true`; failures
@@ -3658,6 +3757,7 @@ async fn build_subagent_runtime_for_session(
     agent_router: &AgentProfileRouter,
     hook_runner: Option<std::sync::Arc<crate::internal::ai::hooks::HookRunner>>,
     runtime_context: Option<ToolRuntimeContext>,
+    live_run_registry: crate::internal::ai::agent_run::LiveRunRegistry,
 ) -> anyhow::Result<crate::internal::ai::agent::runtime::SubAgentToolLoopRuntime> {
     use crate::internal::ai::{
         agent::{
@@ -3698,7 +3798,12 @@ async fn build_subagent_runtime_for_session(
             ),
         },
     )
-    .with_default_child_runner()
+    // CEX-S2-16 live fields: the child runner records each child loop's current
+    // tool/file into the shared registry (the `/agents` pane reads the same one).
+    .with_child_runner(std::sync::Arc::new(
+        crate::internal::ai::agent::runtime::DefaultSubAgentChildRunner::new()
+            .with_live_run_registry(live_run_registry),
+    ))
     // CEX-S2-12 / S2-INV-03: confine each dispatched sub-agent to a
     // materialized per-run workspace so its writes never touch the main
     // worktree. `sessions_root` = the `.libra/sessions` dir the per-run
@@ -3711,6 +3816,21 @@ async fn build_subagent_runtime_for_session(
             allow_full_copy: agents_config.multi_agent.allow_full_copy,
         },
     );
+
+    // CEX-S2-16: persist each successful sub-agent run's workspace diff as a
+    // `PatchSet` git object + `MergeCandidate` record so the merge-review
+    // surface (MCP `merge-candidates/{id}`) can serve it. A store-build
+    // failure leaves the capture dormant rather than blocking startup.
+    let dispatcher = match build_run_patch_store(storage_root).await {
+        Ok(patch_store) => dispatcher.with_patch_store(patch_store),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "sub-agent PatchSet store unavailable; merge-candidate capture disabled this session",
+            );
+            dispatcher
+        }
+    };
 
     // OC-Phase 3 P3.4 / P3.7 interactive permission asker (v0.17.788):
     // construct a ChannelPermissionAsker + spawn a background
@@ -3734,6 +3854,7 @@ async fn build_subagent_runtime_for_session(
                 thread_id = %ask.thread_id,
                 session_id = %ask.session_id,
                 source = ?ask.source,
+                task_id = ?ask.task_id,
                 "permission ask received via ChannelPermissionAsker; \
                  auto-rejecting until interactive TUI prompt widget lands",
             );
@@ -3864,6 +3985,14 @@ async fn build_subagent_runtime_for_session(
         // PostToolUse hook surface as the parent. Sub-agents
         // cannot disable or supersede the parent's runner.
         hook_runner,
+        // CEX-S2-14 tool-loop parallel dispatch: the configured
+        // `code.sub_agents.max_parallel` is plumbed but forced to 1 by the
+        // CP-S2-4 gate (`cex_s2_12_subagent_concurrency_cap`), so production
+        // stays strictly sequential until the parallel path is validated.
+        // A `1` makes the tool loop's parallel branch inert (it needs `>= 2`),
+        // keeping behaviour byte-identical to the pre-parallel path.
+        max_parallel: cex_s2_12_subagent_concurrency_cap(agents_config.sub_agents.max_parallel)
+            as usize,
     })
 }
 
@@ -5590,5 +5719,101 @@ no_cache_unknown_network = true
             !msg.contains("GEMINI_API_KEY"),
             "CLI --provider gemini must NOT win after agent override, got: {msg}"
         );
+    }
+
+    /// CEX-S2-16: the production [`OrphanBranchRunPatchStore`] persists a
+    /// sub-agent's touched-file summary as a real, loadable `PatchSet` git
+    /// object anchored at HEAD, returning the object id the dispatcher records
+    /// on the run's `MergeCandidate`. This pins the B2b production wiring that
+    /// the [`RunPatchStore`](crate::internal::ai::agent::runtime::RunPatchStore)
+    /// recording-sink test cannot: a genuine orphan-branch round-trip.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn orphan_branch_run_patch_store_round_trips_a_loadable_patchset() {
+        use git_internal::internal::object::patchset::{ChangeType, PatchSet, TouchedFile};
+
+        use crate::{
+            internal::ai::history::HistoryManager,
+            utils::{
+                storage::{Storage, local::LocalStorage},
+                storage_ext::StorageExt,
+                test::{ChangeDirGuard, setup_with_new_libra_in},
+            },
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        setup_with_new_libra_in(temp.path()).await;
+
+        // A HEAD commit gives the PatchSet a valid base anchor.
+        {
+            let _guard = ChangeDirGuard::new(temp.path());
+            std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
+            crate::command::add::execute(crate::command::add::AddArgs {
+                pathspec: vec!["seed.txt".to_string()],
+                all: false,
+                update: false,
+                refresh: false,
+                force: false,
+                verbose: false,
+                dry_run: false,
+                ignore_errors: false,
+                ..Default::default()
+            })
+            .await;
+            crate::command::commit::execute(crate::command::commit::CommitArgs {
+                message: Some("seed".to_string()),
+                file: None,
+                allow_empty: false,
+                conventional: false,
+                no_edit: false,
+                amend: false,
+                signoff: false,
+                disable_pre: true,
+                all: false,
+                no_verify: false,
+                author: None,
+                ..Default::default()
+            })
+            .await;
+        }
+
+        let storage_root = temp.path().join(".libra");
+        let store = build_run_patch_store(&storage_root)
+            .await
+            .expect("build run patch store");
+
+        let run_id = uuid::Uuid::new_v4();
+        let touched = vec![
+            TouchedFile::new("seed.txt".to_string(), ChangeType::Modify, 2, 0)
+                .expect("touched file"),
+        ];
+        let patchset_id = store
+            .persist_patchset(run_id, touched)
+            .await
+            .expect("persist patchset");
+
+        // The PatchSet object is tracked in the AI orphan branch and loads back
+        // with the owning run id + touched-file summary intact.
+        let storage: std::sync::Arc<dyn Storage + Send + Sync> =
+            std::sync::Arc::new(LocalStorage::new(storage_root.join("objects")));
+        let db_path = storage_root.join("libra.db");
+        let db_conn =
+            crate::internal::db::establish_connection(db_path.to_str().expect("utf-8 db path"))
+                .await
+                .expect("connect");
+        let history = HistoryManager::new(
+            storage.clone(),
+            storage_root.clone(),
+            std::sync::Arc::new(db_conn),
+        );
+        let hash = history
+            .get_object_hash("patchset", &patchset_id.to_string())
+            .await
+            .expect("query history")
+            .expect("patchset must be tracked in the orphan branch");
+        let loaded: PatchSet = storage.get_json(&hash).await.expect("load patchset");
+        assert_eq!(loaded.header().object_id(), patchset_id);
+        assert_eq!(loaded.run(), run_id);
+        assert_eq!(loaded.touched().len(), 1);
     }
 }

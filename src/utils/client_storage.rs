@@ -597,6 +597,17 @@ impl ClientStorage {
         self.block_on_storage(async move { storage.exist(&hash).await })
     }
 
+    /// Enumerate every locally-stored object id (loose ∪ pack), de-duplicated,
+    /// alongside diagnostics for any skipped/corrupt pack index.
+    ///
+    /// Read-only and local-only: it does not consult or fetch from remote
+    /// tiers, and never rebuilds a missing pack index (a degraded/missing idx
+    /// is reported in the diagnostics list and skipped). Backs
+    /// `cat-file --batch-all-objects`.
+    pub fn list_all_local_oids(&self) -> (Vec<ObjectHash>, Vec<String>) {
+        LocalStorage::open_existing(self.base_path.clone()).list_all_oids()
+    }
+
     /// Read just the `ObjectType` for `obj_id`.
     ///
     /// Boundary conditions:

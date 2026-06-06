@@ -42,8 +42,10 @@ pub mod lfs_schema;
 pub mod log;
 pub mod ls_remote;
 pub mod merge;
+pub(crate) mod merge_base;
 pub mod mv;
 pub mod open;
+pub mod package;
 pub mod publish;
 pub mod pull;
 pub mod push;
@@ -95,7 +97,7 @@ pub fn load_object<T>(hash: &ObjectHash) -> Result<T, GitError>
 where
     T: ObjectTrait,
 {
-    let storage = util::objects_storage();
+    let storage = util::try_objects_storage().map_err(GitError::IOError)?;
     let data = storage.get(hash)?;
     T::from_bytes(&data.to_vec(), *hash)
 }

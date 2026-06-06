@@ -48,6 +48,18 @@ impl StringSetDelta {
         }
     }
 
+    /// Delta between two already de-duplicated string sets: `added` = entries in
+    /// `next` not in `prev`; `removed` = entries in `prev` not in `next`. Both
+    /// lists come out sorted (BTreeSet iteration order) so the result is
+    /// deterministic. Used by the effective-capability-set delta where the
+    /// inputs are already unioned [`BTreeSet`]s rather than raw manifest lists.
+    pub fn between_sets(prev: &BTreeSet<String>, next: &BTreeSet<String>) -> Self {
+        Self {
+            added: next.difference(prev).cloned().collect(),
+            removed: prev.difference(next).cloned().collect(),
+        }
+    }
+
     /// `true` when nothing was added or removed.
     pub fn is_empty(&self) -> bool {
         self.added.is_empty() && self.removed.is_empty()

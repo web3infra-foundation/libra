@@ -101,7 +101,13 @@ jobs:
         run: pnpm --dir web build
 
       - name: Check web/out static export drift
-        run: bash scripts/check_web_out_clean.sh
+        run: |
+          drift="$(git status --porcelain -- web/out)"
+          if [ -n "$drift" ]; then
+            echo "::error::web/out static export drift detected; rebuild and commit web/out/" >&2
+            printf '%s\n' "$drift" >&2
+            exit 1
+          fi
 
   redundancy:
     name: compat-redundancy
@@ -189,7 +195,22 @@ jobs:
           rg --version
 
       - name: Check compatibility matrix drift
-        run: bash scripts/check_compat_matrix.sh
+        # De-scripted: the COMPATIBILITY.md ↔ src/cli.rs::Commands drift check now
+        # lives in tests/compat/matrix_alignment.rs (also runs in `cargo test --all`).
+        run: cargo test --test compat_matrix_alignment
+
+      - name: Check black-box CLI integration plan consistency
+        run: cargo run --manifest-path tools/integration-runner/Cargo.toml -- check-plan
+
+      - name: Run black-box CLI integration tests (waves 0,1,2)
+        # Per docs/development/integration-test-plan.md, `run --waves 0,1,2` is the
+        # default black-box execution gate for the Git-compat command surface.
+        # It must be invoked explicitly via the independent runner crate (never as
+        # a Cargo [[test]] target). Produces §5 report artifacts (report.json, summary.md,
+        # results.ndjson, per-scenario logs) under the runner's temp RUN_ROOT.
+        # Exit code: 0 = no failures, 1 = at least one fail, 2 = preflight/build fail.
+        # env-skip cases are reported but do not fail the gate.
+        run: cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --waves 0,1,2
 
       - name: Run tests (L1 + L2 + L3)
         env:

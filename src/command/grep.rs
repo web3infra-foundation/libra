@@ -50,6 +50,7 @@ EXAMPLES:
     libra grep -c 'unsafe' src/           Per-file match counts
     libra grep -l 'unwrap()' src/         Just the filenames that have matches
     libra grep -e 'TODO' -e 'FIXME'       Match either of multiple regexps
+    libra grep -C 2 'panic' src/          Show 2 lines of context around each match
     libra grep --cached 'TODO'            Search files staged in the index instead of the worktree
     libra grep --tree HEAD~5 'TODO'       Search files inside a historical revision
     libra grep --json 'TODO'              Structured JSON output for agents";
@@ -119,8 +120,93 @@ pub struct GrepArgs {
     tree: Option<String>,
 
     /// Search within tracked files in the index (staging area) instead of the working tree.
-    #[clap(long)]
+    #[clap(long, conflicts_with = "tree")]
     cached: bool,
+
+    /// Use extended regular expressions. Accepted as an alias: Libra's default
+    /// engine (the Rust `regex` crate) is already ERE-style, so this does not
+    /// change matching behavior.
+    #[clap(short = 'E', long = "extended-regexp")]
+    extended_regexp: bool,
+
+    /// Use basic regular expressions. Accepted as an alias: Libra does not ship a
+    /// separate BRE engine, so patterns are still interpreted with the default
+    /// `regex` syntax (which may differ from Git's strict BRE dialect).
+    #[clap(short = 'G', long = "basic-regexp")]
+    basic_regexp: bool,
+
+    /// Use Perl-compatible regular expressions. Declined: the default linear-time
+    /// engine has no backreferences/lookaround, so this fails fast rather than
+    /// silently mis-matching.
+    #[clap(short = 'P', long = "perl-regexp")]
+    perl_regexp: bool,
+
+    /// Show `<NUM>` lines of trailing context after each match.
+    #[clap(short = 'A', long = "after-context", value_name = "NUM")]
+    after_context: Option<usize>,
+
+    /// Show `<NUM>` lines of leading context before each match.
+    #[clap(short = 'B', long = "before-context", value_name = "NUM")]
+    before_context: Option<usize>,
+
+    /// Show `<NUM>` lines of context before and after each match (equivalent to
+    /// `-A <NUM> -B <NUM>`; `-A`/`-B` take precedence for their side).
+    #[clap(short = 'C', long = "context", value_name = "NUM")]
+    context: Option<usize>,
+
+    /// Process binary files as if they were text (do not skip them). The file
+    /// size limit still applies.
+    #[clap(short = 'a', long = "text")]
+    text: bool,
+
+    /// Silently skip binary files without printing a warning.
+    #[clap(short = 'I')]
+    ignore_binary: bool,
+
+    /// Print each file name once as a heading above its matches, and drop the
+    /// inline file-name prefix from the match lines.
+    #[clap(long, overrides_with = "no_heading")]
+    heading: bool,
+
+    /// Disable file-name headings (the default). Overrides `--heading`.
+    #[clap(long = "no-heading", overrides_with = "heading")]
+    no_heading: bool,
+
+    /// Print an empty line between the matches of different files.
+    #[clap(long = "break")]
+    break_between: bool,
+
+    /// Use NUL (`\0`) byte separators between output fields, for safe machine
+    /// consumption. Match/count records stay newline-terminated; `-l`/`-L` paths
+    /// are NUL-terminated with no trailing newline. Disables colorized output.
+    #[clap(short = 'z', long = "null")]
+    null: bool,
+
+    /// Search files on the filesystem (the current directory and below) without
+    /// requiring a libra repository. The `.libra`/`.git` directories are never
+    /// searched and symbolic links are not followed.
+    #[clap(long = "no-index", conflicts_with_all = ["cached", "tree", "untracked"])]
+    pub(crate) no_index: bool,
+
+    /// Also search untracked files (those not in the index and not excluded by
+    /// `.libraignore`), in addition to tracked files.
+    #[clap(long, conflicts_with_all = ["cached", "tree"])]
+    untracked: bool,
+}
+
+impl GrepArgs {
+    /// Resolve the effective (before, after) context line counts. `-A`/`-B`
+    /// override `-C` for their respective side.
+    fn context_counts(&self) -> (usize, usize) {
+        let before = self.before_context.or(self.context).unwrap_or(0);
+        let after = self.after_context.or(self.context).unwrap_or(0);
+        (before, after)
+    }
+
+    /// The field separator between output columns (`\0` under `-z`, else `:`).
+    fn field_separator(&self) -> char {
+        if self.null { '\0' } else { ':' }
+    }
 }
 
 /// A single grep match result.
@@ -138,11 +224,15 @@ pub struct GrepMatch {
 }
 
 /// Internal representation of a file to search, with optional blob hash for tree/index searches.
+#[derive(Default)]
 struct SearchFile {
-    /// Relative path from working directory root.
+    /// Relative path from working directory root (or current directory for `--no-index`).
     path: PathBuf,
     /// Blob hash for tree/index searches (None for working tree searches).
     blob_hash: Option<git_internal::hash::ObjectHash>,
+    /// When true (`--no-index`), the path is resolved against the current
+    /// directory instead of the repository working tree (which may not exist).
+    from_filesystem: bool,
 }
 
 /// Aggregated count result for a file (used with --count).
@@ -160,6 +250,31 @@ pub struct GrepWarning {
     pub path: String,
     /// Human-readable warning message.
     pub message: String,
+}
+
+/// Whether a context output line is itself a match or surrounding context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextLineKind {
+    Match,
+    Context,
+}
+
+/// A single rendered line in `-A`/`-B`/`-C` context mode.
+#[derive(Debug, Clone)]
+struct ContextOutputLine {
+    kind: ContextLineKind,
+    line_number: usize,
+    content: String,
+    /// Byte offset of the first match, only set for match lines with `-b`.
+    byte_offset: Option<usize>,
+}
+
+/// Per-file context output: groups of consecutive lines, rendered with a `--`
+/// separator between non-contiguous groups (text output only).
+#[derive(Debug, Clone)]
+struct FileContextOutput {
+    path: String,
+    groups: Vec<Vec<ContextOutputLine>>,
 }
 
 /// Output structure for JSON mode.
@@ -190,6 +305,10 @@ pub struct GrepOutput {
     /// Warnings about skipped or unreadable files.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub warnings: Vec<GrepWarning>,
+    /// Per-file context blocks for `-A`/`-B`/`-C` text rendering. Never
+    /// serialized: the JSON/NDJSON schema is unchanged by context flags.
+    #[serde(skip)]
+    context_output: Option<Vec<FileContextOutput>>,
 }
 
 pub async fn execute(args: GrepArgs) {
@@ -201,7 +320,20 @@ pub async fn execute(args: GrepArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Searches for pattern matches in tracked files.
 pub async fn execute_safe(args: GrepArgs, output: &OutputConfig) -> CliResult<()> {
-    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    // `-P`/`--perl-regexp` is declined up front (before any repo work) so it
+    // always fails fast with a usage error rather than silently mis-matching.
+    if args.perl_regexp {
+        return Err(CliError::command_usage(
+            "Perl-compatible regular expressions (-P/--perl-regexp) are not supported; \
+             use the default regex syntax",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+
+    // `--no-index` searches the filesystem directly and does not require a repo.
+    if !args.no_index {
+        util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    }
 
     let result = run_grep(&args).await?;
     let has_selected_results = has_selected_results(&args, &result);
@@ -277,6 +409,9 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
     let mut warnings: Vec<GrepWarning> = Vec::new();
     let mut total_matches = 0usize;
     let mut matched_file_count = 0usize;
+    let (before_context, after_context) = args.context_counts();
+    let context_requested = before_context > 0 || after_context > 0;
+    let mut context_blocks: Vec<FileContextOutput> = Vec::new();
 
     for search_file in &files {
         let path_str = search_file.path.display().to_string();
@@ -299,11 +434,15 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
             }
         };
 
-        if is_binary(&content) {
-            warnings.push(GrepWarning {
-                path: search_file.path.display().to_string(),
-                message: "skipped binary file".to_string(),
-            });
+        // `-a`/`--text` forces binary files to be searched as text; otherwise a
+        // binary file is skipped (silently under `-I`, with a warning by default).
+        if is_binary(&content) && !args.text {
+            if !args.ignore_binary {
+                warnings.push(GrepWarning {
+                    path: search_file.path.display().to_string(),
+                    message: "skipped binary file".to_string(),
+                });
+            }
             continue;
         }
 
@@ -336,13 +475,33 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
                     count: file_matches.len(),
                 });
             } else {
-                for (line_num, line, byte_off) in file_matches {
+                let display_path = search_file.path.display().to_string();
+                for (line_num, line, byte_off) in &file_matches {
                     matches.push(GrepMatch {
-                        path: search_file.path.display().to_string(),
-                        line_number: line_num,
-                        line,
-                        byte_offset: args.byte_offset.then_some(byte_off),
+                        path: display_path.clone(),
+                        line_number: *line_num,
+                        line: line.clone(),
+                        byte_offset: args.byte_offset.then_some(*byte_off),
                     });
+                }
+                if context_requested {
+                    let all_lines: Vec<String> = String::from_utf8_lossy(&content)
+                        .lines()
+                        .map(str::to_string)
+                        .collect();
+                    let groups = build_context_groups(
+                        &all_lines,
+                        &file_matches,
+                        before_context,
+                        after_context,
+                        args,
+                    );
+                    if !groups.is_empty() {
+                        context_blocks.push(FileContextOutput {
+                            path: display_path,
+                            groups,
+                        });
+                    }
                 }
             }
             total_matches += match_count;
@@ -364,7 +523,65 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
         files_with_matches: args.files_with_matches.then_some(files_with_matches),
         files_without_matches: args.files_without_matches.then_some(files_without_matches),
         warnings,
+        context_output: context_requested.then_some(context_blocks),
     })
+}
+
+/// Group a file's matches into context blocks. Each match contributes a window
+/// of `[line-before, line+after]`; overlapping or adjacent windows merge into one
+/// group, while gaps start a new group (rendered with a `--` separator). Match
+/// lines are tagged so they render with `:` (and may highlight); surrounding
+/// lines render with `-` and are never highlighted.
+fn build_context_groups(
+    lines: &[String],
+    file_matches: &[(usize, String, usize)],
+    before: usize,
+    after: usize,
+    args: &GrepArgs,
+) -> Vec<Vec<ContextOutputLine>> {
+    use std::collections::HashMap;
+
+    let matched: HashMap<usize, usize> = file_matches
+        .iter()
+        .map(|(line_num, _, byte_off)| (*line_num, *byte_off))
+        .collect();
+    let mut sorted: Vec<usize> = matched.keys().copied().collect();
+    sorted.sort_unstable();
+
+    let mut groups: Vec<Vec<ContextOutputLine>> = Vec::new();
+    let mut current: Vec<ContextOutputLine> = Vec::new();
+    let mut last_emitted = 0usize; // 1-based line number last pushed into `current`
+
+    for line_num in sorted {
+        let start = line_num.saturating_sub(before).max(1);
+        let end = (line_num + after).min(lines.len());
+        if !current.is_empty() && start > last_emitted + 1 {
+            groups.push(std::mem::take(&mut current));
+        }
+        let from = if current.is_empty() {
+            start
+        } else {
+            start.max(last_emitted + 1)
+        };
+        for l in from..=end {
+            let byte_off = matched.get(&l).copied();
+            current.push(ContextOutputLine {
+                kind: if byte_off.is_some() {
+                    ContextLineKind::Match
+                } else {
+                    ContextLineKind::Context
+                },
+                line_number: l,
+                content: lines.get(l - 1).cloned().unwrap_or_default(),
+                byte_offset: byte_off.filter(|_| args.byte_offset),
+            });
+        }
+        last_emitted = end.max(last_emitted);
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    groups
 }
 
 fn collect_patterns(args: &GrepArgs) -> CliResult<Vec<String>> {
@@ -473,16 +690,104 @@ fn escape_regex(s: &str) -> String {
 
 /// Get the list of files to search, respecting pathspec and ignore rules.
 async fn get_search_files(args: &GrepArgs) -> CliResult<Vec<SearchFile>> {
-    if let Some(tree_ref) = &args.tree {
+    if args.no_index {
+        // Search the filesystem directly, no repository required.
+        get_no_index_files(&args.pathspec)
+    } else if let Some(tree_ref) = &args.tree {
         // Search in a specific tree/commit
         get_tree_files(tree_ref, &args.pathspec).await
     } else if args.cached {
         // Search in index (staged files)
         get_index_files(&args.pathspec)
+    } else if args.untracked {
+        // Search tracked plus untracked (non-ignored) working-tree files
+        get_tracked_and_untracked_files(&args.pathspec)
     } else {
         // Search in working tree
         get_working_tree_files(&args.pathspec)
     }
+}
+
+/// List tracked working-tree files plus untracked files that are not excluded by
+/// `.libraignore` (for `--untracked`).
+fn get_tracked_and_untracked_files(pathspec: &[String]) -> CliResult<Vec<SearchFile>> {
+    let index = load_index()?;
+    let path_filters: Vec<PathBuf> = pathspec.iter().map(util::to_workdir_path).collect();
+
+    let mut files = tracked_files_from_index(&index, &path_filters, false);
+
+    let untracked = crate::utils::worktree::untracked_workdir_paths(&index).map_err(|error| {
+        CliError::fatal(format!("failed to list untracked files: {error}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    for path in untracked {
+        if path_filters.is_empty() || path_filters.iter().any(|f| util::is_sub_path(&path, f)) {
+            files.push(SearchFile {
+                path,
+                blob_hash: None,
+                from_filesystem: false,
+            });
+        }
+    }
+    Ok(files)
+}
+
+/// List filesystem files for `--no-index`: walk the current directory, never
+/// descending into `.libra`/`.git` and never following symlinks, then keep the
+/// files matching the (relative-path) pathspec. Paths are reported relative to
+/// the current directory.
+fn get_no_index_files(pathspec: &[String]) -> CliResult<Vec<SearchFile>> {
+    use walkdir::WalkDir;
+
+    let root = std::env::current_dir().map_err(|error| {
+        CliError::fatal(format!("failed to resolve the current directory: {error}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+
+    let mut files: Vec<SearchFile> = WalkDir::new(&root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            // Prune the repository's private metadata directories.
+            if entry.file_type().is_dir() {
+                let name = entry.file_name().to_string_lossy();
+                name != util::ROOT_DIR && name != ".git"
+            } else {
+                true
+            }
+        })
+        .filter_map(Result::ok)
+        // Regular files only — symlinks are not followed, directories skipped.
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| {
+            entry
+                .path()
+                .strip_prefix(&root)
+                .unwrap_or_else(|_| entry.path())
+                .to_path_buf()
+        })
+        .filter(|path| no_index_pathspec_matches(path, pathspec))
+        .map(|path| SearchFile {
+            path,
+            blob_hash: None,
+            from_filesystem: true,
+        })
+        .collect();
+
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
+}
+
+/// Whether a relative path is selected by a `--no-index` pathspec (prefix match).
+/// An empty pathspec selects everything.
+fn no_index_pathspec_matches(path: &std::path::Path, pathspec: &[String]) -> bool {
+    if pathspec.is_empty() {
+        return true;
+    }
+    let display = path.to_string_lossy();
+    pathspec
+        .iter()
+        .any(|spec| path.starts_with(spec) || display.starts_with(spec.as_str()))
 }
 
 async fn get_tree_files(tree_ref: &str, pathspec: &[String]) -> CliResult<Vec<SearchFile>> {
@@ -518,6 +823,7 @@ async fn get_tree_files(tree_ref: &str, pathspec: &[String]) -> CliResult<Vec<Se
             .map(|(path, blob_hash)| SearchFile {
                 path,
                 blob_hash: Some(blob_hash),
+                ..Default::default()
             })
             .collect()
     } else {
@@ -527,6 +833,7 @@ async fn get_tree_files(tree_ref: &str, pathspec: &[String]) -> CliResult<Vec<Se
             .map(|(path, blob_hash)| SearchFile {
                 path,
                 blob_hash: Some(blob_hash),
+                ..Default::default()
             })
             .collect()
     };
@@ -578,6 +885,7 @@ fn tracked_files_from_index(
         .map(|entry| SearchFile {
             path: PathBuf::from(&entry.name),
             blob_hash: include_blob_hash.then_some(entry.hash),
+            ..Default::default()
         })
         .collect()
 }
@@ -592,8 +900,15 @@ async fn read_file_content(search_file: &SearchFile) -> Result<Vec<u8>, GrepRead
             .map_err(|e| GrepReadError::Fatal(format!("failed to load blob: {}", e)))?;
         blob.data
     } else {
-        // Read from working tree
-        let abs_path = util::workdir_to_absolute(&search_file.path);
+        // Read from the filesystem: `--no-index` paths resolve against the
+        // current directory (no repository), others against the working tree.
+        let abs_path = if search_file.from_filesystem {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(&search_file.path))
+                .unwrap_or_else(|_| search_file.path.clone())
+        } else {
+            util::workdir_to_absolute(&search_file.path)
+        };
 
         let metadata = std::fs::symlink_metadata(&abs_path)
             .map_err(|e| GrepReadError::Skippable(format!("failed to stat file: {}", e)))?;
@@ -769,53 +1084,163 @@ fn render_grep_output(
     }
 
     let mut pager = Pager::with_config(output)?;
-    let should_color = std::io::stdout().is_terminal() && !output.is_json();
+    // `-z` output is meant for machine consumption, so colorization is disabled.
+    let should_color = std::io::stdout().is_terminal() && !output.is_json() && !args.null;
     let matcher = should_color
         .then(|| build_matcher(&result.patterns, args))
         .transpose()?;
 
     if args.files_with_matches {
-        for file in result.files_with_matches.as_ref().unwrap_or(&Vec::new()) {
-            pager.write_line(file)?;
-        }
+        render_file_list(
+            &mut pager,
+            result.files_with_matches.as_ref().unwrap_or(&Vec::new()),
+            args,
+        )?;
     } else if args.files_without_matches {
-        for file in result.files_without_matches.as_ref().unwrap_or(&Vec::new()) {
-            pager.write_line(file)?;
-        }
+        render_file_list(
+            &mut pager,
+            result.files_without_matches.as_ref().unwrap_or(&Vec::new()),
+            args,
+        )?;
     } else if args.count {
+        let sep = args.field_separator();
         for count in result.counts.as_ref().unwrap_or(&Vec::new()) {
-            pager.write_line(&format!("{}:{}", count.path, count.count))?;
+            pager.write_line(&format!("{}{sep}{}", count.path, count.count))?;
         }
+    } else if let Some(context_output) = &result.context_output {
+        render_context_output(&mut pager, context_output, args, matcher.as_ref())?;
     } else {
-        // Regular match output with optional highlighting
-        for match_item in result.matches.as_ref().unwrap_or(&Vec::new()) {
-            let line = if let Some(matcher) = matcher.as_ref().filter(|_| !args.invert_match) {
-                colorize_match(&match_item.line, matcher)
-            } else {
-                match_item.line.clone()
-            };
-
-            if args.byte_offset {
-                pager.write_line(&format!(
-                    "{}:{}:{}:{}",
-                    match_item.path,
-                    match_item.line_number,
-                    match_item.byte_offset.unwrap_or(0),
-                    line
-                ))?;
-            } else if args.line_number {
-                pager.write_line(&format!(
-                    "{}:{}:{}",
-                    match_item.path, match_item.line_number, line
-                ))?;
-            } else {
-                pager.write_line(&format!("{}:{}", match_item.path, line))?;
-            }
-        }
+        render_matches(
+            &mut pager,
+            result.matches.as_ref().unwrap_or(&Vec::new()),
+            args,
+            matcher.as_ref(),
+        )?;
     }
 
     pager.finish()?;
     Ok(())
+}
+
+/// Render an `-l`/`-L` file list. Under `-z` each path is NUL-terminated with no
+/// trailing newline; otherwise one path per line.
+fn render_file_list(pager: &mut Pager, files: &[String], args: &GrepArgs) -> CliResult<()> {
+    for file in files {
+        if args.null {
+            pager.write_str(&format!("{file}\0"))?;
+        } else {
+            pager.write_line(file)?;
+        }
+    }
+    Ok(())
+}
+
+/// Render ordinary match lines, honoring `--heading` (file-name header lines with
+/// no inline prefix), `--break` (blank line between files), and `-z` (NUL field
+/// separators; records stay newline-terminated).
+fn render_matches(
+    pager: &mut Pager,
+    matches: &[GrepMatch],
+    args: &GrepArgs,
+    matcher: Option<&regex::Regex>,
+) -> CliResult<()> {
+    let sep = args.field_separator();
+    let heading = args.heading;
+    let mut current_file: Option<&str> = None;
+
+    for item in matches {
+        let is_new_file = current_file != Some(item.path.as_str());
+        if is_new_file {
+            if current_file.is_some() && args.break_between {
+                pager.write_line("")?;
+            }
+            if heading {
+                // The heading line always ends with a newline, even under `-z`.
+                pager.write_line(&item.path)?;
+            }
+            current_file = Some(item.path.as_str());
+        }
+
+        let body = matcher
+            .filter(|_| !args.invert_match)
+            .map(|m| colorize_match(&item.line, m))
+            .unwrap_or_else(|| item.line.clone());
+
+        // The path prefix is dropped in heading mode.
+        let prefix = if heading {
+            String::new()
+        } else {
+            format!("{}{sep}", item.path)
+        };
+
+        if args.byte_offset {
+            pager.write_line(&format!(
+                "{prefix}{}{sep}{}{sep}{body}",
+                item.line_number,
+                item.byte_offset.unwrap_or(0)
+            ))?;
+        } else if args.line_number {
+            pager.write_line(&format!("{prefix}{}{sep}{body}", item.line_number))?;
+        } else {
+            pager.write_line(&format!("{prefix}{body}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Render `-A`/`-B`/`-C` context output: each group's lines, with a `--`
+/// separator line between non-contiguous groups (across the whole output).
+fn render_context_output(
+    pager: &mut Pager,
+    context_output: &[FileContextOutput],
+    args: &GrepArgs,
+    matcher: Option<&regex::Regex>,
+) -> CliResult<()> {
+    let mut first_group = true;
+    for file_output in context_output {
+        for group in &file_output.groups {
+            if !first_group {
+                pager.write_line("--")?;
+            }
+            first_group = false;
+            for line in group {
+                pager.write_line(&render_context_line(&file_output.path, line, args, matcher))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Format a single context-mode line: match lines use `:` separators (and may be
+/// highlighted), context lines use `-` separators and are never highlighted.
+fn render_context_line(
+    path: &str,
+    line: &ContextOutputLine,
+    args: &GrepArgs,
+    matcher: Option<&regex::Regex>,
+) -> String {
+    let is_match = line.kind == ContextLineKind::Match;
+    let sep = if is_match { ':' } else { '-' };
+    let content = if is_match {
+        matcher
+            .filter(|_| !args.invert_match)
+            .map(|m| colorize_match(&line.content, m))
+            .unwrap_or_else(|| line.content.clone())
+    } else {
+        line.content.clone()
+    };
+
+    if is_match && args.byte_offset {
+        format!(
+            "{path}{sep}{}{sep}{}{sep}{content}",
+            line.line_number,
+            line.byte_offset.unwrap_or(0)
+        )
+    } else if args.line_number {
+        format!("{path}{sep}{}{sep}{content}", line.line_number)
+    } else {
+        format!("{path}{sep}{content}")
+    }
 }
 
 /// Colorize matching portions of a line using the actual matcher spans.

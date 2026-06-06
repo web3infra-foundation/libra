@@ -135,6 +135,7 @@ async fn test_remove_single_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -210,6 +211,7 @@ async fn test_remove_cached() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -266,6 +268,7 @@ async fn test_remove_directory_recursive() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -354,6 +357,7 @@ async fn test_remove_directory_without_recursive() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -440,6 +444,7 @@ async fn test_remove_modified_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -515,6 +520,7 @@ async fn test_remove_multiple_files() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -570,6 +576,7 @@ async fn test_remove_dry_run() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -634,6 +641,7 @@ async fn test_remove_dry_run_cached() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -687,6 +695,7 @@ async fn test_remove_dry_run_recursive() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -748,6 +757,7 @@ async fn test_remove_ignore_unmatch() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -799,6 +809,7 @@ async fn test_remove_pathspec_from_file_newline() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -843,6 +854,7 @@ async fn test_remove_pathspec_from_file_nul() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -887,6 +899,7 @@ async fn test_remove_pathspec_from_file_ignore_unmatch() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 

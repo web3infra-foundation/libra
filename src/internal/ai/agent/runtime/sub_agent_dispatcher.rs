@@ -62,6 +62,7 @@ use std::sync::{
 };
 
 use futures::future::BoxFuture;
+use git_internal::internal::object::patchset::TouchedFile;
 
 use super::sub_agent::{
     CancellationSource, DispatchContext, PermissionAskRequest, PermissionAskSource,
@@ -70,7 +71,12 @@ use super::sub_agent::{
 };
 use crate::internal::ai::{
     agent::profile::AgentExecutionSpec,
-    agent_run::{AgentRunEvent, AgentRunEventEnvelope, AgentRunId},
+    agent_run::{
+        AgentContextPack, AgentPatchSetId, AgentRun, AgentRunEvent, AgentRunEventEnvelope,
+        AgentRunId, AgentRunStatus, AgentTaskId, MergeCandidateId, ParallelAdmissionConfig,
+        ParallelTask, RunUsage, decision::MergeCandidate, event_store::AgentRunEventStore,
+        parallel_executor::run_parallel, patch_capture, patchset::AgentPatchSet,
+    },
     completion::CompletionUsageSummary,
     permission::{
         EDIT_TOOLS, PermissionRuleset, agent_permission_spec_to_ruleset, assert_no_escalation,
@@ -105,6 +111,77 @@ impl Default for MultiAgentConfig {
             max_concurrent_subagents: 1,
         }
     }
+}
+
+/// Inputs captured at `Spawned` time so the dispatch tail can persist (and
+/// later update) an [`AgentRun`] snapshot for a sub-agent run (CEX-S2-16).
+///
+/// Present only when workspace isolation supplies a `sessions_root`; the
+/// snapshot lands in the same `{thread_id}/agents/` directory as the run's
+/// event transcript (the `thread_id` is parsed from `parent_thread_id` with a
+/// fresh-uuid fallback, matching [`materialize_isolated_workspace`]), so the MCP
+/// `libra://agents/runs` resources and the TUI agent pane can read the run's
+/// current state. Snapshot writes are best-effort: a failure is logged and
+/// swallowed so persistence never breaks a dispatch.
+struct RunSnapshotCtx {
+    store: AgentRunEventStore,
+    thread_id: uuid::Uuid,
+    task_id: AgentTaskId,
+    provider: String,
+    model: String,
+    transcript_path: String,
+}
+
+/// Write the current [`AgentRun`] snapshot for a run at `status`, overwriting any
+/// prior snapshot. A `None` context (isolation not configured) is a no-op.
+fn persist_run_snapshot(
+    snapshot: Option<&RunSnapshotCtx>,
+    run_id: AgentRunId,
+    status: AgentRunStatus,
+) {
+    let Some(ctx) = snapshot else {
+        return;
+    };
+    let run = AgentRun {
+        id: run_id,
+        task_id: ctx.task_id,
+        thread_id: ctx.thread_id,
+        provider: ctx.provider.clone(),
+        model: ctx.model.clone(),
+        transcript_path: ctx.transcript_path.clone(),
+        workspace_path: None,
+        status,
+    };
+    if let Err(err) = ctx.store.write_snapshot(ctx.thread_id, &run) {
+        tracing::warn!(
+            error = %err,
+            agent_run_id = %run_id.0,
+            ?status,
+            "failed to persist AgentRun snapshot",
+        );
+    }
+}
+
+/// Sink that turns a completed sub-agent run's captured workspace diff into a
+/// persistent git `PatchSet`, returning the stored object's id (CEX-S2-16 merge
+/// candidates).
+///
+/// The dispatcher computes the touched-file summary (it owns the workspace) but
+/// has no object store; the implementation (wired in the session bootstrap)
+/// owns the storage + AI history and performs the `PatchSet::new` + tracked
+/// write, resolving the base commit + actor itself. Decoupling via this trait
+/// keeps the dispatcher free of a `HistoryManager` dependency. Best-effort: a
+/// returned `Err` is logged and the run still completes.
+#[async_trait::async_trait]
+pub trait RunPatchStore: Send + Sync {
+    /// Create + persist a `PatchSet` for `run_id` from its `touched` files,
+    /// returning the stored PatchSet's object id (used as
+    /// [`AgentPatchSet::patchset_id`]).
+    async fn persist_patchset(
+        &self,
+        run_id: uuid::Uuid,
+        touched: Vec<TouchedFile>,
+    ) -> Result<uuid::Uuid, String>;
 }
 
 /// Registry the dispatcher consults to resolve a `subagent_type` string
@@ -148,6 +225,12 @@ pub struct DefaultSubAgentDispatcher {
     /// the main worktree. `None` (every gate-only test and any flag-off
     /// path) means no isolation: behaviour is unchanged.
     workspace_isolation: Option<super::sub_agent::WorkspaceIsolationConfig>,
+    /// Optional sink for persisting a completed run's workspace diff as a git
+    /// `PatchSet` + `MergeCandidate` (CEX-S2-16). `None` (gate-only tests, and
+    /// any path without an object store) means no patch capture — behaviour is
+    /// unchanged. Requires `workspace_isolation` to be set too (the diff is
+    /// against the isolated workspace).
+    patch_store: Option<Arc<dyn RunPatchStore>>,
 }
 
 impl DefaultSubAgentDispatcher {
@@ -158,7 +241,68 @@ impl DefaultSubAgentDispatcher {
             in_flight: Arc::new(AtomicU32::new(0)),
             child_runner: None,
             workspace_isolation: None,
+            patch_store: None,
         }
+    }
+
+    /// Attach a [`RunPatchStore`] so a successful run's workspace diff is
+    /// captured as a persistent `PatchSet` + `MergeCandidate` (CEX-S2-16). Wired
+    /// by the session bootstrap; left unset by tests that don't exercise patch
+    /// capture so their behaviour is unchanged.
+    pub fn with_patch_store(mut self, patch_store: Arc<dyn RunPatchStore>) -> Self {
+        self.patch_store = Some(patch_store);
+        self
+    }
+
+    /// CEX-S2-14: dispatch a batch of sub-agent tasks under controlled
+    /// parallelism. Runs at most `max_parallel` concurrently, serialises tasks
+    /// whose `write_scope`s overlap (so two sub-agents never co-edit the same
+    /// path), and promotes queued tasks as running ones finish — all via the
+    /// pure [`run_parallel`] executor over [`ParallelSchedulerState`]. Each
+    /// task's result is returned in the input order; a per-task `dispatch`
+    /// failure surfaces in its slot rather than aborting the batch.
+    ///
+    /// This is the dispatcher-side parallel entry; the single-task
+    /// [`SubAgentDispatcher::dispatch`] path is unchanged. The caller supplies
+    /// one fully-built [`DispatchContext`] per task (each with its own
+    /// `parent_message_id` / file-history batch), exactly as the single path
+    /// requires.
+    pub async fn dispatch_parallel<'a>(
+        &'a self,
+        tasks: Vec<(
+            DispatchContext<'a>,
+            TaskInvocation,
+            TaskEntryKind,
+            Vec<String>,
+        )>,
+        max_parallel: usize,
+    ) -> Vec<Result<TaskResult, TaskFailure>> {
+        let parallel_tasks = tasks
+            .into_iter()
+            .map(|(ctx, invocation, entry_kind, write_scope)| {
+                // Track each task in the scheduler by its resolved task id (a
+                // fresh id when the invocation carries none), mirroring the
+                // snapshot-task-id derivation on the single path.
+                let task_id = invocation
+                    .task_id
+                    .as_deref()
+                    .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
+                    .map(AgentTaskId::from)
+                    .unwrap_or_default();
+                ParallelTask {
+                    task_id,
+                    write_scope,
+                    payload: (ctx, invocation, entry_kind),
+                }
+            })
+            .collect();
+
+        run_parallel(
+            parallel_tasks,
+            ParallelAdmissionConfig::new(max_parallel),
+            |(ctx, invocation, entry_kind)| self.dispatch(ctx, invocation, entry_kind),
+        )
+        .await
     }
 
     /// Attach workspace-isolation inputs (CEX-S2-12 / S2-INV-03). When
@@ -417,6 +561,10 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                         name: invocation.subagent_type.clone(),
                         prompt_digest: prompt_digest.clone(),
                     },
+                    // CEX-S2-16 验收 (4): surface the task this spawn belongs to
+                    // in the approval prompt (the agent name + command + scope are
+                    // already carried by `source` / `permission` / `patterns`).
+                    task_id: invocation.task_id.as_deref(),
                 };
                 match ctx.permission_service.ask(request).await {
                     PermissionReply::Once | PermissionReply::Always { .. } => {
@@ -485,6 +633,86 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                     subagent = %invocation.subagent_type,
                     "failed to append AgentRunEvent::Spawned to parent session JSONL"
                 );
+            }
+
+            // CEX-S2-16: when workspace isolation supplies a sessions root,
+            // persist the run snapshot so MCP / TUI surfaces can read it. The
+            // snapshot is keyed by a Uuid task id (the invocation's task id when
+            // it parses as one, else a fresh id) and lands beside the run's
+            // event transcript. Captured once here and reused at the terminal
+            // update below. Best-effort — see `persist_run_snapshot`.
+            // Wall-clock timing for the persisted per-run `RunUsage` (budget
+            // view). Started here at `Spawned`, read at the terminal transition.
+            let run_started = std::time::Instant::now();
+            let run_snapshot = self.workspace_isolation.as_ref().map(|isolation| {
+                let thread_id = uuid::Uuid::parse_str(ctx.parent_thread_id)
+                    .unwrap_or_else(|_| uuid::Uuid::new_v4());
+                let store = AgentRunEventStore::new(isolation.sessions_root.clone());
+                let snapshot_task_id = invocation
+                    .task_id
+                    .as_deref()
+                    .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
+                    .map(AgentTaskId::from)
+                    // `AgentTaskId::default()` mints a fresh UUID (the newtype's
+                    // `Default` is `new()`), so this is the no-task-id fallback.
+                    .unwrap_or_default();
+                let transcript_path = store
+                    .transcript_path(thread_id, agent_run_id)
+                    .to_string_lossy()
+                    .into_owned();
+                RunSnapshotCtx {
+                    store,
+                    thread_id,
+                    task_id: snapshot_task_id,
+                    provider: provider_id.clone(),
+                    model: model_id.clone(),
+                    transcript_path,
+                }
+            });
+            persist_run_snapshot(run_snapshot.as_ref(), agent_run_id, AgentRunStatus::Running);
+
+            // CEX-S2-16: persist the run's static permission profile (a sibling
+            // of the snapshot) once, so the MCP `runs/{id}/permissions` resource
+            // can serve it. The profile is fixed at dispatch, so it is written
+            // here rather than rewritten on each transition. Best-effort.
+            if let Some(snapshot) = run_snapshot.as_ref() {
+                let profile = sub_spec.permission.to_permission_profile();
+                if let Err(err) =
+                    snapshot
+                        .store
+                        .write_run_permissions(snapshot.thread_id, agent_run_id, &profile)
+                {
+                    tracing::warn!(
+                        error = %err,
+                        agent_run_id = %agent_run_id.0,
+                        "failed to persist AgentRun permission profile",
+                    );
+                }
+
+                // CEX-S2-16: persist the run's static context pack (sibling of
+                // the snapshot) for the MCP `runs/{id}/context` resource. The
+                // goal is the invocation's task description; the run carries no
+                // explicit path scope or source intent (its writes are confined
+                // to the isolated workspace), so those fields are genuinely
+                // empty rather than fabricated. Best-effort.
+                let context_pack = AgentContextPack {
+                    task_id: snapshot.task_id,
+                    goal: invocation.description.clone(),
+                    read_scope: Vec::new(),
+                    write_scope: Vec::new(),
+                    source_intent_id: None,
+                };
+                if let Err(err) = snapshot.store.write_run_context_pack(
+                    snapshot.thread_id,
+                    agent_run_id,
+                    &context_pack,
+                ) {
+                    tracing::warn!(
+                        error = %err,
+                        agent_run_id = %agent_run_id.0,
+                        "failed to persist AgentRun context pack",
+                    );
+                }
             }
 
             // Bind the task id to the run id so future call sites
@@ -647,6 +875,7 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                     model_id,
                     final_text: String::new(),
                     steps_used: 0,
+                    tool_call_count: 0,
                     usage: CompletionUsageSummary::default(),
                 })
             };
@@ -680,6 +909,135 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                     outcome_ok = outcome.is_ok(),
                     "failed to append AgentRunEvent::Completed/Failed to parent session JSONL"
                 );
+            }
+
+            // CEX-S2-16: update the persisted run snapshot to its terminal
+            // state. Every non-success terminal (Failed / Cancelled / TimedOut /
+            // BudgetExceeded) collapses to the coarse `Failed` status — the
+            // precise reason stays in the terminal event above. Best-effort.
+            let terminal_status = if outcome.is_ok() {
+                AgentRunStatus::Completed
+            } else {
+                AgentRunStatus::Failed
+            };
+            persist_run_snapshot(run_snapshot.as_ref(), agent_run_id, terminal_status);
+
+            // CEX-S2-16: persist the run's terminal usage totals (wall-clock +
+            // tokens / cost / tool-calls) so the MCP `runs/{id}/budget` view can
+            // report them against the run's budget. Best-effort. `source_call`
+            // attribution is a separate concern (the trace-id chain) and is not
+            // counted here.
+            if let Some(snapshot) = run_snapshot.as_ref() {
+                let wall_clock_ms = run_started.elapsed().as_millis() as u64;
+                let usage = match &outcome {
+                    Ok(result) => RunUsage {
+                        prompt_tokens: result.usage.input_tokens,
+                        completion_tokens: result.usage.output_tokens,
+                        cached_tokens: result.usage.cached_tokens.unwrap_or(0),
+                        reasoning_tokens: result.usage.reasoning_tokens.unwrap_or(0),
+                        wall_clock_ms,
+                        provider_latency_ms: 0,
+                        cost_estimate_micro_dollars: result
+                            .usage
+                            .cost_usd
+                            .map(|cost| (cost * 1_000_000.0) as u64)
+                            .unwrap_or(0),
+                        tool_call_count: result.tool_call_count,
+                    },
+                    // A failed run carries no usage payload; record the elapsed
+                    // wall-clock so the budget view still reflects the attempt.
+                    Err(_) => RunUsage {
+                        wall_clock_ms,
+                        ..RunUsage::default()
+                    },
+                };
+                if let Err(err) =
+                    snapshot
+                        .store
+                        .write_run_usage(snapshot.thread_id, agent_run_id, &usage)
+                {
+                    tracing::warn!(
+                        error = %err,
+                        agent_run_id = %agent_run_id.0,
+                        "failed to persist AgentRun usage totals",
+                    );
+                }
+            }
+
+            // CEX-S2-16: on a successful run that materialized a workspace,
+            // capture its diff against the base worktree as a persistent
+            // `PatchSet` + `MergeCandidate`, so the MCP merge-candidates resource
+            // can serve it. Runs BEFORE the teardown below (the diff needs the
+            // live workspace). Best-effort: every failure warns and the run still
+            // completes. Only fires when a patch store is wired and the run
+            // succeeded.
+            if let (Some(patch_store), Some(snapshot), Some(workspace)) = (
+                self.patch_store.as_ref(),
+                run_snapshot.as_ref(),
+                workspace_guard.workspace.as_ref(),
+            ) && outcome.is_ok()
+            {
+                let touched = match patch_capture::workspace_touched_files(
+                    workspace.root(),
+                    ctx.tool_registry.working_dir(),
+                ) {
+                    Ok(touched) => touched,
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            agent_run_id = %agent_run_id.0,
+                            "failed to diff sub-agent workspace for patch capture",
+                        );
+                        Vec::new()
+                    }
+                };
+                if !touched.is_empty() {
+                    let constrained = matches!(
+                        workspace.strategy(),
+                        crate::internal::ai::agent_run::event::WorkspaceStrategy::Sparse
+                            | crate::internal::ai::agent_run::event::WorkspaceStrategy::Blocked
+                    );
+                    match patch_store.persist_patchset(agent_run_id.0, touched).await {
+                        Ok(patchset_object_id) => {
+                            let agent_patchset = AgentPatchSet {
+                                id: AgentPatchSetId::new(),
+                                agent_run_id,
+                                patchset_id: patchset_object_id,
+                                workspace_scope_constrained: constrained,
+                            };
+                            if let Err(err) = snapshot.store.write_run_patchset(
+                                snapshot.thread_id,
+                                agent_run_id,
+                                &agent_patchset,
+                            ) {
+                                tracing::warn!(
+                                    error = %err,
+                                    agent_run_id = %agent_run_id.0,
+                                    "failed to persist AgentPatchSet",
+                                );
+                            }
+                            let candidate = MergeCandidate::from_patchsets(
+                                MergeCandidateId::new(),
+                                std::slice::from_ref(&agent_patchset),
+                            );
+                            if let Err(err) = snapshot
+                                .store
+                                .write_merge_candidate(snapshot.thread_id, &candidate)
+                            {
+                                tracing::warn!(
+                                    error = %err,
+                                    agent_run_id = %agent_run_id.0,
+                                    "failed to persist MergeCandidate",
+                                );
+                            }
+                        }
+                        Err(err) => tracing::warn!(
+                            error = %err,
+                            agent_run_id = %agent_run_id.0,
+                            "failed to create sub-agent PatchSet",
+                        ),
+                    }
+                }
             }
 
             // CEX-S2-12 / S2-INV-03 + CEX-S2-11 (5): tear down the
@@ -722,6 +1080,26 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
             // `_slot` drops here, releasing the concurrency slot.
             outcome
         })
+    }
+
+    /// CEX-S2-14: controlled-parallelism batch entry — overrides the trait's
+    /// sequential default by delegating to the inherent
+    /// [`dispatch_parallel`](DefaultSubAgentDispatcher::dispatch_parallel)
+    /// executor. This is the seam that lets the parent tool loop reach
+    /// controlled concurrency through an `Arc<dyn SubAgentDispatcher>`; the
+    /// per-task `write_scope` serialisation and `max_parallel` cap are
+    /// honoured by `dispatch_parallel`'s `ParallelSchedulerState`.
+    fn dispatch_batch<'a>(
+        &'a self,
+        tasks: Vec<(
+            DispatchContext<'a>,
+            TaskInvocation,
+            TaskEntryKind,
+            Vec<String>,
+        )>,
+        max_parallel: usize,
+    ) -> BoxFuture<'a, Vec<Result<TaskResult, TaskFailure>>> {
+        Box::pin(self.dispatch_parallel(tasks, max_parallel))
     }
 }
 
@@ -1326,6 +1704,155 @@ mod tests {
             events_path.display(),
             String::from_utf8_lossy(&bytes_after),
         );
+    }
+
+    /// CEX-S2-14: `dispatch_parallel` delegates every task in the batch to
+    /// `dispatch` through the parallel executor and returns each result in the
+    /// input order. Exercised on the flag-off path (each `dispatch` short-circuits
+    /// to `FeatureDisabled`) so the test pins the batch wiring + ordering without
+    /// a provider; the executor's concurrency/queue/conflict behaviour itself is
+    /// covered by `parallel_executor`'s unit tests.
+    #[tokio::test]
+    async fn dispatch_parallel_delegates_each_task_and_preserves_order() {
+        let (dispatcher, registry, usage, store) =
+            dispatcher_test_harness(MultiAgentConfig::default()).await;
+        registry.insert(explore_subagent());
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let (permission_service, _asker) = allow_once_service();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-par".to_string();
+        let parent_session: SessionId = "session-par".to_string();
+
+        let make_ctx = || {
+            ctx(
+                &parent_thread,
+                &parent_session,
+                &parent,
+                &parent_ruleset,
+                &parent_binding,
+                &permission_service,
+                &store,
+                &provider_factory,
+                &usage,
+                &context_frame_loader,
+                0,
+            )
+        };
+
+        let results = dispatcher
+            .dispatch_parallel(
+                vec![
+                    (
+                        make_ctx(),
+                        invocation("explore"),
+                        TaskEntryKind::LlmInitiated,
+                        Vec::new(),
+                    ),
+                    (
+                        make_ctx(),
+                        invocation("explore"),
+                        TaskEntryKind::LlmInitiated,
+                        Vec::new(),
+                    ),
+                ],
+                2,
+            )
+            .await;
+
+        assert_eq!(results.len(), 2, "one result per input task");
+        for (i, result) in results.iter().enumerate() {
+            assert!(
+                matches!(result, Err(TaskFailure::FeatureDisabled)),
+                "task {i} must surface its own dispatch result, got {:?}",
+                result.as_ref().err(),
+            );
+        }
+    }
+
+    /// CEX-S2-14: the `SubAgentDispatcher::dispatch_batch` *trait* method —
+    /// the seam the parent tool loop reaches through `Arc<dyn ...>` — must be
+    /// callable from a trait object and route to `DefaultSubAgentDispatcher`'s
+    /// parallel override, returning one result per input task in order. This
+    /// is what makes controlled parallelism reachable from the tool loop
+    /// (which only ever holds an `Arc<dyn SubAgentDispatcher>`) once the cap
+    /// unlocks; the executor's concurrency semantics are covered separately by
+    /// `parallel_executor`'s unit tests.
+    #[tokio::test]
+    async fn dispatch_batch_trait_method_reachable_via_dyn_and_preserves_order() {
+        let (dispatcher, registry, usage, store) =
+            dispatcher_test_harness(MultiAgentConfig::default()).await;
+        registry.insert(explore_subagent());
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let (permission_service, _asker) = allow_once_service();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-batch".to_string();
+        let parent_session: SessionId = "session-batch".to_string();
+
+        let make_ctx = || {
+            ctx(
+                &parent_thread,
+                &parent_session,
+                &parent,
+                &parent_ruleset,
+                &parent_binding,
+                &permission_service,
+                &store,
+                &provider_factory,
+                &usage,
+                &context_frame_loader,
+                0,
+            )
+        };
+
+        // Reach the batch entry through the trait object, exactly as the
+        // parent tool loop will (`runtime.dispatcher: Arc<dyn ...>`).
+        let dyn_dispatcher: &dyn SubAgentDispatcher = &dispatcher;
+        let results = dyn_dispatcher
+            .dispatch_batch(
+                vec![
+                    (
+                        make_ctx(),
+                        invocation("explore"),
+                        TaskEntryKind::LlmInitiated,
+                        Vec::new(),
+                    ),
+                    (
+                        make_ctx(),
+                        invocation("explore"),
+                        TaskEntryKind::LlmInitiated,
+                        Vec::new(),
+                    ),
+                    (
+                        make_ctx(),
+                        invocation("explore"),
+                        TaskEntryKind::LlmInitiated,
+                        Vec::new(),
+                    ),
+                ],
+                2,
+            )
+            .await;
+
+        assert_eq!(
+            results.len(),
+            3,
+            "one result per input task, in input order"
+        );
+        for (i, result) in results.iter().enumerate() {
+            assert!(
+                matches!(result, Err(TaskFailure::FeatureDisabled)),
+                "task {i} must surface its own dispatch result, got {:?}",
+                result.as_ref().err(),
+            );
+        }
     }
 
     /// Scenario: depth gate fires when `ctx.depth + 1 > limit`. The
@@ -2127,6 +2654,97 @@ mod tests {
         }
     }
 
+    /// CEX-S2-16: when workspace isolation supplies a sessions root, a dispatch
+    /// persists an [`AgentRun`] snapshot the MCP / TUI surfaces can read. A
+    /// successful dispatch (here the placeholder branch — isolation is
+    /// configured but no child runner, so no materialization is needed) leaves a
+    /// `Completed` snapshot carrying the run's provider / model, under the
+    /// thread's `agents/` directory. With no isolation configured the dispatcher
+    /// writes no snapshot (the prior tests stay green), so this pins the new
+    /// behaviour without changing the default path.
+    #[tokio::test]
+    async fn isolated_dispatch_persists_completed_run_snapshot() {
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+        };
+        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+
+        // A sessions root we can read the snapshot back from after dispatch.
+        let sessions_temp = tempfile::tempdir().expect("sessions tempdir");
+        let sessions_root = sessions_temp.path().to_path_buf();
+        let dispatcher = dispatcher.with_workspace_isolation(
+            crate::internal::ai::agent::runtime::WorkspaceIsolationConfig {
+                fuse_state:
+                    crate::internal::ai::orchestrator::workspace::FuseProvisionState::default(),
+                sessions_root: sessions_root.clone(),
+                allow_full_copy: false,
+            },
+        );
+
+        let mut sub = explore_subagent();
+        sub.model = ModelBinding::parse("anthropic/claude-3-5-haiku-latest");
+        registry.insert(sub);
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let (permission_service, _asker) = allow_once_service();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        // A real UUID thread id so the snapshot lands at a findable path
+        // (`{thread_id}/agents/{run}.run.json`) rather than the fresh-uuid
+        // fallback the dispatcher uses for a non-UUID thread id.
+        let thread_uuid = uuid::Uuid::new_v4();
+        let parent_thread = thread_uuid.to_string();
+        let parent_session: SessionId = "session-snap".to_string();
+
+        let context = ctx(
+            &parent_thread,
+            &parent_session,
+            &parent,
+            &parent_ruleset,
+            &parent_binding,
+            &permission_service,
+            &store,
+            &provider_factory,
+            &usage,
+            &context_frame_loader,
+            0,
+        );
+
+        let result = dispatcher
+            .dispatch(
+                context,
+                invocation("explore"),
+                TaskEntryKind::UserInitiated {
+                    bypass_permission_ask: true,
+                },
+            )
+            .await
+            .expect("dispatch with isolation configured must succeed");
+        assert_eq!(result.agent_name, "explore");
+
+        let snapshot_store =
+            crate::internal::ai::agent_run::event_store::AgentRunEventStore::new(sessions_root);
+        let runs = snapshot_store
+            .list_snapshots(thread_uuid)
+            .expect("snapshot listing must succeed");
+        assert_eq!(runs.len(), 1, "exactly one AgentRun snapshot was persisted");
+        assert_eq!(
+            runs[0].status,
+            crate::internal::ai::agent_run::AgentRunStatus::Completed,
+            "a successful dispatch must leave a Completed snapshot, not a stuck Running one",
+        );
+        assert_eq!(runs[0].provider, "anthropic");
+        assert_eq!(runs[0].model, "claude-3-5-haiku-latest");
+        assert!(
+            runs[0].transcript_path.ends_with(".jsonl"),
+            "snapshot must record the run's transcript path",
+        );
+    }
+
     /// OC-Phase 3 P3.4 seam: when a `SubAgentChildRunner` is attached
     /// via `with_child_runner`, the dispatcher delegates the result
     /// to it instead of synthesising the legacy placeholder. The
@@ -2159,6 +2777,7 @@ mod tests {
                         model_id: "runner-model".to_string(),
                         final_text: "runner produced this".to_string(),
                         steps_used: 7,
+                        tool_call_count: 0,
                         usage: CompletionUsageSummary::default(),
                     })
                 })
@@ -3067,6 +3686,219 @@ mod tests {
             TARGET_BEFORE,
             "the sub-agent's apply_patch must NOT touch the main worktree (S2-INV-03)",
         );
+    }
+
+    /// CEX-S2-16: a successful isolated run whose child modifies its workspace
+    /// has that diff captured as a persisted `AgentPatchSet` + `MergeCandidate`
+    /// via the wired [`RunPatchStore`]. A custom runner writes into the
+    /// materialized workspace (no provider needed) and a recording sink stands
+    /// in for the real PatchSet store, so this pins the dispatcher-side capture
+    /// wiring without the orchestrator object machinery.
+    #[tokio::test]
+    async fn isolated_dispatch_captures_patchset_and_merge_candidate() {
+        use crate::internal::ai::{
+            agent::runtime::{SubAgentChildRunRequest, SubAgentChildRunner},
+            agent_run::event_store::AgentRunEventStore,
+            providers::ProviderBuildOptions,
+            sandbox::{SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext},
+        };
+
+        struct WorkspaceWritingRunner;
+        impl SubAgentChildRunner for WorkspaceWritingRunner {
+            fn run<'a>(
+                &'a self,
+                request: SubAgentChildRunRequest<'a>,
+            ) -> futures::future::BoxFuture<'a, Result<TaskResult, TaskFailure>> {
+                let task_id = request.task_id.clone();
+                let agent_name = request.sub_spec.name.clone();
+                let workspace_dir = request
+                    .workspace_registry
+                    .as_ref()
+                    .map(|registry| registry.working_dir().to_path_buf());
+                Box::pin(async move {
+                    if let Some(dir) = workspace_dir {
+                        std::fs::write(dir.join("created.txt"), "sub-agent output\n")
+                            .expect("write into workspace");
+                    }
+                    Ok(TaskResult {
+                        task_id,
+                        agent_name,
+                        provider_id: "fake".to_string(),
+                        model_id: "model".to_string(),
+                        final_text: "done".to_string(),
+                        steps_used: 1,
+                        tool_call_count: 0,
+                        usage: CompletionUsageSummary::default(),
+                    })
+                })
+            }
+        }
+
+        struct RecordingPatchStore {
+            calls: Arc<std::sync::Mutex<Vec<(uuid::Uuid, usize)>>>,
+            returned: uuid::Uuid,
+        }
+        #[async_trait::async_trait]
+        impl super::RunPatchStore for RecordingPatchStore {
+            async fn persist_patchset(
+                &self,
+                run_id: uuid::Uuid,
+                touched: Vec<TouchedFile>,
+            ) -> Result<uuid::Uuid, String> {
+                self.calls.lock().unwrap().push((run_id, touched.len()));
+                Ok(self.returned)
+            }
+        }
+
+        let main = tempfile::tempdir().expect("tempdir");
+        let main_dir = main.path().to_path_buf();
+        std::fs::write(main_dir.join("base.txt"), "base\n").expect("seed base");
+        let sessions_root = main_dir.join(".libra").join("sessions");
+
+        let conn = Database::connect("sqlite::memory:").await.unwrap();
+        let usage = UsageRecorder::new(conn);
+        let context_frame_loader = ContextFrameLoader::default();
+        let store = crate::internal::ai::session::jsonl::SessionJsonlStore::new(
+            sessions_root.join("session-x"),
+        );
+        let permission_service =
+            PermissionService::new(Arc::new(TestAsker::always(PermissionReply::Once)));
+        let provider_factory = ProviderFactory;
+        let provider_options = ProviderBuildOptions::default();
+        let tool_registry = ToolRegistry::with_working_dir(main_dir.clone());
+
+        let spec = AgentExecutionSpec {
+            name: "worker".to_string(),
+            description: "writes a file".to_string(),
+            mode: AgentMode::Subagent,
+            model: ModelBinding::parse("fake/some-model"),
+            tools: ToolSelection::Inherit,
+            ..AgentExecutionSpec::default()
+        };
+        let registry = Arc::new(TestRegistry::default());
+        registry.insert(spec);
+
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let patchset_object_id = uuid::Uuid::new_v4();
+        let dispatcher = DefaultSubAgentDispatcher::new(
+            registry,
+            MultiAgentConfig {
+                enabled: true,
+                max_subagent_depth: 4,
+                max_concurrent_subagents: 4,
+            },
+        )
+        .with_child_runner(Arc::new(WorkspaceWritingRunner))
+        .with_workspace_isolation(
+            crate::internal::ai::agent::runtime::WorkspaceIsolationConfig {
+                fuse_state:
+                    crate::internal::ai::orchestrator::workspace::FuseProvisionState::default(),
+                sessions_root: sessions_root.clone(),
+                allow_full_copy: true,
+            },
+        )
+        .with_patch_store(Arc::new(RecordingPatchStore {
+            calls: Arc::clone(&calls),
+            returned: patchset_object_id,
+        }));
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let thread_uuid = uuid::Uuid::new_v4();
+        let parent_thread = thread_uuid.to_string();
+        let parent_session: SessionId = "session-x".to_string();
+        let runtime_context = Some(ToolRuntimeContext {
+            sandbox: Some(ToolSandboxContext {
+                policy: SandboxPolicy::WorkspaceWrite {
+                    writable_roots: vec![main_dir.clone()],
+                    network_access: Default::default(),
+                    exclude_tmpdir_env_var: false,
+                    exclude_slash_tmp: false,
+                },
+                permissions: SandboxPermissions::UseDefault,
+            }),
+            ..ToolRuntimeContext::default()
+        });
+
+        let context = DispatchContext {
+            parent_thread_id: &parent_thread,
+            parent_session_id: &parent_session,
+            parent_agent: &parent,
+            parent_ruleset: &parent_ruleset,
+            parent_model_binding: &parent_binding,
+            parent_message_id: MessageId::from("msg-x"),
+            permission_service: &permission_service,
+            session_store: &store,
+            provider_factory: &provider_factory,
+            provider_build_options: &provider_options,
+            provider_build_options_resolver: None,
+            tool_registry: &tool_registry,
+            runtime_context,
+            usage_recorder: &usage,
+            context_frame_loader: &context_frame_loader,
+            abort_token: AbortToken::new(),
+            depth: 0,
+            compaction_model: None,
+            hook_runner: None,
+        };
+
+        let result = dispatcher
+            .dispatch(
+                context,
+                TaskInvocation {
+                    description: "write a file".to_string(),
+                    prompt: "write".to_string(),
+                    subagent_type: "worker".to_string(),
+                    task_id: None,
+                },
+                TaskEntryKind::UserInitiated {
+                    bypass_permission_ask: true,
+                },
+            )
+            .await
+            .expect("isolated dispatch must succeed");
+        assert_eq!(result.agent_name, "worker");
+
+        // The sink was called once for the run, with the captured diff (the
+        // file the runner created).
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1, "patch store must be called once");
+        assert!(
+            recorded[0].1 >= 1,
+            "captured diff must include the created file",
+        );
+
+        let event_store = AgentRunEventStore::new(&sessions_root);
+        let runs = event_store
+            .list_snapshots(thread_uuid)
+            .expect("list snapshots");
+        assert_eq!(runs.len(), 1);
+        let run_id = runs[0].id;
+        assert_eq!(
+            recorded[0].0, run_id.0,
+            "sink run id matches the dispatched run"
+        );
+
+        let patchset = event_store
+            .read_run_patchset(thread_uuid, run_id)
+            .expect("read patchset")
+            .expect("AgentPatchSet must be persisted");
+        assert_eq!(patchset.patchset_id, patchset_object_id);
+        assert_eq!(patchset.agent_run_id, run_id);
+
+        // A MergeCandidate referencing the patchset was persisted.
+        let agents_dir = sessions_root.join(thread_uuid.to_string()).join("agents");
+        let has_candidate = std::fs::read_dir(&agents_dir)
+            .expect("agents dir")
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".candidate.json")
+            });
+        assert!(has_candidate, "a MergeCandidate must be persisted");
     }
 
     /// CEX-S2-12 / S2-INV-03 panic safety: if the child runner panics

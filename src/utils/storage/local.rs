@@ -476,6 +476,105 @@ impl LocalStorage {
         }
     }
 
+    /// Enumerate every object id stored in a pack index, parsing only the
+    /// already-present `.idx` (read-only — never rebuilds). Supports both V1
+    /// (sha1) and V2 layouts.
+    fn read_idx_all_oids(idx_file: &Path) -> Result<Vec<ObjectHash>, io::Error> {
+        let (version, fanout) = Self::read_idx_fanout(idx_file)?;
+        let object_count = fanout[255] as u64;
+        let hash_size = get_hash_kind().size() as u64;
+        let mut file = fs::File::open(idx_file)?;
+        let mut oids = Vec::with_capacity(object_count as usize);
+        match version {
+            IdxVersion::V1 => {
+                if hash_size != 20 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "pack index v1 only supports sha1",
+                    ));
+                }
+                // After the fanout table: `object_count` entries of
+                // (4-byte offset, hash) — read each hash, skipping the offset.
+                file.seek(io::SeekFrom::Start(FANOUT))?;
+                for _ in 0..object_count {
+                    let _offset = file.read_u32::<BigEndian>()?;
+                    oids.push(read_sha(&mut file)?);
+                }
+            }
+            IdxVersion::V2 => {
+                // magic(4) + version(4) + fanout(1024); the OID table is
+                // `object_count` contiguous hashes.
+                let names_offset = FANOUT + 8;
+                file.seek(io::SeekFrom::Start(names_offset))?;
+                for _ in 0..object_count {
+                    oids.push(read_sha(&mut file)?);
+                }
+            }
+        }
+        Ok(oids)
+    }
+
+    /// List every locally-stored object id (loose ∪ pack), de-duplicated.
+    ///
+    /// This is the read-only enumeration backing `cat-file --batch-all-objects`.
+    /// It walks the loose `XX/<rest>` directories and parses each *existing*
+    /// pack `.idx`'s object-id segment. Unlike [`Self::list_all_idx`], it never
+    /// invokes `build_index_*` (no disk writes): a missing or unreadable idx is
+    /// recorded in the returned diagnostics list (so the command layer can warn
+    /// on stderr) and skipped, rather than rebuilt.
+    pub fn list_all_oids(&self) -> (Vec<ObjectHash>, Vec<String>) {
+        use std::collections::HashSet;
+
+        let mut oids: HashSet<ObjectHash> = HashSet::new();
+        let mut skipped: Vec<String> = Vec::new();
+
+        // Loose objects: base_path/[0-9a-f]{2}/<rest-of-hex>.
+        if let Ok(top_entries) = fs::read_dir(&self.base_path) {
+            for top in top_entries.flatten() {
+                let top_path = top.path();
+                let Some(prefix) = top_path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if prefix.len() != 2
+                    || !prefix.bytes().all(|b| b.is_ascii_hexdigit())
+                    || !top_path.is_dir()
+                {
+                    continue;
+                }
+                let Ok(files) = fs::read_dir(&top_path) else {
+                    continue;
+                };
+                for file in files.flatten() {
+                    if let Some(rest) = file.file_name().to_str() {
+                        let hex = format!("{prefix}{rest}");
+                        if let Ok(oid) = ObjectHash::from_str(&hex) {
+                            oids.insert(oid);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Packed objects: parse the OID segment of each existing idx; never
+        // rebuild a missing/corrupt one.
+        for pack in self.list_all_packs() {
+            let idx = pack.with_extension("idx");
+            if !idx.exists() {
+                skipped.push(format!(
+                    "{}: missing pack index (not rebuilt by --batch-all-objects)",
+                    idx.display()
+                ));
+                continue;
+            }
+            match Self::read_idx_all_oids(&idx) {
+                Ok(found) => oids.extend(found),
+                Err(err) => skipped.push(format!("{}: {err}", idx.display())),
+            }
+        }
+
+        (oids.into_iter().collect(), skipped)
+    }
+
     /// Read and inflate one packed object at the given pack-file offset.
     fn read_pack_obj(pack_file: &Path, offset: u64) -> Result<CacheObject, GitError> {
         let file_name = pack_file

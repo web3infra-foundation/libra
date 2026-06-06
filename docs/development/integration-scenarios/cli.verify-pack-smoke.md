@@ -1,0 +1,57 @@
+### `cli.verify-pack-smoke`
+
+目的：覆盖 `verify-pack` 对 `.idx` / `.pack` 成对文件的黑盒验证，避免 Maintenance 矩阵把 pack 验证误归入 `fsck` 或 `cat-file` 覆盖。
+
+最小步骤：
+
+```bash
+SCENARIO="cli.verify-pack-smoke"
+REPO_ROOT="$PWD"   # 记录 libra 仓库根目录（Wave 0 执行目录），供后续复制 fixture
+RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
+mkdir -p "$RUN_DIR"
+cd "$RUN_DIR"
+# (prelude libra - short converged)
+
+libra init pack-source
+cd pack-source
+libra config set user.name "Libra Pack Test"
+libra config set user.email "pack@example.invalid"
+printf 'pack one\n' > one.txt
+printf 'pack two\n' > two.txt
+libra add one.txt two.txt
+libra commit -m "test: pack source"
+
+# verify-pack 需要 pack+idx 成对输入；用仓库内固定 pack fixture 并通过隐藏
+# index-pack 生成 idx，避免读取开发者真实 .git/.libra pack 目录。
+mkdir -p "$RUN_ROOT/fixtures/$SCENARIO"
+PACK_FILE="$RUN_ROOT/fixtures/$SCENARIO/small-sha1.pack"
+PACK_IDX="$RUN_ROOT/fixtures/$SCENARIO/small-sha1.idx"
+cp "$REPO_ROOT/tests/data/packs/small-sha1.pack" "$PACK_FILE"
+libra index-pack "$PACK_FILE" -o "$PACK_IDX"
+test -f "$PACK_IDX"
+libra verify-pack "$PACK_IDX"
+libra verify-pack --pack "$PACK_FILE" "$PACK_IDX"
+libra verify-pack -v "$PACK_IDX"
+libra verify-pack -s "$PACK_IDX"
+libra --json verify-pack "$PACK_IDX" >verifypack.json
+python3 -c "import json; d=json.load(open('verifypack.json')); assert d['ok'] is True; assert d['data']['verified'] is True; assert 'objects' in d['data']"
+```
+
+负向步骤：
+
+```bash
+cd "$RUN_DIR/pack-source"
+! libra verify-pack "$RUN_ROOT/fixtures/$SCENARIO/missing.idx"
+cp "$PACK_IDX" "$RUN_ROOT/fixtures/$SCENARIO/corrupt.idx"
+printf 'corrupt' >> "$RUN_ROOT/fixtures/$SCENARIO/corrupt.idx"
+! libra verify-pack "$RUN_ROOT/fixtures/$SCENARIO/corrupt.idx"
+```
+
+断言：`index-pack` 仅作为隐藏内部 fixture 生成器使用；`verify-pack` 默认从 idx sibling 推导 `.pack` 路径；`--pack` 显式路径可验证同一 pack；`-v` 输出对象 hash/offset；`-s` 输出统计摘要；`--json` 输出 `verified=true`、object count、pack/index hash 等结构化字段；缺失或损坏 idx 必须失败且错误包含受影响路径。fixture 来源固定为仓库内 `tests/data/packs/small-sha1.pack` 复制到 `$RUN_ROOT/fixtures/$SCENARIO/`，不得读取开发者真实 `.git/objects/pack` 或 `.libra/objects/pack`。
+
+补充可执行断言：
+- `libra --json verify-pack "$PACK_IDX"` 必须 `ok:true`；单 idx 时 `data.verified == true`，多 idx 时 `data.packs[].verified` 全为 true。
+- 损坏 idx 场景 `libra verify-pack corrupt.idx` 必须非 0，stderr 包含路径或 corrupt 信息。
+- 操作后在生成 pack 的仓库执行 `libra fsck` 通过。
+- 验证 `--json` 输出包含 "objects" 数组。
+

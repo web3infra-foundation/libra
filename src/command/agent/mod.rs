@@ -1,10 +1,12 @@
 //! Top-level `libra agent` command surface.
 //!
-//! The Phase 1 cut implements parsing, the read-only `status` subcommand, and
-//! stub handlers for the rest of the CLI surface so users can discover the
-//! shape via `libra agent --help`. Subsequent phases fill in checkpoint /
-//! session / hook routing on top of this scaffold; see
-//! `docs/improvement/entire.md` section 9.
+//! All sub-commands are fully implemented and do real work: `status`,
+//! `enable`/`disable` (hook install/uninstall), `session`
+//! (list/show/stop/resume/promote/derive-tool-calls), `checkpoint`
+//! (list/show/rewind), `clean`, `doctor`, `push`, the hidden `hooks`
+//! ingestion entry point, and the external `rpc` bridge. See
+//! `docs/improvement/entire.md` section 9 for the surface and the phase
+//! history.
 
 use clap::{Args, Subcommand};
 
@@ -210,10 +212,19 @@ pub async fn execute_safe(args: AgentArgs, output: &OutputConfig) -> CliResult<(
     }
 }
 
-/// Set of stable agent slugs whose `HookProvider` is fully installable today.
-/// Phase 1 only ships Claude Code and Gemini stable; everything else is
-/// preview and surfaces as a clear "not yet" rather than a silent no-op.
-const STABLE_AGENT_SLUGS: &[&str] = &["claude-code", "gemini"];
+/// Set of stable agent slugs whose `HookProvider` is fully installable. All
+/// seven external agents now ship a hook installer (Claude/Gemini bespoke;
+/// Cursor/Codex/Copilot/Factory/OpenCode via the shared promoted providers),
+/// so `libra agent enable` with no args wires up every one.
+const STABLE_AGENT_SLUGS: &[&str] = &[
+    "claude-code",
+    "gemini",
+    "cursor",
+    "codex",
+    "copilot",
+    "factory-ai",
+    "opencode",
+];
 
 fn enable_agents(agents: &[String], output: &OutputConfig) -> CliResult<()> {
     install_or_uninstall(agents, output, true)
@@ -355,7 +366,19 @@ mod tests {
     #[test]
     fn resolve_agent_slugs_expands_empty_to_stable() {
         let resolved = resolve_agent_slugs(&[]).expect("empty resolves cleanly");
-        assert_eq!(resolved, vec!["claude-code", "gemini"]);
+        // All seven external agents now carry a hook installer.
+        assert_eq!(
+            resolved,
+            vec![
+                "claude-code",
+                "gemini",
+                "cursor",
+                "codex",
+                "copilot",
+                "factory-ai",
+                "opencode"
+            ]
+        );
     }
 
     #[test]

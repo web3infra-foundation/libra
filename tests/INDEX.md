@@ -19,7 +19,7 @@
 |---|---|---|---|
 | `command_test` | 1 | Top-level dispatcher covering most `libra <subcmd>` integration paths | `src/command/`, `src/cli.rs` |
 | `compat_stash_subcommand_surface` | 1 | Guards `libra stash` subcommand surface vs. git CLI | `src/command/stash.rs` |
-| `compat_bisect_subcommand_surface` | 1 | Guards `libra bisect` subcommand surface | `src/command/bisect.rs` |
+| `compat_bisect_subcommand_surface` | 1 | Guards `libra bisect` subcommand surface and declined parser-only bisect surfaces | `src/command/bisect.rs`, `src/cli.rs` |
 | `compat_worktree_delete_dir` | 1 | Guards worktree delete semantics on dir removal | `src/command/worktree.rs` |
 | `compat_checkout_alias_help` | 1 | Guards `--help` text for checkout aliases | `src/command/checkout.rs` |
 | `compat_matrix_alignment` | 1 | Guards public docs/release matrices vs. real CLI/API surfaces | `COMPATIBILITY.md`, `docs/automation/local-tui-control.md`, `.github/workflows/base.yml`, `src/cli.rs`, `src/internal/ai/web/mod.rs` |
@@ -39,7 +39,6 @@
 | `compat_command_docs_examples_section` | 1 | Every `docs/commands/<name>.md` page carries an `## Examples` / `## Common Commands` heading | `docs/commands/**` |
 | `compat_help_flag_descriptions` | 1 | Every visible flag and positional under `Options:` / `Arguments:` carries a non-empty description; covers 42 root commands + 53 sub/sub-sub-commands (110 surfaces) | `src/cli.rs`, `src/command/**` |
 | `compat_help_no_impl_meta_leak` | 1 | No `libra <cmd> --help` body leaks contributor-facing rustdoc into clap's long_about; forbids 6 phrase classes (e.g. `Codex pass-`, raw markdown headings, code fences) | `src/cli.rs`, `src/command/**` |
-| `db_migration_test` | 1 | SQLite schema bootstrap + migration round-trip | `src/internal/db.rs`, `sql/` |
 
 ## Wave 2 — Code UI & local automation
 
@@ -120,6 +119,7 @@
 | `ai_usage_stats_test` | 2 | CEX-16 usage stats persistence and aggregation tests | `src/internal/ai/usage/` |
 | `ai_usage_tui_test` | 2 | CEX-16 usage display formatting tests | `src/internal/ai/usage/` |
 | `ai_validation_decision_flow_test` | 2 | Phase D validation and decision derived-record tests | `src/internal/ai/orchestrator/` |
+| `db_migration_test` | 2 | SQLite schema bootstrap + migration round-trip | `src/internal/db.rs`, `sql/` |
 | `diagnostics_redaction_test` | 2 | Diagnostics logs redaction and sanitization | `src/internal/ai/usage/` |
 | `local_client_test` | 2 | Local Git protocol client working directory restoration on error | `src/internal/protocol/` |
 | `publish_ai_export_test` | 2 | Publish pipeline export representation for AI tasks | `src/internal/publish/` |
@@ -173,8 +173,11 @@ relevant source entry above.
 
 ## Maintenance
 
-- Every new `tests/<name>.rs` must add a row here in the same PR (enforced by
-  §10 of `docs/development/integration-test-plan.md`).
-- Renames must update both this index and the plan; `scripts/check_integration_plan_consistency.sh`
-  will fail CI on dangling references.
+- Every new `tests/<name>.rs` must add a row here in the same PR. Black-box CLI
+  runner scenarios under `tools/integration-runner/` are not Cargo `--test`
+  targets and must not be added to this index.
+- Renames must update both this index and the relevant plan/docs. The black-box
+  CLI integration-plan consistency gate is `cargo run --manifest-path
+  tools/integration-runner/Cargo.toml -- check-plan`; keep Cargo test indexing and
+  runner scenario indexing separate.
 - TODO rows are tracked as `BASELINE_GAP-INTEG-007` — the index pass.

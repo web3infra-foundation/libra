@@ -32,6 +32,7 @@ async fn stage_file(path: &str, content: &str) {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 }
@@ -53,6 +54,7 @@ async fn test_mv_moves_tracked_file_to_new_path() {
             dry_run: false,
             force: false,
             skip_errors: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )
@@ -85,6 +87,7 @@ async fn test_mv_moves_tracked_file_into_directory() {
             dry_run: false,
             force: false,
             skip_errors: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )
@@ -117,6 +120,7 @@ async fn test_mv_resolves_paths_from_current_subdirectory() {
             dry_run: false,
             force: false,
             skip_errors: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )
@@ -150,6 +154,7 @@ async fn test_mv_moves_directory_with_tracked_files() {
             dry_run: false,
             force: false,
             skip_errors: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )
@@ -186,6 +191,7 @@ async fn test_mv_force_overwrites_tracked_destination_and_replaces_index_entry()
             dry_run: false,
             force: true,
             skip_errors: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )
@@ -226,6 +232,7 @@ async fn test_mv_rebuilds_index_entry_from_destination_file() {
             dry_run: false,
             force: false,
             skip_errors: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )
@@ -753,6 +760,7 @@ async fn test_mv_moves_mixed_directory_and_updates_only_tracked_index_entries() 
             dry_run: false,
             force: false,
             skip_errors: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )
@@ -874,6 +882,7 @@ fn test_mv_help_lists_examples_banner() {
         "libra mv -n",
         "libra mv -f",
         "libra mv -k",
+        "libra mv --sparse a.txt b.txt",
         "libra mv --json",
     ] {
         assert!(
@@ -881,4 +890,410 @@ fn test_mv_help_lists_examples_banner() {
             "mv --help should include `{invocation}`, stdout: {stdout}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Batch 0: `--sparse` no-op flag + locked dry-run/verbose output contract
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial]
+/// `--sparse` is parsed as a no-op: the move still happens and the index updates
+/// exactly as without the flag (Libra has no sparse-checkout cone).
+async fn test_mv_sparse_flag_parses_as_noop() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file("a.txt", "hello").await;
+
+    let output = run_libra_command(&["mv", "--sparse", "a.txt", "b.txt"], temp_path.path());
+    assert_cli_success(&output, "mv --sparse should succeed");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).is_empty(),
+        "mv --sparse success should be silent, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    assert!(!temp_path.path().join("a.txt").exists());
+    assert!(temp_path.path().join("b.txt").exists());
+
+    let index = Index::load(path::index()).unwrap();
+    assert!(!index.tracked("a.txt", 0));
+    assert!(index.tracked("b.txt", 0));
+}
+
+#[tokio::test]
+#[serial]
+/// `mv -n` prints exactly the two Git-compatible lines (`Checking rename of …`
+/// followed by `Renaming …`) and nothing else.
+async fn test_mv_dry_run_emits_checking_and_renaming_lines() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file("a.txt", "hello").await;
+
+    let output = run_libra_command(&["mv", "-n", "a.txt", "b.txt"], temp_path.path());
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout, "Checking rename of 'a.txt' to 'b.txt'\nRenaming a.txt to b.txt\n",
+        "dry-run output must match `git mv -n` exactly"
+    );
+    // The `Checking rename of` line is part of the Git-compatible contract and
+    // must not be dropped.
+    assert!(stdout.contains("Checking rename of"));
+
+    assert!(temp_path.path().join("a.txt").exists());
+    assert!(!temp_path.path().join("b.txt").exists());
+}
+
+#[tokio::test]
+#[serial]
+/// A successful move without `-v`/`-n`/`--json` writes nothing to stdout.
+async fn test_mv_success_is_silent_without_verbose() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file("a.txt", "hello").await;
+
+    let output = run_libra_command(&["mv", "a.txt", "b.txt"], temp_path.path());
+    assert_cli_success(&output, "plain mv should succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "",
+        "plain successful move must be silent on stdout"
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// `mv -v` on a real move prints exactly one `Renaming …` line and never the
+/// dry-run-only `Checking rename of …` line.
+async fn test_mv_verbose_emits_single_renaming_line() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file("a.txt", "hello").await;
+
+    let output = run_libra_command(&["mv", "-v", "a.txt", "b.txt"], temp_path.path());
+    assert_cli_success(&output, "mv -v should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "Renaming a.txt to b.txt\n");
+    assert!(
+        !stdout.contains("Checking rename of"),
+        "verbose real move must not print the dry-run `Checking rename of` line"
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// `--sparse -n` combines cleanly: the two dry-run lines print and no file moves.
+async fn test_mv_sparse_combines_with_dry_run() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file("a.txt", "hello").await;
+
+    let output = run_libra_command(
+        &["mv", "--sparse", "-n", "a.txt", "b.txt"],
+        temp_path.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "Checking rename of 'a.txt' to 'b.txt'\nRenaming a.txt to b.txt\n"
+    );
+
+    assert!(temp_path.path().join("a.txt").exists());
+    assert!(!temp_path.path().join("b.txt").exists());
+}
+
+#[tokio::test]
+#[serial]
+/// The too-few-arguments usage text lists the new `--sparse` flag and exits 129.
+async fn test_mv_too_few_args_usage_mentions_sparse() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(&["mv", "onlyone"], temp_path.path());
+    assert_eq!(output.status.code(), Some(129));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_eq!(report.exit_code, 129);
+    assert!(
+        stderr.contains("--sparse"),
+        "usage text must mention --sparse, got: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// `--sparse` must not leak into the `MvOutput` JSON: the published field set is
+/// unchanged (`moves/index_updates/dry_run/forced/skip_errors/verbose`).
+async fn test_mv_sparse_json_contract_unchanged() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file("a.txt", "hello").await;
+
+    let output = run_libra_command(
+        &["--json", "mv", "--sparse", "a.txt", "b.txt"],
+        temp_path.path(),
+    );
+    assert_cli_success(&output, "mv --json --sparse should succeed");
+
+    let value = parse_json_stdout(&output);
+    let data = value["data"]
+        .as_object()
+        .expect("mv json data should be an object");
+    assert!(
+        data.get("sparse").is_none(),
+        "--sparse must not appear in MvOutput JSON, got keys: {:?}",
+        data.keys().collect::<Vec<_>>()
+    );
+    for key in [
+        "moves",
+        "index_updates",
+        "dry_run",
+        "forced",
+        "skip_errors",
+        "verbose",
+    ] {
+        assert!(data.contains_key(key), "MvOutput JSON missing `{key}`");
+    }
+    assert_eq!(data.len(), 6, "MvOutput JSON field set drifted: {data:?}");
+}
+
+#[tokio::test]
+#[serial]
+/// `--sparse` works with the multi-source-into-directory form.
+async fn test_mv_sparse_multi_source_into_dir() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file("a.txt", "a").await;
+    stage_file("b.txt", "b").await;
+    fs::create_dir_all("dst").unwrap();
+
+    let output = run_libra_command(
+        &["mv", "--sparse", "a.txt", "b.txt", "dst"],
+        temp_path.path(),
+    );
+    assert_cli_success(&output, "mv --sparse multi-source should succeed");
+
+    assert!(temp_path.path().join("dst/a.txt").exists());
+    assert!(temp_path.path().join("dst/b.txt").exists());
+
+    let index = Index::load(path::index()).unwrap();
+    assert!(index.tracked("dst/a.txt", 0));
+    assert!(index.tracked("dst/b.txt", 0));
+}
+
+#[tokio::test]
+#[serial]
+/// A missing source still errors with `bad source` (exit 129) even with `--sparse`.
+async fn test_mv_sparse_missing_source_still_errors() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(&["mv", "--sparse", "nope.txt", "x.txt"], temp_path.path());
+    assert_eq!(output.status.code(), Some(129));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        stderr.contains("fatal: bad source, source=nope.txt, destination=x.txt"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// Control characters (here, newlines) in printed paths are escaped, while the
+/// line structure stays delimited by real newlines and the move still runs on
+/// the raw bytes. A directory source is used so no staging of a weird filename
+/// is required.
+async fn test_mv_escapes_newline_in_printed_paths() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    fs::create_dir_all("a\nb").unwrap();
+    fs::create_dir_all("dest").unwrap();
+
+    let output = run_libra_command(&["mv", "-n", "a\nb", "dest"], temp_path.path());
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout, "Checking rename of 'a\\nb' to 'dest/a\\nb'\nRenaming a\\nb to dest/a\\nb\n",
+        "newlines inside path fields must be escaped, with real newlines only between lines"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Batch 1: atomic-consistency & boundary hardening
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial]
+/// When destination-parent creation fails before any rename, the move aborts
+/// (exit 128) and the index is left untouched.
+async fn test_mv_failed_midway_does_not_persist_index() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file("a.txt", "hello").await;
+    // `blocker` is a regular file, so `create_dir_all("blocker")` for the
+    // destination parent must fail before any rename happens.
+    test::ensure_file("blocker", Some("x"));
+
+    let output = run_libra_command(&["mv", "a.txt", "blocker/b.txt"], temp_path.path());
+    assert_eq!(output.status.code(), Some(128));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("failed to create destination directory"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Nothing moved, index unchanged.
+    assert!(temp_path.path().join("a.txt").exists());
+    assert!(temp_path.path().join("blocker").is_file());
+    let index = Index::load(path::index()).unwrap();
+    assert!(index.tracked("a.txt", 0));
+    assert!(!index.tracked("blocker/b.txt", 0));
+}
+
+#[tokio::test]
+#[serial]
+/// Hidden dotfiles rename like any other tracked file.
+async fn test_mv_hidden_dotfile() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file(".hidden", "secret").await;
+
+    let result = mv::execute_safe(
+        MvArgs {
+            paths: vec![".hidden".to_string(), ".renamed".to_string()],
+            verbose: false,
+            dry_run: false,
+            force: false,
+            skip_errors: false,
+            sparse: false,
+        },
+        &OutputConfig::default(),
+    )
+    .await;
+    assert!(result.is_ok());
+
+    assert!(!temp_path.path().join(".hidden").exists());
+    assert!(temp_path.path().join(".renamed").exists());
+
+    let index = Index::load(path::index()).unwrap();
+    assert!(!index.tracked(".hidden", 0));
+    assert!(index.tracked(".renamed", 0));
+}
+
+#[tokio::test]
+#[serial]
+/// Moving onto an existing (read-only) destination without `-f` is rejected with
+/// `destination already exists` (exit 128), and neither file is touched.
+async fn test_mv_readonly_target_without_force_errors() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file("a.txt", "new").await;
+    test::ensure_file("b.txt", Some("old"));
+    let mut perms = fs::metadata(temp_path.path().join("b.txt"))
+        .unwrap()
+        .permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(temp_path.path().join("b.txt"), perms).unwrap();
+
+    let output = run_libra_command(&["mv", "a.txt", "b.txt"], temp_path.path());
+    assert_eq!(output.status.code(), Some(128));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
+    assert!(
+        stderr.contains("fatal: destination already exists, source=a.txt, destination=b.txt"),
+        "unexpected stderr: {stderr}"
+    );
+
+    assert!(temp_path.path().join("a.txt").exists());
+    assert_eq!(
+        fs::read_to_string(temp_path.path().join("b.txt")).unwrap(),
+        "old"
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// A directory containing an empty subdirectory renames wholesale, while only
+/// the tracked file gets an index entry.
+async fn test_mv_directory_with_empty_subdir() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file("dir/a.txt", "a").await;
+    fs::create_dir_all("dir/empty").unwrap();
+    fs::create_dir_all("dest").unwrap();
+
+    let result = mv::execute_safe(
+        MvArgs {
+            paths: vec!["dir".to_string(), "dest".to_string()],
+            verbose: false,
+            dry_run: false,
+            force: false,
+            skip_errors: false,
+            sparse: false,
+        },
+        &OutputConfig::default(),
+    )
+    .await;
+    assert!(result.is_ok());
+
+    assert!(temp_path.path().join("dest/dir/a.txt").exists());
+    assert!(temp_path.path().join("dest/dir/empty").is_dir());
+
+    let index = Index::load(path::index()).unwrap();
+    assert!(index.tracked("dest/dir/a.txt", 0));
+    assert!(!index.tracked("dir/a.txt", 0));
+}
+
+#[tokio::test]
+#[serial]
+/// Lexical `..` escapes are blocked by `util::is_sub_path` normalization (not
+/// `canonicalize`), so a source that climbs out of the workdir is rejected with
+/// `is outside of the repository` (exit 129).
+async fn test_mv_lexical_path_escape_blocked() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(
+        &["mv", "a/../../escaped.txt", "renamed.txt"],
+        temp_path.path(),
+    );
+    assert_eq!(output.status.code(), Some(129));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        stderr.contains("is outside of the repository at"),
+        "unexpected stderr: {stderr}"
+    );
 }

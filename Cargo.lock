@@ -3335,7 +3335,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libra"
-version = "0.17.1215"
+version = "0.17.1396"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3399,6 +3399,7 @@ dependencies = [
  "serial_test",
  "sha1 0.11.0",
  "shlex",
+ "similar",
  "tempfile",
  "testcontainers",
  "thiserror 2.0.18",

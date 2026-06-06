@@ -10,12 +10,14 @@ libra gc [--dry-run] [--prune=<date> | --no-prune] [--aggressive] [--auto] [--fo
 
 ## Description
 
-`libra gc` traces objects reachable from repository references, reflogs, the
-index, in-progress operation state, and local AI catalogs, then prunes
-unreachable loose objects that match the configured prune cutoff. When cloud
-backup is configured, unsynced `object_index` rows retain matching loose objects
-as pending backup data; they are reported as retained unreachable objects rather
-than counted as reachable graph roots. It also
+`libra gc` first expires reflogs using the default `gc.reflogExpire` and
+`gc.reflogExpireUnreachable` policy, then traces objects reachable from
+repository references, remaining reflogs, the index, in-progress operation
+state, and local AI catalogs. It prunes unreachable loose objects that match the
+configured prune cutoff. When cloud backup is configured, unsynced
+`object_index` rows retain matching loose objects as pending backup data; they
+are reported as retained unreachable objects rather than counted as reachable
+graph roots. It also
 inspects `.libra/objects/pack/` and removes stale sidecar files such as orphan
 `.idx` files when they are old enough and not protected by a matching `.keep`
 file.
@@ -25,8 +27,8 @@ Valid `.pack` + `.idx` pairs are verified through Libra's existing
 reported instead of blocking unrelated cleanup. If reachable-object traversal is
 incomplete, non-dry-run loose-object pruning is skipped for that invocation and
 the reason is emitted in `warnings[]`. Libra currently does not rewrite valid
-packs, perform delta compression, create cruft packs, expire reflogs, or repack
-loose reachable objects.
+packs, perform delta compression, create cruft packs, or repack loose reachable
+objects.
 
 ## Options
 
@@ -56,6 +58,7 @@ Human mode prints a loose-object summary and pack-directory statistics:
 
 ```text
 Enumerating loose objects: 3 scanned, 2 reachable, 1 unreachable.
+Expired 1 reflog entry across 2 ref(s).
 Pruned 1 loose object(s).
 Checked 1 pack(s), containing 42 indexed object(s).
 Cleaned 0 stale pack file(s).
@@ -69,6 +72,7 @@ Cleaned 0 stale pack file(s).
 With `--json`, `libra gc` returns a `gc` envelope containing:
 
 - `loose_objects.scanned`, `reachable`, `unreachable`, `pruned`, and `retained`
+- `reflogs.refs_scanned`, `entries_scanned`, `pruned`, and `rewritten`
 - `reachable_objects`
 - `unreachable_objects[]` with object id, type, action, and reason
 - `pack_files.packs_verified`, `objects_in_packs`, and `stale_files[]`
@@ -87,6 +91,12 @@ With `--json`, `libra gc` returns a `gc` envelope containing:
       "unreachable": 1,
       "pruned": 1,
       "retained": 0
+    },
+    "reflogs": {
+      "refs_scanned": 2,
+      "entries_scanned": 12,
+      "pruned": 1,
+      "rewritten": 0
     },
     "reachable_objects": 2,
     "unreachable_objects": [
@@ -112,9 +122,11 @@ With `--json`, `libra gc` returns a `gc` envelope containing:
 
 The command aligns with Git's core safety rule: reachable objects are retained,
 and unreachable loose objects are pruned only when the prune policy allows it.
-The implementation is intentionally narrower than `git gc`: it does not perform
-full repacking, bitmap generation, commit-graph maintenance, reflog expiration,
-or cruft-pack creation.
+Before pruning objects, Libra runs the same default policy as
+`libra reflog expire --all` without `--rewrite`, `--updateref`, or
+`--stale-fix`. The implementation is intentionally narrower than `git gc`: it
+does not perform full repacking, bitmap generation, commit-graph maintenance, or
+cruft-pack creation.
 
 `.libra/gc.lock` serializes concurrent `libra gc` runs. It is not a repository-wide
 write lock: commands that write new objects or update refs do not currently acquire
@@ -132,7 +144,7 @@ running.
 | GC lock | `.libra/gc.lock` for concurrent `gc` runs only | Supported | N/A |
 | Repack valid objects | Unsupported | Supported | N/A |
 | Cruft packs | Unsupported | Supported | N/A |
-| Reflog expiration | Unsupported | Supported | N/A |
+| Reflog expiration | Default `gc.reflogExpire` / `gc.reflogExpireUnreachable` policy | Supported | N/A |
 | JSON output | `--json` / `--machine` | N/A | N/A |
 
 ## Error Handling

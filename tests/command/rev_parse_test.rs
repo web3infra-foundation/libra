@@ -452,3 +452,105 @@ fn test_rev_parse_help_lists_examples_banner() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// `--verify` (single-object assertion) and `--default` fallback.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_rev_parse_verify_head_prints_full_hash() {
+    let repo = create_committed_repo_via_cli();
+    let plain = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert_cli_success(&plain, "rev-parse HEAD");
+    let verify = run_libra_command(&["rev-parse", "--verify", "HEAD"], repo.path());
+    assert_cli_success(&verify, "rev-parse --verify HEAD");
+    assert_eq!(verify.stdout, plain.stdout, "--verify HEAD == HEAD");
+}
+
+#[test]
+fn test_rev_parse_verify_invalid_ref_fatal_128() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["rev-parse", "--verify", "nope"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Needed a single revision"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(output.stdout.is_empty(), "stdout must be empty on failure");
+}
+
+#[test]
+fn test_rev_parse_verify_quiet_invalid_silent_1() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["--quiet", "rev-parse", "--verify", "nope"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "git --verify -q <bad> exits 1"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "stderr must be silent under --quiet"
+    );
+    assert!(output.stdout.is_empty(), "stdout must be empty");
+}
+
+#[test]
+fn test_rev_parse_verify_default_head() {
+    let repo = create_committed_repo_via_cli();
+    let plain = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert_cli_success(&plain, "rev-parse HEAD");
+    let output = run_libra_command(&["rev-parse", "--verify", "--default", "HEAD"], repo.path());
+    assert_cli_success(&output, "rev-parse --verify --default HEAD");
+    assert_eq!(output.stdout, plain.stdout);
+}
+
+#[test]
+fn test_rev_parse_verify_no_spec_no_default_128() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["rev-parse", "--verify"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+}
+
+#[test]
+fn test_rev_parse_verify_unborn_head_128() {
+    let repo = tempdir().expect("repo dir");
+    init_repo_via_cli(repo.path());
+    let output = run_libra_command(&["rev-parse", "--verify", "HEAD"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Needed a single revision"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_rev_parse_verify_with_short() {
+    let repo = create_committed_repo_via_cli();
+    let full = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert_cli_success(&full, "rev-parse HEAD");
+    let full_hash = String::from_utf8_lossy(&full.stdout).trim().to_string();
+    let output = run_libra_command(&["rev-parse", "--verify", "--short", "HEAD"], repo.path());
+    assert_cli_success(&output, "rev-parse --verify --short HEAD");
+    let short_hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert!(
+        short_hash.len() < full_hash.len(),
+        "short hash is abbreviated"
+    );
+    assert!(full_hash.starts_with(&short_hash), "short hash is a prefix");
+}
+
+#[test]
+fn test_rev_parse_default_used_without_verify() {
+    let repo = create_committed_repo_via_cli();
+    let plain = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert_cli_success(&plain, "rev-parse HEAD");
+    let output = run_libra_command(&["rev-parse", "--default", "HEAD"], repo.path());
+    assert_cli_success(&output, "rev-parse --default HEAD");
+    assert_eq!(
+        output.stdout, plain.stdout,
+        "--default fills in for missing SPEC"
+    );
+}

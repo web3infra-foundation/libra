@@ -34,6 +34,7 @@ use crate::{
         config::ConfigKv,
         db::get_db_conn_instance,
         model::{object_index, reference, reflog},
+        reflog::{ExpireOptions, ReflogError, expire_defaults_with_conn, expire_reflog},
     },
     utils::{
         client_storage::ClientStorage,
@@ -102,8 +103,23 @@ struct GcOutput {
     unreachable_objects: Vec<GcObjectAction>,
     /// Pack-directory verification and cleanup statistics.
     pack_files: PackStats,
+    /// Reflog expiration statistics collected before reachability tracing.
+    reflogs: ReflogExpireStats,
     /// Compatibility warnings emitted for accepted no-op flags.
     warnings: Vec<String>,
+}
+
+/// Aggregate reflog-expiration statistics for the GC pre-prune phase.
+#[derive(Debug, Clone, Default, Serialize)]
+struct ReflogExpireStats {
+    /// Number of distinct reflog refs scanned.
+    refs_scanned: usize,
+    /// Number of reflog entries scanned.
+    entries_scanned: usize,
+    /// Number of reflog entries expired.
+    pruned: usize,
+    /// Number of surviving reflog entries rewritten.
+    rewritten: usize,
 }
 
 /// Aggregate statistics for loose-object scanning and pruning.
@@ -326,6 +342,7 @@ async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
     let objects_dir = path::objects();
     ensure_real_object_directory(&objects_dir)?;
     let storage = ClientStorage::local(objects_dir);
+    let reflogs = expire_reflogs_for_gc(args.dry_run).await?;
     let mut reachability = collect_reachability(&storage).await?;
     trace_reachable(&storage, &mut reachability);
     let skip_loose_prune = !args.dry_run && !reachability.warnings.is_empty();
@@ -393,8 +410,102 @@ async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
         loose_objects: loose_stats,
         unreachable_objects: loose,
         pack_files,
+        reflogs,
         warnings,
     })
+}
+
+/// Expire all reflogs using Git-style default `gc.reflog*` policy before pruning.
+async fn expire_reflogs_for_gc(dry_run: bool) -> CliResult<ReflogExpireStats> {
+    ensure_regular_repository_database()?;
+    let db = get_db_conn_instance().await;
+    let refs = reflog_ref_names(&db).await?;
+    if refs.is_empty() {
+        return Ok(ReflogExpireStats::default());
+    }
+
+    let (expire, expire_unreachable) = expire_defaults_with_conn(&db)
+        .await
+        .map_err(map_gc_reflog_error)?;
+    let options = ExpireOptions {
+        expire,
+        expire_unreachable,
+        rewrite: false,
+        updateref: false,
+        stale_fix: false,
+        dry_run,
+    };
+
+    let mut stats = ReflogExpireStats {
+        refs_scanned: refs.len(),
+        ..Default::default()
+    };
+    for ref_name in refs {
+        let result = expire_reflog(
+            &db,
+            &ref_name,
+            &options,
+            gc_load_commit_parents,
+            gc_oid_is_commit,
+        )
+        .await
+        .map_err(map_gc_reflog_error)?;
+        stats.entries_scanned += result.scanned;
+        stats.pruned += result.pruned;
+        stats.rewritten += result.rewritten;
+    }
+    Ok(stats)
+}
+
+/// Enumerate reflog refs for the GC pre-prune expiration pass.
+async fn reflog_ref_names<C: ConnectionTrait>(db: &C) -> CliResult<Vec<String>> {
+    let rows = db
+        .query_all(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT DISTINCT ref_name FROM reflog;".to_string(),
+        ))
+        .await
+        .map_err(|error| {
+            CliError::fatal(format!("failed to enumerate reflog refs: {error}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+    let mut refs = rows
+        .iter()
+        .filter_map(|row| row.try_get::<String>("", "ref_name").ok())
+        .collect::<Vec<_>>();
+    refs.sort();
+    refs.dedup();
+    Ok(refs)
+}
+
+/// Load commit parents for reflog reachability expiration.
+fn gc_load_commit_parents(oid: &str) -> Option<Vec<String>> {
+    let hash = ObjectHash::from_str(oid).ok()?;
+    let commit: Commit = load_object_for_gc(&hash).ok()?;
+    Some(
+        commit
+            .parent_commit_ids
+            .iter()
+            .map(|parent| parent.to_string())
+            .collect(),
+    )
+}
+
+/// Return whether a reflog object ID still loads as a commit.
+fn gc_oid_is_commit(oid: &str) -> bool {
+    ObjectHash::from_str(oid)
+        .ok()
+        .is_some_and(|hash| load_object_for_gc::<Commit>(&hash).is_ok())
+}
+
+/// Convert reflog-expiration failures into GC CLI errors.
+fn map_gc_reflog_error(error: ReflogError) -> CliError {
+    match error {
+        ReflogError::Config(detail) => CliError::fatal(format!("gc reflog expire: {detail}"))
+            .with_stable_code(StableErrorCode::CliInvalidArguments),
+        other => CliError::fatal(format!("gc reflog expire failed: {other}"))
+            .with_stable_code(StableErrorCode::IoWriteFailed),
+    }
 }
 
 /// Acquire the repository-local GC lock.
@@ -669,6 +780,24 @@ fn render_gc_output(result: &GcOutput, output: &OutputConfig) -> CliResult<()> {
         result.loose_objects.reachable,
         result.loose_objects.unreachable
     );
+    if result.reflogs.refs_scanned > 0 {
+        let entry_label = if result.reflogs.pruned == 1 {
+            "entry"
+        } else {
+            "entries"
+        };
+        if result.dry_run {
+            println!(
+                "Would expire {} reflog {} across {} ref(s).",
+                result.reflogs.pruned, entry_label, result.reflogs.refs_scanned
+            );
+        } else {
+            println!(
+                "Expired {} reflog {} across {} ref(s).",
+                result.reflogs.pruned, entry_label, result.reflogs.refs_scanned
+            );
+        }
+    }
 
     if result.dry_run {
         let would_prune = result
@@ -1784,6 +1913,15 @@ where
 {
     let data = storage.get(hash)?;
     T::from_bytes(&data, *hash)
+}
+
+/// Load one object through the GC-local storage backend.
+fn load_object_for_gc<T>(hash: &ObjectHash) -> Result<T, GitError>
+where
+    T: ObjectTrait,
+{
+    let storage = ClientStorage::local(path::objects());
+    load_object_from_storage(&storage, hash)
 }
 
 /// Convert an object-load failure into a repository-corruption CLI error.
@@ -3080,6 +3218,80 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers GC expiring reflogs with the default policy before object pruning.
+    async fn expire_reflogs_for_gc_prunes_expired_entries() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let db = get_db_conn_instance().await;
+        let old_oid = test_hash(1).to_string();
+        let new_oid = test_hash(2).to_string();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO reflog \
+             (ref_name, old_oid, new_oid, timestamp, committer_name, committer_email, action, message) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+            [
+                "HEAD".into(),
+                old_oid.into(),
+                new_oid.into(),
+                1_i64.into(),
+                "tester".into(),
+                "tester@example.com".into(),
+                "commit".into(),
+                "old entry".into(),
+            ],
+        ))
+        .await
+        .unwrap();
+
+        let stats = expire_reflogs_for_gc(false).await.unwrap();
+        let remaining = reflog::Entity::find().all(&db).await.unwrap();
+
+        assert_eq!(stats.refs_scanned, 1);
+        assert_eq!(stats.entries_scanned, 1);
+        assert_eq!(stats.pruned, 1);
+        assert!(remaining.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers GC dry-run reflog expiration reporting without deleting rows.
+    async fn expire_reflogs_for_gc_dry_run_keeps_expired_entries() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let db = get_db_conn_instance().await;
+        let old_oid = test_hash(3).to_string();
+        let new_oid = test_hash(4).to_string();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO reflog \
+             (ref_name, old_oid, new_oid, timestamp, committer_name, committer_email, action, message) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+            [
+                "HEAD".into(),
+                old_oid.into(),
+                new_oid.into(),
+                1_i64.into(),
+                "tester".into(),
+                "tester@example.com".into(),
+                "commit".into(),
+                "old entry".into(),
+            ],
+        ))
+        .await
+        .unwrap();
+
+        let stats = expire_reflogs_for_gc(true).await.unwrap();
+        let remaining = reflog::Entity::find().all(&db).await.unwrap();
+
+        assert_eq!(stats.pruned, 1);
+        assert_eq!(remaining.len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
     /// Covers `run_gc` retaining unreachable objects when pruning is disabled.
     async fn run_gc_prune_never_reports_retained_unreachable_object() {
         let repo = tempdir().unwrap();
@@ -3565,6 +3777,7 @@ mod tests {
                     reason: "tmp".into(),
                 }],
             },
+            reflogs: ReflogExpireStats::default(),
             warnings: vec!["compat warning".into()],
         };
 
@@ -3596,6 +3809,7 @@ mod tests {
                     reason: "tmp".into(),
                 }],
             },
+            reflogs: ReflogExpireStats::default(),
             warnings: Vec::new(),
         };
 
@@ -3612,6 +3826,7 @@ mod tests {
             reachable_objects: 0,
             unreachable_objects: Vec::new(),
             pack_files: PackStats::default(),
+            reflogs: ReflogExpireStats::default(),
             warnings: Vec::new(),
         };
         let quiet = OutputConfig {
@@ -3806,13 +4021,7 @@ mod tests {
         util::working_dir();
         let add = crate::command::add::AddArgs {
             pathspec: vec!["file.txt".into()],
-            all: false,
-            update: false,
-            verbose: false,
-            dry_run: false,
-            refresh: false,
-            ignore_errors: false,
-            force: false,
+            ..Default::default()
         };
         crate::command::add::execute_safe(add, &OutputConfig::default())
             .await

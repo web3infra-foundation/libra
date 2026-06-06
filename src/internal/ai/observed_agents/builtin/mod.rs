@@ -10,6 +10,7 @@
 pub mod claude_code;
 pub mod gemini;
 pub mod stable_promoted;
+mod stable_promoted_truncation;
 
 pub use claude_code::{
     ClaudeCodeObservedAgent, rfc3339_boundary_for_unix_seconds, write_truncated_transcript,

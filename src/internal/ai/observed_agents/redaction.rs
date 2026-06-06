@@ -128,19 +128,82 @@ pub struct RedactionReport {
     pub bytes_redacted: usize,
 }
 
+/// Redaction behaviour selected via `[agent.redaction] mode` in
+/// `.libra/config` (entire.md §8.4). Defaults to [`Redact`](Self::Redact).
+///
+/// Note this is a *capture-time* concept distinct from the unrelated
+/// `RedactionMode` in `src/internal/publish/` (Worker field-stripping).
+///
+/// # Safety boundary (entire.md §8.3)
+///
+/// `mode` governs only the *free-form session-row fields* (`prompt`,
+/// `tool_input`) whose redacted form lands in `agent_session.redaction_report`.
+/// The full transcript blob written to `refs/libra/agent-traces` is **always**
+/// force-scanned with [`RedactionMode::Redact`] regardless of config — a
+/// `warn`/`off` setting can never let an un-redacted transcript reach durable
+/// storage. The caller is responsible for constructing a force-redact
+/// [`Redactor`] for that path; see `hooks::runtime::build_checkpoint_transcript_redacted`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RedactionMode {
+    /// Replace every match with `<REDACTED:rule_id>` (default, recommended).
+    #[default]
+    Redact,
+    /// Detect and record matches into the [`RedactionReport`] but leave the
+    /// bytes unchanged — an audit-only mode.
+    Warn,
+    /// Skip detection entirely. Documented as not recommended.
+    Off,
+}
+
+impl RedactionMode {
+    /// Parse a config string (`redact` / `warn` / `off`, case-insensitive).
+    /// Unknown values fall back to the safe default ([`Redact`](Self::Redact))
+    /// so a typo can never silently disable redaction.
+    pub fn from_config_str(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "warn" => Self::Warn,
+            "off" => Self::Off,
+            _ => Self::Redact,
+        }
+    }
+}
+
+/// Opt-in PII detection configuration (entire.md §8.2 P3). Every category
+/// defaults to `false` — PII redaction never runs unless explicitly enabled
+/// via `[agent.redaction] pii.* = true`, mirroring the EntireIO default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PiiConfig {
+    /// Master switch — when `false`, no PII category runs.
+    pub enabled: bool,
+    pub email: bool,
+    pub phone: bool,
+}
+
+impl PiiConfig {
+    /// `true` when PII detection should run for at least one category.
+    fn any_active(&self) -> bool {
+        self.enabled && (self.email || self.phone)
+    }
+}
+
 /// Redaction engine. Cheap to clone (the rules are `Arc`-shared) so the
 /// runtime can keep one instance per session without paying per-rule rebuild
 /// costs.
 #[derive(Debug, Clone)]
 pub struct Redactor {
     rules: Arc<Vec<RedactionRule>>,
+    mode: RedactionMode,
+    pii: PiiConfig,
 }
 
 impl Redactor {
-    /// Build a redactor with the v1 default rule set.
+    /// Build a redactor with the v1 default rule set and [`RedactionMode::Redact`].
     pub fn new_default() -> Self {
         Self {
             rules: Arc::clone(&DEFAULT_RULES),
+            mode: RedactionMode::Redact,
+            pii: PiiConfig::default(),
         }
     }
 
@@ -148,7 +211,26 @@ impl Redactor {
     pub fn with_rules(rules: Vec<RedactionRule>) -> Self {
         Self {
             rules: Arc::new(rules),
+            mode: RedactionMode::Redact,
+            pii: PiiConfig::default(),
         }
+    }
+
+    /// Override the redaction mode (config-driven; entire.md §8.4).
+    pub fn with_mode(mut self, mode: RedactionMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Enable opt-in PII categories (entire.md §8.2 P3).
+    pub fn with_pii(mut self, pii: PiiConfig) -> Self {
+        self.pii = pii;
+        self
+    }
+
+    /// The configured redaction mode.
+    pub fn mode(&self) -> RedactionMode {
+        self.mode
     }
 
     /// Number of rules registered. Mostly useful for tests / diagnostics.
@@ -156,17 +238,51 @@ impl Redactor {
         self.rules.len()
     }
 
-    /// Walk every rule across `input` and return the redacted bytes plus a
-    /// report. Rules are applied in priority order (the order they appear in
-    /// [`DEFAULT_RULES`]) and replacements are non-overlapping — once a span
-    /// has been replaced, later rules don't re-scan the placeholder.
+    /// Walk every detector across `input` and return the redacted bytes plus a
+    /// report. Detection runs in layers (entire.md §8.2): the static
+    /// prefix/regex rules first (priority order from [`DEFAULT_RULES`]), then
+    /// the structural detectors (Shannon-entropy, connection-strings, bounded
+    /// credential K/V, and opt-in PII). Replacements are non-overlapping —
+    /// once a span has been replaced, later layers don't re-scan the
+    /// placeholder.
+    ///
+    /// [`RedactionMode`] governs the *output bytes*: `Redact` returns the
+    /// scrubbed buffer; `Warn` returns the original bytes but still reports
+    /// every match (audit mode); `Off` returns the original bytes and an
+    /// empty match list. The report's `bytes_redacted` always reflects what
+    /// *would* be redacted, so a `warn`-mode row records the would-be volume.
     pub fn redact(&self, input: &[u8]) -> (RedactedBytes, RedactionReport) {
+        match self.mode {
+            RedactionMode::Off => (
+                RedactedBytes::new_unchecked(input.to_vec()),
+                RedactionReport {
+                    bytes_scanned: input.len(),
+                    ..Default::default()
+                },
+            ),
+            RedactionMode::Warn => {
+                let (_redacted, report) = self.redact_core(input);
+                // Audit mode: report the matches but leave bytes untouched.
+                (RedactedBytes::new_unchecked(input.to_vec()), report)
+            }
+            RedactionMode::Redact => {
+                let (redacted, report) = self.redact_core(input);
+                (RedactedBytes::new_unchecked(redacted), report)
+            }
+        }
+    }
+
+    /// Unconditional redaction core — always scrubs, ignoring [`Self::mode`].
+    /// Used directly by the §8.3 forced-scan transcript-blob path which must
+    /// never honour `warn`/`off`.
+    fn redact_core(&self, input: &[u8]) -> (Vec<u8>, RedactionReport) {
         let mut output = input.to_vec();
         let mut report = RedactionReport {
             bytes_scanned: input.len(),
             ..Default::default()
         };
 
+        // Layer 1: static prefix/regex rules.
         for rule in self.rules.iter() {
             // Re-scan after each rule because earlier replacements can shift
             // byte offsets. The cost is bounded — typical transcripts are
@@ -200,7 +316,224 @@ impl Redactor {
             output = new_output;
         }
 
-        (RedactedBytes::new_unchecked(output), report)
+        // Layer 2: Shannon-entropy high-entropy tokens (entire.md §8.2 P1).
+        apply_detector(
+            &mut output,
+            &mut report,
+            "high-entropy",
+            &ENTROPY_CANDIDATE,
+            refine_entropy_span,
+        );
+
+        // Layer 3: DB / connection-string detection with placeholder-aware
+        // gating (entire.md §8.2 P1). Only runs when the buffer contains `=`.
+        if output.contains(&b'=') {
+            for rule in CONNECTION_STRING_RULES.iter() {
+                apply_detector(
+                    &mut output,
+                    &mut report,
+                    "connection-string",
+                    &rule.pattern,
+                    |src, cs, ce| {
+                        let end = trim_connection_string_end(src, cs, ce);
+                        if cs >= end {
+                            return None;
+                        }
+                        let candidate = std::str::from_utf8(&src[cs..end]).ok()?;
+                        if (rule.has_secret)(candidate) {
+                            Some((cs, end))
+                        } else {
+                            None
+                        }
+                    },
+                );
+            }
+        }
+
+        // Layer 4: bounded vendor-prefixed credential key/value (§8.2 P2).
+        apply_detector_captures(
+            &mut output,
+            &mut report,
+            "credential-kv",
+            &CREDENTIAL_VALUE,
+            |src, caps| {
+                let m = caps.get(2)?;
+                let (start, end) = unquote_range(src, m.start(), m.end());
+                let value = std::str::from_utf8(&src[start..end]).ok()?;
+                if has_non_placeholder_password_value(value) {
+                    Some((start, end))
+                } else {
+                    None
+                }
+            },
+        );
+
+        // Layer 5: opt-in PII (entire.md §8.2 P3) — never runs unless enabled.
+        if self.pii.any_active() {
+            if self.pii.email {
+                apply_detector(
+                    &mut output,
+                    &mut report,
+                    "pii-email",
+                    &PII_EMAIL,
+                    |src, cs, ce| {
+                        let value = std::str::from_utf8(&src[cs..ce]).ok()?;
+                        if is_allowlisted_email(value) {
+                            None
+                        } else {
+                            Some((cs, ce))
+                        }
+                    },
+                );
+            }
+            if self.pii.phone {
+                apply_detector(
+                    &mut output,
+                    &mut report,
+                    "pii-phone",
+                    &PII_PHONE,
+                    |_src, cs, ce| Some((cs, ce)),
+                );
+            }
+        }
+
+        (output, report)
+    }
+
+    /// JSON-aware redaction (entire.md §8). Parses `input` as a single JSON
+    /// value (e.g. a pretty-printed OpenCode export) or, failing that, as
+    /// JSONL (one value per line — the Claude/Gemini transcript shape) and
+    /// redacts only string *values*, skipping structural fields (`*id`,
+    /// `*ids`, `filepath`/`cwd`/`path`, …) and image objects so high-entropy
+    /// identifiers and file paths are never corrupted. Lines that don't parse
+    /// as JSON fall back to scalar [`Self::redact`]. Honours [`Self::mode`]
+    /// exactly like [`Self::redact`].
+    pub fn redact_jsonl(&self, input: &[u8]) -> (RedactedBytes, RedactionReport) {
+        if self.mode == RedactionMode::Off {
+            return (
+                RedactedBytes::new_unchecked(input.to_vec()),
+                RedactionReport {
+                    bytes_scanned: input.len(),
+                    ..Default::default()
+                },
+            );
+        }
+        let Ok(text) = std::str::from_utf8(input) else {
+            // Non-UTF-8 transcript — fall back to raw scalar redaction.
+            return self.redact(input);
+        };
+        let mut report = RedactionReport {
+            bytes_scanned: input.len(),
+            ..Default::default()
+        };
+        let redacted_text = self.redact_jsonl_text(text, &mut report);
+        let out = if self.mode == RedactionMode::Warn {
+            input.to_vec()
+        } else {
+            redacted_text.into_bytes()
+        };
+        (RedactedBytes::new_unchecked(out), report)
+    }
+
+    /// Core of [`Self::redact_jsonl`]: returns the redacted text and folds
+    /// match counts into `report`. Always computes the scrubbed text (the
+    /// caller decides whether to emit it based on mode).
+    fn redact_jsonl_text(&self, content: &str, report: &mut RedactionReport) -> String {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            // Try the whole content as a single JSON value first (multi-line
+            // pretty-printed object/array). serde_json::from_str only succeeds
+            // when the *entire* string is one value, so a successful parse here
+            // already implies the single-value/EOF condition.
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                let repls = self.collect_json_replacements(&value, report);
+                return apply_json_replacements(content, &repls);
+            }
+        }
+        // Fall back to line-by-line JSONL.
+        let mut out = String::with_capacity(content.len());
+        for (i, line) in content.split('\n').enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            if line.trim().is_empty() {
+                out.push_str(line);
+                continue;
+            }
+            match serde_json::from_str::<serde_json::Value>(line.trim()) {
+                Ok(value) => {
+                    let repls = self.collect_json_replacements(&value, report);
+                    out.push_str(&apply_json_replacements(line, &repls));
+                }
+                Err(_) => {
+                    // Non-JSON line — scrub as raw scalar text.
+                    let (redacted, line_report) = self.redact_core(line.as_bytes());
+                    report.matches.extend(line_report.matches);
+                    report.bytes_redacted += line_report.bytes_redacted;
+                    out.push_str(&String::from_utf8_lossy(&redacted));
+                }
+            }
+        }
+        out
+    }
+
+    /// Recursively walk a parsed JSON value, collecting `(key, original,
+    /// redacted)` replacements for string values that need scrubbing. Skips
+    /// structural fields and image objects (entire.md §8 JSON-aware rules).
+    fn collect_json_replacements(
+        &self,
+        value: &serde_json::Value,
+        report: &mut RedactionReport,
+    ) -> Vec<JsonReplacement> {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut repls: Vec<JsonReplacement> = Vec::new();
+        self.walk_json(value, "", &mut seen, &mut repls, report);
+        repls
+    }
+
+    fn walk_json(
+        &self,
+        value: &serde_json::Value,
+        key: &str,
+        seen: &mut std::collections::HashSet<String>,
+        repls: &mut Vec<JsonReplacement>,
+        report: &mut RedactionReport,
+    ) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if should_skip_json_object(map) {
+                    return;
+                }
+                for (k, child) in map {
+                    if should_skip_json_field(k) {
+                        continue;
+                    }
+                    self.walk_json(child, k, seen, repls, report);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    self.walk_json(child, "", seen, repls, report);
+                }
+            }
+            serde_json::Value::String(s) => {
+                let (redacted, value_report) = self.redact_core(s.as_bytes());
+                let redacted = String::from_utf8_lossy(&redacted).into_owned();
+                if &redacted != s {
+                    let dedup = format!("{key}\u{0}{s}");
+                    if seen.insert(dedup) {
+                        report.matches.extend(value_report.matches);
+                        report.bytes_redacted += value_report.bytes_redacted;
+                        repls.push(JsonReplacement {
+                            key: key.to_string(),
+                            original: s.clone(),
+                            redacted,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -269,10 +602,14 @@ static DEFAULT_RULES: Lazy<Arc<Vec<RedactionRule>>> = Lazy::new(|| {
             "jwt",
             r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
         ),
-        // Postgres / MySQL connection URIs with embedded credentials.
+        // Any-scheme connection URI with embedded userinfo password, e.g.
+        // `postgres://user:pass@host`, `redis://:pass@host` (empty user), or a
+        // custom-scheme `clickhouse://u:p@host`. Generalised from the original
+        // fixed-scheme allowlist to match EntireIO's `credentialedURIPattern`
+        // (redact.go:26) — the leading scheme is `[a-z][a-z0-9+.-]{1,31}`.
         (
             "credential-uri",
-            r"(?i)\b(?:postgres|postgresql|mysql|mongodb|redis|amqp|amqps)://[^\s/@:]+:[^\s/@]+@[^\s]+",
+            r#"(?i)\b[a-z][a-z0-9+.-]{1,31}://[^\s/?#@"'`<>:]*:[^\s/?#@"'`<>]+@[^\s"'`<>]+"#,
         ),
         // Google service-account JSON `private_key` field. JSON pretty-
         // printers escape the BEGIN/END markers; this rule catches both the
@@ -371,6 +708,454 @@ static DEFAULT_RULES: Lazy<Arc<Vec<RedactionRule>>> = Lazy::new(|| {
             .collect(),
     )
 });
+
+// ---------------------------------------------------------------------------
+// Layer 2+: structural detectors (entire.md §8.2). These run after the static
+// rule loop on the post-rule buffer. Each is a span-collecting pass that skips
+// bytes already inside a `<REDACTED:…>` placeholder.
+// ---------------------------------------------------------------------------
+
+/// Minimum Shannon entropy (bits/byte) for a candidate token to be treated as
+/// a secret. 4.5 matches EntireIO (`redact.go:59`): high enough to skip git
+/// SHAs / UUIDs / prose, low enough to catch API keys and base64 tokens.
+const ENTROPY_THRESHOLD: f64 = 4.5;
+
+/// Candidate token shape for entropy scanning. `/` and `.` are excluded so
+/// file paths aren't swallowed as one token (`redact.go:21`).
+static ENTROPY_CANDIDATE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"[A-Za-z0-9+_=-]{10,}").expect("entropy candidate regex must compile")
+});
+
+/// A connection-string detector: a coarse structural regex plus a
+/// placeholder-aware predicate that confirms a *real* secret before redacting.
+struct ConnectionStringRule {
+    pattern: Regex,
+    has_secret: fn(&str) -> bool,
+}
+
+static CONNECTION_STRING_RULES: Lazy<Vec<ConnectionStringRule>> = Lazy::new(|| {
+    vec![
+        ConnectionStringRule {
+            pattern: Regex::new(r#"(?i)\bjdbc:[^\s"'<>`]+"#).unwrap(),
+            has_secret: has_jdbc_password,
+        },
+        ConnectionStringRule {
+            pattern: Regex::new(r#"(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^\s"'<>`]+"#).unwrap(),
+            has_secret: has_database_url_secret,
+        },
+        ConnectionStringRule {
+            pattern: Regex::new(r#"(?i)\b[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+)(?:\s+[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+)){2,}"#).unwrap(),
+            has_secret: has_keyword_dsn_password,
+        },
+        ConnectionStringRule {
+            pattern: Regex::new(r#"(?i)\b[a-z][a-z0-9 _-]*=(?:\{[^}]*\}|"[^"]*"|'[^']*'|[^=;"'\s]+)(?:;[a-z][a-z0-9 _-]*=(?:\{[^}]*\}|"[^"]*"|'[^']*'|[^=;"'\s]+)){2,}"#).unwrap(),
+            has_secret: has_semicolon_connection_password,
+        },
+    ]
+});
+
+/// Vendor-prefixed bounded credential K/V (`DB_PASSWORD=…`). Group 1 = key,
+/// group 2 = value (the span actually redacted). Mirrors `redact.go:32,42`.
+static CREDENTIAL_VALUE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)(?:^|[^A-Za-z0-9])((?:db|database|pg|postgres|postgresql|mysql|mariadb|redis|mongo|mongodb|sqlserver|mssql|jdbc)(?:[_-]+[a-z0-9]+)*[_-]*(?:password|passwd|pwd))\s*=\s*("[^"]*"|'[^']*'|[^\s,;&]+)"#).unwrap()
+});
+
+static PASSWORD_ASSIGNMENT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)(?:^|[?&;\s])(?:password|pwd)=("[^"]*"|'[^']*'|[^&;\s"']+)"#).unwrap()
+});
+static KEYWORD_HOST: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)(?:^|\s)host=").unwrap());
+static KEYWORD_USER: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)(?:^|\s)user=").unwrap());
+static SEMICOLON_SERVER: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:^|;)\s*(?:server|data source|datasource|addr|address|network address)\s*=")
+        .unwrap()
+});
+static SEMICOLON_USER: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)(?:^|;)\s*(?:user id|userid|user|uid)\s*=").unwrap());
+
+/// Opt-in PII patterns (entire.md §8.2 P3). Conservative shapes; phone
+/// requires explicit separators to bound false positives.
+static PII_EMAIL: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b").unwrap());
+static PII_PHONE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?:\+\d{1,3}[ .-]?)?(?:\(\d{2,4}\)|\d{2,4})[ .-]\d{2,4}[ .-]\d{2,4}").unwrap()
+});
+
+/// Lowercase values treated as non-secret placeholders (`redact.go:69-82`).
+static PLACEHOLDER_SECRET_VALUES: Lazy<std::collections::HashSet<&'static str>> = Lazy::new(|| {
+    [
+        "redacted",
+        "[redacted]",
+        "<redacted>",
+        "changeme",
+        "example",
+        "placeholder",
+        "your_password",
+        "your_db_password",
+        "your_secret",
+        "secret_here",
+    ]
+    .into_iter()
+    .collect()
+});
+
+/// A `(key, original, redacted)` triple for JSON-aware replacement.
+struct JsonReplacement {
+    key: String,
+    original: String,
+    redacted: String,
+}
+
+/// Byte ranges already occupied by `<REDACTED:…>` placeholders, so structural
+/// detectors never re-scan or corrupt a prior replacement.
+fn redacted_regions(src: &[u8]) -> Vec<(usize, usize)> {
+    const MARKER: &[u8] = b"<REDACTED:";
+    let mut regions = Vec::new();
+    let mut i = 0;
+    while i + MARKER.len() <= src.len() {
+        if &src[i..i + MARKER.len()] == MARKER
+            && let Some(rel) = src[i..].iter().position(|&b| b == b'>')
+        {
+            regions.push((i, i + rel + 1));
+            i += rel + 1;
+            continue;
+        }
+        i += 1;
+    }
+    regions
+}
+
+fn intersects_any(start: usize, end: usize, regions: &[(usize, usize)]) -> bool {
+    regions.iter().any(|&(s, e)| start < e && s < end)
+}
+
+/// Generic span-collecting detector pass: find candidates with `regex`, refine
+/// each to the actual redaction span (or `None` to skip) via `refine`, then
+/// splice in `<REDACTED:label>`.
+fn apply_detector(
+    buffer: &mut Vec<u8>,
+    report: &mut RedactionReport,
+    label: &str,
+    regex: &Regex,
+    refine: impl Fn(&[u8], usize, usize) -> Option<(usize, usize)>,
+) {
+    let src = std::mem::take(buffer);
+    let regions = redacted_regions(&src);
+    let placeholder = format!("<REDACTED:{label}>");
+    let mut out = Vec::with_capacity(src.len());
+    let mut last_end = 0usize;
+    for m in regex.find_iter(&src) {
+        let Some((start, end)) = refine(&src, m.start(), m.end()) else {
+            continue;
+        };
+        if start < last_end || intersects_any(start, end, &regions) {
+            continue;
+        }
+        out.extend_from_slice(&src[last_end..start]);
+        out.extend_from_slice(placeholder.as_bytes());
+        report.matches.push(RedactionMatch {
+            rule_id: label.to_string(),
+            start,
+            end,
+        });
+        report.bytes_redacted += end - start;
+        last_end = end;
+    }
+    out.extend_from_slice(&src[last_end..]);
+    *buffer = out;
+}
+
+/// Like [`apply_detector`] but the refine closure receives the full
+/// [`regex::bytes::Captures`] so it can redact a specific capture group.
+fn apply_detector_captures(
+    buffer: &mut Vec<u8>,
+    report: &mut RedactionReport,
+    label: &str,
+    regex: &Regex,
+    refine: impl Fn(&[u8], &regex::bytes::Captures) -> Option<(usize, usize)>,
+) {
+    let src = std::mem::take(buffer);
+    let regions = redacted_regions(&src);
+    let placeholder = format!("<REDACTED:{label}>");
+    let mut out = Vec::with_capacity(src.len());
+    let mut last_end = 0usize;
+    for caps in regex.captures_iter(&src) {
+        let Some((start, end)) = refine(&src, &caps) else {
+            continue;
+        };
+        if start < last_end || intersects_any(start, end, &regions) {
+            continue;
+        }
+        out.extend_from_slice(&src[last_end..start]);
+        out.extend_from_slice(placeholder.as_bytes());
+        report.matches.push(RedactionMatch {
+            rule_id: label.to_string(),
+            start,
+            end,
+        });
+        report.bytes_redacted += end - start;
+        last_end = end;
+    }
+    out.extend_from_slice(&src[last_end..]);
+    *buffer = out;
+}
+
+/// Shannon entropy in bits/byte.
+fn shannon_entropy(bytes: &[u8]) -> f64 {
+    if bytes.is_empty() {
+        return 0.0;
+    }
+    let mut freq = [0usize; 256];
+    for &b in bytes {
+        freq[b as usize] += 1;
+    }
+    let len = bytes.len() as f64;
+    let mut entropy = 0.0;
+    for &count in freq.iter() {
+        if count > 0 {
+            let p = count as f64 / len;
+            entropy -= p * p.log2();
+        }
+    }
+    entropy
+}
+
+/// Refine an entropy candidate: apply the JSON-escape guard and the entropy
+/// threshold (`redact.go:179-191`).
+fn refine_entropy_span(src: &[u8], cs: usize, ce: usize) -> Option<(usize, usize)> {
+    let mut start = cs;
+    if start > 0
+        && src[start - 1] == b'\\'
+        && matches!(
+            src[start],
+            b'n' | b't' | b'r' | b'b' | b'f' | b'u' | b'"' | b'\\' | b'/'
+        )
+    {
+        start += 1;
+        if ce.saturating_sub(start) < 10 {
+            return None;
+        }
+    }
+    if shannon_entropy(&src[start..ce]) > ENTROPY_THRESHOLD {
+        Some((start, ce))
+    } else {
+        None
+    }
+}
+
+/// Trim trailing sentence punctuation off a connection-string match
+/// (`redact.go:293-303`).
+fn trim_connection_string_end(src: &[u8], start: usize, mut end: usize) -> usize {
+    while end > start {
+        match src[end - 1] {
+            b'.' | b',' | b';' | b':' | b'!' | b'?' | b')' | b']' => end -= 1,
+            _ => return end,
+        }
+    }
+    end
+}
+
+/// Strip a single pair of matching surrounding quotes from a byte range.
+fn unquote_range(src: &[u8], start: usize, end: usize) -> (usize, usize) {
+    if end - start < 2 {
+        return (start, end);
+    }
+    let (first, last) = (src[start], src[end - 1]);
+    if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+        (start + 1, end - 1)
+    } else {
+        (start, end)
+    }
+}
+
+fn has_non_placeholder_password_value(value: &str) -> bool {
+    !value.is_empty() && !is_placeholder_secret_value(value)
+}
+
+/// Reports whether `value` is a documentation/masked placeholder rather than a
+/// real secret (`redact.go:387-441`).
+fn is_placeholder_secret_value(value: &str) -> bool {
+    let trimmed = value.trim().trim_matches(['"', '\'']);
+    if trimmed.is_empty() {
+        return true;
+    }
+    if is_bracketed_placeholder(trimmed) {
+        return true;
+    }
+    let normalized = trimmed.to_ascii_lowercase();
+    if normalized.starts_with("${") && normalized.ends_with('}') {
+        return true;
+    }
+    if PLACEHOLDER_SECRET_VALUES.contains(normalized.as_str()) {
+        return true;
+    }
+    is_repeated_char_placeholder(&normalized)
+}
+
+/// `<name>` doc placeholder: lowercase letters joined by `-`/`_`, total len ≥ 5.
+fn is_bracketed_placeholder(s: &str) -> bool {
+    if s.len() < 5 || !s.starts_with('<') || !s.ends_with('>') {
+        return false;
+    }
+    let inner = &s[1..s.len() - 1];
+    let mut chars = inner.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    inner
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c == '_' || c == '-')
+}
+
+/// A run of a single masking char (`***`, `xxxx`, `----`, `....`), len ≥ 3.
+fn is_repeated_char_placeholder(s: &str) -> bool {
+    if s.len() < 3 {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    match bytes[0] {
+        b'*' | b'x' | b'.' | b'-' => {}
+        _ => return false,
+    }
+    bytes.iter().all(|&b| b == bytes[0])
+}
+
+fn candidate_has_non_placeholder_password_assignment(candidate: &str) -> bool {
+    for caps in PASSWORD_ASSIGNMENT.captures_iter(candidate.as_bytes()) {
+        if let Some(m) = caps.get(1) {
+            let (s, e) = unquote_range(candidate.as_bytes(), m.start(), m.end());
+            if let Some(value) = candidate.get(s..e)
+                && has_non_placeholder_password_value(value)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn has_jdbc_password(candidate: &str) -> bool {
+    candidate.to_ascii_lowercase().starts_with("jdbc:")
+        && candidate_has_non_placeholder_password_assignment(candidate)
+}
+
+fn has_database_url_secret(candidate: &str) -> bool {
+    // Userinfo passwords are already handled by the `credential-uri` rule; here
+    // we catch `?password=…` / `?pwd=…` query credentials.
+    candidate_has_non_placeholder_password_assignment(candidate)
+}
+
+fn has_keyword_dsn_password(candidate: &str) -> bool {
+    KEYWORD_HOST.is_match(candidate.as_bytes())
+        && KEYWORD_USER.is_match(candidate.as_bytes())
+        && candidate_has_non_placeholder_password_assignment(candidate)
+}
+
+fn has_semicolon_connection_password(candidate: &str) -> bool {
+    SEMICOLON_SERVER.is_match(candidate.as_bytes())
+        && SEMICOLON_USER.is_match(candidate.as_bytes())
+        && candidate_has_non_placeholder_password_assignment(candidate)
+}
+
+fn is_allowlisted_email(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let local = lower.split('@').next().unwrap_or("");
+    local.contains("noreply")
+        || local.contains("no-reply")
+        || local.contains("donotreply")
+        || local.contains("do-not-reply")
+}
+
+/// JSON keys whose string values are structural, not secrets, and must never
+/// be scrubbed (`redact.go:684-703`).
+fn should_skip_json_field(key: &str) -> bool {
+    if key == "signature" {
+        return true;
+    }
+    let lower = key.to_ascii_lowercase();
+    if lower.ends_with("id") || lower.ends_with("ids") {
+        return true;
+    }
+    matches!(
+        lower.as_str(),
+        "filepath" | "file_path" | "cwd" | "root" | "directory" | "dir" | "path"
+    )
+}
+
+/// Skip whole objects that carry binary image payloads (`redact.go:706-709`).
+fn should_skip_json_object(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
+    matches!(obj.get("type"), Some(serde_json::Value::String(t)) if t.starts_with("image") || t == "base64")
+}
+
+fn is_json_ws(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// JSON-encode a string without HTML escaping (serde_json default), matching
+/// the encoding used in the raw transcript so substring replacement aligns.
+fn json_encode_string(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| format!("{s:?}"))
+}
+
+/// Apply collected `(key, original, redacted)` pairs to the raw JSON text,
+/// replacing JSON-encoded originals with redacted forms in value position only.
+fn apply_json_replacements(s: &str, repls: &[JsonReplacement]) -> String {
+    if repls.is_empty() {
+        return s.to_string();
+    }
+    let mut s = s.to_string();
+    for r in repls {
+        let orig_json = json_encode_string(&r.original);
+        let repl_json = json_encode_string(&r.redacted);
+        if r.key.is_empty() {
+            s = s.replace(&orig_json, &repl_json);
+        } else {
+            let key_json = json_encode_string(&r.key);
+            s = replace_keyed_json_value(&s, &key_json, &orig_json, &repl_json);
+        }
+    }
+    s
+}
+
+/// Replace `origJSON` only where it follows `keyJSON : ` (value position), so a
+/// key whose redacted text collides with another field's value is left alone
+/// (`redact.go:588-625`).
+fn replace_keyed_json_value(s: &str, key_json: &str, orig_json: &str, repl_json: &str) -> String {
+    if !s.contains(key_json) {
+        return s.to_string();
+    }
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let Some(rel) = s[i..].find(key_json) else {
+            out.push_str(&s[i..]);
+            break;
+        };
+        let key_end = i + rel + key_json.len();
+        out.push_str(&s[i..key_end]);
+        let mut p = key_end;
+        while p < bytes.len() && is_json_ws(bytes[p]) {
+            p += 1;
+        }
+        if p >= bytes.len() || bytes[p] != b':' {
+            i = key_end;
+            continue;
+        }
+        p += 1;
+        while p < bytes.len() && is_json_ws(bytes[p]) {
+            p += 1;
+        }
+        if p + orig_json.len() <= bytes.len() && &s[p..p + orig_json.len()] == orig_json {
+            out.push_str(&s[key_end..p]);
+            out.push_str(repl_json);
+            i = p + orig_json.len();
+        } else {
+            i = key_end;
+        }
+    }
+    out
+}
 
 #[cfg(test)]
 mod tests {
@@ -525,6 +1310,273 @@ mod tests {
         assert_eq!(first, second);
         // No new matches on the placeholder.
         assert!(second_report.matches.is_empty());
+    }
+
+    // ----- Layer 2: Shannon entropy (entire.md §8.2 P1) -----
+
+    #[test]
+    fn entropy_redacts_high_entropy_token() {
+        let r = Redactor::new_default();
+        // A 44-char random base64-ish token: entropy well above 4.5.
+        let token = "Zk9Qx2Lm7Wp4Rt8Yn1Bv6Cd3Fg5Hj0Ks9Ld2Mq8Nr4Tw";
+        let (out, report) = redact_str(&r, &format!("blob {token} end"));
+        assert!(
+            out.contains("<REDACTED:high-entropy>"),
+            "high-entropy token must be redacted, got `{out}`"
+        );
+        assert!(report.matches.iter().any(|m| m.rule_id == "high-entropy"));
+    }
+
+    #[test]
+    fn entropy_leaves_git_sha_and_uuid_alone() {
+        let r = Redactor::new_default();
+        for clean in [
+            "commit 9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c done",
+            "thread 550e8400-e29b-41d4-a716-446655440000 resumed",
+        ] {
+            let (out, _) = redact_str(&r, clean);
+            assert_eq!(out, clean, "low-entropy id must pass through: `{clean}`");
+        }
+    }
+
+    #[test]
+    fn entropy_json_escape_guard_keeps_escape_valid() {
+        // `\n` followed by a token must not be eaten such that `\R` appears.
+        let r = Redactor::new_default();
+        let (out, _) = redact_str(&r, r#"{"text":"controller.go\nmodelHandlerFactory"}"#);
+        assert!(
+            !out.contains(r"\R"),
+            "must not create an invalid \\R escape: `{out}`"
+        );
+    }
+
+    // ----- Layer 2b: generalised credential URI -----
+
+    #[test]
+    fn redacts_generic_scheme_credential_uri() {
+        let r = Redactor::new_default();
+        for uri in [
+            "redis://:s3cretPass@cache.host:6379/0",
+            "clickhouse://admin:Hunter2Pass@db.internal:9000",
+        ] {
+            let (out, _) = redact_str(&r, &format!("conn {uri} ok"));
+            assert!(
+                out.contains("<REDACTED:credential-uri>"),
+                "credential URI must redact: `{uri}` -> `{out}`"
+            );
+        }
+    }
+
+    // ----- Layer 3: DB connection strings -----
+
+    #[test]
+    fn redacts_jdbc_with_real_password() {
+        let r = Redactor::new_default();
+        let (out, _) = redact_str(
+            &r,
+            "url=jdbc:postgresql://h:5432/db?user=app&password=S3cretPg99 next",
+        );
+        assert!(
+            out.contains("<REDACTED:connection-string>") || out.contains("<REDACTED:"),
+            "jdbc with real password must redact: `{out}`"
+        );
+    }
+
+    #[test]
+    fn keeps_jdbc_with_placeholder_password() {
+        let r = Redactor::new_default();
+        let input = "jdbc:postgresql://h/db?user=app&password=<password>";
+        let (out, _) = redact_str(&r, input);
+        assert!(
+            !out.contains("<REDACTED:connection-string>"),
+            "placeholder password must not trip the connection-string detector: `{out}`"
+        );
+    }
+
+    // ----- Layer 4: bounded vendor-prefixed credential K/V -----
+
+    #[test]
+    fn redacts_short_vendor_prefixed_credential() {
+        let r = Redactor::new_default();
+        let (out, report) = redact_str(&r, "DB_PASSWORD=hunter2");
+        assert!(
+            out.contains("<REDACTED:credential-kv>"),
+            "short DB_PASSWORD value must redact via vendor-prefix rule: `{out}`"
+        );
+        assert!(report.matches.iter().any(|m| m.rule_id == "credential-kv"));
+    }
+
+    #[test]
+    fn keeps_non_vendor_password_word() {
+        let r = Redactor::new_default();
+        // `mydbpassword` has no non-alnum boundary before the vendor shape and
+        // a short value, so neither the K/V nor env rules should fire.
+        let (out, _) = redact_str(&r, "mydbpassword=x");
+        assert_eq!(out, "mydbpassword=x");
+    }
+
+    #[test]
+    fn keeps_placeholder_credential_value() {
+        let r = Redactor::new_default();
+        let (out, _) = redact_str(&r, "DB_PASSWORD=changeme");
+        assert_eq!(
+            out, "DB_PASSWORD=changeme",
+            "placeholder value must not redact"
+        );
+    }
+
+    #[test]
+    fn placeholder_whitelist_classifies_values() {
+        for v in [
+            "${VAR}",
+            "<password>",
+            "***",
+            "xxxx",
+            "changeme",
+            "",
+            "REDACTED",
+        ] {
+            assert!(
+                is_placeholder_secret_value(v),
+                "`{v}` must be a placeholder"
+            );
+        }
+        for v in ["Hunter2Real", "s3cret-value", "abc123xyz"] {
+            assert!(
+                !is_placeholder_secret_value(v),
+                "`{v}` must NOT be a placeholder"
+            );
+        }
+    }
+
+    // ----- JSON-aware redaction (entire.md §8) -----
+
+    #[test]
+    fn jsonl_skips_id_and_path_fields_but_redacts_command() {
+        let r = Redactor::new_default();
+        // tool_use_id is high-entropy but must survive; file_path must survive;
+        // the command carrying an AWS key must be redacted.
+        let line = r#"{"tool_use_id":"Zk9Qx2Lm7Wp4Rt8Yn1Bv6Cd3Fg5Hj0Ks","file_path":"/a/b/Zk9Qx2Lm7Wp4Rt8.rs","command":"export AWS=AKIAIOSFODNN7EXAMPLE"}"#;
+        let (rb, _) = r.redact_jsonl(line.as_bytes());
+        let out = String::from_utf8(rb.into_inner()).unwrap();
+        assert!(
+            out.contains("Zk9Qx2Lm7Wp4Rt8Yn1Bv6Cd3Fg5Hj0Ks"),
+            "tool_use_id preserved"
+        );
+        assert!(
+            out.contains("/a/b/Zk9Qx2Lm7Wp4Rt8.rs"),
+            "file_path preserved"
+        );
+        assert!(
+            out.contains("<REDACTED:aws-access-key-id>"),
+            "command key redacted: `{out}`"
+        );
+    }
+
+    #[test]
+    fn jsonl_skips_image_objects() {
+        let r = Redactor::new_default();
+        let doc =
+            r#"{"type":"image","source":{"data":"Zk9Qx2Lm7Wp4Rt8Yn1Bv6Cd3Fg5Hj0KsLd2Mq8Nr4Tw"}}"#;
+        let (rb, _) = r.redact_jsonl(doc.as_bytes());
+        let out = String::from_utf8(rb.into_inner()).unwrap();
+        assert_eq!(out, doc, "image object must pass through untouched");
+    }
+
+    #[test]
+    fn jsonl_falls_back_to_scalar_for_non_json_line() {
+        let r = Redactor::new_default();
+        let line = "plain log AKIAIOSFODNN7EXAMPLE trailing";
+        let (rb, _) = r.redact_jsonl(line.as_bytes());
+        let out = String::from_utf8(rb.into_inner()).unwrap();
+        assert!(
+            out.contains("<REDACTED:aws-access-key-id>"),
+            "non-json line still scrubbed: `{out}`"
+        );
+    }
+
+    // ----- PII opt-in (entire.md §8.2 P3) -----
+
+    #[test]
+    fn pii_off_by_default() {
+        let r = Redactor::new_default();
+        let (out, _) = redact_str(&r, "contact alice@example.com or +1 415-555-0199");
+        assert!(
+            out.contains("alice@example.com"),
+            "email must survive when PII off"
+        );
+    }
+
+    #[test]
+    fn pii_redacts_when_enabled() {
+        let r = Redactor::new_default().with_pii(PiiConfig {
+            enabled: true,
+            email: true,
+            phone: false,
+        });
+        let (out, report) = redact_str(&r, "contact alice@example.com please");
+        assert!(
+            out.contains("<REDACTED:pii-email>"),
+            "email redacted when enabled: `{out}`"
+        );
+        assert!(report.matches.iter().any(|m| m.rule_id == "pii-email"));
+    }
+
+    #[test]
+    fn pii_email_allowlist_skips_noreply() {
+        let r = Redactor::new_default().with_pii(PiiConfig {
+            enabled: true,
+            email: true,
+            phone: false,
+        });
+        let (out, _) = redact_str(&r, "from noreply@example.com here");
+        assert!(
+            out.contains("noreply@example.com"),
+            "allowlisted email survives: `{out}`"
+        );
+    }
+
+    // ----- Config mode (entire.md §8.4) -----
+
+    #[test]
+    fn mode_warn_reports_but_does_not_replace() {
+        let r = Redactor::new_default().with_mode(RedactionMode::Warn);
+        let (rb, report) = r.redact(b"key AKIAIOSFODNN7EXAMPLE end");
+        assert_eq!(
+            rb.bytes(),
+            b"key AKIAIOSFODNN7EXAMPLE end",
+            "warn leaves bytes intact"
+        );
+        assert!(!report.matches.is_empty(), "warn still records matches");
+        assert!(
+            report.bytes_redacted >= 20,
+            "warn records would-be redacted volume"
+        );
+    }
+
+    #[test]
+    fn mode_off_skips_detection() {
+        let r = Redactor::new_default().with_mode(RedactionMode::Off);
+        let (rb, report) = r.redact(b"key AKIAIOSFODNN7EXAMPLE end");
+        assert_eq!(rb.bytes(), b"key AKIAIOSFODNN7EXAMPLE end");
+        assert!(report.matches.is_empty(), "off records nothing");
+        assert_eq!(report.bytes_redacted, 0);
+    }
+
+    #[test]
+    fn mode_from_config_str_defaults_safe() {
+        assert_eq!(RedactionMode::from_config_str("warn"), RedactionMode::Warn);
+        assert_eq!(RedactionMode::from_config_str("OFF"), RedactionMode::Off);
+        assert_eq!(
+            RedactionMode::from_config_str("redact"),
+            RedactionMode::Redact
+        );
+        // Unknown / typo falls back to the safe default.
+        assert_eq!(
+            RedactionMode::from_config_str("scrub"),
+            RedactionMode::Redact
+        );
+        assert_eq!(RedactionMode::from_config_str(""), RedactionMode::Redact);
     }
 
     #[test]
