@@ -616,6 +616,7 @@ async fn populate_macos_fuse_upper_dir(upper_dir: &Path, checkout_branch: &str) 
         source: Some(checkout_branch.to_string()),
         worktree: true,
         staged: false,
+        ..Default::default()
     })
     .await
     .map_err(|err| {
@@ -746,6 +747,7 @@ async fn add_fuse_worktree(
             source: Some(checkout_branch.clone()),
             worktree: true,
             staged: false,
+            ..Default::default()
         })
         .await
     {

@@ -561,6 +561,9 @@ async fn reset_hard(target: &str, output: &OutputConfig) -> Result<(), CherryPic
             mixed: false,
             hard: true,
             pathspecs: Vec::new(),
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
+            no_refresh: false,
         },
         &child,
     )
