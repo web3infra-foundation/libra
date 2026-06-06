@@ -433,11 +433,6 @@ will use the copy backend instead.
 
 Libra's Git surface stays compatible enough to fetch from / push to standard Git servers (GitHub, Gitea, …). The per-command compatibility status (`supported` / `partial` / `unsupported` / `intentionally-different`) is tracked in [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
-Low-level inspection commands include `libra cat-file`, `libra show-ref`,
-`libra ls-remote`, and the partial `libra ls-tree` implementation for listing
-commit/tree contents. See [`docs/commands/ls-tree.md`](docs/commands/ls-tree.md)
-for the supported first-version flag surface and deferred Git parity items.
-
 ## Features
 
 ### Clean Code
