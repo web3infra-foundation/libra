@@ -1421,10 +1421,9 @@ fn cherry_pick_continue_on_wrong_branch_rejected() {
         run_libra_command(&["cherry-pick", &feat], p).status.code(),
         Some(128)
     );
-    // Move off the sequence branch (force past the dirty conflict worktree).
     assert_cli_success(
-        &run_libra_command(&["checkout", "-f", "feature"], p),
-        "switch away",
+        &run_libra_command(&["symbolic-ref", "HEAD", "refs/heads/feature"], p),
+        "move HEAD to feature",
     );
     let out = run_libra_command(&["cherry-pick", "--continue"], p);
     assert_eq!(out.status.code(), Some(128));
