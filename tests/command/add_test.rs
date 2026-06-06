@@ -12,6 +12,7 @@
 
 use std::{fs, io::Write};
 
+use git_internal::internal::object::tree::TreeItemMode;
 use libra::internal::{ai::automation::AutomationHistory, db::get_db_conn_instance};
 
 use super::*;
@@ -937,6 +938,23 @@ async fn test_add_config_ignore_errors_default() {
     );
 }
 
+#[tokio::test]
+#[serial]
+async fn test_add_config_ignore_errors_lowercase_key_default() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    libra::internal::config::ConfigKv::set("add.ignoreerrors", "true", false)
+        .await
+        .unwrap();
+
+    assert!(
+        add::resolve_ignore_errors(&AddArgs::default()).await,
+        "lowercase add.ignoreerrors should be treated like add.ignoreErrors"
+    );
+}
+
 /// Scenario: an explicit CLI flag overrides the config default in both
 /// directions (proves the `Option<bool>`-equivalent tri-state).
 #[tokio::test]
@@ -992,6 +1010,40 @@ async fn test_add_chmod_plus_x() {
     .expect("add --chmod=+x");
 
     assert_eq!(index_mode(test_dir.path(), "script.sh"), Some(0o100755));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_add_chmod_then_commit_tree_mode() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    configure_identity_via_cli(test_dir.path());
+    fs::write("build.sh", "#!/bin/sh\necho hi\n").unwrap();
+
+    add::run_add(&AddArgs {
+        pathspec: vec!["build.sh".to_string()],
+        chmod: Some("+x".to_string()),
+        ..Default::default()
+    })
+    .await
+    .expect("add --chmod=+x");
+
+    let commit = run_libra_command(
+        &["commit", "-m", "add executable", "--no-verify"],
+        test_dir.path(),
+    );
+    assert_cli_success(&commit, "commit executable");
+
+    let head = Head::current_commit().await.expect("HEAD should exist");
+    let commit: Commit = load_object(&head).expect("HEAD commit should load");
+    let tree: Tree = load_object(&commit.tree_id).expect("HEAD tree should load");
+    let item = tree
+        .tree_items
+        .iter()
+        .find(|item| item.name == "build.sh")
+        .expect("tree should contain build.sh");
+    assert_eq!(item.mode, TreeItemMode::BlobExecutable);
 }
 
 /// Scenario: `--chmod=-x` records index mode 0o100644 even when the worktree
@@ -1147,6 +1199,32 @@ async fn test_add_chmod_core_filemode_false_warns() {
     assert_eq!(index_mode(test_dir.path(), "script.sh"), Some(0o100755));
 }
 
+#[tokio::test]
+#[serial]
+async fn test_add_chmod_core_filemode_camel_case_warns() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write("script.sh", "#!/bin/sh\n").unwrap();
+    libra::internal::config::ConfigKv::set("core.fileMode", "false", false)
+        .await
+        .unwrap();
+
+    libra::utils::output::reset_warning_tracker();
+    add::run_add(&AddArgs {
+        pathspec: vec!["script.sh".to_string()],
+        chmod: Some("+x".to_string()),
+        ..Default::default()
+    })
+    .await
+    .expect("add --chmod=+x under core.fileMode=false");
+
+    assert!(
+        libra::utils::output::warning_was_emitted(),
+        "camel-case core.fileMode should be treated like core.filemode"
+    );
+}
+
 /// Scenario (Wave 1 prerequisite regression): with the fallible blob path,
 /// `--ignore-errors` skips an unreadable file instead of panicking, and still
 /// stages the readable ones.
@@ -1172,6 +1250,43 @@ async fn test_add_ignore_errors_skips_unreadable() {
     .expect("--ignore-errors must not abort on an unreadable file");
 
     // restore perms so the tempdir can be cleaned up
+    fs::set_permissions("secret.txt", fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert!(
+        out.added.iter().any(|p| p == "readable.txt"),
+        "readable file should be staged: {:?}",
+        out.added
+    );
+    assert!(
+        out.failed.iter().any(|f| f.path == "secret.txt"),
+        "unreadable file should be reported as failed: {:?}",
+        out.failed
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_add_config_ignore_errors_skips_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write("readable.txt", "ok").unwrap();
+    fs::write("secret.txt", "nope").unwrap();
+    fs::set_permissions("secret.txt", fs::Permissions::from_mode(0o000)).unwrap();
+    libra::internal::config::ConfigKv::set("add.ignoreerrors", "true", false)
+        .await
+        .unwrap();
+
+    let out = add::run_add(&AddArgs {
+        pathspec: vec!["readable.txt".to_string(), "secret.txt".to_string()],
+        ..Default::default()
+    })
+    .await
+    .expect("configured ignore-errors must not abort on an unreadable file");
+
     fs::set_permissions("secret.txt", fs::Permissions::from_mode(0o644)).unwrap();
 
     assert!(
@@ -1414,6 +1529,31 @@ async fn test_add_ignore_missing_dry_run_skips_missing() {
     .await
     .expect("--dry-run --ignore-missing must skip the missing path");
     assert!(out.added.iter().any(|p| p == "real.txt"), "{:?}", out.added);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_add_ignore_missing_exit_code_on_warning() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+
+    let out = run_libra_command(
+        &[
+            "add",
+            "--dry-run",
+            "--ignore-missing",
+            "--exit-code-on-warning",
+            "ghost.txt",
+        ],
+        test_dir.path(),
+    );
+
+    assert_eq!(
+        out.status.code(),
+        Some(9),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// Scenario: the in-process API must enforce the same Git/clap contract as the

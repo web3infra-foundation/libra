@@ -58,6 +58,7 @@ EXAMPLES:
     libra add --chmod=+x build.sh      Record the executable bit in the index (not the worktree)
     libra add --renormalize .          Re-stage tracked files (force-rewrite their blobs)
     libra add --pathspec-from-file list.txt   Stage paths read from a file ('-' for stdin)
+    libra add --pathspec-from-file=- --pathspec-file-nul   Read NUL-separated paths from stdin
     libra add --dry-run --ignore-missing x    Preview; skip paths missing from the worktree";
 
 /// Stage file contents for the next commit.
@@ -781,8 +782,8 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
         // `--exit-code-on-warning`.
         if chmod_changed
             && matches!(
-                crate::internal::config::read_cascaded_bool("core.filemode").await,
-                Ok(Some(false))
+                read_cascaded_bool_case_variant("core.fileMode").await,
+                Some(false)
             )
         {
             eprintln!(
@@ -1652,9 +1653,6 @@ fn validate_chmod_spec(spec: &str) -> Result<bool, AddError> {
 /// global) applies; otherwise the default is `false`. A config read failure is
 /// treated as "unset" so a broken config never blocks staging.
 ///
-/// Note: libra config keys are case-sensitive (unlike Git), so the key is read
-/// exactly as `add.ignoreErrors`.
-///
 /// Exposed (`pub`) so integration tests can assert the CLI > config > default
 /// precedence directly without depending on an actual staging failure.
 pub async fn resolve_ignore_errors(args: &AddArgs) -> bool {
@@ -1664,11 +1662,25 @@ pub async fn resolve_ignore_errors(args: &AddArgs) -> bool {
     if args.ignore_errors {
         return true;
     }
-    crate::internal::config::read_cascaded_bool("add.ignoreErrors")
+    read_cascaded_bool_case_variant("add.ignoreErrors")
+        .await
+        .unwrap_or(false)
+}
+
+async fn read_cascaded_bool_case_variant(key: &str) -> Option<bool> {
+    if let Ok(Some(value)) = crate::internal::config::read_cascaded_bool(key).await {
+        return Some(value);
+    }
+
+    let lowercase = key.to_ascii_lowercase();
+    if lowercase == key {
+        return None;
+    }
+
+    crate::internal::config::read_cascaded_bool(&lowercase)
         .await
         .ok()
         .flatten()
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
