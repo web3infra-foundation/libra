@@ -34,6 +34,7 @@ EXAMPLES:
     libra worktree unlock ../feature-x             Release the lock
     libra worktree move ../old ../new              Rename a worktree
     libra worktree prune                           Drop entries whose paths vanished
+    libra worktree prune --dry-run                 Report what prune would drop, change nothing
     libra worktree remove ../feature-x             Unregister, keep the directory on disk
     libra worktree remove ../feature-x --delete-dir
                                                    Unregister and delete the directory
@@ -88,7 +89,11 @@ pub enum WorktreeSubcommand {
         dest: String,
     },
     /// Prune worktrees that are no longer valid or reachable.
-    Prune,
+    Prune {
+        /// Report which worktrees would be pruned without modifying the registry.
+        #[clap(long = "dry-run")]
+        dry_run: bool,
+    },
     /// Unregister a worktree. By default the directory on disk is preserved;
     /// pass `--delete-dir` for Git-style behavior that also removes the
     /// directory after a dirty-state check.
@@ -181,6 +186,9 @@ struct WorktreeMoveOutput {
 struct WorktreePruneOutput {
     pruned: Vec<String>,
     pruned_count: usize,
+    /// True when `--dry-run` was given: `pruned` lists what *would* be pruned
+    /// and the registry was left untouched.
+    dry_run: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -370,8 +378,8 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             let result = move_worktree(src, dest).map_err(WorktreeError::into_cli_error)?;
             render_move_worktree(&result, output)
         }
-        WorktreeSubcommand::Prune => {
-            let result = prune_worktrees().map_err(WorktreeError::into_cli_error)?;
+        WorktreeSubcommand::Prune { dry_run } => {
+            let result = prune_worktrees(dry_run).map_err(WorktreeError::into_cli_error)?;
             render_prune_worktrees(&result, output)
         }
         WorktreeSubcommand::Remove { path, delete_dir } => {
@@ -1067,7 +1075,7 @@ fn render_move_worktree(result: &WorktreeMoveOutput, output: &OutputConfig) -> C
 /// Any non-main worktree whose directory no longer exists on disk is removed
 /// from the registry. Before mutating state, the function prints the set of
 /// paths that will be pruned so the user can see what is being cleaned up.
-fn prune_worktrees() -> WorktreeResult<WorktreePruneOutput> {
+fn prune_worktrees(dry_run: bool) -> WorktreeResult<WorktreePruneOutput> {
     let mut state = load_state()?;
     let to_prune: Vec<_> = state
         .worktrees
@@ -1079,7 +1087,8 @@ fn prune_worktrees() -> WorktreeResult<WorktreePruneOutput> {
         .map(|w| w.path.clone())
         .collect();
 
-    if !to_prune.is_empty() {
+    // `--dry-run` reports the prunable entries but leaves the registry intact.
+    if !to_prune.is_empty() && !dry_run {
         state.worktrees.retain(|w| {
             let path = Path::new(&w.path);
             path.exists() || w.is_main || w.locked
@@ -1090,6 +1099,7 @@ fn prune_worktrees() -> WorktreeResult<WorktreePruneOutput> {
     Ok(WorktreePruneOutput {
         pruned_count: to_prune.len(),
         pruned: to_prune,
+        dry_run,
     })
 }
 
@@ -1108,7 +1118,11 @@ fn render_prune_worktrees(result: &WorktreePruneOutput, output: &OutputConfig) -
     for path in &result.pruned {
         println!("  {}", path);
     }
-    println!("Pruned {} worktrees", result.pruned_count);
+    if result.dry_run {
+        println!("Dry run: {} worktrees would be pruned", result.pruned_count);
+    } else {
+        println!("Pruned {} worktrees", result.pruned_count);
+    }
     Ok(())
 }
 

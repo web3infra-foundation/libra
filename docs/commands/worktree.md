@@ -12,7 +12,7 @@ libra worktree list
 libra worktree lock <path> [--reason <text>]
 libra worktree unlock <path>
 libra worktree move <src> <dest>
-libra worktree prune
+libra worktree prune [--dry-run]
 libra worktree remove <path>
 libra worktree umount <path> [--cleanup]
 libra worktree repair
@@ -110,8 +110,11 @@ libra --json worktree move ../my-feature ../my-feature-v2
 
 Remove worktrees from the registry whose directories no longer exist on disk. The main worktree and locked worktrees are never pruned.
 
+Pass `--dry-run` to report which worktrees *would* be pruned without modifying the registry. The output lists the same entries as a real prune, but nothing is written and the JSON envelope carries `"dry_run": true`.
+
 ```bash
 libra worktree prune
+libra worktree prune --dry-run
 libra --machine worktree prune
 ```
 
@@ -254,6 +257,15 @@ Will prune 2 worktrees:
 Pruned 2 worktrees
 ```
 
+**`worktree prune --dry-run`** (with stale entries):
+
+```text
+Will prune 2 worktrees:
+  /Users/alice/projects/old-experiment
+  /Users/alice/projects/deleted-branch
+Dry run: 2 worktrees would be pruned
+```
+
 **`worktree prune`** (nothing to prune):
 
 ```text
@@ -352,10 +364,13 @@ single-line JSON.
   "command": "worktree.prune",
   "data": {
     "pruned": ["/Users/alice/projects/old-experiment"],
-    "pruned_count": 1
+    "pruned_count": 1,
+    "dry_run": false
   }
 }
 ```
+
+With `--dry-run`, `dry_run` is `true` and the listed entries remain in the registry.
 
 **`worktree.remove`**:
 

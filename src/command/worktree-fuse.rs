@@ -94,7 +94,11 @@ pub enum WorktreeSubcommand {
         src: String,
         dest: String,
     },
-    Prune,
+    Prune {
+        /// Report which worktrees would be pruned without modifying the registry.
+        #[clap(long = "dry-run")]
+        dry_run: bool,
+    },
     Remove {
         path: String,
         #[clap(long, help = "Also delete the worktree directory on disk")]
@@ -318,11 +322,15 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             )
             .await
         }
-        WorktreeSubcommand::Prune => {
-            prune_fuse_worktrees().map_err(|e| CliError::fatal(e.to_string()))?;
+        WorktreeSubcommand::Prune { dry_run } => {
+            // `--dry-run` reports prunable entries without mutating either the
+            // FUSE registry or the shared worktree registry.
+            if !dry_run {
+                prune_fuse_worktrees().map_err(|e| CliError::fatal(e.to_string()))?;
+            }
             legacy::execute_safe(
                 legacy::WorktreeArgs {
-                    command: legacy::WorktreeSubcommand::Prune,
+                    command: legacy::WorktreeSubcommand::Prune { dry_run },
                 },
                 output,
             )

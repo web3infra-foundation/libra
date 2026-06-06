@@ -342,6 +342,71 @@ async fn test_worktree_prune_machine_reports_pruned_paths() {
     );
 }
 
+/// `prune --dry-run` reports the prunable entry but leaves `worktrees.json`
+/// byte-identical; a follow-up real prune then drops the entry.
+#[tokio::test]
+#[serial]
+async fn test_worktree_prune_dry_run_preserves_registry() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let add = run_libra_command(&["worktree", "add", "wt_prune_dry"], repo_dir.path());
+    assert_cli_success(&add, "worktree add");
+    let wt_path = repo_dir.path().join("wt_prune_dry");
+    let canonical = wt_path.canonicalize().unwrap();
+    fs::remove_dir_all(&wt_path).expect("failed to remove worktree directory before prune");
+
+    let state_path = repo_dir.path().join(".libra/worktrees.json");
+    let registry_before = fs::read_to_string(&state_path).expect("read worktrees.json");
+    assert!(
+        registry_before.contains(canonical.to_string_lossy().as_ref()),
+        "stale entry should still be registered before dry-run"
+    );
+
+    // Dry run: must report the prunable entry without mutating the registry.
+    let dry = run_libra_command(
+        &["--machine", "worktree", "prune", "--dry-run"],
+        repo_dir.path(),
+    );
+    assert_cli_success(&dry, "machine worktree prune --dry-run");
+    let dry_stdout = String::from_utf8_lossy(&dry.stdout);
+    let dry_line = dry_stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("dry-run machine output should have a JSON line");
+    let parsed: serde_json::Value =
+        serde_json::from_str(dry_line).expect("dry-run machine JSON line");
+    assert_eq!(parsed["command"], "worktree.prune");
+    assert_eq!(parsed["data"]["pruned_count"], 1);
+    assert_eq!(parsed["data"]["dry_run"], true);
+    assert_eq!(
+        parsed["data"]["pruned"][0],
+        canonical.to_string_lossy().as_ref()
+    );
+
+    let registry_after_dry = fs::read_to_string(&state_path).expect("read worktrees.json");
+    assert_eq!(
+        registry_before, registry_after_dry,
+        "dry-run must leave worktrees.json byte-identical"
+    );
+
+    // A real prune now actually drops the stale entry.
+    let real = run_libra_command(&["--machine", "worktree", "prune"], repo_dir.path());
+    assert_cli_success(&real, "machine worktree prune");
+    let real_stdout = String::from_utf8_lossy(&real.stdout);
+    let real_line = real_stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("prune machine output should have a JSON line");
+    let parsed_real: serde_json::Value =
+        serde_json::from_str(real_line).expect("prune machine JSON line");
+    assert_eq!(parsed_real["data"]["dry_run"], false);
+    let registry_after_real = fs::read_to_string(&state_path).expect("read worktrees.json");
+    assert!(
+        !registry_after_real.contains(canonical.to_string_lossy().as_ref()),
+        "real prune should drop the stale entry from the registry"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_worktree_repair_json_reports_changed_state() {
