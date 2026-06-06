@@ -251,6 +251,7 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
             staged: true,
             source: Some("4b825dc642cb6eb9a060e54bf8d69288fbee4904".into()),
             pathspec: vec![util::working_dir_string()],
+            ..Default::default()
         },
         &OutputConfig::default(),
     )

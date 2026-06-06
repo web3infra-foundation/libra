@@ -786,6 +786,7 @@ async fn add_worktree(path: String) -> WorktreeResult<WorktreeAddOutput> {
             source: Some("HEAD".to_string()),
             worktree: true,
             staged: false,
+            ..Default::default()
         })
         .await
         {

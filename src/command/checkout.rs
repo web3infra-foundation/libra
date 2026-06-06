@@ -475,6 +475,7 @@ async fn restore_checkout_paths(args: CheckoutArgs) -> Result<CheckoutOutput, Ch
         staged: source.is_some(),
         source,
         pathspec: args.pathspec,
+        ..Default::default()
     };
     let restore = restore::execute_to_output(restore_args)
         .await
@@ -1138,6 +1139,7 @@ async fn restore_to_commit(commit_id: ObjectHash, output: &OutputConfig) -> CliR
         staged: true,
         source: Some(commit_id.to_string()),
         pathspec: vec![util::working_dir_string()],
+        ..Default::default()
     };
     restore::execute_safe(restore_args, &output.child_output_config()).await
 }
