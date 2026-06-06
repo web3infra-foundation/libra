@@ -208,3 +208,117 @@ fn archive_rejects_output_in_missing_directory() {
     let (_, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-IO-002");
 }
+
+#[test]
+fn archive_preserves_unicode_filenames() {
+    let repo = tempdir().expect("failed to create unicode archive test repository");
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    fs::write(repo.path().join("你好世界.txt"), "unicode content\n")
+        .expect("failed to write unicode file");
+
+    let output = run_libra_command(&["add", ".libraignore", "你好世界.txt"], repo.path());
+    assert_cli_success(&output, "failed to add unicode file");
+    let output = run_libra_command(&["commit", "-m", "unicode", "--no-verify"], repo.path());
+    assert_cli_success(&output, "failed to commit unicode file");
+
+    let out = repo.path().join("unicode.tar");
+    let out_str = out.to_str().expect("archive output path should be UTF-8");
+    let output = run_libra_command(&["archive", "-o", out_str], repo.path());
+
+    assert_cli_success(&output, "archive unicode");
+    let text = String::from_utf8_lossy(&read_bytes(&out)).to_string();
+    assert!(
+        text.contains("你好世界.txt"),
+        "tar should contain unicode filename"
+    );
+}
+
+#[test]
+fn archive_preserves_spaces_in_filenames() {
+    let repo = tempdir().expect("failed to create spaced filename archive test repository");
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    fs::create_dir_all(repo.path().join("my docs")).expect("failed to create spaced directory");
+    fs::write(
+        repo.path().join("my docs").join("hello world.txt"),
+        "hello\n",
+    )
+    .expect("failed to write spaced filename");
+
+    let output = run_libra_command(
+        &["add", ".libraignore", "my docs/hello world.txt"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "failed to add spaced filename");
+    let output = run_libra_command(&["commit", "-m", "spaces", "--no-verify"], repo.path());
+    assert_cli_success(&output, "failed to commit spaced filename");
+
+    let out = repo.path().join("spaces.tar");
+    let out_str = out.to_str().expect("archive output path should be UTF-8");
+    let output = run_libra_command(&["archive", "-o", out_str], repo.path());
+
+    assert_cli_success(&output, "archive spaces");
+    let text = String::from_utf8_lossy(&read_bytes(&out)).to_string();
+    assert!(
+        text.contains("my docs/hello world.txt"),
+        "tar should contain filename with spaces"
+    );
+}
+
+#[test]
+fn archive_preserves_deeply_nested_paths() {
+    let repo = tempdir().expect("failed to create deep archive test repository");
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    let deep = repo.path().join("a/b/c/d/e/f/g");
+    fs::create_dir_all(&deep).expect("failed to create deep directory");
+    fs::write(deep.join("deep.txt"), "bottom\n").expect("failed to write deep file");
+
+    let output = run_libra_command(&["add", ".libraignore", "a/"], repo.path());
+    assert_cli_success(&output, "failed to add deep path");
+    let output = run_libra_command(&["commit", "-m", "deep", "--no-verify"], repo.path());
+    assert_cli_success(&output, "failed to commit deep path");
+
+    let out = repo.path().join("deep.tar");
+    let out_str = out.to_str().expect("archive output path should be UTF-8");
+    let output = run_libra_command(&["archive", "-o", out_str], repo.path());
+
+    assert_cli_success(&output, "archive deep path");
+    let text = String::from_utf8_lossy(&read_bytes(&out)).to_string();
+    assert!(
+        text.contains("a/b/c/d/e/f/g/deep.txt"),
+        "tar should contain full nested path"
+    );
+}
+
+#[test]
+fn archive_preserves_empty_files() {
+    let repo = tempdir().expect("failed to create empty file archive test repository");
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    fs::write(repo.path().join("empty.txt"), "").expect("failed to write empty file");
+
+    let output = run_libra_command(&["add", ".libraignore", "empty.txt"], repo.path());
+    assert_cli_success(&output, "failed to add empty file");
+    let output = run_libra_command(&["commit", "-m", "empty", "--no-verify"], repo.path());
+    assert_cli_success(&output, "failed to commit empty file");
+
+    let out = repo.path().join("empty.tar");
+    let out_str = out.to_str().expect("archive output path should be UTF-8");
+    let output = run_libra_command(&["archive", "-o", out_str], repo.path());
+
+    assert_cli_success(&output, "archive empty file");
+    let text = String::from_utf8_lossy(&read_bytes(&out)).to_string();
+    assert!(text.contains("empty.txt"), "tar should contain empty file");
+}
+
+#[test]
+fn archive_short_format_flag_writes_zip() {
+    let repo = create_archive_test_repo();
+
+    let output = run_libra_command(&["archive", "-f", "zip"], repo.path());
+
+    assert_cli_success(&output, "archive -f zip");
+    assert!(is_zip(&output.stdout), "expected zip output from -f zip");
+}
