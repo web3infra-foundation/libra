@@ -116,6 +116,13 @@ In `--dry-run` mode, the same output is produced but no files are modified.
 Global `--quiet` suppresses this primary human output while keeping warnings
 and errors on stderr.
 
+The path is highlighted only when color is enabled. Output respects `--color` /
+`--no-color`: when stdout is not a terminal (e.g. piped) or `--no-color` is
+given, each line is plain `rm '<path>'` with no ANSI escapes, so scripts can
+parse the filename safely. When a removal is refused for uncommitted changes,
+the conflicting file list is indented with four spaces (matching `git rm`),
+not a tab.
+
 ## JSON Output
 
 `--json` and `--machine` use the `rm` command envelope. `paths` contains every
