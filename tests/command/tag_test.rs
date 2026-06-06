@@ -680,6 +680,7 @@ async fn test_force_tag() {
         name: Some("v1.0".into()),
         list: false,
         delete: false,
+        annotate: false,
         message: Some("Updated".into()),
         force: true,
         n_lines: None,
@@ -791,6 +792,7 @@ async fn test_delete_tag() {
         name: Some("to-delete".into()),
         list: false,
         delete: true,
+        annotate: false,
         message: None,
         force: false,
         n_lines: None,
@@ -843,6 +845,7 @@ async fn test_annotation_lines_tag() {
         name: Some("v1.0.1".into()),
         list: false,
         delete: false,
+        annotate: false,
         message: Some("Single line annotation message".into()),
         force: false,
         n_lines: None,
@@ -884,6 +887,7 @@ async fn test_annotation_lines_tag() {
         name: Some("v1.0.3".into()),
         list: false,
         delete: false,
+        annotate: false,
         message: Some("multi\nline\nannotation\ntag".into()),
         force: false,
         n_lines: None,
@@ -1021,5 +1025,37 @@ fn test_tag_points_at_invalid_object_errors() {
     assert!(
         stderr.contains("not a valid object name"),
         "expected 'not a valid object name' in stderr, got: {stderr}",
+    );
+}
+
+/// `-a`/`--annotate` creates an annotated tag when paired with `-m`, and is a
+/// usage error (exit 129) without a message — never a silent lightweight tag.
+#[test]
+fn test_tag_annotate_flag_requires_message() {
+    let repo = create_committed_repo_via_cli();
+
+    // -a -m creates an annotated tag.
+    let ok = run_libra_command(
+        &["--json", "tag", "-a", "-m", "Release", "v2.0"],
+        repo.path(),
+    );
+    assert_cli_success(&ok, "tag -a -m");
+    let json = parse_json_stdout(&ok);
+    assert_eq!(json["data"]["action"], "create");
+    assert_eq!(json["data"]["tag_type"], "annotated");
+    assert_eq!(json["data"]["message"], "Release");
+
+    // -a without a message must error rather than degrade to a lightweight tag.
+    let no_msg = run_libra_command(&["tag", "-a", "v3.0"], repo.path());
+    assert_eq!(
+        no_msg.status.code(),
+        Some(129),
+        "annotate without message should be a usage error, stderr: {}",
+        String::from_utf8_lossy(&no_msg.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&no_msg.stderr);
+    assert!(
+        stderr.contains("annotated tags require a message"),
+        "expected the annotate-requires-message diagnostic, got: {stderr}"
     );
 }

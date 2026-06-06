@@ -5,7 +5,7 @@ Create, list, or delete tags.
 ## Synopsis
 
 ```
-libra tag [<name>] [-m <message>] [-f]
+libra tag [<name>] [-a] [-m <message>] [-f]
 libra tag -l [-n <lines>] [--points-at <object>]
 libra tag -d <name>
 ```
@@ -30,6 +30,7 @@ Tag references are stored in the SQLite database alongside branch references, pr
 | | `<name>` | positional (optional) | Tag name to create, show, or delete |
 | `-l` | `--list` | | List all tags |
 | `-d` | `--delete` | | Delete the named tag |
+| `-a` | `--annotate` | | Create an annotated tag; requires `-m` (errors without one rather than creating a lightweight tag) |
 | `-m` | `--message` | `<msg>` | Create an annotated tag with the given message |
 | `-f` | `--force` | | Overwrite an existing tag |
 | `-n` | `--n-lines` | `<lines>` | Number of annotation lines to display when listing (0 = names only) |
@@ -41,8 +42,8 @@ Tag references are stored in the SQLite database alongside branch references, pr
 # Create a lightweight tag at HEAD
 libra tag v1.0
 
-# Create an annotated tag with a message
-libra tag -m "Release v1.1" v1.1
+# Create an annotated tag with a message (-a is optional when -m is given)
+libra tag -a -m "Release v1.1" v1.1
 
 # Force-overwrite an existing tag
 libra tag -f v1.0
@@ -174,7 +175,7 @@ Libra preserves Git's two-tier tag model for on-disk format compatibility. Light
 | Feature | Git | Libra | jj |
 |---------|-----|-------|----|
 | Create lightweight | `git tag <name>` | `libra tag <name>` | `jj tag create <name>` |
-| Create annotated | `git tag -a -m "msg" <name>` | `libra tag -m "msg" <name>` | Not supported (lightweight only) |
+| Create annotated | `git tag -a -m "msg" <name>` | `libra tag -a -m "msg" <name>` (or just `-m`) | Not supported (lightweight only) |
 | List tags | `git tag -l` | `libra tag -l` | `jj tag list` |
 | List with message | `git tag -l -n3` | `libra tag -l -n 3` | N/A |
 | List by target | `git tag --points-at <obj>` | `libra tag --points-at <obj>` | N/A |
@@ -193,6 +194,7 @@ Libra preserves Git's two-tier tag model for on-disk format compatibility. Light
 | Tag not found (delete/show) | `LBR-CLI-003` | "use 'libra tag -l' to list available tags." |
 | Unresolvable `--points-at` object | `LBR-CLI-003` | "use 'libra log --oneline' to see available commits." |
 | Missing tag name for --delete/--message/--force | `LBR-CLI-002` | "use 'libra tag <name>' to create or update a tag" |
+| `-a`/`--annotate` without `-m`, or combined with `-l`/`-d` | `LBR-CLI-002` | "create an annotated tag with 'libra tag -a -m <message> <name>'" |
 | Failed to resolve HEAD | `LBR-IO-001` or `LBR-REPO-002` | -- |
 | Failed to serialize annotated tag | `LBR-REPO-005` | -- |
 | Failed to store object | `LBR-IO-002` | -- |

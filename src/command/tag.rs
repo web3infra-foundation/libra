@@ -25,7 +25,7 @@ const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
 const TAG_EXAMPLES: &str = "\
 EXAMPLES:
     libra tag v1.0                        Create a lightweight tag at HEAD
-    libra tag -m \"Release v1.1\" v1.1    Create an annotated tag
+    libra tag -a -m \"Release v1.1\" v1.1 Create an annotated tag
     libra tag -l -n 2                     List tags with up to 2 annotation lines
     libra tag --points-at HEAD            List tags pointing at HEAD's commit
     libra tag -d v1.0                     Delete a tag
@@ -46,6 +46,11 @@ pub struct TagArgs {
     /// Delete a tag
     #[clap(short, long, group = "action")]
     pub delete: bool,
+
+    /// Create an annotated tag. Requires a message (`-m`); without one this
+    /// errors rather than silently creating a lightweight tag.
+    #[clap(short = 'a', long = "annotate")]
+    pub annotate: bool,
 
     /// Message for the annotated tag. If provided, creates an annotated tag.
     #[clap(short, long)]
@@ -124,6 +129,9 @@ enum TagError {
 
     #[error("{0}")]
     MissingName(String),
+
+    #[error("{0}")]
+    AnnotateUsage(String),
 
     #[error("Cannot create tag: HEAD does not point to a commit")]
     HeadUnborn,
@@ -213,6 +221,9 @@ impl From<TagError> for CliError {
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
                 .with_hint("use 'libra tag <name>' to create or update a tag")
                 .with_hint("use 'libra tag -l' to list existing tags"),
+            TagError::AnnotateUsage(message) => CliError::command_usage(message)
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("create an annotated tag with 'libra tag -a -m <message> <name>'"),
             TagError::HeadUnborn => CliError::fatal(message)
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("create a commit first before tagging HEAD."),
@@ -249,6 +260,28 @@ impl From<TagError> for CliError {
 }
 
 fn validate_named_tag_action(args: &TagArgs) -> Result<(), TagError> {
+    // `-a`/`--annotate` is a create-only flag. It must not be combined with
+    // listing/deleting, and (since editor entry is not yet supported) it
+    // requires an explicit message rather than silently degrading to a
+    // lightweight tag.
+    if args.annotate {
+        if args.list || args.delete {
+            return Err(TagError::AnnotateUsage(
+                "the -a/--annotate option is only valid when creating a tag".to_string(),
+            ));
+        }
+        if args.name.is_none() {
+            return Err(TagError::MissingName(
+                "tag name is required when using --annotate".to_string(),
+            ));
+        }
+        if args.message.is_none() {
+            return Err(TagError::AnnotateUsage(
+                "annotated tags require a message; pass -m <message>".to_string(),
+            ));
+        }
+    }
+
     if args.name.is_some() {
         return Ok(());
     }
@@ -776,6 +809,32 @@ mod tests {
         assert_eq!(args.points_at.as_deref(), Some("HEAD"));
         assert!(!args.list);
         assert!(args.name.is_none());
+    }
+
+    #[test]
+    fn annotate_with_message_is_valid() {
+        let args = TagArgs::try_parse_from(["tag", "-a", "-m", "msg", "v1.0"]).unwrap();
+        assert!(args.annotate);
+        assert!(validate_named_tag_action(&args).is_ok());
+    }
+
+    #[test]
+    fn annotate_without_message_is_usage_error() {
+        let args = TagArgs::try_parse_from(["tag", "-a", "v1.0"]).unwrap();
+        let err = validate_named_tag_action(&args).unwrap_err();
+        assert!(matches!(err, TagError::AnnotateUsage(_)), "got: {err:?}");
+        assert!(err.to_string().contains("require a message"));
+    }
+
+    #[test]
+    fn annotate_with_list_is_usage_error() {
+        let args = TagArgs::try_parse_from(["tag", "-a", "-l"]).unwrap();
+        let err = validate_named_tag_action(&args).unwrap_err();
+        assert!(matches!(err, TagError::AnnotateUsage(_)), "got: {err:?}");
+        assert!(
+            CliError::from(err).stable_code() == StableErrorCode::CliInvalidArguments,
+            "annotate misuse must map to LBR-CLI-002"
+        );
     }
 
     /// An unresolvable `--points-at` revision maps to `CliInvalidTarget`
