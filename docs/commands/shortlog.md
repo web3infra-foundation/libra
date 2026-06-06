@@ -7,7 +7,7 @@ Summarize reachable commits by author.
 ## Synopsis
 
 ```
-libra shortlog [<revision>] [-n] [-s] [-e] [--since <date>] [--until <date>]
+libra shortlog [<revision>] [-n] [-s] [-e] [-c] [--no-merges] [--since <date>] [--until <date>]
 ```
 
 ## Description
@@ -25,6 +25,8 @@ Date filtering via `--since` and `--until` restricts which commits are included 
 | Numbered | `-n` | `--numbered` | Sort output by number of commits per author (descending) instead of alphabetically. |
 | Summary | `-s` | `--summary` | Suppress commit descriptions; show only per-author commit counts. |
 | Email | `-e` | `--email` | Show the email address of each author alongside their name. When enabled, authors are grouped by `name <email>` pair. |
+| Committer | `-c` | `--committer` | Group commits by committer identity instead of author. |
+| No merges | | `--no-merges` | Exclude merge commits (those with more than one parent) from the summary and totals. |
 | Since | | `--since <date>` | Only include commits more recent than the specified date. |
 | Until | | `--until <date>` | Only include commits older than the specified date. |
 | Revision | | positional (optional) | The revision to summarize from. Defaults to `HEAD`. |
