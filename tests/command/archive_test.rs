@@ -79,6 +79,26 @@ fn archive_supports_compressed_and_zip_formats() {
 }
 
 #[test]
+fn archive_accepts_compression_format_aliases() {
+    let repo = create_archive_test_repo();
+
+    let gzip = run_libra_command(&["archive", "--format=tgz"], repo.path());
+    assert_cli_success(&gzip, "archive tgz");
+    assert!(is_gzip(&gzip.stdout), "tgz should produce gzip output");
+
+    let bzip2 = run_libra_command(&["archive", "--format=tbz2"], repo.path());
+    assert_cli_success(&bzip2, "archive tbz2");
+    assert!(is_bzip2(&bzip2.stdout), "tbz2 should produce bzip2 output");
+
+    let short_bzip2 = run_libra_command(&["archive", "--format=tbz"], repo.path());
+    assert_cli_success(&short_bzip2, "archive tbz");
+    assert!(
+        is_bzip2(&short_bzip2.stdout),
+        "tbz should produce bzip2 output"
+    );
+}
+
+#[test]
 fn archive_writes_output_file() {
     let repo = create_archive_test_repo();
     let out = repo.path().join("out.tar");
@@ -321,4 +341,75 @@ fn archive_short_format_flag_writes_zip() {
 
     assert_cli_success(&output, "archive -f zip");
     assert!(is_zip(&output.stdout), "expected zip output from -f zip");
+}
+
+#[test]
+fn archive_accepts_tags() {
+    let repo = create_archive_test_repo();
+
+    let output = run_libra_command(&["tag", "v0.1.0"], repo.path());
+    assert_cli_success(&output, "failed to create archive fixture tag");
+
+    let output = run_libra_command(&["archive", "v0.1.0"], repo.path());
+
+    assert_cli_success(&output, "archive tag");
+    assert!(is_tar(&output.stdout), "expected tar output from tag");
+}
+
+#[test]
+fn archive_accepts_short_commit_hashes() {
+    let repo = create_archive_test_repo();
+
+    let output = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert_cli_success(&output, "failed to resolve HEAD");
+    let full_hash = String::from_utf8_lossy(&output.stdout);
+    let short_hash = full_hash
+        .trim()
+        .get(..8)
+        .expect("archive fixture commit hash should be at least 8 chars");
+
+    let output = run_libra_command(&["archive", short_hash], repo.path());
+
+    assert_cli_success(&output, "archive short hash");
+    assert!(
+        is_tar(&output.stdout),
+        "expected tar output from short hash"
+    );
+}
+
+#[test]
+fn archive_head_uses_latest_commit_tree() {
+    let repo = create_archive_test_repo();
+    fs::write(repo.path().join("NEW.txt"), "second commit\n")
+        .expect("failed to write second commit fixture");
+
+    let output = run_libra_command(&["add", "NEW.txt"], repo.path());
+    assert_cli_success(&output, "failed to add second commit fixture");
+    let output = run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    assert_cli_success(&output, "failed to create second commit");
+
+    let out = repo.path().join("head.tar");
+    let out_str = out.to_str().expect("archive output path should be UTF-8");
+    let output = run_libra_command(&["archive", "-o", out_str, "HEAD"], repo.path());
+
+    assert_cli_success(&output, "archive HEAD after second commit");
+    let text = String::from_utf8_lossy(&read_bytes(&out)).to_string();
+    assert!(
+        text.contains("NEW.txt"),
+        "archive should contain the latest committed file"
+    );
+}
+
+#[test]
+fn archive_tar_gz_file_output_is_not_truncated() {
+    let repo = create_archive_test_repo();
+    let out = repo.path().join("out.tar.gz");
+    let out_str = out.to_str().expect("archive output path should be UTF-8");
+
+    let output = run_libra_command(&["archive", "-o", out_str, "--format=tar.gz"], repo.path());
+
+    assert_cli_success(&output, "archive tar.gz file");
+    let data = read_bytes(&out);
+    assert!(is_gzip(&data), "archive output should be gzip");
+    assert!(data.len() > 20, "archive output should not be truncated");
 }
