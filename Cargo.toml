@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.1409"
+version = "0.17.1410"
 edition = "2024"
 license = "MIT"
 description = "AI agent-native version control system with Git on-disk compatibility, SQLite-backed metadata, and tiered cloud storage"
@@ -22,7 +22,7 @@ subagent-scaffold = []  # CEX-S2-10 schema-only scaffold (Step 2 sub-agent contr
 
 [dependencies]
 uuid = { version = "1.23.1", features = ["v4", "v5", "v7"] }
-git-internal = "0.7.4"
+git-internal = "0.7.5"
 anyhow = "1.0.102"
 byte-unit = "5.2.0"
 byteorder = "1.5.0"
