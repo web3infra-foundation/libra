@@ -3,6 +3,7 @@
 use std::{
     collections::HashSet,
     fs, io,
+    io::{BufRead, Read},
     path::{Path, PathBuf},
 };
 
@@ -41,6 +42,7 @@ EXAMPLES:
     libra reset --soft HEAD~2             Move HEAD only, keep index and worktree
     libra reset --hard main               Reset HEAD, index, and worktree to branch 'main'
     libra reset HEAD -- src/lib.rs        Unstage a path back to HEAD
+    libra reset --pathspec-from-file=paths.txt   Unstage paths read from a file ('-' for stdin)
     libra reset --json --hard HEAD~1      Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -65,6 +67,22 @@ pub struct ResetArgs {
     /// Pathspecs to reset specific files
     #[clap(value_name = "PATH")]
     pub pathspecs: Vec<String>,
+
+    /// Read pathspecs from the given file (`-` for stdin), one per line (or
+    /// NUL-separated with --pathspec-file-nul). Mutually exclusive with
+    /// command-line pathspecs.
+    #[clap(long, value_name = "FILE")]
+    pub pathspec_from_file: Option<String>,
+
+    /// Treat --pathspec-from-file input as NUL-separated instead of
+    /// line-separated. No-op without --pathspec-from-file.
+    #[clap(long)]
+    pub pathspec_file_nul: bool,
+
+    /// Accepted for Git compatibility. Libra's reset never refreshes the index,
+    /// so this flag is a no-op.
+    #[clap(long)]
+    pub no_refresh: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -198,6 +216,19 @@ enum ResetError {
     #[error("pathspec '{0}' did not match any file(s) known to libra")]
     PathspecNotMatched(String),
 
+    #[error("--pathspec-from-file cannot be combined with command-line pathspecs")]
+    PathspecSourceConflict,
+
+    #[error("pathspec '{0}' is outside the repository working directory")]
+    PathspecOutsideWorkdir(String),
+
+    #[error("failed to read pathspecs from {path}: {source}")]
+    PathspecFileRead {
+        path: String,
+        #[source]
+        source: io::Error,
+    },
+
     /// Refused to reset onto a Libra-managed locked branch (`intent`,
     /// `agent-traces`, …). These refs hold AI-agent state that the user
     /// should not be able to overwrite by `reset`.
@@ -236,6 +267,9 @@ impl ResetError {
             Self::PathspecWithSoft(_) => StableErrorCode::CliInvalidArguments,
             Self::PathspecWithHard => StableErrorCode::CliInvalidArguments,
             Self::PathspecNotMatched(_) => StableErrorCode::CliInvalidTarget,
+            Self::PathspecSourceConflict => StableErrorCode::CliInvalidArguments,
+            Self::PathspecOutsideWorkdir(_) => StableErrorCode::CliInvalidArguments,
+            Self::PathspecFileRead { .. } => StableErrorCode::IoReadFailed,
             Self::LockedTarget(_) => StableErrorCode::CliInvalidTarget,
             Self::LockedCurrentBranch(_) => StableErrorCode::ConflictOperationBlocked,
             Self::Rollback { primary, .. } => primary.stable_code(),
@@ -263,6 +297,15 @@ impl ResetError {
                 "--hard updates the working tree; omit pathspecs or use --mixed for specific paths.",
             ),
             Self::PathspecNotMatched(_) => Some("check the path and try again."),
+            Self::PathspecSourceConflict => Some(
+                "provide pathspecs either on the command line or via --pathspec-from-file, not both.",
+            ),
+            Self::PathspecOutsideWorkdir(_) => {
+                Some("pathspecs must stay within the repository working directory.")
+            }
+            Self::PathspecFileRead { .. } => {
+                Some("check that the pathspec file exists and is readable.")
+            }
             Self::LockedTarget(_) => Some(
                 "Libra-managed branches like 'intent' and 'agent-traces' cannot be used as reset targets",
             ),
@@ -283,7 +326,10 @@ impl ResetError {
 
     fn is_command_usage(&self) -> bool {
         match self {
-            Self::PathspecWithSoft(_) | Self::PathspecWithHard => true,
+            Self::PathspecWithSoft(_)
+            | Self::PathspecWithHard
+            | Self::PathspecSourceConflict
+            | Self::PathspecOutsideWorkdir(_) => true,
             Self::Rollback { primary, .. } => primary.is_command_usage(),
             _ => false,
         }
@@ -364,16 +410,22 @@ async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError> {
     };
     let previous_commit = Head::current_commit().await.map(|hash| hash.to_string());
 
-    if !args.pathspecs.is_empty() {
+    // Effective pathspecs may come from the command line or from
+    // `--pathspec-from-file` (mutually exclusive; `-` reads stdin). Both
+    // sources flow through the same `reset_pathspecs` execution and
+    // containment checks below.
+    let effective_pathspecs = resolve_effective_pathspecs(&args)?;
+
+    if !effective_pathspecs.is_empty() {
         if matches!(mode, ResetMode::Soft) {
-            return Err(ResetError::PathspecWithSoft(args.pathspecs.join(" ")));
+            return Err(ResetError::PathspecWithSoft(effective_pathspecs.join(" ")));
         }
         if matches!(mode, ResetMode::Hard) {
             return Err(ResetError::PathspecWithHard);
         }
 
         let target_commit_id = resolve_commit(&args.target).await?;
-        let changed_paths = reset_pathspecs(&args.pathspecs, &target_commit_id).await?;
+        let changed_paths = reset_pathspecs(&effective_pathspecs, &target_commit_id).await?;
         let subject = load_commit_summary_or_warn(&target_commit_id);
         let commit = target_commit_id.to_string();
 
@@ -437,6 +489,16 @@ async fn reset_pathspecs(
     let mut changed_paths = Vec::new();
 
     for pathspec in pathspecs {
+        // Containment: a pathspec is workdir-relative, so resolve it against the
+        // working directory and reject anything that escapes the repository (a
+        // `../` traversal). This applies uniformly to command-line and
+        // `--pathspec-from-file` sources. `is_sub_path` normalises `..`
+        // components without touching the filesystem.
+        let absolute = util::workdir_to_absolute(PathBuf::from(pathspec));
+        if !util::is_sub_path(&absolute, util::working_dir()) {
+            return Err(ResetError::PathspecOutsideWorkdir(pathspec.clone()));
+        }
+
         let relative_path = util::workdir_to_current(PathBuf::from(pathspec));
         let path_str = relative_path.to_str().ok_or_else(|| {
             ResetError::InvalidPathspecEncoding(relative_path.display().to_string())
@@ -473,6 +535,113 @@ async fn reset_pathspecs(
             .map_err(|e| ResetError::IndexSave(e.to_string()))?;
     }
     Ok(changed_paths)
+}
+
+/// Upper bound on `--pathspec-from-file` input (file or stdin) to guard against
+/// OOM / DoS from a pathological input. Matches `libra add`'s limit so both
+/// commands share one ceiling.
+const MAX_PATHSPEC_FILE_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Resolve the pathspecs the reset should operate on.
+///
+/// Pathspecs come from exactly one source: the command line, or
+/// `--pathspec-from-file` (`-` reads stdin). Supplying both is a usage error
+/// ([`ResetError::PathspecSourceConflict`], exit 129) so a script cannot
+/// silently merge two lists. `--pathspec-file-nul` only switches the separator
+/// and is an inert no-op when `--pathspec-from-file` is absent (matching Git).
+fn resolve_effective_pathspecs(args: &ResetArgs) -> Result<Vec<String>, ResetError> {
+    match args.pathspec_from_file.as_deref() {
+        Some(file) => {
+            if !args.pathspecs.is_empty() {
+                return Err(ResetError::PathspecSourceConflict);
+            }
+            read_pathspec_from_file(file, args.pathspec_file_nul)
+        }
+        None => Ok(args.pathspecs.clone()),
+    }
+}
+
+/// Read pathspecs from `path` (a file, or `-` for stdin), streaming.
+///
+/// Items are separated by NUL when `nul` is set (`--pathspec-file-nul`),
+/// otherwise by newline (a trailing `\r` is stripped so CRLF files work). Empty
+/// items are dropped. Input is read incrementally via [`BufRead::read_until`]
+/// and bounded at [`MAX_PATHSPEC_FILE_BYTES`] as it is consumed, so even an
+/// unbounded stdin pipe cannot exhaust memory; exceeding the cap (or any read
+/// failure) returns [`ResetError::PathspecFileRead`] and non-UTF-8 input
+/// returns [`ResetError::InvalidPathspecEncoding`].
+///
+/// Each item is taken verbatim — Git's default-mode C-style quoted-path
+/// decoding is intentionally not performed (use `--pathspec-file-nul` for paths
+/// with special characters); the returned raw pathspecs are still normalised
+/// and containment-checked by [`reset_pathspecs`].
+fn read_pathspec_from_file(path: &str, nul: bool) -> Result<Vec<String>, ResetError> {
+    let separator = if nul { b'\0' } else { b'\n' };
+    let (label, reader): (String, Box<dyn Read>) = if path == "-" {
+        ("<stdin>".to_string(), Box::new(io::stdin().lock()))
+    } else {
+        // Fail fast on an oversized file without opening/reading it.
+        let meta = fs::metadata(path).map_err(|source| ResetError::PathspecFileRead {
+            path: path.to_string(),
+            source,
+        })?;
+        if meta.len() > MAX_PATHSPEC_FILE_BYTES {
+            return Err(ResetError::PathspecFileRead {
+                path: path.to_string(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "pathspec file exceeds the 128 MiB limit",
+                ),
+            });
+        }
+        let file = fs::File::open(path).map_err(|source| ResetError::PathspecFileRead {
+            path: path.to_string(),
+            source,
+        })?;
+        (path.to_string(), Box::new(file))
+    };
+
+    // `take` bounds the total read so an unbounded stdin pipe cannot exhaust
+    // memory; `total` enforces the cap precisely as bytes are consumed.
+    let mut reader = io::BufReader::new(reader.take(MAX_PATHSPEC_FILE_BYTES + 1));
+    let mut items = Vec::new();
+    let mut chunk = Vec::new();
+    let mut total: u64 = 0;
+    loop {
+        chunk.clear();
+        let read = reader.read_until(separator, &mut chunk).map_err(|source| {
+            ResetError::PathspecFileRead {
+                path: label.clone(),
+                source,
+            }
+        })?;
+        if read == 0 {
+            break;
+        }
+        total += read as u64;
+        if total > MAX_PATHSPEC_FILE_BYTES {
+            return Err(ResetError::PathspecFileRead {
+                path: label.clone(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "pathspec input exceeds the 128 MiB limit",
+                ),
+            });
+        }
+        if chunk.last() == Some(&separator) {
+            chunk.pop();
+        }
+        if !nul && chunk.last() == Some(&b'\r') {
+            chunk.pop();
+        }
+        if chunk.is_empty() {
+            continue;
+        }
+        let item = std::str::from_utf8(&chunk)
+            .map_err(|_| ResetError::InvalidPathspecEncoding(label.clone()))?;
+        items.push(item.to_string());
+    }
+    Ok(items)
 }
 
 /// Perform the actual reset operation based on the specified mode.
@@ -1110,6 +1279,14 @@ mod tests {
             "pathspec 'src/missing.rs' did not match any file(s) known to libra",
         );
         assert_eq!(
+            ResetError::PathspecSourceConflict.to_string(),
+            "--pathspec-from-file cannot be combined with command-line pathspecs",
+        );
+        assert_eq!(
+            ResetError::PathspecOutsideWorkdir("../escape.txt".to_string()).to_string(),
+            "pathspec '../escape.txt' is outside the repository working directory",
+        );
+        assert_eq!(
             ResetError::LockedCurrentBranch("agent-traces".to_string()).to_string(),
             "refusing to reset locked current branch 'agent-traces'",
         );
@@ -1214,6 +1391,22 @@ mod tests {
         assert_eq!(
             ResetError::PathspecNotMatched("ignored".to_string()).stable_code(),
             StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            ResetError::PathspecSourceConflict.stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            ResetError::PathspecOutsideWorkdir("ignored".to_string()).stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            ResetError::PathspecFileRead {
+                path: "ignored".to_string(),
+                source: io::Error::new(io::ErrorKind::NotFound, "ignored"),
+            }
+            .stable_code(),
+            StableErrorCode::IoReadFailed,
         );
         assert_eq!(
             ResetError::LockedTarget("ignored".to_string()).stable_code(),
