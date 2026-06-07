@@ -10,7 +10,7 @@ use std::{
     io::{Read, Seek},
     path::{Path, PathBuf},
     str::FromStr,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 
 use byteorder::{BigEndian, ReadBytesExt};
@@ -90,6 +90,13 @@ struct PrunePlan {
     prunable: Vec<LooseObjectInfo>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum PrunePolicy {
+    Always,
+    Never,
+    ExpiredBy(SystemTime),
+}
+
 #[derive(Debug, Serialize)]
 struct PruneObjectInfo {
     object_id: String,
@@ -140,7 +147,8 @@ pub async fn execute_safe(args: PruneArgs, output: &OutputConfig) -> CliResult<(
 
     let reachable = collect_reachable_objects(&storage, &args.heads).await?;
     let packed = collect_packed_objects(&storage).await?;
-    let loose_objects = list_loose_objects(&storage, expire_before.is_some())?;
+    let needs_mtime = matches!(expire_before, PrunePolicy::ExpiredBy(_));
+    let loose_objects = list_loose_objects(&storage, needs_mtime)?;
     let plan = build_prune_plan(loose_objects, &reachable, &packed, expire_before);
 
     let should_report = (args.verbose || args.dry_run) && (!output.is_json() && !output.quiet);
@@ -168,25 +176,49 @@ pub async fn execute_safe(args: PruneArgs, output: &OutputConfig) -> CliResult<(
 }
 
 /// Parse the `--expire` argument into a concrete cutoff time.
-fn parse_expire_cutoff(expire: Option<&str>) -> CliResult<Option<SystemTime>> {
+fn parse_expire_cutoff(expire: Option<&str>) -> CliResult<PrunePolicy> {
     let Some(value) = expire else {
-        return Ok(None);
+        return Ok(PrunePolicy::Always);
     };
 
-    let timestamp = parse_date(value).map_err(|error| {
+    parse_expire_date(value)
+}
+
+/// Parse expire dates.
+fn parse_expire_date(raw: &str) -> CliResult<PrunePolicy> {
+    let value = raw.trim();
+
+    if value.eq_ignore_ascii_case("never") {
+        return Ok(PrunePolicy::Never);
+    }
+    if value.eq_ignore_ascii_case("all") {
+        return Ok(PrunePolicy::Always);
+    }
+    if value.eq_ignore_ascii_case("now") {
+        return Ok(PrunePolicy::ExpiredBy(SystemTime::now()));
+    }
+    let value = value.replace('.', " ");
+    let timestamp = parse_date(&value).map_err(|error| {
         CliError::command_usage(error.to_string())
             .with_stable_code(StableErrorCode::CliInvalidArguments)
-            .with_hint(r#"supported formats: YYYY-MM-DD, "N days ago", unix timestamp"#)
+            .with_hint(
+                r#"supported formats: now, never, all, YYYY-MM-DD, "N days ago", unix timestamp"#,
+            )
     })?;
+    Ok(PrunePolicy::ExpiredBy(system_time_from_unix_seconds(
+        timestamp,
+    )))
+}
 
-    if timestamp < 0 {
-        return Err(CliError::command_usage(format!(
-            "expire time must be after 1970-01-01: {value}"
-        ))
-        .with_stable_code(StableErrorCode::CliInvalidArguments));
+/// Convert signed Unix seconds into a `SystemTime` cutoff.
+fn system_time_from_unix_seconds(seconds: i64) -> SystemTime {
+    if seconds >= 0 {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(seconds as u64)
+    } else {
+        SystemTime::UNIX_EPOCH
+            .checked_sub(Duration::from_secs(seconds.unsigned_abs()))
+            .unwrap_or(SystemTime::UNIX_EPOCH)
     }
-
-    Ok(Some(UNIX_EPOCH + Duration::from_secs(timestamp as u64)))
 }
 
 /// Collect all objects reachable from refs, HEAD, and user-supplied heads.
@@ -443,7 +475,7 @@ fn build_prune_plan(
     loose_objects: Vec<LooseObjectInfo>,
     reachable: &HashSet<ObjectHash>,
     packed: &HashSet<ObjectHash>,
-    expire_before: Option<SystemTime>,
+    expire_before: PrunePolicy,
 ) -> PrunePlan {
     let prunable = loose_objects
         .into_iter()
@@ -545,10 +577,11 @@ fn is_dir_empty(dir: &Path) -> CliResult<bool> {
 }
 
 /// Check whether a loose object is expired relative to the cutoff time.
-fn is_expired(modified: Option<SystemTime>, expire_before: Option<SystemTime>) -> bool {
+fn is_expired(modified: Option<SystemTime>, expire_before: PrunePolicy) -> bool {
     match expire_before {
-        None => true,
-        Some(cutoff) => modified.is_some_and(|mtime| mtime < cutoff),
+        PrunePolicy::Always => true,
+        PrunePolicy::Never => false,
+        PrunePolicy::ExpiredBy(cutoff) => modified.is_some_and(|mtime| mtime < cutoff),
     }
 }
 
