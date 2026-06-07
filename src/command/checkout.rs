@@ -1,24 +1,34 @@
 //! Handles checkout-style flows to show the current branch, switch to existing branches, or create and switch to a new one using restore utilities.
 
+use std::{fs, path::PathBuf};
+
 use clap::Parser;
-use git_internal::hash::ObjectHash;
+use git_internal::{
+    hash::{ObjectHash, get_hash_kind},
+    internal::{index::Index, object::blob::Blob},
+};
+use sea_orm::DbErr;
 use serde::Serialize;
 
 use crate::{
     command::{
-        branch, pull,
+        branch, get_target_commit, load_object, pull,
         restore::{self, RestoreArgs},
         switch,
     },
     info_println,
     internal::{
-        branch::{AGENT_TRACES_BRANCH, Branch, BranchStoreError, INTENT_BRANCH},
+        branch::{
+            AGENT_TRACES_BRANCH, Branch, BranchStoreError, INTENT_BRANCH, is_ai_managed_branch,
+            is_ai_managed_revision,
+        },
         head::Head,
+        reflog::{ReflogAction, ReflogContext, with_reflog},
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
-        util,
+        path, util,
     },
 };
 
@@ -35,6 +45,12 @@ EXAMPLES:
     libra checkout main                    Switch to a branch (prefer: libra switch main)
     libra checkout feature-x               Switch to another branch (prefer: libra switch feature-x)
     libra checkout -b feature-x            Create + switch to a new branch (prefer: libra switch -c feature-x)
+    libra checkout -B feature-x            Create or reset a branch to HEAD, then switch
+    libra checkout --detach HEAD~1         Detach HEAD at a commit (no branch)
+    libra checkout --orphan fresh          Start a new unborn branch with no history
+    libra checkout -f main                 Force switch, discarding local changes
+    libra checkout --ours -- file.txt      Take our side of a conflicted path
+    libra checkout --theirs -- file.txt    Take their side of a conflicted path
     libra checkout -- file.txt             Restore a path from the index (prefer: libra restore file.txt)
     libra checkout HEAD -- file.txt        Restore a path from HEAD into index + worktree
     libra --json checkout main             Structured compatibility output
@@ -49,6 +65,30 @@ pub struct CheckoutArgs {
     /// Create and switch to a new branch with the same content as the current branch
     #[clap(short = 'b', group = "sub")]
     new_branch: Option<String>,
+
+    /// Create or reset a branch to the start point (or current HEAD) and switch to it
+    #[clap(short = 'B', value_name = "branch", group = "sub")]
+    force_new_branch: Option<String>,
+
+    /// Detach HEAD at the given commit-ish (or current HEAD) instead of switching to a branch
+    #[clap(long = "detach", conflicts_with = "sub")]
+    detach: bool,
+
+    /// Create a new unborn branch whose first commit will have no parents
+    #[clap(long = "orphan", value_name = "branch", group = "sub")]
+    orphan: Option<String>,
+
+    /// On a conflicted path, check out our side of the merge (stage #2); requires `-- <path>`
+    #[clap(long = "ours", conflicts_with = "theirs")]
+    ours: bool,
+
+    /// On a conflicted path, check out their side of the merge (stage #3); requires `-- <path>`
+    #[clap(long = "theirs")]
+    theirs: bool,
+
+    /// Force checkout: proceed even when the working tree has changes that would be overwritten
+    #[clap(short = 'f', long = "force")]
+    force: bool,
 
     /// Paths to restore after an explicit `--` separator
     #[clap(last = true, value_name = "pathspec")]
@@ -68,6 +108,12 @@ struct CheckoutOutput {
     pulled: bool,
     already_on: bool,
     detached: bool,
+    /// `true` when `-B` reset an already-existing branch (vs. creating it).
+    #[serde(default)]
+    reset: bool,
+    /// `true` when the target is an unborn `--orphan` branch.
+    #[serde(default)]
+    orphan: bool,
     tracking: Option<CheckoutTrackingOutput>,
     restore: Option<restore::RestoreOutput>,
 }
@@ -112,6 +158,24 @@ enum CheckoutError {
 
     #[error("failed to {context}: {detail}")]
     BranchStoreCorrupt { context: String, detail: String },
+
+    #[error("failed to update HEAD/branch reference: {detail}")]
+    HeadUpdateFailed { detail: String },
+
+    #[error("'{flag}' requires a pathspec after '--' (e.g. 'libra checkout {flag} -- <path>')")]
+    ConflictPathRequired { flag: &'static str },
+
+    #[error("path '{path}' is not in a merge conflict state")]
+    NotInMergeConflict { path: String },
+
+    #[error("a branch named '{0}' already exists")]
+    BranchAlreadyExists(String),
+
+    #[error("failed to read index/object for '{path}': {detail}")]
+    IndexReadFailed { path: String, detail: String },
+
+    #[error("failed to write '{path}': {detail}")]
+    WorktreeWriteFailed { path: String, detail: String },
 
     #[error("checkout remote branch left HEAD without a commit")]
     RemoteHeadMissing,
@@ -183,6 +247,34 @@ impl From<CheckoutError> for CliError {
                 CliError::fatal(format!("failed to {context}: {detail}"))
                     .with_stable_code(StableErrorCode::RepoCorrupt)
             }
+            CheckoutError::HeadUpdateFailed { detail } => {
+                CliError::fatal(format!("failed to update HEAD/branch reference: {detail}"))
+                    .with_stable_code(StableErrorCode::IoWriteFailed)
+                    .with_hint("check that the repository database is writable, then retry")
+            }
+            CheckoutError::ConflictPathRequired { flag } => CliError::fatal(format!(
+                "'{flag}' requires a pathspec after '--' (e.g. 'libra checkout {flag} -- <path>')"
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidArguments),
+            CheckoutError::NotInMergeConflict { path } => {
+                CliError::failure(format!("path '{path}' is not in a merge conflict state"))
+                    .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                    .with_hint("only conflicted paths accept '--ours'/'--theirs'")
+            }
+            CheckoutError::BranchAlreadyExists(name) => {
+                CliError::failure(format!("a branch named '{name}' already exists"))
+                    .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                    .with_hint("delete it first or choose a different name")
+            }
+            CheckoutError::IndexReadFailed { path, detail } => CliError::fatal(format!(
+                "failed to read index/object for '{path}': {detail}"
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed),
+            CheckoutError::WorktreeWriteFailed { path, detail } => {
+                CliError::fatal(format!("failed to write '{path}': {detail}"))
+                    .with_stable_code(StableErrorCode::IoWriteFailed)
+                    .with_hint("check that the path is writable, then retry")
+            }
             CheckoutError::RemoteHeadMissing => {
                 CliError::fatal("checkout remote branch left HEAD without a commit")
                     .with_stable_code(StableErrorCode::RepoStateInvalid)
@@ -233,21 +325,57 @@ async fn run_checkout(
     args: CheckoutArgs,
     output: &OutputConfig,
 ) -> Result<CheckoutOutput, CheckoutError> {
+    // `--ours`/`--theirs` operate on conflicted paths only; without a pathspec
+    // after `--` they are a usage error (mirrors Git's "no paths given").
+    if (args.ours || args.theirs) && args.pathspec.is_empty() {
+        let flag = if args.ours { "--ours" } else { "--theirs" };
+        return Err(CheckoutError::ConflictPathRequired { flag });
+    }
     if !args.pathspec.is_empty() {
         return restore_checkout_paths(args).await;
     }
 
-    if let Some(ref branch_name) = args.branch
-        && (branch_name == INTENT_BRANCH || branch_name == AGENT_TRACES_BRANCH)
+    // ── AI-managed branch isolation (intent / agent-traces only; NOT main) ──
+    // Branch NAMES created or reset by -b / -B / --orphan use the plain-name
+    // check; the positional commit-ish / start_point (which may carry a
+    // revision suffix like `agent-traces~1`) uses the revision-aware check.
+    for new_name in [
+        args.new_branch.as_deref(),
+        args.force_new_branch.as_deref(),
+        args.orphan.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
     {
-        return Err(CheckoutError::CheckingOutBranchBlocked(branch_name.clone()));
+        if is_ai_managed_branch(new_name) {
+            return Err(CheckoutError::CreatingBranchBlocked(new_name.to_string()));
+        }
     }
-    if let Some(ref new_branch_name) = args.new_branch
-        && (new_branch_name == INTENT_BRANCH || new_branch_name == AGENT_TRACES_BRANCH)
+    let positional_is_commitish =
+        args.force_new_branch.is_some() || args.detach || args.orphan.is_some();
+    if positional_is_commitish
+        && let Some(rev) = args.branch.as_deref()
+        && is_ai_managed_revision(rev)
     {
-        return Err(CheckoutError::CreatingBranchBlocked(
-            new_branch_name.clone(),
-        ));
+        return Err(CheckoutError::CheckingOutBranchBlocked(rev.to_string()));
+    }
+    if !positional_is_commitish
+        && let Some(name) = args.branch.as_deref()
+        && is_ai_managed_branch(name)
+    {
+        return Err(CheckoutError::CheckingOutBranchBlocked(name.to_string()));
+    }
+
+    // ── New branch-control modes (Batch 0) ──
+    if let Some(force_branch) = args.force_new_branch.clone() {
+        return run_force_branch_checkout(&force_branch, args.branch.clone(), args.force, output)
+            .await;
+    }
+    if args.detach {
+        return run_detach_checkout(args.branch.clone(), args.force, output).await;
+    }
+    if let Some(orphan_branch) = args.orphan.clone() {
+        return run_orphan_checkout(&orphan_branch, args.branch.clone(), args.force, output).await;
     }
 
     let previous_branch = get_current_branch().await;
@@ -270,6 +398,8 @@ async fn run_checkout(
             pulled: false,
             already_on: true,
             detached: false,
+            reset: false,
+            orphan: false,
             tracking: None,
             restore: None,
         });
@@ -284,23 +414,16 @@ async fn run_checkout(
         None
     };
 
-    let clean_status = match target_commit {
-        Some(target_commit) => switch::ensure_clean_status_for_commit(target_commit, output).await,
-        None => switch::ensure_clean_status(output).await,
-    };
-
-    match clean_status {
-        Ok(()) => {}
-        Err(switch::SwitchError::DirtyUnstaged) => {
-            return Err(CheckoutError::DirtyUnstaged);
-        }
-        Err(switch::SwitchError::DirtyUncommitted) => {
-            return Err(CheckoutError::DirtyUncommitted);
-        }
-        Err(switch::SwitchError::UntrackedOverwrite(path)) => {
-            return Err(CheckoutError::UntrackedOverwrite(path));
-        }
-        Err(err) => return Err(CheckoutError::DelegatedCli(CliError::from(err))),
+    // `-f`/`--force` skips the dirty-working-tree guard, letting the target
+    // commit overwrite uncommitted changes (matches Git's forced checkout).
+    if !args.force {
+        let clean_status = match target_commit {
+            Some(target_commit) => {
+                switch::ensure_clean_status_for_commit(target_commit, output).await
+            }
+            None => switch::ensure_clean_status(output).await,
+        };
+        map_clean_status(clean_status)?;
     }
 
     match (args.branch, args.new_branch) {
@@ -323,6 +446,8 @@ async fn run_checkout(
                 pulled: false,
                 already_on: false,
                 detached: false,
+                reset: false,
+                orphan: false,
                 tracking: None,
                 restore: None,
             })
@@ -336,6 +461,12 @@ async fn restore_checkout_paths(args: CheckoutArgs) -> Result<CheckoutOutput, Ch
         return Err(CheckoutError::InvalidPathMode("-b".to_string()));
     }
 
+    // `--ours`/`--theirs` need a dedicated direct-write path: `RestoreArgs`
+    // carries only `source`/`staged`/`pathspec` and cannot target a merge stage.
+    if args.ours || args.theirs {
+        return restore_conflict_stage_paths(&args.pathspec, args.ours).await;
+    }
+
     let previous_branch = get_current_branch().await;
     let previous_commit = current_commit_string().await?;
     let source = args.branch;
@@ -344,6 +475,7 @@ async fn restore_checkout_paths(args: CheckoutArgs) -> Result<CheckoutOutput, Ch
         staged: source.is_some(),
         source,
         pathspec: args.pathspec,
+        ..Default::default()
     };
     let restore = restore::execute_to_output(restore_args)
         .await
@@ -362,8 +494,124 @@ async fn restore_checkout_paths(args: CheckoutArgs) -> Result<CheckoutOutput, Ch
         pulled: false,
         already_on: false,
         detached: was_detached,
+        reset: false,
+        orphan: false,
         tracking: None,
         restore: Some(restore),
+    })
+}
+
+/// `--ours` / `--theirs` path checkout: for each conflicted pathspec, restore the
+/// requested merge stage (stage #2 = ours, stage #3 = theirs) into the working
+/// tree and collapse the index to a clean stage #0 entry, dropping the remaining
+/// conflict stages.
+///
+/// Uses a dedicated direct-write path because [`RestoreArgs`] can only select a
+/// `source`/`staged` target, never a specific merge stage. Validation is a
+/// pre-pass: every pathspec must carry the requested stage before *any* write
+/// happens, so a non-conflicted path fails the whole operation cleanly (no
+/// half-restored worktree). The promoted stage #0 entry is taken **owned** from
+/// `Index::remove` (since `IndexEntry` is not `Clone`) and only has its stage
+/// rewritten, preserving the original mode/metadata — `IndexEntry::new_from_blob`
+/// is avoided because it hard-codes `0o100644` and would drop the executable bit.
+async fn restore_conflict_stage_paths(
+    pathspec: &[String],
+    use_ours: bool,
+) -> Result<CheckoutOutput, CheckoutError> {
+    let stage: u8 = if use_ours { 2 } else { 3 };
+    let other_stage: u8 = if use_ours { 3 } else { 2 };
+
+    let index_path = path::index();
+    // Use a stable "<index>" label rather than the absolute on-disk path so error
+    // messages never leak internal filesystem locations.
+    let mut index = Index::load(&index_path).map_err(|e| CheckoutError::IndexReadFailed {
+        path: "<index>".to_string(),
+        detail: e.to_string(),
+    })?;
+
+    // Pre-pass: every pathspec must be in a conflict state for the requested
+    // side before we touch the worktree or index.
+    let mut targets = Vec::with_capacity(pathspec.len());
+    for spec in pathspec {
+        let hash = index
+            .get_hash(spec, stage)
+            .ok_or_else(|| CheckoutError::NotInMergeConflict { path: spec.clone() })?;
+        targets.push((spec.clone(), hash));
+    }
+
+    let mut restored_files = Vec::with_capacity(targets.len());
+    for (spec, hash) in &targets {
+        // Read the chosen-stage blob and write it to the working tree.
+        let blob = load_object::<Blob>(hash).map_err(|e| CheckoutError::IndexReadFailed {
+            path: spec.clone(),
+            detail: e.to_string(),
+        })?;
+        let path_abs = util::workdir_to_absolute(PathBuf::from(spec));
+        if let Some(parent) = path_abs.parent() {
+            fs::create_dir_all(parent).map_err(|e| CheckoutError::WorktreeWriteFailed {
+                path: spec.clone(),
+                detail: e.to_string(),
+            })?;
+        }
+        util::write_file(&blob.data, &path_abs).map_err(|e| {
+            CheckoutError::WorktreeWriteFailed {
+                path: spec.clone(),
+                detail: e.to_string(),
+            }
+        })?;
+
+        // Promote the chosen stage to stage #0 (owned move; preserves mode), then
+        // drop the base (#1) and the opposite side so only stage #0 remains.
+        let mut entry = index
+            .remove(spec, stage)
+            .ok_or_else(|| CheckoutError::NotInMergeConflict { path: spec.clone() })?;
+        entry.flags.stage = 0;
+        index.add(entry);
+        index.remove(spec, 1);
+        index.remove(spec, other_stage);
+
+        restored_files.push(spec.clone());
+    }
+
+    index
+        .to_file(&index_path)
+        .map_err(|e| CheckoutError::WorktreeWriteFailed {
+            path: "<index>".to_string(),
+            detail: e.to_string(),
+        })?;
+
+    let previous_branch = get_current_branch().await;
+    let previous_commit = current_commit_string().await?;
+    let was_detached = previous_branch.is_none();
+    Ok(CheckoutOutput {
+        action: "restore-paths".to_string(),
+        previous_branch: previous_branch.clone(),
+        previous_commit: previous_commit.clone(),
+        branch: previous_branch,
+        commit: previous_commit.clone(),
+        short_commit: previous_commit.as_deref().map(short_oid),
+        switched: false,
+        created: false,
+        pulled: false,
+        already_on: false,
+        detached: was_detached,
+        reset: false,
+        orphan: false,
+        tracking: None,
+        restore: Some(restore::RestoreOutput {
+            source: Some(
+                if use_ours {
+                    "stage2-ours"
+                } else {
+                    "stage3-theirs"
+                }
+                .to_string(),
+            ),
+            worktree: true,
+            staged: true,
+            restored_files,
+            deleted_files: Vec::new(),
+        }),
     })
 }
 
@@ -434,6 +682,298 @@ async fn create_and_switch_new_branch(
         .await
         .map_err(CheckoutError::DelegatedCli)?;
     switch_branch_with_output(new_branch, output).await
+}
+
+/// Resolve an optional start-point / commit-ish to a commit hash.
+///
+/// `Some(rev)` is resolved through the usual rev parser (branch / `HEAD` / OID /
+/// `~`/`^` suffixes); an unresolvable rev becomes [`CheckoutError::BranchNotFound`].
+/// `None` falls back to the current `HEAD` commit, which is `Ok(None)` on an
+/// unborn HEAD (no commit yet) — callers decide whether that is permitted.
+async fn resolve_start_point(
+    start_point: Option<&str>,
+) -> Result<Option<ObjectHash>, CheckoutError> {
+    match start_point {
+        Some(rev) => get_target_commit(rev)
+            .await
+            .map(Some)
+            .map_err(|_| CheckoutError::BranchNotFound(rev.to_string())),
+        None => {
+            Head::current_commit_result()
+                .await
+                .map_err(|error| CheckoutError::BranchStoreCorrupt {
+                    context: "resolve HEAD commit".to_string(),
+                    detail: error.to_string(),
+                })
+        }
+    }
+}
+
+/// Map the dirty-status outcome of a `switch::ensure_clean_status*` call to the
+/// checkout error domain.
+fn map_clean_status(result: Result<(), switch::SwitchError>) -> Result<(), CheckoutError> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(switch::SwitchError::DirtyUnstaged) => Err(CheckoutError::DirtyUnstaged),
+        Err(switch::SwitchError::DirtyUncommitted) => Err(CheckoutError::DirtyUncommitted),
+        Err(switch::SwitchError::UntrackedOverwrite(path)) => {
+            Err(CheckoutError::UntrackedOverwrite(path))
+        }
+        Err(err) => Err(CheckoutError::DelegatedCli(CliError::from(err))),
+    }
+}
+
+/// Write a `checkout` reflog entry (action `checkout`, message
+/// `moving from <from> to <to>`) while updating HEAD and, optionally, a branch
+/// ref — atomically within one transaction.
+///
+/// Uses the **error-propagating** `Head::update_result_with_conn` so a failed
+/// HEAD/ref write rolls back the entire transaction (no half-written ref or
+/// reflog). `branch_ref = Some((name, commit))` also (re)creates/resets that
+/// branch ref in the same transaction (used by `-B`); `--orphan` passes `None`
+/// to leave the ref unborn. `insert_ref` mirrors Git: `true` for branch modes
+/// (writes the extra `refs/heads/<branch>` reflog row), `false` for `--detach`.
+async fn write_checkout_reflog(
+    new_head: Head,
+    branch_ref: Option<(String, ObjectHash)>,
+    from_label: String,
+    to_label: String,
+    old_oid: String,
+    new_oid: String,
+    insert_ref: bool,
+) -> Result<(), CheckoutError> {
+    let context = ReflogContext {
+        old_oid,
+        new_oid,
+        action: ReflogAction::Checkout {
+            from: from_label,
+            to: to_label,
+        },
+    };
+    with_reflog(
+        context,
+        move |txn: &sea_orm::DatabaseTransaction| {
+            Box::pin(async move {
+                if let Some((branch_name, commit)) = branch_ref {
+                    let commit_str = commit.to_string();
+                    Branch::update_branch_with_conn(txn, &branch_name, &commit_str, None).await?;
+                }
+                Head::update_result_with_conn(txn, new_head, None)
+                    .await
+                    .map_err(|e| DbErr::Custom(e.to_string()))?;
+                Ok(())
+            })
+        },
+        insert_ref,
+    )
+    .await
+    .map_err(|e| CheckoutError::HeadUpdateFailed {
+        detail: e.to_string(),
+    })
+}
+
+/// Label for the `from` side of a checkout reflog message: the current branch
+/// name, or a short OID when HEAD is detached / unborn.
+fn reflog_from_label(previous_branch: &Option<String>, old_oid: &str) -> String {
+    previous_branch
+        .clone()
+        .unwrap_or_else(|| short_oid(old_oid))
+}
+
+/// `-B <branch> [<start_point>]`: create the branch (if absent) or reset it (if
+/// present) to the resolved start point, restore the worktree, and switch.
+async fn run_force_branch_checkout(
+    branch_name: &str,
+    start_point: Option<String>,
+    force: bool,
+    output: &OutputConfig,
+) -> Result<CheckoutOutput, CheckoutError> {
+    let previous_branch = get_current_branch().await;
+    let previous_commit = current_commit_string().await?;
+
+    let resolved_commit = resolve_start_point(start_point.as_deref())
+        .await?
+        .ok_or_else(|| {
+            CheckoutError::BranchNotFound(start_point.clone().unwrap_or_else(|| "HEAD".to_string()))
+        })?;
+
+    // clean-status → restore happen BEFORE the ref is reset, so a failure here
+    // leaves the target branch unchanged (no half-reset). `-f` skips the guard.
+    if !force {
+        map_clean_status(switch::ensure_clean_status_for_commit(resolved_commit, output).await)?;
+    }
+    restore_to_commit(resolved_commit, output)
+        .await
+        .map_err(CheckoutError::DelegatedCli)?;
+
+    let existed = Branch::find_branch_result(branch_name, None)
+        .await
+        .map_err(|error| map_checkout_branch_store_error("resolve branch", error))?
+        .is_some();
+
+    let old_oid = previous_commit
+        .clone()
+        .unwrap_or_else(|| ObjectHash::zero_str(get_hash_kind()));
+    let new_oid = resolved_commit.to_string();
+    write_checkout_reflog(
+        Head::Branch(branch_name.to_string()),
+        Some((branch_name.to_string(), resolved_commit)),
+        reflog_from_label(&previous_branch, &old_oid),
+        branch_name.to_string(),
+        old_oid,
+        new_oid,
+        true,
+    )
+    .await?;
+
+    let commit = resolved_commit.to_string();
+    Ok(CheckoutOutput {
+        action: if existed { "reset" } else { "create" }.to_string(),
+        previous_branch,
+        previous_commit,
+        branch: Some(branch_name.to_string()),
+        short_commit: Some(short_oid(&commit)),
+        commit: Some(commit),
+        switched: true,
+        created: !existed,
+        pulled: false,
+        already_on: false,
+        detached: false,
+        reset: existed,
+        orphan: false,
+        tracking: None,
+        restore: None,
+    })
+}
+
+/// `--detach [<commit-ish>]`: restore the worktree to the resolved commit and
+/// move HEAD into the detached state.
+async fn run_detach_checkout(
+    commit_ish: Option<String>,
+    force: bool,
+    output: &OutputConfig,
+) -> Result<CheckoutOutput, CheckoutError> {
+    let previous_branch = get_current_branch().await;
+    let previous_commit = current_commit_string().await?;
+
+    let resolved_commit = resolve_start_point(commit_ish.as_deref())
+        .await?
+        .ok_or_else(|| {
+            CheckoutError::BranchNotFound(commit_ish.clone().unwrap_or_else(|| "HEAD".to_string()))
+        })?;
+
+    if !force {
+        map_clean_status(switch::ensure_clean_status_for_commit(resolved_commit, output).await)?;
+    }
+    restore_to_commit(resolved_commit, output)
+        .await
+        .map_err(CheckoutError::DelegatedCli)?;
+
+    let old_oid = previous_commit
+        .clone()
+        .unwrap_or_else(|| ObjectHash::zero_str(get_hash_kind()));
+    let new_oid = resolved_commit.to_string();
+    write_checkout_reflog(
+        Head::Detached(resolved_commit),
+        None,
+        reflog_from_label(&previous_branch, &old_oid),
+        short_oid(&new_oid),
+        old_oid,
+        new_oid,
+        false,
+    )
+    .await?;
+
+    let commit = resolved_commit.to_string();
+    Ok(CheckoutOutput {
+        action: "detach".to_string(),
+        previous_branch,
+        previous_commit,
+        branch: None,
+        short_commit: Some(short_oid(&commit)),
+        commit: Some(commit),
+        switched: true,
+        created: false,
+        pulled: false,
+        already_on: false,
+        detached: true,
+        reset: false,
+        orphan: false,
+        tracking: None,
+        restore: None,
+    })
+}
+
+/// `--orphan <branch> [<start_point>]`: point HEAD at a new unborn branch (no
+/// `reference` row until the first commit). The index/worktree are aligned to
+/// the start point (default current HEAD), matching Git's "as if you had run
+/// checkout <start-point>"; an empty/unborn repo simply renames the unborn HEAD.
+async fn run_orphan_checkout(
+    branch_name: &str,
+    start_point: Option<String>,
+    force: bool,
+    output: &OutputConfig,
+) -> Result<CheckoutOutput, CheckoutError> {
+    // Match Git: `checkout --orphan <name>` refuses when the branch already
+    // exists. Without this guard, pointing HEAD at an existing ref would resolve
+    // to that ref's commit (a normal checkout), not the intended unborn branch.
+    //
+    // Use `exists_result` (raw reference-row presence), NOT `find_branch_result`:
+    // the latter returns `None` for rows whose `commit IS NULL` (unborn refs),
+    // which would let an already-existing unborn branch slip through this guard.
+    if Branch::exists_result(branch_name, None)
+        .await
+        .map_err(|error| map_checkout_branch_store_error("resolve orphan target", error))?
+    {
+        return Err(CheckoutError::BranchAlreadyExists(branch_name.to_string()));
+    }
+
+    let previous_branch = get_current_branch().await;
+    let previous_commit = current_commit_string().await?;
+
+    // `None` here means: no explicit start point AND current HEAD is unborn.
+    let start_commit = resolve_start_point(start_point.as_deref()).await?;
+
+    if let Some(start_commit) = start_commit {
+        if !force {
+            map_clean_status(switch::ensure_clean_status_for_commit(start_commit, output).await)?;
+        }
+        restore_to_commit(start_commit, output)
+            .await
+            .map_err(CheckoutError::DelegatedCli)?;
+    } else if !force {
+        // Unborn HEAD with no start point: nothing to restore; only rename HEAD.
+        map_clean_status(switch::ensure_clean_status(output).await)?;
+    }
+
+    // Git writes NO HEAD reflog entry for `checkout --orphan`: the target branch
+    // is unborn, so there is no commit OID to record (verified against stock Git,
+    // whose `.git/logs/HEAD` gains no entry). Point HEAD at the unborn branch
+    // directly — no `reference` row, no reflog — using the error-propagating
+    // update so a failed write surfaces as `HeadUpdateFailed` instead of panicking.
+    Head::update_result(Head::Branch(branch_name.to_string()), None)
+        .await
+        .map_err(|error| CheckoutError::HeadUpdateFailed {
+            detail: error.to_string(),
+        })?;
+
+    Ok(CheckoutOutput {
+        action: "create".to_string(),
+        previous_branch,
+        previous_commit,
+        branch: Some(branch_name.to_string()),
+        short_commit: None,
+        commit: None,
+        switched: true,
+        created: true,
+        pulled: false,
+        already_on: false,
+        detached: false,
+        reset: false,
+        orphan: true,
+        tracking: None,
+        restore: None,
+    })
 }
 
 async fn get_remote(branch_name: &str, output: &OutputConfig) -> Result<ObjectHash, CheckoutError> {
@@ -542,6 +1082,8 @@ async fn check_and_switch_branch(
                 pulled: true,
                 already_on: false,
                 detached: false,
+                reset: false,
+                orphan: false,
                 tracking: Some(CheckoutTrackingOutput {
                     remote: "origin".to_string(),
                     remote_branch: format!("origin/{branch_name}"),
@@ -565,6 +1107,8 @@ async fn check_and_switch_branch(
                 pulled: false,
                 already_on: false,
                 detached: false,
+                reset: false,
+                orphan: false,
                 tracking: None,
                 restore: None,
             })
@@ -581,6 +1125,8 @@ async fn check_and_switch_branch(
             pulled: false,
             already_on: true,
             detached: false,
+            reset: false,
+            orphan: false,
             tracking: None,
             restore: None,
         }),
@@ -593,6 +1139,7 @@ async fn restore_to_commit(commit_id: ObjectHash, output: &OutputConfig) -> CliR
         staged: true,
         source: Some(commit_id.to_string()),
         pathspec: vec![util::working_dir_string()],
+        ..Default::default()
     };
     restore::execute_safe(restore_args, &output.child_output_config()).await
 }
@@ -616,6 +1163,8 @@ async fn show_current_branch(
                 pulled: false,
                 already_on: false,
                 detached: true,
+                reset: false,
+                orphan: false,
                 tracking: None,
                 restore: None,
             })
@@ -632,6 +1181,8 @@ async fn show_current_branch(
             pulled: false,
             already_on: false,
             detached: false,
+            reset: false,
+            orphan: false,
             tracking: None,
             restore: None,
         }),
@@ -670,6 +1221,17 @@ fn render_checkout_output(result: &CheckoutOutput, output: &OutputConfig) -> Cli
         "switch" => {
             if let Some(branch) = &result.branch {
                 println!("Switched to branch '{branch}'");
+            }
+        }
+        "reset" => {
+            if let Some(branch) = &result.branch {
+                println!("Reset branch '{branch}'");
+                println!("Switched to branch '{branch}'");
+            }
+        }
+        "detach" => {
+            if let Some(short_commit) = &result.short_commit {
+                println!("HEAD detached at {short_commit}");
             }
         }
         "track" => {
@@ -765,6 +1327,37 @@ mod tests {
             CheckoutError::RemoteHeadMissing.to_string(),
             "checkout remote branch left HEAD without a commit",
         );
+        assert_eq!(
+            CheckoutError::ConflictPathRequired { flag: "--ours" }.to_string(),
+            "'--ours' requires a pathspec after '--' (e.g. 'libra checkout --ours -- <path>')",
+        );
+        assert_eq!(
+            CheckoutError::NotInMergeConflict {
+                path: "a.txt".to_string(),
+            }
+            .to_string(),
+            "path 'a.txt' is not in a merge conflict state",
+        );
+        assert_eq!(
+            CheckoutError::BranchAlreadyExists("feature".to_string()).to_string(),
+            "a branch named 'feature' already exists",
+        );
+        assert_eq!(
+            CheckoutError::IndexReadFailed {
+                path: "a.txt".to_string(),
+                detail: "object missing".to_string(),
+            }
+            .to_string(),
+            "failed to read index/object for 'a.txt': object missing",
+        );
+        assert_eq!(
+            CheckoutError::WorktreeWriteFailed {
+                path: "a.txt".to_string(),
+                detail: "disk full".to_string(),
+            }
+            .to_string(),
+            "failed to write 'a.txt': disk full",
+        );
         let proxy_err = CliError::failure("remote not configured")
             .with_stable_code(StableErrorCode::NetworkUnavailable);
         assert_eq!(
@@ -830,8 +1423,89 @@ mod tests {
                 CheckoutError::RemoteHeadMissing,
                 StableErrorCode::RepoStateInvalid,
             ),
+            (
+                CheckoutError::HeadUpdateFailed {
+                    detail: "database is locked".to_string(),
+                },
+                StableErrorCode::IoWriteFailed,
+            ),
+            (
+                CheckoutError::InvalidPathMode("-b".to_string()),
+                StableErrorCode::CliInvalidArguments,
+            ),
+            (
+                CheckoutError::ConflictPathRequired { flag: "--theirs" },
+                StableErrorCode::CliInvalidArguments,
+            ),
+            (
+                CheckoutError::NotInMergeConflict {
+                    path: "a.txt".to_string(),
+                },
+                StableErrorCode::ConflictOperationBlocked,
+            ),
+            (
+                CheckoutError::BranchAlreadyExists("feature".to_string()),
+                StableErrorCode::ConflictOperationBlocked,
+            ),
+            (
+                CheckoutError::IndexReadFailed {
+                    path: "a.txt".to_string(),
+                    detail: "object missing".to_string(),
+                },
+                StableErrorCode::IoReadFailed,
+            ),
+            (
+                CheckoutError::WorktreeWriteFailed {
+                    path: "a.txt".to_string(),
+                    detail: "disk full".to_string(),
+                },
+                StableErrorCode::IoWriteFailed,
+            ),
         ];
 
+        for (err, expected) in cases {
+            let cli: CliError = err.into();
+            assert_eq!(cli.stable_code(), expected);
+        }
+    }
+
+    /// Pin the stable-code mapping for the path-mode / conflict / IO variants
+    /// introduced for `--ours`/`--theirs`/`-f` (Batch 1) per the exit-code
+    /// contract: usage → `CliInvalidArguments` (129), non-conflict path →
+    /// `ConflictOperationBlocked` (128), read → `IoReadFailed` (128), write →
+    /// `IoWriteFailed` (128).
+    #[test]
+    fn checkout_error_maps_new_variants_to_stable_codes() {
+        let cases: Vec<(CheckoutError, StableErrorCode)> = vec![
+            (
+                CheckoutError::ConflictPathRequired { flag: "--ours" },
+                StableErrorCode::CliInvalidArguments,
+            ),
+            (
+                CheckoutError::InvalidPathMode("-b".to_string()),
+                StableErrorCode::CliInvalidArguments,
+            ),
+            (
+                CheckoutError::NotInMergeConflict {
+                    path: "a.txt".to_string(),
+                },
+                StableErrorCode::ConflictOperationBlocked,
+            ),
+            (
+                CheckoutError::IndexReadFailed {
+                    path: "<index>".to_string(),
+                    detail: "bad header".to_string(),
+                },
+                StableErrorCode::IoReadFailed,
+            ),
+            (
+                CheckoutError::WorktreeWriteFailed {
+                    path: "a.txt".to_string(),
+                    detail: "permission denied".to_string(),
+                },
+                StableErrorCode::IoWriteFailed,
+            ),
+        ];
         for (err, expected) in cases {
             let cli: CliError = err.into();
             assert_eq!(cli.stable_code(), expected);

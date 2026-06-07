@@ -14,7 +14,7 @@ use serial_test::serial;
 
 use super::{
     assert_cli_success, create_committed_repo_via_cli, parse_cli_error_stderr, parse_json_stdout,
-    run_libra_command,
+    run_libra_command, run_libra_command_with_stdin_and_env,
 };
 
 fn commit_file(repo: &Path, file: &str, content: &str, message: &str) {
@@ -859,6 +859,53 @@ async fn test_merge_squash_updates_index_and_worktree_without_moving_head() {
     assert_eq!(head_after, original_head);
 }
 
+#[tokio::test]
+#[serial]
+async fn test_merge_squash_conflict_does_not_write_merge_state_or_continue() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(
+        temp_path,
+        "tracked.txt",
+        "feature change\n",
+        "feature change",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "tracked.txt", "main change\n", "main change");
+
+    let _guard = ChangeDirGuard::new(temp_path);
+    let original_head = Head::current_commit().await.expect("main should have HEAD");
+    drop(_guard);
+
+    let output = run_libra_command(&["merge", "--squash", "feature"], temp_path);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
+    assert!(
+        stderr.contains("libra commit"),
+        "squash conflict should instruct commit, not continue: {stderr}"
+    );
+    assert!(!temp_path.join(".libra").join("merge-state.json").exists());
+    let conflicted = std::fs::read_to_string(temp_path.join("tracked.txt")).expect("read conflict");
+    assert!(conflicted.contains("<<<<<<< HEAD"));
+
+    let _guard = ChangeDirGuard::new(temp_path);
+    let head_after = Head::current_commit().await.expect("main should keep HEAD");
+    assert_eq!(head_after, original_head);
+}
+
 #[test]
 #[serial]
 fn test_merge_squash_no_ff_is_invalid() {
@@ -875,6 +922,84 @@ fn test_merge_squash_no_ff_is_invalid() {
             .message
             .contains("--squash cannot be combined with --no-ff")
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_merge_criss_cross_synthesizes_virtual_merge_base() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    assert_cli_success(
+        &run_libra_command(&["branch", "left"], temp_path),
+        "create left",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "left"], temp_path),
+        "checkout left",
+    );
+    commit_file(temp_path, "left.txt", "left\n", "left base");
+    assert_cli_success(
+        &run_libra_command(&["branch", "left-base"], temp_path),
+        "save left base",
+    );
+
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    assert_cli_success(
+        &run_libra_command(&["branch", "right"], temp_path),
+        "create right",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "right"], temp_path),
+        "checkout right",
+    );
+    commit_file(temp_path, "right.txt", "right\n", "right base");
+    assert_cli_success(
+        &run_libra_command(&["branch", "right-base"], temp_path),
+        "save right base",
+    );
+
+    assert_cli_success(
+        &run_libra_command(&["checkout", "left"], temp_path),
+        "checkout left",
+    );
+    assert_cli_success(
+        &run_libra_command(&["merge", "right-base"], temp_path),
+        "merge right base into left",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "right"], temp_path),
+        "checkout right",
+    );
+    assert_cli_success(
+        &run_libra_command(&["merge", "left-base"], temp_path),
+        "merge left base into right",
+    );
+
+    assert_cli_success(
+        &run_libra_command(&["checkout", "left"], temp_path),
+        "checkout left again",
+    );
+    let output = run_libra_command(&["merge", "right"], temp_path);
+    assert_cli_success(&output, "merge criss-cross heads");
+
+    assert_eq!(
+        std::fs::read_to_string(temp_path.join("left.txt")).expect("read left"),
+        "left\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp_path.join("right.txt")).expect("read right"),
+        "right\n"
+    );
+    let _guard = ChangeDirGuard::new(temp_path);
+    let head = Head::current_commit()
+        .await
+        .expect("criss-cross merge should create HEAD");
+    let commit: Commit = load_object(&head).expect("load merge commit");
+    assert_eq!(commit.parent_commit_ids.len(), 2);
 }
 
 #[tokio::test]
@@ -920,6 +1045,59 @@ async fn test_merge_no_commit_no_ff_leaves_state_and_continue_commits() {
     let new_head = Head::current_commit()
         .await
         .expect("continue should create HEAD");
+    let commit: Commit = load_object(&new_head).expect("load merge commit");
+    assert_eq!(commit.parent_commit_ids.len(), 2);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_merge_commit_false_config_stops_before_commit_and_commit_overrides() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    assert_cli_success(
+        &run_libra_command(&["config", "merge.commit", "false"], temp_path),
+        "set merge.commit false",
+    );
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feature change");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    let _guard = ChangeDirGuard::new(temp_path);
+    let original_head = Head::current_commit().await.expect("main should have HEAD");
+    drop(_guard);
+
+    let output = run_libra_command(&["merge", "feature"], temp_path);
+    assert_cli_success(&output, "merge.commit=false merge");
+    assert!(temp_path.join(".libra").join("merge-state.json").exists());
+    let _guard = ChangeDirGuard::new(temp_path);
+    let stopped_head = Head::current_commit().await.expect("main should keep HEAD");
+    assert_eq!(stopped_head, original_head);
+    drop(_guard);
+
+    assert_cli_success(
+        &run_libra_command(&["merge", "--abort"], temp_path),
+        "abort no-commit merge",
+    );
+
+    let committed = run_libra_command(&["merge", "--commit", "feature"], temp_path);
+    assert_cli_success(&committed, "--commit overrides merge.commit=false");
+    assert!(!temp_path.join(".libra").join("merge-state.json").exists());
+    let _guard = ChangeDirGuard::new(temp_path);
+    let new_head = Head::current_commit()
+        .await
+        .expect("merge should create HEAD");
     let commit: Commit = load_object(&new_head).expect("load merge commit");
     assert_eq!(commit.parent_commit_ids.len(), 2);
 }
@@ -1417,4 +1595,616 @@ fn test_merge_help_lists_examples_banner() {
             "merge --help should include `{invocation}`, stdout: {stdout}"
         );
     }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_merge_into_name_overrides_message_branch_name() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feature change");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    let output = run_libra_command(
+        &["merge", "--into-name", "release-1.0", "feature"],
+        temp_path,
+    );
+    assert_cli_success(&output, "merge with --into-name");
+
+    let _guard = ChangeDirGuard::new(temp_path);
+    let head = Head::current_commit()
+        .await
+        .expect("merge should create HEAD");
+    let commit: Commit = load_object(&head).expect("load merge commit");
+    assert!(
+        commit.message.contains("into release-1.0"),
+        "merge message should honor --into-name: {}",
+        commit.message
+    );
+}
+
+#[test]
+fn test_merge_diff_algorithm_rejects_unknown_value() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["merge", "--diff-algorithm", "bogus", "main"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        stderr.contains("unknown diff algorithm 'bogus'"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn test_merge_diff_algorithm_accepts_known_value() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feature change");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+
+    let output = run_libra_command(
+        &["merge", "--diff-algorithm", "histogram", "feature"],
+        temp_path,
+    );
+    assert_cli_success(&output, "merge with --diff-algorithm histogram");
+}
+
+#[test]
+fn test_merge_cleanup_rejects_unknown_mode() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["merge", "--cleanup", "bogus", "main"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(stderr.contains("unknown cleanup mode 'bogus'"), "{stderr}");
+}
+
+#[test]
+fn test_merge_help_accepts_git_compat_flags() {
+    let repo = tempfile::tempdir().expect("tempdir for merge --help");
+    let output = run_libra_command(&["merge", "--help"], repo.path());
+    assert_cli_success(&output, "merge help");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for flag in [
+        "--into-name",
+        "--no-log",
+        "--no-signoff",
+        "--no-squash",
+        "--diff-algorithm",
+        "--cleanup",
+        "--no-verify",
+        "--overwrite-ignore",
+        "--no-overwrite-ignore",
+        "--rerere-autoupdate",
+        "--no-rerere-autoupdate",
+    ] {
+        assert!(
+            stdout.contains(flag),
+            "merge --help should list {flag}, stdout: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn test_merge_stat_reports_diffstat() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "alpha\nbeta\n", "feat change");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    let output = run_libra_command(&["merge", "--stat", "feature"], temp_path);
+    assert_cli_success(&output, "merge --stat");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("feature.txt"),
+        "stat should list feature.txt: {stdout}"
+    );
+    assert!(
+        stdout.contains("file") && stdout.contains("changed"),
+        "stat should show a summary line: {stdout}"
+    );
+    assert!(
+        stdout.contains("insertion"),
+        "stat should report insertions: {stdout}"
+    );
+}
+
+#[test]
+fn test_merge_summary_alias_reports_diffstat() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "alpha\n", "feat change");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    let output = run_libra_command(&["merge", "--summary", "feature"], temp_path);
+    assert_cli_success(&output, "merge --summary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("changed"),
+        "--summary alias should print a diffstat summary: {stdout}"
+    );
+}
+
+#[test]
+fn test_merge_no_stat_default_omits_diffstat() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "alpha\n", "feat change");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    let output = run_libra_command(&["merge", "feature"], temp_path);
+    assert_cli_success(&output, "merge without --stat");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("changed,"),
+        "default merge output should not include a diffstat: {stdout}"
+    );
+}
+
+#[test]
+fn test_merge_autostash_preserves_local_changes_on_fast_forward() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    commit_file(temp_path, "tracked.txt", "base\n", "base tracked");
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feat add");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+
+    // Uncommitted local change that would normally block the merge.
+    std::fs::write(temp_path.join("tracked.txt"), "base\nlocal-dirty\n").expect("write dirty");
+
+    let output = run_libra_command(&["merge", "--autostash", "feature"], temp_path);
+    assert_cli_success(&output, "merge --autostash");
+
+    assert!(
+        temp_path.join("feature.txt").exists(),
+        "fast-forward should bring in feature.txt"
+    );
+    let tracked = std::fs::read_to_string(temp_path.join("tracked.txt")).expect("read tracked");
+    assert!(
+        tracked.contains("local-dirty"),
+        "autostash should reapply local changes: {tracked}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_merge_autostash_preserves_local_changes_on_three_way() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    commit_file(temp_path, "tracked.txt", "base\n", "base tracked");
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feat add");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    std::fs::write(temp_path.join("tracked.txt"), "base\nlocal-dirty\n").expect("write dirty");
+
+    let output = run_libra_command(&["merge", "--autostash", "feature"], temp_path);
+    assert_cli_success(&output, "merge --autostash three-way");
+
+    let tracked = std::fs::read_to_string(temp_path.join("tracked.txt")).expect("read tracked");
+    assert!(
+        tracked.contains("local-dirty"),
+        "three-way autostash should reapply local changes: {tracked}"
+    );
+
+    let _guard = ChangeDirGuard::new(temp_path);
+    let head = Head::current_commit()
+        .await
+        .expect("merge should create HEAD");
+    let commit: Commit = load_object(&head).expect("load merge commit");
+    assert_eq!(
+        commit.parent_commit_ids.len(),
+        2,
+        "three-way merge should produce a two-parent commit"
+    );
+}
+
+#[test]
+fn test_merge_ignore_all_space_resolves_whitespace_only_side() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    commit_file(temp_path, "code.txt", "fn main() {}\n", "base code");
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    // theirs: a real semantic change
+    commit_file(
+        temp_path,
+        "code.txt",
+        "fn main() { run(); }\n",
+        "real change",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    // ours: whitespace-only reformatting of the same line
+    commit_file(temp_path, "code.txt", "fn  main()  {}\n", "whitespace only");
+
+    let output = run_libra_command(&["merge", "--ignore-all-space", "feature"], temp_path);
+    assert_cli_success(&output, "merge --ignore-all-space");
+
+    let merged = std::fs::read_to_string(temp_path.join("code.txt")).expect("read merged code");
+    assert!(
+        merged.contains("run();"),
+        "the real change should win over whitespace-only edits: {merged}"
+    );
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "whitespace-only side should not conflict: {merged}"
+    );
+}
+
+#[test]
+fn test_merge_help_lists_whitespace_flags() {
+    let repo = tempfile::tempdir().expect("tempdir for merge --help");
+    let output = run_libra_command(&["merge", "--help"], repo.path());
+    assert_cli_success(&output, "merge help");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for flag in [
+        "--ignore-space-change",
+        "--ignore-all-space",
+        "--ignore-space-at-eol",
+        "--ignore-cr-at-eol",
+        "--autostash",
+        "--gpg-sign",
+        "--no-gpg-sign",
+        "--verify-signatures",
+        "--no-verify-signatures",
+        "--find-renames",
+        "--no-renames",
+    ] {
+        assert!(
+            stdout.contains(flag),
+            "merge --help should list {flag}: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn test_merge_verify_signatures_rejects_unsigned_target() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    // Disable vault signing so the feature commit is unsigned.
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "vault.signing", "false"], temp_path),
+        "disable signing",
+    );
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feat add");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+
+    let output = run_libra_command(&["merge", "--verify-signatures", "feature"], temp_path);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert!(
+        stderr.contains("not signed"),
+        "verify-signatures should reject unsigned target: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_merge_gpg_sign_produces_signed_merge_commit() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    // Turn vault signing off so only `-S` can produce a signature.
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "vault.signing", "false"], temp_path),
+        "disable signing",
+    );
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feat add");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    let output = run_libra_command(&["merge", "-S", "feature"], temp_path);
+    assert_cli_success(&output, "merge -S");
+
+    let _guard = ChangeDirGuard::new(temp_path);
+    let head = Head::current_commit()
+        .await
+        .expect("merge should create HEAD");
+    let commit: Commit = load_object(&head).expect("load merge commit");
+    assert!(
+        commit.message.contains("PGP SIGNATURE"),
+        "merge -S should embed a PGP signature: {}",
+        commit.message
+    );
+}
+
+#[test]
+fn test_merge_help_lists_edit_flags() {
+    let repo = tempfile::tempdir().expect("tempdir for merge --help");
+    let output = run_libra_command(&["merge", "--help"], repo.path());
+    assert_cli_success(&output, "merge help");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for flag in ["--edit", "--no-edit"] {
+        assert!(
+            stdout.contains(flag),
+            "merge --help should list {flag}: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn test_merge_rename_with_edit_on_other_side_merges_cleanly() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    commit_file(temp_path, "old.txt", "line1\nline2\nline3\n", "base file");
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    // theirs: edit the file in place
+    commit_file(
+        temp_path,
+        "old.txt",
+        "line1\nline2-EDITED\nline3\n",
+        "edit on feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    // ours: rename old.txt -> new.txt with identical content
+    std::fs::write(temp_path.join("new.txt"), "line1\nline2\nline3\n").expect("write new.txt");
+    assert_cli_success(
+        &run_libra_command(&["add", "new.txt"], temp_path),
+        "add new",
+    );
+    assert_cli_success(&run_libra_command(&["rm", "old.txt"], temp_path), "rm old");
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "rename on main", "--no-verify"],
+            temp_path,
+        ),
+        "commit rename",
+    );
+
+    let output = run_libra_command(&["merge", "feature"], temp_path);
+    assert_cli_success(&output, "merge rename+edit");
+
+    assert!(
+        !temp_path.join("old.txt").exists(),
+        "renamed-away source should be gone"
+    );
+    let merged = std::fs::read_to_string(temp_path.join("new.txt")).expect("read new.txt");
+    assert!(
+        merged.contains("line2-EDITED"),
+        "the edit should follow the rename: {merged}"
+    );
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "rename + edit should not conflict: {merged}"
+    );
+}
+
+#[test]
+fn test_merge_no_renames_falls_back_to_conflict() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    commit_file(temp_path, "old.txt", "line1\nline2\nline3\n", "base file");
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(
+        temp_path,
+        "old.txt",
+        "line1\nline2-EDITED\nline3\n",
+        "edit on feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    std::fs::write(temp_path.join("new.txt"), "line1\nline2\nline3\n").expect("write new.txt");
+    assert_cli_success(
+        &run_libra_command(&["add", "new.txt"], temp_path),
+        "add new",
+    );
+    assert_cli_success(&run_libra_command(&["rm", "old.txt"], temp_path), "rm old");
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "rename on main", "--no-verify"],
+            temp_path,
+        ),
+        "commit rename",
+    );
+
+    // With rename detection disabled, the delete/modify pair conflicts.
+    let output = run_libra_command(&["merge", "--no-renames", "feature"], temp_path);
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "--no-renames should surface the delete/modify conflict: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_merge_edit_rewrites_message_via_editor() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    // A non-interactive "editor" that rewrites the merge message file.
+    let editor = temp_path.join("editor.sh");
+    std::fs::write(
+        &editor,
+        "#!/bin/sh\nprintf 'EDITED MERGE MESSAGE\\n' > \"$1\"\n",
+    )
+    .expect("write editor script");
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod editor");
+
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feat add");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    let output = run_libra_command_with_stdin_and_env(
+        &["merge", "--edit", "feature"],
+        temp_path,
+        "",
+        &[("GIT_EDITOR", editor.to_str().expect("editor path"))],
+    );
+    assert_cli_success(&output, "merge --edit");
+
+    let _guard = ChangeDirGuard::new(temp_path);
+    let head = Head::current_commit()
+        .await
+        .expect("merge should create HEAD");
+    let commit: Commit = load_object(&head).expect("load merge commit");
+    assert!(
+        commit.message.contains("EDITED MERGE MESSAGE"),
+        "--edit should apply the editor's message: {}",
+        commit.message
+    );
 }

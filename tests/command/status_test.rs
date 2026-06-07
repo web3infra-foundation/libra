@@ -223,6 +223,7 @@ async fn test_changes_to_be_staged() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -356,6 +357,7 @@ async fn test_status_porcelain() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -369,6 +371,7 @@ async fn test_status_porcelain() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     file2.write_all(b"modified content").unwrap();
@@ -504,6 +507,7 @@ async fn test_status_short_format() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -517,6 +521,7 @@ async fn test_status_short_format() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -611,6 +616,7 @@ async fn test_status_porcelain_v2_basic() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     file1.write_all(b" more").unwrap(); // unstaged modification
@@ -688,6 +694,7 @@ async fn test_status_porcelain_v2_branch_metadata_includes_upstream_counts() {
             ignore_errors: false,
             refresh: false,
             force: false,
+            ..Default::default()
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -758,6 +765,7 @@ async fn test_status_porcelain_v2_untracked_files_no() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -815,6 +823,7 @@ async fn test_status_porcelain_v2_untracked_files_all() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -864,6 +873,7 @@ async fn test_status_untracked_files_no() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -921,6 +931,7 @@ async fn test_status_untracked_files_all() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -1004,6 +1015,7 @@ async fn test_status_mixed_changes() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -1067,6 +1079,7 @@ async fn test_status_deleted_files() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -1135,6 +1148,7 @@ async fn test_status_with_subdirectories() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -1220,6 +1234,7 @@ async fn test_status_verbose_output() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -1273,6 +1288,7 @@ async fn test_status_short_format_with_branch() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -1297,6 +1313,7 @@ async fn test_status_short_format_with_branch() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            z: false,
         },
         &mut output,
     )
@@ -1335,6 +1352,7 @@ async fn test_status_porcelain_format_with_branch() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -1359,6 +1377,7 @@ async fn test_status_porcelain_format_with_branch() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            z: false,
         },
         &mut output,
     )
@@ -1397,6 +1416,7 @@ async fn test_status_show_stash_with_existing_stash() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -1419,6 +1439,7 @@ async fn test_status_show_stash_with_existing_stash() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -1438,6 +1459,7 @@ async fn test_status_show_stash_with_existing_stash() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            z: false,
         },
         &mut output,
     )
@@ -1465,6 +1487,7 @@ async fn test_status_show_stash_with_existing_stash() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            z: false,
         },
         &mut output,
     )
@@ -1492,6 +1515,7 @@ async fn test_status_show_stash_with_existing_stash() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            z: false,
         },
         &mut output,
     )
@@ -1530,6 +1554,7 @@ async fn test_status_show_stash_without_stash() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -1546,6 +1571,7 @@ async fn test_status_show_stash_without_stash() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            z: false,
         },
         &mut output,
     )
@@ -1583,6 +1609,7 @@ async fn test_status_branch_detached_head() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -1604,6 +1631,7 @@ async fn test_status_branch_detached_head() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -1613,6 +1641,7 @@ async fn test_status_branch_detached_head() {
     switch::execute(SwitchArgs {
         branch: Some(current_commit.to_string()),
         create: None,
+        force_create: None,
         detach: true,
         track: false,
     })
@@ -1629,6 +1658,7 @@ async fn test_status_branch_detached_head() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            z: false,
         },
         &mut output,
     )
@@ -1666,6 +1696,7 @@ async fn test_status_porcelain_v2_file_modes_and_hashes() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(create_commit_args("Initial commit")).await;
@@ -1681,6 +1712,7 @@ async fn test_status_porcelain_v2_file_modes_and_hashes() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -1695,6 +1727,7 @@ async fn test_status_porcelain_v2_file_modes_and_hashes() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -1817,6 +1850,7 @@ async fn test_status_porcelain_v2_executable_file() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -1880,6 +1914,7 @@ async fn test_status_porcelain_v2_deleted_file() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(create_commit_args("Initial commit")).await;
@@ -1965,6 +2000,7 @@ async fn test_status_after_add() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -2131,5 +2167,36 @@ fn test_add_dry_run_output() {
     assert!(
         !status_stdout.contains("A  file.txt"),
         "dry run should not stage: {status_stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_status_z_nul_terminates_porcelain() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("untracked.txt"), "u\n").unwrap();
+    std::fs::write(repo.path().join("tracked.txt"), "tracked\nmod\n").unwrap();
+
+    // `-z` with no explicit format implies porcelain v1 with NUL terminators.
+    let out = run_libra_command(&["status", "-z"], repo.path());
+    assert_cli_success(&out, "status -z");
+    assert!(
+        out.stdout.contains(&0u8),
+        "status -z must NUL-terminate entries; stdout={:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !out.stdout.contains(&b'\n'),
+        "status -z must not emit newlines; stdout={:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("tracked.txt"),
+        "should list the modified file: {text}"
+    );
+    assert!(
+        text.contains("untracked.txt"),
+        "should list the untracked file: {text}"
     );
 }

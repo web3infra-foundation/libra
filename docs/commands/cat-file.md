@@ -5,7 +5,10 @@ Inspect Git objects and Libra AI history objects stored in the repository.
 ## Synopsis
 
 ```
-libra cat-file [OPTIONS] [OBJECT]
+libra cat-file (-t | -s | -p | -e) <OBJECT>
+libra cat-file (--batch | --batch-check)[=<format>] [-Z] [--buffer] [--follow-symlinks] < object-list
+libra cat-file (--batch | --batch-check)[=<format>] --batch-all-objects [--unordered]
+libra cat-file (--ai | --ai-type) <ID> | --ai-list <TYPE> | --ai-list-types
 ```
 
 ## Description
@@ -33,6 +36,15 @@ branch.
 | `-s` | | Print the object size in bytes. |
 | `-p` | | Pretty-print the object content. |
 | `-e` | | Check if the object exists (exit status only, no stdout). Does not support `--json`. |
+| `--batch[=<format>]` | | Read object refs from stdin; print metadata + raw payload per object. Optional `=<format>` (default `%(objectname) %(objecttype) %(objectsize)`). |
+| `--batch-check[=<format>]` | | Like `--batch` but metadata only (no payload). |
+| `--batch-all-objects` | | With `--batch`/`--batch-check`, iterate every local object instead of reading stdin (local loose + pack only). |
+| `--unordered` | | With `--batch-all-objects`, emit in scan order instead of sorted by object id. |
+| `--buffer` | | Buffer batch output and flush once at EOF (default flushes per object). |
+| | `-Z` | Use NUL (`\0`) instead of newline to separate/terminate batch input and output records. |
+| `--follow-symlinks` | | Follow in-tree symlinks when resolving `<tree-ish>:<path>` batch inputs (object graph only; never the working tree). |
+| `--textconv` | | **Unsupported** (rejected, `LBR-UNSUPPORTED-001`): Libra has no textconv driver. |
+| `--filters` | | **Unsupported** (rejected, `LBR-UNSUPPORTED-001`): Libra has no clean/smudge filter driver. |
 | `--ai <ID>` | | Pretty-print an AI object by ID. Accepts `TYPE:ID` to disambiguate. |
 | `--ai-type <ID>` | | Print the AI object type for the given ID. |
 | `--ai-list <TYPE>` | | List all AI objects of the given type (e.g., `intent`, `patchset`, `event`). |
@@ -57,6 +69,24 @@ libra cat-file -e abc1234
 # Structured JSON type query
 libra cat-file -t HEAD --json
 
+# Stream object metadata for refs read from stdin
+printf 'HEAD\nabc1234\n' | libra cat-file --batch-check
+
+# Stream metadata + raw content for each object
+echo HEAD | libra cat-file --batch
+
+# Custom batch format (note the =<format> syntax)
+echo HEAD | libra cat-file --batch-check="%(objectname) %(objecttype)"
+
+# NUL-separated batch I/O (robust against odd ref names)
+printf 'HEAD\0' | libra cat-file --batch-check -Z
+
+# Print metadata for every local object, sorted by id
+libra cat-file --batch-all-objects --batch-check
+
+# Follow an in-tree symlink to its target
+echo 'HEAD:path/to/symlink' | libra cat-file --batch-check --follow-symlinks
+
 # List all AI intent objects
 libra cat-file --ai-list intent
 
@@ -80,6 +110,8 @@ libra cat-file -t HEAD --json
 libra cat-file --ai-list-types --json
 libra cat-file --ai-list intent
 libra cat-file --ai <session-id>
+echo HEAD | libra cat-file --batch-check
+libra cat-file --batch-all-objects --batch-check
 ```
 
 ## Human Output
@@ -181,15 +213,30 @@ interface. This means a single command can answer both "what type is this
 commit?" and "what does this AI plan contain?" -- which is especially useful
 during debugging of agent workflows.
 
-### Why no batch mode?
+### Batch mode (and its scope)
 
-Git's `cat-file --batch` reads object IDs from stdin in a streaming fashion,
-which is important when processing millions of objects in scripts. Libra targets
-a different workflow: structured JSON output lets agents retrieve object data
-in a single call, and the AI inspection modes already support listing all
-objects of a type. Batch mode would add complexity without a clear use case in
-the agent-native workflow. If bulk inspection becomes necessary, it can be added
-as `--batch` later without breaking the existing interface.
+`libra cat-file` implements the core of Git's batch protocol — `--batch`,
+`--batch-check` (each with the optional `=<format>` syntax and the
+`%(objectname)`/`%(objecttype)`/`%(objectsize)` atoms), `--batch-all-objects`,
+`--unordered`, `-Z` (NUL records), `--buffer`, and `--follow-symlinks` — so
+external scripts and tools can drive Libra as an object-metadata/content
+backend. Batch output is a byte-exact text protocol, so `--json`/`--machine` is
+not layered on top of it.
+
+Differences from Git (intentional, see `COMPATIBILITY.md`):
+
+- A single batch input record is capped at 4 KiB (DoS hardening); over-long
+  input is a `LBR-CLI-003` (129) syntax error.
+- Only the `missing` and `ambiguous` per-line states are emitted; Git's
+  `filtered`/`submodule` states are deferred.
+- `--follow-symlinks` resolves only within the object graph (never the working
+  tree). A link that escapes the tree root resolves to `<path> missing` rather
+  than Git's `symlink <size>` content line; loops are bounded at depth 32.
+- `--batch-all-objects` covers only local (loose + pack) objects, not
+  un-fetched cloud-tiered objects.
+- `--batch-command`, `--filter`, `--use-mailmap`, `--path`, and the bare
+  `<type> <object>` form are not yet implemented (deferred); `--textconv` /
+  `--filters` are rejected as unsupported.
 
 ### Why does `-e` stay human-only?
 
@@ -208,18 +255,30 @@ instead -- if the object does not exist, the JSON response will contain an error
 | Print object size | `-s` | `-s` | N/A |
 | Pretty-print content | `-p` | `-p` | N/A (`jj file show` for blobs) |
 | Check existence | `-e` | `-e` | N/A |
-| Batch mode | Not implemented | `--batch`, `--batch-check` | N/A |
+| Batch metadata/content | `--batch`, `--batch-check` (partial) | `--batch`, `--batch-check` | N/A |
+| Batch all objects | `--batch-all-objects` (local only) | `--batch-all-objects` | N/A |
+| Batch ordering | `--unordered` | `--unordered` | N/A |
+| NUL records | `-Z` | `-Z` (and deprecated `-z`) | N/A |
+| Batch buffering | `--buffer` | `--buffer` | N/A |
+| Follow symlinks | `--follow-symlinks` (in-tree only; escape → `missing`) | `--follow-symlinks` | N/A |
+| Batch command stream | Deferred | `--batch-command` | N/A |
 | AI object inspection | `--ai`, `--ai-type` | N/A | N/A |
 | AI object listing | `--ai-list`, `--ai-list-types` | N/A | N/A |
-| JSON output | `--json` | No | No |
-| Object resolution | SHA-1, refs, `HEAD~N` | SHA-1, refs, all rev-parse syntax | Change IDs, revsets |
-| `--filters` | No | `--filters` (convert to/from external) | N/A |
-| `--textconv` | No | `--textconv` | N/A |
+| JSON output | `--json` (single-object modes only) | No | No |
+| Object resolution | SHA-1/SHA-256, refs, `HEAD~N` | SHA-1, refs, all rev-parse syntax | Change IDs, revsets |
+| `--filters` | Rejected (`LBR-UNSUPPORTED-001`) | `--filters` (convert to/from external) | N/A |
+| `--textconv` | Rejected (`LBR-UNSUPPORTED-001`) | `--textconv` | N/A |
+| `--path`, `--filter`, `--use-mailmap` | Deferred | supported | N/A |
 
 ## Error Handling
 
 | Scenario | StableErrorCode | Exit |
 |----------|-----------------|------|
-| Invalid object / revision | `LBR-CLI-003` | 129 |
-| Unsupported argument combination | `LBR-CLI-002` | 129 |
+| Invalid object / revision (single-object modes) | `LBR-CLI-003` | 129 |
+| Over-long (>4 KiB) batch input record | `LBR-CLI-003` | 129 |
+| Unsupported argument combination (batch + `--json`, modifier without batch, batch + positional, unknown format atom) | `LBR-CLI-002` | 129 |
+| Mode-group conflict (e.g. `--batch-check -p`) | `LBR-CLI-002` | 129 |
+| `--textconv` / `--filters` | `LBR-UNSUPPORTED-001` | 128 |
 | Failed to read object data | `LBR-IO-001` / `LBR-REPO-002` | 128 |
+| Batch line — object missing / ambiguous short SHA | — | 0 (printed inline as `<object> missing` / `<object> ambiguous`) |
+| Downstream pipe closed (`BrokenPipe`) | — | 0 (stream stops quietly) |

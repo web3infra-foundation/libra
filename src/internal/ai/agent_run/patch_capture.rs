@@ -130,7 +130,8 @@ fn line_count(path: &Path) -> io::Result<u32> {
         return Ok(0);
     }
     let newlines = bytes.iter().filter(|&&byte| byte == b'\n').count();
-    let trailing = u32::from(*bytes.last().unwrap() != b'\n');
+    // INVARIANT: `bytes` is non-empty here (the `is_empty()` early-return above).
+    let trailing = u32::from(*bytes.last().expect("INVARIANT: bytes is non-empty") != b'\n');
     Ok(u32::try_from(newlines)
         .unwrap_or(u32::MAX)
         .saturating_add(trailing))

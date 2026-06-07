@@ -16,6 +16,7 @@ use git_internal::{
     hash::ObjectHash,
     internal::object::{blob::Blob, commit::Commit, tree::Tree},
 };
+use regex::{Regex, RegexBuilder};
 use serde::Serialize;
 
 use crate::{
@@ -23,11 +24,12 @@ use crate::{
     common_utils::parse_commit_msg,
     internal::{
         branch::{Branch, BranchStoreError},
-        config::ConfigKv,
+        config::{ConfigKv, validate_config_regex_pattern},
         head::Head,
         log::{
             date_parser::parse_date,
             formatter::{CommitFormatter, FormatContext, FormatType},
+            pickaxe,
         },
         tag::{self, TagObject},
     },
@@ -36,7 +38,7 @@ use crate::{
         object_ext::TreeExt,
         output::{OutputConfig, emit_json_data},
         pager::Pager,
-        util,
+        util::{self, CommitBaseError},
     },
 };
 
@@ -46,7 +48,8 @@ EXAMPLES:
     libra log --oneline --graph            Show a compact commit graph
     libra log --author alice                Filter commits by author (case-insensitive substring)
     libra log --since 24h --until 1h       Time-window filter (relative or RFC3339)
-    libra log --grep 'fix(' -n 20          Filter commits by message substring
+    libra log --grep '^fix' -n 20          Filter commits by message (regex)
+    libra log --merges --first-parent      Show merge commits along the first-parent line
     libra log --name-status src/           Show changed files under src/
     libra --json log -n 1                  Structured JSON output for agents";
 
@@ -172,9 +175,36 @@ pub struct LogArgs {
     #[clap(value_name = "PATHS", num_args = 0..)]
     pathspec: Vec<String>,
 
-    /// Filter commits whose message contains PATTERN (case-sensitive substring match)
+    /// Filter commits whose message matches PATTERN (regular expression, case-sensitive by default)
     #[clap(long, value_name = "PATTERN")]
     pub grep: Option<String>,
+    /// Match the `--grep` pattern case-insensitively
+    #[clap(short = 'i', long = "regexp-ignore-case")]
+    pub regexp_ignore_case: bool,
+    /// Filter commits by committer name or email (case-insensitive substring match)
+    #[clap(long, value_name = "PATTERN")]
+    pub committer: Option<String>,
+    /// Show only merge commits (two or more parents); alias for `--min-parents=2`
+    #[clap(long)]
+    pub merges: bool,
+    /// Show only non-merge commits (fewer than two parents); alias for `--max-parents=1`
+    #[clap(long = "no-merges")]
+    pub no_merges: bool,
+    /// Show only commits with at least N parents
+    #[clap(long, value_name = "N")]
+    pub min_parents: Option<usize>,
+    /// Show only commits with at most N parents
+    #[clap(long, value_name = "N")]
+    pub max_parents: Option<usize>,
+    /// Follow only the first parent of each merge commit when walking history
+    #[clap(long)]
+    pub first_parent: bool,
+    /// Pickaxe: show commits that change the number of occurrences of the literal STRING
+    #[clap(short = 'S', value_name = "STRING", conflicts_with = "pickaxe_regex")]
+    pub pickaxe_string: Option<String>,
+    /// Show commits with an added or removed line matching the REGEX
+    #[clap(short = 'G', value_name = "REGEX")]
+    pub pickaxe_regex: Option<String>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -232,28 +262,264 @@ pub struct LogOutput {
     pub total: Option<usize>,
 }
 
+/// A pickaxe content filter (`-S` / `-G`). The two have different semantics, so
+/// they are distinct variants (see [`pickaxe`]).
+enum Pickaxe {
+    /// `-S`: literal-string occurrence-count difference across full blobs.
+    String(Vec<u8>),
+    /// `-G`: regex match against added/removed diff lines.
+    Regex(Regex),
+}
+
 struct CommitFilter {
     author: Option<String>,
+    committer: Option<String>,
     since: Option<i64>,
     until: Option<i64>,
     paths: Vec<PathBuf>,
-    grep: Option<String>,
+    grep: Option<Regex>,
+    min_parents: Option<usize>,
+    max_parents: Option<usize>,
+    /// When set, only commits whose OID is in this set (the first-parent chain
+    /// from HEAD) pass. `None` means no `--first-parent` restriction.
+    first_parents: Option<HashSet<String>>,
+    /// `-S`/`-G` content filter (requires a per-commit diff; checked in the
+    /// async [`CommitFilter::matches`] path).
+    pickaxe: Option<Pickaxe>,
+}
+
+/// A positional revision-range expression (only parsed when explicit range/
+/// exclude syntax is present among the positionals).
+enum RevRange {
+    /// `^A B` / `A..B`: `union(reachable(positives)) - union(reachable(negatives))`.
+    Include {
+        positives: Vec<String>,
+        negatives: Vec<String>,
+    },
+    /// `A...B`: commits reachable from exactly one of `A`, `B` (symmetric difference).
+    Symmetric { a: String, b: String },
+}
+
+/// Returns whether any positional token uses explicit revision-range/exclude
+/// syntax (`..`, `...`, or a leading `^`). Bare tokens never trigger this, so
+/// pathspec-only invocations keep their existing behavior.
+fn has_rev_range_syntax(tokens: &[String]) -> bool {
+    tokens
+        .iter()
+        .any(|token| token.contains("..") || token.starts_with('^'))
+}
+
+/// An empty range endpoint defaults to `HEAD` (so `..B` and `A..` work).
+fn rev_endpoint(token: &str) -> String {
+    if token.is_empty() {
+        "HEAD".to_string()
+    } else {
+        token.to_string()
+    }
+}
+
+fn rev_range_unsupported(token: &str) -> CliError {
+    CliError::command_usage(format!(
+        "unsupported revision range expression '{token}': `A...B` must be the only argument"
+    ))
+    .with_stable_code(StableErrorCode::CliInvalidArguments)
+}
+
+/// Parses the positional tokens into a [`RevRange`]. The symmetric form
+/// `A...B` must stand alone; otherwise tokens combine as positive refs, `^X`
+/// exclusions, and `A..B` (negative `A`, positive `B`).
+fn parse_rev_range(tokens: &[String]) -> CliResult<RevRange> {
+    if tokens.len() == 1
+        && let Some((a, b)) = tokens[0].split_once("...")
+    {
+        return Ok(RevRange::Symmetric {
+            a: rev_endpoint(a),
+            b: rev_endpoint(b),
+        });
+    }
+
+    let mut positives = Vec::new();
+    let mut negatives = Vec::new();
+    for token in tokens {
+        if token.contains("...") {
+            return Err(rev_range_unsupported(token));
+        } else if let Some((a, b)) = token.split_once("..") {
+            negatives.push(rev_endpoint(a));
+            positives.push(rev_endpoint(b));
+        } else if let Some(rest) = token.strip_prefix('^') {
+            negatives.push(rest.to_string());
+        } else {
+            positives.push(token.clone());
+        }
+    }
+    if positives.is_empty() {
+        // `^A` with no positive ref defaults the positive side to HEAD.
+        positives.push("HEAD".to_string());
+    }
+    Ok(RevRange::Include {
+        positives,
+        negatives,
+    })
+}
+
+/// Maps a revision-resolution failure to a `libra log` CLI error (mirrors
+/// `rev-list`): unknown refs are `CliInvalidTarget` (exit 129).
+fn log_rev_target_error(spec: &str, error: CommitBaseError) -> CliError {
+    match error {
+        CommitBaseError::HeadUnborn => CliError::failure(format!(
+            "not a valid object name: '{spec}' (HEAD does not point to a commit)"
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidTarget)
+        .with_hint("create a commit before resolving HEAD."),
+        CommitBaseError::InvalidReference(detail) => {
+            CliError::failure(format!("not a valid object name: '{spec}' ({detail})"))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+        }
+        CommitBaseError::ReadFailure(detail) => {
+            CliError::fatal(format!("failed to resolve '{spec}': {detail}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        CommitBaseError::CorruptReference(detail) => {
+            CliError::fatal(format!("failed to resolve '{spec}': {detail}"))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+        }
+    }
+}
+
+/// Resolves `spec` and returns the commits reachable from it.
+async fn reachable_commits_for_spec(spec: &str) -> CliResult<Vec<Commit>> {
+    let commit = util::get_commit_base_typed(spec)
+        .await
+        .map_err(|e| log_rev_target_error(spec, e))?;
+    get_reachable_commits(commit.to_string(), None).await
+}
+
+/// Computes the commit set selected by a [`RevRange`].
+async fn resolve_rev_range(range: &RevRange) -> CliResult<Vec<Commit>> {
+    match range {
+        RevRange::Symmetric { a, b } => {
+            let ra = reachable_commits_for_spec(a).await?;
+            let rb = reachable_commits_for_spec(b).await?;
+            let a_oids: HashSet<String> = ra.iter().map(|c| c.id.to_string()).collect();
+            let b_oids: HashSet<String> = rb.iter().map(|c| c.id.to_string()).collect();
+            let mut out: HashMap<String, Commit> = HashMap::new();
+            for commit in ra.into_iter().chain(rb) {
+                let oid = commit.id.to_string();
+                // Reachable from exactly one side.
+                if a_oids.contains(&oid) ^ b_oids.contains(&oid) {
+                    out.entry(oid).or_insert(commit);
+                }
+            }
+            Ok(out.into_values().collect())
+        }
+        RevRange::Include {
+            positives,
+            negatives,
+        } => {
+            let mut excluded: HashSet<String> = HashSet::new();
+            for negative in negatives {
+                for commit in reachable_commits_for_spec(negative).await? {
+                    excluded.insert(commit.id.to_string());
+                }
+            }
+            let mut included: HashMap<String, Commit> = HashMap::new();
+            for positive in positives {
+                for commit in reachable_commits_for_spec(positive).await? {
+                    let oid = commit.id.to_string();
+                    if !excluded.contains(&oid) {
+                        included.entry(oid).or_insert(commit);
+                    }
+                }
+            }
+            Ok(included.into_values().collect())
+        }
+    }
+}
+
+/// Effective minimum parent count: explicit `--min-parents`, else `2` when
+/// `--merges` is set (git treats `--merges` as `--min-parents=2`).
+fn effective_min_parents(args: &LogArgs) -> Option<usize> {
+    args.min_parents.or(args.merges.then_some(2))
+}
+
+/// Effective maximum parent count: explicit `--max-parents`, else `1` when
+/// `--no-merges` is set (git treats `--no-merges` as `--max-parents=1`).
+fn effective_max_parents(args: &LogArgs) -> Option<usize> {
+    args.max_parents.or(args.no_merges.then_some(1))
+}
+
+/// Compiles a `--grep` pattern into a [`Regex`], enforcing the shared 4 KiB
+/// pattern-length cap and mapping every failure to `LBR-CLI-002` (exit 129),
+/// mirroring `libra grep`.
+fn compile_grep_regex(pattern: &str, ignore_case: bool) -> CliResult<Regex> {
+    validate_config_regex_pattern(pattern).map_err(|e| {
+        CliError::command_usage(format!("invalid --grep pattern: {e}"))
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+    })?;
+    RegexBuilder::new(pattern)
+        .case_insensitive(ignore_case)
+        // Match `^`/`$` at line boundaries within the multi-line commit message,
+        // like `git log --grep` (so e.g. `^fix` matches the subject line and
+        // `^Signed-off-by` matches a footer).
+        .multi_line(true)
+        .build()
+        .map_err(|e| {
+            CliError::command_usage(format!("invalid --grep regex '{pattern}': {e}"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })
+}
+
+/// Builds the set of commit OIDs on the first-parent chain from `head`, using
+/// the already-loaded reachable `commits` to look up each commit's first parent.
+fn first_parent_oids(head: &ObjectHash, commits: &[Commit]) -> HashSet<String> {
+    let first_parent: HashMap<String, Option<String>> = commits
+        .iter()
+        .map(|c| {
+            (
+                c.id.to_string(),
+                c.parent_commit_ids.first().map(|p| p.to_string()),
+            )
+        })
+        .collect();
+
+    let mut chain = HashSet::new();
+    let mut current = Some(head.to_string());
+    while let Some(oid) = current {
+        if !chain.insert(oid.clone()) {
+            break; // cycle guard
+        }
+        current = first_parent.get(&oid).cloned().flatten();
+    }
+    chain
 }
 
 impl CommitFilter {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         author: Option<String>,
+        committer: Option<String>,
         since: Option<i64>,
         until: Option<i64>,
         paths: Vec<PathBuf>,
-        grep: Option<String>,
+        // Pre-compiled so the regex failure (the only fallible part) happens
+        // *before* history traversal — see the call sites.
+        grep: Option<Regex>,
+        min_parents: Option<usize>,
+        max_parents: Option<usize>,
+        first_parents: Option<HashSet<String>>,
+        pickaxe: Option<Pickaxe>,
     ) -> Self {
         Self {
             author: author.map(|s| s.to_lowercase()),
+            committer: committer.map(|s| s.to_lowercase()),
             since,
             until,
             paths,
             grep,
+            min_parents,
+            max_parents,
+            first_parents,
+            pickaxe,
         }
     }
 
@@ -265,6 +531,17 @@ impl CommitFilter {
                 commit.author.email.to_lowercase()
             );
             if !author.contains(author_filter) {
+                return false;
+            }
+        }
+
+        if let Some(committer_filter) = &self.committer {
+            let committer = format!(
+                "{} <{}>",
+                commit.committer.name.to_lowercase(),
+                commit.committer.email.to_lowercase()
+            );
+            if !committer.contains(committer_filter) {
                 return false;
             }
         }
@@ -281,9 +558,26 @@ impl CommitFilter {
             return false;
         }
 
+        let parent_count = commit.parent_commit_ids.len();
+        if let Some(min) = self.min_parents
+            && parent_count < min
+        {
+            return false;
+        }
+        if let Some(max) = self.max_parents
+            && parent_count > max
+        {
+            return false;
+        }
+
+        if let Some(chain) = &self.first_parents
+            && !chain.contains(&commit.id.to_string())
+        {
+            return false;
+        }
+
         if let Some(pattern) = &self.grep
-            && !pattern.is_empty()
-            && !commit.message.contains(pattern.as_str())
+            && !pattern.is_match(&commit.message)
         {
             return false;
         }
@@ -307,6 +601,20 @@ impl CommitFilter {
         }
     }
 
+    /// Pickaxe (`-S`/`-G`) predicate. Requires a per-commit diff, so it runs in
+    /// the async path. Object-load/diff failures surface as `RepoCorrupt` (128)
+    /// rather than silently excluding the commit; only a clean "no match"
+    /// excludes it.
+    fn matches_pickaxe(&self, commit: &Commit) -> Result<bool, CliError> {
+        let Some(pickaxe) = &self.pickaxe else {
+            return Ok(true);
+        };
+        match pickaxe {
+            Pickaxe::String(needle) => commit_pickaxe_string(commit, needle, &self.paths),
+            Pickaxe::Regex(re) => commit_pickaxe_regex(commit, re, &self.paths),
+        }
+    }
+
     async fn matches(
         &self,
         commit: &Commit,
@@ -316,8 +624,108 @@ impl CommitFilter {
             return Ok(false);
         }
 
-        self.matches_paths(commit, cached_changes).await
+        if !self.matches_paths(commit, cached_changes).await? {
+            return Ok(false);
+        }
+
+        self.matches_pickaxe(commit)
     }
+}
+
+/// Builds the optional pickaxe filter from `--S`/`-G`, compiling the `-G` regex
+/// up front (4 KiB cap, `LBR-CLI-002` on failure) so an invalid pattern fails
+/// before any history traversal.
+fn build_pickaxe(args: &LogArgs) -> CliResult<Option<Pickaxe>> {
+    if let Some(string) = &args.pickaxe_string {
+        Ok(Some(Pickaxe::String(string.clone().into_bytes())))
+    } else if let Some(pattern) = &args.pickaxe_regex {
+        Ok(Some(Pickaxe::Regex(compile_grep_regex(pattern, false)?)))
+    } else {
+        Ok(None)
+    }
+}
+
+/// A list of `(path, blob-oid)` entries for one tree snapshot.
+type BlobList = Vec<(PathBuf, ObjectHash)>;
+
+/// Loads a commit's child-side and first-parent-side blob lists
+/// (`(path, oid)`), mirroring `get_changed_files_for_commit`'s tree loading.
+fn load_commit_blob_vecs(commit: &Commit) -> Result<(BlobList, BlobList), CliError> {
+    let tree = load_object::<Tree>(&commit.tree_id)
+        .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
+    let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
+
+    let shallow_boundaries = crate::command::fetch::read_shallow_boundaries().unwrap_or_default();
+    let has_parents = !commit.parent_commit_ids.is_empty()
+        && !shallow_boundaries.contains(&commit.id.to_string());
+
+    let old_blobs: Vec<(PathBuf, ObjectHash)> = if has_parents {
+        let parent = &commit.parent_commit_ids[0];
+        let parent_commit = load_object::<Commit>(parent)
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
+        let parent_tree = load_object::<Tree>(&parent_commit.tree_id)
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load parent tree: {e}")))?;
+        parent_tree.get_plain_items()
+    } else {
+        Vec::new()
+    };
+
+    Ok((old_blobs, new_blobs))
+}
+
+fn pickaxe_path_in_scope(path: &std::path::Path, filters: &[PathBuf]) -> bool {
+    filters.is_empty() || filters.iter().any(|filter| util::is_sub_path(path, filter))
+}
+
+/// `-S`: a commit matches when some changed (in-scope) file has a different
+/// **occurrence count** of `needle` between its parent-side and child-side full
+/// blob. Unchanged files (and changes that leave the count equal) do not match.
+fn commit_pickaxe_string(
+    commit: &Commit,
+    needle: &[u8],
+    paths: &[PathBuf],
+) -> Result<bool, CliError> {
+    let (old_blobs, new_blobs) = load_commit_blob_vecs(commit)?;
+    let old_map: HashMap<PathBuf, ObjectHash> = old_blobs.into_iter().collect();
+    let new_map: HashMap<PathBuf, ObjectHash> = new_blobs.into_iter().collect();
+
+    let mut considered: HashSet<&PathBuf> = HashSet::new();
+    considered.extend(old_map.keys());
+    considered.extend(new_map.keys());
+
+    for path in considered {
+        if !pickaxe_path_in_scope(path, paths) {
+            continue;
+        }
+        let old_oid = old_map.get(path);
+        let new_oid = new_map.get(path);
+        if old_oid == new_oid {
+            // File unchanged (same blob): occurrence count is identical.
+            continue;
+        }
+        let old_count = match old_oid {
+            Some(hash) => pickaxe::count_occurrences(&load_commit_blob_content(hash)?, needle),
+            None => 0,
+        };
+        let new_count = match new_oid {
+            Some(hash) => pickaxe::count_occurrences(&load_commit_blob_content(hash)?, needle),
+            None => 0,
+        };
+        if old_count != new_count {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// `-G`: a commit matches when any added/removed diff line (within scope) of any
+/// changed file matches `re`.
+fn commit_pickaxe_regex(commit: &Commit, re: &Regex, paths: &[PathBuf]) -> Result<bool, CliError> {
+    let (old_blobs, new_blobs) = load_commit_blob_vecs(commit)?;
+    let diffs = build_commit_diff_items(old_blobs, new_blobs, paths.to_vec())?;
+    Ok(diffs
+        .iter()
+        .any(|item| pickaxe::diff_line_matches(&item.data, re)))
 }
 
 fn str_to_decorate_option(s: &str) -> Result<DecorateOptions, String> {
@@ -393,6 +801,8 @@ pub async fn get_reachable_commits(
         ObjectHash::from_str(&commit_hash).map_err(|_| log_invalid_object_error(&commit_hash))?;
     queue.push_back((initial_hash, 0)); // (commit_id, current_depth)
 
+    let shallow_boundaries = crate::command::fetch::read_shallow_boundaries().unwrap_or_default();
+
     while let Some((commit_id, current_depth)) = queue.pop_front() {
         // If we've already seen this commit, skip it
         if !commit_set.insert(commit_id) {
@@ -410,9 +820,11 @@ pub async fn get_reachable_commits(
             continue;
         }
 
-        // Add parent commits to the queue with incremented depth
-        for parent_commit_id in &commit.parent_commit_ids {
-            queue.push_back((*parent_commit_id, current_depth + 1));
+        // Add parent commits to the queue with incremented depth (if not a shallow boundary)
+        if !shallow_boundaries.contains(&commit_id.to_string()) {
+            for parent_commit_id in &commit.parent_commit_ids {
+                queue.push_back((*parent_commit_id, current_depth + 1));
+            }
         }
 
         // Add the current commit to the result list
@@ -475,22 +887,54 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
 
     let since = args.since.as_deref().map(parse_date_arg).transpose()?;
     let until = args.until.as_deref().map(parse_date_arg).transpose()?;
-    let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
-    let filter = CommitFilter::new(
-        args.author.clone(),
-        since,
-        until,
-        path_filters.clone(),
-        args.grep.clone(),
-    );
+    // When explicit range syntax (`A..B`, `A...B`, `^X`) is present the
+    // positionals are revisions, not pathspec.
+    let is_range = has_rev_range_syntax(&args.pathspec);
+    let path_filters: Vec<PathBuf> = if is_range {
+        Vec::new()
+    } else {
+        args.pathspec.iter().map(util::to_workdir_path).collect()
+    };
+    // Compile `--grep` before any traversal so an invalid/oversized pattern
+    // fails fast (`LBR-CLI-002`) instead of after loading the whole history.
+    let grep = args
+        .grep
+        .as_deref()
+        .map(|p| compile_grep_regex(p, args.regexp_ignore_case))
+        .transpose()?;
+    let pickaxe = build_pickaxe(&args)?;
+    let rev_range = is_range
+        .then(|| parse_rev_range(&args.pathspec))
+        .transpose()?;
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let commit_hash = current_head_commit.to_string();
 
-    let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None).await?;
+    let mut reachable_commits = match &rev_range {
+        Some(range) => resolve_rev_range(range).await?,
+        None => get_reachable_commits(commit_hash.clone(), None).await?,
+    };
     // newest first
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
     let default_abbrev = util::get_min_unique_hash_length(&reachable_commits).max(7);
+
+    // `--first-parent` restricts to the first-parent chain (computed from the
+    // already-loaded history so the shared `get_reachable_commits` is untouched).
+    // It is anchored at HEAD, so it is skipped for an explicit revision range.
+    let first_parents = (args.first_parent && !is_range)
+        .then(|| first_parent_oids(&current_head_commit, &reachable_commits));
+    let filter = CommitFilter::new(
+        args.author.clone(),
+        args.committer.clone(),
+        since,
+        until,
+        path_filters.clone(),
+        grep,
+        effective_min_parents(&args),
+        effective_max_parents(&args),
+        first_parents,
+        pickaxe,
+    );
 
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
     let reuse_changed_files = name_only || name_status;
@@ -679,21 +1123,46 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
 async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     let since = args.since.as_deref().map(parse_date_arg).transpose()?;
     let until = args.until.as_deref().map(parse_date_arg).transpose()?;
-    let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
-    let filter = CommitFilter::new(
-        args.author.clone(),
-        since,
-        until,
-        path_filters.clone(),
-        args.grep.clone(),
-    );
+    let is_range = has_rev_range_syntax(&args.pathspec);
+    let path_filters: Vec<PathBuf> = if is_range {
+        Vec::new()
+    } else {
+        args.pathspec.iter().map(util::to_workdir_path).collect()
+    };
+    let grep = args
+        .grep
+        .as_deref()
+        .map(|p| compile_grep_regex(p, args.regexp_ignore_case))
+        .transpose()?;
+    let pickaxe = build_pickaxe(args)?;
+    let rev_range = is_range
+        .then(|| parse_rev_range(&args.pathspec))
+        .transpose()?;
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let commit_hash = current_head_commit.to_string();
 
-    let mut reachable_commits = get_reachable_commits(commit_hash, None).await?;
+    let mut reachable_commits = match &rev_range {
+        Some(range) => resolve_rev_range(range).await?,
+        None => get_reachable_commits(commit_hash, None).await?,
+    };
     // newest first
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
+
+    let first_parents = (args.first_parent && !is_range)
+        .then(|| first_parent_oids(&current_head_commit, &reachable_commits));
+    let filter = CommitFilter::new(
+        args.author.clone(),
+        args.committer.clone(),
+        since,
+        until,
+        path_filters.clone(),
+        grep,
+        effective_min_parents(args),
+        effective_max_parents(args),
+        first_parents,
+        pickaxe,
+    );
 
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
     let include_total = args.number.is_none();
@@ -920,7 +1389,11 @@ pub(crate) async fn get_changed_files_for_commit(
         .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
     let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
 
-    let old_blobs: Vec<(PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
+    let shallow_boundaries = crate::command::fetch::read_shallow_boundaries().unwrap_or_default();
+    let has_parents = !commit.parent_commit_ids.is_empty()
+        && !shallow_boundaries.contains(&commit.id.to_string());
+
+    let old_blobs: Vec<(PathBuf, ObjectHash)> = if has_parents {
         let parent = &commit.parent_commit_ids[0];
         let parent_commit = load_object::<Commit>(parent)
             .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
@@ -1025,7 +1498,11 @@ pub async fn compute_commit_stat(
         .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
     let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
 
-    let old_blobs: Vec<(PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
+    let shallow_boundaries = crate::command::fetch::read_shallow_boundaries().unwrap_or_default();
+    let has_parents = !commit.parent_commit_ids.is_empty()
+        && !shallow_boundaries.contains(&commit.id.to_string());
+
+    let old_blobs: Vec<(PathBuf, ObjectHash)> = if has_parents {
         let parent = &commit.parent_commit_ids[0];
         let parent_commit = load_object::<Commit>(parent)
             .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
@@ -1129,6 +1606,20 @@ pub struct GraphState {
     columns: Vec<Option<ObjectHash>>,
 }
 
+/// Returns the rotating color used for graph `column` (mirrors how `git log
+/// --graph` tints each branch line differently).
+fn graph_column_color(column: usize) -> colored::Color {
+    const PALETTE: [colored::Color; 6] = [
+        colored::Color::Red,
+        colored::Color::Green,
+        colored::Color::Yellow,
+        colored::Color::Blue,
+        colored::Color::Magenta,
+        colored::Color::Cyan,
+    ];
+    PALETTE[column % PALETTE.len()]
+}
+
 impl GraphState {
     /// Creates a new, empty `GraphState` for rendering a commit graph.
     pub fn new() -> Self {
@@ -1154,12 +1645,20 @@ impl GraphState {
 
         let mut prefix = String::new();
 
+        // Each branch column is drawn in a rotating color; this is a no-op
+        // unless the global `--color` setting enables it (the `colored` crate
+        // suppresses ANSI for `--color=never`/non-TTY), so the plain ASCII
+        // layout is byte-identical when color is off.
+        let glyph = |ch: &str, column: usize| ch.color(graph_column_color(column)).to_string();
+
         if let Some(pos) = self.columns.iter().position(|&c| c == Some(commit_id)) {
             for (i, col) in self.columns.iter().enumerate() {
                 if i == pos {
-                    prefix.push_str("* ");
+                    prefix.push_str(&glyph("*", i));
+                    prefix.push(' ');
                 } else if col.is_some() {
-                    prefix.push_str("| ");
+                    prefix.push_str(&glyph("|", i));
+                    prefix.push(' ');
                 } else {
                     prefix.push_str("  ");
                 }
@@ -1178,9 +1677,11 @@ impl GraphState {
             }
         } else {
             self.columns.insert(0, None);
-            prefix.push_str("* ");
-            for _ in 1..self.columns.len() {
-                prefix.push_str("| ");
+            prefix.push_str(&glyph("*", 0));
+            prefix.push(' ');
+            for i in 1..self.columns.len() {
+                prefix.push_str(&glyph("|", i));
+                prefix.push(' ');
             }
 
             if !parent_ids.is_empty() {
@@ -1251,8 +1752,12 @@ pub(crate) async fn generate_diff(
         .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
     let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
 
+    let shallow_boundaries = crate::command::fetch::read_shallow_boundaries().unwrap_or_default();
+    let has_parents = !commit.parent_commit_ids.is_empty()
+        && !shallow_boundaries.contains(&commit.id.to_string());
+
     // old_blobs from first parent if exists
-    let old_blobs: Vec<(PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
+    let old_blobs: Vec<(PathBuf, ObjectHash)> = if has_parents {
         let parent = &commit.parent_commit_ids[0];
         let parent_commit = load_object::<Commit>(parent)
             .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
@@ -1392,9 +1897,14 @@ mod tests {
 
         let filter = CommitFilter::new(
             Some("lvy".to_string()),
+            None,
             Some(1_766_000_000),
             Some(1_766_200_000),
             Vec::new(),
+            None,
+            None,
+            None,
+            None,
             None,
         );
 

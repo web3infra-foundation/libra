@@ -135,6 +135,7 @@ async fn test_remove_single_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -210,6 +211,7 @@ async fn test_remove_cached() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -266,6 +268,7 @@ async fn test_remove_directory_recursive() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -354,6 +357,7 @@ async fn test_remove_directory_without_recursive() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -440,6 +444,7 @@ async fn test_remove_modified_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -515,6 +520,7 @@ async fn test_remove_multiple_files() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -570,6 +576,7 @@ async fn test_remove_dry_run() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -634,6 +641,7 @@ async fn test_remove_dry_run_cached() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -687,6 +695,7 @@ async fn test_remove_dry_run_recursive() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -748,6 +757,7 @@ async fn test_remove_ignore_unmatch() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -799,6 +809,7 @@ async fn test_remove_pathspec_from_file_newline() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -843,6 +854,7 @@ async fn test_remove_pathspec_from_file_nul() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -887,6 +899,7 @@ async fn test_remove_pathspec_from_file_ignore_unmatch() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        ..Default::default()
     })
     .await;
 
@@ -947,4 +960,50 @@ fn test_rm_help_lists_examples_banner() {
             "rm --help should include `{invocation}`, stdout: {stdout}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Output hygiene: plain (no-ANSI) piped output and Git-aligned 4-space conflict
+// indentation.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_rm_output_plain_no_ansi_when_piped() {
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["rm", "tracked.txt"], repo.path());
+    assert_cli_success(&out, "rm tracked.txt");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout, "rm 'tracked.txt'\n",
+        "piped output must be plain text"
+    );
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "piped rm output must not contain ANSI escapes: {stdout:?}"
+    );
+}
+
+#[test]
+fn test_rm_conflict_uses_four_space_indent() {
+    let repo = create_committed_repo_via_cli();
+    // Unstaged local modification blocks `rm` without -f.
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmodified\n").unwrap();
+    let out = run_libra_command(&["rm", "tracked.txt"], repo.path());
+    assert!(
+        !out.status.success(),
+        "rm of a locally-modified file must fail without -f"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("local modifications"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("    tracked.txt"),
+        "conflict list must use 4-space indent: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("\ttracked.txt"),
+        "conflict list must not use tab indent: {stderr:?}"
+    );
 }

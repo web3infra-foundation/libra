@@ -85,13 +85,19 @@ pub async fn convert_from_git_repository(
         ..Default::default()
     };
 
-    fetch::fetch_repository_safe(remote.clone(), None, false, None, &child_output)
-        .await
-        .map_err(|error| InitError::ConversionFailed {
-            repo: git_dir.clone(),
-            stage: "fetch",
-            message: error.to_string(),
-        })?;
+    fetch::fetch_repository_safe(
+        remote.clone(),
+        None,
+        false,
+        crate::internal::protocol::ShallowOptions::default(),
+        &child_output,
+    )
+    .await
+    .map_err(|error| InitError::ConversionFailed {
+        repo: git_dir.clone(),
+        stage: "fetch",
+        message: error.to_string(),
+    })?;
 
     let remote_branches = Branch::list_branches_result(Some(&remote.name))
         .await
@@ -108,7 +114,7 @@ pub async fn convert_from_git_repository(
         });
     }
 
-    clone::setup_repository(remote, None, !is_bare)
+    clone::setup_repository(remote, None, !is_bare, false, None)
         .await
         .map(|_| ()) // discard SetupResult; convert only needs success/failure
         .map_err(|error| InitError::ConversionFailed {

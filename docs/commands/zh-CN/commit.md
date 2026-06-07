@@ -16,7 +16,11 @@ libra commit --amend [--no-edit]
 
 `libra commit` 从已暂存更改创建新提交，构建 tree 和 commit 对象，验证消息（包括可选的 conventional commit 格式，以及通过 vault 进行 GPG 签名），并更新 HEAD 和 refs。
 
-该命令读取索引以确定哪些文件已暂存，构造与暂存内容匹配的 tree 对象层级，使用提供的消息和 author/committer 元数据创建 commit 对象，并推进当前分支 ref。启用 vault signing 时，提交会自动进行 GPG 签名。除非用 `--no-verify` 绕过，pre-commit 和 commit-msg hooks 会被执行。
+该命令读取索引以确定哪些文件已暂存，构造与暂存内容匹配的 tree 对象层级，使用提供的消息和 author/committer 元数据创建 commit 对象，并推进当前分支 ref。
+
+**Hook 生命周期。** `.libra/hooks/` 下的 Libra 原生 hooks 在对应节点运行：`pre-commit`（被 `--disable-pre` 或 `--no-verify` 跳过），然后 `prepare-commit-msg`（接收消息文件并可编辑它），然后 `commit-msg`（接收最终消息文件，可重写它或以非零退出中止提交）。`--no-verify` 跳过所有 hooks；`--disable-pre` 只跳过 `pre-commit`，消息 hooks 仍然运行。
+
+**签名优先级。** 提交是否进行（vault-backed）GPG 签名，按以下顺序决定：`--no-gpg-sign` 强制*关闭*；否则 `-S`/`--gpg-sign` 或 `commit.gpgSign true` 强制*开启*（绕过 `vault.signing` 门控）；否则仅当 `vault.signing` 启用时签名。
 
 ## 选项
 
@@ -45,12 +49,37 @@ libra commit --amend
 libra commit --amend -m "Updated message"
 ```
 
+### `-e, --edit`
+
+打开配置的编辑器编辑提交消息，即使已通过 `-m`/`-F`/`-t` 或 `--amend` 提供了消息（提供的消息作为编辑器初始内容）。与 `--no-edit` 冲突。
+
+```bash
+libra commit -e -m "wip: refine later"
+```
+
 ### `--no-edit`
 
-与 `--amend` 一起使用时，复用原提交消息，不提示修改。与 `-m` 和 `-F` 冲突。
+不打开编辑器；按原样使用提供的/模板/被修订的消息。与 `--amend` 一起使用时复用原提交消息。与 Git 较窄的行为不同，Libra 允许 `--no-edit` 在 `--amend` 之外使用，并可与 `-m`/`-F`/`-t` 共存（仅抑制编辑器）。裸 `libra commit --no-edit` 且无任何消息来源时以空消息错误中止。
 
 ```bash
 libra commit --amend --no-edit
+libra commit --no-edit -m "use this exactly"
+```
+
+### `--cleanup <MODE>`
+
+控制提交消息在提交前如何清理（对标 `git commit --cleanup`）。模式：`strip`（删除 `#` 注释行、行尾空白、首尾空行）、`whitespace`（仅 trim，保留 `#` 行）、`verbatim`（不改动）、`scissors`（在 `# ----- >8 -----` 剪切线处截断后再按 `whitespace`）、`default`（经编辑器时同 `strip`，否则同 `whitespace`）。未传 `--cleanup` 时由 `commit.cleanup` 配置提供默认模式。未知模式为解析错误（退出 129）。
+
+```bash
+libra commit --cleanup=verbatim -m "#1234 keep this literal"
+```
+
+### `-t, --template <FILE>`
+
+使用 `<FILE>` 的内容作为初始提交消息（作为编辑器种子，或在 `--no-edit` 下直接使用）。未提供 `-t` 时，`commit.template` 配置提供相同行为。模板文件缺失/不可读时报出可读错误。
+
+```bash
+libra commit -t .commit-template.txt
 ```
 
 ### `--conventional`
@@ -76,6 +105,22 @@ libra commit -a -m "Fix typo"
 
 ```bash
 libra commit -s -m "Add feature"
+```
+
+### `-S, --gpg-sign`
+
+对本次提交强制进行 vault-backed PGP 签名，绕过 `vault.signing` 门控。这是 Git `-S` 的显式 opt-in 等价物，在签名被禁用时很有用。设置 `commit.gpgSign true`（任意大小写——`commit.gpgsign` 同样被识别）可在整个仓库范围获得相同效果。
+
+```bash
+libra commit -S -m "Signed release"
+```
+
+### `--no-gpg-sign`
+
+即使 `vault.signing` 或 `commit.gpgSign` 本会签名，也抑制本次提交的签名。与 `-S`/`--gpg-sign` 互斥（同时传递为解析错误，退出 129）。
+
+```bash
+libra commit --no-gpg-sign -m "Unsigned quick fix"
 ```
 
 ### `--allow-empty`
@@ -110,6 +155,49 @@ libra commit --no-verify -m "WIP: work in progress"
 libra commit --author "Jane Doe <jane@example.com>" -m "Patch"
 ```
 
+### `--fixup <commit>`
+
+创建消息为 `fixup! <commit 的 subject>` 的提交，供 `libra rebase -i --autosquash` 使用。不打开编辑器，且跳过 conventional-commit 检查（`fixup!` 前缀豁免）。与 `-m`/`-F`、`--amend`、`--squash` 互斥。仅接受裸 commit-ish；不支持 Git 的 `amend:`/`reword:` 扩展形态（参数错误，退出 129）。
+
+```bash
+libra commit --fixup HEAD
+libra commit --fixup a1b2c3d
+```
+
+### `--squash <commit>`
+
+创建消息为 `squash! <commit 的 subject>` 的提交，供 autosquash 使用。默认打开编辑器以便添加正文（用 `--no-edit` 抑制）；`-m` 消息会作为正文追加。与 `--amend`、`-F`、`--fixup` 互斥。
+
+```bash
+libra commit --squash HEAD
+libra commit --squash HEAD -m "extra context"
+```
+
+### `--dry-run`
+
+预览将要提交的内容而不创建提交——不写入任何对象、index、reflog 或 post-commit 自动化。有内容可提交时退出 `0`，无内容时退出 `128`（与真实提交路径一致）。
+
+```bash
+libra commit --dry-run
+libra commit --dry-run -a
+```
+
+### `--porcelain`
+
+以 `status` 的机器可读 `XY <path>` 格式输出 dry-run 预览。**必须与 `--dry-run` 同用**（这是与 Git 的有意差异——Git 的 `--porcelain` 隐含 dry-run）；单用为参数错误（退出 129）。
+
+```bash
+libra commit --dry-run --porcelain
+```
+
+### `-v, --verbose`
+
+在提交消息编辑器中、剪切线（`# ------ >8 ------`）下方追加已暂存改动的统一 diff。剪切线及其以下内容在提交前被剥除，因此 diff 不会进入消息。`commit.verbose=true` 配置默认启用此行为。
+
+```bash
+libra commit -v
+```
+
 ## 常用命令
 
 ```bash
@@ -120,6 +208,10 @@ libra commit --amend --no-edit
 libra commit -a -m "Fix typo"
 libra commit -F message.txt
 libra commit -s -m "Add feature"
+libra commit --fixup HEAD
+libra commit --squash HEAD -m "extra context"
+libra commit --dry-run --porcelain
+libra commit -v -m "Add feature"
 libra commit --allow-empty -m "Trigger CI"
 libra commit --json -m "Add feature"
 ```
@@ -271,17 +363,20 @@ Git 没有内置提交消息格式验证；团队依赖 commitlint、husky 或 C
 | 自动暂存已跟踪 | `git commit -a` | N/A（自动跟踪） | `libra commit -a` |
 | 允许空提交 | `git commit --allow-empty` | `jj commit --allow-empty` | `libra commit --allow-empty` |
 | Signoff trailer | `git commit -s` / `--signoff` | N/A | `libra commit -s` / `--signoff` |
-| GPG 签名提交 | `git commit -S`（手动 GPG） | N/A（无签名） | 自动（vault-backed） |
+| GPG 签名提交 | `git commit -S`（手动 GPG） | N/A（无签名） | `libra commit -S` / 自动（vault-backed） |
+| 抑制签名 | `git commit --no-gpg-sign` | N/A | `libra commit --no-gpg-sign` |
 | 覆盖 author | `git commit --author="..."` | N/A | `libra commit --author="..."` |
 | Conventional 检查 | 外部工具（commitlint） | N/A | `libra commit --conventional` |
 | 只跳过 pre-commit | N/A | N/A | `libra commit --disable-pre` |
 | 跳过所有 hooks | `git commit --no-verify` | N/A | `libra commit --no-verify` |
-| Fixup commit | `git commit --fixup=<commit>` | N/A | N/A |
-| Squash commit | `git commit --squash=<commit>` | `jj squash` | N/A |
-| 交互式消息 | `git commit`（打开编辑器） | `jj commit`（打开编辑器） | N/A（需要通过 -m 或 -F 提供消息） |
-| 编辑器中 verbose diff | `git commit -v` | N/A | N/A |
+| Fixup commit | `git commit --fixup=<commit>` | N/A | `libra commit --fixup <commit>`（裸 commit-ish；无 `amend:`/`reword:`） |
+| Squash commit | `git commit --squash=<commit>` | `jj squash` | `libra commit --squash <commit>` |
+| 交互式消息 | `git commit`（打开编辑器） | `jj commit`（打开编辑器） | `libra commit`（打开编辑器） |
+| 编辑器中 verbose diff | `git commit -v` | N/A | `libra commit -v` |
+| Dry-run 预览 | `git commit --dry-run` | N/A | `libra commit --dry-run` |
+| Porcelain 状态 | `git commit --porcelain`（隐含 dry-run） | N/A | `libra commit --dry-run --porcelain` |
 | 重置作者日期 | `git commit --reset-author` | N/A | N/A |
-| Cleanup 模式 | `git commit --cleanup=<mode>` | N/A | N/A |
+| Cleanup 模式 | `git commit --cleanup=<mode>` | N/A | `libra commit --cleanup=<mode>` |
 | Trailer | `git commit --trailer="..."` | N/A | N/A |
 | 结构化 JSON 输出 | N/A | N/A | `--json` / `--machine` |
 | 错误提示 | 最少 | 最少 | 每种错误类型都有可操作提示 |
@@ -300,6 +395,8 @@ Git 没有内置提交消息格式验证；团队依赖 commitlint、husky 或 C
 | 没有可 amend 的提交 | `LBR-REPO-003` | 128 | "create a commit before using --amend" |
 | Amend merge commit | `LBR-REPO-003` | 128 | "create a new commit instead of amending a merge commit" |
 | 无效 author 格式 | `LBR-CLI-002` | 129 | "expected format: 'Name <email>'" |
+| `--fixup`/`--squash` 目标不存在 | `LBR-CLI-003` | 129 | "check the target with 'libra log' and pass an existing commit-ish" |
+| 不支持的 `--fixup=amend:/reword:` 形态 | `LBR-CLI-002` | 129 | "the amend:/reword: autosquash forms are not supported yet" |
 | 无法读取消息文件 | `LBR-IO-001` | 128 | -- |
 | 空提交消息 | `LBR-REPO-003` | 128 | "use -m to provide a commit message" |
 | Tree 创建失败 | `LBR-INTERNAL-001` | 128 | Issues URL |
@@ -307,6 +404,9 @@ Git 没有内置提交消息格式验证；团队依赖 commitlint、husky 或 C
 | 父提交缺失 | `LBR-REPO-002` | 128 | "the parent commit is missing or corrupted" |
 | HEAD 更新失败 | `LBR-IO-002` | 128 | -- |
 | Pre-commit hook 失败 | `LBR-REPO-003` | 128 | "use --no-verify to bypass the hook" |
+| Commit-msg hook 失败 | `LBR-REPO-003` | 128 | "fix the commit message, or use --no-verify to bypass the hook" |
+| 编辑器失败 / 启动错误 | `LBR-REPO-003` | 128 | "set $EDITOR / core.editor, or provide the message with -m/-F" |
+| 无可用编辑器（非 TTY） | `LBR-REPO-003` | 128 | "provide a message with -m/-F, or run in a terminal with an editor" |
 | Conventional commit 无效 | `LBR-CLI-002` | 129 | "see https://www.conventionalcommits.org for format rules" |
 | Vault signing 失败 | `LBR-AUTH-001` | 128 | "check vault configuration with 'libra config --list'" |
 | Auto-stage 失败 | `LBR-IO-001` | 128 | -- |
@@ -314,8 +414,11 @@ Git 没有内置提交消息格式验证；团队依赖 commitlint、husky 或 C
 
 ## 兼容性说明
 
-- Libra 不打开编辑器进行交互式消息编写；始终需要 `-m` 或 `-F`（`--amend --no-edit` 除外）
+- 未提供消息且未给 `--no-edit` 时，Libra 打开编辑器（`$GIT_EDITOR` → `core.editor` → `$VISUAL` → `$EDITOR` → `vi`）；在非 TTY 且未配置编辑器时报错而非挂起
+- `prepare-commit-msg` 和 `commit-msg` hooks（位于 `.libra/hooks/`）作用于消息文件；`commit-msg` hook 非零退出会中止提交。`--no-verify` 跳过所有 hooks；`--disable-pre` 只跳过 `pre-commit`
 - jj 没有带暂存的传统 `commit` 命令；`jj commit` 会完成 working copy commit
-- 不支持 `--fixup` 和 `--squash`；使用 `libra rebase -i` 进行提交重组
-- Vault signing 替代 Git 的 `commit.gpgsign` 和 `user.signingkey` 配置
-- 不支持用于剥离注释的 `--cleanup` 模式；消息按原样使用
+- `--fixup <commit>` / `--squash <commit>` 生成 `fixup!`/`squash!` 消息供 `libra rebase -i --autosquash` 使用；仅接受裸 commit-ish——不支持 Git 的 `amend:`/`reword:` 扩展形态（参数错误）
+- `--dry-run` 预览将要提交的内容而不写入任何东西；`--porcelain` 复用 `status` 的 `XY <path>` 格式且**必须**与 `--dry-run` 同用（有意差异：Git 的 `--porcelain` 隐含 dry-run）
+- `-v`/`--verbose` 在编辑器中剪切线下方显示已暂存 diff（提交前剥除）；`commit.verbose=true` 默认启用
+- `-S`/`--gpg-sign` 强制 vault-backed 签名（`commit.gpgSign true` 在整个仓库范围生效）；`--no-gpg-sign` 抑制签名。它们叠加在 Libra 默认的 vault 签名之上，后者替代 Git 的 `user.signingkey` 配置
+- 支持 `--cleanup` 模式（`strip`/`whitespace`/`verbatim`/`scissors`/`default`）；不支持 `--allow-empty-message`

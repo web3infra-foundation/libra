@@ -35,6 +35,7 @@ EXAMPLES:
     libra show-ref --head            Include HEAD in the output
     libra show-ref -s --heads        Print branch hashes only (one per line, scripting-friendly)
     libra show-ref main              Filter refs by substring match (e.g. only entries containing 'main')
+    libra show-ref --exists refs/heads/main   Exit 0 if the ref exists, 2 if not (no output)
     libra show-ref --json --heads    Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -56,6 +57,12 @@ pub struct ShowRefArgs {
     #[clap(short = 's', long = "hash")]
     pub hash: bool,
 
+    /// Check whether the given full ref name exists. Prints nothing; exits 0
+    /// when it exists and 2 when it does not. Mutually exclusive with the
+    /// listing flags.
+    #[clap(long, value_name = "REF", conflicts_with_all = ["heads", "tags", "head", "hash"])]
+    pub exists: Option<String>,
+
     /// Filter refs by pattern (substring match on the ref name)
     pub pattern: Vec<String>,
 }
@@ -75,6 +82,12 @@ pub async fn execute(args: ShowRefArgs) -> Result<(), String> {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Lists all refs (branches, tags) with their object IDs.
 pub async fn execute_safe(args: ShowRefArgs, output: &OutputConfig) -> CliResult<()> {
+    // `--exists <ref>` is a pure existence probe: no stdout, exit 0 if the
+    // exact full ref name exists, exit 2 if it does not (Git 2.43+ semantics).
+    if let Some(target) = args.exists.as_deref() {
+        return show_ref_exists(target).await;
+    }
+
     let hash_only = args.hash;
     let entries = collect_show_ref_entries(&args).await?;
 
@@ -224,6 +237,65 @@ fn remote_refname(remote: &str, branch_name: &str) -> String {
     } else {
         format!("refs/remotes/{remote}/{branch_name}")
     }
+}
+
+/// Existence probe for `--exists <ref>`: succeeds silently when the exact full
+/// ref name is present, otherwise fails with exit code 2 (Git 2.43+). Like Git,
+/// this only checks the reference record — it does not verify the target object
+/// resolves.
+async fn show_ref_exists(target: &str) -> CliResult<()> {
+    if all_ref_names().await?.iter().any(|name| name == target) {
+        Ok(())
+    } else {
+        Err(CliError::failure("reference does not exist").with_exit_code(2))
+    }
+}
+
+/// Collect every full ref name (HEAD, local + remote-tracking branches, tags)
+/// for existence checks. Unlike [`collect_show_ref_entries`], this never errors
+/// on an empty set and applies no filtering.
+async fn all_ref_names() -> CliResult<Vec<String>> {
+    let mut names: Vec<String> = Vec::new();
+
+    if Head::current_commit_result()
+        .await
+        .map_err(|error| show_ref_branch_store_error("resolve HEAD", error))?
+        .is_some()
+    {
+        names.push("HEAD".to_string());
+    }
+
+    let branches = Branch::list_branches_result(None)
+        .await
+        .map_err(|error| show_ref_branch_store_error("list branches", error))?;
+    for branch in branches {
+        names.push(format!("refs/heads/{}", branch.name));
+    }
+
+    let remotes = ConfigKv::all_remote_configs().await.map_err(|error| {
+        CliError::fatal(format!("failed to list remotes: {error}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    for remote in remotes {
+        let remote_branches = Branch::list_branches_result(Some(&remote.name))
+            .await
+            .map_err(|error| {
+                show_ref_branch_store_error(
+                    &format!("list remote-tracking branches for '{}'", remote.name),
+                    error,
+                )
+            })?;
+        for branch in remote_branches {
+            names.push(remote_refname(&remote.name, &branch.name));
+        }
+    }
+
+    let tag_list = tag::list().await.map_err(show_ref_tag_list_error)?;
+    for t in tag_list {
+        names.push(format!("refs/tags/{}", t.name));
+    }
+
+    Ok(names)
 }
 
 #[cfg(test)]

@@ -474,6 +474,12 @@ pub enum Stash {
         name_only: bool,
         #[arg(long, help = "Show only file names with their status code")]
         name_status: bool,
+        #[arg(
+            short = 'p',
+            long = "patch",
+            help = "Show the stashed changes as a unified diff"
+        )]
+        patch: bool,
     },
     #[command(about = "Create and check out a new branch from the stash, then drop it")]
     Branch {
@@ -496,9 +502,16 @@ pub enum Stash {
 pub enum Bisect {
     #[command(about = "Start a new bisect session")]
     Start {
-        #[arg(help = "Bad commit to start from")]
-        bad: Option<String>,
-        #[arg(long, short, help = "Good commit to mark")]
+        #[arg(
+            value_name = "REV",
+            help = "Bad commit followed by zero or more good commits (git: start <bad> <good>...)"
+        )]
+        revs: Vec<String>,
+        #[arg(
+            long,
+            short,
+            help = "Good commit to mark (alias appended to positional goods)"
+        )]
         good: Option<String>,
     },
     #[command(about = "Mark the current or given commit as bad")]
@@ -624,6 +637,61 @@ fn rewrite_log_short_number_args(args: Vec<String>) -> Vec<String> {
     out
 }
 
+fn rewrite_diff_similarity_short_args(args: Vec<String>) -> Vec<String> {
+    let subcommand = find_subcommand_index(&args);
+    let Some((diff_index, from_double_dash)) = subcommand else {
+        return args;
+    };
+    if !matches!(args.get(diff_index), Some(name) if name == "diff") {
+        return args;
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    if from_double_dash {
+        for (idx, arg) in args.iter().enumerate().take(diff_index + 1) {
+            if idx + 1 == diff_index && arg == "--" {
+                continue;
+            }
+            out.push(arg.clone());
+        }
+    } else {
+        out.extend(args.iter().take(diff_index + 1).cloned());
+    }
+
+    let mut after_double_dash = false;
+    for arg in args.into_iter().skip(diff_index + 1) {
+        if after_double_dash {
+            out.push(arg);
+            continue;
+        }
+        if arg == "--" {
+            after_double_dash = true;
+            out.push(arg);
+            continue;
+        }
+        out.push(rewrite_diff_similarity_short_arg(arg));
+    }
+
+    out
+}
+
+fn rewrite_diff_similarity_short_arg(arg: String) -> String {
+    for flag in ['M', 'C'] {
+        let prefix = format!("-{flag}");
+        let Some(rest) = arg.strip_prefix(&prefix) else {
+            continue;
+        };
+        if rest.is_empty() || rest.starts_with('=') {
+            return arg;
+        }
+        if rest.starts_with(|c: char| c.is_ascii_digit() || c == '.') {
+            return format!("{prefix}={rest}");
+        }
+        return arg;
+    }
+    arg
+}
+
 /// Locate the first non-flag token in `args` and return its index plus whether it was
 /// produced by an explicit `--` separator.
 ///
@@ -652,6 +720,26 @@ fn find_subcommand_index(args: &[String]) -> Option<(usize, bool)> {
         i += 1;
     }
     None
+}
+
+/// True when raw argv contains a `--` pathspec separator after the `bisect`
+/// `start` tokens.
+///
+/// `bisect start` collects variadic positional revs, so clap silently consumes a
+/// `--` separator and folds the trailing pathspec into the good revs. Callers
+/// invoke this only after clap has confirmed the command is `bisect start`, so
+/// the `bisect`/`start` tokens are guaranteed present and global flags (incl.
+/// value-taking ones placed before `bisect`) cannot confuse the scan — we simply
+/// locate the `bisect` then `start` tokens and look for a bare `--` after them.
+fn bisect_start_has_pathspec_separator(argv: &[String]) -> bool {
+    let Some(bisect_idx) = argv.iter().position(|t| t == "bisect") else {
+        return false;
+    };
+    let Some(start_off) = argv[bisect_idx + 1..].iter().position(|t| t == "start") else {
+        return false;
+    };
+    let start_idx = bisect_idx + 1 + start_off;
+    argv[start_idx + 1..].iter().any(|tok| tok == "--")
 }
 
 fn is_short_number_flag(arg: &str) -> bool {
@@ -907,6 +995,9 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
                 utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error(None))?;
             Ok(CommandPreflight::repo_without_schema_guard(storage))
         }
+        // `grep --no-index` searches the filesystem directly, so it neither needs
+        // nor opens a repository.
+        Commands::Grep(args) if args.no_index => Ok(CommandPreflight::none()),
         _ => {
             let storage =
                 utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error(None))?;
@@ -1062,6 +1153,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         None => env::args().collect::<Vec<_>>(),
     };
     let argv = rewrite_log_short_number_args(argv);
+    let argv = rewrite_diff_similarity_short_args(argv);
     utils::output::reset_warning_tracker();
     if is_error_codes_help_topic(&argv) {
         return print_error_codes_help();
@@ -1082,6 +1174,20 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     };
     if let Commands::Tag(tag_args) = &args.command {
         command::tag::validate_cli_args(tag_args)?;
+    }
+    // `bisect start` collects variadic positional revs, so clap silently consumes
+    // a `--` pathspec separator and folds the trailing path into the good revs.
+    // Now that clap has confirmed this *is* `bisect start`, reject a `--`
+    // separator so a path is never mistaken for a good commit (path-limited
+    // bisect is unsupported — see docs/improvement/compatibility/declined.md).
+    // Done post-parse so global flags before `bisect` cannot confuse the scan.
+    if matches!(&args.command, Commands::Bisect(Bisect::Start { .. }))
+        && bisect_start_has_pathspec_separator(&argv)
+    {
+        return Err(CliError::command_usage(
+            "libra bisect start does not support '--' pathspec limiting",
+        )
+        .with_hint("remove the '--' and pathspec; path-limited bisect is not supported"));
     }
     let preflight = command_preflight(&args.command)?;
     if let Some(storage) = preflight.storage.as_deref() {

@@ -1,0 +1,407 @@
+# Libra Black-Box CLI Integration Test Scenario Registry
+#
+# This is the **source of truth** for the set of cli.* and live.* scenarios
+# used by the integration runner (tools/integration-runner) and check-plan.
+#
+# - Per-scenario executable docs: docs/development/integration-scenarios/<id>.md
+#   (one file per id; index in integration-scenarios/README.md).
+# - Plan matrix, isolation, PR protocol: integration-test-plan.md (§2–§3, §8–§9).
+# - Wave membership, gh requirement, and high-level metadata live here.
+# - check-plan (and the runner's registry) MUST load this file.
+# - When adding/removing/renaming a scenario:
+#     1. Edit this yaml (add id, wave, purpose, etc.)
+#     2. Add or update docs/development/integration-scenarios/<id>.md
+#        (+ _parameter-tables.md when adding cross-command flag matrices)
+#     3. If it affects command coverage, update the matrix table in §2.3 of the md
+#        and run `cargo test --test compat_matrix_alignment`
+#     4. Add/update the implementation in the runner's registry.rs and scenarios/<id>.rs
+#
+# This dual (structured manifest + rich md) design makes the plan practical for
+# Agent-generated incremental implementation plans while keeping human-readable
+# examples and rationale in one place.
+#
+# key_assertion_categories allowed values (extend only after updating §2.4 in md):
+#   json_envelope      : success/error JSON output contract
+#   fsck               : connectivity/integrity check after mutating ops
+#   global_db_isolation: no leakage into LIBRA_CONFIG_GLOBAL_DB across scenarios
+#   vault_isolation    : no vault key leakage; vault.db scoped correctly
+#   gitfix_isolation   : git fixture uses gitfix() wrapper, no host GIT_* leak
+#   negative_exit      : error path yields non-zero + actionable stderr/LBR- code
+#   lbr_error          : stderr or JSON error contains LBR-* stable code
+#   no_secret_leak     : output must not contain keys/tokens/PATs
+#   intentional_difference : COMPATIBILITY.md intentionally-different behavior asserted
+#   conflict_markers   : merge/rebase conflict state visible in --json status
+#   gh_lifecycle       : gh repo create/view/api/delete covered
+#   cleanup_guard      : trap/guard ensures gh repo delete on exit
+#   file_exists        : filesystem state assertions (repo dir, objects, db)
+#
+# check-plan ENFORCES the *source-verifiable* categories (json_envelope, fsck,
+# gitfix_isolation, negative_exit, lbr_error, conflict_markers, gh_lifecycle,
+# cleanup_guard, file_exists): a scenario declaring one MUST leave a matching
+# assertion signal in tools/integration-runner/src/scenarios/<id>.rs (e.g.
+# assert_json_ok/--json, fsck, ctx.gitfix, a `, false)` negative call,
+# assert_lbr_or_text, <<<<<<<, ctx.gh, GhRepoCleanupGuard, ensure_file/.join),
+# or check-plan fails. The remaining categories (global_db_isolation,
+# vault_isolation, no_secret_leak, intentional_difference) are advisory: they
+# are guaranteed by the runner's env-isolation / redaction harness, not gated
+# from source. So declaring a category is a promise that check-plan verifies.
+
+version: 1
+last_updated: "2026-06"   # keep in sync with major doc edits
+notes: |
+  Default Waves 0/1/2 are deterministic, no secrets, local only.
+  Wave 3 requires `gh` auth + create/delete private repo permission.
+  All scenarios must follow the §3.3.1 canonical libra()/gitfix() isolation
+  template in the md (env -i + SAFE_PATH + TMPDIR + RUN_ROOT).
+
+scenarios:
+  # --- Wave 1: core local version control (no network, no external services) ---
+  - id: cli.config-basic-kv
+    wave: 1
+    group: config
+    purpose: "Cover config set/get/list/unset, default local scope, and basic key/value behavior."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck, global_db_isolation, lbr_error]
+    doc_section: "cli.config-basic-kv"
+
+  - id: cli.config-scopes
+    wave: 1
+    group: config
+    purpose: "Cover --local / --global / --system scope flags and isolation between them."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [global_db_isolation, negative_exit]
+    doc_section: "cli.config-scopes"
+
+  - id: cli.config-set-input-and-encryption
+    wave: 1
+    group: config
+    purpose: "Cover set --add / --encrypt / --plaintext / --stdin and mutual exclusion rules."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, negative_exit, vault_isolation]
+    doc_section: "cli.config-set-input-and-encryption"
+
+  - id: cli.config-get-default-and-patterns
+    wave: 1
+    group: config
+    purpose: "Cover get --all / --reveal / --regexp / -d/--default and Git-compat hidden flags."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope]
+    doc_section: "cli.config-get-default-and-patterns"
+
+  - id: cli.config-list-variants
+    wave: 1
+    group: config
+    purpose: "Cover list --name-only / --show-origin / --vault / --ssh-keys / --gpg-keys and compat -l."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, no_secret_leak]
+    doc_section: "cli.config-list-variants"
+
+  - id: cli.config-unset-compat-flags
+    wave: 1
+    group: config
+    purpose: "Cover unset / --unset-all and Git-compat hidden --unset / --unset-all."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope]
+    doc_section: "cli.config-unset-compat-flags"
+
+  - id: cli.config-import-path-edit
+    wave: 1
+    group: config
+    purpose: "Cover import / path / edit and Git-compat --import; requires system git in SAFE_PATH."
+    gh_required: false
+    requires_git: true
+    key_assertion_categories: [json_envelope, negative_exit, gitfix_isolation]
+    doc_section: "cli.config-import-path-edit"
+
+  - id: cli.config-key-generation
+    wave: 1
+    group: config
+    purpose: "Cover generate-ssh-key / generate-gpg-key (remote/name/email/usage), vault side-effects, and negative cases."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, no_secret_leak, negative_exit, vault_isolation]
+    doc_section: "cli.config-key-generation"
+
+  - id: cli.config-git-compat-mode
+    wave: 1
+    group: config
+    purpose: "Concentrated coverage of non-import Git-compat hidden flags and positional translation on ConfigArgs; --import happy path lives in cli.config-import-path-edit because it requires system git."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, negative_exit]
+    doc_section: "cli.config-git-compat-mode"
+
+  - id: cli.init-basic
+    wave: 1
+    group: init
+    purpose: "Baseline init creating a usable ordinary repo; foundation for all init parameter matrix."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [file_exists, json_envelope, fsck, negative_exit]
+    doc_section: "cli.init-basic"
+
+  - id: cli.init-directory-and-quiet
+    wave: 1
+    group: init
+    purpose: "Cover DIRECTORY positional (nested creation) and -q/--quiet."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [file_exists, json_envelope, fsck]
+    doc_section: "cli.init-directory-and-quiet"
+
+  - id: cli.init-branch-and-format-options
+    wave: 1
+    group: init
+    purpose: "Cover -b/--initial-branch, --object-format (sha1/sha256), --ref-format (strict/filesystem) and negatives."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck, negative_exit]
+    doc_section: "cli.init-branch-and-format-options"
+
+  - id: cli.init-bare-and-shared
+    wave: 1
+    group: init
+    purpose: "Cover --bare (no .libra/ layout) and all --shared MODE values + invalid cases."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [file_exists, negative_exit, fsck]
+    doc_section: "cli.init-bare-and-shared"
+
+  - id: cli.init-template
+    wave: 1
+    group: init
+    purpose: "Cover --template <dir> (hooks/info/custom content copied into .libra/)."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [file_exists, json_envelope, fsck, negative_exit]
+    doc_section: "cli.init-template"
+
+  - id: cli.init-from-git-repository
+    wave: 1
+    group: init
+    purpose: "Cover --from-git-repository (local Git fixture -> Libra repo conversion); requires git."
+    gh_required: false
+    requires_git: true
+    key_assertion_categories: [json_envelope, fsck, gitfix_isolation, negative_exit]
+    doc_section: "cli.init-from-git-repository"
+
+  - id: cli.init-vault
+    wave: 1
+    group: init
+    purpose: "Cover --vault <bool> and resulting vault.db / vault.* config visibility."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [file_exists, json_envelope, vault_isolation]
+    doc_section: "cli.init-vault"
+
+  - id: cli.commit-status-log
+    wave: 1
+    group: core
+    purpose: "Core status/add/commit/log closed loop + message sources, --dry-run, --amend, conventional, status --exit-code, etc. Baseline for assertion strengthening."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck, global_db_isolation, lbr_error, negative_exit]
+    doc_section: "cli.commit-status-log"
+
+  - id: cli.branch-switch-checkout
+    wave: 1
+    group: branching
+    purpose: "Cover branch/switch/checkout creation, switching, -c/-b, --detach, rename, safe/forced delete, checkout -- <path>, and detached symbolic-ref behavior."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck, negative_exit]
+    doc_section: "cli.branch-switch-checkout"
+
+  - id: cli.restore-reset-diff
+    wave: 1
+    group: working_tree
+    purpose: "Cover diff (unstaged/staged/old-new), restore --staged/--worktree, reset --soft/--mixed/--hard, path-level reset."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck, negative_exit]
+    doc_section: "cli.restore-reset-diff"
+
+  - id: cli.stash-bisect-worktree
+    wave: 1
+    group: workflow
+    purpose: "Cover stash (push/list/show/apply/pop/clear/branch), bisect (start/bad/good/skip/log/view/reset), worktree (add/list/lock/unlock/move/remove/prune + --delete-dir). Verifies intentional difference: remove keeps dir by default."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck, intentional_difference, negative_exit]
+    doc_section: "cli.stash-bisect-worktree"
+
+  - id: cli.tag-basic
+    wave: 1
+    group: history
+    purpose: "Cover lightweight/annotated tag creation, -l, -f (force update), -d, rev-parse, describe --tags --always."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck, negative_exit]
+    doc_section: "cli.tag-basic"
+
+  - id: cli.merge-rebase-cherry-revert-smoke
+    wave: 1
+    group: history_edit
+    purpose: "Smoke for merge (ff + 3-way), rebase, cherry-pick, revert; no-conflict happy paths + --continue/--abort without session must fail."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck, negative_exit]
+    doc_section: "cli.merge-rebase-cherry-revert-smoke"
+
+  - id: cli.merge-conflict-continue
+    wave: 1
+    group: history_edit
+    purpose: "Merge conflict + resolve + add + merge --continue success path; --continue/--abort without session must fail. Verifies merge_state in --json status."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck, conflict_markers, negative_exit]
+    doc_section: "cli.merge-conflict-continue"
+
+  - id: cli.rebase-conflict-continue
+    wave: 1
+    group: history_edit
+    purpose: "Rebase conflict + resolve + add + rebase --continue; equivalent negative cases."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck, conflict_markers, negative_exit]
+    doc_section: "cli.rebase-conflict-continue"
+
+  - id: cli.grep-blame-describe-shortlog
+    wave: 1
+    group: inspection
+    purpose: "Cover remaining inspection commands: grep (many flags + -f + --tree), blame (-L), describe, shortlog (-s/-n)."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, negative_exit]
+    doc_section: "cli.grep-blame-describe-shortlog"
+
+  - id: cli.clean-rm-mv-lfs-basic
+    wave: 1
+    group: working_tree
+    purpose: "Cover clean (-n/-f/-fd/-fX), rm, mv, and local LFS track/untrack/ls-files (writes .libra_attributes). lfs lock is negative (no remote)."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck, negative_exit]
+    doc_section: "cli.clean-rm-mv-lfs-basic"
+
+  - id: cli.reflog-symbolic-ref
+    wave: 1
+    group: ref
+    purpose: "Cover reflog show (with --stat/--pretty), reflog exists, symbolic-ref (read + write HEAD target) and negatives. Note: symbolic-ref limited to HEAD by design."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, negative_exit, intentional_difference]
+    doc_section: "cli.reflog-symbolic-ref"
+
+  - id: cli.open-smoke
+    wave: 1
+    group: misc
+    purpose: "Cover open (and open <remote>) under --json: produces web_url + launched=false, never actually launches. No real browser side-effect in default waves."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, negative_exit]
+    doc_section: "cli.open-smoke"
+
+  - id: cli.cross-cutting-flags
+    wave: 1
+    group: cross_cutting
+    purpose: "Concentrated coverage of root Cli flags: --json/-J (compact/ndjson), --machine, --quiet, --color/--no-color, --progress, --exit-code-on-warning (warning=9 tracked in GAP-009). Also validates error JSON envelope contract."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, lbr_error, negative_exit]
+    doc_section: "cli.cross-cutting-flags"
+
+  # --- Wave 2: storage, schema, local protocol, maintenance (still local/deterministic) ---
+  - id: cli.schema-upgrade-observable
+    wave: 2
+    group: schema
+    purpose: "Verify db status / db --json status / db upgrade on fresh and current-schema repos; non-repo must fail cleanly."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck, negative_exit]
+    doc_section: "cli.schema-upgrade-observable"
+
+  - id: cli.clone-fetch-pull-local
+    wave: 2
+    group: protocol_local
+    purpose: "Local-path Git remote interop for clone/remote/ls-remote/fetch/pull (no push to file remote by design). Uses gitfix() for fixtures."
+    gh_required: false
+    requires_git: true
+    key_assertion_categories: [json_envelope, fsck, gitfix_isolation]
+    doc_section: "cli.clone-fetch-pull-local"
+
+  - id: cli.fetch-depth-local
+    wave: 2
+    group: protocol_local
+    purpose: "Local Git fixture clone --depth N (1/2) semantics, fetch --deepen relative expansion, and illegal depth rejection. Shallow object closure target."
+    gh_required: false
+    requires_git: true
+    key_assertion_categories: [gitfix_isolation, negative_exit]
+    doc_section: "cli.fetch-depth-local"
+
+  - id: cli.push-local-file-remote-rejected
+    wave: 2
+    group: protocol_local
+    purpose: "Explicit intentional difference: push to local file:// or path remote must be rejected with LBR-CLI-003 (only git@ / https supported)."
+    gh_required: false
+    requires_git: true
+    key_assertion_categories: [negative_exit, intentional_difference, lbr_error]
+    doc_section: "cli.push-local-file-remote-rejected"
+
+  - id: cli.object-readback
+    wave: 2
+    group: objects
+    purpose: "End-to-end object roundtrip via cat-file / show / rev-list etc. after normal operations; basic sha1 path."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck]
+    doc_section: "cli.object-readback"
+
+  - id: cli.sha256-object-readback
+    wave: 2
+    group: objects
+    purpose: "Full sha256 object-format init + commit + readback cycle (core.objectformat, 64-hex ids)."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck]
+    doc_section: "cli.sha256-object-readback"
+
+  - id: cli.verify-pack-smoke
+    wave: 2
+    group: maintenance
+    purpose: "Smoke verify-pack (and index-pack as internal fixture helper) on generated pack; covers maintenance inspection commands."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [fsck]
+    doc_section: "cli.verify-pack-smoke"
+
+  # --- Wave 3: GitHub live remote (explicit, requires gh + auth + cleanup) ---
+  - id: live.github-create-push-clone-fetch
+    wave: 3
+    group: github_live
+    purpose: "Full real GitHub remote closed loop: gh create private temp repo, libra push (dry-run/u/refspec/tags/delete/force/mirror), gh api ref checks, clone/fetch/pull, force amend, cleanup via gh repo delete --yes. All gh + libra ops under isolation + redaction."
+    gh_required: true
+    requires_git: true
+    key_assertion_categories: [gh_lifecycle, json_envelope, fsck, no_secret_leak, cleanup_guard]
+    doc_section: "live.github-create-push-clone-fetch"
+
+# Future additions (do not add to default waves until implemented + runner slice landed):
+# - More pack corpus for index-pack/verify-pack depth
+# - LFS remote lock API (explicitly excluded from default waves)
+# - pull --rebase true fork+conflict (deep water, may need Wave 3)
+# - push --force-with-lease (when flag exists)
+# - Additional cross-cutting or new top-level commands (must also update §2.3 matrix)
+
+# See integration-test-plan.md:
+# - §2.3 Command Coverage Matrix (must stay in sync)
+# - §3.3.1 Canonical Safe Invocation (libra()/gitfix() template)
+# - §3.6 Safety & Isolation Checklist (mandatory review gate)
+# - §5 Output Contract (report.json, results.ndjson, failures.md, ...)
+# - §8 PR/Review Protocol (Test Plan stanza, reviewer safety checks)
+# - BASELINE_GAP-INTEG-* for remaining work

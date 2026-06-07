@@ -467,6 +467,7 @@ async fn setup_repo_with_commit_with(
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
 
@@ -482,6 +483,7 @@ async fn setup_repo_with_commit_with(
         all: false,
         no_verify: true,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -654,6 +656,7 @@ async fn test_force_tag() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -668,6 +671,7 @@ async fn test_force_tag() {
         all: false,
         no_verify: true,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -676,9 +680,11 @@ async fn test_force_tag() {
         name: Some("v1.0".into()),
         list: false,
         delete: false,
+        annotate: false,
         message: Some("Updated".into()),
         force: true,
         n_lines: None,
+        points_at: None,
     })
     .await;
     let after = read_tag_oid("v1.0").await;
@@ -786,9 +792,11 @@ async fn test_delete_tag() {
         name: Some("to-delete".into()),
         list: false,
         delete: true,
+        annotate: false,
         message: None,
         force: false,
         n_lines: None,
+        points_at: None,
     })
     .await;
     assert_tag_absent("to-delete").await;
@@ -813,6 +821,7 @@ async fn test_annotation_lines_tag() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -827,6 +836,7 @@ async fn test_annotation_lines_tag() {
         all: false,
         no_verify: true,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -835,9 +845,11 @@ async fn test_annotation_lines_tag() {
         name: Some("v1.0.1".into()),
         list: false,
         delete: false,
+        annotate: false,
         message: Some("Single line annotation message".into()),
         force: false,
         n_lines: None,
+        points_at: None,
     })
     .await;
 
@@ -851,6 +863,7 @@ async fn test_annotation_lines_tag() {
         ignore_errors: false,
         refresh: false,
         force: false,
+        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -865,6 +878,7 @@ async fn test_annotation_lines_tag() {
         all: false,
         no_verify: true,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -873,9 +887,11 @@ async fn test_annotation_lines_tag() {
         name: Some("v1.0.3".into()),
         list: false,
         delete: false,
+        annotate: false,
         message: Some("multi\nline\nannotation\ntag".into()),
         force: false,
         n_lines: None,
+        points_at: None,
     })
     .await;
 
@@ -920,4 +936,126 @@ async fn test_annotation_lines_tag() {
     assert!(output_lines2.contains(&"line"));
     assert!(!output_lines2.contains(&"annotation"));
     assert!(!output_lines2.contains(&"tag"));
+}
+
+/// `libra rev-parse <rev>` → trimmed OID string (panics on failure).
+fn tag_rev_parse(repo: &std::path::Path, rev: &str) -> String {
+    let out = run_libra_command(&["rev-parse", rev], repo);
+    assert_cli_success(&out, "rev-parse");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Collect the `name` field of every tag in a `--json tag` list envelope.
+fn tag_list_names(output: &std::process::Output) -> HashSet<String> {
+    let json = parse_json_stdout(output);
+    json["data"]["tags"]
+        .as_array()
+        .expect("expected tags array")
+        .iter()
+        .map(|entry| {
+            entry["name"]
+                .as_str()
+                .expect("tag entry missing name")
+                .to_string()
+        })
+        .collect()
+}
+
+/// `--points-at <object>` peels each tag to its commit and keeps only those
+/// resolving to the requested object. A lightweight tag points straight at a
+/// commit; an annotated tag peels through its tag object to the same commit,
+/// so both surface when the second commit is requested.
+#[test]
+fn test_tag_points_at_filters_to_matching_commit() {
+    let repo = create_committed_repo_via_cli();
+
+    // The base commit already exists; tag it lightweight.
+    let base = tag_rev_parse(repo.path(), "HEAD");
+    assert_cli_success(
+        &run_libra_command(&["tag", "v-base"], repo.path()),
+        "tag v-base",
+    );
+
+    // Add a second commit; tag it both lightweight and annotated.
+    std::fs::write(repo.path().join("second.txt"), "second\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "second.txt"], repo.path()),
+        "add second",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path()),
+        "commit second",
+    );
+    let second = tag_rev_parse(repo.path(), "HEAD");
+    assert_cli_success(
+        &run_libra_command(&["tag", "v-second"], repo.path()),
+        "tag v-second",
+    );
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "annotated second", "a-second"], repo.path()),
+        "tag a-second",
+    );
+
+    // --points-at <base>: only the lightweight tag on the base commit.
+    let out = run_libra_command(&["--json", "tag", "--points-at", &base], repo.path());
+    assert_cli_success(&out, "tag --points-at base");
+    assert_eq!(tag_list_names(&out), HashSet::from(["v-base".to_string()]));
+
+    // --points-at <second>: lightweight v-second AND annotated a-second
+    // (the annotated tag peels through its tag object to the second commit).
+    let out = run_libra_command(&["--json", "tag", "--points-at", &second], repo.path());
+    assert_cli_success(&out, "tag --points-at second");
+    assert_eq!(
+        tag_list_names(&out),
+        HashSet::from(["v-second".to_string(), "a-second".to_string()]),
+    );
+}
+
+/// An unresolvable `--points-at` revision fails with a `not a valid object
+/// name` message rather than a raw resolver error.
+#[test]
+fn test_tag_points_at_invalid_object_errors() {
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["tag", "--points-at", "definitely-not-a-ref"], repo.path());
+    assert!(
+        !out.status.success(),
+        "expected failure for invalid --points-at object",
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not a valid object name"),
+        "expected 'not a valid object name' in stderr, got: {stderr}",
+    );
+}
+
+/// `-a`/`--annotate` creates an annotated tag when paired with `-m`, and is a
+/// usage error (exit 129) without a message — never a silent lightweight tag.
+#[test]
+fn test_tag_annotate_flag_requires_message() {
+    let repo = create_committed_repo_via_cli();
+
+    // -a -m creates an annotated tag.
+    let ok = run_libra_command(
+        &["--json", "tag", "-a", "-m", "Release", "v2.0"],
+        repo.path(),
+    );
+    assert_cli_success(&ok, "tag -a -m");
+    let json = parse_json_stdout(&ok);
+    assert_eq!(json["data"]["action"], "create");
+    assert_eq!(json["data"]["tag_type"], "annotated");
+    assert_eq!(json["data"]["message"], "Release");
+
+    // -a without a message must error rather than degrade to a lightweight tag.
+    let no_msg = run_libra_command(&["tag", "-a", "v3.0"], repo.path());
+    assert_eq!(
+        no_msg.status.code(),
+        Some(129),
+        "annotate without message should be a usage error, stderr: {}",
+        String::from_utf8_lossy(&no_msg.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&no_msg.stderr);
+    assert!(
+        stderr.contains("annotated tags require a message"),
+        "expected the annotate-requires-message diagnostic, got: {stderr}"
+    );
 }

@@ -438,6 +438,13 @@ async fn test_mcp_agents_runs_lists_persisted_snapshots() {
         serde_json::json!([]),
         "an unlimited default budget exceeds nothing",
     );
+    // CEX-S2-16 (1) "budget remaining": an unlimited (all-`None`) budget has no
+    // enforced dimension, so there is no finite headroom to report.
+    assert_eq!(
+        budget_body["remaining"],
+        serde_json::json!([]),
+        "an unlimited default budget reports no remaining dimensions: {budget_body}",
+    );
 }
 
 /// Scenario (CEX-S2-16 B2a/B2b): once the dispatcher has persisted a

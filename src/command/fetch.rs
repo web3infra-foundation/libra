@@ -31,8 +31,9 @@ use crate::{
         config::{ConfigKv, ConfigKvEntry, RemoteConfig},
         db::get_db_conn_instance,
         head::Head,
+        log::date_parser::parse_date,
         protocol::{
-            DiscRef, DiscoveryResult, FetchStream, ProtocolClient,
+            DiscRef, DiscoveryResult, FetchStream, ProtocolClient, ShallowOptions,
             git_client::GitClient,
             https_client::HttpsClient,
             local_client::LocalClient,
@@ -58,6 +59,10 @@ EXAMPLES:
     libra fetch --all                      Fetch every configured remote
     libra fetch origin --depth 1           Shallow fetch (latest commit only)
     libra fetch --all --depth 3            Shallow fetch across all remotes
+    libra fetch origin --unshallow         Convert a shallow clone to full history
+    libra fetch origin --prune             Drop tracking refs deleted on the remote
+    libra fetch origin --dry-run           Preview updates without fetching objects
+    libra fetch origin --porcelain         Machine-readable per-ref output
     libra --json fetch origin              Structured JSON output for agents";
 
 pub(crate) enum RemoteClient {
@@ -136,13 +141,13 @@ impl RemoteClient {
         have: &[String],
         want: &[String],
         shallow: &[String],
-        depth: Option<usize>,
+        options: &ShallowOptions,
     ) -> Result<FetchStream, IoError> {
         match self {
-            RemoteClient::Http(client) => client.fetch_objects(have, want, shallow, depth).await,
-            RemoteClient::Local(client) => client.fetch_objects(have, want, shallow, depth).await,
-            RemoteClient::Git(client) => client.fetch_objects(have, want, shallow, depth).await,
-            RemoteClient::Ssh(client) => client.fetch_objects(have, want, shallow, depth).await,
+            RemoteClient::Http(client) => client.fetch_objects(have, want, shallow, options).await,
+            RemoteClient::Local(client) => client.fetch_objects(have, want, shallow, options).await,
+            RemoteClient::Git(client) => client.fetch_objects(have, want, shallow, options).await,
+            RemoteClient::Ssh(client) => client.fetch_objects(have, want, shallow, options).await,
         }
     }
 }
@@ -487,6 +492,107 @@ pub struct FetchArgs {
     /// Limit fetching to the specified number of commits from the tip of each remote branch
     #[clap(long, value_name = "N")]
     pub depth: Option<usize>,
+
+    /// Deepen the history of a shallow repository by N commits beyond the current
+    /// boundary (only meaningful when the repository was cloned with `--depth`).
+    #[clap(long, value_name = "N", conflicts_with_all = ["depth", "unshallow"])]
+    pub deepen: Option<usize>,
+
+    /// Convert a shallow repository into a complete one by fetching all missing
+    /// history, then removing the `.libra/shallow` boundary file.
+    #[clap(long, conflicts_with = "depth")]
+    pub unshallow: bool,
+
+    /// Declined: Libra does not manage submodules with the stock Git layout.
+    /// Declared (rather than left unknown) so any value yields a friendly usage
+    /// error (exit 129) instead of a clap parse error (exit 2).
+    #[clap(long = "recurse-submodules", value_name = "MODE", num_args = 0..=1, require_equals = true)]
+    pub recurse_submodules: Option<Option<String>>,
+
+    /// Print a machine-readable, single-space-separated line per ref update:
+    /// `<flag> <old-oid> <new-oid> <local-ref>`. Mutually exclusive with `--json`.
+    #[clap(long)]
+    pub porcelain: bool,
+
+    /// Deepen or shape shallow history to commits more recent than <date>
+    /// (`deepen-since`). Accepts the date formats `libra log --since` understands.
+    #[clap(
+        long = "shallow-since",
+        value_name = "DATE",
+        conflicts_with = "unshallow"
+    )]
+    pub shallow_since: Option<String>,
+
+    /// Deepen or shape shallow history to exclude commits reachable from <ref>
+    /// (`deepen-not`); repeatable.
+    #[clap(
+        long = "shallow-exclude",
+        value_name = "REF",
+        conflicts_with = "unshallow"
+    )]
+    pub shallow_exclude: Vec<String>,
+
+    /// After fetching, delete local `refs/remotes/<remote>/*` tracking branches
+    /// that no longer exist on the remote. Can also be enabled via `fetch.prune`.
+    #[clap(long, short = 'p')]
+    pub prune: bool,
+
+    /// Show what would be fetched/pruned without downloading objects or writing
+    /// any refs, reflog, or shallow metadata.
+    #[clap(long = "dry-run")]
+    pub dry_run: bool,
+
+    /// Append fetched ref records to `.libra/FETCH_HEAD` instead of overwriting
+    /// it. Long-only: `-a` is reserved for `--all` (Git's `-a` is `--append`).
+    #[clap(long)]
+    pub append: bool,
+
+    /// Print extra diagnostics (the remote being contacted) to stderr, leaving
+    /// the stdout result contract unchanged.
+    #[clap(long, short = 'v')]
+    pub verbose: bool,
+
+    /// Fetch all tags from the remote into the global `refs/tags/*` namespace
+    /// (in addition to branches), pulling each tag's object into the pack.
+    /// Overrides the `remote.<name>.tagOpt` configuration. Existing local tags
+    /// are preserved (tags are immutable by default).
+    #[clap(long, short = 't', conflicts_with = "no_tags")]
+    pub tags: bool,
+
+    /// Do not import any tags, overriding `remote.<name>.tagOpt`. Long-only:
+    /// Git's `-n` short form is intentionally not exposed (it stays free).
+    #[clap(long = "no-tags")]
+    pub no_tags: bool,
+
+    /// Allow non-fast-forward updates: overwrite an existing local tag with the
+    /// remote's value (tags are otherwise immutable). Remote-tracking refs are
+    /// always updated regardless of this flag.
+    #[clap(long, short = 'f')]
+    pub force: bool,
+
+    /// Accept new shallow boundaries advertised by a shallow remote even when no
+    /// shallow operation (`--depth`/`--shallow-since`/`--shallow-exclude`) was
+    /// requested and the repository is not already shallow. Boundary removals
+    /// (history deepening) are always applied regardless of this flag.
+    #[clap(long = "update-shallow")]
+    pub update_shallow: bool,
+
+    /// Use an atomic transaction to update refs: a remote's ref updates already
+    /// commit together or not at all (per-remote), and on rollback the pack
+    /// downloaded for that remote is removed so nothing partial is left behind.
+    #[clap(long)]
+    pub atomic: bool,
+
+    /// Override where fetched refs are stored, as `<src>:<dst>` (repeatable; a
+    /// trailing `*` is a glob). The destination must live under
+    /// `refs/remotes/<remote>/`. Requires an explicit remote (not `--all`); each
+    /// entry is capped at 256 bytes.
+    #[clap(long = "refmap", value_name = "REFSPEC")]
+    pub refmap: Vec<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -494,6 +600,10 @@ pub struct FetchRefUpdate {
     pub remote_ref: String,
     pub old_oid: Option<String>,
     pub new_oid: String,
+    /// True when this update overwrote a non-fast-forward target that required
+    /// `--force` (currently a clobbered existing tag); drives the porcelain `+`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub forced: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -502,6 +612,10 @@ pub struct FetchRepositoryResult {
     pub url: String,
     pub refs_updated: Vec<FetchRefUpdate>,
     pub objects_fetched: usize,
+    /// Local `refs/remotes/<remote>/*` tracking branches removed by `--prune`
+    /// (full ref names). Empty unless pruning ran.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pruned: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -753,8 +867,97 @@ pub async fn execute(args: FetchArgs) {
 /// authentication/network/pack negotiation fails, object writes fail, or
 /// remote-tracking refs cannot be updated.
 pub async fn execute_safe(args: FetchArgs, output: &OutputConfig) -> CliResult<()> {
+    // `--recurse-submodules` is declared only so it produces a friendly usage
+    // error (129) rather than a clap "unknown argument" (2).
+    if args.recurse_submodules.is_some() {
+        return Err(CliError::command_usage(
+            "libra fetch does not support submodule recursion",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+        .with_hint(
+            "Libra does not manage submodules with the stock Git layout; fetch them as separate repositories",
+        ));
+    }
+    // `--porcelain` and `--json` are both machine formats; `--json` is a global
+    // flag so this exclusion is enforced here (usage error 129), not by clap.
+    if args.porcelain && output.is_json() {
+        return Err(
+            CliError::command_usage("--porcelain and --json are mutually exclusive")
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+        );
+    }
+    let porcelain = args.porcelain;
+    let dry_run = args.dry_run;
+    let append = args.append;
     let result = run_fetch(args, output).await?;
-    render_fetch_output(&result, output)
+    // FETCH_HEAD records the fetched refs; `--dry-run` writes nothing.
+    if !dry_run {
+        write_fetch_head(&result, append).map_err(CliError::from)?;
+    }
+    if porcelain {
+        render_fetch_porcelain(&result, output)
+    } else {
+        render_fetch_output(&result, output)
+    }
+}
+
+/// Render Git's `--porcelain` format: one `<flag> <old-oid> <new-oid>
+/// <local-ref>` line per ref update, single-space separated, with no human
+/// summary columns.
+fn render_fetch_porcelain(result: &FetchOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.quiet {
+        return Ok(());
+    }
+    let rendered = format_fetch_porcelain(result);
+    if rendered.is_empty() {
+        return Ok(());
+    }
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+    writeln!(writer, "{rendered}")
+        .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))
+}
+
+fn format_fetch_porcelain(result: &FetchOutput) -> String {
+    let mut lines = Vec::new();
+    for remote in &result.remotes {
+        for update in &remote.refs_updated {
+            let (flag, old_oid) = if update.forced {
+                // Forced (non-fast-forward) update, e.g. a `--force` tag clobber.
+                (
+                    '+',
+                    update
+                        .old_oid
+                        .clone()
+                        .unwrap_or_else(|| "0".repeat(update.new_oid.len())),
+                )
+            } else {
+                match &update.old_oid {
+                    // New ref: space-flag is reserved for fast-forward; new refs
+                    // use `*` with an all-zero old object id sized to the hash kind.
+                    None => ('*', "0".repeat(update.new_oid.len())),
+                    Some(old) => (' ', old.clone()),
+                }
+            };
+            lines.push(format!(
+                "{flag} {old_oid} {} {}",
+                update.new_oid, update.remote_ref
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Whether `fetch.prune` is configured truthy, providing the default for
+/// `--prune` when the flag is absent.
+async fn read_fetch_prune_config() -> bool {
+    matches!(
+        ConfigKv::get("fetch.prune").await,
+        Ok(Some(entry)) if matches!(
+            entry.value.trim().to_ascii_lowercase().as_str(),
+            "true" | "yes" | "on" | "1"
+        )
+    )
 }
 
 async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOutput> {
@@ -765,7 +968,47 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         refspec,
         all,
         depth,
+        deepen,
+        unshallow,
+        recurse_submodules: _,
+        porcelain: _,
+        shallow_since,
+        shallow_exclude,
+        prune,
+        dry_run,
+        append: _,
+        verbose,
+        tags,
+        no_tags,
+        force,
+        update_shallow,
+        atomic,
+        refmap,
     } = args;
+
+    // `--refmap` rewrites a single remote's tracking destinations, so it needs an
+    // explicit remote and cannot be combined with `--all`.
+    if !refmap.is_empty() && all {
+        return Err(CliError::command_usage(
+            "--refmap requires an explicit remote and cannot be combined with --all",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+
+    // `--prune` is enabled by the flag or the `fetch.prune` config (flag wins).
+    let prune = prune || read_fetch_prune_config().await;
+
+    // `--shallow-since` is parsed at the command layer so an unparseable date is
+    // a usage error (129) rather than a deep protocol failure.
+    let deepen_since = match &shallow_since {
+        Some(date) => Some(parse_date(date).map_err(|error| {
+            CliError::command_usage(format!("invalid --shallow-since date '{date}': {error}"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?),
+        None => None,
+    };
+    let shallow =
+        build_fetch_shallow_options(depth, deepen, unshallow, deepen_since, shallow_exclude);
 
     if all {
         let remotes = ConfigKv::all_remote_configs().await.map_err(|error| {
@@ -775,10 +1018,32 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
 
         let mut results = Vec::with_capacity(remotes.len());
         for remote in remotes {
+            if verbose {
+                eprintln!(
+                    "Fetching {} from {}",
+                    remote.name,
+                    redact_url_credentials(&remote.url)
+                );
+            }
             results.push(
-                fetch_repository_with_result(remote, None, false, depth, output)
-                    .await
-                    .map_err(CliError::from)?,
+                fetch_repository_with_result(
+                    remote,
+                    None,
+                    false,
+                    shallow.clone(),
+                    unshallow,
+                    prune,
+                    dry_run,
+                    tags,
+                    no_tags,
+                    force,
+                    update_shallow,
+                    atomic,
+                    Vec::new(),
+                    output,
+                )
+                .await
+                .map_err(CliError::from)?,
             );
         }
 
@@ -821,9 +1086,36 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
                 .with_hint("use 'libra remote -v' to inspect configured remotes")
         })?;
 
-    let result = fetch_repository_with_result(remote_config, refspec.clone(), false, depth, output)
-        .await
-        .map_err(CliError::from)?;
+    if verbose {
+        eprintln!(
+            "Fetching {} from {}",
+            remote_config.name,
+            redact_url_credentials(&remote_config.url)
+        );
+    }
+
+    // Validate `--refmap` now that the remote name is known (256-byte cap,
+    // well-formed `<src>:<dst>`, destination under `refs/remotes/<remote>/`).
+    let refmap_rules = parse_refmap_rules(&refmap, &remote_config.name)?;
+
+    let result = fetch_repository_with_result(
+        remote_config,
+        refspec.clone(),
+        false,
+        shallow,
+        unshallow,
+        prune,
+        dry_run,
+        tags,
+        no_tags,
+        force,
+        update_shallow,
+        atomic,
+        refmap_rules,
+        output,
+    )
+    .await
+    .map_err(CliError::from)?;
 
     Ok(FetchOutput {
         all: false,
@@ -862,7 +1154,7 @@ fn render_fetch_output(result: &FetchOutput, output: &OutputConfig) -> CliResult
         writeln!(writer, "From {}", remote.url)
             .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
 
-        if remote.refs_updated.is_empty() {
+        if remote.refs_updated.is_empty() && remote.pruned.is_empty() {
             writeln!(writer, "Already up to date with '{}'", remote.remote)
                 .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
             continue;
@@ -887,6 +1179,14 @@ fn render_fetch_output(result: &FetchOutput, output: &OutputConfig) -> CliResult
             }
         }
 
+        for pruned_ref in &remote.pruned {
+            let ref_name = pruned_ref
+                .strip_prefix("refs/remotes/")
+                .unwrap_or(pruned_ref);
+            writeln!(writer, " - [deleted]         (none)     -> {ref_name}")
+                .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
+        }
+
         writeln!(writer, " {} objects fetched", remote.objects_fetched)
             .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
     }
@@ -909,9 +1209,16 @@ pub(crate) async fn discover_remote_with_name(
 ) -> Result<(RemoteClient, DiscoveryResult), FetchError> {
     let remote_client =
         RemoteClient::from_spec_with_remote(remote_spec, remote_name).map_err(|message| {
-            let (kind, reason) = classify_remote_spec_error(remote_spec, &message);
+            if is_vault_ssh_config_error(&message) {
+                return FetchError::LocalState { message };
+            }
+            // Classify against a credential-redacted spec so neither the `spec`
+            // field nor the `reason` string (which may interpolate the spec for
+            // malformed URLs) can leak a token/password.
+            let redacted_spec = redact_url_credentials(remote_spec);
+            let (kind, reason) = classify_remote_spec_error(&redacted_spec, &message);
             FetchError::InvalidRemoteSpec {
-                spec: remote_spec.to_string(),
+                spec: redacted_spec,
                 kind,
                 reason,
             }
@@ -920,10 +1227,17 @@ pub(crate) async fn discover_remote_with_name(
         .discovery_reference(UploadPack)
         .await
         .map_err(|source| FetchError::Discovery {
-            remote: remote_spec.to_string(),
+            // Redact credentials so a token/password never reaches error output.
+            remote: redact_url_credentials(remote_spec),
             source,
         })?;
     Ok((remote_client, discovery))
+}
+
+fn is_vault_ssh_config_error(message: &str) -> bool {
+    message.contains("vault SSH private key")
+        || message.contains("vault unseal key")
+        || message.contains("temporary SSH key file")
 }
 
 /// Classify a remote-spec construction failure into a typed kind and a
@@ -952,10 +1266,16 @@ fn classify_remote_spec_error(remote_spec: &str, message: &str) -> (RemoteSpecEr
     }
     let lower = message.to_ascii_lowercase();
     if lower.contains("unsupported") && lower.contains("scheme") {
+        // The scheme-only message carries no userinfo.
         return (RemoteSpecErrorKind::UnsupportedScheme, message.to_string());
     }
-    // Default to MalformedUrl for other spec errors (bad syntax, etc.)
-    (RemoteSpecErrorKind::MalformedUrl, message.to_string())
+    // Default to MalformedUrl. The raw `message` may interpolate the original
+    // spec (e.g. "invalid file url: file://user:pass@host/…"), so build the
+    // reason from the already-redacted `remote_spec` instead of the raw message.
+    (
+        RemoteSpecErrorKind::MalformedUrl,
+        format!("'{remote_spec}' is not a valid remote URL or local path"),
+    )
 }
 
 pub(crate) fn normalize_branch_ref(branch: &str) -> String {
@@ -994,7 +1314,7 @@ pub async fn fetch_repository(
         remote_config,
         branch,
         single_branch,
-        depth,
+        ShallowOptions::from_depth(depth),
         &OutputConfig::default(),
     )
     .await
@@ -1003,23 +1323,218 @@ pub async fn fetch_repository(
     }
 }
 
+/// Git uses a very large deepen value to request the complete history when
+/// unshallowing; mirror that here so a shallow source is fully materialized.
+pub(crate) const UNSHALLOW_DEPTH: usize = 0x7fff_ffff;
+
+/// Translate the `fetch` CLI depth/deepen/unshallow flags into a single
+/// [`ShallowOptions`] request. `--unshallow` requests the complete history,
+/// `--deepen N` sends a relative deepen request, otherwise `--depth N` sends an
+/// absolute depth request.
+pub(crate) fn build_fetch_shallow_options(
+    depth: Option<usize>,
+    deepen: Option<usize>,
+    unshallow: bool,
+    deepen_since: Option<i64>,
+    deepen_not: Vec<String>,
+) -> ShallowOptions {
+    let effective_depth = if unshallow {
+        Some(UNSHALLOW_DEPTH)
+    } else {
+        deepen.or(depth)
+    };
+    ShallowOptions {
+        depth: effective_depth,
+        deepen_relative: deepen.is_some() && !unshallow,
+        deepen_since,
+        deepen_not,
+        filter: None,
+    }
+}
+
 pub async fn fetch_repository_safe(
     remote_config: RemoteConfig,
     branch: Option<String>,
     single_branch: bool,
-    depth: Option<usize>,
+    shallow: ShallowOptions,
     output: &OutputConfig,
 ) -> Result<(), FetchError> {
-    fetch_repository_with_result(remote_config, branch, single_branch, depth, output)
-        .await
-        .map(|_| ())
+    fetch_repository_with_result(
+        remote_config,
+        branch,
+        single_branch,
+        shallow,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        Vec::new(),
+        output,
+    )
+    .await
+    .map(|_| ())
 }
 
+/// How `fetch` should treat the remote's tags. Git's auto-follow default — a
+/// second negotiation round that pulls the objects of tags pointing at
+/// already-fetched commits — is deferred; the current default imports no tags
+/// unless `--tags`/`-t` (or `remote.<name>.tagOpt = --tags`) asks for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TagFetchMode {
+    /// Import no tags (the default and `--no-tags`).
+    None,
+    /// Import every advertised tag, pulling each tag object into the pack.
+    All,
+}
+
+/// A remote tag advertised during ref discovery that fetch may import.
+#[derive(Debug, Clone)]
+struct TagCandidate {
+    /// Fully-qualified local ref name, e.g. `refs/tags/v1.0`.
+    ref_name: String,
+    /// Advertised object hash: the tag-object hash for an annotated tag, or the
+    /// commit hash for a lightweight tag. This is both the `want` to request and
+    /// the target the local tag ref is written to (matching `libra tag`).
+    object_hash: String,
+}
+
+/// Collect importable tag candidates from the advertised refs, dropping the
+/// peeled `refs/tags/<name>^{}` companions (whose target is reached through the
+/// annotated tag object itself).
+fn collect_tag_candidates(refs: &[DiscRef]) -> Vec<TagCandidate> {
+    refs.iter()
+        .filter(|reference| {
+            reference._ref.starts_with("refs/tags/") && !reference._ref.ends_with("^{}")
+        })
+        .map(|reference| TagCandidate {
+            ref_name: reference._ref.clone(),
+            object_hash: reference._hash.clone(),
+        })
+        .collect()
+}
+
+/// Read `remote.<name>.tagOpt`, tolerating either the Git-canonical lowercase
+/// `tagopt` key or a verbatim `tagOpt` spelling.
+async fn read_remote_tagopt(remote_name: &str) -> Option<String> {
+    for key in [
+        format!("remote.{remote_name}.tagopt"),
+        format!("remote.{remote_name}.tagOpt"),
+    ] {
+        if let Ok(Some(entry)) = ConfigKv::get(&key).await {
+            return Some(entry.value);
+        }
+    }
+    None
+}
+
+/// Resolve the effective tag-import behavior for a remote: an explicit
+/// `--no-tags`/`--tags` flag wins, otherwise `remote.<name>.tagOpt` (`--tags` /
+/// `--no-tags`) applies, otherwise the default imports no tags.
+async fn resolve_tag_mode(remote_name: &str, tags_flag: bool, no_tags_flag: bool) -> TagFetchMode {
+    if no_tags_flag {
+        return TagFetchMode::None;
+    }
+    if tags_flag {
+        return TagFetchMode::All;
+    }
+    match read_remote_tagopt(remote_name).await.as_deref() {
+        Some("--tags") => TagFetchMode::All,
+        // `--no-tags` or any unrecognised value imports no tags.
+        _ => TagFetchMode::None,
+    }
+}
+
+/// Largest accepted `--refmap` entry, a ReDoS guard against pathological globs.
+const REFMAP_MAX_LEN: usize = 256;
+
+/// A parsed `--refmap` rule: `<src>:<dst>` where either side may end with `*`
+/// (a glob whose captured suffix is carried across).
+#[derive(Debug, Clone)]
+pub(crate) struct RefmapRule {
+    src: String,
+    dst: String,
+}
+
+/// Parse and validate `--refmap` entries for `remote_name`. Each must be at most
+/// [`REFMAP_MAX_LEN`] bytes, a well-formed `<src>:<dst>` with non-empty sides,
+/// and a destination under `refs/remotes/<remote>/`. Violations are usage errors
+/// (exit 129).
+fn parse_refmap_rules(entries: &[String], remote_name: &str) -> CliResult<Vec<RefmapRule>> {
+    let dst_root = format!("refs/remotes/{remote_name}/");
+    let mut rules = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if entry.len() > REFMAP_MAX_LEN {
+            return Err(CliError::command_usage(format!(
+                "--refmap entry exceeds {REFMAP_MAX_LEN} bytes ({} bytes)",
+                entry.len()
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+        }
+        let (src, dst) = entry.split_once(':').ok_or_else(|| {
+            CliError::command_usage(format!("--refmap '{entry}' must be '<src>:<dst>'"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?;
+        if src.is_empty() || dst.is_empty() {
+            return Err(CliError::command_usage(format!(
+                "--refmap '{entry}' has an empty source or destination"
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+        }
+        if !dst.starts_with(&dst_root) {
+            return Err(CliError::command_usage(format!(
+                "--refmap destination '{dst}' must be under '{dst_root}'"
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+        }
+        rules.push(RefmapRule {
+            src: src.to_string(),
+            dst: dst.to_string(),
+        });
+    }
+    Ok(rules)
+}
+
+/// Map a fetched ref to its local destination using the first matching rule. A
+/// trailing `*` on both sides is a glob: the suffix captured from `src` is
+/// appended to the `dst` prefix. Returns `None` when no rule matches (the caller
+/// then uses the default `refs/remotes/<remote>/*` mapping).
+fn apply_refmap_rules(rules: &[RefmapRule], ref_name: &str) -> Option<String> {
+    for rule in rules {
+        match (rule.src.strip_suffix('*'), rule.dst.strip_suffix('*')) {
+            (Some(src_prefix), Some(dst_prefix)) => {
+                if let Some(rest) = ref_name.strip_prefix(src_prefix) {
+                    return Some(format!("{dst_prefix}{rest}"));
+                }
+            }
+            _ => {
+                if rule.src == ref_name {
+                    return Some(rule.dst.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn fetch_repository_with_result(
     remote_config: RemoteConfig,
     branch: Option<String>,
     single_branch: bool,
-    depth: Option<usize>,
+    shallow: ShallowOptions,
+    unshallow: bool,
+    prune: bool,
+    dry_run: bool,
+    tags_flag: bool,
+    no_tags_flag: bool,
+    force: bool,
+    update_shallow: bool,
+    atomic: bool,
+    refmap_rules: Vec<RefmapRule>,
     output: &OutputConfig,
 ) -> Result<FetchRepositoryResult, FetchError> {
     let (remote_client, discovery) =
@@ -1054,6 +1569,7 @@ pub(crate) async fn fetch_repository_with_result(
             url: normalized_url,
             refs_updated: Vec::new(),
             objects_fetched: 0,
+            pruned: Vec::new(),
         });
     }
 
@@ -1067,11 +1583,22 @@ pub(crate) async fn fetch_repository_with_result(
         .cloned()
         .collect::<Vec<_>>();
 
+    // Resolve how tags should be imported (CLI flag > `remote.<name>.tagOpt` >
+    // default of none) and capture the advertised tag candidates *before* the
+    // ref set is narrowed to branches below — tags live in the global
+    // `refs/tags/*` namespace, not under `refs/remotes/<remote>/*`.
+    let tag_mode = resolve_tag_mode(&remote_config.name, tags_flag, no_tags_flag).await;
+    let tag_candidates = match tag_mode {
+        TagFetchMode::None => Vec::new(),
+        TagFetchMode::All => collect_tag_candidates(&discovery.refs),
+    };
+
     // Only request refs we will actually persist as remote-tracking refs.
     // `update_references` saves `refs/heads/*` and `refs/mr/*`; asking for
     // anything else (HEAD symref, `refs/pull/*`, `refs/tags/*`) makes the
     // server include unreachable objects that the next fetch's `have` cannot
-    // cover, which forces the same pack to be re-downloaded every time.
+    // cover, which forces the same pack to be re-downloaded every time. Tags
+    // are requested explicitly via `tag_candidates` when `--tags` is set.
     refs.retain(|reference| {
         reference._ref.starts_with("refs/heads/") || reference._ref.starts_with("refs/mr/")
     });
@@ -1083,27 +1610,77 @@ pub(crate) async fn fetch_repository_with_result(
         refs.retain(|reference| reference._ref == normalized);
     }
 
+    // `--dry-run`: compute the would-be ref updates (and prune list) from the
+    // discovered refs and return before downloading any pack or writing anything
+    // (no `.pack`/`.idx`, no shallow update, no ref/reflog writes, no FETCH_HEAD).
+    if dry_run {
+        let mut refs_updated =
+            compute_fetch_ref_preview(&remote_config, &refs, &refmap_rules).await?;
+        refs_updated.extend(preview_tag_updates(&tag_candidates, force).await?);
+        let pruned = if prune {
+            let remote_branch_names =
+                crate::command::remote::collect_remote_branch_names(&discovery.refs);
+            crate::command::remote::prune_stale_tracking_branches(
+                &remote_config.name,
+                &remote_branch_names,
+                true,
+            )
+            .await
+            .map_err(|error| FetchError::LocalState {
+                message: format!("failed to preview prune: {error}"),
+            })?
+            .into_iter()
+            .map(|entry| entry.remote_ref)
+            .collect()
+        } else {
+            Vec::new()
+        };
+        return Ok(FetchRepositoryResult {
+            remote: remote_config.name,
+            url: normalized_url,
+            refs_updated,
+            objects_fetched: 0,
+            pruned,
+        });
+    }
+
     let mut want = refs
         .iter()
         .map(|reference| reference._hash.clone())
         .collect::<Vec<_>>();
+    // `--tags` pulls each advertised tag object into the pack so the imported
+    // `refs/tags/*` always resolve to present objects.
+    want.extend(
+        tag_candidates
+            .iter()
+            .map(|candidate| candidate.object_hash.clone()),
+    );
     want.sort();
     want.dedup();
     let have = current_have_safe().await?;
     let shallow_boundaries = read_shallow_boundaries()?;
-    let shallow = shallow_boundaries.iter().cloned().collect::<Vec<_>>();
+    let shallow_boundary_oids = shallow_boundaries.iter().cloned().collect::<Vec<_>>();
     let mut result_stream = remote_client
-        .fetch_objects(&have, &want, &shallow, depth)
+        .fetch_objects(&have, &want, &shallow_boundary_oids, &shallow)
         .await
         .map_err(|source| FetchError::FetchObjects {
-            remote: remote_config.url.clone(),
+            // Redact credentials so a token/password never reaches error output.
+            remote: redact_url_credentials(&remote_config.url),
             source,
         })?;
 
     let task = format!("fetch {}", remote_config.name);
-    let fetch_data = read_fetch_stream(&mut result_stream, output, &task).await?;
+    // When any deepen/shallow request is made (depth/since/exclude, an existing
+    // shallow boundary, or unshallow), upload-pack always prefixes the pack with
+    // a shallow section terminated by a flush packet — even when no boundary is
+    // cut. The reader must consume that leading flush instead of stopping early.
+    let shallow_requested = shallow.is_requested() || !shallow_boundary_oids.is_empty();
+    let fetch_data =
+        read_fetch_stream(&mut result_stream, output, &task, shallow_requested).await?;
     let objects_fetched = pack_object_count(&fetch_data.pack_data);
     let pack_file = write_pack_and_index(&fetch_data.pack_data)?;
+    // Keep the pack path so an `--atomic` ref-transaction rollback can remove it.
+    let atomic_pack = if atomic { pack_file.clone() } else { None };
     if let Some(pack_file) = pack_file {
         let index_version = match get_hash_kind() {
             HashKind::Sha1 => None,
@@ -1122,15 +1699,71 @@ pub(crate) async fn fetch_repository_with_result(
                 })?,
         }
     }
-    apply_shallow_updates(&fetch_data.shallow, &fetch_data.unshallow)?;
+    // New shallow boundaries (a shallow remote cutting our history) are only
+    // accepted when a shallow operation was requested, the repository is already
+    // shallow (`shallow_requested` covers both), or `--update-shallow` is set.
+    // Boundary removals (history deepening / unshallow) always apply.
+    let accepted_shallow =
+        accept_new_shallow(&fetch_data.shallow, update_shallow, shallow_requested);
+    apply_shallow_updates(accepted_shallow, &fetch_data.unshallow)?;
+    if unshallow {
+        // `--unshallow` requests the complete history; once the pack is written,
+        // drop every shallow boundary so the repository is no longer shallow.
+        write_shallow_boundaries(&BTreeSet::new())?;
+    }
 
-    let refs_updated =
-        update_references(&remote_config, &refs, &ref_heads, remote_head, branch).await?;
+    let refs_updated = match update_references(
+        &remote_config,
+        &refs,
+        &ref_heads,
+        remote_head,
+        branch,
+        &tag_candidates,
+        force,
+        &refmap_rules,
+    )
+    .await
+    {
+        Ok(updates) => updates,
+        Err(error) => {
+            // `--atomic`: the per-remote ref transaction already rolled back, so
+            // remove the pack/index downloaded for this fetch to leave no
+            // partial state behind.
+            if let Some(pack_file) = &atomic_pack {
+                cleanup_pack_files(pack_file);
+            }
+            return Err(error);
+        }
+    };
+
+    // `--prune` removes local tracking branches whose remote counterpart is gone;
+    // it compares against the remote's advertised refs (`discovery.refs`), never
+    // the locally-filtered set, and never touches `refs/heads/*`.
+    let pruned = if prune {
+        let remote_branch_names =
+            crate::command::remote::collect_remote_branch_names(&discovery.refs);
+        crate::command::remote::prune_stale_tracking_branches(
+            &remote_config.name,
+            &remote_branch_names,
+            false,
+        )
+        .await
+        .map_err(|error| FetchError::LocalState {
+            message: format!("failed to prune stale remote-tracking branches: {error}"),
+        })?
+        .into_iter()
+        .map(|entry| entry.remote_ref)
+        .collect()
+    } else {
+        Vec::new()
+    };
+
     Ok(FetchRepositoryResult {
         remote: remote_config.name,
         url: normalized_url,
         refs_updated,
         objects_fetched,
+        pruned,
     })
 }
 
@@ -1315,12 +1948,18 @@ async fn read_fetch_stream(
     result_stream: &mut FetchStream,
     output: &OutputConfig,
     task: &str,
+    shallow_requested: bool,
 ) -> Result<FetchStreamData, FetchError> {
     let mut reader = StreamReader::new(result_stream);
     let mut data_out = FetchStreamData::default();
     let mut pack_completion = PackCompletionTracker::default();
     let mut reach_pack = false;
     let mut saw_shallow_response = false;
+    // upload-pack emits a shallow section (possibly empty) terminated by a flush
+    // packet before the pack whenever a deepen/shallow request was made. Expect to
+    // consume that one leading flush so an empty shallow section is not mistaken
+    // for end-of-stream.
+    let mut expecting_shallow_terminator = shallow_requested;
     let render_progress = matches!(output.progress, ProgressMode::Text);
     let json_progress = matches!(output.progress, ProgressMode::Json);
     let bar = render_progress.then(ProgressBar::new_spinner);
@@ -1335,8 +1974,11 @@ async fn read_fetch_stream(
             Err(source) => return Err(FetchError::PacketRead { source }),
         };
         if len == 0 {
-            if !reach_pack && saw_shallow_response {
+            if !reach_pack && (saw_shallow_response || expecting_shallow_terminator) {
+                // End of the (possibly empty) shallow section that always precedes
+                // the pack for a deepen/shallow request. Consume it exactly once.
                 saw_shallow_response = false;
+                expecting_shallow_terminator = false;
                 continue;
             }
             break;
@@ -1632,7 +2274,7 @@ fn shallow_file_path() -> Result<PathBuf, FetchError> {
         })
 }
 
-fn read_shallow_boundaries() -> Result<BTreeSet<String>, FetchError> {
+pub(crate) fn read_shallow_boundaries() -> Result<BTreeSet<String>, FetchError> {
     let path = shallow_file_path()?;
     let content = match fs::read_to_string(&path) {
         Ok(content) => content,
@@ -1693,7 +2335,121 @@ fn write_shallow_boundaries(boundaries: &BTreeSet<String>) -> Result<(), FetchEr
             "failed to write shallow metadata '{}': {source}",
             path.display()
         ),
+    })?;
+
+    // The shallow boundary file records repository history limits; keep it owner
+    // read/write only on Unix (Windows has no comparable mode bits to set).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|source| {
+            FetchError::LocalState {
+                message: format!(
+                    "failed to set permissions on shallow metadata '{}': {source}",
+                    path.display()
+                ),
+            }
+        })?;
+    }
+    Ok(())
+}
+
+fn fetch_head_path() -> Result<PathBuf, FetchError> {
+    util::try_get_storage_path(None)
+        .map(|storage| storage.join("FETCH_HEAD"))
+        .map_err(|source| FetchError::LocalState {
+            message: format!("failed to locate repository storage for FETCH_HEAD: {source}"),
+        })
+}
+
+/// Render the `FETCH_HEAD` body: one `<oid>\t<not-for-merge>\t<desc>` line per
+/// fetched ref. Libra fetch never designates a merge target (merge with
+/// `libra pull`), so every line is marked `not-for-merge`.
+fn format_fetch_head(result: &FetchOutput) -> String {
+    let mut lines = Vec::new();
+    for remote in &result.remotes {
+        let tracking_prefix = format!("refs/remotes/{}/", remote.remote);
+        for update in &remote.refs_updated {
+            let branch = update
+                .remote_ref
+                .strip_prefix(&tracking_prefix)
+                .unwrap_or(&update.remote_ref);
+            lines.push(format!(
+                "{}\tnot-for-merge\tbranch '{}' of {}",
+                update.new_oid, branch, remote.url
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Write (or, with `append`, accumulate into) `.libra/FETCH_HEAD` via an atomic
+/// temp-file + rename, owner-only on Unix.
+fn write_fetch_head(result: &FetchOutput, append: bool) -> Result<(), FetchError> {
+    let path = fetch_head_path()?;
+    let body = format_fetch_head(result);
+
+    let mut content = String::new();
+    if append && let Ok(existing) = fs::read_to_string(&path) {
+        content.push_str(&existing);
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+    }
+    if !body.is_empty() {
+        content.push_str(&body);
+        content.push('\n');
+    }
+
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, &content).map_err(|source| FetchError::LocalState {
+        message: format!(
+            "failed to write FETCH_HEAD temp '{}': {source}",
+            tmp.display()
+        ),
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)).map_err(|source| {
+            FetchError::LocalState {
+                message: format!("failed to set permissions on FETCH_HEAD: {source}"),
+            }
+        })?;
+    }
+    fs::rename(&tmp, &path).map_err(|source| FetchError::LocalState {
+        message: format!(
+            "failed to finalize FETCH_HEAD '{}': {source}",
+            path.display()
+        ),
     })
+}
+
+/// Decide whether newly-advertised shallow boundaries should be applied. They
+/// are accepted only when a shallow operation was requested or the repository is
+/// already shallow (`shallow_requested`), or `--update-shallow` (`update_shallow`)
+/// was passed; otherwise a plain fetch from a shallow remote leaves the local
+/// repository unshallow. Boundary *removals* are handled separately and always
+/// apply.
+fn accept_new_shallow(
+    advertised: &[String],
+    update_shallow: bool,
+    shallow_requested: bool,
+) -> &[String] {
+    if update_shallow || shallow_requested {
+        advertised
+    } else {
+        &[]
+    }
+}
+
+/// Remove a freshly-written pack and its `.idx` after an `--atomic` fetch's ref
+/// transaction rolls back, so a failed atomic fetch leaves no partial state.
+/// Best-effort: a missing file or removal error is ignored (the pack is
+/// unreferenced regardless).
+fn cleanup_pack_files(pack_file: &str) {
+    let _ = std::fs::remove_file(pack_file);
+    let _ = std::fs::remove_file(pack_file.replace(".pack", ".idx"));
 }
 
 fn apply_shallow_updates(shallow: &[String], unshallow: &[String]) -> Result<(), FetchError> {
@@ -1717,23 +2473,115 @@ fn apply_shallow_updates(shallow: &[String], unshallow: &[String]) -> Result<(),
     write_shallow_boundaries(&boundaries)
 }
 
+/// Read-only counterpart of [`update_references`] for `--dry-run`: report the
+/// ref updates the discovered refs would produce, without any database writes.
+async fn compute_fetch_ref_preview(
+    remote_config: &RemoteConfig,
+    refs: &[DiscRef],
+    refmap_rules: &[RefmapRule],
+) -> Result<Vec<FetchRefUpdate>, FetchError> {
+    let mut updates = Vec::new();
+    for reference in refs {
+        let full_ref_name = if let Some(mapped) = apply_refmap_rules(refmap_rules, &reference._ref)
+        {
+            mapped
+        } else if let Some(branch_name) = reference._ref.strip_prefix("refs/heads/") {
+            format!("refs/remotes/{}/{}", remote_config.name, branch_name)
+        } else if let Some(mr_name) = reference._ref.strip_prefix("refs/mr/") {
+            format!("refs/remotes/{}/mr/{}", remote_config.name, mr_name)
+        } else {
+            continue;
+        };
+
+        let old_oid = Branch::find_branch_result(&full_ref_name, Some(&remote_config.name))
+            .await
+            .map_err(|error| FetchError::UpdateRefs {
+                message: format!(
+                    "failed to inspect existing remote-tracking ref '{full_ref_name}': {error}"
+                ),
+            })?
+            .map(|branch| branch.commit.to_string());
+
+        if old_oid.as_deref() == Some(reference._hash.as_str()) {
+            continue;
+        }
+        updates.push(FetchRefUpdate {
+            remote_ref: full_ref_name,
+            old_oid,
+            new_oid: reference._hash.clone(),
+            forced: false,
+        });
+    }
+    Ok(updates)
+}
+
+/// Compute the would-be tag imports for `--dry-run`. A candidate whose local
+/// tag does not exist previews as a new ref; an existing tag is skipped unless
+/// `force` is set, in which case it previews as a forced (clobbering) update.
+async fn preview_tag_updates(
+    candidates: &[TagCandidate],
+    force: bool,
+) -> Result<Vec<FetchRefUpdate>, FetchError> {
+    let mut updates = Vec::new();
+    for candidate in candidates {
+        let short = candidate
+            .ref_name
+            .strip_prefix("refs/tags/")
+            .unwrap_or(&candidate.ref_name);
+        let existing = crate::internal::tag::find_tag_ref(short)
+            .await
+            .map_err(|error| FetchError::UpdateRefs {
+                message: format!(
+                    "failed to inspect existing tag '{}': {error}",
+                    candidate.ref_name
+                ),
+            })?;
+        match existing {
+            Some(_) if !force => continue,
+            Some(tag_ref) => updates.push(FetchRefUpdate {
+                remote_ref: candidate.ref_name.clone(),
+                old_oid: tag_ref.target,
+                new_oid: candidate.object_hash.clone(),
+                forced: true,
+            }),
+            None => updates.push(FetchRefUpdate {
+                remote_ref: candidate.ref_name.clone(),
+                old_oid: None,
+                new_oid: candidate.object_hash.clone(),
+                forced: false,
+            }),
+        }
+    }
+    Ok(updates)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn update_references(
     remote_config: &RemoteConfig,
     refs: &[DiscRef],
     ref_heads: &[DiscRef],
     remote_head: Option<DiscRef>,
     branch: Option<String>,
+    tags_to_import: &[TagCandidate],
+    force: bool,
+    refmap_rules: &[RefmapRule],
 ) -> Result<Vec<FetchRefUpdate>, FetchError> {
     let db = get_db_conn_instance().await;
     let remote_config = remote_config.clone();
     let refs = refs.to_vec();
     let ref_heads = ref_heads.to_vec();
+    let tags_to_import = tags_to_import.to_vec();
+    let refmap_rules = refmap_rules.to_vec();
     db.transaction(|txn| {
         Box::pin(async move {
             let mut updates = Vec::new();
             for reference in &refs {
                 let full_ref_name: String;
-                if let Some(branch_name) = reference._ref.strip_prefix("refs/heads/") {
+                if let Some(mapped) = apply_refmap_rules(&refmap_rules, &reference._ref) {
+                    // `--refmap` overrides the destination; validated to sit under
+                    // `refs/remotes/<remote>/`, so the tracking scope is unchanged.
+                    full_ref_name = mapped;
+                } else if let Some(branch_name) = reference._ref.strip_prefix("refs/heads/") {
                     full_ref_name = format!("refs/remotes/{}/{}", remote_config.name, branch_name);
                 } else if let Some(mr_name) = reference._ref.strip_prefix("refs/mr/") {
                     full_ref_name = format!("refs/remotes/{}/mr/{}", remote_config.name, mr_name);
@@ -1793,7 +2641,45 @@ async fn update_references(
                     remote_ref: full_ref_name,
                     old_oid,
                     new_oid: reference._hash.clone(),
+                    forced: false,
                 });
+            }
+
+            // Import fetched tags into the global `refs/tags/*` namespace, in
+            // the same transaction so a failure rolls back the whole batch.
+            // Tags are immutable by default: an existing local tag is preserved
+            // unless `--force` is given, in which case it is clobbered and the
+            // update is flagged as forced (porcelain `+`).
+            for tag in &tags_to_import {
+                let outcome = crate::internal::tag::import_fetched_tag_with_conn(
+                    txn,
+                    &tag.ref_name,
+                    &tag.object_hash,
+                    force,
+                )
+                .await
+                .map_err(|source| FetchError::UpdateRefs {
+                    message: format!("failed to persist fetched tag '{}': {source}", tag.ref_name),
+                })?;
+                match outcome {
+                    crate::internal::tag::TagImportOutcome::Created => {
+                        updates.push(FetchRefUpdate {
+                            remote_ref: tag.ref_name.clone(),
+                            old_oid: None,
+                            new_oid: tag.object_hash.clone(),
+                            forced: false,
+                        });
+                    }
+                    crate::internal::tag::TagImportOutcome::Updated { previous } => {
+                        updates.push(FetchRefUpdate {
+                            remote_ref: tag.ref_name.clone(),
+                            old_oid: previous,
+                            new_oid: tag.object_hash.clone(),
+                            forced: true,
+                        });
+                    }
+                    crate::internal::tag::TagImportOutcome::Preserved => {}
+                }
             }
 
             // Determine the remote default branch.
@@ -1974,6 +2860,15 @@ async fn read_pkt_line(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<(usi
     if len == 0 {
         return Ok((0, Vec::new()));
     }
+    // Reject malformed/short lengths (1..=3) before subtracting the 4-byte
+    // header, so a hostile server cannot underflow the length into a huge
+    // allocation. (`0001`/`0002`/`0003` are not valid data frames here.)
+    if len < 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid pkt-line length {len}"),
+        ));
+    }
     let mut data = vec![0u8; (len - 4) as usize];
     reader.read_exact(&mut data).await?;
     Ok((len as usize, data))
@@ -2001,6 +2896,250 @@ mod tests {
         internal::protocol::FetchStream,
         utils::{output::OutputConfig, test::ScopedEnvVar},
     };
+
+    #[test]
+    fn format_fetch_porcelain_layout_is_space_separated() {
+        use super::{FetchOutput, FetchRefUpdate, FetchRepositoryResult, format_fetch_porcelain};
+
+        let output = FetchOutput {
+            all: false,
+            requested_remote: Some("origin".to_string()),
+            refspec: None,
+            remotes: vec![FetchRepositoryResult {
+                remote: "origin".to_string(),
+                url: "https://example.com/x.git".to_string(),
+                objects_fetched: 2,
+                refs_updated: vec![
+                    FetchRefUpdate {
+                        remote_ref: "refs/remotes/origin/main".to_string(),
+                        old_oid: Some("a".repeat(40)),
+                        new_oid: "b".repeat(40),
+                        forced: false,
+                    },
+                    FetchRefUpdate {
+                        remote_ref: "refs/remotes/origin/dev".to_string(),
+                        old_oid: None,
+                        new_oid: "c".repeat(40),
+                        forced: false,
+                    },
+                ],
+                pruned: Vec::new(),
+            }],
+        };
+
+        let rendered = format_fetch_porcelain(&output);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            format!(
+                "  {} {} refs/remotes/origin/main",
+                "a".repeat(40),
+                "b".repeat(40)
+            ),
+            "fast-forward uses a space flag, then the column separator (two leading spaces)"
+        );
+        assert_eq!(
+            lines[1],
+            format!(
+                "* {} {} refs/remotes/origin/dev",
+                "0".repeat(40),
+                "c".repeat(40)
+            ),
+            "new ref uses `*` and an all-zero old object id"
+        );
+    }
+
+    #[test]
+    fn format_fetch_porcelain_marks_forced_update_with_plus() {
+        use super::{FetchOutput, FetchRefUpdate, FetchRepositoryResult, format_fetch_porcelain};
+
+        let output = FetchOutput {
+            all: false,
+            requested_remote: Some("origin".to_string()),
+            refspec: None,
+            remotes: vec![FetchRepositoryResult {
+                remote: "origin".to_string(),
+                url: "https://example.com/x.git".to_string(),
+                objects_fetched: 1,
+                refs_updated: vec![FetchRefUpdate {
+                    remote_ref: "refs/tags/v1.0".to_string(),
+                    old_oid: Some("a".repeat(40)),
+                    new_oid: "b".repeat(40),
+                    forced: true,
+                }],
+                pruned: Vec::new(),
+            }],
+        };
+
+        assert_eq!(
+            format_fetch_porcelain(&output),
+            format!("+ {} {} refs/tags/v1.0", "a".repeat(40), "b".repeat(40)),
+            "a forced (clobbering) update uses the `+` flag with the previous oid"
+        );
+    }
+
+    #[test]
+    fn format_fetch_head_marks_not_for_merge() {
+        use super::{FetchOutput, FetchRefUpdate, FetchRepositoryResult, format_fetch_head};
+
+        let output = FetchOutput {
+            all: false,
+            requested_remote: Some("origin".to_string()),
+            refspec: None,
+            remotes: vec![FetchRepositoryResult {
+                remote: "origin".to_string(),
+                url: "https://example.com/x.git".to_string(),
+                objects_fetched: 1,
+                pruned: Vec::new(),
+                refs_updated: vec![FetchRefUpdate {
+                    remote_ref: "refs/remotes/origin/main".to_string(),
+                    old_oid: None,
+                    new_oid: "a".repeat(40),
+                    forced: false,
+                }],
+            }],
+        };
+
+        assert_eq!(
+            format_fetch_head(&output),
+            format!(
+                "{}\tnot-for-merge\tbranch 'main' of https://example.com/x.git",
+                "a".repeat(40)
+            )
+        );
+    }
+
+    #[test]
+    fn cleanup_pack_files_removes_pack_and_index() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pack = dir.path().join("pack-abc.pack");
+        let idx = dir.path().join("pack-abc.idx");
+        std::fs::write(&pack, b"pack").expect("write pack");
+        std::fs::write(&idx, b"idx").expect("write idx");
+
+        super::cleanup_pack_files(pack.to_str().unwrap());
+
+        assert!(
+            !pack.exists(),
+            "pack file should be removed on atomic rollback"
+        );
+        assert!(
+            !idx.exists(),
+            "pack index should be removed on atomic rollback"
+        );
+    }
+
+    #[test]
+    fn parse_refmap_rules_validates_entries() {
+        use super::parse_refmap_rules;
+
+        let rules = parse_refmap_rules(
+            &["refs/heads/*:refs/remotes/origin/mirror/*".to_string()],
+            "origin",
+        )
+        .expect("a well-formed refmap into the remote namespace parses");
+        assert_eq!(rules.len(), 1);
+
+        // Missing the `:` separator.
+        assert!(parse_refmap_rules(&["refs/heads/*".to_string()], "origin").is_err());
+        // Destination outside `refs/remotes/<remote>/`.
+        assert!(parse_refmap_rules(&["refs/heads/*:refs/heads/*".to_string()], "origin").is_err());
+        // Empty source or destination.
+        assert!(parse_refmap_rules(&[":refs/remotes/origin/x".to_string()], "origin").is_err());
+        // Over the byte cap.
+        let huge = format!("refs/heads/*:refs/remotes/origin/{}", "a".repeat(300));
+        assert!(parse_refmap_rules(&[huge], "origin").is_err());
+    }
+
+    #[test]
+    fn apply_refmap_rules_substitutes_glob_suffix() {
+        use super::{apply_refmap_rules, parse_refmap_rules};
+
+        let rules = parse_refmap_rules(
+            &["refs/heads/*:refs/remotes/origin/mirror/*".to_string()],
+            "origin",
+        )
+        .unwrap();
+        assert_eq!(
+            apply_refmap_rules(&rules, "refs/heads/main").as_deref(),
+            Some("refs/remotes/origin/mirror/main")
+        );
+        // A ref not matching any rule falls through to the default mapping.
+        assert_eq!(apply_refmap_rules(&rules, "refs/tags/v1").as_deref(), None);
+    }
+
+    #[test]
+    fn accept_new_shallow_gates_on_request_or_flag() {
+        let advertised = vec!["a".repeat(40)];
+        assert!(
+            super::accept_new_shallow(&advertised, false, false).is_empty(),
+            "a plain fetch (no shallow op, no flag) drops newly-advertised shallow roots"
+        );
+        assert_eq!(
+            super::accept_new_shallow(&advertised, true, false),
+            advertised.as_slice(),
+            "--update-shallow accepts new shallow roots"
+        );
+        assert_eq!(
+            super::accept_new_shallow(&advertised, false, true),
+            advertised.as_slice(),
+            "a requested shallow operation accepts new shallow roots"
+        );
+    }
+
+    #[test]
+    fn build_fetch_shallow_options_wires_since_and_exclude() {
+        let opts = super::build_fetch_shallow_options(
+            None,
+            None,
+            false,
+            Some(1_700_000_000),
+            vec!["v1.0".to_string()],
+        );
+        assert_eq!(opts.deepen_since, Some(1_700_000_000));
+        assert_eq!(opts.deepen_not, vec!["v1.0".to_string()]);
+        assert_eq!(opts.depth, None);
+        assert!(
+            !opts.deepen_relative,
+            "`--shallow-since` without `--deepen` is not relative"
+        );
+
+        let deepen = super::build_fetch_shallow_options(None, Some(5), false, None, vec![]);
+        assert_eq!(deepen.depth, Some(5));
+        assert!(
+            deepen.deepen_relative,
+            "`--deepen` must be encoded as a relative deepen request"
+        );
+
+        // `--unshallow` still overrides everything to the max-depth request.
+        let unshallow = super::build_fetch_shallow_options(None, None, true, None, vec![]);
+        assert_eq!(unshallow.depth, Some(super::UNSHALLOW_DEPTH));
+        assert!(
+            !unshallow.deepen_relative,
+            "`--unshallow` uses max depth, not relative deepening"
+        );
+    }
+
+    /// The `.libra/shallow` boundary file must be owner read/write only on Unix.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn write_shallow_boundaries_sets_0600_permissions() {
+        use std::{collections::BTreeSet, os::unix::fs::PermissionsExt};
+
+        let temp = tempdir().unwrap();
+        crate::utils::test::setup_with_new_libra_in(temp.path()).await;
+        let _guard = crate::utils::test::ChangeDirGuard::new(temp.path());
+
+        let mut boundaries = BTreeSet::new();
+        boundaries.insert("a".repeat(40));
+        super::write_shallow_boundaries(&boundaries).expect("write shallow boundaries");
+
+        let path = super::shallow_file_path().expect("resolve shallow path");
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "shallow metadata must be 0o600");
+    }
 
     /// Pin the `Display` format for the static-message and direct-message
     /// variants of [`FetchError`]. These strings are used as the
@@ -2105,9 +3244,36 @@ mod tests {
             stream::iter(vec![Ok::<Bytes, std::io::Error>(response.freeze())]).boxed();
         let output = OutputConfig::default();
 
-        let data = read_fetch_stream(&mut stream, &output, "fetch origin")
+        let data = read_fetch_stream(&mut stream, &output, "fetch origin", false)
             .await
             .expect("EOF after a complete pack should finish the fetch stream");
+
+        assert_eq!(data.pack_data, pack);
+    }
+
+    #[tokio::test]
+    async fn read_fetch_stream_consumes_empty_shallow_section_before_pack() {
+        // A deepen/shallow request whose result cuts no boundary still yields a
+        // shallow section: a leading flush packet before NAK + pack. The reader
+        // must consume it instead of treating it as end-of-stream.
+        let pack = empty_pack_bytes();
+        let mut response = BytesMut::new();
+        // Empty shallow section terminator.
+        response.extend_from_slice(b"0000");
+        append_pkt_line(&mut response, b"NAK\n");
+
+        let mut sideband = Vec::with_capacity(pack.len() + 1);
+        sideband.push(1);
+        sideband.extend_from_slice(&pack);
+        append_pkt_line(&mut response, &sideband);
+
+        let mut stream: FetchStream =
+            stream::iter(vec![Ok::<Bytes, std::io::Error>(response.freeze())]).boxed();
+        let output = OutputConfig::default();
+
+        let data = read_fetch_stream(&mut stream, &output, "fetch origin", true)
+            .await
+            .expect("empty shallow section must not be mistaken for end-of-stream");
 
         assert_eq!(data.pack_data, pack);
     }
@@ -2131,7 +3297,7 @@ mod tests {
 
         let data = tokio::time::timeout(
             Duration::from_millis(250),
-            read_fetch_stream(&mut stream, &output, "fetch origin"),
+            read_fetch_stream(&mut stream, &output, "fetch origin", false),
         )
         .await
         .expect("complete pack should not wait for transport EOF or flush")
@@ -2159,7 +3325,7 @@ mod tests {
 
         let data = tokio::time::timeout(
             Duration::from_millis(250),
-            read_fetch_stream(&mut stream, &output, "fetch origin"),
+            read_fetch_stream(&mut stream, &output, "fetch origin", false),
         )
         .await
         .expect("complete non-empty pack should not wait for transport EOF or flush")

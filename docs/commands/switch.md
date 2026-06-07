@@ -27,12 +27,19 @@ Fuzzy branch name suggestions are provided via Levenshtein distance when a branc
 |------|------|-------|-------------|
 | | `<branch>` | positional (optional) | Target branch, commit, or remote reference to switch to |
 | `-c` | `--create` | `<name>` | Create a new branch and switch to it |
+| `-C` | `--force-create` | `<name>` | Create a new branch, or reset it to the start point if it already exists, then switch to it |
 | `-d` | `--detach` | | Detach HEAD at the given commit, tag, or branch |
 | | `--track` | | Create a local branch tracking the given remote branch and switch to it |
 
 ### Flag details
 
 **`-c / --create <name> [start-point]`**: Creates a new branch named `<name>` from `<start-point>` (or HEAD if omitted), then switches to it. Validates the name, checks that no branch with that name already exists, and rejects reserved internal branch names.
+
+**`-C / --force-create <name> [start-point]`**: Like `-c`, but if a branch named `<name>` already exists it is **reset** to the start point (or HEAD) instead of being refused. Reserved/internal branch names are still rejected. Mutually exclusive with `-c`/`-d`.
+
+```bash
+libra switch -C feature main           # Create or reset feature to main, then switch
+```
 
 ```bash
 libra switch -c feature-x              # New branch from HEAD

@@ -15,7 +15,7 @@ libra merge --quit
 
 `libra merge <branch>` resolves a local branch, commit hash, or remote-tracking ref such as `refs/remotes/origin/main`.
 
-If the current branch can be fast-forwarded, Libra moves the branch pointer to the target commit and restores the index and working tree. If the branches have diverged, Libra performs a single-head three-way merge using the best merge base. Clean multi-head merges are supported for disjoint changes and create an N-parent octopus merge commit.
+If the current branch can be fast-forwarded, Libra moves the branch pointer to the target commit and restores the index and working tree. If the branches have diverged, Libra performs a single-head three-way merge using the best merge base. Criss-cross histories with multiple best bases synthesize a recursive virtual merge base before the final merge. Clean multi-head merges are supported for disjoint changes and create an N-parent octopus merge commit.
 
 Clean three-way merges create a two-parent merge commit, update HEAD, rebuild the index, restore the working tree, and write a merge reflog entry. Conflicting three-way merges write conflict markers to the working tree, write unmerged index stages, save Libra merge state, and return `LBR-CONFLICT-002` with hints for `libra merge --continue` and `libra merge --abort`.
 
@@ -31,18 +31,36 @@ Libra supports fast-forward policy flags/config (`--ff-only`, `--no-ff`, `merge.
 | `--quit` | Remove merge state while leaving the index and working tree untouched. |
 | `--ff-only` | Refuse unless the target can fast-forward HEAD. Overrides `merge.ff`. |
 | `--no-ff` | Create a merge commit even when a fast-forward is possible. Overrides `merge.ff`. |
-| `--squash` | Apply merged changes to the index and working tree without moving HEAD or writing merge state. Cannot be combined with `--no-ff` or `--commit`. |
-| `--no-commit` | Stop after a clean real merge with merge state, index, and worktree updated; finish with `libra merge --continue`. Fast-forwards still fast-forward unless `--no-ff` is also used. |
+| `--squash` | Apply merged changes to the index and working tree without moving HEAD or writing merge state. Conflicts are resolved by staging and running `libra commit`, not `libra merge --continue`. Cannot be combined with `--no-ff` or `--commit`. |
+| `--no-commit` | Stop after a clean real merge with merge state, index, and worktree updated; finish with `libra merge --continue`. Fast-forwards still fast-forward unless `--no-ff` is also used. Honors `merge.commit=false`. |
 | `--commit` | Explicitly request the default commit-after-clean-merge behavior. |
 | `--allow-unrelated-histories` | Permit a two-head merge without a common ancestor. |
+| `--autostash`, `--no-autostash` | Stash local changes before merging and reapply them afterward. Honors `merge.autoStash`. A conflict defers reapplication until `--continue`/`--abort`. |
+| `-S`, `--gpg-sign` | Sign the merge commit with the Libra vault key. (A key id is not accepted; the vault key is always used.) |
+| `--no-gpg-sign` | Do not sign the merge commit (the default). |
+| `--verify-signatures`, `--no-verify-signatures` | Require (or skip) a signature on the merged commit before merging. Honors `merge.verifySignatures`. |
 | `-m`, `--message <msg>` | Use the provided merge commit message. |
 | `-F`, `--file <path>` | Read the merge commit message from a file. |
 | `--signoff` | Append a `Signed-off-by` trailer to merge commit messages. |
 | `-s ours`, `--strategy ours` | Use Git's `ours` strategy for the merge result. |
 | `-X ours`, `-X theirs` | Resolve content/delete conflicts in favor of one side. |
 | `--log[=<n>]` | Append up to `n` shortlog entries to the merge commit message (`20` when omitted). |
+| `--no-log` | Do not append a shortlog (overrides `--log`). |
+| `--no-signoff` | Do not add a `Signed-off-by` trailer (overrides `--signoff`). |
+| `--no-squash` | Create a merge commit instead of squashing (the default; overrides `--squash`). |
+| `--into-name <name>` | Override the branch name recorded in the auto-generated merge message. |
+| `-e`, `--edit`, `--no-edit` | Open (or skip) the merge commit message in `$GIT_EDITOR`/`core.editor`/`$VISUAL`/`$EDITOR`. With no usable editor the message is used unchanged. |
 | `--conflict=diff3` | Include base content in conflict markers. `merge.conflictstyle=diff3` is also supported. |
-| `--stat`, `--no-stat` | Accepted for Git-compatible CLI surface. Libra currently has no reusable diffstat renderer, so merge success output remains unchanged. |
+| `--stat`, `-n`/`--no-stat` | Print (or suppress) a diffstat of what the merge brought in. `--summary`/`--no-summary` are accepted aliases. Honors the `merge.stat` config; defaults off so existing output stays stable. |
+| `--diff-algorithm <algo>` | Validate the requested content-merge algorithm (`myers`/`histogram`/`patience`/`minimal`). Libra uses a single Myers-style backend. |
+| `--ignore-space-change`, `--ignore-all-space`, `--ignore-space-at-eol`, `--ignore-cr-at-eol` | Ignore the named whitespace class when auto-merging text, so a side whose only change is whitespace yields to the side with a real change. |
+| `--find-renames`, `--no-renames` | Enable (default) or disable rename detection so an edit on one side follows a rename on the other. Honors `merge.renames`; uses a 50% content-similarity threshold. |
+| `--cleanup <mode>` | Validate the message cleanup mode (`strip`/`whitespace`/`verbatim`/`scissors`/`default`). Libra already trims merge messages. |
+| `--no-verify` | Accepted for Git compatibility. Libra runs no pre-merge or commit-msg hooks yet, so this has no effect. |
+| `--overwrite-ignore`, `--no-overwrite-ignore` | Accepted for Git compatibility; Libra always preserves ignored files during merge. |
+| `--rerere-autoupdate`, `--no-rerere-autoupdate` | Accepted for Git compatibility; Libra has no rerere resolution store. |
+
+Progress output is controlled by the global `--progress=<json\|text\|none\|auto>` flag rather than a merge-specific `--progress` toggle.
 | `--json` | Emit a structured success envelope. |
 | `--machine` | Emit the same structured envelope as one compact JSON line. |
 | `--quiet` | Suppress human success output. |
@@ -52,9 +70,12 @@ Libra supports fast-forward policy flags/config (`--ff-only`, `--no-ff`, `merge.
 | Key | Values | Behavior |
 |-----|--------|----------|
 | `merge.ff` | `true`/`false`/`only` | Default/true allows fast-forward, false behaves like `--no-ff`, only behaves like `--ff-only`. CLI flags override config. |
+| `merge.commit` | `true`/`false` | Default/true creates the merge commit after a clean merge, false behaves like `--no-commit`. `--commit` and `--no-commit` override config. |
 | `merge.conflictstyle` | `merge`/`diff3` | Selects default conflict marker style. |
-
-`merge.commit` is intentionally absent because stock Git does not define that config key.
+| `merge.stat` | `true`/`false` | When true, print a diffstat after a successful merge (off by default; `--stat`/`--no-stat` override). |
+| `merge.autoStash` | `true`/`false` | When true, autostash local changes around every merge (off by default; `--autostash`/`--no-autostash` override). |
+| `merge.verifySignatures` | `true`/`false` | When true, require the merged commit to be signed (off by default; `--verify-signatures`/`--no-verify-signatures` override). |
+| `merge.renames` | `true`/`false` | Enable rename detection (on by default; `--find-renames`/`--no-renames` override). |
 
 ## Common Commands
 
@@ -83,7 +104,7 @@ Run `libra merge --abort` before continuing to restore the branch, index, and wo
 
 ## Deferred Git Merge Features
 
-The following Git flags are not implemented and are not accepted as ignored no-ops: `--autostash`, `--verify-signatures`, `-S`/`--gpg-sign`, `--no-gpg-sign`, `--progress`, `--no-progress`, `--into-name`, `--no-verify`, `--diff-algorithm`, whitespace strategy options, custom merge drivers, custom strategies beyond `ours`, subtree strategy, and advanced octopus conflict resolution.
+The following Git flags are not implemented and are not accepted as ignored no-ops: custom merge drivers, custom strategies beyond `ours`, subtree strategy, and advanced octopus conflict resolution. Full cryptographic verification of signatures is reduced to a presence check; `--verify-signatures` confirms a signature exists rather than validating it against a keyring. Rename detection handles the clean rename-plus-edit case (and falls back to a delete/modify conflict when the relocated merge would itself conflict); directory renames are not tracked.
 
 ## Human Output
 
@@ -154,7 +175,7 @@ Already-up-to-date merges use `strategy: "already-up-to-date"`, `commit: null`, 
 | Squash | Supported | `--squash` | N/A |
 | Custom strategy | `ours` and `-X ours/theirs` only | `--strategy`, `-X` | N/A |
 | Commit message | `-m`, `-F`, `--log`, `--signoff` | `-m <msg>` | N/A |
-| Verify signatures | Not supported | `--verify-signatures` | N/A |
+| Verify signatures | Presence check only | `--verify-signatures` | N/A |
 | JSON output | `--json` / `--machine` | Not supported | N/A |
 
 ## Error Handling

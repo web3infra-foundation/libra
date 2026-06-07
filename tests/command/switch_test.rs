@@ -109,6 +109,11 @@ fn test_switch_json_create_output_reports_new_branch() {
 #[serial]
 async fn test_switch_json_track_output_stays_clean() {
     let repo = create_committed_repo_via_cli();
+    let remote = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&remote, "remote add origin");
     let _guard = ChangeDirGuard::new(repo.path());
 
     let head = Head::current_commit().await.unwrap();
@@ -141,6 +146,11 @@ async fn test_switch_json_track_output_stays_clean() {
 #[serial]
 async fn test_switch_track_human_output_keeps_tracking_message() {
     let repo = create_committed_repo_via_cli();
+    let remote = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&remote, "remote add origin");
     let _guard = ChangeDirGuard::new(repo.path());
 
     let head = Head::current_commit().await.unwrap();
@@ -207,6 +217,7 @@ async fn test_switch_function() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
     }
@@ -216,6 +227,7 @@ async fn test_switch_function() {
         let args = SwitchArgs {
             branch: None,
             create: Some("test_branch".to_string()),
+            force_create: None,
             detach: false,
             track: false,
         };
@@ -260,12 +272,14 @@ async fn test_switch_function() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
 
         let args = SwitchArgs {
             branch: Some(commit_id_str.clone()),
             create: None,
+            force_create: None,
             detach: true,
             track: false,
         };
@@ -288,6 +302,7 @@ async fn test_switch_function() {
         let args = SwitchArgs {
             branch: Some("main".to_string()),
             create: None,
+            force_create: None,
             detach: false,
             track: false,
         };
@@ -377,6 +392,11 @@ async fn test_switch_track_sets_upstream() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = ChangeDirGuard::new(temp_path.path());
+    let remote = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        temp_path.path(),
+    );
+    assert_cli_success(&remote, "remote add origin");
 
     let args = CommitArgs {
         message: Some("base".to_string()),
@@ -390,6 +410,7 @@ async fn test_switch_track_sets_upstream() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(args).await;
 
@@ -405,6 +426,7 @@ async fn test_switch_track_sets_upstream() {
     let args = SwitchArgs {
         branch: Some("origin/feature".to_string()),
         create: None,
+        force_create: None,
         detach: false,
         track: true,
     };
@@ -451,6 +473,7 @@ async fn test_detach_head_basic() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
     }
@@ -496,6 +519,7 @@ async fn test_detach_head_basic() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
     }
@@ -688,6 +712,7 @@ async fn switch_to_detach(branch_test: String) -> String {
     let args = SwitchArgs {
         branch: Some(branch_test),
         create: None,
+        force_create: None,
         detach: true,
         track: false,
     };
@@ -705,8 +730,45 @@ async fn switch_to_branch(branch_test: String) {
     let args = SwitchArgs {
         branch: Some(branch_test),
         create: None,
+        force_create: None,
         detach: false,
         track: false,
     };
     switch::execute(args).await;
+}
+
+#[test]
+#[serial]
+fn test_switch_force_create_resets_existing_branch() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "feature"], repo.path()),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["switch", "main"], repo.path()),
+        "back to main",
+    );
+
+    // `-c` on an existing branch is refused...
+    let dup = run_libra_command(&["switch", "-c", "feature"], repo.path());
+    assert!(
+        !dup.status.success(),
+        "switch -c on an existing branch must fail"
+    );
+
+    // ...but `-C` force-creates (resets) it and switches.
+    let force = run_libra_command(&["switch", "-C", "feature"], repo.path());
+    assert_cli_success(
+        &force,
+        "switch -C should reset and switch to an existing branch",
+    );
+
+    let current = run_libra_command(&["branch", "--show-current"], repo.path());
+    assert_cli_success(&current, "branch --show-current");
+    assert_eq!(
+        String::from_utf8_lossy(&current.stdout).trim(),
+        "feature",
+        "should be on feature after switch -C"
+    );
 }

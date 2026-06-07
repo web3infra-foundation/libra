@@ -103,6 +103,11 @@ pub struct StatusArgs {
     /// Can be combined with --quiet for silent dirty checking.
     #[clap(long = "exit-code")]
     pub exit_code: bool,
+
+    /// Terminate porcelain entries with a NUL byte instead of a newline.
+    /// Implies `--porcelain=v1` when no other format is given.
+    #[clap(short = 'z')]
+    pub z: bool,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -473,8 +478,14 @@ async fn render_status_to_writer(
         |err: io::Error| CliError::io(format!("failed to write status output: {err}"));
     let mut buffer = Vec::new();
 
-    // Porcelain modes
-    match args.porcelain {
+    // Porcelain modes. `-z` implies porcelain v1 when no explicit format is
+    // given, and switches the entry terminator from newline to NUL.
+    let porcelain = args.porcelain.or(if args.z {
+        Some(PorcelainVersion::V1)
+    } else {
+        None
+    });
+    match porcelain {
         Some(PorcelainVersion::V2) => {
             if args.branch {
                 write_branch_info_v2(
@@ -491,6 +502,9 @@ async fn render_status_to_writer(
                 data.porcelain_v2.as_ref(),
                 &mut buffer,
             )?;
+            if args.z {
+                nul_terminate_lines(&mut buffer);
+            }
             writer.write_all(&buffer).map_err(write_error)?;
             return Ok(());
         }
@@ -503,6 +517,9 @@ async fn render_status_to_writer(
                 for file in &data.ignored_files {
                     writeln!(&mut buffer, "!! {}", file.display()).map_err(write_error)?;
                 }
+            }
+            if args.z {
+                nul_terminate_lines(&mut buffer);
             }
             writer.write_all(&buffer).map_err(write_error)?;
             return Ok(());
@@ -836,6 +853,17 @@ fn build_status_json(data: &StatusData, _args: &StatusArgs) -> serde_json::Value
 // ---------------------------------------------------------------------------
 // Porcelain v1
 // ---------------------------------------------------------------------------
+
+/// Rewrite newline entry terminators to NUL for `status -z`. Porcelain output
+/// emits one entry per line, so replacing every `\n` yields NUL-terminated
+/// records (Git's `-z` machine-readable form).
+fn nul_terminate_lines(buffer: &mut [u8]) {
+    for byte in buffer.iter_mut() {
+        if *byte == b'\n' {
+            *byte = 0;
+        }
+    }
+}
 
 pub fn output_porcelain(
     staged: &Changes,

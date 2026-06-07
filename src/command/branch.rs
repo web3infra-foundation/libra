@@ -35,7 +35,7 @@ use std::collections::{HashSet, VecDeque};
 use clap::{ArgGroup, Parser};
 use colored::Colorize;
 use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
-use sea_orm::ConnectionTrait;
+use sea_orm::{ConnectionTrait, TransactionTrait};
 use serde::Serialize;
 
 use crate::{
@@ -47,6 +47,7 @@ use crate::{
         config::ConfigKv,
         db::get_db_conn_instance,
         head::Head,
+        reflog::Reflog,
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -70,13 +71,25 @@ const BRANCH_AFTER_HELP: &str = "\
 NOTES:
     Libra's global --quiet suppresses the branch listing itself.
     This differs from `git branch --quiet`, which still prints the primary list.
+    --create-reflog is accepted for Git compatibility but has no effect:
+    Libra `branch` does not maintain per-branch reflogs.
+    --track/--no-track are declined (exit 129): use `libra switch --track`
+    or `libra branch -u <remote>/<branch>`. --sort/--format are accepted but
+    ignored (the list prints in the default order); use `--json` instead.
 
 EXAMPLES:
     libra branch feature-x                Create a branch from HEAD
     libra branch feature-x main           Create a branch from another branch
+    libra branch -c old new               Copy a branch (with its tracking config)
+    libra branch -C old existing          Force-copy, overwriting the destination
     libra branch -d topic                 Delete a fully merged branch
     libra branch -D topic                 Force-delete a branch
     libra branch -u origin/main           Set upstream for the current branch
+    libra branch --unset-upstream         Remove upstream tracking for the current branch
+    libra branch --edit-description       Edit the current branch's description
+    libra branch --merged                 List branches merged into HEAD
+    libra branch --no-merged main         List branches not yet merged into main
+    libra branch --points-at HEAD         List branches whose tip is at HEAD
     libra branch --json --show-current    Structured JSON output for agents";
 
 /// Tagged-union output type for `libra branch`.
@@ -87,10 +100,10 @@ EXAMPLES:
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "action")]
 pub enum BranchOutput {
-    /// Result of a list operation. The `head_name`, `detached_head`, and
-    /// `show_unborn_head` fields are skipped from JSON; they only exist to
-    /// drive the human renderer's "*"-prefixed current-branch line and
-    /// detached/unborn HEAD banners.
+    /// Result of a list operation. The `head_name`, `detached_head`,
+    /// `show_unborn_head`, and `ignore_case` fields are skipped from JSON; they
+    /// only exist to drive the human renderer's "*"-prefixed current-branch
+    /// line, detached/unborn HEAD banners, and case-folded sort order.
     #[serde(rename = "list")]
     List {
         branches: Vec<BranchListEntry>,
@@ -100,6 +113,8 @@ pub enum BranchOutput {
         detached_head: Option<String>,
         #[serde(skip_serializing)]
         show_unborn_head: bool,
+        #[serde(skip_serializing)]
+        ignore_case: bool,
     },
     /// `branch <name> [base]` succeeded.
     #[serde(rename = "create")]
@@ -116,9 +131,31 @@ pub enum BranchOutput {
     /// state references.
     #[serde(rename = "rename")]
     Rename { old_name: String, new_name: String },
+    /// `-c` / `-C` succeeded. `force` is true when the copy overwrote an
+    /// existing destination (`-C`, or `-c -f`).
+    #[serde(rename = "copy")]
+    Copy {
+        src: String,
+        dst: String,
+        commit: String,
+        force: bool,
+    },
     /// `--set-upstream-to` succeeded. `upstream` is in `remote/branch` form.
     #[serde(rename = "set-upstream")]
     SetUpstream { branch: String, upstream: String },
+    /// `--unset-upstream` succeeded. `had_upstream` is false when the branch
+    /// had no tracking configured (the operation is an idempotent no-op).
+    #[serde(rename = "unset-upstream")]
+    UnsetUpstream { branch: String, had_upstream: bool },
+    /// `--edit-description` succeeded. `description` is the value after editing,
+    /// or `None` when the description was cleared (the field is omitted from
+    /// JSON in that case).
+    #[serde(rename = "edit-description")]
+    EditDescription {
+        branch: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
     /// `--show-current` result. `detached` is true when HEAD is detached;
     /// `name` is `None` in that case.
     #[serde(rename = "show-current")]
@@ -136,9 +173,21 @@ impl BranchOutput {
             Self::Create { .. }
                 | Self::Delete { .. }
                 | Self::Rename { .. }
+                | Self::Copy { .. }
                 | Self::SetUpstream { .. }
+                | Self::UnsetUpstream { .. }
+                | Self::EditDescription { .. }
         )
     }
+}
+
+/// Upstream tracking information for a local branch, derived from
+/// `branch.<name>.{remote,merge}`. `merge` is the short upstream branch name
+/// (the stored `refs/heads/` prefix is stripped by `branch_config_with_conn`).
+#[derive(Debug, Clone, Serialize)]
+pub struct BranchTracking {
+    pub remote: String,
+    pub merge: String,
 }
 
 /// One row in [`BranchOutput::List`]. `display_name` carries the colorised
@@ -150,6 +199,15 @@ pub struct BranchListEntry {
     pub commit: String,
     #[serde(skip_serializing)]
     pub display_name: String,
+    /// Upstream tracking, when the branch has both `remote` and `merge`
+    /// configured. Omitted from JSON entirely when absent (backward
+    /// compatible — existing consumers see no new key for untracked branches).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracking: Option<BranchTracking>,
+    /// Branch description (`branch.<name>.description`), when set. Omitted from
+    /// JSON entirely when absent (backward compatible).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 // action options are mutually exclusive with query options
@@ -192,6 +250,10 @@ pub struct BranchArgs {
     #[clap(short = 'u', long, group = "action", value_name = "UPSTREAM")]
     pub set_upstream_to: Option<String>,
 
+    /// Remove the upstream tracking information for a branch (the current branch when no name is given).
+    #[clap(long = "unset-upstream", group = "action", value_name = "BRANCH", num_args = 0..=1)]
+    pub unset_upstream: Option<Option<String>>,
+
     /// show current branch
     #[clap(long, group = "action")]
     pub show_current: bool,
@@ -199,6 +261,18 @@ pub struct BranchArgs {
     /// Rename a branch. With one argument, renames the current branch. With two arguments, renames OLD_BRANCH to NEW_BRANCH.
     #[clap(short = 'm', long = "move", group = "action", value_names = ["OLD_BRANCH", "NEW_BRANCH"], num_args = 1..=2)]
     pub rename: Vec<String>,
+
+    /// Copy a branch (and its tracking/description config). With one argument copies the current branch to NEW_BRANCH; with two copies OLD_BRANCH to NEW_BRANCH.
+    #[clap(short = 'c', long = "copy", group = "action", value_names = ["OLD_BRANCH", "NEW_BRANCH"], num_args = 1..=2)]
+    pub copy: Vec<String>,
+
+    /// Copy a branch, overwriting NEW_BRANCH if it already exists (force copy).
+    #[clap(short = 'C', group = "action", value_names = ["OLD_BRANCH", "NEW_BRANCH"], num_args = 1..=2)]
+    pub force_copy: Vec<String>,
+
+    /// Edit a branch's description in your editor (the current branch when no name is given).
+    #[clap(long = "edit-description", group = "action", value_name = "BRANCH", num_args = 0..=1)]
+    pub edit_description: Option<Option<String>>,
 
     /// show remote branches
     #[clap(short, long, group = "query")]
@@ -216,6 +290,46 @@ pub struct BranchArgs {
     /// Only list branches which don’t contain the specified commit (HEAD if not specified). Implies --list.
     #[clap(long, group = "query", alias = "without", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD", action = clap::ArgAction::Append)]
     pub no_contains: Vec<String>,
+
+    /// Only list branches whose tip is merged into the specified commit (HEAD if not specified). Implies --list.
+    #[clap(long, group = "query", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD", conflicts_with = "no_merged")]
+    pub merged: Option<String>,
+
+    /// Only list branches whose tip is not merged into the specified commit (HEAD if not specified). Implies --list.
+    #[clap(long = "no-merged", group = "query", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD")]
+    pub no_merged: Option<String>,
+
+    /// Only list branches whose tip points exactly at the specified object. Implies --list.
+    #[clap(long = "points-at", group = "query", value_name = "object")]
+    pub points_at: Option<String>,
+
+    /// Sort branch names case-insensitively in list output.
+    #[clap(long = "ignore-case", group = "query", action = clap::ArgAction::SetTrue)]
+    pub ignore_case: bool,
+
+    /// Accepted but not implemented; the list is printed in the default order. Use `--json` for structured output.
+    #[clap(long = "sort", group = "query", value_name = "KEY")]
+    pub sort: Option<String>,
+
+    /// Accepted but not implemented; the list is printed in the default format. Use `--json` for structured output.
+    #[clap(long = "format", group = "query", value_name = "FORMAT")]
+    pub format: Option<String>,
+
+    /// Allow create/copy to overwrite an existing branch by resetting its tip (locked branches are still refused; ignored by other actions).
+    #[clap(short = 'f', long = "force", action = clap::ArgAction::SetTrue)]
+    pub force: bool,
+
+    /// Accepted for Git compatibility; Libra `branch` does not maintain per-branch reflogs, so this flag has no effect.
+    #[clap(long = "create-reflog", action = clap::ArgAction::SetTrue)]
+    pub create_reflog: bool,
+
+    /// Declined: Libra `branch` does not set up tracking. Use `libra switch --track` or `libra branch -u <remote>/<branch>`.
+    #[clap(long = "track", value_name = "MODE", num_args = 0..=1, require_equals = true, default_missing_value = "direct")]
+    pub track: Option<String>,
+
+    /// Declined: Libra `branch` does not manage tracking. Use `libra switch` or `libra branch -u`/`--unset-upstream`.
+    #[clap(long = "no-track", action = clap::ArgAction::SetTrue)]
+    pub no_track: bool,
 }
 /// Fire-and-forget entry: prints the rendered error to stderr but does not
 /// signal exit code.
@@ -612,6 +726,201 @@ async fn set_upstream_impl(branch: &str, upstream: &str) -> Result<(), BranchErr
     set_upstream_with_conn(&db, branch, upstream).await
 }
 
+/// Remove `branch.<name>.{remote,merge}` for `branch` within the caller's
+/// connection/transaction.
+///
+/// Functional scope:
+/// - Deletes both the `remote` and `merge` config keys. Returns `true` when
+///   either key existed (so callers can report whether tracking was present).
+///
+/// Boundary conditions:
+/// - Each delete is fallible; a SQL failure becomes a
+///   [`BranchError::ConfigWriteFailed`] keyed by the offending config key. The
+///   caller wraps both deletes in a single transaction so a mid-way failure
+///   leaves no half-removed tracking config.
+async fn unset_upstream_with_conn<C: ConnectionTrait>(
+    db: &C,
+    branch: &str,
+) -> Result<bool, BranchError> {
+    let remote_key = format!("branch.{branch}.remote");
+    let removed_remote = ConfigKv::unset_all_with_conn(db, &remote_key)
+        .await
+        .map_err(|e| branch_config_write_error(&remote_key, e))?;
+    let merge_key = format!("branch.{branch}.merge");
+    let removed_merge = ConfigKv::unset_all_with_conn(db, &merge_key)
+        .await
+        .map_err(|e| branch_config_write_error(&merge_key, e))?;
+    Ok(removed_remote > 0 || removed_merge > 0)
+}
+
+/// Transactional wrapper for [`unset_upstream_with_conn`].
+///
+/// Opens an explicit SQLite transaction so the two key deletions commit or
+/// roll back together (no orphaned `branch.<name>.remote` / `.merge`). Returns
+/// whether the branch previously had tracking configured.
+async fn unset_upstream_impl(branch: &str) -> Result<bool, BranchError> {
+    let db = get_db_conn_instance().await;
+    let txn = db
+        .begin()
+        .await
+        .map_err(|e| BranchError::ConfigWriteFailed {
+            key: format!("branch.{branch}.remote"),
+            detail: format!("failed to begin config transaction: {e}"),
+        })?;
+    let had_upstream = match unset_upstream_with_conn(&txn, branch).await {
+        Ok(value) => value,
+        Err(error) => {
+            // Best-effort rollback; surface the original error regardless.
+            let _ = txn.rollback().await;
+            return Err(error);
+        }
+    };
+    txn.commit()
+        .await
+        .map_err(|e| BranchError::ConfigWriteFailed {
+            key: format!("branch.{branch}.remote"),
+            detail: format!("failed to commit config transaction: {e}"),
+        })?;
+    Ok(had_upstream)
+}
+
+/// Build an IO-class branch error tagged with a specific stable code.
+fn branch_io_error(code: StableErrorCode, detail: impl ToString) -> BranchError {
+    BranchError::DelegatedCli(CliError::fatal(detail.to_string()).with_stable_code(code))
+}
+
+/// Resolve the editor for `--edit-description`, honoring `core.editor` (local
+/// config) then the `$EDITOR` environment variable. No-op editors (`:` /
+/// `true`) and empty values resolve to `None`.
+async fn resolve_branch_editor() -> Option<String> {
+    fn runnable(value: String) -> Option<String> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || trimmed == ":" || trimmed == "true" {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+    if let Ok(Some(entry)) = ConfigKv::get("core.editor").await
+        && let Some(editor) = runnable(entry.value)
+    {
+        return Some(editor);
+    }
+    if let Ok(editor) = std::env::var("EDITOR")
+        && let Some(editor) = runnable(editor)
+    {
+        return Some(editor);
+    }
+    None
+}
+
+/// Body of `libra branch --edit-description [branch]`.
+///
+/// Functional scope:
+/// - Opens the branch's current `branch.<name>.description` in the configured
+///   editor (`core.editor` / `$EDITOR`) via a `0o600` temp file, then writes
+///   the trimmed result back; an empty result clears the key.
+///
+/// Boundary conditions (see the plan's editor contract):
+/// - No configured editor → [`CliError::command_usage`] (`CliInvalidArguments`,
+///   exit 129); the command never hangs.
+/// - Editor exits non-zero (or fails to launch) → treated as a cancel: the
+///   description is left unchanged and the command exits 0.
+/// - Temp-file read/write failures map to the Io stable codes (exit 128).
+/// - Locked branches are refused with [`BranchError::Locked`] (exit 128).
+async fn edit_description_impl(branch: String) -> Result<BranchOutput, BranchError> {
+    if branch::is_locked_branch(&branch) {
+        return Err(BranchError::Locked(branch));
+    }
+
+    let key = format!("branch.{branch}.description");
+    let current = ConfigKv::get(&key)
+        .await
+        .map_err(|e| branch_config_read_error(format!("description for branch '{branch}'"), e))?
+        .map(|entry| entry.value)
+        .unwrap_or_default();
+
+    let Some(editor) = resolve_branch_editor().await else {
+        return Err(BranchError::DelegatedCli(
+            CliError::command_usage("no editor configured for --edit-description")
+                .with_hint("set core.editor or the EDITOR environment variable"),
+        ));
+    };
+
+    // A `tempfile::NamedTempFile` is created mode 0600 on Unix and removed on
+    // drop, satisfying the "0o600 temp file, cleaned up afterwards" contract.
+    let tmp = tempfile::NamedTempFile::new().map_err(|e| {
+        branch_io_error(
+            StableErrorCode::IoWriteFailed,
+            format!("failed to create temp file for description: {e}"),
+        )
+    })?;
+    std::fs::write(tmp.path(), &current).map_err(|e| {
+        branch_io_error(
+            StableErrorCode::IoWriteFailed,
+            format!("failed to write {}: {e}", tmp.path().display()),
+        )
+    })?;
+
+    // Parse the (trusted) editor command into argv with shell-style word
+    // splitting, then exec it directly — passing the temp-file path as a
+    // separate argument. This avoids `sh -c "<editor> <path>"`, so a stray
+    // metacharacter in `core.editor` / `$EDITOR` can't be reinterpreted by a
+    // shell, while still supporting editors with flags (e.g. `code --wait`).
+    let mut argv = match shlex::split(&editor) {
+        Some(argv) if !argv.is_empty() => argv,
+        _ => {
+            return Err(BranchError::DelegatedCli(
+                CliError::command_usage(format!("could not parse editor command: {editor}"))
+                    .with_hint("check core.editor / EDITOR for unbalanced quotes"),
+            ));
+        }
+    };
+    let program = argv.remove(0);
+    let status = std::process::Command::new(program)
+        .args(&argv)
+        .arg(tmp.path())
+        .status();
+
+    let edited = match status {
+        Ok(code) if code.success() => std::fs::read_to_string(tmp.path()).map_err(|e| {
+            branch_io_error(
+                StableErrorCode::IoReadFailed,
+                format!("failed to read edited description: {e}"),
+            )
+        })?,
+        // Editor cancelled (non-zero exit) or failed to launch: leave the
+        // description unchanged and report success.
+        _ => {
+            let description = (!current.is_empty()).then_some(current);
+            return Ok(BranchOutput::EditDescription {
+                branch,
+                description,
+            });
+        }
+    };
+
+    let trimmed = edited.trim_end().to_string();
+    if trimmed.is_empty() {
+        // An empty description clears the key.
+        ConfigKv::unset_all(&key)
+            .await
+            .map_err(|e| branch_config_write_error(&key, e))?;
+        Ok(BranchOutput::EditDescription {
+            branch,
+            description: None,
+        })
+    } else {
+        ConfigKv::set(&key, &trimmed, false)
+            .await
+            .map_err(|e| branch_config_write_error(&key, e))?;
+        Ok(BranchOutput::EditDescription {
+            branch,
+            description: Some(trimmed),
+        })
+    }
+}
+
 /// Enumerate every branch stored under each known remote.
 ///
 /// Functional scope:
@@ -649,6 +958,81 @@ async fn load_remote_branches() -> Result<Vec<Branch>, BranchError> {
     load_remote_branches_with_conn(&db).await
 }
 
+/// The reflog ref-name for a local branch. Libra `branch` does not currently
+/// write per-branch reflogs, so this only matters for the conditional reflog
+/// migration in copy/rename (migrate rows if any exist under the source ref).
+fn branch_reflog_ref(name: &str) -> String {
+    format!("refs/heads/{name}")
+}
+
+/// Map a reflog-layer error onto the branch domain (fatal, repo-state class).
+fn reflog_migration_error(error: impl ToString) -> BranchError {
+    BranchError::DelegatedCli(
+        CliError::fatal(format!(
+            "failed to migrate branch reflog: {}",
+            error.to_string()
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid),
+    )
+}
+
+/// Map a transaction begin/commit failure onto the branch domain.
+fn branch_txn_error(stage: &str, error: impl ToString) -> BranchError {
+    BranchError::DelegatedCli(
+        CliError::fatal(format!(
+            "failed to {stage} branch transaction: {}",
+            error.to_string()
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid),
+    )
+}
+
+/// Migrate the tracking/description config keys from `src` to `dst` within the
+/// caller's transaction.
+///
+/// For each of `branch.<name>.{remote,merge,description}`:
+/// - if `src` has the key, it is written to `dst` (preserving the encrypted
+///   flag) and, when `delete_source` is set (rename), removed from `src`;
+/// - if `src` lacks the key, `dst`'s key is cleared so an overwritten copy
+///   target does not retain a previous occupant's stale value.
+///
+/// The net effect is that `dst`'s tracking/description config exactly mirrors
+/// `src`'s after the call.
+async fn migrate_branch_config_with_conn<C: ConnectionTrait>(
+    db: &C,
+    src: &str,
+    dst: &str,
+    delete_source: bool,
+) -> Result<(), BranchError> {
+    for key in ["remote", "merge", "description"] {
+        let src_key = format!("branch.{src}.{key}");
+        let dst_key = format!("branch.{dst}.{key}");
+        match ConfigKv::get_with_conn(db, &src_key)
+            .await
+            .map_err(|e| branch_config_read_error(format!("config '{src_key}'"), e))?
+        {
+            Some(entry) => {
+                ConfigKv::set_with_conn(db, &dst_key, &entry.value, entry.encrypted)
+                    .await
+                    .map_err(|e| branch_config_write_error(&dst_key, e))?;
+                if delete_source {
+                    ConfigKv::unset_all_with_conn(db, &src_key)
+                        .await
+                        .map_err(|e| branch_config_write_error(&src_key, e))?;
+                }
+            }
+            None => {
+                // Mirror absence onto dst (clears any stale value left by a
+                // prior occupant when overwriting an existing copy target).
+                ConfigKv::unset_all_with_conn(db, &dst_key)
+                    .await
+                    .map_err(|e| branch_config_write_error(&dst_key, e))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Body of `libra branch <new> [base]`.
 ///
 /// Functional scope:
@@ -665,20 +1049,24 @@ async fn load_remote_branches() -> Result<Vec<Branch>, BranchError> {
 async fn create_branch_impl(
     new_branch: String,
     branch_or_commit: Option<String>,
+    force: bool,
 ) -> Result<BranchOutput, BranchError> {
     tracing::debug!("create branch: {} from {:?}", new_branch, branch_or_commit);
 
     if !is_valid_git_branch_name(&new_branch) {
         return Err(BranchError::InvalidName(new_branch));
     }
+    // Locked targets are refused even with `-f` — `--force` only relaxes the
+    // "already exists" guard, never the locked-branch protection.
     if branch::is_locked_branch(&new_branch) {
         return Err(BranchError::Locked(new_branch));
     }
 
-    if Branch::find_branch_result(&new_branch, None)
-        .await
-        .map_err(map_branch_store_error)?
-        .is_some()
+    if !force
+        && Branch::find_branch_result(&new_branch, None)
+            .await
+            .map_err(map_branch_store_error)?
+            .is_some()
     {
         return Err(BranchError::AlreadyExists(new_branch));
     }
@@ -808,6 +1196,18 @@ async fn rename_branch_impl(args: &[String]) -> Result<BranchOutput, BranchError
         _ => return Err(BranchError::RenameTooManyArgs),
     };
 
+    // Renaming a branch onto itself is a degenerate request: the move/migrate
+    // steps would delete the (only) source row, so reject it before any
+    // mutation rather than destroy the branch.
+    if old_name == new_name {
+        return Err(BranchError::DelegatedCli(CliError::command_usage(format!(
+            "cannot rename branch '{old_name}' onto itself"
+        ))));
+    }
+
+    // All read-only validation happens before the transaction opens (fail-fast,
+    // no partial state). `is_valid_git_branch_name` already enforces the
+    // 255-byte cap added in Wave 1.
     if !is_valid_git_branch_name(&new_name) {
         return Err(BranchError::InvalidName(new_name));
     }
@@ -828,24 +1228,149 @@ async fn rename_branch_impl(args: &[String]) -> Result<BranchOutput, BranchError
     }
 
     let commit_hash = old_branch.commit.to_string();
-    Branch::update_branch(&new_name, &commit_hash, None)
-        .await
-        .map_err(|e| BranchError::CreateFailed {
-            branch: new_name.clone(),
-            detail: e.to_string(),
-        })?;
+    let renames_current = matches!(Head::current().await, Head::Branch(name) if name == old_name);
 
-    if let Head::Branch(name) = Head::current().await
-        && name == old_name
-    {
-        Head::update(Head::Branch(new_name.clone()), None).await;
+    // Ref write, HEAD move, config migration, reflog move, and old-row delete
+    // all run in one transaction so a mid-way failure leaves no half-rename.
+    let db = get_db_conn_instance().await;
+    let txn = db.begin().await.map_err(|e| branch_txn_error("begin", e))?;
+    let result: Result<(), BranchError> = async {
+        Branch::update_branch_with_conn(&txn, &new_name, &commit_hash, None)
+            .await
+            .map_err(|e| BranchError::CreateFailed {
+                branch: new_name.clone(),
+                detail: e.to_string(),
+            })?;
+        if renames_current {
+            Head::update_result_with_conn(&txn, Head::Branch(new_name.clone()), None)
+                .await
+                .map_err(map_branch_store_error)?;
+        }
+        migrate_branch_config_with_conn(&txn, &old_name, &new_name, true).await?;
+        // Move the reflog: copy old -> new, then drop the old ref's rows so no
+        // dangling reflog remains (no-op when the branch has no reflog).
+        Reflog::copy_entries_with_conn(
+            &txn,
+            &branch_reflog_ref(&old_name),
+            &branch_reflog_ref(&new_name),
+        )
+        .await
+        .map_err(reflog_migration_error)?;
+        Reflog::delete_entries_with_conn(&txn, &branch_reflog_ref(&old_name))
+            .await
+            .map_err(reflog_migration_error)?;
+        Branch::delete_branch_result_with_conn(&txn, &old_name, None)
+            .await
+            .map_err(map_branch_store_error)?;
+        Ok(())
+    }
+    .await;
+    match result {
+        Ok(()) => txn
+            .commit()
+            .await
+            .map_err(|e| branch_txn_error("commit", e))?,
+        Err(error) => {
+            let _ = txn.rollback().await;
+            return Err(error);
+        }
     }
 
-    Branch::delete_branch_result(&old_name, None)
-        .await
-        .map_err(map_branch_store_error)?;
-
     Ok(BranchOutput::Rename { old_name, new_name })
+}
+
+/// Body of `libra branch -c [old] new` / `-C [old] new`.
+///
+/// Functional scope:
+/// - One argument: copy the current branch to NEW_BRANCH; two arguments:
+///   copy OLD_BRANCH to NEW_BRANCH.
+/// - Creates the destination pointing at the source tip and mirrors the
+///   source's `branch.<src>.{remote,merge,description}` config onto the
+///   destination, plus a conditional reflog copy.
+/// - `force` (from `-C`, or `-c` with `-f`) permits overwriting an existing
+///   destination by resetting it; a locked destination is always refused.
+///
+/// Boundary conditions:
+/// - The source MAY be a locked branch (copy-from is read-only); the
+///   destination may NOT be locked.
+/// - Ref write, config mirror, and reflog copy all run in one transaction.
+async fn copy_branch_impl(args: &[String], force: bool) -> Result<BranchOutput, BranchError> {
+    let (src, dst) = match args.len() {
+        1 => match Head::current().await {
+            Head::Branch(name) => (name, args[0].clone()),
+            Head::Detached(_) => return Err(detached_head_branch_error()),
+        },
+        2 => (args[0].clone(), args[1].clone()),
+        _ => return Err(BranchError::RenameTooManyArgs),
+    };
+
+    // Copying a branch onto itself is rejected before any mutation: with
+    // `-C`/`-f` the reflog "clear dst then copy src" step would erase the
+    // (shared) reflog while reporting success.
+    if src == dst {
+        return Err(BranchError::DelegatedCli(CliError::command_usage(format!(
+            "cannot copy branch '{src}' onto itself"
+        ))));
+    }
+
+    if !is_valid_git_branch_name(&dst) {
+        return Err(BranchError::InvalidName(dst));
+    }
+    // The copy TARGET is a write target, so a locked destination is refused
+    // even with `-f`/`-C`. The SOURCE may be locked — copy-from is read-only.
+    if branch::is_locked_branch(&dst) {
+        return Err(BranchError::Locked(dst));
+    }
+
+    let src_branch = require_existing_local_branch(&src).await?;
+    if !force
+        && Branch::find_branch_result(&dst, None)
+            .await
+            .map_err(map_branch_store_error)?
+            .is_some()
+    {
+        return Err(BranchError::AlreadyExists(dst));
+    }
+    let commit_hash = src_branch.commit.to_string();
+
+    let db = get_db_conn_instance().await;
+    let txn = db.begin().await.map_err(|e| branch_txn_error("begin", e))?;
+    let result: Result<(), BranchError> = async {
+        Branch::update_branch_with_conn(&txn, &dst, &commit_hash, None)
+            .await
+            .map_err(|e| BranchError::CreateFailed {
+                branch: dst.clone(),
+                detail: e.to_string(),
+            })?;
+        migrate_branch_config_with_conn(&txn, &src, &dst, false).await?;
+        // Make the destination reflog mirror the source: clear any rows left by
+        // an overwritten target, then copy the source's (no-op if empty).
+        Reflog::delete_entries_with_conn(&txn, &branch_reflog_ref(&dst))
+            .await
+            .map_err(reflog_migration_error)?;
+        Reflog::copy_entries_with_conn(&txn, &branch_reflog_ref(&src), &branch_reflog_ref(&dst))
+            .await
+            .map_err(reflog_migration_error)?;
+        Ok(())
+    }
+    .await;
+    match result {
+        Ok(()) => txn
+            .commit()
+            .await
+            .map_err(|e| branch_txn_error("commit", e))?,
+        Err(error) => {
+            let _ = txn.rollback().await;
+            return Err(error);
+        }
+    }
+
+    Ok(BranchOutput::Copy {
+        src,
+        dst,
+        commit: commit_hash,
+        force,
+    })
 }
 
 /// Body of `libra branch -l` / `-r` / `-a` (with optional commit filters).
@@ -865,7 +1390,11 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
     } else {
         BranchListMode::Local
     };
-    let has_commit_filters = !args.contains.is_empty() || !args.no_contains.is_empty();
+    let has_commit_filters = !args.contains.is_empty()
+        || !args.no_contains.is_empty()
+        || args.merged.is_some()
+        || args.no_merged.is_some()
+        || args.points_at.is_some();
     let (head_name, detached_head) = match Head::current().await {
         Head::Branch(name) => (Some(name), None),
         Head::Detached(commit_hash) => (None, Some(commit_hash.to_string())),
@@ -885,18 +1414,70 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
 
     let contains_set = resolve_commits(&args.contains).await?;
     let no_contains_set = resolve_commits(&args.no_contains).await?;
+
+    // Merge-status filter (`--merged` / `--no-merged`). The two flags are
+    // mutually exclusive at the clap layer, so at most one branch is taken.
+    // The baseline commit (HEAD when no value is given) yields an ancestor
+    // reachability set; a branch is "merged" when its tip lies inside it.
+    let merge_filter = if let Some(baseline) = args.merged.as_deref() {
+        Some((resolve_reachable_set(baseline).await?, true))
+    } else if let Some(baseline) = args.no_merged.as_deref() {
+        Some((resolve_reachable_set(baseline).await?, false))
+    } else {
+        None
+    };
+
+    // Exact-tip filter (`--points-at`): keep only branches whose tip resolves
+    // to the same object as the requested revision.
+    let points_at = match args.points_at.as_deref() {
+        Some(object) => Some(
+            get_target_commit(object)
+                .await
+                .map_err(|_| BranchError::InvalidCommit(object.to_string()))?,
+        ),
+        None => None,
+    };
+
     for branches in [&mut local_branches, &mut remote_branches] {
         filter_branches_result(branches, &contains_set, &no_contains_set)?;
+        if let Some((reachable, want_merged)) = &merge_filter {
+            branch::retain_by_merge_status(branches, reachable, *want_merged);
+        }
+        if let Some(target) = &points_at {
+            branch::retain_by_points_at(branches, target);
+        }
     }
     let local_branches_empty = local_branches.is_empty();
 
     let current_name = head_name.as_deref();
+    let db = get_db_conn_instance().await;
     let mut entries = Vec::new();
     for branch in local_branches {
+        // Reading `branch.<name>.{remote,merge}` is independent of whether the
+        // referenced remote still exists, so a dangling remote still surfaces
+        // the configured tracking name rather than crashing the listing.
+        let tracking = ConfigKv::branch_config_with_conn(&db, &branch.name)
+            .await
+            .map_err(|e| {
+                branch_config_read_error(format!("upstream config for branch '{}'", branch.name), e)
+            })?
+            .map(|cfg| BranchTracking {
+                remote: cfg.remote,
+                merge: cfg.merge,
+            });
+        let description =
+            ConfigKv::get_with_conn(&db, &format!("branch.{}.description", branch.name))
+                .await
+                .map_err(|e| {
+                    branch_config_read_error(format!("description for branch '{}'", branch.name), e)
+                })?
+                .map(|entry| entry.value);
         entries.push(BranchListEntry {
             current: current_name == Some(branch.name.as_str()),
             commit: branch.commit.to_string(),
             display_name: branch.name.clone(),
+            tracking,
+            description,
             name: branch.name,
         });
     }
@@ -905,6 +1486,8 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
             current: false,
             commit: branch.commit.to_string(),
             display_name: format_branch_name(&branch),
+            tracking: None,
+            description: None,
             name: branch.name,
         });
     }
@@ -920,6 +1503,7 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
         head_name,
         detached_head,
         show_unborn_head,
+        ignore_case: args.ignore_case,
     })
 }
 
@@ -934,10 +1518,21 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
 /// - Returns [`BranchError::NotInRepo`] if the CWD is outside a `.libra`
 ///   repository.
 async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
+    // `--track` / `--no-track` are intentionally declined (Libra keeps branch
+    // creation and tracking setup separate). Fail fast, before any repo access,
+    // as a usage error (CliInvalidArguments → exit 129) rather than a clap
+    // parse error so the message can point at the supported alternatives.
+    if args.track.is_some() || args.no_track {
+        return Err(BranchError::DelegatedCli(
+            CliError::command_usage("libra branch does not support --track/--no-track").with_hint(
+                "set tracking with 'libra switch --track' or 'libra branch -u <remote>/<branch>'",
+            ),
+        ));
+    }
     require_repo().map_err(|_| BranchError::NotInRepo)?;
 
     if let Some(new_branch) = args.new_branch.clone() {
-        create_branch_impl(new_branch, args.commit_hash.clone()).await
+        create_branch_impl(new_branch, args.commit_hash.clone(), args.force).await
     } else if let Some(branch_to_delete) = args.delete.clone() {
         delete_branch_impl(branch_to_delete, true).await
     } else if let Some(branch_to_delete) = args.delete_safe.clone() {
@@ -970,9 +1565,45 @@ async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
             branch,
             upstream: upstream.to_string(),
         })
+    } else if let Some(maybe_branch) = args.unset_upstream.clone() {
+        let branch = match maybe_branch {
+            Some(name) => name,
+            None => match Head::current().await {
+                Head::Branch(name) => name,
+                Head::Detached(_) => return Err(detached_head_branch_error()),
+            },
+        };
+        let had_upstream = unset_upstream_impl(&branch).await?;
+        Ok(BranchOutput::UnsetUpstream {
+            branch,
+            had_upstream,
+        })
     } else if !args.rename.is_empty() {
         rename_branch_impl(&args.rename).await
+    } else if !args.force_copy.is_empty() {
+        // `-C` is copy + force-overwrite.
+        copy_branch_impl(&args.force_copy, true).await
+    } else if !args.copy.is_empty() {
+        // `-c` honours the standalone `-f` modifier for force-overwrite.
+        copy_branch_impl(&args.copy, args.force).await
+    } else if let Some(maybe_branch) = args.edit_description.clone() {
+        let branch = match maybe_branch {
+            Some(name) => name,
+            None => match Head::current().await {
+                Head::Branch(name) => name,
+                Head::Detached(_) => return Err(detached_head_branch_error()),
+            },
+        };
+        edit_description_impl(branch).await
     } else {
+        // `--sort` / `--format` are accepted-but-ignored on the list path: the
+        // list still prints in the default order/format and we emit a plain
+        // informational note to stderr (not a warning, exit stays 0).
+        if args.sort.is_some() || args.format.is_some() {
+            eprintln!(
+                "note: --sort/--format are not implemented; use 'libra branch --json' for structured output"
+            );
+        }
         collect_branch_output(args).await
     }
 }
@@ -998,6 +1629,7 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
             head_name,
             detached_head,
             show_unborn_head,
+            ignore_case,
         } => {
             if let Some(detached_head) = detached_head {
                 println!(
@@ -1012,22 +1644,33 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
                 return Ok(());
             }
 
+            let ignore_case = *ignore_case;
             let mut sorted = branches.clone();
             sorted.sort_by(|a, b| {
                 if a.current {
                     std::cmp::Ordering::Less
                 } else if b.current {
                     std::cmp::Ordering::Greater
+                } else if ignore_case {
+                    a.name
+                        .to_lowercase()
+                        .cmp(&b.name.to_lowercase())
+                        .then_with(|| a.name.cmp(&b.name))
                 } else {
                     a.name.cmp(&b.name)
                 }
             });
 
             for branch in sorted {
+                let tracking = branch
+                    .tracking
+                    .as_ref()
+                    .map(|t| format!(" [{}/{}]", t.remote, t.merge))
+                    .unwrap_or_default();
                 if branch.current {
-                    println!("* {}", branch.display_name.green());
+                    println!("* {}{tracking}", branch.display_name.green());
                 } else {
-                    println!("  {}", branch.display_name);
+                    println!("  {}{tracking}", branch.display_name);
                 }
             }
         }
@@ -1047,9 +1690,38 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
         BranchOutput::Rename { old_name, new_name } => {
             println!("Renamed branch '{old_name}' to '{new_name}'");
         }
+        BranchOutput::Copy {
+            src,
+            dst,
+            commit,
+            force,
+        } => {
+            let overwrite = if *force { " (overwrote existing)" } else { "" };
+            println!(
+                "Copied branch '{src}' to '{dst}' at {}{overwrite}",
+                short_display_hash(commit)
+            );
+        }
         BranchOutput::SetUpstream { branch, upstream } => {
             println!("Branch '{branch}' set up to track remote branch '{upstream}'");
         }
+        BranchOutput::UnsetUpstream {
+            branch,
+            had_upstream,
+        } => {
+            if *had_upstream {
+                println!("Removed upstream tracking for branch '{branch}'");
+            } else {
+                println!("Branch '{branch}' has no upstream tracking to remove");
+            }
+        }
+        BranchOutput::EditDescription {
+            branch,
+            description,
+        } => match description {
+            Some(_) => println!("Updated description for branch '{branch}'"),
+            None => println!("Cleared description for branch '{branch}'"),
+        },
         BranchOutput::ShowCurrent {
             name,
             detached,
@@ -1115,7 +1787,21 @@ pub async fn create_branch_safe(
     new_branch: String,
     branch_or_commit: Option<String>,
 ) -> CliResult<()> {
-    create_branch_impl(new_branch, branch_or_commit)
+    create_branch_impl(new_branch, branch_or_commit, false)
+        .await
+        .map(|_| ())
+        .map_err(CliError::from)?;
+    Ok(())
+}
+
+/// Force-create a branch (Git `switch -C` / `branch -f` semantics): create it,
+/// or reset it to the start point if it already exists. Locked branches are
+/// still refused. Mirrors [`create_branch_safe`] with `force = true`.
+pub async fn create_branch_force(
+    new_branch: String,
+    branch_or_commit: Option<String>,
+) -> CliResult<()> {
+    create_branch_impl(new_branch, branch_or_commit, true)
         .await
         .map(|_| ())
         .map_err(CliError::from)?;
@@ -1164,12 +1850,26 @@ pub async fn list_branches(
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
+        copy: vec![],
+        force_copy: vec![],
+        edit_description: None,
         remotes: matches!(list_mode, BranchListMode::Remote),
         all: matches!(list_mode, BranchListMode::All),
         contains: commits_contains.to_vec(),
         no_contains: commits_no_contains.to_vec(),
+        merged: None,
+        no_merged: None,
+        points_at: None,
+        ignore_case: false,
+        sort: None,
+        format: None,
+        force: false,
+        create_reflog: false,
+        track: None,
+        no_track: false,
     };
     let result = collect_branch_output(&args).await.map_err(CliError::from)?;
     render_branch_output(&result, &OutputConfig::default())
@@ -1234,6 +1934,23 @@ async fn resolve_commits(commits: &[String]) -> Result<HashSet<ObjectHash>, Bran
         set.insert(target_commit);
     }
     Ok(set)
+}
+
+/// Resolve a `--merged` / `--no-merged` baseline into its ancestor set.
+///
+/// The baseline reference (e.g. `HEAD`, a branch name, or a raw OID) is
+/// resolved to a commit, then [`get_reachable_commits`] walks its full
+/// ancestry. A branch tip contained in the returned set is considered merged
+/// into the baseline. In detached-HEAD mode the default `HEAD` resolves to the
+/// detached commit, matching the delete-path merged check.
+async fn resolve_reachable_set(baseline: &str) -> Result<HashSet<ObjectHash>, BranchError> {
+    let baseline_commit = get_target_commit(baseline)
+        .await
+        .map_err(|_| BranchError::InvalidCommit(baseline.to_string()))?;
+    let reachable = get_reachable_commits(baseline_commit.to_string(), None)
+        .await
+        .map_err(BranchError::DelegatedCli)?;
+    Ok(reachable.into_iter().map(|c| c.id).collect())
 }
 
 /// check if a branch contains at least one of the commits
@@ -1301,6 +2018,12 @@ pub fn is_valid_git_branch_name(name: &str) -> bool {
 
     // Not be empty or just a dot ('.')
     if name.trim().is_empty() || name.trim() == "." {
+        return false;
+    }
+
+    // Not exceed the 255-byte ref-name limit imposed by the on-disk and
+    // SQLite-backed reference stores.
+    if name.len() > 255 {
         return false;
     }
 

@@ -131,7 +131,7 @@ fn test_push_invalid_refspec_returns_cli_invalid_arguments() {
         repo.path(),
     );
 
-    let output = run_libra_command(&["push", "origin", ":main"], repo.path());
+    let output = run_libra_command(&["push", "origin", "main:"], repo.path());
     let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
 
     assert_eq!(output.status.code(), Some(129));

@@ -7,9 +7,13 @@
 //!
 //! - `--ff-only` and `--rebase` (`-r`) are implemented and MUST appear in
 //!   `pull --help` (they were misreported as "not exposed" before v0.17.1215).
-//! - `--squash` is genuinely deferred, so it MUST NOT appear — if a future
-//!   change adds it, this guard flips red and forces a `COMPATIBILITY.md`
-//!   update in the same PR.
+//! - The merge-engine forwarding flags `--squash` / `--no-squash` /
+//!   `--commit` / `--no-commit` / `--ff` / `--no-ff` / `--autostash` /
+//!   `--no-autostash` and the fetch `--depth` flag are implemented and MUST
+//!   appear (the `--squash`-deferred era ended in v0.17.1388).
+//! - `--unshallow` is genuinely deferred (fetch has no unshallow path), so it
+//!   MUST NOT appear — if a future change adds it, this guard flips red and
+//!   forces a `COMPATIBILITY.md` update in the same PR.
 
 use std::process::Command;
 
@@ -53,7 +57,34 @@ fn pull_help_exposes_ff_only_and_rebase() {
 }
 
 #[test]
-fn pull_help_omits_unimplemented_squash() {
+fn pull_help_exposes_forwarded_strategy_flags() {
+    let output = run(&["pull", "--help"]);
+    assert!(
+        output.status.success(),
+        "pull --help should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for flag in [
+        "--squash",
+        "--no-squash",
+        "--commit",
+        "--no-commit",
+        "--ff",
+        "--no-ff",
+        "--autostash",
+        "--no-autostash",
+        "--depth",
+    ] {
+        assert!(
+            stdout.contains(flag),
+            "pull --help must expose the forwarded `{flag}` flag; stdout: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pull_help_omits_unimplemented_unshallow() {
     let output = run(&["pull", "--help"]);
     assert!(
         output.status.success(),
@@ -62,9 +93,9 @@ fn pull_help_omits_unimplemented_squash() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !stdout.contains("--squash"),
-        "pull --help must NOT advertise the deferred `--squash` flag; if it was \
-         implemented, update COMPATIBILITY.md and this guard. stdout: {stdout}"
+        !stdout.contains("--unshallow"),
+        "pull --help must NOT advertise the deferred `--unshallow` flag; if it \
+         was implemented, update COMPATIBILITY.md and this guard. stdout: {stdout}"
     );
 }
 

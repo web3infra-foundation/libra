@@ -41,6 +41,7 @@ EXAMPLES:
     libra switch main                      Switch to an existing branch
     libra switch -c feature-x              Create and switch to a new branch
     libra switch -c fix-123 abc1234        Create branch from specific commit
+    libra switch -C feature-x main         Create or reset feature-x to main, then switch
     libra switch --detach v1.0             Detach HEAD at a tag
     libra switch --track origin/main       Track and switch to remote branch
     libra switch --json main               Structured JSON output for agents";
@@ -54,6 +55,11 @@ pub struct SwitchArgs {
     /// Create a new branch based on the given branch or current HEAD, and switch to it
     #[clap(long, short, group = "sub")]
     pub create: Option<String>,
+
+    /// Force-create a branch and switch to it: create it, or reset it to the
+    /// start point if it already exists (Git's `-C`).
+    #[clap(long = "force-create", short = 'C', group = "sub")]
+    pub force_create: Option<String>,
 
     /// Switch to a commit
     #[clap(long, short, action, default_value = "false", group = "sub")]
@@ -522,6 +528,7 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
     let SwitchArgs {
         branch,
         create,
+        force_create,
         detach,
         track,
     } = args;
@@ -556,6 +563,42 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
         }
 
         branch::create_branch_safe(new_branch_name.clone(), branch).await?;
+        let created_branch = resolve_created_branch(&new_branch_name).await?;
+        let commit = switch_to_resolved_branch(created_branch, output).await?;
+        return Ok(SwitchOutput {
+            previous_branch,
+            previous_commit,
+            branch: Some(new_branch_name),
+            commit: commit.to_string(),
+            created: true,
+            detached: false,
+            already_on: false,
+            tracking: None,
+        });
+    }
+
+    // `-C`/`--force-create`: like `-c` but resets the branch to the start point
+    // if it already exists, rather than refusing. Locked branches stay refused.
+    if let Some(new_branch_name) = force_create {
+        if !branch::is_valid_git_branch_name(&new_branch_name) {
+            return Err(SwitchError::DelegatedCli(invalid_branch_name_error(
+                &new_branch_name,
+            )));
+        }
+        if repo_branch::is_locked_branch(&new_branch_name) {
+            return Err(SwitchError::InternalBranchBlocked(new_branch_name.clone()));
+        }
+        if let Some(target) = branch.as_deref() {
+            get_commit_base(target)
+                .await
+                .map_err(|_| SwitchError::DelegatedCli(invalid_branch_base_error(target)))?;
+        }
+        match resolve_create_switch_target(branch.as_deref()).await? {
+            Some(target_commit) => ensure_clean_status_for_commit(target_commit, output).await?,
+            None => ensure_clean_status(output).await?,
+        }
+
+        branch::create_branch_force(new_branch_name.clone(), branch).await?;
         let created_branch = resolve_created_branch(&new_branch_name).await?;
         let commit = switch_to_resolved_branch(created_branch, output).await?;
         return Ok(SwitchOutput {
@@ -837,6 +880,7 @@ async fn restore_to_commit(
         staged: true,
         source: Some(commit_id.to_string()),
         pathspec: vec![util::working_dir_string()],
+        ..Default::default()
     };
     restore::execute_safe(restore_args, &output.child_output_config()).await?;
     Ok(())

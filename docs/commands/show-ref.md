@@ -32,6 +32,7 @@ no filesystem scanning.
 | `--tags` | | Show only tags (`refs/tags/`). |
 | `--head` | | Include `HEAD` in the output. |
 | `--hash` | `-s` | Only show the object hash, not the reference name. |
+| `--exists <REF>` | | Check whether the exact full ref name exists. Prints nothing; exits `0` if it exists, `2` if not. Only checks the reference record (does not verify the target object resolves). Mutually exclusive with the listing flags. |
 | `<PATTERN>...` | | Filter refs by substring match on the ref name. Multiple patterns are OR-ed. |
 
 ### Examples

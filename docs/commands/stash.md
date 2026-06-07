@@ -100,8 +100,9 @@ Show the file-level changes recorded in a stash entry.
 | `<stash>` | Stash reference, e.g. `stash@{1}`. Defaults to `stash@{0}`. |
 | `--name-only` | Show only the changed file names, one per line. |
 | `--name-status` | Show file names prefixed with the status code (`A` / `M` / `D`). |
+| `-p`, `--patch` | Show the stashed changes as a unified diff (`diff --git` + `@@` hunks) between the stash's base and stashed trees. Binary or non-UTF-8 files report `Binary files ... differ`. |
 
-`--name-only` and `--name-status` are mutually exclusive in human render mode; the JSON envelope always carries the full `files` list with status, regardless of which hint is set.
+`--name-only` and `--name-status` are mutually exclusive in human render mode; the JSON envelope always carries the full `files` list with status, regardless of which hint is set. With `-p`/`--patch`, the unified diff is also exposed as an additive `patch` field in the JSON envelope.
 
 ```bash
 # File-level summary of stash@{0}
@@ -112,6 +113,9 @@ libra stash show stash@{1}
 
 # File names only
 libra stash show --name-only
+
+# Full unified diff of the stashed changes
+libra stash show -p
 ```
 
 #### `branch`
