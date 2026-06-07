@@ -284,7 +284,7 @@ scenarios:
   - id: cli.clean-rm-mv-lfs-basic
     wave: 1
     group: working_tree
-    purpose: "Cover clean (-n/-f/-fd/-fX), rm, mv, and local LFS track/untrack/ls-files (writes .libra_attributes). lfs lock is negative (no remote)."
+    purpose: "Cover clean (-n/-f/-fd/-fX), rm, mv (--sparse/-n/-v/--json), and local LFS track/untrack/ls-files (writes .libra_attributes). lfs lock is negative (no remote)."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck, negative_exit]
