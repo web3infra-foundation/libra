@@ -302,10 +302,10 @@ scenarios:
   - id: cli.open-smoke
     wave: 1
     group: misc
-    purpose: "Cover open (and open <remote>) under --json: produces web_url + launched=false, never actually launches. No real browser side-effect in default waves."
+    purpose: "Cover open under --json: repo/default remote, branch deep link, platform override, custom template, launched=false, and JSON error for unsafe direct targets. No real browser side-effect in default waves."
     gh_required: false
     requires_git: false
-    key_assertion_categories: [json_envelope, negative_exit]
+    key_assertion_categories: [json_envelope, negative_exit, fsck]
     doc_section: "cli.open-smoke"
 
   - id: cli.cross-cutting-flags
