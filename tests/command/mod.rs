@@ -333,6 +333,7 @@ mod revert_test;
 mod sandbox_status_test;
 mod schema_upgrade_test;
 mod shortlog_test;
+mod show_ref_exists_test;
 mod show_ref_test;
 mod show_test;
 mod stash_test;

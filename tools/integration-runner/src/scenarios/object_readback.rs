@@ -88,6 +88,19 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     assert_stdout_contains(&guide, "object docs")?;
     ctx.command(&["show-ref", "--head"], repo.clone(), true)?;
     ctx.command(&["show-ref", "--heads"], repo.clone(), true)?;
+    ctx.command(&["show-ref", "--exists", "refs/heads/main"], repo.clone(), true)?;
+    let missing_show_ref = ctx.command(
+        &["show-ref", "--exists", "refs/heads/nope"],
+        repo.clone(),
+        false,
+    )?;
+    if missing_show_ref.status.code() != Some(2) {
+        bail!(
+            "show-ref --exists missing ref exited {:?}, expected 2",
+            missing_show_ref.status.code()
+        );
+    }
+    assert_lbr_or_text(&missing_show_ref, "reference does not exist")?;
     let object_type = ctx.command(&["cat-file", "-t", &head_id], repo.clone(), true)?;
     assert_stdout_contains(&object_type, "commit")?;
     ctx.command(&["cat-file", "-s", &head_id], repo.clone(), true)?;

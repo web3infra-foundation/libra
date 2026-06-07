@@ -37,6 +37,7 @@ libra show --stat HEAD
 libra show HEAD:docs/guide.md
 libra show-ref --head
 libra show-ref --heads
+libra show-ref --exists refs/heads/main
 libra cat-file -t "$HEAD_ID"
 libra cat-file -s "$HEAD_ID"
 libra cat-file -p "$HEAD_ID"
@@ -77,6 +78,7 @@ libra fsck "$HEAD_ID"
 ```bash
 cd "$RUN_DIR/object-repo"
 ! libra rev-parse no-such-revision
+! libra show-ref --exists refs/heads/nope
 ! libra show HEAD:no-such-path
 ! libra cat-file -p no-such-object
 ! libra hash-object missing-file.txt
@@ -89,6 +91,7 @@ cd "$RUN_DIR/object-repo"
 - `libra --json cat-file -p $HEAD_ID` 必须 `ok:true` 且 data 中的 commit 结构包含 `object_type == "commit"`、`tree`、`parents[]`、`message`。
 - `libra --json rev-parse --verify HEAD` 必须 `ok:true`，并返回 `mode == "verify"` 的 data envelope。
 - `libra --json show $BINARY_BLOB_ID` 必须 `ok:true`，并返回 `type == "blob"`、`is_binary == true`、`content == null`。
+- `libra show-ref --exists refs/heads/main` 必须退出 0 且无 stdout；缺失 ref 必须退出 2 并返回 `reference does not exist`。
 - `libra --json rev-list HEAD` / `libra --json rev-list --count HEAD` 返回 `data.commits[]` 与 `data.total`，每个 commit 元素为 hash 字符串。
 - `libra rev-list "$HEAD_ID..HEAD"` 与 `libra rev-list HEAD "^$HEAD_ID"` 只返回第二个提交；`--parents -n 1` 同时包含第二个提交和父提交；`--count HEAD` 输出 `2`。
 - 所有对象操作后 `libra fsck` 必须通过；写入 blob 后 `libra --json cat-file -t $BLOB_ID` 验证类型为 "blob"。

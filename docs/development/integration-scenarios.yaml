@@ -357,10 +357,10 @@ scenarios:
   - id: cli.object-readback
     wave: 2
     group: objects
-    purpose: "End-to-end object roundtrip via rev-parse verify/default, cat-file, show text/binary blobs, and rev-list range/filter/format options after normal operations; basic sha1 path."
+    purpose: "End-to-end object roundtrip via rev-parse verify/default, show-ref list/exists, cat-file, show text/binary blobs, and rev-list range/filter/format options after normal operations; basic sha1 path."
     gh_required: false
     requires_git: false
-    key_assertion_categories: [json_envelope, fsck]
+    key_assertion_categories: [json_envelope, fsck, negative_exit]
     doc_section: "cli.object-readback"
 
   - id: cli.sha256-object-readback
