@@ -37,6 +37,32 @@ pub(crate) fn scenario_restore_reset_diff(ctx: &mut ScenarioCtx<'_>) -> Result<(
     ctx.command(&["add", "tracked.txt"], repo.clone(), true)?;
     ctx.command(&["reset", "HEAD", "--", "tracked.txt"], repo.clone(), true)?;
     ctx.command(&["add", "tracked.txt"], repo.clone(), true)?;
+    fs::write(repo.join("reset-paths.txt"), "tracked.txt\n").context("write reset pathspec file")?;
+    let reset_from_file = ctx.command(
+        &["--json", "reset", "--pathspec-from-file=reset-paths.txt"],
+        repo.clone(),
+        true,
+    )?;
+    assert_json_ok(&reset_from_file, "reset")?;
+    assert_stdout_contains(&reset_from_file, "\"files_unstaged\": 1")?;
+    ctx.command(&["add", "tracked.txt"], repo.clone(), true)?;
+    fs::write(repo.join("reset-paths-nul.txt"), b"tracked.txt\0").context("write NUL reset pathspec file")?;
+    let reset_from_nul = ctx.command(
+        &[
+            "--json",
+            "reset",
+            "--pathspec-from-file=reset-paths-nul.txt",
+            "--pathspec-file-nul",
+        ],
+        repo.clone(),
+        true,
+    )?;
+    assert_json_ok(&reset_from_nul, "reset")?;
+    assert_stdout_contains(&reset_from_nul, "\"pathspecs\": [")?;
+    ctx.command(&["add", "tracked.txt"], repo.clone(), true)?;
+    let reset_no_refresh = ctx.command(&["--json", "reset", "--no-refresh", "HEAD"], repo.clone(), true)?;
+    assert_json_ok(&reset_no_refresh, "reset")?;
+    ctx.command(&["add", "tracked.txt"], repo.clone(), true)?;
     ctx.command(
         &["commit", "-m", "second", "--no-verify"],
         repo.clone(),

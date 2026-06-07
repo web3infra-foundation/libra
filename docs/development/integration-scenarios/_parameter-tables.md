@@ -83,6 +83,8 @@
 | `restore --worktree <path>` | `cli.restore-reset-diff` | 工作区文件恢复到 index 或 source 内容 |
 | `restore --source <rev>` | `cli.restore-reset-diff` | source revision 不存在时失败且不改写文件 |
 | `reset HEAD -- <path>` | `cli.restore-reset-diff` | 路径级 reset 只取消暂存 |
+| `reset --pathspec-from-file=<file>` / `--pathspec-file-nul` | `cli.restore-reset-diff` | file/NUL pathspec 输入只取消暂存指定路径 |
+| `reset --no-refresh` | `cli.restore-reset-diff` | 兼容 no-op flag 可传入且保持 mixed reset 语义 |
 | `reset --soft` | `cli.restore-reset-diff` | 只移动 HEAD，保留 index/工作区 |
 | `reset --mixed` | `cli.restore-reset-diff` | 移动 HEAD 并重置 index |
 | `reset --hard` | `cli.restore-reset-diff` | HEAD、index、工作区全部回到目标 revision |
