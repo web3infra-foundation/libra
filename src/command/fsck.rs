@@ -1643,15 +1643,23 @@ async fn verify_object(
 
                     if strict && report_errors {
                         for item in &tree.tree_items {
+                            let expected_type = expected_type_for_mode(item.mode);
+                            let expected_type_label = expected_type.to_string();
                             // Each entry's target must exist with a matching type.
                             if !storage.exist(&item.id) {
-                                has_error |=
-                                    report(FsckMsgId::Missing, "tree", &item.id.to_string());
+                                has_error |= report(
+                                    FsckMsgId::Missing,
+                                    &expected_type_label,
+                                    &item.id.to_string(),
+                                );
                             } else if let Ok(actual) = storage.get_object_type(&item.id)
-                                && actual != expected_type_for_mode(item.mode)
+                                && actual != expected_type
                             {
-                                has_error |=
-                                    report(FsckMsgId::BadObjectSha1, "tree", &hash.to_string());
+                                has_error |= report(
+                                    FsckMsgId::BadObjectSha1,
+                                    &expected_type_label,
+                                    &item.id.to_string(),
+                                );
                             }
                         }
                         // Entries must be in Git's canonical sort order.
@@ -1733,7 +1741,7 @@ async fn verify_object(
                                 && parent_type != ObjectType::Commit
                             {
                                 has_error |=
-                                    report(FsckMsgId::BadObjectSha1, "commit", &hash.to_string());
+                                    report(FsckMsgId::BadObjectSha1, "commit", &parent.to_string());
                             }
                         }
                     }
@@ -1829,7 +1837,11 @@ async fn verify_object(
                 && actual_type != tag.object_type
             {
                 if report_errors {
-                    has_error |= report(FsckMsgId::BadObjectSha1, "tag", &hash.to_string());
+                    has_error |= report(
+                        FsckMsgId::BadObjectSha1,
+                        &tag.object_type.to_string(),
+                        &tag.object_hash.to_string(),
+                    );
                 }
                 return Ok((
                     ObjectCheckResult {

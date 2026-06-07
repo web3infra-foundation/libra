@@ -8,8 +8,10 @@ use git_internal::{
     hash::{HashKind, ObjectHash, set_hash_kind_for_test},
     internal::object::{
         ObjectTrait,
+        blob::Blob,
         commit::Commit,
         signature::{Signature, SignatureType},
+        tag::Tag as GitTag,
         tree::{Tree, TreeItem, TreeItemMode},
         types::ObjectType,
     },
@@ -866,6 +868,33 @@ fn store_strict_commit(repo: &std::path::Path, email: &str, tz: &str) -> String 
     commit.id.to_string()
 }
 
+fn object_storage(repo: &std::path::Path) -> ClientStorage {
+    ClientStorage::init(repo.join(".libra/objects"))
+}
+
+fn store_git_object<T: ObjectTrait>(storage: &ClientStorage, object: &T, id: &ObjectHash) {
+    storage
+        .put(
+            id,
+            &object.to_data().expect("serialize object"),
+            object.get_type(),
+        )
+        .expect("store object");
+}
+
+fn stored_tree_with_blob(storage: &ClientStorage) -> Tree {
+    let blob = Blob::from_content("tree child");
+    store_git_object(storage, &blob, &blob.id);
+    let tree = Tree::from_tree_items(vec![TreeItem {
+        mode: TreeItemMode::Blob,
+        id: blob.id,
+        name: "file.txt".to_string(),
+    }])
+    .expect("build tree");
+    store_git_object(storage, &tree, &tree.id);
+    tree
+}
+
 /// `--strict` flags a commit whose author/committer email lacks `@`; the default
 /// (non-strict) check does not.
 #[test]
@@ -962,6 +991,122 @@ fn test_strict_tree_unsorted() {
         "strict must flag an unsorted tree: {stderr}"
     );
     assert_eq!(strict.status.code(), Some(1));
+}
+
+#[test]
+#[serial]
+fn test_strict_tree_missing_blob() {
+    let repo = tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+
+    let id = {
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let storage = object_storage(repo.path());
+        let missing_blob = ObjectHash::from_bytes(&[0x33; 20]).expect("valid missing oid");
+        let tree = Tree::from_tree_items(vec![TreeItem {
+            mode: TreeItemMode::Blob,
+            id: missing_blob,
+            name: "missing.txt".to_string(),
+        }])
+        .expect("build tree");
+        store_git_object(&storage, &tree, &tree.id);
+        tree.id.to_string()
+    };
+
+    let plain = run_libra_command(&["fsck", &id], repo.path());
+    assert!(
+        !String::from_utf8_lossy(&plain.stdout).contains("missing blob"),
+        "non-strict fsck must not validate tree entry reachability"
+    );
+
+    let strict = run_libra_command(&["fsck", "--strict", &id], repo.path());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&strict.stdout),
+        String::from_utf8_lossy(&strict.stderr)
+    );
+    assert!(
+        combined.contains("missing blob"),
+        "strict must flag the missing blob entry: {combined}"
+    );
+    assert_eq!(strict.status.code(), Some(1));
+}
+
+#[test]
+#[serial]
+fn test_strict_commit_parent_type() {
+    let repo = tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+
+    let (commit_id, parent_id) = {
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let storage = object_storage(repo.path());
+        let tree = stored_tree_with_blob(&storage);
+        let blob = Blob::from_content("not a commit parent");
+        store_git_object(&storage, &blob, &blob.id);
+        let commit = Commit::new(
+            strict_signature("test@example.com", "+0000", SignatureType::Author),
+            strict_signature("test@example.com", "+0000", SignatureType::Committer),
+            tree.id,
+            vec![blob.id],
+            "bad parent fixture",
+        );
+        store_git_object(&storage, &commit, &commit.id);
+        (commit.id.to_string(), blob.id.to_string())
+    };
+
+    let plain = run_libra_command(&["fsck", &commit_id], repo.path());
+    assert!(
+        !String::from_utf8_lossy(&plain.stderr).contains("bad object sha1"),
+        "non-strict fsck must not validate parent object types"
+    );
+
+    let strict = run_libra_command(&["fsck", "--strict", &commit_id], repo.path());
+    let stderr = String::from_utf8_lossy(&strict.stderr);
+    assert!(
+        stderr.contains(&format!("bad object sha1: commit {parent_id}")),
+        "strict must flag the non-commit parent target: {stderr}"
+    );
+    assert_eq!(strict.status.code(), Some(1));
+}
+
+#[test]
+#[serial]
+fn test_tag_target_type_mismatch_non_strict() {
+    let repo = tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+
+    let (tag_id, target_id) = {
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let storage = object_storage(repo.path());
+        let blob = Blob::from_content("tagged as the wrong type");
+        store_git_object(&storage, &blob, &blob.id);
+        let tag = GitTag::new(
+            blob.id,
+            ObjectType::Commit,
+            "wrong-type".to_string(),
+            strict_signature("test@example.com", "+0000", SignatureType::Tagger),
+            "wrong type target".to_string(),
+        );
+        let tag_data = tag.to_data().expect("serialize tag");
+        let tag_id = ObjectHash::from_type_and_data(ObjectType::Tag, &tag_data);
+        storage
+            .put(&tag_id, &tag_data, ObjectType::Tag)
+            .expect("store tag");
+        (tag_id.to_string(), blob.id.to_string())
+    };
+
+    let output = run_libra_command(&["fsck", &tag_id], repo.path());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains(&format!("bad object sha1: commit {target_id}")),
+        "non-strict fsck must flag tag target type mismatches: {combined}"
+    );
+    assert_eq!(output.status.code(), Some(1));
 }
 
 /// A corrupt index file is an integrity error and exits non-zero (1), aligned

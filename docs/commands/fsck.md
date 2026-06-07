@@ -119,7 +119,11 @@ libra fsck --tags
 
 ### `--connectivity-only`
 
-Only check object existence, skip content validation. Significantly faster but does NOT detect:
+Only check object existence and object type, then skip the later hash and
+content-format validation pass. This can be faster on healthy repositories, but
+it is not a guarantee that no object body bytes are read: the current
+`ClientStorage::get_object_type` path may still decode an object body to learn
+its type. It does NOT detect:
 - Hash mismatches (content corrupted but object exists)
 - Format errors (object cannot be parsed)
 
