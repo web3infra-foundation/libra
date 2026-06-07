@@ -1266,6 +1266,7 @@ fn clone_shallow_options(args: &CloneArgs) -> Result<ShallowOptions, CloneError>
     let deepen_not = args.shallow_exclude.clone();
     Ok(ShallowOptions {
         depth: args.depth,
+        deepen_relative: false,
         deepen_since,
         deepen_not,
         filter: args.filter.clone(),

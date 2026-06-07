@@ -1105,6 +1105,21 @@ fn test_fetch_shallow_since_invalid_date_exits_129() {
     );
 }
 
+#[test]
+fn test_fetch_depth_and_deepen_conflict() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(
+        &["fetch", "origin", "--depth", "1", "--deepen", "1"],
+        repo.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "--depth and --deepen must be rejected as a usage error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// End-to-end `fetch --prune`: a remote-tracking branch whose remote counterpart
 /// was deleted is removed locally; live branches and `refs/heads/*` are kept.
 #[tokio::test]
