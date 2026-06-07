@@ -133,6 +133,6 @@
 | `rm <path>` | `cli.clean-rm-mv-lfs-basic` | tracked 文件从工作区和 index 移除 |
 | `mv <src> <dst>` | `cli.clean-rm-mv-lfs-basic` | tracked 文件移动并更新 index |
 | `lfs track/untrack/ls-files` | `cli.clean-rm-mv-lfs-basic` | `.libra_attributes` pattern 和 LFS tracked 文件列表可观察 |
-| `reflog show` / `reflog show --stat` / `reflog exists` | `cli.reflog-symbolic-ref` | HEAD/ref 更新记录可读，exists 可脚本探测 |
+| `reflog show` / `reflog show --stat` / `reflog exists` / `reflog expire --dry-run` | `cli.reflog-symbolic-ref` | HEAD/ref 更新记录可读，exists 可脚本探测，expire 可预览清理并对无 ref 入参返回稳定错误 |
 | `symbolic-ref` / `symbolic-ref --short` / `symbolic-ref HEAD <target>` | `cli.reflog-symbolic-ref` | HEAD 符号引用读写可观察 |
 | `--json open` | `cli.open-smoke` | 只输出 URL 和 `launched=false`，不启动外部程序 |

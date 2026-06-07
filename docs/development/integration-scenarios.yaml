@@ -293,10 +293,10 @@ scenarios:
   - id: cli.reflog-symbolic-ref
     wave: 1
     group: ref
-    purpose: "Cover reflog show (with --stat/--pretty), reflog exists, symbolic-ref (read + write HEAD target) and negatives. Note: symbolic-ref limited to HEAD by design."
+    purpose: "Cover reflog show (with --stat/--pretty), reflog exists, reflog expire dry-run/no-ref error, symbolic-ref (read + write HEAD target) and negatives. Note: symbolic-ref limited to HEAD by design."
     gh_required: false
     requires_git: false
-    key_assertion_categories: [json_envelope, negative_exit, intentional_difference]
+    key_assertion_categories: [json_envelope, negative_exit, lbr_error, intentional_difference]
     doc_section: "cli.reflog-symbolic-ref"
 
   - id: cli.open-smoke
