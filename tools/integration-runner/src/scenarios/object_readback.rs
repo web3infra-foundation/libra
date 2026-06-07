@@ -35,6 +35,49 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
         bail!("rev-parse HEAD returned an unexpectedly short id: {head_id}");
     }
     ctx.command(&["rev-parse", "--short", "HEAD"], repo.clone(), true)?;
+    let verify = ctx.command(&["rev-parse", "--verify", "HEAD"], repo.clone(), true)?;
+    let verify_id = stdout_trim(&verify);
+    if verify_id != head_id {
+        bail!("rev-parse --verify HEAD returned {verify_id:?}, expected {head_id}");
+    }
+    let verify_short = ctx.command(
+        &["rev-parse", "--verify", "--short", "HEAD"],
+        repo.clone(),
+        true,
+    )?;
+    let verify_short_id = stdout_trim(&verify_short);
+    if verify_short_id.is_empty() || !head_id.starts_with(&verify_short_id) {
+        bail!("rev-parse --verify --short HEAD returned invalid prefix {verify_short_id:?}");
+    }
+    let verify_default = ctx.command(
+        &["rev-parse", "--verify", "--default", "HEAD"],
+        repo.clone(),
+        true,
+    )?;
+    let verify_default_id = stdout_trim(&verify_default);
+    if verify_default_id != head_id {
+        bail!(
+            "rev-parse --verify --default HEAD returned {verify_default_id:?}, expected {head_id}"
+        );
+    }
+    assert_json_ok(
+        &ctx.command(&["--json", "rev-parse", "--verify", "HEAD"], repo.clone(), true)?,
+        "rev-parse",
+    )?;
+    let quiet_verify = ctx.command(
+        &["--quiet", "rev-parse", "--verify", "no-such-revision"],
+        repo.clone(),
+        false,
+    )?;
+    if quiet_verify.status.code() != Some(1) {
+        bail!(
+            "rev-parse --verify under --quiet exited {:?}, expected 1",
+            quiet_verify.status.code()
+        );
+    }
+    if !quiet_verify.stdout.is_empty() || !quiet_verify.stderr.is_empty() {
+        bail!("rev-parse --verify under --quiet must be silent");
+    }
     let top = ctx.command(&["rev-parse", "--show-toplevel"], repo.clone(), true)?;
     assert_stdout_contains(&top, repo.to_string_lossy().as_ref())?;
     let rev_list = ctx.command(&["rev-list", "HEAD"], repo.clone(), true)?;
