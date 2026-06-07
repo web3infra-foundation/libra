@@ -348,7 +348,7 @@ scenarios:
   - id: cli.push-local-file-remote-rejected
     wave: 2
     group: protocol_local
-    purpose: "Explicit intentional difference: push to local file:// or path remote must be rejected with LBR-CLI-003 (only git@ / https supported)."
+    purpose: "Explicit intentional difference: push to local file:// or path remote must be rejected with LBR-CLI-003 across normal/dry-run/force/atomic/tags/mirror forms (only git@ / https supported)."
     gh_required: false
     requires_git: true
     key_assertion_categories: [negative_exit, intentional_difference, lbr_error]

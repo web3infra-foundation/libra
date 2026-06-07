@@ -46,6 +46,7 @@ separate `lfs push` step.
 | `-f`, `--force` | Allow non-fast-forward updates that overwrite remote history. | `libra push --force origin main` |
 | `--force-with-lease[=<ref>[:<expect>]]` | Allow a non-fast-forward update only if the remote ref still matches the expected OID (the tracking-ref OID by default, or an explicit `<expect>`). Conflicts with `--force`. | `libra push --force-with-lease origin main` |
 | `--force-if-includes` | Accepted for `git push` compatibility; **no-op** (the lease check uses the tracking-ref OID only). | `libra push --force-with-lease --force-if-includes origin main` |
+| `--atomic` | Request all remote ref updates to succeed or fail together. The remote must advertise the `atomic` receive-pack capability; local remote-tracking refs are updated in one SQLite transaction. | `libra push --atomic origin main` |
 | `--thin` / `--no-thin` | Accepted for compatibility; **no-op** (the pack encoder always produces a self-contained pack). | `libra push --thin origin main` |
 | `--porcelain` | Machine-readable output: a `To <url>` header then `<flag>\t<from>:<to>\t<summary>` per ref. Conflicts with `--json`/`--machine`. | `libra push --porcelain origin main` |
 | `-n`, `--dry-run` | Perform negotiation and object collection but skip the actual upload. Reports what would be pushed. | `libra push --dry-run` |
@@ -64,6 +65,7 @@ libra push -u origin feature-x
 libra push --force origin main
 libra push --force-with-lease origin main
 libra push --force-with-lease=main:abc123 origin main
+libra push --atomic origin main
 libra push --porcelain origin main
 libra push --dry-run
 libra push origin local_branch:release
@@ -302,6 +304,8 @@ Set upstream:
 - `forced` is `true` when the update required `--force` (non-fast-forward)
 - `bytes_pushed` is the pack data size in bytes; `0` for dry-run
 - `lfs_files_uploaded` counts LFS objects transferred (HTTP transport only)
+- `atomic` is present and `true` when `--atomic` was requested
+- `force_with_lease` is present when `--force-with-lease` was requested (`all`, `<ref>`, or `<ref>:<expect>`)
 - `upstream_set` is non-null when `-u` / `--set-upstream` was used
 - `warnings` contains force push warnings or other advisory messages
 
@@ -384,10 +388,10 @@ continue to fail closed to avoid undefined concurrent filesystem mutation semant
 Git LFS requires a separate binary (`git-lfs`) and a post-push hook to upload large files.
 This two-phase design means LFS failures can leave the remote in an inconsistent state
 where commits reference LFS pointers whose backing objects have not arrived. Libra detects
-LFS pointer blobs during the object-collection phase and uploads them inline during the
-HTTP push transaction. This ensures atomicity: either all objects (including LFS) arrive,
-or the push fails cleanly. The integration is transparent -- users do not need to install
-or configure a separate LFS tool.
+LFS pointer blobs during the object-collection phase and uploads them before the
+receive-pack ref update is sent. If an LFS upload fails, Libra aborts before changing
+remote refs; `--atomic` then covers the receive-pack ref update phase. The integration
+is transparent -- users do not need to install or configure a separate LFS tool.
 
 ## Parameter Comparison: Libra vs Git vs jj
 
@@ -399,9 +403,10 @@ or configure a separate LFS tool.
 | Force push | `libra push --force` | `git push --force` | `jj git push --allow-new` |
 | Lease-protected force | `libra push --force-with-lease` | `git push --force-with-lease` | N/A |
 | Force-if-includes | Accepted, no-op | `git push --force-if-includes` | N/A |
+| Atomic update | `libra push --atomic` | `git push --atomic` | N/A |
 | Porcelain output | `libra push --porcelain` | `git push --porcelain` | N/A |
 | Thin pack | Accepted, no-op | `git push --thin` | N/A |
-| Atomic / signed / push-option / follow-tags | Not yet supported | `git push --atomic` / `--signed` / `-o` / `--follow-tags` | N/A |
+| Signed / push-option / follow-tags | Not yet supported | `git push --signed` / `-o` / `--follow-tags` | N/A |
 | Dry-run | `libra push --dry-run` | `git push --dry-run` | `jj git push --dry-run` |
 | Refspec mapping | `libra push origin src:dst` | `git push origin src:dst` | N/A |
 | Multiple refspecs | `libra push origin main feature:release` | `git push origin main feature:release` | N/A |

@@ -51,6 +51,7 @@ pub(crate) fn scenario_push_local_file_remote_rejected(ctx: &mut ScenarioCtx<'_>
         vec!["--json=compact", "push", "origin", "main"],
         vec!["--json=compact", "push", "--dry-run", "origin", "main"],
         vec!["--json=compact", "push", "--force", "origin", "main"],
+        vec!["--json=compact", "push", "--atomic", "origin", "main"],
         vec!["--json=compact", "push", "--tags", "origin"],
         vec!["--json=compact", "push", "--mirror", "--dry-run", "origin"],
     ] {
