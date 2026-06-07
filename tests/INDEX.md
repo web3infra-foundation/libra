@@ -17,7 +17,7 @@
 
 | target | wave | one-line purpose | relevant src |
 |---|---|---|---|
-| `command_test` | 1 | Top-level dispatcher covering most `libra <subcmd>` integration paths | `src/command/`, `src/cli.rs` |
+| `command_test` | 1 | Top-level dispatcher covering most `libra <subcmd>` integration paths, including commit editor/hooks/signing/autosquash/JSON coverage | `src/command/`, `src/cli.rs`, `tests/command/commit_test.rs`, `tests/command/commit_editor_test.rs`, `tests/command/commit_sign_hooks_test.rs`, `tests/command/commit_autosquash_test.rs`, `tests/command/commit_json_test.rs`, `tests/command/commit_error_test.rs` |
 | `compat_stash_subcommand_surface` | 1 | Guards `libra stash` subcommand surface vs. git CLI | `src/command/stash.rs` |
 | `compat_bisect_subcommand_surface` | 1 | Guards `libra bisect` subcommand surface and declined parser-only bisect surfaces | `src/command/bisect.rs`, `src/cli.rs` |
 | `compat_worktree_delete_dir` | 1 | Guards worktree delete semantics on dir removal | `src/command/worktree.rs` |

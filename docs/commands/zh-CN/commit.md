@@ -68,7 +68,7 @@ libra commit --no-edit -m "use this exactly"
 
 ### `--cleanup <MODE>`
 
-控制提交消息在提交前如何清理（对标 `git commit --cleanup`）。模式：`strip`（删除 `#` 注释行、行尾空白、首尾空行）、`whitespace`（仅 trim，保留 `#` 行）、`verbatim`（不改动）、`scissors`（在 `# ----- >8 -----` 剪切线处截断后再按 `whitespace`）、`default`（经编辑器时同 `strip`，否则同 `whitespace`）。未知模式为解析错误（退出 129）。
+控制提交消息在提交前如何清理（对标 `git commit --cleanup`）。模式：`strip`（删除 `#` 注释行、行尾空白、首尾空行）、`whitespace`（仅 trim，保留 `#` 行）、`verbatim`（不改动）、`scissors`（在 `# ----- >8 -----` 剪切线处截断后再按 `whitespace`）、`default`（经编辑器时同 `strip`，否则同 `whitespace`）。未传 `--cleanup` 时由 `commit.cleanup` 配置提供默认模式。未知模式为解析错误（退出 129）。
 
 ```bash
 libra commit --cleanup=verbatim -m "#1234 keep this literal"
