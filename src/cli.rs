@@ -635,6 +635,61 @@ fn rewrite_log_short_number_args(args: Vec<String>) -> Vec<String> {
     out
 }
 
+fn rewrite_diff_similarity_short_args(args: Vec<String>) -> Vec<String> {
+    let subcommand = find_subcommand_index(&args);
+    let Some((diff_index, from_double_dash)) = subcommand else {
+        return args;
+    };
+    if !matches!(args.get(diff_index), Some(name) if name == "diff") {
+        return args;
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    if from_double_dash {
+        for (idx, arg) in args.iter().enumerate().take(diff_index + 1) {
+            if idx + 1 == diff_index && arg == "--" {
+                continue;
+            }
+            out.push(arg.clone());
+        }
+    } else {
+        out.extend(args.iter().take(diff_index + 1).cloned());
+    }
+
+    let mut after_double_dash = false;
+    for arg in args.into_iter().skip(diff_index + 1) {
+        if after_double_dash {
+            out.push(arg);
+            continue;
+        }
+        if arg == "--" {
+            after_double_dash = true;
+            out.push(arg);
+            continue;
+        }
+        out.push(rewrite_diff_similarity_short_arg(arg));
+    }
+
+    out
+}
+
+fn rewrite_diff_similarity_short_arg(arg: String) -> String {
+    for flag in ['M', 'C'] {
+        let prefix = format!("-{flag}");
+        let Some(rest) = arg.strip_prefix(&prefix) else {
+            continue;
+        };
+        if rest.is_empty() || rest.starts_with('=') {
+            return arg;
+        }
+        if rest.starts_with(|c: char| c.is_ascii_digit() || c == '.') {
+            return format!("{prefix}={rest}");
+        }
+        return arg;
+    }
+    arg
+}
+
 /// Locate the first non-flag token in `args` and return its index plus whether it was
 /// produced by an explicit `--` separator.
 ///
@@ -1096,6 +1151,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         None => env::args().collect::<Vec<_>>(),
     };
     let argv = rewrite_log_short_number_args(argv);
+    let argv = rewrite_diff_similarity_short_args(argv);
     utils::output::reset_warning_tracker();
     if is_error_codes_help_topic(&argv) {
         return print_error_codes_help();
