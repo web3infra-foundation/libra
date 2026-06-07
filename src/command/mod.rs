@@ -221,35 +221,37 @@ mod tests {
     /// Tests commit message formatting and parsing with signatures.
     /// Verifies correct handling of GPG/SSH signatures and proper message extraction.
     fn test_format_and_parse_commit_msg() {
+        use crate::common_utils::{VERSION_CONTROL_BY_TRAILER, append_version_control_trailer};
+
+        let msg_with_trailer = append_version_control_trailer("commit message");
         {
-            let msg = "commit message";
             let gpg_sig =
                 "gpgsig -----BEGIN PGP SIGNATURE-----\ncontent\n-----END PGP SIGNATURE-----";
             let ssh_sig =
                 "gpgsig -----BEGIN SSH SIGNATURE-----\ncontent1\n-----END SSH SIGNATURE-----";
-            let msg_gpg = format_commit_msg(msg, Some(gpg_sig));
-            let msg_ssh = format_commit_msg(msg, Some(ssh_sig));
+            let msg_gpg = format_commit_msg("commit message", Some(gpg_sig));
+            let msg_ssh = format_commit_msg("commit message", Some(ssh_sig));
             let gpg_sig_val = &gpg_sig[7..];
             let ssh_sig_val = &ssh_sig[7..];
             let (msg_, gpg_sig_) = parse_commit_msg(&msg_gpg);
             let (msg__, ssh_sig__) = parse_commit_msg(&msg_ssh);
-            assert_eq!(msg, msg_);
-            assert_eq!(msg, msg__);
+            assert_eq!(msg_with_trailer, msg_);
+            assert_eq!(msg_with_trailer, msg__);
             assert_eq!(gpg_sig_val, gpg_sig_.unwrap());
             assert_eq!(ssh_sig_val, ssh_sig__.unwrap());
 
-            let msg_none = format_commit_msg(msg, None);
+            let msg_none = format_commit_msg("commit message", None);
             let (msg_, sig_) = parse_commit_msg(&msg_none);
-            assert_eq!(msg, msg_);
+            assert_eq!(msg_with_trailer, msg_);
             assert_eq!(None, sig_);
+            assert!(msg_with_trailer.ends_with(VERSION_CONTROL_BY_TRAILER));
         }
 
         {
-            let msg = "commit message";
             let gpg_sig = "gpgsig -----BEGIN PGP SIGNATURE-----\ncontent\n-----END PGP SIGNATURE-----\n \n \n";
-            let msg_gpg = format_commit_msg(msg, Some(gpg_sig));
+            let msg_gpg = format_commit_msg("commit message", Some(gpg_sig));
             let (msg_, _) = parse_commit_msg(&msg_gpg);
-            assert_eq!(msg, msg_);
+            assert_eq!(msg_with_trailer, msg_);
         }
     }
 }

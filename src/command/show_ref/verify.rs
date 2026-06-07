@@ -5,6 +5,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use super::{
     ShowRefArgs, ShowRefEntry, exists::remote_tracking_parts, show_ref_branch_store_error,
+    tag_entries,
 };
 use crate::{
     internal::{branch::Branch, db::get_db_conn_instance, head::Head, model::reference},
@@ -21,16 +22,16 @@ pub(super) async fn show_ref_verify(args: &ShowRefArgs, output: &OutputConfig) -
 
     let mut entries = Vec::with_capacity(args.pattern.len());
     for target in &args.pattern {
-        let Some(entry) = lookup_exact_ref(target).await? else {
+        let Some(mut target_entries) = lookup_exact_ref(target, args.dereference).await? else {
             return verify_missing(target, output);
         };
-        entries.push(entry);
+        entries.append(&mut target_entries);
     }
 
     emit_verified_entries(&entries, args.hash, output)
 }
 
-async fn lookup_exact_ref(target: &str) -> CliResult<Option<ShowRefEntry>> {
+async fn lookup_exact_ref(target: &str, dereference: bool) -> CliResult<Option<Vec<ShowRefEntry>>> {
     if target == "HEAD" {
         return head_entry().await;
     }
@@ -47,19 +48,21 @@ async fn lookup_exact_ref(target: &str) -> CliResult<Option<ShowRefEntry>> {
     }
 
     if target.strip_prefix("refs/tags/").is_some() {
-        return tag_entry(target).await;
+        return tag_entry(target, dereference).await;
     }
 
     Ok(None)
 }
 
-async fn head_entry() -> CliResult<Option<ShowRefEntry>> {
+async fn head_entry() -> CliResult<Option<Vec<ShowRefEntry>>> {
     Head::current_commit_result()
         .await
         .map(|maybe_hash| {
-            maybe_hash.map(|hash| ShowRefEntry {
-                hash: hash.to_string(),
-                refname: "HEAD".to_string(),
+            maybe_hash.map(|hash| {
+                vec![ShowRefEntry {
+                    hash: hash.to_string(),
+                    refname: "HEAD".to_string(),
+                }]
             })
         })
         .map_err(|error| show_ref_branch_store_error("resolve HEAD", error))
@@ -69,19 +72,21 @@ async fn branch_entry(
     branch_name: &str,
     remote: Option<&str>,
     refname: &str,
-) -> CliResult<Option<ShowRefEntry>> {
+) -> CliResult<Option<Vec<ShowRefEntry>>> {
     Branch::find_branch_result(branch_name, remote)
         .await
         .map(|maybe_branch| {
-            maybe_branch.map(|branch| ShowRefEntry {
-                hash: branch.commit.to_string(),
-                refname: refname.to_string(),
+            maybe_branch.map(|branch| {
+                vec![ShowRefEntry {
+                    hash: branch.commit.to_string(),
+                    refname: refname.to_string(),
+                }]
             })
         })
         .map_err(|error| show_ref_branch_store_error("resolve branch reference", error))
 }
 
-async fn tag_entry(refname: &str) -> CliResult<Option<ShowRefEntry>> {
+async fn tag_entry(refname: &str, dereference: bool) -> CliResult<Option<Vec<ShowRefEntry>>> {
     let db = get_db_conn_instance().await;
     let row = reference::Entity::find()
         .filter(reference::Column::Name.eq(refname))
@@ -102,12 +107,12 @@ async fn tag_entry(refname: &str) -> CliResult<Option<ShowRefEntry>> {
     let Some(hash) = row.commit else {
         return Err(corrupt_tag_ref(refname, "missing object hash"));
     };
-    ObjectHash::from_str(&hash).map_err(|error| corrupt_tag_ref(refname, error.to_string()))?;
+    let target =
+        ObjectHash::from_str(&hash).map_err(|error| corrupt_tag_ref(refname, error.to_string()))?;
 
-    Ok(Some(ShowRefEntry {
-        hash,
-        refname: refname.to_string(),
-    }))
+    tag_entries::entries_for_tag_target(refname, &target, dereference)
+        .await
+        .map(Some)
 }
 
 fn verify_missing(target: &str, output: &OutputConfig) -> CliResult<()> {

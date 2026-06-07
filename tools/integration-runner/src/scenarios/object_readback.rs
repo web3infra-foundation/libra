@@ -223,6 +223,24 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
         &ctx.command(&["--json", "show-ref", "--heads"], repo.clone(), true)?,
         "show-ref",
     )?;
+    ctx.command(&["tag", "-m", "object tag", "v-object"], repo.clone(), true)?;
+    let dereferenced_tag = ctx.command(
+        &["show-ref", "--dereference", "--tags", "v-object"],
+        repo.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&dereferenced_tag, "refs/tags/v-object")?;
+    assert_stdout_contains(&dereferenced_tag, "refs/tags/v-object^{}")?;
+    let verified_dereferenced_tag = ctx.command(
+        &["show-ref", "--verify", "--dereference", "refs/tags/v-object"],
+        repo.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&verified_dereferenced_tag, "refs/tags/v-object^{}")?;
+    ctx.command(&["branch", "main-2"], repo.clone(), true)?;
+    let main_pattern = ctx.command(&["show-ref", "--heads", "main"], repo.clone(), true)?;
+    assert_stdout_contains(&main_pattern, "refs/heads/main")?;
+    assert_not_contains(&main_pattern, "refs/heads/main-2")?;
     let missing = ctx.command(&["cat-file", "-t", "deadbeef"], repo.clone(), false)?;
     assert_lbr_or_text(&missing, "object not found")?;
     Ok(())

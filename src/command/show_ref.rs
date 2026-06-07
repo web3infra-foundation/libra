@@ -19,6 +19,8 @@ use crate::{
 };
 
 mod exists;
+mod pattern;
+mod tag_entries;
 mod verify;
 
 /// `--help` examples shown in `libra show-ref --help` output.
@@ -26,7 +28,7 @@ mod verify;
 /// `show-ref` lists local references with their object hashes. The
 /// banner pins the all-refs default, `--heads` / `--tags` scope
 /// filters, the `--head` opt-in for including HEAD, `-s` for hash-only
-/// output, a pattern filter for substring search, and a JSON variant
+/// output, a pattern filter for path-segment suffix search, and a JSON variant
 /// for agents so users see all supported forms without reading the
 /// design doc. Cross-cutting `--help` EXAMPLES rollout per
 /// `docs/improvement/README.md` item B.
@@ -37,7 +39,8 @@ EXAMPLES:
     libra show-ref --tags            List only tags (refs/tags/)
     libra show-ref --head            Include HEAD in the output
     libra show-ref -s --heads        Print branch hashes only (one per line, scripting-friendly)
-    libra show-ref main              Filter refs by substring match (e.g. only entries containing 'main')
+    libra show-ref main              Filter refs by path segment suffix (e.g. heads/main, remotes/origin/main)
+    libra show-ref -d --tags         Include peeled ^{} lines for annotated tags
     libra show-ref --exists refs/heads/main   Exit 0 if the ref exists, 2 if not (no output)
     libra show-ref --verify refs/heads/main   Require an exact full refname match
     libra show-ref --json --heads    Structured JSON output for agents";
@@ -61,6 +64,10 @@ pub struct ShowRefArgs {
     #[clap(short = 's', long = "hash")]
     pub hash: bool,
 
+    /// Dereference annotated tags and include peeled ^{} refs
+    #[clap(short = 'd', long = "dereference")]
+    pub dereference: bool,
+
     /// Verify that each argument is an exact full ref name
     #[clap(long)]
     pub verify: bool,
@@ -70,7 +77,7 @@ pub struct ShowRefArgs {
     #[clap(long, value_name = "REF")]
     pub exists: Option<String>,
 
-    /// Filter refs by pattern (substring match on the ref name)
+    /// Filter refs by path-segment suffix pattern
     pub pattern: Vec<String>,
 }
 
@@ -216,17 +223,14 @@ async fn collect_show_ref_entries(args: &ShowRefArgs) -> CliResult<Vec<ShowRefEn
     if show_tags {
         let tag_list = tag::list().await.map_err(show_ref_tag_list_error)?;
         for t in tag_list {
-            // For annotated tags use the tag object hash; for lightweight use the commit hash.
-            let hash = match &t.object {
-                tag::TagObject::Commit(c) => c.id.to_string(),
-                tag::TagObject::Tag(tg) => tg.id.to_string(),
-                tag::TagObject::Blob(b) => b.id.to_string(),
-                tag::TagObject::Tree(tr) => tr.id.to_string(),
-            };
-            entries.push(ShowRefEntry {
-                hash,
-                refname: format!("refs/tags/{}", t.name),
-            });
+            entries.extend(
+                tag_entries::entries_for_loaded_tag(
+                    &format!("refs/tags/{}", t.name),
+                    &t.object,
+                    args.dereference,
+                )
+                .await?,
+            );
         }
     }
 
@@ -234,10 +238,7 @@ async fn collect_show_ref_entries(args: &ShowRefArgs) -> CliResult<Vec<ShowRefEn
     if !args.pattern.is_empty() {
         entries.retain(|entry| {
             entry.refname == "HEAD"
-                || args
-                    .pattern
-                    .iter()
-                    .any(|p| entry.refname.contains(p.as_str()))
+                || pattern::matches_any_ref_pattern(&entry.refname, &args.pattern)
         });
     }
 
@@ -270,6 +271,7 @@ mod tests {
         assert!(!args.tags);
         assert!(!args.head);
         assert!(!args.hash);
+        assert!(!args.dereference);
         assert!(args.pattern.is_empty());
     }
 
@@ -298,5 +300,11 @@ mod tests {
     fn test_show_ref_args_hash_flag() {
         let args = ShowRefArgs::try_parse_from(["show-ref", "--hash"]).unwrap();
         assert!(args.hash);
+    }
+
+    #[test]
+    fn test_show_ref_args_dereference_flag() {
+        let args = ShowRefArgs::try_parse_from(["show-ref", "--dereference"]).unwrap();
+        assert!(args.dereference);
     }
 }

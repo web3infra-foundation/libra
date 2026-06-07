@@ -1,4 +1,4 @@
-use libra::internal::{branch::Branch, config::ConfigKv, head::Head};
+use libra::internal::{branch::Branch, config::ConfigKv, head::Head, tag as internal_tag};
 
 use super::*;
 
@@ -6,6 +6,20 @@ fn head_id(repo: &std::path::Path) -> String {
     let output = run_libra_command(&["rev-parse", "HEAD"], repo);
     assert_cli_success(&output, "rev-parse HEAD");
     String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn create_annotated_tag(repo: &std::path::Path, name: &str) -> String {
+    let _guard = ChangeDirGuard::new(repo);
+    let runtime = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    runtime
+        .block_on(internal_tag::create(
+            name,
+            Some("release notes".to_string()),
+            false,
+        ))
+        .expect("failed to create annotated tag")
+        .target
+        .to_string()
 }
 
 #[test]
@@ -30,6 +44,25 @@ fn test_show_ref_verify_hash_only() {
     );
     assert_cli_success(&output, "show-ref --hash --verify refs/heads/main");
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+}
+
+#[test]
+fn test_show_ref_verify_dereference_annotated_tag() {
+    let repo = create_committed_repo_via_cli();
+    let peeled = head_id(repo.path());
+    let tag_object = create_annotated_tag(repo.path(), "v1.0");
+
+    let output = run_libra_command(
+        &["show-ref", "--verify", "--dereference", "refs/tags/v1.0"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "show-ref --verify --dereference refs/tags/v1.0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout.lines().collect::<Vec<_>>();
+
+    assert_eq!(lines.len(), 2, "unexpected output: {stdout}");
+    assert_eq!(lines[0], format!("{tag_object} refs/tags/v1.0"));
+    assert_eq!(lines[1], format!("{peeled} refs/tags/v1.0^{{}}"));
 }
 
 #[test]
