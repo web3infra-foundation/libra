@@ -27,6 +27,9 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
         remote_dir.clone(),
         true,
     )?;
+    for tag in ["v1.10.0", "v1.1.0", "v1.2.0"] {
+        ctx.gitfix(&["tag", tag], remote_dir.clone(), true)?;
+    }
 
     let remote = remote_dir.to_string_lossy().to_string();
     let clone = clone_dir.to_string_lossy().to_string();
@@ -37,6 +40,50 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
         ctx.run_dir.clone(),
         true,
     )?;
+    let json_ls_remote = ctx.command(
+        &["--json", "ls-remote", "--heads", &remote],
+        ctx.run_dir.clone(),
+        true,
+    )?;
+    assert_json_ok(&json_ls_remote, "ls-remote")?;
+    assert_stdout_contains(&json_ls_remote, "refs/heads/main")?;
+    let sorted_tags = ctx.command(
+        &["ls-remote", "--sort=version:refname", "--tags", &remote],
+        ctx.run_dir.clone(),
+        true,
+    )?;
+    let sorted_stdout = String::from_utf8_lossy(&sorted_tags.stdout);
+    let v1 = sorted_stdout
+        .find("refs/tags/v1.1.0")
+        .context("missing v1.1.0 in sorted ls-remote tags")?;
+    let v2 = sorted_stdout
+        .find("refs/tags/v1.2.0")
+        .context("missing v1.2.0 in sorted ls-remote tags")?;
+    let v10 = sorted_stdout
+        .find("refs/tags/v1.10.0")
+        .context("missing v1.10.0 in sorted ls-remote tags")?;
+    if !(v1 < v2 && v2 < v10) {
+        bail!("ls-remote version sort order was not natural: {sorted_stdout}");
+    }
+    let no_match = ctx.command(
+        &["ls-remote", "--exit-code", "--heads", &remote, "no-such-branch"],
+        ctx.run_dir.clone(),
+        false,
+    )?;
+    if no_match.status.code() != Some(2) {
+        bail!(
+            "ls-remote --exit-code no-match returned {:?}, expected 2",
+            no_match.status.code()
+        );
+    }
+    let get_url = ctx.command(&["ls-remote", "--get-url", &remote], ctx.run_dir.clone(), true)?;
+    assert_stdout_contains(&get_url, &remote)?;
+    let invalid_sort = ctx.command(
+        &["ls-remote", "--sort=objectname", &remote],
+        ctx.run_dir.clone(),
+        false,
+    )?;
+    assert_lbr_or_text(&invalid_sort, "invalid sort key")?;
     ctx.command(&["clone", &remote, &clone], ctx.run_dir.clone(), true)?;
     let remotes = ctx.command(&["remote", "-v"], clone_dir.clone(), true)?;
     assert_stdout_contains(&remotes, &remote)?;

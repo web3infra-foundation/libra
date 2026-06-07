@@ -34,9 +34,17 @@ gitfix config user.email "remote-seed@example.invalid"
 printf 'first\n' > README.md
 gitfix add README.md
 gitfix commit -m "test: seed remote"
+gitfix tag v1.10.0
+gitfix tag v1.1.0
+gitfix tag v1.2.0
 
 libra ls-remote "$REMOTE_DIR"
 libra ls-remote --heads "$REMOTE_DIR" main
+libra --json ls-remote --heads "$REMOTE_DIR"
+libra ls-remote --sort=version:refname --tags "$REMOTE_DIR"
+! libra ls-remote --exit-code --heads "$REMOTE_DIR" no-such-branch
+libra ls-remote --get-url "$REMOTE_DIR"
+! libra ls-remote --sort=objectname "$REMOTE_DIR"
 libra clone "$REMOTE_DIR" "$CLONE_DIR"
 cd "$CLONE_DIR"
 libra remote -v
@@ -125,7 +133,7 @@ libra --json pull --ff-only origin main >pull.json
 python3 -c "import json; d=json.load(open('pull.json')); assert d['ok'] is True; assert 'data' in d"
 ```
 
-断言：隔离 `gitfix()` 创建的本地 Git 仓库可作为 clone/fetch/pull remote；`remote add`、`remote -v`、`remote get-url` 能观察本地路径 URL；`ls-remote` 可看到 `refs/heads/main`；普通 clone 后文件和 log 可见；Git fixture 新提交后，clone 仓库通过 `fetch`、`fetch --all` 和 `pull --ff-only` 能看到新增提交；**`pull --rebase` 把 clone 端本地提交重放到 upstream 新提交之上——`README.md` 含 upstream 的 `third`，本地 `clone-local.txt` 仍在**；`clone --bare` 生成 Libra bare 布局（可观察到 `libra.db`）；`clone --single-branch -b main` 只检出指定分支；`--origin upstream --no-checkout` 写入 upstream remote 且不物化工作树；`--jobs 2` 被接受；`--reference` / `--local --no-hardlinks` / `--shared` 在本地 remote 上可完成并通过 fsck；缺失 remote 或缺失 ref 必须非 0 退出且不创建半成品仓库或损坏当前 clone。
+断言：隔离 `gitfix()` 创建的本地 Git 仓库可作为 clone/fetch/pull remote；`remote add`、`remote -v`、`remote get-url` 能观察本地路径 URL；`ls-remote` 可看到 `refs/heads/main` 且 `--json ls-remote --heads` 返回结构化 refs 列表，`--sort=version:refname --tags` 对 `v1.1.0` / `v1.2.0` / `v1.10.0` 使用自然版本顺序，`--exit-code` 在无匹配时返回 2，`--get-url` 离线打印 remote spec，非法 sort key 必须失败；普通 clone 后文件和 log 可见；Git fixture 新提交后，clone 仓库通过 `fetch`、`fetch --all` 和 `pull --ff-only` 能看到新增提交；**`pull --rebase` 把 clone 端本地提交重放到 upstream 新提交之上——`README.md` 含 upstream 的 `third`，本地 `clone-local.txt` 仍在**；`clone --bare` 生成 Libra bare 布局（可观察到 `libra.db`）；`clone --single-branch -b main` 只检出指定分支；`--origin upstream --no-checkout` 写入 upstream remote 且不物化工作树；`--jobs 2` 被接受；`--reference` / `--local --no-hardlinks` / `--shared` 在本地 remote 上可完成并通过 fsck；缺失 remote 或缺失 ref 必须非 0 退出且不创建半成品仓库或损坏当前 clone。
 
 补充可执行断言：
 - `libra --json clone "$REMOTE_DIR" clone-json` 成功后 `ok:true`，并验证 `libra --json log -n 1` 结构。
