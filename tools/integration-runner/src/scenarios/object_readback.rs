@@ -101,6 +101,17 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     assert_stdout_contains(&blob_type, "blob")?;
     let blob_content = ctx.command(&["cat-file", "-p", &blob_id], repo.clone(), true)?;
     assert_stdout_contains(&blob_content, "loose blob")?;
+    let shown_blob = ctx.command(&["show", &blob_id], repo.clone(), true)?;
+    assert_stdout_contains(&shown_blob, "loose blob")?;
+    fs::write(repo.join("binary.bin"), b"binary\0blob").context("write binary blob fixture")?;
+    let binary_blob = ctx.command(&["hash-object", "-w", "binary.bin"], repo.clone(), true)?;
+    let binary_blob_id = stdout_trim(&binary_blob);
+    let shown_binary = ctx.command(&["show", &binary_blob_id], repo.clone(), true)?;
+    assert_stdout_contains(&shown_binary, "Binary file")?;
+    assert_json_ok(
+        &ctx.command(&["--json", "show", &binary_blob_id], repo.clone(), true)?,
+        "show",
+    )?;
     fs::write(repo.join("docs/rev-list.md"), "rev-list second\n")
         .context("write rev-list second fixture")?;
     ctx.command(&["add", "docs/rev-list.md"], repo.clone(), true)?;
