@@ -82,6 +82,8 @@
 | `restore --staged <path>` | `cli.restore-reset-diff` | index 恢复到 HEAD，工作区保持修改 |
 | `restore --worktree <path>` | `cli.restore-reset-diff` | 工作区文件恢复到 index 或 source 内容 |
 | `restore --source <rev>` | `cli.restore-reset-diff` | source revision 不存在时失败且不改写文件 |
+| `restore --ours` / `--theirs` | `cli.restore-reset-diff` | 冲突阶段 stage 2/3 写入工作区，index 保持 unmerged |
+| `restore --ignore-unmerged` | `cli.restore-reset-diff` | unmerged path 被跳过，plain restore over unmerged path 退出 128 |
 | `reset HEAD -- <path>` | `cli.restore-reset-diff` | 路径级 reset 只取消暂存 |
 | `reset --pathspec-from-file=<file>` / `--pathspec-file-nul` | `cli.restore-reset-diff` | file/NUL pathspec 输入只取消暂存指定路径 |
 | `reset --no-refresh` | `cli.restore-reset-diff` | 兼容 no-op flag 可传入且保持 mixed reset 语义 |

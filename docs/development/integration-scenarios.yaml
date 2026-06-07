@@ -221,10 +221,10 @@ scenarios:
   - id: cli.restore-reset-diff
     wave: 1
     group: working_tree
-    purpose: "Cover diff (unstaged/staged/old-new), restore --staged/--worktree, reset --soft/--mixed/--hard, path-level reset, pathspec-from-file, and --no-refresh."
+    purpose: "Cover diff (unstaged/staged/old-new), restore --staged/--worktree/conflict-stage, reset --soft/--mixed/--hard, path-level reset, pathspec-from-file, and --no-refresh."
     gh_required: false
     requires_git: false
-    key_assertion_categories: [json_envelope, fsck, negative_exit]
+    key_assertion_categories: [json_envelope, fsck, negative_exit, conflict_markers]
     doc_section: "cli.restore-reset-diff"
 
   - id: cli.stash-bisect-worktree
