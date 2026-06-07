@@ -98,6 +98,9 @@
 | 参数或子命令 | 场景 ID | 关键断言 |
 |---|---|---|
 | `stash push -m` | `cli.stash-bisect-worktree` | tracked 修改被保存，消息可在列表中观察 |
+| `stash push -u` / `--include-untracked` | `cli.stash-bisect-worktree` | 可见 untracked 文件被保存、移除，并可由 `pop` 恢复 |
+| `stash push -a` / `--all` | `cli.stash-bisect-worktree` | ignored 文件与可见 untracked 文件一起被保存、移除，并可恢复 |
+| `stash push --keep-index` | `cli.stash-bisect-worktree` | 已暂存内容保持在 index/worktree，未暂存 delta 被 stash |
 | `stash list` / `stash show` | `cli.stash-bisect-worktree` | stash 条目和文件级摘要可观察 |
 | `stash apply` | `cli.stash-bisect-worktree` | 修改恢复但 stash 条目保留 |
 | `stash pop` | `cli.stash-bisect-worktree` | 修改恢复且 stash 条目删除 |

@@ -1,6 +1,6 @@
 ### `cli.stash-bisect-worktree`
 
-目的：覆盖兼容性差异较大的 `stash`、`bisect`、`worktree` 命令面，重点验证状态保存/恢复、二分会话状态和 Libra worktree remove 默认保留目录的差异语义。
+目的：覆盖兼容性差异较大的 `stash`、`bisect`、`worktree` 命令面，重点验证状态保存/恢复、`stash push -u` / `-a` / `--all` / `--keep-index`、二分会话状态和 Libra worktree remove 默认保留目录的差异语义。
 
 最小步骤：
 
@@ -40,6 +40,34 @@ libra branch -D stash-branch-test
 
 libra stash clear --force
 libra stash list
+
+printf 'visible\n' > visible-untracked.txt
+libra --json stash push -u >stash-push-untracked.json
+python3 -c "import json; d=json.load(open('stash-push-untracked.json')); assert d['ok'] is True; assert d['data']['included_untracked'] >= 1"
+test ! -e visible-untracked.txt
+libra stash pop
+test -f visible-untracked.txt
+rm visible-untracked.txt
+
+printf 'ignored.log\n' > .libraignore
+printf 'ignored\n' > ignored.log
+libra --json stash push --all >stash-push-all.json
+python3 -c "import json; d=json.load(open('stash-push-all.json')); assert d['ok'] is True; assert d['data']['included_untracked'] >= 1"
+test ! -e .libraignore
+test ! -e ignored.log
+libra stash pop
+test -f .libraignore
+test -f ignored.log
+rm .libraignore ignored.log
+
+printf 'staged\n' > number.txt
+libra add number.txt
+printf 'unstaged\n' > number.txt
+libra --json stash push --keep-index >stash-push-keep-index.json
+python3 -c "import json; d=json.load(open('stash-push-keep-index.json')); assert d['ok'] is True; assert d['data']['kept_index'] is True"
+test "$(cat number.txt)" = "staged"
+libra reset --hard
+libra stash clear --force
 
 GOOD_COMMIT="$(libra rev-parse HEAD)"
 printf '1\n' > number.txt
@@ -92,7 +120,7 @@ cd "$RUN_DIR/workflow-repo"
 ! libra worktree remove "$RUN_ROOT/repos/no-such-worktree"
 ```
 
-断言：`stash push` 保存 tracked 修改并清理工作区；`stash list` / `stash show` 能观察 stash 条目；`stash apply` 保留 stash，`stash pop` 应用并删除 stash；`stash clear --force` 清空列表；`bisect start <bad> --good <good>` 建立会话，`view` / `log` 能观察状态，`bad` / `good <rev>` 推进会话，`reset` 恢复原始 HEAD；`worktree add` 注册 linked worktree，`list` 显示路径，`lock --reason` / `unlock` 更新锁状态，`move` 更新路径，`remove` 默认只注销登记且保留目录，`prune` 可执行；非法 stash ref、非法 revision 和缺失 worktree 必须失败且不破坏已有仓库状态。
+断言：`stash push` 保存 tracked 修改并清理工作区；`stash list` / `stash show` 能观察 stash 条目；`stash apply` 保留 stash，`stash pop` 应用并删除 stash；`stash push -u` 保存/移除/恢复可见 untracked 文件；`stash push --all` 保存/移除/恢复可见 untracked 与 ignored 文件；`stash push --keep-index` 保留 staged 内容并移除 unstaged delta；`stash clear --force` 清空列表；`bisect start <bad> --good <good>` 建立会话，`view` / `log` 能观察状态，`bad` / `good <rev>` 推进会话，`reset` 恢复原始 HEAD；`worktree add` 注册 linked worktree，`list` 显示路径，`lock --reason` / `unlock` 更新锁状态，`move` 更新路径，`remove` 默认只注销登记且保留目录，`prune` 可执行；非法 stash ref、非法 revision 和缺失 worktree 必须失败且不破坏已有仓库状态。
 
 补充可执行断言（故意差异重点场景）：
 - `libra worktree remove <path>` 后 `test -d <path>` 必须仍存在（Libra 故意保留目录，不像 Git 默认删除）。
@@ -101,4 +129,3 @@ cd "$RUN_DIR/workflow-repo"
 - `worktree remove` 后的 `libra --json worktree list` 不再包含该 worktree。
 - 负向 `worktree remove` 不存在路径的错误必须非 0，stderr 包含路径。
 - 验证 `--delete-dir` 模式真正删除目录：`libra worktree remove --delete-dir <path> && test ! -d <path>`。
-

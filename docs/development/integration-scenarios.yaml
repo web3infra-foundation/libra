@@ -230,7 +230,7 @@ scenarios:
   - id: cli.stash-bisect-worktree
     wave: 1
     group: workflow
-    purpose: "Cover stash (push/list/show/apply/pop/clear/branch), bisect (start/bad/good/skip/log/view/reset), worktree (add/list/lock/unlock/move/remove/prune + --delete-dir). Verifies intentional difference: remove keeps dir by default."
+    purpose: "Cover stash (push/list/show/apply/pop/clear/branch plus push -u/-a/--all/--keep-index), bisect (start/bad/good/skip/log/view/reset), worktree (add/list/lock/unlock/move/remove/prune + --delete-dir). Verifies intentional difference: remove keeps dir by default."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck, intentional_difference, negative_exit]

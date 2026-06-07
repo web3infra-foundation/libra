@@ -5,7 +5,7 @@ Stash the changes in a dirty working directory away.
 ## Synopsis
 
 ```
-libra stash push [-m <message>]
+libra stash push [-m <message>] [-u | -a] [--keep-index]
 libra stash pop [<stash>]
 libra stash list
 libra stash apply [<stash>]
@@ -17,7 +17,7 @@ libra stash clear [--force]
 
 ## Description
 
-`libra stash` saves your local modifications to a new stash entry and reverts the working directory to match HEAD. The modifications can be restored later with `libra stash pop` or `libra stash apply`. If `stash push` is run on a clean working tree, it exits successfully as a no-op and reports that there are no local changes to save.
+`libra stash` saves your local modifications to a new stash entry and reverts the working directory to match HEAD. By default, `stash push` records tracked index/worktree changes and leaves untracked files alone. Use `-u` / `--include-untracked` to include visible untracked files, or `-a` / `--all` to include ignored files too. The modifications can be restored later with `libra stash pop` or `libra stash apply`. If `stash push` is run on a clean working tree and no requested untracked files exist, it exits successfully as a no-op and reports that there are no local changes to save.
 
 Stash entries are stored as specially-structured commit objects under `.libra/refs/stash`, with a flat-file list tracking the stash stack. Each stash captures both the index state and worktree state at the time of creation.
 
@@ -32,6 +32,9 @@ Save your local modifications to a new stash and clean the working directory.
 | Option | Short | Long | Description |
 |--------|-------|------|-------------|
 | Message | `-m` | `--message` | Optional descriptive message for the stash entry. If omitted, a default "WIP on `<branch>`: `<short-hash>` ..." message is generated. |
+| Include untracked | `-u` | `--include-untracked` | Include visible untracked files in the stash and remove them from the worktree. Ignored files remain in place. |
+| Include all | `-a` | `--all` | Include visible untracked and ignored files in the stash, then remove them from the worktree. |
+| Keep index |  | `--keep-index` | Keep staged changes in the index and restore the worktree to the staged content, removing only unstaged deltas. |
 
 ```bash
 # Save with default message
@@ -39,6 +42,15 @@ libra stash push
 
 # Save with a descriptive message
 libra stash push -m "work in progress on feature X"
+
+# Include visible untracked files
+libra stash push -u
+
+# Include ignored files too
+libra stash push -a
+
+# Stash only unstaged deltas while keeping staged content ready to commit
+libra stash push --keep-index
 ```
 
 #### `pop`
@@ -167,6 +179,12 @@ libra stash push
 # Save with a message
 libra stash push -m "work in progress on feature X"
 
+# Save tracked changes plus visible untracked files
+libra stash push -u
+
+# Save unstaged deltas without disturbing staged content
+libra stash push --keep-index
+
 # List stashes
 libra stash list
 
@@ -224,7 +242,26 @@ When `--json` is passed, all subcommands produce a JSON envelope:
 ```json
 {
   "command": "stash",
-  "data": { "action": "push", "message": "WIP on main: abc1234 ...", "stash_id": "..." }
+  "data": {
+    "action": "push",
+    "message": "WIP on main: abc1234 ...",
+    "stash_id": "..."
+  }
+}
+```
+
+When `-u`, `-a`, or `--keep-index` is used, the push envelope adds only the relevant fields:
+
+```json
+{
+  "command": "stash",
+  "data": {
+    "action": "push",
+    "message": "WIP on main: abc1234 ...",
+    "stash_id": "...",
+    "included_untracked": 2,
+    "kept_index": true
+  }
 }
 ```
 
@@ -334,13 +371,13 @@ The structured envelope always emits the full `files` list. The `--name-only` / 
 
 ## Design Rationale
 
-### Why no `--keep-index`?
+### How untracked and ignored files are stored
 
-Git's `stash push --keep-index` stashes changes but leaves the index (staged files) intact. This is primarily used for testing staged changes before committing. In practice, this flag creates confusing state because the worktree is reset but the index is not, leading to a mismatch that surprises users. Libra's approach is simpler: stash captures everything, and `libra restore --staged` provides a cleaner way to manipulate the index independently.
+`stash push -u` and `stash push -a` use a third stash parent for the untracked/all snapshot, matching Git's object topology. `stash apply` and `stash pop` restore those files as untracked worktree files. If a local file would be overwritten during restore, the apply/pop operation fails and keeps the stash entry intact.
 
-### Why no `--include-untracked` / `--all`?
+### How `--keep-index` works
 
-Git's `--include-untracked` (`-u`) and `--all` (`-a`) stash untracked and ignored files respectively. These flags are rarely needed and add significant complexity to the stash storage format (requiring additional tree objects). In Libra, untracked files are not part of the version-controlled state and should be managed through other means (e.g., `libra clean` for removal, or simply leaving them in place).
+`stash push --keep-index` stores the same stash metadata as a normal push, then writes the saved index back and restores the worktree to the index state. For a mixed file with both staged and unstaged edits, the staged content remains in the index and worktree, while the unstaged delta is saved in the stash.
 
 ### Why a curated subcommand model?
 
@@ -356,9 +393,9 @@ Libra preserves Git's `stash@{N}` reference syntax for familiarity. Users migrat
 |-----------|-------|-----|----|
 | Push (save changes) | `stash push` | `stash push` / `stash save` (deprecated) | N/A (no stash; use `jj new` to shelve) |
 | Message | `-m <message>` | `-m <message>` | N/A |
-| Keep index | Not supported | `--keep-index` / `--no-keep-index` | N/A |
-| Include untracked | Not supported | `-u` / `--include-untracked` | N/A |
-| Include all (ignored too) | Not supported | `-a` / `--all` | N/A |
+| Keep index | `--keep-index` | `--keep-index` / `--no-keep-index` | N/A |
+| Include untracked | `-u` / `--include-untracked` | `-u` / `--include-untracked` | N/A |
+| Include all (ignored too) | `-a` / `--all` | `-a` / `--all` | N/A |
 | Pathspec (partial stash) | Not supported | `-- <pathspec>...` | N/A |
 | Pop | `stash pop [ref]` | `stash pop [--index] [<stash>]` | N/A |
 | Apply | `stash apply [ref]` | `stash apply [--index] [<stash>]` | N/A |
