@@ -69,6 +69,16 @@
 | `diff --old --new` | `cli.restore-reset-diff` | 两个 revision 间差异可见 |
 | `diff --name-only` / `--name-status` | `cli.restore-reset-diff` | 文件名和状态摘要可用于脚本断言 |
 | `diff --stat` / `--numstat` | `cli.restore-reset-diff` | 文件级统计输出可见 |
+| `diff --raw` | `cli.restore-reset-diff` | raw 机器格式含 mode、abbrev object id、状态和路径 |
+| mode-only `diff --raw` / `--name-status` | `cli.restore-reset-diff` | `T` typechange 输出由命令测试覆盖 |
+| `diff -b` / `-w` / `--ignore-blank-lines` | `cli.restore-reset-diff` | 空白忽略路径由命令测试覆盖，runner 覆盖 `-w` |
+| `diff -U<n>` / `--unified <n>` / `diff.context` | `cli.restore-reset-diff` | 可配置上下文由命令测试覆盖，runner 覆盖 `-U0` |
+| `diff --exit-code` / `--quiet` | `cli.restore-reset-diff` | 有差异时语义退码为 1 |
+| `diff -M<n>` / `--find-renames[=<n>]` | `cli.restore-reset-diff` | Git 风格短阈值和 name-status 重命名输出可见 |
+| `diff -C<n>` / `--find-copies[=<n>]` / `--no-renames` | `cli.restore-reset-diff` | copy/禁用 rename 细节由命令测试覆盖 |
+| `diff --relative[=<path>]` / `diff.noPrefix` | `cli.restore-reset-diff` | 子目录过滤和路径裁切由命令测试覆盖 |
+| `diff --word-diff[=<mode>]` / `--word-diff-regex` / `diff.wordRegex` | `cli.restore-reset-diff` | word-diff 标记、regex 上限和配置由命令测试覆盖 |
+| `diff -W` / `--function-context` | `cli.restore-reset-diff` | 函数上下文扩展由命令测试覆盖 |
 | `restore --staged <path>` | `cli.restore-reset-diff` | index 恢复到 HEAD，工作区保持修改 |
 | `restore --worktree <path>` | `cli.restore-reset-diff` | 工作区文件恢复到 index 或 source 内容 |
 | `restore --source <rev>` | `cli.restore-reset-diff` | source revision 不存在时失败且不改写文件 |
@@ -124,4 +134,3 @@
 | `reflog show` / `reflog show --stat` / `reflog exists` | `cli.reflog-symbolic-ref` | HEAD/ref 更新记录可读，exists 可脚本探测 |
 | `symbolic-ref` / `symbolic-ref --short` / `symbolic-ref HEAD <target>` | `cli.reflog-symbolic-ref` | HEAD 符号引用读写可观察 |
 | `--json open` | `cli.open-smoke` | 只输出 URL 和 `launched=false`，不启动外部程序 |
-

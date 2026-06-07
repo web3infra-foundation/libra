@@ -73,6 +73,8 @@ EXAMPLES:
     libra shortlog                  Summarize commits reachable from HEAD by author
     libra shortlog HEAD~5           Summarize a subset of history starting from a revision
     libra shortlog -n -s            Sort by commit count, suppress subjects (count only)
+    libra shortlog -c -s            Summarize by committer instead of author
+    libra shortlog --no-merges      Exclude merge commits from the summary
     libra shortlog --since 24h      Restrict to commits in the last 24 hours
     libra shortlog --json           Structured JSON output for agents";
 
@@ -90,6 +92,14 @@ pub struct ShortlogArgs {
     /// Show the email address of each author
     #[clap(short = 'e', long = "email")]
     pub email: bool,
+
+    /// Group commits by committer identity instead of author.
+    #[clap(short = 'c', long = "committer")]
+    pub committer: bool,
+
+    /// Do not include merge commits (commits with more than one parent).
+    #[clap(long = "no-merges")]
+    pub no_merges: bool,
 
     /// Show commits more recent than DATE (RFC3339, `YYYY-MM-DD`, or relative like `24h` / `7d`)
     #[clap(long = "since", value_name = "DATE")]
@@ -203,7 +213,14 @@ async fn run_shortlog(args: &ShortlogArgs) -> CliResult<ShortlogOutput> {
     let since_ts = parse_shortlog_date_arg(args.since.as_deref(), "--since")?;
     let until_ts = parse_shortlog_date_arg(args.until.as_deref(), "--until")?;
     let revision = args.revision.clone().unwrap_or_else(|| "HEAD".to_string());
-    let commits = get_commits_for_shortlog(args.revision.as_deref(), since_ts, until_ts).await?;
+    let mut commits =
+        get_commits_for_shortlog(args.revision.as_deref(), since_ts, until_ts).await?;
+
+    // `--no-merges` drops merge commits (more than one parent) before
+    // aggregation so the counts and totals reflect only non-merge commits.
+    if args.no_merges {
+        commits.retain(|commit| commit.parent_commit_ids.len() <= 1);
+    }
 
     Ok(aggregate_shortlog(args, &revision, commits))
 }
@@ -213,19 +230,26 @@ fn aggregate_shortlog(args: &ShortlogArgs, revision: &str, commits: Vec<Commit>)
     let mut author_map: HashMap<String, AuthorStats> = HashMap::new();
 
     for commit in commits {
-        let author_name = commit.author.name.clone();
-        let author_email = commit.author.email.clone();
-        let key = if args.email {
-            format!("{} <{}>", author_name, author_email)
+        // `-c`/`--committer` groups by the committer identity; otherwise by the
+        // author (Git's default).
+        let signature = if args.committer {
+            &commit.committer
         } else {
-            author_name.clone()
+            &commit.author
+        };
+        let ident_name = signature.name.clone();
+        let ident_email = signature.email.clone();
+        let key = if args.email {
+            format!("{} <{}>", ident_name, ident_email)
+        } else {
+            ident_name.clone()
         };
 
         let subject = commit.format_message();
 
         author_map
             .entry(key)
-            .or_insert_with(|| AuthorStats::new(author_name.clone(), author_email.clone()))
+            .or_insert_with(|| AuthorStats::new(ident_name.clone(), ident_email.clone()))
             .add_commit(subject);
     }
 

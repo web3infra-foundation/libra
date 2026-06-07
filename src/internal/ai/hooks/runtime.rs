@@ -73,11 +73,10 @@ pub const AI_SESSION_SCHEMA: &str = "libra.ai_session.v2";
 ///
 /// - [`HookTarget::AiIntent`] — the canonical `refs/libra/intent` writer used
 ///   by `libra code` and the existing Claude/Gemini hook configs.
-/// - [`HookTarget::AgentTraces`] — the external-Agent capture writer that
-///   lives on `refs/libra/agent-traces`. Wired since Phase 2: the runtime
-///   redacts the transcript, upserts `agent_session`, and on
-///   `TurnEnd`/`SessionEnd` appends a committed checkpoint commit (see
-///   [`ingest_agent_traces`]).
+/// - [`HookTarget::AgentTraces`] — the new external-Agent capture writer
+///   that lives on `refs/libra/agent-traces`. **Phase 1 stub**: the variant
+///   exists for API surface stability, but the runtime currently rejects it
+///   with a clear "not yet wired" message; Phase 2 lands the actual writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookTarget {
     AiIntent,
@@ -481,7 +480,7 @@ pub(crate) async fn ingest_agent_traces_payload(
 ) -> Result<()> {
     use sea_orm::{ConnectionTrait, Statement};
 
-    use crate::internal::ai::observed_agents::RedactionMatch;
+    use crate::internal::ai::observed_agents::{RedactionMatch, Redactor};
 
     if payload.len() > MAX_STDIN_BYTES {
         bail!("hook input exceeds {MAX_STDIN_BYTES} bytes");
@@ -495,36 +494,22 @@ pub(crate) async fn ingest_agent_traces_payload(
         serde_json::from_str(stdin).map_err(|err| anyhow!("invalid hook JSON payload: {err}"))?;
     validate_session_hook_envelope(&envelope, MAX_TRANSCRIPT_PATH_BYTES)?;
 
-    let mut event = if provider.subcommand_is_authoritative() {
-        // Libra authored this agent's hook config, so the invoked subcommand
-        // (which produced `expected_kind`) is the source of truth. The promoted
-        // external agents send heterogeneous or absent stdin `hook_event_name`s,
-        // so deriving the kind from the name would be unreliable; we still
-        // extract the optional payload fields generically from the envelope.
-        super::lifecycle::build_lifecycle_event(expected_kind, &envelope)
-    } else {
-        let event = provider.parse_hook_event(&envelope.hook_event_name, &envelope)?;
-        if event.kind != expected_kind {
-            bail!(
-                "hook event kind mismatch: expected '{}', got '{}' from hook_event_name '{}'",
-                expected_kind,
-                event.kind,
-                envelope.hook_event_name
-            );
-        }
-        event
-    };
+    let mut event = provider.parse_hook_event(&envelope.hook_event_name, &envelope)?;
+    if event.kind != expected_kind {
+        bail!(
+            "hook event kind mismatch: expected '{}', got '{}' from hook_event_name '{}'",
+            expected_kind,
+            event.kind,
+            envelope.hook_event_name
+        );
+    }
 
     // Redact free-form text fields before they get anywhere near durable
     // storage. We aggregate the per-field reports into a single JSON document
     // that lands in `agent_session.redaction_report` so the persisted row is
     // observably scrubbed (Codex round-3 review: "assert observable redaction
     // outcome").
-    // The session-row field redactor honours `[agent.redaction] mode` (§8.4):
-    // `warn`/`off` change whether prompt/tool_input bytes are replaced in the
-    // persisted row, NOT whether the transcript BLOB is scrubbed — that blob is
-    // force-redacted unconditionally below (§8.3 P0 contract).
-    let redactor = build_configured_redactor(conn).await;
+    let redactor = Redactor::new_default();
     let mut all_matches: Vec<RedactionMatch> = Vec::new();
     let mut bytes_scanned: usize = 0;
     let mut bytes_redacted: usize = 0;
@@ -537,9 +522,7 @@ pub(crate) async fn ingest_agent_traces_payload(
     }
     if let Some(input) = event.tool_input.take() {
         let serialized = serde_json::to_vec(&input).unwrap_or_default();
-        // tool_input is JSON — use the JSON-aware path so structural fields
-        // (*id / file_path / cwd …) and image objects are never corrupted.
-        let (redacted, report) = redactor.redact_jsonl(&serialized);
+        let (redacted, report) = redactor.redact(&serialized);
         event.tool_input = serde_json::from_slice(redacted.bytes()).ok();
         bytes_scanned += report.bytes_scanned;
         bytes_redacted += report.bytes_redacted;
@@ -580,27 +563,6 @@ pub(crate) async fn ingest_agent_traces_payload(
         other => other,
     };
 
-    // Serialise the read-then-write critical section (concurrent-active COUNT
-    // → UPSERT → checkpoint commit) for a single agent session under a
-    // SessionStore file lock (entire.md §6.3 / §13#6). The lock id carries a
-    // `.traces` suffix so it is a DIFFERENT file from the AiIntent path's
-    // `sessions/agent/<id>.lock`, ruling out a self-deadlock if both
-    // `libra hooks <p>` and `libra agent hooks <p>` ever fire in one process
-    // tree. Held to end of function via RAII. Skipped when `repo_path` is None
-    // (the unit-test path) so those tests stay lock-free and deterministic.
-    let _traces_lock = match repo_path {
-        Some(repo) => {
-            let store = SessionStore::from_storage_path_with_subdir(repo, "agent");
-            Some(store.lock_session(&format!("{session_id}.traces")).with_context(|| {
-                format!(
-                    "failed to acquire agent-traces session lock for '{}'",
-                    redact_session_id(&session_id)
-                )
-            })?)
-        }
-        None => None,
-    };
-
     let new_state = match event.kind {
         LifecycleEventKind::SessionStart => "active",
         LifecycleEventKind::SessionEnd | LifecycleEventKind::TurnEnd => "stopped",
@@ -624,21 +586,16 @@ pub(crate) async fn ingest_agent_traces_payload(
         false
     };
     let metadata_json = build_agent_session_metadata_json(&envelope, concurrent_active);
-    // Resolve the worktree the session ran in so `libra agent session list
-    // --worktree <id>` can partition a shared catalog (entire.md §3.4 /
-    // §13 risk #9). NULL when the cwd is outside any libra workspace.
-    let worktree_id = resolve_worktree_id(&envelope.cwd);
     let upsert_sql = "
         INSERT INTO agent_session (
-            session_id, agent_kind, provider_session_id, state, working_dir, worktree_id,
+            session_id, agent_kind, provider_session_id, state, working_dir,
             metadata_json, redaction_report, started_at, last_event_at, stopped_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(agent_kind, provider_session_id) DO UPDATE SET
             state = excluded.state,
             last_event_at = excluded.last_event_at,
             redaction_report = excluded.redaction_report,
-            worktree_id = COALESCE(excluded.worktree_id, agent_session.worktree_id),
             stopped_at = CASE WHEN excluded.state = 'stopped' THEN excluded.last_event_at
                               ELSE agent_session.stopped_at END,
             metadata_json = CASE
@@ -660,7 +617,6 @@ pub(crate) async fn ingest_agent_traces_payload(
             envelope.session_id.clone().into(),
             new_state.into(),
             envelope.cwd.clone().into(),
-            worktree_id.into(),
             metadata_json.into(),
             redaction_report_json.clone().into(),
             now.into(),
@@ -671,40 +627,25 @@ pub(crate) async fn ingest_agent_traces_payload(
     .await
     .with_context(|| format!("failed to upsert agent_session for command '{command}'"))?;
 
-    // Materialise checkpoints at agent boundaries (entire.md §6.3 / §7.1–7.2):
-    //  - `committed` on SessionEnd / TurnEnd — durable per-turn / final snapshot;
-    //  - `subagent` on PostToolUse[Task] — sub-agent spawn (nested run);
-    //  - `temporary` on PostToolUse[TodoWrite] — transient point, later removed
-    //    from the agent-traces history by `libra agent clean`.
-    // Only Task / TodoWrite produce a per-tool-call checkpoint, so the history
-    // is never flooded with a commit per Read/Edit.
-    if let Some(repo) = repo_path {
-        let scope = match event.kind {
-            LifecycleEventKind::SessionEnd | LifecycleEventKind::TurnEnd => {
-                Some(crate::internal::ai::history::CheckpointScope::Committed)
-            }
-            LifecycleEventKind::ToolUse => event
-                .tool_name
-                .as_deref()
-                .and_then(checkpoint_scope_for_tool),
-            _ => None,
-        };
-        if let Some(scope) = scope {
-            write_checkpoint(
-                conn,
-                repo,
-                &session_id,
-                &envelope,
-                agent_kind,
-                scope,
-                None,
-                event.prompt.as_deref(),
-                &redaction_report_json,
-                &all_matches,
-                now,
-            )
-            .await?;
-        }
+    // Materialise committed checkpoints at durable agent boundaries. SessionEnd
+    // captures the final snapshot; TurnEnd captures recoverable per-turn state.
+    if matches!(
+        event.kind,
+        LifecycleEventKind::SessionEnd | LifecycleEventKind::TurnEnd
+    ) && let Some(repo) = repo_path
+    {
+        write_committed_checkpoint(
+            conn,
+            repo,
+            &session_id,
+            &envelope,
+            agent_kind,
+            event.prompt.as_deref(),
+            &redaction_report_json,
+            &all_matches,
+            now,
+        )
+        .await?;
     }
 
     Ok(())
@@ -740,29 +681,6 @@ fn build_agent_session_metadata_json(
     serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string())
 }
 
-/// Resolve a stable worktree identifier for a captured session's working
-/// directory: the name of the nearest ancestor directory that hosts a
-/// `.libra` storage root (i.e. the worktree root). For the primary worktree
-/// this is the repository directory name; for a `libra worktree add`-created
-/// linked worktree it is that worktree's directory name.
-///
-/// Returns `None` when the cwd is empty or no ancestor hosts a `.libra` root
-/// (e.g. the session ran outside any libra workspace) so the column stays
-/// NULL rather than recording a misleading guess. The `COALESCE` in the
-/// upsert keeps a previously-resolved id if a later event can't resolve one.
-fn resolve_worktree_id(cwd: &str) -> Option<String> {
-    if cwd.is_empty() {
-        return None;
-    }
-    let mut dir = std::path::Path::new(cwd);
-    loop {
-        if dir.join(crate::utils::util::ROOT_DIR).exists() {
-            return dir.file_name().map(|n| n.to_string_lossy().into_owned());
-        }
-        dir = dir.parent()?;
-    }
-}
-
 async fn has_concurrent_active_session(
     conn: &sea_orm::DatabaseConnection,
     agent_kind: &str,
@@ -796,77 +714,12 @@ async fn has_concurrent_active_session(
 /// failure here means the hook ingest cannot acknowledge a clean checkpoint
 /// boundary to the caller.
 #[allow(clippy::too_many_arguments)]
-/// Build the field-redaction [`Redactor`] from `[agent.redaction]` config
-/// (entire.md §8.4). Reads `agent.redaction.mode` (default `redact`) and the
-/// opt-in `agent.redaction.pii.*` switches from `config_kv`. Any read error or
-/// unknown value falls back to the safe default so a misconfigured key can
-/// never silently disable redaction.
-async fn build_configured_redactor(
-    conn: &sea_orm::DatabaseConnection,
-) -> crate::internal::ai::observed_agents::Redactor {
-    use crate::internal::ai::observed_agents::{PiiConfig, RedactionMode, Redactor};
-    use crate::internal::config::ConfigKv;
-
-    let mode = ConfigKv::get_with_conn(conn, "agent.redaction.mode")
-        .await
-        .ok()
-        .flatten()
-        .map(|e| RedactionMode::from_config_str(&e.value))
-        .unwrap_or_default();
-    let pii = PiiConfig {
-        enabled: read_bool_config(conn, "agent.redaction.pii.enabled").await,
-        email: read_bool_config(conn, "agent.redaction.pii.email").await,
-        phone: read_bool_config(conn, "agent.redaction.pii.phone").await,
-    };
-    Redactor::new_default().with_mode(mode).with_pii(pii)
-}
-
-/// Read a boolean `config_kv` value, defaulting to `false` on absence/error.
-async fn read_bool_config(conn: &sea_orm::DatabaseConnection, key: &str) -> bool {
-    use crate::internal::config::ConfigKv;
-    ConfigKv::get_with_conn(conn, key)
-        .await
-        .ok()
-        .flatten()
-        .map(|e| {
-            matches!(
-                e.value.trim().to_ascii_lowercase().as_str(),
-                "true" | "1" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
-
-/// Map a `PostToolUse` tool name onto the checkpoint scope it should
-/// materialise (entire.md §6.3 / §7.2). Only the two sub-agent / task-list
-/// tools produce a checkpoint per tool call — every other tool returns `None`
-/// so the agent-traces history is not flooded with a commit per Read/Edit:
-/// - `Task` (sub-agent spawn) → [`CheckpointScope::Subagent`]
-/// - `TodoWrite` (task-list update) → [`CheckpointScope::Temporary`] (cleaned
-///   by `libra agent clean`)
-fn checkpoint_scope_for_tool(
-    tool_name: &str,
-) -> Option<crate::internal::ai::history::CheckpointScope> {
-    use crate::internal::ai::history::CheckpointScope;
-    match tool_name {
-        "Task" => Some(CheckpointScope::Subagent),
-        "TodoWrite" => Some(CheckpointScope::Temporary),
-        _ => None,
-    }
-}
-
-// The checkpoint producer threads several independent, already-redacted
-// inputs (session id, envelope, agent kind, redaction artefacts, timestamp);
-// bundling them into a struct would not improve clarity at the single call site.
-#[allow(clippy::too_many_arguments)]
-async fn write_checkpoint(
+async fn write_committed_checkpoint(
     conn: &sea_orm::DatabaseConnection,
     repo_path: &std::path::Path,
     libra_session_id: &str,
     envelope: &SessionHookEnvelope,
     agent_kind: &str,
-    scope: crate::internal::ai::history::CheckpointScope,
-    tool_use_id: Option<&str>,
     redacted_prompt: Option<&str>,
     redaction_report_json: &str,
     redaction_matches: &[crate::internal::ai::observed_agents::RedactionMatch],
@@ -874,18 +727,16 @@ async fn write_checkpoint(
 ) -> Result<()> {
     use sea_orm::{ConnectionTrait, Statement};
 
-    use crate::internal::ai::history::{CheckpointCommitParams, HistoryManager};
+    use crate::internal::ai::history::{CheckpointCommitParams, CheckpointScope, HistoryManager};
 
-    let scope_str = scope.as_str();
     // Build a minimal metadata.json. Phase 2 keeps the schema small; later
-    // phases extend with model_info and richer subagent links.
+    // phases extend with model_info, tool_use_id, subagent links, etc.
     let metadata = serde_json::json!({
         "schema_version": 1,
         "checkpoint_id": null, // filled in below once we have the UUID
         "session_id": libra_session_id,
         "agent_kind": agent_kind,
-        "scope": scope_str,
-        "tool_use_id": tool_use_id,
+        "scope": "committed",
         "provider_session_id": envelope.session_id,
         "working_dir": envelope.cwd,
         "redaction_report": serde_json::from_str::<serde_json::Value>(redaction_report_json)
@@ -956,8 +807,8 @@ async fn write_checkpoint(
             session_id: libra_session_id,
             agent_kind,
             parent_commit: parent_commit.as_deref(),
-            scope,
-            tool_use_id,
+            scope: CheckpointScope::Committed,
+            tool_use_id: None,
             metadata_json: &metadata_bytes,
             transcript_redacted: &transcript_redacted,
             provider_name,
@@ -967,22 +818,19 @@ async fn write_checkpoint(
         .context("failed to append checkpoint commit on agent-traces")?;
 
     let parent_commit_value: sea_orm::Value = parent_commit.clone().into();
-    let tool_use_id_value: sea_orm::Value = tool_use_id.map(str::to_string).into();
     conn.execute(Statement::from_sql_and_values(
         conn.get_database_backend(),
         "INSERT INTO agent_checkpoint (
             checkpoint_id, session_id, scope, parent_commit, tree_oid,
-            metadata_blob_oid, traces_commit, tool_use_id, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            metadata_blob_oid, traces_commit, created_at
+         ) VALUES (?, ?, 'committed', ?, ?, ?, ?, ?)",
         [
             checkpoint_id.into(),
             libra_session_id.into(),
-            scope_str.into(),
             parent_commit_value,
             written.tree_oid.to_string().into(),
             written.metadata_blob_oid.to_string().into(),
             written.commit_hash.to_string().into(),
-            tool_use_id_value,
             now.into(),
         ],
     ))
@@ -1001,7 +849,9 @@ fn build_checkpoint_transcript_redacted(
     redacted_prompt: Option<&str>,
     metadata: &mut serde_json::Value,
 ) -> crate::internal::ai::observed_agents::RedactedBytes {
-    use crate::internal::ai::observed_agents::{AgentKind, AgentSessionCtx, Redactor, agent_for};
+    use crate::internal::ai::observed_agents::{
+        AgentKind, AgentSessionCtx, RedactedBytes, Redactor, agent_for,
+    };
 
     let Some(kind) = AgentKind::from_db_str(agent_kind) else {
         if let Some(obj) = metadata.as_object_mut() {
@@ -1010,11 +860,7 @@ fn build_checkpoint_transcript_redacted(
                 serde_json::Value::String("fallback_prompt_unknown_agent_kind".to_string()),
             );
         }
-        // §8.3 P0: force-redact even the prompt fallback so a `warn`/`off`
-        // field-redaction mode can never push raw bytes onto agent-traces.
-        return Redactor::new_default()
-            .redact(redacted_prompt.unwrap_or("").as_bytes())
-            .0;
+        return RedactedBytes::new_unchecked(redacted_prompt.unwrap_or("").as_bytes().to_vec());
     };
     let ctx = AgentSessionCtx {
         session_id: build_ai_session_id(
@@ -1031,10 +877,7 @@ fn build_checkpoint_transcript_redacted(
     let agent = agent_for(kind);
     match agent.read_transcript(&ctx) {
         Ok(Some(raw)) => {
-            // Agent transcripts are JSONL — use the JSON-aware path. Always
-            // force-redact (new_default = RedactionMode::Redact) regardless of
-            // the configured field-redaction mode (§8.3 P0).
-            let (redacted, report) = Redactor::new_default().redact_jsonl(&raw);
+            let (redacted, report) = Redactor::new_default().redact(&raw);
             if let Some(obj) = metadata.as_object_mut() {
                 obj.insert(
                     "transcript_source".to_string(),
@@ -1054,10 +897,7 @@ fn build_checkpoint_transcript_redacted(
                     serde_json::Value::String("fallback_prompt".to_string()),
                 );
             }
-            // §8.3 P0: force-redact the prompt fallback unconditionally.
-            Redactor::new_default()
-                .redact(redacted_prompt.unwrap_or("").as_bytes())
-                .0
+            RedactedBytes::new_unchecked(redacted_prompt.unwrap_or("").as_bytes().to_vec())
         }
     }
 }
@@ -1439,38 +1279,6 @@ mod tests {
 
     use super::*;
     use crate::internal::ai::hooks::providers::{claude_provider, gemini_provider};
-
-    /// `resolve_worktree_id` returns the name of the nearest ancestor that
-    /// hosts a `.libra` storage root, whether the cwd is the worktree root or
-    /// a nested subdirectory of it. entire.md §3.4 / §13 risk #9.
-    #[test]
-    fn resolve_worktree_id_uses_libra_root_directory_name() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let wt_root = tmp.path().join("my-worktree");
-        std::fs::create_dir_all(wt_root.join(crate::utils::util::ROOT_DIR)).unwrap();
-        let nested = wt_root.join("src").join("deep");
-        std::fs::create_dir_all(&nested).unwrap();
-
-        assert_eq!(
-            resolve_worktree_id(&nested.to_string_lossy()),
-            Some("my-worktree".to_string()),
-        );
-        assert_eq!(
-            resolve_worktree_id(&wt_root.to_string_lossy()),
-            Some("my-worktree".to_string()),
-        );
-    }
-
-    /// No `.libra` root in the ancestry — and the empty string — yield `None`
-    /// so the `worktree_id` column stays NULL rather than recording a guess.
-    #[test]
-    fn resolve_worktree_id_returns_none_outside_workspace() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let plain = tmp.path().join("no-libra-here");
-        std::fs::create_dir_all(&plain).unwrap();
-        assert_eq!(resolve_worktree_id(&plain.to_string_lossy()), None);
-        assert_eq!(resolve_worktree_id(""), None);
-    }
 
     // Scenario: pushing many keys past the cap evicts the oldest, never exceeding
     // `MAX_PROCESSED_EVENT_KEYS`.
@@ -1959,65 +1767,6 @@ mod tests {
             err.to_string()
                 .contains("agent_session table does not exist"),
             "unexpected error: {err}"
-        );
-    }
-
-    /// entire.md §6.3 / §7.2: `PostToolUse` events produce scoped checkpoints
-    /// for the two sub-agent / task-list tools — `Task` → `subagent`,
-    /// `TodoWrite` → `temporary` — while ordinary tools (e.g. `Read`) produce
-    /// no checkpoint, so the agent-traces history is not flooded.
-    #[tokio::test]
-    async fn ingest_tool_use_produces_subagent_and_temporary_checkpoints() {
-        let (dir, conn) = ingest_fresh_conn().await;
-        let repo_path = dir.path().to_path_buf();
-
-        let start = ingest_envelope("SessionStart", "S-tool", json!({}));
-        ingest_agent_traces_payload(
-            &start,
-            super::super::provider::ProviderHookCommand::SessionStart,
-            LifecycleEventKind::SessionStart,
-            claude_provider(),
-            &conn,
-            Some(&repo_path),
-        )
-        .await
-        .expect("start ok");
-
-        for tool in ["Task", "TodoWrite", "Read"] {
-            let payload = ingest_envelope("PostToolUse", "S-tool", json!({ "tool_name": tool }));
-            ingest_agent_traces_payload(
-                &payload,
-                super::super::provider::ProviderHookCommand::ToolUse,
-                LifecycleEventKind::ToolUse,
-                claude_provider(),
-                &conn,
-                Some(&repo_path),
-            )
-            .await
-            .unwrap_or_else(|e| panic!("PostToolUse[{tool}] ingest must succeed: {e}"));
-        }
-
-        let backend = conn.get_database_backend();
-        let rows = conn
-            .query_all(Statement::from_sql_and_values(
-                backend,
-                "SELECT scope FROM agent_checkpoint WHERE session_id = \
-                 (SELECT session_id FROM agent_session WHERE provider_session_id = 'S-tool' LIMIT 1) \
-                 ORDER BY created_at",
-                [],
-            ))
-            .await
-            .expect("checkpoint query");
-        let mut scopes: Vec<String> = rows
-            .iter()
-            .map(|r| r.try_get_by::<String, _>("scope").unwrap())
-            .collect();
-        scopes.sort();
-        // Task → subagent, TodoWrite → temporary; Read produced none.
-        assert_eq!(
-            scopes,
-            vec!["subagent".to_string(), "temporary".to_string()],
-            "expected exactly the Task(subagent) + TodoWrite(temporary) checkpoints; got {scopes:?}"
         );
     }
 

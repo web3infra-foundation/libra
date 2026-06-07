@@ -629,6 +629,11 @@ fn test_grep_help_lists_examples_banner() {
         "libra grep -c 'unsafe' src/",
         "libra grep -l 'unwrap()' src/",
         "libra grep -e 'TODO' -e 'FIXME'",
+        "libra grep -A 2 'panic' src/",
+        "libra grep -B 2 'panic' src/",
+        "libra grep -C 2 'panic' src/",
+        "libra grep --heading -n 'TODO' src/",
+        "libra grep -z -l 'TODO' src/",
         "libra grep --cached 'TODO'",
         "libra grep --tree HEAD~5 'TODO'",
         "libra grep --json 'TODO'",
@@ -952,6 +957,28 @@ async fn test_grep_null_uses_nul_separators() {
         String::from_utf8_lossy(&output.stdout),
         "a.txt\u{0}1\u{0}match\n",
         "-z should use NUL field separators and a newline record terminator"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_grep_null_context_uses_nul_separators() {
+    let repo = tempdir().expect("repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("lines", "before\nmatch\nafter\n").expect("write file");
+    add_and_commit("add lines", vec!["lines".to_string()]).await;
+
+    let output = run_libra_command(
+        &["grep", "-z", "-n", "-C", "1", "match", "lines"],
+        repo.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "lines\u{0}1\u{0}before\nlines\u{0}2\u{0}match\nlines\u{0}3\u{0}after\n",
+        "-z context output should use NUL field separators"
     );
 }
 

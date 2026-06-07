@@ -1,6 +1,6 @@
 ### `cli.fetch-depth-local`
 
-目的：验证本地路径 Git source 上的 `clone --depth` shallow 基本语义。该场景不使用 `push`，因为当前 `push` 故意拒绝本地 file remote。当前实现若在本场景暴露 `LBR-REPO-002 object not found`，应记录为 shallow clone 对象闭包实现缺口，而不是把场景改回本地 push fixture。
+目的：验证本地路径 Git source 上的 `clone --depth` shallow 基本语义，以及 shallow clone 后 `fetch --deepen` 使用相对加深语义扩展可见历史。该场景不使用 `push`，因为当前 `push` 故意拒绝本地 file remote。当前实现若在本场景暴露 `LBR-REPO-002 object not found`，应记录为 shallow 对象闭包实现缺口，而不是把场景改回本地 push fixture。
 
 最小步骤：
 
@@ -49,6 +49,8 @@ cd shallow-clone
 libra log --oneline | wc -l | grep -q '^1$'
 test -f a.txt
 grep 'third' a.txt
+libra fetch origin --deepen 1
+libra log --oneline | wc -l | grep -q '^2$'
 
 cd "$RUN_DIR"
 libra clone --depth 2 "$REMOTE_DIR" shallow-clone-2
@@ -63,11 +65,11 @@ cd "$RUN_DIR"
 ! libra clone --depth 0 "$REMOTE_DIR" "$RUN_ROOT/repos/$SCENARIO/bad-depth"
 ```
 
-断言：`clone --depth 1` 只获取最新提交，`log` 数量为 1，但工作区文件内容是最新的；`clone --depth 2` 获取 2 个提交；非法 depth（如 0）必须非 0 退出。本地 Git fixture shallow 语义可作为基本功能验证，与真实远端的深度对等性差异另由 BASELINE_GAP-INTEG-009 跟踪。
+断言：`clone --depth 1` 只获取最新提交，`log` 数量为 1，但工作区文件内容是最新的；随后 `fetch --deepen 1` 通过相对加深将可见提交数扩展为 2；`clone --depth 2` 获取 2 个提交；非法 depth（如 0）必须非 0 退出。本地 Git fixture shallow 语义可作为基本功能验证，与真实远端的深度对等性差异另由 BASELINE_GAP-INTEG-009 跟踪。
 
 补充可执行断言：
 - `libra --json clone --depth 1 "$REMOTE_DIR" shallow1` 成功；进入 `shallow1` 后运行 `libra --json log -n 10 >log.json`，用 python 断言 `len(data.commits) == 1`。
+- shallow clone 内执行 `libra fetch origin --deepen 1` 后，`libra log --oneline` 可见 2 个提交，证明 `--deepen` 不是绝对 depth 重放。
 - shallow clone 后 `libra --json rev-list HEAD` 返回 `data.total` 和 `data.commits[]`，数量与 depth 预期一致。
 - 非法 `--depth 0` 错误必须非 0。
 - shallow clone 后执行 `libra fsck --connectivity-only` 必须通过。
-

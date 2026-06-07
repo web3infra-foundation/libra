@@ -25,6 +25,9 @@ printf 'two\n' > src/app.txt
 libra diff src/app.txt
 libra diff --name-only
 libra diff --stat
+libra diff --raw
+libra diff -w -U0
+! libra diff --exit-code
 libra add src/app.txt
 libra diff --staged
 libra diff --staged --name-status
@@ -47,6 +50,14 @@ libra reset --mixed HEAD
 libra restore --worktree src/app.txt
 grep 'one' src/app.txt
 
+printf 'l1\nl2\nl3\nl4\n' > orig.txt
+libra add orig.txt
+libra commit -m "test: rename source"
+rm orig.txt
+printf 'l1\nl2\nl3\nCHANGED\n' > new.txt
+libra diff -M70 --name-status
+libra reset --hard HEAD
+
 printf 'three\n' > src/app.txt
 libra add src/app.txt
 libra commit -m "test: restore third"
@@ -63,7 +74,7 @@ cd "$RUN_DIR/restore-repo"
 ! libra diff --old no-such-revision --new HEAD
 ```
 
-断言：unstaged diff、staged diff、name-only、name-status、numstat 和 stat 输出都能反映同一修改；`restore --staged` 只取消暂存，不丢弃工作区修改；`restore --worktree` 恢复工作区内容；路径级 `reset HEAD -- <path>` 只影响 index；`reset --soft` 保留 index/工作区变化，`reset --mixed` 重置 index，`reset --hard` 重置 HEAD/index/工作区；无效 revision 必须失败且不改变当前 HEAD。
+断言：unstaged diff、staged diff、pathspec、name-only、name-status、numstat、stat、raw、`-w -U0` 和 `--exit-code` 输出/退码都能反映同一修改；`-M70 --name-status` 能识别 75% 相似的重命名；`restore --staged` 只取消暂存，不丢弃工作区修改；`restore --worktree` 恢复工作区内容；路径级 `reset HEAD -- <path>` 只影响 index；`reset --soft` 保留 index/工作区变化，`reset --mixed` 重置 index，`reset --hard` 重置 HEAD/index/工作区；无效 revision 必须失败且不改变当前 HEAD。
 
 补充可执行断言：
 - `libra --json diff --staged` 和 `libra --json diff` 必须返回结构化数据（files 或 changes）。
@@ -71,4 +82,3 @@ cd "$RUN_DIR/restore-repo"
 - 每次重置后 `libra fsck --connectivity-only` 通过。
 - `libra --json reset --hard HEAD~1` 成功后验证 HEAD 回退且工作区文件恢复。
 - 负向 `libra restore --source no-such-rev` 必须非 0，stderr 包含错误路径或 LBR- 标识。
-

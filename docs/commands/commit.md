@@ -91,7 +91,8 @@ Control how the commit message is cleaned before committing (mirrors `git commit
 Modes: `strip` (drop `#` comment lines, trailing whitespace, leading/trailing blanks),
 `whitespace` (trim only, keep `#` lines), `verbatim` (no changes), `scissors` (truncate at the
 `# ----- >8 -----` cut line then apply `whitespace`), and `default` (`strip` when an editor was
-used, `whitespace` otherwise). An unknown mode is a parse error (exit 129).
+used, `whitespace` otherwise). When `--cleanup` is omitted, `commit.cleanup` supplies the default
+mode. An unknown mode is a parse error (exit 129).
 
 ```bash
 libra commit --cleanup=verbatim -m "#1234 keep this literal"

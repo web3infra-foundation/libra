@@ -5,7 +5,7 @@ Revert some existing commits.
 ## Synopsis
 
 ```
-libra revert [-n | --no-commit] [--json] [--quiet] <commit>
+libra revert [-n | --no-commit] [-m | --mainline <parent-number>] [--json] [--quiet] <commit>
 ```
 
 ## Description
@@ -15,6 +15,8 @@ libra revert [-n | --no-commit] [--json] [--quiet] <commit>
 The command works by computing the diff between the target commit and its parent, then applying the inverse of that diff to the current working tree and index. If the resulting state is clean, a new commit is recorded with a message of the form `Revert "<original subject>"`.
 
 Reverting a root commit (one with no parent) produces an empty tree, effectively undoing the initial commit's changes.
+
+To revert a **merge commit** (one with more than one parent), pass `-m <parent-number>` to choose which parent is the mainline; the merge's changes are then computed relative to that parent. See [`-m`, `--mainline`](#-m---mainline-parent-number) below.
 
 The command requires an active branch (not detached HEAD) and accepts exactly one commit reference.
 
@@ -34,6 +36,19 @@ libra diff --cached
 # Commit with a custom message
 libra commit -m "revert abc1234 with adjustments"
 ```
+
+### `-m`, `--mainline <parent-number>`
+
+Specify the 1-based parent number to treat as the mainline when reverting a **merge commit**. The merge's changes are computed relative to that parent's tree (so `-m 1` undoes everything the merge brought in relative to the first parent), and the generated revert commit still records a single parent (the current `HEAD`).
+
+```bash
+# Revert a merge commit, keeping the first-parent line as the baseline
+libra revert -m 1 <merge-commit>
+```
+
+- A merge commit **requires** `-m`; omitting it fails with exit 128 (`commit <hash> is a merge but no -m option was given`).
+- Passing `-m` for a non-merge commit fails with exit 128 (`mainline was specified but commit <hash> is not a merge`).
+- An out-of-range parent number fails with exit 128 (`commit <hash> does not have a parent number <n>`).
 
 ### `<commit>` (positional, required)
 
@@ -69,6 +84,9 @@ libra revert abc1234
 
 # Revert without auto-committing (to edit or combine)
 libra revert -n HEAD
+
+# Revert a merge commit relative to its first parent
+libra revert -m 1 <merge-commit>
 
 # Revert with JSON output for AI agents or scripts
 libra revert --json HEAD
@@ -130,12 +148,14 @@ Git allows `git revert <commit1> <commit2> ...` to revert a sequence of commits.
 2. **Explicit is better.** In a trunk-based monorepo workflow, reverting multiple commits is a significant action that deserves deliberate, per-commit attention. Running `libra revert A && libra revert B` makes the intent clear in the reflog and is trivially scriptable.
 3. **Agent simplicity.** AI agents can loop over commits and handle each revert result independently, which is simpler than managing sequencer state transitions.
 
-### Why no merge commit support (`--mainline`)?
+### Merge commit support (`--mainline`)
 
-Git's `--mainline <parent-number>` selects which parent of a merge commit to diff against when computing the inverse. Libra rejects merge commits because:
+Git's `--mainline <parent-number>` selects which parent of a merge commit to diff against when computing the inverse. Libra supports this: a merge commit (more than one parent) **requires** `-m <n>`, and the revert is computed relative to the chosen parent's tree. To guard against the "picked the wrong parent" footgun:
 
-1. **Parent ambiguity is dangerous.** Picking the wrong parent silently produces a dramatically different changeset. In trunk-based development, the individual commits within a merge are the meaningful units; revert those instead.
-2. **Complexity cost.** Supporting `--mainline` requires the user to know the parent ordering of the merge, which is rarely intuitive. The feature adds significant code complexity for an edge case that trunk-based workflows naturally avoid.
+1. **No silent default.** Omitting `-m` on a merge commit is a hard error (exit 128), so you must consciously choose the mainline rather than getting an arbitrary changeset.
+2. **Symmetric guards.** Passing `-m` on a non-merge commit, or a parent number outside the merge's parent count, is also a hard error — the parent ordering must be explicit and valid.
+
+The generated revert commit still records a single parent (the current `HEAD`), matching Git.
 
 ### Why no `--continue`, `--abort`?
 
@@ -159,7 +179,7 @@ Libra's revert uses a simpler conflict model than Git's three-way merge: if the 
 | Positional commit(s) | `git revert <commit>...` | N/A (uses `jj backout`) | `libra revert <commit>` (single) |
 | No-commit mode | `--no-commit` / `-n` | N/A | `--no-commit` / `-n` |
 | Edit message | `--edit` / `--no-edit` | N/A | Not supported (use `-n` then `commit -m`) |
-| Mainline parent | `--mainline <n>` / `-m <n>` | N/A | Not supported (merge commits rejected) |
+| Mainline parent | `--mainline <n>` / `-m <n>` | N/A | `--mainline <n>` / `-m <n>` (required for merge commits) |
 | Continue after conflict | `--continue` | N/A | Not supported (resolve then `commit`) |
 | Abort in-progress | `--abort` | N/A | Not supported (no sequencer state) |
 | Skip current commit | `--skip` | N/A | Not supported |
@@ -179,7 +199,7 @@ Libra's revert uses a simpler conflict model than Git's three-way merge: if the 
 | `LBR-REPO-001` | Not inside a libra repository | Initialize with `libra init` or navigate to a repo |
 | `LBR-REPO-003` | HEAD is detached (not on a branch) | Switch to a branch with `libra switch <branch>` |
 | `LBR-CLI-003` | Cannot resolve the commit reference | Use `libra log` to find valid commit references |
-| `LBR-CLI-002` | Merge commit revert not supported | Choose a non-merge commit; merge commit support is planned |
+| `LBR-CLI-002` | Merge commit without `-m`, `-m` on a non-merge commit, or out-of-range parent number (exit 128) | Pass a valid `-m <parent-number>` for merge commits; omit `-m` for non-merge commits |
 | `LBR-CONFLICT-001` | File was modified by a later commit, creating a conflict | Resolve conflicts manually, then use `libra commit` |
 | `LBR-IO-001` | Failed to load object (commit, tree, blob) | Check repository integrity |
 | `LBR-IO-002` | Failed to save object, index, or update HEAD | Check filesystem permissions and repository writability |

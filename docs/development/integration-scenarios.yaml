@@ -339,7 +339,7 @@ scenarios:
   - id: cli.fetch-depth-local
     wave: 2
     group: protocol_local
-    purpose: "Local Git fixture clone --depth N (1/2) semantics and illegal depth rejection. Shallow object closure target."
+    purpose: "Local Git fixture clone --depth N (1/2) semantics, fetch --deepen relative expansion, and illegal depth rejection. Shallow object closure target."
     gh_required: false
     requires_git: true
     key_assertion_categories: [gitfix_isolation, negative_exit]

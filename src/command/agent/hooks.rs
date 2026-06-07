@@ -35,36 +35,6 @@ pub enum AgentHooksSubcommand {
         #[command(subcommand)]
         command: HookCommandKind,
     },
-    /// `libra agent hooks cursor <subcommand>` family.
-    #[command(about = "Cursor hook entry points")]
-    Cursor {
-        #[command(subcommand)]
-        command: HookCommandKind,
-    },
-    /// `libra agent hooks codex <subcommand>` family.
-    #[command(about = "Codex hook entry points")]
-    Codex {
-        #[command(subcommand)]
-        command: HookCommandKind,
-    },
-    /// `libra agent hooks copilot <subcommand>` family.
-    #[command(about = "Copilot CLI hook entry points")]
-    Copilot {
-        #[command(subcommand)]
-        command: HookCommandKind,
-    },
-    /// `libra agent hooks factory-ai <subcommand>` family.
-    #[command(about = "Factory AI Droid hook entry points")]
-    FactoryAi {
-        #[command(subcommand)]
-        command: HookCommandKind,
-    },
-    /// `libra agent hooks opencode <subcommand>` family.
-    #[command(about = "OpenCode hook entry points")]
-    Opencode {
-        #[command(subcommand)]
-        command: HookCommandKind,
-    },
 }
 
 #[derive(Subcommand, Debug, Clone, Copy)]
@@ -93,21 +63,9 @@ impl HookCommandKind {
 }
 
 pub async fn execute_safe(cmd: AgentHooksSubcommand, _output: &OutputConfig) -> CliResult<()> {
-    use crate::internal::ai::hooks::providers::promoted;
     match cmd {
         AgentHooksSubcommand::ClaudeCode { command } => run(claude_provider(), command).await,
         AgentHooksSubcommand::Gemini { command } => run(gemini_provider(), command).await,
-        AgentHooksSubcommand::Cursor { command } => run(&promoted::CURSOR_PROVIDER, command).await,
-        AgentHooksSubcommand::Codex { command } => run(&promoted::CODEX_PROVIDER, command).await,
-        AgentHooksSubcommand::Copilot { command } => {
-            run(&promoted::COPILOT_PROVIDER, command).await
-        }
-        AgentHooksSubcommand::FactoryAi { command } => {
-            run(&promoted::FACTORY_PROVIDER, command).await
-        }
-        AgentHooksSubcommand::Opencode { command } => {
-            run(&promoted::OPENCODE_PROVIDER, command).await
-        }
     }
 }
 

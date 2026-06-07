@@ -879,3 +879,28 @@ fn test_stash_clear_force_removes_all_entries() {
         0
     );
 }
+
+#[test]
+#[serial]
+fn test_stash_show_patch_emits_unified_diff() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nadded line\n").unwrap();
+    let push = run_libra_command(&["stash", "push"], repo.path());
+    assert_cli_success(&push, "stash push");
+
+    let out = run_libra_command(&["stash", "show", "-p"], repo.path());
+    assert_cli_success(&out, "stash show -p");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("diff --git a/tracked.txt b/tracked.txt"),
+        "expected diff header, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("@@"),
+        "expected a unified hunk header, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("+added line"),
+        "expected the added line in the patch, got: {stdout}"
+    );
+}

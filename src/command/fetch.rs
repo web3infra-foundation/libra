@@ -495,7 +495,7 @@ pub struct FetchArgs {
 
     /// Deepen the history of a shallow repository by N commits beyond the current
     /// boundary (only meaningful when the repository was cloned with `--depth`).
-    #[clap(long, value_name = "N", conflicts_with = "unshallow")]
+    #[clap(long, value_name = "N", conflicts_with_all = ["depth", "unshallow"])]
     pub deepen: Option<usize>,
 
     /// Convert a shallow repository into a complete one by fetching all missing
@@ -1209,6 +1209,9 @@ pub(crate) async fn discover_remote_with_name(
 ) -> Result<(RemoteClient, DiscoveryResult), FetchError> {
     let remote_client =
         RemoteClient::from_spec_with_remote(remote_spec, remote_name).map_err(|message| {
+            if is_vault_ssh_config_error(&message) {
+                return FetchError::LocalState { message };
+            }
             // Classify against a credential-redacted spec so neither the `spec`
             // field nor the `reason` string (which may interpolate the spec for
             // malformed URLs) can leak a token/password.
@@ -1229,6 +1232,12 @@ pub(crate) async fn discover_remote_with_name(
             source,
         })?;
     Ok((remote_client, discovery))
+}
+
+fn is_vault_ssh_config_error(message: &str) -> bool {
+    message.contains("vault SSH private key")
+        || message.contains("vault unseal key")
+        || message.contains("temporary SSH key file")
 }
 
 /// Classify a remote-spec construction failure into a typed kind and a
@@ -1320,7 +1329,8 @@ pub(crate) const UNSHALLOW_DEPTH: usize = 0x7fff_ffff;
 
 /// Translate the `fetch` CLI depth/deepen/unshallow flags into a single
 /// [`ShallowOptions`] request. `--unshallow` requests the complete history,
-/// `--deepen N` takes precedence over `--depth N`, otherwise `--depth N` is used.
+/// `--deepen N` sends a relative deepen request, otherwise `--depth N` sends an
+/// absolute depth request.
 pub(crate) fn build_fetch_shallow_options(
     depth: Option<usize>,
     deepen: Option<usize>,
@@ -1335,6 +1345,7 @@ pub(crate) fn build_fetch_shallow_options(
     };
     ShallowOptions {
         depth: effective_depth,
+        deepen_relative: deepen.is_some() && !unshallow,
         deepen_since,
         deepen_not,
         filter: None,
@@ -3089,10 +3100,25 @@ mod tests {
         assert_eq!(opts.deepen_since, Some(1_700_000_000));
         assert_eq!(opts.deepen_not, vec!["v1.0".to_string()]);
         assert_eq!(opts.depth, None);
+        assert!(
+            !opts.deepen_relative,
+            "`--shallow-since` without `--deepen` is not relative"
+        );
+
+        let deepen = super::build_fetch_shallow_options(None, Some(5), false, None, vec![]);
+        assert_eq!(deepen.depth, Some(5));
+        assert!(
+            deepen.deepen_relative,
+            "`--deepen` must be encoded as a relative deepen request"
+        );
 
         // `--unshallow` still overrides everything to the max-depth request.
         let unshallow = super::build_fetch_shallow_options(None, None, true, None, vec![]);
         assert_eq!(unshallow.depth, Some(super::UNSHALLOW_DEPTH));
+        assert!(
+            !unshallow.deepen_relative,
+            "`--unshallow` uses max depth, not relative deepening"
+        );
     }
 
     /// The `.libra/shallow` boundary file must be owner read/write only on Unix.

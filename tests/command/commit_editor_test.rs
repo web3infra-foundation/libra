@@ -286,6 +286,65 @@ fn cleanup_strip_drops_comment_lines() {
 }
 
 #[test]
+fn cleanup_config_default_strips_comment_lines() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+    assert!(
+        run_libra(&["config", "commit.cleanup", "strip"], &repo)
+            .status
+            .success()
+    );
+    stage_file(&repo, "a.txt", "x\n");
+
+    let out = run_libra(&["commit", "-m", "subject\n# configured comment"], &repo);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "configured cleanup commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let msg = last_commit_message(&repo);
+    assert!(
+        msg.contains("subject") && !msg.contains("# configured comment"),
+        "commit.cleanup=strip should drop comments by default: {msg}"
+    );
+}
+
+#[test]
+fn cleanup_flag_overrides_config() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+    assert!(
+        run_libra(&["config", "commit.cleanup", "strip"], &repo)
+            .status
+            .success()
+    );
+    stage_file(&repo, "a.txt", "x\n");
+
+    let out = run_libra(
+        &[
+            "commit",
+            "--cleanup=verbatim",
+            "-m",
+            "subject\n# explicit comment",
+        ],
+        &repo,
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "explicit cleanup commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        last_commit_message(&repo).contains("# explicit comment"),
+        "--cleanup=verbatim should override commit.cleanup=strip"
+    );
+}
+
+#[test]
 fn template_t_flag_loads_initial_content() {
     // -t supplies the initial message; with --no-edit it is used directly.
     let temp = tempdir().unwrap();

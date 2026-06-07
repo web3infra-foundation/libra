@@ -238,6 +238,19 @@ fn verify_pack(
     })
 }
 
+/// Validate a single pack index against its pack and discard the structured
+/// report. Used by `fsck` to fold pack-integrity checking into its
+/// object-database health pass without forking a subprocess or printing
+/// anything — fsck owns the reporting and exit-code policy.
+///
+/// Returns `Ok(())` when the pack is intact, or the same `CliError`
+/// (`RepoCorrupt` / `IoReadFailed`) `libra verify-pack` would surface on a
+/// corrupt or unreadable pack. `explicit_pack` mirrors `--pack`; pass `None`
+/// to use the index's sibling `.pack`.
+pub(crate) fn verify_pack_path(idx_file: &Path, explicit_pack: Option<&Path>) -> CliResult<()> {
+    verify_pack(idx_file, explicit_pack, false, false).map(|_| ())
+}
+
 fn parse_index(bytes: &[u8]) -> Result<ParsedIndex, String> {
     if bytes.starts_with(&IDX_MAGIC) {
         parse_idx_v2(bytes)

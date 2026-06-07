@@ -29,6 +29,7 @@ The update form is silent in human output when it succeeds.
 |--------|-------------|
 | `--short` | Print only the branch name, for example `main` |
 | `-q`, `--quiet` | Suppress extra guidance when `HEAD` is not symbolic |
+| `-d`, `--delete` | Rejected (`LBR-CLI-002`, exit 129): Libra stores refs in SQLite and `HEAD` is its only symbolic ref, so there is nothing to delete. Use `libra switch <branch>` to repoint `HEAD` |
 | `HEAD` | The symbolic ref to inspect or update. Omitted defaults to `HEAD` |
 | `refs/heads/<branch>` | New symbolic target for `HEAD` |
 

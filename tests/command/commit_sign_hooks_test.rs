@@ -73,6 +73,17 @@ fn signed_field(repo: &Path, args: &[&str]) -> bool {
     v["data"]["signed"].as_bool().unwrap()
 }
 
+fn head_oid(repo: &Path) -> String {
+    let out = run_libra(&["rev-parse", "HEAD"], repo);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "rev-parse HEAD failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Message hooks
 // ---------------------------------------------------------------------------
@@ -153,6 +164,95 @@ fn prepare_commit_msg_hook_modifies_message() {
     assert!(
         log.contains("PREFIX: body"),
         "prepare-commit-msg edit should be used, got: {log}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn prepare_commit_msg_hook_receives_message_source() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+    stage(&repo, "a.txt", "x\n");
+    write_hook(
+        &repo,
+        "prepare-commit-msg",
+        "printf '%s\\n' \"$2\" > hook-source.txt",
+    );
+
+    let out = run_libra(&["commit", "-m", "body"], &repo);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("hook-source.txt")).unwrap(),
+        "message\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn prepare_commit_msg_hook_receives_squash_source() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+    stage(&repo, "a.txt", "x\n");
+    assert_eq!(
+        run_libra(&["commit", "-m", "base"], &repo).status.code(),
+        Some(0)
+    );
+
+    stage(&repo, "a.txt", "y\n");
+    write_hook(
+        &repo,
+        "prepare-commit-msg",
+        "printf '%s\\n' \"$2\" > hook-source.txt",
+    );
+    let out = run_libra(&["commit", "--no-edit", "--squash", "HEAD"], &repo);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "squash commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("hook-source.txt")).unwrap(),
+        "squash\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn prepare_commit_msg_hook_receives_amend_source_and_sha() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+    stage(&repo, "a.txt", "x\n");
+    assert_eq!(
+        run_libra(&["commit", "-m", "base"], &repo).status.code(),
+        Some(0)
+    );
+    let amended = head_oid(&repo);
+
+    stage(&repo, "a.txt", "y\n");
+    write_hook(
+        &repo,
+        "prepare-commit-msg",
+        "printf '%s\\n%s\\n' \"$2\" \"$3\" > hook-source.txt",
+    );
+    let out = run_libra(&["commit", "--amend", "--no-edit"], &repo);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "amend commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("hook-source.txt")).unwrap(),
+        format!("commit\n{amended}\n")
     );
 }
 

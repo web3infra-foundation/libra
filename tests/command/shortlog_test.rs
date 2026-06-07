@@ -724,3 +724,102 @@ async fn test_shortlog_committer_date_filter() {
     assert!(output.contains("TEST"));
     assert!(output.contains("Test Commit"));
 }
+
+#[tokio::test]
+#[serial]
+async fn test_shortlog_no_merges_excludes_merge_commits() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    let _ = create_test_commit_tree().await;
+
+    let full_args = ShortlogArgs::try_parse_from(["libra"]).unwrap();
+    let mut full_buf = Vec::new();
+    shortlog::execute_to(full_args, &mut full_buf)
+        .await
+        .unwrap();
+    let full = String::from_utf8(full_buf).unwrap();
+
+    let nm_args = ShortlogArgs::try_parse_from(["libra", "--no-merges"]).unwrap();
+    let mut nm_buf = Vec::new();
+    shortlog::execute_to(nm_args, &mut nm_buf).await.unwrap();
+    let nm = String::from_utf8(nm_buf).unwrap();
+
+    // Commit_4 (parents 1,2) and Commit_14 are merge commits; --no-merges drops
+    // them while keeping the single-parent Commit_7.
+    assert!(
+        full.contains("Commit_4"),
+        "full summary should include merge Commit_4"
+    );
+    assert!(
+        full.contains("Commit_14"),
+        "full summary should include merge Commit_14"
+    );
+    assert!(
+        !nm.contains("Commit_4"),
+        "--no-merges must drop merge Commit_4:\n{nm}"
+    );
+    assert!(
+        !nm.contains("Commit_14"),
+        "--no-merges must drop merge Commit_14:\n{nm}"
+    );
+    assert!(
+        nm.contains("Commit_7"),
+        "--no-merges keeps non-merge Commit_7:\n{nm}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_shortlog_committer_groups_by_committer_identity() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let mut solo = Commit::new(
+        create_signature(SignatureType::Author, "ALICE"),
+        create_signature(SignatureType::Committer, "BOB"),
+        ObjectHash::new(&[42; 20]),
+        vec![],
+        &format_commit_msg("Solo", None),
+    );
+    solo.committer.timestamp = solo.author.timestamp;
+    save_object(&solo, &solo.id).unwrap();
+    let branch_name = match Head::current().await {
+        Head::Branch(name) => name,
+        _ => panic!("should be branch"),
+    };
+    Branch::update_branch(&branch_name, &solo.id.to_string(), None)
+        .await
+        .unwrap();
+
+    let author_args = ShortlogArgs::try_parse_from(["libra"]).unwrap();
+    let mut author_buf = Vec::new();
+    shortlog::execute_to(author_args, &mut author_buf)
+        .await
+        .unwrap();
+    let author_out = String::from_utf8(author_buf).unwrap();
+    assert!(
+        author_out.contains("ALICE"),
+        "default groups by author:\n{author_out}"
+    );
+    assert!(
+        !author_out.contains("BOB"),
+        "default must not show committer:\n{author_out}"
+    );
+
+    let committer_args = ShortlogArgs::try_parse_from(["libra", "-c"]).unwrap();
+    let mut committer_buf = Vec::new();
+    shortlog::execute_to(committer_args, &mut committer_buf)
+        .await
+        .unwrap();
+    let committer_out = String::from_utf8(committer_buf).unwrap();
+    assert!(
+        committer_out.contains("BOB"),
+        "-c groups by committer:\n{committer_out}"
+    );
+    assert!(
+        !committer_out.contains("ALICE"),
+        "-c must not show author:\n{committer_out}"
+    );
+}

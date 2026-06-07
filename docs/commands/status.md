@@ -92,6 +92,17 @@ libra status --exit-code
 libra status --quiet --exit-code   # silent dirty check
 ```
 
+### `-z`
+
+Terminate porcelain entries with a NUL byte (`\0`) instead of a newline, for safe
+machine parsing of paths. Implies `--porcelain=v1` when no other format is given;
+combine with `--porcelain=v2` for NUL-terminated v2 records.
+
+```bash
+libra status -z                 # NUL-terminated porcelain v1
+libra status --porcelain=v2 -z  # NUL-terminated porcelain v2
+```
+
 ## Common Commands
 
 ```bash

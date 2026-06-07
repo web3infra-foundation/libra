@@ -84,7 +84,7 @@ pub struct DescribeArgs {
     #[clap(long)]
     pub contains: bool,
 
-    /// Consider at most N candidate tags (default: describe.maxCandidates; rejects 0)
+    /// Consider at most N candidate tags (default: describe.maxCandidates or 10; rejects 0)
     #[clap(long, value_name = "N")]
     pub candidates: Option<usize>,
 
@@ -97,6 +97,7 @@ pub struct DescribeArgs {
 /// against unbounded traversal (and OOM) on very deep histories; when the cap is
 /// hit without `--always`, the command fails with [`DescribeError::TraversalLimitExceeded`].
 const MAX_WALK: usize = 10_000;
+const DEFAULT_CANDIDATES: usize = 10;
 
 /// Maximum byte length accepted for a `--match`/`--exclude` glob pattern, guarding
 /// against pathological inputs. Longer patterns are rejected up front with
@@ -551,10 +552,6 @@ fn tie_break_better(candidate: &RefTip, current: &RefTip) -> bool {
         || (candidate_priority == current_priority && candidate.name < current.name)
 }
 
-/// Resolve the candidate cap for the forward search. An explicit `--candidates=0`
-/// is rejected (`CliInvalidArguments`, 129). With no flag, `describe.maxCandidates`
-/// is consulted; an unparseable or zero config value falls back to the unbounded
-/// nearest-tag search. `Some(n)` bounds candidate collection to `n` tags.
 async fn resolve_max_candidates(flag: Option<usize>) -> Result<Option<usize>, DescribeError> {
     if let Some(n) = flag {
         if n == 0 {
@@ -567,9 +564,9 @@ async fn resolve_max_candidates(flag: Option<usize>) -> Result<Option<usize>, De
     match ConfigKv::get("describe.maxCandidates").await {
         Ok(Some(entry)) => match entry.value.trim().parse::<usize>() {
             Ok(n) if n >= 1 => Ok(Some(n)),
-            _ => Ok(None),
+            _ => Ok(Some(DEFAULT_CANDIDATES)),
         },
-        _ => Ok(None),
+        _ => Ok(Some(DEFAULT_CANDIDATES)),
     }
 }
 
@@ -1000,6 +997,14 @@ mod tests {
             compile_globs(&["v{1".to_string()]),
             Err(DescribeError::InvalidArgument(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn resolve_max_candidates_defaults_to_ten() {
+        assert_eq!(
+            resolve_max_candidates(None).await.unwrap(),
+            Some(DEFAULT_CANDIDATES),
+        );
     }
 
     /// Build a distinct in-memory commit hash for graph-shaped unit tests.

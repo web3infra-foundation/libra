@@ -38,6 +38,7 @@ EXAMPLES:
     libra revert HEAD                     Revert the most recent commit
     libra revert abc1234                  Revert a specific commit
     libra revert -n HEAD                  Revert without auto-committing
+    libra revert -m 1 <merge>             Revert a merge commit relative to parent 1
     libra revert --json HEAD              Structured JSON output for agents";
 
 // ── Typed error ──────────────────────────────────────────────────────
@@ -53,8 +54,18 @@ enum RevertError {
     #[error("failed to resolve commit reference '{0}'")]
     InvalidCommit(String),
 
-    #[error("reverting merge commits is not yet supported")]
-    MergeCommitUnsupported,
+    #[error("commit {0} is a merge but no -m option was given")]
+    MainlineRequired(String),
+
+    #[error("mainline was specified but commit {0} is not a merge")]
+    MainlineForNonMerge(String),
+
+    #[error("commit {commit} does not have a parent number {mainline} (it has {parents})")]
+    InvalidMainline {
+        commit: String,
+        mainline: usize,
+        parents: usize,
+    },
 
     #[error("conflict: file '{path}' was modified in a later commit")]
     Conflict { path: String },
@@ -81,7 +92,9 @@ impl RevertError {
             Self::NotInRepo => StableErrorCode::RepoNotFound,
             Self::DetachedHead => StableErrorCode::RepoStateInvalid,
             Self::InvalidCommit(_) => StableErrorCode::CliInvalidTarget,
-            Self::MergeCommitUnsupported => StableErrorCode::CliInvalidArguments,
+            Self::MainlineRequired(_)
+            | Self::MainlineForNonMerge(_)
+            | Self::InvalidMainline { .. } => StableErrorCode::CliInvalidArguments,
             Self::Conflict { .. } => StableErrorCode::ConflictUnresolved,
             Self::LoadObject(_) => StableErrorCode::IoReadFailed,
             Self::SaveObject(_) => StableErrorCode::IoWriteFailed,
@@ -104,9 +117,20 @@ impl From<RevertError> for CliError {
             RevertError::InvalidCommit(_) => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("use 'libra log' to find valid commit references"),
-            RevertError::MergeCommitUnsupported => CliError::fatal(message)
+            // Mainline usage errors mirror Git's exit 128 (the Cli category
+            // would otherwise default to 129), so override explicitly.
+            RevertError::MainlineRequired(_) => CliError::fatal(message)
                 .with_stable_code(stable_code)
-                .with_hint("merge commit revert support is planned for a future release"),
+                .with_exit_code(128)
+                .with_hint("pass '-m <parent-number>' (e.g. '-m 1') to revert a merge commit"),
+            RevertError::MainlineForNonMerge(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_exit_code(128)
+                .with_hint("'-m' is only valid when reverting a merge commit"),
+            RevertError::InvalidMainline { .. } => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_exit_code(128)
+                .with_hint("choose a parent number within the merge commit's parent count"),
             RevertError::Conflict { .. } => CliError::failure(message)
                 .with_stable_code(stable_code)
                 .with_hint("resolve conflicts manually, then use 'libra commit'"),
@@ -142,6 +166,11 @@ pub struct RevertArgs {
     /// Don't automatically commit the revert, just stage the changes
     #[clap(short = 'n', long)]
     pub no_commit: bool,
+
+    /// Parent number (1-based) to treat as the mainline when reverting a merge
+    /// commit. Required for merge commits; rejected for non-merge commits.
+    #[clap(short = 'm', long, value_name = "parent-number")]
+    pub mainline: Option<usize>,
 }
 
 pub async fn execute(args: RevertArgs) {
@@ -214,14 +243,27 @@ async fn revert_single_commit(
     let reverted_commit: Commit =
         load_object(commit_id).map_err(|e| RevertError::LoadObject(e.to_string()))?;
 
-    if reverted_commit.parent_commit_ids.len() > 1 {
-        return Err(RevertError::MergeCommitUnsupported);
-    }
-
-    let parent_commit_id = if let Some(id) = reverted_commit.parent_commit_ids.first() {
-        *id
-    } else {
-        return revert_root_commit(args).await;
+    // Select the baseline parent to diff against. A merge commit (>1 parent)
+    // requires `-m <n>` to pick the mainline; a non-merge commit rejects `-m`.
+    // The generated revert still records a single parent (the current HEAD).
+    let parents = &reverted_commit.parent_commit_ids;
+    let parent_commit_id = match (parents.len(), args.mainline) {
+        (0, None) => return revert_root_commit(args).await,
+        (0, Some(_)) | (1, Some(_)) => {
+            return Err(RevertError::MainlineForNonMerge(commit_id.to_string()));
+        }
+        (1, None) => parents[0],
+        (_, None) => return Err(RevertError::MainlineRequired(commit_id.to_string())),
+        (count, Some(mainline)) => {
+            if mainline < 1 || mainline > count {
+                return Err(RevertError::InvalidMainline {
+                    commit: commit_id.to_string(),
+                    mainline,
+                    parents: count,
+                });
+            }
+            parents[mainline - 1]
+        }
     };
 
     let parent_commit: Commit =
@@ -548,8 +590,21 @@ mod tests {
             "failed to resolve commit reference 'deadbeef'",
         );
         assert_eq!(
-            RevertError::MergeCommitUnsupported.to_string(),
-            "reverting merge commits is not yet supported",
+            RevertError::MainlineRequired("deadbeef".to_string()).to_string(),
+            "commit deadbeef is a merge but no -m option was given",
+        );
+        assert_eq!(
+            RevertError::MainlineForNonMerge("deadbeef".to_string()).to_string(),
+            "mainline was specified but commit deadbeef is not a merge",
+        );
+        assert_eq!(
+            RevertError::InvalidMainline {
+                commit: "deadbeef".to_string(),
+                mainline: 3,
+                parents: 2,
+            }
+            .to_string(),
+            "commit deadbeef does not have a parent number 3 (it has 2)",
         );
         assert_eq!(
             RevertError::Conflict {
@@ -603,7 +658,20 @@ mod tests {
             StableErrorCode::CliInvalidTarget,
         );
         assert_eq!(
-            RevertError::MergeCommitUnsupported.stable_code(),
+            RevertError::MainlineRequired("x".to_string()).stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            RevertError::MainlineForNonMerge("x".to_string()).stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            RevertError::InvalidMainline {
+                commit: "x".to_string(),
+                mainline: 3,
+                parents: 2,
+            }
+            .stable_code(),
             StableErrorCode::CliInvalidArguments,
         );
         assert_eq!(

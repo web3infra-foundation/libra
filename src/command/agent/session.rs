@@ -60,11 +60,6 @@ pub struct SessionListArgs {
     /// Filter by state (`active`, `stopped`, …).
     #[arg(long, value_name = "STATE")]
     pub state: Option<String>,
-    /// Filter by worktree id (the worktree-root directory name recorded at
-    /// capture time). Useful when several worktrees share one repository's
-    /// `agent_session` catalog. entire.md §3.4 / §13 risk #9.
-    #[arg(long, value_name = "ID")]
-    pub worktree: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -193,11 +188,6 @@ struct SessionRow {
     agent_kind: String,
     state: String,
     working_dir: String,
-    /// Stable identifier of the worktree the session ran in (the
-    /// worktree-root directory name). `None` for sessions captured before
-    /// the column was populated, or when the worktree root couldn't be
-    /// resolved. entire.md §3.4 / §13 risk #9.
-    worktree_id: Option<String>,
     started_at: i64,
     last_event_at: i64,
 }
@@ -406,14 +396,10 @@ async fn list(args: SessionListArgs, output: &OutputConfig) -> CliResult<()> {
     }
 
     let mut sql = String::from(
-        "SELECT session_id, agent_kind, state, working_dir, worktree_id, started_at, last_event_at \
+        "SELECT session_id, agent_kind, state, working_dir, started_at, last_event_at \
          FROM agent_session WHERE 1=1",
     );
     let mut values: Vec<sea_orm::Value> = Vec::new();
-    if let Some(worktree) = &args.worktree {
-        sql.push_str(" AND worktree_id = ?");
-        values.push(worktree.clone().into());
-    }
     if let Some(agent) = &args.agent {
         // The CLI accepts hyphenated slugs (`claude-code`) but the database
         // stores the snake_case `agent_kind` (`claude_code`). Translate to
@@ -451,10 +437,6 @@ async fn list(args: SessionListArgs, output: &OutputConfig) -> CliResult<()> {
             working_dir: row
                 .try_get_by::<String, _>("working_dir")
                 .unwrap_or_default(),
-            worktree_id: row
-                .try_get_by::<Option<String>, _>("worktree_id")
-                .ok()
-                .flatten(),
             started_at: row.try_get_by::<i64, _>("started_at").unwrap_or_default(),
             last_event_at: row
                 .try_get_by::<i64, _>("last_event_at")
@@ -477,7 +459,7 @@ async fn show(args: SessionShowArgs, output: &OutputConfig) -> CliResult<()> {
 
     let stmt = Statement::from_sql_and_values(
         backend,
-        "SELECT session_id, agent_kind, state, working_dir, worktree_id, started_at, last_event_at, \
+        "SELECT session_id, agent_kind, state, working_dir, started_at, last_event_at, \
                 COALESCE(metadata_json, '{}') AS metadata_json \
          FROM agent_session WHERE session_id = ? LIMIT 1",
         [args.session_id.clone().into()],
@@ -499,10 +481,6 @@ async fn show(args: SessionShowArgs, output: &OutputConfig) -> CliResult<()> {
                 working_dir: row
                     .try_get_by::<String, _>("working_dir")
                     .unwrap_or_default(),
-                worktree_id: row
-                    .try_get_by::<Option<String>, _>("worktree_id")
-                    .ok()
-                    .flatten(),
                 started_at: row.try_get_by::<i64, _>("started_at").unwrap_or_default(),
                 last_event_at: row
                     .try_get_by::<i64, _>("last_event_at")
@@ -720,17 +698,13 @@ fn emit_list(rows: &[SessionRow], output: &OutputConfig) -> CliResult<()> {
         return Ok(());
     }
     println!(
-        "{:<37}  {:<14}  {:<10}  {:<16}  {:<20}",
-        "session_id", "agent_kind", "state", "worktree", "started_at"
+        "{:<37}  {:<14}  {:<10}  {:<20}",
+        "session_id", "agent_kind", "state", "started_at"
     );
     for r in rows {
         println!(
-            "{:<37}  {:<14}  {:<10}  {:<16}  {:<20}",
-            r.session_id,
-            r.agent_kind,
-            r.state,
-            r.worktree_id.as_deref().unwrap_or("-"),
-            r.started_at
+            "{:<37}  {:<14}  {:<10}  {:<20}",
+            r.session_id, r.agent_kind, r.state, r.started_at
         );
     }
     Ok(())
@@ -747,10 +721,6 @@ fn emit_one(row: &SessionRow, output: &OutputConfig) -> CliResult<()> {
     println!("agent_kind    : {}", row.agent_kind);
     println!("state         : {}", row.state);
     println!("working_dir   : {}", row.working_dir);
-    println!(
-        "worktree_id   : {}",
-        row.worktree_id.as_deref().unwrap_or("(unset)")
-    );
     println!("started_at    : {}", row.started_at);
     println!("last_event_at : {}", row.last_event_at);
     Ok(())
