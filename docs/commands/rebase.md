@@ -320,7 +320,8 @@ Note: jj does not stop on conflicts during rebase. Instead, conflicts are materi
 | `--abort` without rebase in progress | `LBR-REPO-003` (RepoStateInvalid) | 128 | Error indicating no rebase in progress |
 | `--skip` without rebase in progress | `LBR-REPO-003` (RepoStateInvalid) | 128 | Error indicating no rebase in progress |
 | `--skip` without stopped or pending commit | `LBR-REPO-003` (RepoStateInvalid) | 128 | Error indicating there is no commit to skip |
-| No common ancestor found | pending typed mapping | 128 | Legacy text error refusing to rebase unrelated histories |
+| No common ancestor found | `LBR-CLI-003` (CliInvalidTarget) | 129 | Error refusing to rebase unrelated histories |
+| Criss-cross merge bases | `LBR-CONFLICT-002` (ConflictOperationBlocked) | 128 | Error refusing to choose one of multiple best merge bases |
 | Conflict during commit replay | pending typed mapping | 128 | Rebase stops, state is saved, user prompted to resolve |
 | Failed to create rebased commit | pending typed mapping | 128 | Legacy text error with commit details |
 | Failed to update branch reference | pending typed mapping | 128 | Legacy text error with ref update details |

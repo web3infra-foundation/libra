@@ -102,5 +102,43 @@ pub(crate) fn scenario_merge_rebase_cherry_revert_smoke(ctx: &mut ScenarioCtx<'_
     let bad_merge = ctx.command(&["merge", "nonexistent-branch"], repo.clone(), false)?;
     assert_lbr_or_text(&bad_merge, "merge")?;
     ctx.command(&["fsck", "--connectivity-only"], repo, true)?;
+    assert_criss_cross_rebase_error(ctx)?;
+    Ok(())
+}
+
+fn assert_criss_cross_rebase_error(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
+    let repo = ctx.repo("criss-cross");
+    create_committed_repo(ctx, &repo)?;
+
+    ctx.command(&["switch", "-c", "left"], repo.clone(), true)?;
+    fs::write(repo.join("left.txt"), "left\n").context("write left side")?;
+    ctx.command(&["add", "left.txt"], repo.clone(), true)?;
+    ctx.command(
+        &["commit", "-m", "left side", "--no-verify"],
+        repo.clone(),
+        true,
+    )?;
+    ctx.command(&["branch", "left-base"], repo.clone(), true)?;
+
+    ctx.command(&["switch", "main"], repo.clone(), true)?;
+    ctx.command(&["switch", "-c", "right"], repo.clone(), true)?;
+    fs::write(repo.join("right.txt"), "right\n").context("write right side")?;
+    ctx.command(&["add", "right.txt"], repo.clone(), true)?;
+    ctx.command(
+        &["commit", "-m", "right side", "--no-verify"],
+        repo.clone(),
+        true,
+    )?;
+    ctx.command(&["branch", "right-base"], repo.clone(), true)?;
+
+    ctx.command(&["switch", "left"], repo.clone(), true)?;
+    ctx.command(&["merge", "right-base"], repo.clone(), true)?;
+    ctx.command(&["switch", "right"], repo.clone(), true)?;
+    ctx.command(&["merge", "left-base"], repo.clone(), true)?;
+
+    ctx.command(&["switch", "left"], repo.clone(), true)?;
+    let criss_cross = ctx.command(&["--json", "rebase", "right"], repo.clone(), false)?;
+    assert_json_error_code(&criss_cross, "LBR-CONFLICT-002")?;
+    ctx.command(&["fsck", "--connectivity-only"], repo, true)?;
     Ok(())
 }

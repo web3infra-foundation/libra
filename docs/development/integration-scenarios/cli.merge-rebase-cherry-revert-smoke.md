@@ -102,12 +102,40 @@ cd "$RUN_DIR/history-edit-repo"
 ! libra rebase --continue
 ! libra cherry-pick no-such-commit
 ! libra revert no-such-commit
+
+# criss-cross: left merge commit parents left-base/right-base, right merge
+# commit parents right-base/left-base; rebase must not choose one base.
+libra init criss-cross
+cd criss-cross
+libra config set user.name "Libra History Edit Test"
+libra config set user.email "history-edit@example.invalid"
+printf 'base\n' > tracked.txt
+libra add tracked.txt
+libra commit -m "test: criss-cross base"
+libra switch -c left
+printf 'left\n' > left.txt
+libra add left.txt
+libra commit -m "test: left side"
+libra branch left-base
+libra switch main
+libra switch -c right
+printf 'right\n' > right.txt
+libra add right.txt
+libra commit -m "test: right side"
+libra branch right-base
+libra switch left
+libra merge right-base
+libra switch right
+libra merge left-base
+libra switch left
+! libra --json rebase right
 ```
 
-断言：fast-forward merge 后 HEAD 等于目标提交；三方无冲突 merge 产生可观察 merge 结果并保留双方文件；`--find-renames=<n>` 的相似度阈值可控制 rename+edit 是否自动合并；`--squash --continue` 必须被解析层拒绝；`rebase main` 把 topic 提交重放到新 base 且文件存在；`cherry-pick <commit>` 在当前分支生成等价修改；`revert <commit>` 创建反向提交并撤销目标修改；缺失目标、无 merge/rebase 会话的 continue/abort 和非法 commit 必须失败且不破坏当前分支。
+断言：fast-forward merge 后 HEAD 等于目标提交；三方无冲突 merge 产生可观察 merge 结果并保留双方文件；`--find-renames=<n>` 的相似度阈值可控制 rename+edit 是否自动合并；`--squash --continue` 必须被解析层拒绝；`rebase main` 把 topic 提交重放到新 base 且文件存在；criss-cross 多 best merge-base 的 `rebase` 必须返回 `LBR-CONFLICT-002`，不得静默选择其中一个 base；`cherry-pick <commit>` 在当前分支生成等价修改；`revert <commit>` 创建反向提交并撤销目标修改；缺失目标、无 merge/rebase 会话的 continue/abort 和非法 commit 必须失败且不破坏当前分支。
 
 补充可执行断言：
 - 每次主要操作后执行 `libra fsck --connectivity-only` 必须 0 退出。
 - `libra --json log -n 1` 验证 merge commit 有 2 个 parent（对于非 ff merge）。
 - 负向步骤必须产生非 0 退出，且 stderr 包含 "not a" / "no such" 或 LBR- 相关错误标识（通过捕获验证）。
+- criss-cross rebase 负向路径使用 `libra --json rebase right`，断言 `ok:false` 且 `error_code == "LBR-CONFLICT-002"`。
 - `libra --json show-ref --heads` 验证 `data.entries[]` 中的分支状态在 rebase/cherry 后一致。

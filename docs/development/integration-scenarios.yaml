@@ -248,10 +248,10 @@ scenarios:
   - id: cli.merge-rebase-cherry-revert-smoke
     wave: 1
     group: history_edit
-    purpose: "Smoke for merge (ff + 3-way + rename threshold), rebase, cherry-pick, revert; no-conflict happy paths + lifecycle misuse/empty-session failures."
+    purpose: "Smoke for merge (ff + 3-way + rename threshold), rebase, cherry-pick, revert; no-conflict happy paths + lifecycle misuse/empty-session failures + rebase criss-cross refusal."
     gh_required: false
     requires_git: false
-    key_assertion_categories: [json_envelope, fsck, negative_exit]
+    key_assertion_categories: [json_envelope, fsck, negative_exit, lbr_error]
     doc_section: "cli.merge-rebase-cherry-revert-smoke"
 
   - id: cli.merge-conflict-continue
