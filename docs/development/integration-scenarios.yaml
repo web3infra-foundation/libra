@@ -167,7 +167,7 @@ scenarios:
   - id: cli.init-bare-and-shared
     wave: 1
     group: init
-    purpose: "Cover --bare (no .libra/ layout) and all --shared MODE values + invalid cases."
+    purpose: "Cover --bare (no .libra/ layout) and all --shared=<MODE> values + invalid cases."
     gh_required: false
     requires_git: false
     key_assertion_categories: [file_exists, negative_exit, fsck]
