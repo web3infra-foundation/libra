@@ -4,7 +4,7 @@ use std::{
     cell::RefCell,
     cmp::min,
     collections::{HashMap, HashSet, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     str::FromStr,
 };
@@ -50,6 +50,9 @@ EXAMPLES:
     libra log --since 24h --until 1h       Time-window filter (relative or RFC3339)
     libra log --grep '^fix' -n 20          Filter commits by message (regex)
     libra log --merges --first-parent      Show merge commits along the first-parent line
+    libra log --pretty=format:'%h %s'      Render with a Git-style custom pretty format
+    libra log main..feature -- src/        Show range commits that touch src/
+    libra log -S 'debug_flag' -- src/      Pickaxe literal changes under src/
     libra log --name-status src/           Show changed files under src/
     libra --json log -n 1                  Structured JSON output for agents";
 
@@ -174,6 +177,8 @@ pub struct LogArgs {
     /// Files to limit diff output (used with -p, --name-only, or --stat)
     #[clap(value_name = "PATHS", num_args = 0..)]
     pathspec: Vec<String>,
+    #[clap(skip)]
+    revision_tokens: Option<Vec<String>>,
 
     /// Filter commits whose message matches PATTERN (regular expression, case-sensitive by default)
     #[clap(long, value_name = "PATTERN")]
@@ -303,10 +308,125 @@ enum RevRange {
 /// Returns whether any positional token uses explicit revision-range/exclude
 /// syntax (`..`, `...`, or a leading `^`). Bare tokens never trigger this, so
 /// pathspec-only invocations keep their existing behavior.
+fn token_has_rev_range_syntax(token: &str) -> bool {
+    if token.starts_with('^') {
+        return true;
+    }
+    if let Some((left, right)) = token.split_once("...").or_else(|| token.split_once("..")) {
+        return !left.ends_with(['/', '\\']) && !right.starts_with(['/', '\\']);
+    }
+    false
+}
+
 fn has_rev_range_syntax(tokens: &[String]) -> bool {
+    tokens.iter().any(|token| token_has_rev_range_syntax(token))
+}
+
+pub fn apply_pathspec_separator(args: &mut LogArgs, command_argv: &[String]) {
+    let Some(separator_index) = command_argv.iter().position(|arg| arg == "--") else {
+        return;
+    };
+    let trailing_pathspecs = command_argv[separator_index + 1..].to_vec();
+    if trailing_pathspecs.len() > args.pathspec.len() {
+        return;
+    }
+    let revision_count = args.pathspec.len() - trailing_pathspecs.len();
+    args.revision_tokens = Some(args.pathspec[..revision_count].to_vec());
+    args.pathspec = trailing_pathspecs;
+}
+
+struct LogPositionals {
+    rev_range: Option<RevRange>,
+    path_filters: Vec<PathBuf>,
+    explicit_revision_query: bool,
+}
+
+fn parse_log_positionals(args: &LogArgs) -> CliResult<LogPositionals> {
+    let has_separator = args.revision_tokens.is_some();
+    let revision_tokens = args.revision_tokens.as_deref().unwrap_or(&args.pathspec);
+    let explicit_revision_query =
+        (has_separator && !revision_tokens.is_empty()) || has_rev_range_syntax(revision_tokens);
+
+    let rev_range = explicit_revision_query
+        .then(|| parse_rev_range(revision_tokens))
+        .transpose()?;
+    let path_filters = if has_separator || !explicit_revision_query {
+        normalize_log_pathspecs(&args.pathspec)?
+    } else {
+        Vec::new()
+    };
+
+    Ok(LogPositionals {
+        rev_range,
+        path_filters,
+        explicit_revision_query,
+    })
+}
+
+fn invalid_pathspec_error(raw: &str, reason: &str) -> CliError {
+    CliError::command_usage(format!("invalid pathspec '{raw}': {reason}"))
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+        .with_hint("pathspecs must be relative paths that stay inside the working tree; use `--` to separate paths from revisions.")
+}
+
+fn is_windows_absolute_path(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    raw.starts_with("\\\\")
+        || raw.starts_with('\\')
+        || (bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic())
+}
+
+fn validate_log_pathspec_boundary(raw: &str) -> CliResult<()> {
+    if Path::new(raw).is_absolute() || is_windows_absolute_path(raw) {
+        return Err(invalid_pathspec_error(
+            raw,
+            "absolute paths are not accepted",
+        ));
+    }
+
+    let mut depth = 0usize;
+    for segment in raw.split(['/', '\\']) {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                if depth == 0 {
+                    return Err(invalid_pathspec_error(
+                        raw,
+                        "parent components escape the working tree",
+                    ));
+                }
+                depth -= 1;
+            }
+            _ => depth += 1,
+        }
+    }
+    Ok(())
+}
+
+fn normalize_log_pathspec(raw: &str) -> CliResult<PathBuf> {
+    validate_log_pathspec_boundary(raw)?;
+    let mut normalized = PathBuf::new();
+    for segment in raw.split(['/', '\\']) {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                normalized.pop();
+            }
+            _ => normalized.push(segment),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        Ok(PathBuf::from("."))
+    } else {
+        Ok(normalized)
+    }
+}
+
+fn normalize_log_pathspecs(tokens: &[String]) -> CliResult<Vec<PathBuf>> {
     tokens
         .iter()
-        .any(|token| token.contains("..") || token.starts_with('^'))
+        .map(|token| normalize_log_pathspec(token))
+        .collect()
 }
 
 /// An empty range endpoint defaults to `HEAD` (so `..B` and `A..` work).
@@ -402,15 +522,16 @@ async fn resolve_rev_range(range: &RevRange) -> CliResult<Vec<Commit>> {
             let rb = reachable_commits_for_spec(b).await?;
             let a_oids: HashSet<String> = ra.iter().map(|c| c.id.to_string()).collect();
             let b_oids: HashSet<String> = rb.iter().map(|c| c.id.to_string()).collect();
-            let mut out: HashMap<String, Commit> = HashMap::new();
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut out = Vec::new();
             for commit in ra.into_iter().chain(rb) {
                 let oid = commit.id.to_string();
                 // Reachable from exactly one side.
-                if a_oids.contains(&oid) ^ b_oids.contains(&oid) {
-                    out.entry(oid).or_insert(commit);
+                if (a_oids.contains(&oid) ^ b_oids.contains(&oid)) && seen.insert(oid) {
+                    out.push(commit);
                 }
             }
-            Ok(out.into_values().collect())
+            Ok(out)
         }
         RevRange::Include {
             positives,
@@ -422,16 +543,17 @@ async fn resolve_rev_range(range: &RevRange) -> CliResult<Vec<Commit>> {
                     excluded.insert(commit.id.to_string());
                 }
             }
-            let mut included: HashMap<String, Commit> = HashMap::new();
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut included = Vec::new();
             for positive in positives {
                 for commit in reachable_commits_for_spec(positive).await? {
                     let oid = commit.id.to_string();
-                    if !excluded.contains(&oid) {
-                        included.entry(oid).or_insert(commit);
+                    if !excluded.contains(&oid) && seen.insert(oid) {
+                        included.push(commit);
                     }
                 }
             }
-            Ok(included.into_values().collect())
+            Ok(included)
         }
     }
 }
@@ -673,7 +795,7 @@ fn load_commit_blob_vecs(commit: &Commit) -> Result<(BlobList, BlobList), CliErr
     Ok((old_blobs, new_blobs))
 }
 
-fn pickaxe_path_in_scope(path: &std::path::Path, filters: &[PathBuf]) -> bool {
+fn pickaxe_path_in_scope(path: &Path, filters: &[PathBuf]) -> bool {
     filters.is_empty() || filters.iter().any(|filter| util::is_sub_path(path, filter))
 }
 
@@ -887,14 +1009,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
 
     let since = args.since.as_deref().map(parse_date_arg).transpose()?;
     let until = args.until.as_deref().map(parse_date_arg).transpose()?;
-    // When explicit range syntax (`A..B`, `A...B`, `^X`) is present the
-    // positionals are revisions, not pathspec.
-    let is_range = has_rev_range_syntax(&args.pathspec);
-    let path_filters: Vec<PathBuf> = if is_range {
-        Vec::new()
-    } else {
-        args.pathspec.iter().map(util::to_workdir_path).collect()
-    };
+    let positionals = parse_log_positionals(&args)?;
     // Compile `--grep` before any traversal so an invalid/oversized pattern
     // fails fast (`LBR-CLI-002`) instead of after loading the whole history.
     let grep = args
@@ -903,14 +1018,11 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         .map(|p| compile_grep_regex(p, args.regexp_ignore_case))
         .transpose()?;
     let pickaxe = build_pickaxe(&args)?;
-    let rev_range = is_range
-        .then(|| parse_rev_range(&args.pathspec))
-        .transpose()?;
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let commit_hash = current_head_commit.to_string();
 
-    let mut reachable_commits = match &rev_range {
+    let mut reachable_commits = match &positionals.rev_range {
         Some(range) => resolve_rev_range(range).await?,
         None => get_reachable_commits(commit_hash.clone(), None).await?,
     };
@@ -921,14 +1033,14 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     // `--first-parent` restricts to the first-parent chain (computed from the
     // already-loaded history so the shared `get_reachable_commits` is untouched).
     // It is anchored at HEAD, so it is skipped for an explicit revision range.
-    let first_parents = (args.first_parent && !is_range)
+    let first_parents = (args.first_parent && !positionals.explicit_revision_query)
         .then(|| first_parent_oids(&current_head_commit, &reachable_commits));
     let filter = CommitFilter::new(
         args.author.clone(),
         args.committer.clone(),
         since,
         until,
-        path_filters.clone(),
+        positionals.path_filters.clone(),
         grep,
         effective_min_parents(&args),
         effective_max_parents(&args),
@@ -941,7 +1053,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     let selected_commits = select_log_commits(
         reachable_commits,
         &filter,
-        &path_filters,
+        &positionals.path_filters,
         max_output_number,
         reuse_changed_files,
     )
@@ -950,7 +1062,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     if output.quiet {
         return validate_selected_log_commits(
             &selected_commits,
-            &path_filters,
+            &positionals.path_filters,
             name_only,
             name_status,
             patch,
@@ -1095,7 +1207,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
                 message.push_str(&format_changes(&changes, name_status));
             }
         } else if patch {
-            let patch_output = generate_diff(&commit, path_filters.clone()).await?;
+            let patch_output = generate_diff(&commit, positionals.path_filters.clone()).await?;
             if !patch_output.is_empty() {
                 if !message.ends_with('\n') {
                     message.push('\n');
@@ -1103,7 +1215,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
                 message.push_str(&patch_output);
             }
         } else if args.stat {
-            let stats = compute_commit_stat(&commit, path_filters.clone()).await?;
+            let stats = compute_commit_stat(&commit, positionals.path_filters.clone()).await?;
             let stat_output = format_stat_output(&stats);
             if !stat_output.is_empty() {
                 if !message.ends_with('\n') {
@@ -1123,40 +1235,32 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
 async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     let since = args.since.as_deref().map(parse_date_arg).transpose()?;
     let until = args.until.as_deref().map(parse_date_arg).transpose()?;
-    let is_range = has_rev_range_syntax(&args.pathspec);
-    let path_filters: Vec<PathBuf> = if is_range {
-        Vec::new()
-    } else {
-        args.pathspec.iter().map(util::to_workdir_path).collect()
-    };
+    let positionals = parse_log_positionals(args)?;
     let grep = args
         .grep
         .as_deref()
         .map(|p| compile_grep_regex(p, args.regexp_ignore_case))
         .transpose()?;
     let pickaxe = build_pickaxe(args)?;
-    let rev_range = is_range
-        .then(|| parse_rev_range(&args.pathspec))
-        .transpose()?;
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let commit_hash = current_head_commit.to_string();
 
-    let mut reachable_commits = match &rev_range {
+    let mut reachable_commits = match &positionals.rev_range {
         Some(range) => resolve_rev_range(range).await?,
         None => get_reachable_commits(commit_hash, None).await?,
     };
     // newest first
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
 
-    let first_parents = (args.first_parent && !is_range)
+    let first_parents = (args.first_parent && !positionals.explicit_revision_query)
         .then(|| first_parent_oids(&current_head_commit, &reachable_commits));
     let filter = CommitFilter::new(
         args.author.clone(),
         args.committer.clone(),
         since,
         until,
-        path_filters.clone(),
+        positionals.path_filters.clone(),
         grep,
         effective_min_parents(args),
         effective_max_parents(args),
@@ -1178,7 +1282,7 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
             continue;
         }
 
-        let files = get_changed_files_for_commit(&commit, &path_filters).await?;
+        let files = get_changed_files_for_commit(&commit, &positionals.path_filters).await?;
         if !filter.matches(&commit, Some(&files)).await? {
             continue;
         }

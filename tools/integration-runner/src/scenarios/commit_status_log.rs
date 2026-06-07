@@ -26,6 +26,24 @@ pub(crate) fn scenario_commit_status_log(ctx: &mut ScenarioCtx<'_>) -> Result<()
     )?;
     let log = ctx.command(&["log", "--oneline"], repo.clone(), true)?;
     assert_stdout_contains(&log, "initial")?;
+    let filtered_log = ctx.command(
+        &[
+            "log",
+            "-n",
+            "1",
+            "--name-status",
+            "--grep",
+            "initial",
+            "--author",
+            "Libra Integration",
+        ],
+        repo.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&filtered_log, "initial")?;
+    assert_stdout_contains(&filtered_log, "tracked.txt")?;
+    let stat_log = ctx.command(&["log", "--stat", "-n", "3"], repo.clone(), true)?;
+    assert_stdout_contains(&stat_log, "tracked.txt")?;
     ctx.command(&["fsck", "--connectivity-only"], repo.clone(), true)?;
     let empty = ctx.command(
         &["commit", "-m", "empty", "--no-verify"],

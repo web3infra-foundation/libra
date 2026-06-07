@@ -1,9 +1,6 @@
 //! Implements `rev-list` to enumerate commits reachable from a revision.
 
-use std::{
-    collections::{HashMap, HashSet},
-    io::Write,
-};
+use std::{collections::HashSet, io::Write};
 
 use clap::Parser;
 use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
@@ -253,17 +250,19 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<ResolvedRevList> {
     }
 
     // Included = everything reachable from a positive tip and not excluded.
-    let mut included: HashMap<ObjectHash, Commit> = HashMap::new();
+    let mut seen: HashSet<ObjectHash> = HashSet::new();
+    let mut commits: Vec<Commit> = Vec::new();
     for tip in &positive_tips {
         for commit in log::get_reachable_commits(tip.to_string(), None).await? {
             if excluded.contains(&commit.id) {
                 continue;
             }
-            included.entry(commit.id).or_insert(commit);
+            if seen.insert(commit.id) {
+                commits.push(commit);
+            }
         }
     }
 
-    let mut commits: Vec<Commit> = included.into_values().collect();
     sort_rev_list_commits(&mut commits);
 
     // Parent-count predicate first, then skip/limit on the surviving stream so
