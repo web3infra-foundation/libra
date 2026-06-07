@@ -102,6 +102,24 @@ Merge made by the 'three-way' strategy.
  2 files changed
 ```
 
+Squash merge:
+
+```text
+From git@github.com:user/repo.git
+   abc1234..def5678  origin/main
+Squash commit -- not updating HEAD.
+ 2 files changed
+```
+
+No-commit merge:
+
+```text
+From git@github.com:user/repo.git
+   abc1234..def5678  origin/main
+Automatic merge went well; stopped before committing as requested.
+ 2 files changed
+```
+
 Already up to date:
 
 ```text

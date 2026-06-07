@@ -254,6 +254,32 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
         "pull",
     )?;
 
+    let squash_clone = ctx.run_dir.join("pull-squash-clone");
+    let squash_clone_arg = squash_clone.to_string_lossy().to_string();
+    ctx.command(
+        &["clone", &remote, &squash_clone_arg],
+        ctx.run_dir.clone(),
+        true,
+    )?;
+    ctx.command(
+        &["config", "set", "user.name", "Libra Pull Squash"],
+        squash_clone.clone(),
+        true,
+    )?;
+    ctx.command(
+        &["config", "set", "user.email", "pull-squash@example.invalid"],
+        squash_clone.clone(),
+        true,
+    )?;
+    fs::write(squash_clone.join("squash-local.txt"), "squash local\n")
+        .context("write squash local commit")?;
+    ctx.command(&["add", "squash-local.txt"], squash_clone.clone(), true)?;
+    ctx.command(
+        &["commit", "-m", "test: squash local commit"],
+        squash_clone.clone(),
+        true,
+    )?;
+
     fs::write(clone_dir.join("clone-local.txt"), "local only\n")
         .context("write clone local commit")?;
     ctx.command(&["add", "clone-local.txt"], clone_dir.clone(), true)?;
@@ -270,6 +296,20 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
         remote_dir.clone(),
         true,
     )?;
+    let squash_pull = ctx.command(
+        &["pull", "--squash", "origin", "main"],
+        squash_clone.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&squash_pull, "Squash commit -- not updating HEAD.")?;
+    assert_not_contains(&squash_pull, "Fast-forward")?;
+    let squash_readme =
+        fs::read_to_string(squash_clone.join("README.md")).context("read squash README")?;
+    if !squash_readme.contains("third") {
+        bail!("squash pull README did not contain third commit content: {squash_readme}");
+    }
+    ensure_file(squash_clone.join("squash-local.txt"))?;
+
     ctx.command(
         &["pull", "--rebase", "origin", "main"],
         clone_dir.clone(),

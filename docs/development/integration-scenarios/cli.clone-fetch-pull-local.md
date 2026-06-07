@@ -68,8 +68,18 @@ libra show-ref --heads
 libra pull --ff-only origin main
 grep 'second' README.md
 
+cd "$RUN_ROOT/repos/$SCENARIO"
+libra clone "$REMOTE_DIR" pull-squash-clone
+cd pull-squash-clone
+libra config set user.name "Libra Pull Squash"
+libra config set user.email "pull-squash@example.invalid"
+printf 'squash local\n' > squash-local.txt
+libra add squash-local.txt
+libra commit -m "test: squash local commit"
+
 # pull --rebase：clone 端先造一个本地提交，再让 source 推进 upstream，
 # rebase 把本地提交重放到 upstream 新提交之上（改不同文件，确定性无冲突）
+cd "$CLONE_DIR"
 printf 'local only\n' > clone-local.txt
 libra add clone-local.txt
 libra commit -m "test: clone local commit"
@@ -77,6 +87,12 @@ cd "$REMOTE_DIR"
 printf 'third\n' >> README.md
 gitfix add README.md
 gitfix commit -m "test: third remote commit"
+cd "$RUN_ROOT/repos/$SCENARIO/pull-squash-clone"
+libra pull --squash origin main >"$RUN_ROOT/repos/$SCENARIO/pull-squash-output.txt"
+grep 'Squash commit -- not updating HEAD.' "$RUN_ROOT/repos/$SCENARIO/pull-squash-output.txt"
+! grep -x 'Fast-forward' "$RUN_ROOT/repos/$SCENARIO/pull-squash-output.txt"
+grep 'third' README.md
+test -f squash-local.txt
 cd "$CLONE_DIR"
 libra pull --rebase origin main
 grep 'third' README.md
@@ -133,11 +149,12 @@ libra --json pull --ff-only origin main >pull.json
 python3 -c "import json; d=json.load(open('pull.json')); assert d['ok'] is True; assert 'data' in d"
 ```
 
-断言：隔离 `gitfix()` 创建的本地 Git 仓库可作为 clone/fetch/pull remote；`remote add`、`remote -v`、`remote get-url` 能观察本地路径 URL；`ls-remote` 可看到 `refs/heads/main` 且 `--json ls-remote --heads` 返回结构化 refs 列表，`--sort=version:refname --tags` 对 `v1.1.0` / `v1.2.0` / `v1.10.0` 使用自然版本顺序，`--exit-code` 在无匹配时返回 2，`--get-url` 离线打印 remote spec，非法 sort key 必须失败；普通 clone 后文件和 log 可见；Git fixture 新提交后，clone 仓库通过 `fetch`、`fetch --all` 和 `pull --ff-only` 能看到新增提交；**`pull --rebase` 把 clone 端本地提交重放到 upstream 新提交之上——`README.md` 含 upstream 的 `third`，本地 `clone-local.txt` 仍在**；`clone --bare` 生成 Libra bare 布局（可观察到 `libra.db`）；`clone --single-branch -b main` 只检出指定分支；`--origin upstream --no-checkout` 写入 upstream remote 且不物化工作树；`--jobs 2` 被接受；`--reference` / `--local --no-hardlinks` / `--shared` 在本地 remote 上可完成并通过 fsck；缺失 remote 或缺失 ref 必须非 0 退出且不创建半成品仓库或损坏当前 clone。
+断言：隔离 `gitfix()` 创建的本地 Git 仓库可作为 clone/fetch/pull remote；`remote add`、`remote -v`、`remote get-url` 能观察本地路径 URL；`ls-remote` 可看到 `refs/heads/main` 且 `--json ls-remote --heads` 返回结构化 refs 列表，`--sort=version:refname --tags` 对 `v1.1.0` / `v1.2.0` / `v1.10.0` 使用自然版本顺序，`--exit-code` 在无匹配时返回 2，`--get-url` 离线打印 remote spec，非法 sort key 必须失败；普通 clone 后文件和 log 可见；Git fixture 新提交后，clone 仓库通过 `fetch`、`fetch --all` 和 `pull --ff-only` 能看到新增提交；`pull --squash` 在分叉历史下输出 `Squash commit -- not updating HEAD.` 且不误报 `Fast-forward`，同时保留本地提交文件并把 upstream 的 `third` 写入工作区；**`pull --rebase` 把 clone 端本地提交重放到 upstream 新提交之上——`README.md` 含 upstream 的 `third`，本地 `clone-local.txt` 仍在**；`clone --bare` 生成 Libra bare 布局（可观察到 `libra.db`）；`clone --single-branch -b main` 只检出指定分支；`--origin upstream --no-checkout` 写入 upstream remote 且不物化工作树；`--jobs 2` 被接受；`--reference` / `--local --no-hardlinks` / `--shared` 在本地 remote 上可完成并通过 fsck；缺失 remote 或缺失 ref 必须非 0 退出且不创建半成品仓库或损坏当前 clone。
 
 补充可执行断言：
 - `libra --json clone "$REMOTE_DIR" clone-json` 成功后 `ok:true`，并验证 `libra --json log -n 1` 结构。
 - 每次 fetch/pull 后 `libra fsck --connectivity-only` 通过。
 - `libra --json ls-remote --heads` 返回结构化 refs 列表。
 - 负向 `libra fetch origin no-such` 必须非 0，stderr 包含 "couldn't find remote ref" 或对应 LBR-NET 错误。
+- 验证 `pull --squash` 的 human summary 使用 squash 文案，且不出现单独一行 `Fast-forward`。
 - 验证 `pull --rebase` 成功后，本地提交历史被重放（通过 `libra --json log -n 5` 的 `data.commits[]` 顺序观察）。

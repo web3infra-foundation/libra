@@ -805,6 +805,11 @@ fn render_pull_output(result: &PullOutput, output: &OutputConfig) -> CliResult<(
     }
     match merge.strategy.as_str() {
         "three-way" => writeln!(writer, "Merge made by the 'three-way' strategy."),
+        "squash" => writeln!(writer, "Squash commit -- not updating HEAD."),
+        "no-commit" => writeln!(
+            writer,
+            "Automatic merge went well; stopped before committing as requested."
+        ),
         _ => writeln!(writer, "Fast-forward"),
     }
     .map_err(|error| CliError::io(format!("failed to write pull summary: {error}")))?;
