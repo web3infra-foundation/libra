@@ -2,11 +2,25 @@
 
 ## 状态
 
-Proposed（已过两轮安全复核：内部 hardening + 一轮独立复核，无新增漏洞类别，详见“现状安全缺口”）
+Proposed（已过两轮安全复核 + 2026-06-07 十维度审查修订；无新增漏洞类别，详见“现状安全缺口”与“十维度综合审查”）
 
 ## 日期
 
-2026-06-05（2026-06-06 修订：补“现状安全缺口”对齐、`/api/internal/verify` 契约、契约小节现状澄清）
+2026-06-05（2026-06-06：补“现状安全缺口”对齐、`/api/internal/verify` 契约；2026-06-07：十维度审查、决策账本、全局存储路径澄清、scope 注册表、完成定义）
+
+## 一、摘要
+
+**概述**：为 Libra CLI 新增 `libra login` / `logout` / `whoami`，复用 website 已有 GitHub OAuth + loopback CLI flow，在 **Track A（website Phase 0）安全前提** 落地后，由 CLI 通过 PKCE 绑定兑换 scoped JWT，并将登录态写入**全局**加密配置（`~/.libra/config.db` 的 `vault.account.*`，非 repo-local）。
+
+**当前 Libra 基线**：`src/cli.rs::Commands` **尚无** `Login`/`Logout`/`Whoami`；`LBR-AUTH-001/002` 已存在于 `src/utils/error.rs`，`003–005` 待新增；`is_sensitive_key()` 对末段含 `token` 的键已有启发式命中，但 `vault.account.*` 命名空间仍需显式纳入 `is_vault_internal_key()` 与 compat guard。
+
+**关键依赖**：[LFS 配额托管设计](lfs-quota-service-design.md)（Phase 3 Bearer 认证）；website `/Users/eli/Documents/website` CLI auth routes（Phase 0 必须先于 CLI 指向生产 host）。
+
+**交付物**：website Track A（PKCE/JWT/持久存储/限流/GitHub-only）+ Libra Track B–D（login/Vault/whoami/logout/credential provider/LFS Bearer）+ 文档/compat/integration 同步。
+
+**规模**：大（跨两个仓库，约 18 个 PR；website ~安全关键，CLI ~600–900 LOC）
+
+**关键路径**：`A1–A16` 服务端契约冻结 → `B1–B5` CLI login → `C1–C4` Vault 读取与 provider → `D1–D2` LFS Bearer
 
 ## 背景
 
@@ -50,7 +64,40 @@ Libra 网站使用 `/Users/eli/Documents/website` 的程序。该网站已经存
 - 不直接使用 Better Auth browser session cookie 作为 CLI token；CLI 使用网站签发的 scoped JWT。
 - 不在本文实现 LFS 配额表；LFS 只依赖本文定义的账号 token 和 token 验证契约。
 
-## 威胁模型
+## 二、十维度综合审查与改进结论
+
+| 维度 | 结论 / 差距 | 已固化到本文的改进 |
+|------|-------------|-------------------|
+| **1. 方案合理性** | 方向正确：复用 website flow、PKCE 补最大缺口、全局存储避 repo 泄漏、GitHub-only 符合产品定位。风险在于把契约字段误当现网已有——已通过“现状安全缺口”表与契约小节 **现状澄清** 约束。 | 维持 Track A 先于 CLI 生产；契约字段均标 **待新增**；禁止 B-5 真连未实现 PKCE 的生产 host。 |
+| **2. 可行性** | website 路由与页面已存在，Libra 侧重 CLI + Vault 接线；`vault_sign_commit` 级复杂度的密码学在 website 侧。全局加密存储可复用 `ConfigKv` + `encrypt_token`（global unseal），无需新造 repo `vault.db` 账号桶。 | 明确全局存储实现路径（§本地登录态）；`client.rs` 补 `code_verifier` 参数；分 18 PR、mock/staging 门禁。 |
+| **3. 安全性** | 威胁模型与 Phase 0 缺口表扎实；PKCE + Host 校验 + `aud`/`iss`/`jti` 为必要增量。残余风险（本机同用户读 `~/.libra/`）已诚实记录。 | HS256 仅开发期；生产 RS256/EdDSA + JWKS；全路由限流；opaque 错误；`vault.account.*` 不可 `--reveal`。 |
+| **4. 功能正确性与接口兼容性** | 与 Git 无直接对标（Libra-only extension）。与 website 契约需字节级对齐：`exchange` 请求体、JWT claims、scope 字符串。 | scope 注册表（§Scope）；`whoami` 补 `--verify`；JSON schema _additive_；`registry_url` 保留为 package registry hint（可选字段）。 |
+| **5. 数据流与控制流** | 主路径清晰（CLI→loopback→exchange→Vault）。须防止：`vault.account.*` 误写入 repo-local config；exchange 响应未校验即落盘；logout 网络失败与本地删除顺序。 | 全局-only 写入 API；typed deserialize + `expires_at` 校验后才 `save_token`；logout 先 revoke 再本地删（best-effort）。 |
+| **6. 性能与效率** | loopback 默认 300s 阻塞可接受；D1 session 表需 TTL/cron 防膨胀；限流防刷表。 | session/code 短 TTL + 清理任务；loopback 首 callback 即关；whoami local-first 减 RTT。 |
+| **7. 可靠性与容错性** | 网络分区：whoami 降级、logout 本地优先；多实例：必须 D1 持久存储。端口占用、`ssh -L` 场景已文档化。 | whoami 网络不可达降级（`--verify` 强制在线）；`--port` 绑定失败硬错误；website 原子 consume。 |
+| **8. 兼容性与互操作性** | 与 Git credential helper **不**互操作；与 GitHub OAuth、RFC 7636 PKCE、RFC 8252 loopback 对齐。CI 用 `LIBRA_ACCOUNT_TOKEN` 旁路。 | 文档明确 loopback 限制与 v2 device flow；`LIBRA_ACCOUNT_TOKEN` 仅 CI、不入日志；staging gate 跨仓库 PR 依赖。 |
+| **9. 可扩展性与可维护性** | `internal/account/` + credential provider 抽象正确，可供 LFS/package/cloud 复用。 | 统一 `resolve_account_bearer`；redaction 模块；website store interface 可插拔。 |
+| **10. 合规性与标准符合性** | OAuth/PKCE/JWT 标准可对照；新增 `LBR-AUTH-003–005` 须同步 `docs/error-codes.md` 与 `compat_error_codes_doc_sync`。公开命令须 EXAMPLES + compat 三守卫。 | 错误码表 + 退出码矩阵（§错误码）；E1–E3 文档/integration 清单；测试隔离 `LIBRA_CONFIG_GLOBAL_DB`/`LIBRA_TEST_HOME`。 |
+
+**审查结论**：方案**合理且应实施**，但 **Track A 是安全前提，不是可跳过的前置文案**；在 Phase 0 完成前，不得将 `--verify-signatures` 级信任赋予当前 website CLI auth 现网行为。
+
+## 三、决策账本
+
+| 决策点 | 级别 | 决策 | 拒绝的替代方案 |
+|--------|------|------|----------------|
+| 顶层 `libra login` | Libra-only | v1 提供顶层命令，非仅 `libra account login` | 仅子命令命名空间（用户发现成本高） |
+| 登录方式 | intentionally-different | 仅 GitHub OAuth；website 禁用其他 Better Auth provider | 邮箱密码/多 provider（扩大攻击面） |
+| CLI token 形态 | supported（相对 OAuth 标准） | scoped JWT，`aud=libra-cli`，无 refresh token | 复用 browser session cookie（难撤销、难 scope） |
+| PKCE | supported（RFC 7636） | S256 必须；`code_verifier` 仅进程内存 | 仅 `state`（不足以防本机 code 截获） |
+| JWT 算法 | partially-deferred | 生产 RS256/EdDSA + `/.well-known/jwks.json`；HS256 仅 dev/staging | 长期 HS256 共享密钥（扩散面大） |
+| 登录态存储 | intentionally-different | **全局** `~/.libra/config.db` 的 `vault.account.*`（encrypted）；`account.default_host` 非敏感放普通 global config | repo-local config/vault（随仓库共享泄漏） |
+| whoami 离线行为 | supported | local-first；网络不可达降级提示；`--verify` 强制在线 | 每次 whoami 必须联网（离线不可用） |
+| 退出码 | intentionally-different | auth 失败 coarse **128**（`LBR-AUTH-*`）；参数/clap **129**；与全局 `src/utils/error.rs` 一致 | 照搬 Git 各类 auth 细粒度退出码 |
+| CI 凭据 | supported | `LIBRA_ACCOUNT_TOKEN` 最高优先级；文档标注仅 CI | 交互式 login 上 CI（不可行） |
+| 远程 headless | deferred | v1 不宣称 `--no-browser` = headless；v2 RFC 8628 device flow | v1 伪 device flow（易钓鱼） |
+| LFS 身份 | supported | Bearer + `user_id` 配额归属；不经 `user.name` | BasicAuth / Cloudflare 运维 token |
+
+## 四、威胁模型
 
 明确本设计要防御的攻击者，以及显式不在 v1 防御范围内的部分，避免后续实现误判优先级。
 
@@ -69,7 +116,7 @@ Libra 网站使用 `/Users/eli/Documents/website` 的程序。该网站已经存
 - **被攻陷的浏览器或操作系统**。
 - **GitHub 账号本身被攻陷**。
 
-## 现状安全缺口（当前 website 代码实测）
+## 五、现状安全缺口（当前 website 代码实测）
 
 一次对 `/Users/eli/Documents/website` 当前代码的独立安全复核确认：本设计要求的服务端安全控制**目前大多尚未实现**，因此 Phase 0 是安全关键阶段，不是“小改文案”。下面这张表把“本文要求”与“当前代码现状”逐条对齐，带 file 锚点，避免后续把契约小节里的 `code_challenge`/`aud`/`jti` 误读成“现网已有”。
 
@@ -87,7 +134,7 @@ Libra 网站使用 `/Users/eli/Documents/website` 的程序。该网站已经存
 
 复核未发现本文要求之外的新漏洞类别——设计方向被验证为可靠；上述差距全部落在 Phase 0 服务端实现，本文契约小节中标注的 `code_challenge`/`code_verifier`/`aud`/`jti` 均为**待新增**，而非现网既有。
 
-## 命令面
+## 六、命令面
 
 ### `libra login`
 
@@ -183,13 +230,21 @@ ABCD-1234
 ### `libra whoami`
 
 ```text
-libra whoami [--host <url>] [--json|--machine]
+libra whoami [--host <url>] [--verify] [--json|--machine]
 ```
+
+| Flag | 说明 |
+|------|------|
+| `--host` | 指定账号 host；默认读 `account.default_host`，再回退到上次登录 host |
+| `--verify` | 强制在线校验；网络失败或 token 无效/撤销时失败（不降级为本地视图） |
+| `--json` / `--machine` | 结构化输出；**永不**包含 token |
 
 行为：
 
-- 从全局 Vault 读取 `vault.account.hosts.<host_hash>.*` 登录态。
-- 默认 local-first：先用本地 `expires_at` 判断；再调用 `GET <host>/api/account/me` 或等价 verify endpoint 确认 token 未过期、未撤销。网络不可达时降级为“本地视图 + 未在线校验”提示，不直接报错（除非传 `--verify` 强制在线校验）。
+- 从**全局** config（`~/.libra/config.db`）读取 `vault.account.hosts.<host_hash>.*` 登录态（解密后仅在进程内存）。
+- 默认 **local-first**：先用本地 `expires_at` 判断；再调用 `GET <host>/api/account/me` 确认 token 未过期、未撤销。
+- 网络不可达且**未**传 `--verify`：输出“本地视图 + 未在线校验”warning，退出码 0（仅展示缓存元数据）。
+- 传 `--verify` 或本地已判定过期：必须在线；失败映射 `LBR-AUTH-004`（过期/撤销）或 `LBR-AUTH-005`（API 不可用）。
 - 成功输出 username、user_id、host、expires_at、scopes。
 - token 缺失时返回 `LBR-AUTH-001`，hint：`run: libra login`。
 - token 过期/撤销时返回 `LBR-AUTH-004`，hint：`run: libra login`。
@@ -206,9 +261,24 @@ libra logout [--host <url>] [--all] [--json|--machine]
 - 尝试调用 `POST <host>/api/cli/revoke` 撤销服务端 token；网络失败时本地删除仍成功，但输出 warning。
 - `--all` 删除所有 `vault.account.hosts.*` 登录态。
 
-## 本地登录态和 Vault 存储
+## 七、本地登录态与全局加密存储
 
-登录态必须写入全局 Vault-backed secret storage，不写入 repo-local `.libra/libra.db`，也不写入 repo-local Vault。`account.default_host` 这类非敏感偏好可以继续放普通全局 config；每个 host 的登录状态必须放 Vault。
+登录态必须写入**全局**加密配置，不写入 repo-local `.libra/libra.db`，也不写入 repo-local `.libra/vault.db`。`account.default_host` 等非敏感偏好可放普通 global config（明文）；每个 host 的 token 与账号元数据必须加密。
+
+### 7.1 实现路径（与现有 Vault 架构对齐）
+
+Libra 当前有两套秘密存储，账号登录态必须走 **global** 路径：
+
+| 存储 | 路径 | 账号登录态 |
+|------|------|------------|
+| Repo-local vault | `.libra/vault.db` + repo `ConfigKv` | **禁止**写入 `vault.account.*` |
+| Global config + global unseal | `~/.libra/config.db`（或 `LIBRA_CONFIG_GLOBAL_DB`）+ `~/.libra/vault-unseal-key` | **必须**写入 `vault.account.*`（`ConfigKv::set(..., encrypted=true)`，经 `vault::encrypt_token`） |
+
+实现约束：
+
+- `save_token()` / `load_token()` / `delete_token()` 必须显式打开 **global** DB（`global_config_path()`），不得经 `read_cascaded_config_value` 落到 repo-local。
+- 在任意 repo 目录内执行 `libra login` 时，登录态仍只进 `~/.libra/config.db`；`cwd` 下的 `.libra/libra.db` 不得出现 `vault.account.*` 键（集成测试必须断言）。
+- 测试必须使用隔离 `LIBRA_CONFIG_GLOBAL_DB` + `LIBRA_TEST_HOME`（与 `docs/development/integration-test-plan.md` §3 一致），不得读写开发者真实 `~/.libra/config.db`。
 
 建议键名：
 
@@ -230,9 +300,24 @@ vault.account.hosts.<host_hash>.token = <encrypted JWT>
 - `config list` / `config get` 默认显示 `<REDACTED>`；`--reveal` 不得 reveal `vault.account.*`。
 - `--json` / `--machine` 不输出 token，即使用户传 `--reveal` 也不应该通过 login/whoami 输出 token。
 - 文件权限沿用全局 Vault 现有约束（密钥文件 0600、目录 0700）；不要新增独立 plaintext token 文件。
-- 诚实记录残余风险：全局 Vault 的机密性来自文件权限 + 对称密钥（`~/.libra/` 下的 32 字节 AES-256-GCM 密钥，见 `src/internal/vault.rs`），不是口令派生加密。能以同一用户身份读取 `~/.libra/` 的本机攻击者可同时拿到密钥和密文并解出 token——这是与系统 keychain / 浏览器同级的固有边界，靠短 token 生命周期 + 服务端可撤销（`jti`）来限制损失。
+- 诚实记录残余风险：全局加密的机密性来自文件权限 + `~/.libra/vault-unseal-key`（32 字节 AES-256-GCM，见 `src/internal/vault.rs::lazy_init_vault_for_scope("global")`），不是口令派生加密。能以同一用户身份读取 `~/.libra/` 的本机攻击者可同时拿到密钥和密文并解出 token——这是与系统 keychain / 浏览器同级的固有边界，靠短 token 生命周期 + 服务端可撤销（`jti`）来限制损失。
+- **多 host**：允许同时保存多个 `vault.account.hosts.<host_hash>.*`；`--host` 选择操作对象；`logout --all` 清空全部。
 
-## 登录流程图
+## 八、Scope 注册表
+
+v1 使用空格分隔请求、逗号分隔持久化；服务端可降级授予子集。
+
+| Scope | 含义 | 需要该 scope 的操作 |
+|-------|------|---------------------|
+| `account:read` | 读取账号身份 | `libra whoami`、`/api/account/me` |
+| `lfs:read` | LFS 下载、读锁 | `libra lfs` download、quota 读 |
+| `lfs:write` | LFS 上传、写锁 | `libra lfs` push、lock/unlock |
+| `package:read` | 包注册表读 | 未来 `libra package` pull |
+| `package:write` | 包注册表写 | 未来 `libra package` push |
+
+CLI 默认请求：`account:read lfs:read lfs:write package:read package:write`。`resolve_account_bearer(host, required_scope)` 在本地做**提示性**预检；LFS/package 服务端必须独立强制 scope（纵深防御）。
+
+## 九、登录流程图
 
 ### CLI 视角
 
@@ -308,7 +393,7 @@ GitHub-only 约束：
 - 邮箱密码、Google、微信、手机号、magic link、passkey 和其他 Better Auth provider 在 Libra 域禁用。
 - 非 GitHub provider 请求必须在进入 OAuth 前被拒绝，不能 fallback 到 GitHub 或普通网页登录。
 
-## 网站 API 契约
+## 十、网站 API 契约
 
 ### `GET /api/cli/login`
 
@@ -434,8 +519,13 @@ JWT claims 建议：
 - `token` 必须绑定 `aud=libra-cli` 和 `iss=libra.tools`，避免误用到其他服务；下游（LFS / registry）验签时必须校验 `aud`、`iss`、`exp` 和 `scopes`。
 - 必须签发 `jti`，并以 `jti` 支持服务端撤销（`/api/cli/revoke` + 撤销表/短期黑名单）和审计。
 - **验签必须 pin 算法**：只接受签发时约定的 `alg`，显式拒绝 `alg: none` 及 HS/RS 混淆（不能用“header 里写什么算法就用什么”的实现）。
-- 当前实现是 HS256 共享密钥，且该密钥与 LFS/Distribution 等下游共享——这会随服务数量扩大对称密钥扩散面。**建议直接采用 RS256 或 EdDSA + JWKS**：网站用私钥签发，下游用公钥验签，无需共享密钥；HS256 仅作为单实例开发期的临时方案，生产前迁移。`JWT_SECRET`（若仍用 HS256）只能由网站和可信内部服务持有，绝不下发给 CLI。
+- 当前实现是 HS256 共享密钥，且该密钥与 LFS/Distribution 等下游共享——这会随服务数量扩大对称密钥扩散面。**生产必须采用 RS256 或 EdDSA + JWKS**：
+  - 签发：website 私钥（仅 website 持有）
+  - 验签：下游拉取 `GET https://<issuer>/.well-known/jwks.json`（缓存 TTL 建议 1h，支持 `kid` 轮换）
+  - HS256 仅作为单实例 dev/staging 临时方案；`JWT_SECRET` 绝不下发 CLI
+- **时钟偏移**：`exp`/`iat` 校验允许 ±60s skew（CLI 与 `/api/internal/verify` 一致）。
 - token 生命周期：建议较短（当前默认 24h 可接受），到期重新 `libra login`；以服务端可撤销（`jti`）作为长寿命场景的安全网。CLI 不持有 refresh token，避免长寿命凭据落盘。
+- `registry_url`（exchange 响应）：可选 hint，指向 Libra package registry 基址；CLI v1 可忽略，供未来 `libra package` 发现。
 
 ### `GET /api/account/me`
 
@@ -505,7 +595,7 @@ Authorization: Bearer <token>
 - 查询 `jti` denylist / 撤销表；命中即拒绝，**不论 token 是否仍在有效期**。
 - 错误响应不得泄漏 token、DB 错误或验签内部原因；统一不透明错误 + 结构化服务端日志。
 
-## 服务端状态存储要求
+## 十一、服务端状态存储要求
 
 当前 `libs/auth/cli-auth.ts` 使用两个进程内 Map：
 
@@ -554,7 +644,7 @@ CREATE TABLE cli_auth_codes (
 - consume auth code 必须原子更新 `used_at`，防止并发二次兑换。
 - 定期清理过期 session/code（cron / TTL 索引），不依赖单实例的 `setInterval`。
 
-## GitHub-only 登录要求
+## 十二、GitHub-only 登录要求
 
 Libra 登录域必须显式禁用 GitHub 之外的登录方式：
 
@@ -566,7 +656,7 @@ Libra 登录域必须显式禁用 GitHub 之外的登录方式：
 - 账号绑定安全：禁止“GitHub 登录自动 link 到已存在的同邮箱 email/password 账号”这类隐式合并（Better Auth 默认可能开启 account linking），否则攻击者可用未验证邮箱抢注后等待受害者 GitHub 登录被并入。要绑定必须显式确认且校验邮箱归属（GitHub 已验证邮箱 + 用户主动确认）。
 - 测试必须覆盖非 GitHub provider 被拒绝，且错误响应不暴露内部 provider 配置。
 
-## Libra CLI 实现边界
+## 十三、Libra CLI 实现边界
 
 建议新增：
 
@@ -616,19 +706,25 @@ pub async fn delete_token(host: &str) -> CliResult<DeleteTokenResult>;
 
 - `save_token()` 必须写 global scope 的 Vault-backed storage；不得写 repo-local `.libra/libra.db` 或 repo-local Vault。
 - `load_token()` 和 `delete_token()` 必须只访问 `vault.account.*` namespace，除非用户通过 `LIBRA_ACCOUNT_TOKEN` 显式覆盖。
-- `src/internal/config.rs::is_sensitive_key()`（config.rs:1721）和 `is_vault_internal_key()`（config.rs:1767）必须把 `vault.account.*` 视为敏感且不可 reveal 的 Vault 账号命名空间——当前二者只覆盖 `vault.env.*` / `*.privkey` / `vault.unsealkey|roottoken`，需显式扩展。
+- `src/internal/config.rs::is_sensitive_key()`（config.rs:1721）对末段含 `token` 的键已有启发式命中，但 **`vault.account.*` 前缀必须整体纳入** `is_sensitive_key()` 与 `is_vault_internal_key()`（config.rs:1767）——当前后者只覆盖 `vault.env.*` / `*.privkey` / `vault.unsealkey|roottoken`；需显式扩展 + `tests/compat/` guard，确保 `username`/`user_id`/`scopes` 等字段也不可 `--reveal`。
 - `src/command/config.rs` 的 generic section rename/remove 必须继续拒绝 `vault.account.*`，避免普通 config 操作移动或删除登录态。
 - `SecretString`：代码库当前**未**引入 `secrecy` crate（现有脱敏走 ConfigKv `encrypted` 标志 + 渲染期 `<REDACTED>`）。若用 `token: SecretString` 需新增依赖并确保其 `Debug`/`Display`/`Serialize` 不泄漏明文；否则沿用现有 encrypted-value 模式即可。
 
 `client.rs` 对外提供：
 
 ```rust
-pub async fn exchange_auth_code(host: &str, code: &str) -> CliResult<ExchangeResponse>;
+pub async fn exchange_auth_code(
+    host: &str,
+    code: &str,
+    code_verifier: &str,  // PKCE；仅内存传入，不得持久化
+) -> CliResult<ExchangeResponse>;
 pub async fn get_me(host: &str, token: &AccountToken) -> CliResult<AccountMe>;
 pub async fn revoke(host: &str, token: &AccountToken) -> CliResult<()>;
 ```
 
-## Credential Provider
+`ExchangeResponse` 反序列化后须经 schema 校验再构造 `AccountToken`；`token` 字段进入 `AccountToken` 后不得实现泄漏明文的 `Debug`/`Display`/`Serialize`。
+
+## 十四、Credential Provider
 
 LFS 和后续 registry/package 命令不得直接读 config key，而应通过统一 provider：
 
@@ -644,25 +740,27 @@ pub async fn resolve_account_bearer(host: &str, required_scope: &str) -> CliResu
 
 解析规则：
 
-1. 显式环境变量 `LIBRA_ACCOUNT_TOKEN`，仅用于 CI，优先级最高。
+1. 显式环境变量 `LIBRA_ACCOUNT_TOKEN`，**仅用于 CI/自动化**，优先级最高；不得写入 shell profile、不得提交到仓库；进程 env 不入持久日志；文档与 `--help` 须警告泄露风险。
 2. 全局 Vault 中 `vault.account.hosts.<host_hash>.token`。
 3. 缺失时返回 `LBR-AUTH-001`，hint：`run: libra login --host <host>`。
 4. 过期时返回 `LBR-AUTH-004`，hint：`run: libra login --host <host>`。
 5. scope 不足返回 `LBR-AUTH-002`，hint：重新登录或联系组织管理员。
 
-## 错误码
+## 十五、错误码与退出码
 
-稳定错误码（注意 `LBR-AUTH-001/002` **已存在**于 `src/utils/error.rs::StableErrorCode`，分别是 `AuthMissingCredentials` / `AuthPermissionDenied`——直接复用其语义，不要重复定义；只需新增 003–005）：
+稳定错误码（`LBR-AUTH-001/002` **已存在**于 `src/utils/error.rs`；只需新增 `003–005` 三个枚举变体）：
 
-| Code | 现状 | 场景 | Hint |
-| --- | --- | --- | --- |
-| `LBR-AUTH-001` | 已存在（`AuthMissingCredentials`） | 未登录 / token 缺失 | `run: libra login` |
-| `LBR-AUTH-002` | 已存在（`AuthPermissionDenied`） | 已登录但权限或 scope 不足 | 重新登录或联系管理员 |
-| `LBR-AUTH-003` | 新增 | 浏览器登录超时 / state mismatch / PKCE 校验失败 / callback 失败 | 重新运行 `libra login` |
-| `LBR-AUTH-004` | 新增 | token 过期或被撤销 | `run: libra login` |
-| `LBR-AUTH-005` | 新增 | 服务端账号 API 不可用或响应格式无效 | 检查 `--host` 和网络 |
+| Code | 枚举变体（建议） | 场景 | 退出码（coarse） | Hint |
+| --- | --- | --- | --- | --- |
+| `LBR-AUTH-001` | `AuthMissingCredentials`（已有） | 未登录 / token 缺失 | 128 | `run: libra login` |
+| `LBR-AUTH-002` | `AuthPermissionDenied`（已有） | 已登录但 scope 不足 | 128 | 重新登录或联系管理员 |
+| `LBR-AUTH-003` | `AuthLoginFailed`（新增） | 登录超时 / state 不匹配 / PKCE 失败 / callback 失败 / 非法 host | 128 | 重新运行 `libra login` |
+| `LBR-AUTH-004` | `AuthTokenExpired`（新增） | token 过期或被撤销 | 128 | `run: libra login` |
+| `LBR-AUTH-005` | `AuthServiceUnavailable`（新增） | 账号 API 不可用或响应无效 | 128 | 检查 `--host` 和网络 |
 
-新增 003–005 必须同步 `StableErrorCode` 枚举（`as_str()` / `category()` → `CliErrorCategory::Auth` / `description()`）和 `docs/error-codes.md`，否则 `compat_error_codes_doc_sync` guard 会失败。
+**有意差异**：clap 参数错误 / usage → **129**；与全局 Libra coarse 模型一致，不照搬 Git。
+
+新增 003–005 必须同步：`StableErrorCode`（`as_str` / `category`→`Auth` / `description`）、`From<AccountError> for CliError` 映射测试、`docs/error-codes.md`，否则 `compat_error_codes_doc_sync` 失败。
 
 错误输出必须脱敏：
 
@@ -670,7 +768,7 @@ pub async fn resolve_account_bearer(host: &str, required_scope: &str) -> CliResu
 - 不打印带 code/state 的完整 URL 到 debug/error log；human 输出可以显示给用户打开的 URL，但 structured log 要 redacted。
 - 不把 one-time auth code 写入持久日志。
 
-## 安全要求
+## 十六、安全要求
 
 PKCE 与兑换绑定：
 
@@ -707,7 +805,7 @@ token 与状态：
 - JWT 验签 pin 算法、校验 `aud`/`iss`/`exp`；优先 RS256/EdDSA + JWKS。
 - 全部 CLI auth 路由限流并对失败计数。
 
-## 与 LFS 的关系
+## 十七、与 LFS 的关系
 
 LFS 托管设计必须依赖本文账号登录能力：
 
@@ -716,7 +814,7 @@ LFS 托管设计必须依赖本文账号登录能力：
 - LFS quota 以 `user_id` 或 org account id 为 owner，不以 Git remote URL 或本地 `user.name` 为身份。
 - LFS 不应复用 Cloudflare `LIBRA_D1_API_TOKEN` / `LIBRA_STORAGE_*`，这些是运维凭据，不是用户账号凭据。
 
-## 实施计划
+## 十八、实施计划
 
 ### Phase 0：网站 CLI auth 改名和生产化前置
 
@@ -733,7 +831,7 @@ LFS 托管设计必须依赖本文账号登录能力：
 - `userCodeStore` / `authCodeStore` 抽象为 store interface。
 - 生产 store 使用 D1/KV/数据库短期表；测试可以继续用内存实现。
 - 全部 CLI auth 路由限流 + 失败计数；code/user code 哈希存储 + 一次性消费 + 短 TTL。
-- JWT 签发增加 `aud=libra-cli`、`iss`、`jti`、`scopes`；规划 RS256/EdDSA + JWKS。
+- JWT 签发增加 `aud=libra-cli`、`iss`、`jti`、`scopes`；生产 RS256/EdDSA + `/.well-known/jwks.json`。
 - `/api/internal/verify` 收紧为完整契约：pin 算法、校验 `iss`/`aud`/`exp`/`scopes`、查询 `jti` denylist（当前只校验签名/过期/`sub`）。
 - `/api/cli/exchange` 响应增加 `token_type`、`user_id`、`issuer`、`scopes`。
 - authorize/exchange 的 code 生命周期错误统一为不透明错误（消除 missing/expired/invalid/used oracle）。
@@ -770,7 +868,7 @@ LFS 托管设计必须依赖本文账号登录能力：
 - token 缺失时提示 `libra login`。
 - LFS 错误日志和 JSON 输出不泄漏 token/action URL secrets。
 
-## 实现任务清单（可执行）
+## 十九、实现任务清单（可执行）
 
 把上面的 Phase 0–3 拆成原子、可独立验收、带依赖顺序的任务。`[W]` = website (`/Users/eli/Documents/website`)，`[L]` = Libra CLI (`/Volumes/Data/GitMono/libra`)。每个任务给出关键文件与验收信号；安全关键任务集中在 Track A，必须先落地。
 
@@ -781,7 +879,7 @@ LFS 托管设计必须依赖本文账号登录能力：
 - [ ] **A3 [W] 持久短期存储**。把 `libs/auth/cli-auth.ts` 的 `userCodeStore`/`authCodeStore` 抽象为 store interface，生产实现用 D1 表 `cli_login_sessions` / `cli_auth_codes`（见 SQL）；只存 hash；测试保留内存实现。验收：多实例/重启不丢登录流程态。依赖：无。
 - [ ] **A4 [W] 原子一次性消费**。consume auth code 用 `UPDATE ... SET used_at=now() WHERE used_at IS NULL` 等价的事务原子更新，防并发二次兑换。验收：并发兑换测试只有一次成功。依赖：A3。
 - [ ] **A5 [W] PKCE 端到端**。`/api/cli/login` 解析并随 session 持久化 `code_challenge`+`code_challenge_method`（仅 S256）；写入 `cli_auth_codes`；`/api/cli/exchange` 必须收 `code_verifier`，校验 `BASE64URL(SHA256(verifier))==code_challenge` 才签发。验收：缺/错 verifier 返回 400 且不签发；正确 verifier 成功。依赖：A3。
-- [ ] **A6 [W] JWT 签发强化**。`/api/cli/exchange` 签发带 `aud=libra-cli`、`iss=libra.tools`、`jti`、`scopes`、`iat`、`exp`；持久化 `jti`。规划 RS256/EdDSA+JWKS（HS256 仅开发期）。验收：解出的 token 含全部 claim。依赖：A3。
+- [ ] **A6 [W] JWT 签发强化**。`/api/cli/exchange` 签发带 `aud=libra-cli`、`iss=libra.tools`、`jti`、`scopes`、`iat`、`exp`；持久化 `jti`。生产 RS256/EdDSA；暴露 `GET /.well-known/jwks.json`（`kid` 轮换）；HS256 仅 dev/staging。验收：解出的 token 含全部 claim；下游仅凭 JWKS 验签（无共享 `JWT_SECRET`）。依赖：A3。
 - [ ] **A7 [W] `/api/internal/verify` 收紧**。pin 算法、拒 `alg:none`/HS-RS 混淆；校验 `iss`/`aud`/`exp`/`scopes`；查询 `jti` denylist。验收：篡改 alg、错 aud、撤销的 jti、scope 不足全部被拒。依赖：A6、A9。
 - [ ] **A8 [W] callback fallback 收紧**。`app/api/cli/callback/route.ts`：CLI 流程（带 CLI 专属标记）的 state 失败必须终止报错，绝不回退 `/api/auth/callback/github`。验收：CLI state 篡改不再降级为网页 session。依赖：无。
 - [ ] **A9 [W] 撤销端点**。新增 `POST /api/cli/revoke`（按 `jti` 或 Authorization）写撤销表；`/api/internal/verify` 命中即拒。验收：revoke 后即便未过期也验签失败。依赖：A6。
@@ -801,12 +899,12 @@ LFS 托管设计必须依赖本文账号登录能力：
 - [ ] **B4 [L] PKCE + state + user_code 生成**。CSPRNG：`state`≥128bit、`user_code` 8 位 charset36、`code_verifier`≥256bit（仅内存）、`code_challenge=BASE64URL(SHA256(verifier))` S256。验收：verifier 不写盘、不进 URL、不进日志。依赖：B2。
 - [ ] **B5 [L] loopback server**。仅绑 `127.0.0.1`（可选 `[::1]`），固定 `/callback`，非该 path/非 GET 拒绝；校验 `Host` 头（防 DNS rebinding）；校验 `state`；首个有效 callback 后立即关闭；无效请求计数阈值放弃；最小本地回执页（无外部资源，防 Referer 泄漏）；`--port` 固定端口（`1024..=65535`，绑定失败报错不回退）。验收：各分支单元测试。依赖：B4。
 - [ ] **B6 [L] 浏览器拉起**。参数传递不经 shell 拼接（防注入）；`--no-browser` 只打印 URL，且文档不宣称等于 headless。验收：注入用例测试。依赖：B4。
-- [ ] **B7 [L] exchange + 响应校验**。`POST /api/cli/exchange { code, code_verifier }`；typed struct 反序列化（外部输入不可信）；`expires_at` 解析 RFC3339，缺失/过去时间拒绝保存；映射失败到 `LBR-AUTH-003/005`。验收：PKCE 失败、invalid JSON、timeout、500 均到稳定错误码。依赖：B5、A5、A13。
+- [ ] **B7 [L] exchange + 响应校验**。`client.rs::exchange_auth_code(host, code, code_verifier)` → `POST /api/cli/exchange { code, code_verifier }`；typed struct 反序列化（外部输入不可信）；`expires_at` RFC3339，缺失/过去时间拒绝 `save_token`；失败映射 `LBR-AUTH-003/005`。验收：PKCE 失败、invalid JSON、timeout、500 均到稳定错误码；`code_verifier` 不出现在日志/磁盘。依赖：B5、A5、A13。
 - [ ] **B8 [L] 错误码同步**。新增 `LBR-AUTH-003/004/005` 到 `StableErrorCode`（`as_str`/`category`→`Auth`/`description`）+ `docs/error-codes.md`；复用既有 `001/002`。验收：`compat_error_codes_doc_sync` 通过。依赖：B2。
 
 ### Track C — Vault 存储 + `whoami`/`logout`/credential provider（Phase 2）
 
-- [ ] **C1 [L] Vault 写入**。`credential.rs::save_token()` 写全局 Vault `vault.account.hosts.<host_hash>.*`（`<host_hash>`=规范化 host 的 SHA-256 前 16 hex）；整登录态原子写入；不写 repo-local。验收：写后 repo `.libra/libra.db` 无账号态。依赖：B2。
+- [ ] **C1 [L] 全局 Vault 写入**。`credential.rs::save_token()` 经 `global_config_path()` 写 `~/.libra/config.db`（或 `LIBRA_CONFIG_GLOBAL_DB`）的 `vault.account.hosts.<host_hash>.*`（`<host_hash>`=规范化 host SHA-256 前 16 hex，`encrypted=true`）；整登录态原子写入；**禁止**写 repo-local `.libra/libra.db` / `.libra/vault.db`。验收：任意 repo 目录 login 后 repo `.libra/libra.db` grep 无 `vault.account`；隔离 `LIBRA_CONFIG_GLOBAL_DB` 的集成测试。依赖：B2。
 - [ ] **C2 [L] 敏感键扩展**。`src/internal/config.rs::is_sensitive_key()`(1721) 与 `is_vault_internal_key()`(1767) 纳入 `vault.account.*`（默认脱敏 + 不可 `--reveal`）；`src/command/config.rs` 的 section rename/remove 拒绝 `vault.account.*`。验收：`config list/get` 显示 `<REDACTED>`，`--reveal` 不泄漏，rename/remove 被拒，新增 compat guard。依赖：C1。
 - [ ] **C3 [L] load/delete**。`load_token()`/`delete_token()` 只访问 `vault.account.*`，除非 `LIBRA_ACCOUNT_TOKEN` 覆盖；`SecretString` 决策：当前无 `secrecy` crate，沿用 ConfigKv `encrypted` 模式或新增依赖并确保 `Debug`/`Display`/`Serialize` 不泄漏。验收：单元测试。依赖：C1。
 - [ ] **C4 [L] `whoami`**。读 Vault；local-first（本地 `expires_at`）→ `GET /api/account/me` 在线校验；网络不可达降级提示（除非 `--verify`）；缺失→`001`、过期/撤销→`004`。验收：三态测试 + `--json` 不含 token。依赖：C3、A14。
@@ -910,7 +1008,7 @@ Track D (CLI):      C-4 ──► D-1 ──► D-2
 
 共 7（website）+ 5（B）+ 4（C）+ 2（D）= **18 个 PR**。Track A 与 Track B 的非 exchange 部分可并行推进；B-5、C-2、C-3、D 受对应 website PR gate。
 
-## 必跑验证
+## 二十、必跑验证
 
 Libra CLI 侧：
 
@@ -932,25 +1030,77 @@ pnpm --dir /Users/eli/Documents/website test
 pnpm --dir /Users/eli/Documents/website --filter next-app build
 ```
 
-新增公开命令时还必须同步：
+新增公开命令时还必须同步（AGENTS.md 公开面清单）：
 
-- `src/cli.rs`
-- `docs/commands/login.md`、`docs/commands/logout.md`、`docs/commands/whoami.md`
-- `COMPATIBILITY.md`，标记为 Libra-only extension
+- `src/cli.rs`（`Commands` + `LOGIN_EXAMPLES` / `LOGOUT_EXAMPLES` / `WHOAMI_EXAMPLES` + `after_help`）
+- `docs/commands/login.md`、`docs/commands/logout.md`、`docs/commands/whoami.md`（含 `## Examples`）
+- `COMPATIBILITY.md`：`login`/`logout`/`whoami` 标记 **Libra-only extension**（非 Git 对标）
+- `tests/INDEX.md`（若新增 top-level `command_test` 子模块或独立 `--test` target）
 - `docs/development/integration-scenarios.yaml`
 - `docs/development/integration-scenarios/cli.account-login-smoke.md`
-- `tools/integration-runner/src/scenarios/account_login_smoke.rs`
+- `tools/integration-runner/src/scenarios/account_login_smoke.rs` + `registry.rs`
 - `docs/development/integration-scenarios/README.md` 命令映射
+- `tests/compat/` + `Cargo.toml [[test]]`（若新增 `vault.account` redaction guard）
 
-## 关键决策
+## 二十一、数据流与控制流（CLI 登录）
 
-- 采用顶层 `libra login`，不是只提供 `libra account login`。
-- GitHub OAuth 由网站后端完成，CLI 只接收一次性 auth code 并交换 Libra JWT。
-- **CLI 兑换必须用 PKCE（S256）绑定**：现有 website flow 没有 PKCE，落地 Libra 前必须补上——这是本设计相对现状最重要的安全增量。
-- **强制 HTTPS host + 非默认 host 告警**，防 `--host` 钓鱼。
-- **JWT 验签 pin 算法、绑定 `aud`/`iss`/`jti`**；优先 RS256/EdDSA + JWKS 而非长期沿用 HS256 共享密钥。
-- CLI 登录态存全局 Vault，不存仓库 local config 或 repo-local Vault；机密性边界（文件权限而非口令加密）写入威胁模型。
-- Website 当前 CLI auth flow 可复用，但生产必须替换进程内 Map，并对全部 CLI auth 路由限流。
-- Libra 账号登录只支持 GitHub；其他 Better Auth 登录方式必须在 Libra 域禁用，且禁止隐式账号合并。
-- v1 用 loopback flow；远程 headless（SSH）不被 `--no-browser` 覆盖，真正的 device flow（RFC 8628 + 反钓鱼）留给 v2。
-- LFS 必须通过 account credential provider 取 Bearer token，不直接读取 Cloudflare 运维凭据。
+```text
+libra login
+  ├─ resolve host (https only, warn if non-default)
+  ├─ CSPRNG: state, user_code, code_verifier → code_challenge
+  ├─ start loopback 127.0.0.1:port/callback (Host check, state check)
+  ├─ open browser → GET /api/cli/login?...&code_challenge
+  │     └─ [website] persist session (D1 hash) → GitHub OAuth → loopback ?code&state
+  ├─ POST /api/cli/exchange { code, code_verifier }
+  │     └─ [website] PKCE verify → atomic consume → issue JWT (aud/iss/jti/scopes)
+  ├─ validate ExchangeResponse schema + expires_at
+  ├─ save_token → global config.db vault.account.* ONLY (encrypted)
+  └─ human/json output (no token in json)
+
+libra whoami
+  ├─ load_token from global vault.account.* (or LIBRA_ACCOUNT_TOKEN override)
+  ├─ local expires_at check
+  ├─ optional GET /api/account/me (--verify forces)
+  └─ output metadata (no token)
+
+libra logout
+  ├─ best-effort POST /api/cli/revoke
+  └─ delete_token global vault.account.* (always succeeds locally)
+
+LFS / package (Phase 3+)
+  └─ resolve_account_bearer(host, scope) → Authorization: Bearer
+```
+
+**控制流不变量**：`save_token` 之前不得更新任何 repo-local state；`code_verifier` 生命周期 ≤ 单次 login 进程；loopback server 在成功或超时后必须关闭。
+
+## 二十二、完成定义（Definition of Done）
+
+- [ ] website Track A（A1–A16）验收全过，含 PKCE、JWT claims、D1 存储、限流、GitHub-only、`/api/account/me`、`/api/cli/revoke`
+- [ ] Libra `libra login` 端到端对 staging/production（已实现 Track A）成功；`--json` 不含 token
+- [ ] 登录态仅存在于 global `config.db`；repo-local 无 `vault.account.*`
+- [ ] `whoami` / `logout` / `resolve_account_bearer` 可用；LFS Bearer 路径（Track D）可调用 provider
+- [ ] `LBR-AUTH-001–005` 文档与 `compat_error_codes_doc_sync` 同步
+- [ ] `compat_help_examples_banner`、`compat_command_docs_examples_section`、`compat_matrix_alignment` 通过
+- [ ] `check-plan` + `run --only cli.account-login-smoke` 通过
+- [ ] `cargo +nightly fmt --check`、`clippy -D warnings`、`cargo test --all`（L1）通过
+- [ ] 无新增生产 `unwrap`/`expect`（`compat_all_production_unwrap_guard` 通过）
+
+## 二十三、相关文档
+
+| 文档 | 关系 |
+|------|------|
+| [lfs-quota-service-design.md](lfs-quota-service-design.md) | 下游：LFS Bearer 认证与 `user_id` 配额 |
+| [integration-test-plan.md](integration-test-plan.md) | 测试隔离：`LIBRA_CONFIG_GLOBAL_DB`、`HOME` |
+| [docs/error-codes.md](../error-codes.md) | `LBR-AUTH-*` 公开契约 |
+| [docs/commands/config.md](../commands/config.md) | `vault.account.*` 脱敏与 `--reveal` 行为 |
+| `COMPATIBILITY.md` | Libra-only 命令 tier |
+
+## 二十四、关键决策（索引）
+
+完整论证见 **§三、决策账本**。实施时优先记住：
+
+- **Track A 是安全前提**；现网 website CLI auth **不能**直接用于生产 Libra CLI。
+- **PKCE（S256）** 是本设计相对现状最重要的安全增量。
+- 登录态 → **全局** `~/.libra/config.db` 加密命名空间，非 repo-local。
+- v1 **loopback only**；`--no-browser` ≠ headless；CI 用 `LIBRA_ACCOUNT_TOKEN`。
+- LFS 走 **credential provider**，不用 Cloudflare 运维凭据。
