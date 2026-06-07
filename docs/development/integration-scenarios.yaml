@@ -357,7 +357,7 @@ scenarios:
   - id: cli.object-readback
     wave: 2
     group: objects
-    purpose: "End-to-end object roundtrip via cat-file / show / rev-list etc. after normal operations; basic sha1 path."
+    purpose: "End-to-end object roundtrip via cat-file / show / rev-list range, filter, and format options after normal operations; basic sha1 path."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck]

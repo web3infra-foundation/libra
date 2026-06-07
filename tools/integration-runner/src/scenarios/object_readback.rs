@@ -58,6 +58,54 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     assert_stdout_contains(&blob_type, "blob")?;
     let blob_content = ctx.command(&["cat-file", "-p", &blob_id], repo.clone(), true)?;
     assert_stdout_contains(&blob_content, "loose blob")?;
+    fs::write(repo.join("docs/rev-list.md"), "rev-list second\n")
+        .context("write rev-list second fixture")?;
+    ctx.command(&["add", "docs/rev-list.md"], repo.clone(), true)?;
+    ctx.command(
+        &["commit", "-m", "test: rev-list second", "--no-verify"],
+        repo.clone(),
+        true,
+    )?;
+    let second = ctx.command(&["rev-parse", "HEAD"], repo.clone(), true)?;
+    let second_id = stdout_trim(&second);
+    let limited = ctx.command(&["rev-list", "-n", "1", "HEAD"], repo.clone(), true)?;
+    assert_stdout_contains(&limited, &second_id)?;
+    let skipped = ctx.command(&["rev-list", "--skip", "1", "HEAD"], repo.clone(), true)?;
+    assert_stdout_contains(&skipped, &head_id)?;
+    let range_spec = format!("{head_id}..HEAD");
+    let range = ctx.command(&["rev-list", &range_spec], repo.clone(), true)?;
+    let range_stdout = stdout_trim(&range);
+    if range_stdout != second_id {
+        bail!("rev-list range {range_spec} returned {range_stdout:?}, expected {second_id}");
+    }
+    let exclude_spec = format!("^{head_id}");
+    let excluded = ctx.command(&["rev-list", "HEAD", &exclude_spec], repo.clone(), true)?;
+    let excluded_stdout = stdout_trim(&excluded);
+    if excluded_stdout != second_id {
+        bail!("rev-list exclusion returned {excluded_stdout:?}, expected {second_id}");
+    }
+    let count = ctx.command(&["rev-list", "--count", "HEAD"], repo.clone(), true)?;
+    let count_stdout = stdout_trim(&count);
+    if count_stdout != "2" {
+        bail!("rev-list --count HEAD returned {count_stdout:?}, expected 2");
+    }
+    let parents = ctx.command(
+        &["rev-list", "--parents", "-n", "1", "HEAD"],
+        repo.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&parents, &second_id)?;
+    assert_stdout_contains(&parents, &head_id)?;
+    let timestamp = ctx.command(
+        &["rev-list", "--timestamp", "-n", "1", "HEAD"],
+        repo.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&timestamp, &second_id)?;
+    assert_json_ok(
+        &ctx.command(&["--json", "rev-list", "--count", "HEAD"], repo.clone(), true)?,
+        "rev-list",
+    )?;
     ctx.command(&["fsck"], repo.clone(), true)?;
     ctx.command(&["fsck", "--connectivity-only"], repo.clone(), true)?;
     ctx.command(&["fsck", &head_id], repo.clone(), true)?;
