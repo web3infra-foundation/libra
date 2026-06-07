@@ -15,14 +15,11 @@
 //! satisfied the stable-promoted exclusion but never landed the
 //! dedicated type the assertion implies — this module closes that gap.
 //!
-//! `TranscriptTruncator` IS implemented (entire.md §14.4 phase-4 item 1):
-//! Gemini's session transcript is a single JSON document
-//! `{"sessionId":…,"messages":[{"id":…,"timestamp":"<ISO>","type":"user"|
-//! "gemini"|"info",…}]}` (schema mirrored from EntireIO
-//! `transcript/compact/gemini.go:17`). On `rewind --apply` the truncator
-//! drops every message whose ISO-8601 `timestamp` parses strictly after the
-//! checkpoint boundary, keeping messages with missing/unparseable timestamps
-//! verbatim — the same conservative policy as the Claude Code JSONL truncator.
+//! `TranscriptTruncator` is intentionally not implemented here: per
+//! `docs/improvement/entire.md` §7.3, v1 leaves the agent's transcript
+//! file untouched on `rewind --apply` and prints a warning. Adding the
+//! truncator is gated on understanding Gemini's session JSONL schema
+//! and is tracked alongside the Claude Code truncator's evolution.
 
 use std::{
     fs,
@@ -31,9 +28,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use chrono::{DateTime, Utc};
 
-use super::super::adapter::{AgentKind, AgentSessionCtx, ObservedAgent, TranscriptTruncator};
+use super::super::adapter::{AgentKind, AgentSessionCtx, ObservedAgent};
 
 /// Hard cap on how many bytes the transcript reader will pull off disk.
 /// Mirrors the Claude Code adapter's 16 MiB ceiling: Gemini transcripts
@@ -93,63 +89,6 @@ impl ObservedAgent for GeminiObservedAgent {
     fn protected_dirs(&self) -> &'static [&'static str] {
         &[".gemini"]
     }
-}
-
-impl TranscriptTruncator for GeminiObservedAgent {
-    /// Truncate the Gemini transcript at the checkpoint boundary. `checkpoint_id`
-    /// carries the boundary as a serialised RFC-3339 timestamp (the
-    /// `rewind --apply` caller resolves `agent_checkpoint.created_at` to that
-    /// string), keeping the trait surface free of timestamp types — identical
-    /// contract to [`super::claude_code::ClaudeCodeObservedAgent`].
-    fn truncate_transcript(&self, transcript_data: &[u8], checkpoint_id: &str) -> Result<Vec<u8>> {
-        let boundary: DateTime<Utc> = checkpoint_id.parse().with_context(|| {
-            format!(
-                "checkpoint boundary '{checkpoint_id}' must be an RFC-3339 timestamp \
-                 (caller is responsible for resolving agent_checkpoint.created_at)"
-            )
-        })?;
-        truncate_gemini_messages_after(transcript_data, boundary)
-    }
-}
-
-/// Parse `transcript_data` as a single Gemini session document and drop every
-/// entry in its top-level `messages` array whose ISO-8601 `timestamp` parses
-/// strictly after `boundary`. Messages with a missing or unparseable timestamp
-/// are kept (conservative — never silently erase a record we don't understand).
-///
-/// Non-JSON input, or a JSON document without a `messages` array, is returned
-/// byte-for-byte unchanged so the truncator is a safe no-op on shapes it does
-/// not recognise. All other top-level keys (`sessionId`, …) and per-message
-/// fields are preserved.
-fn truncate_gemini_messages_after(
-    transcript_data: &[u8],
-    boundary: DateTime<Utc>,
-) -> Result<Vec<u8>> {
-    let mut value: serde_json::Value = match serde_json::from_slice(transcript_data) {
-        Ok(v) => v,
-        // Not a single JSON document (empty, partial, or JSONL) — leave it
-        // alone; physical truncation is the user's job once they inspect it.
-        Err(_) => return Ok(transcript_data.to_vec()),
-    };
-    let Some(messages) = value
-        .get_mut("messages")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return Ok(transcript_data.to_vec());
-    };
-    messages.retain(|msg| {
-        match msg
-            .get("timestamp")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
-        {
-            // Strictly after the checkpoint — drop.
-            Some(ts) => ts <= boundary,
-            // Missing or unparseable timestamp — keep verbatim.
-            None => true,
-        }
-    });
-    serde_json::to_vec(&value).context("re-serialise truncated gemini transcript")
 }
 
 fn read_transcript_capped(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>> {
@@ -282,99 +221,5 @@ mod tests {
             message.contains("exceeds 64 byte cap"),
             "unexpected error message: {message}",
         );
-    }
-
-    // ----- TranscriptTruncator (entire.md §14.4) -----
-
-    const GEMINI_DOC: &str = r#"{"sessionId":"s1","messages":[
-        {"id":"m1","timestamp":"2026-05-05T10:00:00Z","type":"user","content":"hello"},
-        {"id":"m2","timestamp":"2026-05-05T10:00:05Z","type":"gemini","content":"hi","tokens":{"input":10,"output":5}},
-        {"id":"m3","timestamp":"2026-05-05T10:00:10Z","type":"user","content":"bye"}
-    ]}"#;
-
-    fn messages(bytes: &[u8]) -> Vec<serde_json::Value> {
-        let v: serde_json::Value = serde_json::from_slice(bytes).expect("valid json out");
-        v.get("messages")
-            .and_then(|m| m.as_array())
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    #[test]
-    fn truncator_drops_messages_after_boundary() {
-        let agent = GeminiObservedAgent::new();
-        // Boundary at 10:00:05 — keep m1 and m2, drop m3.
-        let out = agent
-            .truncate_transcript(GEMINI_DOC.as_bytes(), "2026-05-05T10:00:05Z")
-            .expect("truncate must succeed");
-        let msgs = messages(&out);
-        assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0]["id"], "m1");
-        assert_eq!(msgs[1]["id"], "m2");
-    }
-
-    #[test]
-    fn truncator_preserves_session_id_and_message_fields() {
-        let agent = GeminiObservedAgent::new();
-        let out = agent
-            .truncate_transcript(GEMINI_DOC.as_bytes(), "2026-05-05T10:00:05Z")
-            .expect("truncate must succeed");
-        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
-        assert_eq!(v["sessionId"], "s1", "top-level sessionId preserved");
-        let msgs = messages(&out);
-        // The kept gemini message retains its nested tokens object.
-        assert_eq!(msgs[1]["tokens"]["input"], 10);
-        assert_eq!(msgs[1]["type"], "gemini");
-    }
-
-    #[test]
-    fn truncator_keeps_messages_without_parseable_timestamp() {
-        let agent = GeminiObservedAgent::new();
-        let doc = r#"{"messages":[{"id":"m1","type":"info","content":"no ts"},{"id":"m2","timestamp":"2026-05-05T10:00:10Z","type":"user"}]}"#;
-        // Boundary BEFORE m2 — m2 drops, but the timestamp-less m1 stays.
-        let out = agent
-            .truncate_transcript(doc.as_bytes(), "2026-05-05T09:00:00Z")
-            .expect("truncate must succeed");
-        let msgs = messages(&out);
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0]["id"], "m1");
-    }
-
-    #[test]
-    fn truncator_returns_non_json_unchanged() {
-        let agent = GeminiObservedAgent::new();
-        let garbage = b"not json at all\npartial {";
-        let out = agent
-            .truncate_transcript(garbage, "2026-05-05T10:00:05Z")
-            .expect("non-json must be a no-op");
-        assert_eq!(out, garbage);
-    }
-
-    #[test]
-    fn truncator_returns_unchanged_when_no_messages_key() {
-        let agent = GeminiObservedAgent::new();
-        let doc = br#"{"sessionId":"s1","other":true}"#;
-        let out = agent
-            .truncate_transcript(doc, "2026-05-05T10:00:05Z")
-            .expect("missing messages key must be a no-op");
-        assert_eq!(out, doc);
-    }
-
-    #[test]
-    fn truncator_empty_input_returns_empty() {
-        let agent = GeminiObservedAgent::new();
-        let out = agent
-            .truncate_transcript(b"", "2026-05-05T10:00:05Z")
-            .expect("empty input must not error");
-        assert!(out.is_empty());
-    }
-
-    #[test]
-    fn truncator_rejects_non_rfc3339_boundary() {
-        let agent = GeminiObservedAgent::new();
-        let err = agent
-            .truncate_transcript(GEMINI_DOC.as_bytes(), "not-a-timestamp")
-            .expect_err("non-rfc3339 boundary must error");
-        assert!(format!("{err:#}").contains("RFC-3339"));
     }
 }

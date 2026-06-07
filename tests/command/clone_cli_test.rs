@@ -1316,6 +1316,34 @@ fn successful_clone_initializes_vault() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn cloned_db_is_0600_unix() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-db-mode");
+
+    let output = run_libra(
+        &["clone", remote.to_str().unwrap(), dest.to_str().unwrap()],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mode = fs::metadata(dest.join(".libra").join("libra.db"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, ".libra/libra.db must be private");
+}
+
 #[test]
 fn clone_converts_gitignore_files_to_visible_libraignore_files() {
     let temp = tempdir().unwrap();
@@ -2150,6 +2178,47 @@ fn origin_name_in_json_output() {
     let json: serde_json::Value =
         serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
     assert_eq!(json["data"]["origin_name"], "upstream");
+}
+
+#[test]
+fn origin_name_rejects_ref_unsafe_values() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+
+    for (index, bad) in [
+        "",
+        "refs/heads/main",
+        "bad/name",
+        "bad name",
+        "bad..name",
+        "bad\nname",
+        "bad:name",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dest = temp.path().join(format!("clone-bad-origin-{index}"));
+        let output = run_libra(
+            &[
+                "clone",
+                "--origin",
+                bad,
+                remote.to_str().unwrap(),
+                dest.to_str().unwrap(),
+            ],
+            temp.path(),
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(129),
+            "origin {bad:?} must exit 129: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !dest.exists(),
+            "invalid origin must fail before creating the destination"
+        );
+    }
 }
 
 /// Cloud sources reject `--mirror`, `--origin`, and `--no-checkout` (exit 129).
@@ -3006,6 +3075,17 @@ fn clone_documentation_and_help_sync() {
         assert!(
             doc_zh.contains(flag),
             "docs/commands/zh-CN/clone.md is missing {flag}"
+        );
+    }
+
+    let examples = help
+        .split("EXAMPLES:")
+        .nth(1)
+        .expect("clone help must include an EXAMPLES block");
+    for flag in expected_flags {
+        assert!(
+            examples.contains(flag),
+            "clone EXAMPLES block is missing {flag}"
         );
     }
 }

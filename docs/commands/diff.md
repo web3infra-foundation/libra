@@ -16,7 +16,7 @@ libra diff [--algorithm <name>] [--output <file>]
 
 `libra diff` shows changes between different states of the repository. By default it compares the index against the working tree (unstaged changes). With `--staged`, it compares HEAD against the index (staged changes). With `--old` and `--new`, it compares two arbitrary commits.
 
-The diff engine supports multiple algorithms (histogram by default, with myers and myersMinimal as alternatives). Output can be directed to a file with `--output`, and several summary formats are available (`--name-only`, `--name-status`, `--numstat`, `--stat`).
+The diff engine currently accepts `--algorithm=histogram` only. `myers` and `myersMinimal` are parsed for compatibility but fail closed with `LBR-CLI-002` until alternate backends are implemented. Output can be directed to a file with `--output`, and several summary formats are available (`--name-only`, `--name-status`, `--numstat`, `--stat`, `--raw`).
 
 Pathspec arguments filter the diff to only show changes in matching files or directories.
 
@@ -28,10 +28,10 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | New commit | | `--new <COMMIT>` | Specifies the "new" side. Requires `--old`. Conflicts with `--staged`. |
 | Staged | | `--staged` | Compare HEAD against the index (staged changes). Conflicts with `--new`. |
 | Pathspec | | positional | One or more files or directories to restrict the diff. |
-| Algorithm | | `--algorithm <name>` | Diff algorithm: `histogram` (default), `myers`, or `myersMinimal`. |
+| Algorithm | | `--algorithm <name>` | Diff algorithm label: `histogram` (default and only supported value). `myers` and `myersMinimal` fail closed with `LBR-CLI-002`. |
 | Output file | | `--output <FILENAME>` | Write human-readable output to a file instead of stdout. Ignored in `--json` mode. |
 | Name only | | `--name-only` | Show only the names of changed files. |
-| Name status | | `--name-status` | Show changed file names with a status letter (A/D/M). |
+| Name status | | `--name-status` | Show changed file names with a status letter (`A`/`D`/`M`/`T`; renames/copies use `R<score>`/`C<score>` plus old and new paths). |
 | Numstat | | `--numstat` | Show insertion/deletion counts in a machine-friendly tab-separated format. |
 | Stat | | `--stat` | Show a diffstat summary with +/- bar graph. |
 | Raw | | `--raw` | Emit Git's raw format (`:<old-mode> <new-mode> <old-sha> <new-sha> <status>\t<path>`; renames/copies emit `R<score>`/`C<score>` and both paths). |
@@ -85,11 +85,11 @@ libra diff --staged src/
 
 **`--algorithm`**
 
-Select the diff algorithm. Histogram (the default) generally produces more readable diffs for code:
+Select the diff algorithm label. Only `histogram` is currently implemented:
 
 ```bash
-libra diff --algorithm myers
-libra diff --algorithm myersMinimal
+libra diff --algorithm histogram
+# myers and myersMinimal currently fail closed with LBR-CLI-002
 ```
 
 **`--output`**
@@ -171,6 +171,7 @@ Supported output modes:
 - `--name-status`
 - `--numstat`
 - `--stat`
+- `--raw`
 - `--quiet` suppresses stdout and uses exit `1` to signal that differences exist
 
 `--output <file>` writes human-readable output to a file. In `--quiet` mode the file is still written, but differences still return exit `1`. In `--json` mode this flag is ignored and output always goes to stdout.
@@ -210,7 +211,7 @@ Output is automatically paged when connected to a terminal.
 }
 ```
 
-The `status` field is one of: `added`, `deleted`, `modified`.
+The `status` field is one of: `added`, `deleted`, `modified`, `typechange`, `renamed`, or `copied`. Rename/copy and mode-change entries may also include `old_path`, `similarity`, `old_mode`, `new_mode`, `old_sha`, and `new_sha`.
 
 The `old_ref` and `new_ref` fields indicate what was compared (e.g., `"index"`, `"working tree"`, `"HEAD"`, or a commit reference).
 
@@ -222,9 +223,9 @@ Git uses positional arguments for commit comparison (`git diff HEAD~1 HEAD`), bu
 
 Libra uses explicit named flags (`--old`, `--new`) to eliminate all ambiguity. Any positional arguments are always pathspecs. This is particularly valuable for AI agents that construct commands programmatically -- there is exactly one way to express each intent.
 
-### Why histogram as the default algorithm?
+### Why only histogram as the accepted algorithm?
 
-Git defaults to the Myers algorithm for historical reasons. The histogram algorithm (introduced in Git 2.0 as an option) generally produces more readable diffs for source code because it is better at identifying moved blocks and avoids pathological cases with repeated lines. Libra defaults to histogram for better out-of-the-box quality. Myers and myersMinimal remain available for compatibility and edge cases.
+Libra keeps the `--algorithm` surface narrow until alternate backends are wired through the diff engine. `histogram` is the accepted compatibility label today; `myers` and `myersMinimal` are rejected with `LBR-CLI-002` rather than silently producing a diff with a different backend than requested.
 
 ### Why no `--cached` alias?
 
@@ -252,7 +253,7 @@ Allowing `--new` without `--old` would create an ambiguous comparison (new compa
 | Staged changes | `--staged` | `--staged` / `--cached` | N/A (no staging area) |
 | Two commits | `--old <A> --new <B>` | `<A> <B>` or `<A>..<B>` | `--from <A> --to <B>` |
 | Pathspec filter | `<pathspec>...` | `-- <pathspec>...` | `<paths>...` |
-| Algorithm | `--algorithm` (histogram/myers/myersMinimal) | `--diff-algorithm` (patience/histogram/myers/minimal) | N/A (uses internal algorithm) |
+| Algorithm | `--algorithm=histogram` only; `myers`/`myersMinimal` fail closed | `--diff-algorithm` (patience/histogram/myers/minimal) | N/A (uses internal algorithm) |
 | Output to file | `--output <file>` | `--output <file>` | N/A (use shell redirect) |
 | Name only | `--name-only` | `--name-only` | `--name-only` |
 | Name with status | `--name-status` | `--name-status` | N/A |

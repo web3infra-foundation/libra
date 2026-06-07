@@ -72,6 +72,13 @@ The fields are `<oid> <type> <size> <size-in-pack> <offset>`. CRC32 values for
 version 2 indexes are validated and remain available in structured output, but
 are not printed in human verbose mode.
 
+> **Intentional difference from Git.** For deltified objects, `git verify-pack
+> -v` appends two extra columns — `<chain-depth> <base-oid>` — to each line.
+> Libra omits them: the `git-internal` decoder yields the reconstructed object
+> stream and each object's `chain_len`, but not the original delta's base
+> reference, so the base OID cannot be recovered at the callback. Chain depth
+> remains observable through `--stat-only`'s histogram.
+
 Stat-only mode prints Git-compatible aggregate counts:
 
 ```text
@@ -123,3 +130,11 @@ each result's `objects[]` contains `oid`, `object_type`, `size`,
 | Index is malformed | `LBR-REPO-002` | 128 |
 | Pack is malformed | `LBR-REPO-002` | 128 |
 | Index and pack disagree | `LBR-REPO-002` | 128 |
+
+## Reused by `fsck`
+
+`verify-pack`'s core validation is reused in-process by [`libra fsck`](fsck.md)
+to health-check every packfile in `objects/pack/`. fsck does not fork a
+subprocess; it calls the same validation directly, reports any corrupt or
+unreadable pack, and exits `1` (matching `git fsck`) without aborting the
+remaining packs.

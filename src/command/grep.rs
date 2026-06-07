@@ -50,7 +50,11 @@ EXAMPLES:
     libra grep -c 'unsafe' src/           Per-file match counts
     libra grep -l 'unwrap()' src/         Just the filenames that have matches
     libra grep -e 'TODO' -e 'FIXME'       Match either of multiple regexps
+    libra grep -A 2 'panic' src/          Show 2 lines after each match
+    libra grep -B 2 'panic' src/          Show 2 lines before each match
     libra grep -C 2 'panic' src/          Show 2 lines of context around each match
+    libra grep --heading -n 'TODO' src/   Group matches under file-name headings
+    libra grep -z -l 'TODO' src/          NUL-terminate matched file names
     libra grep --cached 'TODO'            Search files staged in the index instead of the worktree
     libra grep --tree HEAD~5 'TODO'       Search files inside a historical revision
     libra grep --json 'TODO'              Structured JSON output for agents";
@@ -1220,7 +1224,13 @@ fn render_context_line(
     matcher: Option<&regex::Regex>,
 ) -> String {
     let is_match = line.kind == ContextLineKind::Match;
-    let sep = if is_match { ':' } else { '-' };
+    let sep = if args.null {
+        '\0'
+    } else if is_match {
+        ':'
+    } else {
+        '-'
+    };
     let content = if is_match {
         matcher
             .filter(|_| !args.invert_match)

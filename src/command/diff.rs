@@ -303,9 +303,11 @@ pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()
         return Err(CliError::from(DiffError::NotInRepo));
     }
     validate_diff_algorithm(&args).map_err(CliError::from)?;
-    validate_diff_word_diff_regex(&args).map_err(CliError::from)?;
+    validate_diff_word_diff_args(&args).map_err(CliError::from)?;
     emit_worktree_scan_progress(&args, output);
-    let result = run_diff(&args).await.map_err(CliError::from)?;
+    let result = run_diff(&args, output.is_json())
+        .await
+        .map_err(CliError::from)?;
     render_diff_output(&args, &result, output)
 }
 
@@ -316,15 +318,27 @@ fn validate_diff_algorithm(args: &DiffArgs) -> Result<(), DiffError> {
     }
 }
 
-/// `--word-diff-regex` is bounded here (not by clap) so an over-long pattern maps
-/// to a usage error (129) rather than a clap parse error (exit 2).
-fn validate_diff_word_diff_regex(args: &DiffArgs) -> Result<(), DiffError> {
+fn validate_diff_word_diff_args(args: &DiffArgs) -> Result<(), DiffError> {
+    if let Some(Some(mode)) = &args.word_diff
+        && !matches!(mode.as_str(), "plain" | "color")
+    {
+        return Err(DiffError::InvalidArgument(format!(
+            "--word-diff mode '{mode}' is not supported; use 'plain' or 'color'"
+        )));
+    }
     if let Some(re) = &args.word_diff_regex
         && re.len() > 4096
     {
         return Err(DiffError::InvalidArgument(
             "--word-diff-regex must be at most 4096 bytes".to_string(),
         ));
+    }
+    if let Some(re) = &args.word_diff_regex
+        && let Err(err) = regex::Regex::new(re)
+    {
+        return Err(DiffError::InvalidArgument(format!(
+            "--word-diff-regex is invalid: {err}"
+        )));
     }
     Ok(())
 }
@@ -355,7 +369,7 @@ fn emit_worktree_scan_progress(args: &DiffArgs, output: &OutputConfig) {
     }
 }
 
-async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
+async fn run_diff(args: &DiffArgs, structured_output: bool) -> Result<DiffOutput, DiffError> {
     util::require_repo().map_err(|_| DiffError::NotInRepo)?;
     tracing::debug!("diff args: {:?}", args);
     let index = Index::load(path::index()).map_err(|e| DiffError::IndexLoad(e.to_string()))?;
@@ -382,7 +396,7 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
     let new_map: HashMap<PathBuf, ObjectHash> = new_side.blobs.iter().cloned().collect();
 
     let worktree_entries = new_side.worktree_entries.clone();
-    let worktree_cache = RefCell::new(HashMap::<ObjectHash, Vec<u8>>::new());
+    let worktree_cache = RefCell::new(new_side.worktree_contents.clone());
     let repo_cache = RefCell::new(HashMap::<ObjectHash, Vec<u8>>::new());
     let load_error = Rc::new(RefCell::new(None::<DiffError>));
     let load_error_for_read = Rc::clone(&load_error);
@@ -398,7 +412,7 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
                     data
                 }
                 Err(err) => {
-                    record_diff_content_error(&load_error_for_read, err);
+                    crate::utils::error::emit_warning(format!("{err}; skipping it in diff"));
                     Vec::new()
                 }
             }
@@ -442,6 +456,13 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
     }
 
     let mut files: Vec<DiffFileStat> = diff_output.iter().map(parse_diff_item).collect();
+    add_mode_only_diffs(
+        &mut files,
+        &old_map,
+        &new_map,
+        &old_side.modes,
+        &new_side.modes,
+    );
 
     // Rename / copy detection (Wave 1): rewrites added/deleted pairs into
     // `renamed` / `copied` entries when content is similar enough.
@@ -482,7 +503,10 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
 
     // `--word-diff` rewrites unified hunk bodies into inline `[-del-]`/`{+add+}`
     // (or ANSI-color) markers; it is a submode of the unified format.
-    if args.word_diff.is_some() {
+    if !structured_output
+        && args.word_diff.is_some()
+        && matches!(select_output_kind(args), OutputKind::Unified)
+    {
         apply_word_diff(&mut files, args).await;
     }
 
@@ -505,6 +529,7 @@ struct DiffSide {
     label: String,
     blobs: Vec<(PathBuf, ObjectHash)>,
     worktree_entries: HashMap<PathBuf, ObjectHash>,
+    worktree_contents: HashMap<ObjectHash, Vec<u8>>,
     /// File mode (octal `u32`) per path on this side, used for rename
     /// mode-change headers and `--raw`.
     modes: HashMap<PathBuf, u32>,
@@ -524,7 +549,11 @@ fn tree_item_mode_to_u32(mode: TreeItemMode) -> u32 {
 
 /// diff needs to print hashes even if the files have not been staged yet.
 /// This helper maps workdir paths to blob ids while applying the shared ignore policy.
-type BlobsAndModes = (Vec<(PathBuf, ObjectHash)>, HashMap<PathBuf, u32>);
+type BlobsAndModes = (
+    Vec<(PathBuf, ObjectHash)>,
+    HashMap<PathBuf, u32>,
+    HashMap<ObjectHash, Vec<u8>>,
+);
 
 fn get_files_blobs(
     files: &[PathBuf],
@@ -533,6 +562,7 @@ fn get_files_blobs(
 ) -> Result<BlobsAndModes, DiffError> {
     let mut blobs = Vec::new();
     let mut modes = HashMap::new();
+    let mut contents = HashMap::new();
     for p in files {
         if ignore::should_ignore(p, policy, index) {
             continue;
@@ -544,20 +574,39 @@ fn get_files_blobs(
         let hash = if let Some(hash) = index_hash_if_worktree_stat_matches(p, index) {
             hash
         } else {
-            let data = std::fs::read(&absolute).map_err(|e| DiffError::FileRead {
-                path: absolute.display().to_string(),
-                detail: e.to_string(),
-            })?;
-            calculate_object_hash(ObjectType::Blob, &data)
+            match std::fs::read(&absolute) {
+                Ok(data) => {
+                    let hash = calculate_object_hash(ObjectType::Blob, &data);
+                    contents.insert(hash, data);
+                    hash
+                }
+                Err(error) => {
+                    crate::utils::error::emit_warning(format!(
+                        "failed to read file '{}': {}; skipping it in diff",
+                        absolute.display(),
+                        error
+                    ));
+                    let Some(entry) = index_entry_for_path(p, index) else {
+                        continue;
+                    };
+                    modes.insert(p.to_owned(), entry.mode);
+                    blobs.push((p.to_owned(), entry.hash));
+                    continue;
+                }
+            }
         };
         modes.insert(p.to_owned(), mode);
         blobs.push((p.to_owned(), hash));
     }
-    Ok((blobs, modes))
+    Ok((blobs, modes, contents))
+}
+
+fn index_entry_for_path<'a>(path: &Path, index: &'a Index) -> Option<&'a IndexEntry> {
+    index.get(path.to_str()?, 0)
 }
 
 fn index_hash_if_worktree_stat_matches(path: &Path, index: &Index) -> Option<ObjectHash> {
-    let entry = index.get(path.to_str()?, 0)?;
+    let entry = index_entry_for_path(path, index)?;
     let absolute = util::workdir_to_absolute(path);
     let metadata = std::fs::symlink_metadata(&absolute).ok()?;
     index_entry_matches_worktree_stat(entry, &metadata).then_some(entry.hash)
@@ -699,7 +748,7 @@ fn get_index_blobs(index: &Index, policy: IgnorePolicy) -> BlobsAndModes {
         modes.insert(path.clone(), entry.mode);
         blobs.push((path, entry.hash));
     }
-    (blobs, modes)
+    (blobs, modes, HashMap::new())
 }
 
 async fn resolve_diff_side(
@@ -712,42 +761,47 @@ async fn resolve_diff_side(
         let commit_hash = get_target_commit(source)
             .await
             .map_err(|_| DiffError::InvalidRevision(source.clone()))?;
-        let (blobs, modes) = get_commit_blobs(&commit_hash).await?;
+        let (blobs, modes, worktree_contents) = get_commit_blobs(&commit_hash).await?;
         return Ok(DiffSide {
             label: source.clone(),
             blobs,
             worktree_entries: HashMap::new(),
+            worktree_contents,
             modes,
         });
     }
 
     if is_new {
         if staged {
-            let (blobs, modes) = get_index_blobs(index, IgnorePolicy::Respect);
+            let (blobs, modes, worktree_contents) = get_index_blobs(index, IgnorePolicy::Respect);
             Ok(DiffSide {
                 label: "index".to_string(),
                 blobs,
                 worktree_entries: HashMap::new(),
+                worktree_contents,
                 modes,
             })
         } else {
             let files = get_worktree_diff_files(index)?;
-            let (blobs, modes) = get_files_blobs(&files, index, IgnorePolicy::Respect)?;
+            let (blobs, modes, worktree_contents) =
+                get_files_blobs(&files, index, IgnorePolicy::Respect)?;
             Ok(DiffSide {
                 label: "working tree".to_string(),
                 worktree_entries: blobs.iter().cloned().collect(),
                 blobs,
+                worktree_contents,
                 modes,
             })
         }
     } else if staged {
         match Head::current_commit().await {
             Some(commit_hash) => {
-                let (blobs, modes) = get_commit_blobs(&commit_hash).await?;
+                let (blobs, modes, worktree_contents) = get_commit_blobs(&commit_hash).await?;
                 Ok(DiffSide {
                     label: "HEAD".to_string(),
                     blobs,
                     worktree_entries: HashMap::new(),
+                    worktree_contents,
                     modes,
                 })
             }
@@ -755,15 +809,17 @@ async fn resolve_diff_side(
                 label: "HEAD".to_string(),
                 blobs: Vec::new(),
                 worktree_entries: HashMap::new(),
+                worktree_contents: HashMap::new(),
                 modes: HashMap::new(),
             }),
         }
     } else {
-        let (blobs, modes) = get_index_blobs(index, IgnorePolicy::Respect);
+        let (blobs, modes, worktree_contents) = get_index_blobs(index, IgnorePolicy::Respect);
         Ok(DiffSide {
             label: "index".to_string(),
             blobs,
             worktree_entries: HashMap::new(),
+            worktree_contents,
             modes,
         })
     }
@@ -786,7 +842,7 @@ async fn get_commit_blobs(commit_hash: &ObjectHash) -> Result<BlobsAndModes, Dif
         modes.insert(path.clone(), tree_item_mode_to_u32(mode));
         blobs.push((path, hash));
     }
-    Ok((blobs, modes))
+    Ok((blobs, modes, HashMap::new()))
 }
 
 fn load_repo_blob_content(hash: &ObjectHash) -> Result<Vec<u8>, DiffError> {
@@ -1393,9 +1449,9 @@ fn native_diff_for_file(
 
     match text_pair(old_bytes, new_bytes) {
         Some((old_text, new_text)) => {
-            let (old_pref, new_pref) = if old_text.is_empty() {
+            let (old_pref, new_pref) = if old_hash.is_none() {
                 ("/dev/null".to_string(), format!("b/{}", file.display()))
-            } else if new_text.is_empty() {
+            } else if new_hash.is_none() {
                 (format!("a/{}", file.display()), "/dev/null".to_string())
             } else {
                 (
@@ -1975,6 +2031,55 @@ fn enrich_file_metadata(
     }
 }
 
+fn add_mode_only_diffs(
+    files: &mut Vec<DiffFileStat>,
+    old_map: &HashMap<PathBuf, ObjectHash>,
+    new_map: &HashMap<PathBuf, ObjectHash>,
+    old_modes: &HashMap<PathBuf, u32>,
+    new_modes: &HashMap<PathBuf, u32>,
+) {
+    let changed_paths: HashSet<PathBuf> =
+        files.iter().map(|file| PathBuf::from(&file.path)).collect();
+
+    for (path, old_hash) in old_map {
+        if changed_paths.contains(path) {
+            continue;
+        }
+        let Some(new_hash) = new_map.get(path) else {
+            continue;
+        };
+        if old_hash != new_hash {
+            continue;
+        }
+        let (Some(old_mode), Some(new_mode)) = (old_modes.get(path), new_modes.get(path)) else {
+            continue;
+        };
+        if old_mode == new_mode {
+            continue;
+        }
+
+        let display_path = path.to_string_lossy().to_string();
+        let mut raw = String::new();
+        let _ = writeln!(raw, "diff --git a/{display_path} b/{display_path}");
+        let _ = writeln!(raw, "old mode {old_mode:o}");
+        let _ = writeln!(raw, "new mode {new_mode:o}");
+        files.push(DiffFileStat {
+            path: display_path,
+            status: "typechange".to_string(),
+            insertions: 0,
+            deletions: 0,
+            hunks: Vec::new(),
+            old_path: None,
+            similarity: None,
+            old_mode: Some(*old_mode),
+            new_mode: Some(*new_mode),
+            old_sha: Some(old_hash.to_string()),
+            new_sha: Some(new_hash.to_string()),
+            raw_diff: raw,
+        });
+    }
+}
+
 /// Resolve `--relative` to a repo-root-relative directory (empty string for the
 /// repo root), or `None` when the flag is absent. A path escaping the repository
 /// is a usage error (129).
@@ -2435,6 +2540,7 @@ fn format_raw_line(file: &DiffFileStat) -> String {
         ),
         "added" => format!("{head}A\t{}", file.path),
         "deleted" => format!("{head}D\t{}", file.path),
+        "typechange" => format!("{head}T\t{}", file.path),
         _ => format!("{head}M\t{}", file.path),
     }
 }
@@ -2452,6 +2558,7 @@ fn diff_status_letter(status: &str) -> &'static str {
         "deleted" => "D",
         "renamed" => "R",
         "copied" => "C",
+        "typechange" => "T",
         _ => "M",
     }
 }
@@ -2494,7 +2601,7 @@ pub async fn staged_diff_text() -> String {
         word_diff_regex: None,
         function_context: false,
     };
-    match run_diff(&args).await {
+    match run_diff(&args, false).await {
         Ok(result) => format_unified_diff(&result),
         Err(_) => String::new(),
     }
@@ -2939,7 +3046,7 @@ mod test {
         fs::File::create("not_ignore").unwrap();
 
         let index = Index::load(path::index()).unwrap();
-        let (blobs, _modes) = get_files_blobs(
+        let (blobs, _modes, _contents) = get_files_blobs(
             &[PathBuf::from("should_ignore"), PathBuf::from("not_ignore")],
             &index,
             IgnorePolicy::Respect,
@@ -2969,7 +3076,7 @@ mod test {
                 .unwrap(),
         );
 
-        let (blobs, _modes) = get_files_blobs(
+        let (blobs, _modes, _contents) = get_files_blobs(
             &[PathBuf::from("tracked.txt")],
             &index,
             IgnorePolicy::Respect,

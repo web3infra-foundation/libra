@@ -253,9 +253,7 @@ libra --json=pretty automation list                   # Structured JSON output f
 
 ### `libra agent` — External-Agent Capture
 
-Capture sessions and checkpoints from external coding agents into `refs/libra/agent-traces`. The agent surface records provider lifecycle hooks, stores redacted transcript blobs, indexes `agent_session` / `agent_checkpoint` rows in `.libra/libra.db`, supports dry-run or applied checkpoint rewinds, and can push the trace ref to a shared remote for audit and handoff.
-
-Installable hook capture currently ships for Claude Code and Gemini. Codex is also known to Libra as an observed-agent kind, and Codex JSONL transcripts can be read and truncated when a session row points at them, but automatic `libra agent enable --agent codex` hook installation is not registered yet. Use `libra code --provider codex` for the fully wired Libra-managed Codex workflow.
+Capture sessions and checkpoints from external coding agents (Claude Code, Gemini, ...) into `refs/libra/agent-traces`. Useful for replaying agent transcripts and pushing traces to a shared remote so the team can audit what an external agent actually did.
 
 ```bash
 libra agent status                                    # Captured-session counts and recent checkpoints
@@ -271,51 +269,6 @@ libra agent doctor                                    # Diagnose hook installati
 libra agent push [--remote origin]                    # Push refs/libra/agent-traces
 libra agent rpc list                                  # Discover libra-agent-<name> RPC binaries on PATH
 libra agent rpc invoke <slug> <method> --params '{}'
-```
-
-#### Claude Code Capture Flow
-
-```bash
-# From the root of a Libra repository, install Claude Code hook forwarding.
-libra agent enable --agent claude-code
-
-# Run Claude Code normally in the same repository. Its hook events call:
-#   libra agent hooks claude-code <event>
-
-# Inspect captured sessions and checkpoints.
-libra agent status
-libra agent session list
-libra agent session show <session-id> --extract-transcript /tmp/claude-session.jsonl
-libra agent checkpoint list --session <session-id>
-libra agent checkpoint show <checkpoint-id>
-
-# Preview a rewind, then apply it only when you want to restore the worktree.
-libra agent checkpoint rewind <checkpoint-id> --dry-run
-libra agent checkpoint rewind <checkpoint-id> --apply
-
-# Share the external-agent trace history.
-libra agent push --remote origin
-```
-
-#### Codex Managed-Agent Flow
-
-```bash
-# Run Libra's managed Codex runtime. Codex plan mode defaults on for this provider.
-libra code --provider codex --plan-mode
-
-# For a browser-driven Codex session, use the web-only loopback runtime.
-libra code --web-only --provider codex --browser-control loopback
-
-# Resume a persisted Libra-managed session later.
-libra code --provider codex --resume <thread-id>
-
-# Inspect durable AI history produced by the managed runtime.
-libra graph <thread-id>
-libra usage
-
-# Optional: inspect external libra-agent-* RPC binaries, if one is installed.
-libra agent rpc list
-libra agent rpc invoke codex capabilities
 ```
 
 ### `libra publish` — Read-Only Cloudflare Worker Publishing

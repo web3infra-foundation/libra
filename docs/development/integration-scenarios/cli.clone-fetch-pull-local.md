@@ -85,6 +85,27 @@ test -f bare-clone.git/libra.db
 libra clone --single-branch -b main "$REMOTE_DIR" single-branch
 cd single-branch
 libra branch --show-current
+
+cd "$RUN_ROOT/repos/$SCENARIO"
+libra clone --origin upstream --no-checkout "$REMOTE_DIR" no-checkout
+cd no-checkout
+libra config get remote.upstream.url
+test ! -f README.md
+
+cd "$RUN_ROOT/repos/$SCENARIO"
+libra clone --jobs 2 "$REMOTE_DIR" jobs-clone
+libra clone --reference "$CLONE_DIR" "$REMOTE_DIR" reference-clone
+cd reference-clone
+libra fsck --connectivity-only
+
+cd "$RUN_ROOT/repos/$SCENARIO"
+libra clone --local --no-hardlinks "$REMOTE_DIR" local-copy
+libra clone --shared "$REMOTE_DIR" shared-copy
+cd shared-copy
+libra fsck --connectivity-only
+
+cd "$RUN_ROOT/repos/$SCENARIO"
+libra --json clone "$REMOTE_DIR" clone-json
 ```
 
 负向步骤：
@@ -95,10 +116,8 @@ cd "$RUN_ROOT/repos/$SCENARIO/clone"
 ! libra pull --ff-only origin no-such-branch
 ! libra clone "$RUN_ROOT/fixtures/$SCENARIO/missing.git" "$RUN_ROOT/repos/$SCENARIO/missing-clone"
 
-# Verify clone/fetch/pull JSON output format
+# Verify fetch/pull JSON output format
 cd "$RUN_DIR"
-libra --json clone "$REMOTE_DIR" "$RUN_ROOT/repos/$SCENARIO/clone-json" >clone.json
-python3 -c "import json; d=json.load(open('clone.json')); assert d['ok'] is True; assert 'data' in d"
 cd "$RUN_ROOT/repos/$SCENARIO/clone-json"
 libra --json fetch origin >fetch.json
 python3 -c "import json; d=json.load(open('fetch.json')); assert d['ok'] is True; assert 'data' in d"
@@ -106,7 +125,7 @@ libra --json pull --ff-only origin main >pull.json
 python3 -c "import json; d=json.load(open('pull.json')); assert d['ok'] is True; assert 'data' in d"
 ```
 
-断言：隔离 `gitfix()` 创建的本地 Git 仓库可作为 clone/fetch/pull remote；`remote add`、`remote -v`、`remote get-url` 能观察本地路径 URL；`ls-remote` 可看到 `refs/heads/main`；普通 clone 后文件和 log 可见；Git fixture 新提交后，clone 仓库通过 `fetch`、`fetch --all` 和 `pull --ff-only` 能看到新增提交；**`pull --rebase` 把 clone 端本地提交重放到 upstream 新提交之上——`README.md` 含 upstream 的 `third`，本地 `clone-local.txt` 仍在**；`clone --bare` 生成 Libra bare 布局（可观察到 `libra.db`）；`clone --single-branch -b main` 只检出指定分支；缺失 remote 或缺失 ref 必须非 0 退出且不创建半成品仓库或损坏当前 clone。
+断言：隔离 `gitfix()` 创建的本地 Git 仓库可作为 clone/fetch/pull remote；`remote add`、`remote -v`、`remote get-url` 能观察本地路径 URL；`ls-remote` 可看到 `refs/heads/main`；普通 clone 后文件和 log 可见；Git fixture 新提交后，clone 仓库通过 `fetch`、`fetch --all` 和 `pull --ff-only` 能看到新增提交；**`pull --rebase` 把 clone 端本地提交重放到 upstream 新提交之上——`README.md` 含 upstream 的 `third`，本地 `clone-local.txt` 仍在**；`clone --bare` 生成 Libra bare 布局（可观察到 `libra.db`）；`clone --single-branch -b main` 只检出指定分支；`--origin upstream --no-checkout` 写入 upstream remote 且不物化工作树；`--jobs 2` 被接受；`--reference` / `--local --no-hardlinks` / `--shared` 在本地 remote 上可完成并通过 fsck；缺失 remote 或缺失 ref 必须非 0 退出且不创建半成品仓库或损坏当前 clone。
 
 补充可执行断言：
 - `libra --json clone "$REMOTE_DIR" clone-json` 成功后 `ok:true`，并验证 `libra --json log -n 1` 结构。
@@ -114,4 +133,3 @@ python3 -c "import json; d=json.load(open('pull.json')); assert d['ok'] is True;
 - `libra --json ls-remote --heads` 返回结构化 refs 列表。
 - 负向 `libra fetch origin no-such` 必须非 0，stderr 包含 "couldn't find remote ref" 或对应 LBR-NET 错误。
 - 验证 `pull --rebase` 成功后，本地提交历史被重放（通过 `libra --json log -n 5` 的 `data.commits[]` 顺序观察）。
-

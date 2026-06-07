@@ -25,6 +25,7 @@ use git_internal::{
     },
 };
 use serde::Serialize;
+use similar::TextDiff;
 
 use crate::{
     cli::Stash,
@@ -196,6 +197,10 @@ pub enum StashOutput {
         name_only: bool,
         #[serde(skip)]
         name_status: bool,
+        // Unified-diff text for `-p`/`--patch`. Additive and omitted from JSON
+        // when absent so the structured `files` list stays the stable contract.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        patch: Option<String>,
     },
     #[serde(rename = "branch")]
     Branch {
@@ -273,7 +278,8 @@ async fn run_stash(stash_cmd: Stash, output: &OutputConfig) -> Result<StashOutpu
             stash,
             name_only,
             name_status,
-        } => run_show(stash, name_only, name_status).await,
+            patch,
+        } => run_show(stash, name_only, name_status, patch).await,
         Stash::Branch { branch, stash } => run_branch(branch, stash).await,
         Stash::Clear { force } => run_clear(force, output).await,
     }
@@ -463,6 +469,7 @@ async fn run_show(
     stash: Option<String>,
     name_only: bool,
     name_status: bool,
+    patch: bool,
 ) -> Result<StashOutput, StashError> {
     let (index, stash_id_str) = resolve_stash_to_commit_hash(stash)?;
     let git_dir =
@@ -535,6 +542,20 @@ async fn run_show(
     files.sort_by(|a, b| a.path.cmp(&b.path));
     stats.total = files.len();
 
+    // `-p`/`--patch` renders a real unified diff between the base tree and the
+    // stash tree for each changed file (binary/undecodable files report
+    // "Binary files ... differ", matching Git).
+    let patch_output = if patch {
+        Some(build_stash_patch(
+            &git_dir,
+            &files,
+            &base_files,
+            &stash_files,
+        )?)
+    } else {
+        None
+    };
+
     Ok(StashOutput::Show {
         stash: format!("stash@{{{index}}}"),
         stash_id: stash_id_str,
@@ -542,7 +563,88 @@ async fn run_show(
         files_changed: stats,
         name_only,
         name_status,
+        patch: patch_output,
     })
+}
+
+/// Build the `stash show -p` unified diff over every changed file, in the same
+/// (sorted) order as the file summary.
+fn build_stash_patch(
+    git_dir: &Path,
+    files: &[StashFileChange],
+    base_files: &HashMap<String, TreeItem>,
+    stash_files: &HashMap<String, TreeItem>,
+) -> Result<String, StashError> {
+    let mut out = String::new();
+    for change in files {
+        let base_id = base_files.get(&change.path).map(|item| item.id);
+        let stash_id = stash_files.get(&change.path).map(|item| item.id);
+        out.push_str(&render_stash_file_patch(
+            git_dir,
+            &change.path,
+            base_id,
+            stash_id,
+        )?);
+    }
+    Ok(out)
+}
+
+/// Read a blob's bytes by hash; an absent side (added/deleted) is empty.
+fn read_stash_blob_bytes(git_dir: &Path, id: Option<ObjectHash>) -> Result<Vec<u8>, StashError> {
+    match id {
+        Some(hash) => object::read_git_object(git_dir, &hash)
+            .map_err(|e| StashError::ReadObject(e.to_string())),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Render the unified diff for one changed path between the base and stash
+/// blobs, prefixed with a `diff --git` header. Non-UTF-8 or NUL-containing
+/// content is reported as binary without a textual diff.
+fn render_stash_file_patch(
+    git_dir: &Path,
+    path: &str,
+    base_id: Option<ObjectHash>,
+    stash_id: Option<ObjectHash>,
+) -> Result<String, StashError> {
+    let base_bytes = read_stash_blob_bytes(git_dir, base_id)?;
+    let stash_bytes = read_stash_blob_bytes(git_dir, stash_id)?;
+
+    let mut out = format!("diff --git a/{path} b/{path}\n");
+
+    let binary = base_bytes.contains(&0) || stash_bytes.contains(&0);
+    let (Ok(old_text), Ok(new_text)) = (
+        std::str::from_utf8(&base_bytes),
+        std::str::from_utf8(&stash_bytes),
+    ) else {
+        out.push_str(&format!("Binary files a/{path} and b/{path} differ\n"));
+        return Ok(out);
+    };
+    if binary {
+        out.push_str(&format!("Binary files a/{path} and b/{path} differ\n"));
+        return Ok(out);
+    }
+
+    let old_label = if base_id.is_some() {
+        format!("a/{path}")
+    } else {
+        "/dev/null".to_string()
+    };
+    let new_label = if stash_id.is_some() {
+        format!("b/{path}")
+    } else {
+        "/dev/null".to_string()
+    };
+
+    let diff = TextDiff::from_lines(old_text, new_text);
+    out.push_str(
+        &diff
+            .unified_diff()
+            .context_radius(3)
+            .header(&old_label, &new_label)
+            .to_string(),
+    );
+    Ok(out)
 }
 
 async fn run_branch(branch_name: String, stash: Option<String>) -> Result<StashOutput, StashError> {
@@ -684,9 +786,12 @@ fn render_stash_output(result: &StashOutput, output: &OutputConfig) -> CliResult
             files_changed,
             name_only,
             name_status,
+            patch,
             ..
         } => {
-            if *name_only {
+            if let Some(patch_text) = patch {
+                print!("{patch_text}");
+            } else if *name_only {
                 for change in files {
                     println!("{}", change.path);
                 }

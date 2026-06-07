@@ -9,6 +9,7 @@ C3（Audit P1）
 ### 已确认落地的基线
 - [`src/command/clone.rs`](../../../src/command/clone.rs) 已暴露 `--depth` 和 `--single-branch`（[clone.rs:111-119](../../../src/command/clone.rs#L111)）。
 - [`src/command/fetch.rs`](../../../src/command/fetch.rs) 已暴露 `--depth <N>`，并透传到 `fetch_repository_with_result(..., depth)`。
+- [`src/command/fetch.rs`](../../../src/command/fetch.rs) 后续已补齐 `--deepen`、`--unshallow`、`--shallow-since`、`--shallow-exclude` 与 `--update-shallow`；其中 `--deepen` 使用 Git 的 `deepen-relative` 能力。
 - `fetch` 会处理 upload-pack 返回的 `shallow` / `unshallow` 响应帧，把 shallow boundary 持久化到 `.libra/shallow`，并在后续浅 fetch negotiation 中发送现有 boundary。
 - 第 5 批 [fetch.md](../fetch.md) 与 [`tests/command/fetch_test.rs`](../../../tests/command/fetch_test.rs) 已覆盖 fetch 顶层 JSON / machine / 错误码契约；C3 又补齐浅 fetch 端到端用例。
 - [`docs/commands/clone.md`](../../commands/clone.md) 已包含 `--depth` 示例与参数对比，并与最终 `COMPATIBILITY.md` 表述一致。
@@ -17,6 +18,7 @@ C3（Audit P1）
 
 ### 基于当前代码的 Review 结论
 - `fetch --depth` 已从内部能力变成稳定公开入口；命令文档、兼容矩阵和测试均已同步。
+- 高级 shallow fetch flag 已由后续 fetch 兼容计划落地；本 C3 文档保留为原始 depth 决策记录，不再把它们视为非目标。
 - `clone --depth` 已存在且命令文档已有示例；根 `COMPATIBILITY.md` 已把 clone shallow / single-branch 现状列入事实表。
 - `clone --sparse` 不应在本批强行加 CLI——若内部不支持，宁可在 `COMPATIBILITY.md` 标 `unsupported` 也不发明半成品 flag。
 
@@ -32,7 +34,7 @@ C3（Audit P1）
 - 不实现 `clone --sparse`；仅在 `COMPATIBILITY.md` 显式标 `unsupported`。
 - 不实现 `clone --recurse-submodules`；submodule 在 [declined.md](declined.md) 登记为产品边界。
 - 不改动 `fetch_repository` 内部签名；只接 CLI flag 进现有 wiring。
-- 不引入"渐进 deepen"语义（`--shallow-since` / `--shallow-exclude` 等高级 flag）；这些归后续独立评估。
+- 渐进 deepen 与高级 shallow flag 已在后续 fetch 兼容计划中落地；本节仅说明 C3 当时没有同时实现这些能力。
 
 ## 设计要点
 

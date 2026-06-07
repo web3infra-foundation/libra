@@ -1076,6 +1076,81 @@ fn diff_unified_zero_context_emits_only_changed_lines() {
 }
 
 #[test]
+fn diff_native_empty_tracked_file_uses_file_headers() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "empty.txt", "");
+    fs::write(repo.path().join("empty.txt"), "now has content\n").unwrap();
+
+    let output = run_libra_command(&["diff", "-U0"], repo.path());
+    assert_cli_success(&output, "diff -U0 empty file");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--- a/empty.txt"), "stdout={stdout}");
+    assert!(stdout.contains("+++ b/empty.txt"), "stdout={stdout}");
+    assert!(
+        !stdout.contains("--- /dev/null"),
+        "an existing empty old file must not be rendered as /dev/null: {stdout}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn diff_worktree_file_read_failure_warns_and_skips() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "unreadable.txt", "base\n");
+    let unreadable = repo.path().join("unreadable.txt");
+    fs::write(&unreadable, "changed\n").unwrap();
+    fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let output = run_libra_command(&["--progress=none", "diff", "--name-only"], repo.path());
+    fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert_cli_success(&output, "diff skips unreadable worktree file");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+        "unreadable tracked file should be skipped, not reported as changed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("warning: failed to read file") && stderr.contains("skipping it in diff"),
+        "expected read warning, got: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn diff_worktree_file_read_warning_honors_exit_code_on_warning() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "unreadable.txt", "base\n");
+    let unreadable = repo.path().join("unreadable.txt");
+    fs::write(&unreadable, "changed\n").unwrap();
+    fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let output = run_libra_command(
+        &[
+            "--exit-code-on-warning",
+            "--progress=none",
+            "diff",
+            "--name-only",
+        ],
+        repo.path(),
+    );
+    fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(9),
+        "warning exit code should be 9: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("LBR-WARN-001"), "stderr={stderr}");
+}
+
+#[test]
 fn diff_exit_code_flag_returns_1_when_changes() {
     let repo = create_committed_repo_via_cli();
     fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
@@ -1348,6 +1423,89 @@ fn diff_rename_threshold_bare_number_means_percent() {
 }
 
 #[test]
+fn diff_short_similarity_threshold_flags_parse_as_percent() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "orig.txt", "l1\nl2\nl3\nl4\n");
+    fs::remove_file(repo.path().join("orig.txt")).unwrap();
+    fs::write(repo.path().join("new.txt"), "l1\nl2\nl3\nCHANGED\n").unwrap();
+
+    let strict_rename = run_libra_command(&["--json", "diff", "-M80"], repo.path());
+    assert_cli_success(&strict_rename, "diff -M80");
+    assert!(
+        renamed_entry(&parse_json_stdout(&strict_rename)).is_none(),
+        "-M80 must parse as an 80% threshold"
+    );
+
+    let loose_rename = run_libra_command(&["--json", "diff", "-M70"], repo.path());
+    assert_cli_success(&loose_rename, "diff -M70");
+    assert!(
+        renamed_entry(&parse_json_stdout(&loose_rename)).is_some(),
+        "-M70 must parse as a 70% threshold"
+    );
+}
+
+#[test]
+fn diff_copy_short_similarity_threshold_flags_parse_as_percent() {
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "src.txt", "one\ntwo\nthree\nfour\n");
+    fs::write(repo.path().join("src.txt"), "one\ntwo\nthree\nFOUR\n").unwrap();
+    fs::write(repo.path().join("copy.txt"), "one\ntwo\nthree\nCOPY\n").unwrap();
+
+    let strict_copy = run_libra_command(&["--json", "diff", "-C80"], repo.path());
+    assert_cli_success(&strict_copy, "diff -C80");
+    let files = parse_json_stdout(&strict_copy)["data"]["files"].clone();
+    assert!(
+        !files
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["status"] == "copied"),
+        "-C80 must parse as an 80% threshold: {files:?}"
+    );
+
+    let loose_copy = run_libra_command(&["--json", "diff", "-C70"], repo.path());
+    assert_cli_success(&loose_copy, "diff -C70");
+    let files = parse_json_stdout(&loose_copy)["data"]["files"].clone();
+    assert!(
+        files
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["status"] == "copied"),
+        "-C70 must parse as a 70% threshold: {files:?}"
+    );
+}
+
+#[test]
+fn diff_bare_find_renames_does_not_swallow_pathspec() {
+    let repo = create_committed_repo_via_cli();
+    fs::create_dir_all(repo.path().join("src")).unwrap();
+    fs::write(repo.path().join("src/a.txt"), "a\n").unwrap();
+    fs::write(repo.path().join("outside.txt"), "outside\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "src/a.txt", "outside.txt"], repo.path()),
+        "stage pathspec fixture",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "pathspec fixture", "--no-verify"],
+            repo.path(),
+        ),
+        "commit pathspec fixture",
+    );
+    fs::write(repo.path().join("src/a.txt"), "a2\n").unwrap();
+    fs::write(repo.path().join("outside.txt"), "outside2\n").unwrap();
+
+    let output = run_libra_command(&["diff", "-M", "src", "--name-only"], repo.path());
+    assert_cli_success(&output, "diff -M src --name-only");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "src/a.txt",
+        "bare -M must leave the following token as a pathspec"
+    );
+}
+
+#[test]
 fn diff_config_renames_false_disables() {
     let repo = create_committed_repo_via_cli();
     commit_file(&repo, "orig.txt", "alpha\nbeta\ngamma\n");
@@ -1574,6 +1732,26 @@ fn diff_raw_rename_emits_two_paths() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn diff_raw_mode_only_change_emits_typechange() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = create_committed_repo_via_cli();
+    commit_file(&repo, "script.sh", "echo hi\n");
+    let script = repo.path().join("script.sh");
+    fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = run_libra_command(&["diff", "--raw"], repo.path());
+    assert_cli_success(&output, "diff --raw mode-only");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| line.ends_with("T\tscript.sh"))
+        .expect("typechange raw line");
+    assert!(line.starts_with(":100644 100755 "), "line={line}");
+}
+
 #[test]
 fn diff_relative_filters_to_subdir() {
     let repo = setup_subdir_repo();
@@ -1688,6 +1866,33 @@ fn diff_output_format_precedence() {
     assert_eq!(parsed["data"]["files_changed"], 1);
 }
 
+#[test]
+fn diff_stat_word_diff_does_not_tokenize_or_warn() {
+    let repo = create_committed_repo_via_cli();
+    let base: String = (0..1000)
+        .map(|_| format!("{}\n", "a".repeat(6000)))
+        .collect();
+    let modified: String = (0..1000)
+        .map(|_| format!("{}\n", "b".repeat(6000)))
+        .collect();
+    commit_file(&repo, "big.txt", &base);
+    fs::write(repo.path().join("big.txt"), &modified).unwrap();
+
+    let output = run_libra_command(
+        &["--progress=none", "diff", "--stat", "--word-diff=plain"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "diff --stat --word-diff");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).is_empty(),
+        "--stat wins over --word-diff, so word-diff tokenization should not warn"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("big.txt |"),
+        "stat output should still render"
+    );
+}
+
 // ----- Wave 2b: --word-diff -----
 
 #[test]
@@ -1732,6 +1937,39 @@ fn diff_word_diff_regex_over_4kib_rejected() {
         output.status.code(),
         Some(129),
         "over-long --word-diff-regex must be a usage error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+#[test]
+fn diff_word_diff_invalid_mode_rejected() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let output = run_libra_command(&["diff", "--word-diff=porcelain"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "unsupported --word-diff mode must be a usage error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+#[test]
+fn diff_word_diff_invalid_regex_rejected() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let output = run_libra_command(
+        &["diff", "--word-diff=plain", "--word-diff-regex", "["],
+        repo.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "invalid --word-diff-regex must be a usage error: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let (_stderr, report) = parse_cli_error_stderr(&output.stderr);

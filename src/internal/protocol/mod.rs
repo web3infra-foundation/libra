@@ -198,7 +198,8 @@ pub fn parse_discovered_references(
 /// boundary set. Models the three Git deepen requests plus the partial-clone
 /// object filter:
 ///
-/// - [`depth`](Self::depth) → `deepen <n>` (`--depth N` / `--deepen N`)
+/// - [`depth`](Self::depth) → `deepen <n>` (`--depth N`)
+/// - [`deepen_relative`](Self::deepen_relative) → `deepen-relative` capability (`--deepen N`)
 /// - [`deepen_since`](Self::deepen_since) → `deepen-since <unix>` (`--shallow-since`)
 /// - [`deepen_not`](Self::deepen_not) → one `deepen-not <ref>` per entry (`--shallow-exclude`)
 /// - [`filter`](Self::filter) → `filter <spec>` (`--filter`, partial clone)
@@ -209,6 +210,9 @@ pub fn parse_discovered_references(
 pub struct ShallowOptions {
     /// Truncate history to this many commits from each tip (`deepen <n>`).
     pub depth: Option<usize>,
+    /// Treat [`depth`](Self::depth) as a relative deepen request from the current
+    /// shallow boundary (`deepen-relative` + `deepen <n>`).
+    pub deepen_relative: bool,
     /// Restrict shallow history to commits newer than this Unix timestamp
     /// (`deepen-since <unix-seconds>`).
     pub deepen_since: Option<i64>,
@@ -251,6 +255,9 @@ pub fn generate_upload_pack_content(
     // `deepen-since`/`deepen-not` commands are only honored by upload-pack when
     // the corresponding capability is advertised on the first `want` line; a
     // plain `deepen <n>` does not need one.
+    if options.deepen_relative && options.depth.is_some() {
+        capability.push("deepen-relative");
+    }
     if options.deepen_since.is_some() {
         capability.push("deepen-since");
     }
@@ -347,8 +354,26 @@ mod test {
         let content = render(&want, &shallow, &ShallowOptions::from_depth(Some(5)));
         assert!(content.contains(&format!("shallow {}", "b".repeat(40))));
         assert!(content.contains("deepen 5\n"));
+        assert!(!content.contains("deepen-relative"));
         assert!(!content.contains("deepen-since"));
         assert!(!content.contains("deepen-not"));
+    }
+
+    #[test]
+    fn upload_pack_emits_deepen_relative_capability_for_fetch_deepen() {
+        let want = vec!["a".repeat(40)];
+        let opts = ShallowOptions {
+            depth: Some(3),
+            deepen_relative: true,
+            ..ShallowOptions::default()
+        };
+        let content = render(&want, &[], &opts);
+
+        assert!(
+            content.contains("deepen-relative"),
+            "`--deepen` must request relative deepening: {content:?}"
+        );
+        assert!(content.contains("deepen 3\n"));
     }
 
     #[test]

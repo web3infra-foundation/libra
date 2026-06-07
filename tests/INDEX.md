@@ -17,7 +17,7 @@
 
 | target | wave | one-line purpose | relevant src |
 |---|---|---|---|
-| `command_test` | 1 | Top-level dispatcher covering most `libra <subcmd>` integration paths | `src/command/`, `src/cli.rs` |
+| `command_test` | 1 | Top-level dispatcher covering most `libra <subcmd>` integration paths, including commit editor/hooks/signing/autosquash/JSON coverage | `src/command/`, `src/cli.rs`, `tests/command/commit_test.rs`, `tests/command/commit_editor_test.rs`, `tests/command/commit_sign_hooks_test.rs`, `tests/command/commit_autosquash_test.rs`, `tests/command/commit_json_test.rs`, `tests/command/commit_error_test.rs` |
 | `compat_stash_subcommand_surface` | 1 | Guards `libra stash` subcommand surface vs. git CLI | `src/command/stash.rs` |
 | `compat_bisect_subcommand_surface` | 1 | Guards `libra bisect` subcommand surface and declined parser-only bisect surfaces | `src/command/bisect.rs`, `src/cli.rs` |
 | `compat_worktree_delete_dir` | 1 | Guards worktree delete semantics on dir removal | `src/command/worktree.rs` |
@@ -32,6 +32,7 @@
 | `compat_client_storage_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in `utils/client_storage.rs` | `src/utils/client_storage.rs` |
 | `compat_extra_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in miscellaneous modules | `src/**` |
 | `compat_all_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in general production codebase | `src/**` |
+| `compat_diff_production_expect_guard` | 1 | Bans bare `unwrap()` and unjustified production `expect()` in diff implementation files | `src/command/diff.rs`, `src/utils/blob_similarity.rs` |
 | `compat_agent_run_non_exhaustive_guard` | 1 | Enforces `#[non_exhaustive]` on every `pub enum` under `agent_run/` for additive evolution | `src/internal/ai/agent_run/` |
 | `compat_agent_docs_contract` | 1 | Guards active Agent plan claims against stale removed-provider status | `docs/improvement/agent.md`, `src/command/code.rs` |
 | `compat_help_examples_banner` | 1 | Every visible command in `src/cli.rs::Commands` renders an `EXAMPLES:` / `Examples:` section in `<cmd> --help` (cross-cutting item B) | `src/cli.rs`, `src/command/**` |

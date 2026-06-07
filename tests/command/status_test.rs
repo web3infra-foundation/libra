@@ -1313,6 +1313,7 @@ async fn test_status_short_format_with_branch() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            z: false,
         },
         &mut output,
     )
@@ -1376,6 +1377,7 @@ async fn test_status_porcelain_format_with_branch() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            z: false,
         },
         &mut output,
     )
@@ -1457,6 +1459,7 @@ async fn test_status_show_stash_with_existing_stash() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            z: false,
         },
         &mut output,
     )
@@ -1484,6 +1487,7 @@ async fn test_status_show_stash_with_existing_stash() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            z: false,
         },
         &mut output,
     )
@@ -1511,6 +1515,7 @@ async fn test_status_show_stash_with_existing_stash() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            z: false,
         },
         &mut output,
     )
@@ -1566,6 +1571,7 @@ async fn test_status_show_stash_without_stash() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            z: false,
         },
         &mut output,
     )
@@ -1635,6 +1641,7 @@ async fn test_status_branch_detached_head() {
     switch::execute(SwitchArgs {
         branch: Some(current_commit.to_string()),
         create: None,
+        force_create: None,
         detach: true,
         track: false,
     })
@@ -1651,6 +1658,7 @@ async fn test_status_branch_detached_head() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            z: false,
         },
         &mut output,
     )
@@ -2159,5 +2167,36 @@ fn test_add_dry_run_output() {
     assert!(
         !status_stdout.contains("A  file.txt"),
         "dry run should not stage: {status_stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_status_z_nul_terminates_porcelain() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("untracked.txt"), "u\n").unwrap();
+    std::fs::write(repo.path().join("tracked.txt"), "tracked\nmod\n").unwrap();
+
+    // `-z` with no explicit format implies porcelain v1 with NUL terminators.
+    let out = run_libra_command(&["status", "-z"], repo.path());
+    assert_cli_success(&out, "status -z");
+    assert!(
+        out.stdout.contains(&0u8),
+        "status -z must NUL-terminate entries; stdout={:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !out.stdout.contains(&b'\n'),
+        "status -z must not emit newlines; stdout={:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("tracked.txt"),
+        "should list the modified file: {text}"
+    );
+    assert!(
+        text.contains("untracked.txt"),
+        "should list the untracked file: {text}"
     );
 }

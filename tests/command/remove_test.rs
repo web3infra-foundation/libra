@@ -961,3 +961,49 @@ fn test_rm_help_lists_examples_banner() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Output hygiene: plain (no-ANSI) piped output and Git-aligned 4-space conflict
+// indentation.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_rm_output_plain_no_ansi_when_piped() {
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["rm", "tracked.txt"], repo.path());
+    assert_cli_success(&out, "rm tracked.txt");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout, "rm 'tracked.txt'\n",
+        "piped output must be plain text"
+    );
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "piped rm output must not contain ANSI escapes: {stdout:?}"
+    );
+}
+
+#[test]
+fn test_rm_conflict_uses_four_space_indent() {
+    let repo = create_committed_repo_via_cli();
+    // Unstaged local modification blocks `rm` without -f.
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmodified\n").unwrap();
+    let out = run_libra_command(&["rm", "tracked.txt"], repo.path());
+    assert!(
+        !out.status.success(),
+        "rm of a locally-modified file must fail without -f"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("local modifications"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("    tracked.txt"),
+        "conflict list must use 4-space indent: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("\ttracked.txt"),
+        "conflict list must not use tab indent: {stderr:?}"
+    );
+}

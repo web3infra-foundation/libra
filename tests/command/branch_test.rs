@@ -949,6 +949,7 @@ async fn test_rename_current_branch() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some(feature_branch.clone()),
+        force_create: None,
         detach: false,
         track: false,
     })
@@ -1335,6 +1336,7 @@ async fn test_branch_delete_safe() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
         detach: false,
         track: false,
     })
@@ -1360,6 +1362,7 @@ async fn test_branch_delete_safe() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
         detach: false,
         track: false,
     })
@@ -1408,6 +1411,7 @@ async fn test_branch_delete_safe() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
         detach: false,
         track: false,
     })
@@ -1416,6 +1420,7 @@ async fn test_branch_delete_safe() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
         detach: false,
         track: false,
     })
@@ -1564,6 +1569,7 @@ async fn test_branch_contains_commit_filter() {
     switch::execute(SwitchArgs {
         branch: Some("dev".to_string()),
         create: None,
+        force_create: None,
         detach: false,
         track: false,
     })
@@ -1579,6 +1585,7 @@ async fn test_branch_contains_commit_filter() {
     switch::execute(SwitchArgs {
         branch: Some(main_branch.clone()),
         create: None,
+        force_create: None,
         detach: false,
         track: false,
     })
@@ -2992,6 +2999,7 @@ async fn test_branch_rename_migrates_config_and_updates_head() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
         detach: false,
         track: false,
     })

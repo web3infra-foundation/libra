@@ -227,6 +227,7 @@ async fn test_show_non_quiet_uses_forced_pager() {
         no_patch: true,
         oneline: false,
         name_only: false,
+        name_status: false,
         stat: false,
         pathspec: vec![],
     };
@@ -274,6 +275,7 @@ async fn test_show_quiet_still_validates_patch_generation() {
         no_patch: false,
         oneline: false,
         name_only: false,
+        name_status: false,
         stat: false,
         pathspec: vec![],
     };
@@ -322,6 +324,7 @@ async fn test_show_quiet_stat_succeeds_with_missing_blob_like_human_path() {
         no_patch: false,
         oneline: false,
         name_only: false,
+        name_status: false,
         stat: true,
         pathspec: vec![],
     };
@@ -779,6 +782,7 @@ async fn test_show_execute_safe_bad_ref_returns_cli_error() {
         no_patch: false,
         oneline: false,
         name_only: false,
+        name_status: false,
         stat: false,
         pathspec: vec![],
     };
@@ -818,6 +822,7 @@ async fn test_show_execute_safe_bad_rev_path_returns_cli_error() {
         no_patch: false,
         oneline: false,
         name_only: false,
+        name_status: false,
         stat: false,
         pathspec: vec![],
     };
@@ -914,4 +919,49 @@ fn test_show_json_lightweight_tag_resolves_to_commit() {
     let json = parse_json_stdout(&output);
     assert_eq!(json["data"]["type"], "commit");
     assert_eq!(json["data"]["subject"], "Initial commit");
+}
+
+#[test]
+fn test_show_name_status_reports_modified() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let add = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert!(
+        add.status.success(),
+        "add: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let commit = run_libra_command(&["commit", "-m", "modify", "--no-verify"], repo.path());
+    assert!(
+        commit.status.success(),
+        "commit: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    let out = run_libra_command(&["show", "--name-status", "HEAD"], repo.path());
+    assert!(
+        out.status.success(),
+        "show: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("M\ttracked.txt"),
+        "expected 'M<tab>tracked.txt', got: {stdout}"
+    );
+}
+
+#[test]
+fn test_show_name_status_reports_added() {
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["show", "--name-status", "HEAD"], repo.path());
+    assert!(
+        out.status.success(),
+        "show: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("A\ttracked.txt"),
+        "base commit adds tracked.txt with status A, got: {stdout}"
+    );
 }
