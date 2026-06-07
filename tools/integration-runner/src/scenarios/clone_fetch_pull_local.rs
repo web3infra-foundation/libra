@@ -89,6 +89,20 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
     assert_stdout_contains(&remotes, &remote)?;
     let origin = ctx.command(&["remote", "get-url", "origin"], clone_dir.clone(), true)?;
     assert_stdout_contains(&origin, &remote)?;
+    let set_branches = ctx.command(
+        &["--json", "remote", "set-branches", "origin", "main"],
+        clone_dir.clone(),
+        true,
+    )?;
+    assert_json_ok(&set_branches, "remote")?;
+    assert_stdout_contains(&set_branches, "refs/remotes/origin/main")?;
+    let set_head = ctx.command(
+        &["--json", "remote", "set-head", "origin", "main"],
+        clone_dir.clone(),
+        true,
+    )?;
+    assert_json_ok(&set_head, "remote")?;
+    assert_stdout_contains(&set_head, "\"target\": \"main\"")?;
     ctx.command(
         &["remote", "add", "mirror", &remote],
         clone_dir.clone(),
