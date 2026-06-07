@@ -67,12 +67,34 @@ test -f pick.txt
 REVERT_TARGET="$(libra rev-parse HEAD)"
 libra revert "$REVERT_TARGET"
 test ! -f pick.txt
+
+printf 'line1\nline2\nline3\nline4\n' > rename-base.txt
+libra add rename-base.txt
+libra commit -m "test: rename base"
+printf 'stable\n' > stable-rename.txt
+libra add stable-rename.txt
+libra commit -m "test: stable rename"
+libra branch rename-side
+libra switch rename-side
+printf 'line1\nline2-feature\nline3\nline4\n' > rename-base.txt
+libra add rename-base.txt
+libra commit -m "test: rename side edit"
+libra switch main
+printf 'line1\nline2\nline3\nline4-main\n' > renamed.txt
+libra add renamed.txt
+libra rm rename-base.txt
+libra commit -m "test: rename on main"
+! libra merge --find-renames=90 rename-side
+libra merge --abort
+libra merge --find-renames=70 rename-side
+test -f renamed.txt
 ```
 
 负向步骤：
 
 ```bash
 cd "$RUN_DIR/history-edit-repo"
+! libra merge --squash --continue
 ! libra merge no-such-branch
 ! libra merge --continue
 ! libra merge --abort
@@ -82,11 +104,10 @@ cd "$RUN_DIR/history-edit-repo"
 ! libra revert no-such-commit
 ```
 
-断言：fast-forward merge 后 HEAD 等于目标提交；三方无冲突 merge 产生可观察 merge 结果并保留双方文件；`rebase main` 把 topic 提交重放到新 base 且文件存在；`cherry-pick <commit>` 在当前分支生成等价修改；`revert <commit>` 创建反向提交并撤销目标修改；缺失目标、无 merge/rebase 会话的 continue/abort 和非法 commit 必须失败且不破坏当前分支。
+断言：fast-forward merge 后 HEAD 等于目标提交；三方无冲突 merge 产生可观察 merge 结果并保留双方文件；`--find-renames=<n>` 的相似度阈值可控制 rename+edit 是否自动合并；`--squash --continue` 必须被解析层拒绝；`rebase main` 把 topic 提交重放到新 base 且文件存在；`cherry-pick <commit>` 在当前分支生成等价修改；`revert <commit>` 创建反向提交并撤销目标修改；缺失目标、无 merge/rebase 会话的 continue/abort 和非法 commit 必须失败且不破坏当前分支。
 
 补充可执行断言：
 - 每次主要操作后执行 `libra fsck --connectivity-only` 必须 0 退出。
 - `libra --json log -n 1` 验证 merge commit 有 2 个 parent（对于非 ff merge）。
 - 负向步骤必须产生非 0 退出，且 stderr 包含 "not a" / "no such" 或 LBR- 相关错误标识（通过捕获验证）。
 - `libra --json show-ref --heads` 验证 `data.entries[]` 中的分支状态在 rebase/cherry 后一致。
-

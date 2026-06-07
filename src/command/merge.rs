@@ -94,7 +94,7 @@ pub struct MergeArgs {
     pub no_ff: bool,
 
     /// Squash changes into the index and working tree without creating a merge commit
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["continue_merge", "abort", "quit"])]
     pub squash: bool,
 
     /// Perform the merge but stop before creating a merge commit
@@ -198,9 +198,15 @@ pub struct MergeArgs {
     #[arg(long = "ignore-cr-at-eol")]
     pub ignore_cr_at_eol: bool,
 
-    /// Detect file renames so an edit on one side follows a rename on the other (default)
-    #[arg(long = "find-renames", conflicts_with = "no_renames")]
-    pub find_renames: bool,
+    /// Detect file renames at an optional similarity threshold (default 50%)
+    #[arg(
+        long = "find-renames",
+        value_name = "N",
+        num_args = 0..=1,
+        require_equals = true,
+        conflicts_with = "no_renames"
+    )]
+    pub find_renames: Option<Option<String>>,
 
     /// Turn off rename detection (overrides merge.renames)
     #[arg(long = "no-renames", conflicts_with = "find_renames")]
@@ -373,6 +379,8 @@ pub(crate) struct PullMergeOptions {
     pub verify_signatures: bool,
     pub edit: bool,
     pub detect_renames: bool,
+    pub rename_threshold: Option<f64>,
+    pub rename_limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -456,6 +464,10 @@ pub(crate) enum PullMergeError {
     InvalidMergeFfConfig { value: String },
     #[error("invalid merge.commit value '{value}'")]
     InvalidMergeCommitConfig { value: String },
+    #[error("invalid --find-renames similarity '{value}'")]
+    InvalidRenameSimilarity { value: String },
+    #[error("invalid merge.renameLimit value '{value}'")]
+    InvalidRenameLimitConfig { value: String },
     #[error("unknown diff algorithm '{value}' (expected myers, histogram, patience, or minimal)")]
     InvalidDiffAlgorithm { value: String },
     #[error(
@@ -545,6 +557,8 @@ impl From<PullMergeError> for CliError {
             | PullMergeError::SquashCommit
             | PullMergeError::InvalidMergeFfConfig { .. }
             | PullMergeError::InvalidMergeCommitConfig { .. }
+            | PullMergeError::InvalidRenameSimilarity { .. }
+            | PullMergeError::InvalidRenameLimitConfig { .. }
             | PullMergeError::InvalidDiffAlgorithm { .. }
             | PullMergeError::InvalidCleanupMode { .. } => {
                 CliError::command_usage(error.to_string())
@@ -762,6 +776,12 @@ async fn merge_options_from_args(args: &MergeArgs) -> Result<PullMergeOptions, M
         verify_signatures: resolve_verify_signatures(args).await,
         edit: args.edit && !args.no_edit,
         detect_renames: resolve_detect_renames(args).await,
+        rename_threshold: args
+            .find_renames
+            .as_ref()
+            .map(parse_rename_similarity)
+            .transpose()?,
+        rename_limit: Some(resolve_rename_limit().await?),
     })
 }
 
@@ -794,7 +814,7 @@ async fn resolve_detect_renames(args: &MergeArgs) -> bool {
     if args.no_renames {
         return false;
     }
-    if args.find_renames {
+    if args.find_renames.is_some() {
         return true;
     }
     read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.renames")
@@ -808,6 +828,54 @@ async fn resolve_detect_renames(args: &MergeArgs) -> bool {
             )
         })
         .unwrap_or(true)
+}
+
+fn parse_rename_similarity(flag: &Option<String>) -> Result<f64, PullMergeError> {
+    match flag {
+        None => Ok(RENAME_SIMILARITY_THRESHOLD),
+        Some(value) => {
+            let trimmed = value.trim();
+            let had_percent = trimmed.ends_with('%');
+            let core = trimmed.strip_suffix('%').unwrap_or(trimmed);
+            match core.parse::<f64>() {
+                Ok(number)
+                    if core.contains('.') && !had_percent && (0.0..=1.0).contains(&number) =>
+                {
+                    Ok(number)
+                }
+                Ok(number) if !core.contains('.') || had_percent => {
+                    if (0.0..=100.0).contains(&number) {
+                        Ok(number / 100.0)
+                    } else {
+                        Err(PullMergeError::InvalidRenameSimilarity {
+                            value: value.clone(),
+                        })
+                    }
+                }
+                _ => Err(PullMergeError::InvalidRenameSimilarity {
+                    value: value.clone(),
+                }),
+            }
+        }
+    }
+}
+
+async fn resolve_rename_limit() -> Result<usize, PullMergeError> {
+    let Some(value) =
+        read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.renameLimit")
+            .await
+            .ok()
+            .flatten()
+    else {
+        return Ok(RENAME_LIMIT);
+    };
+
+    value
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|limit| *limit > 0)
+        .ok_or(PullMergeError::InvalidRenameLimitConfig { value })
 }
 
 /// Resolve `--verify-signatures`/`--no-verify-signatures`, falling back to the
@@ -2427,18 +2495,28 @@ fn detect_clean_renames(
     }
 
     let deleted_sources = base_items.len();
-    if deleted_sources.saturating_mul(our_added.len().max(their_added.len())) > RENAME_LIMIT {
+    let rename_limit = options.rename_limit.unwrap_or(RENAME_LIMIT);
+    if deleted_sources.saturating_mul(our_added.len().max(their_added.len())) > rename_limit {
         return Ok(Vec::new());
     }
 
     let mut renames = Vec::new();
     let mut used_dests: HashSet<PathBuf> = HashSet::new();
+    let rename_threshold = options
+        .rename_threshold
+        .unwrap_or(RENAME_SIMILARITY_THRESHOLD);
     for (source, base_entry) in base_items {
         // `ours` renamed the file away while `theirs` edited it in place.
         if !our_items.contains_key(source)
             && let Some(their_entry) = their_items.get(source)
             && their_entry != base_entry
-            && let Some(dest) = best_rename_dest(base_entry, &our_added, our_items, &used_dests)?
+            && let Some(dest) = best_rename_dest(
+                base_entry,
+                &our_added,
+                our_items,
+                &used_dests,
+                rename_threshold,
+            )?
             && rename_resolves_cleanly(
                 base_entry,
                 our_items.get(&dest),
@@ -2458,8 +2536,13 @@ fn detect_clean_renames(
         if !their_items.contains_key(source)
             && let Some(our_entry) = our_items.get(source)
             && our_entry != base_entry
-            && let Some(dest) =
-                best_rename_dest(base_entry, &their_added, their_items, &used_dests)?
+            && let Some(dest) = best_rename_dest(
+                base_entry,
+                &their_added,
+                their_items,
+                &used_dests,
+                rename_threshold,
+            )?
             && rename_resolves_cleanly(
                 base_entry,
                 Some(our_entry),
@@ -2484,6 +2567,7 @@ fn best_rename_dest(
     candidates: &[&PathBuf],
     side_items: &HashMap<PathBuf, MergeTreeEntry>,
     used_dests: &HashSet<PathBuf>,
+    threshold: f64,
 ) -> Result<Option<PathBuf>, PullMergeError> {
     let mut best: Option<(PathBuf, f64)> = None;
     for candidate in candidates {
@@ -2494,9 +2578,7 @@ fn best_rename_dest(
             continue;
         };
         let similarity = content_similarity(base_entry, candidate_entry)?;
-        if similarity >= RENAME_SIMILARITY_THRESHOLD
-            && best.as_ref().is_none_or(|(_, score)| similarity > *score)
-        {
+        if similarity >= threshold && best.as_ref().is_none_or(|(_, score)| similarity > *score) {
             best = Some(((*candidate).clone(), similarity));
         }
     }
