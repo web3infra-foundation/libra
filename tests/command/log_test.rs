@@ -175,6 +175,46 @@ fn test_log_invalid_decorate_uses_command_usage_error() {
     assert_eq!(report.hints, vec!["valid options: no, short, full, auto"]);
 }
 
+fn assert_log_rejects_escaping_pathspec(pathspec: &str) {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["log", pathspec], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "escaping pathspec should be usage error, stderr: {stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "escaping pathspec must not produce log output"
+    );
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report.message.contains("pathspec"),
+        "message should identify pathspec problem: {}",
+        report.message
+    );
+}
+
+#[test]
+fn test_log_pathspec_rejects_parent_escape() {
+    assert_log_rejects_escaping_pathspec("../outside.txt");
+}
+
+#[test]
+fn test_log_pathspec_rejects_absolute_path() {
+    let outside = tempdir().unwrap();
+    let path = outside.path().join("outside.txt");
+    assert_log_rejects_escaping_pathspec(&path.to_string_lossy());
+}
+
+#[test]
+fn test_log_pathspec_rejects_windows_parent_separator() {
+    assert_log_rejects_escaping_pathspec(r"..\outside.txt");
+}
+
 #[tokio::test]
 #[serial]
 async fn test_log_decorate_no_skips_corrupt_reference_map() {
@@ -2356,6 +2396,52 @@ fn test_rev_range_json_total() {
         "main..feature has exactly one commit: {json}"
     );
     assert_eq!(commits[0]["subject"], "feature work");
+}
+
+#[test]
+fn test_rev_range_double_dash_pathspec_filters_results() {
+    let repo = rev_range_repo();
+    let matches_feature = run_libra_command(
+        &["log", "--oneline", "main..feature", "--", "f.txt"],
+        repo.path(),
+    );
+    assert!(
+        matches_feature.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&matches_feature.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&matches_feature.stdout);
+    assert!(stdout.contains("feature work"), "stdout: {stdout}");
+
+    let misses_feature = run_libra_command(
+        &["log", "--oneline", "main..feature", "--", "m.txt"],
+        repo.path(),
+    );
+    assert!(
+        misses_feature.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&misses_feature.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&misses_feature.stdout);
+    assert!(
+        !stdout.contains("feature work"),
+        "range pathspec must filter commit file changes: {stdout}"
+    );
+}
+
+#[test]
+fn test_rev_range_double_dash_pathspec_rejects_parent_escape() {
+    let repo = rev_range_repo();
+    let out = run_libra_command(&["log", "main..feature", "--", "../outside"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "escaping separated pathspec should be usage error, stderr: {stderr}"
+    );
+    assert!(out.stdout.is_empty());
+    assert_eq!(report.error_code, "LBR-CLI-002");
 }
 
 #[test]

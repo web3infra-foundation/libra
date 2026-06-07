@@ -41,6 +41,9 @@ EXAMPLES:
     libra show --name-status HEAD           Show changed files with A/M/D status
     libra --json show HEAD                  Structured JSON output for agents";
 
+const LARGE_BLOB_THRESHOLD_BYTES: usize = 10 * 1024 * 1024;
+const BINARY_DETECTION_SAMPLE_BYTES: usize = 8192;
+
 /// Shows commits, tags, trees, or blobs.
 #[derive(Parser, Debug)]
 #[command(after_help = SHOW_EXAMPLES)]
@@ -475,11 +478,25 @@ fn validate_tree(hash: &ObjectHash) -> CliResult<()> {
 /// Shows a blob as text when possible.
 async fn show_blob(hash: &ObjectHash) -> CliResult<String> {
     let blob = load_object::<Blob>(hash).map_err(|e| show_object_load_error(hash, e))?;
+    let data = blob.data;
+    let size = data.len();
 
-    // Print text blobs directly and summarize binary blobs.
-    match String::from_utf8(blob.data.clone()) {
+    if size > LARGE_BLOB_THRESHOLD_BYTES {
+        return Ok(format!(
+            "File content too large ({size} bytes). Use 'libra cat-file -p' to output raw content.\n"
+        ));
+    }
+
+    if data.contains(&0) {
+        return Ok(format!("Binary file (size: {size} bytes)\n"));
+    }
+
+    match String::from_utf8(data) {
         Ok(text) => Ok(text),
-        Err(_) => Ok(format!("Binary file (size: {} bytes)\n", blob.data.len())),
+        Err(error) => Ok(format!(
+            "Binary file (size: {} bytes)\n",
+            error.into_bytes().len()
+        )),
     }
 }
 
@@ -779,14 +796,32 @@ async fn collect_tree_output(hash: &ObjectHash) -> CliResult<ShowOutput> {
 
 async fn collect_blob_output(hash: &ObjectHash) -> CliResult<ShowOutput> {
     let blob = load_object::<Blob>(hash).map_err(|e| show_object_load_error(hash, e))?;
-    let content = String::from_utf8(blob.data.clone()).ok();
+    let data = blob.data;
+    let size = data.len();
+
+    let (is_binary, content) = if size > LARGE_BLOB_THRESHOLD_BYTES {
+        (sampled_blob_is_binary(&data), None)
+    } else if data.contains(&0) {
+        (true, None)
+    } else {
+        match String::from_utf8(data) {
+            Ok(content) => (false, Some(content)),
+            Err(_) => (true, None),
+        }
+    };
 
     Ok(ShowOutput::Blob(ShowBlobData {
         hash: hash.to_string(),
-        size: blob.data.len(),
-        is_binary: content.is_none(),
+        size,
+        is_binary,
         content,
     }))
+}
+
+fn sampled_blob_is_binary(data: &[u8]) -> bool {
+    let sample_len = data.len().min(BINARY_DETECTION_SAMPLE_BYTES);
+    let sample = &data[..sample_len];
+    sample.contains(&0) || std::str::from_utf8(sample).is_err()
 }
 
 async fn collect_commit_file_output(rev: &str, file_path: &str) -> CliResult<ShowOutput> {

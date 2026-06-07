@@ -992,10 +992,26 @@ fn copy_template(src: &Path, dst: &Path) -> io::Result<()> {
             fs::create_dir_all(&dest_path)?;
             copy_template(&entry.path(), &dest_path)?;
         } else if !dest_path.exists() {
-            fs::copy(entry.path(), &dest_path)?;
+            let source = entry.path();
+            let contents = fs::read(&source)?;
+            install_missing_file(&dest_path, &contents, template_file_mode(&source)?)?;
         }
     }
     Ok(())
+}
+
+fn template_file_mode(path: &Path) -> io::Result<Option<u32>> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).map(|metadata| Some(metadata.permissions().mode() & 0o777))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = path;
+        Ok(None)
+    }
 }
 
 /// Seeds a default project-local "libra" skill into `.libra/skills/libra.md`

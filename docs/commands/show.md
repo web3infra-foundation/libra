@@ -19,7 +19,7 @@ For commits the output includes the header (author, committer, date, message)
 followed by a unified diff (the "patch"). Flags such as `--no-patch`, `--stat`,
 and `--name-only` control how much diff context is shown. For annotated tags the
 tagger metadata and message are printed, followed by the target object. Trees
-list their entries and blobs print their text content (or a binary summary).
+list their entries and blobs print their text content. Binary blobs and blobs larger than 10 MiB are summarized with metadata instead of raw content.
 
 ## Options
 
@@ -76,6 +76,7 @@ Human mode preserves the existing presentation:
 - Annotated tag: tag metadata followed by the target object
 - Tree: list of tree entries
 - Blob: text content or a binary summary
+- Large blob: metadata summary; use `libra cat-file -p <blob>` when raw content is required
 - `--quiet`: validates the object reference but suppresses human output
 - Human output uses the shared pager policy; pass global `--no-pager` to force direct stdout
 
@@ -167,6 +168,7 @@ Notes:
 - Commit JSON `refs` are best-effort decoration metadata; unrelated branch/tag rows no longer block `show`
 - Human `--quiet` still validates the target object but suppresses stdout and does not initialize the pager
 - Commit patch / stat paths stay strict: corrupt historical blobs fail with `LBR-REPO-002` instead of falling back to working tree contents
+- Blob JSON sets `content: null` for binary blobs and blobs larger than 10 MiB; large text blobs are intentionally summarized to avoid duplicating large object bytes in `show`
 
 ## Design Rationale
 
@@ -214,6 +216,7 @@ but I expected it" bugs in agent tooling.
 | JSON output | `--json` with typed schema | No | No |
 | Pathspec filter | Yes (trailing `<PATHS>...`) | Yes | No (use `jj diff --from/--to`) |
 | Tag-aware display | Auto-detects annotated tags | Auto-detects annotated tags | No tag objects |
+| Large blob display | Metadata summary above 10 MiB | Prints raw blob content | `jj file show` |
 
 ## Error Handling
 

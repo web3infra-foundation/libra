@@ -448,6 +448,23 @@ pub enum Stash {
     Push {
         #[arg(short, long, help = "The message to display for the stash")]
         message: Option<String>,
+        #[arg(
+            short = 'u',
+            long = "include-untracked",
+            help = "Include untracked files in the stash"
+        )]
+        include_untracked: bool,
+        #[arg(
+            short = 'a',
+            long = "all",
+            help = "Include untracked and ignored files in the stash"
+        )]
+        all: bool,
+        #[arg(
+            long = "keep-index",
+            help = "Keep staged changes in the index and working tree"
+        )]
+        keep_index: bool,
     },
     #[command(about = "Remove a single stashed state from the stash list")]
     Pop {
@@ -1158,7 +1175,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     if is_error_codes_help_topic(&argv) {
         return print_error_codes_help();
     }
-    let args = match Cli::try_parse_from(argv.clone()) {
+    let mut args = match Cli::try_parse_from(argv.clone()) {
         Ok(args) => args,
         Err(err) => match err.kind() {
             ErrorKind::DisplayHelp
@@ -1172,6 +1189,11 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             _ => return Err(classify_parse_error(&argv, &err)),
         },
     };
+    if let Commands::Log(log_args) = &mut args.command
+        && let Some((log_index, _)) = find_subcommand_index(&argv)
+    {
+        command::log::apply_pathspec_separator(log_args, &argv[log_index + 1..]);
+    }
     if let Commands::Tag(tag_args) = &args.command {
         command::tag::validate_cli_args(tag_args)?;
     }

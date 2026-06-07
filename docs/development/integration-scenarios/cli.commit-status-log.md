@@ -26,6 +26,7 @@ libra commit -m "test: initial commit"
 libra status --exit-code
 libra log --oneline
 libra log -n 1 --name-status --grep "initial" --author "Libra Test"
+libra log --stat -n 3
 
 printf 'from file\n' > message.txt
 printf 'tracked\n' > tracked.txt
@@ -36,7 +37,6 @@ printf 'tracked update\n' >> tracked.txt
 libra commit -a -m "test: auto stage tracked update"
 libra commit --allow-empty -m "test: empty marker"
 libra commit --amend --no-edit
-libra log --stat -n 3
 ```
 
 负向步骤：
@@ -51,7 +51,7 @@ printf 'dirty\n' > dirty.txt
 rm dirty.txt
 ```
 
-断言：`add --dry-run` 不写入 index；`add` 后 `status --porcelain` 能看到 staged 文件；`commit -m` / `commit -F` / `commit -a` / `commit --allow-empty` / `commit --amend --no-edit` 均按预期创建或更新提交；`status --exit-code` 在干净工作区退出码为 0、在 dirty 工作区非 0；`log --oneline`、`log --name-status`、`log --stat` 能观察到对应提交、作者、消息和文件变化；缺少 staged change 或 conventional 校验失败必须非 0 且不产生新提交。
+断言：`add --dry-run` 不写入 index；`add` 后 `status --porcelain` 能看到 staged 文件；`commit -m` / `commit -F` / `commit -a` / `commit --allow-empty` / `commit --amend --no-edit` 均按预期创建或更新提交；`status --exit-code` 在干净工作区退出码为 0、在 dirty 工作区非 0；`log --oneline`、`log --name-status --grep --author`、`log --stat` 能观察到对应提交、作者、消息和文件变化；缺少 staged change 或 conventional 校验失败必须非 0 且不产生新提交。
 
 补充可执行断言（本场景为基础，推荐所有后续场景复用模式）：
 - 每次 commit 后立即 `libra --json status` + python 断言 `ok:true` 且 data 反映干净或 dirty 状态。
@@ -60,4 +60,3 @@ rm dirty.txt
 - 负向 conventional commit 失败的 stderr 必须包含 "conventional" 或对应 LBR- 错误码（通过 `2>&1 | cat` 捕获验证）。
 - `libra --json commit --allow-empty -m "json empty"` 成功后验证 envelope + 新 commit 在 `libra --json log -n 1` 中出现。
 - 操作全程使用隔离的 `LIBRA_CONFIG_GLOBAL_DB`，结束后用该 DB 执行 `libra config list --global` 不得残留本场景的临时 key。
-

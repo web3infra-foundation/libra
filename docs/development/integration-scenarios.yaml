@@ -167,7 +167,7 @@ scenarios:
   - id: cli.init-bare-and-shared
     wave: 1
     group: init
-    purpose: "Cover --bare (no .libra/ layout) and all --shared MODE values + invalid cases."
+    purpose: "Cover --bare (no .libra/ layout) and all --shared=<MODE> values + invalid cases."
     gh_required: false
     requires_git: false
     key_assertion_categories: [file_exists, negative_exit, fsck]
@@ -221,16 +221,16 @@ scenarios:
   - id: cli.restore-reset-diff
     wave: 1
     group: working_tree
-    purpose: "Cover diff (unstaged/staged/old-new), restore --staged/--worktree, reset --soft/--mixed/--hard, path-level reset."
+    purpose: "Cover diff (unstaged/staged/old-new), restore --staged/--worktree/conflict-stage, reset --soft/--mixed/--hard, path-level reset, pathspec-from-file, and --no-refresh."
     gh_required: false
     requires_git: false
-    key_assertion_categories: [json_envelope, fsck, negative_exit]
+    key_assertion_categories: [json_envelope, fsck, negative_exit, conflict_markers]
     doc_section: "cli.restore-reset-diff"
 
   - id: cli.stash-bisect-worktree
     wave: 1
     group: workflow
-    purpose: "Cover stash (push/list/show/apply/pop/clear/branch), bisect (start/bad/good/skip/log/view/reset), worktree (add/list/lock/unlock/move/remove/prune + --delete-dir). Verifies intentional difference: remove keeps dir by default."
+    purpose: "Cover stash (push/list/show/apply/pop/clear/branch plus push -u/-a/--all/--keep-index), bisect (start/bad/good/skip/log/view/reset), worktree (add/list/lock/unlock/move/remove/prune + --delete-dir). Verifies intentional difference: remove keeps dir by default."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck, intentional_difference, negative_exit]
@@ -248,10 +248,10 @@ scenarios:
   - id: cli.merge-rebase-cherry-revert-smoke
     wave: 1
     group: history_edit
-    purpose: "Smoke for merge (ff + 3-way), rebase, cherry-pick, revert; no-conflict happy paths + --continue/--abort without session must fail."
+    purpose: "Smoke for merge (ff + 3-way + rename threshold), rebase, cherry-pick, revert; no-conflict happy paths + lifecycle misuse/empty-session failures + rebase criss-cross refusal."
     gh_required: false
     requires_git: false
-    key_assertion_categories: [json_envelope, fsck, negative_exit]
+    key_assertion_categories: [json_envelope, fsck, negative_exit, lbr_error]
     doc_section: "cli.merge-rebase-cherry-revert-smoke"
 
   - id: cli.merge-conflict-continue
@@ -284,7 +284,7 @@ scenarios:
   - id: cli.clean-rm-mv-lfs-basic
     wave: 1
     group: working_tree
-    purpose: "Cover clean (-n/-f/-fd/-fX), rm, mv, and local LFS track/untrack/ls-files (writes .libra_attributes). lfs lock is negative (no remote)."
+    purpose: "Cover clean (-n/-f/-fd/-fX), rm, mv (--sparse/-n/-v/--json), and local LFS track/untrack/ls-files (writes .libra_attributes). lfs lock is negative (no remote)."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck, negative_exit]
@@ -293,19 +293,19 @@ scenarios:
   - id: cli.reflog-symbolic-ref
     wave: 1
     group: ref
-    purpose: "Cover reflog show (with --stat/--pretty), reflog exists, symbolic-ref (read + write HEAD target) and negatives. Note: symbolic-ref limited to HEAD by design."
+    purpose: "Cover reflog show (with --stat/--pretty), reflog exists, reflog expire dry-run/no-ref error, symbolic-ref (read + write HEAD target) and negatives. Note: symbolic-ref limited to HEAD by design."
     gh_required: false
     requires_git: false
-    key_assertion_categories: [json_envelope, negative_exit, intentional_difference]
+    key_assertion_categories: [json_envelope, negative_exit, lbr_error, intentional_difference]
     doc_section: "cli.reflog-symbolic-ref"
 
   - id: cli.open-smoke
     wave: 1
     group: misc
-    purpose: "Cover open (and open <remote>) under --json: produces web_url + launched=false, never actually launches. No real browser side-effect in default waves."
+    purpose: "Cover open under --json: repo/default remote, branch deep link, platform override, custom template, launched=false, and JSON error for unsafe direct targets. No real browser side-effect in default waves."
     gh_required: false
     requires_git: false
-    key_assertion_categories: [json_envelope, negative_exit]
+    key_assertion_categories: [json_envelope, negative_exit, fsck]
     doc_section: "cli.open-smoke"
 
   - id: cli.cross-cutting-flags
@@ -330,7 +330,7 @@ scenarios:
   - id: cli.clone-fetch-pull-local
     wave: 2
     group: protocol_local
-    purpose: "Local-path Git remote interop for clone/remote/ls-remote/fetch/pull (no push to file remote by design). Uses gitfix() for fixtures."
+    purpose: "Local-path Git remote interop for clone/remote/ls-remote (sort/get-url/exit-code)/fetch/pull, including pull --ff-only/--squash/--rebase; no push to file remote by design. Uses gitfix() for fixtures."
     gh_required: false
     requires_git: true
     key_assertion_categories: [json_envelope, fsck, gitfix_isolation]
@@ -348,7 +348,7 @@ scenarios:
   - id: cli.push-local-file-remote-rejected
     wave: 2
     group: protocol_local
-    purpose: "Explicit intentional difference: push to local file:// or path remote must be rejected with LBR-CLI-003 (only git@ / https supported)."
+    purpose: "Explicit intentional difference: push to local file:// or path remote must be rejected with LBR-CLI-003 across normal/dry-run/force/atomic/tags/mirror forms (only git@ / https supported)."
     gh_required: false
     requires_git: true
     key_assertion_categories: [negative_exit, intentional_difference, lbr_error]
@@ -357,10 +357,10 @@ scenarios:
   - id: cli.object-readback
     wave: 2
     group: objects
-    purpose: "End-to-end object roundtrip via cat-file / show / rev-list etc. after normal operations; basic sha1 path."
+    purpose: "End-to-end object roundtrip via rev-parse verify/default, show-ref list/exists/verify/dereference/pattern, cat-file, show text/binary blobs, and rev-list range/filter/format options after normal operations; basic sha1 path."
     gh_required: false
     requires_git: false
-    key_assertion_categories: [json_envelope, fsck]
+    key_assertion_categories: [json_envelope, fsck, negative_exit]
     doc_section: "cli.object-readback"
 
   - id: cli.sha256-object-readback

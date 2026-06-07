@@ -246,6 +246,39 @@ async fn test_mv_rebuilds_index_entry_from_destination_file() {
     assert_eq!(dst_entry_hash, expected_hash);
 }
 
+#[test]
+fn test_mv_rehashes_destination_entry_in_sha256_repo() {
+    let temp_path = tempdir().unwrap();
+    let init = run_libra_command(
+        &["init", "--object-format", "sha256", "--vault", "false"],
+        temp_path.path(),
+    );
+    assert_cli_success(&init, "init sha256 repo");
+
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    fs::write("src.txt", "sha256 content\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "src.txt"], temp_path.path()),
+        "add sha256 source",
+    );
+    assert_cli_success(
+        &run_libra_command(&["mv", "src.txt", "dst.txt"], temp_path.path()),
+        "mv sha256 source",
+    );
+
+    let _hash_guard = set_hash_kind_for_test(HashKind::Sha256);
+    let index = Index::load(path::index()).unwrap();
+    let entry = index.get("dst.txt", 0).expect("dst.txt should be tracked");
+    let moved_hash = entry.hash.to_string();
+    let expected = run_libra_command(&["hash-object", "dst.txt"], temp_path.path());
+    assert_cli_success(&expected, "hash-object dst.txt in sha256 repo");
+    let expected_hash = String::from_utf8_lossy(&expected.stdout).trim().to_string();
+
+    assert_eq!(moved_hash.len(), 64, "expected SHA-256 index hash");
+    assert_eq!(moved_hash, expected_hash);
+    assert!(!index.tracked("src.txt", 0));
+}
+
 #[tokio::test]
 #[serial]
 /// Prints a rename message when `-v` is used and move succeeds.
@@ -715,8 +748,7 @@ async fn test_mv_skip_errors_skips_duplicate_target_sources() {
 
 #[tokio::test]
 #[serial]
-/// Moves a directory even when it contains only untracked files.
-async fn test_mv_moves_directory_without_tracked_files() {
+async fn test_mv_rejects_directory_without_tracked_files() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = ChangeDirGuard::new(temp_path.path());
@@ -730,15 +762,16 @@ async fn test_mv_moves_directory_without_tracked_files() {
         .output()
         .expect("failed to execute libra mv untracked-only directory case");
 
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(128));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
     assert!(
-        String::from_utf8_lossy(&output.stderr).is_empty(),
-        "unexpected stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        stderr.contains("fatal: not under version control, source=src_dir, destination=dest"),
+        "unexpected stderr: {stderr}"
     );
 
-    assert!(!temp_path.path().join("src_dir/untracked.txt").exists());
-    assert!(temp_path.path().join("dest/src_dir/untracked.txt").exists());
+    assert!(temp_path.path().join("src_dir/untracked.txt").exists());
+    assert!(!temp_path.path().join("dest/src_dir").exists());
 }
 
 #[tokio::test]
@@ -1128,7 +1161,7 @@ async fn test_mv_escapes_newline_in_printed_paths() {
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = ChangeDirGuard::new(temp_path.path());
 
-    fs::create_dir_all("a\nb").unwrap();
+    stage_file("a\nb/file.txt", "tracked").await;
     fs::create_dir_all("dest").unwrap();
 
     let output = run_libra_command(&["mv", "-n", "a\nb", "dest"], temp_path.path());

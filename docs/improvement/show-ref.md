@@ -22,12 +22,17 @@
 - 命令文档同步
 - JSON 回归测试
 - README 计划状态同步
+- `--exists <ref>` 按原始 reference 行核对，不解析目标对象
+- `--verify` 精确 full-refname 验证，缺失 ref 默认退出 128，`--quiet` 退出 1
+- `-d` / `--dereference` 为 annotated tags 输出 peeled `^{}` 行，lightweight tags 保持单行
+- pattern 过滤已按 Git 风格改为 refname path-segment suffix 匹配，避免 `main` 命中 `main-2`
 
 **后续维护目标：**
 - 新增 ref 类型时继续以向后兼容方式扩展 `entries`
 
 **本批非目标：**
-- 不引入 Git `show-ref --verify` / `--exclude-existing`
+- 不引入 Git `show-ref --exclude-existing`
+- 暂不实现 `--abbrev` / `--hash=<n>` 宽度控制
 
 ## 验证方式
 

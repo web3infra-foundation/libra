@@ -35,6 +35,7 @@ HEAD and is not applied to an explicit range.
 libra log main..feature
 libra log ^main feature
 libra log v1.0...v2.0
+libra log main..feature -- src/
 ```
 
 Human mode preserves the current `--oneline`, `--graph`, `--pretty`, `--stat`, `--patch`, and
@@ -282,6 +283,10 @@ libra --color=always log --graph   # force-colored graph
 Limit diff output to the specified paths. Used with `-p`, `--name-only`, `--name-status`,
 or `--stat`.
 
+Pathspecs must be relative paths inside the working tree. Parent-directory escapes (`../x`),
+Windows-style parent escapes (`..\\x`), and absolute paths fail before history traversal with
+`LBR-CLI-002` (exit 129), leaving stdout empty.
+
 ```bash
 libra log -- src/
 libra log -p -- src/main.rs tests/
@@ -384,14 +389,12 @@ not yet implemented. The current single-HEAD walk covers the most common use cas
 (inspecting the current branch history) and avoids the complexity of multi-root graph
 merging.
 
-### No revision range (`A..B`) syntax yet
+### Limited revision range syntax
 
-Git's revision range syntax (`main..feature`, `main...feature`, `HEAD~3..HEAD`) is a
-powerful but complex feature that requires a full revision parser supporting symbolic refs,
-ancestry operators (`~`, `^`), and set operations (difference, symmetric difference). Libra
-does not yet implement a revision parser. The `-n` flag and `--since`/`--until` date filters
-provide basic history scoping. A full revision range parser is on the roadmap and will
-support both Git-compatible syntax and additional Libra-specific extensions.
+Libra supports the high-value range forms `A..B`, `A...B`, and `^A B`. Ranges can be
+combined with pathspecs by using Git's `--` separator (`A..B -- path`). Libra does not yet
+support the full Git revision language, such as ancestry suffixes (`HEAD~3`, `topic^2`) or
+multi-positive-ref union walks like `git log main dev`.
 
 ### `--graph` with text rendering
 
@@ -455,6 +458,7 @@ flag only affects the human rendering layer.
 | Empty branch or empty HEAD | `LBR-REPO-003` | 128 | "create a commit first before running 'libra log'" |
 | Invalid date argument | `LBR-CLI-002` | 129 | -- |
 | Invalid `--decorate` option | `LBR-CLI-002` | 129 | -- |
+| Pathspec escapes working tree or is absolute | `LBR-CLI-002` | 129 | Use a relative path inside the repository; use `--` to separate paths from revisions. |
 | Invalid object name | `LBR-CLI-003` | 129 | "check the revision name and try again" |
 | Corrupted commit/tree/blob | `LBR-REPO-002` | 128 | -- |
 | Failed to read historical objects | `LBR-REPO-002` | 128 | -- |
@@ -462,7 +466,7 @@ flag only affects the human rendering layer.
 ## Compatibility Notes
 
 - `--all`, `--branches`, and `--remotes` are not yet implemented; without a revision range, log walks from HEAD only
-- Revision range syntax (`A..B`, `A...B`, `^A B`) is supported; mixing a range with a pathspec in the same invocation (e.g. `A..B -- path`) is not yet supported
+- Revision range syntax (`A..B`, `A...B`, `^A B`) is supported; use `A..B -- path` to combine a range with pathspec filtering, and escaping/absolute pathspecs fail with `LBR-CLI-002`
 - jj's log uses a template language (`-T`) for formatting; Libra uses Git-compatible `--pretty` format strings
 - `--grep` uses regular-expression matching (a semantic change from the earlier substring match); `^`/`$` are line anchors and `-i` enables case-insensitive matching
 - `--reverse` for chronological order is not yet implemented

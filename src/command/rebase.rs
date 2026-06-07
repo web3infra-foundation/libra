@@ -590,6 +590,8 @@ pub(crate) enum RebaseError {
     UpstreamResolve { upstream: String, detail: String },
     #[error("no common ancestor found")]
     NoCommonAncestor,
+    #[error("multiple best merge bases found ({bases}); criss-cross merge bases are unsupported")]
+    AmbiguousMergeBase { bases: String },
     #[error("failed to determine working tree status: {0}")]
     WorktreeStatus(String),
     #[error("{detail}, can't {action}")]
@@ -656,6 +658,9 @@ impl From<RebaseError> for CliError {
                 CliError::fatal(error.to_string())
                     .with_stable_code(StableErrorCode::CliInvalidTarget)
             }
+            RebaseError::AmbiguousMergeBase { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                .with_hint("choose a history with a single best merge base before rebasing"),
             RebaseError::WorktreeStatus(..) => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
             }
@@ -1008,11 +1013,7 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
     })?;
 
     let base_id = find_merge_base(&head_to_rebase_id, &upstream_id)
-        .await
-        .map_err(|detail| RebaseError::CommitLoad {
-            commit: head_to_rebase_id.to_string(),
-            detail,
-        })?
+        .await?
         .ok_or(RebaseError::NoCommonAncestor)?;
 
     if base_id == head_to_rebase_id {
@@ -1909,7 +1910,11 @@ mod tests {
 
     use git_internal::{
         hash::ObjectHash,
-        internal::object::tree::{Tree, TreeItem, TreeItemMode},
+        internal::object::{
+            blob::Blob,
+            commit::Commit,
+            tree::{Tree, TreeItem, TreeItemMode},
+        },
     };
     use tempfile::tempdir;
 
@@ -1921,7 +1926,7 @@ mod tests {
         resolve_three_way, tree_item_mode_to_index_mode, tree_item_name, write_workdir_blob,
     };
     use crate::{
-        command::load_object,
+        command::{load_object, save_object},
         utils::{
             error::{CliError, StableErrorCode},
             test::{ChangeDirGuard, setup_with_new_libra_in},
@@ -2028,6 +2033,13 @@ mod tests {
             "no common ancestor found",
         );
         assert_eq!(
+            RebaseError::AmbiguousMergeBase {
+                bases: "aaa, bbb".to_string(),
+            }
+            .to_string(),
+            "multiple best merge bases found (aaa, bbb); criss-cross merge bases are unsupported",
+        );
+        assert_eq!(
             RebaseError::UnresolvedConflicts.to_string(),
             "you must resolve all conflicts before continuing",
         );
@@ -2128,6 +2140,12 @@ mod tests {
         assert_eq!(
             code_of(RebaseError::NoCommonAncestor),
             StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            code_of(RebaseError::AmbiguousMergeBase {
+                bases: "aaa, bbb".to_string(),
+            }),
+            StableErrorCode::ConflictOperationBlocked,
         );
         assert_eq!(
             code_of(RebaseError::WorktreeStatus("ignored".to_string())),
@@ -2235,6 +2253,44 @@ mod tests {
             code_of(RebaseError::Finalize("ignored".to_string())),
             StableErrorCode::IoWriteFailed,
         );
+    }
+
+    #[tokio::test]
+    async fn find_merge_base_maps_criss_cross_to_typed_rebase_error() {
+        let repo = tempdir().expect("repo tempdir");
+        setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let blob = Blob::from_content("fixture\n");
+        save_object(&blob, &blob.id).expect("save fixture blob");
+        let tree = Tree::from_tree_items(vec![TreeItem::new(
+            TreeItemMode::Blob,
+            blob.id,
+            "fixture.txt".to_string(),
+        )])
+        .expect("fixture tree should be valid");
+        save_object(&tree, &tree.id).expect("save tree");
+
+        let base_a = Commit::from_tree_id(tree.id, Vec::new(), "base a");
+        save_object(&base_a, &base_a.id).expect("save base a");
+        let base_b = Commit::from_tree_id(tree.id, Vec::new(), "base b");
+        save_object(&base_b, &base_b.id).expect("save base b");
+        let left = Commit::from_tree_id(tree.id, vec![base_a.id, base_b.id], "left");
+        save_object(&left, &left.id).expect("save left");
+        let right = Commit::from_tree_id(tree.id, vec![base_b.id, base_a.id], "right");
+        save_object(&right, &right.id).expect("save right");
+
+        let err = super::find_merge_base(&left.id, &right.id)
+            .await
+            .expect_err("criss-cross graph should be ambiguous");
+
+        match err {
+            RebaseError::AmbiguousMergeBase { bases } => {
+                assert!(bases.contains(&base_a.id.to_string()));
+                assert!(bases.contains(&base_b.id.to_string()));
+            }
+            other => panic!("expected AmbiguousMergeBase, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3028,8 +3084,16 @@ async fn replay_commit_with_conflict_detection(
 async fn find_merge_base(
     commit1_id: &ObjectHash,
     commit2_id: &ObjectHash,
-) -> Result<Option<ObjectHash>, String> {
-    merge_base::find_best_merge_base(*commit1_id, *commit2_id).map_err(|error| error.to_string())
+) -> Result<Option<ObjectHash>, RebaseError> {
+    merge_base::find_best_merge_base(*commit1_id, *commit2_id).map_err(|error| match error {
+        merge_base::MergeBaseError::Load { commit_id, detail } => RebaseError::CommitLoad {
+            commit: commit_id,
+            detail,
+        },
+        merge_base::MergeBaseError::Ambiguous { bases } => {
+            RebaseError::AmbiguousMergeBase { bases }
+        }
+    })
 }
 
 /// Collect all commits from base (exclusive) to head (inclusive) that need to be replayed

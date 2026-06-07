@@ -82,7 +82,11 @@
 | `restore --staged <path>` | `cli.restore-reset-diff` | index 恢复到 HEAD，工作区保持修改 |
 | `restore --worktree <path>` | `cli.restore-reset-diff` | 工作区文件恢复到 index 或 source 内容 |
 | `restore --source <rev>` | `cli.restore-reset-diff` | source revision 不存在时失败且不改写文件 |
+| `restore --ours` / `--theirs` | `cli.restore-reset-diff` | 冲突阶段 stage 2/3 写入工作区，index 保持 unmerged |
+| `restore --ignore-unmerged` | `cli.restore-reset-diff` | unmerged path 被跳过，plain restore over unmerged path 退出 128 |
 | `reset HEAD -- <path>` | `cli.restore-reset-diff` | 路径级 reset 只取消暂存 |
+| `reset --pathspec-from-file=<file>` / `--pathspec-file-nul` | `cli.restore-reset-diff` | file/NUL pathspec 输入只取消暂存指定路径 |
+| `reset --no-refresh` | `cli.restore-reset-diff` | 兼容 no-op flag 可传入且保持 mixed reset 语义 |
 | `reset --soft` | `cli.restore-reset-diff` | 只移动 HEAD，保留 index/工作区 |
 | `reset --mixed` | `cli.restore-reset-diff` | 移动 HEAD 并重置 index |
 | `reset --hard` | `cli.restore-reset-diff` | HEAD、index、工作区全部回到目标 revision |
@@ -94,6 +98,9 @@
 | 参数或子命令 | 场景 ID | 关键断言 |
 |---|---|---|
 | `stash push -m` | `cli.stash-bisect-worktree` | tracked 修改被保存，消息可在列表中观察 |
+| `stash push -u` / `--include-untracked` | `cli.stash-bisect-worktree` | 可见 untracked 文件被保存、移除，并可由 `pop` 恢复 |
+| `stash push -a` / `--all` | `cli.stash-bisect-worktree` | ignored 文件与可见 untracked 文件一起被保存、移除，并可恢复 |
+| `stash push --keep-index` | `cli.stash-bisect-worktree` | 已暂存内容保持在 index/worktree，未暂存 delta 被 stash |
 | `stash list` / `stash show` | `cli.stash-bisect-worktree` | stash 条目和文件级摘要可观察 |
 | `stash apply` | `cli.stash-bisect-worktree` | 修改恢复但 stash 条目保留 |
 | `stash pop` | `cli.stash-bisect-worktree` | 修改恢复且 stash 条目删除 |
@@ -118,6 +125,8 @@
 | `tag <name>` / `tag -m <msg>` | `cli.tag-basic` | 轻量和 annotated tag 均可创建、列出、解析 |
 | `tag -l` / `tag -l -n` / `tag -f` / `tag -d` | `cli.tag-basic` | 列表、注释摘要、强制更新和删除路径覆盖 |
 | `merge <branch>` | `cli.merge-rebase-cherry-revert-smoke` | fast-forward 与三方无冲突 merge 均可观察 |
+| `merge --find-renames[=<n>]` | `cli.merge-rebase-cherry-revert-smoke` | 相似度阈值控制 rename+edit 是否自动合并 |
+| `merge --squash --continue` | `cli.merge-rebase-cherry-revert-smoke` | 与 lifecycle action 组合必须被拒绝 |
 | `merge --continue` / `--abort` | `cli.merge-rebase-cherry-revert-smoke` | 无会话时明确失败；冲突续跑场景另行补充 |
 | `rebase <upstream>` | `cli.merge-rebase-cherry-revert-smoke` | topic 提交重放到新 base |
 | `rebase --continue` | `cli.merge-rebase-cherry-revert-smoke` | 无会话时明确失败；冲突续跑场景另行补充 |
@@ -127,10 +136,16 @@
 | `blame` / `blame -L` | `cli.grep-blame-describe-shortlog` | 行级作者、提交和范围限制可观察 |
 | `describe --tags/--always/--abbrev` | `cli.grep-blame-describe-shortlog` | tag 描述和 hash fallback 可观察 |
 | `shortlog` / `shortlog -s` / `shortlog -n` | `cli.grep-blame-describe-shortlog` | 作者汇总和排序可观察 |
+| `rev-parse HEAD` / `--short` / `--show-toplevel` | `cli.object-readback` | 完整哈希、短哈希和工作树根路径可传递给后续 plumbing 命令 |
+| `rev-parse --verify` / `--verify --short` / `--default` | `cli.object-readback` | 单对象断言、短哈希断言、默认 revision 回退和 quiet 失败退出 1 可观察 |
+| `show --no-patch` / `--stat` / `<rev>:<path>` / `<blob>` | `cli.object-readback` | commit 元数据、统计、历史文件内容、文本 blob 与 binary blob 元数据可观察 |
+| `show-ref --head` / `--heads` / `--exists` / `--verify` / `--dereference` / pattern | `cli.object-readback` | HEAD/分支引用可列出，完整 refname 存在性、精确验证、annotated tag peeled 行、path-segment suffix 过滤和缺失 ref 退出码可观察 |
+| `rev-list HEAD` / `A..B` / `^A` | `cli.object-readback` | 可达提交、two-dot range 和排除引用输出符合 fixture |
+| `rev-list -n` / `--skip` / `--count` / `--parents` / `--timestamp` | `cli.object-readback` | 限制、跳过、计数、父提交和时间戳格式可观察 |
 | `clean -n/-f/-fd/-fX` | `cli.clean-rm-mv-lfs-basic` | dry-run、文件删除、目录删除、ignored-only 删除覆盖 |
 | `rm <path>` | `cli.clean-rm-mv-lfs-basic` | tracked 文件从工作区和 index 移除 |
 | `mv <src> <dst>` | `cli.clean-rm-mv-lfs-basic` | tracked 文件移动并更新 index |
 | `lfs track/untrack/ls-files` | `cli.clean-rm-mv-lfs-basic` | `.libra_attributes` pattern 和 LFS tracked 文件列表可观察 |
-| `reflog show` / `reflog show --stat` / `reflog exists` | `cli.reflog-symbolic-ref` | HEAD/ref 更新记录可读，exists 可脚本探测 |
+| `reflog show` / `reflog show --stat` / `reflog exists` / `reflog expire --dry-run` | `cli.reflog-symbolic-ref` | HEAD/ref 更新记录可读，exists 可脚本探测，expire 可预览清理并对无 ref 入参返回稳定错误 |
 | `symbolic-ref` / `symbolic-ref --short` / `symbolic-ref HEAD <target>` | `cli.reflog-symbolic-ref` | HEAD 符号引用读写可观察 |
 | `--json open` | `cli.open-smoke` | 只输出 URL 和 `launched=false`，不启动外部程序 |

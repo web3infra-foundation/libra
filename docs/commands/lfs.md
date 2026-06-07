@@ -232,7 +232,7 @@ libra lfs prune --dry-run    # report what would be deleted, delete nothing
 |------|-------|------|-------------|
 | Dry run | `-n` | `--dry-run` | List the objects that would be pruned without deleting anything. |
 
-The keep set is every OID referenced by a reachable commit (branches, tags, `HEAD`, and reflog OIDs — ancestry is followed) **plus** the OIDs staged in the current index, so objects you have `add`ed but not yet committed are never deleted. Malformed cache entries (non-64-hex filenames) are skipped, individual removal failures degrade to a warning, and emptied sharding directories are cleaned up. Reports `Pruned <n> files (<size>)`.
+The keep set is every OID referenced by a reachable commit (branches, tags, `HEAD`, and reflog OIDs — ancestry is followed) **plus** the OIDs staged in the current index and the OIDs referenced by current working-tree LFS pointer files, so objects you have created but not yet committed are never deleted. Malformed cache entries (non-64-hex filenames) are skipped, individual removal failures degrade to a warning, and emptied sharding directories are cleaned up. Reports `Pruned <n> files (<size>)`.
 
 > Reachability boundary: the keep set does **not** include remote-tracking branches or git-lfs's `--recent` time window. Make sure unpushed objects are pushed before pruning.
 
@@ -367,7 +367,7 @@ Unlocking a file while the working tree is dirty could indicate that the develop
 | Install / uninstall | `libra lfs install` / `uninstall` (no-op shims) | `git lfs install` / `uninstall` (registers filters/hooks) | Not available |
 | Push objects | `libra lfs push [<remote>]` (current branch) | `git lfs push <remote> <ref>` | Not available |
 | Fetch objects | `libra lfs fetch [<remote>] [<ref>...]` | `git lfs fetch <remote> <ref>` | Not available |
-| Prune cache | `libra lfs prune [--dry-run]` (refs+tags+HEAD+reflog+index) | `git lfs prune` (+`--recent` window) | Not available |
+| Prune cache | `libra lfs prune [--dry-run]` (refs+tags+HEAD+reflog+index+worktree pointers) | `git lfs prune` (+`--recent` window) | Not available |
 | Checkout pointers | `libra lfs checkout [<path>...]` | `git lfs checkout` | Not available |
 | Installation required | Built-in | Separate `git-lfs` install + `git lfs install` | Not available |
 | Attributes file | `.libra_attributes` | `.gitattributes` | Not available |

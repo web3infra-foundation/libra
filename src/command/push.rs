@@ -83,6 +83,7 @@ EXAMPLES:
     libra push --force origin main      Force push (overwrites remote history)
     libra push --force-with-lease origin main
                                         Force push only if the remote still matches your tracking ref
+    libra push --atomic origin main     Request all remote ref updates to succeed or fail together
     libra push --porcelain origin main  Machine-readable per-ref status lines
     libra push --dry-run                Preview what would be pushed without sending
     libra push --json                   Structured JSON output for agents";
@@ -122,6 +123,10 @@ pub struct PushArgs {
     #[clap(long = "no-thin", conflicts_with = "thin")]
     pub no_thin: bool,
 
+    /// Request atomic remote ref updates; the remote must advertise `atomic`
+    #[clap(long)]
+    pub atomic: bool,
+
     /// Machine-readable single-line-per-ref output; conflicts with `--json`/`--machine`
     #[clap(long)]
     pub porcelain: bool,
@@ -152,6 +157,7 @@ impl PushArgs {
             force_if_includes: false,
             thin: false,
             no_thin: false,
+            atomic: false,
             porcelain: false,
             dry_run: false,
             tags: false,
@@ -222,6 +228,9 @@ pub enum PushError {
 
     #[error("remote rejected ref update for '{refname}': {reason}")]
     RemoteRefUpdateFailed { refname: String, reason: String },
+
+    #[error("remote does not support required capability '{capability}'")]
+    UnsupportedRemoteCapability { capability: String },
 
     #[error("network error: {0}")]
     Network(String),
@@ -304,6 +313,9 @@ impl From<PushError> for CliError {
             PushError::RemoteRefUpdateFailed { .. } => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::NetworkProtocol)
                 .with_hint("the remote rejected the update; check branch protection rules"),
+            PushError::UnsupportedRemoteCapability { capability } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_hint(format!("retry without --{capability}, or use a remote that advertises the {capability} capability")),
             PushError::Network(..) => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::NetworkUnavailable)
                 .with_hint("check network connectivity and retry"),
@@ -367,6 +379,10 @@ pub struct PushOutput {
     pub lfs_upload: LfsUploadSummary,
     /// Whether this was a dry-run
     pub dry_run: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub atomic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_with_lease: Option<String>,
     /// Whether everything was already up-to-date
     pub up_to_date: bool,
     /// Upstream tracking branch set (if --set-upstream)
@@ -635,6 +651,8 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     }
     set_wire_hash_kind(discovery.hash_kind);
     let remote_refs = remote_ref_map(&discovery.refs);
+    let atomic_output = args.atomic.then_some(true);
+    let force_with_lease_output = force_with_lease_output_value(&args.force_with_lease);
 
     let mut warnings = Vec::new();
     // `--force-with-lease` permits a non-fast-forward update into the plan; the
@@ -729,9 +747,17 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             lfs_files_uploaded: 0,
             lfs_upload: LfsUploadSummary { files_uploaded: 0 },
             dry_run: args.dry_run,
+            atomic: atomic_output,
+            force_with_lease: force_with_lease_output,
             up_to_date: true,
             upstream_set,
             warnings,
+        });
+    }
+
+    if args.atomic && !remote_supports_capability(&discovery.capabilities, "atomic") {
+        return Err(PushError::UnsupportedRemoteCapability {
+            capability: "atomic".to_string(),
         });
     }
 
@@ -762,6 +788,8 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             lfs_files_uploaded: 0,
             lfs_upload: LfsUploadSummary { files_uploaded: 0 },
             dry_run: true,
+            atomic: atomic_output,
+            force_with_lease: force_with_lease_output,
             up_to_date: false,
             upstream_set: None,
             warnings,
@@ -769,11 +797,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     }
 
     let mut data = BytesMut::new();
-    let mut capabilities = vec!["report-status"];
-    if get_wire_hash_kind() == HashKind::Sha256 {
-        capabilities.push("object-format=sha256");
-    }
-    let capability = capabilities.join(" ");
+    let capability = send_pack_capability_string(args.atomic);
     let zero_oid = ObjectHash::zero_str(get_hash_kind());
     for (index, plan) in plans.iter().enumerate() {
         let old_oid = plan
@@ -891,7 +915,11 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         }
     }
 
-    update_remote_tracking_refs(&repository, &plans).await?;
+    if args.atomic {
+        update_remote_tracking_refs_atomic(&repository, &plans).await?;
+    } else {
+        update_remote_tracking_refs(&repository, &plans).await?;
+    }
 
     let upstream_set = if let Some(plan) = upstream_plan.as_ref() {
         Some(set_upstream_from_push_plan(&repository, plan, output).await?)
@@ -910,6 +938,8 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             files_uploaded: lfs_files_uploaded,
         },
         dry_run: false,
+        atomic: atomic_output,
+        force_with_lease: force_with_lease_output,
         up_to_date: false,
         upstream_set,
         warnings,
@@ -1149,6 +1179,26 @@ fn parse_force_with_lease(raw: &Option<Option<String>>) -> Option<ForceWithLease
             None => Some(ForceWithLease::Ref(spec.clone())),
         },
     }
+}
+
+fn force_with_lease_output_value(raw: &Option<Option<String>>) -> Option<String> {
+    raw.as_ref()
+        .map(|value| value.clone().unwrap_or_else(|| "all".to_string()))
+}
+
+fn remote_supports_capability(capabilities: &[String], capability: &str) -> bool {
+    capabilities.iter().any(|item| item == capability)
+}
+
+fn send_pack_capability_string(atomic: bool) -> String {
+    let mut capabilities = vec!["report-status"];
+    if atomic {
+        capabilities.push("atomic");
+    }
+    if get_wire_hash_kind() == HashKind::Sha256 {
+        capabilities.push("object-format=sha256");
+    }
+    capabilities.join(" ")
 }
 
 /// Whether a full remote ref (`refs/heads/main`) is named by a lease `<refname>`
@@ -1611,6 +1661,117 @@ async fn update_remote_tracking_refs(
     Ok(())
 }
 
+async fn update_remote_tracking_refs_atomic(
+    repository: &str,
+    plans: &[RefUpdatePlan],
+) -> Result<(), PushError> {
+    let db = get_db_conn_instance().await;
+    let repository = repository.to_string();
+    let plans = plans.to_vec();
+    let transaction_result = db
+        .transaction(|txn| {
+            Box::pin(async move {
+                for plan in &plans {
+                    let Some(remote_branch) = plan.update.remote_ref.strip_prefix("refs/heads/")
+                    else {
+                        continue;
+                    };
+                    let remote_tracking_branch =
+                        format!("refs/remotes/{repository}/{remote_branch}");
+                    let old_oid = Branch::find_branch_result_with_conn(
+                        txn,
+                        &remote_tracking_branch,
+                        Some(&repository),
+                    )
+                    .await
+                    .map_err(|error| {
+                        map_update_remote_tracking_branch_error(&remote_tracking_branch, error)
+                    })?
+                    .map(|branch| branch.commit.to_string());
+
+                    match plan.update.kind {
+                        PushRefUpdateKind::Update => {
+                            Branch::update_branch_with_conn(
+                                txn,
+                                &remote_tracking_branch,
+                                &plan.update.new_oid,
+                                Some(&repository),
+                            )
+                            .await
+                            .map_err(|source| {
+                                map_write_remote_tracking_branch_error(
+                                    &remote_tracking_branch,
+                                    source,
+                                )
+                            })?;
+
+                            let context = ReflogContext {
+                                old_oid: old_oid.unwrap_or_else(|| {
+                                    ObjectHash::zero_str(get_hash_kind()).to_string()
+                                }),
+                                new_oid: plan.update.new_oid.clone(),
+                                action: ReflogAction::Push,
+                            };
+                            Reflog::insert_single_entry(txn, &context, &remote_tracking_branch)
+                                .await
+                                .map_err(|source| {
+                                    map_write_remote_tracking_branch_error(
+                                        &remote_tracking_branch,
+                                        source,
+                                    )
+                                })?;
+                        }
+                        PushRefUpdateKind::Delete => {
+                            let Some(old_oid) = old_oid else {
+                                continue;
+                            };
+                            match Branch::delete_branch_result_with_conn(
+                                txn,
+                                &remote_tracking_branch,
+                                Some(&repository),
+                            )
+                            .await
+                            {
+                                Ok(()) | Err(BranchStoreError::NotFound(_)) => {}
+                                Err(error) => {
+                                    return Err(map_delete_remote_tracking_branch_error(
+                                        &remote_tracking_branch,
+                                        error,
+                                    ));
+                                }
+                            }
+                            let context = ReflogContext {
+                                old_oid,
+                                new_oid: ObjectHash::zero_str(get_hash_kind()).to_string(),
+                                action: ReflogAction::Push,
+                            };
+                            Reflog::insert_single_entry(txn, &context, &remote_tracking_branch)
+                                .await
+                                .map_err(|source| {
+                                    map_write_remote_tracking_branch_error(
+                                        &remote_tracking_branch,
+                                        source,
+                                    )
+                                })?;
+                        }
+                    }
+                }
+                Ok::<_, CliError>(())
+            })
+        })
+        .await;
+
+    match transaction_result {
+        Ok(()) => Ok(()),
+        Err(TransactionError::Connection(source)) => Err(PushError::TrackingRefUpdate(format!(
+            "failed to update remote tracking refs atomically: {source}"
+        ))),
+        Err(TransactionError::Transaction(error)) => {
+            Err(PushError::TrackingRefUpdate(error.message().to_string()))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -2004,6 +2165,26 @@ fn map_update_remote_tracking_branch_error(
     }
 }
 
+fn map_write_remote_tracking_branch_error(
+    remote_tracking_branch: &str,
+    source: impl std::fmt::Display,
+) -> CliError {
+    CliError::fatal(format!(
+        "failed to update remote tracking branch '{remote_tracking_branch}': {source}"
+    ))
+    .with_stable_code(StableErrorCode::IoWriteFailed)
+}
+
+fn map_delete_remote_tracking_branch_error(
+    remote_tracking_branch: &str,
+    source: BranchStoreError,
+) -> CliError {
+    CliError::fatal(format!(
+        "failed to delete remote tracking branch '{remote_tracking_branch}': {source}"
+    ))
+    .with_stable_code(StableErrorCode::IoWriteFailed)
+}
+
 fn is_local_file_remote(spec: &str) -> bool {
     if let Ok(url) = Url::parse(spec) {
         if url.scheme() == "file" || url.scheme().len() == 1 {
@@ -2389,6 +2570,54 @@ mod test {
     }
 
     #[test]
+    fn atomic_flag_parses_and_advertises_capability() {
+        use clap::Parser as _;
+        let args = PushArgs::try_parse_from(["push", "--atomic", "origin", "main"])
+            .expect("--atomic origin main should parse");
+        assert!(args.atomic);
+        assert_eq!(args.repository.as_deref(), Some("origin"));
+        assert_eq!(args.refspecs, vec!["main".to_string()]);
+
+        let capability = send_pack_capability_string(true);
+        assert!(capability.split(' ').any(|item| item == "atomic"));
+        let capability = send_pack_capability_string(false);
+        assert!(!capability.split(' ').any(|item| item == "atomic"));
+    }
+
+    #[test]
+    fn remote_capability_detection_requires_exact_token() {
+        let capabilities = vec![
+            "report-status".to_string(),
+            "atomic".to_string(),
+            "agent=git/github".to_string(),
+        ];
+        assert!(remote_supports_capability(&capabilities, "atomic"));
+        assert!(!remote_supports_capability(&capabilities, "atom"));
+    }
+
+    #[test]
+    fn push_output_serializes_atomic_and_lease_fields_when_present() {
+        let output = PushOutput {
+            remote: "origin".to_string(),
+            url: "https://example.invalid/repo.git".to_string(),
+            updates: vec![],
+            objects_pushed: 0,
+            bytes_pushed: 0,
+            lfs_files_uploaded: 0,
+            lfs_upload: LfsUploadSummary { files_uploaded: 0 },
+            dry_run: true,
+            atomic: Some(true),
+            force_with_lease: Some("all".to_string()),
+            up_to_date: true,
+            upstream_set: None,
+            warnings: vec![],
+        };
+        let value = serde_json::to_value(&output).expect("push output should serialize");
+        assert_eq!(value["atomic"], true);
+        assert_eq!(value["force_with_lease"], "all");
+    }
+
+    #[test]
     fn force_with_lease_all_matches_and_rejects() {
         let mut tracking = HashMap::new();
         tracking.insert("refs/heads/main".to_string(), Some("aaaa".to_string()));
@@ -2687,6 +2916,13 @@ mod test {
             "remote rejected ref update for 'refs/heads/main': non-fast-forward",
         );
         assert_eq!(
+            PushError::UnsupportedRemoteCapability {
+                capability: "atomic".to_string(),
+            }
+            .to_string(),
+            "remote does not support required capability 'atomic'",
+        );
+        assert_eq!(
             PushError::LfsUploadFailed {
                 path: "src/big.bin".to_string(),
                 oid: "abc123".to_string(),
@@ -2897,6 +3133,7 @@ mod test {
             force_if_includes: false,
             thin: false,
             no_thin: false,
+            atomic: false,
             porcelain: false,
             dry_run: false,
             tags: false,

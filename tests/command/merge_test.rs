@@ -924,6 +924,22 @@ fn test_merge_squash_no_ff_is_invalid() {
     );
 }
 
+#[test]
+fn test_merge_squash_conflicts_with_lifecycle_actions() {
+    let repo = create_committed_repo_via_cli();
+    for action in ["--continue", "--abort", "--quit"] {
+        let output = run_libra_command(&["merge", "--squash", action], repo.path());
+        let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+        assert_eq!(output.status.code(), Some(129), "{action}");
+        assert_eq!(report.error_code, "LBR-CLI-002", "{action}");
+        assert!(
+            report.message.contains("--squash") && report.message.contains(action),
+            "{action}: {}",
+            report.message
+        );
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn test_merge_criss_cross_synthesizes_virtual_merge_base() {
@@ -2152,6 +2168,135 @@ fn test_merge_no_renames_falls_back_to_conflict() {
         Some(128),
         "--no-renames should surface the delete/modify conflict: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn setup_merge_similarity_rename_repo() -> tempfile::TempDir {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    commit_file(
+        temp_path,
+        "old.txt",
+        "line1\nline2\nline3\nline4\n",
+        "base file",
+    );
+    commit_file(temp_path, "stable.txt", "stable\n", "stable file");
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(
+        temp_path,
+        "old.txt",
+        "line1\nline2-feature\nline3\nline4\n",
+        "edit on feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    std::fs::write(
+        temp_path.join("new.txt"),
+        "line1\nline2\nline3\nline4-main\n",
+    )
+    .expect("write new.txt");
+    assert_cli_success(
+        &run_libra_command(&["add", "new.txt"], temp_path),
+        "add new",
+    );
+    assert_cli_success(&run_libra_command(&["rm", "old.txt"], temp_path), "rm old");
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "rename on main", "--no-verify"],
+            temp_path,
+        ),
+        "commit rename",
+    );
+
+    temp_repo
+}
+
+#[test]
+fn test_merge_find_renames_similarity_threshold_controls_detection() {
+    let strict_repo = setup_merge_similarity_rename_repo();
+    let strict = run_libra_command(
+        &["merge", "--find-renames=90", "feature"],
+        strict_repo.path(),
+    );
+    assert_eq!(
+        strict.status.code(),
+        Some(128),
+        "strict threshold should leave delete/modify conflict: {}",
+        String::from_utf8_lossy(&strict.stderr)
+    );
+
+    let loose_repo = setup_merge_similarity_rename_repo();
+    let loose = run_libra_command(
+        &["merge", "--find-renames=70", "feature"],
+        loose_repo.path(),
+    );
+    assert_cli_success(&loose, "merge --find-renames=70");
+    let merged = std::fs::read_to_string(loose_repo.path().join("new.txt")).expect("read new.txt");
+    assert!(merged.contains("line2-feature"), "{merged}");
+    assert!(merged.contains("line4-main"), "{merged}");
+}
+
+#[test]
+fn test_merge_find_renames_invalid_similarity_is_usage_error() {
+    let temp_repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["merge", "--find-renames=bogus", "main"], temp_repo.path());
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report.message.contains("invalid --find-renames similarity"),
+        "{}",
+        report.message
+    );
+}
+
+#[test]
+fn test_merge_rename_limit_config_can_disable_inexact_detection() {
+    let temp_repo = setup_merge_similarity_rename_repo();
+    let temp_path = temp_repo.path();
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "merge.renameLimit", "1"], temp_path),
+        "set merge.renameLimit=1",
+    );
+
+    let output = run_libra_command(&["merge", "feature"], temp_path);
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "low merge.renameLimit should skip rename detection: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_merge_invalid_rename_limit_config_is_usage_error() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "merge.renameLimit", "bogus"], temp_path),
+        "set invalid merge.renameLimit",
+    );
+
+    let output = run_libra_command(&["merge", "main"], temp_path);
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report.message.contains("invalid merge.renameLimit value"),
+        "{}",
+        report.message
     );
 }
 

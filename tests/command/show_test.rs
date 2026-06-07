@@ -105,6 +105,17 @@ fn create_commit(temp_path: &std::path::Path, filename: &str, content: &str, mes
     }
 }
 
+fn write_loose_blob(temp_path: &std::path::Path, filename: &str, content: &[u8]) -> String {
+    std::fs::write(temp_path.join(filename), content).expect("failed to write blob fixture");
+    let output = run_libra_command(&["hash-object", "-w", filename], temp_path);
+    assert!(
+        output.status.success(),
+        "hash-object failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 /// Create a lightweight tag using CLI.
 fn create_lightweight_tag(temp_path: &std::path::Path, tag_name: &str) {
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
@@ -886,6 +897,82 @@ async fn test_show_json_blob_output_includes_content() {
         "text blob should have content"
     );
     assert!(json["data"]["size"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn test_show_large_blob_outputs_metadata_not_content() {
+    let repo = create_committed_repo_via_cli();
+    let sentinel = b"large-sentinel";
+    let mut content = vec![b'x'; 10 * 1024 * 1024 + 1];
+    content[..sentinel.len()].copy_from_slice(sentinel);
+    let blob_hash = write_loose_blob(repo.path(), "large.txt", &content);
+
+    let output = run_libra_command(&["show", &blob_hash], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("File content too large"),
+        "expected large blob metadata, got: {stdout}"
+    );
+    assert!(
+        stdout.contains(&content.len().to_string()),
+        "expected size in metadata, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("large-sentinel"),
+        "large blob content must not be printed"
+    );
+
+    let json_output = run_libra_command(&["--json", "show", &blob_hash], repo.path());
+    assert!(
+        json_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&json_output.stderr)
+    );
+    let json = parse_json_stdout(&json_output);
+    assert_eq!(json["data"]["type"], "blob");
+    assert_eq!(json["data"]["size"].as_u64(), Some(content.len() as u64));
+    assert_eq!(json["data"]["is_binary"], false);
+    assert!(json["data"]["content"].is_null());
+}
+
+#[test]
+fn test_show_binary_blob_outputs_metadata() {
+    let repo = create_committed_repo_via_cli();
+    let content = b"text-prefix\0binary-suffix";
+    let blob_hash = write_loose_blob(repo.path(), "binary.bin", content);
+
+    let output = run_libra_command(&["show", &blob_hash], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Binary file"),
+        "expected binary metadata, got: {stdout}"
+    );
+    assert!(
+        stdout.contains(&content.len().to_string()),
+        "expected binary size in metadata, got: {stdout}"
+    );
+
+    let json_output = run_libra_command(&["--json", "show", &blob_hash], repo.path());
+    assert!(
+        json_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&json_output.stderr)
+    );
+    let json = parse_json_stdout(&json_output);
+    assert_eq!(json["data"]["type"], "blob");
+    assert_eq!(json["data"]["size"].as_u64(), Some(content.len() as u64));
+    assert_eq!(json["data"]["is_binary"], true);
+    assert!(json["data"]["content"].is_null());
 }
 
 #[test]

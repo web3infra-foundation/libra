@@ -234,6 +234,7 @@ fn test_push_help_lists_new_flags() {
         "--force-if-includes",
         "--thin",
         "--no-thin",
+        "--atomic",
         "--porcelain",
     ] {
         assert!(
