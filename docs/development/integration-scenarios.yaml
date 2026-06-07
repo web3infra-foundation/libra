@@ -167,7 +167,7 @@ scenarios:
   - id: cli.init-bare-and-shared
     wave: 1
     group: init
-    purpose: "Cover --bare (no .libra/ layout) and all --shared MODE values + invalid cases."
+    purpose: "Cover --bare (no .libra/ layout) and all --shared=<MODE> values + invalid cases."
     gh_required: false
     requires_git: false
     key_assertion_categories: [file_exists, negative_exit, fsck]
@@ -248,7 +248,7 @@ scenarios:
   - id: cli.merge-rebase-cherry-revert-smoke
     wave: 1
     group: history_edit
-    purpose: "Smoke for merge (ff + 3-way), rebase, cherry-pick, revert; no-conflict happy paths + --continue/--abort without session must fail."
+    purpose: "Smoke for merge (ff + 3-way + rename threshold), rebase, cherry-pick, revert; no-conflict happy paths + lifecycle misuse/empty-session failures."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck, negative_exit]
@@ -284,7 +284,7 @@ scenarios:
   - id: cli.clean-rm-mv-lfs-basic
     wave: 1
     group: working_tree
-    purpose: "Cover clean (-n/-f/-fd/-fX), rm, mv, and local LFS track/untrack/ls-files (writes .libra_attributes). lfs lock is negative (no remote)."
+    purpose: "Cover clean (-n/-f/-fd/-fX), rm, mv (--sparse/-n/-v/--json), and local LFS track/untrack/ls-files (writes .libra_attributes). lfs lock is negative (no remote)."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck, negative_exit]
@@ -330,7 +330,7 @@ scenarios:
   - id: cli.clone-fetch-pull-local
     wave: 2
     group: protocol_local
-    purpose: "Local-path Git remote interop for clone/remote/ls-remote/fetch/pull (no push to file remote by design). Uses gitfix() for fixtures."
+    purpose: "Local-path Git remote interop for clone/remote/ls-remote (sort/get-url/exit-code)/fetch/pull; no push to file remote by design. Uses gitfix() for fixtures."
     gh_required: false
     requires_git: true
     key_assertion_categories: [json_envelope, fsck, gitfix_isolation]

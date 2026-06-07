@@ -318,6 +318,56 @@ async fn hash_object_write_commit_persists_for_cat_file() {
     assert_eq!(String::from_utf8_lossy(&cat.stdout).trim(), "commit");
 }
 
+#[tokio::test]
+async fn hash_object_write_tree_persists_for_cat_file() {
+    let repo = tempfile::tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+    fs::write(repo.path().join("empty-tree.bin"), b"").expect("write tree body");
+
+    let output = run_libra_command(
+        &["hash-object", "-t", "tree", "-w", "empty-tree.bin"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "hash-object -t tree -w should succeed");
+    let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    let cat = run_libra_command(&["cat-file", "-t", &oid], repo.path());
+    assert_cli_success(&cat, "cat-file -t should read the written tree");
+    assert_eq!(String::from_utf8_lossy(&cat.stdout).trim(), "tree");
+}
+
+#[tokio::test]
+async fn hash_object_stdin_paths_write_multiple() {
+    let repo = tempfile::tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+    fs::write(repo.path().join("a.txt"), b"hello").expect("write first fixture");
+    fs::write(repo.path().join("b.txt"), b"world").expect("write second fixture");
+
+    let output = run_libra_command_with_stdin(
+        &["hash-object", "--stdin-paths", "-w"],
+        repo.path(),
+        "a.txt\nb.txt\n",
+    );
+    assert_cli_success(&output, "hash-object --stdin-paths -w should succeed");
+    let hashes = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        hashes,
+        vec![
+            "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0",
+            "04fea06420ca60892f73becee3614f6d023a4b7f",
+        ]
+    );
+
+    for oid in hashes {
+        let cat = run_libra_command(&["cat-file", "-t", &oid], repo.path());
+        assert_cli_success(&cat, "cat-file -t should find written blob");
+        assert_eq!(String::from_utf8_lossy(&cat.stdout).trim(), "blob");
+    }
+}
+
 /// The `--json` output reports the resolved object type.
 #[tokio::test]
 async fn hash_object_json_object_type_reflects_resolved_type() {
@@ -384,6 +434,25 @@ async fn hash_object_no_filters_is_noop() {
     );
 }
 
+#[tokio::test]
+async fn hash_object_no_filters_allowed_with_stdin_paths() {
+    let repo = tempfile::tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+    fs::write(repo.path().join("a.txt"), b"a\r\n").expect("write first fixture");
+    fs::write(repo.path().join("b.txt"), b"b\r\n").expect("write second fixture");
+
+    let output = run_libra_command_with_stdin(
+        &["hash-object", "--stdin-paths", "--no-filters"],
+        repo.path(),
+        "a.txt\nb.txt\n",
+    );
+    assert_cli_success(
+        &output,
+        "hash-object --stdin-paths --no-filters should succeed",
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).lines().count(), 2);
+}
+
 /// `--path` conflicts with `--no-filters` and `--stdin-paths` at parse time.
 #[tokio::test]
 async fn hash_object_path_conflicts_are_rejected() {
@@ -401,4 +470,30 @@ async fn hash_object_path_conflicts_are_rejected() {
             "conflicting --path usage {argv:?} should be rejected"
         );
     }
+}
+
+#[tokio::test]
+async fn hash_object_invalid_type_checked_before_io() {
+    let repo = tempfile::tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(
+        &["hash-object", "-t", "badtype", "missing.txt"],
+        repo.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "invalid type should be reported before missing input"
+    );
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        human.contains("unsupported object type 'badtype'"),
+        "human stderr should explain unsupported type: {human}"
+    );
+    assert!(
+        !human.contains("missing.txt"),
+        "input path should not be read before type validation: {human}"
+    );
+    assert_eq!(report.error_code, "LBR-CLI-002");
 }

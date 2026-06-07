@@ -12,7 +12,7 @@ libra mv [<options>] <source>... <destination>
 
 `libra mv` moves or renames files and directories in the working tree and updates the index accordingly. The last argument is always the destination; all preceding arguments are sources. When there are multiple sources, the destination must be an existing directory.
 
-The command validates that all source paths exist, are tracked in the index, are not in a conflicted state, and reside within the repository working directory. Directory moves are performed as a single filesystem rename, with individual index entries updated for each tracked file within the directory. Untracked files inside a moved directory are carried along by the filesystem rename but are not added to the index.
+The command validates that all source paths exist, are tracked in the index, are not in a conflicted state, and reside within the repository working directory. Directory moves are performed as a single filesystem rename, with individual index entries updated for each tracked file within the directory. A directory source must contain at least one tracked entry; untracked files inside an otherwise tracked directory are carried along by the filesystem rename but are not added to the index.
 
 After all filesystem moves succeed, the index is updated atomically: old entries are removed and new entries (with recalculated blob hashes) are inserted. The index is saved only after all operations complete successfully.
 
@@ -126,6 +126,9 @@ Checking rename of 'old.rs' to 'new.rs'
 Renaming old.rs to new.rs
 ```
 
+Control characters inside printed path fields are escaped (for example a newline
+inside a filename is rendered as `\n`) so the human output remains line-oriented.
+
 Global `--quiet` suppresses dry-run and verbose human output while keeping
 warnings and errors on stderr.
 
@@ -218,7 +221,7 @@ Moving a file that is in a conflicted state (stages 1-3 in the index) would lose
 
 ### How does this compare to Git and jj?
 
-Git's `mv` command is similar in design: it moves files in the working tree and updates the index. It supports `-k` to skip move errors and also supports `--sparse`, which Libra does not yet expose.
+Git's `mv` command is similar in design: it moves files in the working tree and updates the index. It supports `-k` to skip move errors and also supports `--sparse`; Libra accepts `--sparse` as a no-op because sparse checkout is not implemented.
 
 jj does not have a `mv` command. Because jj uses automatic snapshotting of the working tree, file moves are detected automatically by the working-copy scanner. Users simply move files with the system `mv` command and jj records the change on the next snapshot. This works well for simple renames but cannot reliably detect moves (as opposed to delete-then-create) for large refactors.
 

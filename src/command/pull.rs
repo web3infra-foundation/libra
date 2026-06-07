@@ -986,6 +986,8 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
         | merge::PullMergeError::SquashCommit
         | merge::PullMergeError::InvalidMergeFfConfig { .. }
         | merge::PullMergeError::InvalidMergeCommitConfig { .. }
+        | merge::PullMergeError::InvalidRenameSimilarity { .. }
+        | merge::PullMergeError::InvalidRenameLimitConfig { .. }
         | merge::PullMergeError::InvalidDiffAlgorithm { .. }
         | merge::PullMergeError::InvalidCleanupMode { .. } => {
             CliError::command_usage(error.to_string())

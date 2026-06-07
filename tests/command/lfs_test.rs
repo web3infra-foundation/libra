@@ -1583,6 +1583,33 @@ fn test_lfs_prune_keeps_staged_uncommitted_objects() {
 }
 
 #[test]
+fn test_lfs_prune_keeps_unstaged_worktree_pointer_objects() {
+    let repo = init_temp_repo();
+    run_libra_ok(repo.path(), &["lfs", "track", "*.bin"]);
+    let oid = "f".repeat(64);
+    create_fake_lfs_object(repo.path(), &oid, b"UNSTAGED-worktree-cache");
+    fs::write(
+        repo.path().join("unstaged.bin"),
+        lfs_pointer_text(&oid, b"UNSTAGED-worktree-cache".len()),
+    )
+    .unwrap();
+
+    let output = libra_command(repo.path())
+        .args(["lfs", "prune"])
+        .output()
+        .expect("failed to run lfs prune");
+    assert!(
+        output.status.success(),
+        "prune should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        lfs_entity_path(repo.path(), &oid).exists(),
+        "unstaged worktree pointer object must be kept (worktree reachability)"
+    );
+}
+
+#[test]
 fn test_lfs_prune_dry_run_no_delete() {
     let repo = init_temp_repo();
     let oid = "b".repeat(64);

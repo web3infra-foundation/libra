@@ -402,6 +402,14 @@ fn resolve_move_directory(src: &Path, dst: &Path, index: &Index) -> Result<MoveP
         })
         .collect();
 
+    if tracked_updates.is_empty() {
+        return Err(format!(
+            "fatal: not under version control, source={}, destination={}",
+            util::to_workdir_path(src).display(),
+            util::to_workdir_path(dst).display()
+        ));
+    }
+
     Ok(MovePlan {
         fs_moves: vec![(src.to_path_buf(), target_dir)],
         index_updates: tracked_updates,
