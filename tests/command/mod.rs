@@ -335,6 +335,7 @@ mod schema_upgrade_test;
 mod shortlog_test;
 mod show_ref_exists_test;
 mod show_ref_test;
+mod show_ref_verify_test;
 mod show_test;
 mod stash_test;
 mod status_error_test;

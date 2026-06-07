@@ -136,7 +136,7 @@
 | `rev-parse HEAD` / `--short` / `--show-toplevel` | `cli.object-readback` | 完整哈希、短哈希和工作树根路径可传递给后续 plumbing 命令 |
 | `rev-parse --verify` / `--verify --short` / `--default` | `cli.object-readback` | 单对象断言、短哈希断言、默认 revision 回退和 quiet 失败退出 1 可观察 |
 | `show --no-patch` / `--stat` / `<rev>:<path>` / `<blob>` | `cli.object-readback` | commit 元数据、统计、历史文件内容、文本 blob 与 binary blob 元数据可观察 |
-| `show-ref --head` / `--heads` / `--exists` | `cli.object-readback` | HEAD/分支引用可列出，完整 refname 存在性和缺失 ref exit 2 可观察 |
+| `show-ref --head` / `--heads` / `--exists` / `--verify` | `cli.object-readback` | HEAD/分支引用可列出，完整 refname 存在性、精确验证和缺失 ref 退出码可观察 |
 | `rev-list HEAD` / `A..B` / `^A` | `cli.object-readback` | 可达提交、two-dot range 和排除引用输出符合 fixture |
 | `rev-list -n` / `--skip` / `--count` / `--parents` / `--timestamp` | `cli.object-readback` | 限制、跳过、计数、父提交和时间戳格式可观察 |
 | `clean -n/-f/-fd/-fX` | `cli.clean-rm-mv-lfs-basic` | dry-run、文件删除、目录删除、ignored-only 删除覆盖 |

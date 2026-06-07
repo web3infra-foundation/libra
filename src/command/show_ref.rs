@@ -19,6 +19,7 @@ use crate::{
 };
 
 mod exists;
+mod verify;
 
 /// `--help` examples shown in `libra show-ref --help` output.
 ///
@@ -38,6 +39,7 @@ EXAMPLES:
     libra show-ref -s --heads        Print branch hashes only (one per line, scripting-friendly)
     libra show-ref main              Filter refs by substring match (e.g. only entries containing 'main')
     libra show-ref --exists refs/heads/main   Exit 0 if the ref exists, 2 if not (no output)
+    libra show-ref --verify refs/heads/main   Require an exact full refname match
     libra show-ref --json --heads    Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -58,6 +60,10 @@ pub struct ShowRefArgs {
     /// Only show the object hash, not the reference name
     #[clap(short = 's', long = "hash")]
     pub hash: bool,
+
+    /// Verify that each argument is an exact full ref name
+    #[clap(long)]
+    pub verify: bool,
 
     /// Check whether the given full ref name exists. Prints nothing; exits 0
     /// when it exists and 2 when it does not.
@@ -83,10 +89,21 @@ pub async fn execute(args: ShowRefArgs) -> Result<(), String> {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Lists all refs (branches, tags) with their object IDs.
 pub async fn execute_safe(args: ShowRefArgs, output: &OutputConfig) -> CliResult<()> {
+    if args.verify && args.exists.is_some() {
+        return Err(
+            CliError::fatal("options '--verify' and '--exists' cannot be used together")
+                .with_exit_code(128),
+        );
+    }
+
     // `--exists <ref>` is a pure existence probe: no stdout, exit 0 if the
     // exact full ref name exists, exit 2 if it does not (Git 2.43+ semantics).
     if let Some(target) = args.exists.as_deref() {
         return exists::show_ref_exists(target).await;
+    }
+
+    if args.verify {
+        return verify::show_ref_verify(&args, output).await;
     }
 
     let hash_only = args.hash;

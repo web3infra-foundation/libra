@@ -69,7 +69,7 @@ async fn local_ref_row_exists(refname: &str, kind: reference::ConfigKind) -> Cli
         .map_err(|error| raw_query_error(refname, error))
 }
 
-fn remote_tracking_parts(refname: &str) -> Option<(&str, &str)> {
+pub(super) fn remote_tracking_parts(refname: &str) -> Option<(&str, &str)> {
     let rest = refname.strip_prefix("refs/remotes/")?;
     let (remote, branch_name) = rest.split_once('/')?;
     if remote.is_empty() || branch_name.is_empty() {

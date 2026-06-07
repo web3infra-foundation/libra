@@ -89,6 +89,21 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     ctx.command(&["show-ref", "--head"], repo.clone(), true)?;
     ctx.command(&["show-ref", "--heads"], repo.clone(), true)?;
     ctx.command(&["show-ref", "--exists", "refs/heads/main"], repo.clone(), true)?;
+    let verified_show_ref = ctx.command(
+        &["show-ref", "--verify", "refs/heads/main"],
+        repo.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&verified_show_ref, "refs/heads/main")?;
+    let verified_hash = ctx.command(
+        &["show-ref", "--hash", "--verify", "refs/heads/main"],
+        repo.clone(),
+        true,
+    )?;
+    let verified_hash_stdout = stdout_trim(&verified_hash);
+    if verified_hash_stdout != head_id {
+        bail!("show-ref --hash --verify returned {verified_hash_stdout:?}, expected {head_id}");
+    }
     let missing_show_ref = ctx.command(
         &["show-ref", "--exists", "refs/heads/nope"],
         repo.clone(),
@@ -101,6 +116,34 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
         );
     }
     assert_lbr_or_text(&missing_show_ref, "reference does not exist")?;
+    let missing_verified_show_ref = ctx.command(
+        &["show-ref", "--verify", "refs/heads/nope"],
+        repo.clone(),
+        false,
+    )?;
+    if missing_verified_show_ref.status.code() != Some(128) {
+        bail!(
+            "show-ref --verify missing ref exited {:?}, expected 128",
+            missing_verified_show_ref.status.code()
+        );
+    }
+    assert_lbr_or_text(&missing_verified_show_ref, "not a valid ref")?;
+    let quiet_missing_verified_show_ref = ctx.command(
+        &["--quiet", "show-ref", "--verify", "refs/heads/nope"],
+        repo.clone(),
+        false,
+    )?;
+    if quiet_missing_verified_show_ref.status.code() != Some(1) {
+        bail!(
+            "quiet show-ref --verify missing ref exited {:?}, expected 1",
+            quiet_missing_verified_show_ref.status.code()
+        );
+    }
+    if !quiet_missing_verified_show_ref.stdout.is_empty()
+        || !quiet_missing_verified_show_ref.stderr.is_empty()
+    {
+        bail!("quiet show-ref --verify missing ref must be silent");
+    }
     let object_type = ctx.command(&["cat-file", "-t", &head_id], repo.clone(), true)?;
     assert_stdout_contains(&object_type, "commit")?;
     ctx.command(&["cat-file", "-s", &head_id], repo.clone(), true)?;

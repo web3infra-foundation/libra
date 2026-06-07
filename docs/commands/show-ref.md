@@ -33,6 +33,7 @@ no filesystem scanning.
 | `--head` | | Include `HEAD` in the output. |
 | `--hash` | `-s` | Only show the object hash, not the reference name. |
 | `--exists <REF>` | | Check whether the exact full ref name exists. Prints nothing; exits `0` if it exists, `2` if not. Only checks the reference record and does not verify that the target object resolves. Listing/output flags are ignored in this mode. |
+| `--verify` | | Treat each pattern as an exact full ref name. Missing refs exit `128`, or `1` with `--quiet`. |
 | `<PATTERN>...` | | Filter refs by substring match on the ref name. Multiple patterns are OR-ed. |
 
 ### Examples
@@ -56,6 +57,9 @@ libra show-ref release
 # Check whether a full refname exists
 libra show-ref --exists refs/heads/main
 
+# Verify an exact full refname and print it
+libra show-ref --verify refs/heads/main
+
 # Combine filters: only branches matching "feat"
 libra show-ref --heads feat
 ```
@@ -68,6 +72,7 @@ libra show-ref --heads
 libra show-ref --tags
 libra show-ref --head --hash
 libra show-ref --exists refs/heads/main
+libra show-ref --verify refs/heads/main
 libra show-ref --json --head --heads
 libra show-ref main
 ```
@@ -159,7 +164,7 @@ and which commit it resolves to.
 | Hash-only output | `-s` / `--hash` | `-s` / `--hash` | N/A |
 | Pattern matching | Substring match | Prefix/glob match | Regex via revset |
 | `--exists <ref>` | Yes | Yes | N/A |
-| `--verify` (check single ref) | Not yet implemented | Yes | N/A |
+| `--verify` (check exact ref) | Yes | Yes | N/A |
 | `-d` / `--dereference` | Not yet implemented | Yes | N/A |
 | JSON output | `--json` | No | No |
 | Ref storage | SQLite `reference` table | Loose files + packed-refs | Operation log |
@@ -171,5 +176,7 @@ and which commit it resolves to.
 |----------|-----------------|------|
 | No matching refs | `LBR-CLI-003` | 129 |
 | `--exists` missing ref | `LBR-CLI-003` | 2 |
+| `--verify` missing ref | `LBR-INTERNAL-001` | 128 |
+| `--quiet --verify` missing ref | silent | 1 |
 | Failed to read refs | `LBR-IO-001` | 128 |
 | Corrupt stored branch/tag data | `LBR-REPO-002` | 128 |
