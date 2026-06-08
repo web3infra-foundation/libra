@@ -895,6 +895,7 @@ async fn cherry_pick_single_commit(
         && !args.append_source
         && !args.signoff
         && !args.edit
+        && !args.gpg_sign
         && args.mainline.is_none()
         && parent_count == 1
         && let Some(head) = Head::current_commit().await
