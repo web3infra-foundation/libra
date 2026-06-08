@@ -1288,6 +1288,7 @@ async fn collect_roots_from_database() -> CliResult<(HashSet<ObjectHash>, HashSe
     roots.extend(stash_roots()?);
     roots.extend(index_roots()?);
     roots.extend(rebase_state_roots(&db).await?);
+    roots.extend(cherry_pick_state_roots(&db).await?);
     roots.extend(bisect_state_roots(&db).await?);
     roots.extend(merge_state_roots()?);
     protected.extend(object_index_prune_protections(&db).await?);
@@ -1411,6 +1412,39 @@ async fn rebase_state_roots<C: ConnectionTrait>(db: &C) -> CliResult<HashSet<Obj
         )?;
     }
     roots.extend(legacy_rebase_state_roots()?);
+    Ok(roots)
+}
+
+/// Load object IDs held by an in-progress cherry-pick sequencer state row.
+async fn cherry_pick_state_roots<C: ConnectionTrait>(db: &C) -> CliResult<HashSet<ObjectHash>> {
+    let mut roots = HashSet::new();
+    if !table_exists(db, "cherry_pick_state").await? {
+        return Ok(roots);
+    }
+    let rows = db
+        .query_all(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT head_orig, current_oid, todo FROM cherry_pick_state".to_string(),
+        ))
+        .await
+        .map_err(|error| {
+            CliError::fatal(format!("failed to load cherry_pick_state roots: {error}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+    for row in rows {
+        insert_required_root(
+            &mut roots,
+            required_root_text(&row, 0, "cherry_pick_state.head_orig")?,
+            "cherry_pick_state.head_orig",
+        )?;
+        insert_required_root(
+            &mut roots,
+            required_root_text(&row, 1, "cherry_pick_state.current_oid")?,
+            "cherry_pick_state.current_oid",
+        )?;
+        let todo = required_root_text(&row, 2, "cherry_pick_state.todo")?;
+        insert_line_roots(&mut roots, &todo, "cherry_pick_state.todo")?;
+    }
     Ok(roots)
 }
 
@@ -4383,6 +4417,101 @@ mod tests {
 
         assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
         assert!(error.render().contains("rebase_state.current_head"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers cherry-pick sequencer commits being protected as roots.
+    async fn collect_roots_includes_cherry_pick_state() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let db = get_db_conn_instance().await;
+        let head_orig = test_hash(50);
+        let current_oid = test_hash(51);
+        let todo_one = test_hash(52);
+        let todo_two = test_hash(53);
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "CREATE TABLE IF NOT EXISTS cherry_pick_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                head_name TEXT NOT NULL,
+                head_orig TEXT NOT NULL,
+                current_oid TEXT NOT NULL,
+                todo TEXT NOT NULL,
+                opts_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "DELETE FROM cherry_pick_state".to_string(),
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO cherry_pick_state
+                (head_name, head_orig, current_oid, todo, opts_json)
+             VALUES ('main', ?, ?, ?, '{}')",
+            [
+                head_orig.to_string().into(),
+                current_oid.to_string().into(),
+                format!("{todo_one}\n{todo_two}\n").into(),
+            ],
+        ))
+        .await
+        .unwrap();
+
+        let (roots, _protected) = collect_roots_from_database().await.unwrap();
+
+        for hash in [head_orig, current_oid, todo_one, todo_two] {
+            assert!(roots.contains(&hash));
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers fail-closed decoding for malformed cherry-pick sequencer roots.
+    async fn cherry_pick_state_roots_rejects_malformed_columns() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let db = get_db_conn_instance().await;
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "DROP TABLE IF EXISTS cherry_pick_state".to_string(),
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "CREATE TABLE cherry_pick_state (
+                head_orig TEXT,
+                current_oid TEXT,
+                todo TEXT
+            )",
+            [],
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO cherry_pick_state
+                (head_orig, current_oid, todo)
+             VALUES (?, NULL, '')",
+            [test_hash(54).to_string().into()],
+        ))
+        .await
+        .unwrap();
+
+        let error = cherry_pick_state_roots(&db).await.unwrap_err();
+
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(error.render().contains("cherry_pick_state.current_oid"));
     }
 
     #[tokio::test]
