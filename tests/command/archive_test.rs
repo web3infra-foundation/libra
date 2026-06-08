@@ -377,6 +377,25 @@ fn archive_short_format_flag_writes_zip() {
 }
 
 #[test]
+fn archive_zip_writes_output_file() {
+    let repo = create_archive_test_repo();
+    let out = repo.path().join("out.zip");
+    let out_str = out.to_str().expect("archive output path should be UTF-8");
+
+    let output = run_libra_command(&["archive", "--format=zip", "-o", out_str], repo.path());
+
+    assert_cli_success(&output, "archive zip -o");
+    assert!(
+        output.stdout.is_empty(),
+        "zip file output should not write archive bytes to stdout"
+    );
+    assert!(
+        is_zip(&read_bytes(&out)),
+        "output file should contain zip data"
+    );
+}
+
+#[test]
 fn archive_help_mentions_archive_options() {
     let repo = create_archive_test_repo();
 

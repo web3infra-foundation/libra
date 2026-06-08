@@ -96,6 +96,23 @@ struct ArchiveEntry {
     mode: TreeItemMode,
 }
 
+/// Validate one raw tree item name before joining it into an archive path.
+fn validate_tree_entry_name(name: &str) -> Result<&Path, CliError> {
+    let path = Path::new(name);
+    let mut components = path.components();
+    let is_safe_single_component =
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
+
+    if !is_safe_single_component {
+        return Err(CliError::fatal(format!(
+            "unsafe archive tree entry name '{name}': expected one relative path component"
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt));
+    }
+
+    Ok(path)
+}
+
 /// Recursively collect archiveable file entries from a tree.
 fn collect_tree_entries(
     tree: &Tree,
@@ -103,7 +120,7 @@ fn collect_tree_entries(
     entries: &mut Vec<ArchiveEntry>,
 ) -> Result<(), CliError> {
     for item in &tree.tree_items {
-        let path = base.join(&item.name);
+        let path = base.join(validate_tree_entry_name(&item.name)?);
         match item.mode {
             TreeItemMode::Tree => {
                 let sub_tree: Tree = load_object(&item.id).map_err(|error| {
@@ -396,18 +413,45 @@ fn write_zip_archive<W: Write + Seek>(
     Ok(())
 }
 
+/// Create a buffered output file.
+fn create_output_file(path: &str) -> Result<BufWriter<File>, CliError> {
+    let file = File::create(path).map_err(|error| {
+        CliError::fatal(format!("failed to create output file '{path}': {error}"))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+    })?;
+    Ok(BufWriter::new(file))
+}
+
 /// Open the output destination: either a file path or stdout.
 fn open_output(path: Option<&str>) -> Result<Box<dyn Write>, CliError> {
     match path {
-        Some(path) => {
-            let file = File::create(path).map_err(|error| {
-                CliError::fatal(format!("failed to create output file '{path}': {error}"))
-                    .with_stable_code(StableErrorCode::IoWriteFailed)
-            })?;
-            Ok(Box::new(BufWriter::new(file)))
-        }
+        Some(path) => Ok(Box::new(create_output_file(path)?)),
         None => Ok(Box::new(std::io::stdout())),
     }
+}
+
+/// Write zip output to a seekable file when available, buffering only for stdout.
+fn write_zip_output(
+    entries: &[ArchiveEntry],
+    prefix: Option<&Path>,
+    output: Option<&str>,
+) -> Result<(), CliError> {
+    if let Some(path) = output {
+        return write_zip_archive(entries, prefix, create_output_file(path)?);
+    }
+
+    let mut buffer = Cursor::new(Vec::new());
+    write_zip_archive(entries, prefix, &mut buffer)?;
+
+    let mut stdout = std::io::stdout();
+    stdout.write_all(&buffer.into_inner()).map_err(|error| {
+        CliError::fatal(format!("failed to write zip output: {error}"))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+    })?;
+    stdout.flush().map_err(|error| {
+        CliError::fatal(format!("failed to flush zip output: {error}"))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+    })
 }
 
 /// Create an archive from tree entries, dispatching to the correct writer.
@@ -430,20 +474,7 @@ fn create_archive(
             let writer = open_output(output)?;
             write_tar_bz2_archive(entries, prefix, writer)
         }
-        ArchiveFormat::Zip => {
-            let mut buffer = Cursor::new(Vec::new());
-            write_zip_archive(entries, prefix, &mut buffer)?;
-
-            let mut writer = open_output(output)?;
-            writer.write_all(&buffer.into_inner()).map_err(|error| {
-                CliError::fatal(format!("failed to write zip output: {error}"))
-                    .with_stable_code(StableErrorCode::IoWriteFailed)
-            })?;
-            writer.flush().map_err(|error| {
-                CliError::fatal(format!("failed to flush zip output: {error}"))
-                    .with_stable_code(StableErrorCode::IoWriteFailed)
-            })
-        }
+        ArchiveFormat::Zip => write_zip_output(entries, prefix, output),
     }
 }
 
@@ -556,6 +587,24 @@ mod tests {
             apply_prefix(None, Path::new("src/lib.rs")),
             PathBuf::from("src/lib.rs")
         );
+    }
+
+    #[test]
+    fn validate_tree_entry_name_rejects_unsafe_names() {
+        assert!(validate_tree_entry_name("README.md").is_ok());
+        assert!(validate_tree_entry_name("你好.txt").is_ok());
+
+        for name in [
+            "",
+            ".",
+            "..",
+            "../payload",
+            "/tmp/payload",
+            "nested/file.txt",
+        ] {
+            let err = validate_tree_entry_name(name).expect_err("unsafe tree entry should fail");
+            assert_eq!(err.stable_code(), StableErrorCode::RepoCorrupt);
+        }
     }
 
     #[test]
