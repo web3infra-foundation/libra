@@ -34,7 +34,10 @@ use crate::{
         config::ConfigKv,
         db::get_db_conn_instance,
         model::{object_index, reference, reflog},
-        reflog::{ExpireOptions, ReflogError, expire_defaults_with_conn, expire_reflog},
+        reflog::{
+            ExpireOptions, Reflog as ReflogStore, ReflogError, expire_defaults_with_conn,
+            expire_reflog,
+        },
     },
     utils::{
         client_storage::ClientStorage,
@@ -342,8 +345,9 @@ async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
     let objects_dir = path::objects();
     ensure_real_object_directory(&objects_dir)?;
     let storage = ClientStorage::local(objects_dir);
-    let reflogs = expire_reflogs_for_gc(args.dry_run).await?;
+    let (reflogs, reflog_warnings) = expire_reflogs_for_gc(&storage, args.dry_run).await?;
     let mut reachability = collect_reachability(&storage).await?;
+    reachability.warnings.extend(reflog_warnings);
     trace_reachable(&storage, &mut reachability);
     let skip_loose_prune = !args.dry_run && !reachability.warnings.is_empty();
     let loose_policy = if skip_loose_prune {
@@ -416,17 +420,30 @@ async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
 }
 
 /// Expire all reflogs using Git-style default `gc.reflog*` policy before pruning.
-async fn expire_reflogs_for_gc(dry_run: bool) -> CliResult<ReflogExpireStats> {
+async fn expire_reflogs_for_gc(
+    storage: &ClientStorage,
+    dry_run: bool,
+) -> CliResult<(ReflogExpireStats, Vec<String>)> {
     ensure_regular_repository_database()?;
     let db = get_db_conn_instance().await;
     let refs = reflog_ref_names(&db).await?;
     if refs.is_empty() {
-        return Ok(ReflogExpireStats::default());
+        return Ok((ReflogExpireStats::default(), Vec::new()));
     }
 
     let (expire, expire_unreachable) = expire_defaults_with_conn(&db)
         .await
         .map_err(map_gc_reflog_error)?;
+    let (tips, entries_scanned) = reflog_tips_for_refs(&db, &refs).await?;
+    let mut stats = ReflogExpireStats {
+        refs_scanned: refs.len(),
+        entries_scanned,
+        ..Default::default()
+    };
+    if let Some(warning) = reflog_parent_traversal_warning(storage, &tips) {
+        return Ok((stats, vec![warning]));
+    }
+
     let options = ExpireOptions {
         expire,
         expire_unreachable,
@@ -436,10 +453,6 @@ async fn expire_reflogs_for_gc(dry_run: bool) -> CliResult<ReflogExpireStats> {
         dry_run,
     };
 
-    let mut stats = ReflogExpireStats {
-        refs_scanned: refs.len(),
-        ..Default::default()
-    };
     for ref_name in refs {
         let result = expire_reflog(
             &db,
@@ -450,11 +463,10 @@ async fn expire_reflogs_for_gc(dry_run: bool) -> CliResult<ReflogExpireStats> {
         )
         .await
         .map_err(map_gc_reflog_error)?;
-        stats.entries_scanned += result.scanned;
         stats.pruned += result.pruned;
         stats.rewritten += result.rewritten;
     }
-    Ok(stats)
+    Ok((stats, Vec::new()))
 }
 
 /// Enumerate reflog refs for the GC pre-prune expiration pass.
@@ -476,6 +488,53 @@ async fn reflog_ref_names<C: ConnectionTrait>(db: &C) -> CliResult<Vec<String>> 
     refs.sort();
     refs.dedup();
     Ok(refs)
+}
+
+/// Load each reflog ref's current tip and count entries before expiration.
+async fn reflog_tips_for_refs<C: ConnectionTrait>(
+    db: &C,
+    refs: &[String],
+) -> CliResult<(Vec<ObjectHash>, usize)> {
+    let mut tips = Vec::new();
+    let mut entries_scanned = 0;
+    for ref_name in refs {
+        let entries = ReflogStore::find_all(db, ref_name)
+            .await
+            .map_err(map_gc_reflog_error)?;
+        entries_scanned += entries.len();
+        let Some(entry) = entries.first() else {
+            continue;
+        };
+        if !is_null_oid(&entry.new_oid) {
+            tips.push(parse_stored_hash(&entry.new_oid, "reflog tip")?);
+        }
+    }
+    Ok((tips, entries_scanned))
+}
+
+/// Return a warning when reflog commit-parent traversal cannot be trusted.
+fn reflog_parent_traversal_warning(storage: &ClientStorage, tips: &[ObjectHash]) -> Option<String> {
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::from_iter(tips.iter().copied());
+    while let Some(hash) = queue.pop_front() {
+        if !seen.insert(hash) {
+            continue;
+        }
+        let commit: Commit = match load_object_from_storage(storage, &hash) {
+            Ok(commit) => commit,
+            Err(error) => {
+                return Some(format!(
+                    "reflog expiration skipped because commit parent traversal is incomplete at {hash}: {error}"
+                ));
+            }
+        };
+        for parent in commit.parent_commit_ids {
+            if !seen.contains(&parent) {
+                queue.push_back(parent);
+            }
+        }
+    }
+    None
 }
 
 /// Load commit parents for reflog reachability expiration.
@@ -2301,7 +2360,7 @@ fn display_path(path: &Path) -> String {
 mod tests {
     use std::{
         fs,
-        time::{Duration, SystemTime},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use git_internal::{
@@ -3224,8 +3283,10 @@ mod tests {
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
         let db = get_db_conn_instance().await;
+        let commit = commit_with_tree(test_hash(8), Vec::new());
+        save_test_object(&commit, &commit.id).unwrap();
         let old_oid = test_hash(1).to_string();
-        let new_oid = test_hash(2).to_string();
+        let new_oid = commit.id.to_string();
         db.execute(Statement::from_sql_and_values(
             DbBackend::Sqlite,
             "INSERT INTO reflog \
@@ -3245,9 +3306,11 @@ mod tests {
         .await
         .unwrap();
 
-        let stats = expire_reflogs_for_gc(false).await.unwrap();
+        let storage = ClientStorage::local(path::objects());
+        let (stats, warnings) = expire_reflogs_for_gc(&storage, false).await.unwrap();
         let remaining = reflog::Entity::find().all(&db).await.unwrap();
 
+        assert!(warnings.is_empty());
         assert_eq!(stats.refs_scanned, 1);
         assert_eq!(stats.entries_scanned, 1);
         assert_eq!(stats.pruned, 1);
@@ -3262,8 +3325,10 @@ mod tests {
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
         let db = get_db_conn_instance().await;
+        let commit = commit_with_tree(test_hash(8), Vec::new());
+        save_test_object(&commit, &commit.id).unwrap();
         let old_oid = test_hash(3).to_string();
-        let new_oid = test_hash(4).to_string();
+        let new_oid = commit.id.to_string();
         db.execute(Statement::from_sql_and_values(
             DbBackend::Sqlite,
             "INSERT INTO reflog \
@@ -3283,11 +3348,76 @@ mod tests {
         .await
         .unwrap();
 
-        let stats = expire_reflogs_for_gc(true).await.unwrap();
+        let storage = ClientStorage::local(path::objects());
+        let (stats, warnings) = expire_reflogs_for_gc(&storage, true).await.unwrap();
         let remaining = reflog::Entity::find().all(&db).await.unwrap();
 
+        assert!(warnings.is_empty());
         assert_eq!(stats.pruned, 1);
         assert_eq!(remaining.len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers GC skipping reflog expiration when commit traversal is incomplete.
+    async fn expire_reflogs_for_gc_skips_when_tip_traversal_is_incomplete() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let db = get_db_conn_instance().await;
+        let missing_tip = test_hash(7).to_string();
+        let ancestor = test_hash(8).to_string();
+        let null_oid = test_hash(0).to_string();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let older_than_unreachable_expire = now - 31 * 24 * 60 * 60;
+
+        for (old_oid, new_oid, timestamp, message) in [
+            (
+                null_oid.as_str(),
+                ancestor.as_str(),
+                older_than_unreachable_expire,
+                "ancestor entry",
+            ),
+            (
+                ancestor.as_str(),
+                missing_tip.as_str(),
+                now,
+                "missing packed tip",
+            ),
+        ] {
+            db.execute(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "INSERT INTO reflog \
+                 (ref_name, old_oid, new_oid, timestamp, committer_name, committer_email, action, message) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+                [
+                    "HEAD".into(),
+                    old_oid.into(),
+                    new_oid.into(),
+                    timestamp.into(),
+                    "tester".into(),
+                    "tester@example.com".into(),
+                    "commit".into(),
+                    message.into(),
+                ],
+            ))
+            .await
+            .unwrap();
+        }
+
+        let storage = ClientStorage::local(path::objects());
+        let (stats, warnings) = expire_reflogs_for_gc(&storage, false).await.unwrap();
+        let remaining = reflog::Entity::find().all(&db).await.unwrap();
+
+        assert_eq!(stats.refs_scanned, 1);
+        assert_eq!(stats.entries_scanned, 2);
+        assert_eq!(stats.pruned, 0);
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("reflog expiration skipped"));
     }
 
     #[tokio::test]
