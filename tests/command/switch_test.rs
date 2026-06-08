@@ -2,6 +2,7 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
+use clap::Parser;
 use git_internal::internal::index::Index;
 use libra::{
     internal::{
@@ -230,6 +231,7 @@ async fn test_switch_function() {
             force_create: None,
             detach: false,
             track: false,
+            ..Default::default()
         };
         switch::execute(args).await;
         let head = Head::current().await;
@@ -282,6 +284,7 @@ async fn test_switch_function() {
             force_create: None,
             detach: true,
             track: false,
+            ..Default::default()
         };
         switch::execute(args).await;
         let head = Head::current().await;
@@ -305,6 +308,7 @@ async fn test_switch_function() {
             force_create: None,
             detach: false,
             track: false,
+            ..Default::default()
         };
         switch::execute(args).await;
         let head = Head::current().await;
@@ -429,6 +433,7 @@ async fn test_switch_track_sets_upstream() {
         force_create: None,
         detach: false,
         track: true,
+        ..Default::default()
     };
     switch::execute(args).await;
 
@@ -715,6 +720,7 @@ async fn switch_to_detach(branch_test: String) -> String {
         force_create: None,
         detach: true,
         track: false,
+        ..Default::default()
     };
     switch::execute(args).await;
     let head = Head::current().await;
@@ -723,7 +729,12 @@ async fn switch_to_detach(branch_test: String) -> String {
         _ => panic!("head not detached,unreachable"),
     };
     let commit = load_object::<Commit>(&commit_id).unwrap();
-    commit.message.trim().to_string()
+    commit
+        .message
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .to_string()
 }
 
 async fn switch_to_branch(branch_test: String) {
@@ -733,6 +744,7 @@ async fn switch_to_branch(branch_test: String) {
         force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     };
     switch::execute(args).await;
 }
@@ -770,5 +782,207 @@ fn test_switch_force_create_resets_existing_branch() {
         String::from_utf8_lossy(&current.stdout).trim(),
         "feature",
         "should be on feature after switch -C"
+    );
+}
+
+#[test]
+fn switch_force_flags_parse_as_aliases() {
+    for flag in ["-f", "--force", "--discard-changes"] {
+        let args = SwitchArgs::try_parse_from(["switch", flag, "main"])
+            .unwrap_or_else(|err| panic!("{flag} should parse: {err}"));
+        assert_eq!(args.branch.as_deref(), Some("main"));
+        assert!(args.force, "{flag} should enable force switching");
+    }
+}
+
+#[test]
+fn switch_guess_flags_parse_as_tristate() {
+    let default_args = SwitchArgs::try_parse_from(["switch", "feature"]).unwrap();
+    assert!(!default_args.guess);
+    assert!(!default_args.no_guess);
+
+    let guess_args = SwitchArgs::try_parse_from(["switch", "--guess", "feature"]).unwrap();
+    assert!(guess_args.guess);
+    assert!(!guess_args.no_guess);
+
+    let no_guess_args = SwitchArgs::try_parse_from(["switch", "--no-guess", "feature"]).unwrap();
+    assert!(!no_guess_args.guess);
+    assert!(no_guess_args.no_guess);
+}
+
+#[test]
+fn switch_mode_flags_are_mutually_exclusive() {
+    for args in [
+        vec!["switch", "-c", "one", "-C", "two"],
+        vec!["switch", "-c", "one", "--orphan", "two"],
+        vec!["switch", "-C", "one", "--detach", "main"],
+        vec!["switch", "--orphan", "one", "--detach", "main"],
+        vec!["switch", "--guess", "--no-guess", "feature"],
+    ] {
+        assert!(
+            SwitchArgs::try_parse_from(args.clone()).is_err(),
+            "{args:?} should be rejected by clap"
+        );
+    }
+}
+
+#[test]
+fn switch_force_overwrites_dirty_tracked_file() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(&run_libra_command(&["branch", "other"], p), "branch other");
+    assert_cli_success(&run_libra_command(&["switch", "other"], p), "switch other");
+    std::fs::write(p.join("tracked.txt"), "target branch content\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], p), "add target");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "target edit", "--no-verify"], p),
+        "commit target edit",
+    );
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+
+    std::fs::write(p.join("tracked.txt"), "dirty local edit\n").unwrap();
+    let blocked = run_libra_command(&["switch", "other"], p);
+    assert!(
+        !blocked.status.success(),
+        "plain switch should reject dirty tracked files"
+    );
+
+    assert_cli_success(
+        &run_libra_command(&["switch", "-f", "other"], p),
+        "switch -f",
+    );
+    assert_eq!(
+        std::fs::read_to_string(p.join("tracked.txt")).unwrap(),
+        "target branch content\n"
+    );
+}
+
+#[test]
+fn switch_force_still_rejects_untracked_overwrite() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "other"], p),
+        "switch other",
+    );
+    std::fs::write(p.join("conflict.txt"), "tracked on target\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "conflict.txt"], p),
+        "add conflict",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "target conflict", "--no-verify"], p),
+        "commit target conflict",
+    );
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    std::fs::write(p.join("conflict.txt"), "untracked local\n").unwrap();
+
+    let output = run_libra_command(&["switch", "-f", "other"], p);
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("untracked working tree file would be overwritten"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(p.join("conflict.txt")).unwrap(),
+        "untracked local\n"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn switch_guess_creates_tracking_branch_by_default() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(
+            &["remote", "add", "origin", "https://example.com/repo.git"],
+            repo.path(),
+        ),
+        "remote add origin",
+    );
+    let _guard = ChangeDirGuard::new(repo.path());
+    let head = Head::current_commit().await.unwrap();
+    Branch::update_branch(
+        "refs/remotes/origin/feature",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
+
+    let output = run_libra_command(&["switch", "feature"], repo.path());
+    assert_cli_success(&output, "switch feature should guess origin/feature");
+
+    let branch_config = libra::internal::config::ConfigKv::branch_config("feature")
+        .await
+        .ok()
+        .flatten()
+        .expect("feature should have upstream config");
+    assert_eq!(branch_config.remote, "origin");
+    assert_eq!(branch_config.merge, "feature");
+}
+
+#[tokio::test]
+#[serial]
+async fn switch_no_guess_disables_remote_tracking_guess() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(
+            &["remote", "add", "origin", "https://example.com/repo.git"],
+            repo.path(),
+        ),
+        "remote add origin",
+    );
+    let _guard = ChangeDirGuard::new(repo.path());
+    let head = Head::current_commit().await.unwrap();
+    Branch::update_branch(
+        "refs/remotes/origin/feature",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
+
+    let output = run_libra_command(&["switch", "--no-guess", "feature"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("branch 'feature' not found"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn switch_checkout_guess_false_disables_implicit_guess() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(
+            &["remote", "add", "origin", "https://example.com/repo.git"],
+            repo.path(),
+        ),
+        "remote add origin",
+    );
+    assert_cli_success(
+        &run_libra_command(&["config", "checkout.guess", "false"], repo.path()),
+        "config checkout.guess false",
+    );
+    let _guard = ChangeDirGuard::new(repo.path());
+    let head = Head::current_commit().await.unwrap();
+    Branch::update_branch(
+        "refs/remotes/origin/feature",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
+
+    let output = run_libra_command(&["switch", "feature"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("branch 'feature' not found"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }

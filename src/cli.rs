@@ -489,6 +489,8 @@ pub enum Stash {
         name_only: bool,
         #[arg(long, help = "Show only file names with their status code")]
         name_status: bool,
+        #[arg(long, help = "Show a file-level summary of the stashed changes")]
+        stat: bool,
         #[arg(
             short = 'p',
             long = "patch",
@@ -982,6 +984,7 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
                 Err(_) => Ok(CommandPreflight::sha1_without_repo()),
             }
         }
+        Commands::RevParse(args) if args.sq_quote => Ok(CommandPreflight::none()),
         Commands::VerifyPack(_) => match utils::util::try_get_storage_path(None) {
             Ok(storage) => Ok(CommandPreflight::repo_hash_kind_without_schema_guard(
                 storage,

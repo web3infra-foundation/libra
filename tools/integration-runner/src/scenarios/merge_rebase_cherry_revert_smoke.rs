@@ -38,12 +38,38 @@ pub(crate) fn scenario_merge_rebase_cherry_revert_smoke(ctx: &mut ScenarioCtx<'_
         &ctx.command(&["--json", "log", "--oneline"], repo.clone(), true)?,
         "log",
     )?;
+    fs::write(repo.join("range-a.txt"), "range-a\n").context("write range-a")?;
+    ctx.command(&["add", "range-a.txt"], repo.clone(), true)?;
+    ctx.command(
+        &["commit", "-m", "range a", "--no-verify"],
+        repo.clone(),
+        true,
+    )?;
+    fs::write(repo.join("range-b.txt"), "range-b\n").context("write range-b")?;
+    ctx.command(&["add", "range-b.txt"], repo.clone(), true)?;
+    ctx.command(
+        &["commit", "-m", "range b", "--no-verify"],
+        repo.clone(),
+        true,
+    )?;
+    assert_json_ok(
+        &ctx.command(&["--json", "revert", "HEAD~2..HEAD"], repo.clone(), true)?,
+        "revert",
+    )?;
+    if repo.join("range-a.txt").exists() || repo.join("range-b.txt").exists() {
+        bail!("range revert should remove range-a.txt and range-b.txt");
+    }
+    assert_lbr_or_text(
+        &ctx.command(&["revert", "--continue"], repo.clone(), false)?,
+        "revert",
+    )?;
+    assert_lbr_or_text(
+        &ctx.command(&["revert", "--abort"], repo.clone(), false)?,
+        "revert",
+    )?;
 
-    fs::write(
-        repo.join("rename-base.txt"),
-        "line1\nline2\nline3\nline4\n",
-    )
-    .context("write rename base")?;
+    fs::write(repo.join("rename-base.txt"), "line1\nline2\nline3\nline4\n")
+        .context("write rename base")?;
     ctx.command(&["add", "rename-base.txt"], repo.clone(), true)?;
     ctx.command(
         &["commit", "-m", "rename base", "--no-verify"],

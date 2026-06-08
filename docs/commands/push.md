@@ -33,6 +33,19 @@ on either side.
 
 `--porcelain` prints a stable, machine-readable line per ref instead of the human summary.
 
+`--follow-tags` appends missing annotated tags that point at commits reachable from the
+refs being pushed. Lightweight tags are not included; use `--tags` to push every local
+tag.
+
+`--push-option` (`-o`) sends server-side receive-pack options when the remote advertises
+the `push-options` capability. Options are validated before transmission: no NUL/newline
+bytes and at most 1024 bytes per option.
+
+`--signed[=true|false|if-asked]` uses Libra's vault-backed PGP key to build a Git push
+certificate when the remote advertises `push-cert`. `--signed=true` requires that
+capability and a configured vault signing key; `--signed=if-asked` silently falls back to
+an unsigned push when the remote does not ask for push certificates.
+
 LFS-tracked files are transparently uploaded during HTTP pushes without requiring a
 separate `lfs push` step.
 
@@ -46,6 +59,9 @@ separate `lfs push` step.
 | `-f`, `--force` | Allow non-fast-forward updates that overwrite remote history. | `libra push --force origin main` |
 | `--force-with-lease[=<ref>[:<expect>]]` | Allow a non-fast-forward update only if the remote ref still matches the expected OID (the tracking-ref OID by default, or an explicit `<expect>`). Conflicts with `--force`. | `libra push --force-with-lease origin main` |
 | `--force-if-includes` | Accepted for `git push` compatibility; **no-op** (the lease check uses the tracking-ref OID only). | `libra push --force-with-lease --force-if-includes origin main` |
+| `--follow-tags` / `--no-follow-tags` | Push missing annotated tags reachable from the refs being pushed, or override `push.followTags=true` off. Lightweight tags are skipped. | `libra push --follow-tags origin main` |
+| `--signed[=true\|false\|if-asked]` | Send a vault-backed Git push certificate. `true` requires remote `push-cert`; `if-asked` signs only when advertised. | `libra push --signed=if-asked origin main` |
+| `-o`, `--push-option <option>` | Send a validated server-side push option. Requires remote `push-options`; repeatable. | `libra push -o ci.skip origin main` |
 | `--atomic` | Request all remote ref updates to succeed or fail together. The remote must advertise the `atomic` receive-pack capability; local remote-tracking refs are updated in one SQLite transaction. | `libra push --atomic origin main` |
 | `--thin` / `--no-thin` | Accepted for compatibility; **no-op** (the pack encoder always produces a self-contained pack). | `libra push --thin origin main` |
 | `--porcelain` | Machine-readable output: a `To <url>` header then `<flag>\t<from>:<to>\t<summary>` per ref. Conflicts with `--json`/`--machine`. | `libra push --porcelain origin main` |
@@ -65,6 +81,9 @@ libra push -u origin feature-x
 libra push --force origin main
 libra push --force-with-lease origin main
 libra push --force-with-lease=main:abc123 origin main
+libra push --follow-tags origin main
+libra push -o ci.skip origin main
+libra push --signed=if-asked origin main
 libra push --atomic origin main
 libra push --porcelain origin main
 libra push --dry-run
@@ -406,7 +425,9 @@ is transparent -- users do not need to install or configure a separate LFS tool.
 | Atomic update | `libra push --atomic` | `git push --atomic` | N/A |
 | Porcelain output | `libra push --porcelain` | `git push --porcelain` | N/A |
 | Thin pack | Accepted, no-op | `git push --thin` | N/A |
-| Signed / push-option / follow-tags | Not yet supported | `git push --signed` / `-o` / `--follow-tags` | N/A |
+| Follow tags | `libra push --follow-tags` | `git push --follow-tags` | N/A |
+| Push options | `libra push -o <option>` (requires `push-options`) | `git push -o <option>` | N/A |
+| Signed push | `libra push --signed[=...]` (vault + `push-cert`) | `git push --signed[=...]` | N/A |
 | Dry-run | `libra push --dry-run` | `git push --dry-run` | `jj git push --dry-run` |
 | Refspec mapping | `libra push origin src:dst` | `git push origin src:dst` | N/A |
 | Multiple refspecs | `libra push origin main feature:release` | `git push origin main feature:release` | N/A |

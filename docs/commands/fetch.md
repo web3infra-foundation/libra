@@ -23,6 +23,10 @@ the fetch to a single branch.
 Fetch supports SSH, HTTPS, local file, and `git://` transports. Vault-backed SSH keys
 are loaded automatically when configured via `vault.ssh.<remote>.privkey`.
 
+By default, fetch auto-follows advertised tags that point at commits fetched in
+the same operation. `--tags` imports every advertised tag, while `--no-tags`
+disables tag import for that invocation.
+
 ## Options
 
 | Flag / Argument | Description | Example |
@@ -40,8 +44,8 @@ are loaded automatically when configured via `vault.ssh.<remote>.privkey`.
 | `--porcelain` | Print one machine-readable `<flag> <old-oid> <new-oid> <local-ref>` line per ref update. Mutually exclusive with `--json` (usage error). | `libra fetch origin --porcelain` |
 | `--append` | Append fetched ref records to `.libra/FETCH_HEAD` instead of overwriting. Long-only (`-a` is `--all`). | `libra fetch origin --append` |
 | `-v`, `--verbose` | Announce the remote (name and credential-redacted URL) being contacted on stderr before connecting; leaves the stdout result contract unchanged. | `libra fetch origin -v` |
-| `-t`, `--tags` | Import every advertised tag into the global `refs/tags/*` namespace, pulling each tag's object into the pack. Overrides `remote.<name>.tagOpt`. Existing local tags are preserved (immutable without `--force`). | `libra fetch origin --tags` |
-| `--no-tags` | Import no tags, overriding `remote.<name>.tagOpt`. Long-only (Git's `-n` short form is intentionally not exposed). | `libra fetch origin --no-tags` |
+| `-t`, `--tags` | Import every advertised tag into the global `refs/tags/*` namespace, pulling each tag's object into the pack. Overrides the default auto-follow mode and `remote.<name>.tagOpt`. Existing local tags are preserved (immutable without `--force`). | `libra fetch origin --tags` |
+| `--no-tags` | Import no tags, overriding the default auto-follow mode and `remote.<name>.tagOpt`. Long-only (Git's `-n` short form is intentionally not exposed). | `libra fetch origin --no-tags` |
 | `-f`, `--force` | Allow non-fast-forward updates: overwrite an existing local tag with the remote's value (tags are otherwise immutable). Forced updates render with the porcelain `+` flag. Remote-tracking refs always update regardless. | `libra fetch origin --tags --force` |
 | `--update-shallow` | Accept new shallow boundaries advertised by a shallow remote even when no shallow operation was requested and the repository is not already shallow. Boundary removals (history deepening) always apply. | `libra fetch origin --update-shallow` |
 | `--atomic` | Update a remote's refs atomically: they already commit together (one transaction per remote), and on rollback the pack downloaded for that remote is removed so no partial state is left. | `libra fetch origin --atomic` |
@@ -58,6 +62,7 @@ libra fetch
 libra fetch origin
 libra fetch origin main
 libra fetch --all
+libra fetch origin --no-tags              # skip default tag auto-follow
 libra fetch origin --depth 1               # shallow fetch
 libra fetch --all --depth 3                # shallow across all remotes
 libra --json fetch origin

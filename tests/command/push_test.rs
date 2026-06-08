@@ -232,6 +232,10 @@ fn test_push_help_lists_new_flags() {
     for flag in [
         "--force-with-lease",
         "--force-if-includes",
+        "--follow-tags",
+        "--no-follow-tags",
+        "--signed",
+        "--push-option",
         "--thin",
         "--no-thin",
         "--atomic",

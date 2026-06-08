@@ -22,7 +22,11 @@ pub(crate) fn scenario_init_bare_and_shared(ctx: &mut ScenarioCtx<'_>) -> Result
         ("0770", "shared-octal"),
     ] {
         let shared_arg = format!("--shared={mode}");
-        ctx.command(&["init", shared_arg.as_str(), dir], ctx.run_dir.clone(), true)?;
+        ctx.command(
+            &["init", shared_arg.as_str(), dir],
+            ctx.run_dir.clone(),
+            true,
+        )?;
         let repo = ctx.run_dir.join(dir);
         ctx.command(&["--json", "db", "status"], repo.clone(), true)?;
         ctx.command(&["fsck", "--connectivity-only"], repo, true)?;

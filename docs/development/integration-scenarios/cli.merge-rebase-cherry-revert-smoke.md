@@ -1,6 +1,6 @@
 ### `cli.merge-rebase-cherry-revert-smoke`
 
-目的：覆盖 `merge`（fast-forward 与三方无冲突 merge）、`rebase`、`cherry-pick`、`revert` 的最小可观察闭环，以及 `--continue` / `--abort` 无会话失败路径。
+目的：覆盖 `merge`（fast-forward 与三方无冲突 merge）、`rebase`、`cherry-pick`、`revert` 单提交/范围回滚的最小可观察闭环，以及 lifecycle misuse / 空会话失败路径。
 
 最小步骤：
 
@@ -68,6 +68,18 @@ REVERT_TARGET="$(libra rev-parse HEAD)"
 libra revert "$REVERT_TARGET"
 test ! -f pick.txt
 
+printf 'range-a\n' > range-a.txt
+libra add range-a.txt
+libra commit -m "test: range a"
+printf 'range-b\n' > range-b.txt
+libra add range-b.txt
+libra commit -m "test: range b"
+libra --json revert HEAD~2..HEAD
+test ! -f range-a.txt
+test ! -f range-b.txt
+! libra revert --continue
+! libra revert --abort
+
 printf 'line1\nline2\nline3\nline4\n' > rename-base.txt
 libra add rename-base.txt
 libra commit -m "test: rename base"
@@ -131,7 +143,7 @@ libra switch left
 ! libra --json rebase right
 ```
 
-断言：fast-forward merge 后 HEAD 等于目标提交；三方无冲突 merge 产生可观察 merge 结果并保留双方文件；`--find-renames=<n>` 的相似度阈值可控制 rename+edit 是否自动合并；`--squash --continue` 必须被解析层拒绝；`rebase main` 把 topic 提交重放到新 base 且文件存在；criss-cross 多 best merge-base 的 `rebase` 必须返回 `LBR-CONFLICT-002`，不得静默选择其中一个 base；`cherry-pick <commit>` 在当前分支生成等价修改；`revert <commit>` 创建反向提交并撤销目标修改；缺失目标、无 merge/rebase 会话的 continue/abort 和非法 commit 必须失败且不破坏当前分支。
+断言：fast-forward merge 后 HEAD 等于目标提交；三方无冲突 merge 产生可观察 merge 结果并保留双方文件；`--find-renames=<n>` 的相似度阈值可控制 rename+edit 是否自动合并；`--squash --continue` 必须被解析层拒绝；`rebase main` 把 topic 提交重放到新 base 且文件存在；criss-cross 多 best merge-base 的 `rebase` 必须返回 `LBR-CONFLICT-002`，不得静默选择其中一个 base；`cherry-pick <commit>` 在当前分支生成等价修改；`revert <commit>` 创建反向提交并撤销目标修改；`revert HEAD~2..HEAD` 以 JSON 成功输出并移除范围内两个提交添加的文件；缺失目标、无 merge/rebase/revert 会话的 continue/abort 和非法 commit 必须失败且不破坏当前分支。
 
 补充可执行断言：
 - 每次主要操作后执行 `libra fsck --connectivity-only` 必须 0 退出。

@@ -48,7 +48,11 @@ pub(crate) fn scenario_grep_blame_describe_shortlog(ctx: &mut ScenarioCtx<'_>) -
         "grep",
     )?;
     assert_json_ok(
-        &ctx.command(&["--json", "describe", "--tags", "HEAD"], repo.clone(), true)?,
+        &ctx.command(
+            &["--json", "describe", "--tags", "HEAD"],
+            repo.clone(),
+            true,
+        )?,
         "describe",
     )?;
     assert_lbr_or_text(

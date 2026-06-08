@@ -922,6 +922,14 @@ fn test_stash_show_reports_modified_file() {
             .expect("files_changed.modified should be a number")
             >= 1
     );
+    assert!(
+        json["data"].get("show_stat").is_none(),
+        "human-only show_stat hint must not leak into JSON: {json}"
+    );
+    assert!(
+        json["data"].get("stat").is_none(),
+        "human-only stat mode must not leak into JSON: {json}"
+    );
 }
 
 /// `stash show --name-only` in human mode prints only the file path,
@@ -1143,5 +1151,59 @@ fn test_stash_show_patch_emits_unified_diff() {
     assert!(
         stdout.contains("+added line"),
         "expected the added line in the patch, got: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_stash_show_stat_flag_and_mode_precedence() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nadded line\n").unwrap();
+    let push = run_libra_command(&["stash", "push"], repo.path());
+    assert_cli_success(&push, "stash push");
+
+    let stat = run_libra_command(&["stash", "show", "--stat", "--name-only"], repo.path());
+    assert_cli_success(&stat, "stash show --stat --name-only");
+    let stat_stdout = String::from_utf8_lossy(&stat.stdout);
+    assert!(
+        stat_stdout.contains("Files changed in stash@{0}:"),
+        "--stat should take precedence over --name-only, got: {stat_stdout}"
+    );
+    assert!(
+        stat_stdout.contains("files changed"),
+        "expected summary footer, got: {stat_stdout}"
+    );
+
+    let patch = run_libra_command(&["stash", "show", "-p", "--stat"], repo.path());
+    assert_cli_success(&patch, "stash show -p --stat");
+    let patch_stdout = String::from_utf8_lossy(&patch.stdout);
+    assert!(
+        patch_stdout.contains("diff --git a/tracked.txt b/tracked.txt"),
+        "-p should take precedence over --stat, got: {patch_stdout}"
+    );
+    assert!(
+        !patch_stdout.contains("Files changed in stash@{0}:"),
+        "patch mode should not also render stat summary, got: {patch_stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_stash_show_reads_show_patch_config() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nadded line\n").unwrap();
+    let push = run_libra_command(&["stash", "push"], repo.path());
+    assert_cli_success(&push, "stash push");
+    assert_cli_success(
+        &run_libra_command(&["config", "stash.showPatch", "true"], repo.path()),
+        "set stash.showPatch",
+    );
+
+    let out = run_libra_command(&["stash", "show"], repo.path());
+    assert_cli_success(&out, "stash show with stash.showPatch=true");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("diff --git a/tracked.txt b/tracked.txt"),
+        "stash.showPatch=true should make patch the default, got: {stdout}"
     );
 }

@@ -1827,6 +1827,7 @@ async fn new_reflog_context(commit_id: &str, message: &str) -> ReflogContext {
         old_oid,
         new_oid,
         action,
+        message: None,
     }
 }
 

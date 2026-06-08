@@ -196,6 +196,163 @@ fn test_show_json_commit_output_includes_type_and_files() {
 }
 
 #[test]
+fn test_show_multiple_objects_render_in_order() {
+    let repo = init_temp_repo();
+    configure_user_identity(repo.path());
+    create_commit(repo.path(), "tracked.txt", "base\n", "base commit");
+    create_commit(repo.path(), "tracked.txt", "second\n", "second commit");
+
+    let output = run_libra_command(&["show", "--no-patch", "HEAD", "HEAD~1"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let second_pos = stdout
+        .find("second commit")
+        .expect("expected latest commit in output");
+    let base_pos = stdout
+        .find("base commit")
+        .expect("expected parent commit in output");
+    assert!(
+        second_pos < base_pos,
+        "objects should render in command-line order, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_show_json_multiple_objects_is_array() {
+    let repo = init_temp_repo();
+    configure_user_identity(repo.path());
+    create_commit(repo.path(), "tracked.txt", "base\n", "base commit");
+    create_commit(repo.path(), "tracked.txt", "second\n", "second commit");
+
+    let output = run_libra_command(
+        &["--json", "show", "--no-patch", "HEAD", "HEAD~1"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    let data = json["data"].as_array().expect("multi-object data is array");
+    assert_eq!(data.len(), 2);
+    assert_eq!(data[0]["subject"], "second commit");
+    assert_eq!(data[1]["subject"], "base commit");
+}
+
+#[test]
+fn test_show_pretty_and_format_commit_headers() {
+    let repo = create_committed_repo_via_cli();
+
+    let fuller = run_libra_command(
+        &["show", "--no-patch", "--pretty=fuller", "HEAD"],
+        repo.path(),
+    );
+    assert!(
+        fuller.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&fuller.stderr)
+    );
+    let fuller_stdout = String::from_utf8_lossy(&fuller.stdout);
+    assert!(
+        fuller_stdout.contains("AuthorDate:"),
+        "expected fuller author date, got: {fuller_stdout}"
+    );
+    assert!(
+        fuller_stdout.contains("CommitDate:"),
+        "expected fuller commit date, got: {fuller_stdout}"
+    );
+
+    let formatted = run_libra_command(
+        &["show", "--no-patch", "--format=%h: %an %s", "HEAD"],
+        repo.path(),
+    );
+    assert!(
+        formatted.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&formatted.stderr)
+    );
+    let formatted_stdout = String::from_utf8_lossy(&formatted.stdout);
+    assert!(
+        formatted_stdout.contains(": Test User base"),
+        "expected custom format output, got: {formatted_stdout}"
+    );
+    assert!(
+        !formatted_stdout.contains("Author:"),
+        "custom format should replace the default header, got: {formatted_stdout}"
+    );
+}
+
+#[test]
+fn test_show_invalid_pretty_and_format_return_cli_invalid_arguments() {
+    let repo = create_committed_repo_via_cli();
+
+    let invalid_pretty = run_libra_command(&["show", "--pretty=bogus", "HEAD"], repo.path());
+    let (_stderr, report) = parse_cli_error_stderr(&invalid_pretty.stderr);
+    assert_eq!(invalid_pretty.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+
+    let invalid_format = run_libra_command(&["show", "--format=%b", "HEAD"], repo.path());
+    let (_stderr, report) = parse_cli_error_stderr(&invalid_format.stderr);
+    assert_eq!(invalid_format.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+#[test]
+fn test_show_display_mode_precedence() {
+    let repo = create_committed_repo_via_cli();
+
+    let no_patch = run_libra_command(&["show", "--no-patch", "--patch", "HEAD"], repo.path());
+    assert!(
+        no_patch.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&no_patch.stderr)
+    );
+    let no_patch_stdout = String::from_utf8_lossy(&no_patch.stdout);
+    assert!(
+        !no_patch_stdout.contains("diff --git"),
+        "--no-patch should suppress explicit --patch, got: {no_patch_stdout}"
+    );
+
+    let name_only = run_libra_command(&["show", "--stat", "--name-only", "HEAD"], repo.path());
+    assert!(
+        name_only.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&name_only.stderr)
+    );
+    let name_only_stdout = String::from_utf8_lossy(&name_only.stdout);
+    assert!(
+        name_only_stdout.contains("tracked.txt"),
+        "expected name-only file path, got: {name_only_stdout}"
+    );
+    assert!(
+        !name_only_stdout.contains("file changed"),
+        "--name-only should take precedence over --stat, got: {name_only_stdout}"
+    );
+
+    let name_status = run_libra_command(
+        &["show", "--name-status", "--name-only", "HEAD"],
+        repo.path(),
+    );
+    assert!(
+        name_status.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&name_status.stderr)
+    );
+    let name_status_stdout = String::from_utf8_lossy(&name_status.stdout);
+    assert!(
+        name_status_stdout.contains("A\ttracked.txt"),
+        "--name-status should take precedence over --name-only, got: {name_status_stdout}"
+    );
+}
+
+#[test]
 fn test_show_quiet_suppresses_human_output() {
     let repo = create_committed_repo_via_cli();
 
@@ -239,7 +396,10 @@ async fn test_show_non_quiet_uses_forced_pager() {
         oneline: false,
         name_only: false,
         name_status: false,
+        patch: false,
         stat: false,
+        pretty: None,
+        format: None,
         pathspec: vec![],
     };
 
@@ -287,7 +447,10 @@ async fn test_show_quiet_still_validates_patch_generation() {
         oneline: false,
         name_only: false,
         name_status: false,
+        patch: false,
         stat: false,
+        pretty: None,
+        format: None,
         pathspec: vec![],
     };
     let output = OutputConfig {
@@ -336,7 +499,10 @@ async fn test_show_quiet_stat_succeeds_with_missing_blob_like_human_path() {
         oneline: false,
         name_only: false,
         name_status: false,
+        patch: false,
         stat: true,
+        pretty: None,
+        format: None,
         pathspec: vec![],
     };
     let output = OutputConfig {
@@ -794,7 +960,10 @@ async fn test_show_execute_safe_bad_ref_returns_cli_error() {
         oneline: false,
         name_only: false,
         name_status: false,
+        patch: false,
         stat: false,
+        pretty: None,
+        format: None,
         pathspec: vec![],
     };
     let result = execute_safe(args, &OutputConfig::default()).await;
@@ -834,7 +1003,10 @@ async fn test_show_execute_safe_bad_rev_path_returns_cli_error() {
         oneline: false,
         name_only: false,
         name_status: false,
+        patch: false,
         stat: false,
+        pretty: None,
+        format: None,
         pathspec: vec![],
     };
     let result = execute_safe(args, &OutputConfig::default()).await;

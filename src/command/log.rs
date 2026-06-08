@@ -52,6 +52,7 @@ EXAMPLES:
     libra log --merges --first-parent      Show merge commits along the first-parent line
     libra log --pretty=format:'%h %s'      Render with a Git-style custom pretty format
     libra log main..feature -- src/        Show range commits that touch src/
+    libra log --follow renamed.txt         Follow one file across renames
     libra log -S 'debug_flag' -- src/      Pickaxe literal changes under src/
     libra log --name-status src/           Show changed files under src/
     libra --json log -n 1                  Structured JSON output for agents";
@@ -210,6 +211,9 @@ pub struct LogArgs {
     /// Show commits with an added or removed line matching the REGEX
     #[clap(short = 'G', value_name = "REGEX")]
     pub pickaxe_regex: Option<String>,
+    /// Follow a single file's history across renames
+    #[clap(long)]
+    pub follow: bool,
 }
 
 #[derive(PartialEq, Debug)]
@@ -236,6 +240,21 @@ pub struct FileChange {
 struct SelectedLogCommit {
     commit: Commit,
     cached_changes: Option<Vec<FileChange>>,
+    path_filters: Vec<PathBuf>,
+    follow_rename: Option<FollowRename>,
+}
+
+#[derive(Debug, Clone)]
+struct FollowRename {
+    from: PathBuf,
+    to: PathBuf,
+    score: u32,
+}
+
+struct FollowCommitChanges {
+    changes: Vec<FileChange>,
+    previous_path: Option<PathBuf>,
+    rename: Option<FollowRename>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -427,6 +446,20 @@ fn normalize_log_pathspecs(tokens: &[String]) -> CliResult<Vec<PathBuf>> {
         .iter()
         .map(|token| normalize_log_pathspec(token))
         .collect()
+}
+
+fn resolve_follow_path(args: &LogArgs, positionals: &LogPositionals) -> CliResult<Option<PathBuf>> {
+    if !args.follow {
+        return Ok(None);
+    }
+    match positionals.path_filters.as_slice() {
+        [path] if path != Path::new(".") => Ok(Some(path.clone())),
+        _ => Err(
+            CliError::command_usage("log --follow requires exactly one file pathspec")
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("use `libra log --follow -- <path>` with one file path."),
+        ),
+    }
 }
 
 /// An empty range endpoint defaults to `HEAD` (so `..B` and `A..` work).
@@ -728,12 +761,20 @@ impl CommitFilter {
     /// rather than silently excluding the commit; only a clean "no match"
     /// excludes it.
     fn matches_pickaxe(&self, commit: &Commit) -> Result<bool, CliError> {
+        self.matches_pickaxe_with_paths(commit, &self.paths)
+    }
+
+    fn matches_pickaxe_with_paths(
+        &self,
+        commit: &Commit,
+        paths: &[PathBuf],
+    ) -> Result<bool, CliError> {
         let Some(pickaxe) = &self.pickaxe else {
             return Ok(true);
         };
         match pickaxe {
-            Pickaxe::String(needle) => commit_pickaxe_string(commit, needle, &self.paths),
-            Pickaxe::Regex(re) => commit_pickaxe_regex(commit, re, &self.paths),
+            Pickaxe::String(needle) => commit_pickaxe_string(commit, needle, paths),
+            Pickaxe::Regex(re) => commit_pickaxe_regex(commit, re, paths),
         }
     }
 
@@ -848,6 +889,107 @@ fn commit_pickaxe_regex(commit: &Commit, re: &Regex, paths: &[PathBuf]) -> Resul
     Ok(diffs
         .iter()
         .any(|item| pickaxe::diff_line_matches(&item.data, re)))
+}
+
+fn map_by_path(blobs: BlobList) -> HashMap<PathBuf, ObjectHash> {
+    blobs.into_iter().collect()
+}
+
+fn file_change_for_path(
+    path: &Path,
+    old_hash: Option<&ObjectHash>,
+    new_hash: Option<&ObjectHash>,
+) -> Option<FileChange> {
+    match (old_hash, new_hash) {
+        (None, Some(_)) => Some(FileChange {
+            path: path.to_path_buf(),
+            status: ChangeType::Added,
+        }),
+        (Some(_), None) => Some(FileChange {
+            path: path.to_path_buf(),
+            status: ChangeType::Deleted,
+        }),
+        (Some(old), Some(new)) if old != new => Some(FileChange {
+            path: path.to_path_buf(),
+            status: ChangeType::Modified,
+        }),
+        _ => None,
+    }
+}
+
+fn best_follow_rename(
+    current_path: &Path,
+    old_map: &HashMap<PathBuf, ObjectHash>,
+    new_map: &HashMap<PathBuf, ObjectHash>,
+) -> Result<Option<FollowRename>, CliError> {
+    let Some(new_hash) = new_map.get(current_path) else {
+        return Ok(None);
+    };
+    if old_map.contains_key(current_path) {
+        return Ok(None);
+    }
+
+    let mut best: Option<(PathBuf, f64)> = None;
+    let new_content = load_commit_blob_content(new_hash)?;
+    for (old_path, old_hash) in old_map {
+        if new_map.contains_key(old_path) {
+            continue;
+        }
+        let similarity = if old_hash == new_hash {
+            1.0
+        } else {
+            crate::utils::blob_similarity::blob_line_similarity(
+                &load_commit_blob_content(old_hash)?,
+                &new_content,
+            )
+        };
+        if similarity >= 0.5 && best.as_ref().is_none_or(|(_, score)| similarity > *score) {
+            best = Some((old_path.clone(), similarity));
+        }
+    }
+
+    Ok(best.map(|(from, similarity)| FollowRename {
+        from,
+        to: current_path.to_path_buf(),
+        score: ((similarity * 100.0).round() as u32).min(100),
+    }))
+}
+
+fn follow_changes_for_commit(
+    commit: &Commit,
+    current_path: &Path,
+) -> Result<FollowCommitChanges, CliError> {
+    let (old_blobs, new_blobs) = load_commit_blob_vecs(commit)?;
+    let old_map = map_by_path(old_blobs);
+    let new_map = map_by_path(new_blobs);
+    if let Some(rename) = best_follow_rename(current_path, &old_map, &new_map)? {
+        return Ok(FollowCommitChanges {
+            changes: vec![
+                FileChange {
+                    path: rename.from.clone(),
+                    status: ChangeType::Deleted,
+                },
+                FileChange {
+                    path: rename.to.clone(),
+                    status: ChangeType::Added,
+                },
+            ],
+            previous_path: Some(rename.from.clone()),
+            rename: Some(rename),
+        });
+    }
+
+    Ok(FollowCommitChanges {
+        changes: file_change_for_path(
+            current_path,
+            old_map.get(current_path),
+            new_map.get(current_path),
+        )
+        .into_iter()
+        .collect(),
+        previous_path: None,
+        rename: None,
+    })
 }
 
 fn str_to_decorate_option(s: &str) -> Result<DecorateOptions, String> {
@@ -1010,6 +1152,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     let since = args.since.as_deref().map(parse_date_arg).transpose()?;
     let until = args.until.as_deref().map(parse_date_arg).transpose()?;
     let positionals = parse_log_positionals(&args)?;
+    let follow_path = resolve_follow_path(&args, &positionals)?;
     // Compile `--grep` before any traversal so an invalid/oversized pattern
     // fails fast (`LBR-CLI-002`) instead of after loading the whole history.
     let grep = args
@@ -1050,12 +1193,14 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
 
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
     let reuse_changed_files = name_only || name_status;
-    let selected_commits = select_log_commits(
+    let (selected_commits, _) = select_log_commits(
         reachable_commits,
         &filter,
         &positionals.path_filters,
         max_output_number,
         reuse_changed_files,
+        follow_path,
+        false,
     )
     .await?;
 
@@ -1108,6 +1253,8 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         let SelectedLogCommit {
             commit,
             mut cached_changes,
+            path_filters,
+            follow_rename,
         } = selected;
         let ref_msg = if decorate_option != DecorateOptions::No {
             let mut ref_msgs: Vec<String> = vec![];
@@ -1204,10 +1351,14 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
                 if !message.ends_with('\n') {
                     message.push('\n');
                 }
-                message.push_str(&format_changes(&changes, name_status));
+                message.push_str(&format_changes(
+                    &changes,
+                    name_status,
+                    follow_rename.as_ref(),
+                ));
             }
         } else if patch {
-            let patch_output = generate_diff(&commit, positionals.path_filters.clone()).await?;
+            let patch_output = generate_diff(&commit, path_filters.clone()).await?;
             if !patch_output.is_empty() {
                 if !message.ends_with('\n') {
                     message.push('\n');
@@ -1215,7 +1366,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
                 message.push_str(&patch_output);
             }
         } else if args.stat {
-            let stats = compute_commit_stat(&commit, positionals.path_filters.clone()).await?;
+            let stats = compute_commit_stat(&commit, path_filters.clone()).await?;
             let stat_output = format_stat_output(&stats);
             if !stat_output.is_empty() {
                 if !message.ends_with('\n') {
@@ -1236,6 +1387,7 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     let since = args.since.as_deref().map(parse_date_arg).transpose()?;
     let until = args.until.as_deref().map(parse_date_arg).transpose()?;
     let positionals = parse_log_positionals(args)?;
+    let follow_path = resolve_follow_path(args, &positionals)?;
     let grep = args
         .grep
         .as_deref()
@@ -1271,26 +1423,24 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
     let include_total = args.number.is_none();
     let ref_commits = create_reference_commit_map().await;
+    let (selected_commits, total) = select_log_commits(
+        reachable_commits,
+        &filter,
+        &positionals.path_filters,
+        max_output_number,
+        true,
+        follow_path,
+        include_total,
+    )
+    .await?;
     let mut commits = Vec::new();
-    let mut total = 0usize;
-
-    for commit in reachable_commits {
-        if !include_total && commits.len() >= max_output_number {
-            break;
-        }
-        if !filter.passes_non_path_filters(&commit) {
-            continue;
-        }
-
-        let files = get_changed_files_for_commit(&commit, &positionals.path_filters).await?;
-        if !filter.matches(&commit, Some(&files)).await? {
-            continue;
-        }
-
-        total += 1;
-        if commits.len() >= max_output_number {
-            continue;
-        }
+    for selected in selected_commits {
+        let SelectedLogCommit {
+            commit,
+            cached_changes,
+            ..
+        } = selected;
+        let files = cached_changes.unwrap_or_default();
 
         let (parsed_message, _) = parse_commit_msg(&commit.message);
         let mut message_lines = parsed_message.lines();
@@ -1348,34 +1498,61 @@ async fn select_log_commits(
     path_filters: &[PathBuf],
     max_output_number: usize,
     keep_changed_files: bool,
-) -> Result<Vec<SelectedLogCommit>, CliError> {
+    follow_path: Option<PathBuf>,
+    count_all_matches: bool,
+) -> Result<(Vec<SelectedLogCommit>, usize), CliError> {
     let mut selected = Vec::new();
+    let mut total = 0usize;
+    let mut current_follow_path = follow_path;
 
     for commit in reachable_commits {
-        if selected.len() >= max_output_number {
+        if selected.len() >= max_output_number && !count_all_matches {
             break;
         }
         if !filter.passes_non_path_filters(&commit) {
             continue;
         }
 
-        let cached_changes = if filter.paths.is_empty() && !keep_changed_files {
-            None
-        } else {
-            Some(get_changed_files_for_commit(&commit, path_filters).await?)
-        };
+        let (effective_paths, cached_changes, follow_rename) =
+            if let Some(current_path) = current_follow_path.clone() {
+                let follow = follow_changes_for_commit(&commit, &current_path)?;
+                if let Some(previous_path) = follow.previous_path {
+                    current_follow_path = Some(previous_path);
+                }
+                if follow.changes.is_empty()
+                    || !filter
+                        .matches_pickaxe_with_paths(&commit, std::slice::from_ref(&current_path))?
+                {
+                    continue;
+                }
+                (vec![current_path], Some(follow.changes), follow.rename)
+            } else if filter.paths.is_empty() && !keep_changed_files {
+                if !filter.matches(&commit, None).await? {
+                    continue;
+                }
+                (path_filters.to_vec(), None, None)
+            } else {
+                let changes = get_changed_files_for_commit(&commit, path_filters).await?;
+                if !filter.matches(&commit, Some(&changes)).await? {
+                    continue;
+                }
+                (path_filters.to_vec(), Some(changes), None)
+            };
 
-        if !filter.matches(&commit, cached_changes.as_deref()).await? {
+        total += 1;
+        if selected.len() >= max_output_number {
             continue;
         }
 
         selected.push(SelectedLogCommit {
             commit,
             cached_changes,
+            path_filters: effective_paths,
+            follow_rename,
         });
     }
 
-    Ok(selected)
+    Ok((selected, total))
 }
 
 async fn validate_selected_log_commits(
@@ -1387,14 +1564,19 @@ async fn validate_selected_log_commits(
     stat: bool,
 ) -> CliResult<()> {
     for selected in selected_commits {
+        let effective_paths = if selected.path_filters.is_empty() {
+            path_filters
+        } else {
+            &selected.path_filters
+        };
         if name_only || name_status {
             if selected.cached_changes.is_none() {
-                let _ = get_changed_files_for_commit(&selected.commit, path_filters).await?;
+                let _ = get_changed_files_for_commit(&selected.commit, effective_paths).await?;
             }
         } else if patch {
-            let _ = generate_diff(&selected.commit, path_filters.to_vec()).await?;
+            let _ = generate_diff(&selected.commit, effective_paths.to_vec()).await?;
         } else if stat {
-            let _ = compute_commit_stat(&selected.commit, path_filters.to_vec()).await?;
+            let _ = compute_commit_stat(&selected.commit, effective_paths.to_vec()).await?;
         }
     }
 
@@ -1554,8 +1736,21 @@ pub(crate) async fn get_changed_files_for_commit(
     Ok(changed_files)
 }
 
-fn format_changes(changes: &[FileChange], include_status: bool) -> String {
+fn format_changes(
+    changes: &[FileChange],
+    include_status: bool,
+    follow_rename: Option<&FollowRename>,
+) -> String {
     let mut out = String::new();
+    if include_status && let Some(rename) = follow_rename {
+        out.push_str(&format!(
+            "R{}\t{}\t{}\n",
+            rename.score,
+            rename.from.display(),
+            rename.to.display()
+        ));
+        return out;
+    }
     for change in changes {
         if include_status {
             let status = match change.status {
@@ -1984,10 +2179,10 @@ mod tests {
             path: PathBuf::from("src/main.rs"),
             status: ChangeType::Added,
         }];
-        let with_status = format_changes(&changes, true);
+        let with_status = format_changes(&changes, true, None);
         assert!(with_status.contains("A\tsrc/main.rs"));
 
-        let names_only = format_changes(&changes, false);
+        let names_only = format_changes(&changes, false, None);
         assert!(names_only.contains("src/main.rs"));
         assert!(!names_only.contains("A\t"));
     }

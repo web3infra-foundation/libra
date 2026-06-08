@@ -13,6 +13,7 @@
 - `stash push` 已支持 `-m`、`-u` / `--include-untracked`、`-a` / `--all` 和 `--keep-index`。默认只保存 tracked index/worktree 修改，并保留 untracked 文件。
 - `stash push -u` / `--all` 会把被纳入的 untracked/ignored 文件写入第三个 stash parent；`stash apply` / `pop` 会把这些文件恢复为未跟踪工作区文件，并在会覆盖本地同名文件时拒绝执行。
 - `stash push --keep-index` 会保存普通 stash 元数据，然后恢复原 index，并把 worktree 还原到 index 内容；同一文件的 staged 内容保留，unstaged delta 进入 stash。
+- `stash show` 已支持 `--stat`、`-p` / `--patch`、`--name-only`、`--name-status`，并按 `-p > --stat > --name-status > --name-only` 解析多 flag；无显式模式时读取 `stash.showPatch` 和 `stash.showStat` 默认。
 - `STASH_EXAMPLES` 已通过 clap `after_help` 接入，包含 `-u`、`-a` 和 `--keep-index` 示例。
 - `docs/commands/stash.md`、`docs/commands/zh-CN/stash.md`、`COMPATIBILITY.md`、`docs/development/integration-test-plan.md` 和 `docs/development/integration-scenarios/*` 已记录当前公开面。
 - `tests/command/stash_test.rs` 已覆盖 push/pop/list/apply/drop/show/branch/clear、JSON 输出、错误码、仓库外调用、默认排除 untracked、`-u`/`--all` 纳入 untracked/ignored、`--keep-index`、untracked apply 恢复和碰撞拒绝。
@@ -28,6 +29,7 @@
 **已完成目标：**
 - typed error、显式错误码、run/render 分层、JSON / machine、`--help` EXAMPLES、命令文档和集成测试已全部落地
 - Batch 0：`stash push -u/-a/--keep-index`、第三 parent untracked 快照、apply/pop untracked 恢复、碰撞拒绝、black-box runner 覆盖已落地
+- Batch 2 show 子集：`stash show --stat`、`-p` / `--patch`、`stash.showPatch` / `stash.showStat` 配置默认和 human-mode 优先级已落地；JSON 继续保持结构化 `files` / `files_changed` schema，human-only mode hint 不外泄
 
 **后续维护目标：**
 - 继续维护冲突、空 stash、list schema 和 no-op 场景的回归测试

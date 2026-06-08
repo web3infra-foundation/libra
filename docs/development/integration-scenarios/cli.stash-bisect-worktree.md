@@ -1,6 +1,6 @@
 ### `cli.stash-bisect-worktree`
 
-目的：覆盖兼容性差异较大的 `stash`、`bisect`、`worktree` 命令面，重点验证状态保存/恢复、`stash push -u` / `-a` / `--all` / `--keep-index`、二分会话状态和 Libra worktree remove 默认保留目录的差异语义。
+目的：覆盖兼容性差异较大的 `stash`、`bisect`、`worktree` 命令面，重点验证状态保存/恢复、`stash push -u` / `-a` / `--all` / `--keep-index`、二分会话状态，以及 Libra worktree 的 shared-HEAD 差异语义、常用 Git 兼容 flags 和 remove 默认保留目录的安全边界。
 
 最小步骤：
 
@@ -89,20 +89,33 @@ libra bisect start "$BAD_COMMIT" --good "$GOOD_COMMIT"
 libra bisect skip
 libra bisect reset
 
-libra worktree add "$RUN_ROOT/repos/workflow-linked"
-libra worktree list
+libra worktree add -b workflow-linked "$RUN_ROOT/repos/workflow-linked"
+libra worktree list --verbose
+libra worktree list --porcelain
 libra worktree lock "$RUN_ROOT/repos/workflow-linked" --reason "integration smoke"
-libra worktree list
+libra worktree list --porcelain
 libra worktree unlock "$RUN_ROOT/repos/workflow-linked"
 libra worktree move "$RUN_ROOT/repos/workflow-linked" "$RUN_ROOT/repos/workflow-moved"
 libra worktree remove "$RUN_ROOT/repos/workflow-moved"
 test -d "$RUN_ROOT/repos/workflow-moved"
-libra worktree prune
 
-# Test worktree remove --delete-dir
-libra worktree add "$RUN_ROOT/repos/workflow-to-delete"
-libra worktree remove --delete-dir "$RUN_ROOT/repos/workflow-to-delete"
-test ! -d "$RUN_ROOT/repos/workflow-to-delete"
+# Test stale-entry pruning without deleting live worktrees
+libra worktree add "$RUN_ROOT/repos/workflow-stale"
+rm -rf "$RUN_ROOT/repos/workflow-stale"
+libra worktree prune --dry-run
+libra worktree prune --verbose --expire now
+
+# Test --no-checkout plus locked double-force unregister
+libra worktree add --no-checkout --lock --reason "integration no checkout" "$RUN_ROOT/repos/workflow-empty"
+test ! -e "$RUN_ROOT/repos/workflow-empty/tracked.txt"
+libra worktree remove -f -f "$RUN_ROOT/repos/workflow-empty"
+test -d "$RUN_ROOT/repos/workflow-empty"
+
+# Test worktree remove --delete-dir --force
+libra worktree add "$RUN_ROOT/repos/workflow-dirty-delete"
+printf 'dirty\n' > "$RUN_ROOT/repos/workflow-dirty-delete/dirty.txt"
+libra worktree remove --delete-dir --force "$RUN_ROOT/repos/workflow-dirty-delete"
+test ! -d "$RUN_ROOT/repos/workflow-dirty-delete"
 
 # Verify JSON outputs for AI Agent readability
 libra --json stash list >stash-list.json
@@ -120,12 +133,14 @@ cd "$RUN_DIR/workflow-repo"
 ! libra worktree remove "$RUN_ROOT/repos/no-such-worktree"
 ```
 
-断言：`stash push` 保存 tracked 修改并清理工作区；`stash list` / `stash show` 能观察 stash 条目；`stash apply` 保留 stash，`stash pop` 应用并删除 stash；`stash push -u` 保存/移除/恢复可见 untracked 文件；`stash push --all` 保存/移除/恢复可见 untracked 与 ignored 文件；`stash push --keep-index` 保留 staged 内容并移除 unstaged delta；`stash clear --force` 清空列表；`bisect start <bad> --good <good>` 建立会话，`view` / `log` 能观察状态，`bad` / `good <rev>` 推进会话，`reset` 恢复原始 HEAD；`worktree add` 注册 linked worktree，`list` 显示路径，`lock --reason` / `unlock` 更新锁状态，`move` 更新路径，`remove` 默认只注销登记且保留目录，`prune` 可执行；非法 stash ref、非法 revision 和缺失 worktree 必须失败且不破坏已有仓库状态。
+断言：`stash push` 保存 tracked 修改并清理工作区；`stash list` / `stash show` 能观察 stash 条目；`stash apply` 保留 stash，`stash pop` 应用并删除 stash；`stash push -u` 保存/移除/恢复可见 untracked 文件；`stash push --all` 保存/移除/恢复可见 untracked 与 ignored 文件；`stash push --keep-index` 保留 staged 内容并移除 unstaged delta；`stash clear --force` 清空列表；`bisect start <bad> --good <good>` 建立会话，`view` / `log` 能观察状态，`bad` / `good <rev>` 推进会话，`reset` 恢复原始 HEAD；`worktree add -b` 注册 linked worktree 并创建 shared branch，`list --verbose` 显示共享 HEAD 短 hash，`list --porcelain` 输出 `worktree` / `HEAD` / `locked` 记录且不输出 Git per-worktree `branch` / `detached` 行，`lock --reason` / `unlock` 更新锁状态，`move` 更新路径，`remove` 默认只注销登记且保留目录，`prune --dry-run` 不写 registry，`prune --expire now` 清理目录缺失条目，`add --no-checkout` 不恢复 tracked 文件，locked worktree 需要 `-f -f` 注销，`remove --delete-dir --force` 可删除 dirty linked worktree；非法 stash ref、非法 revision 和缺失 worktree 必须失败且不破坏已有仓库状态。
 
 补充可执行断言（故意差异重点场景）：
 - `libra worktree remove <path>` 后 `test -d <path>` 必须仍存在（Libra 故意保留目录，不像 Git 默认删除）。
+- `libra worktree list --porcelain` 必须包含 `worktree <path>` 和共享 `HEAD <hash>`，且不得包含 `branch` / `detached`（Libra 无 per-worktree HEAD）。
+- `libra worktree add --no-checkout <path>` 后 tracked fixture 不应被恢复。
 - `libra --json stash list` 验证 `ok:true` 且 `data.entries[]` 或 `data.stashes[]` 可解析。
 - 每次 stash/bisect/worktree 操作后 `libra fsck --connectivity-only` 必须 0 退出。
 - `worktree remove` 后的 `libra --json worktree list` 不再包含该 worktree。
 - 负向 `worktree remove` 不存在路径的错误必须非 0，stderr 包含路径。
-- 验证 `--delete-dir` 模式真正删除目录：`libra worktree remove --delete-dir <path> && test ! -d <path>`。
+- 验证 `--delete-dir --force` 模式真正删除 dirty 目录：`libra worktree remove --delete-dir --force <path> && test ! -d <path>`。

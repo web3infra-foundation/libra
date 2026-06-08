@@ -1,5 +1,7 @@
 //! Show command that resolves object IDs and prints commit, tree, blob, or ref details with formatting suitable for diffable objects.
 
+mod pretty;
+
 use std::{path::PathBuf, str::FromStr};
 
 use clap::Parser;
@@ -37,15 +39,17 @@ EXAMPLES:
     libra show HEAD                         Show the latest commit and patch
     libra show --no-patch v1.0.0            Show tag or commit metadata only
     libra show HEAD:src/main.rs             Show a file from a specific revision
-    libra show --stat HEAD~1                Show only diff statistics
+    libra show --pretty=fuller HEAD         Show commit metadata with fuller headers
+    libra show --format='%h %s' HEAD        Show a formatted commit summary
     libra show --name-status HEAD           Show changed files with A/M/D status
+    libra show HEAD HEAD~1 --no-patch       Show multiple commits in order
     libra --json show HEAD                  Structured JSON output for agents";
 
 const LARGE_BLOB_THRESHOLD_BYTES: usize = 10 * 1024 * 1024;
 const BINARY_DETECTION_SAMPLE_BYTES: usize = 8192;
 
 /// Shows commits, tags, trees, or blobs.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(after_help = SHOW_EXAMPLES)]
 pub struct ShowArgs {
     /// Object name (commit, tag, etc.) or `<object>:<path>`. Defaults to `HEAD`.
@@ -68,9 +72,21 @@ pub struct ShowArgs {
     #[clap(long = "name-status")]
     pub name_status: bool,
 
+    /// Show patch output explicitly.
+    #[clap(short = 'p', long = "patch")]
+    pub patch: bool,
+
     /// Show diff statistics.
     #[clap(long)]
     pub stat: bool,
+
+    /// Pretty-print commit headers with a supported preset.
+    #[clap(long = "pretty", value_name = "FORMAT")]
+    pub pretty: Option<String>,
+
+    /// Pretty-print commit headers with a limited placeholder template.
+    #[clap(long = "format", value_name = "FORMAT")]
+    pub format: Option<String>,
 
     /// Limit output to matching paths.
     #[clap(value_name = "PATHS", num_args = 0..)]
@@ -204,8 +220,12 @@ pub async fn execute_safe(args: ShowArgs, output: &OutputConfig) -> CliResult<()
     util::require_repo().map_err(|_| CliError::from(ShowError::NotInRepo))?;
 
     if output.is_json() {
-        let result = run_show(&args).await?;
-        return emit_json_data("show", &result, output);
+        let mut results = run_show_many(&args).await?;
+        if results.len() == 1 {
+            let result = results.remove(0);
+            return emit_json_data("show", &result, output);
+        }
+        return emit_json_data("show", &results, output);
     }
 
     if output.quiet {
@@ -223,6 +243,16 @@ pub async fn execute_safe(args: ShowArgs, output: &OutputConfig) -> CliResult<()
 }
 
 async fn render_show_human(args: &ShowArgs) -> CliResult<String> {
+    let selection = resolve_show_selection(args).await;
+    let mut rendered = String::new();
+    for object_ref in selection.objects {
+        let item_args = args_for_object(args, object_ref, &selection.pathspec);
+        rendered.push_str(&render_show_single(&item_args).await?);
+    }
+    Ok(rendered)
+}
+
+async fn render_show_single(args: &ShowArgs) -> CliResult<String> {
     let object_ref = args.object.as_deref().unwrap_or("HEAD");
 
     // Handle `<revision>:<path>` lookups before generic revision resolution.
@@ -260,6 +290,15 @@ async fn render_show_human(args: &ShowArgs) -> CliResult<String> {
 }
 
 async fn validate_show_quiet(args: &ShowArgs) -> CliResult<()> {
+    let selection = resolve_show_selection(args).await;
+    for object_ref in selection.objects {
+        let item_args = args_for_object(args, object_ref, &selection.pathspec);
+        validate_show_single(&item_args).await?;
+    }
+    Ok(())
+}
+
+async fn validate_show_single(args: &ShowArgs) -> CliResult<()> {
     let object_ref = args.object.as_deref().unwrap_or("HEAD");
 
     if let Some((rev, path)) = object_ref.split_once(':') {
@@ -287,6 +326,67 @@ async fn validate_show_quiet(args: &ShowArgs) -> CliResult<()> {
     }
 
     Err(show_bad_revision_error(object_ref))
+}
+
+struct ShowSelection {
+    objects: Vec<String>,
+    pathspec: Vec<String>,
+}
+
+async fn resolve_show_selection(args: &ShowArgs) -> ShowSelection {
+    let mut objects = Vec::new();
+    let mut pathspec = Vec::new();
+
+    if let Some(object) = &args.object {
+        objects.push(object.clone());
+    }
+
+    let mut collecting_pathspec = false;
+    for token in &args.pathspec {
+        if !collecting_pathspec && token_resolves_as_object(token).await {
+            objects.push(token.clone());
+        } else {
+            collecting_pathspec = true;
+            pathspec.push(token.clone());
+        }
+    }
+
+    if objects.is_empty() {
+        objects.push("HEAD".to_string());
+    }
+
+    ShowSelection { objects, pathspec }
+}
+
+async fn token_resolves_as_object(token: &str) -> bool {
+    if let Some((revision, path)) = token.split_once(':') {
+        return commit_file_exists(revision, path).await;
+    }
+
+    resolve_existing_object_hash(token).is_some() || util::get_commit_base(token).await.is_ok()
+}
+
+async fn commit_file_exists(revision: &str, file_path: &str) -> bool {
+    let Ok(commit_hash) = util::get_commit_base(revision).await else {
+        return false;
+    };
+    let Ok(commit) = load_object::<Commit>(&commit_hash) else {
+        return false;
+    };
+    let Ok(tree) = load_object::<Tree>(&commit.tree_id) else {
+        return false;
+    };
+    let target_path = PathBuf::from(file_path);
+    tree.get_plain_items()
+        .iter()
+        .any(|(path, _)| path == &target_path)
+}
+
+fn args_for_object(args: &ShowArgs, object: String, pathspec: &[String]) -> ShowArgs {
+    let mut item_args = args.clone();
+    item_args.object = Some(object);
+    item_args.pathspec = pathspec.to_vec();
+    item_args
 }
 
 /// Shows an object by hash after resolving its object type.
@@ -339,19 +439,13 @@ async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<Str
         load_object::<Commit>(commit_hash).map_err(|e| show_object_load_error(commit_hash, e))?;
 
     let mut output = String::new();
-    display_commit_info(&mut output, &commit, args);
+    output.push_str(&pretty::render_commit_header(&commit, args)?);
 
     // Render patch-style details when requested.
     if !args.no_patch {
         let paths: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
 
-        if args.stat {
-            // Show the summary view.
-            let diffstat = show_diffstat(&commit, paths.clone()).await?;
-            if !diffstat.is_empty() {
-                output.push_str(&diffstat);
-            }
-        } else if args.name_status {
+        if args.name_status {
             // Show changed file names prefixed by their status letter (A/M/D),
             // tab-separated, matching `git show --name-status`.
             let changed_files = get_changed_files_for_commit(&commit, &paths).await?;
@@ -374,6 +468,12 @@ async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<Str
                 for file in changed_files {
                     output.push_str(&format!("{}\n", file.path.display()));
                 }
+            }
+        } else if args.stat {
+            // Show the summary view.
+            let diffstat = show_diffstat(&commit, paths.clone()).await?;
+            if !diffstat.is_empty() {
+                output.push_str(&diffstat);
             }
         } else {
             // Show the full patch.
@@ -551,40 +651,6 @@ async fn validate_commit_file(rev: &str, file_path: &str) -> CliResult<()> {
     }
 }
 
-/// Renders the commit header using the selected format.
-fn display_commit_info(output: &mut String, commit: &Commit, args: &ShowArgs) {
-    if args.oneline {
-        // Oneline format prints the short hash and the first subject line.
-        let short_hash = &commit.id.to_string()[..7];
-        let (msg, _) = parse_commit_msg(&commit.message);
-        let first_line = msg.lines().next().unwrap_or("");
-        output.push_str(&format!("{} {}\n", short_hash.yellow(), first_line));
-    } else {
-        // Full format matches the default `show` header layout.
-        output.push_str(&format!(
-            "{} {}\n",
-            "commit".yellow(),
-            commit.id.to_string().yellow()
-        ));
-        output.push_str(&format!(
-            "Author: {} <{}>\n",
-            commit.author.name.trim(),
-            commit.author.email.trim()
-        ));
-
-        // Format the commit timestamp for display.
-        let date = chrono::DateTime::from_timestamp(commit.committer.timestamp as i64, 0)
-            .unwrap_or(chrono::DateTime::UNIX_EPOCH);
-        output.push_str(&format!("Date:   {}\n", date.to_rfc2822()));
-
-        // Print the commit message body.
-        let (msg, _) = parse_commit_msg(&commit.message);
-        for line in msg.lines() {
-            output.push_str(&format!("    {}\n", line));
-        }
-    }
-}
-
 /// Renders a simple diffstat summary.
 async fn show_diffstat(commit: &Commit, paths: Vec<PathBuf>) -> CliResult<String> {
     let changed_files = get_changed_files_for_commit(commit, &paths).await?;
@@ -690,6 +756,16 @@ async fn run_show(args: &ShowArgs) -> CliResult<ShowOutput> {
     }
 
     Err(show_bad_revision_error(object_ref))
+}
+
+async fn run_show_many(args: &ShowArgs) -> CliResult<Vec<ShowOutput>> {
+    let selection = resolve_show_selection(args).await;
+    let mut outputs = Vec::with_capacity(selection.objects.len());
+    for object_ref in selection.objects {
+        let item_args = args_for_object(args, object_ref, &selection.pathspec);
+        outputs.push(run_show(&item_args).await?);
+    }
+    Ok(outputs)
 }
 
 async fn collect_object_output(hash: &ObjectHash, paths: &[PathBuf]) -> CliResult<ShowOutput> {
@@ -1042,6 +1118,18 @@ mod tests {
         // `--stat` flag.
         let args = ShowArgs::try_parse_from(["show", "--stat"]).unwrap();
         assert!(args.stat);
+
+        // `-p` / `--patch` flag.
+        let args = ShowArgs::try_parse_from(["show", "-p"]).unwrap();
+        assert!(args.patch);
+
+        // `--pretty` preset.
+        let args = ShowArgs::try_parse_from(["show", "--pretty=fuller"]).unwrap();
+        assert_eq!(args.pretty.as_deref(), Some("fuller"));
+
+        // `--format` template.
+        let args = ShowArgs::try_parse_from(["show", "--format=%h: %s"]).unwrap();
+        assert_eq!(args.format.as_deref(), Some("%h: %s"));
 
         // `<revision>:<path>` syntax.
         let args = ShowArgs::try_parse_from(["show", "HEAD:test.txt"]).unwrap();

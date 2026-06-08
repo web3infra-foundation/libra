@@ -215,6 +215,21 @@ libra log -G 'TODO\(.*\)'          # commits that touch a line matching the rege
 libra log -S api_token -- src/     # scope the search to a path
 ```
 
+### `--follow`
+
+Follow a single file's history across renames. `--follow` requires exactly one file
+pathspec; multiple pathspecs or a missing path fail with `LBR-CLI-002` (exit 129).
+Rename detection uses the same 50% line-similarity threshold as Libra's rename-aware
+diff and merge paths. In human `--name-status` output, a detected rename is rendered
+as `R<score>  old  new`; JSON output keeps the stable `added`/`modified`/`deleted`
+file status vocabulary.
+
+```bash
+libra log --follow renamed.txt
+libra log --follow --name-status renamed.txt
+libra --json log --follow renamed.txt
+```
+
 ### `--pretty <FORMAT>`
 
 Custom pretty-print format string. A bare template, `format:<template>`, and
@@ -300,6 +315,7 @@ libra log -n 5
 libra log --oneline --graph
 libra log --author alice --since 2026-01-01
 libra log --name-status src/
+libra log --follow renamed.txt
 libra --json log -n 1
 ```
 

@@ -2814,34 +2814,42 @@ mod test {
         use git_internal::hash::{HashKind, set_hash_kind_for_test};
         let _guard = set_hash_kind_for_test(HashKind::Sha256);
 
-        let cases: &[(&str, &str)] = &[
-            ("a\nb\nc\n", "a\nB\nc\nd\n"),
+        let cases: &[(Option<&str>, Option<&str>)] = &[
+            (Some("a\nb\nc\n"), Some("a\nB\nc\nd\n")),
             (
-                "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\n",
-                "l1\nl2\nl3\nl4\nL5\nl6\nl7\nl8\nl9\n",
+                Some("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\n"),
+                Some("l1\nl2\nl3\nl4\nL5\nl6\nl7\nl8\nl9\n"),
             ),
-            ("", "x\ny\n"),
-            ("x\ny\n", ""),
+            (None, Some("x\ny\n")),
+            (Some("x\ny\n"), None),
             (
-                "one\ntwo\nthree\nfour\nfive\n",
-                "one\nthree\nfour\nfive\nsix\n",
+                Some("one\ntwo\nthree\nfour\nfive\n"),
+                Some("one\nthree\nfour\nfive\nsix\n"),
             ),
-            ("trailing\nno newline", "trailing\nno newline!"),
+            (Some("trailing\nno newline"), Some("trailing\nno newline!")),
         ];
         let file = PathBuf::from("f.txt");
         for (old, new) in cases {
-            let old_bytes = old.as_bytes().to_vec();
-            let new_bytes = new.as_bytes().to_vec();
-            let old_hash = calculate_object_hash(ObjectType::Blob, &old_bytes);
-            let new_hash = calculate_object_hash(ObjectType::Blob, &new_bytes);
+            let old_bytes = old.map(str::as_bytes).unwrap_or_default().to_vec();
+            let new_bytes = new.map(str::as_bytes).unwrap_or_default().to_vec();
+            let old_hash = old.map(|_| calculate_object_hash(ObjectType::Blob, &old_bytes));
+            let new_hash = new.map(|_| calculate_object_hash(ObjectType::Blob, &new_bytes));
 
             let mut old_map = HashMap::new();
             let mut new_map = HashMap::new();
-            old_map.insert(file.clone(), old_hash);
-            new_map.insert(file.clone(), new_hash);
+            if let Some(old_hash) = old_hash {
+                old_map.insert(file.clone(), old_hash);
+            }
+            if let Some(new_hash) = new_hash {
+                new_map.insert(file.clone(), new_hash);
+            }
             let mut store = HashMap::new();
-            store.insert(old_hash, old_bytes.clone());
-            store.insert(new_hash, new_bytes.clone());
+            if let Some(old_hash) = old_hash {
+                store.insert(old_hash, old_bytes.clone());
+            }
+            if let Some(new_hash) = new_hash {
+                store.insert(new_hash, new_bytes.clone());
+            }
             let reader = |_: &PathBuf, h: &ObjectHash| -> Vec<u8> {
                 store.get(h).cloned().unwrap_or_default()
             };
@@ -2849,8 +2857,8 @@ mod test {
             let git_internal_out = Diff::diff_for_file_string(&file, &old_map, &new_map, &reader);
             let native_out = native_diff_for_file(
                 file.as_path(),
-                Some(&old_hash),
-                Some(&new_hash),
+                old_hash.as_ref(),
+                new_hash.as_ref(),
                 &old_bytes,
                 &new_bytes,
                 DEFAULT_CONTEXT,

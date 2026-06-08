@@ -560,6 +560,8 @@ async fn reset_hard(target: &str, output: &OutputConfig) -> Result<(), CherryPic
             soft: false,
             mixed: false,
             hard: true,
+            merge: false,
+            keep: false,
             pathspecs: Vec::new(),
             pathspec_from_file: None,
             pathspec_file_nul: false,
@@ -1186,6 +1188,7 @@ async fn create_cherry_pick_commit(
         old_oid: parent_id.to_string(),
         new_oid: commit.id.to_string(),
         action,
+        message: None,
     };
 
     with_reflog(

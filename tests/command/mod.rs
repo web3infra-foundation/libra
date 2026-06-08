@@ -342,6 +342,7 @@ mod stash_test;
 mod status_error_test;
 mod status_json_test;
 mod status_test;
+mod status_wave0_test;
 mod switch_error_test;
 mod switch_json_test;
 mod switch_test;
