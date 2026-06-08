@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     command::verify_pack,
     internal::{
-        config::ConfigKv,
+        config::{ConfigKv, LocalIdentityTarget, read_cascaded_config_value_decrypted},
         db::get_db_conn_instance,
         model::{object_index, reference, reflog},
         reflog::{
@@ -1627,14 +1627,9 @@ async fn current_repo_id<C: ConnectionTrait>(db: &C) -> CliResult<String> {
 }
 
 /// Return whether cloud backup is configured for this repository.
-async fn cloud_backup_enabled<C: ConnectionTrait>(db: &C) -> CliResult<bool> {
-    if let Some(storage_type) = config_value(db, "vault.env.LIBRA_STORAGE_TYPE").await?
-        && matches!(storage_type.trim(), "s3" | "r2")
-    {
-        return Ok(true);
-    }
+async fn cloud_backup_enabled<C: ConnectionTrait>(_db: &C) -> CliResult<bool> {
     if matches!(
-        std::env::var("LIBRA_STORAGE_TYPE").ok().as_deref(),
+        cloud_env_value("LIBRA_STORAGE_TYPE").await?.as_deref(),
         Some("s3" | "r2")
     ) {
         return Ok(true);
@@ -1648,42 +1643,39 @@ async fn cloud_backup_enabled<C: ConnectionTrait>(db: &C) -> CliResult<bool> {
         "LIBRA_STORAGE_ACCESS_KEY",
         "LIBRA_STORAGE_SECRET_KEY",
     ] {
-        let env_present = std::env::var(key)
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false);
-        let config_present = config_value(db, &format!("vault.env.{key}"))
-            .await?
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false);
-        if env_present || config_present {
+        if cloud_env_value(key).await?.is_some() {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-/// Read a config value from the current repository database when present.
-async fn config_value<C: ConnectionTrait>(db: &C, key: &str) -> CliResult<Option<String>> {
-    if !table_exists(db, "config_kv").await? {
-        return Ok(None);
+/// Resolve a cloud-related env value using storage's env/local/global cascade.
+async fn cloud_env_value(name: &str) -> CliResult<Option<String>> {
+    if let Ok(value) = std::env::var(name) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Ok(Some(trimmed.to_string()));
+        }
     }
-    let row = db
-        .query_one(Statement::from_sql_and_values(
-            DbBackend::Sqlite,
-            "SELECT value FROM config_kv WHERE key = ? LIMIT 1",
-            [key.into()],
-        ))
-        .await
-        .map_err(|error| {
-            CliError::fatal(format!("failed to read config value '{key}': {error}"))
-                .with_stable_code(StableErrorCode::IoReadFailed)
-        })?;
-    row.map(|row| row.try_get_by_index(0))
-        .transpose()
-        .map_err(|error| {
-            CliError::fatal(format!("failed to decode config value '{key}': {error}"))
-                .with_stable_code(StableErrorCode::IoReadFailed)
+
+    read_cascaded_config_value_decrypted(
+        LocalIdentityTarget::CurrentRepo,
+        &format!("vault.env.{name}"),
+    )
+    .await
+    .map(|value| {
+        value.and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
         })
+    })
+    .map_err(|error| {
+        CliError::fatal(format!(
+            "failed to resolve cloud backup config '{name}': {error:#}"
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })
 }
 
 /// Load unsynced cloud index rows that should be retained until uploaded.
@@ -4706,6 +4698,8 @@ mod tests {
         let _endpoint = test::ScopedEnvVar::set("LIBRA_STORAGE_ENDPOINT", "");
         let _access = test::ScopedEnvVar::set("LIBRA_STORAGE_ACCESS_KEY", "");
         let _secret = test::ScopedEnvVar::set("LIBRA_STORAGE_SECRET_KEY", "");
+        let _global_config =
+            test::ScopedEnvVar::set("LIBRA_CONFIG_GLOBAL_DB", repo.path().join("global.db"));
         ConfigKv::set("libra.repoid", "repo-a", false)
             .await
             .unwrap();
@@ -4723,6 +4717,48 @@ mod tests {
         let protected = object_index_prune_protections(&db).await.unwrap();
 
         assert!(protected.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers global vault cloud settings retaining unsynced object-index rows.
+    async fn object_index_protections_read_global_cloud_config() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let _storage_type = test::ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "");
+        let _d1_account = test::ScopedEnvVar::set("LIBRA_D1_ACCOUNT_ID", "");
+        let _d1_token = test::ScopedEnvVar::set("LIBRA_D1_API_TOKEN", "");
+        let _d1_database = test::ScopedEnvVar::set("LIBRA_D1_DATABASE_ID", "");
+        let _endpoint = test::ScopedEnvVar::set("LIBRA_STORAGE_ENDPOINT", "");
+        let _access = test::ScopedEnvVar::set("LIBRA_STORAGE_ACCESS_KEY", "");
+        let _secret = test::ScopedEnvVar::set("LIBRA_STORAGE_SECRET_KEY", "");
+        let global_db_path = repo.path().join("global-config.db");
+        let _global_config = test::ScopedEnvVar::set("LIBRA_CONFIG_GLOBAL_DB", &global_db_path);
+        let global_db =
+            crate::internal::db::create_database(global_db_path.to_string_lossy().as_ref())
+                .await
+                .unwrap();
+        ConfigKv::set_with_conn(&global_db, "vault.env.LIBRA_STORAGE_TYPE", "r2", false)
+            .await
+            .unwrap();
+        ConfigKv::set("libra.repoid", "repo-a", false)
+            .await
+            .unwrap();
+        let db = get_db_conn_instance().await;
+        let unsynced = test_hash(58);
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO object_index (o_id, o_type, o_size, repo_id, created_at, is_synced) \
+             VALUES (?, 'blob', 1, 'repo-a', 1, 0)",
+            [unsynced.to_string().into()],
+        ))
+        .await
+        .unwrap();
+
+        let protected = object_index_prune_protections(&db).await.unwrap();
+
+        assert!(protected.contains(&unsynced));
     }
 
     #[tokio::test]
