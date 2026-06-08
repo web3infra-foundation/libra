@@ -243,6 +243,31 @@ fn tar_entry_type(mode: &TreeItemMode) -> tar::EntryType {
     }
 }
 
+/// Apply symlink-specific tar header fields and finalize their checksum.
+fn configure_tar_symlink_header(
+    header: &mut tar::Header,
+    archive_path: &Path,
+    data: Vec<u8>,
+) -> Result<(), CliError> {
+    let link_target = String::from_utf8(data).map_err(|error| {
+        CliError::fatal(format!(
+            "symlink target for '{}' is not valid UTF-8: {error}",
+            archive_path.display()
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    header.set_link_name(&link_target).map_err(|error| {
+        CliError::fatal(format!(
+            "invalid symlink target for '{}': {error}",
+            archive_path.display()
+        ))
+        .with_stable_code(StableErrorCode::IoWriteFailed)
+    })?;
+    header.set_size(0);
+    header.set_cksum();
+    Ok(())
+}
+
 /// Write a tar archive of the given entries to `writer`.
 fn write_tar_archive<W: Write>(
     entries: &[ArchiveEntry],
@@ -272,21 +297,7 @@ fn write_tar_archive<W: Write>(
         header.set_cksum();
 
         if entry_type == tar::EntryType::Symlink {
-            let link_target = String::from_utf8(data).map_err(|error| {
-                CliError::fatal(format!(
-                    "symlink target for '{}' is not valid UTF-8: {error}",
-                    archive_path.display()
-                ))
-                .with_stable_code(StableErrorCode::RepoCorrupt)
-            })?;
-            header.set_link_name(&link_target).map_err(|error| {
-                CliError::fatal(format!(
-                    "invalid symlink target for '{}': {error}",
-                    archive_path.display()
-                ))
-                .with_stable_code(StableErrorCode::IoWriteFailed)
-            })?;
-            header.set_size(0);
+            configure_tar_symlink_header(&mut header, &archive_path, data)?;
             builder.append(&header, std::io::empty()).map_err(|error| {
                 CliError::fatal(format!(
                     "failed to write symlink '{}': {error}",
@@ -660,6 +671,48 @@ mod tests {
         write_tar_archive(&[], None, &mut buf).expect("empty tar should finalize");
 
         assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn configure_tar_symlink_header_recomputes_readable_checksum() {
+        let mut header = tar::Header::new_gnu();
+        header
+            .set_path("readme-link")
+            .expect("valid symlink test path");
+        header.set_size("README.md".len() as u64);
+        header.set_mode(tar_entry_mode(&TreeItemMode::Link));
+        header.set_mtime(0);
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_cksum();
+
+        configure_tar_symlink_header(&mut header, Path::new("readme-link"), b"README.md".to_vec())
+            .expect("configure symlink header");
+
+        let mut buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut buf);
+            builder
+                .append(&header, std::io::empty())
+                .expect("append symlink header");
+            builder.finish().expect("finish symlink tar");
+        }
+
+        let mut archive = tar::Archive::new(buf.as_slice());
+        let mut entries = archive.entries().expect("read symlink tar entries");
+        let entry = entries
+            .next()
+            .expect("symlink tar should contain one entry")
+            .expect("parse symlink tar entry");
+
+        assert_eq!(entry.header().entry_type(), tar::EntryType::Symlink);
+        assert_eq!(
+            entry
+                .link_name()
+                .expect("read symlink target")
+                .expect("symlink target should be present"),
+            Path::new("README.md")
+        );
+        assert!(entries.next().is_none());
     }
 
     #[test]
