@@ -76,6 +76,13 @@ libra show-ref --heads
 libra pull --ff-only origin main
 grep 'second' README.md
 
+# advanced fetch flags for improvement plan maintenance (prune, porcelain, dry-run, --tags --force)
+libra fetch --prune origin
+libra fetch --porcelain origin main
+libra fetch --dry-run origin main
+libra fetch --tags --force origin
+# (asserts in runner for coverage of --prune/--porcelain/dry-run/tags per plan "继续维护" regression)
+
 cd "$RUN_ROOT/repos/$SCENARIO"
 libra clone "$REMOTE_DIR" pull-squash-clone
 cd pull-squash-clone

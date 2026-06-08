@@ -291,6 +291,13 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
     assert_stdout_contains(&fetched_tags, "refs/tags/v2.0.0")?;
     ctx.command(&["fetch", "--all"], clone_dir.clone(), true)?;
     ctx.command(&["show-ref", "--heads"], clone_dir.clone(), true)?;
+
+    // advanced fetch flags for plan maintenance (prune/porcelain/dry-run/tags per "继续维护" in improvement/fetch.md)
+    ctx.command(&["fetch", "--prune", "origin"], clone_dir.clone(), true)?;
+    let porcelain = ctx.command(&["fetch", "--porcelain", "origin", "main"], clone_dir.clone(), true)?;
+    assert_stdout_contains(&porcelain, "From ") ?;
+    ctx.command(&["fetch", "--dry-run", "origin", "main"], clone_dir.clone(), true)?;
+    ctx.command(&["fetch", "--tags", "--force", "origin"], clone_dir.clone(), true)?;
     ctx.command(
         &["pull", "--ff-only", "origin", "main"],
         clone_dir.clone(),
