@@ -33,16 +33,14 @@ EXAMPLES:
     libra open https://github.com/web3infra-foundation/libra    Open a direct URL
     libra open --json                                     Structured JSON output for agents (no browser)
     libra open --print-only                               Print the resolved URL without opening the browser
-    libra open origin --print-only                        Print a specific remote's URL without opening the browser";
-
-#[derive(Parser, Debug, Clone, Default)]
+    libra open origin --print-only                        Print a specific remote's URL without opening the browser
     libra open -b main origin                            Open a branch page (/tree/main)
     libra open -c a1b2c3d origin                         Open a commit page
     libra open --issue=42 origin                         Open issue #42 (use --issue alone for the list)
     libra open --pr=7 origin                             Open pull request #7 (use --pr alone for the list)
     libra open --json                                    Structured JSON output for agents (no browser)";
 
-#[derive(Parser, Debug, Default)]
+#[derive(Parser, Debug, Clone, Default)]
 #[command(after_help = OPEN_EXAMPLES)]
 pub struct OpenArgs {
     /// Remote name (e.g. `origin`) or a direct URL. Omit to auto-detect from the current branch's upstream
@@ -279,7 +277,6 @@ pub async fn execute(args: OpenArgs) {
 /// deep-linked) web URL, and opens it in the default browser.
 pub async fn execute_safe(args: OpenArgs, output: &OutputConfig) -> CliResult<()> {
     let in_repo = require_repo().is_ok();
-    let resolution = resolve_open_target(args.clone(), in_repo)
 
     // Parse and whitelist-sanitise the deep-link target up front so malicious
     // ref components are rejected before any URL assembly.
