@@ -249,14 +249,7 @@ fn configure_tar_symlink_header(
     archive_path: &Path,
     data: Vec<u8>,
 ) -> Result<(), CliError> {
-    let link_target = String::from_utf8(data).map_err(|error| {
-        CliError::fatal(format!(
-            "symlink target for '{}' is not valid UTF-8: {error}",
-            archive_path.display()
-        ))
-        .with_stable_code(StableErrorCode::RepoCorrupt)
-    })?;
-    header.set_link_name(&link_target).map_err(|error| {
+    header.set_link_name_literal(&data).map_err(|error| {
         CliError::fatal(format!(
             "invalid symlink target for '{}': {error}",
             archive_path.display()
@@ -379,22 +372,23 @@ fn write_zip_archive<W: Write + Seek>(
         let data = load_blob_content(&entry.hash)?;
 
         if entry.mode == TreeItemMode::Link {
-            let link_target = String::from_utf8(data).map_err(|error| {
+            let symlink_options = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .unix_permissions(0o120777);
+            archive.start_file(path, symlink_options).map_err(|error| {
                 CliError::fatal(format!(
-                    "symlink target for '{}' is not valid UTF-8: {error}",
+                    "failed to add symlink '{}': {error}",
                     archive_path.display()
                 ))
-                .with_stable_code(StableErrorCode::RepoCorrupt)
+                .with_stable_code(StableErrorCode::IoWriteFailed)
             })?;
-            archive
-                .add_symlink(path, link_target, options)
-                .map_err(|error| {
-                    CliError::fatal(format!(
-                        "failed to add symlink '{}': {error}",
-                        archive_path.display()
-                    ))
-                    .with_stable_code(StableErrorCode::IoWriteFailed)
-                })?;
+            archive.write_all(&data).map_err(|error| {
+                CliError::fatal(format!(
+                    "failed to write symlink target '{}': {error}",
+                    archive_path.display()
+                ))
+                .with_stable_code(StableErrorCode::IoWriteFailed)
+            })?;
             continue;
         }
 
@@ -707,12 +701,33 @@ mod tests {
         assert_eq!(entry.header().entry_type(), tar::EntryType::Symlink);
         assert_eq!(
             entry
-                .link_name()
+                .link_name_bytes()
                 .expect("read symlink target")
-                .expect("symlink target should be present"),
-            Path::new("README.md")
+                .as_ref(),
+            b"README.md"
         );
         assert!(entries.next().is_none());
+    }
+
+    #[test]
+    fn configure_tar_symlink_header_preserves_non_utf8_target_bytes() {
+        let mut header = tar::Header::new_gnu();
+        header
+            .set_path("link")
+            .expect("valid non-utf8 symlink test path");
+        header.set_size(2);
+        header.set_mode(tar_entry_mode(&TreeItemMode::Link));
+        header.set_mtime(0);
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_cksum();
+
+        configure_tar_symlink_header(&mut header, Path::new("link"), vec![0xff, b'x'])
+            .expect("configure non-utf8 symlink header");
+
+        assert_eq!(
+            header.link_name_bytes().expect("link bytes").as_ref(),
+            &[0xff, b'x']
+        );
     }
 
     #[test]
