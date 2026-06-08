@@ -1076,7 +1076,10 @@ async fn build_cherry_pick_message(
     args: &CherryPickArgs,
     output: &OutputConfig,
 ) -> Result<String, CherryPickSingleError> {
-    let mut message = original_commit.message.trim().to_string();
+    let mut message = crate::common_utils::parse_commit_msg(&original_commit.message)
+        .0
+        .trim()
+        .to_string();
 
     // Trailer block: `-x` line first, `Signed-off-by` last (matches Git).
     let mut trailers: Vec<String> = Vec::new();
