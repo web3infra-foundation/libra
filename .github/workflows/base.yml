@@ -124,6 +124,13 @@ jobs:
       LIBRA_SKIP_WEB_BUILD: "1"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_BUILD_JOBS: "1"
+      # The production CLI runs on a 32 MiB worker-thread stack (see
+      # `src/main.rs::CLI_STACK_SIZE`) because the smart-protocol/object code
+      # paths use deep call chains. Tests exercise the same paths on the default
+      # ~2 MiB harness/tokio thread stack, so borderline async tests can overflow
+      # on some targets (observed: `command::tag::tests::*` on x86_64 Linux).
+      # Align the test thread stack with production to remove that class of flake.
+      RUST_MIN_STACK: "33554432"
 
     steps:
       - name: Checkout repository
