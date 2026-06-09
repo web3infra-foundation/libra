@@ -9,13 +9,15 @@ use std::{
 };
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use git_internal::{
     hash::ObjectHash,
     internal::object::{
+        ObjectTrait,
         blob::Blob,
         commit::Commit,
         tree::{Tree, TreeItem, TreeItemMode},
+        types::ObjectType,
     },
 };
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait, Value};
@@ -23,10 +25,11 @@ use serde::Serialize;
 
 use crate::{
     cli_error,
-    command::{load_object, save_object, status},
-    common_utils::parse_commit_msg,
+    command::{commit, load_object, merge, merge_base, save_object, stash, status, switch},
+    common_utils::{format_commit_msg, parse_commit_msg},
     internal::{
         branch::Branch,
+        config::{LocalIdentityTarget, read_cascaded_config_value},
         db::get_db_conn_instance,
         head::Head,
         reflog,
@@ -40,6 +43,55 @@ use crate::{
         path, util, worktree,
     },
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EmptyMode {
+    Drop,
+    Keep,
+    Stop,
+}
+
+impl EmptyMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            EmptyMode::Drop => "drop",
+            EmptyMode::Keep => "keep",
+            EmptyMode::Stop => "stop",
+        }
+    }
+
+    fn from_db(value: &str) -> Self {
+        match value {
+            "keep" => EmptyMode::Keep,
+            "stop" => EmptyMode::Stop,
+            _ => EmptyMode::Drop,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RebaseRuntimeOptions {
+    pub autosquash: bool,
+    pub reapply_cherry_picks: bool,
+    pub keep_empty: bool,
+    pub empty_mode: EmptyMode,
+    pub signoff: bool,
+    pub gpg_sign: bool,
+}
+
+impl Default for RebaseRuntimeOptions {
+    fn default() -> Self {
+        Self {
+            autosquash: false,
+            reapply_cherry_picks: false,
+            keep_empty: true,
+            empty_mode: EmptyMode::Drop,
+            signoff: false,
+            gpg_sign: false,
+        }
+    }
+}
 
 /// Rebase state stored in the repo database
 #[derive(Debug, Clone)]
@@ -58,6 +110,8 @@ pub struct RebaseState {
     pub stopped_sha: Option<ObjectHash>,
     /// Current new base (HEAD of rebased commits so far)
     pub current_head: ObjectHash,
+    pub autostash_ref: Option<String>,
+    pub options: RebaseRuntimeOptions,
 }
 
 impl RebaseState {
@@ -135,6 +189,7 @@ impl RebaseState {
         {
             let count: i64 = result.try_get_by_index(0).unwrap_or(0);
             if count > 0 {
+                Self::ensure_rebase_state_columns(db).await?;
                 return Ok(());
             }
         }
@@ -150,7 +205,14 @@ impl RebaseState {
                     `current_head` TEXT NOT NULL,
                     `todo`         TEXT NOT NULL,
                     `done`         TEXT NOT NULL,
-                    `stopped_sha`  TEXT
+                    `stopped_sha`  TEXT,
+                    `autostash_ref` TEXT,
+                    `autosquash` INTEGER NOT NULL DEFAULT 0,
+                    `reapply_cherry_picks` INTEGER NOT NULL DEFAULT 0,
+                    `keep_empty` INTEGER NOT NULL DEFAULT 1,
+                    `empty_mode` TEXT NOT NULL DEFAULT 'drop',
+                    `signoff` INTEGER NOT NULL DEFAULT 0,
+                    `gpg_sign` INTEGER NOT NULL DEFAULT 0
                 );
             "#
             .to_string(),
@@ -160,6 +222,53 @@ impl RebaseState {
             .await
             .map_err(|e| format!("failed to create rebase_state table: {e}"))?;
         Ok(())
+    }
+
+    async fn ensure_rebase_state_columns<C: ConnectionTrait>(db: &C) -> Result<(), String> {
+        for (column, definition) in [
+            ("autostash_ref", "TEXT"),
+            ("autosquash", "INTEGER NOT NULL DEFAULT 0"),
+            ("reapply_cherry_picks", "INTEGER NOT NULL DEFAULT 0"),
+            ("keep_empty", "INTEGER NOT NULL DEFAULT 1"),
+            ("empty_mode", "TEXT NOT NULL DEFAULT 'drop'"),
+            ("signoff", "INTEGER NOT NULL DEFAULT 0"),
+            ("gpg_sign", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if Self::rebase_state_has_column(db, column).await? {
+                continue;
+            }
+            let stmt = Statement::from_string(
+                DbBackend::Sqlite,
+                format!("ALTER TABLE rebase_state ADD COLUMN `{column}` {definition};"),
+            );
+            db.execute(stmt)
+                .await
+                .map_err(|e| format!("failed to add rebase_state.{column}: {e}"))?;
+        }
+        Ok(())
+    }
+
+    async fn rebase_state_has_column<C: ConnectionTrait>(
+        db: &C,
+        column: &str,
+    ) -> Result<bool, String> {
+        let stmt = Statement::from_string(
+            DbBackend::Sqlite,
+            "PRAGMA table_info(rebase_state)".to_string(),
+        );
+        let rows = db
+            .query_all(stmt)
+            .await
+            .map_err(|e| format!("failed to inspect rebase_state columns: {e}"))?;
+        for row in rows {
+            let name: String = row
+                .try_get_by("name")
+                .map_err(|e| format!("invalid rebase_state column metadata: {e}"))?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     async fn has_state_in_db<C: ConnectionTrait>(db: &C) -> Result<bool, String> {
@@ -178,7 +287,9 @@ impl RebaseState {
         let stmt = Statement::from_string(
             DbBackend::Sqlite,
             r#"
-                SELECT head_name, onto, orig_head, current_head, todo, done, stopped_sha
+                SELECT head_name, onto, orig_head, current_head, todo, done, stopped_sha,
+                       autostash_ref, autosquash, reapply_cherry_picks, keep_empty,
+                       empty_mode, signoff, gpg_sign
                 FROM rebase_state
                 LIMIT 1
             "#
@@ -213,6 +324,27 @@ impl RebaseState {
         let stopped_str: Option<String> = row
             .try_get_by_index(6)
             .map_err(|e| format!("invalid stopped_sha: {e}"))?;
+        let autostash_ref: Option<String> = row
+            .try_get_by_index(7)
+            .map_err(|e| format!("invalid autostash_ref: {e}"))?;
+        let autosquash: i64 = row
+            .try_get_by_index(8)
+            .map_err(|e| format!("invalid autosquash: {e}"))?;
+        let reapply_cherry_picks: i64 = row
+            .try_get_by_index(9)
+            .map_err(|e| format!("invalid reapply_cherry_picks: {e}"))?;
+        let keep_empty: i64 = row
+            .try_get_by_index(10)
+            .map_err(|e| format!("invalid keep_empty: {e}"))?;
+        let empty_mode_raw: String = row
+            .try_get_by_index(11)
+            .map_err(|e| format!("invalid empty_mode: {e}"))?;
+        let signoff: i64 = row
+            .try_get_by_index(12)
+            .map_err(|e| format!("invalid signoff: {e}"))?;
+        let gpg_sign: i64 = row
+            .try_get_by_index(13)
+            .map_err(|e| format!("invalid gpg_sign: {e}"))?;
 
         let onto =
             ObjectHash::from_str(onto_str.trim()).map_err(|e| format!("Invalid onto hash: {e}"))?;
@@ -238,6 +370,15 @@ impl RebaseState {
             done,
             stopped_sha,
             current_head,
+            autostash_ref,
+            options: RebaseRuntimeOptions {
+                autosquash: autosquash != 0,
+                reapply_cherry_picks: reapply_cherry_picks != 0,
+                keep_empty: keep_empty != 0,
+                empty_mode: EmptyMode::from_db(empty_mode_raw.trim()),
+                signoff: signoff != 0,
+                gpg_sign: gpg_sign != 0,
+            },
         }))
     }
 
@@ -254,13 +395,19 @@ impl RebaseState {
             Some(sha) => sha.to_string().into(),
             None => Value::String(None),
         };
+        let autostash_value = match &state.autostash_ref {
+            Some(stash) => stash.clone().into(),
+            None => Value::String(None),
+        };
 
         let insert_stmt = Statement::from_sql_and_values(
             DbBackend::Sqlite,
             r#"
                 INSERT INTO rebase_state
-                (head_name, onto, orig_head, current_head, todo, done, stopped_sha)
-                VALUES (?, ?, ?, ?, ?, ?, ?);
+                (head_name, onto, orig_head, current_head, todo, done, stopped_sha,
+                 autostash_ref, autosquash, reapply_cherry_picks, keep_empty,
+                 empty_mode, signoff, gpg_sign)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             "#,
             [
                 state.head_name.clone().into(),
@@ -270,6 +417,13 @@ impl RebaseState {
                 todo.into(),
                 done.into(),
                 stopped_value,
+                autostash_value,
+                (state.options.autosquash as i64).into(),
+                (state.options.reapply_cherry_picks as i64).into(),
+                (state.options.keep_empty as i64).into(),
+                state.options.empty_mode.as_str().to_string().into(),
+                (state.options.signoff as i64).into(),
+                (state.options.gpg_sign as i64).into(),
             ],
         );
 
@@ -356,6 +510,8 @@ impl RebaseState {
             done,
             stopped_sha,
             current_head,
+            autostash_ref: None,
+            options: RebaseRuntimeOptions::default(),
         })
     }
 
@@ -392,6 +548,7 @@ impl RebaseState {
 pub enum ReplayResult {
     /// Commit was successfully replayed; contains the new commit hash.
     Success(ObjectHash),
+    DroppedEmpty,
     /// A user-visible merge conflict was hit while replaying the commit.
     ///
     /// - `paths` lists files left in a conflicted state and waiting for manual resolution.
@@ -507,30 +664,177 @@ impl ReplayResult {
 pub const REBASE_EXAMPLES: &str = "\
 EXAMPLES:
     libra rebase main             Replay current branch on top of main
+    libra rebase --onto next main topic
+                                  Replay topic's main..topic commits onto next
+    libra rebase --root --onto main
+                                  Replay the entire branch history onto main
+    libra rebase --autostash main Stash dirty work before replay and restore it afterward
+    libra rebase --autosquash main
+                                  Fold fixup!/squash! commits without opening an editor
+    libra rebase --empty=keep main
+                                  Keep commits that become empty after replay
+    libra rebase --signoff main   Add Signed-off-by trailers to replayed commits
+    libra rebase -S main          Vault-sign replayed commits
     libra rebase --continue       Resume an in-progress rebase after fixing conflicts
     libra rebase --skip           Drop the current conflicting commit and continue
     libra rebase --abort          Restore the original branch and clear rebase state
     libra rebase --json main      Structured JSON output for agents";
 
 /// Command-line arguments for the rebase operation
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Default)]
 #[command(after_help = REBASE_EXAMPLES)]
 pub struct RebaseArgs {
     /// The upstream branch to rebase the current branch onto.
     /// This can be a branch name, commit hash, or other Git reference.
-    #[clap(required_unless_present_any = ["continue_rebase", "abort", "skip"])]
+    #[clap(required_unless_present_any = ["continue_rebase", "abort", "skip", "root"])]
     pub upstream: Option<String>,
 
+    /// Optional branch to switch to before rebasing.
+    #[clap(conflicts_with_all = ["continue_rebase", "abort", "skip"])]
+    pub branch: Option<String>,
+
+    /// Replay commits onto this new base while using <upstream> only to define the range.
+    #[clap(long, value_name = "newbase", conflicts_with_all = ["continue_rebase", "abort", "skip"])]
+    pub onto: Option<String>,
+
+    /// Rebase all commits reachable from the root commit
+    #[clap(long, conflicts_with_all = ["continue_rebase", "abort", "skip"])]
+    pub root: bool,
+
+    /// Stash dirty work before rebasing and restore it after completion or abort
+    #[clap(long, conflicts_with = "no_autostash")]
+    pub autostash: bool,
+
+    /// Disable rebase.autoStash for this invocation
+    #[clap(long = "no-autostash", conflicts_with = "autostash")]
+    pub no_autostash: bool,
+
+    /// Move and fold fixup!/squash! commits automatically
+    #[clap(long, conflicts_with = "no_autosquash")]
+    pub autosquash: bool,
+
+    /// Disable rebase.autoSquash for this invocation
+    #[clap(long = "no-autosquash", conflicts_with = "autosquash")]
+    pub no_autosquash: bool,
+
+    /// Reapply commits even when an equivalent patch already exists upstream
+    #[clap(long, conflicts_with = "no_reapply_cherry_picks")]
+    pub reapply_cherry_picks: bool,
+
+    /// Skip commits whose patch already exists upstream
+    #[clap(
+        long = "no-reapply-cherry-picks",
+        conflicts_with = "reapply_cherry_picks"
+    )]
+    pub no_reapply_cherry_picks: bool,
+
+    /// Preserve commits that were already empty before replay
+    #[clap(long, conflicts_with = "no_keep_empty")]
+    pub keep_empty: bool,
+
+    /// Drop commits that were already empty before replay
+    #[clap(long = "no-keep-empty", conflicts_with = "keep_empty")]
+    pub no_keep_empty: bool,
+
+    /// Control commits that become empty after replay
+    #[clap(long, value_enum, value_name = "drop|keep|stop")]
+    pub empty: Option<EmptyMode>,
+
+    /// Add a Signed-off-by trailer to replayed commits
+    #[clap(short = 's', long = "signoff", conflicts_with = "no_signoff")]
+    pub signoff: bool,
+
+    /// Do not add a Signed-off-by trailer
+    #[clap(long = "no-signoff", conflicts_with = "signoff")]
+    pub no_signoff: bool,
+
+    /// GPG-sign replayed commits using the vault signing key
+    #[clap(short = 'S', long = "gpg-sign", conflicts_with = "no_gpg_sign")]
+    pub gpg_sign: bool,
+
+    /// Do not GPG-sign replayed commits
+    #[clap(long = "no-gpg-sign", conflicts_with = "gpg_sign")]
+    pub no_gpg_sign: bool,
+
     /// Continue an in-progress rebase after resolving conflicts
-    #[clap(long = "continue", conflicts_with_all = ["abort", "skip", "upstream"])]
+    #[clap(
+        long = "continue",
+        conflicts_with_all = [
+            "abort",
+            "skip",
+            "upstream",
+            "branch",
+            "onto",
+            "root",
+            "autostash",
+            "no_autostash",
+            "autosquash",
+            "no_autosquash",
+            "reapply_cherry_picks",
+            "no_reapply_cherry_picks",
+            "keep_empty",
+            "no_keep_empty",
+            "empty",
+            "signoff",
+            "no_signoff",
+            "gpg_sign",
+            "no_gpg_sign"
+        ]
+    )]
     pub continue_rebase: bool,
 
     /// Abort the current rebase and restore the original branch
-    #[clap(long, conflicts_with_all = ["continue_rebase", "skip", "upstream"])]
+    #[clap(
+        long,
+        conflicts_with_all = [
+            "continue_rebase",
+            "skip",
+            "upstream",
+            "branch",
+            "onto",
+            "root",
+            "autostash",
+            "no_autostash",
+            "autosquash",
+            "no_autosquash",
+            "reapply_cherry_picks",
+            "no_reapply_cherry_picks",
+            "keep_empty",
+            "no_keep_empty",
+            "empty",
+            "signoff",
+            "no_signoff",
+            "gpg_sign",
+            "no_gpg_sign"
+        ]
+    )]
     pub abort: bool,
 
     /// Skip the current commit and continue with the next
-    #[clap(long, conflicts_with_all = ["continue_rebase", "abort", "upstream"])]
+    #[clap(
+        long,
+        conflicts_with_all = [
+            "continue_rebase",
+            "abort",
+            "upstream",
+            "branch",
+            "onto",
+            "root",
+            "autostash",
+            "no_autostash",
+            "autosquash",
+            "no_autosquash",
+            "reapply_cherry_picks",
+            "no_reapply_cherry_picks",
+            "keep_empty",
+            "no_keep_empty",
+            "empty",
+            "signoff",
+            "no_signoff",
+            "gpg_sign",
+            "no_gpg_sign"
+        ]
+    )]
     pub skip: bool,
 }
 
@@ -560,6 +864,12 @@ struct RebaseOutput {
     skipped_subject: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     remaining: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    autostashed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    autosquashed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dropped_empty: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -572,6 +882,8 @@ struct RebaseAppliedCommitOutput {
 #[derive(Debug, Default)]
 struct RebaseReplaySummary {
     applied_commits: Vec<RebaseAppliedCommitOutput>,
+    autosquashed: usize,
+    dropped_empty: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -590,10 +902,18 @@ pub(crate) enum RebaseError {
     UpstreamResolve { upstream: String, detail: String },
     #[error("no common ancestor found")]
     NoCommonAncestor,
+    #[error("multiple best merge bases found ({bases}); criss-cross merge bases are unsupported")]
+    AmbiguousMergeBase { bases: String },
     #[error("failed to determine working tree status: {0}")]
     WorktreeStatus(String),
     #[error("{detail}, can't {action}")]
     WorktreeDirty { action: String, detail: String },
+    #[error("autostash failed: {0}")]
+    Autostash(String),
+    #[error("{0}")]
+    InvalidArguments(String),
+    #[error("failed to sign rebased commit: {0}")]
+    Sign(String),
     #[error("untracked working tree file would be overwritten by rebase: {path}")]
     UntrackedOverwrite { path: String },
     #[error("you must resolve all conflicts before continuing")]
@@ -656,12 +976,23 @@ impl From<RebaseError> for CliError {
                 CliError::fatal(error.to_string())
                     .with_stable_code(StableErrorCode::CliInvalidTarget)
             }
+            RebaseError::AmbiguousMergeBase { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                .with_hint("choose a history with a single best merge base before rebasing"),
             RebaseError::WorktreeStatus(..) => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
             }
             RebaseError::WorktreeDirty { .. } => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("commit or stash your changes before rebasing."),
+            RebaseError::Autostash(..) => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("inspect 'libra stash list' and recover the saved changes manually."),
+            RebaseError::InvalidArguments(..) => CliError::command_usage(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+            RebaseError::Sign(..) => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::AuthMissingCredentials)
+                .with_hint("configure the Libra vault signing key or retry without --gpg-sign."),
             RebaseError::UntrackedOverwrite { .. } => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::ConflictOperationBlocked)
                 .with_hint("move or remove it before you rebase."),
@@ -763,6 +1094,13 @@ pub async fn execute(args: RebaseArgs) {
 pub async fn execute_safe(args: RebaseArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
+    // Refuse to start a NEW rebase while a cherry-pick sequence is in progress
+    // (rebase's own --continue/--abort/--skip operate on rebase state, not
+    // cherry-pick, so they are exempt from this guard).
+    if !(args.continue_rebase || args.abort || args.skip) {
+        crate::command::cherry_pick::ensure_no_cherry_pick_in_progress().await?;
+    }
+
     // For --continue, --abort, --skip: verify that a rebase is actually in
     // progress before delegating to typed runners.  This ensures
     // a non-zero exit code (128) is returned when there is nothing to do,
@@ -806,11 +1144,155 @@ pub async fn execute_safe(args: RebaseArgs, output: &OutputConfig) -> CliResult<
         let result = run_rebase_skip().await.map_err(CliError::from)?;
         return render_rebase_output(&result, output);
     }
-    if let Some(upstream) = args.upstream.as_deref() {
-        let result = run_rebase_start(upstream).await.map_err(CliError::from)?;
+    if let Some(start) = resolve_rebase_start_request(&args)? {
+        if let Some(branch) = start.branch.as_deref() {
+            switch_to_rebase_branch(branch, output).await?;
+        }
+        let options = resolve_rebase_runtime_options(&args).await?;
+        let autostash = resolve_rebase_autostash(&args).await?;
+        let result = if start.root {
+            run_rebase_root_start(start.onto.as_deref(), options, autostash)
+                .await
+                .map_err(CliError::from)?
+        } else {
+            let upstream = start.upstream.as_deref().ok_or_else(|| {
+                CliError::command_usage("no upstream specified")
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+            })?;
+            run_rebase_start(upstream, start.onto.as_deref(), options, autostash)
+                .await
+                .map_err(CliError::from)?
+        };
         return render_rebase_output(&result, output);
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct RebaseStartRequest {
+    upstream: Option<String>,
+    branch: Option<String>,
+    onto: Option<String>,
+    root: bool,
+}
+
+fn resolve_rebase_start_request(args: &RebaseArgs) -> CliResult<Option<RebaseStartRequest>> {
+    if args.continue_rebase || args.abort || args.skip {
+        return Ok(None);
+    }
+    if args.root {
+        if args.branch.is_some() {
+            return Err(CliError::command_usage(
+                "rebase --root accepts at most one optional branch positional",
+            )
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+        }
+        return Ok(Some(RebaseStartRequest {
+            upstream: None,
+            branch: args.upstream.clone(),
+            onto: args.onto.clone(),
+            root: true,
+        }));
+    }
+    Ok(Some(RebaseStartRequest {
+        upstream: args.upstream.clone(),
+        branch: args.branch.clone(),
+        onto: args.onto.clone(),
+        root: false,
+    }))
+}
+
+async fn resolve_rebase_runtime_options(args: &RebaseArgs) -> CliResult<RebaseRuntimeOptions> {
+    let autosquash = resolve_bool_flag_config(
+        args.autosquash,
+        args.no_autosquash,
+        &["rebase.autoSquash", "rebase.autosquash"],
+        false,
+    )
+    .await;
+    let keep_empty = resolve_bool_flag_config(
+        args.keep_empty,
+        args.no_keep_empty,
+        &["rebase.keepEmpty", "rebase.keepempty"],
+        true,
+    )
+    .await;
+    let empty_mode = match args.empty {
+        Some(mode) => mode,
+        None => read_first_rebase_config(&["rebase.empty"])
+            .await
+            .as_deref()
+            .map(EmptyMode::from_db)
+            .unwrap_or(EmptyMode::Drop),
+    };
+    Ok(RebaseRuntimeOptions {
+        autosquash,
+        reapply_cherry_picks: args.reapply_cherry_picks && !args.no_reapply_cherry_picks,
+        keep_empty,
+        empty_mode,
+        signoff: args.signoff && !args.no_signoff,
+        gpg_sign: args.gpg_sign && !args.no_gpg_sign,
+    })
+}
+
+async fn resolve_rebase_autostash(args: &RebaseArgs) -> CliResult<bool> {
+    Ok(resolve_bool_flag_config(
+        args.autostash,
+        args.no_autostash,
+        &["rebase.autoStash", "rebase.autostash"],
+        false,
+    )
+    .await)
+}
+
+async fn resolve_bool_flag_config(
+    positive: bool,
+    negative: bool,
+    keys: &[&str],
+    default: bool,
+) -> bool {
+    if negative {
+        return false;
+    }
+    if positive {
+        return true;
+    }
+    read_first_rebase_config(keys)
+        .await
+        .as_deref()
+        .map(parse_config_bool)
+        .unwrap_or(default)
+}
+
+async fn read_first_rebase_config(keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Ok(Some(value)) =
+            read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, key).await
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn parse_config_bool(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "true" | "yes" | "on" | "1"
+    )
+}
+
+async fn switch_to_rebase_branch(branch: &str, output: &OutputConfig) -> CliResult<()> {
+    let mut child_output = output.child_output_config();
+    child_output.quiet = true;
+    switch::execute_safe(
+        switch::SwitchArgs {
+            branch: Some(branch.to_string()),
+            ..Default::default()
+        },
+        &child_output,
+    )
+    .await
 }
 
 fn render_rebase_output(result: &RebaseOutput, output: &OutputConfig) -> CliResult<()> {
@@ -942,15 +1424,218 @@ fn commit_subject_lossy(commit_id: &ObjectHash, emit_human: bool) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RebaseTodoAction {
+    Pick,
+    Fixup,
+    Squash,
+}
+
+impl RebaseTodoAction {
+    fn from_message(message: &str) -> Self {
+        let subject = commit_subject_from_message(message);
+        if subject.starts_with("fixup! ") || subject.starts_with("amend! ") {
+            RebaseTodoAction::Fixup
+        } else if subject.starts_with("squash! ") {
+            RebaseTodoAction::Squash
+        } else {
+            RebaseTodoAction::Pick
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AutosquashResult {
+    commits: Vec<ObjectHash>,
+    moved: usize,
+}
+
+fn autosquash_commits(commits: Vec<ObjectHash>) -> Result<AutosquashResult, RebaseError> {
+    let mut picks: Vec<ObjectHash> = Vec::new();
+    let mut fixups: Vec<ObjectHash> = Vec::new();
+    for commit_id in commits {
+        let commit: Commit = load_object(&commit_id).map_err(|error| RebaseError::CommitLoad {
+            commit: commit_id.to_string(),
+            detail: error.to_string(),
+        })?;
+        match RebaseTodoAction::from_message(&commit.message) {
+            RebaseTodoAction::Pick => picks.push(commit_id),
+            RebaseTodoAction::Fixup | RebaseTodoAction::Squash => fixups.push(commit_id),
+        }
+    }
+
+    let mut moved = 0;
+    for fixup_id in fixups {
+        let fixup_commit: Commit =
+            load_object(&fixup_id).map_err(|error| RebaseError::CommitLoad {
+                commit: fixup_id.to_string(),
+                detail: error.to_string(),
+            })?;
+        let target = autosquash_target(&fixup_commit.message).ok_or_else(|| {
+            RebaseError::InvalidArguments(format!(
+                "could not parse autosquash target for {}",
+                short_object_id(&fixup_id)
+            ))
+        })?;
+        let target_pos = picks
+            .iter()
+            .position(|candidate| autosquash_target_matches(candidate, &target))
+            .ok_or_else(|| {
+                RebaseError::InvalidArguments(format!(
+                    "autosquash target '{target}' was not found in the rebase todo"
+                ))
+            })?;
+        let mut insert_at = target_pos + 1;
+        while insert_at < picks.len() {
+            let commit: Commit =
+                load_object(&picks[insert_at]).map_err(|error| RebaseError::CommitLoad {
+                    commit: picks[insert_at].to_string(),
+                    detail: error.to_string(),
+                })?;
+            if matches!(
+                RebaseTodoAction::from_message(&commit.message),
+                RebaseTodoAction::Fixup | RebaseTodoAction::Squash
+            ) {
+                insert_at += 1;
+            } else {
+                break;
+            }
+        }
+        picks.insert(insert_at, fixup_id);
+        moved += 1;
+    }
+
+    Ok(AutosquashResult {
+        commits: picks,
+        moved,
+    })
+}
+
+fn autosquash_target(message: &str) -> Option<String> {
+    let subject = commit_subject_from_message(message);
+    for prefix in ["fixup! ", "squash! ", "amend! "] {
+        if let Some(target) = subject.strip_prefix(prefix) {
+            let trimmed = target.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn autosquash_target_matches(commit_id: &ObjectHash, target: &str) -> bool {
+    let full = commit_id.to_string();
+    if full.starts_with(target) {
+        return true;
+    }
+    load_object::<Commit>(commit_id)
+        .map(|commit| commit_subject_from_message(&commit.message) == target)
+        .unwrap_or(false)
+}
+
+fn filter_redundant_cherry_picks(
+    commits: &[ObjectHash],
+    onto_id: &ObjectHash,
+) -> Result<Vec<ObjectHash>, RebaseError> {
+    let upstream_patch_ids = reachable_patch_ids(onto_id)?;
+    let mut filtered = Vec::new();
+    for commit_id in commits {
+        let patch_id = patch_id_for_commit(commit_id)?;
+        if upstream_patch_ids.contains(&patch_id) {
+            continue;
+        }
+        filtered.push(*commit_id);
+    }
+    Ok(filtered)
+}
+
+fn reachable_patch_ids(head_id: &ObjectHash) -> Result<HashSet<String>, RebaseError> {
+    let mut ids = HashSet::new();
+    let mut stack = vec![*head_id];
+    let mut seen = HashSet::new();
+    while let Some(commit_id) = stack.pop() {
+        if !seen.insert(commit_id) {
+            continue;
+        }
+        if let Ok(patch_id) = patch_id_for_commit(&commit_id) {
+            ids.insert(patch_id);
+        }
+        let commit: Commit = load_object(&commit_id).map_err(|error| RebaseError::CommitLoad {
+            commit: commit_id.to_string(),
+            detail: error.to_string(),
+        })?;
+        stack.extend(commit.parent_commit_ids);
+    }
+    Ok(ids)
+}
+
+fn patch_id_for_commit(commit_id: &ObjectHash) -> Result<String, RebaseError> {
+    let commit: Commit = load_object(commit_id).map_err(|error| RebaseError::CommitLoad {
+        commit: commit_id.to_string(),
+        detail: error.to_string(),
+    })?;
+    let parent_tree = match commit.parent_commit_ids.first() {
+        Some(parent_id) => {
+            let parent: Commit =
+                load_object(parent_id).map_err(|error| RebaseError::CommitLoad {
+                    commit: parent_id.to_string(),
+                    detail: error.to_string(),
+                })?;
+            load_object::<Tree>(&parent.tree_id).map_err(|error| RebaseError::OriginalTreeLoad {
+                tree: parent.tree_id.to_string(),
+                detail: error.to_string(),
+            })?
+        }
+        None => empty_tree().map_err(|detail| RebaseError::OriginalTreeLoad {
+            tree: "<empty>".to_string(),
+            detail,
+        })?,
+    };
+    let commit_tree: Tree =
+        load_object(&commit.tree_id).map_err(|error| RebaseError::OriginalTreeLoad {
+            tree: commit.tree_id.to_string(),
+            detail: error.to_string(),
+        })?;
+    let parent_items = tree_item_fingerprint_map(&parent_tree);
+    let commit_items = tree_item_fingerprint_map(&commit_tree);
+    let mut paths: Vec<_> = parent_items
+        .keys()
+        .chain(commit_items.keys())
+        .cloned()
+        .collect();
+    paths.sort();
+    paths.dedup();
+    let mut payload = String::new();
+    for path in paths {
+        if parent_items.get(&path) == commit_items.get(&path) {
+            continue;
+        }
+        payload.push_str(&path);
+        payload.push('\0');
+        payload.push_str(parent_items.get(&path).map(String::as_str).unwrap_or("-"));
+        payload.push('\0');
+        payload.push_str(commit_items.get(&path).map(String::as_str).unwrap_or("-"));
+        payload.push('\n');
+    }
+    Ok(ObjectHash::from_type_and_data(ObjectType::Blob, payload.as_bytes()).to_string())
+}
+
+fn tree_item_fingerprint_map(tree: &Tree) -> HashMap<String, String> {
+    tree.get_plain_items_with_mode()
+        .into_iter()
+        .filter(|(_, _, mode)| *mode != TreeItemMode::Commit)
+        .map(|(path, hash, mode)| (path.display().to_string(), format!("{mode:?}:{hash}")))
+        .collect()
+}
+
 async fn preflight_rebase(args: &RebaseArgs) -> CliResult<()> {
     if args.continue_rebase || args.abort || args.skip {
         return Ok(());
     }
 
-    let upstream = args
-        .upstream
-        .as_deref()
-        .ok_or_else(|| CliError::fatal("no upstream specified"))?;
+    let start = resolve_rebase_start_request(args)?
+        .ok_or_else(|| CliError::command_usage("no rebase start request"))?;
 
     match RebaseState::is_in_progress().await {
         Ok(true) => {
@@ -972,13 +1657,25 @@ async fn preflight_rebase(args: &RebaseArgs) -> CliResult<()> {
 
     // `resolve_branch_or_commit` returns legacy `"fatal: ..."` prefixed strings,
     // so `from_legacy_string` strips the prefix to avoid double-prefix rendering.
-    resolve_branch_or_commit(upstream)
-        .await
-        .map_err(CliError::from_legacy_string)?;
+    if let Some(upstream) = start.upstream.as_deref() {
+        resolve_branch_or_commit(upstream)
+            .await
+            .map_err(CliError::from_legacy_string)?;
+    }
+    if let Some(onto) = start.onto.as_deref() {
+        resolve_branch_or_commit(onto)
+            .await
+            .map_err(CliError::from_legacy_string)?;
+    }
     Ok(())
 }
 
-async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
+async fn run_rebase_start(
+    upstream: &str,
+    onto: Option<&str>,
+    options: RebaseRuntimeOptions,
+    autostash: bool,
+) -> Result<RebaseOutput, RebaseError> {
     let db = get_db_conn_instance().await;
 
     let current_branch_name = match Head::current().await {
@@ -999,16 +1696,22 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
             detail,
         }
     })?;
+    let onto_id = match onto {
+        Some(newbase) => resolve_branch_or_commit(newbase).await.map_err(|detail| {
+            RebaseError::UpstreamResolve {
+                upstream: newbase.to_string(),
+                detail,
+            }
+        })?,
+        None => upstream_id,
+    };
+    let onto_display = onto.unwrap_or(upstream);
 
     let base_id = find_merge_base(&head_to_rebase_id, &upstream_id)
-        .await
-        .map_err(|detail| RebaseError::CommitLoad {
-            commit: head_to_rebase_id.to_string(),
-            detail,
-        })?
+        .await?
         .ok_or(RebaseError::NoCommonAncestor)?;
 
-    if base_id == head_to_rebase_id {
+    if onto.is_none() && base_id == head_to_rebase_id {
         let upstream_commit: Commit =
             load_object(&upstream_id).map_err(|e| RebaseError::CommitLoad {
                 commit: upstream_id.to_string(),
@@ -1026,7 +1729,11 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
         let mut index = git_internal::internal::index::Index::new();
         rebuild_index_from_tree(&upstream_tree, &mut index, "")
             .map_err(RebaseError::IndexRebuild)?;
-        rebase_worktree_guard_structured(&index, "fast-forward rebase").await?;
+        let autostash_ref = prepare_rebase_autostash(autostash).await?;
+        if let Err(error) = rebase_worktree_guard_structured(&index, "fast-forward rebase").await {
+            restore_rebase_autostash(autostash_ref.as_deref()).await;
+            return Err(error);
+        }
 
         let fast_forward_action = ReflogAction::Rebase {
             state: "fast-forward".to_string(),
@@ -1036,6 +1743,7 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
             old_oid: head_to_rebase_id.to_string(),
             new_oid: upstream_id.to_string(),
             action: fast_forward_action,
+            message: None,
         };
 
         let branch_name_cloned = current_branch_name.clone();
@@ -1064,6 +1772,7 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
             .save(&index_file)
             .map_err(|e| RebaseError::IndexSave(e.to_string()))?;
         reset_workdir_tracked_only(&current_index, &index).map_err(RebaseError::WorkdirReset)?;
+        restore_rebase_autostash(autostash_ref.as_deref()).await;
 
         return Ok(RebaseOutput {
             action: "start".to_string(),
@@ -1080,10 +1789,13 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
             skipped_commit: None,
             skipped_subject: None,
             remaining: Some(0),
+            autostashed: Some(autostash_ref.is_some()),
+            autosquashed: None,
+            dropped_empty: None,
         });
     }
 
-    if base_id == upstream_id {
+    if onto.is_none() && base_id == upstream_id {
         return Ok(RebaseOutput {
             action: "start".to_string(),
             status: "already-up-to-date".to_string(),
@@ -1099,15 +1811,28 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
             skipped_commit: None,
             skipped_subject: None,
             remaining: Some(0),
+            autostashed: None,
+            autosquashed: None,
+            dropped_empty: None,
         });
     }
 
-    let commits_to_replay = collect_commits_to_replay(&base_id, &head_to_rebase_id)
+    let mut commits_to_replay = collect_commits_to_replay(&base_id, &head_to_rebase_id)
         .await
         .map_err(|detail| RebaseError::CommitLoad {
             commit: head_to_rebase_id.to_string(),
             detail,
         })?;
+    if !options.reapply_cherry_picks {
+        commits_to_replay = filter_redundant_cherry_picks(&commits_to_replay, &onto_id)?;
+    }
+    let autosquashed = if options.autosquash {
+        let autosquash = autosquash_commits(commits_to_replay)?;
+        commits_to_replay = autosquash.commits;
+        autosquash.moved
+    } else {
+        0
+    };
     if commits_to_replay.is_empty() {
         return Ok(RebaseOutput {
             action: "start".to_string(),
@@ -1124,14 +1849,16 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
             skipped_commit: None,
             skipped_subject: None,
             remaining: Some(0),
+            autostashed: None,
+            autosquashed: Some(autosquashed),
+            dropped_empty: None,
         });
     }
 
-    let upstream_commit: Commit =
-        load_object(&upstream_id).map_err(|e| RebaseError::CommitLoad {
-            commit: upstream_id.to_string(),
-            detail: e.to_string(),
-        })?;
+    let upstream_commit: Commit = load_object(&onto_id).map_err(|e| RebaseError::CommitLoad {
+        commit: onto_id.to_string(),
+        detail: e.to_string(),
+    })?;
     let upstream_tree: Tree =
         load_object(&upstream_commit.tree_id).map_err(|e| RebaseError::OriginalTreeLoad {
             tree: upstream_commit.tree_id.to_string(),
@@ -1140,21 +1867,26 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
     let mut guard_index = git_internal::internal::index::Index::new();
     rebuild_index_from_tree(&upstream_tree, &mut guard_index, "")
         .map_err(RebaseError::IndexRebuild)?;
-    rebase_worktree_guard_structured(&guard_index, "rebase").await?;
+    let autostash_ref = prepare_rebase_autostash(autostash).await?;
+    if let Err(error) = rebase_worktree_guard_structured(&guard_index, "rebase").await {
+        restore_rebase_autostash(autostash_ref.as_deref()).await;
+        return Err(error);
+    }
 
     let start_action = ReflogAction::Rebase {
         state: "start".to_string(),
-        details: format!("checkout {}", upstream),
+        details: format!("checkout {}", onto_display),
     };
     let start_context = ReflogContext {
         old_oid: head_to_rebase_id.to_string(),
-        new_oid: upstream_id.to_string(),
+        new_oid: onto_id.to_string(),
         action: start_action,
+        message: None,
     };
     db.transaction(|txn| {
         Box::pin(async move {
             reflog::Reflog::insert_single_entry(txn, &start_context, "HEAD").await?;
-            Head::update_with_conn(txn, Head::Detached(upstream_id), None).await;
+            Head::update_with_conn(txn, Head::Detached(onto_id), None).await;
             Ok::<_, ReflogError>(())
         })
     })
@@ -1164,18 +1896,20 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
     let replay_count = commits_to_replay.len();
     let mut state = RebaseState {
         head_name: current_branch_name.clone(),
-        onto: upstream_id,
+        onto: onto_id,
         orig_head: head_to_rebase_id,
         todo: VecDeque::from(commits_to_replay),
         done: Vec::new(),
         stopped_sha: None,
-        current_head: upstream_id,
+        current_head: onto_id,
+        autostash_ref,
+        options,
     };
 
     state.save().await.map_err(RebaseError::StateSave)?;
-    Head::update_with_conn(&db, Head::Detached(upstream_id), None).await;
+    Head::update_with_conn(&db, Head::Detached(onto_id), None).await;
 
-    let replay = continue_replay(&mut state, &current_branch_name, upstream, false).await?;
+    let replay = continue_replay(&mut state, &current_branch_name, onto_display, false).await?;
 
     Ok(RebaseOutput {
         action: "start".to_string(),
@@ -1183,7 +1917,7 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
         branch: current_branch_name,
         commit: state.current_head.to_string(),
         upstream: Some(upstream.to_string()),
-        onto: Some(upstream_id.to_string()),
+        onto: Some(onto_id.to_string()),
         common_ancestor: Some(base_id.to_string()),
         replay_count: Some(replay_count),
         previous_commit: Some(head_to_rebase_id.to_string()),
@@ -1192,6 +1926,163 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
         skipped_commit: None,
         skipped_subject: None,
         remaining: Some(state.todo.len()),
+        autostashed: Some(state.autostash_ref.is_some()),
+        autosquashed: Some(replay.autosquashed),
+        dropped_empty: Some(replay.dropped_empty),
+    })
+}
+
+async fn run_rebase_root_start(
+    onto: Option<&str>,
+    options: RebaseRuntimeOptions,
+    autostash: bool,
+) -> Result<RebaseOutput, RebaseError> {
+    let db = get_db_conn_instance().await;
+    let current_branch_name = match Head::current().await {
+        Head::Branch(name) if !name.is_empty() => name,
+        _ => return Err(RebaseError::NotOnBranch),
+    };
+    let head_to_rebase_id =
+        Head::current_commit()
+            .await
+            .ok_or_else(|| RebaseError::BranchHasNoCommits {
+                branch: current_branch_name.clone(),
+            })?;
+
+    let onto_id = match onto {
+        Some(newbase) => Some(resolve_branch_or_commit(newbase).await.map_err(|detail| {
+            RebaseError::UpstreamResolve {
+                upstream: newbase.to_string(),
+                detail,
+            }
+        })?),
+        None => None,
+    };
+
+    let mut commits_to_replay = collect_root_commits_to_replay(&head_to_rebase_id)?;
+    if let Some(onto_id) = onto_id
+        && !options.reapply_cherry_picks
+    {
+        commits_to_replay = filter_redundant_cherry_picks(&commits_to_replay, &onto_id)?;
+    }
+    if options.autosquash {
+        let autosquash = autosquash_commits(commits_to_replay)?;
+        commits_to_replay = autosquash.commits;
+    }
+
+    let guard_tree = match onto_id {
+        Some(onto_id) => {
+            let onto_commit: Commit =
+                load_object(&onto_id).map_err(|error| RebaseError::CommitLoad {
+                    commit: onto_id.to_string(),
+                    detail: error.to_string(),
+                })?;
+            load_object::<Tree>(&onto_commit.tree_id).map_err(|error| {
+                RebaseError::OriginalTreeLoad {
+                    tree: onto_commit.tree_id.to_string(),
+                    detail: error.to_string(),
+                }
+            })?
+        }
+        None => {
+            let head_commit: Commit =
+                load_object(&head_to_rebase_id).map_err(|error| RebaseError::CommitLoad {
+                    commit: head_to_rebase_id.to_string(),
+                    detail: error.to_string(),
+                })?;
+            load_object::<Tree>(&head_commit.tree_id).map_err(|error| {
+                RebaseError::OriginalTreeLoad {
+                    tree: head_commit.tree_id.to_string(),
+                    detail: error.to_string(),
+                }
+            })?
+        }
+    };
+    let mut guard_index = git_internal::internal::index::Index::new();
+    rebuild_index_from_tree(&guard_tree, &mut guard_index, "")
+        .map_err(RebaseError::IndexRebuild)?;
+    let autostash_ref = prepare_rebase_autostash(autostash).await?;
+    if let Err(error) = rebase_worktree_guard_structured(&guard_index, "rebase").await {
+        restore_rebase_autostash(autostash_ref.as_deref()).await;
+        return Err(error);
+    }
+
+    let replay_count = commits_to_replay.len();
+    let mut done = Vec::new();
+    let initial_head = if let Some(onto_id) = onto_id {
+        onto_id
+    } else {
+        let first = commits_to_replay
+            .first()
+            .copied()
+            .ok_or_else(|| RebaseError::InvalidArguments("no commits to rebase".to_string()))?;
+        let first_commit: Commit =
+            load_object(&first).map_err(|error| RebaseError::CommitLoad {
+                commit: first.to_string(),
+                detail: error.to_string(),
+            })?;
+        let rewritten =
+            create_replayed_root_commit(&first_commit, first_commit.tree_id, options).await?;
+        save_object(&rewritten, &rewritten.id)
+            .map_err(|error| RebaseError::CommitSave(error.to_string()))?;
+        commits_to_replay.remove(0);
+        done.push(first);
+        rewritten.id
+    };
+
+    let start_action = ReflogAction::Rebase {
+        state: "start".to_string(),
+        details: "rebase --root".to_string(),
+    };
+    let start_context = ReflogContext {
+        old_oid: head_to_rebase_id.to_string(),
+        new_oid: initial_head.to_string(),
+        action: start_action,
+        message: None,
+    };
+    db.transaction(|txn| {
+        Box::pin(async move {
+            reflog::Reflog::insert_single_entry(txn, &start_context, "HEAD").await?;
+            Head::update_with_conn(txn, Head::Detached(initial_head), None).await;
+            Ok::<_, ReflogError>(())
+        })
+    })
+    .await
+    .map_err(|e| RebaseError::Finalize(format!("failed to start rebase: {e}")))?;
+
+    let mut state = RebaseState {
+        head_name: current_branch_name.clone(),
+        onto: initial_head,
+        orig_head: head_to_rebase_id,
+        todo: VecDeque::from(commits_to_replay),
+        done,
+        stopped_sha: None,
+        current_head: initial_head,
+        autostash_ref,
+        options,
+    };
+    state.save().await.map_err(RebaseError::StateSave)?;
+
+    let replay = continue_replay(&mut state, &current_branch_name, "--root", false).await?;
+
+    Ok(RebaseOutput {
+        action: "start".to_string(),
+        status: "completed".to_string(),
+        branch: current_branch_name,
+        commit: state.current_head.to_string(),
+        upstream: None,
+        onto: Some(state.onto.to_string()),
+        common_ancestor: None,
+        replay_count: Some(replay_count),
+        previous_commit: Some(head_to_rebase_id.to_string()),
+        restored: None,
+        applied_commits: replay.applied_commits,
+        skipped_commit: None,
+        skipped_subject: None,
+        remaining: Some(state.todo.len()),
+        autostashed: Some(state.autostash_ref.is_some()),
+        autosquashed: Some(replay.autosquashed),
+        dropped_empty: Some(replay.dropped_empty),
     })
 }
 
@@ -1225,7 +2116,7 @@ pub(crate) struct PullRebaseSummary {
 /// with structured hints — pull just wraps it in its own error
 /// variant so the `phase=rebase` detail can be attached.
 pub(crate) async fn run_rebase_for_pull(upstream: &str) -> Result<PullRebaseSummary, RebaseError> {
-    let output = run_rebase_start(upstream).await?;
+    let output = run_rebase_start(upstream, None, RebaseRuntimeOptions::default(), false).await?;
     let old_commit = output
         .previous_commit
         .clone()
@@ -1238,6 +2129,24 @@ pub(crate) async fn run_rebase_for_pull(upstream: &str) -> Result<PullRebaseSumm
         onto: output.onto.unwrap_or_else(|| upstream.to_string()),
         replay_count: output.replay_count.unwrap_or(0),
     })
+}
+
+async fn prepare_rebase_autostash(enabled: bool) -> Result<Option<String>, RebaseError> {
+    if !enabled {
+        return Ok(None);
+    }
+    stash::autostash_push_with_message("rebase: autostash")
+        .await
+        .map_err(RebaseError::Autostash)
+}
+
+async fn restore_rebase_autostash(stash_id: Option<&str>) {
+    let Some(stash_id) = stash_id else {
+        return;
+    };
+    if let Err(error) = stash::autostash_pop_by_oid(stash_id).await {
+        emit_warning(format!("failed to reapply autostashed changes: {error}"));
+    }
 }
 
 /// Continue replaying commits from the current state
@@ -1260,7 +2169,21 @@ async fn continue_replay(
     }
 
     while let Some(commit_id) = state.todo.front().cloned() {
-        match replay_commit_with_conflict_detection(&commit_id, &state.current_head).await {
+        let action = if state.options.autosquash {
+            load_object::<Commit>(&commit_id)
+                .map(|commit| RebaseTodoAction::from_message(&commit.message))
+                .unwrap_or(RebaseTodoAction::Pick)
+        } else {
+            RebaseTodoAction::Pick
+        };
+        match replay_commit_with_conflict_detection(
+            &commit_id,
+            &state.current_head,
+            action,
+            state.options,
+        )
+        .await
+        {
             ReplayResult::Success(replayed_commit_id) => {
                 let subject = commit_subject_lossy(&commit_id, emit_human);
                 state.current_head = replayed_commit_id;
@@ -1284,6 +2207,9 @@ async fn continue_replay(
                     commit: state.current_head.to_string(),
                     subject,
                 });
+                if action != RebaseTodoAction::Pick {
+                    summary.autosquashed += 1;
+                }
 
                 // Save state after each successful commit
                 if let Err(e) = state.save().await {
@@ -1292,6 +2218,15 @@ async fn continue_replay(
                     } else {
                         return Err(RebaseError::StateSave(e));
                     }
+                }
+            }
+            ReplayResult::DroppedEmpty => {
+                state.todo.pop_front();
+                state.done.push(commit_id);
+                state.stopped_sha = None;
+                summary.dropped_empty += 1;
+                if let Err(e) = state.save().await {
+                    return Err(RebaseError::StateSave(e));
                 }
             }
             ReplayResult::Conflict { paths, message } => {
@@ -1379,6 +2314,7 @@ async fn finalize_rebase(state: &RebaseState, emit_human: bool) -> anyhow::Resul
         old_oid: state.orig_head.to_string(),
         new_oid: final_commit_id.to_string(),
         action: finish_action,
+        message: None,
     };
 
     let branch_name_cloned = state.head_name.clone();
@@ -1433,6 +2369,8 @@ async fn finalize_rebase(state: &RebaseState, emit_human: bool) -> anyhow::Resul
         .map_err(|e| anyhow::anyhow!(e))
         .context("failed to reset working directory after rebase")?;
 
+    restore_rebase_autostash(state.autostash_ref.as_deref()).await;
+
     // Clean up rebase state
     if let Err(e) = RebaseState::cleanup().await {
         emit_warning(format!("failed to clean up rebase state: {}", e));
@@ -1455,6 +2393,8 @@ async fn run_rebase_continue() -> Result<RebaseOutput, RebaseError> {
     let branch = state.head_name.clone();
     let onto_display = short_object_id(&state.onto);
     let mut applied_commits = Vec::new();
+    let mut autosquashed = 0;
+    let mut dropped_empty = 0;
 
     if let Some(stopped_sha) = state.stopped_sha {
         // Create a commit from the current index after the user has resolved
@@ -1477,11 +2417,19 @@ async fn run_rebase_continue() -> Result<RebaseOutput, RebaseError> {
             })?;
         let subject = commit_subject_from_message(&original_commit.message);
 
-        let new_commit = Commit::from_tree_id(
+        let action = if state.options.autosquash {
+            RebaseTodoAction::from_message(&original_commit.message)
+        } else {
+            RebaseTodoAction::Pick
+        };
+        let new_commit = create_replayed_commit(
+            &original_commit,
             new_tree_id,
-            vec![state.current_head],
-            &original_commit.message,
-        );
+            state.current_head,
+            action,
+            state.options,
+        )
+        .await?;
         save_object(&new_commit, &new_commit.id)
             .map_err(|e| RebaseError::CommitSave(e.to_string()))?;
 
@@ -1507,6 +2455,8 @@ async fn run_rebase_continue() -> Result<RebaseOutput, RebaseError> {
     } else {
         state.save().await.map_err(RebaseError::StateSave)?;
         let replay = continue_replay(&mut state, &branch, &onto_display, false).await?;
+        autosquashed += replay.autosquashed;
+        dropped_empty += replay.dropped_empty;
         applied_commits.extend(replay.applied_commits);
     }
 
@@ -1525,6 +2475,9 @@ async fn run_rebase_continue() -> Result<RebaseOutput, RebaseError> {
         skipped_commit: None,
         skipped_subject: None,
         remaining: Some(state.todo.len()),
+        autostashed: None,
+        autosquashed: Some(autosquashed),
+        dropped_empty: Some(dropped_empty),
     })
 }
 
@@ -1548,6 +2501,7 @@ async fn run_rebase_abort() -> Result<RebaseOutput, RebaseError> {
         old_oid: state.current_head.to_string(),
         new_oid: state.orig_head.to_string(),
         action: abort_action,
+        message: None,
     };
 
     let branch_name_cloned = state.head_name.clone();
@@ -1615,6 +2569,8 @@ async fn run_rebase_abort() -> Result<RebaseOutput, RebaseError> {
         return Err(RebaseError::WorkdirReset(e));
     }
 
+    restore_rebase_autostash(state.autostash_ref.as_deref()).await;
+
     // Clean up rebase state
     if let Err(e) = RebaseState::cleanup().await {
         emit_warning(format!("failed to clean up rebase state: {}", e));
@@ -1635,6 +2591,9 @@ async fn run_rebase_abort() -> Result<RebaseOutput, RebaseError> {
         skipped_commit: None,
         skipped_subject: None,
         remaining: None,
+        autostashed: None,
+        autosquashed: None,
+        dropped_empty: None,
     })
 }
 
@@ -1681,6 +2640,8 @@ async fn run_rebase_skip() -> Result<RebaseOutput, RebaseError> {
         .map_err(|e| RebaseError::WorkdirReset(e.to_string()))?;
 
     let mut applied_commits = Vec::new();
+    let mut autosquashed = 0;
+    let mut dropped_empty = 0;
     if state.todo.is_empty() {
         finalize_rebase(&state, false)
             .await
@@ -1688,6 +2649,8 @@ async fn run_rebase_skip() -> Result<RebaseOutput, RebaseError> {
     } else {
         state.save().await.map_err(RebaseError::StateSave)?;
         let replay = continue_replay(&mut state, &branch, &onto_display, false).await?;
+        autosquashed += replay.autosquashed;
+        dropped_empty += replay.dropped_empty;
         applied_commits.extend(replay.applied_commits);
     }
 
@@ -1706,6 +2669,9 @@ async fn run_rebase_skip() -> Result<RebaseOutput, RebaseError> {
         skipped_commit: Some(skipped_sha.to_string()),
         skipped_subject,
         remaining: Some(state.todo.len()),
+        autostashed: None,
+        autosquashed: Some(autosquashed),
+        dropped_empty: Some(dropped_empty),
     })
 }
 
@@ -1900,21 +2866,27 @@ mod tests {
         path::{Path, PathBuf},
     };
 
+    use clap::Parser;
     use git_internal::{
         hash::ObjectHash,
-        internal::object::tree::{Tree, TreeItem, TreeItemMode},
+        internal::object::{
+            blob::Blob,
+            commit::Commit,
+            tree::{Tree, TreeItem, TreeItemMode},
+        },
     };
     use tempfile::tempdir;
 
     #[cfg(unix)]
     use super::path_to_index_key;
     use super::{
-        RebaseError, RebaseTreeEntry, ReplayErrorKind, classify_relative_to_base,
-        collect_tree_items_and_paths, create_tree_from_items_map, index_mode_to_tree_item_mode,
-        resolve_three_way, tree_item_mode_to_index_mode, tree_item_name, write_workdir_blob,
+        EmptyMode, RebaseArgs, RebaseError, RebaseTreeEntry, ReplayErrorKind,
+        classify_relative_to_base, collect_tree_items_and_paths, create_tree_from_items_map,
+        index_mode_to_tree_item_mode, resolve_rebase_start_request, resolve_three_way,
+        tree_item_mode_to_index_mode, tree_item_name, write_workdir_blob,
     };
     use crate::{
-        command::load_object,
+        command::{load_object, save_object},
         utils::{
             error::{CliError, StableErrorCode},
             test::{ChangeDirGuard, setup_with_new_libra_in},
@@ -1926,6 +2898,78 @@ mod tests {
             hash: ObjectHash::new(&[byte; 20]),
             mode,
         }
+    }
+
+    #[test]
+    fn rebase_args_onto_three_positionals_parse() {
+        let args = RebaseArgs::try_parse_from(["rebase", "--onto", "next", "main", "topic"])
+            .expect("--onto with upstream and branch should parse");
+        assert_eq!(args.onto.as_deref(), Some("next"));
+        assert_eq!(args.upstream.as_deref(), Some("main"));
+        assert_eq!(args.branch.as_deref(), Some("topic"));
+        assert!(!args.continue_rebase);
+        assert!(!args.abort);
+        assert!(!args.skip);
+    }
+
+    #[test]
+    fn rebase_args_root_with_optional_branch_parse() {
+        let args = RebaseArgs::try_parse_from(["rebase", "--root", "topic"])
+            .expect("--root with one optional branch should parse");
+        assert!(args.root);
+        assert_eq!(args.upstream.as_deref(), Some("topic"));
+        assert_eq!(args.branch.as_deref(), None);
+
+        let request = resolve_rebase_start_request(&args)
+            .expect("root request should resolve")
+            .expect("root request should start a rebase");
+        assert!(request.root);
+        assert_eq!(request.upstream.as_deref(), None);
+        assert_eq!(request.branch.as_deref(), Some("topic"));
+    }
+
+    #[test]
+    fn rebase_args_root_rejects_two_positionals() {
+        let args = RebaseArgs::try_parse_from(["rebase", "--root", "first", "second"])
+            .expect("clap should leave semantic root positional validation to rebase");
+        let error = resolve_rebase_start_request(&args)
+            .expect_err("--root accepts only one optional branch positional");
+        assert_eq!(error.stable_code(), StableErrorCode::CliInvalidArguments);
+    }
+
+    #[test]
+    fn rebase_args_advanced_flags_parse() {
+        let args = RebaseArgs::try_parse_from([
+            "rebase",
+            "--autostash",
+            "--autosquash",
+            "--reapply-cherry-picks",
+            "--keep-empty",
+            "--empty=keep",
+            "--signoff",
+            "-S",
+            "main",
+        ])
+        .expect("advanced rebase flags should parse");
+
+        assert!(args.autostash);
+        assert!(args.autosquash);
+        assert!(args.reapply_cherry_picks);
+        assert!(args.keep_empty);
+        assert_eq!(args.empty, Some(EmptyMode::Keep));
+        assert!(args.signoff);
+        assert!(args.gpg_sign);
+        assert_eq!(args.upstream.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn rebase_args_state_modes_reject_onto_and_branch() {
+        let continue_with_onto =
+            RebaseArgs::try_parse_from(["rebase", "--continue", "--onto", "next"]);
+        assert!(continue_with_onto.is_err());
+
+        let abort_with_branch = RebaseArgs::try_parse_from(["rebase", "--abort", "topic"]);
+        assert!(abort_with_branch.is_err());
     }
 
     #[test]
@@ -2021,6 +3065,13 @@ mod tests {
             "no common ancestor found",
         );
         assert_eq!(
+            RebaseError::AmbiguousMergeBase {
+                bases: "aaa, bbb".to_string(),
+            }
+            .to_string(),
+            "multiple best merge bases found (aaa, bbb); criss-cross merge bases are unsupported",
+        );
+        assert_eq!(
             RebaseError::UnresolvedConflicts.to_string(),
             "you must resolve all conflicts before continuing",
         );
@@ -2055,6 +3106,18 @@ mod tests {
             .to_string(),
             "uncommitted changes, can't switch",
         );
+        assert_eq!(
+            RebaseError::Autostash("stash apply failed".to_string()).to_string(),
+            "autostash failed: stash apply failed",
+        );
+        assert_eq!(
+            RebaseError::InvalidArguments("bad root form".to_string()).to_string(),
+            "bad root form",
+        );
+        assert_eq!(
+            RebaseError::Sign("vault is locked".to_string()).to_string(),
+            "failed to sign rebased commit: vault is locked",
+        );
     }
 
     /// Pin the `From<RebaseError> for CliError` stable_code mapping
@@ -2064,7 +3127,7 @@ mod tests {
     /// wire surface ("which StableErrorCode does each variant
     /// produce in --json envelopes?") can be locked down.
     ///
-    /// The 25 variants collapse into 6 stable codes via a match
+    /// The variants collapse into a small stable-code set via a match
     /// with many alternations. A future refactor that re-routed
     /// any variant — e.g. flipping `OriginalTreeLoad` from
     /// `RepoCorrupt` to `IoReadFailed`, or accidentally landing
@@ -2123,6 +3186,12 @@ mod tests {
             StableErrorCode::CliInvalidTarget,
         );
         assert_eq!(
+            code_of(RebaseError::AmbiguousMergeBase {
+                bases: "aaa, bbb".to_string(),
+            }),
+            StableErrorCode::ConflictOperationBlocked,
+        );
+        assert_eq!(
             code_of(RebaseError::WorktreeStatus("ignored".to_string())),
             StableErrorCode::IoReadFailed,
         );
@@ -2132,6 +3201,18 @@ mod tests {
                 detail: "ignored".to_string(),
             }),
             StableErrorCode::RepoStateInvalid,
+        );
+        assert_eq!(
+            code_of(RebaseError::Autostash("ignored".to_string())),
+            StableErrorCode::RepoStateInvalid,
+        );
+        assert_eq!(
+            code_of(RebaseError::InvalidArguments("ignored".to_string())),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            code_of(RebaseError::Sign("ignored".to_string())),
+            StableErrorCode::AuthMissingCredentials,
         );
         assert_eq!(
             code_of(RebaseError::UntrackedOverwrite {
@@ -2228,6 +3309,44 @@ mod tests {
             code_of(RebaseError::Finalize("ignored".to_string())),
             StableErrorCode::IoWriteFailed,
         );
+    }
+
+    #[tokio::test]
+    async fn find_merge_base_maps_criss_cross_to_typed_rebase_error() {
+        let repo = tempdir().expect("repo tempdir");
+        setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let blob = Blob::from_content("fixture\n");
+        save_object(&blob, &blob.id).expect("save fixture blob");
+        let tree = Tree::from_tree_items(vec![TreeItem::new(
+            TreeItemMode::Blob,
+            blob.id,
+            "fixture.txt".to_string(),
+        )])
+        .expect("fixture tree should be valid");
+        save_object(&tree, &tree.id).expect("save tree");
+
+        let base_a = Commit::from_tree_id(tree.id, Vec::new(), "base a");
+        save_object(&base_a, &base_a.id).expect("save base a");
+        let base_b = Commit::from_tree_id(tree.id, Vec::new(), "base b");
+        save_object(&base_b, &base_b.id).expect("save base b");
+        let left = Commit::from_tree_id(tree.id, vec![base_a.id, base_b.id], "left");
+        save_object(&left, &left.id).expect("save left");
+        let right = Commit::from_tree_id(tree.id, vec![base_b.id, base_a.id], "right");
+        save_object(&right, &right.id).expect("save right");
+
+        let err = super::find_merge_base(&left.id, &right.id)
+            .await
+            .expect_err("criss-cross graph should be ambiguous");
+
+        match err {
+            RebaseError::AmbiguousMergeBase { bases } => {
+                assert!(bases.contains(&base_a.id.to_string()));
+                assert!(bases.contains(&base_b.id.to_string()));
+            }
+            other => panic!("expected AmbiguousMergeBase, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2769,6 +3888,180 @@ fn write_conflict_markers(
     Ok(())
 }
 
+fn collect_root_commits_to_replay(head_id: &ObjectHash) -> Result<Vec<ObjectHash>, RebaseError> {
+    let roots = reachable_roots(head_id)?;
+    if roots.len() > 1 {
+        return Err(RebaseError::InvalidArguments(
+            "rebase --root does not support histories with multiple root commits".to_string(),
+        ));
+    }
+    let mut commits = Vec::new();
+    let mut current = *head_id;
+    loop {
+        commits.push(current);
+        let commit: Commit = load_object(&current).map_err(|error| RebaseError::CommitLoad {
+            commit: current.to_string(),
+            detail: error.to_string(),
+        })?;
+        let Some(parent) = commit.parent_commit_ids.first() else {
+            break;
+        };
+        current = *parent;
+    }
+    commits.reverse();
+    Ok(commits)
+}
+
+fn reachable_roots(head_id: &ObjectHash) -> Result<HashSet<ObjectHash>, RebaseError> {
+    let mut roots = HashSet::new();
+    let mut stack = vec![*head_id];
+    let mut seen = HashSet::new();
+    while let Some(commit_id) = stack.pop() {
+        if !seen.insert(commit_id) {
+            continue;
+        }
+        let commit: Commit = load_object(&commit_id).map_err(|error| RebaseError::CommitLoad {
+            commit: commit_id.to_string(),
+            detail: error.to_string(),
+        })?;
+        if commit.parent_commit_ids.is_empty() {
+            roots.insert(commit_id);
+        } else {
+            stack.extend(commit.parent_commit_ids);
+        }
+    }
+    Ok(roots)
+}
+
+async fn create_replayed_root_commit(
+    original_commit: &Commit,
+    tree_id: ObjectHash,
+    options: RebaseRuntimeOptions,
+) -> Result<Commit, RebaseError> {
+    let mut message = original_commit.message.clone();
+    if options.signoff {
+        let (name, email) = merge::resolve_signoff_identity()
+            .await
+            .map_err(|error| RebaseError::Sign(error.to_string()))?;
+        let trailer = format!("Signed-off-by: {name} <{email}>");
+        if !message.contains(&trailer) {
+            message.push_str("\n\n");
+            message.push_str(&trailer);
+        }
+    }
+    let parents = Vec::new();
+    let committer = commit::current_committer_signature()
+        .await
+        .map_err(RebaseError::CommitSave)?;
+    if options.gpg_sign {
+        let gpgsig = commit::vault_sign_commit(
+            &tree_id,
+            &parents,
+            &original_commit.author,
+            &committer,
+            &message,
+            true,
+        )
+        .await
+        .map_err(|error| RebaseError::Sign(error.to_string()))?;
+        let sig = gpgsig.ok_or_else(|| {
+            RebaseError::Sign(
+                "vault signing key unavailable; configure libra vault to use --gpg-sign"
+                    .to_string(),
+            )
+        })?;
+        return Ok(Commit::new(
+            original_commit.author.clone(),
+            committer,
+            tree_id,
+            parents,
+            &format_commit_msg(&message, Some(&sig)),
+        ));
+    }
+    Ok(Commit::new(
+        original_commit.author.clone(),
+        committer,
+        tree_id,
+        parents,
+        &format_commit_msg(&message, None),
+    ))
+}
+
+async fn create_replayed_commit(
+    original_commit: &Commit,
+    tree_id: ObjectHash,
+    new_parent_id: ObjectHash,
+    action: RebaseTodoAction,
+    options: RebaseRuntimeOptions,
+) -> Result<Commit, RebaseError> {
+    let (author, parents, mut message) = match action {
+        RebaseTodoAction::Pick => (
+            original_commit.author.clone(),
+            vec![new_parent_id],
+            original_commit.message.clone(),
+        ),
+        RebaseTodoAction::Fixup | RebaseTodoAction::Squash => {
+            let target: Commit =
+                load_object(&new_parent_id).map_err(|error| RebaseError::CommitLoad {
+                    commit: new_parent_id.to_string(),
+                    detail: error.to_string(),
+                })?;
+            let mut message = target.message.clone();
+            if action == RebaseTodoAction::Squash {
+                message.push_str("\n\n");
+                message.push_str(original_commit.message.trim());
+            }
+            (
+                target.author.clone(),
+                target.parent_commit_ids.clone(),
+                message,
+            )
+        }
+    };
+
+    if options.signoff {
+        let (name, email) = merge::resolve_signoff_identity()
+            .await
+            .map_err(|error| RebaseError::Sign(error.to_string()))?;
+        let trailer = format!("Signed-off-by: {name} <{email}>");
+        if !message.contains(&trailer) {
+            message.push_str("\n\n");
+            message.push_str(&trailer);
+        }
+    }
+
+    let committer = commit::current_committer_signature()
+        .await
+        .map_err(RebaseError::CommitSave)?;
+    if options.gpg_sign {
+        let gpgsig =
+            commit::vault_sign_commit(&tree_id, &parents, &author, &committer, &message, true)
+                .await
+                .map_err(|error| RebaseError::Sign(error.to_string()))?;
+        let sig = gpgsig.ok_or_else(|| {
+            RebaseError::Sign(
+                "vault signing key unavailable; configure libra vault to use --gpg-sign"
+                    .to_string(),
+            )
+        })?;
+        return Ok(Commit::new(
+            author,
+            committer,
+            tree_id,
+            parents,
+            &format_commit_msg(&message, Some(&sig)),
+        ));
+    }
+
+    Ok(Commit::new(
+        author,
+        committer,
+        tree_id,
+        parents,
+        &format_commit_msg(&message, None),
+    ))
+}
+
 /// Replay a single commit with conflict detection
 ///
 /// This function performs a three-way merge to apply the changes from one commit
@@ -2786,6 +4079,8 @@ fn write_conflict_markers(
 async fn replay_commit_with_conflict_detection(
     commit_to_replay_id: &ObjectHash,
     new_parent_id: &ObjectHash,
+    action: RebaseTodoAction,
+    options: RebaseRuntimeOptions,
 ) -> ReplayResult {
     let index_file = path::index();
     let current_index = match git_internal::internal::index::Index::load(&index_file) {
@@ -2800,19 +4095,21 @@ async fn replay_commit_with_conflict_detection(
         Err(e) => return ReplayResult::internal(ReplayErrorKind::CommitLoad, e.to_string()),
     };
 
-    let original_parent_id = match commit_to_replay.parent_commit_ids.first() {
-        Some(id) => id,
-        None => {
-            return ReplayResult::internal(ReplayErrorKind::MissingParent, "commit has no parents");
-        }
-    };
+    let original_parent_id = commit_to_replay.parent_commit_ids.first().copied();
 
     // Load the three trees needed for the three-way merge
-    let base_tree: Tree =
-        match load_object::<Commit>(original_parent_id).and_then(|c| load_object(&c.tree_id)) {
+    let base_tree: Tree = match original_parent_id {
+        Some(parent_id) => match load_object::<Commit>(&parent_id)
+            .and_then(|c| load_object(&c.tree_id))
+        {
             Ok(t) => t,
             Err(e) => return ReplayResult::internal(ReplayErrorKind::BaseTreeLoad, e.to_string()),
-        };
+        },
+        None => match empty_tree() {
+            Ok(tree) => tree,
+            Err(e) => return ReplayResult::internal(ReplayErrorKind::BaseTreeLoad, e),
+        },
+    };
 
     let their_tree: Tree = match load_object(&commit_to_replay.tree_id) {
         Ok(t) => t,
@@ -2979,8 +4276,44 @@ async fn replay_commit_with_conflict_detection(
         Err(e) => return ReplayResult::internal(ReplayErrorKind::TreeCreate, e.to_string()),
     };
 
-    let new_commit =
-        Commit::from_tree_id(new_tree_id, vec![*new_parent_id], &commit_to_replay.message);
+    let original_empty = match original_parent_id {
+        Some(parent_id) => match load_object::<Commit>(&parent_id) {
+            Ok(parent) => parent.tree_id == commit_to_replay.tree_id,
+            Err(e) => return ReplayResult::internal(ReplayErrorKind::CommitLoad, e.to_string()),
+        },
+        None => base_tree.id == commit_to_replay.tree_id,
+    };
+    let becomes_empty = new_tree_id == our_tree.id;
+    if original_empty && !options.keep_empty {
+        return ReplayResult::DroppedEmpty;
+    }
+    if !original_empty && becomes_empty {
+        match options.empty_mode {
+            EmptyMode::Drop => return ReplayResult::DroppedEmpty,
+            EmptyMode::Stop => {
+                return ReplayResult::internal(
+                    ReplayErrorKind::CommitSave,
+                    "commit became empty during rebase; use --skip or --empty=keep".to_string(),
+                );
+            }
+            EmptyMode::Keep => {}
+        }
+    }
+
+    let new_commit = match create_replayed_commit(
+        &commit_to_replay,
+        new_tree_id,
+        *new_parent_id,
+        action,
+        options,
+    )
+    .await
+    {
+        Ok(commit) => commit,
+        Err(error) => {
+            return ReplayResult::internal(ReplayErrorKind::CommitSave, error.to_string());
+        }
+    };
 
     if let Err(e) = save_object(&new_commit, &new_commit.id) {
         return ReplayResult::internal(ReplayErrorKind::CommitSave, e.to_string());
@@ -3005,54 +4338,19 @@ async fn replay_commit_with_conflict_detection(
     ReplayResult::Success(new_commit.id)
 }
 
-/// Find the merge base (common ancestor) of two commits
-///
-/// This function implements a simple merge base algorithm:
-/// 1. Traverse all ancestors of the first commit and store them in a set
-/// 2. Traverse ancestors of the second commit until we find one in the set
-/// 3. Return the first common ancestor found
-///
-/// Note: This returns the first common ancestor found, not necessarily the
-/// best common ancestor. A more sophisticated algorithm would find the
-/// lowest common ancestor (LCA).
-///
-/// TODO: Implement proper LCA algorithm for better merge base detection
-/// TODO: Optimize performance for large repositories with many commits
 async fn find_merge_base(
     commit1_id: &ObjectHash,
     commit2_id: &ObjectHash,
-) -> Result<Option<ObjectHash>, String> {
-    let mut visited1 = HashSet::new();
-    let mut visited2 = HashSet::new();
-    let mut queue1 = vec![*commit1_id];
-    let mut queue2 = vec![*commit2_id];
-    while !queue1.is_empty() || !queue2.is_empty() {
-        // Process one level of ancestors for commit1
-        if let Some(current_id) = queue1.pop() {
-            if visited2.contains(&current_id) {
-                return Ok(Some(current_id)); // Found common ancestor
-            }
-            if visited1.insert(current_id) {
-                let commit: Commit = load_object(&current_id).map_err(|e| e.to_string())?;
-                for parent_id in &commit.parent_commit_ids {
-                    queue1.push(*parent_id);
-                }
-            }
+) -> Result<Option<ObjectHash>, RebaseError> {
+    merge_base::find_best_merge_base(*commit1_id, *commit2_id).map_err(|error| match error {
+        merge_base::MergeBaseError::Load { commit_id, detail } => RebaseError::CommitLoad {
+            commit: commit_id,
+            detail,
+        },
+        merge_base::MergeBaseError::Ambiguous { bases } => {
+            RebaseError::AmbiguousMergeBase { bases }
         }
-        // Process one level of ancestors for commit2
-        if let Some(current_id) = queue2.pop() {
-            if visited1.contains(&current_id) {
-                return Ok(Some(current_id)); // Found common ancestor
-            }
-            if visited2.insert(current_id) {
-                let commit: Commit = load_object(&current_id).map_err(|e| e.to_string())?;
-                for parent_id in &commit.parent_commit_ids {
-                    queue2.push(*parent_id);
-                }
-            }
-        }
-    }
-    Ok(None)
+    })
 }
 
 /// Collect all commits from base (exclusive) to head (inclusive) that need to be replayed
@@ -3099,6 +4397,12 @@ async fn collect_commits_to_replay(
 fn create_tree_from_items_map(
     items: &HashMap<PathBuf, RebaseTreeEntry>,
 ) -> Result<ObjectHash, String> {
+    if items.is_empty() {
+        let tree = empty_tree()?;
+        save_object(&tree, &tree.id).map_err(|e| e.to_string())?;
+        return Ok(tree.id);
+    }
+
     // Group files by their parent directories
     let mut entries_map: HashMap<PathBuf, Vec<TreeItem>> = HashMap::new();
     for (path, entry) in items {
@@ -3156,6 +4460,11 @@ fn build_tree_recursively(
     let tree = Tree::from_tree_items(current_items).map_err(|e| e.to_string())?;
     save_object(&tree, &tree.id).map_err(|e| e.to_string())?;
     Ok(tree.id)
+}
+
+fn empty_tree() -> Result<Tree, String> {
+    let empty_id = ObjectHash::from_type_and_data(ObjectType::Tree, &[]);
+    Tree::from_bytes(&[], empty_id).map_err(|e| format!("failed to create empty tree: {e}"))
 }
 
 /// Reset the working directory to match the new index state without overwriting untracked files.

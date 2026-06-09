@@ -7,17 +7,21 @@ use std::{io::IsTerminal, path::PathBuf, process::Command};
 
 use clap::{Parser, Subcommand};
 use once_cell::sync::Lazy;
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, TransactionTrait};
 use serde::Serialize;
 use tokio::sync::Mutex;
 
 use crate::{
     internal::{
-        config::{ConfigKv, ConfigKvEntry, is_sensitive_key, is_vault_internal_key},
+        config::{
+            ConfigKv, ConfigKvEntry, ValueFilter, is_protected_vault_section, is_sensitive_key,
+            is_vault_internal_key, validate_config_regex_pattern, validate_key_syntax,
+            validate_section_syntax,
+        },
         db::{create_database, establish_connection, get_db_conn_instance},
         vault::{
-            decrypt_token, encrypt_token, generate_pgp_key, generate_ssh_key_pair,
-            lazy_init_vault_for_scope, load_unseal_key_for_scope,
+            decrypt_token, encrypt_token, generate_pgp_encrypt_key, generate_pgp_key,
+            generate_ssh_key_pair, lazy_init_vault_for_scope, load_unseal_key_for_scope,
         },
     },
     utils::{
@@ -37,9 +41,13 @@ const EXAMPLES: &str = r#"EXAMPLES:
     libra config set user.name "John Doe"              Set local config value
     libra config get user.name                         Get value (cascade lookup)
     libra config list                                  List all local entries
-    libra config list --show-origin                    List with scope labels
+    libra config list --show-origin --show-scope       List with file: origin and local/global scope
+    libra config list --null                           NUL-delimited records for scripts (-z)
     libra config set --global user.email "j@x.com"     Set global config
     libra config unset user.signingkey                 Remove a key
+    libra config --replace-all remote.origin.fetch +refs/heads/*:refs/remotes/origin/*  Replace all values
+    libra config --get-all remote.origin.fetch --value '^main$' --fixed-value  Filter multi-values literally
+    libra config rename-section remote.origin remote.upstream  Move a config section
     libra config import --global                       Import from Git global config
     libra config set vault.env.GEMINI_API_KEY          Store API key (interactive)
     echo "$SECRET" | libra config set --stdin vault.env.KEY  Set from stdin (CI/CD)
@@ -93,6 +101,23 @@ impl ConfigScope {
                         create_database(&config_path_str)
                             .await
                             .map_err(|e| format!("Failed to create global config database: {e}"))?;
+                        // The global config DB may hold (encrypted) secrets, so
+                        // restrict it to the owner on first creation. Windows
+                        // has no direct equivalent here; that is a documented
+                        // platform difference.
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            std::fs::set_permissions(
+                                &config_path,
+                                std::fs::Permissions::from_mode(0o600),
+                            )
+                            .map_err(|e| {
+                                format!(
+                                    "Failed to restrict permissions on global config database: {e}"
+                                )
+                            })?;
+                        }
                     }
                     Ok(())
                 } else {
@@ -245,6 +270,91 @@ impl ScopedConfig {
 // CLI argument definitions
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Wave 3–6 Git-compat flags, flattened into [`ConfigArgs`].
+///
+/// These are deliberately NOT `global = true` (global args propagate to every
+/// subcommand and bloat clap's generated builders) and are grouped here so the
+/// generated `augment_args` functions stay small enough for the in-process
+/// `exec_async` test path's stack. They still parse in flag-mode and before a
+/// subcommand, which covers the supported scripting surface.
+#[derive(clap::Args, Debug, Default)]
+pub struct GitExtraArgs {
+    /// Filter values by regex (or a literal string with --fixed-value).
+    ///
+    /// The clap field is `value_filter` (not `value`) on purpose: a bare `value`
+    /// id collides with the `ConfigCommand::Set { value }` positional, and clap's
+    /// arg merging would then route the set positional into this filter.
+    /// `long = "value"` keeps the Git-compatible `--value` spelling.
+    #[clap(long = "value", value_name = "pattern", hide = true)]
+    pub value_filter: Option<String>,
+    /// Treat --value as a literal string instead of a regex
+    #[clap(long("fixed-value"), hide = true)]
+    pub fixed_value: bool,
+    /// Case-insensitive key/value regex matching
+    #[clap(long("ignore-case"), short = 'i', hide = true)]
+    pub ignore_case: bool,
+    /// Replace all values for a key with a single new value (Git --replace-all)
+    #[clap(long("replace-all"), hide = true)]
+    pub replace_all: bool,
+    /// Rename a config section: takes <old> <new> via the key/value positionals
+    #[clap(long("rename-section"), hide = true)]
+    pub rename_section: bool,
+    /// Remove a config section: takes <section> via the key positional
+    #[clap(long("remove-section"), hide = true)]
+    pub remove_section: bool,
+    /// Canonicalize the value as a type: bool | int | path
+    #[clap(long = "type", value_name = "type", hide = true)]
+    pub r#type: Option<String>,
+    /// Alias for --type=bool
+    #[clap(long, hide = true)]
+    pub bool: bool,
+    /// Alias for --type=int
+    #[clap(long, hide = true)]
+    pub int: bool,
+    /// Alias for --type=path
+    #[clap(long, hide = true)]
+    pub path: bool,
+    /// (rejected) worktree-scoped config
+    #[clap(long, hide = true)]
+    pub worktree: bool,
+    /// (rejected) read/write a plaintext config file
+    #[clap(long, short = 'f', value_name = "path", hide = true)]
+    pub file: Option<String>,
+    /// (rejected) read config from a blob
+    #[clap(long, value_name = "blob", hide = true)]
+    pub blob: Option<String>,
+    /// (rejected) follow include directives
+    #[clap(long, hide = true)]
+    pub includes: bool,
+    /// (rejected) do not follow include directives
+    #[clap(long("no-includes"), hide = true)]
+    pub no_includes: bool,
+    /// (rejected) legacy color helper
+    #[clap(long("get-color"), hide = true)]
+    pub get_color: bool,
+    /// (rejected) legacy colorbool helper
+    #[clap(long("get-colorbool"), hide = true)]
+    pub get_colorbool: bool,
+    /// (rejected) clear a value pattern
+    #[clap(long("no-value"), hide = true)]
+    pub no_value: bool,
+    /// (rejected) show only names for modern get
+    #[clap(long("show-names"), hide = true)]
+    pub show_names: bool,
+    /// (rejected) hide names for modern get
+    #[clap(long("no-show-names"), hide = true)]
+    pub no_show_names: bool,
+    /// (rejected) clear the value type
+    #[clap(long("no-type"), hide = true)]
+    pub no_type: bool,
+    /// (rejected) URL-matched config lookup
+    #[clap(long, value_name = "url", hide = true)]
+    pub url: Option<String>,
+    /// (rejected) URL-matched config lookup
+    #[clap(long("get-urlmatch"), hide = true)]
+    pub get_urlmatch: bool,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     about = "Manage repository configurations",
@@ -279,9 +389,45 @@ pub struct ConfigArgs {
     /// Get entries matching a regex
     #[clap(long("get-regexp"), hide = true)]
     pub get_regexp: bool,
-    /// Show which scope each value comes from
-    #[clap(long("show-origin"), hide = true)]
+    /// Show the `file:<path>` SQLite origin for each value
+    #[clap(long("show-origin"), global = true, hide = true)]
     pub show_origin: bool,
+    /// Show the local/global scope for each value
+    #[clap(long("show-scope"), global = true, hide = true)]
+    pub show_scope: bool,
+    /// NUL-delimit output records (Git -z)
+    #[clap(long, short = 'z', global = true, hide = true)]
+    pub null: bool,
+    /// Show only key names (list / get-regexp)
+    #[clap(long("name-only"), global = true, hide = true)]
+    pub name_only: bool,
+    /// Reveal encrypted values (Git-compat get paths)
+    #[clap(long, hide = true)]
+    pub reveal: bool,
+    /// Filter values by regex (or a literal string with --fixed-value).
+    ///
+    /// The clap field is `value_filter` (not `value`) on purpose: a bare `value`
+    /// id collides with the `ConfigCommand::Set { value }` positional, and clap's
+    /// arg merging would then route the set positional into this filter.
+    /// `long = "value"` keeps the Git-compatible `--value` spelling.
+    ///
+    /// These Git-compat flags are intentionally NOT `global = true`: every global
+    /// flag is propagated to every subcommand and inflates clap's generated
+    /// `augment_subcommands` stack frame, which overflows tokio's small default
+    /// test-thread stack for in-process callers. As hidden top-level flags they
+    /// still parse in flag-mode (`config --get key --value …`) and before a
+    /// subcommand, which is all the supported scripting surface needs.
+    /// Wave 3–6 Git-compat flags, flattened into a sub-struct.
+    ///
+    /// Flattening is deliberate: bundling these ~23 hidden flags here keeps
+    /// `ConfigArgs`'s clap-derived `augment_args` function small. A single flat
+    /// struct with this many args produces a giant generated builder whose
+    /// stack frame (which transitively contains the `augment_subcommands` call)
+    /// overflows tokio's small default test-thread stack for in-process
+    /// `exec_async` callers. Flatten splits it into a separate, smaller augment
+    /// function. Access via `args.extra.<field>`.
+    #[command(flatten)]
+    pub extra: GitExtraArgs,
 
     // ── Scope flags ──────────────────────────────────────────────────
     /// Use repository config (default)
@@ -317,6 +463,12 @@ pub enum ConfigCommand {
         /// Add as additional value (allows duplicates)
         #[clap(long)]
         add: bool,
+        /// Append a value without replacing existing ones (Git `set --append`)
+        #[clap(long)]
+        append: bool,
+        /// Replace all existing values with this one (Git `set --all`)
+        #[clap(long)]
+        all: bool,
         /// Force vault encryption
         #[clap(long)]
         encrypt: bool,
@@ -346,12 +498,6 @@ pub enum ConfigCommand {
     },
     /// List configuration entries
     List {
-        /// Show only key names
-        #[clap(long("name-only"))]
-        name_only: bool,
-        /// Show scope origin for each entry
-        #[clap(long("show-origin"))]
-        show_origin: bool,
         /// Show only vault.env.* entries
         #[clap(long)]
         vault: bool,
@@ -369,6 +515,18 @@ pub enum ConfigCommand {
         /// Remove all values for this key
         #[clap(long)]
         all: bool,
+    },
+    /// Rename a configuration section (e.g. remote.origin -> remote.upstream)
+    RenameSection {
+        /// Existing section name (dotted prefix, e.g. remote.origin)
+        old: String,
+        /// New section name (dotted prefix, e.g. remote.upstream)
+        new: String,
+    },
+    /// Remove a configuration section and all of its keys
+    RemoveSection {
+        /// Section name to remove (dotted prefix, e.g. branch.main)
+        section: String,
     },
     /// Import configuration from Git
     Import,
@@ -400,12 +558,22 @@ pub enum ConfigCommand {
 // Serializable output types
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 struct ConfigListEntry {
     key: String,
     value: Option<String>,
+    /// Backward-compatible scope label (`local`/`global`). Do not repurpose.
     #[serde(skip_serializing_if = "Option::is_none")]
     origin: Option<String>,
+    /// Explicit scope label, emitted only when `--show-scope` is requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
+    /// Git-style origin kind (`"file"`), emitted only with `--show-origin`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin_type: Option<String>,
+    /// Git-style origin path (the backing SQLite DB), emitted only with `--show-origin`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     encrypted: Option<bool>,
 }
@@ -460,14 +628,54 @@ pub async fn execute_safe(args: ConfigArgs, output: &OutputConfig) -> CliResult<
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()> {
-    // Reject --system early. config.md treats this as a CLI usage error
-    // (exit 2 fine / 129 coarse) — the user picked an unsupported scope at
-    // the argument level, not at runtime.
+    // Reject unsupported scopes and source selectors as early as possible —
+    // before opening any database, reading a `--file`/blob path, or consuming
+    // stdin. These are SQLite/vault-backed-config incompatibilities, surfaced as
+    // actionable CLI usage errors (exit 129 in coarse mode).
     if args.system {
         return Err(CliError::command_usage(
             "--system scope is not supported\n\nhint: use --local or --global",
         ));
     }
+    if args.extra.worktree {
+        return Err(CliError::command_usage(
+            "--worktree scope is not supported by Libra's SQLite/vault-backed config\n\nhint: use --local or --global",
+        ));
+    }
+    if args.extra.file.is_some() {
+        return Err(CliError::command_usage(
+            "--file is not supported (config is SQLite/vault-backed)\n\nhint: to import a Git config file use `libra config --import`",
+        ));
+    }
+    if args.extra.blob.is_some() {
+        return Err(CliError::command_usage(
+            "--blob is not supported: Libra config is SQLite/vault-backed, not blob-backed",
+        ));
+    }
+    if args.extra.includes || args.extra.no_includes {
+        return Err(CliError::command_usage(
+            "include directives are not supported: they are not part of Libra's SQLite-backed config",
+        ));
+    }
+    if args.extra.get_color || args.extra.get_colorbool {
+        return Err(CliError::command_usage(
+            "--get-color / --get-colorbool are deferred legacy color helpers and not yet supported",
+        ));
+    }
+    if args.extra.no_value || args.extra.show_names || args.extra.no_show_names {
+        return Err(CliError::command_usage(
+            "--no-value / --show-names / --no-show-names are not supported by Libra config",
+        ));
+    }
+    if args.extra.url.is_some() || args.extra.get_urlmatch {
+        return Err(CliError::command_usage(
+            "--url / --get-urlmatch are deferred advanced Git compatibility features and not yet supported",
+        ));
+    }
+
+    // Collapse the typed-value flags up front (rejects --no-type, unknown/
+    // deferred types, and multiple selectors with exit 129).
+    let config_type = resolve_type(&args)?;
 
     let scope = get_scope(&args);
     let use_cascade = !has_explicit_scope(&args);
@@ -475,22 +683,53 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
     // Resolve subcommand: either explicit or translated from Git-compat flags
     let cmd = resolve_command(&args)?;
 
+    // `--type` only applies to get/set value canonicalization; reject it with
+    // list (Git filters un-canonicalizable entries, which silently drops config)
+    // and with section operations.
+    if config_type.is_some()
+        && matches!(
+            cmd,
+            ResolvedCommand::List { .. }
+                | ResolvedCommand::RenameSection { .. }
+                | ResolvedCommand::RemoveSection { .. }
+        )
+    {
+        return Err(CliError::command_usage(
+            "--type can only be used with get/get-all/get-regexp or set",
+        ));
+    }
+
+    // `--null` only controls output delimiters; it must never be repurposed to
+    // parse stdin input. Reject the combination before any stdin is consumed.
+    if args.null
+        && let ResolvedCommand::Set { stdin: true, .. } = &cmd
+    {
+        return Err(CliError::command_usage(
+            "--null controls output delimiters and cannot be used to parse stdin values",
+        ));
+    }
+
     match cmd {
         ResolvedCommand::Set {
             key,
             value,
             add,
+            replace_all,
             encrypt,
             plaintext,
             stdin,
+            filter,
         } => {
             handle_set(
                 &key,
                 value.as_deref(),
                 add,
+                replace_all,
                 encrypt,
                 plaintext,
                 stdin,
+                filter,
+                config_type,
                 scope,
                 output,
             )
@@ -502,6 +741,8 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
             reveal,
             regexp,
             default,
+            flags,
+            filter,
         } => {
             handle_get(
                 &key,
@@ -509,6 +750,9 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
                 reveal,
                 regexp,
                 default.as_deref(),
+                flags,
+                filter,
+                config_type,
                 scope,
                 use_cascade,
                 output,
@@ -516,25 +760,20 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
             .await
         }
         ResolvedCommand::List {
-            name_only,
-            show_origin,
+            flags,
             vault,
             ssh_keys,
             gpg_keys,
-        } => {
-            handle_list(
-                name_only,
-                show_origin,
-                vault,
-                ssh_keys,
-                gpg_keys,
-                scope,
-                use_cascade,
-                output,
-            )
-            .await
+        } => handle_list(flags, vault, ssh_keys, gpg_keys, scope, use_cascade, output).await,
+        ResolvedCommand::Unset { key, all, filter } => {
+            handle_unset(&key, all, filter, scope, output).await
         }
-        ResolvedCommand::Unset { key, all } => handle_unset(&key, all, scope, output).await,
+        ResolvedCommand::RenameSection { old, new } => {
+            handle_rename_section(&old, &new, scope, output).await
+        }
+        ResolvedCommand::RemoveSection { section } => {
+            handle_remove_section(&section, scope, output).await
+        }
         ResolvedCommand::Import => handle_import(scope, output).await,
         ResolvedCommand::Path => handle_path(scope, output).await,
         ResolvedCommand::Edit => Err(CliError::from_legacy_string(
@@ -560,15 +799,247 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
 // Command resolution (subcommand ↔ flag translation)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Script-safe display flags shared by `get`/`list` output paths.
+///
+/// These are parsed as global Git-compat flags on [`ConfigArgs`] and bundled
+/// here so handler signatures do not balloon as more output options land.
+#[derive(Debug, Clone, Copy, Default)]
+struct OutputFlags {
+    /// NUL-delimit records (`-z`/`--null`): `key\nvalue\0` instead of `key=value\n`.
+    null: bool,
+    /// Prefix each record with its `local`/`global` scope label.
+    show_scope: bool,
+    /// Prefix each record with its `file:<path>` SQLite origin.
+    show_origin: bool,
+    /// Emit key names only (no values).
+    name_only: bool,
+}
+
+impl OutputFlags {
+    fn from_args(args: &ConfigArgs) -> Self {
+        Self {
+            null: args.null,
+            show_scope: args.show_scope,
+            show_origin: args.show_origin,
+            name_only: args.name_only,
+        }
+    }
+
+    /// True when a scope/origin prefix must precede each record.
+    fn prefixed(&self) -> bool {
+        self.show_scope || self.show_origin
+    }
+}
+
+/// Git-compatible `--value` / `--fixed-value` / `--ignore-case` filter inputs.
+///
+/// Parsed from the global Git-compat flags on [`ConfigArgs`] and threaded into
+/// `get`/`set`/`unset` handlers. [`Self::compile`] validates and compiles the
+/// pattern up front (invalid/over-long → exit 6) so it fails before any DB
+/// access; `ignore_case` is also consulted by `get-regexp` for the key regex.
+#[derive(Debug, Clone, Default)]
+struct ValueFilterSpec {
+    pattern: Option<String>,
+    fixed: bool,
+    ignore_case: bool,
+}
+
+impl ValueFilterSpec {
+    fn from_args(args: &ConfigArgs) -> Self {
+        Self {
+            pattern: args.extra.value_filter.clone(),
+            fixed: args.extra.fixed_value,
+            ignore_case: args.extra.ignore_case,
+        }
+    }
+
+    /// Compile to an internal [`ValueFilter`], or `None` when no `--value` was
+    /// given. Invalid or over-long patterns map to exit code 6.
+    fn compile(&self) -> CliResult<Option<ValueFilter>> {
+        match &self.pattern {
+            None => Ok(None),
+            Some(p) => ValueFilter::compile(p, self.fixed, self.ignore_case)
+                .map(Some)
+                .map_err(regex_cli_error),
+        }
+    }
+}
+
+/// Map an invalid/over-long regex error to a stable exit-6 CLI error.
+fn regex_cli_error(err: impl std::fmt::Display) -> CliError {
+    CliError::from_legacy_string(format!("error: {err}")).with_exit_code(6)
+}
+
+/// Map a SQLite write error (including locked/busy/full) to an actionable
+/// exit-4 CLI error. The underlying message is a DB error, never a config
+/// value, so no secret material is surfaced.
+fn config_write_cli_error(context: &str, err: impl std::fmt::Display) -> CliError {
+    let message = err.to_string();
+    let lower = message.to_ascii_lowercase();
+    let hint = if lower.contains("sqlite_full") || lower.contains("disk is full") {
+        "insufficient disk space"
+    } else if lower.contains("locked") || lower.contains("sqlite_busy") || lower.contains("busy") {
+        "database is locked"
+    } else {
+        "failed to write config"
+    };
+    CliError::fatal(format!("{context}: {hint}: {message}"))
+        .with_stable_code(StableErrorCode::IoWriteFailed)
+        .with_exit_code(4)
+}
+
+/// Supported `--type` canonicalizations. Table-driven so adding `color` /
+/// `bool-or-int` later only extends this enum and [`canonicalize_typed_value`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigType {
+    Bool,
+    Int,
+    Path,
+}
+
+/// Collapse `--type=<t>` and the `--bool`/`--int`/`--path` aliases into a single
+/// optional [`ConfigType`]. Unknown/deferred types, `--no-type`, and multiple
+/// selectors are usage errors (exit 129 in coarse mode).
+fn resolve_type(args: &ConfigArgs) -> CliResult<Option<ConfigType>> {
+    let mut picks: Vec<ConfigType> = Vec::new();
+    if args.extra.bool {
+        picks.push(ConfigType::Bool);
+    }
+    if args.extra.int {
+        picks.push(ConfigType::Int);
+    }
+    if args.extra.path {
+        picks.push(ConfigType::Path);
+    }
+    if let Some(t) = args.extra.r#type.as_deref() {
+        match t {
+            "bool" => picks.push(ConfigType::Bool),
+            "int" => picks.push(ConfigType::Int),
+            "path" => picks.push(ConfigType::Path),
+            "bool-or-int" | "expiry-date" | "color" => {
+                return Err(CliError::command_usage(format!(
+                    "--type={t} is not yet supported by Libra config"
+                )));
+            }
+            other => {
+                return Err(CliError::command_usage(format!(
+                    "unknown --type value: {other}"
+                )));
+            }
+        }
+    }
+    if args.extra.no_type {
+        return Err(CliError::command_usage(
+            "--no-type is not supported by Libra config",
+        ));
+    }
+    if picks.len() > 1 {
+        return Err(CliError::command_usage(
+            "multiple type selectors specified (--type / --bool / --int / --path)",
+        ));
+    }
+    Ok(picks.into_iter().next())
+}
+
+/// Resolve the `HOME` (or, on Windows, `USERPROFILE`) directory for `~`
+/// expansion. Reads the environment directly (no passwd fallback) so an unset or
+/// empty value is an error, matching the documented `--type=path` contract.
+fn typed_path_home() -> CliResult<PathBuf> {
+    let vars: &[&str] = if cfg!(windows) {
+        &["USERPROFILE", "HOME"]
+    } else {
+        &["HOME"]
+    };
+    for var in vars {
+        if let Some(v) = std::env::var_os(var)
+            && !v.is_empty()
+        {
+            return Ok(PathBuf::from(v));
+        }
+    }
+    Err(
+        CliError::from_legacy_string("error: cannot expand '~': HOME is not set or empty")
+            .with_exit_code(1),
+    )
+}
+
+/// Expand a leading `~` / `~/child` for `--type=path` reads. `~user` is rejected
+/// (exit 1); a value without a leading `~` is returned unchanged.
+fn expand_typed_path(value: &str) -> CliResult<String> {
+    if value == "~" {
+        return Ok(typed_path_home()?.to_string_lossy().into_owned());
+    }
+    if let Some(child) = value.strip_prefix("~/") {
+        return Ok(typed_path_home()?
+            .join(child)
+            .to_string_lossy()
+            .into_owned());
+    }
+    if value.starts_with('~') {
+        return Err(CliError::from_legacy_string(
+            "~user path expansion is not supported by Libra config",
+        )
+        .with_exit_code(1));
+    }
+    Ok(value.to_string())
+}
+
+/// Canonicalize an already-revealed plaintext value for `--type=bool|int|path`.
+/// Bool/int parse failures and int overflow map to exit 2; `~user` / unset-HOME
+/// path errors map to exit 1. Error messages never echo the value (no secret
+/// leak for sensitive keys).
+fn canonicalize_typed_value(ty: ConfigType, value: &str) -> CliResult<String> {
+    match ty {
+        ConfigType::Bool => {
+            let b = crate::internal::config::parse_config_bool(value).ok_or_else(|| {
+                CliError::from_legacy_string("error: invalid boolean value (expected true/false)")
+                    .with_exit_code(2)
+            })?;
+            Ok(if b { "true" } else { "false" }.to_string())
+        }
+        ConfigType::Int => {
+            let n = crate::internal::config::parse_config_int(value).map_err(|e| {
+                CliError::from_legacy_string(format!("error: invalid integer value: {e}"))
+                    .with_exit_code(2)
+            })?;
+            Ok(n.to_string())
+        }
+        ConfigType::Path => expand_typed_path(value),
+    }
+}
+
+/// Apply `--type` canonicalization to a rendered get value. Encrypted values
+/// that were not revealed (or are vault-internal) stay `<REDACTED>` and are
+/// never parsed as a type.
+fn typed_output(
+    entry: &ConfigKvEntry,
+    reveal: bool,
+    rendered: &str,
+    ty: Option<ConfigType>,
+) -> CliResult<String> {
+    match ty {
+        None => Ok(rendered.to_string()),
+        Some(t) => {
+            if entry.encrypted && (!reveal || is_vault_internal_key(&entry.key)) {
+                Ok(rendered.to_string())
+            } else {
+                canonicalize_typed_value(t, rendered)
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 enum ResolvedCommand {
     Set {
         key: String,
         value: Option<String>,
         add: bool,
+        replace_all: bool,
         encrypt: bool,
         plaintext: bool,
         stdin: bool,
+        filter: ValueFilterSpec,
     },
     Get {
         key: String,
@@ -576,10 +1047,11 @@ enum ResolvedCommand {
         reveal: bool,
         regexp: bool,
         default: Option<String>,
+        flags: OutputFlags,
+        filter: ValueFilterSpec,
     },
     List {
-        name_only: bool,
-        show_origin: bool,
+        flags: OutputFlags,
         vault: bool,
         ssh_keys: bool,
         gpg_keys: bool,
@@ -587,6 +1059,14 @@ enum ResolvedCommand {
     Unset {
         key: String,
         all: bool,
+        filter: ValueFilterSpec,
+    },
+    RenameSection {
+        old: String,
+        new: String,
+    },
+    RemoveSection {
+        section: String,
     },
     Import,
     Path,
@@ -609,16 +1089,20 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
                 key,
                 value,
                 add,
+                append,
+                all,
                 encrypt,
                 plaintext,
                 stdin,
             } => ResolvedCommand::Set {
                 key: key.clone(),
                 value: value.clone(),
-                add: *add,
+                add: *add || *append,
+                replace_all: *all || args.extra.replace_all,
                 encrypt: *encrypt,
                 plaintext: *plaintext,
                 stdin: *stdin,
+                filter: ValueFilterSpec::from_args(args),
             },
             ConfigCommand::Get {
                 key,
@@ -632,16 +1116,15 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
                 reveal: *reveal,
                 regexp: *regexp,
                 default: default.clone(),
+                flags: OutputFlags::from_args(args),
+                filter: ValueFilterSpec::from_args(args),
             },
             ConfigCommand::List {
-                name_only,
-                show_origin,
                 vault,
                 ssh_keys,
                 gpg_keys,
             } => ResolvedCommand::List {
-                name_only: *name_only,
-                show_origin: *show_origin,
+                flags: OutputFlags::from_args(args),
                 vault: *vault,
                 ssh_keys: *ssh_keys,
                 gpg_keys: *gpg_keys,
@@ -649,6 +1132,14 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
             ConfigCommand::Unset { key, all } => ResolvedCommand::Unset {
                 key: key.clone(),
                 all: *all,
+                filter: ValueFilterSpec::from_args(args),
+            },
+            ConfigCommand::RenameSection { old, new } => ResolvedCommand::RenameSection {
+                old: old.clone(),
+                new: new.clone(),
+            },
+            ConfigCommand::RemoveSection { section } => ResolvedCommand::RemoveSection {
+                section: section.clone(),
             },
             ConfigCommand::Import => ResolvedCommand::Import,
             ConfigCommand::Path => ResolvedCommand::Path,
@@ -666,11 +1157,43 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
         });
     }
 
+    // Git-compat section flags reuse the key/value positionals as <old> <new>
+    // (rename) or <section> (remove). Handle them before the generic key path
+    // so the `<old> <new>` arguments are not misread as a set's key/value.
+    if args.extra.rename_section {
+        let old = args.key.as_deref().ok_or_else(|| {
+            CliError::from_legacy_string("error: --rename-section requires <old> <new>")
+                .with_exit_code(2)
+        })?;
+        let new = args.valuepattern.as_deref().ok_or_else(|| {
+            CliError::from_legacy_string("error: --rename-section requires <old> <new>")
+                .with_exit_code(2)
+        })?;
+        return Ok(ResolvedCommand::RenameSection {
+            old: old.to_string(),
+            new: new.to_string(),
+        });
+    }
+    if args.extra.remove_section {
+        let section = args.key.as_deref().ok_or_else(|| {
+            CliError::from_legacy_string("error: --remove-section requires <section>")
+                .with_exit_code(2)
+        })?;
+        if args.valuepattern.is_some() {
+            return Err(CliError::from_legacy_string(
+                "error: --remove-section takes exactly one <section>",
+            )
+            .with_exit_code(2));
+        }
+        return Ok(ResolvedCommand::RemoveSection {
+            section: section.to_string(),
+        });
+    }
+
     // Git-compat flag translation
     if args.list {
         return Ok(ResolvedCommand::List {
-            name_only: false,
-            show_origin: args.show_origin,
+            flags: OutputFlags::from_args(args),
             vault: false,
             ssh_keys: false,
             gpg_keys: false,
@@ -699,8 +1222,11 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
         CliError::from_legacy_string("error: missing required argument: <key>").with_exit_code(2)
     })?;
 
-    // Validate key format (must contain at least one dot)
-    if !key.contains('.') {
+    // Validate key format (must contain at least one dot). For `--get-regexp`
+    // the "key" is a regex pattern, not a literal key, so the dot requirement
+    // does not apply — its length/syntax are validated when the pattern is
+    // compiled (over-long → exit 6).
+    if !args.get_regexp && !key.contains('.') {
         let mut msg = format!("error: key does not contain a section: {key}");
         if key == "init" || key == "clone" {
             msg.push_str(&format!(
@@ -722,41 +1248,51 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
         return Ok(ResolvedCommand::Get {
             key: key.to_string(),
             all: false,
-            reveal: false,
+            reveal: args.reveal,
             regexp: true,
             default: args.default.clone(),
+            flags: OutputFlags::from_args(args),
+            filter: ValueFilterSpec::from_args(args),
         });
     }
     if args.get {
         return Ok(ResolvedCommand::Get {
             key: key.to_string(),
             all: false,
-            reveal: false,
+            reveal: args.reveal,
             regexp: false,
             default: args.default.clone(),
+            flags: OutputFlags::from_args(args),
+            filter: ValueFilterSpec::from_args(args),
         });
     }
     if args.get_all {
         return Ok(ResolvedCommand::Get {
             key: key.to_string(),
             all: true,
-            reveal: false,
+            reveal: args.reveal,
             regexp: false,
             default: args.default.clone(),
+            flags: OutputFlags::from_args(args),
+            filter: ValueFilterSpec::from_args(args),
         });
     }
     if args.unset {
         return Ok(ResolvedCommand::Unset {
             key: key.to_string(),
             all: false,
+            filter: ValueFilterSpec::from_args(args),
         });
     }
     if args.unset_all {
         return Ok(ResolvedCommand::Unset {
             key: key.to_string(),
             all: true,
+            filter: ValueFilterSpec::from_args(args),
         });
     }
+    // Flag-mode append is the legacy `--add`; `--append` is the modern
+    // `set --append` subcommand field (see ConfigCommand::Set).
     if args.add {
         let value = args.valuepattern.as_deref().ok_or_else(|| {
             CliError::from_legacy_string("error: missing required argument: <value>")
@@ -766,9 +1302,28 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
             key: key.to_string(),
             value: Some(value.to_string()),
             add: true,
+            replace_all: false,
             encrypt: false,
             plaintext: false,
             stdin: false,
+            filter: ValueFilterSpec::from_args(args),
+        });
+    }
+    // `--replace-all` replaces every (or every matching) value with one new value.
+    if args.extra.replace_all {
+        let value = args.valuepattern.as_deref().ok_or_else(|| {
+            CliError::from_legacy_string("error: missing required argument: <value>")
+                .with_exit_code(2)
+        })?;
+        return Ok(ResolvedCommand::Set {
+            key: key.to_string(),
+            value: Some(value.to_string()),
+            add: false,
+            replace_all: true,
+            encrypt: false,
+            plaintext: false,
+            stdin: false,
+            filter: ValueFilterSpec::from_args(args),
         });
     }
 
@@ -779,6 +1334,8 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
         key: key.to_string(),
         value: args.valuepattern.clone(),
         add: false,
+        replace_all: false,
+        filter: ValueFilterSpec::from_args(args),
         encrypt: false,
         plaintext: false,
         stdin: false,
@@ -794,19 +1351,24 @@ async fn handle_set(
     key: &str,
     value: Option<&str>,
     add: bool,
+    replace_all: bool,
     encrypt: bool,
     plaintext: bool,
     stdin: bool,
+    filter: ValueFilterSpec,
+    config_type: Option<ConfigType>,
     scope: ConfigScope,
     output: &OutputConfig,
 ) -> CliResult<()> {
-    // Validate key format
-    if !key.contains('.') {
-        return Err(CliError::from_legacy_string(format!(
-            "error: key does not contain a section: {key}"
-        ))
-        .with_exit_code(1));
-    }
+    // Validate the user-typed key syntax (permissive flat-dotted-key rules).
+    // Genuine malformations exit 1; legal-but-non-classic keys (underscores,
+    // camelCase, many segments) are accepted. NOT applied to `--import`.
+    validate_key_syntax(key)
+        .map_err(|e| CliError::from_legacy_string(format!("error: {e}")).with_exit_code(1))?;
+
+    // Compile any `--value` filter up front so an invalid/over-long pattern
+    // fails (exit 6) before any DB access or mutation.
+    let value_filter = filter.compile()?;
 
     // `--encrypt` and `--plaintext` are mutually exclusive. config.md (line 77)
     // classifies this as a CLI usage error (exit 2 in fine mode, 129 in
@@ -892,6 +1454,17 @@ async fn handle_set(
         }
     };
 
+    // `--type=bool|int` validate and normalize the input before storage (the
+    // canonical form is stored). `--type=path` stores the value verbatim and
+    // only expands `~` on read. Validation runs on the plaintext before any
+    // encryption; error messages never echo the value (no secret leak).
+    let resolved_value = match config_type {
+        Some(ty @ (ConfigType::Bool | ConfigType::Int)) => {
+            canonicalize_typed_value(ty, &resolved_value)?
+        }
+        Some(ConfigType::Path) | None => resolved_value,
+    };
+
     // Determine encryption
     let should_encrypt = if encrypt {
         true
@@ -936,10 +1509,46 @@ async fn handle_set(
     };
 
     if add {
+        // `--append` / `--add`: append without replacing existing values.
         ScopedConfig::add(scope, key, &store_value, should_encrypt)
             .await
             .map_err(CliError::from_legacy_string)?;
         emit_set_ack("add", scope, key, should_encrypt, output)?;
+    } else if replace_all || value_filter.is_some() {
+        // `--replace-all` / `set --all`, or a value-filtered set: read matching
+        // rows by id, delete them, and insert the new value — all in one
+        // transaction so any error path leaves the store unchanged. A default
+        // (non-replace-all) set with a `--value` filter must reject an ambiguous
+        // (>1) match set with exit 5, mirroring Git.
+        let conn = ScopedConfig::get_connection(scope)
+            .await
+            .map_err(CliError::from_legacy_string)?;
+        let txn = conn
+            .begin()
+            .await
+            .map_err(|e| config_write_cli_error("failed to begin config transaction", e))?;
+        let enforce_single = !replace_all;
+        ConfigKv::replace_matching_with_conn(
+            &txn,
+            key,
+            &store_value,
+            should_encrypt,
+            value_filter.as_ref(),
+            enforce_single,
+        )
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("values exist") {
+                CliError::from_legacy_string(format!("error: {msg}")).with_exit_code(5)
+            } else {
+                config_write_cli_error("failed to write config", e)
+            }
+        })?;
+        txn.commit()
+            .await
+            .map_err(|e| config_write_cli_error("failed to commit config transaction", e))?;
+        emit_set_ack("set", scope, key, should_encrypt, output)?;
     } else {
         ScopedConfig::set(scope, key, &store_value, should_encrypt)
             .await
@@ -1004,6 +1613,214 @@ async fn render_get_value(
     Ok(decrypted)
 }
 
+/// Resolve the backing SQLite database path for a scope (no `file:` prefix).
+///
+/// Local uses the repository's `.libra/libra.db`; global uses the resolved
+/// global config DB. Returns `None` only when the path cannot be determined
+/// (e.g. local scope outside a repository).
+fn config_origin_path_string(scope: ConfigScope) -> Option<String> {
+    let path = match scope {
+        ConfigScope::Local => try_get_storage_path(None).ok().map(|s| s.join(DATABASE)),
+        ConfigScope::Global => scope.get_config_path(),
+    };
+    path.map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Git-style `file:<absolute-path>` origin for a scope's backing SQLite DB.
+fn format_config_origin(scope: ConfigScope) -> String {
+    match config_origin_path_string(scope) {
+        Some(p) => format!("file:{p}"),
+        None => format!("file:{}", scope_name(scope)),
+    }
+}
+
+/// Push the scope/origin prefix fields (when requested) onto `out`.
+fn push_prefix_fields(out: &mut String, scope: ConfigScope, flags: OutputFlags) {
+    let sep = if flags.null { '\0' } else { '\t' };
+    if flags.show_scope {
+        out.push_str(scope_name(scope));
+        out.push(sep);
+    }
+    if flags.show_origin {
+        out.push_str(&format_config_origin(scope));
+        out.push(sep);
+    }
+}
+
+/// Build one key/value text record for `list` / `get-regexp` output.
+///
+/// `value == None` selects name-only (key only). `kv_sep` joins key and value
+/// in non-null text mode (`'='` for `list`, `' '` for `get-regexp`); under
+/// `--null` the separator is always `\n` per Git's null record format. The
+/// returned string includes its trailing record delimiter (`\n` or `\0`) and
+/// any requested scope/origin prefix.
+fn format_config_record(
+    scope: ConfigScope,
+    key: &str,
+    value: Option<&str>,
+    kv_sep: char,
+    flags: OutputFlags,
+) -> String {
+    let mut out = String::new();
+    push_prefix_fields(&mut out, scope, flags);
+    match (value, flags.null) {
+        // name-only
+        (None, false) => {
+            out.push_str(key);
+            out.push('\n');
+        }
+        (None, true) => {
+            out.push_str(key);
+            out.push('\0');
+        }
+        // key + value
+        (Some(v), false) => {
+            out.push_str(key);
+            out.push(kv_sep);
+            out.push_str(v);
+            out.push('\n');
+        }
+        (Some(v), true) => {
+            out.push_str(key);
+            out.push('\n');
+            out.push_str(v);
+            out.push('\0');
+        }
+    }
+    out
+}
+
+/// Build a single `get` / `get-all` value record (value only, no key),
+/// honouring scope/origin prefixes and `--null`.
+fn format_get_value_record(scope: ConfigScope, value: &str, flags: OutputFlags) -> String {
+    let mut out = String::new();
+    push_prefix_fields(&mut out, scope, flags);
+    out.push_str(value);
+    out.push(if flags.null { '\0' } else { '\n' });
+    out
+}
+
+/// Build a JSON entry for a `get`/`get-all` value (no `key`), keeping the
+/// existing `value`/`origin`/`encrypted` fields and adding `scope`/`origin_type`/
+/// `origin_path` only when the corresponding `--show-*` flag is set.
+fn get_value_json(
+    value: &str,
+    scope: ConfigScope,
+    encrypted: bool,
+    flags: OutputFlags,
+) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("value".into(), serde_json::json!(value));
+    obj.insert("origin".into(), serde_json::json!(scope_name(scope)));
+    obj.insert("encrypted".into(), serde_json::json!(encrypted));
+    if flags.show_scope {
+        obj.insert("scope".into(), serde_json::json!(scope_name(scope)));
+    }
+    if flags.show_origin {
+        obj.insert("origin_type".into(), serde_json::json!("file"));
+        obj.insert(
+            "origin_path".into(),
+            serde_json::json!(config_origin_path_string(scope)),
+        );
+    }
+    serde_json::Value::Object(obj)
+}
+
+/// Compute the display value for a list entry, honouring redaction, the
+/// `[PLAINTEXT]` safety marker (human text mode only), and name-only mode.
+fn render_list_value(entry: &ConfigKvEntry, flags: OutputFlags) -> Option<String> {
+    if flags.name_only {
+        return None;
+    }
+    if entry.encrypted {
+        return Some("<REDACTED>".to_string());
+    }
+    // Plaintext value. Append a `[PLAINTEXT]` marker for sensitive-looking keys
+    // in human text mode only; machine (`--null`) output stays raw.
+    if !flags.null && is_sensitive_key(&entry.key) {
+        Some(format!("{} [PLAINTEXT]", entry.value))
+    } else {
+        Some(entry.value.clone())
+    }
+}
+
+/// Construct a [`ConfigListEntry`] for a prefixed (scope/origin) listing,
+/// honouring the JSON backward-compatibility contract: `origin` keeps its
+/// scope-label meaning; `scope`/`origin_type`/`origin_path` appear only when
+/// the corresponding `--show-*` flag is set.
+fn build_prefixed_list_entry(
+    key: String,
+    value: Option<String>,
+    scope: ConfigScope,
+    encrypted: bool,
+    flags: OutputFlags,
+) -> ConfigListEntry {
+    ConfigListEntry {
+        key,
+        value,
+        origin: Some(scope_name(scope).to_string()),
+        scope: flags.show_scope.then(|| scope_name(scope).to_string()),
+        origin_type: flags.show_origin.then(|| "file".to_string()),
+        origin_path: if flags.show_origin {
+            config_origin_path_string(scope)
+        } else {
+            None
+        },
+        encrypted: Some(encrypted),
+    }
+}
+
+/// Reject `--null` combined with JSON output (JSON is already machine-readable).
+fn reject_null_with_json(flags: OutputFlags, output: &OutputConfig) -> CliResult<()> {
+    if flags.null && output.is_json() {
+        return Err(CliError::command_usage(
+            "--null is not compatible with JSON output; JSON is already machine-readable",
+        ));
+    }
+    Ok(())
+}
+
+/// Reject `--name-only` combined with JSON output (consumers read the `key` field).
+fn reject_name_only_with_json(flags: OutputFlags, output: &OutputConfig) -> CliResult<()> {
+    if flags.name_only && output.is_json() {
+        return Err(CliError::command_usage(
+            "--name-only is not compatible with JSON output; read the `key` field instead",
+        ));
+    }
+    Ok(())
+}
+
+/// The string a `--value` filter matches against for one entry.
+///
+/// Encrypted + revealed (non-vault-internal) keys match on the decrypted text
+/// (which is exactly what was rendered for display); every other case matches on
+/// the stored value (plaintext, or hex ciphertext for unrevealed secrets), so an
+/// unrevealed secret is never decrypted merely to be filtered.
+fn value_filter_input<'a>(entry: &'a ConfigKvEntry, reveal: bool, display: &'a str) -> &'a str {
+    if entry.encrypted && reveal && !is_vault_internal_key(&entry.key) {
+        display
+    } else {
+        entry.value.as_str()
+    }
+}
+
+/// Compile a `get-regexp` key pattern, honouring `--ignore-case` and the 4 KiB
+/// length cap. Invalid or over-long patterns map to exit code 6.
+fn compile_key_regex(pattern: &str, ignore_case: bool) -> CliResult<regex::Regex> {
+    validate_config_regex_pattern(pattern).map_err(regex_cli_error)?;
+    regex::RegexBuilder::new(pattern)
+        .case_insensitive(ignore_case)
+        .build()
+        .map_err(|e| regex_cli_error(format!("invalid regex pattern '{pattern}': {e}")))
+}
+
+/// Read-path error when a `--value` filter matched nothing (Git exit 1, empty stdout).
+fn no_value_match_error() -> CliError {
+    CliError::failure("no value matched the --value filter")
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+        .with_exit_code(1)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_get(
     key: &str,
@@ -1011,10 +1828,28 @@ async fn handle_get(
     reveal: bool,
     regexp: bool,
     default: Option<&str>,
+    flags: OutputFlags,
+    filter: ValueFilterSpec,
+    config_type: Option<ConfigType>,
     scope: ConfigScope,
     use_cascade: bool,
     output: &OutputConfig,
 ) -> CliResult<()> {
+    reject_null_with_json(flags, output)?;
+    reject_name_only_with_json(flags, output)?;
+
+    // Compile any `--value` filter up front so an invalid/over-long pattern
+    // fails (exit 6) before any DB access.
+    let value_filter = filter.compile()?;
+
+    // `--name-only` is only meaningful for list / get-regexp output; a single
+    // or multi get of a value has no key column to reduce to.
+    if flags.name_only && !regexp {
+        return Err(CliError::command_usage(
+            "--name-only is only supported for list and --get-regexp; it cannot be combined with a single-key get",
+        ));
+    }
+
     // Block --reveal for vault internal keys on exact-key queries
     if reveal && !regexp && !all && is_vault_internal_key(key) {
         return Err(CliError::from_legacy_string(format!(
@@ -1024,60 +1859,86 @@ async fn handle_get(
     }
 
     if regexp {
-        // Regex search across all keys
-        let entries: Vec<(ConfigKvEntry, ConfigScope)> = if use_cascade {
-            let mut all_entries = Vec::new();
-            for s in ConfigScope::CASCADE_ORDER {
-                if s != ConfigScope::Local {
-                    let Some(path) = s.get_config_path() else {
-                        continue;
-                    };
-                    if !path.exists() {
-                        continue;
-                    }
-                }
-                let scope_entries = ScopedConfig::get_regexp(s, key).await.map_err(|e| {
-                    config_read_cli_error(format!("failed to read {} config: {e}", scope_name(s)))
-                })?;
-                for e in scope_entries {
-                    all_entries.push((e, s));
+        // Regex search across all keys (honouring --ignore-case and the 4 KiB cap).
+        let key_re = compile_key_regex(key, filter.ignore_case)?;
+        let scopes: Vec<ConfigScope> = if use_cascade {
+            ConfigScope::CASCADE_ORDER.to_vec()
+        } else {
+            vec![scope]
+        };
+        let mut entries: Vec<(ConfigKvEntry, ConfigScope)> = Vec::new();
+        for s in scopes {
+            if s != ConfigScope::Local {
+                let Some(path) = s.get_config_path() else {
+                    continue;
+                };
+                if !path.exists() {
+                    continue;
                 }
             }
-            all_entries
-        } else {
-            ScopedConfig::get_regexp(scope, key)
-                .await
-                .map_err(CliError::from_legacy_string)?
-                .into_iter()
-                .map(|e| (e, scope))
-                .collect()
-        };
+            let scope_entries = if use_cascade {
+                // Cascade view skips unreadable scopes (mirrors handle_list).
+                ScopedConfig::list_all(s).await.map_err(|e| {
+                    config_read_cli_error(format!("failed to read {} config: {e}", scope_name(s)))
+                })?
+            } else {
+                ScopedConfig::list_all(s)
+                    .await
+                    .map_err(CliError::from_legacy_string)?
+            };
+            for e in scope_entries {
+                if key_re.is_match(&e.key) {
+                    entries.push((e, s));
+                }
+            }
+        }
 
-        // Build display values with decryption support
+        // Build display values + apply the optional value filter (on the raw
+        // rendered value) then `--type` canonicalization (on the output value).
         let mut display_entries = Vec::new();
         for (e, s) in &entries {
-            let val = render_get_value(e, reveal, *s, use_cascade).await?;
-            display_entries.push((e, s, val));
+            let raw = render_get_value(e, reveal, *s, use_cascade).await?;
+            if let Some(vf) = &value_filter
+                && !vf.matches(value_filter_input(e, reveal, &raw))
+            {
+                continue;
+            }
+            let out_val = typed_output(e, reveal, &raw, config_type)?;
+            display_entries.push((e, s, out_val));
+        }
+
+        // A value-filtered regexp read with no matches exits 1 (empty stdout).
+        if value_filter.is_some() && display_entries.is_empty() {
+            return Err(no_value_match_error());
         }
 
         if output.is_json() {
+            let json_entries: Vec<ConfigListEntry> = display_entries
+                .iter()
+                .map(|(e, s, val)| {
+                    build_prefixed_list_entry(
+                        e.key.clone(),
+                        Some(val.clone()),
+                        **s,
+                        e.encrypted,
+                        flags,
+                    )
+                })
+                .collect();
             emit_json_data(
                 "config",
                 &serde_json::json!({
                     "action": "get-regexp",
                     "pattern": key,
-                    "entries": display_entries.iter().map(|(e, s, val)| serde_json::json!({
-                        "key": e.key,
-                        "value": val,
-                        "origin": scope_name(**s),
-                        "encrypted": e.encrypted,
-                    })).collect::<Vec<_>>(),
+                    "entries": json_entries,
                 }),
                 output,
             )?;
         } else if !output.quiet {
-            for (e, _, val) in &display_entries {
-                println!("{} = {val}", e.key);
+            // Git-style `key value` (space-separated); `--name-only` emits the key only.
+            for (e, s, val) in &display_entries {
+                let value = (!flags.name_only).then_some(val.as_str());
+                print!("{}", format_config_record(**s, &e.key, value, ' ', flags));
             }
         }
         return Ok(());
@@ -1111,16 +1972,33 @@ async fn handle_get(
                     output,
                 )?;
             } else if !output.quiet {
-                println!("{d}");
+                let bare = OutputFlags {
+                    show_scope: false,
+                    show_origin: false,
+                    ..flags
+                };
+                print!("{}", format_get_value_record(scope, d, bare));
             }
             return Ok(());
         }
 
-        // Build display values with decryption support
+        // Build display values + apply the optional value filter (raw) then
+        // `--type` canonicalization (output).
         let mut display_entries = Vec::new();
         for (e, s) in &entries {
-            let val = render_get_value(e, reveal, *s, use_cascade).await?;
-            display_entries.push((e, s, val));
+            let raw = render_get_value(e, reveal, *s, use_cascade).await?;
+            if let Some(vf) = &value_filter
+                && !vf.matches(value_filter_input(e, reveal, &raw))
+            {
+                continue;
+            }
+            let out_val = typed_output(e, reveal, &raw, config_type)?;
+            display_entries.push((e, s, out_val));
+        }
+
+        // A value-filtered get-all with no matches exits 1 (empty stdout).
+        if value_filter.is_some() && display_entries.is_empty() {
+            return Err(no_value_match_error());
         }
 
         if output.is_json() {
@@ -1129,20 +2007,92 @@ async fn handle_get(
                 &serde_json::json!({
                     "action": "get-all",
                     "key": key,
-                    "entries": display_entries.iter().map(|(e, s, val)| serde_json::json!({
-                        "value": val,
-                        "origin": scope_name(**s),
-                        "encrypted": e.encrypted,
-                    })).collect::<Vec<_>>(),
+                    "entries": display_entries.iter().map(|(e, s, val)| {
+                        get_value_json(val, **s, e.encrypted, flags)
+                    }).collect::<Vec<_>>(),
                     "default_applied": false,
                 }),
                 output,
             )?;
         } else if !output.quiet {
-            for (_, _, val) in &display_entries {
-                println!("{val}");
+            for (_, s, val) in &display_entries {
+                print!("{}", format_get_value_record(**s, val, flags));
             }
         }
+    } else if let Some(vf) = &value_filter {
+        // Single get with `--value`: among all values of the key, return the
+        // LAST one that matches the filter (Git's last-one-wins). No match with
+        // an existing key exits 1; an entirely absent key may fall back to
+        // `--default`.
+        let entries: Vec<(ConfigKvEntry, ConfigScope)> = if use_cascade {
+            get_all_cascaded(key).await.map_err(config_read_cli_error)?
+        } else {
+            ScopedConfig::get_all(scope, key)
+                .await
+                .map_err(CliError::from_legacy_string)?
+                .into_iter()
+                .map(|e| (e, scope))
+                .collect()
+        };
+
+        let mut matched: Option<(ConfigScope, String)> = None;
+        for (e, s) in &entries {
+            let raw = render_get_value(e, reveal, *s, use_cascade).await?;
+            if vf.matches(value_filter_input(e, reveal, &raw)) {
+                matched = Some((*s, typed_output(e, reveal, &raw, config_type)?));
+            }
+        }
+
+        match matched {
+            Some((s, val)) => {
+                if output.is_json() {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("action".into(), serde_json::json!("get"));
+                    obj.insert("key".into(), serde_json::json!(key));
+                    obj.insert("value".into(), serde_json::json!(val));
+                    obj.insert("origin".into(), serde_json::json!(scope_name(s)));
+                    obj.insert("default_applied".into(), serde_json::json!(false));
+                    if flags.show_scope {
+                        obj.insert("scope".into(), serde_json::json!(scope_name(s)));
+                    }
+                    if flags.show_origin {
+                        obj.insert("origin_type".into(), serde_json::json!("file"));
+                        obj.insert(
+                            "origin_path".into(),
+                            serde_json::json!(config_origin_path_string(s)),
+                        );
+                    }
+                    emit_json_data("config", &serde_json::Value::Object(obj), output)?;
+                } else if !output.quiet {
+                    print!("{}", format_get_value_record(s, &val, flags));
+                }
+            }
+            None if entries.is_empty() && default.is_some() => {
+                let d = default.unwrap_or_default();
+                if output.is_json() {
+                    emit_json_data(
+                        "config",
+                        &serde_json::json!({
+                            "action": "get",
+                            "key": key,
+                            "value": d,
+                            "origin": serde_json::Value::Null,
+                            "default_applied": true,
+                        }),
+                        output,
+                    )?;
+                } else if !output.quiet {
+                    let bare = OutputFlags {
+                        show_scope: false,
+                        show_origin: false,
+                        ..flags
+                    };
+                    print!("{}", format_get_value_record(scope, d, bare));
+                }
+            }
+            None => return Err(no_value_match_error()),
+        }
+        return Ok(());
     } else {
         // Get single value (last-one-wins)
         let entry: Option<(ConfigKvEntry, ConfigScope)> = if use_cascade {
@@ -1156,7 +2106,8 @@ async fn handle_get(
 
         let (display_value, default_applied, origin_scope) = match entry {
             Some((ref e, s)) => {
-                let val = render_get_value(e, reveal, s, use_cascade).await?;
+                let raw = render_get_value(e, reveal, s, use_cascade).await?;
+                let val = typed_output(e, reveal, &raw, config_type)?;
                 (val, false, Some(s))
             }
             None => {
@@ -1216,28 +2167,49 @@ async fn handle_get(
         };
 
         if output.is_json() {
-            emit_json_data(
-                "config",
-                &serde_json::json!({
-                    "action": "get",
-                    "key": key,
-                    "value": display_value,
-                    "origin": origin_scope.map(scope_name),
-                    "default_applied": default_applied,
-                }),
-                output,
-            )?;
+            let mut obj = serde_json::Map::new();
+            obj.insert("action".into(), serde_json::json!("get"));
+            obj.insert("key".into(), serde_json::json!(key));
+            obj.insert("value".into(), serde_json::json!(display_value));
+            obj.insert(
+                "origin".into(),
+                serde_json::json!(origin_scope.map(scope_name)),
+            );
+            obj.insert("default_applied".into(), serde_json::json!(default_applied));
+            if let Some(s) = origin_scope {
+                if flags.show_scope {
+                    obj.insert("scope".into(), serde_json::json!(scope_name(s)));
+                }
+                if flags.show_origin {
+                    obj.insert("origin_type".into(), serde_json::json!("file"));
+                    obj.insert(
+                        "origin_path".into(),
+                        serde_json::json!(config_origin_path_string(s)),
+                    );
+                }
+            }
+            emit_json_data("config", &serde_json::Value::Object(obj), output)?;
         } else if !output.quiet {
-            println!("{display_value}");
+            match origin_scope {
+                Some(s) => print!("{}", format_get_value_record(s, &display_value, flags)),
+                None => {
+                    // Default applied: no real origin, so drop the scope/origin
+                    // prefix but still honour the `--null` record delimiter.
+                    let bare = OutputFlags {
+                        show_scope: false,
+                        show_origin: false,
+                        ..flags
+                    };
+                    print!("{}", format_get_value_record(scope, &display_value, bare));
+                }
+            }
         }
     }
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn handle_list(
-    name_only: bool,
-    show_origin: bool,
+    flags: OutputFlags,
     vault: bool,
     ssh_keys: bool,
     gpg_keys: bool,
@@ -1245,6 +2217,9 @@ async fn handle_list(
     use_cascade: bool,
     output: &OutputConfig,
 ) -> CliResult<()> {
+    reject_null_with_json(flags, output)?;
+    reject_name_only_with_json(flags, output)?;
+
     if ssh_keys {
         let entries = list_ssh_key_entries(scope).await?;
         if output.is_json() {
@@ -1337,6 +2312,7 @@ async fn handle_list(
                         }),
                         origin: Some(scope_name(s).to_string()),
                         encrypted: Some(e.encrypted),
+                        ..Default::default()
                     });
                 }
             }
@@ -1371,114 +2347,84 @@ async fn handle_list(
         return Ok(());
     }
 
-    if show_origin {
-        // Show all entries with scope labels
-        let mut entries = Vec::new();
-        for s in ConfigScope::CASCADE_ORDER {
-            if s != ConfigScope::Local {
-                let Some(path) = s.get_config_path() else {
-                    continue;
-                };
-                if !path.exists() {
-                    continue;
-                }
+    // General listing. With `--show-origin`/`--show-scope` we surface every
+    // scope (cascade) with its prefix; otherwise we list the single resolved
+    // scope only (default local), matching the historical behaviour.
+    let prefixed = flags.prefixed();
+    let cascade_all = prefixed && use_cascade;
+    let scopes: Vec<ConfigScope> = if cascade_all {
+        ConfigScope::CASCADE_ORDER.to_vec()
+    } else {
+        vec![scope]
+    };
+
+    let mut collected: Vec<(ConfigScope, ConfigKvEntry)> = Vec::new();
+    for s in scopes {
+        if s != ConfigScope::Local {
+            let Some(path) = s.get_config_path() else {
+                continue;
+            };
+            if !path.exists() {
+                continue;
             }
+        }
+        if cascade_all {
+            // Cascade view skips unreadable scopes (mirrors prior show-origin loop).
             if let Ok(scope_entries) = ScopedConfig::list_all(s).await {
                 for e in scope_entries {
-                    let plaintext_warning = if !e.encrypted && is_sensitive_key(&e.key) {
-                        " [PLAINTEXT]"
-                    } else {
-                        ""
-                    };
-                    entries.push(ConfigListEntry {
-                        key: e.key.clone(),
-                        value: if name_only {
-                            None
-                        } else if e.encrypted {
-                            Some("<REDACTED>".to_string())
-                        } else {
-                            Some(format!("{}{plaintext_warning}", e.value))
-                        },
-                        origin: if show_origin {
-                            Some(scope_name(s).to_string())
-                        } else {
-                            None
-                        },
-                        encrypted: Some(e.encrypted),
-                    });
+                    collected.push((s, e));
                 }
             }
-        }
-
-        if output.is_json() {
-            emit_json_data(
-                "config",
-                &serde_json::json!({
-                    "action": "list",
-                    "scope": if show_origin { "all" } else { scope_name(scope) },
-                    "cascade": use_cascade,
-                    "entries": entries,
-                    "count": entries.len(),
-                }),
-                output,
-            )?;
-        } else if !output.quiet {
-            for e in &entries {
-                match (&e.origin, &e.value) {
-                    (Some(origin), Some(val)) => println!("  {:<8} {} = {val}", origin, e.key),
-                    (Some(origin), None) => println!("  {:<8} {}", origin, e.key),
-                    (None, Some(val)) => println!("{}={val}", e.key),
-                    (None, None) => println!("{}", e.key),
-                }
+        } else {
+            // Single explicit scope: surface read failures as an error.
+            let scope_entries = ScopedConfig::list_all(s)
+                .await
+                .map_err(CliError::from_legacy_string)?;
+            for e in scope_entries {
+                collected.push((s, e));
             }
         }
-    } else {
-        // Single scope list
-        let scope_entries = ScopedConfig::list_all(scope)
-            .await
-            .map_err(CliError::from_legacy_string)?;
+    }
 
-        let entries: Vec<ConfigListEntry> = scope_entries
-            .into_iter()
-            .map(|e| {
-                let plaintext_warning = if !e.encrypted && is_sensitive_key(&e.key) {
-                    " [PLAINTEXT]"
+    if output.is_json() {
+        let entries: Vec<ConfigListEntry> = collected
+            .iter()
+            .map(|(s, e)| {
+                let value = render_list_value(e, flags);
+                if prefixed {
+                    build_prefixed_list_entry(e.key.clone(), value, *s, e.encrypted, flags)
                 } else {
-                    ""
-                };
-                ConfigListEntry {
-                    key: e.key.clone(),
-                    value: if name_only {
-                        None
-                    } else if e.encrypted {
-                        Some("<REDACTED>".to_string())
-                    } else {
-                        Some(format!("{}{plaintext_warning}", e.value))
-                    },
-                    origin: None,
-                    encrypted: Some(e.encrypted),
+                    ConfigListEntry {
+                        key: e.key.clone(),
+                        value,
+                        encrypted: Some(e.encrypted),
+                        ..Default::default()
+                    }
                 }
             })
             .collect();
-
-        if output.is_json() {
-            emit_json_data(
-                "config",
-                &serde_json::json!({
-                    "action": "list",
-                    "scope": scope_name(scope),
-                    "entries": entries,
-                    "count": entries.len(),
-                }),
-                output,
-            )?;
-        } else if !output.quiet {
-            for e in &entries {
-                match &e.value {
-                    Some(val) => println!("{}={val}", e.key),
-                    None => println!("{}", e.key),
-                }
-            }
+        let scope_label = if cascade_all {
+            "all"
+        } else {
+            scope_name(scope)
+        };
+        let mut payload = serde_json::json!({
+            "action": "list",
+            "scope": scope_label,
+            "entries": entries,
+            "count": entries.len(),
+        });
+        if prefixed {
+            payload["cascade"] = serde_json::json!(use_cascade);
+        }
+        emit_json_data("config", &payload, output)?;
+    } else if !output.quiet {
+        for (s, e) in &collected {
+            let value = render_list_value(e, flags);
+            print!(
+                "{}",
+                format_config_record(*s, &e.key, value.as_deref(), '=', flags)
+            );
         }
     }
     Ok(())
@@ -1550,10 +2496,40 @@ async fn list_gpg_key_entries(scope: ConfigScope) -> CliResult<Vec<ConfigGpgKeyE
 async fn handle_unset(
     key: &str,
     all: bool,
+    filter: ValueFilterSpec,
     scope: ConfigScope,
     output: &OutputConfig,
 ) -> CliResult<()> {
-    let count = if all {
+    // Compile any `--value` filter up front (invalid/over-long → exit 6) before
+    // touching the DB.
+    let value_filter = filter.compile()?;
+
+    let count = if let Some(vf) = &value_filter {
+        // Value-filtered unset: delete matching rows by id inside a transaction.
+        // A default (non-`--unset-all`) filtered unset rejects an ambiguous (>1)
+        // match set with exit 5; `--unset-all --value` removes every match.
+        let conn = ScopedConfig::get_connection(scope)
+            .await
+            .map_err(CliError::from_legacy_string)?;
+        let txn = conn
+            .begin()
+            .await
+            .map_err(|e| config_write_cli_error("failed to begin config transaction", e))?;
+        let removed = ConfigKv::unset_matching_with_conn(&txn, key, vf, !all)
+            .await
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("values exist") {
+                    CliError::from_legacy_string(format!("error: {msg}")).with_exit_code(5)
+                } else {
+                    config_write_cli_error("failed to write config", e)
+                }
+            })?;
+        txn.commit()
+            .await
+            .map_err(|e| config_write_cli_error("failed to commit config transaction", e))?;
+        removed
+    } else if all {
         ScopedConfig::unset_all(scope, key)
             .await
             .map_err(CliError::from_legacy_string)?
@@ -1590,6 +2566,161 @@ async fn handle_unset(
         } else {
             println!("Unset {}: {}", scope_name(scope), key);
         }
+    }
+    Ok(())
+}
+
+/// Reject generic section operations on protected vault namespaces.
+fn reject_protected_vault_section(name: &str) -> CliResult<()> {
+    if is_protected_vault_section(name) {
+        return Err(CliError::command_usage(
+            "vault sections must be managed by dedicated vault/config commands",
+        ));
+    }
+    Ok(())
+}
+
+async fn handle_rename_section(
+    old: &str,
+    new: &str,
+    scope: ConfigScope,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    // Validate both section names (exit 1 on malformation) before any DB work.
+    validate_section_syntax(old)
+        .map_err(|e| CliError::from_legacy_string(format!("error: {e}")).with_exit_code(1))?;
+    validate_section_syntax(new)
+        .map_err(|e| CliError::from_legacy_string(format!("error: {e}")).with_exit_code(1))?;
+    reject_protected_vault_section(old)?;
+    reject_protected_vault_section(new)?;
+
+    let old_prefix = format!("{old}.");
+    let new_prefix = format!("{new}.");
+
+    let conn = ScopedConfig::get_connection(scope)
+        .await
+        .map_err(CliError::from_legacy_string)?;
+    let txn = conn
+        .begin()
+        .await
+        .map_err(|e| config_write_cli_error("failed to begin config transaction", e))?;
+
+    // Defence in depth: never move a vault-internal credential row, even if it
+    // somehow lives under a non-vault section (e.g. a stray `*.privkey`).
+    let source_rows = ConfigKv::get_by_prefix_with_conn(&txn, &old_prefix)
+        .await
+        .map_err(|e| {
+            config_read_cli_error(format!("failed to read {} config: {e}", scope_name(scope)))
+        })?;
+    if source_rows.iter().any(|r| is_vault_internal_key(&r.key)) {
+        return Err(CliError::command_usage(
+            "vault sections must be managed by dedicated vault/config commands",
+        ));
+    }
+
+    let moved = ConfigKv::rename_section_with_conn(&txn, &old_prefix, &new_prefix)
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("already exists") {
+                CliError::failure(format!("target section '{new}' already exists"))
+                    .with_stable_code(StableErrorCode::RepoStateInvalid)
+                    .with_exit_code(5)
+            } else {
+                config_write_cli_error("failed to rename config section", e)
+            }
+        })?;
+    if moved == 0 {
+        return Err(CliError::failure(format!("section '{old}' does not exist"))
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+            .with_exit_code(5));
+    }
+    txn.commit()
+        .await
+        .map_err(|e| config_write_cli_error("failed to commit config transaction", e))?;
+
+    if output.is_json() {
+        emit_json_data(
+            "config",
+            &serde_json::json!({
+                "action": "rename-section",
+                "scope": scope_name(scope),
+                "old": old,
+                "new": new,
+                "moved": moved,
+            }),
+            output,
+        )?;
+    } else if !output.quiet {
+        println!(
+            "Renamed {} section: {old} -> {new} ({moved} key{})",
+            scope_name(scope),
+            if moved == 1 { "" } else { "s" }
+        );
+    }
+    Ok(())
+}
+
+async fn handle_remove_section(
+    section: &str,
+    scope: ConfigScope,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    validate_section_syntax(section)
+        .map_err(|e| CliError::from_legacy_string(format!("error: {e}")).with_exit_code(1))?;
+    reject_protected_vault_section(section)?;
+
+    let prefix = format!("{section}.");
+
+    let conn = ScopedConfig::get_connection(scope)
+        .await
+        .map_err(CliError::from_legacy_string)?;
+    let txn = conn
+        .begin()
+        .await
+        .map_err(|e| config_write_cli_error("failed to begin config transaction", e))?;
+
+    let source_rows = ConfigKv::get_by_prefix_with_conn(&txn, &prefix)
+        .await
+        .map_err(|e| {
+            config_read_cli_error(format!("failed to read {} config: {e}", scope_name(scope)))
+        })?;
+    if source_rows.iter().any(|r| is_vault_internal_key(&r.key)) {
+        return Err(CliError::command_usage(
+            "vault sections must be managed by dedicated vault/config commands",
+        ));
+    }
+
+    let removed = ConfigKv::remove_section_with_conn(&txn, &prefix)
+        .await
+        .map_err(|e| config_write_cli_error("failed to remove config section", e))?;
+    if removed == 0 {
+        return Err(
+            CliError::failure(format!("section '{section}' does not exist"))
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_exit_code(5),
+        );
+    }
+    txn.commit()
+        .await
+        .map_err(|e| config_write_cli_error("failed to commit config transaction", e))?;
+
+    if output.is_json() {
+        emit_json_data(
+            "config",
+            &serde_json::json!({
+                "action": "remove-section",
+                "scope": scope_name(scope),
+                "section": section,
+                "removed": removed,
+            }),
+            output,
+        )?;
+    } else if !output.quiet {
+        println!(
+            "Removed {} section: {section} ({removed} key{})",
+            scope_name(scope),
+            if removed == 1 { "" } else { "s" }
+        );
     }
     Ok(())
 }
@@ -1815,11 +2946,12 @@ async fn handle_generate_gpg_key(
         .map(String::from)
         .unwrap_or_else(|| "user@libra.local".to_string());
 
-    let public_key = generate_pgp_key(&storage, &unseal_key, &user_name, &user_email)
-        .await
-        .map_err(|e| {
-            CliError::from_legacy_string(format!("error: GPG key generation failed: {e}"))
-        })?;
+    let public_key = if is_signing {
+        generate_pgp_key(&storage, &unseal_key, &user_name, &user_email).await
+    } else {
+        generate_pgp_encrypt_key(&storage, &unseal_key, &user_name, &user_email).await
+    }
+    .map_err(|e| CliError::from_legacy_string(format!("error: GPG key generation failed: {e}")))?;
 
     // Store pubkey under usage-specific dotted key
     let pubkey_config_key = if is_signing {

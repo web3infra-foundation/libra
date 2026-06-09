@@ -1,4 +1,6 @@
 //! FUSE mount helpers shared by worktree commands and AI task workspaces.
+//!
+//! 由工作树命令和 AI 任务工作空间共享的 FUSE 挂载助手。
 
 use std::{
     ffi::OsString,

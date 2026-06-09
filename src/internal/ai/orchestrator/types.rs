@@ -1,6 +1,8 @@
 //! Shared orchestrator domain types for tasks, plans, evidence, and workspace backend
 //! choices.
 //!
+//! 任务、计划、证据和工作区后端选择的共享编排器域类型。
+//!
 //! Boundary: these types form the internal API between planner, executor, verifier,
 //! persistence, and projection. Runtime contract tests cover default values and
 //! serialized compatibility for persisted run records.

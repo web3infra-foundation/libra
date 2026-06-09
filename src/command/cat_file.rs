@@ -22,7 +22,12 @@ use clap::Parser;
 use git_internal::{
     errors::GitError,
     hash::ObjectHash,
-    internal::object::{blob::Blob, commit::Commit, tree::Tree, types::ObjectType},
+    internal::object::{
+        blob::Blob,
+        commit::Commit,
+        tree::{Tree, TreeItemMode},
+        types::ObjectType,
+    },
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
@@ -57,10 +62,21 @@ Notes:
 const CAT_FILE_AFTER_HELP: &str = "EXAMPLES:
     libra cat-file -p HEAD                                  Pretty-print the commit object at HEAD
     libra cat-file -t 40d352ee7190f9…                       Print the object type (blob/tree/commit/tag)
+    echo HEAD | libra cat-file --batch-check                Stream object metadata for refs read from stdin
+    echo HEAD | libra cat-file --batch                      Stream metadata + raw content per object
+    libra cat-file --batch-all-objects --batch-check        Print metadata for every local object
     libra cat-file --ai-list intent                         List all AI objects of a built-in type
     libra cat-file --ai-list-types                          List every AI object type in the history branch
     libra cat-file --ai patchset:call_KjR3NB4cQaT5Rm1c7…    Look up an AI object by TYPE:ID
     libra cat-file --ai 5b878637-f852-4bff-adee-3354c42a…   Look up an AI object across all types by id";
+
+/// Default `--batch`/`--batch-check` output format when none is given via `=<format>`.
+/// Matches Git's default: object name, type, and size separated by spaces.
+const DEFAULT_BATCH_FORMAT: &str = "%(objectname) %(objecttype) %(objectsize)";
+
+/// Maximum accepted length (bytes) of a single batch input record, before the
+/// terminator. Over-long input is rejected as a syntax error (DoS hardening).
+const MAX_BATCH_LINE_BYTES: usize = 4096;
 
 /// Provide content, type, or size information for repository objects (Git and AI).
 #[derive(Parser, Debug)]
@@ -86,6 +102,59 @@ pub struct CatFileArgs {
     /// Check if the object exists (exit with zero status if it does)
     #[clap(short = 'e', group = "mode")]
     pub check_exist: bool,
+
+    // ── Batch modes (read objects from stdin) ───────────────────────────
+    /// Print metadata and raw content for each object read from stdin. Optional =<format>.
+    #[clap(
+        long = "batch",
+        group = "mode",
+        value_name = "FORMAT",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = DEFAULT_BATCH_FORMAT,
+    )]
+    pub batch: Option<String>,
+
+    /// Print object metadata for each object read from stdin. Optional =<format> (defaults to "%(objectname) %(objecttype) %(objectsize)").
+    #[clap(
+        long = "batch-check",
+        group = "mode",
+        value_name = "FORMAT",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = DEFAULT_BATCH_FORMAT,
+    )]
+    pub batch_check: Option<String>,
+
+    // ── Batch modifiers (require a batch mode) ──────────────────────────
+    /// Use NUL ('\0') instead of newline to separate/terminate batch input and output records.
+    #[clap(short = 'Z')]
+    pub nul: bool,
+
+    /// Buffer batch output and flush once at EOF, instead of after every object.
+    #[clap(long = "buffer")]
+    pub buffer: bool,
+
+    /// With --batch/--batch-check, iterate every local object instead of reading stdin.
+    #[clap(long = "batch-all-objects")]
+    pub batch_all_objects: bool,
+
+    /// With --batch-all-objects, emit objects in scan order instead of sorted by object id.
+    #[clap(long = "unordered")]
+    pub unordered: bool,
+
+    /// Follow in-tree symlinks when resolving <tree-ish>:<path> batch inputs (object graph only).
+    #[clap(long = "follow-symlinks")]
+    pub follow_symlinks: bool,
+
+    // ── Explicitly unsupported (rejected) ───────────────────────────────
+    /// Unsupported: Libra has no textconv driver. Rejected with LBR-UNSUPPORTED-001.
+    #[clap(long = "textconv")]
+    pub textconv: bool,
+
+    /// Unsupported: Libra has no clean/smudge filter driver. Rejected with LBR-UNSUPPORTED-001.
+    #[clap(long = "filters")]
+    pub filters: bool,
 
     // ── AI object modes ─────────────────────────────────────────────────
     /// Pretty-print an AI object by ID across all stored AI types, or disambiguate with TYPE:ID.
@@ -327,6 +396,22 @@ pub async fn execute(args: CatFileArgs) {
 /// safe path only delegates to it for plain human-output mode.
 pub async fn execute_safe(args: CatFileArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
+
+    // `--textconv` / `--filters` are explicitly unsupported (Libra has no
+    // clean/smudge/textconv drivers); reject before any other dispatch.
+    if args.textconv || args.filters {
+        return Err(CliError::fatal(
+            "cat-file --textconv/--filters is not supported: Libra has no clean/smudge/textconv drivers",
+        )
+        .with_stable_code(StableErrorCode::Unsupported));
+    }
+
+    // Batch surface (`--batch-check` and, in later batches, `--batch` /
+    // modifiers) bypasses the legacy single-object path entirely and runs the
+    // streaming protocol on its own `CliResult` path.
+    if uses_batch_surface(&args) {
+        return run_batch(&args, output).await;
+    }
 
     if args.check_exist && !output.is_json() {
         execute(args).await;
@@ -912,8 +997,11 @@ fn print_commit(hash: &ObjectHash) {
         commit.committer.timestamp,
         commit.committer.timezone,
     );
+    let (msg, signature) = parse_commit_msg(&commit.message);
+    if let Some(signature) = signature {
+        println!("gpgsig {signature}");
+    }
     println!();
-    let (msg, _) = parse_commit_msg(&commit.message);
     println!("{}", msg.trim());
 }
 
@@ -1273,6 +1361,553 @@ async fn ai_show_type(uuid: &str) {
         Ok((_hash, type_name)) => println!("{}", type_name),
         Err(err) => cat_file_exit_error(err),
     }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  Batch protocol engine (`--batch-check`, and later `--batch` / scanning).
+//
+//  The batch surface is a machine-readable text protocol that reads object
+//  references from stdin and writes one record per object to stdout. It runs
+//  on its own `CliResult` path (bypassing the legacy single-object `execute`),
+//  tolerates a closed downstream pipe (BrokenPipe → exit 0), and never panics
+//  on malformed input.
+// ════════════════════════════════════════════════════════════════════════
+
+/// Whether any batch flag/modifier appears, so `execute_safe` should hand off
+/// to [`run_batch`] instead of the legacy single-object path. (Modifier-only
+/// invocations are caught and reported inside `run_batch`.)
+fn uses_batch_surface(args: &CatFileArgs) -> bool {
+    args.batch.is_some()
+        || args.batch_check.is_some()
+        || args.nul
+        || args.buffer
+        || args.batch_all_objects
+        || args.unordered
+        || args.follow_symlinks
+}
+
+/// Whether a real batch *mode* (not just a modifier) is selected.
+fn batch_mode_selected(args: &CatFileArgs) -> bool {
+    args.batch.is_some() || args.batch_check.is_some()
+}
+
+/// Per-line resolution outcome for a batch token.
+enum BatchResolution {
+    Resolved(ObjectHash),
+    Missing,
+    Ambiguous,
+}
+
+/// Validate batch-surface flag combinations, then run the selected batch mode.
+async fn run_batch(args: &CatFileArgs, output: &OutputConfig) -> CliResult<()> {
+    // Batch output is itself a machine-parseable protocol; `--json`/`--machine`
+    // are not layered on top of it.
+    if output.is_json() {
+        return Err(
+            CliError::command_usage("batch modes do not support --json/--machine output")
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+        );
+    }
+
+    // Modifiers (`-Z`, `--buffer`, and later `--unordered` / `--follow-symlinks`
+    // / `--batch-all-objects`) only make sense alongside a batch mode.
+    if !batch_mode_selected(args) {
+        let modifier = if args.nul {
+            "-Z"
+        } else if args.buffer {
+            "--buffer"
+        } else if args.batch_all_objects {
+            "--batch-all-objects"
+        } else if args.unordered {
+            "--unordered"
+        } else if args.follow_symlinks {
+            "--follow-symlinks"
+        } else {
+            "a batch modifier"
+        };
+        return Err(CliError::command_usage(format!(
+            "{modifier} requires --batch or --batch-check"
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+
+    // Batch modes read object references from stdin; a positional OBJECT would
+    // be ambiguous.
+    if args.object.is_some() {
+        return Err(CliError::command_usage(
+            "batch modes read objects from stdin; positional OBJECT is not allowed",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+
+    // Exactly one of `--batch` / `--batch-check` is set (mutual exclusion is
+    // enforced by the clap `mode` group + `batch_mode_selected` above).
+    let (format, kind) = match (args.batch.as_deref(), args.batch_check.as_deref()) {
+        (Some(format), _) => (format, BatchKind::Content),
+        (_, Some(format)) => (format, BatchKind::CheckOnly),
+        _ => return Ok(()),
+    };
+
+    let storage = ClientStorage::init(path::objects());
+    if args.batch_all_objects {
+        // `--batch-all-objects` iterates the local object store instead of
+        // stdin; `--follow-symlinks` has no stdin tokens to act on here.
+        run_batch_all_objects(
+            format,
+            args.nul,
+            args.buffer,
+            kind,
+            args.unordered,
+            &storage,
+        )
+        .await
+    } else {
+        run_batch_stream(
+            format,
+            args.nul,
+            args.buffer,
+            kind,
+            args.follow_symlinks,
+            &storage,
+        )
+        .await
+    }
+}
+
+/// Whether a batch run emits object content after each metadata line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BatchKind {
+    /// `--batch-check`: metadata line only.
+    CheckOnly,
+    /// `--batch`: metadata line followed by the raw object payload.
+    Content,
+}
+
+/// Resolve one batch input token into a three-state outcome, distinguishing a
+/// missing object from an ambiguous short SHA (≥2 candidates). Unlike
+/// [`resolve_object_safe`], a missing/ambiguous token is *not* an error here —
+/// those are protocol states printed inline without changing the exit code.
+async fn resolve_batch_token(token: &str, storage: &ClientStorage) -> CliResult<BatchResolution> {
+    if let Some(hash) = resolve_tag_object_ref(token).await {
+        return Ok(BatchResolution::Resolved(hash));
+    }
+    if let Ok(hash) = util::get_commit_base(token).await {
+        return Ok(BatchResolution::Resolved(hash));
+    }
+    if let Ok(hash) = ObjectHash::from_str(token) {
+        // A syntactically valid full hash that is not present is `missing`.
+        return Ok(if storage.exist(&hash) {
+            BatchResolution::Resolved(hash)
+        } else {
+            BatchResolution::Missing
+        });
+    }
+    let candidates = storage.search_result(token).await.map_err(|error| {
+        CliError::fatal(format!(
+            "failed to search objects while resolving '{token}': {error}"
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    Ok(match candidates.len() {
+        0 => BatchResolution::Missing,
+        1 => BatchResolution::Resolved(candidates[0]),
+        _ => BatchResolution::Ambiguous,
+    })
+}
+
+/// Bounded read of one stdin record terminated by `sep`. Returns `Ok(None)` at
+/// EOF. Rejects records whose content exceeds `max` bytes (DoS hardening) with
+/// `LBR-CLI-003` — without first reading the whole over-long line into memory
+/// (the `take(max + 1)` cap bounds the read).
+fn read_bounded_record<R: std::io::BufRead>(
+    reader: &mut R,
+    sep: u8,
+    max: usize,
+) -> CliResult<Option<Vec<u8>>> {
+    use std::io::{BufRead, Read};
+
+    let mut buf = Vec::new();
+    let read = reader
+        .by_ref()
+        .take((max as u64) + 1)
+        .read_until(sep, &mut buf)
+        .map_err(|e| {
+            CliError::fatal(format!("failed to read batch input: {e}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if buf.last() == Some(&sep) {
+        buf.pop();
+        return Ok(Some(buf));
+    }
+    // No terminator within the cap: either the final unterminated record (EOF)
+    // or an over-long line. `buf.len() > max` distinguishes the latter.
+    if buf.len() > max {
+        return Err(
+            CliError::fatal(format!("batch input record exceeds the {max}-byte limit"))
+                .with_stable_code(StableErrorCode::CliInvalidTarget),
+        );
+    }
+    Ok(Some(buf))
+}
+
+/// Decode a raw record into a token string, tolerating a trailing `\r` (CRLF)
+/// in newline-separated mode. The trailing separator is already stripped by
+/// [`read_bounded_record`].
+fn batch_token_string(record: &[u8], sep: u8) -> String {
+    let mut token = String::from_utf8_lossy(record).into_owned();
+    if sep == b'\n' && token.ends_with('\r') {
+        token.pop();
+    }
+    token
+}
+
+/// Render a batch output line from a format template, substituting the known
+/// atoms `%(objectname)` / `%(objecttype)` / `%(objectsize)`. An unknown or
+/// unterminated `%(…)` atom is a usage error (`LBR-CLI-002`). `oid` is passed
+/// pre-stringified so the up-front format validation can use a dummy value.
+fn render_batch_format(format: &str, oid: &str, obj_type: &str, size: usize) -> CliResult<String> {
+    let mut out = String::with_capacity(format.len() + oid.len());
+    let mut chars = format.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' || chars.peek() != Some(&'(') {
+            out.push(c);
+            continue;
+        }
+        chars.next(); // consume '('
+        let mut atom = String::new();
+        let mut closed = false;
+        for ac in chars.by_ref() {
+            if ac == ')' {
+                closed = true;
+                break;
+            }
+            atom.push(ac);
+        }
+        if !closed {
+            return Err(CliError::command_usage(format!(
+                "unterminated batch format placeholder: %({atom}"
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+        }
+        match atom.as_str() {
+            "objectname" => out.push_str(oid),
+            "objecttype" => out.push_str(obj_type),
+            "objectsize" => out.push_str(&size.to_string()),
+            other => {
+                return Err(CliError::command_usage(format!(
+                    "unknown batch format placeholder: %({other})"
+                ))
+                .with_stable_code(StableErrorCode::CliInvalidArguments));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Write `bytes` followed by the record separator. Returns `Ok(false)` when the
+/// downstream pipe is closed (`BrokenPipe`) so the caller can stop quietly with
+/// exit code 0; `Ok(true)` to continue.
+fn write_record(w: &mut impl std::io::Write, bytes: &[u8], sep: u8) -> CliResult<bool> {
+    match w.write_all(bytes).and_then(|()| w.write_all(&[sep])) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
+        Err(e) => Err(
+            CliError::fatal(format!("failed to write batch output: {e}"))
+                .with_stable_code(StableErrorCode::IoWriteFailed),
+        ),
+    }
+}
+
+/// Flush `writer`, mapping a closed downstream pipe to a quiet success.
+/// Returns `Ok(false)` on `BrokenPipe` (caller should stop with exit 0).
+fn flush_batch_writer(writer: &mut impl std::io::Write) -> CliResult<bool> {
+    match writer.flush() {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
+        Err(e) => Err(
+            CliError::fatal(format!("failed to flush batch output: {e}"))
+                .with_stable_code(StableErrorCode::IoWriteFailed),
+        ),
+    }
+}
+
+/// Write one resolved object's record: the metadata line and, for `--batch`,
+/// the raw payload. Returns `Ok(false)` on `BrokenPipe` (caller stops, exit 0).
+fn write_object_record(
+    writer: &mut impl std::io::Write,
+    format: &str,
+    kind: BatchKind,
+    sep: u8,
+    hash: &ObjectHash,
+    storage: &ClientStorage,
+) -> CliResult<bool> {
+    // Read the body first so a corrupt/unreadable object surfaces as an I/O
+    // failure before the (separate) type lookup. The decompressed body is both
+    // the size source and the raw `--batch` payload written verbatim (binary
+    // tree/commit encodings included — never the `-p` pretty-print rendering).
+    let body = storage.get(hash).map_err(|e| {
+        CliError::fatal(format!("could not read object {hash}: {e}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    let obj_type = storage.get_object_type(hash).map_err(|e| {
+        CliError::fatal(format!("could not resolve object type for {hash}: {e}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    let meta = render_batch_format(format, &hash.to_string(), &obj_type.to_string(), body.len())?;
+    if !write_record(writer, meta.as_bytes(), sep)? {
+        return Ok(false);
+    }
+    if kind == BatchKind::Content && !write_record(writer, &body, sep)? {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// Stream the batch protocol over stdin: one record per token. `kind` selects
+/// `--batch-check` (metadata only) vs `--batch` (metadata + raw payload). When
+/// `follow_symlinks` is set, `<tree-ish>:<path>` tokens are resolved through the
+/// object graph, following in-tree symlinks. Without `--buffer`, output is
+/// flushed after every object so interactive drivers see each record
+/// immediately. A closed downstream pipe stops the stream quietly (exit 0); no
+/// path panics.
+async fn run_batch_stream(
+    format: &str,
+    nul: bool,
+    buffer: bool,
+    kind: BatchKind,
+    follow_symlinks: bool,
+    storage: &ClientStorage,
+) -> CliResult<()> {
+    use std::io::{BufReader, BufWriter};
+
+    let sep = if nul { b'\0' } else { b'\n' };
+
+    // Validate the format up front so a bad placeholder fails fast, even with
+    // empty stdin (dummy values; the result is discarded).
+    render_batch_format(format, "", "", 0)?;
+
+    let stdin = std::io::stdin();
+    let mut reader = BufReader::new(stdin.lock());
+    let stdout = std::io::stdout();
+    let mut writer = BufWriter::new(stdout.lock());
+
+    while let Some(record) = read_bounded_record(&mut reader, sep, MAX_BATCH_LINE_BYTES)? {
+        let token = batch_token_string(&record, sep);
+        if token.is_empty() {
+            continue;
+        }
+        let resolution = if follow_symlinks {
+            resolve_follow_symlinks(&token, storage).await?
+        } else {
+            resolve_batch_token(&token, storage).await?
+        };
+        let keep_going = match resolution {
+            BatchResolution::Resolved(hash) => {
+                write_object_record(&mut writer, format, kind, sep, &hash, storage)?
+            }
+            BatchResolution::Missing => {
+                write_record(&mut writer, format!("{token} missing").as_bytes(), sep)?
+            }
+            BatchResolution::Ambiguous => {
+                write_record(&mut writer, format!("{token} ambiguous").as_bytes(), sep)?
+            }
+        };
+        if !keep_going {
+            return Ok(());
+        }
+        if !buffer && !flush_batch_writer(&mut writer)? {
+            return Ok(()); // downstream closed the pipe
+        }
+    }
+
+    flush_batch_writer(&mut writer)?;
+    Ok(())
+}
+
+/// `--batch-all-objects`: emit a record for every local object (loose ∪ pack,
+/// de-duplicated), with no stdin. Sorted by object id unless `--unordered`.
+async fn run_batch_all_objects(
+    format: &str,
+    nul: bool,
+    buffer: bool,
+    kind: BatchKind,
+    unordered: bool,
+    storage: &ClientStorage,
+) -> CliResult<()> {
+    use std::io::BufWriter;
+
+    let sep = if nul { b'\0' } else { b'\n' };
+    render_batch_format(format, "", "", 0)?;
+
+    let (mut oids, skipped) = storage.list_all_local_oids();
+    // The storage layer only logs skipped/corrupt indexes via `tracing`; surface
+    // them on stderr so scripts and tests can observe the warning.
+    for note in &skipped {
+        eprintln!("warning: skipping pack index ({note})");
+    }
+    if !unordered {
+        oids.sort_by_key(|oid| oid.to_string());
+    }
+
+    let stdout = std::io::stdout();
+    let mut writer = BufWriter::new(stdout.lock());
+    for oid in oids {
+        if !write_object_record(&mut writer, format, kind, sep, &oid, storage)? {
+            return Ok(()); // downstream closed the pipe
+        }
+        if !buffer && !flush_batch_writer(&mut writer)? {
+            return Ok(());
+        }
+    }
+    flush_batch_writer(&mut writer)?;
+    Ok(())
+}
+
+/// Maximum number of in-tree symlinks followed while resolving one token.
+const FOLLOW_SYMLINK_DEPTH_CAP: usize = 32;
+
+/// Intermediate result while walking a `<tree>:<path>` within a single tree.
+enum WalkOutcome {
+    Resolved(ObjectHash),
+    Missing,
+    /// A `TreeItemMode::Link` was hit at `link_index` in the path; `target_oid`
+    /// holds the link object whose body is the (relative) target path.
+    Symlink {
+        link_index: usize,
+        target_oid: ObjectHash,
+    },
+}
+
+/// Resolve a `--follow-symlinks` token `<tree-ish>:<path>`, walking the path in
+/// the object graph and following in-tree symlinks (`TreeItemMode::Link`). This
+/// never touches the working tree / host filesystem. Escaping the tree root,
+/// dangling targets, type mismatches, and exceeding the depth cap all resolve
+/// to `Missing` (a Libra simplification vs. Git's `symlink <size>` output — see
+/// the plan's decision ledger).
+async fn resolve_follow_symlinks(
+    token: &str,
+    storage: &ClientStorage,
+) -> CliResult<BatchResolution> {
+    let Some((rev, path)) = token.split_once(':') else {
+        // Not a `<tree>:<path>` token; resolve as an ordinary object reference.
+        return resolve_batch_token(token, storage).await;
+    };
+
+    let Some(root_tree) = resolve_to_root_tree(rev, storage).await? else {
+        return Ok(BatchResolution::Missing);
+    };
+
+    let Some(mut components) = normalize_tree_path(&[], path) else {
+        return Ok(BatchResolution::Missing); // escaped the root
+    };
+
+    let mut depth = 0usize;
+    loop {
+        // Walk `components` from the root tree.
+        let Ok(mut current) = load_object::<Tree>(&root_tree) else {
+            return Ok(BatchResolution::Missing);
+        };
+        let mut idx = 0usize;
+        let outcome = loop {
+            let Some(name) = components.get(idx) else {
+                // Path exhausted on a directory: the tree itself is the target.
+                break WalkOutcome::Resolved(current.id);
+            };
+            let Some(item) = current.tree_items.iter().find(|i| &i.name == name) else {
+                break WalkOutcome::Missing;
+            };
+            let is_last = idx + 1 == components.len();
+            match item.mode {
+                TreeItemMode::Link => {
+                    break WalkOutcome::Symlink {
+                        link_index: idx,
+                        target_oid: item.id,
+                    };
+                }
+                TreeItemMode::Tree => {
+                    if is_last {
+                        break WalkOutcome::Resolved(item.id);
+                    }
+                    match load_object::<Tree>(&item.id) {
+                        Ok(next) => {
+                            current = next;
+                            idx += 1;
+                        }
+                        Err(_) => break WalkOutcome::Missing,
+                    }
+                }
+                // Blob / BlobExecutable / Commit: only valid as the final segment.
+                _ => {
+                    break if is_last {
+                        WalkOutcome::Resolved(item.id)
+                    } else {
+                        WalkOutcome::Missing
+                    };
+                }
+            }
+        };
+
+        match outcome {
+            WalkOutcome::Resolved(hash) => return Ok(BatchResolution::Resolved(hash)),
+            WalkOutcome::Missing => return Ok(BatchResolution::Missing),
+            WalkOutcome::Symlink {
+                link_index,
+                target_oid,
+            } => {
+                depth += 1;
+                if depth > FOLLOW_SYMLINK_DEPTH_CAP {
+                    return Ok(BatchResolution::Missing); // link loop / too deep
+                }
+                let Ok(target_bytes) = storage.get(&target_oid) else {
+                    return Ok(BatchResolution::Missing);
+                };
+                let target = String::from_utf8_lossy(&target_bytes);
+                // The target is relative to the link's parent directory
+                // (`components[..link_index]`); the remaining components after
+                // the link are re-appended after normalization.
+                let Some(mut rewritten) = normalize_tree_path(&components[..link_index], &target)
+                else {
+                    return Ok(BatchResolution::Missing); // escaped the root
+                };
+                rewritten.extend_from_slice(&components[link_index + 1..]);
+                components = rewritten;
+                // Re-walk from the root with the rewritten path.
+            }
+        }
+    }
+}
+
+/// Resolve a tree-ish to its root tree hash: a commit maps to its tree; a tree
+/// is used directly. Returns `Ok(None)` when it cannot be resolved to a tree.
+async fn resolve_to_root_tree(rev: &str, storage: &ClientStorage) -> CliResult<Option<ObjectHash>> {
+    let hash = match resolve_batch_token(rev, storage).await? {
+        BatchResolution::Resolved(h) => h,
+        _ => return Ok(None),
+    };
+    match storage.get_object_type(&hash) {
+        Ok(ObjectType::Tree) => Ok(Some(hash)),
+        Ok(ObjectType::Commit) => Ok(load_object::<Commit>(&hash).ok().map(|c| c.tree_id)),
+        _ => Ok(None),
+    }
+}
+
+/// Normalize `path` relative to the `base` directory components, resolving `.`
+/// and `..`. Returns `None` if it escapes above the tree root.
+fn normalize_tree_path(base: &[String], path: &str) -> Option<Vec<String>> {
+    let mut out: Vec<String> = base.to_vec();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => continue,
+            ".." => {
+                out.pop()?; // escaped above the root
+            }
+            other => out.push(other.to_string()),
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]

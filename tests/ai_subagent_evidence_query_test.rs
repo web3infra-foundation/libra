@@ -13,7 +13,8 @@ use futures::StreamExt;
 use libra::internal::ai::agent_run::{
     AgentEvidence, AgentRunId, AgentType, AnchorScope, Confidence, DecisionId, EventId,
     EvidenceFilter, EvidenceId, MergeCandidateId, MergeDecision, MergeDecisionPayloadV0,
-    ReviewState, evidence_query_by_scope, evidence_stream, merge_decision_distillable_evidence,
+    ReviewState, SourceCallId, ToolCallId, evidence_query_by_scope, evidence_stream,
+    merge_decision_distillable_evidence,
 };
 
 /// Build an `AgentEvidence` with the query-relevant fields set and the
@@ -139,4 +140,160 @@ fn merge_decision_distillable_evidence_reads_the_recorded_ids() {
     // them; the read API must surface that as an empty list, not panic.
     let empty = merge_decision_with(Vec::new());
     assert!(merge_decision_distillable_evidence(&empty).is_empty());
+}
+
+/// CEX-S2-18 验收 (4): the `AgentEvidence` wire schema is frozen for Step 3.D
+/// compatibility. The struct carries `#[serde(deny_unknown_fields)]` (matching
+/// `git_internal::Evidence`), so — verified against the code per the "核对落地"
+/// rule, rather than the card's aspirational "old reader skips a new field"
+/// wording — the *deliberate* contract is strict: an unknown field is REJECTED.
+/// This pins that contract three ways: (a) every field round-trips, (b) the
+/// serialized key set is exactly the 10 schema fields (deleting/renaming a
+/// field breaks the test), and (c) an unknown field fails to deserialize.
+#[test]
+fn agent_evidence_schema_is_wire_stable() {
+    let original = AgentEvidence {
+        id: EvidenceId::new(),
+        agent_run_id: AgentRunId::new(),
+        source_agent_type: AgentType::Worker,
+        source_event_id: EventId::new(),
+        tool_call_id: Some(ToolCallId::new()),
+        source_call_id: Some(SourceCallId::new()),
+        confidence: Confidence::new(0.75),
+        applies_to_scope: AnchorScope::Project,
+        distillable: true,
+        evidence_snapshot_id: uuid::Uuid::new_v4(),
+    };
+
+    // (a) lossless round-trip (compared via the canonical wire form, since
+    // `AgentEvidence` does not derive `PartialEq`). serde emits struct fields
+    // in declaration order, so an equal re-serialization proves no field was
+    // dropped or altered.
+    let json = serde_json::to_string(&original).expect("serialize");
+    let restored: AgentEvidence = serde_json::from_str(&json).expect("deserialize");
+    let rejson = serde_json::to_string(&restored).expect("re-serialize");
+    assert_eq!(rejson, json, "AgentEvidence must round-trip losslessly");
+
+    // (b) exact frozen key set (all optional fields populated above so all 10
+    // appear). A deleted/renamed field changes this set and fails the test.
+    let value: serde_json::Value = serde_json::from_str(&json).expect("to value");
+    let obj = value.as_object().expect("evidence serializes as an object");
+    let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec![
+            "agent_run_id",
+            "applies_to_scope",
+            "confidence",
+            "distillable",
+            "evidence_snapshot_id",
+            "id",
+            "source_agent_type",
+            "source_call_id",
+            "source_event_id",
+            "tool_call_id",
+        ],
+        "frozen AgentEvidence wire schema changed (Step 3.D compatibility break): {keys:?}",
+    );
+
+    // (c) deny_unknown_fields: an unknown field is rejected, not silently skipped.
+    let mut tampered = obj.clone();
+    tampered.insert("speculative_new_field".to_string(), serde_json::json!("x"));
+    let tampered = serde_json::Value::Object(tampered).to_string();
+    assert!(
+        serde_json::from_str::<AgentEvidence>(&tampered).is_err(),
+        "deny_unknown_fields must reject an unknown field (strict wire contract)",
+    );
+}
+
+/// CEX-S2-18 验收 (4) cont.: the two optional ids default to `None` and
+/// `distillable` to `false` when a minimal wire record omits them, and the
+/// optional ids are skipped (absent) when `None` rather than serialized as
+/// `null` — so a writer that never sets them stays byte-compatible.
+#[test]
+fn agent_evidence_optional_fields_default_and_skip() {
+    let id = EvidenceId::new();
+    let run = AgentRunId::new();
+    let event = EventId::new();
+    let snap = uuid::Uuid::new_v4();
+    // Minimal record: the 7 required fields only.
+    let json = serde_json::json!({
+        "id": id,
+        "agent_run_id": run,
+        "source_agent_type": "worker",
+        "source_event_id": event,
+        "confidence": Confidence::new(0.5),
+        "applies_to_scope": AnchorScope::Project,
+        "evidence_snapshot_id": snap,
+    });
+    let parsed: AgentEvidence =
+        serde_json::from_value(json).expect("minimal record must deserialize via defaults");
+    assert_eq!(parsed.tool_call_id, None);
+    assert_eq!(parsed.source_call_id, None);
+    assert!(!parsed.distillable, "distillable defaults to false");
+
+    // When `None`, the optional ids are skipped (absent), not emitted as `null`.
+    let reserialized = serde_json::to_value(&parsed).expect("serialize");
+    let obj = reserialized.as_object().expect("object");
+    assert!(
+        !obj.contains_key("tool_call_id"),
+        "a None tool_call_id must be skipped, not serialized as null",
+    );
+    assert!(
+        !obj.contains_key("source_call_id"),
+        "a None source_call_id must be skipped, not serialized as null",
+    );
+}
+
+/// CEX-S2-18 验收 (3): under `code.sub_agents.enabled = false` no `AgentEvidence`
+/// / `MergeDecision` is ever persisted into the main session log, and
+/// `evidence_query_by_scope` returns an empty set rather than panicking.
+///
+/// Verified against the code (rule 12, not the doc alone): `AgentEvidence` /
+/// `MergeDecision` are NOT variants of `SessionEvent` — they are separate
+/// orphan-branch objects that only the flag-gated sub-agent / orchestrator path
+/// writes. So the main `session.jsonl` is *structurally* unable to surface them
+/// as typed events: even a hand-injected `agent_evidence` / `merge_decision`
+/// row is dropped by the loader's unknown-kind branch. This is a stronger
+/// guarantee than a single runtime session check — it also fails if someone
+/// later adds such a `SessionEvent` variant and regresses Step 3.D / S2-INV-08.
+#[test]
+fn flag_off_session_does_not_persist_agent_evidence() {
+    use libra::internal::ai::session::jsonl::SessionJsonlStore;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = SessionJsonlStore::new(temp.path().to_path_buf());
+
+    // A hostile/legacy log that contains evidence + decision rows. The main
+    // session stream must skip them: they are not `SessionEvent` kinds, so a
+    // replay never surfaces agent evidence/decisions into the session.
+    let path = store.events_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create session dir");
+    }
+    std::fs::write(
+        &path,
+        concat!(
+            r#"{"kind":"agent_evidence","payload":{"id":"01890000-0000-7000-8000-000000000001"}}"#,
+            "\n",
+            r#"{"kind":"merge_decision","payload":{"id":"01890000-0000-7000-8000-000000000002"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write session log");
+
+    let events = store.load_events().expect("load_events must not error");
+    assert!(
+        events.is_empty(),
+        "agent_evidence / merge_decision rows must be skipped — the main session \
+         stream cannot surface AgentEvidence/MergeDecision (CEX-S2-18 (3)): {events:?}",
+    );
+
+    // The read API over an empty evidence set returns empty and never panics.
+    let empty: Vec<AgentEvidence> = Vec::new();
+    assert!(
+        evidence_query_by_scope(&empty, AnchorScope::Project).is_empty(),
+        "evidence_query_by_scope over an empty corpus must return empty, not panic",
+    );
 }

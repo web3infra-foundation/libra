@@ -4,41 +4,38 @@
 
 第四批：暂存与撤销命令（P1 一致性修复）
 
-## 已完成前置条件与当前代码状态
+## 落地状态（2026-06-08）
 
-### 已确认落地的基线
-- `RestoreError` typed enum（restore.rs:52）含 10 变体（`ResolveSource` / `ReferenceNotCommit` / `PathspecNotMatched` / `ReadIndex` / `ReadObject` / `ReadWorktree` / `InvalidPathEncoding` / `WriteWorktree` / `LfsDownload` / `LockedSource`）；每个变体在 `RestoreError::stable_code()`（restore.rs:78-93）有显式 `StableErrorCode` 映射，覆盖 source / pathspec / index / object / LFS / Libra-managed 锁定分支拒绝分类。`LockedSource` 在 `--source` 指向 `intent` / `agent-traces` 等被 `is_locked_revision` 命中的 ref 时返回 `CliInvalidTarget`，阻止用户通过 `restore` 覆写 AI agent 状态
-- `run_restore()`（restore.rs:185）+ `render_restore_output()`（restore.rs:252）已完成执行层/渲染层拆分
-- `RestoreOutput`（restore.rs:130）已覆盖 `source`、`worktree`、`staged`、`restored_files`、`deleted_files`
-- `checkout` 兼容路径已复用 typed restore API（`execute_checked_typed` at restore.rs:533 返回 `Result<(), RestoreError>`），而不是继续走裸 `io::Error`
-- `docs/commands/restore.md` 已记录 JSON schema、错误码和常用示例
-- `tests/command/restore_test.rs` 现含 10 个 test，覆盖正向与错误两侧：
-  - 正向：`test_restore_worktree_overwrites_modification_with_committed_blob`（worktree restore + 确认消息断言）、`test_restore_staged_resets_index_entry_to_head`（staged restore + status 二次校验）、`test_restore_json_envelope_reports_restored_files`（`--json` envelope schema 与字段断言）、`test_restore_quiet_suppresses_confirmation_but_still_restores`（`--quiet` 静默语义）
-  - 错误路径：仓库外调用、unborn HEAD、pathspec 缺失、unborn 分支不回退到 hash 前缀、locked-branch 守卫（`test_restore_source_refuses_locked_intent_branch` 与 `test_restore_source_refuses_locked_branch_with_revision_suffix` 守住 `intent` 与 `agent-traces~1` 两类 spelling）
+`restore` 的 Git 兼容核心能力已落地，当前命令整体在 `COMPATIBILITY.md` 中保持 `partial`：常用恢复、冲突阶段恢复、overlay 和 pathspec 文件输入已支持；`-p`/`--patch`、`--conflict=zdiff3`、非 NUL pathspec 文件的 Git C-quoting / `core.quotePath` 解码，以及 restore-time `core.autocrlf` renormalization 仍列为 deferred / intentional difference。
 
-### 基于当前代码的 Review 结论
-- 第四批对外契约已落地，restore 的 human/JSON 行为与命令文档保持一致
-- `checkout` 与 `restore` 的 typed 边界已经对齐，减少了跨命令委托时的错误信息丢失
-- 本轮 Review 的主要修订是把本计划文档从“待实施”状态更新为“已实施 + 后续维护点”，避免和当前代码冲突
+### 已完成能力
 
-## 目标与非目标
+- `RestoreArgs` 增加 `--ours` / `-2`、`--theirs` / `-3`、`--merge`、`--conflict=<merge|diff3>`、`--ignore-unmerged`、`--overlay`、`--no-overlay`、`--pathspec-from-file`、`--pathspec-file-nul`。
+- 默认 restore 遇 unmerged path 会以 `LBR-CONFLICT-001`、exit 128 阻断；`--ignore-unmerged` 跳过该路径。
+- `--ours` / `--theirs` 从 index stage 2 / 3 写回工作区，index 保持 unmerged。
+- `--merge` / `--conflict=diff3` 复用 `merge.rs` 的冲突样式解析和冲突标记渲染 helper，重建工作区冲突标记，index 保持 unmerged。
+- `--merge` / `--conflict` 对二进制或超过 50 MiB 的冲突 blob fail closed，并建议改用 `--ours` / `--theirs`。
+- 默认 no-overlay 会删除目标中已追踪但 source 中不存在的文件；`--overlay` 保留这些文件。
+- `--pathspec-from-file=<file>` 和 `--pathspec-from-file=-` 支持 newline / NUL 分隔，并以 128 MiB 上限防止无界读取。
+- `docs/commands/restore.md`、`COMPATIBILITY.md`、`docs/development/integration-scenarios.yaml`、`docs/development/integration-scenarios/cli.restore-reset-diff.md` 和 integration-runner 场景已同步。
 
-**已完成目标：**
-- 显式错误码、JSON / machine、确认消息、run/render 分层和正向 restore 测试已全部落地
+### 关键保护
 
-**后续维护目标：**
-- 继续维护 worktree + staged 组合、pathspec 过滤和 LFS 下载失败的回归测试
-- 继续保持 `checkout` 兼容层与 `restore` 真实行为一致
-- `docs/commands/restore.md` 的 “Human Output” 段已对齐当前实现（输出 `Updated N path(s) from <source>` 汇总而非逐文件 `Restored …`），后续如要切回逐文件渲染，需同步更新 `render_restore_output` 与上述测试
+- 冲突选择参数只写工作区，不改 index，不创建或推进 merge 状态。
+- no-overlay 删除前确认路径是 index stage 0 中的 tracked 文件，不删除未追踪文件。
+- pathspec 文件解析结果仍走既有 pathspec 归一化和匹配路径。
+- 生产 `src/**` 路径没有新增 `unwrap()` / `expect()`。
 
-**本批非目标：**
-- 不引入交互式 restore
-- 不改变底层 tree/index 恢复算法
-- 不为 `checkout` 提前承诺完整 JSON 契约（完整现代化仍留 [README.md](README.md#后续批次基于本轮-review-重排) 第 30 批）
+## 已验证命令
 
-## 验证方式
+- `source .env.test && LIBRA_SKIP_WEB_BUILD=1 cargo check`
+- `source .env.test && LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test -- restore --test-threads=1 --nocapture`
+- `source .env.test && LIBRA_SKIP_WEB_BUILD=1 cargo test --lib restore -- --test-threads=1 --nocapture`
+- `source .env.test && cargo run --manifest-path tools/integration-runner/Cargo.toml -- check-plan`
+- `source .env.test && cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --only cli.restore-reset-diff`
 
-1. `cargo +nightly fmt --all --check`
-2. `cargo clippy --all-targets --all-features -- -D warnings`
-3. `cargo test restore_test`
-4. `docs/commands/restore.md` 与命令输出、错误码保持一致
+## 后续维护点
+
+- 如实现 `-p` / `--patch`，需要引入统一交互式 hunk 框架，而不是在 `restore` 内单独实现一套。
+- 如扩展 `--conflict=zdiff3`，应先扩展共享的 `MergeConflictStyle`，让 `merge` 与 `restore` 同步使用同一渲染路径。
+- 如实现 Git C-quoting / `core.quotePath`，应优先抽取为共享 pathspec-file parser，供 `add` / `remove` / `restore` 等命令复用。

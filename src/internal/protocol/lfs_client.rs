@@ -137,6 +137,25 @@ impl LFSClient {
                      `libra branch --set-upstream-to <remote>/<branch>`"
                 )
             })?;
+        Self::from_remote_url(url)
+    }
+
+    /// Construct an LFS client for an explicitly named remote, reading
+    /// `remote.<remote>.url` from config.
+    ///
+    /// Unlike [`new`](Self::new)/[`get`](Self::get), this never falls back to the
+    /// current-branch upstream, so an explicit `libra lfs push <remote>` /
+    /// `fetch <remote>` always targets the requested remote. When the remote is
+    /// unknown, [`ConfigKv::get_remote_url`] returns Git's
+    /// `No URL configured for remote '<remote>'` error, which propagates here.
+    pub async fn new_from_remote(remote: &str) -> anyhow::Result<Self> {
+        let url = ConfigKv::get_remote_url(remote).await?;
+        Self::from_remote_url(url)
+    }
+
+    /// Build a client from a raw remote URL string (shared by [`new`](Self::new)
+    /// and [`new_from_remote`](Self::new_from_remote)).
+    fn from_remote_url(url: String) -> anyhow::Result<Self> {
         // generate_lfs_server_url converts SCP-style SSH URLs (git@host:user/repo.git)
         // to valid HTTPS URLs, so we pass the raw remote string directly instead of
         // going through Url::parse which rejects SCP format with RelativeUrlWithoutBase.
@@ -156,7 +175,11 @@ impl LFSClient {
     }
 
     /// push LFS objects to remote server
-    pub async fn push_objects<'a, I>(&self, objs: I) -> Result<usize, LfsPushError>
+    ///
+    /// When `quiet` is true the human progress lines this method (and the
+    /// `upload_object` it calls) writes to stdout are suppressed, so callers
+    /// rendering structured `--json`/`--machine` output keep stdout clean.
+    pub async fn push_objects<'a, I>(&self, objs: I, quiet: bool) -> Result<usize, LfsPushError>
     where
         I: IntoIterator<Item = &'a Entry>,
     {
@@ -247,7 +270,7 @@ impl LFSClient {
                         lfs::get_oid_by_path(&l.path).is_some_and(|oid| oids.contains(&oid))
                     })
                     .collect::<Vec<_>>();
-                if !ours.is_empty() {
+                if !ours.is_empty() && !quiet {
                     println!("The following files are locked by you, consider unlocking them:");
                     for lock in ours {
                         println!("  - {}", lock.path);
@@ -314,16 +337,23 @@ impl LFSClient {
         let mut uploaded = 0;
         for obj in resp.objects {
             let file_path = lfs::lfs_object_path(&obj.oid);
-            if self.upload_object(obj, &file_path).await? {
+            if self.upload_object(obj, &file_path, quiet).await? {
                 uploaded += 1;
             }
         }
-        println!("LFS objects push completed.");
+        if !quiet {
+            println!("LFS objects push completed.");
+        }
         Ok(uploaded)
     }
 
     /// push LFS object to remote server, didn't need local lfs storage
-    pub async fn push_object(&self, oid: &str, file: &Path) -> Result<bool, LfsPushError> {
+    pub async fn push_object(
+        &self,
+        oid: &str,
+        file: &Path,
+        quiet: bool,
+    ) -> Result<bool, LfsPushError> {
         let batch_request = BatchRequest {
             operation: Operation::Upload,
             transfers: vec![lfs::LFS_TRANSFER_API.to_string()],
@@ -385,8 +415,10 @@ impl LFSClient {
             .into_iter()
             .next()
             .expect("LFS batch response had exactly one object (checked above)");
-        let uploaded = self.upload_object(obj, file).await?;
-        println!("LFS objects push completed.");
+        let uploaded = self.upload_object(obj, file, quiet).await?;
+        if !quiet {
+            println!("LFS objects push completed.");
+        }
         Ok(uploaded)
     }
 
@@ -395,6 +427,7 @@ impl LFSClient {
         &self,
         object: ResponseObject,
         file: &Path,
+        quiet: bool,
     ) -> Result<bool, LfsPushError> {
         let oid = object.oid.clone();
         if let Some(err) = object.error {
@@ -412,7 +445,9 @@ impl LFSClient {
                 detail: "remote did not provide an upload action".to_string(),
             })?;
 
-            println!("Uploading LFS file: {}", object.oid);
+            if !quiet {
+                println!("Uploading LFS file: {}", object.oid);
+            }
             let content_len = tokio::fs::metadata(file)
                 .await
                 .map_err(|e| LfsPushError {
@@ -465,7 +500,9 @@ impl LFSClient {
                     detail: format!("upload request failed with status {status}: {message}"),
                 });
             }
-            println!("Uploaded.");
+            if !quiet {
+                println!("Uploaded.");
+            }
             Ok(true)
         } else {
             tracing::debug!("LFS file {} already exists on remote server", object.oid);
@@ -502,6 +539,11 @@ impl LFSClient {
             &mut (dyn FnMut(f64) -> anyhow::Result<()> + Send), // progress callback
             f64,                                                // step
         )>,
+        // When true, suppress the human progress lines that this method writes to
+        // stdout (e.g. `Downloading LFS file: …`). Callers rendering structured
+        // `--json`/`--machine` output pass `true` so stdout carries only the JSON
+        // envelope; stderr diagnostics (404/checksum warnings) are unaffected.
+        quiet: bool,
     ) -> anyhow::Result<()> {
         let batch_request = BatchRequest {
             operation: Operation::Download,
@@ -613,18 +655,22 @@ impl LFSClient {
                 .await?;
             let file_len = file.metadata().await?.len();
             if file_len > size {
-                println!("Local file size is larger than remote, truncate to 0.");
+                if !quiet {
+                    println!("Local file size is larger than remote, truncate to 0.");
+                }
                 file.set_len(0).await?; // clear
                 file.seek(tokio::io::SeekFrom::Start(0)).await?;
             } else if file_len > 0 {
                 let chunk_size = chunk_size as u64;
                 got_parts = file_len / chunk_size;
                 let file_offset = got_parts * chunk_size;
-                println!(
-                    "Resume download from offset: {}, part: {}",
-                    file_offset,
-                    got_parts + 1
-                );
+                if !quiet {
+                    println!(
+                        "Resume download from offset: {}, part: {}",
+                        file_offset,
+                        got_parts + 1
+                    );
+                }
                 file.set_len(file_offset).await?; // truncate
                 Self::update_file_checksum(&mut file, &mut checksum).await?; // resume checksum
                 file.seek(tokio::io::SeekFrom::End(0)).await?;
@@ -632,14 +678,16 @@ impl LFSClient {
             file
         };
 
-        println!("Downloading LFS file: {oid}");
+        if !quiet {
+            println!("Downloading LFS file: {oid}");
+        }
         let parts = links.len();
         let mut downloaded: u64 = file.metadata().await?.len();
         let mut last_progress = 0.0;
         let start_part = got_parts as usize;
         for link in links.iter().skip(start_part) {
             got_parts += 1;
-            if is_chunked {
+            if is_chunked && !quiet {
                 println!("- part: {got_parts}/{parts}");
             }
 
@@ -691,7 +739,10 @@ impl LFSClient {
         }
         let checksum = hex::encode(checksum.finish().as_ref());
         if checksum == oid {
-            println!("Downloaded.");
+            file.flush().await?;
+            if !quiet {
+                println!("Downloaded.");
+            }
             Ok(())
         } else {
             eprintln!(
@@ -701,6 +752,7 @@ impl LFSClient {
             file.set_len(0).await?; // clear
             file.seek(tokio::io::SeekFrom::Start(0)).await?; // ensure
             file.write_all(pointer.as_bytes()).await?;
+            file.flush().await?;
             Err(anyhow!("Checksum mismatch, fallback to pointer file."))
         }
     }
@@ -1015,7 +1067,7 @@ mod tests {
         let oid = lfs::calc_lfs_file_hash(&test_file).unwrap();
 
         // Test push
-        match client.push_object(&oid, &test_file).await {
+        match client.push_object(&oid, &test_file, false).await {
             Ok(_) => println!("Pushed successfully."),
             Err(err) => eprintln!("Push failed: {err:?}"),
         }
@@ -1061,7 +1113,7 @@ mod tests {
         let out_path = tmp_dir.path().join("test_lfs_file");
 
         let result = client
-            .download_object(test_oid, test_size, &out_path, None)
+            .download_object(test_oid, test_size, &out_path, None, false)
             .await;
 
         assert!(
@@ -1296,7 +1348,7 @@ mod tests {
         let client = test_lfs_client(&base_url);
 
         let err = client
-            .download_object(test_oid, 4, &out_path, None)
+            .download_object(test_oid, 4, &out_path, None, false)
             .await
             .expect_err("missing download action should surface a typed error");
         let msg = err.to_string();
@@ -1335,7 +1387,7 @@ mod tests {
         let base_url = format!("http://{addr}/");
         let client = test_lfs_client(&base_url);
         let err = client
-            .push_object("deadbeef", &file_path)
+            .push_object("deadbeef", &file_path, false)
             .await
             .expect_err("empty objects array should be rejected by push_object");
         assert!(
@@ -1379,7 +1431,7 @@ mod tests {
         let base_url = format!("http://{addr}/");
         let client = test_lfs_client(&base_url);
         let err = client
-            .push_object(test_oid, &file_path)
+            .push_object(test_oid, &file_path, false)
             .await
             .expect_err("missing upload action should surface a typed LfsPushError");
         assert!(

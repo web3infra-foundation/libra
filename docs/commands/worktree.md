@@ -7,13 +7,13 @@ Manage multiple working trees attached to this repository.
 ## Synopsis
 
 ```
-libra worktree add <path>
-libra worktree list
+libra worktree add [options] <path> [commit-ish]
+libra worktree list [--porcelain | --verbose]
 libra worktree lock <path> [--reason <text>]
 libra worktree unlock <path>
 libra worktree move <src> <dest>
-libra worktree prune
-libra worktree remove <path>
+libra worktree prune [--dry-run] [--verbose] [--expire <time>]
+libra worktree remove [--delete-dir] [--force] <path>
 libra worktree umount <path> [--cleanup]
 libra worktree repair
 ```
@@ -26,7 +26,9 @@ Each linked worktree is a directory containing a `.libra` symlink pointing back 
 
 Worktree metadata is persisted in a `worktrees.json` file inside the `.libra` storage directory. Each entry tracks the filesystem path, whether it is the main worktree, its lock status, and an optional lock reason. The state file is written atomically via a temporary file rename to prevent corruption.
 
-When a new worktree is added and HEAD points to a commit, the worktree is automatically populated with the committed content from HEAD (not staged index changes).
+When a new worktree is added and HEAD points to a commit, the worktree is automatically populated with the committed content from HEAD (not staged index changes), unless `--no-checkout` is used.
+
+Libra worktrees intentionally share one `.libra` storage directory. That means linked worktrees share refs and HEAD; Libra does not maintain Git's per-worktree `.git/worktrees/<name>/HEAD` state. Branch-creation flags are useful for creating or resetting shared branches before populating a worktree, but they do not create an isolated per-worktree checkout state.
 
 ## Options
 
@@ -34,14 +36,28 @@ When a new worktree is added and HEAD points to a commit, the worktree is automa
 
 Create a new linked worktree at the given filesystem path.
 
-| Argument | Description |
-|----------|-------------|
+| Argument / Flag | Description |
+|-----------------|-------------|
 | `<path>` | Filesystem path for the new worktree. Can be relative or absolute. The directory is created if it does not exist. Must not be inside `.libra` storage, must not already be registered, and must be empty if it exists. |
+| `[commit-ish]` | Optional commit, branch, or tag used as the restore/start point. Defaults to shared `HEAD`. |
+| `-b, --create-branch <branch>` | Create a shared branch before adding the worktree. The optional `[commit-ish]` is used as the branch start point. |
+| `-B, --force-create-branch <branch>` | Create or reset a shared branch before adding the worktree. |
+| `--detach` | Do not create or switch a named branch. This is partial Git compatibility because Libra has no per-worktree detached HEAD. |
+| `--no-checkout` | Create the directory and `.libra` link without restoring files from `HEAD` or `[commit-ish]`. |
+| `--lock` | Register the new worktree as locked immediately. |
+| `--reason <text>` | Optional lock reason. Requires `--lock`. |
 
 ```bash
 # Create a new worktree for a feature branch
 libra worktree add ../my-feature
 libra --json worktree add ../my-feature
+
+# Create a shared branch and restore from HEAD
+libra worktree add -b feature/my-feature ../my-feature
+
+# Restore from a specific commit, or create metadata only
+libra worktree add ../old-build HEAD~1
+libra worktree add --no-checkout ../empty
 
 # Create using absolute path
 libra worktree add /tmp/libra-test
@@ -51,8 +67,15 @@ libra worktree add /tmp/libra-test
 
 List all registered worktrees and their state.
 
+| Flag | Description |
+|------|-------------|
+| `--porcelain` | Emit stable key-value records separated by blank lines. Records include `worktree <path>`, optional shared `HEAD <hash>`, and `locked`. Libra does not print `branch` or `detached` lines because there is no per-worktree HEAD. |
+| `-v, --verbose` | Append the shared short `HEAD` hash to human output. Conflicts with `--porcelain`. |
+
 ```bash
 libra worktree list
+libra worktree list --porcelain
+libra worktree list --verbose
 libra --json worktree list
 libra --machine worktree list
 ```
@@ -110,8 +133,14 @@ libra --json worktree move ../my-feature ../my-feature-v2
 
 Remove worktrees from the registry whose directories no longer exist on disk. The main worktree and locked worktrees are never pruned.
 
+Pass `--dry-run` to report which worktrees *would* be pruned without modifying the registry. The output lists the same entries as a real prune, but nothing is written and the JSON envelope carries `"dry_run": true`.
+
+`--expire <time>` is a partial Git-compatible age filter for missing-directory entries only. It accepts `now`, `0`, or relative forms such as `30.minutes`, `1.hour.ago`, `2.days`, and `1.week.ago`. Existing worktree directories are never pruned solely because of age.
+
 ```bash
 libra worktree prune
+libra worktree prune --dry-run
+libra worktree prune --verbose --expire 1.day.ago
 libra --machine worktree prune
 ```
 
@@ -119,14 +148,13 @@ libra --machine worktree prune
 
 Unregister a worktree from the state file. By default the directory on disk
 is intentionally left untouched to avoid destructive behavior. Pass
-`--delete-dir` for Git-style behavior — the directory is removed only after
-a dirty-state check passes. Cannot remove the main worktree or a locked
-worktree.
+`--delete-dir` for Git-style behavior. Without `--force`, the directory is removed only after a dirty-state check passes. Cannot remove the main worktree. Locked worktrees require `-f -f` to unregister.
 
 | Argument / Flag | Description |
 |-----------------|-------------|
 | `<path>` | Filesystem path of the worktree to unregister. |
 | `--delete-dir` | After unregistering, also delete the directory on disk. Refused when the worktree contains uncommitted changes (staged or unstaged). |
+| `-f, --force` | Repeatable. One `--force` skips the dirty check for `--delete-dir`; two (`-f -f`) also allow unregistering a locked worktree. `--force` alone never deletes files without `--delete-dir`. |
 
 ```bash
 # Default — keep the directory on disk
@@ -136,6 +164,10 @@ libra --json worktree remove ../my-feature
 # Git-style — also delete the directory (clean worktree only)
 libra worktree remove --delete-dir ../my-feature
 libra --machine worktree remove --delete-dir ../my-feature
+
+# Force dirty deletion, or force-unregister a locked worktree
+libra worktree remove --delete-dir --force ../dirty-feature
+libra worktree remove -f -f ../locked-feature
 
 # Refused when dirty:
 $ libra worktree remove --delete-dir ../dirty-feature
@@ -187,7 +219,7 @@ JSON / machine output envelope:
 
 ### Subcommand: `repair`
 
-Repair worktree metadata by removing duplicate entries (same canonical path) and ensuring exactly one main worktree entry exists. Only writes the state file if changes are actually made.
+Repair worktree metadata by removing duplicate entries (same canonical path), ensuring exactly one main worktree entry exists, and rebuilding missing or stale `.libra` symlinks in linked worktrees. Real `.libra` directories are skipped and never deleted. Only writes the state file if changes are actually made.
 
 ```bash
 libra worktree repair
@@ -199,9 +231,12 @@ libra --json worktree repair
 ```bash
 # Create a new worktree
 libra worktree add ../experiment
+libra worktree add -b experiment ../experiment
+libra worktree add --no-checkout ../empty
 
 # List all worktrees
 libra wt list
+libra wt list --porcelain
 
 # Lock a worktree to protect it
 libra wt lock ../experiment --reason "production hotfix in progress"
@@ -214,9 +249,11 @@ libra wt move ../experiment ../experiment-v2
 
 # Clean up worktrees whose directories were deleted
 libra wt prune
+libra wt prune --expire 1.day.ago --verbose
 
 # Unregister a worktree (keeps files on disk)
 libra wt remove ../experiment-v2
+libra wt remove --delete-dir --force ../dirty-experiment
 
 # Fix inconsistent worktree metadata
 libra wt repair
@@ -238,11 +275,32 @@ worktree /Users/alice/projects/my-feature
 worktree /Users/alice/projects/hotfix [locked: production hotfix in progress]
 ```
 
+**`worktree list --porcelain`**:
+
+```text
+worktree /Users/alice/projects/my-repo
+HEAD 4b6ec7f9c6ad8d9e8d4b2f0a7f7c6f1e8c0d1a2b
+
+worktree /Users/alice/projects/hotfix
+HEAD 4b6ec7f9c6ad8d9e8d4b2f0a7f7c6f1e8c0d1a2b
+locked
+
+```
+
+**`worktree list --verbose`**:
+
+```text
+main /Users/alice/projects/my-repo [HEAD 4b6ec7f]
+worktree /Users/alice/projects/hotfix [locked: production hotfix in progress] [HEAD 4b6ec7f]
+```
+
 **`worktree remove`**:
 
 ```text
 Removed worktree '/Users/alice/projects/my-feature' from registry. Directory kept on disk.
 Removed worktree '/Users/alice/projects/my-feature' from registry and deleted directory.
+warning: forced deletion skipped worktree safety checks for '/Users/alice/projects/dirty-feature'
+Removed worktree '/Users/alice/projects/dirty-feature' from registry and deleted directory.
 ```
 
 **`worktree prune`** (with stale entries):
@@ -252,6 +310,23 @@ Will prune 2 worktrees:
   /Users/alice/projects/old-experiment
   /Users/alice/projects/deleted-branch
 Pruned 2 worktrees
+```
+
+**`worktree prune --dry-run`** (with stale entries):
+
+```text
+Will prune 2 worktrees:
+  /Users/alice/projects/old-experiment
+  /Users/alice/projects/deleted-branch
+Dry run: 2 worktrees would be pruned
+```
+
+**`worktree prune --verbose --expire 1.day.ago`**:
+
+```text
+Will prune 1 worktrees:
+  /Users/alice/projects/old-experiment (missing)
+Pruned 1 worktrees
 ```
 
 **`worktree prune`** (nothing to prune):
@@ -352,21 +427,8 @@ single-line JSON.
   "command": "worktree.prune",
   "data": {
     "pruned": ["/Users/alice/projects/old-experiment"],
-    "pruned_count": 1
-  }
-}
-```
-
-**`worktree.remove`**:
-
-```json
-{
-  "ok": true,
-  "command": "worktree.remove",
-  "data": {
-    "path": "/Users/alice/projects/my-feature",
-    "registry_removed": true,
-    "disk_directory_deleted": false
+    "pruned_count": 1,
+    "dry_run": false
   }
 }
 ```
@@ -378,7 +440,25 @@ single-line JSON.
   "ok": true,
   "command": "worktree.repair",
   "data": {
-    "changed": true
+    "changed": true,
+    "links_repaired": 1,
+    "links_skipped": 0
+  }
+}
+```
+
+With `--dry-run`, `dry_run` is `true` and the listed entries remain in the registry.
+
+**`worktree.remove`**:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.remove",
+  "data": {
+    "path": "/Users/alice/projects/my-feature",
+    "registry_removed": true,
+    "disk_directory_deleted": false
   }
 }
 ```
@@ -411,16 +491,16 @@ When creating a linked worktree, Libra restores content from the HEAD commit rat
 
 | Operation | Libra | Git | jj |
 |-----------|-------|-----|----|
-| Create worktree | `worktree add <path>` | `worktree add <path> [<branch>]` | `workspace add <path>` |
-| Create on branch | Not supported | `worktree add <path> <branch>` | `workspace add <path>` (then `jj edit`) |
-| Create detached | Not supported | `worktree add --detach <path> <commit>` | N/A |
-| List worktrees | `worktree list` | `worktree list [--porcelain]` | `workspace list` |
+| Create worktree | `worktree add <path> [commit-ish]` | `worktree add <path> [<branch>]` | `workspace add <path>` |
+| Create on branch | `worktree add -b <branch> <path> [commit-ish]` (shared branch) | `worktree add <path> <branch>` | `workspace add <path>` (then `jj edit`) |
+| Create detached | `worktree add --detach <path> [commit-ish]` (no per-worktree detached HEAD) | `worktree add --detach <path> <commit>` | N/A |
+| List worktrees | `worktree list [--porcelain | --verbose]` | `worktree list [--porcelain]` | `workspace list` |
 | Lock | `worktree lock <path> [--reason]` | `worktree lock [--reason] <worktree>` | N/A |
 | Unlock | `worktree unlock <path>` | `worktree unlock <worktree>` | N/A |
 | Move | `worktree move <src> <dest>` | `worktree move <worktree> <new-path>` | N/A |
-| Prune | `worktree prune` | `worktree prune [--dry-run]` | N/A (automatic) |
-| Remove | `worktree remove <path>` (registry only) | `worktree remove [--force] <worktree>` (deletes dir) | `workspace forget <name>` |
-| Repair | `worktree repair` | `worktree repair [<path>...]` | N/A |
+| Prune | `worktree prune [--dry-run] [--expire <time>]` | `worktree prune [--dry-run] [--expire <time>]` | N/A (automatic) |
+| Remove | `worktree remove [--delete-dir] [--force] <path>` (registry only unless `--delete-dir`) | `worktree remove [--force] <worktree>` (deletes dir) | `workspace forget <name>` |
+| Repair | `worktree repair` (dedupe/main/symlink repair) | `worktree repair [<path>...]` | N/A |
 | Alias | `wt` | N/A | N/A |
 | Branch per worktree | Not supported | Automatic (new branch or existing) | Automatic (new working copy commit) |
 | Storage | JSON file (`worktrees.json`) | Filesystem structure (`.git/worktrees/`) | Operation log |
@@ -435,6 +515,7 @@ Note: jj uses the term "workspace" instead of "worktree". Each workspace automat
 | `LBR-REPO-001` | Not a libra repository |
 | `LBR-REPO-002` | `worktrees.json` is corrupt |
 | `LBR-CLI-003` | Worktree path cannot be inside `.libra` storage |
+| `LBR-CLI-003` | Invalid `worktree prune --expire` value |
 | `LBR-CLI-003` | Target exists and is not a directory |
 | `LBR-CLI-003` | No such worktree (for lock, unlock, move, remove) |
 | `LBR-CLI-003` | Cannot move or remove main worktree |

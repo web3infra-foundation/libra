@@ -87,6 +87,51 @@ fn test_shortlog_json_output_has_author_summary() {
 
 #[tokio::test]
 #[serial]
+async fn test_shortlog_json_revision_summary_email_contract() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    fs::write(repo.path().join("second.txt"), "second\n").unwrap();
+    let output = run_libra_command(&["add", "second.txt"], repo.path());
+    assert_cli_success(&output, "failed to add second file");
+    let output = run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    assert_cli_success(&output, "failed to create second commit");
+
+    let head = Head::current_commit().await.unwrap();
+    let commits = get_reachable_commits(head.to_string(), None).await.unwrap();
+    let base_commit = commits
+        .iter()
+        .find(|commit| commit.message.contains("base"))
+        .expect("expected base commit")
+        .id
+        .to_string();
+
+    let output = run_libra_command(
+        &["shortlog", &base_commit, "-s", "-e", "--json"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "shortlog revision -s -e --json should succeed");
+    let json = parse_json_stdout(&output);
+
+    assert_eq!(json["command"], "shortlog");
+    assert_eq!(json["data"]["revision"], base_commit);
+    assert_eq!(json["data"]["summary"], true);
+    assert_eq!(json["data"]["email"], true);
+    assert_eq!(json["data"]["total_commits"], 1);
+    assert_eq!(json["data"]["authors"][0]["name"], "Test User");
+    assert_eq!(json["data"]["authors"][0]["email"], "test@example.com");
+    assert_eq!(json["data"]["authors"][0]["count"], 1);
+    assert_eq!(
+        json["data"]["authors"][0]["subjects"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_shortlog_revision_argument_limits_history() {
     let repo = create_committed_repo_via_cli();
     let _guard = ChangeDirGuard::new(repo.path());
@@ -678,4 +723,223 @@ async fn test_shortlog_committer_date_filter() {
     // Expect the commit to be present
     assert!(output.contains("TEST"));
     assert!(output.contains("Test Commit"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_shortlog_no_merges_excludes_merge_commits() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    let _ = create_test_commit_tree().await;
+
+    let full_args = ShortlogArgs::try_parse_from(["libra"]).unwrap();
+    let mut full_buf = Vec::new();
+    shortlog::execute_to(full_args, &mut full_buf)
+        .await
+        .unwrap();
+    let full = String::from_utf8(full_buf).unwrap();
+
+    let nm_args = ShortlogArgs::try_parse_from(["libra", "--no-merges"]).unwrap();
+    let mut nm_buf = Vec::new();
+    shortlog::execute_to(nm_args, &mut nm_buf).await.unwrap();
+    let nm = String::from_utf8(nm_buf).unwrap();
+
+    // Commit_4 (parents 1,2) and Commit_14 are merge commits; --no-merges drops
+    // them while keeping the single-parent Commit_7.
+    assert!(
+        full.contains("Commit_4"),
+        "full summary should include merge Commit_4"
+    );
+    assert!(
+        full.contains("Commit_14"),
+        "full summary should include merge Commit_14"
+    );
+    assert!(
+        !nm.contains("Commit_4"),
+        "--no-merges must drop merge Commit_4:\n{nm}"
+    );
+    assert!(
+        !nm.contains("Commit_14"),
+        "--no-merges must drop merge Commit_14:\n{nm}"
+    );
+    assert!(
+        nm.contains("Commit_7"),
+        "--no-merges keeps non-merge Commit_7:\n{nm}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_shortlog_committer_groups_by_committer_identity() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let mut solo = Commit::new(
+        create_signature(SignatureType::Author, "ALICE"),
+        create_signature(SignatureType::Committer, "BOB"),
+        ObjectHash::new(&[42; 20]),
+        vec![],
+        &format_commit_msg("Solo", None),
+    );
+    solo.committer.timestamp = solo.author.timestamp;
+    save_object(&solo, &solo.id).unwrap();
+    let branch_name = match Head::current().await {
+        Head::Branch(name) => name,
+        _ => panic!("should be branch"),
+    };
+    Branch::update_branch(&branch_name, &solo.id.to_string(), None)
+        .await
+        .unwrap();
+
+    let author_args = ShortlogArgs::try_parse_from(["libra"]).unwrap();
+    let mut author_buf = Vec::new();
+    shortlog::execute_to(author_args, &mut author_buf)
+        .await
+        .unwrap();
+    let author_out = String::from_utf8(author_buf).unwrap();
+    assert!(
+        author_out.contains("ALICE"),
+        "default groups by author:\n{author_out}"
+    );
+    assert!(
+        !author_out.contains("BOB"),
+        "default must not show committer:\n{author_out}"
+    );
+
+    let committer_args = ShortlogArgs::try_parse_from(["libra", "-c"]).unwrap();
+    let mut committer_buf = Vec::new();
+    shortlog::execute_to(committer_args, &mut committer_buf)
+        .await
+        .unwrap();
+    let committer_out = String::from_utf8(committer_buf).unwrap();
+    assert!(
+        committer_out.contains("BOB"),
+        "-c groups by committer:\n{committer_out}"
+    );
+    assert!(
+        !committer_out.contains("ALICE"),
+        "-c must not show author:\n{committer_out}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_shortlog_double_dot_range_excludes_left_side() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    fs::write(repo.path().join("second.txt"), "second\n").unwrap();
+    let output = run_libra_command(&["add", "second.txt"], repo.path());
+    assert_cli_success(&output, "failed to add second file");
+    let output = run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    assert_cli_success(&output, "failed to create second commit");
+
+    fs::write(repo.path().join("third.txt"), "third\n").unwrap();
+    let output = run_libra_command(&["add", "third.txt"], repo.path());
+    assert_cli_success(&output, "failed to add third file");
+    let output = run_libra_command(&["commit", "-m", "third", "--no-verify"], repo.path());
+    assert_cli_success(&output, "failed to create third commit");
+
+    let head = Head::current_commit().await.unwrap();
+    let commits = get_reachable_commits(head.to_string(), None).await.unwrap();
+    let second_commit = commits
+        .iter()
+        .find(|commit| commit.message.contains("second"))
+        .expect("expected second commit")
+        .id
+        .to_string();
+    let range = format!("{second_commit}..HEAD");
+
+    let output = run_libra_command(&["shortlog", &range, "--json"], repo.path());
+    assert_cli_success(&output, "shortlog A..B should succeed");
+    let json = parse_json_stdout(&output);
+
+    assert_eq!(json["data"]["revision"], range);
+    assert_eq!(json["data"]["total_commits"], 1);
+    assert_eq!(json["data"]["authors"][0]["subjects"][0], "third");
+}
+
+#[test]
+fn test_shortlog_format_changes_json_subjects() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(
+        &["shortlog", "--format", "%h %an %s", "--json"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "shortlog --format --json should succeed");
+    let json = parse_json_stdout(&output);
+    let subject = json["data"]["authors"][0]["subjects"][0].as_str().unwrap();
+
+    assert!(
+        subject.contains(" Test User "),
+        "unexpected subject: {subject}"
+    );
+    assert!(subject.ends_with(" base"), "unexpected subject: {subject}");
+}
+
+#[test]
+fn test_shortlog_invalid_format_placeholder_returns_cli_error() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["shortlog", "--format", "%b"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        stderr.contains("unsupported shortlog --format placeholder '%b'"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_shortlog_width_does_not_wrap_json_subjects() {
+    let repo = create_committed_repo_via_cli();
+    let long_subject = "this is a deliberately long subject that should stay unwrapped in json";
+
+    fs::write(repo.path().join("long.txt"), "long\n").unwrap();
+    let output = run_libra_command(&["add", "long.txt"], repo.path());
+    assert_cli_success(&output, "failed to add long file");
+    let output = run_libra_command(&["commit", "-m", long_subject, "--no-verify"], repo.path());
+    assert_cli_success(&output, "failed to create long commit");
+
+    let output = run_libra_command(
+        &["shortlog", "-w=24", "--format", "%s", "--json"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "shortlog -w --json should succeed");
+    let json = parse_json_stdout(&output);
+    let subjects = json["data"]["authors"][0]["subjects"].as_array().unwrap();
+
+    assert!(
+        subjects
+            .iter()
+            .any(|subject| subject.as_str() == Some(long_subject)),
+        "JSON subjects should keep the unwrapped subject: {subjects:?}"
+    );
+}
+
+#[test]
+fn test_shortlog_mailmap_maps_author_and_reports_bad_line() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(
+        repo.path().join(".mailmap"),
+        "Canonical User <canonical@example.com> Test User <test@example.com>\nnot a mailmap line\n",
+    )
+    .unwrap();
+
+    let output = run_libra_command(&["shortlog", "-e", "--json"], repo.path());
+    assert_cli_success(&output, "shortlog with mailmap should succeed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let json = parse_json_stdout(&output);
+
+    assert!(
+        stderr.contains("warning: .mailmap line 2 is malformed and was skipped"),
+        "unexpected stderr: {stderr}"
+    );
+    assert_eq!(json["data"]["authors"][0]["name"], "Canonical User");
+    assert_eq!(json["data"]["authors"][0]["email"], "canonical@example.com");
 }

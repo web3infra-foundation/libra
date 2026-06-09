@@ -120,6 +120,10 @@ helpers in `db.rs`. Subsequent CEXes have populated this directory.
 | `2026050501`  | `agent_checkpoint_parent_nullable` | `2026050501_agent_checkpoint_parent_nullable{,_down}.sql` |
 | `2026050601`  | `approved_permission` | `2026050601_approved_permission{,_down}.sql`  |
 | `2026050801`  | `agent_usage_stats_agent_name` | `2026050801_agent_usage_stats_agent_name{,_down}.sql` |
+| `2026052301`  | `source_call_log`   | `2026052301_source_call_log{,_down}.sql`        |
+| `2026060201`  | `source_call_log_agent_run_id` | `2026060201_source_call_log_agent_run_id{,_down}.sql` |
+| `2026060401`  | `cherry_pick_state` | `2026060401_cherry_pick_state{,_down}.sql`      |
+| `2026060801`  | `revert_sequence` | `2026060801_revert_sequence{,_down}.sql`        |
 
 All registered migrations are loaded via `include_str!`. New migrations must
 follow the same pattern — inline SQL strings in `builtin_migrations()` are no

@@ -7,9 +7,14 @@ use std::{
 
 use super::{SkillDefinition, parse_skill_definition};
 
-/// Load skills from project, user, then embedded tiers.
+/// Load skills from the three-tier hierarchy (highest priority first):
 ///
-/// Project-local skills override user-global skills with the same name.
+/// 1. `{working_dir}/.libra/skills/*.md` (project-local)
+/// 2. `~/.config/libra/skills/*.md` (user-global)
+/// 3. Embedded defaults compiled into the binary (e.g. the built-in "libra" skill)
+///
+/// Later tiers only contribute skills whose `name` has not already been seen.
+/// This gives project authors full control to override or suppress built-in skills.
 pub fn load_skills(working_dir: &Path) -> Vec<SkillDefinition> {
     let mut skills = Vec::new();
     let mut loaded_names = HashSet::new();
@@ -20,6 +25,13 @@ pub fn load_skills(working_dir: &Path) -> Vec<SkillDefinition> {
     if let Some(config_dir) = dirs::config_dir() {
         let user_dir = config_dir.join("libra").join("skills");
         load_skills_from_dir_with_seen(&user_dir, &mut skills, &mut loaded_names);
+    }
+
+    // 3. Embedded defaults (lowest priority; never override project/user)
+    for skill in load_embedded_skills() {
+        if loaded_names.insert(skill.name.clone()) {
+            skills.push(skill);
+        }
     }
 
     skills
@@ -80,6 +92,26 @@ fn load_skill_from_file(path: &Path) -> Option<SkillDefinition> {
             None
         }
     }
+}
+
+/// Load all embedded default skills baked into the binary via `include_str!`.
+///
+/// These provide baseline, always-available knowledge (e.g. the canonical
+/// "libra" skill that teaches agents how to operate on any `.libra/` tree).
+/// Parse failures are logged at error level but never panic the process.
+pub fn load_embedded_skills() -> Vec<SkillDefinition> {
+    let sources: &[&str] = &[include_str!("embedded/libra.md")];
+
+    sources
+        .iter()
+        .filter_map(|src| match parse_skill_definition(src) {
+            Ok(skill) => Some(skill),
+            Err(err) => {
+                tracing::error!("embedded skill failed to parse: {err}");
+                None
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -237,5 +269,42 @@ mod tests {
         let tmp = TempDir::new().expect("tmp dir");
         let missing = tmp.path().join("never-created.md");
         assert!(load_skill_from_file(&missing).is_none());
+    }
+
+    /// `load_embedded_skills` must always return the built-in "libra" skill
+    /// (the primary skill that teaches agents how to operate on any
+    /// libra-format repository). This test pins that the embedded tier is
+    /// populated and parses successfully at compile time.
+    #[test]
+    fn load_embedded_skills_contains_libra_skill() {
+        let embedded = load_embedded_skills();
+        assert!(
+            !embedded.is_empty(),
+            "embedded skills must not be empty after adding libra.md"
+        );
+        let libra = embedded
+            .iter()
+            .find(|s| s.name == "libra")
+            .expect("the canonical 'libra' skill must be present in embedded tier");
+        assert_eq!(libra.version.as_deref(), Some("1.0.0"));
+        assert!(libra.template.contains("libra-format repositories"));
+        assert!(libra.template.contains(".libra/libra.db"));
+        // It deliberately declares broad tools (shell, apply_patch, run_libra_vcs)
+        // so the scanner will emit warnings — that is expected and tested elsewhere.
+    }
+
+    /// When no project or user skills exist, `load_skills(tempdir)` must still
+    /// surface the embedded defaults (lowest tier). This guarantees that
+    /// `/skill libra` is always available inside `libra code` even in a fresh
+    /// checkout or empty working directory.
+    #[test]
+    fn load_skills_falls_back_to_embedded_when_no_project_or_user_skills() {
+        let tmp = TempDir::new().expect("tmp dir");
+        // Use a path that contains no .libra/skills and no user config override.
+        let skills = load_skills(tmp.path());
+        assert!(
+            skills.iter().any(|s| s.name == "libra"),
+            "embedded 'libra' skill must appear when project/user tiers are empty"
+        );
     }
 }

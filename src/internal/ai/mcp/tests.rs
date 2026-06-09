@@ -109,7 +109,8 @@ impl McpAuthorizer for DenyAllAuthz {
 }
 
 /// `list_resources_impl` without an authz handler installed must continue
-/// to return its standard two-resource list (pre-Phase-5 behavior).
+/// to return its standard resource list: `libra://history/latest`,
+/// `libra://context/active`, and the CEX-S2-16 `libra://agents/runs`.
 #[tokio::test]
 async fn list_resources_impl_succeeds_without_authz() {
     let server = LibraMcpServer::new(None, None);
@@ -119,7 +120,8 @@ async fn list_resources_impl_succeeds_without_authz() {
         .await
         .expect("list_resources_impl must succeed when no authz handler is installed");
 
-    assert_eq!(resources.len(), 2);
+    assert_eq!(resources.len(), 3);
+    assert!(resources.iter().any(|r| r.uri == "libra://agents/runs"));
 }
 
 /// With a `DenyAllAuthz` installed via [`LibraMcpServer::set_authz`], the
@@ -332,5 +334,41 @@ async fn create_task_impl_threads_actor_into_authz_principal() {
         recorded.role,
         PrincipalRole::Contributor,
         "default_actor() builds an McpClient ActorRef which maps to Contributor"
+    );
+}
+
+/// CEX-S2-16 (`docs/improvement/agent.md:1631`): the four readable agent-run
+/// detail URIs plus the `merge-candidates/{id}` view are advertised as resource
+/// *templates* (discoverable via `resources/templates/list`), alongside the two
+/// original AI-object templates. `merge-candidates/{id}` is now served from the
+/// dispatcher-persisted records (B2a/B2b), so the server advertises it.
+#[test]
+fn ai_resource_templates_advertises_readable_agent_run_views() {
+    let uris: Vec<String> = crate::internal::ai::mcp::server::ai_resource_templates()
+        .iter()
+        .map(|template| template.uri_template.clone())
+        .collect();
+
+    // The two original AI-object templates remain.
+    assert!(uris.iter().any(|u| u == "libra://object/{object_id}"));
+    assert!(uris.iter().any(|u| u == "libra://objects/{object_type}"));
+    // The four readable agent-run detail views are discoverable.
+    assert!(uris.iter().any(|u| u == "libra://agents/runs/{id}"));
+    assert!(
+        uris.iter()
+            .any(|u| u == "libra://agents/runs/{id}/permissions")
+    );
+    assert!(uris.iter().any(|u| u == "libra://agents/runs/{id}/budget"));
+    assert!(uris.iter().any(|u| u == "libra://agents/runs/{id}/context"));
+    // The merge-candidates view is now servable, so it is advertised.
+    assert!(
+        uris.iter()
+            .any(|u| u == "libra://agents/merge-candidates/{id}"),
+        "merge-candidates must be advertised now that its records are persisted",
+    );
+    assert_eq!(
+        uris.len(),
+        7,
+        "exactly the 2 object + 4 agent-run + 1 merge-candidate templates"
     );
 }

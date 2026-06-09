@@ -20,8 +20,8 @@ use crate::{
 /// `--help` examples shown in `libra mv --help` output.
 ///
 /// `mv` accepts `<source>... <destination>` with optional `--dry-run`,
-/// `--force`, and `--verbose`. The banner covers the rename, move-into-dir,
-/// multi-source, dry-run, force-overwrite, and JSON-for-agents forms so
+/// `--force`, `--skip-errors`, and `--verbose`. The banner covers the rename, move-into-dir,
+/// multi-source, dry-run, force-overwrite, skip-errors, and JSON-for-agents forms so
 /// users can map intent to invocation without reading the design doc.
 /// Cross-cutting `--help` EXAMPLES rollout per
 /// `docs/improvement/README.md` item B.
@@ -32,7 +32,9 @@ EXAMPLES:
     libra mv a.txt b.txt subdir/          Move multiple files into a directory
     libra mv -n old.txt new.txt           Dry-run: preview the rename without touching the index
     libra mv -f stale.txt fresh.txt       Overwrite the destination if it already exists
+    libra mv -k missing.txt a.txt dst/    Skip invalid move actions and keep valid sources
     libra mv -v old.txt new.txt           Verbose: print each move as it happens
+    libra mv --sparse a.txt b.txt         No-op sparse flag for git-mv script compatibility
     libra mv --json src/foo.rs src/bar.rs    Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -52,6 +54,16 @@ pub struct MvArgs {
     /// Force move/rename even if the destination already exists (overwriting it)
     #[clap(short = 'f', long)]
     pub force: bool,
+
+    /// Skip move actions that would fail validation.
+    #[clap(short = 'k', long = "skip-errors")]
+    pub skip_errors: bool,
+
+    /// Accept and ignore for `git mv` script compatibility (no-op). Libra has no
+    /// sparse-checkout cone, so every path is always considered present; the flag
+    /// is parsed so third-party `git mv --sparse` scripts do not fail to parse.
+    #[clap(long)]
+    pub sparse: bool,
 }
 
 #[derive(Default)]
@@ -79,6 +91,7 @@ struct MvOutput {
     index_updates: Vec<MovePair>,
     dry_run: bool,
     forced: bool,
+    skip_errors: bool,
     verbose: bool,
 }
 
@@ -106,7 +119,7 @@ async fn execute_inner(args: MvArgs, output: &OutputConfig) -> Result<MvOutput, 
     // If the user just types `git mv` without enough arguments, print usage information instead of an error message.
     if args.paths.len() < 2 {
         return Err(
-            "usage: libra mv [<options>] <source>... <destination>\n\n-v, --verbose    be verbose\n-n, --dry-run    dry run\n-f, --force      force move/rename even if target exists"
+            "usage: libra mv [<options>] <source>... <destination>\n\n-v, --verbose       be verbose\n-n, --dry-run       dry run\n-f, --force         force move/rename even if target exists\n-k, --skip-errors   skip move actions that would fail validation\n    --sparse        accept and ignore (no-op; sparse-checkout not implemented)"
                 .to_string(),
         );
     }
@@ -135,6 +148,7 @@ async fn execute_inner(args: MvArgs, output: &OutputConfig) -> Result<MvOutput, 
 
     // Check the validity of all sources and collect the valid move operations.
     let mut move_plan = MovePlan::default();
+    let mut accepted_targets = HashSet::new();
     let index_file = path::index();
     let mut index = match Index::load(&index_file) {
         Ok(index) => index,
@@ -150,14 +164,25 @@ async fn execute_inner(args: MvArgs, output: &OutputConfig) -> Result<MvOutput, 
             &index,
             args.force,
         ) {
-            Ok(plan) => move_plan.extend(plan),
+            Ok(plan) => {
+                if args.skip_errors && plan_has_duplicate_target(&plan.fs_moves, &accepted_targets)
+                {
+                    continue;
+                }
+                if args.skip_errors {
+                    accepted_targets.extend(plan.fs_moves.iter().map(|(_, target)| target.clone()));
+                }
+                move_plan.extend(plan);
+            }
             Err(err) => {
-                return Err(err);
+                if !args.skip_errors {
+                    return Err(err);
+                }
             }
         }
     }
 
-    if has_duplicate_target(&move_plan.fs_moves) {
+    if !args.skip_errors && has_duplicate_target(&move_plan.fs_moves) {
         return Err(format!(
             "fatal: multiple sources moving to the same target path, source={}, destination={}",
             util::to_workdir_path(&sources[sources.len() - 1]).display(),
@@ -169,6 +194,7 @@ async fn execute_inner(args: MvArgs, output: &OutputConfig) -> Result<MvOutput, 
         args.verbose,
         args.dry_run,
         args.force,
+        args.skip_errors,
         &mut index,
         output,
     )
@@ -376,6 +402,14 @@ fn resolve_move_directory(src: &Path, dst: &Path, index: &Index) -> Result<MoveP
         })
         .collect();
 
+    if tracked_updates.is_empty() {
+        return Err(format!(
+            "fatal: not under version control, source={}, destination={}",
+            util::to_workdir_path(src).display(),
+            util::to_workdir_path(dst).display()
+        ));
+    }
+
     Ok(MovePlan {
         fs_moves: vec![(src.to_path_buf(), target_dir)],
         index_updates: tracked_updates,
@@ -398,10 +432,68 @@ fn has_duplicate_target(moves: &[(PathBuf, PathBuf)]) -> bool {
     false
 }
 
+fn plan_has_duplicate_target(
+    moves: &[(PathBuf, PathBuf)],
+    accepted_targets: &HashSet<PathBuf>,
+) -> bool {
+    let mut plan_targets = HashSet::new();
+    for (_, target) in moves {
+        if accepted_targets.contains(target) || !plan_targets.insert(target.clone()) {
+            return true;
+        }
+    }
+    false
+}
+
 fn remove_index_entry_all_stages(index: &mut Index, path: &str) {
     for stage in 0..=3 {
         let _ = index.remove(path, stage);
     }
+}
+
+/// Escapes C0/C1 control characters in a path string for safe terminal display.
+///
+/// Real Unix filenames may legally contain control bytes such as `\n`, `\r`, and
+/// `\t` (the kernel forbids only `/` and NUL). Printing them verbatim risks
+/// terminal injection, so each control character is rendered in an escaped form
+/// (`\n` -> `\\n`, `\r` -> `\\r`, `\t` -> `\\t`, others -> `\\xNN`). This mirrors
+/// Git's `core.quotePath` philosophy of *escaping rather than rejecting*
+/// otherwise-legal filenames: the escaping affects only what is printed, never
+/// the bytes handed to `std::fs::rename`. Path separators (including a Windows
+/// `\\`) are intentionally left intact so platform separators are not mangled.
+fn escape_control_chars(raw: &str) -> String {
+    if !raw.chars().any(char::is_control) {
+        return raw.to_string();
+    }
+    let mut escaped = String::with_capacity(raw.len() + 8);
+    for ch in raw.chars() {
+        match ch {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if c.is_control() => escaped.push_str(&format!("\\x{:02x}", c as u32)),
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+/// Renders a move as workdir-relative paths with control characters escaped and
+/// writes it to stdout. This is the single stdout entry point for both dry-run
+/// and verbose moves, so terminal-injection escaping happens in exactly one
+/// place.
+///
+/// With `checking = true` the two-line `git mv -n` preview is emitted
+/// (`Checking rename of '<src>' to '<dst>'` then `Renaming <src> to <dst>`);
+/// with `checking = false` only the single verbose `Renaming <src> to <dst>`
+/// line is printed.
+fn print_rename(src: &Path, dst: &Path, checking: bool) {
+    let src_disp = escape_control_chars(&util::to_workdir_path(src).display().to_string());
+    let dst_disp = escape_control_chars(&util::to_workdir_path(dst).display().to_string());
+    if checking {
+        println!("Checking rename of '{src_disp}' to '{dst_disp}'");
+    }
+    println!("Renaming {src_disp} to {dst_disp}");
 }
 
 fn perform_moves(
@@ -409,49 +501,76 @@ fn perform_moves(
     verbose: bool,
     dry_run: bool,
     force: bool,
+    skip_errors: bool,
     index: &mut Index,
     output: &OutputConfig,
 ) -> Result<MvOutput, String> {
-    let mut moved_count = 0usize;
     let output_result = MvOutput {
         moves: move_pairs_for_output(&plan.fs_moves),
         index_updates: move_pairs_for_output(&plan.index_updates),
         dry_run,
         forced: force,
+        skip_errors,
         verbose,
     };
 
-    for (src, dst) in &plan.fs_moves {
-        let src_workdir = util::to_workdir_path(src);
-        let dst_workdir = util::to_workdir_path(dst);
-
-        // If it's a dry run, we just print the move operations without performing them.
-        if dry_run {
-            if !output.is_json() && !output.quiet {
-                println!(
-                    "Checking rename of '{}' to '{}'",
-                    src_workdir.display(),
-                    dst_workdir.display()
-                );
-                println!(
-                    "Renaming {} to {}",
-                    src_workdir.display(),
-                    dst_workdir.display()
-                );
+    // Dry-run: emit the Git-compatible two-line preview for each planned move
+    // and return without touching the filesystem or the index.
+    if dry_run {
+        if !output.is_json() && !output.quiet {
+            for (src, dst) in &plan.fs_moves {
+                print_rename(src, dst, true);
             }
-            continue;
         }
-        // For actual move, we first check if the parent directory of the destination exists, if not, we try to create it.
+        return Ok(output_result);
+    }
+
+    // (a) Read-only pre-validation across the WHOLE plan before any mutation:
+    // fail fast (all-or-nothing) if a source vanished since collection or a
+    // destination is occupied without `--force`. Nothing is created or renamed
+    // when this fails. Only deterministic, side-effect-free checks live here;
+    // permission/writability failures are surfaced by the real create_dir_all /
+    // rename / remove_file calls below (avoiding a TOCTOU probe that would be
+    // both racy and platform-dependent).
+    for (src, dst) in &plan.fs_moves {
+        if !src.exists() {
+            return Err(format!(
+                "fatal: bad source, source={}, destination={}",
+                util::to_workdir_path(src).display(),
+                util::to_workdir_path(dst).display()
+            ));
+        }
+        if !force && std::fs::symlink_metadata(dst).is_ok() {
+            return Err(format!(
+                "fatal: destination already exists, source={}, destination={}",
+                util::to_workdir_path(src).display(),
+                util::to_workdir_path(dst).display()
+            ));
+        }
+    }
+
+    // (b) First batch of mutations: create EVERY destination parent directory
+    // before any rename, so a create failure aborts while no file has moved yet
+    // (previously create_dir_all was interleaved with renames, leaving earlier
+    // moves applied when a later parent could not be created).
+    for (src, dst) in &plan.fs_moves {
         if let Some(parent) = dst.parent()
             && let Err(err) = std::fs::create_dir_all(parent)
         {
             return Err(format!(
                 "fatal: failed to create destination directory, source={}, destination={}, error={}",
-                src_workdir.display(),
-                dst_workdir.display(),
+                util::to_workdir_path(src).display(),
+                util::to_workdir_path(dst).display(),
                 err
             ));
         }
+    }
+
+    // Rename pass: force-remove any occupied destination, then rename.
+    let mut moved_count = 0usize;
+    for (src, dst) in &plan.fs_moves {
+        let src_workdir = util::to_workdir_path(src);
+        let dst_workdir = util::to_workdir_path(dst);
 
         if force && let Ok(meta) = std::fs::symlink_metadata(dst) {
             let file_type = meta.file_type();
@@ -481,16 +600,8 @@ fn perform_moves(
 
         // Print the move operation if verbose is enabled.
         if verbose && !output.is_json() && !output.quiet {
-            println!(
-                "Renaming {} to {}",
-                src_workdir.display(),
-                dst_workdir.display()
-            );
+            print_rename(src, dst, false);
         }
-    }
-
-    if dry_run {
-        return Ok(output_result);
     }
 
     // Update index only after all filesystem moves succeeded.
@@ -547,4 +658,38 @@ fn move_pairs_for_output(pairs: &[(PathBuf, PathBuf)]) -> Vec<MovePair> {
             destination: util::to_workdir_path(destination).display().to_string(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_control_chars;
+
+    /// NUL never appears in a real path (the kernel rejects filenames with NUL),
+    /// so this guards the string-level escaping fallback directly: a NUL byte is
+    /// rendered in escaped form and no raw NUL survives into the printed output.
+    #[test]
+    fn print_rename_escapes_nul_byte() {
+        let escaped = escape_control_chars("a\0b");
+        assert!(
+            !escaped.contains('\0'),
+            "escaped output must not contain a raw NUL byte: {escaped:?}"
+        );
+        assert_eq!(escaped, "a\\x00b");
+    }
+
+    /// The three control characters that legally occur in Unix filenames render
+    /// as their familiar escapes rather than as raw bytes on the terminal.
+    #[test]
+    fn escape_control_chars_escapes_newline_cr_and_tab() {
+        assert_eq!(escape_control_chars("a\nb"), "a\\nb");
+        assert_eq!(escape_control_chars("a\rb"), "a\\rb");
+        assert_eq!(escape_control_chars("a\tb"), "a\\tb");
+    }
+
+    /// Plain paths (the overwhelmingly common case) are returned untouched, and
+    /// path separators are never mangled.
+    #[test]
+    fn escape_control_chars_leaves_plain_paths_untouched() {
+        assert_eq!(escape_control_chars("src/dir/file.rs"), "src/dir/file.rs");
+    }
 }

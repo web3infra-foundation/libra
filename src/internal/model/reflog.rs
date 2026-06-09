@@ -1,4 +1,6 @@
 //! SeaORM entity definition for reflog entries that record ref transitions with actor metadata and messages.
+//!
+//! 记录引用转换以及行为者元数据和消息的 reflog 条目的 SeaORM 实体定义。
 
 use sea_orm::entity::prelude::*;
 

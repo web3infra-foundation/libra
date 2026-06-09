@@ -1,5 +1,7 @@
 //! Implementation of `fsck` command for verifying repository integrity.
 //!
+//! `fsck` 命令的实现，用于验证存储库完整性。
+//!
 //! This command checks the integrity of objects, refs, and index in a Libra repository.
 
 use std::{
@@ -14,7 +16,11 @@ use git_internal::{
     internal::{
         index::Index,
         object::{
-            ObjectTrait, blob::Blob, commit::Commit, tag::Tag as GitTag, tree::Tree,
+            ObjectTrait,
+            blob::Blob,
+            commit::Commit,
+            tag::Tag as GitTag,
+            tree::{Tree, TreeItemMode},
             types::ObjectType,
         },
     },
@@ -224,6 +230,8 @@ const FSCK_AFTER_HELP: &str = "EXAMPLES:
     libra fsck --root                   Print root commit ids in the report
     libra fsck --tags                   Print tag ids in the report
     libra fsck --connectivity-only      Skip blob content checks; verify graph only
+    libra fsck --no-full                Verify only loose objects (skip packfiles)
+    libra fsck --strict                 Apply stricter commit/tree format checks
     libra fsck <object-id>              Verify a single object by id";
 
 /// Verify repository integrity by checking objects, refs, and index
@@ -277,6 +285,22 @@ pub struct FsckArgs {
     /// Only check connectivity, not object contents
     #[arg(long)]
     pub connectivity_only: bool,
+
+    /// Also verify objects stored in packfiles (default). Accepted explicitly;
+    /// pass `--no-full` to restrict the check to loose objects.
+    #[arg(long, conflicts_with = "no_full")]
+    pub full: bool,
+
+    /// Restrict the check to loose objects, skipping packed objects.
+    #[arg(long)]
+    pub no_full: bool,
+
+    /// Enable stricter format checks: commit author/committer emails must
+    /// contain `@` and carry a well-formed timezone within ±1400; a commit's
+    /// tree/parents and a tree's entries must exist with matching object types;
+    /// and tree entries must be in Git's canonical sort order.
+    #[arg(long)]
+    pub strict: bool,
 }
 
 impl FsckArgs {
@@ -292,6 +316,12 @@ impl FsckArgs {
             None => true, // default
             Some(s) => s != "false" && s != "no" && s != "0",
         }
+    }
+
+    /// Returns whether packed objects should be enumerated and verified.
+    /// `--full` is the default; `--no-full` restricts the check to loose objects.
+    fn full_enabled(&self) -> bool {
+        !self.no_full
     }
 }
 
@@ -360,7 +390,7 @@ async fn run_fsck(args: &FsckArgs) -> CliResult<FsckResult> {
     let storage = ClientStorage::init(path::objects());
 
     if let Some(ref object_id) = args.object {
-        check_single_object(object_id, &storage).await
+        check_single_object(object_id, &storage, args.strict).await
     } else {
         check_all_objects(args, &storage).await
     }
@@ -393,14 +423,25 @@ fn try_parse_loose_object(dir_name: &str, sub_path: &std::path::Path) -> Option<
     parse_object_hash(&full_hash)
 }
 
-/// List all object hashes in storage
-fn list_all_objects_in_storage(storage: &ClientStorage) -> io::Result<Vec<ObjectHash>> {
+/// List the object hashes stored in a single pack index (`.idx`, v1 or v2),
+/// reusing `verify_pack`'s validated index reader. A malformed/truncated index
+/// surfaces as `io::ErrorKind::InvalidData`.
+fn list_objects_in_pack_idx(idx_path: &std::path::Path) -> io::Result<Vec<ObjectHash>> {
+    let bytes = fs::read(idx_path)?;
+    super::verify_pack::parse_index_object_hashes(&bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+/// List all object hashes in storage. Loose objects are always enumerated; when
+/// `full` is set, packed objects from every `objects/pack/*.idx` are merged in
+/// (deduplicated against loose objects that may also be packed).
+fn list_all_objects_in_storage(storage: &ClientStorage, full: bool) -> io::Result<Vec<ObjectHash>> {
     let objects_dir = storage.base_path();
     if !objects_dir.exists() {
         return Ok(Vec::new());
     }
 
-    let mut hashes = Vec::new();
+    let mut hashes: HashSet<ObjectHash> = HashSet::new();
     for entry in fs::read_dir(objects_dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -410,6 +451,8 @@ fn list_all_objects_in_storage(storage: &ClientStorage) -> io::Result<Vec<Object
         let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
+        // The `pack/` directory has a 4-char name, so it is skipped here and
+        // handled separately below.
         if dir_name.len() != 2 {
             continue;
         }
@@ -420,19 +463,37 @@ fn list_all_objects_in_storage(storage: &ClientStorage) -> io::Result<Vec<Object
             if sub_path.is_file()
                 && let Some(hash) = try_parse_loose_object(dir_name, &sub_path)
             {
-                hashes.push(hash);
+                hashes.insert(hash);
             }
         }
     }
 
-    Ok(hashes)
+    if full {
+        let pack_dir = objects_dir.join("pack");
+        if pack_dir.exists() {
+            for entry in fs::read_dir(&pack_dir)? {
+                let path = entry?.path();
+                if path.is_file() && path.extension().is_some_and(|ext| ext == "idx") {
+                    for hash in list_objects_in_pack_idx(&path)? {
+                        hashes.insert(hash);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(hashes.into_iter().collect())
 }
 
-async fn check_single_object(object_id: &str, storage: &ClientStorage) -> CliResult<FsckResult> {
+async fn check_single_object(
+    object_id: &str,
+    storage: &ClientStorage,
+    strict: bool,
+) -> CliResult<FsckResult> {
     let hash = parse_object_hash(object_id)
         .ok_or_else(|| CliError::command_usage(format!("invalid object ID: {}", object_id)))?;
 
-    let (check_result, has_errors) = verify_object(&hash, storage, false, true).await?;
+    let (check_result, has_errors) = verify_object(&hash, storage, false, true, strict).await?;
 
     let overall_status = match check_result.status {
         CheckStatus::Ok => {
@@ -482,8 +543,8 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         has_errors: false,
     };
 
-    // Get all object hashes
-    let all_hashes = list_all_objects_in_storage(storage)
+    // Get all object hashes (loose + packed unless `--no-full`)
+    let all_hashes = list_all_objects_in_storage(storage, args.full_enabled())
         .map_err(|e| CliError::fatal(format!("failed to list objects: {}", e)))?;
 
     // Stage 1: Check all 256 object directories
@@ -500,6 +561,7 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         &mut result,
         args.verbose,
         args.connectivity_only,
+        args.strict,
     )
     .await?;
 
@@ -536,12 +598,13 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         args.no_reflogs,
         args.dangling_enabled(),
         args.lost_found,
+        args.full_enabled(),
     )
     .await?;
 
     // Stage 9: Report root commits
     if args.root {
-        find_and_report_roots(storage).await?;
+        find_and_report_roots(storage, args.full_enabled()).await?;
     }
 
     // Stage 10: Report tagged commits
@@ -549,10 +612,60 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         find_and_report_tags().await?;
     }
 
+    // Stage 11: Verify packfile integrity (reuses verify-pack in-process).
+    // Runs last so its per-pack hash-kind inference cannot perturb the
+    // earlier object/connectivity passes.
+    check_packs(storage, &mut result, args.verbose)?;
+
     // Print notices
     print_notices(head_is_unborn, &result);
 
     Ok(result)
+}
+
+/// Verify the integrity of every packfile by reusing verify-pack's in-process
+/// validation (no subprocess, no `process::exit`). A corrupt or unreadable
+/// pack records `has_errors` — so fsck exits 1, matching `git fsck`'s
+/// treatment of broken packs — but does not abort the pass: each `.idx` is
+/// checked independently and its diagnostic reported to stderr. An absent
+/// pack directory or a repository with no packs is a silent no-op. fsck only
+/// reports here; it never deletes, rewrites, or repairs a faulty pack.
+fn check_packs(storage: &ClientStorage, result: &mut FsckResult, verbose: bool) -> CliResult<()> {
+    let pack_dir = storage.base_path().join("pack");
+    if !pack_dir.exists() {
+        return Ok(());
+    }
+
+    let Ok(entries) = fs::read_dir(&pack_dir) else {
+        // An unreadable pack directory is reported but does not abort the
+        // remaining fsck stages.
+        eprintln!("bad pack directory: {}", pack_dir.display());
+        result.has_errors = true;
+        return Ok(());
+    };
+
+    // Collect and sort the `.idx` paths so multi-pack reporting is
+    // deterministic and every pack is checked even when an earlier one is bad.
+    let mut idx_files: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "idx"))
+        .collect();
+    idx_files.sort();
+
+    for idx in &idx_files {
+        if verbose {
+            println!("Checking pack {}", idx.display());
+        }
+        if let Err(error) = super::verify_pack::verify_pack_path(idx, None) {
+            // verify-pack's message already names the offending index and the
+            // specific corruption (checksum / offset / crc32 / decode).
+            eprintln!("error: {}", error.message());
+            result.has_errors = true;
+        }
+    }
+
+    Ok(())
 }
 
 /// Check all 256 object directories and print progress
@@ -637,6 +750,7 @@ async fn check_objects(
     result: &mut FsckResult,
     verbose: bool,
     connectivity_only: bool,
+    strict: bool,
 ) -> CliResult<()> {
     for hash_str in sorted_hashes {
         let hash = match parse_object_hash(hash_str) {
@@ -661,7 +775,7 @@ async fn check_objects(
         }
 
         let (check_result, reported_errors) =
-            verify_object(&hash, storage, connectivity_only, true).await?;
+            verify_object(&hash, storage, connectivity_only, true, strict).await?;
         result.objects_checked += 1;
         result.has_errors |= reported_errors;
 
@@ -825,7 +939,7 @@ async fn check_reflogs(
             && !storage.exist(&_hash)
         {
             result.reflog_issues += 1;
-            report(FsckMsgId::Missing, "unknown", &entry.old_oid);
+            result.has_errors |= report(FsckMsgId::Missing, "unknown", &entry.old_oid);
         }
 
         if !is_null_oid(&entry.new_oid)
@@ -833,7 +947,7 @@ async fn check_reflogs(
             && !storage.exist(&_hash)
         {
             result.reflog_issues += 1;
-            report(FsckMsgId::Missing, "unknown", &entry.new_oid);
+            result.has_errors |= report(FsckMsgId::Missing, "unknown", &entry.new_oid);
         }
     }
     Ok(())
@@ -848,8 +962,13 @@ fn check_index(storage: &ClientStorage, result: &mut FsckResult, verbose: bool) 
     let index_result = check_index_file(storage)?;
     result.index_valid = index_result.valid;
 
-    if !index_result.valid && result.overall_status == CheckStatus::Ok {
-        result.overall_status = CheckStatus::InvalidFormat;
+    if !index_result.valid {
+        // Index corruption is a real integrity error: surface it as a non-zero
+        // exit (aligning with `git fsck`), not just a status downgrade.
+        result.has_errors = true;
+        if result.overall_status == CheckStatus::Ok {
+            result.overall_status = CheckStatus::InvalidFormat;
+        }
     }
     Ok(())
 }
@@ -889,7 +1008,7 @@ async fn check_connectivity(
             }
         }
         let (check_result, reported_errors) =
-            verify_object(hash, storage, connectivity_only, false).await?;
+            verify_object(hash, storage, connectivity_only, false, false).await?;
         result.has_errors |= reported_errors;
         if check_result.status != CheckStatus::Ok && result.overall_status == CheckStatus::Ok {
             result.overall_status = check_result.status.clone();
@@ -922,11 +1041,14 @@ impl ReachabilityContext {
 }
 
 /// Collect all starting points for reachability analysis
-async fn collect_reachability_context(storage: &ClientStorage) -> CliResult<ReachabilityContext> {
+async fn collect_reachability_context(
+    storage: &ClientStorage,
+    full: bool,
+) -> CliResult<ReachabilityContext> {
     let mut ctx = ReachabilityContext::new();
 
     // Collect all objects in storage
-    ctx.all_objects = list_all_objects_in_storage(storage)
+    ctx.all_objects = list_all_objects_in_storage(storage, full)
         .map_err(|e| CliError::fatal(format!("failed to list objects: {}", e)))?
         .into_iter()
         .collect();
@@ -1051,8 +1173,9 @@ async fn find_dangling_unreachable(
     no_reflogs: bool,
     dangling: bool,
     lost_found: bool,
+    full: bool,
 ) -> CliResult<()> {
-    let ctx = collect_reachability_context(storage).await?;
+    let ctx = collect_reachability_context(storage, full).await?;
 
     // --lost-found implies --no-reflogs for dangling detection (matching git fsck behavior)
     let effective_no_reflogs = no_reflogs || lost_found;
@@ -1111,10 +1234,10 @@ async fn find_dangling_unreachable(
 }
 
 /// Find and report root commits (commits with no parents)
-async fn find_and_report_roots(storage: &ClientStorage) -> CliResult<()> {
+async fn find_and_report_roots(storage: &ClientStorage, full: bool) -> CliResult<()> {
     use git_internal::internal::object::commit::Commit;
 
-    let all_hashes = list_all_objects_in_storage(storage)
+    let all_hashes = list_all_objects_in_storage(storage, full)
         .map_err(|e| CliError::fatal(format!("failed to list objects: {}", e)))?;
 
     for hash in all_hashes {
@@ -1301,15 +1424,58 @@ async fn check_and_fix_refs(
     Ok(())
 }
 
+/// Whether a signature timezone is a well-formed `±HHMM` offset within ±1400
+/// (the widest real-world UTC offset). Used by `--strict`.
+fn is_valid_timezone(tz: &str) -> bool {
+    let bytes = tz.as_bytes();
+    if bytes.len() != 5 || (bytes[0] != b'+' && bytes[0] != b'-') {
+        return false;
+    }
+    let digits = &tz[1..];
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let hours: i32 = digits[0..2].parse().unwrap_or(99);
+    let minutes: i32 = digits[2..4].parse().unwrap_or(99);
+    minutes < 60 && hours * 100 + minutes <= 1400
+}
+
+/// The object type a tree entry of the given mode must resolve to (used by
+/// `--strict` to flag mode/type mismatches).
+fn expected_type_for_mode(mode: TreeItemMode) -> ObjectType {
+    match mode {
+        TreeItemMode::Tree => ObjectType::Tree,
+        TreeItemMode::Commit => ObjectType::Commit, // gitlink / submodule
+        TreeItemMode::Blob | TreeItemMode::BlobExecutable | TreeItemMode::Link => ObjectType::Blob,
+    }
+}
+
+/// Whether tree entries are in Git's canonical sort order: by name, treating a
+/// tree entry's name as if it had a trailing `/`.
+fn tree_entries_sorted(items: &[git_internal::internal::object::tree::TreeItem]) -> bool {
+    fn sort_key(item: &git_internal::internal::object::tree::TreeItem) -> Vec<u8> {
+        let mut key = item.name.as_bytes().to_vec();
+        if item.mode == TreeItemMode::Tree {
+            key.push(b'/');
+        }
+        key
+    }
+    items
+        .windows(2)
+        .all(|pair| sort_key(&pair[0]) <= sort_key(&pair[1]))
+}
+
 /// Verify a single object's integrity
 /// If connectivity_only is true, only checks that objects exist (not their content)
 /// If report_errors is true, reports errors immediately; otherwise just returns status
+/// If strict is true, applies the additional `--strict` format/graph checks
 /// Returns (ObjectCheckResult, has_error)
 async fn verify_object(
     hash: &ObjectHash,
     storage: &ClientStorage,
     connectivity_only: bool,
     report_errors: bool,
+    strict: bool,
 ) -> CliResult<(ObjectCheckResult, bool)> {
     let mut has_error = false;
 
@@ -1474,6 +1640,34 @@ async fn verify_object(
                             has_error |= report(FsckMsgId::NullSha1, "tree", &hash.to_string());
                         }
                     }
+
+                    if strict && report_errors {
+                        for item in &tree.tree_items {
+                            let expected_type = expected_type_for_mode(item.mode);
+                            let expected_type_label = expected_type.to_string();
+                            // Each entry's target must exist with a matching type.
+                            if !storage.exist(&item.id) {
+                                has_error |= report(
+                                    FsckMsgId::Missing,
+                                    &expected_type_label,
+                                    &item.id.to_string(),
+                                );
+                            } else if let Ok(actual) = storage.get_object_type(&item.id)
+                                && actual != expected_type
+                            {
+                                has_error |= report(
+                                    FsckMsgId::BadObjectSha1,
+                                    &expected_type_label,
+                                    &item.id.to_string(),
+                                );
+                            }
+                        }
+                        // Entries must be in Git's canonical sort order.
+                        if !tree_entries_sorted(&tree.tree_items) {
+                            has_error |=
+                                report(FsckMsgId::TreeNotSorted, "tree", &hash.to_string());
+                        }
+                    }
                 }
                 Err(_) => {
                     if report_errors {
@@ -1509,6 +1703,47 @@ async fn verify_object(
                     }
                     if commit.committer.email.is_empty() && report_errors {
                         has_error |= report(FsckMsgId::MissingEmail, "commit", &hash.to_string());
+                    }
+
+                    if strict && report_errors {
+                        // Emails must contain '@'.
+                        if !commit.author.email.is_empty() && !commit.author.email.contains('@') {
+                            has_error |= report(FsckMsgId::BadEmail, "commit", &hash.to_string());
+                        }
+                        if !commit.committer.email.is_empty()
+                            && !commit.committer.email.contains('@')
+                        {
+                            has_error |= report(FsckMsgId::BadEmail, "commit", &hash.to_string());
+                        }
+                        // Timezones must be well-formed and within range.
+                        if !is_valid_timezone(&commit.author.timezone)
+                            || !is_valid_timezone(&commit.committer.timezone)
+                        {
+                            has_error |=
+                                report(FsckMsgId::BadTimezone, "commit", &hash.to_string());
+                        }
+                        // The tree must exist and be a tree.
+                        if !storage.exist(&commit.tree_id) {
+                            has_error |=
+                                report(FsckMsgId::MissingTree, "commit", &hash.to_string());
+                        } else if let Ok(tree_type) = storage.get_object_type(&commit.tree_id)
+                            && tree_type != ObjectType::Tree
+                        {
+                            has_error |=
+                                report(FsckMsgId::BadObjectSha1, "commit", &hash.to_string());
+                        }
+                        // Parents must exist and be commits.
+                        for parent in &commit.parent_commit_ids {
+                            if !storage.exist(parent) {
+                                has_error |=
+                                    report(FsckMsgId::Missing, "commit", &parent.to_string());
+                            } else if let Ok(parent_type) = storage.get_object_type(parent)
+                                && parent_type != ObjectType::Commit
+                            {
+                                has_error |=
+                                    report(FsckMsgId::BadObjectSha1, "commit", &parent.to_string());
+                            }
+                        }
                     }
                 }
                 Err(_) => {
@@ -1602,7 +1837,11 @@ async fn verify_object(
                 && actual_type != tag.object_type
             {
                 if report_errors {
-                    has_error |= report(FsckMsgId::BadObjectSha1, "tag", &hash.to_string());
+                    has_error |= report(
+                        FsckMsgId::BadObjectSha1,
+                        &tag.object_type.to_string(),
+                        &tag.object_hash.to_string(),
+                    );
                 }
                 return Ok((
                     ObjectCheckResult {
@@ -1675,7 +1914,7 @@ async fn check_refs(storage: &ClientStorage, connectivity_only: bool) -> CliResu
             if let Some(hash) = parse_object_hash(commit_hash_str) {
                 if storage.exist(&hash) {
                     // Verify the object is actually valid
-                    match verify_object(&hash, storage, connectivity_only, false).await {
+                    match verify_object(&hash, storage, connectivity_only, false, false).await {
                         Ok((check, _reported)) if check.status == CheckStatus::Ok => {
                             result.ok += 1;
                         }
@@ -1815,6 +2054,32 @@ fn validate_index_entry(
 #[cfg(test)]
 mod tests {
     use super::{FsckMsgId, tag_parse_error_msg_id};
+
+    #[test]
+    fn is_valid_timezone_accepts_in_range_and_rejects_invalid() {
+        assert!(super::is_valid_timezone("+0000"));
+        assert!(super::is_valid_timezone("-0800"));
+        assert!(super::is_valid_timezone("+1400"));
+        assert!(!super::is_valid_timezone("+9900"), "hours out of range");
+        assert!(!super::is_valid_timezone("+0060"), "minutes must be < 60");
+        assert!(!super::is_valid_timezone("0000"), "missing sign");
+        assert!(!super::is_valid_timezone("+00:0"), "non-digit");
+        assert!(!super::is_valid_timezone("+000"), "wrong length");
+    }
+
+    #[test]
+    fn list_objects_in_pack_idx_rejects_malformed_index() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let idx = dir.path().join("bad.idx");
+        std::fs::write(&idx, b"not a valid pack index").expect("write garbage idx");
+
+        let error = super::list_objects_in_pack_idx(&idx).expect_err("malformed idx must error");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::InvalidData,
+            "a malformed pack index should surface as InvalidData"
+        );
+    }
 
     #[test]
     fn tag_parse_error_msg_id_keeps_object_type_errors_specific() {

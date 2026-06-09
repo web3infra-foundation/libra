@@ -12,7 +12,7 @@ use tokio::{
 use url::Url;
 
 use super::{
-    DiscoveryResult, FetchStream, ProtocolClient, generate_upload_pack_content,
+    DiscoveryResult, FetchStream, ProtocolClient, ShallowOptions, generate_upload_pack_content,
     parse_discovered_references,
 };
 use crate::git_protocol::{ServiceType, add_pkt_line_string};
@@ -98,14 +98,14 @@ impl GitClient {
         have: &[String],
         want: &[String],
         shallow: &[String],
-        depth: Option<usize>,
+        options: &ShallowOptions,
     ) -> Result<FetchStream, IoError> {
         let mut stream = self.open_stream().await?;
         let request = self.build_service_request(ServiceType::UploadPack);
         stream.write_all(&request).await?;
         self.read_advertisement(&mut stream).await?;
 
-        let body = generate_upload_pack_content(have, want, shallow, depth);
+        let body = generate_upload_pack_content(have, want, shallow, options);
         stream.write_all(&body).await?;
         stream.flush().await?;
 

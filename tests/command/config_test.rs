@@ -298,6 +298,9 @@ async fn test_config_get_all_with_default() {
 
     // set the current working directory to the temporary path
     let _guard = test::ChangeDirGuard::new(temp_path.path());
+    let global_db_dir = tempdir().unwrap();
+    let _scoped =
+        ScopedConfigPathGuard::new(&global_db_dir.path().join("global_config_get_all.db"));
 
     let result = exec_async(vec!["config", "--get-all", "-d", "erasernoob", "user.name"]).await;
     assert!(result.is_ok());
@@ -1437,10 +1440,1495 @@ async fn resolve_env_sync_returns_none_when_no_layer_supplies_value() {
         "LIBRA_CONFIG_GLOBAL_DB",
         std::ffi::OsStr::new("/nonexistent/resolve-env-sync-absent-path.db"),
     );
+    let temp_dir = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(temp_dir.path());
 
     let value = resolve_env_sync("LIBRA_RESOLVE_ENV_SYNC_ABSENT_KEY").unwrap();
     assert!(
         value.is_none(),
         "expected None for an unset key, got {value:?}"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wave 2 — script-safe output flags (--null / --show-origin / --show-scope /
+// --name-only). Process-level assertions on exact bytes and exit codes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn test_config_list_null_uses_git_record_format() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    run_libra_command(&["config", "set", "user.name", "Ada"], temp_path.path());
+    let output = run_libra_command(&["config", "--list", "--null"], temp_path.path());
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Git-style record: key\nvalue\0 (NOT key=value\0).
+    assert!(
+        stdout.contains("user.name\nAda\0"),
+        "expected Git null record `user.name\\nAda\\0`, got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("user.name=Ada\0"),
+        "null mode must not emit `key=value\\0`, got: {stdout:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_get_null_emits_nul_terminated_value() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    run_libra_command(&["config", "set", "user.name", "Ada"], temp_path.path());
+    let output = run_libra_command(
+        &["config", "--get", "user.name", "--null"],
+        temp_path.path(),
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"Ada\0", "get --null must emit `Ada\\0`");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_get_all_null_one_record_per_value() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    run_libra_command(
+        &[
+            "config",
+            "--add",
+            "remote.origin.fetch",
+            "+refs/heads/a:refs/remotes/origin/a",
+        ],
+        temp_path.path(),
+    );
+    run_libra_command(
+        &[
+            "config",
+            "--add",
+            "remote.origin.fetch",
+            "+refs/heads/b:refs/remotes/origin/b",
+        ],
+        temp_path.path(),
+    );
+
+    let output = run_libra_command(
+        &["config", "--get-all", "remote.origin.fetch", "--null"],
+        temp_path.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.stdout,
+        b"+refs/heads/a:refs/remotes/origin/a\0+refs/heads/b:refs/remotes/origin/b\0".to_vec(),
+        "get-all --null must emit one NUL-terminated record per value"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_get_regexp_name_only_keys_without_values() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    run_libra_command(
+        &["config", "set", "remote.origin.url", "ssh://example/x.git"],
+        temp_path.path(),
+    );
+    let output = run_libra_command(
+        &["config", "--get-regexp", "^remote\\.", "--name-only"],
+        temp_path.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("remote.origin.url\n"),
+        "name-only must list the key, got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("ssh://example") && !stdout.contains('='),
+        "name-only must not emit the value or `=`, got: {stdout:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_get_regexp_text_is_space_separated() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    run_libra_command(
+        &["config", "set", "remote.origin.url", "ssh://example/x.git"],
+        temp_path.path(),
+    );
+    let output = run_libra_command(&["config", "--get-regexp", "^remote\\."], temp_path.path());
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Git-style `key value` (space), NOT the historical `key = value`.
+    assert!(
+        stdout.contains("remote.origin.url ssh://example/x.git\n"),
+        "get-regexp text must be space-separated `key value`, got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("remote.origin.url = "),
+        "get-regexp must not use the legacy `key = value` format, got: {stdout:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_single_get_name_only_is_rejected() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    run_libra_command(&["config", "set", "user.name", "Ada"], temp_path.path());
+
+    for args in [
+        vec!["config", "--get", "user.name", "--name-only"],
+        vec!["config", "get", "user.name", "--name-only"],
+    ] {
+        let output = run_libra_command(&args, temp_path.path());
+        assert_eq!(
+            output.status.code(),
+            Some(129),
+            "single-key get --name-only must exit 129, args: {args:?}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("name-only is only supported for list and --get-regexp"),
+            "stderr should explain the restriction, got: {stderr}"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_list_show_origin_and_scope() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    run_libra_command(&["config", "set", "user.name", "Ada"], temp_path.path());
+    let output = run_libra_command(
+        &["config", "--list", "--show-origin", "--show-scope"],
+        temp_path.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // scope<TAB>file:<path><TAB>key=value — scope label AND a file: origin.
+    assert!(
+        stdout.contains("local\tfile:") && stdout.contains("\tuser.name=Ada\n"),
+        "show-origin+show-scope must emit `local<TAB>file:<path><TAB>user.name=Ada`, got: {stdout:?}"
+    );
+    // Origin must be a file path, not the scope label masquerading as origin.
+    assert!(
+        stdout.contains(".libra"),
+        "origin path should point at a `.libra` SQLite DB, got: {stdout:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_json_null_is_rejected() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    let output = run_libra_command(&["--json", "config", "--list", "--null"], temp_path.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "--json --null must exit 129, got: {:?}",
+        output.status
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--null is not compatible with JSON output"),
+        "stderr should explain the JSON/null conflict, got: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_json_show_origin_scope_adds_fields_without_breaking_origin() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    run_libra_command(&["config", "set", "user.name", "Ada"], temp_path.path());
+    let output = run_libra_command(
+        &[
+            "--json",
+            "config",
+            "--list",
+            "--show-origin",
+            "--show-scope",
+        ],
+        temp_path.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let entries = json["data"]["entries"].as_array().expect("entries array");
+    let entry = entries
+        .iter()
+        .find(|e| e["key"] == "user.name")
+        .expect("user.name entry present");
+    // Existing `origin` field keeps its scope-label meaning.
+    assert_eq!(
+        entry["origin"], "local",
+        "origin must remain the scope label"
+    );
+    // New precise fields.
+    assert_eq!(entry["scope"], "local");
+    assert_eq!(entry["origin_type"], "file");
+    assert!(
+        entry["origin_path"]
+            .as_str()
+            .unwrap_or("")
+            .contains(".libra"),
+        "origin_path must be the backing SQLite DB path, got: {entry:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_set_stdin_null_is_rejected_before_stdin_consumed() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    let output = run_libra_command_with_stdin(
+        &["config", "set", "custom.value", "--stdin", "--null"],
+        temp_path.path(),
+        "super-secret",
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "--stdin --null must exit 129, got: {:?}",
+        output.status
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr
+            .contains("--null controls output delimiters and cannot be used to parse stdin values"),
+        "stderr should explain the stdin/null conflict, got: {stderr}"
+    );
+    // The value must not have been stored.
+    let got = run_libra_command(&["config", "--get", "custom.value"], temp_path.path());
+    assert_ne!(
+        got.status.code(),
+        Some(0),
+        "custom.value must not be stored"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wave 3 — multi-value git semantics, value filtering, and key validation
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Add two refspec values to `remote.origin.fetch` in `cwd`.
+#[cfg(test)]
+fn seed_two_fetch_values(cwd: &std::path::Path) {
+    run_libra_command(
+        &[
+            "config",
+            "--add",
+            "remote.origin.fetch",
+            "+refs/heads/a:refs/remotes/origin/a",
+        ],
+        cwd,
+    );
+    run_libra_command(
+        &[
+            "config",
+            "--add",
+            "remote.origin.fetch",
+            "+refs/heads/b:refs/remotes/origin/b",
+        ],
+        cwd,
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_append_and_add_are_equivalent_and_do_not_replace() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    run_libra_command(
+        &["config", "set", "--append", "remote.origin.fetch", "v1"],
+        temp_path.path(),
+    );
+    run_libra_command(
+        &["config", "--add", "remote.origin.fetch", "v2"],
+        temp_path.path(),
+    );
+
+    let out = run_libra_command(
+        &["config", "--get-all", "remote.origin.fetch"],
+        temp_path.path(),
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("v1\n") && stdout.contains("v2\n"),
+        "both values kept, got: {stdout:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_default_set_on_multivalue_is_ambiguous_exit_5() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    seed_two_fetch_values(temp_path.path());
+
+    let out = run_libra_command(&["config", "remote.origin.fetch", "NEW"], temp_path.path());
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "ambiguous default set must exit 5, got: {:?}",
+        out.status
+    );
+    // The original values must be untouched.
+    let got = run_libra_command(
+        &["config", "--get-all", "remote.origin.fetch"],
+        temp_path.path(),
+    );
+    let stdout = String::from_utf8_lossy(&got.stdout);
+    assert!(
+        stdout.contains("origin/a") && stdout.contains("origin/b"),
+        "values unchanged, got: {stdout:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_replace_all_collapses_to_single_value() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    seed_two_fetch_values(temp_path.path());
+
+    let out = run_libra_command(
+        &["config", "--replace-all", "remote.origin.fetch", "NEW"],
+        temp_path.path(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "replace-all should succeed, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let got = run_libra_command(
+        &["config", "--get-all", "remote.origin.fetch", "--null"],
+        temp_path.path(),
+    );
+    assert_eq!(
+        got.stdout, b"NEW\0",
+        "replace-all must leave exactly one value"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_set_all_subcommand_matches_replace_all() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    seed_two_fetch_values(temp_path.path());
+
+    let out = run_libra_command(
+        &["config", "set", "--all", "remote.origin.fetch", "NEW"],
+        temp_path.path(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "set --all should succeed, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let got = run_libra_command(
+        &["config", "--get-all", "remote.origin.fetch", "--null"],
+        temp_path.path(),
+    );
+    assert_eq!(got.stdout, b"NEW\0");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_replace_all_value_filter_no_match_inserts() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "--add", "remote.origin.fetch", "main"],
+        temp_path.path(),
+    );
+
+    let out = run_libra_command(
+        &[
+            "config",
+            "--replace-all",
+            "remote.origin.fetch",
+            "NEW",
+            "--value",
+            "^missing$",
+        ],
+        temp_path.path(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "no-match replace-all inserts and exits 0"
+    );
+    let got = run_libra_command(
+        &["config", "--get-all", "remote.origin.fetch"],
+        temp_path.path(),
+    );
+    let stdout = String::from_utf8_lossy(&got.stdout);
+    assert!(
+        stdout.contains("main\n") && stdout.contains("NEW\n"),
+        "original + inserted, got: {stdout:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_get_value_filter_returns_last_match() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    for v in ["main", "dev", "main-2"] {
+        run_libra_command(
+            &["config", "--add", "remote.origin.fetch", v],
+            temp_path.path(),
+        );
+    }
+    let out = run_libra_command(
+        &["config", "--get", "remote.origin.fetch", "--value", "^main"],
+        temp_path.path(),
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "main-2\n",
+        "last matching value"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_get_all_value_filter_and_no_match_exit_1() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    for v in ["main", "dev"] {
+        run_libra_command(
+            &["config", "--add", "remote.origin.fetch", v],
+            temp_path.path(),
+        );
+    }
+    let matched = run_libra_command(
+        &[
+            "config",
+            "--get-all",
+            "remote.origin.fetch",
+            "--value",
+            "^main$",
+        ],
+        temp_path.path(),
+    );
+    assert_eq!(matched.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&matched.stdout), "main\n");
+
+    let no_match = run_libra_command(
+        &[
+            "config",
+            "--get-all",
+            "remote.origin.fetch",
+            "--value",
+            "^missing$",
+        ],
+        temp_path.path(),
+    );
+    assert_eq!(
+        no_match.status.code(),
+        Some(1),
+        "value read no-match exits 1"
+    );
+    assert!(no_match.stdout.is_empty(), "no-match stdout must be empty");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_get_regexp_value_filter_pairs_only() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "set", "remote.origin.fetch", "main"],
+        temp_path.path(),
+    );
+    run_libra_command(
+        &["config", "set", "remote.origin.url", "ssh://example"],
+        temp_path.path(),
+    );
+
+    let out = run_libra_command(
+        &["config", "--get-regexp", "^remote\\.", "--value", "^main$"],
+        temp_path.path(),
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("remote.origin.fetch main\n"),
+        "matching pair present, got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("remote.origin.url"),
+        "non-matching pair excluded, got: {stdout:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_get_regexp_ignore_case_on_key_and_value() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "set", "remote.origin.fetch", "main"],
+        temp_path.path(),
+    );
+
+    let out = run_libra_command(
+        &[
+            "config",
+            "--get-regexp",
+            "^REMOTE\\.",
+            "--value",
+            "^MAIN$",
+            "--ignore-case",
+        ],
+        temp_path.path(),
+    );
+    assert_eq!(out.status.code(), Some(0), "ignore-case key+value match");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("remote.origin.fetch main"));
+
+    // Short form `-i` behaves the same.
+    let short = run_libra_command(
+        &[
+            "config",
+            "--get-regexp",
+            "^remote\\.",
+            "--value",
+            "^MAIN$",
+            "-i",
+        ],
+        temp_path.path(),
+    );
+    assert_eq!(short.status.code(), Some(0));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_fixed_value_ignore_case_is_case_sensitive() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "--add", "remote.origin.fetch", "main"],
+        temp_path.path(),
+    );
+
+    // Fixed-value literal matching is case-sensitive even with --ignore-case.
+    let out = run_libra_command(
+        &[
+            "config",
+            "--get-all",
+            "remote.origin.fetch",
+            "--value",
+            "MAIN",
+            "--fixed-value",
+            "--ignore-case",
+        ],
+        temp_path.path(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "fixed-value MAIN must not match stored main"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_unset_value_filter_and_negation_and_fixed() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    for v in ["keep", "drop1", "drop2"] {
+        run_libra_command(&["config", "--add", "branch.x.merge", v], temp_path.path());
+    }
+    // Negated value: remove everything that is NOT `keep` (unset-all variant).
+    let out = run_libra_command(
+        &[
+            "config",
+            "--unset-all",
+            "branch.x.merge",
+            "--value",
+            "!^keep$",
+        ],
+        temp_path.path(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "negated unset, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let got = run_libra_command(
+        &["config", "--get-all", "branch.x.merge", "--null"],
+        temp_path.path(),
+    );
+    assert_eq!(got.stdout, b"keep\0", "only `keep` should remain");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_unset_fixed_value_literal_dot() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "--add", "branch.x.merge", "a.b"],
+        temp_path.path(),
+    );
+    run_libra_command(
+        &["config", "--add", "branch.x.merge", "axb"],
+        temp_path.path(),
+    );
+
+    let out = run_libra_command(
+        &[
+            "config",
+            "--unset-all",
+            "branch.x.merge",
+            "--value",
+            "a.b",
+            "--fixed-value",
+        ],
+        temp_path.path(),
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let got = run_libra_command(
+        &["config", "--get-all", "branch.x.merge", "--null"],
+        temp_path.path(),
+    );
+    assert_eq!(
+        got.stdout, b"axb\0",
+        "fixed-value `a.b` removes only the literal, keeps axb"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_invalid_value_regex_exits_6_without_mutation() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "--add", "branch.x.merge", "stable"],
+        temp_path.path(),
+    );
+
+    let out = run_libra_command(
+        &["config", "--unset-all", "branch.x.merge", "--value", "["],
+        temp_path.path(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(6),
+        "invalid regex exits 6, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The value must survive.
+    let got = run_libra_command(
+        &["config", "--get-all", "branch.x.merge", "--null"],
+        temp_path.path(),
+    );
+    assert_eq!(
+        got.stdout, b"stable\0",
+        "config must be unchanged after invalid regex"
+    );
+
+    // Fixed-value treats `[` as a literal — no regex error.
+    let fixed = run_libra_command(
+        &[
+            "config",
+            "--get-all",
+            "branch.x.merge",
+            "--value",
+            "[",
+            "--fixed-value",
+        ],
+        temp_path.path(),
+    );
+    assert_eq!(
+        fixed.status.code(),
+        Some(1),
+        "literal `[` simply does not match (exit 1)"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_overlong_regex_exits_6() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "set", "remote.origin.fetch", "main"],
+        temp_path.path(),
+    );
+
+    let long = "a".repeat(5000);
+    let out = run_libra_command(&["config", "--get-regexp", &long], temp_path.path());
+    assert_eq!(out.status.code(), Some(6), "over-long key regex exits 6");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("regex pattern is too long"),
+        "stderr should mention the length cap"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_rejects_genuinely_invalid_keys_exit_1() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    for key in ["invalid_key", ".foo", "foo.", "a..b"] {
+        let out = run_libra_command(&["config", "set", key, "x"], temp_path.path());
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "key `{key}` should be rejected with exit 1, got: {:?}",
+            out.status
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_accepts_legal_non_classic_keys() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    for key in [
+        "cloud.clone_domains.example.account_id",
+        "custom.api_token",
+        "sec.key.123",
+        "core.bigFileThreshold",
+    ] {
+        let out = run_libra_command(&["config", "set", key, "value"], temp_path.path());
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "key `{key}` should be accepted, stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_sensitive_value_filter_reveal_path() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    // Auto-encrypted sensitive key with an explicit value.
+    run_libra_command(
+        &["config", "set", "vault.env.SECRET", "plainsecret"],
+        temp_path.path(),
+    );
+
+    // Without --reveal, the filter runs over ciphertext; the plaintext pattern
+    // does not match, and nothing is leaked.
+    let no_reveal = run_libra_command(
+        &[
+            "config",
+            "--get",
+            "vault.env.SECRET",
+            "--value",
+            "^plainsecret$",
+        ],
+        temp_path.path(),
+    );
+    assert_eq!(
+        no_reveal.status.code(),
+        Some(1),
+        "ciphertext filter should not match plaintext pattern"
+    );
+    assert!(
+        !String::from_utf8_lossy(&no_reveal.stdout).contains("plainsecret"),
+        "secret must not leak without --reveal"
+    );
+
+    // With --reveal, the value is decrypted, the filter matches, and the
+    // plaintext is returned — proving --reveal is wired into the filter path.
+    let revealed = run_libra_command(
+        &[
+            "config",
+            "--get",
+            "vault.env.SECRET",
+            "--reveal",
+            "--value",
+            "^plainsecret$",
+        ],
+        temp_path.path(),
+    );
+    assert_eq!(
+        revealed.status.code(),
+        Some(0),
+        "reveal+filter should match, stderr: {}",
+        String::from_utf8_lossy(&revealed.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&revealed.stdout), "plainsecret\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wave 4 — section operations (rename-section / remove-section)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn test_config_rename_section_moves_all_dotted_keys() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "set", "remote.origin.url", "ssh://x"],
+        temp_path.path(),
+    );
+    run_libra_command(
+        &["config", "set", "remote.origin.fetch", "+a"],
+        temp_path.path(),
+    );
+
+    let out = run_libra_command(
+        &[
+            "config",
+            "rename-section",
+            "remote.origin",
+            "remote.upstream",
+        ],
+        temp_path.path(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "rename-section should succeed, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let names = run_libra_command(&["config", "--list", "--name-only"], temp_path.path());
+    let stdout = String::from_utf8_lossy(&names.stdout);
+    assert!(stdout.contains("remote.upstream.url") && stdout.contains("remote.upstream.fetch"));
+    assert!(
+        !stdout.contains("remote.origin."),
+        "no remote.origin.* should remain, got: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_rename_section_flag_form_matches_subcommand() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "set", "remote.origin.url", "ssh://x"],
+        temp_path.path(),
+    );
+
+    let out = run_libra_command(
+        &[
+            "config",
+            "--rename-section",
+            "remote.origin",
+            "remote.upstream",
+        ],
+        temp_path.path(),
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let got = run_libra_command(
+        &["config", "--get", "remote.upstream.url"],
+        temp_path.path(),
+    );
+    assert_eq!(String::from_utf8_lossy(&got.stdout), "ssh://x\n");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_rename_section_conflict_exit_5_no_partial_write() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "set", "remote.origin.url", "src"],
+        temp_path.path(),
+    );
+    run_libra_command(
+        &["config", "set", "remote.upstream.url", "dst"],
+        temp_path.path(),
+    );
+
+    let out = run_libra_command(
+        &[
+            "config",
+            "rename-section",
+            "remote.origin",
+            "remote.upstream",
+        ],
+        temp_path.path(),
+    );
+    assert_eq!(out.status.code(), Some(5), "rename conflict must exit 5");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("target section 'remote.upstream' already exists"),
+        "stderr: {stderr}"
+    );
+    // Both sections must be unchanged.
+    let origin = run_libra_command(&["config", "--get", "remote.origin.url"], temp_path.path());
+    assert_eq!(String::from_utf8_lossy(&origin.stdout), "src\n");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_remove_section_deletes_all_keys() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "set", "branch.main.remote", "origin"],
+        temp_path.path(),
+    );
+    run_libra_command(
+        &["config", "set", "branch.main.merge", "refs/heads/main"],
+        temp_path.path(),
+    );
+    run_libra_command(
+        &["config", "set", "branch.dev.remote", "origin"],
+        temp_path.path(),
+    );
+
+    let out = run_libra_command(
+        &["config", "remove-section", "branch.main"],
+        temp_path.path(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "remove-section should succeed, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let names = run_libra_command(&["config", "--list", "--name-only"], temp_path.path());
+    let stdout = String::from_utf8_lossy(&names.stdout);
+    assert!(!stdout.contains("branch.main."), "branch.main.* removed");
+    assert!(
+        stdout.contains("branch.dev.remote"),
+        "sibling section survives"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_remove_missing_section_exit_5() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    let out = run_libra_command(&["config", "remove-section", "no.such"], temp_path.path());
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "missing section removal exits 5"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("section 'no.such' does not exist"),
+        "stderr: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_section_ops_scope_isolation() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let global_db_dir = tempdir().unwrap();
+    let _scoped = ScopedConfigPathGuard::new(&global_db_dir.path().join("global_section.db"));
+
+    // Same section name in both scopes.
+    run_libra_command(
+        &["config", "set", "remote.origin.url", "local-url"],
+        temp_path.path(),
+    );
+    run_libra_command(
+        &[
+            "config",
+            "--global",
+            "set",
+            "remote.origin.url",
+            "global-url",
+        ],
+        temp_path.path(),
+    );
+
+    // Local rename must not touch the global section.
+    run_libra_command(
+        &[
+            "config",
+            "rename-section",
+            "remote.origin",
+            "remote.renamed",
+        ],
+        temp_path.path(),
+    );
+
+    let global = run_libra_command(
+        &["config", "--global", "--get", "remote.origin.url"],
+        temp_path.path(),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&global.stdout),
+        "global-url\n",
+        "global section unchanged"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_generic_rename_has_no_remote_side_effects() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "set", "remote.origin.url", "ssh://x"],
+        temp_path.path(),
+    );
+    run_libra_command(
+        &["config", "set", "branch.main.remote", "origin"],
+        temp_path.path(),
+    );
+
+    let out = run_libra_command(
+        &[
+            "config",
+            "rename-section",
+            "remote.origin",
+            "remote.upstream",
+        ],
+        temp_path.path(),
+    );
+    assert_eq!(out.status.code(), Some(0));
+    // branch.main.remote must still point at "origin" (no remote-cascade rewrite).
+    let br = run_libra_command(&["config", "--get", "branch.main.remote"], temp_path.path());
+    assert_eq!(
+        String::from_utf8_lossy(&br.stdout),
+        "origin\n",
+        "branch.*.remote untouched"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_vault_section_rename_rejected_129() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "set", "vault.env.TEST_SECRET", "shh"],
+        temp_path.path(),
+    );
+
+    for argv in [
+        vec!["config", "remove-section", "vault.env"],
+        vec!["config", "rename-section", "vault.env", "vault.elsewhere"],
+        vec!["config", "rename-section", "remote.origin", "vault.sneaky"],
+    ] {
+        let out = run_libra_command(&argv, temp_path.path());
+        assert_eq!(
+            out.status.code(),
+            Some(129),
+            "vault section op must exit 129: {argv:?}"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("vault sections must be managed by dedicated vault/config commands"),
+            "argv {argv:?} stderr: {stderr}"
+        );
+    }
+    // The secret must still exist (redacted).
+    let got = run_libra_command(
+        &["config", "--get", "vault.env.TEST_SECRET"],
+        temp_path.path(),
+    );
+    assert_eq!(got.status.code(), Some(0), "secret must still be present");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_invalid_section_name_rejected_no_change() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(&["config", "set", "keep.this.x", "v"], temp_path.path());
+
+    for bad in ["a..b", ".lead", "trail."] {
+        let out = run_libra_command(&["config", "remove-section", bad], temp_path.path());
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "invalid section `{bad}` should exit 1"
+        );
+    }
+    let got = run_libra_command(&["config", "--get", "keep.this.x"], temp_path.path());
+    assert_eq!(
+        String::from_utf8_lossy(&got.stdout),
+        "v\n",
+        "unrelated key unchanged"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wave 5 — typed value normalization (--type=bool|int|path)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn test_config_type_bool_canonicalizes_get() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "set", "feature.enabled", "yes"],
+        temp_path.path(),
+    );
+
+    let out = run_libra_command(
+        &["config", "--type=bool", "--get", "feature.enabled"],
+        temp_path.path(),
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "true\n");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_type_int_suffix_get() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "set", "core.bigfilethreshold", "1k"],
+        temp_path.path(),
+    );
+
+    let out = run_libra_command(
+        &["config", "--type=int", "--get", "core.bigfilethreshold"],
+        temp_path.path(),
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1024\n");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_type_int_overflow_exits_2_no_panic() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "set", "core.size", "9223372036854775807g"],
+        temp_path.path(),
+    );
+
+    let out = run_libra_command(
+        &["config", "--type=int", "--get", "core.size"],
+        temp_path.path(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "int overflow must exit 2, not panic"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_type_int_set_invalid_rejected_no_store() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    let set = run_libra_command(
+        &["config", "--type=int", "set", "core.size", "nope"],
+        temp_path.path(),
+    );
+    assert_eq!(set.status.code(), Some(2), "invalid int set exits 2");
+    let got = run_libra_command(&["config", "--get", "core.size"], temp_path.path());
+    assert_ne!(
+        got.status.code(),
+        Some(0),
+        "core.size must not have been stored"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_type_path_expands_tilde() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "set", "core.excludesfile", "~/ignore"],
+        temp_path.path(),
+    );
+
+    let out = run_libra_command(
+        &["config", "--type=path", "--get", "core.excludesfile"],
+        temp_path.path(),
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let home = temp_path.path().join(".libra-test-home");
+    let expected = format!("{}\n", home.join("ignore").to_string_lossy());
+    assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_type_path_rejects_tilde_user() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "set", "core.excludesfile", "~alice/ignore"],
+        temp_path.path(),
+    );
+
+    let out = run_libra_command(
+        &["config", "--type=path", "--get", "core.excludesfile"],
+        temp_path.path(),
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("~user path expansion is not supported by Libra config")
+    );
+    assert!(out.stdout.is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_config_type_path_unset_home_exits_1() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(
+        &["config", "set", "core.excludesfile", "~/ignore"],
+        temp_path.path(),
+    );
+
+    // Override HOME to empty: `~` cannot be expanded.
+    let out = run_libra_command_with_stdin_and_env(
+        &["config", "--type=path", "--get", "core.excludesfile"],
+        temp_path.path(),
+        "",
+        &[("HOME", "")],
+    );
+    assert_eq!(out.status.code(), Some(1), "empty HOME must exit 1");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_type_encrypted_redacted_without_reveal_then_revealed() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    // Auto-encrypted sensitive key holding a bool-like value.
+    run_libra_command(
+        &["config", "set", "vault.env.FLAG", "yes"],
+        temp_path.path(),
+    );
+
+    let redacted = run_libra_command(
+        &["config", "--type=bool", "--get", "vault.env.FLAG"],
+        temp_path.path(),
+    );
+    assert_eq!(redacted.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&redacted.stdout),
+        "<REDACTED>\n",
+        "must not parse ciphertext"
+    );
+
+    let revealed = run_libra_command(
+        &[
+            "config",
+            "--type=bool",
+            "--get",
+            "vault.env.FLAG",
+            "--reveal",
+        ],
+        temp_path.path(),
+    );
+    assert_eq!(
+        revealed.status.code(),
+        Some(0),
+        "reveal+type should canonicalize, stderr: {}",
+        String::from_utf8_lossy(&revealed.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&revealed.stdout), "true\n");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_type_deferred_and_combo_rejections_129() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    run_libra_command(&["config", "set", "user.name", "Ada"], temp_path.path());
+
+    for argv in [
+        vec!["config", "--type=color", "--get", "color.ui"],
+        vec!["config", "--type=bool", "--list"],
+        vec!["config", "--no-type", "--get", "user.name"],
+    ] {
+        let out = run_libra_command(&argv, temp_path.path());
+        assert_eq!(out.status.code(), Some(129), "{argv:?} should exit 129");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wave 6 — explicit rejection of unsupported selectors + global DB 0600
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn test_config_unsupported_selectors_rejected_129() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    let cases: &[(&[&str], &str)] = &[
+        (&["config", "--worktree", "--get", "user.name"], "worktree"),
+        (&["config", "--blob", "HEAD:.gitconfig", "--list"], "blob"),
+        (&["config", "--includes", "--list"], "include"),
+        (&["config", "--no-includes", "--list"], "include"),
+        (&["config", "--get-color", "color.ui"], "color"),
+        (&["config", "--get-colorbool", "color.ui"], "color"),
+        (&["config", "--no-value", "--get", "user.name"], "no-value"),
+        (
+            &["config", "--show-names", "--get", "user.name"],
+            "show-names",
+        ),
+        (&["config", "--get-urlmatch", "http", "https://x"], "url"),
+    ];
+    for (argv, needle) in cases {
+        let out = run_libra_command(argv, temp_path.path());
+        assert_eq!(out.status.code(), Some(129), "{argv:?} should exit 129");
+        let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
+        assert!(
+            stderr.contains(needle),
+            "stderr for {argv:?} should mention `{needle}`: {stderr}"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_file_selector_rejected_suggests_import() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    let out = run_libra_command(
+        &["config", "--file", "/tmp/example.gitconfig", "--list"],
+        temp_path.path(),
+    );
+    assert_eq!(out.status.code(), Some(129));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--file is not supported"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("libra config --import"),
+        "should suggest --import: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_supported_global_still_works() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    let set = run_libra_command(
+        &["config", "--global", "user.name", "Ada"],
+        temp_path.path(),
+    );
+    assert_eq!(set.status.code(), Some(0));
+    let get = run_libra_command(
+        &["config", "--global", "--get", "user.name"],
+        temp_path.path(),
+    );
+    assert_eq!(get.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&get.stdout), "Ada\n");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_config_global_db_created_with_0600() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    let set = run_libra_command(
+        &["config", "--global", "user.name", "Ada"],
+        temp_path.path(),
+    );
+    assert_eq!(set.status.code(), Some(0));
+
+    // base_libra_command points LIBRA_CONFIG_GLOBAL_DB at this isolated path.
+    let global_db = temp_path
+        .path()
+        .join(".libra-test-home")
+        .join(".libra")
+        .join("config.db");
+    assert!(
+        global_db.exists(),
+        "global DB should have been created at {global_db:?}"
+    );
+    let mode = std::fs::metadata(&global_db).unwrap().permissions().mode();
+    assert_eq!(
+        mode & 0o777,
+        0o600,
+        "global config DB must be 0600, got {:o}",
+        mode & 0o777
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wave 7 — documentation contract (closed flag list ↔ docs ↔ `--help`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Closed list of decision-ledger flags that must be both documented and
+/// surfaced by `config --help`. A closed list avoids false failures when prose
+/// mentions a flag that is intentionally not in EXAMPLES.
+const REQUIRED_LEDGER_FLAGS: &[&str] =
+    &["--null", "--show-origin", "--show-scope", "--replace-all"];
+
+#[test]
+fn config_doc_ledger_flags_are_documented_and_helpable() {
+    let doc = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/docs/commands/config.md"
+    ))
+    .expect("read docs/commands/config.md");
+    let home = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_libra"))
+        .args(["config", "--help"])
+        .env("HOME", home.path())
+        .env("LANG", "C")
+        .output()
+        .expect("run config --help");
+    assert!(out.status.success(), "config --help must succeed");
+    let help = String::from_utf8_lossy(&out.stdout);
+    for flag in REQUIRED_LEDGER_FLAGS {
+        assert!(
+            doc.contains(flag),
+            "docs/commands/config.md must document {flag}"
+        );
+        assert!(
+            help.contains(flag),
+            "`libra config --help` must expose {flag} (via EXAMPLES) once implemented"
+        );
+    }
 }

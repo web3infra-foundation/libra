@@ -8,6 +8,8 @@ Reapply commits on top of another base tip.
 
 ```
 libra rebase <upstream>
+libra rebase --onto <newbase> <upstream> [<branch>]
+libra rebase --root [--onto <newbase>] [<branch>]
 libra rebase --continue
 libra rebase --abort
 libra rebase --skip
@@ -16,6 +18,8 @@ libra rebase --skip
 ## Description
 
 `libra rebase` moves a sequence of commits from the current branch onto a new base commit. It finds the common ancestor between the current branch and the specified upstream, collects all commits from that ancestor to the current HEAD, and replays each commit on top of the upstream branch. After all commits are replayed, the current branch reference is updated to point to the final rebased commit.
+
+Each replayed commit preserves its **original author** while recording a fresh **committer** stamped with the current identity (`user.name` / `user.email`), matching Git's rebase semantics.
 
 If a conflict occurs during replay, the rebase stops and reports the conflicting files. The user resolves conflicts manually, stages the resolved files, and then runs `libra rebase --continue` to proceed. Alternatively, `--abort` restores the original branch state and `--skip` discards the current commit and moves on to the next.
 
@@ -26,6 +30,16 @@ Rebase state (the list of remaining and completed commits, the original HEAD, an
 | Option | Long | Description |
 |--------|------|-------------|
 | `<upstream>` | | The upstream branch or commit to rebase onto. Required unless `--continue`, `--abort`, or `--skip` is specified. Can be a branch name, commit hash, or any Git reference. |
+| `<branch>` | | Optional branch to switch to before starting the rebase. Used with the two- or three-argument form. |
+| | `--onto <newbase>` | Replay the `<upstream>..<branch-or-HEAD>` range onto `<newbase>` instead of onto `<upstream>`. |
+| | `--root` | Replay the entire branch history from the root commit. Single-root histories are supported; multi-root histories are rejected. |
+| | `--autostash` / `--no-autostash` | Stash dirty work before replay and restore the saved stash by OID after completion or abort. Reads `rebase.autoStash`. |
+| | `--autosquash` / `--no-autosquash` | Non-interactively move and fold `fixup!`, `squash!`, and `amend!` commits. Reads `rebase.autoSquash`. |
+| | `--reapply-cherry-picks` / `--no-reapply-cherry-picks` | Reapply or skip commits whose patch already exists on the target side. |
+| | `--keep-empty` / `--no-keep-empty` | Preserve or drop commits that were already empty before replay. Reads `rebase.keepEmpty`. |
+| | `--empty=<drop\|keep\|stop>` | Control commits that become empty after replay. Reads `rebase.empty`; `ask` is not supported. |
+| `-s` | `--signoff` | Add a deduplicated `Signed-off-by:` trailer to replayed commits. |
+| `-S` | `--gpg-sign` / `--no-gpg-sign` | Vault-sign replayed commits. Libra does not call external GnuPG or support keyid selection. |
 | | `--continue` | Continue the rebase after resolving conflicts. Mutually exclusive with `--abort`, `--skip`, and `<upstream>`. |
 | | `--abort` | Abort the current rebase and restore the original branch to its pre-rebase state. Mutually exclusive with `--continue`, `--skip`, and `<upstream>`. |
 | | `--skip` | Skip the current commit and continue with the next commit in the rebase sequence. Mutually exclusive with `--continue`, `--abort`, and `<upstream>`. |
@@ -44,6 +58,19 @@ Applied: def5678 feat: add parser
 Applied: 987abcd feat: add lexer
 Applied: 13579bd test: add parser tests
 Successfully rebased branch 'feature' onto '1234567'.
+```
+
+**`--onto <newbase>`**
+
+Replay commits selected by `<upstream>` onto an independent new base. If `<branch>` is supplied, Libra first switches to that branch and then rebases it:
+
+```bash
+$ libra rebase --onto next main topic
+Found common ancestor: abc1234
+Rebasing 2 commits from `topic` onto `next`...
+Applied: def5678 feat: topic change
+Applied: 987abcd test: topic coverage
+Successfully rebased branch 'topic' onto '7654321'.
 ```
 
 **`--continue`**
@@ -87,6 +114,25 @@ libra rebase main
 
 # Rebase onto a specific commit
 libra rebase abc1234
+
+# Replay topic's main..topic commits onto next
+libra rebase --onto next main topic
+
+# Replay all commits from the root onto main
+libra rebase --root --onto main
+
+# Rebase with dirty-worktree protection
+libra rebase --autostash main
+
+# Fold fixup!/squash! commits without an editor
+libra rebase --autosquash main
+
+# Keep commits that become empty after replay
+libra rebase --empty=keep main
+
+# Add trailers or vault signatures to rewritten commits
+libra rebase --signoff main
+libra rebase -S main
 
 # Continue after resolving conflicts
 libra rebase --continue
@@ -250,6 +296,13 @@ Rebase state is stored in a `rebase_state` SQLite table with the following field
 | `todo` | TEXT | Remaining commits to replay (newline-separated hashes) |
 | `done` | TEXT | Commits already replayed (newline-separated hashes) |
 | `stopped_sha` | TEXT (nullable) | Current commit that caused a conflict |
+| `autostash_ref` | TEXT (nullable) | Saved autostash commit OID for exact restore/drop |
+| `autosquash` | INTEGER | Whether autosquash was enabled for this rebase |
+| `reapply_cherry_picks` | INTEGER | Whether redundant cherry-picks are reapplied |
+| `keep_empty` | INTEGER | Whether originally empty commits are preserved |
+| `empty_mode` | TEXT | `drop`, `keep`, or `stop` for commits that become empty |
+| `signoff` | INTEGER | Whether signoff trailers are added during replay |
+| `gpg_sign` | INTEGER | Whether replayed commits are vault-signed |
 
 ## Design Rationale
 
@@ -259,11 +312,13 @@ Git's interactive rebase opens an editor with a list of commits that can be reor
 
 Libra targets AI-agent and automation workflows where interactive editor sessions are not feasible. Instead of interactive rebase, Libra encourages breaking complex history rewriting into discrete operations: use `rebase` for linear replay, and (in the future) dedicated commands for squashing or reordering.
 
-### Why no `--onto`?
+### `--onto`
 
-Git's `--onto` flag allows rebasing a subset of commits onto an arbitrary base, independent of the upstream reference. This is a powerful but rarely used feature that creates confusion about the three-argument form (`git rebase --onto <newbase> <upstream> [<branch>]`).
+Libra supports Git's non-interactive `--onto <newbase> <upstream> [<branch>]` form. The upstream still defines the replay range, while `<newbase>` is the target parent for the replayed commits. Interactive todo editing remains intentionally unsupported.
 
-Libra simplifies by always rebasing all commits from the common ancestor to HEAD onto the specified upstream. This covers the vast majority of rebase use cases. The `--onto` flag may be added in the future if there is demand for more precise commit range selection.
+### Autosquash And Signing
+
+Libra supports a non-interactive autosquash path. It recognizes `fixup!`, `squash!`, and `amend!` subjects and folds them during replay without opening an editor. Signing is intentionally vault-backed: `-S`/`--gpg-sign` uses Libra's vault signing key and does not accept Git keyid forms such as `-S<keyid>`.
 
 ### Why persist state in SQLite?
 
@@ -292,13 +347,19 @@ Libra provides a middle ground: a linear rebase with conflict-stop semantics (fa
 | Abort | `--abort` | `--abort` | `jj op undo` |
 | Skip | `--skip` | `--skip` | N/A |
 | Interactive | Not supported | `-i` / `--interactive` | N/A |
-| Onto | Not supported | `--onto <newbase>` | `-d` with `-s` / `--source` |
+| Onto | Supported | `--onto <newbase>` | `-d` with `-s` / `--source` |
 | Exec | Not supported | `--exec <cmd>` | N/A |
-| Autosquash | Not supported | `--autosquash` | N/A |
+| Autosquash | Partial: non-interactive folding | `--autosquash` | N/A |
 | Rebase merges | Not supported | `--rebase-merges` | Default behavior |
-| Keep empty | Not supported | `--keep-empty` / `--no-keep-empty` | Default keeps empty |
+| Autostash | Supported | `--autostash` / `--no-autostash` | N/A |
+| Reapply cherry-picks | Supported | `--reapply-cherry-picks` | N/A |
+| Root | Partial: single-root histories | `--root` | N/A |
+| Keep empty | Supported | `--keep-empty` / `--no-keep-empty` | Default keeps empty |
+| Empty after replay | Supported: `drop`/`keep`/`stop` | `--empty=` | N/A |
+| Signoff | Supported | `--signoff` | N/A |
+| GPG sign | Vault-backed, no keyid | `-S` / `--gpg-sign` | N/A |
 | Force rebase | Not supported | `--force-rebase` | N/A |
-| Branch | Not supported | `<branch>` (third positional) | `-s` / `--source` |
+| Branch | Supported | `<branch>` (third positional) | `-s` / `--source` |
 | Revision set | Not supported | N/A | `-r` / `--revisions` |
 | State persistence | SQLite database | `.git/rebase-merge/` directory | Not applicable |
 
@@ -318,7 +379,8 @@ Note: jj does not stop on conflicts during rebase. Instead, conflicts are materi
 | `--abort` without rebase in progress | `LBR-REPO-003` (RepoStateInvalid) | 128 | Error indicating no rebase in progress |
 | `--skip` without rebase in progress | `LBR-REPO-003` (RepoStateInvalid) | 128 | Error indicating no rebase in progress |
 | `--skip` without stopped or pending commit | `LBR-REPO-003` (RepoStateInvalid) | 128 | Error indicating there is no commit to skip |
-| No common ancestor found | pending typed mapping | 128 | Legacy text error refusing to rebase unrelated histories |
+| No common ancestor found | `LBR-CLI-003` (CliInvalidTarget) | 129 | Error refusing to rebase unrelated histories |
+| Criss-cross merge bases | `LBR-CONFLICT-002` (ConflictOperationBlocked) | 128 | Error refusing to choose one of multiple best merge bases |
 | Conflict during commit replay | pending typed mapping | 128 | Rebase stops, state is saved, user prompted to resolve |
 | Failed to create rebased commit | pending typed mapping | 128 | Legacy text error with commit details |
 | Failed to update branch reference | pending typed mapping | 128 | Legacy text error with ref update details |

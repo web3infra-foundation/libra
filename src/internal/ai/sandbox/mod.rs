@@ -1,5 +1,7 @@
 //! Sandbox subsystem for AI tool calls.
 //!
+//! AI 工具调用的沙箱子系统。
+//!
 //! Boundary: exposes policy parsing, command-safety checks, and runtime enforcement;
 //! it does not decide workflow phase state. AI hardening contract tests exercise the
 //! public guarantees of this module.
@@ -67,6 +69,11 @@ pub struct ToolRuntimeContext {
     pub approval: Option<ToolApprovalContext>,
     pub file_history: Option<FileHistoryRuntimeContext>,
     pub max_output_bytes: Option<usize>,
+    /// Owning sub-agent run id, when this context drives a sub-agent's tool
+    /// calls (CEX-S2-14 trace chain). Source-Pool calls read it to attribute
+    /// the `source_call_log` row to the run (`thread → agent_run_id →
+    /// tool_call_id → source_call`). `None` on the main-session path.
+    pub agent_run_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1777,13 +1784,7 @@ fn resolve_linux_sandbox_exe(sandbox_runtime: Option<&SandboxRuntimeConfig>) -> 
 
     #[cfg(target_os = "linux")]
     {
-        if candidate
-            .as_ref()
-            .is_some_and(|path| is_executable_file(path))
-        {
-            return candidate;
-        }
-        return None;
+        candidate.filter(|path| is_executable_file(path))
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -1802,13 +1803,17 @@ fn locate_bwrap_binary_for_prefer_strict() -> Option<PathBuf> {
         return None;
     }
 
-    let path_env = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_env) {
-        let candidate = dir.join("bwrap");
-        if is_executable_file(&candidate) {
-            return Some(candidate);
+    #[cfg(not(test))]
+    {
+        let path_env = std::env::var_os("PATH")?;
+        for dir in std::env::split_paths(&path_env) {
+            let candidate = dir.join("bwrap");
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
         }
     }
+
     None
 }
 
@@ -2479,18 +2484,31 @@ mod tests {
     #[cfg_attr(target_os = "linux", serial)]
     #[test]
     fn seccomp_policy_env_resolves_path_only_when_non_empty() {
-        // SAFETY: test-only env mutation.
         let prior = std::env::var_os(SANDBOX_SECCOMP_POLICY_ENV);
-        let _policy = match prior {
-            Some(value) => Some(ScopedEnvVar::set(SANDBOX_SECCOMP_POLICY_ENV, value)),
-            None => {
-                // SAFETY: test-only env cleanup before running the assertion.
+
+        struct EnvRestore {
+            key: &'static str,
+            value: Option<std::ffi::OsString>,
+        }
+
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
                 unsafe {
-                    std::env::remove_var(SANDBOX_SECCOMP_POLICY_ENV);
+                    if let Some(value) = &self.value {
+                        std::env::set_var(self.key, value);
+                    } else {
+                        std::env::remove_var(self.key);
+                    }
                 }
-                None
             }
+        }
+
+        let _restore = EnvRestore {
+            key: SANDBOX_SECCOMP_POLICY_ENV,
+            value: prior,
         };
+
+        // SAFETY: test-only env mutation; restored by `_restore`.
         unsafe {
             std::env::remove_var(SANDBOX_SECCOMP_POLICY_ENV);
         }
@@ -3033,7 +3051,7 @@ mod tests {
 
         let sink = Arc::new(InMemorySandboxEvidenceSink::new());
         let sandbox_runtime = SandboxRuntimeConfig {
-            enforcement: runtime::SandboxEnforcement::Required,
+            enforcement: SandboxEnforcement::Required,
             evidence_sink: Some(sink.clone()),
             ..SandboxRuntimeConfig::default()
         };
@@ -3148,7 +3166,18 @@ mod tests {
         assert_eq!(events.len(), 1, "exactly one Evidence event per rejection");
         match &events[0] {
             SandboxEvidenceEvent::WritableRootRejected { root, reason } => {
-                assert_eq!(root, &dangerous_root);
+                // The recorded root is canonicalised before validation
+                // (see `push_root_unique` in policy.rs), so on hosts
+                // where `/var/run` is a symlink to `/run` it surfaces as
+                // `/run/docker.sock` rather than the requested
+                // `/var/run/docker.sock`. Assert the stable, symlink-
+                // independent property: the rejected root is the Docker
+                // socket by file name.
+                assert_eq!(
+                    root.file_name(),
+                    dangerous_root.file_name(),
+                    "rejected root should be the docker socket (canonicalised path may differ by host symlink layout): {root:?}"
+                );
                 assert!(
                     !reason.is_empty(),
                     "rejection must include a non-empty reason"

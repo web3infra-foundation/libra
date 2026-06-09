@@ -75,7 +75,7 @@ jobs:
 
           echo "Building $BINARY_NAME for target ${{ matrix.target.rust }}..."
 
-          RUSTFLAGS="-C strip=symbols" cargo build --locked --release --target ${{ matrix.target.rust }}
+          RUSTFLAGS="-C strip=symbols" cargo build --locked --release --target ${{ matrix.target.rust }} --features worktree-fuse
 
           # Create build directory and copy binary
           mkdir -p build

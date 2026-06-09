@@ -1,5 +1,7 @@
 //! Client-side object storage gateway.
 //!
+//! 客户端对象存储网关。
+//!
 //! This module is the synchronous facade that the rest of the codebase uses to read,
 //! write, and search Git objects. It hides three orthogonal concerns:
 //!
@@ -568,6 +570,17 @@ impl ClientStorage {
         let storage = self.storage.clone();
         let hash = *obj_id;
         self.block_on_storage(async move { storage.exist(&hash).await })
+    }
+
+    /// Enumerate every locally-stored object id (loose ∪ pack), de-duplicated,
+    /// alongside diagnostics for any skipped/corrupt pack index.
+    ///
+    /// Read-only and local-only: it does not consult or fetch from remote
+    /// tiers, and never rebuilds a missing pack index (a degraded/missing idx
+    /// is reported in the diagnostics list and skipped). Backs
+    /// `cat-file --batch-all-objects`.
+    pub fn list_all_local_oids(&self) -> (Vec<ObjectHash>, Vec<String>) {
+        LocalStorage::new(self.base_path.clone()).list_all_oids()
     }
 
     /// Read just the `ObjectType` for `obj_id`.

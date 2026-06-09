@@ -144,8 +144,12 @@ fn test_pull_cli_remote_not_found_returns_cli_exit_code() {
 }
 
 #[test]
-fn test_pull_ff_only_conflicts_with_rebase_at_parse_time() {
-    let repo = tempdir().expect("failed to create local repo");
+#[serial]
+fn test_pull_ff_only_conflicts_with_rebase() {
+    // `--ff-only` is a merge-only flag; combining it with `--rebase` is a
+    // runtime usage error. (`--rebase=false --ff-only` is allowed, so this is a
+    // runtime guard rather than a clap conflict — see `rebase_false_allows_*`.)
+    let repo = create_committed_repo_via_cli();
 
     let output = run_libra_command(&["pull", "--ff-only", "--rebase"], repo.path());
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
@@ -156,7 +160,7 @@ fn test_pull_ff_only_conflicts_with_rebase_at_parse_time() {
         stderr.contains("cannot be used with")
             && stderr.contains("--ff-only")
             && stderr.contains("--rebase"),
-        "pull should reject conflicting integration modes before repo preflight: {stderr}"
+        "pull should reject conflicting integration modes: {stderr}"
     );
 }
 
@@ -661,5 +665,416 @@ async fn test_pull_rebase_already_up_to_date_reports_noop() {
     assert_eq!(
         old, new_commit,
         "HEAD must not move when there is nothing to rebase"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Batch 0/1: flag-compatibility and config gates (fail before fetch; a
+// committed repo is enough — no remote needed).
+// ─────────────────────────────────────────────────────────────────────────
+
+fn assert_incompatible(output: &std::process::Output, needles: &[&str]) {
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(129), "stderr: {stderr}");
+    assert_eq!(report.error_code, "LBR-CLI-002", "stderr: {stderr}");
+    for needle in needles {
+        assert!(stderr.contains(needle), "expected `{needle}` in: {stderr}");
+    }
+}
+
+#[test]
+#[serial]
+fn test_pull_squash_conflicts_with_rebase() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["pull", "--rebase", "--squash"], repo.path());
+    assert_incompatible(&output, &["--rebase", "--squash"]);
+}
+
+#[test]
+#[serial]
+fn test_pull_no_commit_conflicts_with_rebase() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["pull", "--rebase", "--no-commit"], repo.path());
+    assert_incompatible(&output, &["--rebase", "--no-commit"]);
+}
+
+#[test]
+#[serial]
+fn test_pull_rebase_autostash_rejected() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["pull", "--rebase", "--autostash"], repo.path());
+    assert_incompatible(&output, &["--rebase", "--autostash"]);
+}
+
+#[test]
+#[serial]
+fn test_pull_squash_autostash_rejected_upfront() {
+    // Tracking IS configured so the squash guard (which runs after rebase
+    // resolution but before fetch) is the failure, not a tracking error.
+    let repo = create_committed_repo_via_cli();
+    run_libra_command(&["config", "branch.main.remote", "origin"], repo.path());
+    run_libra_command(
+        &["config", "branch.main.merge", "refs/heads/main"],
+        repo.path(),
+    );
+    let output = run_libra_command(&["pull", "--squash", "--autostash"], repo.path());
+    assert_incompatible(&output, &["--squash", "autostash"]);
+}
+
+#[test]
+#[serial]
+fn test_pull_rebase_false_allows_squash() {
+    // `--rebase=false` forces the merge path and must NOT trip the rebase guard;
+    // it falls through to the (here unconfigured) tracking lookup instead.
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["pull", "--rebase=false", "--squash"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(128), "stderr: {stderr}");
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert!(
+        !stderr.contains("cannot be used with"),
+        "--rebase=false --squash must not be rejected as incompatible: {stderr}"
+    );
+    assert!(stderr.contains("no tracking information"));
+}
+
+#[test]
+#[serial]
+fn test_pull_rebase_merges_rejected() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["pull", "--rebase=merges"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(129), "stderr: {stderr}");
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(stderr.contains("not supported"), "stderr: {stderr}");
+}
+
+#[test]
+#[serial]
+fn test_pull_rebase_interactive_rejected() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["pull", "--rebase=interactive"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(129), "stderr: {stderr}");
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(stderr.contains("not supported"), "stderr: {stderr}");
+}
+
+#[test]
+#[serial]
+fn test_pull_rebase_config_merges_rejected() {
+    let repo = create_committed_repo_via_cli();
+    run_libra_command(&["config", "pull.rebase", "merges"], repo.path());
+    let output = run_libra_command(&["pull"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(129), "stderr: {stderr}");
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(stderr.contains("not supported"), "stderr: {stderr}");
+}
+
+#[test]
+#[serial]
+fn test_pull_rebase_config_invalid_value_rejected() {
+    let repo = create_committed_repo_via_cli();
+    run_libra_command(&["config", "pull.rebase", "bogus"], repo.path());
+    let output = run_libra_command(&["pull"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(129), "stderr: {stderr}");
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(stderr.contains("pull.rebase"), "stderr: {stderr}");
+}
+
+#[test]
+#[serial]
+fn test_pull_squash_with_merge_autostash_config_rejected() {
+    let repo = create_committed_repo_via_cli();
+    run_libra_command(&["config", "branch.main.remote", "origin"], repo.path());
+    run_libra_command(
+        &["config", "branch.main.merge", "refs/heads/main"],
+        repo.path(),
+    );
+    run_libra_command(&["config", "merge.autoStash", "true"], repo.path());
+
+    // merge.autoStash=true resolves autostash on, so --squash is rejected.
+    let rejected = run_libra_command(&["pull", "--squash"], repo.path());
+    assert_incompatible(&rejected, &["--squash", "autostash"]);
+
+    // --no-autostash forces autostash off, so the squash guard passes and we
+    // fall through to target resolution, which fails with "remote not found"
+    // (LBR-CLI-003) — distinct from the squash guard's LBR-CLI-002. Both are
+    // exit 129, so distinguish by stable code.
+    let allowed = run_libra_command(&["pull", "--squash", "--no-autostash"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&allowed.stderr);
+    assert_eq!(
+        report.error_code, "LBR-CLI-003",
+        "--no-autostash should clear the squash/autostash conflict and reach \
+         target resolution, not be rejected as incompatible: {stderr}"
+    );
+    assert!(
+        !stderr.contains("autostash"),
+        "cleared squash/autostash conflict must not mention autostash: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_pull_squash_with_pull_ff_false_config_rejected() {
+    let repo = create_committed_repo_via_cli();
+    run_libra_command(&["config", "branch.main.remote", "origin"], repo.path());
+    run_libra_command(
+        &["config", "branch.main.merge", "refs/heads/main"],
+        repo.path(),
+    );
+    run_libra_command(&["config", "pull.ff", "false"], repo.path());
+
+    let output = run_libra_command(&["pull", "--squash"], repo.path());
+    assert_incompatible(&output, &["--squash", "no-fast-forward"]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Batch 0/1: behavioral forwarding against a real local remote.
+// ─────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn test_pull_no_ff_forces_merge_commit() {
+    let (_temp_root, remote_dir, work_dir, branch) = create_remote_fixture();
+    let local_repo = tempdir().expect("local repo");
+    init_repo_via_cli(local_repo.path());
+    configure_identity_via_cli(local_repo.path());
+    configure_pull_tracking(local_repo.path(), &remote_dir, &branch);
+    assert_cli_success(
+        &run_libra_command(&["pull"], local_repo.path()),
+        "initial pull",
+    );
+
+    push_remote_commit(
+        &work_dir,
+        &branch,
+        "remote.txt",
+        "remote\n",
+        "remote update",
+    );
+
+    let output = run_libra_command(&["pull", "--no-ff"], local_repo.path());
+    assert_cli_success(&output, "pull --no-ff");
+
+    let _guard = ChangeDirGuard::new(local_repo.path());
+    let head = Head::current_commit().await.expect("merge commit");
+    let commit: Commit = load_object(&head).expect("load merge commit");
+    assert_eq!(
+        commit.parent_commit_ids.len(),
+        2,
+        "--no-ff must force a merge commit even when fast-forward is possible"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_pull_squash_stages_without_commit() {
+    let (_temp_root, remote_dir, work_dir, branch) = create_remote_fixture();
+    let local_repo = tempdir().expect("local repo");
+    init_repo_via_cli(local_repo.path());
+    configure_identity_via_cli(local_repo.path());
+    configure_pull_tracking(local_repo.path(), &remote_dir, &branch);
+    assert_cli_success(
+        &run_libra_command(&["pull"], local_repo.path()),
+        "initial pull",
+    );
+
+    push_remote_commit(
+        &work_dir,
+        &branch,
+        "remote.txt",
+        "remote\n",
+        "remote update",
+    );
+    fs::write(local_repo.path().join("local.txt"), "local\n").expect("write local");
+    assert_cli_success(
+        &run_libra_command(&["add", "local.txt"], local_repo.path()),
+        "stage local",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "local", "--no-verify"], local_repo.path()),
+        "commit local",
+    );
+
+    let head_before = {
+        let _g = ChangeDirGuard::new(local_repo.path());
+        Head::current_commit().await.expect("HEAD before squash")
+    };
+
+    let output = run_libra_command(&["--json", "pull", "--squash"], local_repo.path());
+    assert_cli_success(&output, "pull --squash");
+    let json = parse_json_stdout(&output);
+    assert!(
+        json["data"]["merge"]["commit"].is_null(),
+        "squash must not record a merge commit: {json}"
+    );
+
+    let head_after = {
+        let _g = ChangeDirGuard::new(local_repo.path());
+        Head::current_commit().await.expect("HEAD after squash")
+    };
+    assert_eq!(head_before, head_after, "squash must not move HEAD");
+    assert!(
+        local_repo.path().join("remote.txt").exists(),
+        "squash stages the remote change into the worktree"
+    );
+}
+
+#[test]
+#[serial]
+fn test_pull_squash_human_output_does_not_report_fast_forward() {
+    let (_temp_root, remote_dir, work_dir, branch) = create_remote_fixture();
+    let local_repo = tempdir().expect("local repo");
+    init_repo_via_cli(local_repo.path());
+    configure_identity_via_cli(local_repo.path());
+    configure_pull_tracking(local_repo.path(), &remote_dir, &branch);
+    assert_cli_success(
+        &run_libra_command(&["pull"], local_repo.path()),
+        "initial pull",
+    );
+
+    push_remote_commit(
+        &work_dir,
+        &branch,
+        "remote.txt",
+        "remote\n",
+        "remote update",
+    );
+    fs::write(local_repo.path().join("local.txt"), "local\n").expect("write local");
+    assert_cli_success(
+        &run_libra_command(&["add", "local.txt"], local_repo.path()),
+        "stage local",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "local", "--no-verify"], local_repo.path()),
+        "commit local",
+    );
+
+    let output = run_libra_command(&["pull", "--squash"], local_repo.path());
+    assert_cli_success(&output, "pull --squash");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Squash commit -- not updating HEAD."),
+        "squash pull should explain that HEAD was not updated: {stdout}"
+    );
+    assert!(
+        !stdout.lines().any(|line| line == "Fast-forward"),
+        "squash pull must not report the integration as a fast-forward: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_pull_no_commit_human_output_leaves_merge_state_without_fast_forward_label() {
+    let (_temp_root, remote_dir, work_dir, branch) = create_remote_fixture();
+    let local_repo = tempdir().expect("local repo");
+    init_repo_via_cli(local_repo.path());
+    configure_identity_via_cli(local_repo.path());
+    configure_pull_tracking(local_repo.path(), &remote_dir, &branch);
+    assert_cli_success(
+        &run_libra_command(&["pull"], local_repo.path()),
+        "initial pull",
+    );
+
+    push_remote_commit(
+        &work_dir,
+        &branch,
+        "remote.txt",
+        "remote\n",
+        "remote update",
+    );
+    fs::write(local_repo.path().join("local.txt"), "local\n").expect("write local");
+    assert_cli_success(
+        &run_libra_command(&["add", "local.txt"], local_repo.path()),
+        "stage local",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "local", "--no-verify"], local_repo.path()),
+        "commit local",
+    );
+
+    let output = run_libra_command(&["pull", "--no-commit"], local_repo.path());
+    assert_cli_success(&output, "pull --no-commit");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Automatic merge went well; stopped before committing as requested."),
+        "no-commit pull should explain that it stopped before committing: {stdout}"
+    );
+    assert!(
+        !stdout.lines().any(|line| line == "Fast-forward"),
+        "no-commit pull must not report the integration as a fast-forward: {stdout}"
+    );
+    assert!(
+        local_repo
+            .path()
+            .join(".libra")
+            .join("merge-state.json")
+            .exists(),
+        "--no-commit pull should leave merge state for an explicit commit/continue"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_pull_autostash_clean_after_up_to_date() {
+    let (_temp_root, remote_dir, _work_dir, branch) = create_remote_fixture();
+    let local_repo = tempdir().expect("local repo");
+    init_repo_via_cli(local_repo.path());
+    configure_identity_via_cli(local_repo.path());
+    configure_pull_tracking(local_repo.path(), &remote_dir, &branch);
+    assert_cli_success(
+        &run_libra_command(&["pull"], local_repo.path()),
+        "initial pull",
+    );
+
+    // Dirty a tracked file; remote is unchanged so the pull is up to date.
+    fs::write(local_repo.path().join("README.md"), "dirty local edit\n").expect("dirty edit");
+
+    let output = run_libra_command(&["pull", "--autostash"], local_repo.path());
+    assert_cli_success(&output, "pull --autostash up-to-date");
+
+    assert_eq!(
+        fs::read_to_string(local_repo.path().join("README.md")).expect("read README"),
+        "dirty local edit\n",
+        "autostash must restore the dirty edit after integrating"
+    );
+    let stash_list = run_libra_command(&["stash", "list"], local_repo.path());
+    assert_cli_success(&stash_list, "stash list");
+    assert!(
+        String::from_utf8_lossy(&stash_list.stdout)
+            .trim()
+            .is_empty(),
+        "autostash must not leave a stash entry behind"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_pull_depth_forwarded_to_fetch_local_remote() {
+    let (_temp_root, remote_dir, work_dir, branch) = create_remote_fixture();
+    push_remote_commit(&work_dir, &branch, "c2.txt", "c2\n", "second");
+    push_remote_commit(&work_dir, &branch, "c3.txt", "c3\n", "third");
+
+    let local_repo = tempdir().expect("local repo");
+    init_repo_via_cli(local_repo.path());
+    configure_identity_via_cli(local_repo.path());
+    let remote_add = run_libra_command(
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+        local_repo.path(),
+    );
+    assert_cli_success(&remote_add, "remote add");
+
+    let output = run_libra_command(
+        &["pull", "origin", &branch, "--depth", "1"],
+        local_repo.path(),
+    );
+    assert_cli_success(&output, "pull origin <branch> --depth 1");
+
+    assert!(
+        local_repo.path().join(".libra").join("shallow").exists(),
+        "a depth-limited pull must record the .libra/shallow boundary, proving --depth reached fetch"
     );
 }

@@ -65,16 +65,16 @@ C1（Audit P0）
 | graph | intentionally-different | Libra AI graph inspection extension, not a Git command |
 | add | partial | sparse-checkout flag unsupported |
 | rm | partial | --force / --dry-run / --quiet not exposed |
-| mv | partial | sparse-checkout flag unsupported; --skip-errors not exposed |
+| mv | partial | sparse-checkout flag unsupported |
 | restore | supported | |
 | status | supported | |
 | clean | supported | |
 | stash | partial | push / pop / list / apply / drop / show / branch / clear supported; create / store unsupported (see [declined.md#d8-stash-create](../../improvement/compatibility/declined.md#d8) / [#d9-stash-store](../../improvement/compatibility/declined.md#d9)) |
 | lfs | partial | built-in Libra LFS command; uses `.libra_attributes`, not Git LFS filters/hooks |
 | log | supported | |
-| shortlog | supported | |
-| show | supported | |
-| show-ref | supported | |
+| shortlog | partial | `-n`/`-s`/`-e`, `-c`/`--committer`, `--no-merges`, `--since`/`--until`, single revision, `A..B` ranges, root `.mailmap`, `-w` wrapping, limited `--format`, and JSON/`--machine` supported. Unsupported: stdin log parsing, pathspecs, multi-ref traversal, `--group`, advanced range syntax, and config-backed mailmap sources |
+| show | partial | multiple objects, common `--pretty` presets, limited `--format`, and blob safety supported; full Git format mini-language, `-U`, and `diff.noprefix` deferred |
+| show-ref | partial | `--verify`, `--exists`, `-d`, and Git-style pattern matching supported; `--exclude-existing` and abbreviation width controls deferred |
 | branch | supported | |
 | tag | supported | |
 | commit | supported | |
@@ -243,4 +243,4 @@ C2 把 `.github/workflows/base.yml` 与 `.github/workflows/codeql.yml` 的 `name
 ## 风险与缓解
 
 1. **`.gitattributes` 影响历史 diff 显示** → 缓解：text=auto eol=lf 对已有 LF 文件无效；仅在新平台 checkout 时归一化。
-2. **`COMPATIBILITY.md` 与代码不同步** → 缓解：C2 已在 `compat-offline-core` job 中加入 `scripts/check_compat_matrix.sh`，并通过 `tests/compat/matrix_alignment.rs` 接入 `cargo test --all`，扫描 `src/cli.rs` Commands 变体并对比矩阵行。
+2. **`COMPATIBILITY.md` 与代码不同步** → 缓解：C2 通过 `tests/compat/matrix_alignment.rs` 接入 `cargo test --all`（compat-offline-core job 另以 `cargo test --test compat_matrix_alignment` 单独 gate），自包含地扫描 `src/cli.rs` Commands 变体并对比矩阵行。原 `scripts/check_compat_matrix.sh` 已移除，检测逻辑内联进该 Rust 测试。
