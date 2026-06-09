@@ -75,6 +75,13 @@ pub(crate) fn scenario_stash_bisect_worktree(ctx: &mut ScenarioCtx<'_>) -> Resul
     ctx.command(&["bisect", "log"], repo.clone(), true)?;
     ctx.command(&["bisect", "reset"], repo.clone(), true)?;
 
+    // Multi-good positional surface (git parity for start <bad> <good1> <good2>...)
+    // Exercises the Vec revs path added for the bisect improvement plan.
+    // Use a depth guaranteed by the fixture at this point (after prior bisect reset).
+    ctx.command(&["bisect", "start", "HEAD", "HEAD~1"], repo.clone(), true)?;
+    ctx.command(&["bisect", "log"], repo.clone(), true)?;
+    ctx.command(&["bisect", "reset"], repo.clone(), true)?;
+
     let wt = ctx.run_dir.join("wt").to_string_lossy().to_string();
     ctx.command(
         &["worktree", "add", "-b", "workflow-linked", &wt],

@@ -84,6 +84,11 @@ libra bisect good "$GOOD_COMMIT"
 libra bisect log
 libra bisect reset
 
+# Test bisect multi-good positional (git: start <bad> <good1> <good2>...)
+libra bisect start "$BAD_COMMIT" "$GOOD_COMMIT" HEAD~2
+libra bisect log
+libra bisect reset
+
 # Test bisect skip
 libra bisect start "$BAD_COMMIT" --good "$GOOD_COMMIT"
 libra bisect skip
@@ -133,7 +138,7 @@ cd "$RUN_DIR/workflow-repo"
 ! libra worktree remove "$RUN_ROOT/repos/no-such-worktree"
 ```
 
-断言：`stash push` 保存 tracked 修改并清理工作区；`stash list` / `stash show` 能观察 stash 条目；`stash apply` 保留 stash，`stash pop` 应用并删除 stash；`stash push -u` 保存/移除/恢复可见 untracked 文件；`stash push --all` 保存/移除/恢复可见 untracked 与 ignored 文件；`stash push --keep-index` 保留 staged 内容并移除 unstaged delta；`stash clear --force` 清空列表；`bisect start <bad> --good <good>` 建立会话，`view` / `log` 能观察状态，`bad` / `good <rev>` 推进会话，`reset` 恢复原始 HEAD；`worktree add -b` 注册 linked worktree 并创建 shared branch，`list --verbose` 显示共享 HEAD 短 hash，`list --porcelain` 输出 `worktree` / `HEAD` / `locked` 记录且不输出 Git per-worktree `branch` / `detached` 行，`lock --reason` / `unlock` 更新锁状态，`move` 更新路径，`remove` 默认只注销登记且保留目录，`prune --dry-run` 不写 registry，`prune --expire now` 清理目录缺失条目，`add --no-checkout` 不恢复 tracked 文件，locked worktree 需要 `-f -f` 注销，`remove --delete-dir --force` 可删除 dirty linked worktree；非法 stash ref、非法 revision 和缺失 worktree 必须失败且不破坏已有仓库状态。
+断言：`stash push` 保存 tracked 修改并清理工作区；`stash list` / `stash show` 能观察 stash 条目；`stash apply` 保留 stash，`stash pop` 应用并删除 stash；`stash push -u` 保存/移除/恢复可见 untracked 文件；`stash push --all` 保存/移除/恢复可见 untracked 与 ignored 文件；`stash push --keep-index` 保留 staged 内容并移除 unstaged delta；`stash clear --force` 清空列表；`bisect start <bad> --good <good>` 建立会话，`bisect start <bad> <good1> <good2>...` 多 good 位置参数（git 表面），`view` / `log` 能观察状态，`bad` / `good <rev>` 推进会话，`reset` 恢复原始 HEAD；`worktree add -b` 注册 linked worktree 并创建 shared branch，`list --verbose` 显示共享 HEAD 短 hash，`list --porcelain` 输出 `worktree` / `HEAD` / `locked` 记录且不输出 Git per-worktree `branch` / `detached` 行，`lock --reason` / `unlock` 更新锁状态，`move` 更新路径，`remove` 默认只注销登记且保留目录，`prune --dry-run` 不写 registry，`prune --expire now` 清理目录缺失条目，`add --no-checkout` 不恢复 tracked 文件，locked worktree 需要 `-f -f` 注销，`remove --delete-dir --force` 可删除 dirty linked worktree；非法 stash ref、非法 revision 和缺失 worktree 必须失败且不破坏已有仓库状态。
 
 补充可执行断言（故意差异重点场景）：
 - `libra worktree remove <path>` 后 `test -d <path>` 必须仍存在（Libra 故意保留目录，不像 Git 默认删除）。
