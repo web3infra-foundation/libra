@@ -616,6 +616,16 @@ pub fn builtin_migrations() -> Vec<Migration> {
                 "../../../sql/migrations/2026052301_source_call_log_down.sql"
             )),
         },
+        // v0.17.906 notes: adds the `notes` table mapping (notes_ref, object)
+        // pairs to blob hashes. DDL is idempotent (CREATE TABLE IF NOT EXISTS).
+        Migration {
+            version: 2026053101,
+            name: "notes",
+            up: include_str!("../../../sql/migrations/2026053101_notes.sql"),
+            down: Some(include_str!(
+                "../../../sql/migrations/2026053101_notes_down.sql"
+            )),
+        },
         // CEX-S2-14 trace chain: attribute a sub-agent's Source-Pool calls to
         // its run via `agent_run_id` (producer reads it from the invocation's
         // ToolRuntimeContext). Additive column; NULL = main-session call.
@@ -767,7 +777,7 @@ mod tests {
         // `builtin_migrations()` so silent registry regressions surface
         // here in addition to `tests/db_migration_test.rs`.
         let runner = builtin_runner().expect("CEX-12.5 builtin registry must build clean");
-        assert_eq!(runner.len(), 10);
+        assert_eq!(runner.len(), 11);
         assert!(!runner.is_empty());
         assert_eq!(runner.max_registered_version(), Some(2026060801));
     }

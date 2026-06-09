@@ -44,6 +44,7 @@ pub mod ls_remote;
 pub mod merge;
 pub(crate) mod merge_base;
 pub mod mv;
+pub mod notes;
 pub mod open;
 pub mod package;
 pub mod publish;
