@@ -227,6 +227,17 @@ fn test_merge_fast_forward_leaves_ignored_artifacts_untouched() {
     let temp_repo = create_committed_repo_via_cli();
     let temp_path = temp_repo.path();
 
+    // Commit the `artifacts/` ignore rule on `main` *before* branching so the
+    // working tree is clean at merge time. `libra init` seeds a tracked
+    // `.libraignore`, so overwriting it without committing would leave a
+    // modified tracked file and the merge preflight would refuse the merge.
+    commit_file(
+        temp_path,
+        ".libraignore",
+        "artifacts/\n",
+        "ignore build artifacts",
+    );
+
     // Advance `feature` one commit ahead of `main` so `main` can fast-forward.
     assert_cli_success(
         &run_libra_command(&["branch", "feature"], temp_path),
@@ -243,7 +254,6 @@ fn test_merge_fast_forward_leaves_ignored_artifacts_untouched() {
     );
 
     // An ignored "build artifact" directory that must be left completely alone.
-    std::fs::write(temp_path.join(".libraignore"), "artifacts/\n").expect("write .libraignore");
     std::fs::create_dir_all(temp_path.join("artifacts")).expect("create artifacts dir");
     let artifact = temp_path.join("artifacts").join("big.bin");
     let artifact_bytes = vec![0x5Au8; 256 * 1024];
