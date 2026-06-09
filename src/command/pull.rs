@@ -1060,7 +1060,7 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
         merge::PullMergeError::HeadResolve(..) => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
         }
-        merge::PullMergeError::HeadUpdate(..) | merge::PullMergeError::Restore(..) => {
+        merge::PullMergeError::HeadUpdate(..) => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
         }
     }
