@@ -69,6 +69,11 @@
   synopsis, CLI flags, human/JSON output examples, parameter comparison with Git
   and jj, design rationale (SQLite-backed refs, no editor support), and error
   handling reference.
+- **`libra prune`**: Prunes unreachable loose objects from repository. Supports `-dry-run`
+  for dry-run mode, `--verbose` for verbose report, `--expire` for expiration specification,
+  and user-specified heads as additional reachability start points.
+- **`docs/commands/prune.md`**: Comprehensive documentation for the `prune` command
+  including synopsis, CLI flags, human/JSON output examples and error handling reference.
 
 ### Documentation
 

@@ -317,6 +317,7 @@ mod mv_test;
 mod notes_test;
 mod open_test;
 mod output_flags_test;
+mod prune_test;
 mod publish_test;
 mod pull_json_test;
 mod pull_test;
