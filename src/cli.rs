@@ -36,7 +36,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, notes, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent, package
-  Maintenance And Plumbing db, fsck, cat-file, hash-object, verify-pack, archive, rev-parse, rev-list, symbolic-ref, reflog, bisect
+  Maintenance And Plumbing db, fsck, prune, cat-file, hash-object, verify-pack, archive, rev-parse, rev-list, symbolic-ref, reflog, bisect
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
