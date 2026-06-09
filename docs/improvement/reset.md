@@ -4,7 +4,7 @@
 
 同时落地 [Cross-Cutting Improvements A/B/F/G](README.md#全局层面改进贯穿所有命令)。
 
-> 当前工作区实现已按本文范围落地一部分改动；以下内容改为记录已落地能力、剩余遗漏和后续收口项。
+> 当前工作区实现已按本文范围落地；以下内容记录已落地能力、维护边界和后续收口项。
 
 ### 已完成前置条件与当前代码状态
 
@@ -20,13 +20,15 @@
 - `run_reset()` + `render_reset_output()` 执行层/渲染层拆分已落地
 - `ResetOutput` 已定义，`--json` / `--machine` 已通过 `emit_json_data("reset", ...)` 输出结构化结果
 - `--soft` / `--mixed` / `--hard` 三种模式已实现
+- `--merge` / `--keep` 安全 reset 模式已实现，预检失败返回 `LBR-CONFLICT-002` 且 JSON details 包含 `conflict_files`
 - pathspec 支持已实现（reset 特定文件）
+- `--pathspec-from-file` / `--pathspec-file-nul` 已实现；`--no-refresh` 作为 Git 兼容 no-op 已实现
 - reflog 记录已集成（`ReflogContext` + `with_reflog()`）
 - `reset_index_to_commit()` / `reset_working_directory_to_commit()` 核心逻辑已实现
 - `rebuild_index_from_tree()` 和 `restore_working_directory_from_tree()` 已实现
 - 空目录清理 `remove_empty_directories()` 已实现
 - human 成功确认消息已落地：全量 reset 输出 `HEAD is now at <short-hash> <subject>`；pathspec reset 输出 `Unstaged changes after reset:`
-- pathspec 与 `--soft` / `--hard` 的冲突校验已接入显式 `StableErrorCode`
+- pathspec 与 `--soft` / `--hard` / `--merge` / `--keep` 的冲突校验已接入显式 `StableErrorCode`
 
 **基于当前代码的 Review 结论（已改进部分 vs 仍需改进部分）：**
 
@@ -40,7 +42,7 @@
 - **运行时 helper 已完成 typed 化**：`perform_reset()`、pathspec 查找、目录清理等路径已移除关键词匹配分类
 - **warning 管线已落地**：目录清理 warning 已改走共享 `emit_warning()` / warning tracker，不再直写 stderr
 - **`--help` EXAMPLES 已落地**
-- **JSON 回归测试已存在**：`tests/command/reset_test.rs` 已覆盖 `--json` schema、`--hard HEAD` restore 计数和 pathspec usage error
+- **JSON 回归测试已存在**：`tests/command/reset_test.rs` 已覆盖 `--json` schema、`--hard HEAD` restore 计数、pathspec usage error、`--merge`/`--keep` mode 输出和 `conflict_files` 错误 details
 
 仍需维护：
 
@@ -50,17 +52,15 @@
 ### 目标与非目标
 
 **已完成目标：**
-- `ResetError` typed error enum、typed helper、pathspec typed error、warning 管线、`run_reset()` / `render_reset_output()` 分层与 `--help` EXAMPLES 已落地
+- `ResetError` typed error enum、typed helper、pathspec typed error、`--merge`/`--keep` 预检、warning 管线、`run_reset()` / `render_reset_output()` 分层与 `--help` EXAMPLES 已落地
 
 **后续收口目标：**
-- 继续保持 rollback / warning / pathspec corruption 边界回归测试覆盖
+- 继续保持 rollback / warning / pathspec corruption / `--merge` / `--keep` 边界回归测试覆盖
 - 如后续增加 internal invariant 兜底错误，再统一接入 Issues URL
 
 **本批非目标：**
 - **不改变 soft/mixed/hard reset 核心逻辑**。索引重建和工作树恢复行为不变
 - **不引入 `--patch` 交互式 reset**
-- **不引入 `--keep` 模式**
-- **不改变 pathspec reset 行为**
 
 ### 设计原则
 
@@ -125,11 +125,20 @@ enum ResetError {
     #[error("Cannot do hard reset with paths.")]
     PathspecWithHard,
 
+    #[error("Cannot do merge reset with paths: {0}")]
+    PathspecWithMerge(String),
+
+    #[error("Cannot do keep reset with paths: {0}")]
+    PathspecWithKeep(String),
+
     #[error("pathspec '{0}' did not match any file(s) known to libra")]
     PathspecNotMatched(String),
 
     #[error("refusing to reset to locked branch '{0}'")]
     LockedTarget(String),
+
+    #[error("Entry '{path}' not uptodate. Cannot merge.")]
+    ConflictPrevented { path: String, files: Vec<String> },
 
     #[error("{primary}; rollback failed: {rollback}")]
     Rollback { primary: Box<ResetError>, rollback: Box<ResetError> },
@@ -161,8 +170,11 @@ enum ResetError {
 | `InvalidPathspecEncoding` | `CliInvalidArguments` | 129 | `rename the path or invoke libra from a path representable as UTF-8` |
 | `PathspecWithSoft` | `CliInvalidArguments` | 129 | `--soft only moves HEAD; use --mixed to reset index for specific paths` |
 | `PathspecWithHard` | `CliInvalidArguments` | 129 | `--hard updates the working tree; omit pathspecs or use --mixed for specific paths` |
+| `PathspecWithMerge` | `CliInvalidArguments` | 129 | `--merge updates the whole tree; omit pathspecs or use --mixed for specific paths` |
+| `PathspecWithKeep` | `CliInvalidArguments` | 129 | `--keep updates the whole tree; omit pathspecs or use --mixed for specific paths` |
 | `PathspecNotMatched` | `CliInvalidTarget` | 129 | `check the path and try again` |
 | `LockedTarget` | `CliInvalidTarget` | 129 | 无（拒绝 reset 到 `intent` / `agent-traces` 等 Libra 锁定分支） |
+| `ConflictPrevented` | `ConflictOperationBlocked` | 128 | `commit, stash, or discard the listed local changes before retrying` |
 | `Rollback { primary, rollback }` | 继承 `primary` 的 stable code | 128 | 无（rollback 失败时把原错误与 rollback 失败包起来一起传递） |
 
 **与当前代码中 inline 错误的对应关系：**
@@ -312,7 +324,7 @@ M       src/lib.rs
 
 | ID | 改进 | reset 中的具体落地 |
 |----|------|-----------------|
-| **A** | 退出码 `0/128/129` | 参数错误（无效 revision、pathspec + soft/hard 冲突）→ exit `129`；运行时错误（object 损坏、HEAD unborn、I/O 失败）→ exit `128`；成功 → exit `0` |
+| **A** | 退出码 `0/128/129` | 参数错误（无效 revision、pathspec + soft/hard/merge/keep 冲突）→ exit `129`；运行时错误（object 损坏、HEAD unborn、I/O 失败、merge/keep 预检冲突）→ exit `128`；成功 → exit `0` |
 | **B** | `--help` EXAMPLES | 见下方 EXAMPLES 段 |
 | **F** | 拼写纠错 | **不适用**——reset 的参数是 revision 和 pathspec，无 enum 值可做 fuzzy match |
 | **G** | Issues URL | 与 switch 保持一致——仅在映射为 `InternalInvariant` 的内部不变式错误时输出。当前 `reset` 计划内没有 `InternalInvariant` 变体，`RepoCorrupt` 是数据问题而非代码 bug，不附带 Issues URL |
@@ -338,6 +350,8 @@ EXAMPLES:
   - `InvalidRevision`：无效 revision 返回 exit `129` + `LBR-CLI-003`
   - `PathspecWithSoft`：`--soft` + pathspec 返回 exit `129` + `LBR-CLI-002`
   - `PathspecWithHard`：`--hard` + pathspec 返回 exit `129` + `LBR-CLI-002`
+  - `PathspecWithMerge` / `PathspecWithKeep`：`--merge` / `--keep` + pathspec 返回 exit `129` + `LBR-CLI-002`
+  - `ConflictPrevented`：`--merge` / `--keep` 预检冲突返回 exit `128` + `LBR-CONFLICT-002`，JSON `details.conflict_files` 包含冲突路径
   - `HeadUnborn`：空仓库 reset 返回 exit `128` + `LBR-REPO-003`
 - **（新增）成功确认消息**：human 模式下 stdout 包含 `HEAD is now at`
 - **（新增）pathspec reset 输出**：mixed 模式 + pathspec 后 stdout 包含 unstaged 文件列表
@@ -351,6 +365,7 @@ EXAMPLES:
 - **`--mixed --json`**：`mode == "mixed"`
 - **`--soft --json`**：`mode == "soft"`，`files_unstaged == 0`，`files_restored == 0`
 - **pathspec `--json`**：仅 mixed pathspec reset 成功，`pathspecs` 数组非空
+- **merge/keep `--json`**：`mode` 分别输出 `"merge"` / `"keep"`；冲突错误不写入成功 schema，而是进入 `CliError` JSON 信封
 - **错误 `--json`**：`ok == false` + 错误码
 - **`--machine reset`**：stdout 恰好 1 行非空行
 
@@ -367,6 +382,6 @@ EXAMPLES:
 
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
-| `src/command/reset.rs` | **维护** | 保持已落地的 `ResetOutput` / `ResetError` / `run_reset()` / `render_reset_output()` / warning 管线 / JSON / human 确认消息 / `--help` EXAMPLES / rollback 主错误分类保护不回退；后续仅维护边界回归 |
+| `src/command/reset.rs` | **维护** | 保持已落地的 `ResetOutput` / `ResetError` / `run_reset()` / `render_reset_output()` / `--merge` / `--keep` 预检 / warning 管线 / JSON / human 确认消息 / `--help` EXAMPLES / rollback 主错误分类保护不回退；后续仅维护边界回归 |
 | `tests/command/reset_test.rs` | **扩展** | 在现有 JSON / human 输出回归基础上，补齐 typed error、warning 路径与 help EXAMPLES 回归 |
 | `tests/command/reset_json_test.rs` | **可选拆分** | 若 `reset_test.rs` 中的 JSON 覆盖继续膨胀，可再拆出独立 schema 稳定性文件；当前不是阻断项 |

@@ -32,6 +32,7 @@ Multiple specs are unioned and de-duplicated. Exclusions and ranges follow Git:
 | `--max-parents <N>` | Show only commits with at most N parents. |
 | `--parents` | Append each commit's parent hashes: `<hash> <p1> <p2>…`. |
 | `--timestamp` | Prefix each line with the committer Unix timestamp. |
+| `--objects` | After each selected commit, print reachable tree/blob object IDs. Object lines are `<hash>` for the root tree and `<hash> <path>` for child trees/blobs. |
 
 Predicates apply before `--skip`/`--max-count`, so `--skip`/`-n` count post-filter commits (matching Git).
 
@@ -46,6 +47,7 @@ libra rev-list HEAD ^origin/main       # local-only commits
 libra rev-list -n 10 --no-merges HEAD  # 10 newest non-merge commits
 libra rev-list --count HEAD            # just the count
 libra rev-list --parents --timestamp HEAD
+libra rev-list --objects HEAD          # commits plus reachable trees/blobs
 libra --json rev-list HEAD
 ```
 
@@ -70,10 +72,24 @@ def5678901234567890abcdef12345678abc1234
       "abc1234def5678901234567890abcdef12345678",
       "def5678901234567890abcdef12345678abc1234"
     ],
-    "total": 2
+    "total": 2,
+    "objects": [
+      {
+        "hash": "0123456789abcdef0123456789abcdef01234567",
+        "path": "",
+        "type": "tree"
+      },
+      {
+        "hash": "89abcdef0123456789abcdef0123456789abcdef",
+        "path": "src/main.rs",
+        "type": "blob"
+      }
+    ]
   }
 }
 ```
+
+The optional `objects` array appears only with `--objects`. Commit IDs remain in `commits`; `objects` contains only tree/blob entries.
 
 ## Parameter Comparison: Libra vs Git vs jj
 
@@ -88,7 +104,7 @@ def5678901234567890abcdef12345678abc1234
 | Parent filters | `--merges`/`--no-merges`/`--min-parents`/`--max-parents` | Same | revset functions |
 | Format | `--parents`, `--timestamp` | Same | `--template` |
 | JSON output | `--json` | No | No |
-| Object walk | Not implemented (deferred) | `--objects` | N/A |
+| Object walk | `--objects` | `--objects` | N/A |
 | Topo / date order | Commit-date (default); `--topo-order`, `--since`/`--until`, `--children`, `--header`, pathspec limiting not implemented | All supported | Revset-dependent |
 | Ordering | Newest first (commit date) | Reachability order | Revset-dependent |
 

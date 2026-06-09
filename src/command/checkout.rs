@@ -749,6 +749,7 @@ async fn write_checkout_reflog(
             from: from_label,
             to: to_label,
         },
+        message: None,
     };
     with_reflog(
         context,

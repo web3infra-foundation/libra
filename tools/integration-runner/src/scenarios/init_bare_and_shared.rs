@@ -21,19 +21,24 @@ pub(crate) fn scenario_init_bare_and_shared(ctx: &mut ScenarioCtx<'_>) -> Result
         ("everybody", "shared-everybody"),
         ("0770", "shared-octal"),
     ] {
-        ctx.command(&["init", "--shared", mode, dir], ctx.run_dir.clone(), true)?;
+        let shared_arg = format!("--shared={mode}");
+        ctx.command(
+            &["init", shared_arg.as_str(), dir],
+            ctx.run_dir.clone(),
+            true,
+        )?;
         let repo = ctx.run_dir.join(dir);
         ctx.command(&["--json", "db", "status"], repo.clone(), true)?;
         ctx.command(&["fsck", "--connectivity-only"], repo, true)?;
     }
     let invalid = ctx.command(
-        &["init", "--shared", "invalid", "shared-invalid"],
+        &["init", "--shared=invalid", "shared-invalid"],
         ctx.run_dir.clone(),
         false,
     )?;
     assert_lbr_or_text(&invalid, "shared")?;
     let bad_octal = ctx.command(
-        &["init", "--shared", "8888", "shared-bad-octal"],
+        &["init", "--shared=8888", "shared-bad-octal"],
         ctx.run_dir.clone(),
         false,
     )?;

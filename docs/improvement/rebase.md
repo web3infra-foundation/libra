@@ -17,11 +17,14 @@
 - replay 内部失败分类已细化为 `ReplayErrorKind`（14 个变体），通过 `ReplayResult::Internal { kind, detail }` 与新增的 `RebaseError::ReplayInternal { commit, subject, kind, detail }` 透传，映射到 4 个独立稳定错误码（`RepoCorrupt` 用于对象/parent 加载失败、`IoReadFailed` 用于 index 读取、`IoWriteFailed` 用于 tree/commit/index/workdir 写入、`ConflictOperationBlocked` 用于 untracked overwrite）；不再让真实合并冲突与内部 IO 失败共用 `LBR-CONFLICT-001`。
 - `execute()` 已回收 legacy 内部路径；`execute` 与 `execute_safe` 共享同一运行路径，减少历史输出风格差异。
 - replay 创建新 tree、重建 index 时会保留普通 blob、可执行 blob、symlink 的 mode；Unix 工作区写回会恢复可执行位与 symlink，非 fast-forward rebase 不再把可执行脚本改写成普通文件，也不会因 mode 丢失留下脏工作区。
+- criss-cross 多 best merge-base 现在通过专用 `RebaseError::AmbiguousMergeBase` 返回 `LBR-CONFLICT-002` / 128，不再被降级成 commit-load/repo-corrupt 类错误；命令文档错误表已同步。
+- `--onto <newbase> <upstream> [<branch>]` 已接入非交互 rebase：`<upstream>` 只定义 replay range，`<newbase>` 作为 replay 目标；给出 `<branch>` 时会先切到该分支再执行 rebase。
+- 高阶非交互 rebase 能力已接入：`--autostash`/`rebase.autoStash`、`--autosquash`/`rebase.autoSquash`、`--reapply-cherry-picks`、`--root`（单根历史）、`--keep-empty`、`--empty=drop|keep|stop`、`--signoff`、vault-backed `-S`/`--gpg-sign`。
 
 ## 当前未完成
 
 - 本计划范围内的项目已全部收口；结构化输出、JSON/machine envelope、稳定错误码、replay 内部失败分类、`--abort/--continue/--skip` 状态机均已落地（详见上面"当前已落地"列表）。
-- `--onto` / interactive / autosquash / exec / rebase-merges 等历史 git 功能列在下面"非目标"段，是本计划**显式不实现**的范围，不算未完成项。
+- interactive / exec / rebase-merges 等历史 git 功能列在下面"非目标"段，是本计划**显式不实现**的范围，不算未完成项。
 
 ## 后续切片建议
 
@@ -29,6 +32,7 @@
 
 ## 非目标
 
-- 不实现 interactive rebase、`--onto`、autosquash、exec、rebase-merges 或多 source rebase。
+- 不实现 interactive rebase、exec、rebase-merges 或多 source rebase。
+- `--root` 的多根历史仍不支持；`--empty=ask` 不支持；`-S=<keyid>` / `--gpg-sign=<keyid>` 不支持（Libra 仅使用 vault 单一签名密钥）。
 - 不改变 SQLite rebase state schema，除非后续输出模型确实需要新增持久字段。
 - 不在 structured-output 迁移期间改变现有 conflict-stop 用户流程。

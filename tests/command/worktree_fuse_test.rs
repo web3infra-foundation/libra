@@ -157,6 +157,87 @@ fn test_fuse_worktree_umount_json_reports_cleanup_without_repo() {
 
 #[tokio::test]
 #[serial]
+async fn test_fuse_worktree_non_fuse_add_forwards_standard_flags() {
+    let repo_dir = tempdir().expect("create temp repo");
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+
+    fs::write(repo_dir.path().join("seed.txt"), "seed\n").expect("write seed");
+    let add = run_libra_command(&["add", "seed.txt"], repo_dir.path());
+    assert_cli_success(&add, "add seed");
+    let commit = run_libra_command(&["commit", "-m", "seed", "--no-verify"], repo_dir.path());
+    assert_cli_success(&commit, "commit seed");
+
+    let output = run_libra_command(
+        &[
+            "worktree",
+            "add",
+            "--no-checkout",
+            "--lock",
+            "--reason",
+            "delegated",
+            "wt-delegated",
+        ],
+        repo_dir.path(),
+    );
+    assert_cli_success(
+        &output,
+        "feature worktree add standard flags without --fuse",
+    );
+
+    let wt_path = repo_dir.path().join("wt-delegated");
+    assert!(
+        !wt_path.join("seed.txt").exists(),
+        "non-FUSE wrapper should forward --no-checkout"
+    );
+    let list = run_libra_command(&["--json", "worktree", "list"], repo_dir.path());
+    assert_cli_success(&list, "json worktree list");
+    let parsed = parse_json_stdout(&list);
+    let entries = parsed["data"]["worktrees"]
+        .as_array()
+        .expect("worktrees should be an array");
+    let delegated = entries
+        .iter()
+        .find(|entry| {
+            entry["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("wt-delegated"))
+        })
+        .expect("delegated worktree should be listed");
+    assert_eq!(delegated["locked"], true);
+    assert_eq!(delegated["lock_reason"], "delegated");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_fuse_worktree_non_fuse_remove_forwards_force() {
+    let repo_dir = tempdir().expect("create temp repo");
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+
+    let add = run_libra_command(&["worktree", "add", "wt-force-delegated"], repo_dir.path());
+    assert_cli_success(&add, "worktree add");
+    let wt_path = repo_dir.path().join("wt-force-delegated");
+    fs::write(wt_path.join("dirty.txt"), "dirty\n").expect("dirty delegated worktree");
+
+    let remove = run_libra_command(
+        &[
+            "worktree",
+            "remove",
+            "--delete-dir",
+            "--force",
+            "wt-force-delegated",
+        ],
+        repo_dir.path(),
+    );
+
+    assert_cli_success(&remove, "feature worktree remove forwards --force");
+    assert!(
+        !wt_path.exists(),
+        "non-FUSE wrapper should forward --delete-dir --force to legacy remove"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_fuse_worktree_metadata_management() {
     if !can_run_fuse_tests() {
         return;

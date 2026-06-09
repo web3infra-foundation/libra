@@ -113,6 +113,14 @@ chain length = 1: 4 objects
 | Pack 格式错误 | `LBR-REPO-002` | 128 |
 | 索引和 pack 不一致 | `LBR-REPO-002` | 128 |
 
+详细的损坏诊断会保留在人类可读错误文本中。常见示例包括
+`pack index v2 checksum mismatch`、`pack checksum mismatch: index has <hash>,
+pack has <hash>`、`offset mismatch for <oid>: index has <n>, pack has <n>`，
+以及 `crc32 mismatch for <oid>: index has <hex>, pack has <hex>`。
+
+当一次传入多个索引文件时，Libra 当前会在第一个失败索引处停止，并在
+stderr 输出共享 CLI 错误。`--json` 和 `--machine` 只会在所有请求的索引都校验通过时输出成功 payload。
+
 ## 被 `fsck` 复用
 
 `verify-pack` 的核心校验逻辑被 [`libra fsck`](../fsck.md) 在进程内复用，用于体检 `objects/pack/` 下的每个 packfile。fsck 不 fork 子进程，而是直接调用同一校验逻辑：报告任何受损或不可读的 pack，并以退出码 `1`（与 `git fsck` 一致）结束，且不会因单个坏 pack 而中断对其余 pack 的检查。

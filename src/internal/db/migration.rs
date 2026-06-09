@@ -652,6 +652,17 @@ pub fn builtin_migrations() -> Vec<Migration> {
                 "../../../sql/migrations/2026060401_cherry_pick_state_down.sql"
             )),
         },
+        // Revert sequencer state (Git-core metadata): persists in-progress
+        // `revert --continue/--skip/--abort/--quit` state in SQLite instead
+        // of `.libra/REVERT_HEAD` files, matching the cherry-pick sequencer.
+        Migration {
+            version: 2026060801,
+            name: "revert_sequence",
+            up: include_str!("../../../sql/migrations/2026060801_revert_sequence.sql"),
+            down: Some(include_str!(
+                "../../../sql/migrations/2026060801_revert_sequence_down.sql"
+            )),
+        },
     ]
 }
 
@@ -768,7 +779,7 @@ mod tests {
         let runner = builtin_runner().expect("CEX-12.5 builtin registry must build clean");
         assert_eq!(runner.len(), 10);
         assert!(!runner.is_empty());
-        assert_eq!(runner.max_registered_version(), Some(2026060401));
+        assert_eq!(runner.max_registered_version(), Some(2026060801));
     }
 
     #[test]

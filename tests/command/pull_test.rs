@@ -923,6 +923,100 @@ async fn test_pull_squash_stages_without_commit() {
     );
 }
 
+#[test]
+#[serial]
+fn test_pull_squash_human_output_does_not_report_fast_forward() {
+    let (_temp_root, remote_dir, work_dir, branch) = create_remote_fixture();
+    let local_repo = tempdir().expect("local repo");
+    init_repo_via_cli(local_repo.path());
+    configure_identity_via_cli(local_repo.path());
+    configure_pull_tracking(local_repo.path(), &remote_dir, &branch);
+    assert_cli_success(
+        &run_libra_command(&["pull"], local_repo.path()),
+        "initial pull",
+    );
+
+    push_remote_commit(
+        &work_dir,
+        &branch,
+        "remote.txt",
+        "remote\n",
+        "remote update",
+    );
+    fs::write(local_repo.path().join("local.txt"), "local\n").expect("write local");
+    assert_cli_success(
+        &run_libra_command(&["add", "local.txt"], local_repo.path()),
+        "stage local",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "local", "--no-verify"], local_repo.path()),
+        "commit local",
+    );
+
+    let output = run_libra_command(&["pull", "--squash"], local_repo.path());
+    assert_cli_success(&output, "pull --squash");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Squash commit -- not updating HEAD."),
+        "squash pull should explain that HEAD was not updated: {stdout}"
+    );
+    assert!(
+        !stdout.lines().any(|line| line == "Fast-forward"),
+        "squash pull must not report the integration as a fast-forward: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_pull_no_commit_human_output_leaves_merge_state_without_fast_forward_label() {
+    let (_temp_root, remote_dir, work_dir, branch) = create_remote_fixture();
+    let local_repo = tempdir().expect("local repo");
+    init_repo_via_cli(local_repo.path());
+    configure_identity_via_cli(local_repo.path());
+    configure_pull_tracking(local_repo.path(), &remote_dir, &branch);
+    assert_cli_success(
+        &run_libra_command(&["pull"], local_repo.path()),
+        "initial pull",
+    );
+
+    push_remote_commit(
+        &work_dir,
+        &branch,
+        "remote.txt",
+        "remote\n",
+        "remote update",
+    );
+    fs::write(local_repo.path().join("local.txt"), "local\n").expect("write local");
+    assert_cli_success(
+        &run_libra_command(&["add", "local.txt"], local_repo.path()),
+        "stage local",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "local", "--no-verify"], local_repo.path()),
+        "commit local",
+    );
+
+    let output = run_libra_command(&["pull", "--no-commit"], local_repo.path());
+    assert_cli_success(&output, "pull --no-commit");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Automatic merge went well; stopped before committing as requested."),
+        "no-commit pull should explain that it stopped before committing: {stdout}"
+    );
+    assert!(
+        !stdout.lines().any(|line| line == "Fast-forward"),
+        "no-commit pull must not report the integration as a fast-forward: {stdout}"
+    );
+    assert!(
+        local_repo
+            .path()
+            .join(".libra")
+            .join("merge-state.json")
+            .exists(),
+        "--no-commit pull should leave merge state for an explicit commit/continue"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_pull_autostash_clean_after_up_to_date() {

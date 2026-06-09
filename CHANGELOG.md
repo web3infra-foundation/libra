@@ -4,6 +4,11 @@
 
 ### Added
 
+- **`libra archive`**: create archives from committed tree snapshots. Supports
+  `tar`, `tar.gz`/`tgz`, `tar.bz2`/`tbz2`/`tbz`, and `zip`, with optional
+  `--output <FILE>` and safe relative `--prefix <PREFIX>` handling. The focused
+  integration coverage includes happy paths, invalid inputs, Unicode filenames,
+  spaces in paths, deeply nested files, and empty files.
 - **Cross-cutting `--help` EXAMPLES rollout (v0.17.812..v0.17.836, sealed
   v0.17.837)**: every visible command in `src/cli.rs::Commands` now ends
   its `--help` output with an `EXAMPLES:` section listing the canonical

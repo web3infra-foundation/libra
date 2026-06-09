@@ -80,6 +80,7 @@ async fn test_basic_cherry_pick() {
         force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
     println!("Switched to new branch 'feature'.");
@@ -159,6 +160,7 @@ async fn test_basic_cherry_pick() {
         force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
     println!("Switched back to master.");
@@ -299,6 +301,7 @@ async fn test_cherry_pick_with_commit() {
         force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
 
@@ -342,6 +345,7 @@ async fn test_cherry_pick_with_commit() {
         force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
 
@@ -424,6 +428,7 @@ async fn test_cherry_pick_multiple_commits() {
         force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
 
@@ -496,6 +501,7 @@ async fn test_cherry_pick_multiple_commits() {
         force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
 
@@ -702,6 +708,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
         force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
     fs::write("feature.txt", "feature").unwrap();
@@ -742,6 +749,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
         force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
     let head_before = Head::current_commit().await.unwrap();

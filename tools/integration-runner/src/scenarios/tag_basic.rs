@@ -5,7 +5,30 @@ pub(crate) fn scenario_tag_basic(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
     create_committed_repo(ctx, &repo)?;
     ctx.command(&["tag", "v1.0.0"], repo.clone(), true)?;
     assert_stdout_contains(&ctx.command(&["tag", "-l"], repo.clone(), true)?, "v1.0.0")?;
-    ctx.command(&["tag", "v1.1.0"], repo.clone(), true)?;
+    ctx.command(
+        &["tag", "-m", "release v1.1.0", "v1.1.0"],
+        repo.clone(),
+        true,
+    )?;
+    fs::write(repo.join("release.txt"), "release v1.2.0\n")
+        .context("write release note fixture")?;
+    ctx.command(&["tag", "-F", "release.txt", "v1.2.0"], repo.clone(), true)?;
+    assert_stdout_contains(
+        &ctx.command(&["tag", "--points-at", "HEAD"], repo.clone(), true)?,
+        "v1.0.0",
+    )?;
+    assert_stdout_contains(
+        &ctx.command(&["tag", "--contains", "HEAD"], repo.clone(), true)?,
+        "v1.2.0",
+    )?;
+    assert_stdout_contains(
+        &ctx.command(
+            &["tag", "--merged", "HEAD", "--sort=-refname"],
+            repo.clone(),
+            true,
+        )?,
+        "v1.2.0",
+    )?;
     let rev = ctx.command(&["rev-parse", "v1.0.0"], repo.clone(), true)?;
     if stdout_trim(&rev).len() < 40 {
         bail!("tag rev-parse returned short id");
@@ -15,10 +38,22 @@ pub(crate) fn scenario_tag_basic(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
         "v1",
     )?;
     ctx.command(&["tag", "-f", "v1.0.0"], repo.clone(), true)?;
-    ctx.command(&["tag", "-d", "v1.1.0"], repo.clone(), true)?;
+    ctx.command(&["tag", "-d", "v1.1.0", "v1.2.0"], repo.clone(), true)?;
     assert_lbr_or_text(
         &ctx.command(&["rev-parse", "v1.1.0"], repo.clone(), false)?,
         "not found",
+    )?;
+    assert_lbr_or_text(
+        &ctx.command(&["tag", "v1.3.0", "v1.4.0"], repo.clone(), false)?,
+        "only --delete accepts multiple tag names",
+    )?;
+    assert_json_ok(
+        &ctx.command(
+            &["--json", "tag", "-d", "v1.0.0", "missing-tag"],
+            repo.clone(),
+            false,
+        )?,
+        "tag",
     )?;
     assert_json_ok(
         &ctx.command(&["--json", "tag", "-l"], repo.clone(), true)?,

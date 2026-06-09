@@ -259,6 +259,107 @@ fn test_restore_quiet_suppresses_confirmation_but_still_restores() {
     );
 }
 
+#[test]
+#[serial]
+fn test_restore_overlay_keeps_tracked_file_missing_from_source() {
+    let repo = create_committed_repo_via_cli();
+    commit_file_cli(repo.path(), "extra.txt", "extra\n", "add extra");
+
+    let output = run_libra_command(
+        &["restore", "--source", "HEAD~1", "--overlay", "extra.txt"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "restore --overlay should succeed");
+
+    let extra = std::fs::read_to_string(repo.path().join("extra.txt"))
+        .expect("overlay restore should keep extra.txt");
+    assert_eq!(extra, "extra\n");
+}
+
+#[test]
+#[serial]
+fn test_restore_no_overlay_removes_tracked_file_missing_from_source() {
+    let repo = create_committed_repo_via_cli();
+    commit_file_cli(repo.path(), "extra.txt", "extra\n", "add extra");
+
+    let output = run_libra_command(&["restore", "--source", "HEAD~1", "extra.txt"], repo.path());
+    assert_cli_success(&output, "default no-overlay restore should succeed");
+
+    assert!(
+        !repo.path().join("extra.txt").exists(),
+        "no-overlay restore should remove tracked files missing from the source"
+    );
+}
+
+#[test]
+#[serial]
+fn test_restore_pathspec_from_file_stdin_restores_path() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "modified\n")
+        .expect("failed to modify tracked file");
+
+    let output = run_libra_command_with_stdin(
+        &["restore", "--pathspec-from-file=-"],
+        repo.path(),
+        "tracked.txt\n",
+    );
+    assert_cli_success(&output, "restore should read pathspecs from stdin");
+
+    let restored = std::fs::read_to_string(repo.path().join("tracked.txt"))
+        .expect("failed to read restored file");
+    assert_eq!(restored, "tracked\n");
+}
+
+#[test]
+#[serial]
+fn test_restore_pathspec_file_nul_restores_path() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "modified\n")
+        .expect("failed to modify tracked file");
+    std::fs::write(repo.path().join("paths.bin"), b"tracked.txt\0")
+        .expect("failed to write NUL pathspec file");
+
+    let output = run_libra_command(
+        &[
+            "restore",
+            "--pathspec-from-file=paths.bin",
+            "--pathspec-file-nul",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&output, "restore should read NUL-separated pathspecs");
+
+    let restored = std::fs::read_to_string(repo.path().join("tracked.txt"))
+        .expect("failed to read restored file");
+    assert_eq!(restored, "tracked\n");
+}
+
+#[test]
+#[serial]
+fn test_restore_pathspec_from_file_conflicts_with_positional_pathspec() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("paths.txt"), "tracked.txt\n")
+        .expect("failed to write pathspec file");
+
+    let output = run_libra_command(
+        &["restore", "--pathspec-from-file=paths.txt", "tracked.txt"],
+        repo.path(),
+    );
+    assert_eq!(output.status.code(), Some(129));
+}
+
+#[test]
+#[serial]
+fn test_restore_overlay_modes_mutually_exclusive() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(
+        &["restore", "--overlay", "--no-overlay", "tracked.txt"],
+        repo.path(),
+    );
+    assert_eq!(output.status.code(), Some(129));
+}
+
 // ── Locked-branch guard ─────────────────────────────────────────────────
 
 #[test]
@@ -505,6 +606,50 @@ fn test_restore_ours_keeps_index_unmerged() {
 
 #[test]
 #[serial]
+fn test_restore_merge_renders_conflict_markers() {
+    let repo = create_conflicted_repo();
+    assert_cli_success(
+        &run_libra_command(&["restore", "--ours", "tracked.txt"], repo.path()),
+        "restore --ours",
+    );
+
+    let out = run_libra_command(&["restore", "--merge", "tracked.txt"], repo.path());
+    assert_cli_success(&out, "restore --merge should succeed");
+
+    let content = std::fs::read_to_string(repo.path().join("tracked.txt"))
+        .expect("failed to read conflict markers");
+    assert!(content.contains("<<<<<<< HEAD"), "content: {content}");
+    assert!(content.contains("======="), "content: {content}");
+    assert!(content.contains(">>>>>>> theirs"), "content: {content}");
+
+    let plain = run_libra_command(&["restore", "tracked.txt"], repo.path());
+    assert_eq!(
+        plain.status.code(),
+        Some(128),
+        "restore --merge should leave the index unmerged"
+    );
+}
+
+#[test]
+#[serial]
+fn test_restore_conflict_diff3_includes_base_marker() {
+    let repo = create_conflicted_repo();
+    assert_cli_success(
+        &run_libra_command(&["restore", "--ours", "tracked.txt"], repo.path()),
+        "restore --ours",
+    );
+
+    let out = run_libra_command(&["restore", "--conflict=diff3", "tracked.txt"], repo.path());
+    assert_cli_success(&out, "restore --conflict=diff3 should succeed");
+
+    let content = std::fs::read_to_string(repo.path().join("tracked.txt"))
+        .expect("failed to read diff3 conflict markers");
+    assert!(content.contains("||||||| base"), "content: {content}");
+    assert!(content.contains("tracked\n"), "content: {content}");
+}
+
+#[test]
+#[serial]
 fn test_restore_ours_staged_rejected_by_clap() {
     let repo = create_committed_repo_via_cli();
     let out = run_libra_command(
@@ -547,5 +692,22 @@ fn test_restore_conflict_flags_mutually_exclusive() {
         .code(),
         Some(129),
         "--ignore-unmerged conflicts with --ours",
+    );
+    assert_eq!(
+        run_libra_command(&["restore", "--merge", "--ours", "tracked.txt"], path)
+            .status
+            .code(),
+        Some(129),
+        "--merge conflicts with --ours",
+    );
+    assert_eq!(
+        run_libra_command(
+            &["restore", "--conflict=diff3", "--theirs", "tracked.txt"],
+            path,
+        )
+        .status
+        .code(),
+        Some(129),
+        "--conflict conflicts with --theirs",
     );
 }

@@ -339,7 +339,8 @@ async fn run_remove(args: RemoveArgs) -> CliResult<RemoveOutput> {
             error_msg.push_str("(use -f to force removal)");
         }
         if !error_msg.is_empty() {
-            return Err(CliError::failure(error_msg.trim_end().to_string()));
+            return Err(CliError::failure(error_msg.trim_end().to_string())
+                .with_stable_code(StableErrorCode::WarningEmitted));
         }
     }
 
@@ -366,46 +367,51 @@ async fn run_remove(args: RemoveArgs) -> CliResult<RemoveOutput> {
         }
     }
 
-    // Persist the index BEFORE deleting any files. If the save fails after the
-    // physical deletion, the index would still track files that no longer
-    // exist on disk — an unrecoverable inconsistency. Saving first keeps the
-    // index and working tree in agreement on every failure path.
-    index.save(&idx_file).map_err(|e| {
-        CliError::fatal(format!(
-            "failed to save index '{}': {e}",
-            idx_file.display()
-        ))
-        .with_stable_code(StableErrorCode::IoWriteFailed)
-    })?;
+    if !args.dry_run {
+        // Persist the index BEFORE deleting any files. If the save fails after the
+        // physical deletion, the index would still track files that no longer
+        // exist on disk — an unrecoverable inconsistency. Saving first keeps the
+        // index and working tree in agreement on every failure path.
+        index.save(&idx_file).map_err(|e| {
+            CliError::fatal(format!(
+                "failed to save index '{}': {e}",
+                idx_file.display()
+            ))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+        })?;
+    }
 
     if !args.cached && !args.dry_run {
+        let mut failed_removals: Vec<(PathBuf, String)> = Vec::new();
         for path_str in remove_list {
             let path = PathBuf::from(&path_str);
             if let Err(e) = fs::remove_file(&path).await {
-                return Err(CliError::failure(format!(
-                    "failed to remove file '{}': {}",
-                    path.display(),
-                    e
-                )));
+                failed_removals.push((path, e.to_string()));
             }
         }
         for path_str in remove_dir_list {
             let path = PathBuf::from(&path_str);
             if args.recursive {
                 if let Err(e) = fs::remove_dir_all(&path).await {
-                    return Err(CliError::failure(format!(
-                        "failed to remove directory '{}': {}",
-                        path.display(),
-                        e
-                    )));
+                    failed_removals.push((path, e.to_string()));
                 }
             } else if let Err(e) = fs::remove_dir(&path).await {
-                return Err(CliError::failure(format!(
-                    "failed to remove directory '{}': {}",
-                    path.display(),
-                    e
-                )));
+                failed_removals.push((path, e.to_string()));
             }
+        }
+        if !failed_removals.is_empty() {
+            let failed_paths = failed_removals
+                .iter()
+                .map(|(path, _)| path.display().to_string())
+                .collect::<Vec<_>>();
+            let summary = failed_removals
+                .iter()
+                .map(|(path, error)| format!("failed to remove '{}': {error}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(CliError::failure(summary)
+                .with_stable_code(StableErrorCode::WarningEmitted)
+                .with_detail("failed_paths", serde_json::json!(failed_paths)));
         }
     }
 

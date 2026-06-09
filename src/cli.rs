@@ -36,7 +36,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, notes, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent, package
-  Maintenance And Plumbing db, fsck, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
+  Maintenance And Plumbing db, fsck, cat-file, hash-object, verify-pack, archive, rev-parse, rev-list, symbolic-ref, reflog, bisect
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -350,6 +350,8 @@ enum Commands {
     HashObject(command::hash_object::HashObjectArgs),
     #[command(about = "Validate pack index files against pack archives")]
     VerifyPack(command::verify_pack::VerifyPackArgs),
+    #[command(about = "Create an archive of files from a named tree")]
+    Archive(command::archive::ArchiveArgs),
 
     #[command(about = "Record changes to the repository", alias = "ci")]
     Commit(command::commit::CommitArgs),
@@ -448,6 +450,23 @@ pub enum Stash {
     Push {
         #[arg(short, long, help = "The message to display for the stash")]
         message: Option<String>,
+        #[arg(
+            short = 'u',
+            long = "include-untracked",
+            help = "Include untracked files in the stash"
+        )]
+        include_untracked: bool,
+        #[arg(
+            short = 'a',
+            long = "all",
+            help = "Include untracked and ignored files in the stash"
+        )]
+        all: bool,
+        #[arg(
+            long = "keep-index",
+            help = "Keep staged changes in the index and working tree"
+        )]
+        keep_index: bool,
     },
     #[command(about = "Remove a single stashed state from the stash list")]
     Pop {
@@ -474,6 +493,8 @@ pub enum Stash {
         name_only: bool,
         #[arg(long, help = "Show only file names with their status code")]
         name_status: bool,
+        #[arg(long, help = "Show a file-level summary of the stashed changes")]
+        stat: bool,
         #[arg(
             short = 'p',
             long = "patch",
@@ -967,6 +988,7 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
                 Err(_) => Ok(CommandPreflight::sha1_without_repo()),
             }
         }
+        Commands::RevParse(args) if args.sq_quote => Ok(CommandPreflight::none()),
         Commands::VerifyPack(_) => match utils::util::try_get_storage_path(None) {
             Ok(storage) => Ok(CommandPreflight::repo_hash_kind_without_schema_guard(
                 storage,
@@ -1158,7 +1180,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     if is_error_codes_help_topic(&argv) {
         return print_error_codes_help();
     }
-    let args = match Cli::try_parse_from(argv.clone()) {
+    let mut args = match Cli::try_parse_from(argv.clone()) {
         Ok(args) => args,
         Err(err) => match err.kind() {
             ErrorKind::DisplayHelp
@@ -1172,6 +1194,11 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             _ => return Err(classify_parse_error(&argv, &err)),
         },
     };
+    if let Commands::Log(log_args) = &mut args.command
+        && let Some((log_index, _)) = find_subcommand_index(&argv)
+    {
+        command::log::apply_pathspec_separator(log_args, &argv[log_index + 1..]);
+    }
     if let Commands::Tag(tag_args) = &args.command {
         command::tag::validate_cli_args(tag_args)?;
     }
@@ -1293,6 +1320,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::VerifyPack(cmd_args) => {
             command::verify_pack::execute_safe(cmd_args, &output).await?
         }
+        Commands::Archive(cmd_args) => command::archive::execute_safe(cmd_args, &output).await?,
         Commands::IndexPack(cmd_args) => command::index_pack::execute_safe(cmd_args, &output)?,
         Commands::Fetch(cmd_args) => command::fetch::execute_safe(cmd_args, &output).await?,
         Commands::Fsck(cmd_args) => command::fsck::execute_safe(cmd_args, &output).await?,

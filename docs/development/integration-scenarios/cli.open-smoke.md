@@ -15,8 +15,18 @@ cd open-repo
 libra remote add origin git@github.com:example/open-repo.git
 libra --json open >open-default.json
 libra --json open origin >open-origin.json
-python3 -c "import json; d=json.load(open('open-default.json')); assert d['ok'] is True; assert d['data']['launched'] is False; assert 'web_url' in d['data']"
-python3 -c "import json; d=json.load(open('open-origin.json')); assert d['ok'] is True; assert d['data']['launched'] is False; assert 'web_url' in d['data']"
+libra --json open -b main origin >open-branch.json
+libra config open.platform gitlab
+libra --json open -c a1b2c3d origin >open-gitlab-commit.json
+libra config open.platform custom
+libra config open.template.issue "{base_url}/tickets/{issue}"
+libra --json open --issue=42 origin >open-custom-issue.json
+python3 -c "import json; d=json.load(open('open-default.json')); assert d['ok'] is True; assert d['data']['remote'] == 'origin'; assert d['data']['web_url'] == 'https://github.com/example/open-repo'; assert d['data']['target_type'] == 'repo'; assert d['data']['platform'] == 'github'; assert d['data']['launched'] is False"
+python3 -c "import json; d=json.load(open('open-origin.json')); assert d['ok'] is True; assert d['data']['remote'] == 'origin'; assert d['data']['web_url'] == 'https://github.com/example/open-repo'; assert d['data']['target_type'] == 'repo'; assert d['data']['platform'] == 'github'; assert d['data']['launched'] is False"
+python3 -c "import json; d=json.load(open('open-branch.json')); assert d['ok'] is True; assert d['data']['web_url'] == 'https://github.com/example/open-repo/tree/main'; assert d['data']['target_type'] == 'branch'; assert d['data']['platform'] == 'github'; assert d['data']['launched'] is False"
+python3 -c "import json; d=json.load(open('open-gitlab-commit.json')); assert d['ok'] is True; assert d['data']['web_url'] == 'https://github.com/example/open-repo/-/commit/a1b2c3d'; assert d['data']['target_type'] == 'commit'; assert d['data']['platform'] == 'gitlab'; assert d['data']['launched'] is False"
+python3 -c "import json; d=json.load(open('open-custom-issue.json')); assert d['ok'] is True; assert d['data']['web_url'] == 'https://github.com/example/open-repo/tickets/42'; assert d['data']['target_type'] == 'issue'; assert d['data']['platform'] == 'custom'; assert d['data']['launched'] is False"
+libra fsck --connectivity-only
 ```
 
 负向步骤：
@@ -26,10 +36,9 @@ cd "$RUN_DIR/open-repo"
 ! libra --json open no-such-remote
 ```
 
-断言：全局 `--json` 模式输出包含 `remote`、`remote_url`、`web_url` 和 `launched=false`，不启动外部程序；指定 remote 可解析托管页面 URL；缺失 remote 或不安全 URL 必须失败。默认 Wave 严禁运行会真实启动浏览器/系统应用的裸 `libra open`。
+断言：全局 `--json` 模式输出包含 `remote`、`remote_url`、`web_url`、`target_type`、`platform` 和 `launched=false`，不启动外部程序；指定 remote 可解析托管页面 URL；deep-link 分支页、GitLab 平台覆盖、自定义 issue 模板均生成精确 URL；缺失 remote 或不安全 URL 必须以 JSON error envelope 失败。默认 Wave 严禁运行会真实启动浏览器/系统应用的裸 `libra open`。
 
 补充可执行断言：
-- 已有 JSON 断言保持；额外验证 `libra --json open no-such-remote` 的错误 envelope 包含 `ok:false` + LBR- 码或 "no such remote"。
-- 验证即使 remote URL 非法，`launched=false` 且无副作用（无浏览器进程）。
-- 操作后 `libra fsck` 通过。
-
+- 已有 JSON 断言保持；额外验证 `libra --json open no-such-remote` 的错误 envelope 包含 `ok:false` + `LBR-CLI-003`。
+- 验证所有正向路径都在 `--json` 下返回 `launched=false`，不触发浏览器启动。
+- 操作后 `libra fsck --connectivity-only` 通过。

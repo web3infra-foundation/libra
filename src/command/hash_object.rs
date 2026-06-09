@@ -14,12 +14,12 @@ use git_internal::{
 use serde::Serialize;
 
 use crate::{
-    command::save_object,
+    command::save_object_to_storage,
     utils::{
         client_storage::ClientStorage,
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
-        path,
+        util,
     },
 };
 
@@ -150,23 +150,24 @@ fn stdin_source_label(args: &HashObjectArgs) -> String {
 }
 
 fn hash_objects(args: &HashObjectArgs, object_type: ObjectType) -> CliResult<HashObjectOutput> {
+    let storage = object_storage_for_write(args.write)?;
     let objects = if args.stdin {
         vec![hash_one_source(
             stdin_source_label(args),
             read_stdin()?,
-            args.write,
             object_type,
             args.literally,
+            storage.as_ref(),
         )?]
     } else if args.stdin_paths {
         hash_path_entries(
             &read_stdin_paths()?,
-            args.write,
             object_type,
             args.literally,
+            storage.as_ref(),
         )?
     } else {
-        hash_path_entries(&args.paths, args.write, object_type, args.literally)?
+        hash_path_entries(&args.paths, object_type, args.literally, storage.as_ref())?
     };
 
     Ok(HashObjectOutput {
@@ -187,14 +188,15 @@ fn hash_objects_streaming(
 
     let stdout = io::stdout();
     let mut writer = stdout.lock();
+    let storage = object_storage_for_write(args.write)?;
 
     if args.stdin {
         let entry = hash_one_source(
             stdin_source_label(args),
             read_stdin()?,
-            args.write,
             object_type,
             args.literally,
+            storage.as_ref(),
         )?;
         write_hash_line(&mut writer, &entry.oid)?;
         return Ok(());
@@ -209,9 +211,9 @@ fn hash_objects_streaming(
         let entry = hash_one_source(
             path.display().to_string(),
             read_file(&path)?,
-            args.write,
             object_type,
             args.literally,
+            storage.as_ref(),
         )?;
         write_hash_line(&mut writer, &entry.oid)?;
     }
@@ -221,18 +223,18 @@ fn hash_objects_streaming(
 
 fn hash_path_entries(
     paths: &[PathBuf],
-    write: bool,
     object_type: ObjectType,
     literally: bool,
+    storage: Option<&ClientStorage>,
 ) -> CliResult<Vec<HashObjectEntry>> {
     let mut entries = Vec::with_capacity(paths.len());
     for path in paths {
         entries.push(hash_one_source(
             path.display().to_string(),
             read_file(path)?,
-            write,
             object_type,
             literally,
+            storage,
         )?);
     }
     Ok(entries)
@@ -241,9 +243,9 @@ fn hash_path_entries(
 fn hash_one_source(
     source: impl Into<String>,
     data: Vec<u8>,
-    write: bool,
     object_type: ObjectType,
     literally: bool,
+    storage: Option<&ClientStorage>,
 ) -> CliResult<HashObjectEntry> {
     let size = data.len();
 
@@ -255,15 +257,16 @@ fn hash_one_source(
     let oid = if object_type == ObjectType::Blob {
         let blob = Blob::from_content_bytes(data);
         let oid = blob.id.to_string();
-        if write {
-            save_object(&blob, &blob.id).map_err(|error| write_object_error(&oid, &error))?;
+        if let Some(storage) = storage {
+            save_object_to_storage(storage, &blob, &blob.id)
+                .map_err(|error| write_object_error(&oid, &error))?;
         }
         oid
     } else {
         let oid_hash = ObjectHash::from_type_and_data(object_type, &data);
         let oid = oid_hash.to_string();
-        if write {
-            save_raw_object(&oid_hash, &data, object_type)
+        if let Some(storage) = storage {
+            save_raw_object(storage, &oid_hash, &data, object_type)
                 .map_err(|error| write_object_error(&oid, &error))?;
         }
         oid
@@ -273,8 +276,26 @@ fn hash_one_source(
         source: source.into(),
         oid,
         size,
-        written: write,
+        written: storage.is_some(),
     })
+}
+
+fn object_storage_for_write(write: bool) -> CliResult<Option<ClientStorage>> {
+    if !write {
+        return Ok(None);
+    }
+
+    util::try_objects_storage()
+        .map(Some)
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::NotFound => CliError::repo_not_found(),
+            _ => CliError::fatal(format!(
+                "failed to open object storage: {}",
+                format_io_error(&error)
+            ))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+            .with_hint("check repository object storage permissions and available disk space."),
+        })
 }
 
 /// Build the fatal error for an object-write failure.
@@ -287,11 +308,11 @@ fn write_object_error(oid: &str, error: &impl std::fmt::Display) -> CliError {
 /// Persist a raw object body (commit/tree/tag) into the object database. `put`
 /// prepends the `<type> <len>\0` header internally.
 fn save_raw_object(
+    storage: &ClientStorage,
     oid: &ObjectHash,
     data: &[u8],
     object_type: ObjectType,
 ) -> Result<(), io::Error> {
-    let storage = ClientStorage::init(path::objects());
     storage.put(oid, data, object_type).map(|_| ())
 }
 
@@ -567,7 +588,7 @@ mod tests {
 
     #[test]
     fn hash_one_source_matches_git_empty_blob_hash() {
-        let entry = hash_one_source("-", Vec::new(), false, ObjectType::Blob, false)
+        let entry = hash_one_source("-", Vec::new(), ObjectType::Blob, false, None)
             .expect("hash empty source");
         assert_eq!(entry.oid, "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
         assert_eq!(entry.size, 0);

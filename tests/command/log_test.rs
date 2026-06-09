@@ -175,6 +175,46 @@ fn test_log_invalid_decorate_uses_command_usage_error() {
     assert_eq!(report.hints, vec!["valid options: no, short, full, auto"]);
 }
 
+fn assert_log_rejects_escaping_pathspec(pathspec: &str) {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["log", pathspec], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "escaping pathspec should be usage error, stderr: {stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "escaping pathspec must not produce log output"
+    );
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report.message.contains("pathspec"),
+        "message should identify pathspec problem: {}",
+        report.message
+    );
+}
+
+#[test]
+fn test_log_pathspec_rejects_parent_escape() {
+    assert_log_rejects_escaping_pathspec("../outside.txt");
+}
+
+#[test]
+fn test_log_pathspec_rejects_absolute_path() {
+    let outside = tempdir().unwrap();
+    let path = outside.path().join("outside.txt");
+    assert_log_rejects_escaping_pathspec(&path.to_string_lossy());
+}
+
+#[test]
+fn test_log_pathspec_rejects_windows_parent_separator() {
+    assert_log_rejects_escaping_pathspec(r"..\outside.txt");
+}
+
 #[tokio::test]
 #[serial]
 async fn test_log_decorate_no_skips_corrupt_reference_map() {
@@ -472,7 +512,7 @@ async fn test_execute_log() {
         "Commit_6", "Commit_5", "Commit_4", "Commit_3", "Commit_2", "Commit_1",
     ];
     for (i, commit) in reachable_commits.iter().take(max_output_number).enumerate() {
-        let msg = commit.message.trim_start_matches('\n');
+        let (msg, _) = libra::common_utils::parse_commit_msg(&commit.message);
         assert_eq!(msg, expected_msgs[i]);
     }
 }
@@ -2356,6 +2396,175 @@ fn test_rev_range_json_total() {
         "main..feature has exactly one commit: {json}"
     );
     assert_eq!(commits[0]["subject"], "feature work");
+}
+
+#[test]
+fn test_rev_range_double_dash_pathspec_filters_results() {
+    let repo = rev_range_repo();
+    let matches_feature = run_libra_command(
+        &["log", "--oneline", "main..feature", "--", "f.txt"],
+        repo.path(),
+    );
+    assert!(
+        matches_feature.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&matches_feature.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&matches_feature.stdout);
+    assert!(stdout.contains("feature work"), "stdout: {stdout}");
+
+    let misses_feature = run_libra_command(
+        &["log", "--oneline", "main..feature", "--", "m.txt"],
+        repo.path(),
+    );
+    assert!(
+        misses_feature.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&misses_feature.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&misses_feature.stdout);
+    assert!(
+        !stdout.contains("feature work"),
+        "range pathspec must filter commit file changes: {stdout}"
+    );
+}
+
+#[test]
+fn test_rev_range_double_dash_pathspec_rejects_parent_escape() {
+    let repo = rev_range_repo();
+    let out = run_libra_command(&["log", "main..feature", "--", "../outside"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "escaping separated pathspec should be usage error, stderr: {stderr}"
+    );
+    assert!(out.stdout.is_empty());
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+fn follow_rename_repo() -> tempfile::TempDir {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    log_commit(
+        repo.path(),
+        "old.txt",
+        "line one\nline two\n",
+        "create old file",
+    );
+
+    let mv = run_libra_command(&["mv", "old.txt", "renamed.txt"], repo.path());
+    assert!(
+        mv.status.success(),
+        "mv failed: {}",
+        String::from_utf8_lossy(&mv.stderr)
+    );
+    let commit = run_libra_command(
+        &["commit", "-m", "rename old file", "--no-verify"],
+        repo.path(),
+    );
+    assert!(
+        commit.status.success(),
+        "rename commit failed: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+
+    log_commit(
+        repo.path(),
+        "renamed.txt",
+        "line one\nline two\nline three\n",
+        "modify renamed file",
+    );
+    repo
+}
+
+#[test]
+fn test_follow_rename_history() {
+    let repo = follow_rename_repo();
+    let out = run_libra_command(
+        &["log", "--follow", "--oneline", "renamed.txt"],
+        repo.path(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("modify renamed file"), "stdout: {stdout}");
+    assert!(stdout.contains("rename old file"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("create old file"),
+        "--follow must continue through the rename to the old path: {stdout}"
+    );
+}
+
+#[test]
+fn test_follow_name_status_renders_rename_human_only() {
+    let repo = follow_rename_repo();
+    let out = run_libra_command(
+        &["log", "--follow", "--name-status", "renamed.txt"],
+        repo.path(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("R100\told.txt\trenamed.txt"),
+        "--follow --name-status should show the rename relationship: {stdout}"
+    );
+}
+
+#[test]
+fn test_follow_multi_path_rejected() {
+    let repo = follow_rename_repo();
+    let out = run_libra_command(
+        &["log", "--follow", "renamed.txt", "other.txt"],
+        repo.path(),
+    );
+    let (stderr, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "multi-path --follow should be usage error, stderr: {stderr}"
+    );
+    assert!(out.stdout.is_empty());
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+#[test]
+fn test_follow_json_schema_is_stable() {
+    let repo = follow_rename_repo();
+    let out = run_libra_command(&["--json", "log", "--follow", "renamed.txt"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = parse_json_stdout(&out);
+    let commits = json["data"]["commits"].as_array().expect("commits array");
+    let subjects = commits
+        .iter()
+        .map(|commit| commit["subject"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert!(
+        subjects.contains(&"create old file"),
+        "JSON --follow must include old-path history: {json}"
+    );
+    for commit in commits {
+        for file in commit["files"].as_array().expect("files array") {
+            let status = file["status"].as_str().expect("file status");
+            assert!(
+                matches!(status, "added" | "modified" | "deleted"),
+                "JSON schema must not grow a rename status: {json}"
+            );
+        }
+    }
 }
 
 #[test]
