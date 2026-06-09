@@ -243,8 +243,7 @@ fn test_merge_fast_forward_leaves_ignored_artifacts_untouched() {
     );
 
     // An ignored "build artifact" directory that must be left completely alone.
-    std::fs::write(temp_path.join(".libraignore"), "artifacts/\n")
-        .expect("write .libraignore");
+    std::fs::write(temp_path.join(".libraignore"), "artifacts/\n").expect("write .libraignore");
     std::fs::create_dir_all(temp_path.join("artifacts")).expect("create artifacts dir");
     let artifact = temp_path.join("artifacts").join("big.bin");
     let artifact_bytes = vec![0x5Au8; 256 * 1024];

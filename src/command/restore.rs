@@ -554,8 +554,7 @@ async fn restore_worktree_tracked(
                 // build artifacts under `target/` or `node_modules/`) are never
                 // read, so enumerating a whole-working-directory pathspec cannot
                 // blow up memory or stall the restore by SHA-1-hashing gigabytes.
-                let hash =
-                    calc_file_blob_hash(&path_abs).map_err(|_| RestoreError::ReadObject)?;
+                let hash = calc_file_blob_hash(&path_abs).map_err(|_| RestoreError::ReadObject)?;
                 if hash != target_map[path_wd] {
                     restore_to_file_typed(&target_map[path_wd], path_wd).await?;
                     restored.push(path_wd.display().to_string());
@@ -1297,8 +1296,7 @@ async fn restore_worktree_legacy_typed(
             let path_wd_str = path_to_utf8_typed(path_wd)?;
             if target_blobs.contains_key(path_wd) {
                 // Hash only restore targets; never read untracked/ignored files.
-                let hash =
-                    calc_file_blob_hash(&path_abs).map_err(|_| RestoreError::ReadObject)?;
+                let hash = calc_file_blob_hash(&path_abs).map_err(|_| RestoreError::ReadObject)?;
                 if hash != target_blobs[path_wd] {
                     restore_to_file_typed(&target_blobs[path_wd], path_wd).await?;
                 }
