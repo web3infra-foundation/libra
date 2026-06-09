@@ -6,7 +6,6 @@
 //! monitoring; the human path prints a category summary plus a per-issue
 //! line for anything non-zero.
 
-use chrono::Utc;
 use sea_orm::{ConnectionTrait, Statement};
 use serde::Serialize;
 
@@ -14,7 +13,7 @@ use super::DoctorArgs;
 use crate::{
     internal::{
         ai::{
-            hooks::providers::{claude_provider, find_provider, gemini_provider},
+            hooks::providers::{claude_provider, gemini_provider},
             observed_agents::{AgentStability, PREVIEW_SPECS, STABLE_PROMOTED_SPECS},
         },
         db::get_db_conn_instance,
@@ -41,29 +40,16 @@ struct DoctorReport {
     schema_present: bool,
     active_sessions: i64,
     stopped_sessions: i64,
-    /// Active sessions whose `last_event_at` is older than
-    /// [`STUCK_SESSION_AGE_SECS`]. These are almost always sessions whose
-    /// agent exited without firing `SessionEnd` — e.g. the agent crashed or
-    /// libra was unavailable when the session ended (entire.md §13 risk #8).
-    /// A subset of `active_sessions`.
-    stuck_sessions: i64,
     orphan_checkpoints: i64,
     provider_hooks: Vec<ProviderHookStatus>,
 }
-
-/// An `active` session with no lifecycle event for this many seconds is
-/// reported as stuck. Six hours comfortably exceeds any realistic gap
-/// between a `TurnStart`/`TurnEnd` pair while still catching sessions
-/// abandoned mid-flight (the agent never fired `SessionEnd`).
-const STUCK_SESSION_AGE_SECS: i64 = 6 * 60 * 60;
 
 pub async fn execute_safe(_args: DoctorArgs, output: &OutputConfig) -> CliResult<()> {
     let conn = get_db_conn_instance().await;
     let schema_present = table_exists(&conn, "agent_session").await?
         && table_exists(&conn, "agent_checkpoint").await?;
 
-    let (active_sessions, stopped_sessions, stuck_sessions, orphan_checkpoints) = if schema_present
-    {
+    let (active_sessions, stopped_sessions, orphan_checkpoints) = if schema_present {
         let active = scalar_count(
             &conn,
             "SELECT COUNT(*) AS n FROM agent_session WHERE state = 'active'",
@@ -72,21 +58,6 @@ pub async fn execute_safe(_args: DoctorArgs, output: &OutputConfig) -> CliResult
         let stopped = scalar_count(
             &conn,
             "SELECT COUNT(*) AS n FROM agent_session WHERE state = 'stopped'",
-        )
-        .await?;
-        // Stuck = active sessions with no event in STUCK_SESSION_AGE_SECS.
-        // The cutoff is an i64 timestamp, so it is safe to inline into the
-        // SQL text (no untrusted input). entire.md §13 risk #8: surfaces
-        // sessions whose agent exited without a SessionEnd (e.g. libra was
-        // unavailable when the agent stopped), which would otherwise sit
-        // `active` forever and skew concurrency detection.
-        let cutoff = Utc::now().timestamp() - STUCK_SESSION_AGE_SECS;
-        let stuck = scalar_count(
-            &conn,
-            &format!(
-                "SELECT COUNT(*) AS n FROM agent_session \
-                 WHERE state = 'active' AND last_event_at < {cutoff}"
-            ),
         )
         .await?;
         // Orphan = checkpoint rows whose session_id no longer joins (would
@@ -99,18 +70,21 @@ pub async fn execute_safe(_args: DoctorArgs, output: &OutputConfig) -> CliResult
              WHERE s.session_id IS NULL",
         )
         .await?;
-        (active, stopped, stuck, orphans)
+        (active, stopped, orphans)
     } else {
-        (0, 0, 0, 0)
+        (0, 0, 0)
     };
 
-    // Hook installation status across the adapter matrix. All seven external
-    // agents now carry a HookProvider and report real install status:
-    // claude-code/gemini via their bespoke providers; the five promoted
-    // adapters (Cursor/Codex/OpenCode/Copilot/FactoryAi) via the shared
-    // `providers::promoted` providers, resolved by `find_provider`. (The
-    // `STABLE_PROMOTED_SPECS` provider_name uses `factory_ai` while the
-    // provider registry keys on `factory-ai`, so normalise `_`→`-`.)
+    // Hook installation status across the v1 adapter matrix.
+    // - Two adapters carry HookProvider impls (claude-code, gemini) and
+    //   report real install status.
+    // - The five Phase 4.4 stable-promoted adapters (Cursor, Codex,
+    //   OpenCode, Copilot, FactoryAi) report `tier: Stable` but
+    //   `installed: None` because they read transcripts via
+    //   `AgentSessionCtx.transcript_path` rather than through a
+    //   HookProvider — the install pathway is per-agent v2 work.
+    // - Any future preview adapters (PREVIEW_SPECS empty after Phase
+    //   4.4) would surface here too.
     let mut provider_hooks = vec![
         check_provider(
             "claude-code",
@@ -120,8 +94,11 @@ pub async fn execute_safe(_args: DoctorArgs, output: &OutputConfig) -> CliResult
         check_provider("gemini", AgentStability::Stable, Some(gemini_provider())),
     ];
     for spec in STABLE_PROMOTED_SPECS {
-        let provider = find_provider(&spec.provider_name.replace('_', "-"));
-        provider_hooks.push(check_provider(spec.provider_name, AgentStability::Stable, provider));
+        provider_hooks.push(check_provider(
+            spec.provider_name,
+            AgentStability::Stable,
+            None,
+        ));
     }
     for spec in PREVIEW_SPECS {
         provider_hooks.push(check_provider(
@@ -136,7 +113,6 @@ pub async fn execute_safe(_args: DoctorArgs, output: &OutputConfig) -> CliResult
             schema_present,
             active_sessions,
             stopped_sessions,
-            stuck_sessions,
             orphan_checkpoints,
             provider_hooks,
         },
@@ -188,7 +164,6 @@ fn emit_report(report: &DoctorReport, output: &OutputConfig) -> CliResult<()> {
     );
     println!("Active sessions      : {}", report.active_sessions);
     println!("Stopped sessions     : {}", report.stopped_sessions);
-    println!("Stuck sessions       : {}", report.stuck_sessions);
     println!("Orphan checkpoints   : {}", report.orphan_checkpoints);
 
     println!("Provider hooks:");
@@ -205,14 +180,6 @@ fn emit_report(report: &DoctorReport, output: &OutputConfig) -> CliResult<()> {
         }
     }
 
-    if report.stuck_sessions > 0 {
-        println!(
-            "Hint: {} active session(s) have had no events for over 6h — the \
-             agent likely exited without firing SessionEnd (e.g. libra was \
-             unavailable). Mark them done with `libra agent session stop <id>`.",
-            report.stuck_sessions
-        );
-    }
     if report.orphan_checkpoints > 0 {
         println!(
             "Hint: orphan checkpoints indicate broken FK cascade — \

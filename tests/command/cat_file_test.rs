@@ -12,10 +12,7 @@
 //! output (`tree <hash>`, tree entries `mode blob <hash>\t<name>`); these
 //! parsers must therefore stay in sync with the cat-file pretty-printer.
 
-use std::{
-    io::{Read, Write},
-    process::Command,
-};
+use std::io::{Read, Write};
 
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use git_internal::internal::object::{
@@ -771,8 +768,7 @@ fn run_cat_file_with_stdin(
     stdin_data: &[u8],
 ) -> std::process::Output {
     use std::process::Stdio;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let mut child = libra_command(temp_path)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -790,8 +786,7 @@ fn run_cat_file_with_stdin(
 
 /// Resolve `HEAD` to its full commit hash via `rev-parse`.
 fn head_commit_hash(temp_path: &std::path::Path) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let out = libra_command(temp_path)
         .args(["rev-parse", "HEAD"])
         .output()
         .expect("rev-parse HEAD");
@@ -801,8 +796,7 @@ fn head_commit_hash(temp_path: &std::path::Path) -> String {
 
 /// Resolve the first blob hash reachable from HEAD's tree.
 fn head_first_blob_hash(temp_path: &std::path::Path) -> String {
-    let commit = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let commit = libra_command(temp_path)
         .args(["cat-file", "-p", "HEAD"])
         .output()
         .expect("cat-file -p HEAD");
@@ -813,8 +807,7 @@ fn head_first_blob_hash(temp_path: &std::path::Path) -> String {
         .and_then(|l| l.split_whitespace().nth(1))
         .expect("tree line")
         .to_string();
-    let tree_out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let tree_out = libra_command(temp_path)
         .args(["cat-file", "-p", &tree])
         .output()
         .expect("cat-file -p tree");
@@ -1055,8 +1048,7 @@ async fn batch_check_oversize_line_rejected() {
 async fn batch_check_brokenpipe_exits_zero() {
     use std::process::Stdio;
     let repo = batch_repo();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(repo.path())
+    let mut child = libra_command(repo.path())
         .args(["cat-file", "--batch-check"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1163,8 +1155,7 @@ async fn z_modifier_without_batch_rejected() {
 /// Stage and commit `bytes` (possibly non-UTF-8) under `filename`.
 fn commit_bytes(temp_path: &std::path::Path, filename: &str, bytes: &[u8]) {
     std::fs::write(temp_path.join(filename), bytes).expect("write file");
-    let add = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let add = libra_command(temp_path)
         .args(["add", filename])
         .output()
         .expect("add");
@@ -1173,8 +1164,7 @@ fn commit_bytes(temp_path: &std::path::Path, filename: &str, bytes: &[u8]) {
         "add: {}",
         String::from_utf8_lossy(&add.stderr)
     );
-    let commit = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let commit = libra_command(temp_path)
         .args(["commit", "-m", "binary", "--no-verify"])
         .output()
         .expect("commit");
@@ -1357,8 +1347,7 @@ fn batch_first_record_visible_before_eof(extra: &[&str]) -> bool {
     let repo = batch_repo();
     let mut argv = vec!["cat-file", "--batch"];
     argv.extend_from_slice(extra);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(repo.path())
+    let mut child = libra_command(repo.path())
         .args(&argv)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

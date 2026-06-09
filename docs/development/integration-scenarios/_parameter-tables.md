@@ -69,10 +69,24 @@
 | `diff --old --new` | `cli.restore-reset-diff` | 两个 revision 间差异可见 |
 | `diff --name-only` / `--name-status` | `cli.restore-reset-diff` | 文件名和状态摘要可用于脚本断言 |
 | `diff --stat` / `--numstat` | `cli.restore-reset-diff` | 文件级统计输出可见 |
+| `diff --raw` | `cli.restore-reset-diff` | raw 机器格式含 mode、abbrev object id、状态和路径 |
+| mode-only `diff --raw` / `--name-status` | `cli.restore-reset-diff` | `T` typechange 输出由命令测试覆盖 |
+| `diff -b` / `-w` / `--ignore-blank-lines` | `cli.restore-reset-diff` | 空白忽略路径由命令测试覆盖，runner 覆盖 `-w` |
+| `diff -U<n>` / `--unified <n>` / `diff.context` | `cli.restore-reset-diff` | 可配置上下文由命令测试覆盖，runner 覆盖 `-U0` |
+| `diff --exit-code` / `--quiet` | `cli.restore-reset-diff` | 有差异时语义退码为 1 |
+| `diff -M<n>` / `--find-renames[=<n>]` | `cli.restore-reset-diff` | Git 风格短阈值和 name-status 重命名输出可见 |
+| `diff -C<n>` / `--find-copies[=<n>]` / `--no-renames` | `cli.restore-reset-diff` | copy/禁用 rename 细节由命令测试覆盖 |
+| `diff --relative[=<path>]` / `diff.noPrefix` | `cli.restore-reset-diff` | 子目录过滤和路径裁切由命令测试覆盖 |
+| `diff --word-diff[=<mode>]` / `--word-diff-regex` / `diff.wordRegex` | `cli.restore-reset-diff` | word-diff 标记、regex 上限和配置由命令测试覆盖 |
+| `diff -W` / `--function-context` | `cli.restore-reset-diff` | 函数上下文扩展由命令测试覆盖 |
 | `restore --staged <path>` | `cli.restore-reset-diff` | index 恢复到 HEAD，工作区保持修改 |
 | `restore --worktree <path>` | `cli.restore-reset-diff` | 工作区文件恢复到 index 或 source 内容 |
 | `restore --source <rev>` | `cli.restore-reset-diff` | source revision 不存在时失败且不改写文件 |
+| `restore --ours` / `--theirs` | `cli.restore-reset-diff` | 冲突阶段 stage 2/3 写入工作区，index 保持 unmerged |
+| `restore --ignore-unmerged` | `cli.restore-reset-diff` | unmerged path 被跳过，plain restore over unmerged path 退出 128 |
 | `reset HEAD -- <path>` | `cli.restore-reset-diff` | 路径级 reset 只取消暂存 |
+| `reset --pathspec-from-file=<file>` / `--pathspec-file-nul` | `cli.restore-reset-diff` | file/NUL pathspec 输入只取消暂存指定路径 |
+| `reset --no-refresh` | `cli.restore-reset-diff` | 兼容 no-op flag 可传入且保持 mixed reset 语义 |
 | `reset --soft` | `cli.restore-reset-diff` | 只移动 HEAD，保留 index/工作区 |
 | `reset --mixed` | `cli.restore-reset-diff` | 移动 HEAD 并重置 index |
 | `reset --hard` | `cli.restore-reset-diff` | HEAD、index、工作区全部回到目标 revision |
@@ -84,6 +98,9 @@
 | 参数或子命令 | 场景 ID | 关键断言 |
 |---|---|---|
 | `stash push -m` | `cli.stash-bisect-worktree` | tracked 修改被保存，消息可在列表中观察 |
+| `stash push -u` / `--include-untracked` | `cli.stash-bisect-worktree` | 可见 untracked 文件被保存、移除，并可由 `pop` 恢复 |
+| `stash push -a` / `--all` | `cli.stash-bisect-worktree` | ignored 文件与可见 untracked 文件一起被保存、移除，并可恢复 |
+| `stash push --keep-index` | `cli.stash-bisect-worktree` | 已暂存内容保持在 index/worktree，未暂存 delta 被 stash |
 | `stash list` / `stash show` | `cli.stash-bisect-worktree` | stash 条目和文件级摘要可观察 |
 | `stash apply` | `cli.stash-bisect-worktree` | 修改恢复但 stash 条目保留 |
 | `stash pop` | `cli.stash-bisect-worktree` | 修改恢复且 stash 条目删除 |
@@ -92,12 +109,16 @@
 | `bisect bad` / `bisect good <rev>` | `cli.stash-bisect-worktree` | 会话状态推进并可由 log/view 观察 |
 | `bisect log` / `bisect view` | `cli.stash-bisect-worktree` | 当前会话和候选状态可输出 |
 | `bisect reset` | `cli.stash-bisect-worktree` | 结束会话并恢复原 HEAD |
-| `worktree add <path>` | `cli.stash-bisect-worktree` | linked worktree 被创建并登记 |
-| `worktree list` | `cli.stash-bisect-worktree` | 主 worktree 和 linked worktree 均可列出 |
+| `worktree add -b <branch> <path>` | `cli.stash-bisect-worktree` | shared branch 被创建，linked worktree 被创建并登记 |
+| `worktree add --no-checkout --lock --reason <text> <path>` | `cli.stash-bisect-worktree` | linked worktree 仅创建目录与 `.libra` 链接，不恢复 tracked 文件，并立即登记为 locked |
+| `worktree list --verbose` | `cli.stash-bisect-worktree` | 主 worktree 和 linked worktree 均可列出，并显示 shared HEAD 短 hash |
+| `worktree list --porcelain` | `cli.stash-bisect-worktree` | 输出稳定 `worktree` / `HEAD` / `locked` 记录，不输出 Git per-worktree `branch` / `detached` |
 | `worktree lock --reason` / `unlock` | `cli.stash-bisect-worktree` | 锁状态和 reason 可观察并可解除 |
 | `worktree move <src> <dest>` | `cli.stash-bisect-worktree` | 登记路径和目录路径同步移动 |
 | `worktree remove <path>` | `cli.stash-bisect-worktree` | 默认注销登记但保留目录 |
-| `worktree prune` | `cli.stash-bisect-worktree` | 清理 stale 登记路径可执行 |
+| `worktree remove -f -f <path>` | `cli.stash-bisect-worktree` | locked worktree 需要双 force 才能注销；未带 `--delete-dir` 时仍保留目录 |
+| `worktree remove --delete-dir --force <path>` | `cli.stash-bisect-worktree` | dirty linked worktree 需显式 force 才能删盘 |
+| `worktree prune --dry-run` / `--verbose --expire now` | `cli.stash-bisect-worktree` | dry-run 仅报告 stale 登记，expire 只清理目录缺失条目 |
 
 
 
@@ -105,23 +126,31 @@
 
 | 参数或子命令 | 场景 ID | 关键断言 |
 |---|---|---|
-| `tag <name>` / `tag -m <msg>` | `cli.tag-basic` | 轻量和 annotated tag 均可创建、列出、解析 |
-| `tag -l` / `tag -l -n` / `tag -f` / `tag -d` | `cli.tag-basic` | 列表、注释摘要、强制更新和删除路径覆盖 |
+| `tag <name>` / `tag -m <msg>` / `tag -F <file>` | `cli.tag-basic` | 轻量、inline-message annotated 和 file-message annotated tag 均可创建、列出、解析 |
+| `tag -l` / `tag -l -n` / `tag --points-at` / `tag --contains` / `tag --merged` / `tag --sort` | `cli.tag-basic` | 列表、注释摘要、target/history/merged 过滤和 refname 排序覆盖 |
+| `tag -f` / `tag -d <name>...` / JSON batch delete partial failure | `cli.tag-basic` | 强制更新、批量删除、部分失败 JSON `deleted`/`failed` 契约覆盖 |
 | `merge <branch>` | `cli.merge-rebase-cherry-revert-smoke` | fast-forward 与三方无冲突 merge 均可观察 |
+| `merge --find-renames[=<n>]` | `cli.merge-rebase-cherry-revert-smoke` | 相似度阈值控制 rename+edit 是否自动合并 |
+| `merge --squash --continue` | `cli.merge-rebase-cherry-revert-smoke` | 与 lifecycle action 组合必须被拒绝 |
 | `merge --continue` / `--abort` | `cli.merge-rebase-cherry-revert-smoke` | 无会话时明确失败；冲突续跑场景另行补充 |
 | `rebase <upstream>` | `cli.merge-rebase-cherry-revert-smoke` | topic 提交重放到新 base |
 | `rebase --continue` | `cli.merge-rebase-cherry-revert-smoke` | 无会话时明确失败；冲突续跑场景另行补充 |
 | `cherry-pick <commit>` | `cli.merge-rebase-cherry-revert-smoke` | 指定提交修改被重放到当前分支 |
-| `revert <commit>` | `cli.merge-rebase-cherry-revert-smoke` | 创建反向提交并撤销目标修改 |
+| `revert <commit>` / `A..B`, `revert --continue` / `--abort` | `cli.merge-rebase-cherry-revert-smoke` | 创建反向提交、范围回滚并验证空会话控制失败 |
 | `grep` / `grep -F/-i/-n/-c/-l/-e/-f/--tree` | `cli.grep-blame-describe-shortlog` | 工作区、pathspec、pattern file 和历史 tree 搜索可观察 |
 | `blame` / `blame -L` | `cli.grep-blame-describe-shortlog` | 行级作者、提交和范围限制可观察 |
 | `describe --tags/--always/--abbrev` | `cli.grep-blame-describe-shortlog` | tag 描述和 hash fallback 可观察 |
 | `shortlog` / `shortlog -s` / `shortlog -n` | `cli.grep-blame-describe-shortlog` | 作者汇总和排序可观察 |
+| `rev-parse HEAD` / `--short` / `--show-toplevel` | `cli.object-readback` | 完整哈希、短哈希和工作树根路径可传递给后续 plumbing 命令 |
+| `rev-parse --verify` / `--verify --short` / `--default` | `cli.object-readback` | 单对象断言、短哈希断言、默认 revision 回退和 quiet 失败退出 1 可观察 |
+| `show --no-patch` / `--stat` / `<rev>:<path>` / `<blob>` | `cli.object-readback` | commit 元数据、统计、历史文件内容、文本 blob 与 binary blob 元数据可观察 |
+| `show-ref --head` / `--heads` / `--exists` / `--verify` / `--dereference` / pattern | `cli.object-readback` | HEAD/分支引用可列出，完整 refname 存在性、精确验证、annotated tag peeled 行、path-segment suffix 过滤和缺失 ref 退出码可观察 |
+| `rev-list HEAD` / `A..B` / `^A` | `cli.object-readback` | 可达提交、two-dot range 和排除引用输出符合 fixture |
+| `rev-list -n` / `--skip` / `--count` / `--parents` / `--timestamp` | `cli.object-readback` | 限制、跳过、计数、父提交和时间戳格式可观察 |
 | `clean -n/-f/-fd/-fX` | `cli.clean-rm-mv-lfs-basic` | dry-run、文件删除、目录删除、ignored-only 删除覆盖 |
 | `rm <path>` | `cli.clean-rm-mv-lfs-basic` | tracked 文件从工作区和 index 移除 |
 | `mv <src> <dst>` | `cli.clean-rm-mv-lfs-basic` | tracked 文件移动并更新 index |
 | `lfs track/untrack/ls-files` | `cli.clean-rm-mv-lfs-basic` | `.libra_attributes` pattern 和 LFS tracked 文件列表可观察 |
-| `reflog show` / `reflog show --stat` / `reflog exists` | `cli.reflog-symbolic-ref` | HEAD/ref 更新记录可读，exists 可脚本探测 |
+| `reflog show` / `reflog show --stat` / `reflog exists` / `reflog expire --dry-run` | `cli.reflog-symbolic-ref` | HEAD/ref 更新记录可读，exists 可脚本探测，expire 可预览清理并对无 ref 入参返回稳定错误 |
 | `symbolic-ref` / `symbolic-ref --short` / `symbolic-ref HEAD <target>` | `cli.reflog-symbolic-ref` | HEAD 符号引用读写可观察 |
 | `--json open` | `cli.open-smoke` | 只输出 URL 和 `launched=false`，不启动外部程序 |
-

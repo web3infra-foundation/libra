@@ -155,20 +155,6 @@ pub trait HookProvider: Sync {
     /// Detect whether the provider's hooks are currently wired up. Used for status
     /// reporting and idempotent installs.
     fn hooks_are_installed(&self) -> Result<bool>;
-
-    /// When `true`, the AgentTraces ingest path trusts the invoked subcommand
-    /// (the `libra agent hooks <slug> <subcommand>` argv that Libra itself
-    /// wrote into the hook config) as the authoritative lifecycle kind, rather
-    /// than re-deriving it from the provider's stdin `hook_event_name`.
-    ///
-    /// Default `false` — Claude/Gemini send a reliable `hook_event_name` that
-    /// [`parse_hook_event`](Self::parse_hook_event) maps and the ingest
-    /// cross-checks. The promoted external agents (Cursor/Codex/Copilot/
-    /// Factory/OpenCode) send heterogeneous or (OpenCode) absent event names,
-    /// so for them the subcommand Libra installed is the source of truth.
-    fn subcommand_is_authoritative(&self) -> bool {
-        false
-    }
 }
 
 #[cfg(test)]

@@ -23,6 +23,10 @@ the fetch to a single branch.
 Fetch supports SSH, HTTPS, local file, and `git://` transports. Vault-backed SSH keys
 are loaded automatically when configured via `vault.ssh.<remote>.privkey`.
 
+By default, fetch auto-follows advertised tags that point at commits fetched in
+the same operation. `--tags` imports every advertised tag, while `--no-tags`
+disables tag import for that invocation.
+
 ## Options
 
 | Flag / Argument | Description | Example |
@@ -31,7 +35,7 @@ are loaded automatically when configured via `vault.ssh.<remote>.privkey`.
 | `<refspec>` | Branch name to fetch. Requires `<repository>`. When omitted, all branches from the remote are fetched. | `libra fetch origin main` |
 | `-a`, `--all` | Fetch from every configured remote. Conflicts with `<repository>`. | `libra fetch --all` |
 | `--depth <N>` | Limit fetching to the specified number of commits from the tip of each remote branch (shallow fetch). Public stable flag. | `libra fetch origin --depth 1` |
-| `--deepen <N>` | Deepen the history of a shallow repository by `N` commits beyond the current boundary. Conflicts with `--unshallow`. | `libra fetch origin --deepen 10` |
+| `--deepen <N>` | Deepen a shallow repository by `N` commits relative to the current boundary (`deepen-relative`). Conflicts with `--depth` and `--unshallow`. | `libra fetch origin --deepen 10` |
 | `--unshallow` | Convert a shallow repository into a complete one by fetching all missing history, then removing the `.libra/shallow` boundary file. Conflicts with `--depth`. | `libra fetch origin --unshallow` |
 | `--shallow-since <DATE>` | Shape shallow history to commits more recent than `<DATE>` (`deepen-since`). Conflicts with `--unshallow`. | `libra fetch origin --shallow-since=2024-01-01` |
 | `--shallow-exclude <REF>` | Shape shallow history to exclude commits reachable from `<REF>` (`deepen-not`); repeatable. Conflicts with `--unshallow`. | `libra fetch origin --shallow-exclude=v1.0` |
@@ -40,8 +44,8 @@ are loaded automatically when configured via `vault.ssh.<remote>.privkey`.
 | `--porcelain` | Print one machine-readable `<flag> <old-oid> <new-oid> <local-ref>` line per ref update. Mutually exclusive with `--json` (usage error). | `libra fetch origin --porcelain` |
 | `--append` | Append fetched ref records to `.libra/FETCH_HEAD` instead of overwriting. Long-only (`-a` is `--all`). | `libra fetch origin --append` |
 | `-v`, `--verbose` | Announce the remote (name and credential-redacted URL) being contacted on stderr before connecting; leaves the stdout result contract unchanged. | `libra fetch origin -v` |
-| `-t`, `--tags` | Import every advertised tag into the global `refs/tags/*` namespace, pulling each tag's object into the pack. Overrides `remote.<name>.tagOpt`. Existing local tags are preserved (immutable without `--force`). | `libra fetch origin --tags` |
-| `--no-tags` | Import no tags, overriding `remote.<name>.tagOpt`. Long-only (Git's `-n` short form is intentionally not exposed). | `libra fetch origin --no-tags` |
+| `-t`, `--tags` | Import every advertised tag into the global `refs/tags/*` namespace, pulling each tag's object into the pack. Overrides the default auto-follow mode and `remote.<name>.tagOpt`. Existing local tags are preserved (immutable without `--force`). | `libra fetch origin --tags` |
+| `--no-tags` | Import no tags, overriding the default auto-follow mode and `remote.<name>.tagOpt`. Long-only (Git's `-n` short form is intentionally not exposed). | `libra fetch origin --no-tags` |
 | `-f`, `--force` | Allow non-fast-forward updates: overwrite an existing local tag with the remote's value (tags are otherwise immutable). Forced updates render with the porcelain `+` flag. Remote-tracking refs always update regardless. | `libra fetch origin --tags --force` |
 | `--update-shallow` | Accept new shallow boundaries advertised by a shallow remote even when no shallow operation was requested and the repository is not already shallow. Boundary removals (history deepening) always apply. | `libra fetch origin --update-shallow` |
 | `--atomic` | Update a remote's refs atomically: they already commit together (one transaction per remote), and on rollback the pack downloaded for that remote is removed so no partial state is left. | `libra fetch origin --atomic` |
@@ -58,6 +62,7 @@ libra fetch
 libra fetch origin
 libra fetch origin main
 libra fetch --all
+libra fetch origin --no-tags              # skip default tag auto-follow
 libra fetch origin --depth 1               # shallow fetch
 libra fetch --all --depth 3                # shallow across all remotes
 libra --json fetch origin
@@ -100,12 +105,14 @@ Already up to date with 'origin'
 - `url`: normalized remote URL/path
 - `refs_updated[]`: updated remote-tracking refs
 - `objects_fetched`: object count parsed from the received pack
+- `pruned[]`: stale `refs/remotes/<remote>/*` refs removed by `--prune` (omitted when empty)
 
 ### Refs Updated Schema
 
 - `remote_ref`: fully qualified local remote-tracking ref, e.g. `refs/remotes/origin/main`
 - `old_oid`: previous object id, or `null` when the ref is new
 - `new_oid`: fetched object id
+- `forced`: present and `true` when an update required `--force`, such as clobbering an existing tag
 
 Example (single remote):
 
@@ -189,9 +196,9 @@ for some time; C3 surfaces it on the CLI and binds the contract:
   idempotent: Libra persists server-advertised shallow boundaries in
   `.libra/shallow` and sends them during later upload-pack negotiation.
 - `--deepen N` extends a shallow repository by `N` more commits beyond the
-  current boundary, and `--unshallow` restores complete history (requesting the
-  full depth and then clearing `.libra/shallow`). `--deepen` and `--unshallow`
-  conflict with each other and with `--depth`.
+  current boundary using Git's `deepen-relative` request. `--unshallow`
+  restores complete history (requesting the full depth and then clearing
+  `.libra/shallow`). `--deepen` conflicts with both `--depth` and `--unshallow`.
 - Sparse checkout (`clone --sparse`) is **not** part of this contract — see
   [`docs/improvement/compatibility/declined.md`](../improvement/compatibility/declined.md)
   for why sparse-checkout is intentionally deferred.
@@ -220,7 +227,7 @@ by default for maximum script friendliness.
 | Named remote | `libra fetch origin` | `git fetch origin` | `jj git fetch --remote origin` |
 | Single branch | `libra fetch origin main` | `git fetch origin main` | `jj git fetch --remote origin --branch main` |
 | All remotes | `libra fetch --all` | `git fetch --all` | `jj git fetch --all-remotes` |
-| Prune stale refs | `libra remote prune <name>` | `git fetch --prune` | Automatic |
+| Prune stale refs | `libra fetch --prune` or `libra remote prune <name>` | `git fetch --prune` | Automatic |
 | Shallow fetch | `libra fetch --depth N` | `git fetch --depth N` | Not supported |
 | Structured output | `--json` / `--machine` | No | No |
 | Progress events | NDJSON on stderr | Text on stderr | Text on stderr |

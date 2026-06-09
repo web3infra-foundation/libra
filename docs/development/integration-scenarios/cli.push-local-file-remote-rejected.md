@@ -45,14 +45,14 @@ PY
 expect_local_push_rejected push-main origin main
 expect_local_push_rejected push-dry-run --dry-run origin main
 expect_local_push_rejected push-force --force origin main
+expect_local_push_rejected push-atomic --atomic origin main
 expect_local_push_rejected push-tags --tags origin
 expect_local_push_rejected push-mirror --mirror --dry-run origin
 ```
 
-断言：本地 file remote 已存在且可作为 remote URL 存储；`push origin main`、`push --dry-run origin main`、`push --force origin main`、`push --tags origin`、`push --mirror --dry-run origin` 都必须非 0 退出；`--json=compact` 的 stderr 错误 envelope 必须包含 `ok:false`、`error_code == "LBR-CLI-003"` 和本地 file remote 不支持的可操作提示；失败不得写入 remote refs 或修改本地 HEAD。
+断言：本地 file remote 已存在且可作为 remote URL 存储；`push origin main`、`push --dry-run origin main`、`push --force origin main`、`push --atomic origin main`、`push --tags origin`、`push --mirror --dry-run origin` 都必须非 0 退出；`--json=compact` 的 stderr 错误 envelope 必须包含 `ok:false`、`error_code == "LBR-CLI-003"` 和本地 file remote 不支持的可操作提示；失败不得写入 remote refs 或修改本地 HEAD。
 
 补充可执行断言：
 - 每个本地 file remote push 失败后执行 `libra fsck --connectivity-only`，确认本地源仓库仍健康。
 - `libra --json remote get-url --all origin` 仍能返回本地路径，证明失败点是 push 传输策略而非 remote 配置丢失。
 - 若未来实现支持本地 file remote push，必须把本场景改成正向闭环，并同步更新 COMPATIBILITY.md / declined note。
-

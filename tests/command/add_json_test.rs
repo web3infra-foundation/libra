@@ -10,7 +10,7 @@
 //! can produce `modified`/`refreshed` rows. Schema regressions here are
 //! breaking changes for downstream consumers (CI parsers, AI agents, MCP).
 
-use std::fs;
+use std::{collections::BTreeSet, fs};
 
 use tempfile::tempdir;
 
@@ -179,6 +179,50 @@ fn json_refresh_returns_refreshed_array() {
     assert_eq!(data["added"].as_array().map(Vec::len), Some(0));
     assert_eq!(data["modified"].as_array().map(Vec::len), Some(0));
     assert_eq!(data["removed"].as_array().map(Vec::len), Some(0));
+}
+
+#[test]
+fn json_new_add_flags_keep_existing_field_set() {
+    let repo = create_committed_repo();
+    fs::write(repo.path().join("paths.txt"), "base.txt\n").unwrap();
+
+    let output = run_libra_command(
+        &[
+            "--json",
+            "add",
+            "--dry-run",
+            "--renormalize",
+            "--chmod=+x",
+            "--pathspec-from-file",
+            "paths.txt",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&output, "json add with new flags");
+
+    let parsed = parse_json_stdout(&output);
+    let data = parsed["data"].as_object().expect("data should be object");
+    let actual_keys = data.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    let expected_keys = BTreeSet::from([
+        "added",
+        "modified",
+        "removed",
+        "refreshed",
+        "ignored",
+        "failed",
+        "dry_run",
+    ]);
+    assert_eq!(actual_keys, expected_keys);
+    assert_eq!(data.get("dry_run"), Some(&serde_json::Value::Bool(true)));
+    assert!(
+        data.get("modified")
+            .expect("modified field should exist")
+            .as_array()
+            .expect("modified should be array")
+            .iter()
+            .any(|value| value.as_str() == Some("base.txt")),
+        "renormalize/chmod dry-run should reuse modified bucket: {data:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

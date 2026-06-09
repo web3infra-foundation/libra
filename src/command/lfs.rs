@@ -22,6 +22,7 @@ use git_internal::{
 };
 use reqwest::StatusCode;
 use sea_orm::EntityTrait;
+use walkdir::WalkDir;
 
 use crate::{
     command::{
@@ -478,6 +479,7 @@ async fn collect_reachable_lfs_oids() -> CliResult<HashSet<String>> {
         .map(|pointer| pointer.oid)
         .collect();
     oids.extend(index_lfs_oids()?);
+    oids.extend(worktree_lfs_oids());
     Ok(oids)
 }
 
@@ -499,6 +501,39 @@ fn index_lfs_oids() -> CliResult<HashSet<String>> {
         }
     }
     Ok(oids)
+}
+
+fn worktree_lfs_oids() -> HashSet<String> {
+    let root = util::working_dir();
+    let mut oids = HashSet::new();
+    let entries = WalkDir::new(&root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            !(entry.depth() == 1
+                && entry.file_type().is_dir()
+                && entry.file_name().to_str() == Some(".libra"))
+        });
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "skipping unreadable path while scanning worktree LFS pointers"
+                );
+                continue;
+            }
+        };
+        if !entry.file_type().is_file() || !lfs::is_lfs_tracked(entry.path()) {
+            continue;
+        }
+        if let Ok((oid, _)) = lfs::parse_pointer_file(entry.path()) {
+            oids.insert(oid);
+        }
+    }
+    oids
 }
 
 /// `libra lfs prune [-n/--dry-run]` — delete local LFS objects not referenced by

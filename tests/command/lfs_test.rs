@@ -16,13 +16,20 @@ use tempfile::TempDir;
 fn libra_command(cwd: &Path) -> Command {
     let home = cwd.join(".libra-test-home");
     let config_home = home.join(".config");
+    let global_db = home.join(".libra").join("config.db");
     fs::create_dir_all(&config_home).expect("failed to create isolated HOME");
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
     cmd.current_dir(cwd)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", &config_home)
-        .env("USERPROFILE", &home);
+        .env("USERPROFILE", &home)
+        .env("LIBRA_CONFIG_GLOBAL_DB", &global_db)
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("LIBRA_TEST", "1");
     cmd
 }
 
@@ -1220,8 +1227,10 @@ async fn test_lfs_fetch_downloads_missing_object() {
     let entity = lfs_entity_path(repo.path(), &oid);
     assert!(
         entity.exists(),
-        "fetch must restore the LFS entity at {}",
-        entity.display()
+        "fetch must restore the LFS entity at {}; stdout: {}; stderr: {}",
+        entity.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
         fs::read(&entity).expect("read restored entity"),
@@ -1579,6 +1588,33 @@ fn test_lfs_prune_keeps_staged_uncommitted_objects() {
     assert!(
         lfs_entity_path(repo.path(), &oid).exists(),
         "staged-but-uncommitted object must be kept (index reachability)"
+    );
+}
+
+#[test]
+fn test_lfs_prune_keeps_unstaged_worktree_pointer_objects() {
+    let repo = init_temp_repo();
+    run_libra_ok(repo.path(), &["lfs", "track", "*.bin"]);
+    let oid = "f".repeat(64);
+    create_fake_lfs_object(repo.path(), &oid, b"UNSTAGED-worktree-cache");
+    fs::write(
+        repo.path().join("unstaged.bin"),
+        lfs_pointer_text(&oid, b"UNSTAGED-worktree-cache".len()),
+    )
+    .unwrap();
+
+    let output = libra_command(repo.path())
+        .args(["lfs", "prune"])
+        .output()
+        .expect("failed to run lfs prune");
+    assert!(
+        output.status.success(),
+        "prune should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        lfs_entity_path(repo.path(), &oid).exists(),
+        "unstaged worktree pointer object must be kept (worktree reachability)"
     );
 }
 

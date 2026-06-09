@@ -1440,6 +1440,8 @@ async fn resolve_env_sync_returns_none_when_no_layer_supplies_value() {
         "LIBRA_CONFIG_GLOBAL_DB",
         std::ffi::OsStr::new("/nonexistent/resolve-env-sync-absent-path.db"),
     );
+    let temp_dir = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(temp_dir.path());
 
     let value = resolve_env_sync("LIBRA_RESOLVE_ENV_SYNC_ABSENT_KEY").unwrap();
     assert!(

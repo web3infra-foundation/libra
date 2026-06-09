@@ -98,6 +98,35 @@ fn corrupt_v1_index_with_duplicate_first_entry(idx_path: &Path) {
     fs::write(idx_path, bytes).expect("write duplicate idx");
 }
 
+fn v2_sha1_layout(bytes: &[u8]) -> (usize, usize, usize, usize, usize) {
+    const V2_HEADER_LEN: usize = 8;
+    const FANOUT_LEN: usize = 256 * 4;
+    const HASH_LEN: usize = 20;
+
+    let object_count = u32::from_be_bytes(
+        bytes[V2_HEADER_LEN + FANOUT_LEN - 4..V2_HEADER_LEN + FANOUT_LEN]
+            .try_into()
+            .expect("fanout[255] is present"),
+    ) as usize;
+    let names_start = V2_HEADER_LEN + FANOUT_LEN;
+    let crc_start = names_start + object_count * HASH_LEN;
+    let offset_start = crc_start + object_count * 4;
+    let pack_hash_start = offset_start + object_count * 4;
+    let index_hash_start = pack_hash_start + HASH_LEN;
+    (
+        object_count,
+        crc_start,
+        offset_start,
+        pack_hash_start,
+        index_hash_start,
+    )
+}
+
+fn rewrite_v2_sha1_index_checksum(bytes: &mut [u8], index_hash_start: usize) {
+    let checksum: [u8; 20] = Sha1::digest(&bytes[..index_hash_start]).into();
+    bytes[index_hash_start..index_hash_start + 20].copy_from_slice(&checksum);
+}
+
 #[test]
 #[serial]
 fn verify_pack_accepts_generated_v1_index() {
@@ -475,6 +504,130 @@ fn verify_pack_rejects_corrupt_index_entry() {
     assert!(
         human.contains("invalid pack index") || human.contains("pack verification failed"),
         "error should explain verification failure: {human}"
+    );
+}
+
+#[test]
+#[serial]
+fn verify_pack_reports_index_checksum_mismatch() {
+    let repo = tempfile::tempdir().expect("create repo");
+    init_repo_via_cli(repo.path());
+    let (_pack_dir, pack_path) = copy_pack_to_temp("small-sha1");
+    let idx_path = build_index(repo.path(), &pack_path, "2");
+
+    let mut bytes = fs::read(&idx_path).expect("read generated idx");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x80;
+    fs::write(&idx_path, bytes).expect("write checksum-corrupt idx");
+
+    let output = run_libra_command(
+        &["verify-pack", idx_path.to_str().expect("idx path UTF-8")],
+        repo.path(),
+    );
+    assert_eq!(output.status.code(), Some(128));
+
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        human.contains("checksum mismatch"),
+        "error should identify index checksum mismatch: {human}"
+    );
+}
+
+#[test]
+#[serial]
+fn verify_pack_reports_pack_checksum_mismatch() {
+    let repo = tempfile::tempdir().expect("create repo");
+    init_repo_via_cli(repo.path());
+    let (_pack_dir, pack_path) = copy_pack_to_temp("small-sha1");
+    let idx_path = build_index(repo.path(), &pack_path, "2");
+
+    let mut bytes = fs::read(&idx_path).expect("read generated idx");
+    let (_object_count, _crc_start, _offset_start, pack_hash_start, index_hash_start) =
+        v2_sha1_layout(&bytes);
+    bytes[pack_hash_start] ^= 0x01;
+    rewrite_v2_sha1_index_checksum(&mut bytes, index_hash_start);
+    fs::write(&idx_path, bytes).expect("write pack-checksum-mismatch idx");
+
+    let output = run_libra_command(
+        &["verify-pack", idx_path.to_str().expect("idx path UTF-8")],
+        repo.path(),
+    );
+    assert_eq!(output.status.code(), Some(128));
+
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        human.contains("pack checksum mismatch: index has"),
+        "error should identify pack checksum mismatch: {human}"
+    );
+}
+
+#[test]
+#[serial]
+fn verify_pack_reports_offset_mismatch() {
+    let repo = tempfile::tempdir().expect("create repo");
+    init_repo_via_cli(repo.path());
+    let (_pack_dir, pack_path) = copy_pack_to_temp("small-sha1");
+    let idx_path = build_index(repo.path(), &pack_path, "2");
+
+    let mut bytes = fs::read(&idx_path).expect("read generated idx");
+    let (_object_count, _crc_start, offset_start, _pack_hash_start, index_hash_start) =
+        v2_sha1_layout(&bytes);
+    let mut first_offset = u32::from_be_bytes(
+        bytes[offset_start..offset_start + 4]
+            .try_into()
+            .expect("first offset is present"),
+    );
+    first_offset = first_offset.saturating_add(1);
+    bytes[offset_start..offset_start + 4].copy_from_slice(&first_offset.to_be_bytes());
+    rewrite_v2_sha1_index_checksum(&mut bytes, index_hash_start);
+    fs::write(&idx_path, bytes).expect("write offset-mismatch idx");
+
+    let output = run_libra_command(
+        &["verify-pack", idx_path.to_str().expect("idx path UTF-8")],
+        repo.path(),
+    );
+    assert_eq!(output.status.code(), Some(128));
+
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        human.contains("offset mismatch for"),
+        "error should identify offset mismatch: {human}"
+    );
+}
+
+#[test]
+#[serial]
+fn verify_pack_reports_crc32_mismatch() {
+    let repo = tempfile::tempdir().expect("create repo");
+    init_repo_via_cli(repo.path());
+    let (_pack_dir, pack_path) = copy_pack_to_temp("small-sha1");
+    let idx_path = build_index(repo.path(), &pack_path, "2");
+
+    let mut bytes = fs::read(&idx_path).expect("read generated idx");
+    let (object_count, crc_start, _offset_start, _pack_hash_start, index_hash_start) =
+        v2_sha1_layout(&bytes);
+    assert!(
+        object_count > 0,
+        "fixture should contain at least one object"
+    );
+    bytes[crc_start] ^= 0x01;
+    rewrite_v2_sha1_index_checksum(&mut bytes, index_hash_start);
+    fs::write(&idx_path, bytes).expect("write crc-mismatch idx");
+
+    let output = run_libra_command(
+        &["verify-pack", idx_path.to_str().expect("idx path UTF-8")],
+        repo.path(),
+    );
+    assert_eq!(output.status.code(), Some(128));
+
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        human.contains("crc32 mismatch for"),
+        "error should identify crc32 mismatch: {human}"
     );
 }
 

@@ -131,6 +131,16 @@ each result's `objects[]` contains `oid`, `object_type`, `size`,
 | Pack is malformed | `LBR-REPO-002` | 128 |
 | Index and pack disagree | `LBR-REPO-002` | 128 |
 
+Detailed corruption diagnostics are preserved in the human error text. Common
+examples include `pack index v2 checksum mismatch`, `pack checksum mismatch:
+index has <hash>, pack has <hash>`, `offset mismatch for <oid>: index has
+<n>, pack has <n>`, and `crc32 mismatch for <oid>: index has <hex>, pack has
+<hex>`.
+
+When several index files are provided, Libra currently stops at the first
+failing index and reports that shared CLI error on stderr. `--json` and
+`--machine` emit success payloads only when all requested indexes verify.
+
 ## Reused by `fsck`
 
 `verify-pack`'s core validation is reused in-process by [`libra fsck`](fsck.md)

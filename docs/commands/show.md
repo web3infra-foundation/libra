@@ -1,33 +1,36 @@
 # `libra show`
 
-Show a commit, tag, tree, blob, or the blob referenced by `REV:path`.
+Show one or more commits, tags, trees, blobs, or blobs referenced by `REV:path`.
 
 ## Synopsis
 
 ```
-libra show [OPTIONS] [OBJECT] [-- <PATHS>...]
+libra show [OPTIONS] [OBJECT]... [-- <PATHS>...]
 ```
 
 ## Description
 
-`libra show` resolves a single object reference and renders its contents. The
-default target is `HEAD`. It understands commit-ish references (`HEAD~2`,
-branch names, tag names), raw SHA-1 hashes, and the `REV:path` syntax for
+`libra show` resolves object references and renders their contents in the order
+given. The default target is `HEAD`. It understands commit-ish references
+(`HEAD~2`, branch names, tag names), raw object hashes, and the `REV:path` syntax for
 extracting a specific blob from a tree at a given revision.
 
 For commits the output includes the header (author, committer, date, message)
 followed by a unified diff (the "patch"). Flags such as `--no-patch`, `--stat`,
-and `--name-only` control how much diff context is shown. For annotated tags the
+`--name-only`, and `--name-status` control how much diff context is shown. For annotated tags the
 tagger metadata and message are printed, followed by the target object. Trees
-list their entries and blobs print their text content (or a binary summary).
+list their entries and blobs print their text content. Binary blobs and blobs larger than 10 MiB are summarized with metadata instead of raw content.
 
 ## Options
 
 | Flag | Short | Description |
 |------|-------|-------------|
-| `<OBJECT>` | | Object name (commit, tag, tree, blob) or `<object>:<path>`. Defaults to `HEAD`. |
+| `<OBJECT>...` | | Object names (commit, tag, tree, blob) or `<object>:<path>`. Defaults to `HEAD`. |
 | `--no-patch` | `-s` | Skip patch output and only show object metadata. |
+| `--patch` | `-p` | Show patch output explicitly. This is the default for commit objects unless suppressed by another display mode. |
 | `--oneline` | | Shorthand for `--pretty=oneline` -- prints hash and subject on one line. |
+| `--pretty <FORMAT>` | | Commit header format preset: `oneline`, `short`, `medium`, `full`, `fuller`, or `format:<template>`. |
+| `--format <FORMAT>` | | Commit header template. Supported placeholders: `%H`, `%h`, `%s`, `%n`, `%an`, `%ae`, `%cn`, `%ce`, and `%%`. |
 | `--name-only` | | Show only changed file names (no diff hunks). |
 | `--name-status` | | Show changed file names prefixed by a status letter (`A`/`M`/`D`), tab-separated. |
 | `--stat` | | Show diff statistics (insertions / deletions per file). |
@@ -48,6 +51,15 @@ libra show HEAD:src/main.rs
 # One-line summary of a commit
 libra show --oneline abc1234
 
+# Fuller commit header
+libra show --pretty=fuller HEAD
+
+# Custom commit header format
+libra show --format="%h %an %s" HEAD
+
+# Multiple commits in command-line order
+libra show --no-patch HEAD HEAD~1
+
 # Diff statistics only
 libra show --stat HEAD~1
 
@@ -60,8 +72,11 @@ libra show HEAD -- src/command/
 ```bash
 libra show                          # show HEAD commit and patch
 libra show HEAD~3                   # show an ancestor commit
+libra show HEAD HEAD~1              # show multiple objects in order
 libra show -s v2.0.0                # metadata only for a tag
 libra show HEAD:Cargo.toml          # print a file at HEAD
+libra show --pretty=short HEAD      # short commit header
+libra show --format="%h %s" HEAD    # custom commit header
 libra show --name-only HEAD         # list changed files
 libra show --name-status HEAD       # list changed files with A/M/D status
 libra show --stat HEAD              # diff statistics
@@ -72,10 +87,12 @@ libra --json show HEAD              # structured JSON output
 
 Human mode preserves the existing presentation:
 
-- Commit: header plus optional patch / stat / name-only output
+- Commit: header plus optional patch / stat / name-only / name-status output
 - Annotated tag: tag metadata followed by the target object
 - Tree: list of tree entries
 - Blob: text content or a binary summary
+- Large blob: metadata summary; use `libra cat-file -p <blob>` when raw content is required
+- Multiple objects: rendered sequentially in command-line order without a custom separator
 - `--quiet`: validates the object reference but suppresses human output
 - Human output uses the shared pager policy; pass global `--no-pager` to force direct stdout
 
@@ -165,8 +182,10 @@ Human mode preserves the existing presentation:
 Notes:
 
 - Commit JSON `refs` are best-effort decoration metadata; unrelated branch/tag rows no longer block `show`
+- Single-object JSON keeps `data` as one typed object; multi-object JSON returns `data` as an array of typed objects in command-line order
 - Human `--quiet` still validates the target object but suppresses stdout and does not initialize the pager
 - Commit patch / stat paths stay strict: corrupt historical blobs fail with `LBR-REPO-002` instead of falling back to working tree contents
+- Blob JSON sets `content: null` for binary blobs and blobs larger than 10 MiB; large text blobs are intentionally summarized to avoid duplicating large object bytes in `show`
 
 ## Design Rationale
 
@@ -180,14 +199,13 @@ implementations across branches or time, without mutating the working tree.
 Libra preserves this syntax for full Git compatibility and because it maps
 naturally to the internal tree-walk operation that Libra already performs.
 
-### Why no `--format`?
+### Why is `--format` limited?
 
-Git's `--format` / `--pretty=format:` machinery is powerful but complex, with
-dozens of `%`-placeholders and conditional formatting. Libra instead provides
-structured JSON output (`--json`) which gives programmatic consumers every field
-in a well-typed schema. Human users get a sensible default presentation. This
-avoids the maintenance burden of a format mini-language while giving agents a
-strictly better interface (typed JSON fields vs. string parsing).
+Git's `--format` / `--pretty=format:` machinery has dozens of placeholders and
+conditional formatting rules. Libra supports the common commit-header subset
+used by scripts and keeps structured JSON (`--json`) as the complete machine
+interface. Unsupported placeholders fail with `LBR-CLI-002` instead of being
+silently printed or guessed.
 
 ### Why type-aware JSON schema?
 
@@ -207,13 +225,16 @@ but I expected it" bugs in agent tooling.
 | `REV:path` syntax | Yes | Yes | No (use `jj file show -r REV path`) |
 | `--no-patch` / `-s` | Yes | Yes | N/A |
 | `--oneline` | Yes | Yes | N/A (use `jj log --template`) |
+| `--pretty` presets | Partial (`oneline`, `short`, `medium`, `full`, `fuller`) | Yes | No (use templates) |
 | `--name-only` | Yes | Yes | N/A |
+| `--name-status` | Yes | Yes | N/A |
 | `--stat` | Yes | Yes | N/A (`jj diff --stat -r REV`) |
-| `--format` / `--pretty=format:` | No (use `--json`) | Yes | No (use templates) |
+| `--format` / `--pretty=format:` | Partial common placeholder subset | Yes | No (use templates) |
 | `--quiet` | Yes (validates only) | No | N/A |
 | JSON output | `--json` with typed schema | No | No |
 | Pathspec filter | Yes (trailing `<PATHS>...`) | Yes | No (use `jj diff --from/--to`) |
 | Tag-aware display | Auto-detects annotated tags | Auto-detects annotated tags | No tag objects |
+| Large blob display | Metadata summary above 10 MiB | Prints raw blob content | `jj file show` |
 
 ## Error Handling
 

@@ -2,7 +2,7 @@
 //! remote-tracking refs, and honor prune/depth options.
 
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fs,
     io::{self, Error as IoError, Write},
     path::{Path, PathBuf},
@@ -44,6 +44,7 @@ use crate::{
         vault::{decrypt_token, load_unseal_key},
     },
     utils::{
+        client_storage::ClientStorage,
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, ProgressMode, ProgressReporter, emit_json_data},
         path, util,
@@ -495,7 +496,7 @@ pub struct FetchArgs {
 
     /// Deepen the history of a shallow repository by N commits beyond the current
     /// boundary (only meaningful when the repository was cloned with `--depth`).
-    #[clap(long, value_name = "N", conflicts_with = "unshallow")]
+    #[clap(long, value_name = "N", conflicts_with_all = ["depth", "unshallow"])]
     pub deepen: Option<usize>,
 
     /// Convert a shallow repository into a complete one by fetching all missing
@@ -1209,6 +1210,9 @@ pub(crate) async fn discover_remote_with_name(
 ) -> Result<(RemoteClient, DiscoveryResult), FetchError> {
     let remote_client =
         RemoteClient::from_spec_with_remote(remote_spec, remote_name).map_err(|message| {
+            if is_vault_ssh_config_error(&message) {
+                return FetchError::LocalState { message };
+            }
             // Classify against a credential-redacted spec so neither the `spec`
             // field nor the `reason` string (which may interpolate the spec for
             // malformed URLs) can leak a token/password.
@@ -1229,6 +1233,12 @@ pub(crate) async fn discover_remote_with_name(
             source,
         })?;
     Ok((remote_client, discovery))
+}
+
+fn is_vault_ssh_config_error(message: &str) -> bool {
+    message.contains("vault SSH private key")
+        || message.contains("vault unseal key")
+        || message.contains("temporary SSH key file")
 }
 
 /// Classify a remote-spec construction failure into a typed kind and a
@@ -1320,7 +1330,8 @@ pub(crate) const UNSHALLOW_DEPTH: usize = 0x7fff_ffff;
 
 /// Translate the `fetch` CLI depth/deepen/unshallow flags into a single
 /// [`ShallowOptions`] request. `--unshallow` requests the complete history,
-/// `--deepen N` takes precedence over `--depth N`, otherwise `--depth N` is used.
+/// `--deepen N` sends a relative deepen request, otherwise `--depth N` sends an
+/// absolute depth request.
 pub(crate) fn build_fetch_shallow_options(
     depth: Option<usize>,
     deepen: Option<usize>,
@@ -1335,6 +1346,7 @@ pub(crate) fn build_fetch_shallow_options(
     };
     ShallowOptions {
         depth: effective_depth,
+        deepen_relative: deepen.is_some() && !unshallow,
         deepen_since,
         deepen_not,
         filter: None,
@@ -1368,33 +1380,38 @@ pub async fn fetch_repository_safe(
     .map(|_| ())
 }
 
-/// How `fetch` should treat the remote's tags. Git's auto-follow default — a
-/// second negotiation round that pulls the objects of tags pointing at
-/// already-fetched commits — is deferred; the current default imports no tags
-/// unless `--tags`/`-t` (or `remote.<name>.tagOpt = --tags`) asks for them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TagFetchMode {
-    /// Import no tags (the default and `--no-tags`).
     None,
-    /// Import every advertised tag, pulling each tag object into the pack.
+    Auto,
     All,
 }
 
 /// A remote tag advertised during ref discovery that fetch may import.
 #[derive(Debug, Clone)]
 struct TagCandidate {
-    /// Fully-qualified local ref name, e.g. `refs/tags/v1.0`.
     ref_name: String,
-    /// Advertised object hash: the tag-object hash for an annotated tag, or the
-    /// commit hash for a lightweight tag. This is both the `want` to request and
-    /// the target the local tag ref is written to (matching `libra tag`).
     object_hash: String,
+    peeled_hash: Option<String>,
 }
 
-/// Collect importable tag candidates from the advertised refs, dropping the
-/// peeled `refs/tags/<name>^{}` companions (whose target is reached through the
-/// annotated tag object itself).
+impl TagCandidate {
+    fn target_hash(&self) -> &str {
+        self.peeled_hash.as_deref().unwrap_or(&self.object_hash)
+    }
+}
+
 fn collect_tag_candidates(refs: &[DiscRef]) -> Vec<TagCandidate> {
+    let peeled = refs
+        .iter()
+        .filter_map(|reference| {
+            reference
+                ._ref
+                .strip_suffix("^{}")
+                .map(|base| (base.to_string(), reference._hash.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+
     refs.iter()
         .filter(|reference| {
             reference._ref.starts_with("refs/tags/") && !reference._ref.ends_with("^{}")
@@ -1402,6 +1419,7 @@ fn collect_tag_candidates(refs: &[DiscRef]) -> Vec<TagCandidate> {
         .map(|reference| TagCandidate {
             ref_name: reference._ref.clone(),
             object_hash: reference._hash.clone(),
+            peeled_hash: peeled.get(&reference._ref).cloned(),
         })
         .collect()
 }
@@ -1420,9 +1438,6 @@ async fn read_remote_tagopt(remote_name: &str) -> Option<String> {
     None
 }
 
-/// Resolve the effective tag-import behavior for a remote: an explicit
-/// `--no-tags`/`--tags` flag wins, otherwise `remote.<name>.tagOpt` (`--tags` /
-/// `--no-tags`) applies, otherwise the default imports no tags.
 async fn resolve_tag_mode(remote_name: &str, tags_flag: bool, no_tags_flag: bool) -> TagFetchMode {
     if no_tags_flag {
         return TagFetchMode::None;
@@ -1432,8 +1447,8 @@ async fn resolve_tag_mode(remote_name: &str, tags_flag: bool, no_tags_flag: bool
     }
     match read_remote_tagopt(remote_name).await.as_deref() {
         Some("--tags") => TagFetchMode::All,
-        // `--no-tags` or any unrecognised value imports no tags.
-        _ => TagFetchMode::None,
+        Some("--no-tags") => TagFetchMode::None,
+        _ => TagFetchMode::Auto,
     }
 }
 
@@ -1572,14 +1587,12 @@ pub(crate) async fn fetch_repository_with_result(
         .cloned()
         .collect::<Vec<_>>();
 
-    // Resolve how tags should be imported (CLI flag > `remote.<name>.tagOpt` >
-    // default of none) and capture the advertised tag candidates *before* the
-    // ref set is narrowed to branches below — tags live in the global
-    // `refs/tags/*` namespace, not under `refs/remotes/<remote>/*`.
     let tag_mode = resolve_tag_mode(&remote_config.name, tags_flag, no_tags_flag).await;
+    let all_tag_candidates = collect_tag_candidates(&discovery.refs);
     let tag_candidates = match tag_mode {
         TagFetchMode::None => Vec::new(),
-        TagFetchMode::All => collect_tag_candidates(&discovery.refs),
+        TagFetchMode::Auto => Vec::new(),
+        TagFetchMode::All => all_tag_candidates.clone(),
     };
 
     // Only request refs we will actually persist as remote-tracking refs.
@@ -1605,7 +1618,22 @@ pub(crate) async fn fetch_repository_with_result(
     if dry_run {
         let mut refs_updated =
             compute_fetch_ref_preview(&remote_config, &refs, &refmap_rules).await?;
-        refs_updated.extend(preview_tag_updates(&tag_candidates, force).await?);
+        let dry_run_tags = match tag_mode {
+            TagFetchMode::None => Vec::new(),
+            TagFetchMode::All => tag_candidates.clone(),
+            TagFetchMode::Auto => {
+                let fetched_tips = refs
+                    .iter()
+                    .map(|reference| reference._hash.as_str())
+                    .collect::<HashSet<_>>();
+                all_tag_candidates
+                    .iter()
+                    .filter(|candidate| fetched_tips.contains(candidate.target_hash()))
+                    .cloned()
+                    .collect()
+            }
+        };
+        refs_updated.extend(preview_tag_updates(&dry_run_tags, force).await?);
         let pruned = if prune {
             let remote_branch_names =
                 crate::command::remote::collect_remote_branch_names(&discovery.refs);
@@ -1666,10 +1694,12 @@ pub(crate) async fn fetch_repository_with_result(
     let shallow_requested = shallow.is_requested() || !shallow_boundary_oids.is_empty();
     let fetch_data =
         read_fetch_stream(&mut result_stream, output, &task, shallow_requested).await?;
-    let objects_fetched = pack_object_count(&fetch_data.pack_data);
+    let mut objects_fetched = pack_object_count(&fetch_data.pack_data);
     let pack_file = write_pack_and_index(&fetch_data.pack_data)?;
-    // Keep the pack path so an `--atomic` ref-transaction rollback can remove it.
-    let atomic_pack = if atomic { pack_file.clone() } else { None };
+    let mut atomic_packs = Vec::new();
+    if atomic && let Some(pack_file) = &pack_file {
+        atomic_packs.push(pack_file.clone());
+    }
     if let Some(pack_file) = pack_file {
         let index_version = match get_hash_kind() {
             HashKind::Sha1 => None,
@@ -1701,6 +1731,26 @@ pub(crate) async fn fetch_repository_with_result(
         write_shallow_boundaries(&BTreeSet::new())?;
     }
 
+    let tag_candidates = match tag_mode {
+        TagFetchMode::None | TagFetchMode::All => tag_candidates,
+        TagFetchMode::Auto => {
+            let followed = auto_follow_tag_candidates(&all_tag_candidates)?;
+            let (extra_objects, extra_pack) = fetch_missing_tag_objects(
+                &remote_client,
+                &followed,
+                &remote_config.name,
+                &remote_config.url,
+                output,
+            )
+            .await?;
+            objects_fetched += extra_objects;
+            if atomic && let Some(pack_file) = extra_pack {
+                atomic_packs.push(pack_file);
+            }
+            followed
+        }
+    };
+
     let refs_updated = match update_references(
         &remote_config,
         &refs,
@@ -1718,7 +1768,7 @@ pub(crate) async fn fetch_repository_with_result(
             // `--atomic`: the per-remote ref transaction already rolled back, so
             // remove the pack/index downloaded for this fetch to leave no
             // partial state behind.
-            if let Some(pack_file) = &atomic_pack {
+            for pack_file in &atomic_packs {
                 cleanup_pack_files(pack_file);
             }
             return Err(error);
@@ -2544,6 +2594,60 @@ async fn preview_tag_updates(
     Ok(updates)
 }
 
+fn object_exists(hash: &str) -> Result<bool, FetchError> {
+    let hash = ObjectHash::from_str(hash).map_err(|source| FetchError::UpdateRefs {
+        message: format!("remote advertised invalid object id '{hash}': {source}"),
+    })?;
+    let storage = ClientStorage::init(path::objects());
+    Ok(storage.get_object_type(&hash).is_ok())
+}
+
+fn auto_follow_tag_candidates(
+    candidates: &[TagCandidate],
+) -> Result<Vec<TagCandidate>, FetchError> {
+    let mut followed = Vec::new();
+    for candidate in candidates {
+        if object_exists(candidate.target_hash())? {
+            followed.push(candidate.clone());
+        }
+    }
+    Ok(followed)
+}
+
+async fn fetch_missing_tag_objects(
+    remote_client: &RemoteClient,
+    candidates: &[TagCandidate],
+    remote_name: &str,
+    remote_url: &str,
+    output: &OutputConfig,
+) -> Result<(usize, Option<String>), FetchError> {
+    let mut want = Vec::new();
+    for candidate in candidates {
+        if !object_exists(&candidate.object_hash)? {
+            want.push(candidate.object_hash.clone());
+        }
+    }
+    want.sort();
+    want.dedup();
+    if want.is_empty() {
+        return Ok((0, None));
+    }
+
+    let have = current_have_safe().await?;
+    let mut result_stream = remote_client
+        .fetch_objects(&have, &want, &[], &ShallowOptions::default())
+        .await
+        .map_err(|source| FetchError::FetchObjects {
+            remote: redact_url_credentials(remote_url),
+            source,
+        })?;
+    let task = format!("fetch {remote_name} tags");
+    let fetch_data = read_fetch_stream(&mut result_stream, output, &task, false).await?;
+    let objects_fetched = pack_object_count(&fetch_data.pack_data);
+    let pack_file = write_pack_and_index(&fetch_data.pack_data)?;
+    Ok((objects_fetched, pack_file))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn update_references(
     remote_config: &RemoteConfig,
@@ -2618,6 +2722,7 @@ async fn update_references(
                         .unwrap_or_else(|| ObjectHash::zero_str(get_hash_kind()).to_string()),
                     new_oid: reference._hash.clone(),
                     action: ReflogAction::Fetch,
+                    message: None,
                 };
                 Reflog::insert_single_entry(txn, &context, &full_ref_name)
                     .await
@@ -3089,10 +3194,25 @@ mod tests {
         assert_eq!(opts.deepen_since, Some(1_700_000_000));
         assert_eq!(opts.deepen_not, vec!["v1.0".to_string()]);
         assert_eq!(opts.depth, None);
+        assert!(
+            !opts.deepen_relative,
+            "`--shallow-since` without `--deepen` is not relative"
+        );
+
+        let deepen = super::build_fetch_shallow_options(None, Some(5), false, None, vec![]);
+        assert_eq!(deepen.depth, Some(5));
+        assert!(
+            deepen.deepen_relative,
+            "`--deepen` must be encoded as a relative deepen request"
+        );
 
         // `--unshallow` still overrides everything to the max-depth request.
         let unshallow = super::build_fetch_shallow_options(None, None, true, None, vec![]);
         assert_eq!(unshallow.depth, Some(super::UNSHALLOW_DEPTH));
+        assert!(
+            !unshallow.deepen_relative,
+            "`--unshallow` uses max depth, not relative deepening"
+        );
     }
 
     /// The `.libra/shallow` boundary file must be owner read/write only on Unix.

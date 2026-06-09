@@ -1,16 +1,22 @@
-//! Implements `rev-parse` to resolve revision names and print basic repository paths.
+//! Implements `rev-parse` to resolve revision names and print repository metadata.
 
-use std::{fs, io::Write, path::PathBuf};
+use std::{
+    fs,
+    io::Write,
+    path::{Component, Path, PathBuf},
+};
 
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use git_internal::hash::ObjectHash;
 use serde::Serialize;
 
 use crate::{
+    command::merge_base::{self, MergeBaseError},
     internal::{
         branch::{Branch, BranchStoreError},
         config::ConfigKv,
         head::Head,
+        tag,
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -36,36 +42,127 @@ EXAMPLES:
     libra rev-parse --abbrev-ref HEAD   Print the branch name (or HEAD when detached)
     libra rev-parse --verify HEAD       Assert HEAD resolves to one object (exit 128 if not)
     libra rev-parse --show-toplevel     Print the absolute path of the repository root
+    libra rev-parse --show-prefix       Print cwd relative to the repository root
+    libra rev-parse main..HEAD          Print range endpoints for plumbing scripts
+    libra rev-parse --sq HEAD main      Shell-quote resolved revisions
     libra rev-parse --json HEAD         Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
 #[command(after_help = REV_PARSE_EXAMPLES)]
+#[command(group(
+    ArgGroup::new("metadata_mode")
+        .multiple(false)
+        .args([
+            "show_toplevel",
+            "git_dir",
+            "show_prefix",
+            "show_cdup",
+            "is_inside_git_dir",
+            "is_inside_work_tree",
+            "is_bare_repository",
+        ]),
+))]
 pub struct RevParseArgs {
     /// Show a non-ambiguous short object name.
-    #[clap(long, conflicts_with_all = ["abbrev_ref", "show_toplevel"])]
+    #[clap(long, conflicts_with_all = ["abbrev_ref", "metadata_mode"])]
     pub short: bool,
 
     /// Show the branch name instead of the commit hash.
-    #[clap(long = "abbrev-ref", conflicts_with_all = ["show_toplevel", "short"])]
+    #[clap(
+        long = "abbrev-ref",
+        conflicts_with_all = [
+            "show_toplevel",
+            "git_dir",
+            "show_prefix",
+            "show_cdup",
+            "is_inside_git_dir",
+            "is_inside_work_tree",
+            "is_bare_repository",
+            "short",
+            "verify",
+            "sq",
+            "sq_quote",
+            "symbolic",
+            "symbolic_full_name",
+        ]
+    )]
     pub abbrev_ref: bool,
 
     /// Show the absolute path of the top-level working tree.
-    #[clap(long = "show-toplevel", conflicts_with_all = ["abbrev_ref", "short", "spec", "verify"])]
+    #[clap(long = "show-toplevel", conflicts_with_all = ["specs", "verify"])]
     pub show_toplevel: bool,
+
+    /// Show the Libra storage directory.
+    #[clap(long = "git-dir", conflicts_with_all = ["specs", "verify"])]
+    pub git_dir: bool,
+
+    /// Show the current directory prefix relative to the worktree root.
+    #[clap(long = "show-prefix", conflicts_with_all = ["specs", "verify"])]
+    pub show_prefix: bool,
+
+    /// Show a ../ path from the current directory back to the worktree root.
+    #[clap(long = "show-cdup", conflicts_with_all = ["specs", "verify"])]
+    pub show_cdup: bool,
+
+    /// Print whether the current directory is inside the Libra storage directory.
+    #[clap(long = "is-inside-git-dir", conflicts_with_all = ["specs", "verify"])]
+    pub is_inside_git_dir: bool,
+
+    /// Print whether the current directory is inside the worktree.
+    #[clap(long = "is-inside-work-tree", conflicts_with_all = ["specs", "verify"])]
+    pub is_inside_work_tree: bool,
+
+    /// Print whether this repository is configured as bare.
+    #[clap(long = "is-bare-repository", conflicts_with_all = ["specs", "verify"])]
+    pub is_bare_repository: bool,
 
     /// Verify that the single argument resolves to one object and print it;
     /// otherwise fail (exit 128, or exit 1 under global `--quiet`). May be
     /// combined with `--short`.
-    #[clap(long, conflicts_with_all = ["abbrev_ref"])]
+    #[clap(
+        long,
+        conflicts_with_all = [
+            "abbrev_ref",
+            "metadata_mode",
+            "sq",
+            "sq_quote",
+            "symbolic",
+            "symbolic_full_name",
+        ]
+    )]
     pub verify: bool,
+
+    /// Quiet verify mode (`git rev-parse --verify -q` exits 1 silently).
+    #[clap(short = 'q', long = "quiet")]
+    pub quiet: bool,
 
     /// Revision to use when no positional SPEC is given (Git's `--default`).
     #[clap(long, value_name = "SPEC")]
     pub default: Option<String>,
 
-    /// Revision to parse. Defaults to HEAD when omitted.
-    #[clap(value_name = "SPEC")]
-    pub spec: Option<String>,
+    /// Shell-quote resolved revision outputs on one line.
+    #[clap(long, conflicts_with_all = ["sq_quote", "metadata_mode", "verify", "abbrev_ref"])]
+    pub sq: bool,
+
+    /// Shell-quote positional arguments literally without resolving revisions.
+    #[clap(long = "sq-quote", conflicts_with_all = ["sq", "metadata_mode", "verify", "abbrev_ref"])]
+    pub sq_quote: bool,
+
+    /// Prefer symbolic names for plain ref inputs.
+    #[clap(long, conflicts_with_all = ["symbolic_full_name", "metadata_mode", "verify", "abbrev_ref"])]
+    pub symbolic: bool,
+
+    /// Prefer full ref names for plain ref inputs.
+    #[clap(
+        long = "symbolic-full-name",
+        conflicts_with_all = ["symbolic", "metadata_mode", "verify", "abbrev_ref"]
+    )]
+    pub symbolic_full_name: bool,
+
+    /// Revisions or literal arguments. Defaults to HEAD when omitted except
+    /// under `--verify` and `--sq-quote`.
+    #[clap(value_name = "SPEC", allow_hyphen_values = true)]
+    pub specs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -73,6 +170,8 @@ struct RevParseOutput {
     mode: &'static str,
     input: Option<String>,
     value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    values: Option<Vec<String>>,
 }
 
 pub async fn execute(args: RevParseArgs) -> Result<(), String> {
@@ -82,10 +181,15 @@ pub async fn execute(args: RevParseArgs) -> Result<(), String> {
 }
 
 pub async fn execute_safe(args: RevParseArgs, output: &OutputConfig) -> CliResult<()> {
-    if !args.show_toplevel {
+    if output.is_json() && (args.sq || args.sq_quote) {
+        return Err(CliError::command_usage(
+            "rev-parse --sq/--sq-quote do not support --json or --machine output",
+        ));
+    }
+    if !args.sq_quote {
         util::require_repo().map_err(|_| CliError::repo_not_found())?;
     }
-    let result = resolve_rev_parse(&args, output.quiet).await?;
+    let result = resolve_rev_parse(&args, output.quiet || args.quiet).await?;
 
     if output.is_json() {
         emit_json_data("rev-parse", &result, output)
@@ -110,24 +214,86 @@ fn write_rev_parse_output<W: Write>(writer: &mut W, value: &str) -> CliResult<()
 }
 
 async fn resolve_rev_parse(args: &RevParseArgs, quiet: bool) -> CliResult<RevParseOutput> {
+    if args.sq_quote {
+        return Ok(RevParseOutput {
+            mode: "sq_quote",
+            input: None,
+            value: shell_quote_literals(&args.specs, true),
+            values: None,
+        });
+    }
+
     if args.show_toplevel {
         let workdir = resolve_show_toplevel_path().await?;
         return Ok(RevParseOutput {
             mode: "show_toplevel",
             input: None,
             value: util::path_to_string(&workdir),
+            values: None,
+        });
+    }
+    if args.git_dir {
+        let storage = util::try_get_storage_path(None).map_err(map_repo_path_error)?;
+        return Ok(RevParseOutput {
+            mode: "git_dir",
+            input: None,
+            value: util::path_to_string(&storage),
+            values: None,
+        });
+    }
+    if args.show_prefix {
+        return Ok(RevParseOutput {
+            mode: "show_prefix",
+            input: None,
+            value: resolve_show_prefix()?,
+            values: None,
+        });
+    }
+    if args.show_cdup {
+        return Ok(RevParseOutput {
+            mode: "show_cdup",
+            input: None,
+            value: resolve_show_cdup()?,
+            values: None,
+        });
+    }
+    if args.is_inside_git_dir {
+        return Ok(RevParseOutput {
+            mode: "is_inside_git_dir",
+            input: None,
+            value: bool_output(is_current_dir_inside_storage()?),
+            values: None,
+        });
+    }
+    if args.is_inside_work_tree {
+        return Ok(RevParseOutput {
+            mode: "is_inside_work_tree",
+            input: None,
+            value: bool_output(!is_current_dir_inside_storage()?),
+            values: None,
+        });
+    }
+    if args.is_bare_repository {
+        return Ok(RevParseOutput {
+            mode: "is_bare_repository",
+            input: None,
+            value: bool_output(is_bare_repository().await?),
+            values: None,
         });
     }
 
     // `--default <SPEC>` supplies the revision when no positional spec is given
     // (Git semantics). Without either, revision modes fall back to HEAD.
-    let resolved_spec: Option<String> = args.spec.clone().or_else(|| args.default.clone());
+    let specs = effective_specs(args, !args.verify);
 
     // `--verify`: the argument must resolve to exactly one object, otherwise
     // fail with Git's plumbing exit codes — 128 normally, or 1 under `--quiet`
     // (silent). Unlike the default path it never falls back to HEAD.
     if args.verify {
-        let spec = resolved_spec.ok_or_else(|| verify_failure(quiet))?;
+        if specs.len() != 1 {
+            return Err(verify_failure(quiet));
+        }
+        let spec = specs[0].clone();
         let commit = util::get_commit_base_typed(&spec)
             .await
             .map_err(|_| verify_failure(quiet))?;
@@ -140,34 +306,236 @@ async fn resolve_rev_parse(args: &RevParseArgs, quiet: bool) -> CliResult<RevPar
             mode: "verify",
             input: Some(spec),
             value,
+            values: None,
         });
     }
 
-    let spec = resolved_spec.unwrap_or_else(|| "HEAD".to_string());
-
     if args.abbrev_ref {
+        let spec = single_spec(&specs)?;
         let value = resolve_abbrev_ref(&spec).await?;
         return Ok(RevParseOutput {
             mode: "abbrev_ref",
             input: Some(spec),
             value,
+            values: None,
         });
     }
 
-    let commit = util::get_commit_base_typed(&spec)
+    let mut outputs = Vec::new();
+    for spec in &specs {
+        outputs.extend(resolve_spec_outputs(spec, args).await?);
+    }
+    let value = if args.sq {
+        shell_quote_literals(&outputs, false)
+    } else {
+        outputs.join("\n")
+    };
+
+    Ok(RevParseOutput {
+        mode: rev_parse_mode(args),
+        input: Some(specs.join(" ")),
+        value,
+        values: rev_parse_values(args, &outputs),
+    })
+}
+
+fn effective_specs(args: &RevParseArgs, default_head: bool) -> Vec<String> {
+    if !args.specs.is_empty() {
+        return args.specs.clone();
+    }
+    if let Some(default) = &args.default {
+        return vec![default.clone()];
+    }
+    if default_head {
+        return vec!["HEAD".to_string()];
+    }
+    Vec::new()
+}
+
+fn single_spec(specs: &[String]) -> CliResult<String> {
+    if specs.len() == 1 {
+        Ok(specs[0].clone())
+    } else {
+        Err(CliError::command_usage(
+            "rev-parse mode requires exactly one revision",
+        ))
+    }
+}
+
+fn rev_parse_mode(args: &RevParseArgs) -> &'static str {
+    if args.sq {
+        "sq"
+    } else if args.specs.iter().any(|spec| spec_is_range_query(spec)) {
+        "range"
+    } else if args.symbolic {
+        "symbolic"
+    } else if args.symbolic_full_name {
+        "symbolic_full_name"
+    } else if args.short {
+        "short"
+    } else {
+        "resolve"
+    }
+}
+
+fn rev_parse_values(args: &RevParseArgs, outputs: &[String]) -> Option<Vec<String>> {
+    if args.sq || outputs.len() <= 1 {
+        None
+    } else {
+        Some(outputs.to_vec())
+    }
+}
+
+fn spec_is_range_query(spec: &str) -> bool {
+    spec.contains("..") || spec.starts_with('^')
+}
+
+async fn resolve_spec_outputs(spec: &str, args: &RevParseArgs) -> CliResult<Vec<String>> {
+    if let Some((lhs, rhs)) = spec.split_once("...") {
+        let left = resolve_range_endpoint(lhs).await?;
+        let right = resolve_range_endpoint(rhs).await?;
+        let mut out = vec![left.to_string(), right.to_string()];
+        for base in merge_base::find_best_merge_bases(left, right).map_err(map_merge_base_error)? {
+            out.push(format!("^{base}"));
+        }
+        return Ok(out);
+    }
+    if let Some((lhs, rhs)) = spec.split_once("..") {
+        let left = resolve_range_endpoint(lhs).await?;
+        let right = resolve_range_endpoint(rhs).await?;
+        return Ok(vec![right.to_string(), format!("^{left}")]);
+    }
+    if let Some(rest) = spec.strip_prefix('^') {
+        let commit = resolve_range_endpoint(rest).await?;
+        return Ok(vec![format!("^{commit}")]);
+    }
+    if args.symbolic {
+        return resolve_symbolic_name(spec).await;
+    }
+    if args.symbolic_full_name {
+        return resolve_symbolic_full_name(spec)
+            .await
+            .map(|name| vec![name]);
+    }
+    let commit = util::get_commit_base_typed(spec)
         .await
-        .map_err(|err| rev_parse_target_error(&spec, err))?;
+        .map_err(|err| rev_parse_target_error(spec, err))?;
     let value = if args.short {
         resolve_short_commit(&commit).await?
     } else {
         commit.to_string()
     };
+    Ok(vec![value])
+}
 
-    Ok(RevParseOutput {
-        mode: if args.short { "short" } else { "resolve" },
-        input: Some(spec),
-        value,
-    })
+async fn resolve_range_endpoint(spec: &str) -> CliResult<ObjectHash> {
+    let endpoint = if spec.is_empty() { "HEAD" } else { spec };
+    util::get_commit_base_typed(endpoint)
+        .await
+        .map_err(|err| rev_parse_target_error(endpoint, err))
+}
+
+fn map_merge_base_error(error: MergeBaseError) -> CliError {
+    CliError::fatal(format!(
+        "failed to compute merge base for rev-parse range: {error}"
+    ))
+    .with_stable_code(StableErrorCode::RepoCorrupt)
+}
+
+async fn resolve_symbolic_name(spec: &str) -> CliResult<Vec<String>> {
+    Ok(vec![spec.to_string()])
+}
+
+async fn resolve_symbolic_full_name(spec: &str) -> CliResult<String> {
+    if spec == "HEAD" {
+        return match Head::current_result().await {
+            Ok(Head::Branch(name)) => Ok(format!("refs/heads/{name}")),
+            Ok(Head::Detached(_)) => Ok("HEAD".to_string()),
+            Err(error) => Err(map_head_resolution_error(error)),
+        };
+    }
+    if spec.starts_with("refs/heads/")
+        && Branch::find_branch_result(spec.trim_start_matches("refs/heads/"), None)
+            .await
+            .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
+            .is_some()
+    {
+        return Ok(spec.to_string());
+    }
+    if spec.starts_with("refs/remotes/") && resolve_remote_tracking_ref(spec, spec).await? {
+        return Ok(spec.to_string());
+    }
+    if let Some(tag_name) = spec.strip_prefix("refs/tags/") {
+        return resolve_tag_full_name(tag_name)
+            .await
+            .map(|()| spec.to_string());
+    }
+    if let Some(branch) = Branch::find_branch_result(spec, None)
+        .await
+        .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
+    {
+        return Ok(format!("refs/heads/{}", branch.name));
+    }
+    for (remote, branch_name) in util::remote_tracking_candidates(spec) {
+        let full_ref = format!("refs/remotes/{remote}/{branch_name}");
+        if Branch::find_branch_result(&full_ref, Some(remote))
+            .await
+            .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
+            .is_some()
+            || Branch::find_branch_result(branch_name, Some(remote))
+                .await
+                .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
+                .is_some()
+        {
+            return Ok(full_ref);
+        }
+    }
+    resolve_tag_full_name(spec)
+        .await
+        .map(|()| format!("refs/tags/{spec}"))
+        .map_err(|_| {
+            CliError::failure(format!("not a symbolic ref: '{spec}'"))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+        })
+}
+
+async fn resolve_tag_full_name(spec: &str) -> CliResult<()> {
+    match tag::find_tag_ref(spec).await {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(CliError::failure(format!("not a symbolic ref: '{spec}'"))
+            .with_stable_code(StableErrorCode::CliInvalidTarget)),
+        Err(error) => Err(CliError::fatal(format!(
+            "failed to resolve symbolic tag '{spec}': {error}"
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)),
+    }
+}
+
+fn shell_quote_literals(values: &[String], leading_space: bool) -> String {
+    let mut out = String::new();
+    if leading_space && !values.is_empty() {
+        out.push(' ');
+    }
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            out.push(' ');
+        }
+        out.push_str(&shell_quote(value));
+    }
+    out
+}
+
+fn shell_quote(value: &str) -> String {
+    let mut out = String::from("'");
+    for ch in value.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 /// Build the error for a failed `--verify`: silent exit 1 under global
@@ -328,6 +696,86 @@ async fn resolve_show_toplevel_path() -> CliResult<PathBuf> {
     Ok(workdir)
 }
 
+fn resolve_show_prefix() -> CliResult<String> {
+    let (current, workdir, storage) = canonical_repo_paths()?;
+    if current.starts_with(&storage) {
+        return Ok(String::new());
+    }
+    let Ok(relative) = current.strip_prefix(&workdir) else {
+        return Ok(String::new());
+    };
+    slash_path(relative, true)
+}
+
+fn resolve_show_cdup() -> CliResult<String> {
+    let prefix = resolve_show_prefix()?;
+    if prefix.is_empty() {
+        return Ok(String::new());
+    }
+    let depth = prefix.trim_end_matches('/').split('/').count();
+    Ok("../".repeat(depth))
+}
+
+fn is_current_dir_inside_storage() -> CliResult<bool> {
+    let (current, _, storage) = canonical_repo_paths()?;
+    Ok(current.starts_with(storage))
+}
+
+fn canonical_repo_paths() -> CliResult<(PathBuf, PathBuf, PathBuf)> {
+    let current = std::env::current_dir().map_err(map_repo_path_error)?;
+    let workdir = util::try_working_dir().map_err(map_repo_path_error)?;
+    let storage = util::try_get_storage_path(None).map_err(map_repo_path_error)?;
+    Ok((
+        canonicalize_path(&current)?,
+        canonicalize_path(&workdir)?,
+        canonicalize_path(&storage)?,
+    ))
+}
+
+fn canonicalize_path(path: &Path) -> CliResult<PathBuf> {
+    fs::canonicalize(path).map_err(|error| {
+        CliError::io(format!(
+            "failed to resolve repository path '{}': {error}",
+            path.display()
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })
+}
+
+fn slash_path(path: &Path, trailing_slash: bool) -> CliResult<String> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => {
+                let value = value.to_str().ok_or_else(|| {
+                    CliError::fatal(format!(
+                        "repository path contains non-UTF-8 component: {}",
+                        path.display()
+                    ))
+                    .with_stable_code(StableErrorCode::IoReadFailed)
+                })?;
+                parts.push(value.to_string());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => parts.push("..".to_string()),
+            Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+    let mut out = parts.join("/");
+    if trailing_slash && !out.is_empty() {
+        out.push('/');
+    }
+    Ok(out)
+}
+
+fn bool_output(value: bool) -> String {
+    if value {
+        "true".to_string()
+    } else {
+        "false".to_string()
+    }
+}
+
 fn map_repo_path_error(err: std::io::Error) -> CliError {
     match err.kind() {
         std::io::ErrorKind::NotFound => CliError::repo_not_found(),
@@ -383,7 +831,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{RevParseArgs, write_rev_parse_output};
+    use super::{RevParseArgs, shell_quote, shell_quote_literals, write_rev_parse_output};
     use crate::utils::error::StableErrorCode;
 
     struct FailingWriter {
@@ -406,21 +854,21 @@ mod tests {
         assert!(!args.short);
         assert!(!args.abbrev_ref);
         assert!(!args.show_toplevel);
-        assert!(args.spec.is_none());
+        assert!(args.specs.is_empty());
     }
 
     #[test]
     fn test_rev_parse_args_short_head() {
         let args = RevParseArgs::try_parse_from(["rev-parse", "--short", "HEAD"]).unwrap();
         assert!(args.short);
-        assert_eq!(args.spec.as_deref(), Some("HEAD"));
+        assert_eq!(args.specs, vec!["HEAD".to_string()]);
     }
 
     #[test]
     fn test_rev_parse_args_abbrev_ref() {
         let args = RevParseArgs::try_parse_from(["rev-parse", "--abbrev-ref", "HEAD"]).unwrap();
         assert!(args.abbrev_ref);
-        assert_eq!(args.spec.as_deref(), Some("HEAD"));
+        assert_eq!(args.specs, vec!["HEAD".to_string()]);
     }
 
     #[test]
@@ -433,13 +881,30 @@ mod tests {
     fn test_rev_parse_args_verify_and_default() {
         let args = RevParseArgs::try_parse_from(["rev-parse", "--verify", "HEAD"]).unwrap();
         assert!(args.verify);
-        assert_eq!(args.spec.as_deref(), Some("HEAD"));
+        assert_eq!(args.specs, vec!["HEAD".to_string()]);
 
         let args =
             RevParseArgs::try_parse_from(["rev-parse", "--verify", "--default", "HEAD"]).unwrap();
         assert!(args.verify);
-        assert!(args.spec.is_none());
+        assert!(args.specs.is_empty());
         assert_eq!(args.default.as_deref(), Some("HEAD"));
+    }
+
+    #[test]
+    fn test_rev_parse_args_sq_quote_hyphen_literal() {
+        let args = RevParseArgs::try_parse_from(["rev-parse", "--sq-quote", "-x", "a b"])
+            .expect("hyphen literal should be accepted");
+        assert!(args.sq_quote);
+        assert_eq!(args.specs, vec!["-x".to_string(), "a b".to_string()]);
+    }
+
+    #[test]
+    fn test_shell_quote_escapes_single_quote() {
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+        assert_eq!(
+            shell_quote_literals(&["foo".to_string(), "a b".to_string()], true),
+            " 'foo' 'a b'"
+        );
     }
 
     #[test]
