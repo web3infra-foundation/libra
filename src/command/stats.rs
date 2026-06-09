@@ -10,7 +10,13 @@ use crate::utils::{
     output::OutputConfig,
 };
 
+const STATS_EXAMPLES: &str = "\
+EXAMPLES:
+    libra stats                     Count working-tree files grouped by extension
+    libra stats --json              Structured JSON output for agents";
+
 #[derive(Parser, Debug)]
+#[command(after_help = STATS_EXAMPLES)]
 pub struct StatsArgs {}
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
