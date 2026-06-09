@@ -1355,9 +1355,98 @@ fn effective_push_urls(fetch_urls: &[String], push_urls: &[String]) -> Vec<Strin
     }
 }
 
+fn redact_url_list(urls: &[String]) -> Vec<String> {
+    urls.iter()
+        .map(|url| fetch::redact_url_credentials(url))
+        .collect()
+}
+
+fn redacted_remote_output(result: &RemoteOutput) -> RemoteOutput {
+    match result {
+        RemoteOutput::Add { name, url } => RemoteOutput::Add {
+            name: name.clone(),
+            url: fetch::redact_url_credentials(url),
+        },
+        RemoteOutput::List { verbose, remotes } => RemoteOutput::List {
+            verbose: *verbose,
+            remotes: remotes
+                .iter()
+                .map(|remote| RemoteListEntry {
+                    name: remote.name.clone(),
+                    fetch_urls: redact_url_list(&remote.fetch_urls),
+                    push_urls: redact_url_list(&remote.push_urls),
+                })
+                .collect(),
+        },
+        RemoteOutput::Urls {
+            name,
+            push,
+            all,
+            urls,
+        } => RemoteOutput::Urls {
+            name: name.clone(),
+            push: *push,
+            all: *all,
+            urls: redact_url_list(urls),
+        },
+        RemoteOutput::SetUrl {
+            name,
+            role,
+            mode,
+            urls,
+            removed,
+        } => RemoteOutput::SetUrl {
+            name: name.clone(),
+            role: *role,
+            mode: *mode,
+            urls: redact_url_list(urls),
+            removed: *removed,
+        },
+        RemoteOutput::Show {
+            name,
+            fetch_urls,
+            push_urls,
+            head_branch,
+            remote_branches,
+            pull_config,
+            push_config,
+            queried,
+        } => RemoteOutput::Show {
+            name: name.clone(),
+            fetch_urls: redact_url_list(fetch_urls),
+            push_urls: redact_url_list(push_urls),
+            head_branch: head_branch.clone(),
+            remote_branches: remote_branches.clone(),
+            pull_config: pull_config.clone(),
+            push_config: push_config.clone(),
+            queried: *queried,
+        },
+        RemoteOutput::Update { remotes } => RemoteOutput::Update {
+            remotes: remotes
+                .iter()
+                .map(|remote| RemoteUpdateResult {
+                    name: remote.name.clone(),
+                    url: fetch::redact_url_credentials(&remote.url),
+                    ok: remote.ok,
+                    error: remote.error.clone(),
+                    refs_updated: remote.refs_updated,
+                    objects_fetched: remote.objects_fetched,
+                    pruned: remote.pruned,
+                })
+                .collect(),
+        },
+        RemoteOutput::Remove { .. }
+        | RemoteOutput::Rename { .. }
+        | RemoteOutput::Prune { .. }
+        | RemoteOutput::SetBranches { .. }
+        | RemoteOutput::SetHead { .. } => result.clone(),
+    }
+}
+
 fn render_remote_output(result: &RemoteOutput, output: &OutputConfig) -> CliResult<()> {
     if output.is_json() {
-        return emit_json_data("remote", result, output);
+        let redacted = redacted_remote_output(result);
+        return emit_json_data("remote", &redacted, output);
     }
 
     if output.quiet {
