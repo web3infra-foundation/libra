@@ -50,6 +50,7 @@ Every Libra command accepts the following global flags:
 | `libra diff` | | Compare differences between HEAD, index, working tree, or two revisions | [diff.md](diff.md) |
 | `libra blame` | | Trace each line of a file to its introducing commit | [blame.md](blame.md) |
 | `libra describe` | `desc` | Find the nearest reachable tag and format as `tag-N-g<abbrev>` | [describe.md](describe.md) |
+| `libra notes` | | Add, show, list, or remove notes attached to commits without modifying the commits themselves | [notes.md](notes.md) |
 | `libra grep` | | Search for patterns in tracked files with regex, revision, and index support | [grep.md](grep.md) |
 | `libra reflog` | | View, delete, or check existence of reference change logs | [reflog.md](reflog.md) |
 | `libra rev-list` | | List commit objects reachable from a revision | [rev-list.md](rev-list.md) |

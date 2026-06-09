@@ -48,7 +48,7 @@ fn builtin_migrations_register_current_schema_migrations() {
         versions,
         vec![
             2026050301, 2026050302, 2026050303, 2026050501, 2026050601, 2026050801, 2026052301,
-            2026060201, 2026060401, 2026060801
+            2026053101, 2026060201, 2026060401, 2026060801
         ]
     );
     assert_eq!(
@@ -61,6 +61,7 @@ fn builtin_migrations_register_current_schema_migrations() {
             "approved_permission",
             "agent_usage_stats_agent_name",
             "source_call_log",
+            "notes",
             "source_call_log_agent_run_id",
             "cherry_pick_state",
             "revert_sequence",
@@ -69,7 +70,7 @@ fn builtin_migrations_register_current_schema_migrations() {
 
     let runner = builtin_runner().expect("builtin registry must build clean");
     assert!(!runner.is_empty());
-    assert_eq!(runner.len(), 10);
+    assert_eq!(runner.len(), 11);
     assert_eq!(runner.max_registered_version(), Some(2026060801));
 }
 
@@ -1043,7 +1044,7 @@ async fn run_builtin_migrations_applies_current_builtin_registry() {
         applied,
         vec![
             2026050301, 2026050302, 2026050303, 2026050501, 2026050601, 2026050801, 2026052301,
-            2026060201, 2026060401, 2026060801
+            2026053101, 2026060201, 2026060401, 2026060801
         ]
     );
     assert!(table_exists(&conn, "schema_versions").await);
@@ -1089,7 +1090,7 @@ async fn approved_permission_up_down_up_round_trip() {
     assert_eq!(
         rolled,
         vec![
-            2026060801, 2026060401, 2026060201, 2026052301, 2026050801, 2026050601
+            2026060801, 2026060401, 2026060201, 2026053101, 2026052301, 2026050801, 2026050601
         ]
     );
     assert!(
@@ -1121,7 +1122,7 @@ async fn approved_permission_up_down_up_round_trip() {
     assert_eq!(
         reapplied,
         vec![
-            2026050601, 2026050801, 2026052301, 2026060201, 2026060401, 2026060801
+            2026050601, 2026050801, 2026052301, 2026053101, 2026060201, 2026060401, 2026060801
         ]
     );
     assert!(

@@ -26,9 +26,8 @@ use git_internal::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    commit, get_target_commit, load_object, log, merge_base, reset,
-    restore::{self, RestoreArgs},
-    save_object, stash, status, switch,
+    commit, get_target_commit, load_object, log, merge_base, reset, save_object, stash, status,
+    switch,
 };
 use crate::{
     common_utils::format_commit_msg,
@@ -542,8 +541,6 @@ pub(crate) enum PullMergeError {
     HeadResolve(String),
     #[error("failed to update HEAD during merge: {0}")]
     HeadUpdate(String),
-    #[error("failed to restore working tree after merge: {0}")]
-    Restore(String),
 }
 
 pub(crate) type MergeError = PullMergeError;
@@ -618,7 +615,7 @@ impl From<PullMergeError> for CliError {
             PullMergeError::HeadResolve(..) => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
             }
-            PullMergeError::HeadUpdate(..) | PullMergeError::Restore(..) => {
+            PullMergeError::HeadUpdate(..) => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
             }
         }
@@ -2056,19 +2053,19 @@ async fn apply_fast_forward_merge(
         return Err(PullMergeError::HeadUpdate(e.to_string()));
     }
 
-    // Only restore the working directory *after* the pointers have been updated.
-    restore::execute_safe(
-        RestoreArgs {
-            worktree: true,
-            staged: true,
-            source: None, // `restore` without source defaults to HEAD, which is now correct.
-            pathspec: vec![util::working_dir_string()],
-            ..Default::default()
-        },
-        &output.child_output_config(),
-    )
-    .await
-    .map_err(|error| PullMergeError::Restore(error.to_string()))?;
+    // Only update the working directory *after* the pointers have been updated.
+    //
+    // Sync the index and working tree to the target tree using the tracked-only
+    // reset primitive (the same one squash/rebase/cherry-pick use) rather than
+    // restoring the entire working directory. The previous approach passed the
+    // whole working directory as a `restore` pathspec, which expands (via
+    // `list_files`) to *every* file on disk — including untracked and ignored
+    // build artifacts such as `target/` and `node_modules/`. Restore then read
+    // and SHA-1-hashed each one, which on a large repository consumed gigabytes
+    // of memory and effectively hung the `libra pull` fast-forward. Operating on
+    // tracked files only bounds the work to the actual tree and never walks
+    // ignored directories.
+    reset_index_and_workdir_to_tree(&target_commit.tree_id)?;
     Ok(())
 }
 
@@ -3472,10 +3469,6 @@ mod tests {
         assert_eq!(
             PullMergeError::HeadUpdate("write failed".to_string()).to_string(),
             "failed to update HEAD during merge: write failed",
-        );
-        assert_eq!(
-            PullMergeError::Restore("checkout failed".to_string()).to_string(),
-            "failed to restore working tree after merge: checkout failed",
         );
         assert_eq!(
             PullMergeError::InvalidDiffAlgorithm {
