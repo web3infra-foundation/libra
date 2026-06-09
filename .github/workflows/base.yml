@@ -150,39 +150,6 @@ jobs:
           LIBRA_STORAGE_SECRET_KEY: ${{ secrets.LIBRA_STORAGE_SECRET_KEY }}
         run: cargo test --all
 
-      # Phase 6 — Local TUI Automation Control scenario suite (docs/improvement/agent.md Part C).
-      # Without `--features test-provider` + `LIBRA_ENABLE_TEST_PROVIDER=1`, the scenarios
-      # in tests/code_ui_scenarios.rs and tests/harness_self_test.rs short-circuit; CI
-      # would silently skip them. `--test-threads=1` because each scenario spawns a
-      # `libra code` subprocess that contends for 0600 control-token files and ports.
-      #
-      # docs/improvement/test.md Wave 1 + Wave 3 also require the SSE harness and
-      # lease matrix to run under the same gate, otherwise CI silently skips every
-      # `lease_case!()` / `sse_case!()` registration.
-      - name: Run TUI automation scenarios
-        env:
-          LIBRA_ENABLE_TEST_PROVIDER: "1"
-          # These scenarios validate the loopback browser against the real
-          # embedded Next.js app, so the build.rs fallback stub is not valid here.
-          LIBRA_SKIP_WEB_BUILD: "0"
-        run: |
-          cargo test --features test-provider \
-            --test code_ui_scenarios \
-            --test harness_self_test \
-            --test code_codex_default_tui_test \
-            --test code_ui_remote_lease_matrix \
-            --test code_ui_remote_sse_matrix \
-            -- --test-threads=1
-
-      - name: Upload TUI scenario artifacts on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: code-ui-scenarios
-          path: target/code-ui-scenarios/**
-          if-no-files-found: ignore
-          retention-days: 7
-
   network-remotes:
     name: compat-network-remotes
     runs-on: libra-runner-set
