@@ -28,7 +28,10 @@ use serde::Serialize;
 
 use crate::{
     command::{get_target_commit, load_object, save_object_to_storage, status},
-    common_utils::{check_conventional_commits_message, format_commit_msg, parse_commit_msg},
+    common_utils::{
+        append_version_control_trailer, check_conventional_commits_message, format_commit_msg,
+        parse_commit_msg,
+    },
     internal::{
         ai::automation::{VCS_EVENT_POST_COMMIT, dispatch_current_repo_vcs_event_to_history},
         branch::Branch,
@@ -1564,6 +1567,8 @@ pub(crate) async fn vault_sign_commit(
         CommitError::VaultSign("vault signing enabled but no unseal key found".to_string())
     })?;
 
+    let message = append_version_control_trailer(message);
+
     // Build the commit content to sign (same format Git uses)
     let mut content: Vec<u8> = Vec::new();
     content.extend(b"tree ");
@@ -1822,6 +1827,7 @@ async fn new_reflog_context(commit_id: &str, message: &str) -> ReflogContext {
         old_oid,
         new_oid,
         action,
+        message: None,
     }
 }
 

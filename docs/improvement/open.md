@@ -11,6 +11,7 @@
 - 已为无 remote、unsafe URL、浏览器启动失败补齐稳定错误码
 - `docs/commands/open.md` 已补命令契约
 - `tests/command/open_test.rs` 已补 JSON 和错误提示回归
+- `cli.open-smoke` 黑盒场景已覆盖 `--json open` / `open origin`、分支 deep-link、`open.platform` 覆盖、自定义 template、负向 JSON error envelope 与 `fsck --connectivity-only`
 
 ### 基于当前代码的 Review 结论
 - 旧实现只能输出 `"Opening ..."`，用户和脚本都看不到最终解析链路；本轮已显式暴露
@@ -39,6 +40,9 @@
 ## 验证方式
 
 1. `cargo +nightly fmt --all --check`
-2. `cargo clippy --all-targets --all-features -- -D warnings`
-3. `cargo test open_test`
-4. `docs/commands/open.md` 与命令输出保持一致
+2. `source .env.test && CARGO_TARGET_DIR=target/open-test LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test -- open --test-threads=1`
+3. `source .env.test && CARGO_TARGET_DIR=target/open-test LIBRA_SKIP_WEB_BUILD=1 cargo test --lib command::open -- --test-threads=1`
+4. `cargo run --manifest-path tools/integration-runner/Cargo.toml -- check-plan`
+5. `cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --only cli.open-smoke --binary target/open-test/debug/libra`
+6. `source .env.test && CARGO_TARGET_DIR=target/open-test LIBRA_SKIP_WEB_BUILD=1 cargo clippy --all-targets --all-features -- -D warnings`
+7. `docs/commands/open.md`、`COMPATIBILITY.md`、`docs/development/integration-scenarios/cli.open-smoke.md` 与命令输出保持一致

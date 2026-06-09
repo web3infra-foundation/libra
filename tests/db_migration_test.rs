@@ -48,7 +48,7 @@ fn builtin_migrations_register_current_schema_migrations() {
         versions,
         vec![
             2026050301, 2026050302, 2026050303, 2026050501, 2026050601, 2026050801, 2026052301,
-            2026060201, 2026060401
+            2026060201, 2026060401, 2026060801
         ]
     );
     assert_eq!(
@@ -63,13 +63,14 @@ fn builtin_migrations_register_current_schema_migrations() {
             "source_call_log",
             "source_call_log_agent_run_id",
             "cherry_pick_state",
+            "revert_sequence",
         ]
     );
 
     let runner = builtin_runner().expect("builtin registry must build clean");
     assert!(!runner.is_empty());
-    assert_eq!(runner.len(), 9);
-    assert_eq!(runner.max_registered_version(), Some(2026060401));
+    assert_eq!(runner.len(), 10);
+    assert_eq!(runner.max_registered_version(), Some(2026060801));
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,7 +1043,7 @@ async fn run_builtin_migrations_applies_current_builtin_registry() {
         applied,
         vec![
             2026050301, 2026050302, 2026050303, 2026050501, 2026050601, 2026050801, 2026052301,
-            2026060201, 2026060401
+            2026060201, 2026060401, 2026060801
         ]
     );
     assert!(table_exists(&conn, "schema_versions").await);
@@ -1058,6 +1059,7 @@ async fn run_builtin_migrations_applies_current_builtin_registry() {
     assert!(column_exists(&conn, "source_call_log", "agent_run_id").await);
     assert!(index_exists(&conn, "idx_source_call_log_agent_run_id").await);
     assert!(table_exists(&conn, "cherry_pick_state").await);
+    assert!(table_exists(&conn, "revert_sequence").await);
 }
 
 /// OC-Phase 2 P2.5 regression guard: `approved_permission` survives an
@@ -1086,7 +1088,13 @@ async fn approved_permission_up_down_up_round_trip() {
         .expect("rollback past approved_permission");
     assert_eq!(
         rolled,
-        vec![2026060401, 2026060201, 2026052301, 2026050801, 2026050601]
+        vec![
+            2026060801, 2026060401, 2026060201, 2026052301, 2026050801, 2026050601
+        ]
+    );
+    assert!(
+        !table_exists(&conn, "revert_sequence").await,
+        "revert_sequence down migration must drop the table"
     );
     assert!(
         !table_exists(&conn, "cherry_pick_state").await,
@@ -1112,7 +1120,13 @@ async fn approved_permission_up_down_up_round_trip() {
         .expect("second up reapplies cleanly");
     assert_eq!(
         reapplied,
-        vec![2026050601, 2026050801, 2026052301, 2026060201, 2026060401]
+        vec![
+            2026050601, 2026050801, 2026052301, 2026060201, 2026060401, 2026060801
+        ]
+    );
+    assert!(
+        table_exists(&conn, "revert_sequence").await,
+        "revert_sequence up migration must re-create the table"
     );
     assert!(
         table_exists(&conn, "cherry_pick_state").await,

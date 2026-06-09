@@ -997,8 +997,11 @@ fn print_commit(hash: &ObjectHash) {
         commit.committer.timestamp,
         commit.committer.timezone,
     );
+    let (msg, signature) = parse_commit_msg(&commit.message);
+    if let Some(signature) = signature {
+        println!("gpgsig {signature}");
+    }
     println!();
-    let (msg, _) = parse_commit_msg(&commit.message);
     println!("{}", msg.trim());
 }
 

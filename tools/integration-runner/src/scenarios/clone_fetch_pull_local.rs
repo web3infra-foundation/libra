@@ -66,7 +66,13 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
         bail!("ls-remote version sort order was not natural: {sorted_stdout}");
     }
     let no_match = ctx.command(
-        &["ls-remote", "--exit-code", "--heads", &remote, "no-such-branch"],
+        &[
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            &remote,
+            "no-such-branch",
+        ],
         ctx.run_dir.clone(),
         false,
     )?;
@@ -76,7 +82,11 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
             no_match.status.code()
         );
     }
-    let get_url = ctx.command(&["ls-remote", "--get-url", &remote], ctx.run_dir.clone(), true)?;
+    let get_url = ctx.command(
+        &["ls-remote", "--get-url", &remote],
+        ctx.run_dir.clone(),
+        true,
+    )?;
     assert_stdout_contains(&get_url, &remote)?;
     let invalid_sort = ctx.command(
         &["ls-remote", "--sort=objectname", &remote],
@@ -89,6 +99,47 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
     assert_stdout_contains(&remotes, &remote)?;
     let origin = ctx.command(&["remote", "get-url", "origin"], clone_dir.clone(), true)?;
     assert_stdout_contains(&origin, &remote)?;
+    let set_branches = ctx.command(
+        &["--json", "remote", "set-branches", "origin", "main"],
+        clone_dir.clone(),
+        true,
+    )?;
+    assert_json_ok(&set_branches, "remote")?;
+    assert_stdout_contains(&set_branches, "refs/remotes/origin/main")?;
+    let set_head = ctx.command(
+        &["--json", "remote", "set-head", "origin", "main"],
+        clone_dir.clone(),
+        true,
+    )?;
+    assert_json_ok(&set_head, "remote")?;
+    assert_stdout_contains(&set_head, "\"target\": \"main\"")?;
+    let show_origin = ctx.command(
+        &["remote", "show", "--no-query", "origin"],
+        clone_dir.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&show_origin, "* remote origin")?;
+    assert_stdout_contains(&show_origin, "HEAD branch: main")?;
+    ctx.command(
+        &["remote", "set-head", "origin", "-d"],
+        clone_dir.clone(),
+        true,
+    )?;
+    let set_head_auto = ctx.command(
+        &["--json", "remote", "set-head", "origin", "--auto"],
+        clone_dir.clone(),
+        true,
+    )?;
+    assert_json_ok(&set_head_auto, "remote")?;
+    assert_stdout_contains(&set_head_auto, "\"mode\": \"auto\"")?;
+    assert_stdout_contains(&set_head_auto, "\"target\": \"main\"")?;
+    let update_origin = ctx.command(
+        &["--json", "remote", "update", "origin"],
+        clone_dir.clone(),
+        true,
+    )?;
+    assert_json_ok(&update_origin, "remote")?;
+    assert_stdout_contains(&update_origin, "\"action\": \"update\"")?;
     ctx.command(
         &["remote", "add", "mirror", &remote],
         clone_dir.clone(),
@@ -112,6 +163,10 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
     if !readme.contains("first") {
         bail!("cloned README did not contain first commit content: {readme}");
     }
+    let clone_tags = ctx.command(&["show-ref", "--tags"], clone_dir.clone(), true)?;
+    assert_stdout_contains(&clone_tags, "refs/tags/v1.1.0")?;
+    assert_stdout_contains(&clone_tags, "refs/tags/v1.2.0")?;
+    assert_stdout_contains(&clone_tags, "refs/tags/v1.10.0")?;
     let bare_clone = ctx.run_dir.join("bare-clone.git");
     let bare_clone_arg = bare_clone.to_string_lossy().to_string();
     ctx.command(
@@ -190,7 +245,13 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
     let local_copy = ctx.run_dir.join("local-copy");
     let local_copy_arg = local_copy.to_string_lossy().to_string();
     ctx.command(
-        &["clone", "--local", "--no-hardlinks", &remote, &local_copy_arg],
+        &[
+            "clone",
+            "--local",
+            "--no-hardlinks",
+            &remote,
+            &local_copy_arg,
+        ],
         ctx.run_dir.clone(),
         true,
     )?;
@@ -223,10 +284,20 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
         remote_dir.clone(),
         true,
     )?;
+    ctx.gitfix(&["tag", "v2.0.0"], remote_dir.clone(), true)?;
 
     ctx.command(&["fetch", "origin", "main"], clone_dir.clone(), true)?;
+    let fetched_tags = ctx.command(&["show-ref", "--tags"], clone_dir.clone(), true)?;
+    assert_stdout_contains(&fetched_tags, "refs/tags/v2.0.0")?;
     ctx.command(&["fetch", "--all"], clone_dir.clone(), true)?;
     ctx.command(&["show-ref", "--heads"], clone_dir.clone(), true)?;
+
+    // advanced fetch flags for plan maintenance (prune/porcelain/dry-run/tags per "继续维护" in improvement/fetch.md)
+    ctx.command(&["fetch", "--prune", "origin"], clone_dir.clone(), true)?;
+    let porcelain = ctx.command(&["fetch", "--porcelain", "origin", "main"], clone_dir.clone(), true)?;
+    assert_stdout_contains(&porcelain, "From ") ?;
+    ctx.command(&["fetch", "--dry-run", "origin", "main"], clone_dir.clone(), true)?;
+    ctx.command(&["fetch", "--tags", "--force", "origin"], clone_dir.clone(), true)?;
     ctx.command(
         &["pull", "--ff-only", "origin", "main"],
         clone_dir.clone(),
@@ -254,6 +325,32 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
         "pull",
     )?;
 
+    let squash_clone = ctx.run_dir.join("pull-squash-clone");
+    let squash_clone_arg = squash_clone.to_string_lossy().to_string();
+    ctx.command(
+        &["clone", &remote, &squash_clone_arg],
+        ctx.run_dir.clone(),
+        true,
+    )?;
+    ctx.command(
+        &["config", "set", "user.name", "Libra Pull Squash"],
+        squash_clone.clone(),
+        true,
+    )?;
+    ctx.command(
+        &["config", "set", "user.email", "pull-squash@example.invalid"],
+        squash_clone.clone(),
+        true,
+    )?;
+    fs::write(squash_clone.join("squash-local.txt"), "squash local\n")
+        .context("write squash local commit")?;
+    ctx.command(&["add", "squash-local.txt"], squash_clone.clone(), true)?;
+    ctx.command(
+        &["commit", "-m", "test: squash local commit"],
+        squash_clone.clone(),
+        true,
+    )?;
+
     fs::write(clone_dir.join("clone-local.txt"), "local only\n")
         .context("write clone local commit")?;
     ctx.command(&["add", "clone-local.txt"], clone_dir.clone(), true)?;
@@ -270,6 +367,20 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
         remote_dir.clone(),
         true,
     )?;
+    let squash_pull = ctx.command(
+        &["pull", "--squash", "origin", "main"],
+        squash_clone.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&squash_pull, "Squash commit -- not updating HEAD.")?;
+    assert_not_contains(&squash_pull, "Fast-forward")?;
+    let squash_readme =
+        fs::read_to_string(squash_clone.join("README.md")).context("read squash README")?;
+    if !squash_readme.contains("third") {
+        bail!("squash pull README did not contain third commit content: {squash_readme}");
+    }
+    ensure_file(squash_clone.join("squash-local.txt"))?;
+
     ctx.command(
         &["pull", "--rebase", "origin", "main"],
         clone_dir.clone(),

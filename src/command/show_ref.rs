@@ -18,12 +18,17 @@ use crate::{
     },
 };
 
+mod exists;
+mod pattern;
+mod tag_entries;
+mod verify;
+
 /// `--help` examples shown in `libra show-ref --help` output.
 ///
 /// `show-ref` lists local references with their object hashes. The
 /// banner pins the all-refs default, `--heads` / `--tags` scope
 /// filters, the `--head` opt-in for including HEAD, `-s` for hash-only
-/// output, a pattern filter for substring search, and a JSON variant
+/// output, a pattern filter for path-segment suffix search, and a JSON variant
 /// for agents so users see all supported forms without reading the
 /// design doc. Cross-cutting `--help` EXAMPLES rollout per
 /// `docs/improvement/README.md` item B.
@@ -34,8 +39,10 @@ EXAMPLES:
     libra show-ref --tags            List only tags (refs/tags/)
     libra show-ref --head            Include HEAD in the output
     libra show-ref -s --heads        Print branch hashes only (one per line, scripting-friendly)
-    libra show-ref main              Filter refs by substring match (e.g. only entries containing 'main')
+    libra show-ref main              Filter refs by path segment suffix (e.g. heads/main, remotes/origin/main)
+    libra show-ref -d --tags         Include peeled ^{} lines for annotated tags
     libra show-ref --exists refs/heads/main   Exit 0 if the ref exists, 2 if not (no output)
+    libra show-ref --verify refs/heads/main   Require an exact full refname match
     libra show-ref --json --heads    Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -57,13 +64,20 @@ pub struct ShowRefArgs {
     #[clap(short = 's', long = "hash")]
     pub hash: bool,
 
+    /// Dereference annotated tags and include peeled ^{} refs
+    #[clap(short = 'd', long = "dereference")]
+    pub dereference: bool,
+
+    /// Verify that each argument is an exact full ref name
+    #[clap(long)]
+    pub verify: bool,
+
     /// Check whether the given full ref name exists. Prints nothing; exits 0
-    /// when it exists and 2 when it does not. Mutually exclusive with the
-    /// listing flags.
-    #[clap(long, value_name = "REF", conflicts_with_all = ["heads", "tags", "head", "hash"])]
+    /// when it exists and 2 when it does not.
+    #[clap(long, value_name = "REF")]
     pub exists: Option<String>,
 
-    /// Filter refs by pattern (substring match on the ref name)
+    /// Filter refs by path-segment suffix pattern
     pub pattern: Vec<String>,
 }
 
@@ -82,10 +96,21 @@ pub async fn execute(args: ShowRefArgs) -> Result<(), String> {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Lists all refs (branches, tags) with their object IDs.
 pub async fn execute_safe(args: ShowRefArgs, output: &OutputConfig) -> CliResult<()> {
+    if args.verify && args.exists.is_some() {
+        return Err(
+            CliError::fatal("options '--verify' and '--exists' cannot be used together")
+                .with_exit_code(128),
+        );
+    }
+
     // `--exists <ref>` is a pure existence probe: no stdout, exit 0 if the
     // exact full ref name exists, exit 2 if it does not (Git 2.43+ semantics).
     if let Some(target) = args.exists.as_deref() {
-        return show_ref_exists(target).await;
+        return exists::show_ref_exists(target).await;
+    }
+
+    if args.verify {
+        return verify::show_ref_verify(&args, output).await;
     }
 
     let hash_only = args.hash;
@@ -198,17 +223,14 @@ async fn collect_show_ref_entries(args: &ShowRefArgs) -> CliResult<Vec<ShowRefEn
     if show_tags {
         let tag_list = tag::list().await.map_err(show_ref_tag_list_error)?;
         for t in tag_list {
-            // For annotated tags use the tag object hash; for lightweight use the commit hash.
-            let hash = match &t.object {
-                tag::TagObject::Commit(c) => c.id.to_string(),
-                tag::TagObject::Tag(tg) => tg.id.to_string(),
-                tag::TagObject::Blob(b) => b.id.to_string(),
-                tag::TagObject::Tree(tr) => tr.id.to_string(),
-            };
-            entries.push(ShowRefEntry {
-                hash,
-                refname: format!("refs/tags/{}", t.name),
-            });
+            entries.extend(
+                tag_entries::entries_for_loaded_tag(
+                    &format!("refs/tags/{}", t.name),
+                    &t.object,
+                    args.dereference,
+                )
+                .await?,
+            );
         }
     }
 
@@ -216,10 +238,7 @@ async fn collect_show_ref_entries(args: &ShowRefArgs) -> CliResult<Vec<ShowRefEn
     if !args.pattern.is_empty() {
         entries.retain(|entry| {
             entry.refname == "HEAD"
-                || args
-                    .pattern
-                    .iter()
-                    .any(|p| entry.refname.contains(p.as_str()))
+                || pattern::matches_any_ref_pattern(&entry.refname, &args.pattern)
         });
     }
 
@@ -239,65 +258,6 @@ fn remote_refname(remote: &str, branch_name: &str) -> String {
     }
 }
 
-/// Existence probe for `--exists <ref>`: succeeds silently when the exact full
-/// ref name is present, otherwise fails with exit code 2 (Git 2.43+). Like Git,
-/// this only checks the reference record — it does not verify the target object
-/// resolves.
-async fn show_ref_exists(target: &str) -> CliResult<()> {
-    if all_ref_names().await?.iter().any(|name| name == target) {
-        Ok(())
-    } else {
-        Err(CliError::failure("reference does not exist").with_exit_code(2))
-    }
-}
-
-/// Collect every full ref name (HEAD, local + remote-tracking branches, tags)
-/// for existence checks. Unlike [`collect_show_ref_entries`], this never errors
-/// on an empty set and applies no filtering.
-async fn all_ref_names() -> CliResult<Vec<String>> {
-    let mut names: Vec<String> = Vec::new();
-
-    if Head::current_commit_result()
-        .await
-        .map_err(|error| show_ref_branch_store_error("resolve HEAD", error))?
-        .is_some()
-    {
-        names.push("HEAD".to_string());
-    }
-
-    let branches = Branch::list_branches_result(None)
-        .await
-        .map_err(|error| show_ref_branch_store_error("list branches", error))?;
-    for branch in branches {
-        names.push(format!("refs/heads/{}", branch.name));
-    }
-
-    let remotes = ConfigKv::all_remote_configs().await.map_err(|error| {
-        CliError::fatal(format!("failed to list remotes: {error}"))
-            .with_stable_code(StableErrorCode::IoReadFailed)
-    })?;
-    for remote in remotes {
-        let remote_branches = Branch::list_branches_result(Some(&remote.name))
-            .await
-            .map_err(|error| {
-                show_ref_branch_store_error(
-                    &format!("list remote-tracking branches for '{}'", remote.name),
-                    error,
-                )
-            })?;
-        for branch in remote_branches {
-            names.push(remote_refname(&remote.name, &branch.name));
-        }
-    }
-
-    let tag_list = tag::list().await.map_err(show_ref_tag_list_error)?;
-    for t in tag_list {
-        names.push(format!("refs/tags/{}", t.name));
-    }
-
-    Ok(names)
-}
-
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -311,6 +271,7 @@ mod tests {
         assert!(!args.tags);
         assert!(!args.head);
         assert!(!args.hash);
+        assert!(!args.dereference);
         assert!(args.pattern.is_empty());
     }
 
@@ -339,5 +300,11 @@ mod tests {
     fn test_show_ref_args_hash_flag() {
         let args = ShowRefArgs::try_parse_from(["show-ref", "--hash"]).unwrap();
         assert!(args.hash);
+    }
+
+    #[test]
+    fn test_show_ref_args_dereference_flag() {
+        let args = ShowRefArgs::try_parse_from(["show-ref", "--dereference"]).unwrap();
+        assert!(args.dereference);
     }
 }

@@ -956,8 +956,14 @@ fn validate_cleanup_mode(mode: Option<&str>) -> Result<(), MergeError> {
 async fn resolve_conflict_style(
     cli_style: Option<MergeConflictStyle>,
 ) -> Result<MergeConflictStyle, PullMergeError> {
+    Ok(resolve_merge_conflict_style(cli_style).await)
+}
+
+pub(crate) async fn resolve_merge_conflict_style(
+    cli_style: Option<MergeConflictStyle>,
+) -> MergeConflictStyle {
     if let Some(style) = cli_style {
-        return Ok(style);
+        return style;
     }
     let Some(value) =
         read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.conflictstyle")
@@ -965,12 +971,12 @@ async fn resolve_conflict_style(
             .ok()
             .flatten()
     else {
-        return Ok(MergeConflictStyle::Merge);
+        return MergeConflictStyle::Merge;
     };
     match value.trim().to_ascii_lowercase().as_str() {
-        "merge" => Ok(MergeConflictStyle::Merge),
-        "diff3" => Ok(MergeConflictStyle::Diff3),
-        _ => Ok(MergeConflictStyle::Merge),
+        "merge" => MergeConflictStyle::Merge,
+        "diff3" => MergeConflictStyle::Diff3,
+        _ => MergeConflictStyle::Merge,
     }
 }
 
@@ -2017,6 +2023,7 @@ async fn apply_fast_forward_merge(
         }),
         new_oid: target_commit.id.to_string(),
         action,
+        message: None,
     };
 
     // Use `with_reflog`. A merge operation should log for the branch.
@@ -2136,6 +2143,7 @@ async fn update_head_with_reflog(
         }),
         new_oid: new_oid.to_string(),
         action,
+        message: None,
     };
 
     let head_name = head_name.to_string();
@@ -2968,6 +2976,52 @@ fn conflict_payload(content: &[u8]) -> Cow<'_, str> {
     }
 }
 
+pub(crate) fn render_conflict_marker_content(
+    marker_eol: &str,
+    commit_abbrev: &str,
+    base: Option<&[u8]>,
+    ours: Option<&[u8]>,
+    theirs: Option<&[u8]>,
+    conflict_style: MergeConflictStyle,
+) -> String {
+    match (ours, theirs) {
+        (Some(ours), Some(theirs)) => {
+            let base_section = if conflict_style == MergeConflictStyle::Diff3 {
+                base.map(|payload| {
+                    format!(
+                        "||||||| base{marker_eol}{}{marker_eol}",
+                        conflict_payload(payload)
+                    )
+                })
+                .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            format!(
+                "<<<<<<< HEAD{marker_eol}{}{marker_eol}{base_section}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
+                conflict_payload(ours),
+                conflict_payload(theirs),
+                commit_abbrev
+            )
+        }
+        (Some(ours), None) => {
+            format!(
+                "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}>>>>>>> {} (deleted){marker_eol}",
+                conflict_payload(ours),
+                commit_abbrev
+            )
+        }
+        (None, Some(theirs)) => {
+            format!(
+                "<<<<<<< HEAD (deleted){marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
+                conflict_payload(theirs),
+                commit_abbrev
+            )
+        }
+        (None, None) => String::new(),
+    }
+}
+
 fn write_conflict_markers(
     workdir: &Path,
     path: &Path,
@@ -2981,44 +3035,45 @@ fn write_conflict_markers(
         ConflictKind::BothChanged { ours, theirs } => {
             let ours_blob: Blob = load_object(&ours).map_err(|error| error.to_string())?;
             let theirs_blob: Blob = load_object(&theirs).map_err(|error| error.to_string())?;
-            let base_section = if conflict_style == MergeConflictStyle::Diff3 {
-                base.map(load_conflict_base_payload)
+            let base_blob: Option<Blob> = if conflict_style == MergeConflictStyle::Diff3 {
+                base.map(|base| load_object(&base).map_err(|error| error.to_string()))
                     .transpose()?
-                    .map(|payload| format!("||||||| base{marker_eol}{payload}{marker_eol}"))
-                    .unwrap_or_default()
             } else {
-                String::new()
+                None
             };
-            format!(
-                "<<<<<<< HEAD{marker_eol}{}{marker_eol}{base_section}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
-                conflict_payload(&ours_blob.data),
-                conflict_payload(&theirs_blob.data),
-                commit_abbrev
+            render_conflict_marker_content(
+                marker_eol,
+                commit_abbrev,
+                base_blob.as_ref().map(|blob| blob.data.as_slice()),
+                Some(&ours_blob.data),
+                Some(&theirs_blob.data),
+                conflict_style,
             )
         }
         ConflictKind::OursModifiedTheirsDeleted { ours } => {
             let ours_blob: Blob = load_object(&ours).map_err(|error| error.to_string())?;
-            format!(
-                "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}>>>>>>> {} (deleted){marker_eol}",
-                conflict_payload(&ours_blob.data),
-                commit_abbrev
+            render_conflict_marker_content(
+                marker_eol,
+                commit_abbrev,
+                None,
+                Some(&ours_blob.data),
+                None,
+                conflict_style,
             )
         }
         ConflictKind::TheirsModifiedOursDeleted { theirs } => {
             let theirs_blob: Blob = load_object(&theirs).map_err(|error| error.to_string())?;
-            format!(
-                "<<<<<<< HEAD (deleted){marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
-                conflict_payload(&theirs_blob.data),
-                commit_abbrev
+            render_conflict_marker_content(
+                marker_eol,
+                commit_abbrev,
+                None,
+                None,
+                Some(&theirs_blob.data),
+                conflict_style,
             )
         }
     };
     write_workdir_file(workdir, path, content.as_bytes())
-}
-
-fn load_conflict_base_payload(base: ObjectHash) -> Result<Cow<'static, str>, String> {
-    let base_blob: Blob = load_object(&base).map_err(|error| error.to_string())?;
-    Ok(Cow::Owned(conflict_payload(&base_blob.data).into_owned()))
 }
 
 fn index_tree_items(index: &Index) -> Result<HashMap<PathBuf, MergeTreeEntry>, PullMergeError> {
@@ -3296,16 +3351,11 @@ async fn append_merge_shortlog(
 }
 
 fn first_non_empty_line(message: &str) -> Option<String> {
+    let (message, _) = crate::common_utils::parse_commit_msg(message);
     message
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .rev()
-        .find(|line| {
-            !line.starts_with("gpgsig")
-                && !line.starts_with("-----")
-                && !line.starts_with("Version:")
-        })
+        .find(|line| !line.is_empty())
         .map(str::to_string)
 }
 

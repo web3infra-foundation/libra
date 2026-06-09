@@ -15,10 +15,11 @@ and optionally `HEAD`) along with the object hash each ref points to. By default
 both branches and tags are shown. Use `--heads` or `--tags` to restrict output
 to one category.
 
-Positional `<PATTERN>` arguments act as substring filters on the fully-qualified
-ref name (e.g., `refs/heads/main`). Only refs whose name contains at least one
-of the given patterns are included. `HEAD` is never filtered out by patterns
-when `--head` is specified.
+Positional `<PATTERN>` arguments match from the end of the fully-qualified ref
+name (e.g., `refs/heads/main`) and must align to a slash-separated refname
+segment. For example, `main` matches `refs/heads/main` and
+`refs/remotes/origin/main`, but not `refs/heads/main-2`. `HEAD` is never
+filtered out by patterns when `--head` is specified.
 
 Libra stores refs in SQLite rather than loose files or packed-refs, so
 `show-ref` queries the database directly. This makes enumeration O(rows) with
@@ -32,8 +33,10 @@ no filesystem scanning.
 | `--tags` | | Show only tags (`refs/tags/`). |
 | `--head` | | Include `HEAD` in the output. |
 | `--hash` | `-s` | Only show the object hash, not the reference name. |
-| `--exists <REF>` | | Check whether the exact full ref name exists. Prints nothing; exits `0` if it exists, `2` if not. Only checks the reference record (does not verify the target object resolves). Mutually exclusive with the listing flags. |
-| `<PATTERN>...` | | Filter refs by substring match on the ref name. Multiple patterns are OR-ed. |
+| `--dereference` | `-d` | For annotated tags, also print the peeled target as `<ref>^{}`. Lightweight tags still print one line. |
+| `--exists <REF>` | | Check whether the exact full ref name exists. Prints nothing; exits `0` if it exists, `2` if not. Only checks the reference record and does not verify that the target object resolves. Listing/output flags are ignored in this mode. |
+| `--verify` | | Treat each pattern as an exact full ref name. With `--dereference`, verified annotated tags also emit their peeled `<ref>^{}` line. Missing refs exit `128`, or `1` with `--quiet`. |
+| `<PATTERN>...` | | Filter refs by path-segment suffix match on the ref name. Multiple patterns are OR-ed. |
 
 ### Examples
 
@@ -50,8 +53,20 @@ libra show-ref --tags
 # Include HEAD and show hashes only
 libra show-ref --head --hash
 
-# Filter to refs containing "release"
+# Filter to refs whose refname ends at a "release" path segment
 libra show-ref release
+
+# Include peeled ^{} lines for annotated tags
+libra show-ref --dereference --tags
+
+# Check whether a full refname exists
+libra show-ref --exists refs/heads/main
+
+# Verify an exact full refname and print it
+libra show-ref --verify refs/heads/main
+
+# Verify an annotated tag and print its peeled target too
+libra show-ref --verify --dereference refs/tags/v1.0.0
 
 # Combine filters: only branches matching "feat"
 libra show-ref --heads feat
@@ -64,6 +79,10 @@ libra show-ref
 libra show-ref --heads
 libra show-ref --tags
 libra show-ref --head --hash
+libra show-ref --dereference --tags
+libra show-ref --exists refs/heads/main
+libra show-ref --verify refs/heads/main
+libra show-ref --verify --dereference refs/tags/v1.0.0
 libra show-ref --json --head --heads
 libra show-ref main
 ```
@@ -75,6 +94,14 @@ Default:
 ```text
 abc1234def5678901234567890abcdef12345678 refs/heads/main
 def5678901234567890abcdef12345678abc1234 refs/tags/v1.0.0
+```
+
+With `--dereference`, annotated tags print their tag object line and a peeled
+target line:
+
+```text
+def5678901234567890abcdef12345678abc1234 refs/tags/v1.0.0
+abc1234def5678901234567890abcdef12345678 refs/tags/v1.0.0^{}
 ```
 
 With `--hash`, only the object IDs are printed:
@@ -104,6 +131,10 @@ def5678901234567890abcdef12345678abc1234
       {
         "hash": "def5678901234567890abcdef12345678abc1234",
         "refname": "refs/tags/v1.0.0"
+      },
+      {
+        "hash": "abc1234def5678901234567890abcdef12345678",
+        "refname": "refs/tags/v1.0.0^{}"
       }
     ]
   }
@@ -112,19 +143,18 @@ def5678901234567890abcdef12345678abc1234
 
 When `--hash` is active, `hash_only` is `true`. The `entries` array is always
 present regardless of the flag so that JSON consumers have a uniform schema.
+With `--dereference`, peeled annotated tag entries appear in the same array with
+the `^{}` suffix on `refname`.
 
 ## Design Rationale
 
-### Why substring match instead of glob?
+### Why path-segment suffix matching instead of substring?
 
-Git's `show-ref` uses prefix matching against fully-qualified ref names, but
-in practice users most often want to ask "show me anything related to
-`release`" or "anything with `main` in its name." Substring matching is
-simpler to implement, simpler to explain, and covers the common case. It
-avoids the cognitive overhead of remembering whether you need `refs/heads/main*`
-or `main*`. For the rare case where you need precise control, the JSON output
-gives you the full ref name array and you can filter client-side. Glob support
-may be added later as a superset.
+Git's `show-ref` matches patterns from the end of full ref names and only across
+complete slash-separated refname segments. Libra follows that behavior so a
+script asking for `main` gets `refs/heads/main` and
+`refs/remotes/origin/main`, but does not accidentally include
+`refs/heads/main-2`. For exact checks, use `--verify <full-refname>`.
 
 ### Why SQLite-backed refs?
 
@@ -153,9 +183,10 @@ and which commit it resolves to.
 | Filter to tags | `--tags` | `--tags` | `jj tag list` |
 | Include HEAD | `--head` | `--head` | N/A (no HEAD concept) |
 | Hash-only output | `-s` / `--hash` | `-s` / `--hash` | N/A |
-| Pattern matching | Substring match | Prefix/glob match | Regex via revset |
-| `--verify` (check single ref) | Not yet implemented | Yes | N/A |
-| `-d` / `--dereference` | Not yet implemented | Yes | N/A |
+| Pattern matching | Path-segment suffix match | Path-segment suffix match | Regex via revset |
+| `--exists <ref>` | Yes | Yes | N/A |
+| `--verify` (check exact ref) | Yes | Yes | N/A |
+| `-d` / `--dereference` | Yes | Yes | N/A |
 | JSON output | `--json` | No | No |
 | Ref storage | SQLite `reference` table | Loose files + packed-refs | Operation log |
 | Remote-tracking refs | Yes (`refs/remotes/`) | Yes (`refs/remotes/`) | Via `jj git fetch` |
@@ -165,5 +196,9 @@ and which commit it resolves to.
 | Scenario | StableErrorCode | Exit |
 |----------|-----------------|------|
 | No matching refs | `LBR-CLI-003` | 129 |
+| `--exists` missing ref | `LBR-CLI-003` | 2 |
+| `--verify` missing ref | `LBR-INTERNAL-001` | 128 |
+| `--quiet --verify` missing ref | silent | 1 |
+| Failed to dereference a corrupt tag | `LBR-REPO-002` | 128 |
 | Failed to read refs | `LBR-IO-001` | 128 |
 | Corrupt stored branch/tag data | `LBR-REPO-002` | 128 |

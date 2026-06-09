@@ -14,6 +14,8 @@ use libra::{
     internal::{
         branch::Branch,
         config::{ConfigKv, RemoteConfig},
+        db::get_db_conn_instance,
+        head::Head,
     },
     utils::{error::StableErrorCode, output::OutputConfig},
 };
@@ -1637,13 +1639,83 @@ async fn test_remote_set_head_missing_branch_errors() {
 
 #[tokio::test]
 #[serial]
-async fn test_remote_set_head_auto_deferred() {
-    let repo_dir = tempdir().unwrap();
-    test::setup_with_new_libra_in(repo_dir.path()).await;
-    let _guard = test::ChangeDirGuard::new(repo_dir.path());
-    add_origin().await;
+async fn test_remote_set_head_auto_resolves_local_head() {
+    let temp_root = tempdir().unwrap();
+    let remote_dir = temp_root.path().join("remote");
+    let repo_dir = temp_root.path().join("libra");
+    fs::create_dir_all(&repo_dir).unwrap();
 
-    let error = remote::execute_safe(
+    assert!(
+        Command::new("git")
+            .args(["init", "-b", "main", remote_dir.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&remote_dir)
+            .args(["config", "user.name", "Libra Tester"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&remote_dir)
+            .args(["config", "user.email", "tester@example.com"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(remote_dir.join("README.md"), "remote\n").unwrap();
+    assert!(
+        Command::new("git")
+            .current_dir(&remote_dir)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&remote_dir)
+            .args(["commit", "-m", "seed"])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    test::setup_with_new_libra_in(&repo_dir).await;
+    let _guard = test::ChangeDirGuard::new(&repo_dir);
+    let remote_url = remote_dir.to_str().unwrap().to_string();
+    ConfigKv::set("remote.origin.url", &remote_url, false)
+        .await
+        .unwrap();
+    fetch::fetch_repository(
+        RemoteConfig {
+            name: "origin".to_string(),
+            url: remote_url,
+        },
+        None,
+        false,
+        None,
+    )
+    .await;
+
+    remote::execute_safe(
+        RemoteCmds::SetHead {
+            auto: false,
+            delete: true,
+            name: "origin".into(),
+            branch: None,
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .expect("delete remote HEAD before auto");
+
+    remote::execute_safe(
         RemoteCmds::SetHead {
             auto: true,
             delete: false,
@@ -1653,9 +1725,13 @@ async fn test_remote_set_head_auto_deferred() {
         &OutputConfig::default(),
     )
     .await
-    .expect_err("--auto is deferred");
-    assert_eq!(error.exit_code(), 129);
-    assert!(error.message().contains("not yet supported"));
+    .expect("set-head --auto should resolve main");
+
+    let db = get_db_conn_instance().await;
+    let head = Head::remote_current_result_with_conn(&db, "origin")
+        .await
+        .expect("read remote HEAD");
+    assert!(matches!(head, Some(Head::Branch(branch)) if branch == "main"));
 }
 
 #[test]
@@ -1678,4 +1754,56 @@ fn test_remote_set_branches_json_schema() {
     assert_eq!(json["data"]["added"], false);
     let specs = json["data"]["fetch_refspecs"].as_array().expect("refspecs");
     assert_eq!(specs.len(), 1);
+}
+
+#[test]
+fn test_remote_show_named_no_query_human_format() {
+    let repo = create_committed_repo_via_cli();
+    let add = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&add, "remote add origin");
+
+    let output = run_libra_command(&["remote", "show", "--no-query", "origin"], repo.path());
+    assert_cli_success(&output, "remote show --no-query origin");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("* remote origin"), "stdout: {stdout}");
+    assert!(stdout.contains("Fetch URL:"), "stdout: {stdout}");
+    assert!(stdout.contains("HEAD branch:"), "stdout: {stdout}");
+    assert!(stdout.contains("Remote branches:"), "stdout: {stdout}");
+}
+
+#[test]
+fn test_remote_update_json_schema_with_unknown_fetch_failure() {
+    let repo = create_committed_repo_via_cli();
+    let add = run_libra_command(
+        &[
+            "remote",
+            "add",
+            "origin",
+            "/definitely/missing/libra/remote",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&add, "remote add origin");
+
+    let output = run_libra_command(&["--json", "remote", "update", "origin"], repo.path());
+    assert!(
+        !output.status.success(),
+        "remote update should fail after rendering aggregate JSON"
+    );
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "remote");
+    assert_eq!(json["data"]["action"], "update");
+    let remotes = json["data"]["remotes"].as_array().expect("remotes");
+    assert_eq!(remotes.len(), 1);
+    assert_eq!(remotes[0]["name"], "origin");
+    assert_eq!(remotes[0]["ok"], false);
+    assert!(
+        remotes[0]["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("missing")
+    );
 }

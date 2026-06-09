@@ -560,6 +560,8 @@ async fn reset_hard(target: &str, output: &OutputConfig) -> Result<(), CherryPic
             soft: false,
             mixed: false,
             hard: true,
+            merge: false,
+            keep: false,
             pathspecs: Vec::new(),
             pathspec_from_file: None,
             pathspec_file_nul: false,
@@ -893,6 +895,7 @@ async fn cherry_pick_single_commit(
         && !args.append_source
         && !args.signoff
         && !args.edit
+        && !args.gpg_sign
         && args.mainline.is_none()
         && parent_count == 1
         && let Some(head) = Head::current_commit().await
@@ -1074,7 +1077,10 @@ async fn build_cherry_pick_message(
     args: &CherryPickArgs,
     output: &OutputConfig,
 ) -> Result<String, CherryPickSingleError> {
-    let mut message = original_commit.message.trim().to_string();
+    let mut message = crate::common_utils::parse_commit_msg(&original_commit.message)
+        .0
+        .trim()
+        .to_string();
 
     // Trailer block: `-x` line first, `Signed-off-by` last (matches Git).
     let mut trailers: Vec<String> = Vec::new();
@@ -1186,6 +1192,7 @@ async fn create_cherry_pick_commit(
         old_oid: parent_id.to_string(),
         new_oid: commit.id.to_string(),
         action,
+        message: None,
     };
 
     with_reflog(

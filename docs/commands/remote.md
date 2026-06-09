@@ -6,7 +6,7 @@ Manage configured remotes: list, add, remove, rename, inspect and mutate URLs, a
 
 ```
 libra remote <subcommand> [OPTIONS] [ARGS]
-libra remote show
+libra remote show [--no-query] [<name>]
 libra remote -v
 libra remote add <name> <url>
 libra remote remove <name>
@@ -14,6 +14,9 @@ libra remote rename <old> <new>
 libra remote get-url [--push] [--all] <name>
 libra remote set-url [--add | --delete] [--push] [--all] <name> <value>
 libra remote prune [--dry-run] <name>
+libra remote set-branches [--add] <name> <branch>...
+libra remote set-head <name> (--auto | --delete | <branch>)
+libra remote update [<remote>...]
 ```
 
 ## Description
@@ -32,11 +35,18 @@ by agents and tooling.
 
 ### Subcommand: `show`
 
-List configured remote names, one per line.
+List configured remote names, or show details for one remote.
 
-| Argument | Description |
-|----------|-------------|
+| Flag / Argument | Description |
+|-----------------|-------------|
 | (none) | Prints all remote names |
+| `<name>` | Show details for one remote: URLs, HEAD branch, branch status, pull config and push refspecs. |
+| `-n`, `--no-query` | Do not contact the remote; render cached `refs/remotes/<name>/*` state only. |
+| `-v`, `--verbose` | Accepted for compatibility; current detail output already includes all available local fields. |
+
+`show <name>` attempts remote discovery by default. If discovery fails, Libra prints
+a warning to stderr, falls back to cached local remote-tracking refs, and exits 0.
+All URLs are credential-redacted in human and JSON output.
 
 ### Subcommand: `-v` (list verbose)
 
@@ -124,13 +134,28 @@ Set or delete a remote's default branch pointer (`refs/remotes/<name>/HEAD`).
 | `<name>` | Remote name | `origin` |
 | `<branch>` | Branch to set as the remote HEAD (must already exist as a tracking branch) | `libra remote set-head origin main` |
 | `-d`, `--delete` | Delete the remote HEAD ref (idempotent) | `libra remote set-head origin -d` |
-| `-a`, `--auto` | Detect the remote HEAD automatically — **deferred / not yet implemented** (returns a usage error directing you to specify a branch) | `libra remote set-head origin -a` |
+| `-a`, `--auto` | Detect the remote HEAD automatically from the remote's `symref=HEAD` capability, falling back to matching the advertised `HEAD` OID to a branch. The matching tracking branch must already exist locally. | `libra remote set-head origin -a` |
 
 > The three modes (`<branch>`, `--delete`, `--auto`) are mutually exclusive.
 > `set-head <branch>` requires the tracking branch `refs/remotes/<name>/<branch>`
-> to already exist (fetch it first). `--auto` is deferred pending remote HEAD
-> discovery; `remote show <name>` detail and `remote update` are likewise not
-> yet implemented (see `COMPATIBILITY.md`).
+> to already exist (fetch it first). `--auto` also requires the inferred branch
+> to have a local tracking ref; if the remote does not advertise enough
+> information, specify the branch explicitly.
+
+### Subcommand: `update`
+
+Fetch updates from one or more remotes. With no arguments, every configured
+remote that has a fetch URL is updated. Remotes are processed sequentially to
+avoid SQLite write-lock contention.
+
+| Flag / Argument | Description | Example |
+|-----------------|-------------|---------|
+| `<remote>...` | Optional remote names to update. Omit to update all configured remotes. | `libra remote update origin upstream` |
+
+If one remote fails during fetch, Libra still attempts the remaining remotes,
+prints a single aggregate result, and exits 128. With `--json`, stdout contains
+one `remote` success envelope whose `data.action` is `update`; the process exit
+code carries the partial-failure status without printing a second error envelope.
 
 ## Common Commands
 
@@ -145,12 +170,29 @@ libra remote set-url --add --push origin ssh://git@example.com/repo.git
 libra remote prune --dry-run origin
 libra remote set-branches origin main dev
 libra remote set-head origin main
+libra remote set-head origin --auto
 libra remote set-head origin -d
+libra remote show --no-query origin
+libra remote update origin
 ```
 
 ## Human Output
 
 - `remote show` prints configured remote names, one per line.
+- `remote show <name>` prints remote detail:
+
+```text
+* remote origin
+  Fetch URL: https://example.com/repo.git
+  Push URL: https://example.com/repo.git
+  HEAD branch: main
+  Remote branches:
+    main tracked
+  Local branches configured for 'git pull':
+    main merges with remote main
+  Local refs configured for 'git push':
+    (none)
+```
 - `remote -v` prints every fetch URL and effective push URL:
 
 ```text
@@ -187,8 +229,10 @@ Would prune 2 stale remote-tracking branch(es).
 - `urls`: `name`, `push`, `all`, `urls[]`
 - `set-url`: `name`, `role`, `mode`, `urls[]`, `removed`
 - `prune`: `name`, `dry_run`, `stale_branches[]`
+- `show`: `name`, `fetch_urls[]`, `push_urls[]`, `head_branch`, `remote_branches[]`, `pull_config[]`, `push_config[]`, `queried`
+- `update`: `remotes[]` with `name`, `url`, `ok`, `error`, `refs_updated`, `objects_fetched`, `pruned`
 - `set-branches`: `name`, `added`, `fetch_refspecs[]`
-- `set-head`: `name`, `mode` (`set`/`delete`), `target`
+- `set-head`: `name`, `mode` (`set`/`delete`/`auto`), `target`
 
 Example (verbose list):
 
@@ -235,7 +279,9 @@ Example (prune dry-run):
 - `list.remotes[].fetch_urls` contains all configured fetch URLs
 - `list.remotes[].push_urls` contains effective push URLs; when no explicit `pushurl` is configured it falls back to fetch URLs
 - `prune.stale_branches[].branch` is the user-facing short name such as `origin/feature`
-- `remote show` currently maps to `action = "list"` with `verbose = false`
+- `remote show` with no name maps to `action = "list"` with `verbose = false`
+- `remote show <name>` maps to `action = "show"`
+- `remote update` maps to `action = "update"`; partial fetch failures are encoded per remote and use the process exit code for failure status
 
 ## Design Rationale
 

@@ -1037,6 +1037,16 @@ fn map_checkout_error(source: RestoreError) -> CliError {
             CliError::fatal("internal error: clone checkout encountered an unmerged path")
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
         }
+        RestoreError::MergeFileBinary(_) | RestoreError::MergeFileTooLarge(_) => {
+            CliError::fatal(
+                "internal error: clone checkout attempted to render conflict markers",
+            )
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+        }
+        RestoreError::PathspecFileRead { .. } | RestoreError::PathspecFileTooLarge(_) => {
+            CliError::fatal("internal error: clone checkout attempted to read pathspecs from a file")
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+        }
     }
 }
 
@@ -3635,6 +3645,7 @@ pub(crate) async fn setup_repository(
             old_oid: ObjectHash::zero_str(get_hash_kind()).to_string(),
             new_oid: origin_branch.commit.to_string(),
             action,
+            message: None,
         };
 
         // Clone the values that move into the transaction closure.

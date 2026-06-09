@@ -49,23 +49,27 @@
 //! layer (it writes directly to the provided `Write`), while still
 //! aggregating per-author statistics in memory for predictable formatting.
 
-use std::{
-    collections::HashMap,
-    fmt,
-    io::{self, Write},
-};
+mod format;
+mod mailmap;
+#[cfg(test)]
+mod mailmap_tests;
+mod range;
+mod render;
+#[cfg(test)]
+mod tests;
+mod wrap;
+
+use std::{collections::HashMap, io::Write};
 
 use clap::Parser;
 use git_internal::internal::object::commit::Commit;
 use serde::Serialize;
 
-use crate::{
-    internal::log::date_parser::parse_date,
-    utils::{
-        error::{CliError, CliResult, StableErrorCode},
-        output::{OutputConfig, emit_json_data},
-        util::{self, CommitBaseError, require_repo},
-    },
+use self::{mailmap::Mailmap, wrap::WrapOptions};
+use crate::utils::{
+    error::{CliError, CliResult, emit_warning},
+    output::{OutputConfig, emit_json_data},
+    util::{self, require_repo},
 };
 
 const SHORTLOG_EXAMPLES: &str = "\
@@ -75,6 +79,8 @@ EXAMPLES:
     libra shortlog -n -s            Sort by commit count, suppress subjects (count only)
     libra shortlog -c -s            Summarize by committer instead of author
     libra shortlog --no-merges      Exclude merge commits from the summary
+    libra shortlog -w=72            Wrap subject lines at 72 columns
+    libra shortlog --format '%h %s' Render per-commit descriptions with a template
     libra shortlog --since 24h      Restrict to commits in the last 24 hours
     libra shortlog --json           Structured JSON output for agents";
 
@@ -100,6 +106,20 @@ pub struct ShortlogArgs {
     /// Do not include merge commits (commits with more than one parent).
     #[clap(long = "no-merges")]
     pub no_merges: bool,
+
+    /// Wrap subject lines; use -w for Git defaults or -w=<width>,<indent1>,<indent2>.
+    #[clap(
+        short = 'w',
+        num_args = 0..=1,
+        default_missing_value = "76,6,9",
+        require_equals = true,
+        value_name = "WIDTH"
+    )]
+    pub width: Option<Option<String>>,
+
+    /// Render each commit description using a limited pretty-format template.
+    #[clap(long = "format", value_name = "FORMAT")]
+    pub format: Option<String>,
 
     /// Show commits more recent than DATE (RFC3339, `YYYY-MM-DD`, or relative like `24h` / `7d`)
     #[clap(long = "since", value_name = "DATE")]
@@ -153,6 +173,8 @@ struct ShortlogOutput {
     total_authors: usize,
     total_commits: usize,
     authors: Vec<ShortlogAuthor>,
+    #[serde(skip)]
+    wrap: Option<WrapOptions>,
 }
 
 /// Runs shortlog and writes **human-readable** output to the given writer.
@@ -163,27 +185,10 @@ struct ShortlogOutput {
 /// quiet modes, use [`execute_safe`].
 pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> CliResult<()> {
     require_repo().map_err(|_| CliError::repo_not_found())?;
-    let shortlog_output = run_shortlog(&args).await?;
-    render_shortlog_output(&shortlog_output, writer)
-}
-
-fn write_shortlog_line(writer: &mut impl Write, args: fmt::Arguments<'_>) -> CliResult<bool> {
-    match writer.write_fmt(args) {
-        Ok(()) => {}
-        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => return Ok(false),
-        Err(err) => return Err(shortlog_output_error(err)),
-    }
-
-    match writer.write_all(b"\n") {
-        Ok(()) => Ok(true),
-        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(false),
-        Err(err) => Err(shortlog_output_error(err)),
-    }
-}
-
-fn shortlog_output_error(err: io::Error) -> CliError {
-    CliError::fatal(format!("shortlog output error: {err}"))
-        .with_stable_code(StableErrorCode::IoWriteFailed)
+    let run = run_shortlog(&args).await?;
+    render::render_shortlog_output(&run.output, writer)?;
+    emit_shortlog_warnings(run.warnings);
+    Ok(())
 }
 
 pub async fn execute(args: ShortlogArgs) {
@@ -197,55 +202,70 @@ pub async fn execute(args: ShortlogArgs) {
 /// [`execute_to`] for formatted output.
 pub async fn execute_safe(args: ShortlogArgs, output: &OutputConfig) -> CliResult<()> {
     require_repo().map_err(|_| CliError::repo_not_found())?;
-    let shortlog_output = run_shortlog(&args).await?;
+    let run = run_shortlog(&args).await?;
 
     if output.is_json() {
-        emit_json_data("shortlog", &shortlog_output, output)?;
+        emit_json_data("shortlog", &run.output, output)?;
     } else if !output.quiet {
         let mut stdout = std::io::stdout();
-        render_shortlog_output(&shortlog_output, &mut stdout)?;
+        render::render_shortlog_output(&run.output, &mut stdout)?;
     }
 
+    emit_shortlog_warnings(run.warnings);
     Ok(())
 }
 
-async fn run_shortlog(args: &ShortlogArgs) -> CliResult<ShortlogOutput> {
-    let since_ts = parse_shortlog_date_arg(args.since.as_deref(), "--since")?;
-    let until_ts = parse_shortlog_date_arg(args.until.as_deref(), "--until")?;
+struct ShortlogRun {
+    output: ShortlogOutput,
+    warnings: Vec<String>,
+}
+
+async fn run_shortlog(args: &ShortlogArgs) -> CliResult<ShortlogRun> {
+    let since_ts = range::parse_shortlog_date_arg(args.since.as_deref(), "--since")?;
+    let until_ts = range::parse_shortlog_date_arg(args.until.as_deref(), "--until")?;
+    let wrap = wrap::parse_width_arg(&args.width)?;
     let revision = args.revision.clone().unwrap_or_else(|| "HEAD".to_string());
     let mut commits =
-        get_commits_for_shortlog(args.revision.as_deref(), since_ts, until_ts).await?;
+        range::get_commits_for_shortlog(args.revision.as_deref(), since_ts, until_ts).await?;
 
-    // `--no-merges` drops merge commits (more than one parent) before
-    // aggregation so the counts and totals reflect only non-merge commits.
     if args.no_merges {
         commits.retain(|commit| commit.parent_commit_ids.len() <= 1);
     }
 
-    Ok(aggregate_shortlog(args, &revision, commits))
+    let workdir = util::try_working_dir().map_err(|_| CliError::repo_not_found())?;
+    let mailmap_load = mailmap::load_mailmap(&workdir);
+    let output = aggregate_shortlog(args, &revision, commits, &mailmap_load.mailmap, wrap)?;
+
+    Ok(ShortlogRun {
+        output,
+        warnings: mailmap_load.warnings,
+    })
 }
 
-fn aggregate_shortlog(args: &ShortlogArgs, revision: &str, commits: Vec<Commit>) -> ShortlogOutput {
+fn aggregate_shortlog(
+    args: &ShortlogArgs,
+    revision: &str,
+    commits: Vec<Commit>,
+    mailmap: &Mailmap,
+    wrap: Option<WrapOptions>,
+) -> CliResult<ShortlogOutput> {
     let total_commits = commits.len();
     let mut author_map: HashMap<String, AuthorStats> = HashMap::new();
 
     for commit in commits {
-        // `-c`/`--committer` groups by the committer identity; otherwise by the
-        // author (Git's default).
         let signature = if args.committer {
             &commit.committer
         } else {
             &commit.author
         };
-        let ident_name = signature.name.clone();
-        let ident_email = signature.email.clone();
+        let (ident_name, ident_email) = mailmap.resolve(&signature.name, &signature.email);
         let key = if args.email {
             format!("{} <{}>", ident_name, ident_email)
         } else {
             ident_name.clone()
         };
 
-        let subject = commit.format_message();
+        let subject = format::format_subject(&commit, args.format.as_deref())?;
 
         author_map
             .entry(key)
@@ -273,7 +293,7 @@ fn aggregate_shortlog(args: &ShortlogArgs, revision: &str, commits: Vec<Commit>)
         authors.sort_by_key(|stats| stats.name.to_lowercase());
     }
 
-    ShortlogOutput {
+    Ok(ShortlogOutput {
         revision: revision.to_string(),
         numbered: args.numbered,
         summary: args.summary,
@@ -281,205 +301,12 @@ fn aggregate_shortlog(args: &ShortlogArgs, revision: &str, commits: Vec<Commit>)
         total_authors: authors.len(),
         total_commits,
         authors,
-    }
-}
-
-fn render_shortlog_output(output: &ShortlogOutput, writer: &mut impl Write) -> CliResult<()> {
-    let max_count = output
-        .authors
-        .iter()
-        .map(|stats| stats.count)
-        .max()
-        .unwrap_or(0);
-    let width = std::cmp::max(4, max_count.to_string().len());
-
-    for stats in &output.authors {
-        if output.email {
-            if !write_shortlog_line(
-                writer,
-                format_args!(
-                    "{:>width$}  {} <{}>",
-                    stats.count,
-                    stats.name,
-                    stats.email.as_deref().unwrap_or(""),
-                    width = width
-                ),
-            )? {
-                return Ok(());
-            }
-        } else if !write_shortlog_line(
-            writer,
-            format_args!("{:>width$}  {}", stats.count, stats.name, width = width),
-        )? {
-            return Ok(());
-        }
-
-        if !output.summary {
-            for subject in &stats.subjects {
-                if !write_shortlog_line(writer, format_args!("      {}", subject))? {
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn get_commits_for_shortlog(
-    revision: Option<&str>,
-    since_ts: Option<i64>,
-    until_ts: Option<i64>,
-) -> CliResult<Vec<Commit>> {
-    use crate::command::log::get_reachable_commits;
-
-    let revision = revision.unwrap_or("HEAD");
-    let commit_hash = util::get_commit_base_typed(revision)
-        .await
-        .map_err(|error| shortlog_commit_base_error(revision, error))?
-        .to_string();
-
-    let mut commits: Vec<Commit> = get_reachable_commits(commit_hash, None)
-        .await?
-        .into_iter()
-        .filter(|c| passes_filter(c, since_ts, until_ts))
-        .collect();
-
-    // newest first
-    commits.sort_by_key(|c| std::cmp::Reverse(c.committer.timestamp));
-
-    Ok(commits)
-}
-
-fn passes_filter(commit: &Commit, since_ts: Option<i64>, until_ts: Option<i64>) -> bool {
-    let commit_ts = commit.committer.timestamp as i64;
-
-    if let Some(since) = since_ts
-        && commit_ts < since
-    {
-        return false;
-    }
-
-    if let Some(until) = until_ts
-        && commit_ts > until
-    {
-        return false;
-    }
-
-    true
-}
-
-fn parse_shortlog_date_arg(value: Option<&str>, flag: &str) -> CliResult<Option<i64>> {
-    value.map(parse_date).transpose().map_err(|error| {
-        CliError::fatal(format!("invalid {flag} date: {error}"))
-            .with_stable_code(StableErrorCode::CliInvalidArguments)
-            .with_hint(r#"supported formats: YYYY-MM-DD, "N days ago", unix timestamp"#)
+        wrap,
     })
 }
 
-fn shortlog_commit_base_error(revision: &str, error: CommitBaseError) -> CliError {
-    match error {
-        CommitBaseError::HeadUnborn => CliError::fatal("HEAD does not point to a commit")
-            .with_stable_code(StableErrorCode::RepoStateInvalid)
-            .with_hint("create a commit before running 'libra shortlog'."),
-        CommitBaseError::InvalidReference(message) => CliError::fatal(format!(
-            "failed to resolve revision '{revision}': {message}"
-        ))
-        .with_stable_code(StableErrorCode::CliInvalidTarget),
-        CommitBaseError::ReadFailure(message) => {
-            CliError::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
-        }
-        CommitBaseError::CorruptReference(message) => {
-            CliError::fatal(message).with_stable_code(StableErrorCode::RepoCorrupt)
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::io;
-
-    use serial_test::serial;
-    use tempfile::tempdir;
-
-    use super::*;
-    use crate::utils::{
-        error::StableErrorCode,
-        output::OutputConfig,
-        test::{self, ChangeDirGuard},
-    };
-
-    #[test]
-    fn test_parse_args() {
-        let args = ShortlogArgs::parse_from(["shortlog"]);
-        assert!(!args.numbered);
-        assert!(!args.summary);
-        assert!(!args.email);
-
-        let args = ShortlogArgs::parse_from(["shortlog", "-n", "-s", "-e"]);
-        assert!(args.numbered);
-        assert!(args.summary);
-        assert!(args.email);
-
-        let args = ShortlogArgs::parse_from(["shortlog", "--since", "2024-01-01"]);
-        assert!(args.since.is_some());
-    }
-
-    #[test]
-    fn broken_pipe_writer_is_ignored() {
-        struct BrokenPipeWriter;
-
-        impl Write for BrokenPipeWriter {
-            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-                Err(io::Error::from(io::ErrorKind::BrokenPipe))
-            }
-
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-
-        let mut writer = BrokenPipeWriter;
-        assert!(
-            !write_shortlog_line(&mut writer, format_args!("alice")).unwrap(),
-            "BrokenPipe should terminate output quietly"
-        );
-    }
-
-    #[test]
-    fn non_broken_pipe_writer_error_is_structured() {
-        struct PermissionDeniedWriter;
-
-        impl Write for PermissionDeniedWriter {
-            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-                Err(io::Error::from(io::ErrorKind::PermissionDenied))
-            }
-
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-
-        let mut writer = PermissionDeniedWriter;
-        let err = write_shortlog_line(&mut writer, format_args!("alice")).unwrap_err();
-        assert_eq!(err.stable_code(), StableErrorCode::IoWriteFailed);
-        assert!(err.message().contains("shortlog output error"));
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn execute_safe_requires_repository() {
-        let temp = tempdir().unwrap();
-        test::setup_clean_testing_env_in(temp.path());
-        let _guard = ChangeDirGuard::new(temp.path());
-
-        let err = execute_safe(
-            ShortlogArgs::parse_from(["shortlog"]),
-            &OutputConfig::default(),
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(err.stable_code(), StableErrorCode::RepoNotFound);
+fn emit_shortlog_warnings(warnings: Vec<String>) {
+    for warning in warnings {
+        emit_warning(warning);
     }
 }

@@ -43,9 +43,17 @@ pub(crate) fn scenario_fetch_depth_local(ctx: &mut ScenarioCtx<'_>) -> Result<()
     if !content.contains("third") {
         bail!("shallow clone did not check out latest content: {content}");
     }
-    ctx.command(&["fetch", "origin", "--deepen", "1"], shallow1.clone(), true)?;
+    ctx.command(
+        &["fetch", "origin", "--deepen", "1"],
+        shallow1.clone(),
+        true,
+    )?;
     let deepened_log = ctx.command(&["log", "--oneline"], shallow1.clone(), true)?;
-    if String::from_utf8_lossy(&deepened_log.stdout).lines().count() != 2 {
+    if String::from_utf8_lossy(&deepened_log.stdout)
+        .lines()
+        .count()
+        != 2
+    {
         bail!("fetch --deepen 1 did not reveal exactly two visible commits");
     }
     ctx.command(&["fsck", "--connectivity-only"], shallow1, true)?;
