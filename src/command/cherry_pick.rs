@@ -895,6 +895,7 @@ async fn cherry_pick_single_commit(
         && !args.append_source
         && !args.signoff
         && !args.edit
+        && !args.gpg_sign
         && args.mainline.is_none()
         && parent_count == 1
         && let Some(head) = Head::current_commit().await
@@ -1076,7 +1077,10 @@ async fn build_cherry_pick_message(
     args: &CherryPickArgs,
     output: &OutputConfig,
 ) -> Result<String, CherryPickSingleError> {
-    let mut message = original_commit.message.trim().to_string();
+    let mut message = crate::common_utils::parse_commit_msg(&original_commit.message)
+        .0
+        .trim()
+        .to_string();
 
     // Trailer block: `-x` line first, `Signed-off-by` last (matches Git).
     let mut trailers: Vec<String> = Vec::new();

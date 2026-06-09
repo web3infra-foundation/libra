@@ -2855,10 +2855,12 @@ mod test {
             };
 
             let git_internal_out = Diff::diff_for_file_string(&file, &old_map, &new_map, &reader);
+            let old_hash = old_map.get(&file);
+            let new_hash = new_map.get(&file);
             let native_out = native_diff_for_file(
                 file.as_path(),
-                old_hash.as_ref(),
-                new_hash.as_ref(),
+                old_hash,
+                new_hash,
                 &old_bytes,
                 &new_bytes,
                 DEFAULT_CONTEXT,

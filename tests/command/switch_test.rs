@@ -729,11 +729,9 @@ async fn switch_to_detach(branch_test: String) -> String {
         _ => panic!("head not detached,unreachable"),
     };
     let commit = load_object::<Commit>(&commit_id).unwrap();
-    commit
-        .message
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or_default()
+    libra::common_utils::parse_commit_msg(&commit.message)
+        .0
+        .trim()
         .to_string()
 }
 

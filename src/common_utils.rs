@@ -59,6 +59,18 @@ pub fn format_commit_msg(msg: &str, gpg_sig: Option<&str>) -> String {
     }
 }
 
+fn strip_version_control_trailer(message: &str) -> &str {
+    let trimmed = message.trim_end();
+    let Some(without_trailer) = trimmed.strip_suffix(VERSION_CONTROL_BY_TRAILER) else {
+        return trimmed;
+    };
+
+    let without_trailer = without_trailer.trim_end();
+    without_trailer
+        .strip_suffix("\n\n")
+        .unwrap_or(without_trailer)
+}
+
 /// Split a stored commit body into `(message, optional_signature)`.
 ///
 /// Functional scope:
@@ -97,14 +109,6 @@ pub fn parse_commit_msg(msg_gpg: &str) -> (&str, Option<&str>) {
     } else {
         (strip_version_control_trailer(msg_gpg.trim_start()), None)
     }
-}
-
-fn strip_version_control_trailer(message: &str) -> &str {
-    message
-        .trim_end()
-        .strip_suffix(VERSION_CONTROL_BY_TRAILER)
-        .map(str::trim_end)
-        .unwrap_or(message)
 }
 
 /// Check whether the first line of `msg` matches the Conventional Commits 1.0 grammar.
@@ -226,6 +230,20 @@ mod tests {
     fn parse_commit_msg_plain_message_has_no_signature() {
         assert_eq!(parse_commit_msg("  hello\nworld"), ("hello\nworld", None));
         assert_eq!(parse_commit_msg("subject"), ("subject", None));
+    }
+
+    #[test]
+    fn parse_commit_msg_hides_version_control_trailer() {
+        assert_eq!(
+            parse_commit_msg(&format!("subject\n\n{VERSION_CONTROL_BY_TRAILER}")),
+            ("subject", None)
+        );
+        assert_eq!(
+            parse_commit_msg(&format!(
+                "subject\n\nSigned-off-by: Alice <alice@example.com>\n\n{VERSION_CONTROL_BY_TRAILER}"
+            )),
+            ("subject\n\nSigned-off-by: Alice <alice@example.com>", None)
+        );
     }
 
     /// A `gpgsig`-prefixed PGP signature block round-trips: the parsed
