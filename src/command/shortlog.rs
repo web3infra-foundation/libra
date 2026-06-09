@@ -129,6 +129,18 @@ pub struct ShortlogArgs {
     #[clap(long = "until", value_name = "DATE")]
     pub until: Option<String>,
 
+    /// Show only the top N authors
+    #[clap(long = "top", value_name = "N")]
+    pub top: Option<usize>,
+
+    /// Show only authors with at least N commits
+    #[clap(long = "min-count", value_name = "N")]
+    pub min_count: Option<usize>,
+
+    /// Reverse the output order
+    #[clap(long = "reverse")]
+    pub reverse: bool,
+
     /// Revision to summarize. Defaults to HEAD.
     pub revision: Option<String>,
 }
@@ -291,6 +303,18 @@ fn aggregate_shortlog(
         authors.sort_by_key(|stats| (std::cmp::Reverse(stats.count), stats.name.to_lowercase()));
     } else {
         authors.sort_by_key(|stats| stats.name.to_lowercase());
+    }
+
+    if let Some(min_count) = args.min_count {
+        authors.retain(|stats| stats.count >= min_count);
+    }
+
+    if args.reverse {
+        authors.reverse();
+    }
+
+    if let Some(top) = args.top {
+        authors.truncate(top);
     }
 
     Ok(ShortlogOutput {
