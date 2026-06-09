@@ -1026,7 +1026,10 @@ mod tests {
         assert!(result.is_ok());
         let (object, commit) = result.unwrap().unwrap();
         assert_eq!(object.get_type(), ObjectType::Commit);
-        assert!(commit.message.trim_start().starts_with("Initial commit"));
+        assert_eq!(
+            crate::common_utils::parse_commit_msg(&commit.message).0,
+            "Initial commit"
+        );
     }
 
     #[tokio::test]
@@ -1038,7 +1041,10 @@ mod tests {
         assert!(result.is_ok());
         let (object, commit) = result.unwrap().unwrap();
         assert_eq!(object.get_type(), ObjectType::Tag);
-        assert!(commit.message.trim_start().starts_with("Initial commit"));
+        assert_eq!(
+            crate::common_utils::parse_commit_msg(&commit.message).0,
+            "Initial commit"
+        );
 
         // Verify tag object content directly from the TagObject enum
         if let tag::TagObject::Tag(tag_object) = object {

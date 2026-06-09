@@ -216,6 +216,60 @@ async fn test_merge_fast_forward() {
     );
 }
 
+#[test]
+#[serial]
+/// A fast-forward merge must only touch tracked files and must never read or
+/// rewrite ignored build artifacts. Regression test for a hang where the
+/// fast-forward path restored the *entire* working directory as a pathspec,
+/// expanding to every file on disk (including ignored directories such as
+/// `target/`) and SHA-1-hashing each one.
+fn test_merge_fast_forward_leaves_ignored_artifacts_untouched() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    // Advance `feature` one commit ahead of `main` so `main` can fast-forward.
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create branch",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature content\n", "add feature");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+
+    // An ignored "build artifact" directory that must be left completely alone.
+    std::fs::write(temp_path.join(".libraignore"), "artifacts/\n")
+        .expect("write .libraignore");
+    std::fs::create_dir_all(temp_path.join("artifacts")).expect("create artifacts dir");
+    let artifact = temp_path.join("artifacts").join("big.bin");
+    let artifact_bytes = vec![0x5Au8; 256 * 1024];
+    std::fs::write(&artifact, &artifact_bytes).expect("write ignored artifact");
+
+    let merge_output = run_libra_command(&["merge", "feature"], temp_path);
+    assert!(
+        merge_output.status.success(),
+        "Fast-forward merge failed: {}",
+        String::from_utf8_lossy(&merge_output.stderr)
+    );
+
+    // The fast-forward applied the tracked file from `feature`.
+    assert_eq!(
+        std::fs::read_to_string(temp_path.join("feature.txt")).expect("read fast-forwarded file"),
+        "feature content\n",
+    );
+    // The ignored artifact is byte-identical and was never rewritten.
+    assert_eq!(
+        std::fs::read(&artifact).expect("read ignored artifact"),
+        artifact_bytes,
+        "fast-forward merge must not touch ignored build artifacts",
+    );
+}
+
 #[tokio::test]
 #[serial]
 /// Test merging a remote branch

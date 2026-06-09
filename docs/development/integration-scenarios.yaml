@@ -372,6 +372,15 @@ scenarios:
     key_assertion_categories: [json_envelope, fsck]
     doc_section: "cli.sha256-object-readback"
 
+  - id: cli.archive-smoke
+    wave: 2
+    group: maintenance
+    purpose: "Smoke archive creation from committed tree snapshots, including tar/zip file output, safe prefix handling, and invalid prefix rejection."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [file_exists, fsck, negative_exit]
+    doc_section: "cli.archive-smoke"
+
   - id: cli.verify-pack-smoke
     wave: 2
     group: maintenance

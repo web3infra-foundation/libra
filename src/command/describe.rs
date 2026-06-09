@@ -16,7 +16,7 @@ use crate::{
     internal::{
         branch::Branch,
         config::ConfigKv,
-        db::get_db_conn_instance_for_path,
+        db,
         tag::{self, TagObject},
     },
     utils::{
@@ -562,21 +562,23 @@ async fn resolve_max_candidates(flag: Option<usize>) -> Result<Option<usize>, De
         }
         return Ok(Some(n));
     }
-    let Ok(storage_path) = util::try_get_storage_path(None) else {
-        return Ok(Some(DEFAULT_CANDIDATES));
-    };
-    let db_path = storage_path.join(util::DATABASE);
-    let Ok(db) = get_db_conn_instance_for_path(&db_path).await else {
-        return Ok(Some(DEFAULT_CANDIDATES));
-    };
-
-    match ConfigKv::get_with_conn(&db, "describe.maxCandidates").await {
-        Ok(Some(entry)) => match entry.value.trim().parse::<usize>() {
+    match read_describe_max_candidates_config().await {
+        Some(value) => match value.trim().parse::<usize>() {
             Ok(n) if n >= 1 => Ok(Some(n)),
             _ => Ok(Some(DEFAULT_CANDIDATES)),
         },
-        _ => Ok(Some(DEFAULT_CANDIDATES)),
+        None => Ok(Some(DEFAULT_CANDIDATES)),
     }
+}
+
+async fn read_describe_max_candidates_config() -> Option<String> {
+    let db_path = util::try_get_storage_path(None).ok()?.join(util::DATABASE);
+    let conn = db::get_db_conn_instance_for_path(&db_path).await.ok()?;
+    ConfigKv::get_with_conn(&conn, "describe.maxCandidates")
+        .await
+        .ok()
+        .flatten()
+        .map(|entry| entry.value)
 }
 
 /// Walk the commit DAG breadth-first from `start`, returning the nearest tag
