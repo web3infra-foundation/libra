@@ -1,6 +1,4 @@
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::Path;
+use std::{collections::BTreeMap, fs, path::Path};
 
 use clap::Parser;
 use serde::Serialize;
