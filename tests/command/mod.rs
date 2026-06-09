@@ -342,6 +342,7 @@ mod show_ref_test;
 mod show_ref_verify_test;
 mod show_test;
 mod stash_test;
+mod stats_test;
 mod status_error_test;
 mod status_json_test;
 mod status_test;

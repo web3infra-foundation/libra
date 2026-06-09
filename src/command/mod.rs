@@ -75,6 +75,7 @@ pub mod worktree;
 pub mod worktree;
 
 pub mod stash;
+pub mod stats;
 pub mod status;
 pub mod switch;
 pub mod web_assets;
