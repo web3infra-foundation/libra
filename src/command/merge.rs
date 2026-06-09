@@ -1,25 +1,40 @@
 //! Merge command orchestration that resolves base/target commits, performs recursive merge, stages results, and updates refs or surfaces conflicts.
 
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+    str::FromStr,
 };
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use git_internal::{
     hash::{ObjectHash, get_hash_kind},
-    internal::object::{commit::Commit, tree::Tree},
+    internal::{
+        index::{Index, IndexEntry},
+        object::{
+            blob::Blob,
+            commit::Commit,
+            tree::{Tree, TreeItem, TreeItemMode},
+        },
+    },
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{
-    get_target_commit, load_object, log,
-    restore::{self, RestoreArgs},
+    commit, get_target_commit, load_object, log, merge_base, reset, save_object, stash, status,
+    switch,
 };
 use crate::{
+    common_utils::format_commit_msg,
     info_println,
     internal::{
         branch::{Branch, BranchStoreError},
+        config::{LocalIdentityTarget, env_first_non_empty, read_cascaded_config_value},
         db::get_db_conn_instance,
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
@@ -28,34 +43,290 @@ use crate::{
         error::{CliError, CliResult, StableErrorCode},
         object_ext::TreeExt,
         output::{OutputConfig, emit_json_data},
-        util,
+        path, util, worktree,
     },
 };
 
 /// `--help` examples shown in `libra merge --help` output.
 ///
-/// Libra's merge surface today only resolves fast-forward / already-up-to-date
-/// cases (true three-way merge is tracked under the merge batch in
-/// `docs/improvement/merge.md`). The banner covers the two supported
-/// invocations and a remote-ref form so users see what works without
-/// hitting a runtime "non-fast-forward" error. Cross-cutting `--help`
-/// EXAMPLES rollout per `docs/improvement/README.md` item B.
 pub const MERGE_EXAMPLES: &str = "\
 EXAMPLES:
     libra merge feature-x          Fast-forward current branch onto feature-x if possible
     libra merge origin/main        Fast-forward onto a remote-tracking branch
+    libra merge --ff-only feature  Refuse unless feature can fast-forward HEAD
+    libra merge --no-ff feature    Always create a merge commit when possible
+    libra merge -m 'Merge topic' feature
+    libra merge --continue         Finish an in-progress merge after resolving conflicts
+    libra merge --abort            Restore the pre-merge HEAD, index, and worktree
+    libra merge --quit             Forget merge state but keep index/worktree as-is
     libra merge --json feature-x   Structured JSON output for agents
 
 NOTES:
-    Non-fast-forward (true three-way) merges are not yet supported and
-    fail with stable error code LBR-CONFLICT-002 (ConflictOperationBlocked);
-    resolve manually with libra rebase or by re-creating the branch.";
+    Divergent single-head merges create a merge commit when paths do not
+    conflict. Conflicts write markers and can be finished with --continue
+    or restored with --abort.";
 
 #[derive(Parser, Debug)]
 #[command(after_help = MERGE_EXAMPLES)]
 pub struct MergeArgs {
-    /// The branch to merge into the current branch, could be remote branch
-    pub branch: String,
+    /// Branches or commits to merge into the current branch
+    pub branches: Vec<String>,
+
+    /// Continue an in-progress merge after resolving conflicts
+    #[arg(long = "continue", conflicts_with_all = ["abort", "quit"])]
+    pub continue_merge: bool,
+
+    /// Abort an in-progress merge and restore the pre-merge state
+    #[arg(long, conflicts_with_all = ["continue_merge", "quit"])]
+    pub abort: bool,
+
+    /// Forget an in-progress merge while leaving index and working tree untouched
+    #[arg(long, conflicts_with_all = ["continue_merge", "abort"])]
+    pub quit: bool,
+
+    /// Refuse to merge unless HEAD can be fast-forwarded
+    #[arg(long, conflicts_with = "no_ff")]
+    pub ff_only: bool,
+
+    /// Create a merge commit even when the merge could fast-forward
+    #[arg(long = "no-ff", conflicts_with = "ff_only")]
+    pub no_ff: bool,
+
+    /// Squash changes into the index and working tree without creating a merge commit
+    #[arg(long, conflicts_with_all = ["continue_merge", "abort", "quit"])]
+    pub squash: bool,
+
+    /// Perform the merge but stop before creating a merge commit
+    #[arg(long = "no-commit", conflicts_with = "commit")]
+    pub no_commit: bool,
+
+    /// Create a merge commit after a clean merge
+    #[arg(long)]
+    pub commit: bool,
+
+    /// Allow merging histories with no common ancestor
+    #[arg(long)]
+    pub allow_unrelated_histories: bool,
+
+    /// Stash local changes before merging and reapply them afterward
+    #[arg(long, conflicts_with = "no_autostash")]
+    pub autostash: bool,
+
+    /// Do not autostash local changes (default; overrides merge.autoStash)
+    #[arg(long = "no-autostash", conflicts_with = "autostash")]
+    pub no_autostash: bool,
+
+    /// Use the given merge commit message
+    #[arg(short, long, conflicts_with = "file")]
+    pub message: Option<String>,
+
+    /// Read merge commit message from file
+    #[arg(short = 'F', long, conflicts_with = "message")]
+    pub file: Option<String>,
+
+    /// Add Signed-off-by trailer to the merge commit message
+    #[arg(long)]
+    pub signoff: bool,
+
+    /// Merge strategy to use (currently only 'ours')
+    #[arg(short = 's', long, value_enum)]
+    pub strategy: Option<MergeStrategy>,
+
+    /// Pass a strategy option (currently ours or theirs) to the three-way merge
+    #[arg(short = 'X', long = "strategy-option", value_enum)]
+    pub strategy_option: Option<MergeFavor>,
+
+    /// Append up to n one-line commit summaries to the merge commit message
+    #[arg(long, num_args = 0..=1, default_missing_value = "20")]
+    pub log: Option<usize>,
+
+    /// Do not append a shortlog to the merge commit message (overrides --log)
+    #[arg(long = "no-log", conflicts_with = "log")]
+    pub no_log: bool,
+
+    /// Do not add a Signed-off-by trailer (overrides --signoff)
+    #[arg(long = "no-signoff", conflicts_with = "signoff")]
+    pub no_signoff: bool,
+
+    /// Create a merge commit instead of squashing (default; overrides --squash)
+    #[arg(long = "no-squash", conflicts_with = "squash")]
+    pub no_squash: bool,
+
+    /// Override the branch name recorded in the merge commit message
+    #[arg(long = "into-name", value_name = "NAME")]
+    pub into_name: Option<String>,
+
+    /// Open the merge commit message in an editor before committing
+    #[arg(short = 'e', long, conflicts_with = "no_edit")]
+    pub edit: bool,
+
+    /// Accept the auto-generated merge message without editing (default)
+    #[arg(long = "no-edit", conflicts_with = "edit")]
+    pub no_edit: bool,
+
+    /// Show a diffstat of what the merge brought in
+    #[arg(long, visible_alias = "summary", conflicts_with = "no_stat")]
+    pub stat: bool,
+
+    /// Suppress the merge diffstat
+    #[arg(
+        short = 'n',
+        long = "no-stat",
+        visible_alias = "no-summary",
+        conflicts_with = "stat"
+    )]
+    pub no_stat: bool,
+
+    /// Conflict marker style
+    #[arg(long, value_enum)]
+    pub conflict: Option<MergeConflictStyle>,
+
+    /// Ignore changes in amount of whitespace when auto-merging text
+    #[arg(long = "ignore-space-change")]
+    pub ignore_space_change: bool,
+
+    /// Ignore all whitespace when auto-merging text
+    #[arg(long = "ignore-all-space")]
+    pub ignore_all_space: bool,
+
+    /// Ignore whitespace at end of line when auto-merging text
+    #[arg(long = "ignore-space-at-eol")]
+    pub ignore_space_at_eol: bool,
+
+    /// Ignore carriage returns at end of line when auto-merging text
+    #[arg(long = "ignore-cr-at-eol")]
+    pub ignore_cr_at_eol: bool,
+
+    /// Detect file renames at an optional similarity threshold (default 50%)
+    #[arg(
+        long = "find-renames",
+        value_name = "N",
+        num_args = 0..=1,
+        require_equals = true,
+        conflicts_with = "no_renames"
+    )]
+    pub find_renames: Option<Option<String>>,
+
+    /// Turn off rename detection (overrides merge.renames)
+    #[arg(long = "no-renames", conflicts_with = "find_renames")]
+    pub no_renames: bool,
+
+    /// Diff algorithm to use for content merges (myers, histogram, patience, minimal)
+    #[arg(long = "diff-algorithm", value_name = "ALGO")]
+    pub diff_algorithm: Option<String>,
+
+    /// How to clean up the merge commit message (accepted for Git compatibility)
+    #[arg(long, value_name = "MODE")]
+    pub cleanup: Option<String>,
+
+    /// Skip pre-merge/commit-msg hooks (accepted; Libra runs no merge hooks yet)
+    #[arg(long = "no-verify")]
+    pub no_verify: bool,
+
+    /// Overwrite ignored files when merging (default; accepted for Git compatibility)
+    #[arg(long = "overwrite-ignore", conflicts_with = "no_overwrite_ignore")]
+    pub overwrite_ignore: bool,
+
+    /// Do not overwrite ignored files when merging (accepted for Git compatibility)
+    #[arg(long = "no-overwrite-ignore", conflicts_with = "overwrite_ignore")]
+    pub no_overwrite_ignore: bool,
+
+    /// Update the rerere resolution database (accepted; Libra has no rerere store)
+    #[arg(long = "rerere-autoupdate", conflicts_with = "no_rerere_autoupdate")]
+    pub rerere_autoupdate: bool,
+
+    /// Do not update the rerere database (default; accepted for Git compatibility)
+    #[arg(long = "no-rerere-autoupdate", conflicts_with = "rerere_autoupdate")]
+    pub no_rerere_autoupdate: bool,
+
+    /// GPG-sign the merge commit using the vault signing key
+    #[arg(short = 'S', long = "gpg-sign", conflicts_with = "no_gpg_sign")]
+    pub gpg_sign: bool,
+
+    /// Do not GPG-sign the merge commit (default; overrides --gpg-sign)
+    #[arg(long = "no-gpg-sign", conflicts_with = "gpg_sign")]
+    pub no_gpg_sign: bool,
+
+    /// Verify that the merged commit carries a signature before merging
+    #[arg(long = "verify-signatures", conflicts_with = "no_verify_signatures")]
+    pub verify_signatures: bool,
+
+    /// Do not verify the merged commit's signature (default)
+    #[arg(long = "no-verify-signatures", conflicts_with = "verify_signatures")]
+    pub no_verify_signatures: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MergeStrategy {
+    Ours,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MergeFavor {
+    Ours,
+    Theirs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize, Default)]
+pub enum MergeConflictStyle {
+    #[default]
+    Merge,
+    Diff3,
+}
+
+/// Whitespace-insensitivity options for the textual three-way merge, mirroring
+/// Git's `-Xignore-*` strategy options.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct WhitespaceMode {
+    pub ignore_space_change: bool,
+    pub ignore_all_space: bool,
+    pub ignore_space_at_eol: bool,
+    pub ignore_cr_at_eol: bool,
+}
+
+impl WhitespaceMode {
+    fn is_active(&self) -> bool {
+        self.ignore_space_change
+            || self.ignore_all_space
+            || self.ignore_space_at_eol
+            || self.ignore_cr_at_eol
+    }
+
+    /// Canonicalize `content` so two blobs that differ only by the ignored
+    /// whitespace classes compare equal.
+    fn canonicalize(&self, content: &[u8]) -> Vec<u8> {
+        if !self.is_active() {
+            return content.to_vec();
+        }
+        let text = String::from_utf8_lossy(content);
+        let mut out = String::with_capacity(text.len());
+        for raw in text.split_inclusive('\n') {
+            let had_newline = raw.ends_with('\n');
+            let line = raw.strip_suffix('\n').unwrap_or(raw);
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            out.push_str(&self.canonicalize_line(line));
+            if had_newline {
+                out.push('\n');
+            }
+        }
+        out.into_bytes()
+    }
+
+    fn canonicalize_line(&self, line: &str) -> String {
+        if self.ignore_all_space {
+            return line.chars().filter(|c| !c.is_whitespace()).collect();
+        }
+        let mut result = line.to_string();
+        if self.ignore_space_change {
+            // Collapse runs of whitespace to a single space and trim the edges.
+            let collapsed: String = result.split_whitespace().collect::<Vec<_>>().join(" ");
+            result = collapsed;
+        } else if self.ignore_space_at_eol {
+            result = result.trim_end().to_string();
+        }
+        // `ignore_cr_at_eol` is handled by the `\r` strip in `canonicalize`.
+        result
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -66,12 +337,150 @@ pub(crate) struct PullMergeSummary {
     pub commit: Option<String>,
     pub files_changed: usize,
     pub up_to_date: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicted_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub aborted: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub continued: bool,
 }
 
 pub(crate) type MergeOutput = PullMergeSummary;
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PullMergeOptions {
+    pub ff_only: bool,
+    pub no_ff: bool,
+    /// Set by the `pull` path once it has resolved fast-forward intent from the
+    /// command line / `pull.ff`, so [`run_merge_for_pull_with_options`] does not
+    /// re-read `merge.ff` and clobber that decision. Defaults `false` for the
+    /// public `merge` command, preserving its existing `merge.ff` fallback.
+    pub ff_resolved: bool,
+    pub squash: bool,
+    pub no_commit: bool,
+    pub allow_unrelated_histories: bool,
+    pub message: Option<String>,
+    pub signoff: bool,
+    pub strategy: Option<MergeStrategy>,
+    pub strategy_option: Option<MergeFavor>,
+    pub log: Option<usize>,
+    pub conflict_style: MergeConflictStyle,
+    pub into_name: Option<String>,
+    pub autostash: bool,
+    pub whitespace: WhitespaceMode,
+    pub sign: bool,
+    pub verify_signatures: bool,
+    pub edit: bool,
+    pub detect_renames: bool,
+    pub rename_threshold: Option<f64>,
+    pub rename_limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MergeState {
+    pub head_name: String,
+    pub orig_head: String,
+    pub target: String,
+    pub target_ref: String,
+    pub base: String,
+    pub conflicted_paths: Vec<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub signoff: bool,
+    #[serde(default)]
+    pub log: Option<usize>,
+    #[serde(default)]
+    pub conflict_style: MergeConflictStyle,
+    /// Stash id saved by `--autostash`, reapplied on `--continue`/`--abort`.
+    #[serde(default)]
+    pub autostash: Option<String>,
+}
+
+impl MergeState {
+    fn path() -> PathBuf {
+        util::storage_path().join("merge-state.json")
+    }
+
+    pub(crate) fn load_optional_sync() -> Result<Option<Self>, String> {
+        let path = Self::path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let data = fs::read_to_string(&path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        serde_json::from_str(&data)
+            .map(Some)
+            .map_err(|error| format!("failed to parse {}: {error}", path.display()))
+    }
+
+    fn load_required() -> Result<Self, PullMergeError> {
+        Self::load_optional_sync()
+            .map_err(PullMergeError::StateLoad)?
+            .ok_or(PullMergeError::NoMergeInProgress)
+    }
+
+    fn save(&self) -> Result<(), PullMergeError> {
+        let path = Self::path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                PullMergeError::StateSave(format!("failed to create {}: {error}", parent.display()))
+            })?;
+        }
+        let data = serde_json::to_vec_pretty(self)
+            .map_err(|error| PullMergeError::StateSave(error.to_string()))?;
+        fs::write(&path, data)
+            .map_err(|error| PullMergeError::StateSave(format!("{}: {error}", path.display())))
+    }
+
+    fn cleanup() -> Result<(), PullMergeError> {
+        let path = Self::path();
+        if !path.exists() {
+            return Ok(());
+        }
+        fs::remove_file(&path)
+            .map_err(|error| PullMergeError::StateCleanup(format!("{}: {error}", path.display())))
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PullMergeError {
+    #[error("merge requires a branch argument, --continue, or --abort")]
+    MissingAction,
+    #[error("merge accepts either a branch argument, --continue, or --abort")]
+    ConflictingAction,
+    #[error("--squash cannot be combined with --no-ff")]
+    SquashNoFf,
+    #[error("--squash cannot be combined with --commit")]
+    SquashCommit,
+    #[error("invalid merge.ff value '{value}'")]
+    InvalidMergeFfConfig { value: String },
+    #[error("invalid merge.commit value '{value}'")]
+    InvalidMergeCommitConfig { value: String },
+    #[error("invalid --find-renames similarity '{value}'")]
+    InvalidRenameSimilarity { value: String },
+    #[error("invalid merge.renameLimit value '{value}'")]
+    InvalidRenameLimitConfig { value: String },
+    #[error("unknown diff algorithm '{value}' (expected myers, histogram, patience, or minimal)")]
+    InvalidDiffAlgorithm { value: String },
+    #[error(
+        "unknown cleanup mode '{value}' (expected strip, whitespace, verbatim, scissors, or default)"
+    )]
+    InvalidCleanupMode { value: String },
+    #[error("octopus merge refused: {detail}")]
+    OctopusConflict { detail: String },
+    #[error("directory/file conflict in merge: {path}")]
+    DirectoryFileConflict { path: String },
+    #[error("failed to read merge message file '{path}': {detail}")]
+    MessageFileRead { path: String, detail: String },
+    #[error("merge --signoff requires configured user.name and user.email")]
+    SignoffIdentity,
     #[error("{0} - not something we can merge")]
     InvalidTarget(String),
     #[error("failed to load merge target '{commit_id}': {detail}")]
@@ -80,18 +489,58 @@ pub(crate) enum PullMergeError {
     CurrentLoad { commit_id: String, detail: String },
     #[error("failed to inspect merge history: {0}")]
     History(String),
+    #[error("failed to synthesize recursive merge base: {0}")]
+    VirtualMergeBase(String),
     #[error("refusing to merge unrelated histories")]
     UnrelatedHistories,
-    #[error("non-fast-forward merge from '{upstream}' requires manual merge")]
-    ManualMergeRequired { upstream: String },
+    #[error("merge has conflicts in {paths}")]
+    Conflicts { paths: String },
+    #[error("no merge in progress")]
+    NoMergeInProgress,
+    #[error("merge already in progress")]
+    MergeInProgress,
+    #[error("you must resolve all merge conflicts before continuing")]
+    UnresolvedConflicts,
+    #[error("uncommitted changes, cannot merge")]
+    DirtyWorktree,
+    #[error("untracked working tree file would be overwritten by merge: {path}")]
+    UntrackedOverwrite { path: String },
+    #[error("non-fast-forward merge refused (current {current}, target {target})")]
+    NonFastForward { current: String, target: String },
+    #[error("failed to load merge state: {0}")]
+    StateLoad(String),
+    #[error("failed to save merge state: {0}")]
+    StateSave(String),
+    #[error("failed to clean up merge state: {0}")]
+    StateCleanup(String),
+    #[error("autostash failed: {0}")]
+    Autostash(String),
+    #[error("failed to sign merge commit: {0}")]
+    Sign(String),
+    #[error("merge target '{target}' is not signed")]
+    UnsignedTarget { target: String },
+    #[error("failed to load index: {0}")]
+    IndexLoad(String),
+    #[error("failed to save index: {0}")]
+    IndexSave(String),
+    #[error(
+        "squash merge has conflicts; resolve them and run 'libra commit' instead of 'libra merge --continue'"
+    )]
+    SquashConflicts,
+    #[error("failed to create merge tree: {0}")]
+    TreeCreate(String),
+    #[error("failed to save merge commit: {0}")]
+    CommitSave(String),
+    #[error("failed to reset working tree after merge: {0}")]
+    WorkdirReset(String),
     #[error("failed to load tree '{tree_id}': {detail}")]
     TreeLoad { tree_id: String, detail: String },
+    #[error("failed to load object '{object_id}': {detail}")]
+    ObjectLoad { object_id: String, detail: String },
     #[error("failed to resolve HEAD state: {0}")]
     HeadResolve(String),
     #[error("failed to update HEAD during merge: {0}")]
     HeadUpdate(String),
-    #[error("failed to restore working tree after merge: {0}")]
-    Restore(String),
 }
 
 pub(crate) type MergeError = PullMergeError;
@@ -99,22 +548,74 @@ pub(crate) type MergeError = PullMergeError;
 impl From<PullMergeError> for CliError {
     fn from(error: PullMergeError) -> Self {
         match &error {
+            PullMergeError::MissingAction
+            | PullMergeError::ConflictingAction
+            | PullMergeError::SquashNoFf
+            | PullMergeError::SquashCommit
+            | PullMergeError::InvalidMergeFfConfig { .. }
+            | PullMergeError::InvalidMergeCommitConfig { .. }
+            | PullMergeError::InvalidRenameSimilarity { .. }
+            | PullMergeError::InvalidRenameLimitConfig { .. }
+            | PullMergeError::InvalidDiffAlgorithm { .. }
+            | PullMergeError::InvalidCleanupMode { .. } => {
+                CliError::command_usage(error.to_string())
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+            }
+            PullMergeError::MessageFileRead { .. } => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            PullMergeError::SignoffIdentity => CliError::failure(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("configure user.name and user.email before using --signoff"),
             PullMergeError::InvalidTarget(..) => CliError::command_usage(error.to_string())
                 .with_stable_code(StableErrorCode::CliInvalidTarget),
             PullMergeError::TargetLoad { .. }
             | PullMergeError::CurrentLoad { .. }
             | PullMergeError::History(..)
-            | PullMergeError::TreeLoad { .. } => {
+            | PullMergeError::VirtualMergeBase(..)
+            | PullMergeError::TreeLoad { .. }
+            | PullMergeError::ObjectLoad { .. } => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::RepoCorrupt)
             }
             PullMergeError::UnrelatedHistories => CliError::failure(error.to_string())
                 .with_stable_code(StableErrorCode::RepoStateInvalid),
-            PullMergeError::ManualMergeRequired { .. } => CliError::failure(error.to_string())
-                .with_stable_code(StableErrorCode::ConflictOperationBlocked),
+            PullMergeError::NonFastForward { .. } => CliError::failure(error.to_string())
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                .with_hint("run 'libra pull' without --ff-only to allow a merge commit")
+                .with_hint("or run 'libra pull --rebase' to replay local commits"),
+            PullMergeError::Conflicts { .. }
+            | PullMergeError::SquashConflicts
+            | PullMergeError::OctopusConflict { .. }
+            | PullMergeError::DirectoryFileConflict { .. }
+            | PullMergeError::DirtyWorktree
+            | PullMergeError::UntrackedOverwrite { .. }
+            | PullMergeError::MergeInProgress
+            | PullMergeError::UnresolvedConflicts => CliError::failure(error.to_string())
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                .with_hint("resolve conflicts, then run 'libra merge --continue'")
+                .with_hint("or run 'libra merge --abort' to restore the pre-merge state"),
+            PullMergeError::NoMergeInProgress => CliError::failure(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid),
+            PullMergeError::StateLoad(..) | PullMergeError::IndexLoad(..) => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            PullMergeError::StateSave(..)
+            | PullMergeError::StateCleanup(..)
+            | PullMergeError::Autostash(..)
+            | PullMergeError::Sign(..)
+            | PullMergeError::IndexSave(..)
+            | PullMergeError::TreeCreate(..)
+            | PullMergeError::CommitSave(..)
+            | PullMergeError::WorkdirReset(..) => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
+            }
+            PullMergeError::UnsignedTarget { .. } => CliError::failure(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("pass --no-verify-signatures to merge an unsigned commit"),
             PullMergeError::HeadResolve(..) => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
             }
-            PullMergeError::HeadUpdate(..) | PullMergeError::Restore(..) => {
+            PullMergeError::HeadUpdate(..) => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
             }
         }
@@ -139,18 +640,385 @@ pub async fn execute(args: MergeArgs) {
 ///
 /// # Errors
 /// Returns [`CliError`] when the target is invalid, histories are unrelated,
-/// manual merge is required, objects cannot be read, or HEAD/worktree updates
-/// fail.
+/// conflicts need resolution, objects cannot be read, or HEAD/worktree updates fail.
 pub async fn execute_safe(args: MergeArgs, output: &OutputConfig) -> CliResult<()> {
+    // Refuse to start a merge while a cherry-pick sequence is in progress.
+    crate::command::cherry_pick::ensure_no_cherry_pick_in_progress().await?;
+    let want_stat = resolve_merge_stat(&args).await;
     let result = run_merge(args, output).await.map_err(merge_error_to_cli)?;
-    render_merge_output(&result, output)
+    render_merge_output(&result, want_stat, output)
+}
+
+/// Resolve whether to print a diffstat after the merge. `--stat`/`--no-stat`
+/// (and the `--summary`/`--no-summary` aliases) win over the `merge.stat`
+/// config key. Unlike Git, Libra defaults the diffstat off so existing merge
+/// output stays stable unless explicitly requested.
+async fn resolve_merge_stat(args: &MergeArgs) -> bool {
+    if args.no_stat {
+        return false;
+    }
+    if args.stat {
+        return true;
+    }
+    read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.stat")
+        .await
+        .ok()
+        .flatten()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "yes" | "on" | "1"
+            )
+        })
+        .unwrap_or(false)
 }
 
 async fn run_merge(args: MergeArgs, output: &OutputConfig) -> Result<MergeOutput, MergeError> {
-    run_merge_for_pull(&args.branch, &args.branch, output).await
+    let options = merge_options_from_args(&args).await?;
+    match (
+        args.branches.as_slice(),
+        args.continue_merge,
+        args.abort,
+        args.quit,
+    ) {
+        ([branch], false, false, false) => {
+            let stash_id = maybe_autostash_push(&options).await?;
+            let result = run_merge_for_pull_with_options(branch, branch, output, options).await;
+            finalize_autostash(stash_id, result).await
+        }
+        (branches, false, false, false) if branches.len() > 1 => {
+            let stash_id = maybe_autostash_push(&options).await?;
+            let result = run_octopus_merge(branches, output, options).await;
+            finalize_autostash(stash_id, result).await
+        }
+        ([], true, false, false) => run_merge_continue(output, options).await,
+        ([], false, true, false) => run_merge_abort(output).await,
+        ([], false, false, true) => run_merge_quit().await,
+        ([], false, false, false) => Err(MergeError::MissingAction),
+        _ => Err(MergeError::ConflictingAction),
+    }
 }
 
-fn render_merge_output(result: &MergeOutput, output: &OutputConfig) -> CliResult<()> {
+/// Stash the working tree before a merge when `--autostash` is in effect.
+/// Returns the saved stash id, or `None` when autostash is off or the tree is
+/// already clean.
+async fn maybe_autostash_push(options: &PullMergeOptions) -> Result<Option<String>, MergeError> {
+    if !options.autostash {
+        return Ok(None);
+    }
+    stash::autostash_push()
+        .await
+        .map_err(PullMergeError::Autostash)
+}
+
+/// Reapply (or defer) an autostash once the merge settles. A merge that left
+/// state behind (conflict or `--no-commit`) records the stash id so
+/// `--continue`/`--abort` can reapply it; otherwise the stash is popped now.
+async fn finalize_autostash(
+    stash_id: Option<String>,
+    result: Result<MergeOutput, MergeError>,
+) -> Result<MergeOutput, MergeError> {
+    let Some(stash_id) = stash_id else {
+        return result;
+    };
+    if let Some(mut state) = MergeState::load_optional_sync().map_err(PullMergeError::StateLoad)? {
+        state.autostash = Some(stash_id);
+        state.save()?;
+        return result;
+    }
+    if let Err(error) = stash::autostash_pop().await {
+        eprintln!("warning: failed to reapply autostashed changes: {error}");
+    }
+    result
+}
+
+async fn merge_options_from_args(args: &MergeArgs) -> Result<PullMergeOptions, MergeError> {
+    if args.squash && args.no_ff {
+        return Err(MergeError::SquashNoFf);
+    }
+    if args.squash && args.commit {
+        return Err(MergeError::SquashCommit);
+    }
+    validate_diff_algorithm(args.diff_algorithm.as_deref())?;
+    validate_cleanup_mode(args.cleanup.as_deref())?;
+    let mut ff_only = args.ff_only;
+    let mut no_ff = args.no_ff;
+    if !ff_only && !no_ff {
+        apply_merge_ff_config(&mut ff_only, &mut no_ff).await?;
+    }
+    Ok(PullMergeOptions {
+        ff_only,
+        no_ff,
+        // The `merge` command keeps its existing `merge.ff` fallback inside
+        // `run_merge_for_pull_with_options`; only the `pull` path pre-resolves.
+        ff_resolved: false,
+        squash: args.squash,
+        no_commit: resolve_no_commit(args).await?,
+        allow_unrelated_histories: args.allow_unrelated_histories,
+        message: read_merge_message(args)?,
+        signoff: args.signoff,
+        strategy: args.strategy,
+        strategy_option: args.strategy_option,
+        log: if args.no_log { None } else { args.log },
+        conflict_style: resolve_conflict_style(args.conflict).await?,
+        into_name: args.into_name.clone(),
+        autostash: resolve_autostash(args).await,
+        whitespace: WhitespaceMode {
+            ignore_space_change: args.ignore_space_change,
+            ignore_all_space: args.ignore_all_space,
+            ignore_space_at_eol: args.ignore_space_at_eol,
+            ignore_cr_at_eol: args.ignore_cr_at_eol,
+        },
+        sign: !args.no_gpg_sign && args.gpg_sign,
+        verify_signatures: resolve_verify_signatures(args).await,
+        edit: args.edit && !args.no_edit,
+        detect_renames: resolve_detect_renames(args).await,
+        rename_threshold: args
+            .find_renames
+            .as_ref()
+            .map(parse_rename_similarity)
+            .transpose()?,
+        rename_limit: Some(resolve_rename_limit().await?),
+    })
+}
+
+/// Resolve `--commit`/`--no-commit`, falling back to the plan-required
+/// `merge.commit` key where false means stop before creating the merge commit.
+async fn resolve_no_commit(args: &MergeArgs) -> Result<bool, PullMergeError> {
+    if args.commit {
+        return Ok(false);
+    }
+    if args.no_commit {
+        return Ok(true);
+    }
+    let Some(value) = read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.commit")
+        .await
+        .ok()
+        .flatten()
+    else {
+        return Ok(false);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Ok(false),
+        "false" | "no" | "off" | "0" => Ok(true),
+        _ => Err(PullMergeError::InvalidMergeCommitConfig { value }),
+    }
+}
+
+/// Resolve whether to run rename detection (`--find-renames`/`--no-renames`,
+/// falling back to the `merge.renames` config; defaults on like Git).
+async fn resolve_detect_renames(args: &MergeArgs) -> bool {
+    if args.no_renames {
+        return false;
+    }
+    if args.find_renames.is_some() {
+        return true;
+    }
+    read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.renames")
+        .await
+        .ok()
+        .flatten()
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "false" | "no" | "off" | "0"
+            )
+        })
+        .unwrap_or(true)
+}
+
+fn parse_rename_similarity(flag: &Option<String>) -> Result<f64, PullMergeError> {
+    match flag {
+        None => Ok(RENAME_SIMILARITY_THRESHOLD),
+        Some(value) => {
+            let trimmed = value.trim();
+            let had_percent = trimmed.ends_with('%');
+            let core = trimmed.strip_suffix('%').unwrap_or(trimmed);
+            match core.parse::<f64>() {
+                Ok(number)
+                    if core.contains('.') && !had_percent && (0.0..=1.0).contains(&number) =>
+                {
+                    Ok(number)
+                }
+                Ok(number) if !core.contains('.') || had_percent => {
+                    if (0.0..=100.0).contains(&number) {
+                        Ok(number / 100.0)
+                    } else {
+                        Err(PullMergeError::InvalidRenameSimilarity {
+                            value: value.clone(),
+                        })
+                    }
+                }
+                _ => Err(PullMergeError::InvalidRenameSimilarity {
+                    value: value.clone(),
+                }),
+            }
+        }
+    }
+}
+
+async fn resolve_rename_limit() -> Result<usize, PullMergeError> {
+    let Some(value) =
+        read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.renameLimit")
+            .await
+            .ok()
+            .flatten()
+    else {
+        return Ok(RENAME_LIMIT);
+    };
+
+    value
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|limit| *limit > 0)
+        .ok_or(PullMergeError::InvalidRenameLimitConfig { value })
+}
+
+/// Resolve `--verify-signatures`/`--no-verify-signatures`, falling back to the
+/// `merge.verifySignatures` config key (default off).
+async fn resolve_verify_signatures(args: &MergeArgs) -> bool {
+    if args.no_verify_signatures {
+        return false;
+    }
+    if args.verify_signatures {
+        return true;
+    }
+    read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.verifySignatures")
+        .await
+        .ok()
+        .flatten()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "yes" | "on" | "1"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Resolve `--autostash`/`--no-autostash`, falling back to the
+/// `merge.autoStash` config key (default off).
+async fn resolve_autostash(args: &MergeArgs) -> bool {
+    if args.no_autostash {
+        return false;
+    }
+    if args.autostash {
+        return true;
+    }
+    read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.autoStash")
+        .await
+        .ok()
+        .flatten()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "yes" | "on" | "1"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Accept Git's `--diff-algorithm` flag for content merges. Libra's blob
+/// merge currently uses a single Myers-style backend, so we validate the
+/// requested algorithm name and proceed with that backend rather than
+/// silently ignoring an unknown value.
+fn validate_diff_algorithm(algorithm: Option<&str>) -> Result<(), MergeError> {
+    match algorithm {
+        None => Ok(()),
+        Some(name) => match name.trim().to_ascii_lowercase().as_str() {
+            "myers" | "histogram" | "patience" | "minimal" => Ok(()),
+            other => Err(MergeError::InvalidDiffAlgorithm {
+                value: other.to_string(),
+            }),
+        },
+    }
+}
+
+/// Accept Git's `--cleanup=<mode>` flag for the merge message. The mode is
+/// validated against Git's documented set; the actual message body produced
+/// by Libra is already trimmed, so non-`verbatim` modes are equivalent here.
+fn validate_cleanup_mode(mode: Option<&str>) -> Result<(), MergeError> {
+    match mode {
+        None => Ok(()),
+        Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "strip" | "whitespace" | "verbatim" | "scissors" | "default" => Ok(()),
+            other => Err(MergeError::InvalidCleanupMode {
+                value: other.to_string(),
+            }),
+        },
+    }
+}
+
+async fn resolve_conflict_style(
+    cli_style: Option<MergeConflictStyle>,
+) -> Result<MergeConflictStyle, PullMergeError> {
+    Ok(resolve_merge_conflict_style(cli_style).await)
+}
+
+pub(crate) async fn resolve_merge_conflict_style(
+    cli_style: Option<MergeConflictStyle>,
+) -> MergeConflictStyle {
+    if let Some(style) = cli_style {
+        return style;
+    }
+    let Some(value) =
+        read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.conflictstyle")
+            .await
+            .ok()
+            .flatten()
+    else {
+        return MergeConflictStyle::Merge;
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "merge" => MergeConflictStyle::Merge,
+        "diff3" => MergeConflictStyle::Diff3,
+        _ => MergeConflictStyle::Merge,
+    }
+}
+
+async fn apply_merge_ff_config(ff_only: &mut bool, no_ff: &mut bool) -> Result<(), PullMergeError> {
+    let Some(value) = read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.ff")
+        .await
+        .ok()
+        .flatten()
+    else {
+        return Ok(());
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Ok(()),
+        "false" | "no" | "off" | "0" => {
+            *no_ff = true;
+            Ok(())
+        }
+        "only" => {
+            *ff_only = true;
+            Ok(())
+        }
+        _ => Err(PullMergeError::InvalidMergeFfConfig { value }),
+    }
+}
+
+fn read_merge_message(args: &MergeArgs) -> Result<Option<String>, MergeError> {
+    if let Some(message) = &args.message {
+        return Ok(Some(message.clone()));
+    }
+    if let Some(file_path) = &args.file {
+        return fs::read_to_string(file_path).map(Some).map_err(|error| {
+            MergeError::MessageFileRead {
+                path: file_path.clone(),
+                detail: error.to_string(),
+            }
+        });
+    }
+    Ok(None)
+}
+
+fn render_merge_output(
+    result: &MergeOutput,
+    want_stat: bool,
+    output: &OutputConfig,
+) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("merge", result, output);
     }
@@ -158,29 +1026,70 @@ fn render_merge_output(result: &MergeOutput, output: &OutputConfig) -> CliResult
         return Ok(());
     }
 
+    if want_stat
+        && !result.up_to_date
+        && !result.aborted
+        && result.conflicted_paths.is_empty()
+        && let Some(stat) = render_merge_diffstat(result)
+    {
+        info_println!(output, "{stat}");
+    }
+
     if result.up_to_date {
         info_println!(output, "Already up to date.");
+    } else if result.aborted {
+        info_println!(output, "Merge aborted.");
+    } else if result.continued {
+        info_println!(output, "Merge completed.");
+    } else if !result.conflicted_paths.is_empty() {
+        info_println!(
+            output,
+            "Automatic merge failed; fix conflicts and then commit the result."
+        );
     } else {
-        info_println!(output, "Fast-forward");
+        match result.strategy.as_str() {
+            "three-way" => info_println!(output, "Merge made by the 'three-way' strategy."),
+            "octopus" => info_println!(output, "Merge made by the 'octopus' strategy."),
+            "squash" => info_println!(output, "Squash commit -- not updating HEAD."),
+            "no-commit" => info_println!(
+                output,
+                "Automatic merge went well; stopped before committing as requested."
+            ),
+            _ => info_println!(output, "Fast-forward"),
+        }
     }
     Ok(())
 }
 
 fn merge_error_to_cli(error: MergeError) -> CliError {
     match error {
-        MergeError::ManualMergeRequired { .. } => {
-            CliError::fatal("Not possible to fast-forward merge, try merge manually")
-                .with_stable_code(StableErrorCode::ConflictOperationBlocked)
-        }
+        MergeError::Conflicts { .. } => CliError::from(error)
+            .with_priority_hint("resolve conflicts, then run 'libra merge --continue'")
+            .with_hint("or run 'libra merge --abort' to restore the pre-merge state"),
+        MergeError::SquashConflicts => CliError::failure(error.to_string())
+            .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+            .with_priority_hint("resolve conflicts, stage the result, then run 'libra commit'")
+            .with_hint("squash merges do not support 'libra merge --continue'"),
         error => CliError::from(error),
     }
 }
 
-pub(crate) async fn run_merge_for_pull(
+pub(crate) async fn run_merge_for_pull_with_options(
     target_ref: &str,
     upstream: &str,
     output: &OutputConfig,
+    mut options: PullMergeOptions,
 ) -> Result<PullMergeSummary, PullMergeError> {
+    if !options.ff_resolved && !options.ff_only && !options.no_ff {
+        apply_merge_ff_config(&mut options.ff_only, &mut options.no_ff).await?;
+    }
+    if MergeState::load_optional_sync()
+        .map_err(PullMergeError::StateLoad)?
+        .is_some()
+    {
+        return Err(PullMergeError::MergeInProgress);
+    }
+
     let commit_hash = resolve_merge_target(target_ref)
         .await
         .map_err(|_| PullMergeError::InvalidTarget(upstream.to_string()))?;
@@ -189,6 +1098,12 @@ pub(crate) async fn run_merge_for_pull(
             commit_id: commit_hash.to_string(),
             detail: error.to_string(),
         })?;
+
+    if options.verify_signatures && !commit_is_signed(&target_commit) {
+        return Err(PullMergeError::UnsignedTarget {
+            target: upstream.to_string(),
+        });
+    }
 
     let Some(current_commit_id) = Head::current_commit().await else {
         let files_changed = count_changed_files(None, &target_commit)?;
@@ -199,6 +1114,10 @@ pub(crate) async fn run_merge_for_pull(
             commit: Some(target_commit.id.to_string()),
             files_changed,
             up_to_date: false,
+            parents: Vec::new(),
+            conflicted_paths: Vec::new(),
+            aborted: false,
+            continued: false,
         });
     };
     let current_commit: Commit =
@@ -207,24 +1126,46 @@ pub(crate) async fn run_merge_for_pull(
             detail: error.to_string(),
         })?;
 
-    let lca = lca_commit(&current_commit, &target_commit)
-        .await
-        .map_err(|error| PullMergeError::History(error.to_string()))?;
+    let lca = recursive_merge_base(&current_commit, &target_commit)?;
 
-    let lca = lca.ok_or(PullMergeError::UnrelatedHistories)?;
+    if lca.is_none() && !options.allow_unrelated_histories {
+        return Err(PullMergeError::UnrelatedHistories);
+    }
 
-    if lca.id == target_commit.id {
+    if lca.as_ref().is_some_and(|base| base.id == target_commit.id) {
         return Ok(PullMergeSummary {
             strategy: "already-up-to-date".to_string(),
             old_commit: Some(current_commit_id.to_string()),
             commit: None,
             files_changed: 0,
             up_to_date: true,
+            parents: Vec::new(),
+            conflicted_paths: Vec::new(),
+            aborted: false,
+            continued: false,
         });
     }
 
-    if lca.id == current_commit.id {
+    if lca
+        .as_ref()
+        .is_some_and(|base| base.id == current_commit.id)
+        && !options.no_ff
+    {
         let files_changed = count_changed_files(Some(&current_commit), &target_commit)?;
+        if options.squash {
+            apply_squash_merge(&target_commit)?;
+            return Ok(PullMergeSummary {
+                strategy: "squash".to_string(),
+                old_commit: Some(current_commit_id.to_string()),
+                commit: None,
+                files_changed,
+                up_to_date: false,
+                parents: Vec::new(),
+                conflicted_paths: Vec::new(),
+                aborted: false,
+                continued: false,
+            });
+        }
         apply_fast_forward_merge(target_commit.clone(), upstream, output).await?;
         return Ok(PullMergeSummary {
             strategy: "fast-forward".to_string(),
@@ -232,11 +1173,742 @@ pub(crate) async fn run_merge_for_pull(
             commit: Some(target_commit.id.to_string()),
             files_changed,
             up_to_date: false,
+            parents: Vec::new(),
+            conflicted_paths: Vec::new(),
+            aborted: false,
+            continued: false,
         });
     }
 
-    Err(PullMergeError::ManualMergeRequired {
-        upstream: upstream.to_string(),
+    if options.ff_only {
+        return Err(PullMergeError::NonFastForward {
+            current: current_commit.id.to_string(),
+            target: target_commit.id.to_string(),
+        });
+    }
+
+    perform_three_way_merge(
+        current_commit,
+        target_commit,
+        lca,
+        upstream,
+        output,
+        options,
+    )
+    .await
+}
+
+/// Merge-owned autostash wrapper for the `pull` merge path. Mirrors the public
+/// `merge` command's `maybe_autostash_push` → merge → `finalize_autostash`
+/// sequence so a `libra pull --autostash` stashes a dirty tree before
+/// integration, pops it on success, and parks the stash OID in `MergeState`
+/// (for `--continue`/`--abort`) on conflict — without `pull.rs` ever touching
+/// the stash state machine. `options.autostash` decides whether anything is
+/// stashed; an autostash-off call is byte-identical to
+/// [`run_merge_for_pull_with_options`].
+pub(crate) async fn run_merge_for_pull_with_autostash(
+    target_ref: &str,
+    upstream: &str,
+    output: &OutputConfig,
+    options: PullMergeOptions,
+) -> Result<PullMergeSummary, PullMergeError> {
+    let stash_id = maybe_autostash_push(&options).await?;
+    let result = run_merge_for_pull_with_options(target_ref, upstream, output, options).await;
+    finalize_autostash(stash_id, result).await
+}
+
+async fn run_octopus_merge(
+    branches: &[String],
+    output: &OutputConfig,
+    options: PullMergeOptions,
+) -> Result<PullMergeSummary, PullMergeError> {
+    if options.squash
+        || options.no_commit
+        || options.strategy.is_some()
+        || options.strategy_option.is_some()
+    {
+        return Err(PullMergeError::OctopusConflict {
+            detail: "advanced merge options are only supported for single-head merges".to_string(),
+        });
+    }
+    switch::ensure_clean_status(output)
+        .await
+        .map_err(|_| PullMergeError::DirtyWorktree)?;
+    let current_commit_id =
+        Head::current_commit()
+            .await
+            .ok_or_else(|| PullMergeError::OctopusConflict {
+                detail: "current branch has no commits".to_string(),
+            })?;
+    let current_commit: Commit =
+        load_object(&current_commit_id).map_err(|error| PullMergeError::CurrentLoad {
+            commit_id: current_commit_id.to_string(),
+            detail: error.to_string(),
+        })?;
+    let current_items = commit_tree_items(&current_commit)?;
+    let mut merged_items = current_items.clone();
+    let mut parents = vec![current_commit.id];
+    let mut changed_paths = HashSet::new();
+    let mut target_names = Vec::new();
+
+    for branch in branches {
+        let commit_hash = resolve_merge_target(branch)
+            .await
+            .map_err(|_| PullMergeError::InvalidTarget(branch.clone()))?;
+        let target_commit: Commit =
+            load_object(&commit_hash).map_err(|error| PullMergeError::TargetLoad {
+                commit_id: commit_hash.to_string(),
+                detail: error.to_string(),
+            })?;
+        if options.verify_signatures && !commit_is_signed(&target_commit) {
+            return Err(PullMergeError::UnsignedTarget {
+                target: branch.clone(),
+            });
+        }
+        let lca = recursive_merge_base(&current_commit, &target_commit)?;
+        if lca.as_ref().is_none_or(|base| base.id != current_commit.id) {
+            return Err(PullMergeError::OctopusConflict {
+                detail: format!("target '{branch}' is not a clean descendant of HEAD"),
+            });
+        }
+        let target_items = commit_tree_items(&target_commit)?;
+        for (path, target_entry) in &target_items {
+            if current_items.get(path) == Some(target_entry) {
+                continue;
+            }
+            if let Some(existing) = merged_items.get(path)
+                && existing != target_entry
+                && changed_paths.contains(path)
+            {
+                return Err(PullMergeError::OctopusConflict {
+                    detail: format!("path '{}' changed by multiple heads", path.display()),
+                });
+            }
+            changed_paths.insert(path.clone());
+            merged_items.insert(path.clone(), *target_entry);
+        }
+        for path in current_items.keys() {
+            if target_items.contains_key(path) {
+                continue;
+            }
+            if changed_paths.contains(path) {
+                return Err(PullMergeError::OctopusConflict {
+                    detail: format!("path '{}' changed by multiple heads", path.display()),
+                });
+            }
+            changed_paths.insert(path.clone());
+            merged_items.remove(path);
+        }
+        parents.push(target_commit.id);
+        target_names.push(branch.clone());
+    }
+
+    ensure_no_directory_file_conflicts(merged_items.keys())?;
+    let current_index =
+        Index::load(path::index()).map_err(|error| PullMergeError::IndexLoad(error.to_string()))?;
+    let paths_to_write: Vec<PathBuf> = merged_items.keys().cloned().collect();
+    ensure_no_untracked_conflicts(&current_index, &paths_to_write)?;
+    let tree_id = create_tree_from_items_map(&merged_items).map_err(PullMergeError::TreeCreate)?;
+    let head_name = current_head_name().await?;
+    let into_label = options.into_name.as_deref().unwrap_or(&head_name);
+    let message = options.message.clone().unwrap_or_else(|| {
+        format!(
+            "Merge branches {} into {into_label}",
+            target_names.join(", ")
+        )
+    });
+    let merge_commit = create_merge_commit(
+        tree_id,
+        parents.clone(),
+        &message,
+        options.sign,
+        options.edit,
+    )
+    .await?;
+    save_object(&merge_commit, &merge_commit.id)
+        .map_err(|error| PullMergeError::CommitSave(error.to_string()))?;
+    update_head_with_reflog(
+        &head_name,
+        merge_commit.id,
+        &target_names.join(","),
+        "octopus",
+    )
+    .await?;
+    reset_index_and_workdir_to_tree(&tree_id)?;
+    let files_changed = count_item_map_changes(&current_items, &merged_items);
+
+    Ok(PullMergeSummary {
+        strategy: "octopus".to_string(),
+        old_commit: Some(current_commit.id.to_string()),
+        commit: Some(merge_commit.id.to_string()),
+        files_changed,
+        up_to_date: false,
+        parents: parents
+            .into_iter()
+            .map(|parent| parent.to_string())
+            .collect(),
+        conflicted_paths: Vec::new(),
+        aborted: false,
+        continued: false,
+    })
+}
+
+struct ThreeWayMergeResult {
+    merged_items: HashMap<PathBuf, MergeTreeEntry>,
+    conflicts: Vec<(PathBuf, ConflictKind)>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+struct MergeTreeEntry {
+    hash: ObjectHash,
+    mode: TreeItemMode,
+}
+
+async fn perform_three_way_merge(
+    current_commit: Commit,
+    target_commit: Commit,
+    base_commit: Option<Commit>,
+    upstream: &str,
+    output: &OutputConfig,
+    options: PullMergeOptions,
+) -> Result<PullMergeSummary, PullMergeError> {
+    switch::ensure_clean_status(output)
+        .await
+        .map_err(|_| PullMergeError::DirtyWorktree)?;
+
+    let head_name = current_head_name().await?;
+    let base_items = match &base_commit {
+        Some(commit) => commit_tree_items(commit)?,
+        None => HashMap::new(),
+    };
+    let our_items = commit_tree_items(&current_commit)?;
+    let their_items = commit_tree_items(&target_commit)?;
+    let merge_result = if options.strategy == Some(MergeStrategy::Ours) {
+        ThreeWayMergeResult {
+            merged_items: our_items.clone(),
+            conflicts: Vec::new(),
+        }
+    } else {
+        merge_tree_items_with_options(&base_items, &our_items, &their_items, &options)?
+    };
+    let files_changed = count_item_map_changes(&our_items, &merge_result.merged_items);
+    ensure_no_directory_file_conflicts(
+        merge_result
+            .merged_items
+            .keys()
+            .chain(merge_result.conflicts.iter().map(|(path, _)| path)),
+    )?;
+
+    if !merge_result.conflicts.is_empty() {
+        let paths = merge_result
+            .conflicts
+            .iter()
+            .map(|(path, _)| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        write_conflicted_merge_state(MergeConflictInput {
+            head_name: head_name.clone(),
+            upstream: upstream.to_string(),
+            squash: options.squash,
+            base: base_commit
+                .as_ref()
+                .map(|commit| commit.id)
+                .unwrap_or_else(zero_object_hash),
+            ours: current_commit.id,
+            theirs: target_commit.id,
+            merged_items: merge_result.merged_items,
+            conflicts: merge_result.conflicts,
+            base_items,
+            our_items,
+            their_items,
+            message: merge_commit_message(
+                upstream,
+                &head_name,
+                Some((&current_commit, &target_commit)),
+                &options,
+            )
+            .await?,
+            signoff: options.signoff,
+            log: options.log,
+            conflict_style: options.conflict_style,
+        })?;
+        return if options.squash {
+            Err(PullMergeError::SquashConflicts)
+        } else {
+            Err(PullMergeError::Conflicts { paths })
+        };
+    }
+
+    let current_index =
+        Index::load(path::index()).map_err(|error| PullMergeError::IndexLoad(error.to_string()))?;
+    let paths_to_write: Vec<PathBuf> = merge_result.merged_items.keys().cloned().collect();
+    ensure_no_untracked_conflicts(&current_index, &paths_to_write)?;
+
+    let tree_id = create_tree_from_items_map(&merge_result.merged_items)
+        .map_err(PullMergeError::TreeCreate)?;
+    if options.squash {
+        reset_index_and_workdir_to_tree(&tree_id)?;
+        return Ok(PullMergeSummary {
+            strategy: "squash".to_string(),
+            old_commit: Some(current_commit.id.to_string()),
+            commit: None,
+            files_changed,
+            up_to_date: false,
+            parents: Vec::new(),
+            conflicted_paths: Vec::new(),
+            aborted: false,
+            continued: false,
+        });
+    }
+    let message = merge_commit_message(
+        upstream,
+        &head_name,
+        Some((&current_commit, &target_commit)),
+        &options,
+    )
+    .await?;
+    if options.no_commit {
+        save_clean_merge_state(CleanMergeStateInput {
+            head_name: head_name.clone(),
+            upstream: upstream.to_string(),
+            base: base_commit
+                .as_ref()
+                .map(|commit| commit.id)
+                .unwrap_or_else(zero_object_hash),
+            ours: current_commit.id,
+            theirs: target_commit.id,
+            message: message.clone(),
+            signoff: options.signoff,
+            log: options.log,
+            conflict_style: options.conflict_style,
+        })?;
+        reset_index_and_workdir_to_tree(&tree_id)?;
+        return Ok(PullMergeSummary {
+            strategy: "no-commit".to_string(),
+            old_commit: Some(current_commit.id.to_string()),
+            commit: None,
+            files_changed,
+            up_to_date: false,
+            parents: vec![current_commit.id.to_string(), target_commit.id.to_string()],
+            conflicted_paths: Vec::new(),
+            aborted: false,
+            continued: false,
+        });
+    }
+    let merge_commit = create_merge_commit(
+        tree_id,
+        vec![current_commit.id, target_commit.id],
+        &message,
+        options.sign,
+        options.edit,
+    )
+    .await?;
+    save_object(&merge_commit, &merge_commit.id)
+        .map_err(|error| PullMergeError::CommitSave(error.to_string()))?;
+    update_head_with_reflog(&head_name, merge_commit.id, upstream, "three-way").await?;
+    reset_index_and_workdir_to_tree(&tree_id)?;
+
+    Ok(PullMergeSummary {
+        strategy: "three-way".to_string(),
+        old_commit: Some(current_commit.id.to_string()),
+        commit: Some(merge_commit.id.to_string()),
+        files_changed,
+        up_to_date: false,
+        parents: vec![current_commit.id.to_string(), target_commit.id.to_string()],
+        conflicted_paths: Vec::new(),
+        aborted: false,
+        continued: false,
+    })
+}
+
+struct MergeConflictInput {
+    head_name: String,
+    upstream: String,
+    squash: bool,
+    base: ObjectHash,
+    ours: ObjectHash,
+    theirs: ObjectHash,
+    merged_items: HashMap<PathBuf, MergeTreeEntry>,
+    conflicts: Vec<(PathBuf, ConflictKind)>,
+    base_items: HashMap<PathBuf, MergeTreeEntry>,
+    our_items: HashMap<PathBuf, MergeTreeEntry>,
+    their_items: HashMap<PathBuf, MergeTreeEntry>,
+    message: String,
+    signoff: bool,
+    log: Option<usize>,
+    conflict_style: MergeConflictStyle,
+}
+
+struct CleanMergeStateInput {
+    head_name: String,
+    upstream: String,
+    base: ObjectHash,
+    ours: ObjectHash,
+    theirs: ObjectHash,
+    message: String,
+    signoff: bool,
+    log: Option<usize>,
+    conflict_style: MergeConflictStyle,
+}
+
+fn save_clean_merge_state(input: CleanMergeStateInput) -> Result<(), PullMergeError> {
+    MergeState {
+        head_name: input.head_name,
+        orig_head: input.ours.to_string(),
+        target: input.theirs.to_string(),
+        target_ref: input.upstream,
+        base: input.base.to_string(),
+        conflicted_paths: Vec::new(),
+        message: Some(input.message),
+        signoff: input.signoff,
+        log: input.log,
+        conflict_style: input.conflict_style,
+        autostash: None,
+    }
+    .save()
+}
+
+fn write_conflicted_merge_state(input: MergeConflictInput) -> Result<(), PullMergeError> {
+    let current_index =
+        Index::load(path::index()).map_err(|error| PullMergeError::IndexLoad(error.to_string()))?;
+
+    let conflict_paths: Vec<PathBuf> = input
+        .conflicts
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect();
+    let paths_to_write: Vec<PathBuf> = input
+        .merged_items
+        .keys()
+        .cloned()
+        .chain(conflict_paths.iter().cloned())
+        .collect();
+    ensure_no_untracked_conflicts(&current_index, &paths_to_write)?;
+
+    let conflict_set: HashSet<PathBuf> = conflict_paths.iter().cloned().collect();
+    let workdir = util::working_dir();
+    let marker_eol = conflict_marker_eol();
+    let theirs_abbrev = short_object_id(&input.theirs);
+
+    let mut index = Index::new();
+    for (path, entry) in &input.merged_items {
+        add_blob_index_entry(&mut index, path, *entry, 0)?;
+    }
+    for path in &conflict_paths {
+        if let Some(entry) = input.base_items.get(path) {
+            add_blob_index_entry(&mut index, path, *entry, 1)?;
+        }
+        if let Some(entry) = input.our_items.get(path) {
+            add_blob_index_entry(&mut index, path, *entry, 2)?;
+        }
+        if let Some(entry) = input.their_items.get(path) {
+            add_blob_index_entry(&mut index, path, *entry, 3)?;
+        }
+    }
+
+    if !input.squash {
+        let state = MergeState {
+            head_name: input.head_name,
+            orig_head: input.ours.to_string(),
+            target: input.theirs.to_string(),
+            target_ref: input.upstream,
+            base: input.base.to_string(),
+            conflicted_paths: conflict_paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+            message: Some(input.message),
+            signoff: input.signoff,
+            log: input.log,
+            conflict_style: input.conflict_style,
+            autostash: None,
+        };
+        state.save()?;
+    }
+
+    if let Err(error) = index.save(path::index()) {
+        let _ = MergeState::cleanup();
+        return Err(PullMergeError::IndexSave(error.to_string()));
+    }
+
+    for (path, entry) in &input.merged_items {
+        let blob: Blob = load_object(&entry.hash).map_err(|error| {
+            PullMergeError::WorkdirReset(format!(
+                "failed to load merged blob {} for '{}': {error}",
+                entry.hash,
+                path.display()
+            ))
+        })?;
+        write_workdir_blob(&workdir, path, entry.mode, &blob.data)
+            .map_err(PullMergeError::WorkdirReset)?;
+    }
+
+    let mut tracked_paths: HashSet<PathBuf> = current_index.tracked_files().into_iter().collect();
+    tracked_paths.extend(input.base_items.keys().cloned());
+    tracked_paths.extend(input.our_items.keys().cloned());
+    tracked_paths.extend(input.their_items.keys().cloned());
+    for path in tracked_paths {
+        if conflict_set.contains(&path) || input.merged_items.contains_key(&path) {
+            continue;
+        }
+        let full_path = workdir.join(&path);
+        if full_path.exists() {
+            fs::remove_file(&full_path).map_err(|error| {
+                PullMergeError::WorkdirReset(format!(
+                    "failed to remove {}: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
+
+    for (path, kind) in &input.conflicts {
+        let base = input.base_items.get(path).map(|entry| entry.hash);
+        write_conflict_markers(
+            &workdir,
+            path,
+            marker_eol,
+            &theirs_abbrev,
+            *kind,
+            base,
+            input.conflict_style,
+        )
+        .map_err(PullMergeError::WorkdirReset)?;
+    }
+
+    Ok(())
+}
+
+async fn run_merge_continue(
+    _output: &OutputConfig,
+    options: PullMergeOptions,
+) -> Result<MergeOutput, MergeError> {
+    let state = MergeState::load_required()?;
+    ensure_no_unstaged_changes_for_continue()?;
+    let index =
+        Index::load(path::index()).map_err(|error| MergeError::IndexLoad(error.to_string()))?;
+    if has_unmerged_entries(&index) {
+        return Err(MergeError::UnresolvedConflicts);
+    }
+
+    let orig_head = object_hash_from_state("orig_head", &state.orig_head)?;
+    let target = object_hash_from_state("target", &state.target)?;
+    let original_commit: Commit =
+        load_object(&orig_head).map_err(|error| MergeError::CurrentLoad {
+            commit_id: orig_head.to_string(),
+            detail: error.to_string(),
+        })?;
+    let original_items = commit_tree_items(&original_commit)?;
+    let index_items = index_tree_items(&index)?;
+    let files_changed = count_item_map_changes(&original_items, &index_items);
+    let tree_id = create_tree_from_items_map(&index_items).map_err(MergeError::TreeCreate)?;
+    let message = match options.message.clone().or(state.message) {
+        Some(message) => message,
+        None => merge_commit_message(&state.target_ref, &state.head_name, None, &options).await?,
+    };
+    let merge_commit = create_merge_commit(
+        tree_id,
+        vec![orig_head, target],
+        &message,
+        options.sign,
+        options.edit,
+    )
+    .await?;
+    save_object(&merge_commit, &merge_commit.id)
+        .map_err(|error| MergeError::CommitSave(error.to_string()))?;
+    update_head_with_reflog(
+        &state.head_name,
+        merge_commit.id,
+        &state.target_ref,
+        "three-way",
+    )
+    .await?;
+    reset_index_and_workdir_to_tree(&tree_id)?;
+    MergeState::cleanup()?;
+    reapply_recorded_autostash(state.autostash.as_deref()).await;
+
+    Ok(PullMergeSummary {
+        strategy: "three-way".to_string(),
+        old_commit: Some(orig_head.to_string()),
+        commit: Some(merge_commit.id.to_string()),
+        files_changed,
+        up_to_date: false,
+        parents: vec![orig_head.to_string(), target.to_string()],
+        conflicted_paths: Vec::new(),
+        aborted: false,
+        continued: true,
+    })
+}
+
+/// Reapply an autostash recorded in the merge state once the merge finishes
+/// via `--continue`/`--abort`. Failures are surfaced as a warning rather than
+/// failing the completed operation, mirroring Git.
+async fn reapply_recorded_autostash(autostash: Option<&str>) {
+    if autostash.is_none() {
+        return;
+    }
+    if let Err(error) = stash::autostash_pop().await {
+        eprintln!("warning: failed to reapply autostashed changes: {error}");
+    }
+}
+
+/// Build the merge commit, GPG-signing it with the vault key when `sign` is
+/// requested (`--gpg-sign`/`-S`). Unsigned merges keep the existing
+/// placeholder-author behavior so default output is unchanged.
+async fn create_merge_commit(
+    tree_id: ObjectHash,
+    parents: Vec<ObjectHash>,
+    message: &str,
+    sign: bool,
+    edit: bool,
+) -> Result<Commit, PullMergeError> {
+    let message = maybe_edit_message(message, edit).await?;
+    let message = message.as_str();
+    if !sign {
+        return Ok(Commit::from_tree_id(
+            tree_id,
+            parents,
+            &format_commit_msg(message, None),
+        ));
+    }
+    let (author, committer) = util::create_signatures().await;
+    let gpgsig = commit::vault_sign_commit(&tree_id, &parents, &author, &committer, message, true)
+        .await
+        .map_err(|error| PullMergeError::Sign(error.to_string()))?;
+    match gpgsig {
+        Some(sig) => Ok(Commit::new(
+            author,
+            committer,
+            tree_id,
+            parents,
+            &format_commit_msg(message, Some(&sig)),
+        )),
+        None => Err(PullMergeError::Sign(
+            "vault signing key unavailable; configure libra vault to use --gpg-sign".to_string(),
+        )),
+    }
+}
+
+/// Let the user edit the merge message in `$GIT_EDITOR`/`core.editor`/`$VISUAL`/
+/// `$EDITOR` when `--edit` is set. If no usable editor is configured the message
+/// is returned unchanged (Libra is agent-first and does not force interactivity).
+async fn maybe_edit_message(message: &str, edit: bool) -> Result<String, PullMergeError> {
+    if !edit {
+        return Ok(message.to_string());
+    }
+    let Some(editor) = resolve_editor().await else {
+        return Ok(message.to_string());
+    };
+    let path = util::storage_path().join("MERGE_MSG");
+    fs::write(&path, message)
+        .map_err(|error| PullMergeError::StateSave(format!("{}: {error}", path.display())))?;
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"{}\"", path.display()))
+        .status();
+    match status {
+        Ok(code) if code.success() => fs::read_to_string(&path).map_err(|error| {
+            PullMergeError::StateLoad(format!("failed to read edited merge message: {error}"))
+        }),
+        // A failed or unavailable editor leaves the original message in place.
+        _ => Ok(message.to_string()),
+    }
+}
+
+/// Resolve the editor command Git would use, honoring `GIT_EDITOR`,
+/// `core.editor`, `VISUAL`, then `EDITOR`. No-op editors (`:`/`true`) and empty
+/// values resolve to `None`.
+///
+/// `pub(crate)` so sibling commands (e.g. `cherry-pick -e`) reuse the identical
+/// editor-resolution cascade instead of re-implementing it.
+pub(crate) async fn resolve_editor() -> Option<String> {
+    fn runnable(value: String) -> Option<String> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || trimmed == ":" || trimmed == "true" {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+    if let Ok(editor) = std::env::var("GIT_EDITOR")
+        && let Some(editor) = runnable(editor)
+    {
+        return Some(editor);
+    }
+    if let Some(editor) =
+        read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "core.editor")
+            .await
+            .ok()
+            .flatten()
+        && let Some(editor) = runnable(editor)
+    {
+        return Some(editor);
+    }
+    for var in ["VISUAL", "EDITOR"] {
+        if let Ok(editor) = std::env::var(var)
+            && let Some(editor) = runnable(editor)
+        {
+            return Some(editor);
+        }
+    }
+    None
+}
+
+/// Whether a commit carries an embedded PGP/SSH signature.
+fn commit_is_signed(commit: &Commit) -> bool {
+    crate::common_utils::parse_commit_msg(&commit.message)
+        .1
+        .is_some()
+}
+
+async fn run_merge_quit() -> Result<MergeOutput, MergeError> {
+    MergeState::load_required()?;
+    MergeState::cleanup()?;
+    Ok(PullMergeSummary {
+        strategy: "quit".to_string(),
+        old_commit: None,
+        commit: None,
+        files_changed: 0,
+        up_to_date: false,
+        parents: Vec::new(),
+        conflicted_paths: Vec::new(),
+        aborted: false,
+        continued: false,
+    })
+}
+
+fn ensure_no_unstaged_changes_for_continue() -> Result<(), PullMergeError> {
+    let unstaged = status::changes_to_be_staged()
+        .map_err(|error| PullMergeError::IndexLoad(error.to_string()))?;
+    if !unstaged.modified.is_empty() || !unstaged.deleted.is_empty() {
+        return Err(PullMergeError::DirtyWorktree);
+    }
+    Ok(())
+}
+
+async fn run_merge_abort(_output: &OutputConfig) -> Result<MergeOutput, MergeError> {
+    let state = MergeState::load_required()?;
+    let orig_head = object_hash_from_state("orig_head", &state.orig_head)?;
+    update_head_with_reflog(&state.head_name, orig_head, &state.target_ref, "abort").await?;
+    let original_commit: Commit =
+        load_object(&orig_head).map_err(|error| MergeError::CurrentLoad {
+            commit_id: orig_head.to_string(),
+            detail: error.to_string(),
+        })?;
+    reset_index_and_workdir_to_tree(&original_commit.tree_id)?;
+    MergeState::cleanup()?;
+    reapply_recorded_autostash(state.autostash.as_deref()).await;
+
+    Ok(PullMergeSummary {
+        strategy: "abort".to_string(),
+        old_commit: Some(orig_head.to_string()),
+        commit: Some(orig_head.to_string()),
+        files_changed: 0,
+        up_to_date: false,
+        parents: Vec::new(),
+        conflicted_paths: Vec::new(),
+        aborted: true,
+        continued: false,
     })
 }
 
@@ -253,32 +1925,64 @@ async fn resolve_merge_target(target_ref: &str) -> Result<ObjectHash, Box<dyn st
     get_target_commit(target_ref).await
 }
 
-async fn lca_commit(lhs: &Commit, rhs: &Commit) -> Result<Option<Commit>, CliError> {
-    let lhs_reachable = log::get_reachable_commits(lhs.id.to_string(), None).await?;
-    let rhs_reachable = log::get_reachable_commits(rhs.id.to_string(), None).await?;
-
-    // Commit `eq` is based on tree_id, so we shouldn't use it here
-
-    for commit in lhs_reachable.iter() {
-        if commit.id == rhs.id {
-            return Ok(Some(commit.to_owned()));
-        }
+fn recursive_merge_base(lhs: &Commit, rhs: &Commit) -> Result<Option<Commit>, PullMergeError> {
+    let base_ids = merge_base::find_best_merge_bases(lhs.id, rhs.id)
+        .map_err(|error| PullMergeError::History(error.to_string()))?;
+    match base_ids.as_slice() {
+        [] => Ok(None),
+        [id] => load_object(id)
+            .map(Some)
+            .map_err(|error| PullMergeError::History(error.to_string())),
+        ids => synthesize_virtual_merge_base(ids),
     }
+}
 
-    for commit in rhs_reachable.iter() {
-        if commit.id == lhs.id {
-            return Ok(Some(commit.to_owned()));
-        }
+fn synthesize_virtual_merge_base(
+    base_ids: &[ObjectHash],
+) -> Result<Option<Commit>, PullMergeError> {
+    let mut bases = base_ids
+        .iter()
+        .map(|id| load_object(id).map_err(|error| PullMergeError::History(error.to_string())))
+        .collect::<Result<Vec<Commit>, PullMergeError>>()?;
+    let mut current = bases.remove(0);
+    for next in bases {
+        current = merge_base_pair(&current, &next)?;
     }
+    Ok(Some(current))
+}
 
-    for lhs_parent in lhs_reachable.iter() {
-        for rhs_parent in rhs_reachable.iter() {
-            if lhs_parent.id == rhs_parent.id {
-                return Ok(Some(lhs_parent.to_owned()));
-            }
-        }
+fn merge_base_pair(lhs: &Commit, rhs: &Commit) -> Result<Commit, PullMergeError> {
+    let base = recursive_merge_base(lhs, rhs)?;
+    let base_items = match &base {
+        Some(commit) => commit_tree_items(commit)?,
+        None => HashMap::new(),
+    };
+    let lhs_items = commit_tree_items(lhs)?;
+    let rhs_items = commit_tree_items(rhs)?;
+    let options = PullMergeOptions {
+        detect_renames: true,
+        ..Default::default()
+    };
+    let merge_result =
+        merge_tree_items_with_options(&base_items, &lhs_items, &rhs_items, &options)?;
+    if !merge_result.conflicts.is_empty() {
+        let paths = merge_result
+            .conflicts
+            .iter()
+            .map(|(path, _)| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(PullMergeError::VirtualMergeBase(format!(
+            "recursive merge base conflicts in {paths}"
+        )));
     }
-    Ok(None)
+    let tree_id = create_tree_from_items_map(&merge_result.merged_items)
+        .map_err(PullMergeError::TreeCreate)?;
+    Ok(Commit::from_tree_id(
+        tree_id,
+        vec![lhs.id, rhs.id],
+        "virtual recursive merge base",
+    ))
 }
 
 async fn apply_fast_forward_merge(
@@ -286,6 +1990,15 @@ async fn apply_fast_forward_merge(
     target_branch_name: &str,
     output: &OutputConfig,
 ) -> Result<(), PullMergeError> {
+    switch::ensure_clean_status(output)
+        .await
+        .map_err(|_| PullMergeError::DirtyWorktree)?;
+    let target_items = commit_tree_items(&target_commit)?;
+    let current_index =
+        Index::load(path::index()).map_err(|error| PullMergeError::IndexLoad(error.to_string()))?;
+    let paths_to_write: Vec<PathBuf> = target_items.keys().cloned().collect();
+    ensure_no_untracked_conflicts(&current_index, &paths_to_write)?;
+
     let db = get_db_conn_instance().await;
 
     let old_oid_opt = Head::current_commit_result_with_conn(&db)
@@ -307,6 +2020,7 @@ async fn apply_fast_forward_merge(
         }),
         new_oid: target_commit.id.to_string(),
         action,
+        message: None,
     };
 
     // Use `with_reflog`. A merge operation should log for the branch.
@@ -339,19 +2053,24 @@ async fn apply_fast_forward_merge(
         return Err(PullMergeError::HeadUpdate(e.to_string()));
     }
 
-    // Only restore the working directory *after* the pointers have been updated.
-    restore::execute_safe(
-        RestoreArgs {
-            worktree: true,
-            staged: true,
-            source: None, // `restore` without source defaults to HEAD, which is now correct.
-            pathspec: vec![util::working_dir_string()],
-        },
-        &output.child_output_config(),
-    )
-    .await
-    .map_err(|error| PullMergeError::Restore(error.to_string()))?;
+    // Only update the working directory *after* the pointers have been updated.
+    //
+    // Sync the index and working tree to the target tree using the tracked-only
+    // reset primitive (the same one squash/rebase/cherry-pick use) rather than
+    // restoring the entire working directory. The previous approach passed the
+    // whole working directory as a `restore` pathspec, which expands (via
+    // `list_files`) to *every* file on disk — including untracked and ignored
+    // build artifacts such as `target/` and `node_modules/`. Restore then read
+    // and SHA-1-hashed each one, which on a large repository consumed gigabytes
+    // of memory and effectively hung the `libra pull` fast-forward. Operating on
+    // tracked files only bounds the work to the actual tree and never walks
+    // ignored directories.
+    reset_index_and_workdir_to_tree(&target_commit.tree_id)?;
     Ok(())
+}
+
+fn apply_squash_merge(target_commit: &Commit) -> Result<(), PullMergeError> {
+    reset_index_and_workdir_to_tree(&target_commit.tree_id)
 }
 
 fn count_changed_files(
@@ -373,17 +2092,1316 @@ fn count_changed_files(
         .count())
 }
 
-fn commit_tree_items(commit: &Commit) -> Result<HashMap<PathBuf, ObjectHash>, PullMergeError> {
+fn commit_tree_items(commit: &Commit) -> Result<HashMap<PathBuf, MergeTreeEntry>, PullMergeError> {
     let tree: Tree = load_object(&commit.tree_id).map_err(|error| PullMergeError::TreeLoad {
         tree_id: commit.tree_id.to_string(),
         detail: error.to_string(),
     })?;
-    Ok(tree.get_plain_items().into_iter().collect())
+    Ok(tree
+        .get_plain_items_with_mode()
+        .into_iter()
+        .filter_map(|(path, hash, mode)| {
+            if mode == TreeItemMode::Commit {
+                None
+            } else {
+                Some((path, MergeTreeEntry { hash, mode }))
+            }
+        })
+        .collect())
+}
+
+async fn current_head_name() -> Result<String, PullMergeError> {
+    Head::current_result()
+        .await
+        .map_err(|error| PullMergeError::HeadResolve(error.to_string()))
+        .map(|head| match head {
+            Head::Branch(name) => name,
+            Head::Detached(_) => "HEAD".to_string(),
+        })
+}
+
+async fn update_head_with_reflog(
+    head_name: &str,
+    new_oid: ObjectHash,
+    target_branch_name: &str,
+    policy: &str,
+) -> Result<(), PullMergeError> {
+    let db = get_db_conn_instance().await;
+    let old_oid_opt = Head::current_commit_result_with_conn(&db)
+        .await
+        .map_err(|error| PullMergeError::HeadResolve(error.to_string()))?;
+    let action = ReflogAction::Merge {
+        branch: target_branch_name.to_string(),
+        policy: policy.to_string(),
+    };
+    let context = ReflogContext {
+        old_oid: old_oid_opt.map_or(ObjectHash::zero_str(get_hash_kind()).to_string(), |id| {
+            id.to_string()
+        }),
+        new_oid: new_oid.to_string(),
+        action,
+        message: None,
+    };
+
+    let head_name = head_name.to_string();
+    with_reflog(
+        context,
+        move |txn: &sea_orm::DatabaseTransaction| {
+            let head_name = head_name.clone();
+            Box::pin(async move {
+                if head_name == "HEAD" {
+                    Head::update_with_conn(txn, Head::Detached(new_oid), None).await;
+                } else {
+                    Branch::update_branch_with_conn(txn, &head_name, &new_oid.to_string(), None)
+                        .await?;
+                }
+                Ok(())
+            })
+        },
+        true,
+    )
+    .await
+    .map_err(|error| PullMergeError::HeadUpdate(error.to_string()))
+}
+
+fn object_hash_from_state(field: &str, value: &str) -> Result<ObjectHash, PullMergeError> {
+    ObjectHash::from_str(value)
+        .map_err(|error| PullMergeError::StateLoad(format!("invalid {field} '{value}': {error}")))
+}
+
+#[derive(Debug, Copy, Clone)]
+enum MergeResolution {
+    Use(MergeTreeEntry),
+    Delete,
+    Conflict(ConflictKind),
+}
+
+#[derive(Debug, Copy, Clone)]
+enum ConflictKind {
+    BothChanged {
+        ours: ObjectHash,
+        theirs: ObjectHash,
+    },
+    OursModifiedTheirsDeleted {
+        ours: ObjectHash,
+    },
+    TheirsModifiedOursDeleted {
+        theirs: ObjectHash,
+    },
+}
+
+#[derive(Debug, Copy, Clone)]
+enum RelativeState {
+    Same(MergeTreeEntry),
+    Modified(MergeTreeEntry),
+    Deleted,
+    Added(MergeTreeEntry),
+    Missing,
+}
+
+fn classify_relative_to_base(
+    base: Option<&MergeTreeEntry>,
+    side: Option<&MergeTreeEntry>,
+) -> RelativeState {
+    match (base, side) {
+        (Some(base), Some(side)) if base == side => RelativeState::Same(*side),
+        (Some(_), Some(side)) => RelativeState::Modified(*side),
+        (Some(_), None) => RelativeState::Deleted,
+        (None, Some(side)) => RelativeState::Added(*side),
+        (None, None) => RelativeState::Missing,
+    }
+}
+
+fn resolve_three_way_with_options(
+    base: Option<&MergeTreeEntry>,
+    ours: Option<&MergeTreeEntry>,
+    theirs: Option<&MergeTreeEntry>,
+    options: &PullMergeOptions,
+) -> Result<MergeResolution, PullMergeError> {
+    let base_present = base.is_some();
+    let ours_state = classify_relative_to_base(base, ours);
+    let theirs_state = classify_relative_to_base(base, theirs);
+
+    Ok(match (base_present, ours_state, theirs_state) {
+        (false, RelativeState::Missing, RelativeState::Missing) => MergeResolution::Delete,
+        (false, RelativeState::Added(ours), RelativeState::Missing) => MergeResolution::Use(ours),
+        (false, RelativeState::Missing, RelativeState::Added(theirs)) => {
+            MergeResolution::Use(theirs)
+        }
+        (false, RelativeState::Added(ours), RelativeState::Added(theirs)) => {
+            if ours == theirs {
+                MergeResolution::Use(theirs)
+            } else {
+                conflict_or_favor(
+                    options.strategy_option,
+                    ours_state,
+                    theirs_state,
+                    ConflictKind::BothChanged {
+                        ours: ours.hash,
+                        theirs: theirs.hash,
+                    },
+                )
+            }
+        }
+        (true, RelativeState::Same(ours), RelativeState::Same(_)) => MergeResolution::Use(ours),
+        (true, RelativeState::Same(_), RelativeState::Modified(theirs)) => {
+            MergeResolution::Use(theirs)
+        }
+        (true, RelativeState::Modified(ours), RelativeState::Same(_)) => MergeResolution::Use(ours),
+        (true, RelativeState::Modified(ours), RelativeState::Modified(theirs)) => {
+            // Identical content (even when only the file mode differs) needs no
+            // textual merge; both sides agree on the blob bytes.
+            if ours.hash == theirs.hash {
+                MergeResolution::Use(theirs)
+            } else if let Some(base) = base
+                && let Some(merged) =
+                    try_merge_blob_contents(base, ours, theirs, options.whitespace)?
+            {
+                MergeResolution::Use(merged)
+            } else {
+                conflict_or_favor(
+                    options.strategy_option,
+                    ours_state,
+                    theirs_state,
+                    ConflictKind::BothChanged {
+                        ours: ours.hash,
+                        theirs: theirs.hash,
+                    },
+                )
+            }
+        }
+        (true, RelativeState::Deleted, RelativeState::Same(_)) => MergeResolution::Delete,
+        (true, RelativeState::Same(_), RelativeState::Deleted) => MergeResolution::Delete,
+        (true, RelativeState::Deleted, RelativeState::Deleted) => MergeResolution::Delete,
+        (true, RelativeState::Deleted, RelativeState::Modified(theirs)) => conflict_or_favor(
+            options.strategy_option,
+            ours_state,
+            theirs_state,
+            ConflictKind::TheirsModifiedOursDeleted {
+                theirs: theirs.hash,
+            },
+        ),
+        (true, RelativeState::Modified(ours), RelativeState::Deleted) => conflict_or_favor(
+            options.strategy_option,
+            ours_state,
+            theirs_state,
+            ConflictKind::OursModifiedTheirsDeleted { ours: ours.hash },
+        ),
+        _ => MergeResolution::Delete,
+    })
+}
+
+fn conflict_or_favor(
+    favor: Option<MergeFavor>,
+    ours_state: RelativeState,
+    theirs_state: RelativeState,
+    kind: ConflictKind,
+) -> MergeResolution {
+    match favor {
+        Some(MergeFavor::Ours) => state_to_resolution(ours_state),
+        Some(MergeFavor::Theirs) => state_to_resolution(theirs_state),
+        None => MergeResolution::Conflict(kind),
+    }
+}
+
+fn state_to_resolution(state: RelativeState) -> MergeResolution {
+    match state {
+        RelativeState::Same(entry)
+        | RelativeState::Modified(entry)
+        | RelativeState::Added(entry) => MergeResolution::Use(entry),
+        RelativeState::Deleted | RelativeState::Missing => MergeResolution::Delete,
+    }
+}
+
+fn try_merge_blob_contents(
+    base: &MergeTreeEntry,
+    ours: MergeTreeEntry,
+    theirs: MergeTreeEntry,
+    whitespace: WhitespaceMode,
+) -> Result<Option<MergeTreeEntry>, PullMergeError> {
+    if base.mode != ours.mode
+        || base.mode != theirs.mode
+        || !matches!(base.mode, TreeItemMode::Blob | TreeItemMode::BlobExecutable)
+    {
+        return Ok(None);
+    }
+
+    let base_blob = load_merge_blob(base.hash)?;
+    let ours_blob = load_merge_blob(ours.hash)?;
+    let theirs_blob = load_merge_blob(theirs.hash)?;
+
+    if is_binary_blob(&base_blob.data)
+        || is_binary_blob(&ours_blob.data)
+        || is_binary_blob(&theirs_blob.data)
+    {
+        return Ok(None);
+    }
+
+    // When whitespace differences are ignored, a side whose only change is
+    // whitespace yields to the side with a real change, preserving that side's
+    // original formatting rather than a normalized blob.
+    if whitespace.is_active() {
+        let base_norm = whitespace.canonicalize(&base_blob.data);
+        let ours_norm = whitespace.canonicalize(&ours_blob.data);
+        let theirs_norm = whitespace.canonicalize(&theirs_blob.data);
+        if ours_norm == theirs_norm {
+            return Ok(Some(ours));
+        }
+        if ours_norm == base_norm {
+            return Ok(Some(theirs));
+        }
+        if theirs_norm == base_norm {
+            return Ok(Some(ours));
+        }
+    }
+
+    let Ok(merged_bytes) = diffy::merge_bytes(&base_blob.data, &ours_blob.data, &theirs_blob.data)
+    else {
+        return Ok(None);
+    };
+
+    let merged_blob = Blob::from_content_bytes(merged_bytes);
+    save_object(&merged_blob, &merged_blob.id).map_err(|error| {
+        PullMergeError::TreeCreate(format!(
+            "failed to save auto-merged blob {}: {error}",
+            merged_blob.id
+        ))
+    })?;
+
+    Ok(Some(MergeTreeEntry {
+        hash: merged_blob.id,
+        mode: ours.mode,
+    }))
+}
+
+fn is_binary_blob(data: &[u8]) -> bool {
+    data.contains(&0)
+}
+
+fn load_merge_blob(hash: ObjectHash) -> Result<Blob, PullMergeError> {
+    load_object(&hash).map_err(|error| PullMergeError::ObjectLoad {
+        object_id: hash.to_string(),
+        detail: error.to_string(),
+    })
+}
+
+#[cfg(test)]
+fn merge_tree_items(
+    base_items: &HashMap<PathBuf, MergeTreeEntry>,
+    our_items: &HashMap<PathBuf, MergeTreeEntry>,
+    their_items: &HashMap<PathBuf, MergeTreeEntry>,
+) -> Result<ThreeWayMergeResult, PullMergeError> {
+    merge_tree_items_with_options(
+        base_items,
+        our_items,
+        their_items,
+        &PullMergeOptions::default(),
+    )
+}
+
+fn merge_tree_items_with_options(
+    base_items: &HashMap<PathBuf, MergeTreeEntry>,
+    our_items: &HashMap<PathBuf, MergeTreeEntry>,
+    their_items: &HashMap<PathBuf, MergeTreeEntry>,
+    options: &PullMergeOptions,
+) -> Result<ThreeWayMergeResult, PullMergeError> {
+    let renames = if options.detect_renames {
+        detect_clean_renames(base_items, our_items, their_items, options)?
+    } else {
+        Vec::new()
+    };
+    if renames.is_empty() {
+        return resolve_item_maps(base_items, our_items, their_items, options);
+    }
+
+    // Relocate each detected rename so the renamed file is resolved at its new
+    // path (carrying the other side's edit), then run the normal resolution.
+    let mut base = base_items.clone();
+    let mut ours = our_items.clone();
+    let mut theirs = their_items.clone();
+    for rename in &renames {
+        apply_rename(&mut base, &mut ours, &mut theirs, rename);
+    }
+    resolve_item_maps(&base, &ours, &theirs, options)
+}
+
+fn resolve_item_maps(
+    base_items: &HashMap<PathBuf, MergeTreeEntry>,
+    our_items: &HashMap<PathBuf, MergeTreeEntry>,
+    their_items: &HashMap<PathBuf, MergeTreeEntry>,
+    options: &PullMergeOptions,
+) -> Result<ThreeWayMergeResult, PullMergeError> {
+    let mut all_paths: HashSet<PathBuf> = base_items.keys().cloned().collect();
+    all_paths.extend(our_items.keys().cloned());
+    all_paths.extend(their_items.keys().cloned());
+
+    let mut merged_items = HashMap::new();
+    let mut conflicts = Vec::new();
+    for path in all_paths {
+        match resolve_three_way_with_options(
+            base_items.get(&path),
+            our_items.get(&path),
+            their_items.get(&path),
+            options,
+        )? {
+            MergeResolution::Use(hash) => {
+                merged_items.insert(path, hash);
+            }
+            MergeResolution::Delete => {}
+            MergeResolution::Conflict(kind) => conflicts.push((path, kind)),
+        }
+    }
+
+    Ok(ThreeWayMergeResult {
+        merged_items,
+        conflicts,
+    })
+}
+
+/// A detected file rename: `source` (a base path removed on one side) was
+/// renamed to `dest` (a new path added on that same side), while the other
+/// side kept editing `source`.
+#[derive(Debug, Clone)]
+struct Rename {
+    source: PathBuf,
+    dest: PathBuf,
+    /// True when `ours` performed the rename (so `theirs` holds the edit).
+    renamed_by_ours: bool,
+}
+
+/// Minimum content similarity (Git's default 50%) for two blobs to count as a
+/// rename pair.
+const RENAME_SIMILARITY_THRESHOLD: f64 = 0.5;
+
+/// Cap on `deleted × added` candidate comparisons, mirroring Git's
+/// `merge.renameLimit`, to keep detection from blowing up on huge trees.
+const RENAME_LIMIT: usize = 1000;
+
+/// Detect renames where one side renamed a base file while the other side
+/// edited it, but only when the relocated three-way merge resolves cleanly.
+/// Ambiguous or conflicting cases are left alone so the existing delete/modify
+/// conflict still surfaces.
+fn detect_clean_renames(
+    base_items: &HashMap<PathBuf, MergeTreeEntry>,
+    our_items: &HashMap<PathBuf, MergeTreeEntry>,
+    their_items: &HashMap<PathBuf, MergeTreeEntry>,
+    options: &PullMergeOptions,
+) -> Result<Vec<Rename>, PullMergeError> {
+    let our_added: Vec<&PathBuf> = our_items
+        .keys()
+        .filter(|path| !base_items.contains_key(*path) && !their_items.contains_key(*path))
+        .collect();
+    let their_added: Vec<&PathBuf> = their_items
+        .keys()
+        .filter(|path| !base_items.contains_key(*path) && !our_items.contains_key(*path))
+        .collect();
+    if our_added.is_empty() && their_added.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let deleted_sources = base_items.len();
+    let rename_limit = options.rename_limit.unwrap_or(RENAME_LIMIT);
+    if deleted_sources.saturating_mul(our_added.len().max(their_added.len())) > rename_limit {
+        return Ok(Vec::new());
+    }
+
+    let mut renames = Vec::new();
+    let mut used_dests: HashSet<PathBuf> = HashSet::new();
+    let rename_threshold = options
+        .rename_threshold
+        .unwrap_or(RENAME_SIMILARITY_THRESHOLD);
+    for (source, base_entry) in base_items {
+        // `ours` renamed the file away while `theirs` edited it in place.
+        if !our_items.contains_key(source)
+            && let Some(their_entry) = their_items.get(source)
+            && their_entry != base_entry
+            && let Some(dest) = best_rename_dest(
+                base_entry,
+                &our_added,
+                our_items,
+                &used_dests,
+                rename_threshold,
+            )?
+            && rename_resolves_cleanly(
+                base_entry,
+                our_items.get(&dest),
+                Some(their_entry),
+                options,
+            )?
+        {
+            used_dests.insert(dest.clone());
+            renames.push(Rename {
+                source: source.clone(),
+                dest,
+                renamed_by_ours: true,
+            });
+            continue;
+        }
+        // `theirs` renamed the file away while `ours` edited it in place.
+        if !their_items.contains_key(source)
+            && let Some(our_entry) = our_items.get(source)
+            && our_entry != base_entry
+            && let Some(dest) = best_rename_dest(
+                base_entry,
+                &their_added,
+                their_items,
+                &used_dests,
+                rename_threshold,
+            )?
+            && rename_resolves_cleanly(
+                base_entry,
+                Some(our_entry),
+                their_items.get(&dest),
+                options,
+            )?
+        {
+            used_dests.insert(dest.clone());
+            renames.push(Rename {
+                source: source.clone(),
+                dest,
+                renamed_by_ours: false,
+            });
+        }
+    }
+    Ok(renames)
+}
+
+/// Pick the highest-similarity unused destination for a renamed `base_entry`.
+fn best_rename_dest(
+    base_entry: &MergeTreeEntry,
+    candidates: &[&PathBuf],
+    side_items: &HashMap<PathBuf, MergeTreeEntry>,
+    used_dests: &HashSet<PathBuf>,
+    threshold: f64,
+) -> Result<Option<PathBuf>, PullMergeError> {
+    let mut best: Option<(PathBuf, f64)> = None;
+    for candidate in candidates {
+        if used_dests.contains(*candidate) {
+            continue;
+        }
+        let Some(candidate_entry) = side_items.get(*candidate) else {
+            continue;
+        };
+        let similarity = content_similarity(base_entry, candidate_entry)?;
+        if similarity >= threshold && best.as_ref().is_none_or(|(_, score)| similarity > *score) {
+            best = Some(((*candidate).clone(), similarity));
+        }
+    }
+    Ok(best.map(|(path, _)| path))
+}
+
+/// Verify the relocated three-way merge (base = renamed source, plus the two
+/// sides at the new path) resolves without a conflict.
+fn rename_resolves_cleanly(
+    base_entry: &MergeTreeEntry,
+    ours: Option<&MergeTreeEntry>,
+    theirs: Option<&MergeTreeEntry>,
+    options: &PullMergeOptions,
+) -> Result<bool, PullMergeError> {
+    Ok(matches!(
+        resolve_three_way_with_options(Some(base_entry), ours, theirs, options)?,
+        MergeResolution::Use(_) | MergeResolution::Delete
+    ))
+}
+
+/// Apply a detected rename to the working item maps: move the base entry and
+/// the editing side's entry onto the destination path, and drop the source so
+/// it resolves as deleted.
+fn apply_rename(
+    base: &mut HashMap<PathBuf, MergeTreeEntry>,
+    ours: &mut HashMap<PathBuf, MergeTreeEntry>,
+    theirs: &mut HashMap<PathBuf, MergeTreeEntry>,
+    rename: &Rename,
+) {
+    if let Some(base_entry) = base.remove(&rename.source) {
+        base.insert(rename.dest.clone(), base_entry);
+    }
+    if rename.renamed_by_ours {
+        if let Some(their_entry) = theirs.remove(&rename.source) {
+            theirs.insert(rename.dest.clone(), their_entry);
+        }
+    } else if let Some(our_entry) = ours.remove(&rename.source) {
+        ours.insert(rename.dest.clone(), our_entry);
+    }
+}
+
+/// Dice-coefficient line similarity between two blobs (1.0 when the hashes are
+/// identical). Binary blobs only match on an exact hash.
+fn content_similarity(a: &MergeTreeEntry, b: &MergeTreeEntry) -> Result<f64, PullMergeError> {
+    if a.hash == b.hash {
+        return Ok(1.0);
+    }
+    if !matches!(a.mode, TreeItemMode::Blob | TreeItemMode::BlobExecutable)
+        || !matches!(b.mode, TreeItemMode::Blob | TreeItemMode::BlobExecutable)
+    {
+        return Ok(0.0);
+    }
+    let a_data = load_merge_blob(a.hash)?.data;
+    let b_data = load_merge_blob(b.hash)?.data;
+    // The binary check, empty-input handling and multiset Sørensen–Dice formula
+    // live in the shared helper so `diff`'s rename detection cannot drift.
+    Ok(crate::utils::blob_similarity::blob_line_similarity(
+        &a_data, &b_data,
+    ))
+}
+
+fn count_item_map_changes(
+    before: &HashMap<PathBuf, MergeTreeEntry>,
+    after: &HashMap<PathBuf, MergeTreeEntry>,
+) -> usize {
+    let mut paths: HashSet<PathBuf> = before.keys().cloned().collect();
+    paths.extend(after.keys().cloned());
+    paths
+        .into_iter()
+        .filter(|path| before.get(path) != after.get(path))
+        .count()
+}
+
+/// Build the diffstat shown by `--stat` from the pre-merge HEAD tree to the
+/// merge result (commit tree for committed merges, staged index for
+/// `--squash`/`--no-commit`). Returns `None` when nothing changed or the
+/// trees cannot be loaded.
+fn render_merge_diffstat(result: &PullMergeSummary) -> Option<String> {
+    let old_items = match &result.old_commit {
+        Some(id) => commit_items_for_stat(id)?,
+        None => HashMap::new(),
+    };
+    let new_items = match &result.commit {
+        Some(id) => commit_items_for_stat(id)?,
+        None => {
+            // Squash / no-commit leave the result staged rather than committed.
+            let index = Index::load(path::index()).ok()?;
+            index_tree_items(&index).ok()?
+        }
+    };
+    merge_diffstat(&old_items, &new_items)
+}
+
+fn commit_items_for_stat(commit_id: &str) -> Option<HashMap<PathBuf, MergeTreeEntry>> {
+    let oid = ObjectHash::from_str(commit_id).ok()?;
+    let commit: Commit = load_object(&oid).ok()?;
+    commit_tree_items(&commit).ok()
+}
+
+/// Format a Git-style diffstat (`path | N +++--` lines plus a summary line)
+/// for the files that differ between two tree-item maps.
+fn merge_diffstat(
+    old: &HashMap<PathBuf, MergeTreeEntry>,
+    new: &HashMap<PathBuf, MergeTreeEntry>,
+) -> Option<String> {
+    let mut paths: Vec<PathBuf> = old.keys().chain(new.keys()).cloned().collect();
+    paths.sort();
+    paths.dedup();
+
+    struct StatRow {
+        path: String,
+        total: usize,
+        insertions: usize,
+        deletions: usize,
+        binary: bool,
+    }
+
+    let mut rows = Vec::new();
+    let mut total_insertions = 0usize;
+    let mut total_deletions = 0usize;
+    for path in paths {
+        let (old_entry, new_entry) = (old.get(&path), new.get(&path));
+        if old_entry == new_entry {
+            continue;
+        }
+        let (insertions, deletions, binary) = file_line_delta(old_entry, new_entry);
+        total_insertions += insertions;
+        total_deletions += deletions;
+        rows.push(StatRow {
+            path: path.display().to_string(),
+            total: insertions + deletions,
+            insertions,
+            deletions,
+            binary,
+        });
+    }
+    if rows.is_empty() {
+        return None;
+    }
+
+    let name_width = rows.iter().map(|row| row.path.len()).max().unwrap_or(0);
+    let count_width = rows
+        .iter()
+        .map(|row| row.total.to_string().len())
+        .max()
+        .unwrap_or(1);
+    // Scale the +/- bar so the widest row fits in ~60 columns, matching Git's
+    // capped histogram behaviour.
+    let max_total = rows.iter().map(|row| row.total).max().unwrap_or(0);
+    let scale = if max_total > 60 {
+        60.0 / max_total as f64
+    } else {
+        1.0
+    };
+
+    let mut out = String::new();
+    for row in &rows {
+        if row.binary {
+            out.push_str(&format!(" {:<name_width$} | Bin\n", row.path));
+            continue;
+        }
+        let plus = ((row.insertions as f64) * scale).round() as usize;
+        let minus = ((row.deletions as f64) * scale).round() as usize;
+        let plus = if row.insertions > 0 { plus.max(1) } else { 0 };
+        let minus = if row.deletions > 0 { minus.max(1) } else { 0 };
+        out.push_str(&format!(
+            " {:<name_width$} | {:>count_width$} {}{}\n",
+            row.path,
+            row.total,
+            "+".repeat(plus),
+            "-".repeat(minus),
+        ));
+    }
+    let mut summary = format!(
+        " {} file{} changed",
+        rows.len(),
+        if rows.len() == 1 { "" } else { "s" }
+    );
+    if total_insertions > 0 {
+        summary.push_str(&format!(
+            ", {} insertion{}(+)",
+            total_insertions,
+            if total_insertions == 1 { "" } else { "s" }
+        ));
+    }
+    if total_deletions > 0 {
+        summary.push_str(&format!(
+            ", {} deletion{}(-)",
+            total_deletions,
+            if total_deletions == 1 { "" } else { "s" }
+        ));
+    }
+    out.push_str(&summary);
+    Some(out)
+}
+
+/// Count inserted/deleted lines between the blob at two tree entries. Returns
+/// `(insertions, deletions, is_binary)`; binary differences report `(0, 0, true)`.
+fn file_line_delta(
+    old: Option<&MergeTreeEntry>,
+    new: Option<&MergeTreeEntry>,
+) -> (usize, usize, bool) {
+    let load = |entry: Option<&MergeTreeEntry>| -> Option<Vec<u8>> {
+        let entry = entry?;
+        let blob: Blob = load_object(&entry.hash).ok()?;
+        Some(blob.data)
+    };
+    let old_data = load(old);
+    let new_data = load(new);
+    let is_binary = old_data.as_deref().map(is_binary_blob).unwrap_or(false)
+        || new_data.as_deref().map(is_binary_blob).unwrap_or(false);
+    if is_binary {
+        return (0, 0, true);
+    }
+    let old_lines = old_data.as_deref().map(bytes_to_lines).unwrap_or_default();
+    let new_lines = new_data.as_deref().map(bytes_to_lines).unwrap_or_default();
+    let ops = git_internal::diff::compute_diff(&old_lines, &new_lines);
+    let insertions = ops
+        .iter()
+        .filter(|op| matches!(op, git_internal::diff::DiffOperation::Insert { .. }))
+        .count();
+    let deletions = ops
+        .iter()
+        .filter(|op| matches!(op, git_internal::diff::DiffOperation::Delete { .. }))
+        .count();
+    (insertions, deletions, false)
+}
+
+fn bytes_to_lines(data: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(data)
+        .lines()
+        .map(String::from)
+        .collect()
+}
+
+fn add_blob_index_entry(
+    index: &mut Index,
+    path: &Path,
+    item: MergeTreeEntry,
+    stage: u8,
+) -> Result<(), PullMergeError> {
+    let blob: Blob = load_object(&item.hash).map_err(|error| {
+        PullMergeError::IndexSave(format!(
+            "failed to load blob {} for index entry '{}': {error}",
+            item.hash,
+            path.display()
+        ))
+    })?;
+    let mut entry = IndexEntry::new_from_blob(
+        path_to_index_key(path)?.to_string(),
+        item.hash,
+        blob.data.len() as u32,
+    );
+    entry.mode = tree_item_mode_to_index_mode(item.mode)?;
+    entry.flags.stage = stage;
+    index.add(entry);
+    Ok(())
+}
+
+fn ensure_no_untracked_conflicts(
+    current_index: &Index,
+    paths: &[PathBuf],
+) -> Result<(), PullMergeError> {
+    let untracked_paths =
+        worktree::untracked_workdir_paths(current_index).map_err(PullMergeError::IndexLoad)?;
+    for untracked in &untracked_paths {
+        for path in paths {
+            if worktree::paths_conflict(untracked, path) {
+                return Err(PullMergeError::UntrackedOverwrite {
+                    path: untracked.display().to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_no_directory_file_conflicts<'a>(
+    paths: impl IntoIterator<Item = &'a PathBuf>,
+) -> Result<(), PullMergeError> {
+    let mut sorted: Vec<&PathBuf> = paths.into_iter().collect();
+    sorted.sort();
+    for (index, path) in sorted.iter().enumerate() {
+        for other in sorted.iter().skip(index + 1) {
+            if other.starts_with(path) {
+                return Err(PullMergeError::DirectoryFileConflict {
+                    path: path.display().to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_workdir_file(workdir: &Path, relative: &Path, content: &[u8]) -> Result<(), String> {
+    let file_path = workdir.join(relative);
+    if let Some(parent) = file_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
+    if fs::symlink_metadata(&file_path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fs::remove_file(&file_path)
+            .map_err(|error| format!("failed to replace {}: {error}", file_path.display()))?;
+    }
+    fs::write(&file_path, content)
+        .map_err(|error| format!("failed to write {}: {error}", file_path.display()))
+}
+
+fn write_workdir_blob(
+    workdir: &Path,
+    path: &Path,
+    mode: TreeItemMode,
+    content: &[u8],
+) -> Result<(), String> {
+    match mode {
+        TreeItemMode::Blob => write_workdir_file(workdir, path, content),
+        TreeItemMode::BlobExecutable => {
+            write_workdir_file(workdir, path, content)?;
+            set_executable_workdir_mode(&workdir.join(path))
+        }
+        TreeItemMode::Link => write_workdir_symlink(workdir, path, content),
+        TreeItemMode::Tree => Err(format!(
+            "tree entry cannot be written as a file: {}",
+            path.display()
+        )),
+        TreeItemMode::Commit => Err(format!(
+            "gitlink entries are not supported by merge: {}",
+            path.display()
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn set_executable_workdir_mode(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).map_err(|error| {
+        format!(
+            "failed to set executable mode on {}: {error}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn set_executable_workdir_mode(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_workdir_symlink(workdir: &Path, path: &Path, target: &[u8]) -> Result<(), String> {
+    let file_path = workdir.join(path);
+    if let Some(parent) = file_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
+    if fs::symlink_metadata(&file_path).is_ok() {
+        fs::remove_file(&file_path)
+            .map_err(|error| format!("failed to replace {}: {error}", file_path.display()))?;
+    }
+    std::os::unix::fs::symlink(
+        PathBuf::from(OsString::from_vec(target.to_vec())),
+        &file_path,
+    )
+    .map_err(|error| format!("failed to create symlink {}: {error}", file_path.display()))
+}
+
+#[cfg(not(unix))]
+fn write_workdir_symlink(workdir: &Path, path: &Path, target: &[u8]) -> Result<(), String> {
+    write_workdir_file(workdir, path, target)
+}
+
+fn conflict_marker_eol() -> &'static str {
+    if cfg!(windows) { "\r\n" } else { "\n" }
+}
+
+fn conflict_payload(content: &[u8]) -> Cow<'_, str> {
+    if is_binary_blob(content) {
+        return Cow::Owned(format!("[binary content, {} bytes]", content.len()));
+    }
+    match std::str::from_utf8(content) {
+        Ok(text) => Cow::Borrowed(text),
+        Err(_) => Cow::Owned(format!("[binary content, {} bytes]", content.len())),
+    }
+}
+
+pub(crate) fn render_conflict_marker_content(
+    marker_eol: &str,
+    commit_abbrev: &str,
+    base: Option<&[u8]>,
+    ours: Option<&[u8]>,
+    theirs: Option<&[u8]>,
+    conflict_style: MergeConflictStyle,
+) -> String {
+    match (ours, theirs) {
+        (Some(ours), Some(theirs)) => {
+            let base_section = if conflict_style == MergeConflictStyle::Diff3 {
+                base.map(|payload| {
+                    format!(
+                        "||||||| base{marker_eol}{}{marker_eol}",
+                        conflict_payload(payload)
+                    )
+                })
+                .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            format!(
+                "<<<<<<< HEAD{marker_eol}{}{marker_eol}{base_section}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
+                conflict_payload(ours),
+                conflict_payload(theirs),
+                commit_abbrev
+            )
+        }
+        (Some(ours), None) => {
+            format!(
+                "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}>>>>>>> {} (deleted){marker_eol}",
+                conflict_payload(ours),
+                commit_abbrev
+            )
+        }
+        (None, Some(theirs)) => {
+            format!(
+                "<<<<<<< HEAD (deleted){marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
+                conflict_payload(theirs),
+                commit_abbrev
+            )
+        }
+        (None, None) => String::new(),
+    }
+}
+
+fn write_conflict_markers(
+    workdir: &Path,
+    path: &Path,
+    marker_eol: &str,
+    commit_abbrev: &str,
+    kind: ConflictKind,
+    base: Option<ObjectHash>,
+    conflict_style: MergeConflictStyle,
+) -> Result<(), String> {
+    let content = match kind {
+        ConflictKind::BothChanged { ours, theirs } => {
+            let ours_blob: Blob = load_object(&ours).map_err(|error| error.to_string())?;
+            let theirs_blob: Blob = load_object(&theirs).map_err(|error| error.to_string())?;
+            let base_blob: Option<Blob> = if conflict_style == MergeConflictStyle::Diff3 {
+                base.map(|base| load_object(&base).map_err(|error| error.to_string()))
+                    .transpose()?
+            } else {
+                None
+            };
+            render_conflict_marker_content(
+                marker_eol,
+                commit_abbrev,
+                base_blob.as_ref().map(|blob| blob.data.as_slice()),
+                Some(&ours_blob.data),
+                Some(&theirs_blob.data),
+                conflict_style,
+            )
+        }
+        ConflictKind::OursModifiedTheirsDeleted { ours } => {
+            let ours_blob: Blob = load_object(&ours).map_err(|error| error.to_string())?;
+            render_conflict_marker_content(
+                marker_eol,
+                commit_abbrev,
+                None,
+                Some(&ours_blob.data),
+                None,
+                conflict_style,
+            )
+        }
+        ConflictKind::TheirsModifiedOursDeleted { theirs } => {
+            let theirs_blob: Blob = load_object(&theirs).map_err(|error| error.to_string())?;
+            render_conflict_marker_content(
+                marker_eol,
+                commit_abbrev,
+                None,
+                None,
+                Some(&theirs_blob.data),
+                conflict_style,
+            )
+        }
+    };
+    write_workdir_file(workdir, path, content.as_bytes())
+}
+
+fn index_tree_items(index: &Index) -> Result<HashMap<PathBuf, MergeTreeEntry>, PullMergeError> {
+    let mut items = HashMap::new();
+    for path in index.tracked_files() {
+        if let Some(entry) = index.get(path_to_index_key(&path)?, 0) {
+            items.insert(
+                path,
+                MergeTreeEntry {
+                    hash: entry.hash,
+                    mode: index_mode_to_tree_item_mode(entry.mode)?,
+                },
+            );
+        }
+    }
+    Ok(items)
+}
+
+fn create_tree_from_items_map(
+    items: &HashMap<PathBuf, MergeTreeEntry>,
+) -> Result<ObjectHash, String> {
+    let mut entries_map = tree_entries_map_from_items(items)?;
+    build_tree_recursively(Path::new(""), &mut entries_map)
+}
+
+fn tree_entries_map_from_items(
+    items: &HashMap<PathBuf, MergeTreeEntry>,
+) -> Result<HashMap<PathBuf, Vec<TreeItem>>, String> {
+    let mut entries_map: HashMap<PathBuf, Vec<TreeItem>> = HashMap::new();
+    for (path, entry) in items {
+        let parent_dir = path.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
+        ensure_tree_parent_dirs(&mut entries_map, &parent_dir);
+        entries_map.entry(parent_dir).or_default().push(TreeItem {
+            mode: entry.mode,
+            name: tree_item_name(path)?,
+            id: entry.hash,
+        });
+    }
+    Ok(entries_map)
+}
+
+fn ensure_tree_parent_dirs(entries_map: &mut HashMap<PathBuf, Vec<TreeItem>>, dir: &Path) {
+    let mut current = Some(dir);
+    while let Some(path) = current {
+        if path.as_os_str().is_empty() {
+            break;
+        }
+        entries_map.entry(path.to_path_buf()).or_default();
+        current = path.parent();
+    }
+}
+
+fn build_tree_recursively(
+    current_path: &Path,
+    entries_map: &mut HashMap<PathBuf, Vec<TreeItem>>,
+) -> Result<ObjectHash, String> {
+    let mut current_items = entries_map.remove(current_path).unwrap_or_default();
+    let subdirs: Vec<_> = entries_map
+        .keys()
+        .filter(|path| path.parent() == Some(current_path))
+        .cloned()
+        .collect();
+
+    for subdir in subdirs {
+        let subtree_id = build_tree_recursively(&subdir, entries_map)?;
+        current_items.push(TreeItem {
+            mode: TreeItemMode::Tree,
+            name: tree_item_name(&subdir)?,
+            id: subtree_id,
+        });
+    }
+
+    crate::utils::tree::sort_tree_items_for_git(&mut current_items);
+    let tree = Tree::from_tree_items(current_items).map_err(|error| error.to_string())?;
+    save_object(&tree, &tree.id).map_err(|error| error.to_string())?;
+    Ok(tree.id)
+}
+
+fn reset_index_and_workdir_to_tree(tree_id: &ObjectHash) -> Result<(), PullMergeError> {
+    let tree: Tree = load_object(tree_id).map_err(|error| PullMergeError::TreeLoad {
+        tree_id: tree_id.to_string(),
+        detail: error.to_string(),
+    })?;
+    let current_index =
+        Index::load(path::index()).map_err(|error| PullMergeError::IndexLoad(error.to_string()))?;
+    let mut new_index = Index::new();
+    reset::rebuild_index_from_tree(&tree, &mut new_index, "")
+        .map_err(PullMergeError::TreeCreate)?;
+    reset_workdir_tracked_only(&current_index, &new_index)?;
+    new_index
+        .save(path::index())
+        .map_err(|error| PullMergeError::IndexSave(error.to_string()))
+}
+
+fn reset_workdir_tracked_only(
+    current_index: &Index,
+    new_index: &Index,
+) -> Result<(), PullMergeError> {
+    let workdir = util::working_dir();
+    let untracked_paths =
+        worktree::untracked_workdir_paths(current_index).map_err(PullMergeError::IndexLoad)?;
+    if let Some(conflict) = worktree::untracked_overwrite_path(&untracked_paths, new_index) {
+        return Err(PullMergeError::UntrackedOverwrite {
+            path: conflict.display().to_string(),
+        });
+    }
+
+    let new_tracked_paths: HashSet<_> = new_index.tracked_files().into_iter().collect();
+    for path_buf in current_index.tracked_files() {
+        if !new_tracked_paths.contains(&path_buf) {
+            let full_path = workdir.join(path_buf);
+            if full_path.exists() {
+                fs::remove_file(&full_path).map_err(|error| {
+                    PullMergeError::WorkdirReset(format!("failed to remove file: {error}"))
+                })?;
+            }
+        }
+    }
+
+    for path_buf in new_index.tracked_files() {
+        if let Some(entry) = new_index.get(path_to_index_key(&path_buf)?, 0) {
+            let blob: Blob = load_object(&entry.hash).map_err(|error| {
+                PullMergeError::WorkdirReset(format!(
+                    "failed to load blob {} for '{}': {error}",
+                    entry.hash,
+                    path_buf.display()
+                ))
+            })?;
+            write_workdir_blob(
+                &workdir,
+                &path_buf,
+                index_mode_to_tree_item_mode(entry.mode)?,
+                &blob.data,
+            )
+            .map_err(PullMergeError::WorkdirReset)?;
+        }
+    }
+    Ok(())
+}
+
+fn has_unmerged_entries(index: &Index) -> bool {
+    !unresolved_conflicted_paths(index, &[]).is_empty()
+}
+
+pub(crate) fn unresolved_conflicted_paths(
+    index: &Index,
+    conflicted_paths: &[String],
+) -> Vec<String> {
+    let resolved: HashSet<String> = index
+        .tracked_entries(0)
+        .into_iter()
+        .map(|entry| entry.name.clone())
+        .collect();
+    let staged_conflicts = staged_conflict_paths(index);
+    let mut paths: Vec<String> = if conflicted_paths.is_empty() {
+        staged_conflicts.into_iter().collect()
+    } else {
+        conflicted_paths
+            .iter()
+            .filter(|path| staged_conflicts.contains(path.as_str()))
+            .cloned()
+            .collect()
+    };
+    paths.retain(|path| !resolved.contains(path.as_str()));
+    paths.sort();
+    paths
+}
+
+fn staged_conflict_paths(index: &Index) -> HashSet<String> {
+    (1..=3)
+        .flat_map(|stage| index.tracked_entries(stage))
+        .map(|entry| entry.name.clone())
+        .collect()
+}
+
+fn tree_item_name(path: &Path) -> Result<String, String> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("path has no file name: {}", path.display()))?;
+    name.to_str()
+        .map(str::to_string)
+        .ok_or_else(|| format!("path is not valid UTF-8: {}", path.display()))
+}
+
+fn path_to_index_key(path: &Path) -> Result<&str, PullMergeError> {
+    path.to_str().ok_or_else(|| {
+        PullMergeError::IndexSave(format!("path is not valid UTF-8: {}", path.display()))
+    })
+}
+
+fn tree_item_mode_to_index_mode(mode: TreeItemMode) -> Result<u32, PullMergeError> {
+    match mode {
+        TreeItemMode::Blob => Ok(0o100644),
+        TreeItemMode::BlobExecutable => Ok(0o100755),
+        TreeItemMode::Link => Ok(0o120000),
+        TreeItemMode::Tree => Err(PullMergeError::IndexSave(
+            "tree entry cannot be represented as a file index entry".to_string(),
+        )),
+        TreeItemMode::Commit => Err(PullMergeError::IndexSave(
+            "gitlink entries are not supported by merge".to_string(),
+        )),
+    }
+}
+
+fn index_mode_to_tree_item_mode(mode: u32) -> Result<TreeItemMode, PullMergeError> {
+    match mode {
+        0o100644 => Ok(TreeItemMode::Blob),
+        0o100755 => Ok(TreeItemMode::BlobExecutable),
+        0o120000 => Ok(TreeItemMode::Link),
+        other => Err(PullMergeError::TreeCreate(format!(
+            "unsupported index mode {other:o} while creating merge tree"
+        ))),
+    }
+}
+
+fn short_object_id(object_id: &ObjectHash) -> String {
+    let object_id = object_id.to_string();
+    object_id.chars().take(7).collect()
+}
+
+async fn merge_commit_message(
+    upstream: &str,
+    head_name: &str,
+    commits: Option<(&Commit, &Commit)>,
+    options: &PullMergeOptions,
+) -> Result<String, PullMergeError> {
+    let into_label = options.into_name.as_deref().unwrap_or(head_name);
+    let mut base_message = options
+        .message
+        .clone()
+        .unwrap_or_else(|| format!("Merge {upstream} into {into_label}"));
+    if let Some(limit) = options.log
+        && limit > 0
+        && let Some((current, target)) = commits
+    {
+        append_merge_shortlog(&mut base_message, current, target, limit).await?;
+    }
+    if !options.signoff {
+        return Ok(base_message);
+    }
+    let (name, email) = resolve_signoff_identity().await?;
+    Ok(format!("{base_message}\n\nSigned-off-by: {name} <{email}>"))
+}
+
+async fn append_merge_shortlog(
+    message: &mut String,
+    current: &Commit,
+    target: &Commit,
+    limit: usize,
+) -> Result<(), PullMergeError> {
+    let current_ids: HashSet<ObjectHash> = log::get_reachable_commits(current.id.to_string(), None)
+        .await
+        .map_err(|error| PullMergeError::History(error.to_string()))?
+        .into_iter()
+        .map(|commit| commit.id)
+        .collect();
+    let subjects: Vec<String> = log::get_reachable_commits(target.id.to_string(), None)
+        .await
+        .map_err(|error| PullMergeError::History(error.to_string()))?
+        .into_iter()
+        .filter(|commit| !current_ids.contains(&commit.id))
+        .filter_map(|commit| first_non_empty_line(&commit.message))
+        .take(limit)
+        .collect();
+    if subjects.is_empty() {
+        return Ok(());
+    }
+    message.push_str("\n\n");
+    for subject in subjects {
+        message.push_str("* ");
+        message.push_str(&subject);
+        message.push('\n');
+    }
+    Ok(())
+}
+
+fn first_non_empty_line(message: &str) -> Option<String> {
+    let (message, _) = crate::common_utils::parse_commit_msg(message);
+    message
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+/// Resolve the `Signed-off-by` identity (name, email), honoring repo/global
+/// config first, then the `GIT_*` / `LIBRA_COMMITTER_*` / `EMAIL` env cascade.
+///
+/// `pub(crate)` so sibling commands (e.g. `cherry-pick -s`) reuse the identical
+/// identity cascade rather than re-implementing it.
+pub(crate) async fn resolve_signoff_identity() -> Result<(String, String), PullMergeError> {
+    let config_name = read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "user.name")
+        .await
+        .ok()
+        .flatten();
+    let config_email = read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "user.email")
+        .await
+        .ok()
+        .flatten();
+    let env_name = env_first_non_empty(&[
+        "GIT_COMMITTER_NAME",
+        "GIT_AUTHOR_NAME",
+        "LIBRA_COMMITTER_NAME",
+    ]);
+    let env_email = env_first_non_empty(&[
+        "GIT_COMMITTER_EMAIL",
+        "GIT_AUTHOR_EMAIL",
+        "EMAIL",
+        "LIBRA_COMMITTER_EMAIL",
+    ]);
+    match (config_name.or(env_name), config_email.or(env_email)) {
+        (Some(name), Some(email)) => Ok((name, email)),
+        _ => Err(PullMergeError::SignoffIdentity),
+    }
+}
+
+fn zero_object_hash() -> ObjectHash {
+    ObjectHash::from_str(&ObjectHash::zero_str(get_hash_kind()))
+        .unwrap_or_else(|_| ObjectHash::new(&vec![0; get_hash_kind().size()]))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn merge_entry(byte: u8, mode: TreeItemMode) -> MergeTreeEntry {
+        MergeTreeEntry {
+            hash: ObjectHash::new(&[byte; 20]),
+            mode,
+        }
+    }
 
     /// Pin the `Display` format for every variant of [`PullMergeError`]
     /// (also exposed as `MergeError`). These strings are used as the
@@ -421,11 +3439,12 @@ mod tests {
             "refusing to merge unrelated histories",
         );
         assert_eq!(
-            PullMergeError::ManualMergeRequired {
-                upstream: "origin/main".to_string(),
+            PullMergeError::NonFastForward {
+                current: "1111111".to_string(),
+                target: "2222222".to_string(),
             }
             .to_string(),
-            "non-fast-forward merge from 'origin/main' requires manual merge",
+            "non-fast-forward merge refused (current 1111111, target 2222222)",
         );
         assert_eq!(
             PullMergeError::TreeLoad {
@@ -436,6 +3455,14 @@ mod tests {
             "failed to load tree 'abc123': decode failed",
         );
         assert_eq!(
+            PullMergeError::ObjectLoad {
+                object_id: "def456".to_string(),
+                detail: "blob missing".to_string(),
+            }
+            .to_string(),
+            "failed to load object 'def456': blob missing",
+        );
+        assert_eq!(
             PullMergeError::HeadResolve("db locked".to_string()).to_string(),
             "failed to resolve HEAD state: db locked",
         );
@@ -444,8 +3471,120 @@ mod tests {
             "failed to update HEAD during merge: write failed",
         );
         assert_eq!(
-            PullMergeError::Restore("checkout failed".to_string()).to_string(),
-            "failed to restore working tree after merge: checkout failed",
+            PullMergeError::InvalidDiffAlgorithm {
+                value: "bogus".to_string(),
+            }
+            .to_string(),
+            "unknown diff algorithm 'bogus' (expected myers, histogram, patience, or minimal)",
         );
+        assert_eq!(
+            PullMergeError::InvalidCleanupMode {
+                value: "bogus".to_string(),
+            }
+            .to_string(),
+            "unknown cleanup mode 'bogus' (expected strip, whitespace, verbatim, scissors, or default)",
+        );
+        assert_eq!(
+            PullMergeError::Autostash("stash push failed".to_string()).to_string(),
+            "autostash failed: stash push failed",
+        );
+        assert_eq!(
+            PullMergeError::Sign("no key".to_string()).to_string(),
+            "failed to sign merge commit: no key",
+        );
+        assert_eq!(
+            PullMergeError::UnsignedTarget {
+                target: "feature".to_string(),
+            }
+            .to_string(),
+            "merge target 'feature' is not signed",
+        );
+    }
+
+    #[test]
+    fn whitespace_mode_canonicalize_ignores_configured_classes() {
+        let all_space = WhitespaceMode {
+            ignore_all_space: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            all_space.canonicalize(b"a b  c\n"),
+            all_space.canonicalize(b"abc\n"),
+        );
+
+        let space_change = WhitespaceMode {
+            ignore_space_change: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            space_change.canonicalize(b"  a   b  \n"),
+            space_change.canonicalize(b"a b\n"),
+        );
+
+        let space_at_eol = WhitespaceMode {
+            ignore_space_at_eol: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            space_at_eol.canonicalize(b"a b   \n"),
+            space_at_eol.canonicalize(b"a b\n"),
+        );
+
+        let cr_at_eol = WhitespaceMode {
+            ignore_cr_at_eol: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            cr_at_eol.canonicalize(b"a b\r\n"),
+            cr_at_eol.canonicalize(b"a b\n"),
+        );
+
+        let none = WhitespaceMode::default();
+        assert_ne!(
+            none.canonicalize(b"a  b\n"),
+            none.canonicalize(b"a b\n"),
+            "default mode preserves whitespace differences"
+        );
+    }
+
+    #[test]
+    fn merge_tree_items_preserves_mode_from_changed_side() {
+        let path = PathBuf::from("script.sh");
+        let base = merge_entry(1, TreeItemMode::Blob);
+        let theirs = merge_entry(2, TreeItemMode::BlobExecutable);
+        let mut base_items = HashMap::new();
+        base_items.insert(path.clone(), base);
+        let mut our_items = HashMap::new();
+        our_items.insert(path.clone(), base);
+        let mut their_items = HashMap::new();
+        their_items.insert(path.clone(), theirs);
+
+        let result =
+            merge_tree_items(&base_items, &our_items, &their_items).expect("merge tree items");
+
+        assert!(result.conflicts.is_empty());
+        assert_eq!(result.merged_items.get(&path), Some(&theirs));
+    }
+
+    #[test]
+    fn tree_entries_map_from_items_materializes_nested_parent_dirs() {
+        let mut items = HashMap::new();
+        items.insert(
+            PathBuf::from("dir/sub/file.txt"),
+            merge_entry(1, TreeItemMode::Blob),
+        );
+
+        let entries = tree_entries_map_from_items(&items).expect("build tree entries");
+
+        assert!(
+            entries.contains_key(Path::new("dir")),
+            "parent directory should be present so recursive tree building can attach it to root"
+        );
+        assert!(
+            entries.contains_key(Path::new("dir/sub")),
+            "leaf directory should contain the nested file entry"
+        );
+        assert_eq!(entries[Path::new("dir")].len(), 0);
+        assert_eq!(entries[Path::new("dir/sub")].len(), 1);
     }
 }

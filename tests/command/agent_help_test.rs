@@ -49,3 +49,23 @@ fn test_agent_help_lists_examples_banner() {
         );
     }
 }
+
+#[test]
+fn test_agent_checkpoint_rewind_help_mentions_supported_transcript_truncation() {
+    let repo = tempdir().expect("tempdir for agent checkpoint rewind --help");
+    let output = run_libra_command(&["agent", "checkpoint", "rewind", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "agent checkpoint rewind --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("supported agent transcripts"),
+        "rewind help should describe the current truncation behavior, stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("NOT rewritten") && !stdout.contains("restores worktree only"),
+        "rewind help must not claim transcripts are never rewritten, stdout: {stdout}"
+    );
+}

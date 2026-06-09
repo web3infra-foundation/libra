@@ -31,6 +31,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use super::NetworkProtocol;
+
 /// Structured sandbox events that callers can observe via
 /// [`SandboxEvidenceSink::record`].
 ///
@@ -103,6 +105,23 @@ pub enum SandboxEvidenceEvent {
         /// [`crate::internal::ai::sandbox::runtime::SandboxTransformError::NetworkEnforcementFailed`].
         reason: String,
     },
+    /// The runtime allowlist proxy denied an individual outbound
+    /// connection request after inspecting the CONNECT target or HTTP
+    /// Host header. Doc reference: `docs/improvement/sandbox.md:348`
+    /// ("网络拒绝事件（连接被 OS 或代理阻断）写入
+    /// ToolInvocation[E] + Evidence[E]").
+    NetworkRequestDenied {
+        /// Stable proxy backend identifier, e.g. `"allowlist"`.
+        proxy_backend: String,
+        /// Requested destination host.
+        host: String,
+        /// Requested destination port.
+        port: u16,
+        /// Requested wire protocol.
+        protocol: NetworkProtocol,
+        /// Human-readable denial reason from the proxy decision.
+        reason: String,
+    },
 }
 
 impl SandboxEvidenceEvent {
@@ -112,6 +131,7 @@ impl SandboxEvidenceEvent {
             Self::WritableRootRejected { .. } => "writable_root_rejected",
             Self::EnforcementFailed { .. } => "enforcement_failed",
             Self::NetworkEnforcementFailed { .. } => "network_enforcement_failed",
+            Self::NetworkRequestDenied { .. } => "network_request_denied",
         }
     }
 
@@ -133,6 +153,20 @@ impl SandboxEvidenceEvent {
                     "reason": reason,
                 })
             }
+            Self::NetworkRequestDenied {
+                proxy_backend,
+                host,
+                port,
+                protocol,
+                reason,
+            } => serde_json::json!({
+                "kind": self.kind(),
+                "proxy_backend": proxy_backend,
+                "host": host,
+                "port": port,
+                "protocol": protocol,
+                "reason": reason,
+            }),
         }
     }
 }
@@ -209,6 +243,22 @@ impl SandboxEvidenceSink for TracingSandboxEvidenceSink {
                     "sandbox.evidence network_enforcement_failed",
                 );
             }
+            SandboxEvidenceEvent::NetworkRequestDenied {
+                proxy_backend,
+                host,
+                port,
+                protocol,
+                reason,
+            } => {
+                tracing::warn!(
+                    proxy_backend = %proxy_backend,
+                    host = %host,
+                    port = port,
+                    protocol = ?protocol,
+                    reason = %reason,
+                    "sandbox.evidence network_request_denied",
+                );
+            }
         }
     }
 }
@@ -274,6 +324,13 @@ mod tests {
         sink.record(SandboxEvidenceEvent::NetworkEnforcementFailed {
             reason: "allowlist proxy unavailable in Required mode".to_string(),
         });
+        sink.record(SandboxEvidenceEvent::NetworkRequestDenied {
+            proxy_backend: "allowlist".to_string(),
+            host: "denied.example".to_string(),
+            port: 443,
+            protocol: NetworkProtocol::Tcp,
+            reason: "not in allowlist".to_string(),
+        });
     }
 
     /// `InMemorySandboxEvidenceSink` captures events in the order
@@ -299,8 +356,15 @@ mod tests {
         sink.record(SandboxEvidenceEvent::NetworkEnforcementFailed {
             reason: "proxy unavailable".to_string(),
         });
+        sink.record(SandboxEvidenceEvent::NetworkRequestDenied {
+            proxy_backend: "allowlist".to_string(),
+            host: "denied.example".to_string(),
+            port: 443,
+            protocol: NetworkProtocol::Tcp,
+            reason: "not in allowlist".to_string(),
+        });
         let recorded = sink.events();
-        assert_eq!(recorded.len(), 4);
+        assert_eq!(recorded.len(), 5);
         assert!(matches!(
             &recorded[0],
             SandboxEvidenceEvent::TmpdirCleanupFailed { path, .. }
@@ -320,6 +384,11 @@ mod tests {
             &recorded[3],
             SandboxEvidenceEvent::NetworkEnforcementFailed { reason }
                 if reason == "proxy unavailable"
+        ));
+        assert!(matches!(
+            &recorded[4],
+            SandboxEvidenceEvent::NetworkRequestDenied { host, port, .. }
+                if host == "denied.example" && *port == 443
         ));
     }
 
@@ -351,6 +420,26 @@ mod tests {
                 "kind": "writable_root_rejected",
                 "root": "/",
                 "reason": "dangerous root",
+            })
+        );
+
+        let event = SandboxEvidenceEvent::NetworkRequestDenied {
+            proxy_backend: "allowlist".to_string(),
+            host: "denied.example".to_string(),
+            port: 443,
+            protocol: NetworkProtocol::Tcp,
+            reason: "not in allowlist".to_string(),
+        };
+        assert_eq!(event.kind(), "network_request_denied");
+        assert_eq!(
+            event.to_metadata_value(),
+            serde_json::json!({
+                "kind": "network_request_denied",
+                "proxy_backend": "allowlist",
+                "host": "denied.example",
+                "port": 443,
+                "protocol": "tcp",
+                "reason": "not in allowlist",
             })
         );
     }

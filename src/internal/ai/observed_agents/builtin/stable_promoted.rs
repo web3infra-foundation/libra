@@ -78,37 +78,47 @@ impl ObservedAgent for StablePromotedAgent {
     }
 }
 
+pub static CURSOR_STABLE_PROMOTED_SPEC: StablePromotedSpec = StablePromotedSpec {
+    kind: AgentKind::Cursor,
+    provider_name: "cursor",
+    protected_dirs: &[".cursor"],
+};
+
+pub static CODEX_STABLE_PROMOTED_SPEC: StablePromotedSpec = StablePromotedSpec {
+    kind: AgentKind::Codex,
+    provider_name: "codex",
+    protected_dirs: &[".codex"],
+};
+
+pub static OPENCODE_STABLE_PROMOTED_SPEC: StablePromotedSpec = StablePromotedSpec {
+    kind: AgentKind::OpenCode,
+    provider_name: "opencode",
+    protected_dirs: &[".opencode"],
+};
+
+pub static COPILOT_STABLE_PROMOTED_SPEC: StablePromotedSpec = StablePromotedSpec {
+    kind: AgentKind::Copilot,
+    provider_name: "copilot",
+    protected_dirs: &[".copilot"],
+};
+
+pub static FACTORY_AI_STABLE_PROMOTED_SPEC: StablePromotedSpec = StablePromotedSpec {
+    kind: AgentKind::FactoryAi,
+    provider_name: "factory_ai",
+    protected_dirs: &[".factory"],
+};
+
 /// Phase 4.4 stable-promoted adapter table. Mirrors the v1 adapter
 /// matrix (entire.md §5.2) for the five agents that previously
 /// returned `AgentNotYetImplemented`. The `protected_dirs` mirror each
 /// agent's well-known config directory so `clean` / `rewind --apply`
 /// won't trample them.
-pub static STABLE_PROMOTED_SPECS: &[StablePromotedSpec] = &[
-    StablePromotedSpec {
-        kind: AgentKind::Cursor,
-        provider_name: "cursor",
-        protected_dirs: &[".cursor"],
-    },
-    StablePromotedSpec {
-        kind: AgentKind::Codex,
-        provider_name: "codex",
-        protected_dirs: &[".codex"],
-    },
-    StablePromotedSpec {
-        kind: AgentKind::OpenCode,
-        provider_name: "opencode",
-        protected_dirs: &[".opencode"],
-    },
-    StablePromotedSpec {
-        kind: AgentKind::Copilot,
-        provider_name: "copilot",
-        protected_dirs: &[".copilot"],
-    },
-    StablePromotedSpec {
-        kind: AgentKind::FactoryAi,
-        provider_name: "factory_ai",
-        protected_dirs: &[".factory"],
-    },
+pub static STABLE_PROMOTED_SPECS: &[&StablePromotedSpec] = &[
+    &CURSOR_STABLE_PROMOTED_SPEC,
+    &CODEX_STABLE_PROMOTED_SPEC,
+    &OPENCODE_STABLE_PROMOTED_SPEC,
+    &COPILOT_STABLE_PROMOTED_SPEC,
+    &FACTORY_AI_STABLE_PROMOTED_SPEC,
 ];
 
 /// Lookup a stable-promoted spec by `AgentKind`. Returns `None` for
@@ -116,7 +126,10 @@ pub static STABLE_PROMOTED_SPECS: &[StablePromotedSpec] = &[
 /// stable adapters — Claude Code, Gemini — have their own dedicated
 /// types with extra capabilities like `TranscriptTruncator`).
 pub fn stable_promoted_spec_for(kind: AgentKind) -> Option<&'static StablePromotedSpec> {
-    STABLE_PROMOTED_SPECS.iter().find(|spec| spec.kind == kind)
+    STABLE_PROMOTED_SPECS
+        .iter()
+        .copied()
+        .find(|spec| spec.kind == kind)
 }
 
 #[cfg(test)]

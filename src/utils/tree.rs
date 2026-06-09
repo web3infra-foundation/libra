@@ -48,10 +48,26 @@ pub fn create_tree_from_index(index: &Index) -> Result<Tree, GitError> {
         tree_items.push(TreeItem::new(mode, entry.hash, entry.name.clone()));
     }
 
-    // Git tree entries must be sorted by name.
-    tree_items.sort_by(|a, b| a.name.cmp(&b.name));
+    sort_tree_items_for_git(&mut tree_items);
 
     Tree::from_tree_items(tree_items)
+}
+
+/// Sort tree entries using Git's tree ordering.
+///
+/// Git compares names bytewise, treating directories as if their name ends in
+/// `/`. Unsigned or server-side `index-pack --strict` rejects tree objects that
+/// do not use this order.
+pub fn sort_tree_items_for_git(tree_items: &mut [TreeItem]) {
+    tree_items.sort_by_key(git_tree_sort_key);
+}
+
+fn git_tree_sort_key(item: &TreeItem) -> Vec<u8> {
+    let mut key = item.name.as_bytes().to_vec();
+    if item.mode == TreeItemMode::Tree {
+        key.push(b'/');
+    }
+    key
 }
 
 /// Helper function to recursively get all files from a tree.
@@ -91,6 +107,25 @@ mod tests {
         let mut e = IndexEntry::new_from_blob(name.to_string(), ObjectHash::new(&[1; 20]), 0);
         e.mode = mode;
         e
+    }
+
+    #[test]
+    fn sort_tree_items_for_git_orders_names_and_directories() {
+        let hash = ObjectHash::new(&[1; 20]);
+        let mut items = vec![
+            TreeItem::new(TreeItemMode::Blob, hash, "z.txt".to_string()),
+            TreeItem::new(TreeItemMode::Tree, hash, "foo".to_string()),
+            TreeItem::new(TreeItemMode::Blob, hash, "foo.txt".to_string()),
+            TreeItem::new(TreeItemMode::Blob, hash, "a.txt".to_string()),
+        ];
+
+        sort_tree_items_for_git(&mut items);
+
+        let ordered = items
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ordered, vec!["a.txt", "foo.txt", "foo", "z.txt"]);
     }
 
     fn item_mode(tree: &Tree, name: &str) -> TreeItemMode {

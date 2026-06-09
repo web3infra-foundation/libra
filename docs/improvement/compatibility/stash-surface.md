@@ -9,10 +9,10 @@ C4（Audit P2）
 ### 已确认落地的基线
 - 第 4 批 [stash.md](../stash.md) 已落地：`StashError` typed enum（14 变体）、`run_stash()` / `render_stash_output()` 拆分、JSON / machine / human 三套渲染共用同一份 `StashOutput`、`STASH_EXAMPLES` `--help` 接入。
 - [`src/command/stash.rs`](../../../src/command/stash.rs) 与 [`src/cli.rs`](../../../src/cli.rs) 中的 `Stash` enum 已实现 `Push` / `Pop` / `List` / `Apply` / `Drop` / `Show` / `Branch` / `Clear` 八个 variant；C4 计划的 `show` / `branch` / `clear` 扩展已经在主分支落地（参见 src/cli.rs:425-472）。`StashOutput` 是 `#[serde(tag = "action")]` enum，扩展时直接加新 variant。
-- [`tests/command/stash_test.rs`](../../../tests/command/stash_test.rs) 已覆盖八个子命令的 happy path / error path / JSON 输出（含 `BranchExists` / `BranchLookupFailed` / `ClearRequiresForce` 三个新增 typed-error 变体）。
+- [`tests/command/stash_test.rs`](../../../tests/command/stash_test.rs) 已覆盖八个子命令的 happy path / error path / JSON 输出（含 `BranchExists` / `BranchLookupFailed` / `ClearRequiresForce` 以及 dirty-worktree typed-error 变体）。
 
 ### 基于当前代码的 Review 结论
-- 第 4 批的 scaffolding（typed error / render split / JSON enum tag）已经在第 5/30+ 批被实际扩展使用：`show` / `branch` / `clear` 的子命令面、对应的 `StashError` 变体（`BranchExists` / `BranchLookupFailed` / `ClearRequiresForce`）、`StashOutput` 的新 action variant 与 `STASH_EXAMPLES` 的扩展都已合入。C4 计划本身已经收口，剩余职责只是把 `COMPATIBILITY.md` 的对应行从 `partial` 升级到 `supported`（如尚未升级）并保持文档同步。
+- 第 4 批的 scaffolding（typed error / render split / JSON enum tag）已经在第 5/30+ 批被实际扩展使用：`show` / `branch` / `clear` 的子命令面、对应的 `StashError` 变体（`BranchExists` / `BranchLookupFailed` / `ClearRequiresForce` 以及 `stash branch` dirty-worktree refusal 变体）、`StashOutput` 的新 action variant 与 `STASH_EXAMPLES` 的扩展都已合入。C4 计划本身已经收口；`COMPATIBILITY.md` 中 `stash` 继续保持 `partial`，唯一原因是 `create` / `store` 已作为 D8/D9 明确延后，不是 C4 仍缺用户路径。
 - 历史上 `show` / `branch` / `clear` 是审计 P2 中"用户视野中已存在但子命令面缺失"的最高优先级三项；现已全部落地。
 - `create` / `store` 属于 stash 内部 plumbing（构建 stash object、把 object 写入 stash ref），非用户日常路径，本批不做。
 
@@ -159,7 +159,7 @@ Cleared 3 stash entries.
 
 ### Error 复用
 
-复用现有 `StashError` 变体；`stash show` 在 stash ref 不存在时返回 `StashError::StashNotExist`；`stash branch` 在分支已存在时返回 `StashError::Other(...)` 携带分支冲突 detail（或新增 `StashError::BranchExists { name }` 变体——若新增需同步加 `StableErrorCode` 映射）。
+复用现有 `StashError` 变体；`stash show` 在 stash ref 不存在时返回 `StashError::StashNotExist`；`stash branch` 在分支已存在时返回 `StashError::BranchExists`，在 staged / unstaged / untracked dirty worktree 场景分别返回 typed refusal（均映射到 `LBR-REPO-003`），状态读取失败时返回 `StashError::StatusCheck`。
 
 ## 关键文件与改动
 
@@ -183,7 +183,7 @@ Cleared 3 stash entries.
 
 ## 风险与缓解
 
-1. **`stash branch` 跨当前工作树 dirty 状态时行为不一致** → 缓解：实现复用 `switch` 的 `ensure_clean_status()`；测试覆盖 dirty 工作树场景。
+1. **`stash branch` 跨当前工作树 dirty 状态时行为不一致** → 已缓解：`stash branch` 在创建新分支前拒绝 staged / unstaged / untracked changes，并由 `test_stash_branch_refuses_dirty_worktree_without_creating_branch`、`test_stash_branch_refuses_staged_worktree_without_side_effects`、`test_stash_branch_refuses_untracked_worktree_without_side_effects` 覆盖“不创建分支、不覆盖 dirty 文件、stash entry 保留”。
 2. **`stash clear` 误操作不可逆** → 缓解：human 模式默认要求 `y/N` 确认；`--force` 跳过；JSON / machine 模式按文档约定不询问（脚本场景假设调用方已确认）。
 3. **`stash show` 与未来 `stash show --patch` 字段冲突** → 缓解：本批仅文件级 `files` / `files_changed`；`--patch` 引入时新增独立字段（如 `patch` 或 `diff`），保持向后兼容。
 4. **新增 variant 破坏既有 JSON 消费方** → 缓解：JSON 是 `#[serde(tag = "action")]` enum，新 tag 值对老消费方表现为未知 action；不破坏现有字段。

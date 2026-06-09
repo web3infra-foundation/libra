@@ -121,20 +121,20 @@ async fn agent_capture_rollback_drops_tables_and_indexes_only() {
     let runner = registered_runner();
     runner.run_pending(&conn).await.expect("run_pending");
 
-    // Rolling back to before agent_capture also rolls back every migration
-    // sitting on top of it (parent_commit nullable, approved_permission,
-    // agent_usage_stats agent_name column, source_call_log). Rollback
-    // returns versions in reverse-application order — newest first — so the
-    // list reads from the most recent built-in migration down to
-    // agent_capture itself.
+    // Rolling back to before agent_capture also rolls back every built-in
+    // migration sitting on top of it. Rollback returns versions in
+    // reverse-application order: newest first, down to agent_capture itself.
     let rolled_back = runner
         .rollback_to(&conn, 2026050302)
         .await
         .expect("rollback_to(2026050302)");
-    assert_eq!(
-        rolled_back,
-        vec![2026052301, 2026050801, 2026050601, 2026050501, 2026050303]
-    );
+    let mut expected_rolled_back: Vec<i64> = builtin_migrations()
+        .into_iter()
+        .filter(|migration| migration.version > 2026050302)
+        .map(|migration| migration.version)
+        .collect();
+    expected_rolled_back.reverse();
+    assert_eq!(rolled_back, expected_rolled_back);
 
     // agent_capture artifacts gone.
     assert!(!table_exists(&conn, "agent_session").await);

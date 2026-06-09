@@ -1115,6 +1115,22 @@ impl CodeSession {
         Ok(status)
     }
 
+    pub fn detach_automation(&self, client_id: &str) -> Result<StatusCode> {
+        let response = self
+            .authorized_post("/controller/detach")
+            .json(&json!({ "clientId": client_id }))
+            .send()
+            .context("failed to send automation detach request")?;
+        let status = response.status();
+        if !status.is_success() {
+            bail!(
+                "automation detach failed with {status}: {}",
+                response.text().unwrap_or_default()
+            );
+        }
+        Ok(status)
+    }
+
     pub fn submit_message_expect_error(&self, text: &str) -> Result<(StatusCode, Value)> {
         let response = self
             .authorized_post("/messages")

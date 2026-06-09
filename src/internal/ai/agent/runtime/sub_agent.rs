@@ -1,20 +1,19 @@
 //! Sub-agent dispatcher contract — types and trait definitions only.
 //!
-//! This module is the OC-Phase 3 P3.2 deliverable from
-//! `docs/improvement/opencode.md`. It defines the **vocabulary** that
-//! P3.3 → P3.7 will fill in: a [`SubAgentDispatcher`] trait that the tool
-//! loop forwards `task` calls into, the [`DispatchContext`] that carries
-//! the parent-session state the dispatcher needs, and the
-//! [`TaskInvocation`] / [`TaskResult`] / [`TaskFailure`] types that bound
-//! the call shape on either side.
+//! This module started as the OC-Phase 3 P3.2 vocabulary from
+//! `docs/improvement/opencode.md` and now also carries the shared
+//! runtime collaborators used by the shipped dispatcher tail:
+//! [`SubAgentDispatcher`], [`DispatchContext`], the task
+//! invocation/result/failure shapes, permission asking, context-frame
+//! loading, provider-option resolution, and the default child runner.
 //!
 //! What this module is:
-//! - Pure data and trait definitions. No runtime implementation, no
-//!   registration into the tool loop, no `code.multi_agent.enabled` gate.
-//!   The dispatcher landing in P3.3+ will live next to or replace this
-//!   file.
-//! - Forward-stable shapes the doc commits to. Any field rename here
-//!   has to update the contract section of `opencode.md` first.
+//! - Forward-stable shapes and small services the dispatcher and tool
+//!   loop share. Any field rename here has to update the contract
+//!   section of `opencode.md` first.
+//! - The object-safe seams that let tests substitute permission
+//!   askers, provider-option resolvers, and child runners without
+//!   constructing a full TUI session.
 //!
 //! What this module is **not**:
 //! - It does not register the `task` tool — that is OC-Phase 3 P3.1's
@@ -22,9 +21,9 @@
 //! - It does not implement the 14-step dispatcher main flow from the
 //!   doc — that lands in P3.3 / P3.4 / P3.7.
 //! - It does not own the runtime services it references
-//!   ([`PermissionService`], [`ContextFrameLoader`]). Those are
-//!   placeholder shells that the real wiring PRs replace; their **names
-//!   and method signatures** are the future contract, not the bodies.
+//!   ([`PermissionService`], [`ContextFrameLoader`]). Their method
+//!   signatures are the public contract; their bodies are intentionally
+//!   small and test-pinned.
 
 use std::sync::{
     Arc, Mutex,
@@ -43,10 +42,10 @@ use crate::internal::ai::{
     providers::{ProviderBuildOptions, ProviderFactory},
     sandbox::ToolRuntimeContext,
     session::{
-        SessionId,
-        jsonl::{SessionEvent, SessionJsonlStore},
+        SessionId, SessionMessage, SessionState,
+        jsonl::{SessionEvent, SessionJsonlStore, SessionToolCallEvent, SessionToolResultEvent},
     },
-    tools::ToolRegistry,
+    tools::{ToolOutput, ToolRegistry},
     usage::UsageRecorder,
 };
 
@@ -229,6 +228,12 @@ pub struct PermissionAskRequest<'a> {
     pub thread_id: &'a str,
     pub session_id: &'a SessionId,
     pub source: PermissionAskSource,
+    /// The task this ask belongs to, when known (CEX-S2-16 验收 (4): the
+    /// approval prompt surfaces `agent_id` / `task_id` / `command` / `scope`).
+    /// The agent identity and the command/scope are already carried by
+    /// [`PermissionAskSource`], `permission`, and `patterns` respectively; this
+    /// adds the task id. `None` when the dispatch carries no resume task id.
+    pub task_id: Option<&'a str>,
 }
 
 /// Object-safe trait the [`PermissionService`] delegates to.
@@ -279,8 +284,8 @@ impl PermissionService {
 /// `reply_tx`. Mirrors the existing exec-approval flow's shape so
 /// the future TUI integration can reuse the same widget skeleton.
 ///
-/// `permission`, `patterns`, `thread_id`, `session_id`, `source`
-/// are owned String/clone copies of the original
+/// `permission`, `patterns`, `thread_id`, `session_id`, `source`,
+/// `task_id` are owned String/clone copies of the original
 /// [`PermissionAskRequest`]'s borrowed shape — the channel needs
 /// 'static data because the asker future is detached from the
 /// dispatch lifetime.
@@ -291,6 +296,8 @@ pub struct ChannelPermissionAsk {
     pub thread_id: String,
     pub session_id: SessionId,
     pub source: PermissionAskSource,
+    /// Owned copy of [`PermissionAskRequest::task_id`] (CEX-S2-16 验收 (4)).
+    pub task_id: Option<String>,
     pub reply_tx: tokio::sync::oneshot::Sender<PermissionReply>,
 }
 
@@ -335,6 +342,7 @@ impl PermissionAsker for ChannelPermissionAsker {
             thread_id: request.thread_id.to_string(),
             session_id: request.session_id.clone(),
             source: request.source,
+            task_id: request.task_id.map(str::to_string),
             reply_tx,
         };
         let send_result = self.tx.send(ask);
@@ -509,6 +517,10 @@ pub struct TaskResult {
     pub model_id: String,
     pub final_text: String,
     pub steps_used: u32,
+    /// Number of tool calls the child made during the run (counted via the
+    /// tool-loop `on_tool_call_begin` hook). Distinct from `steps_used` (model
+    /// turns); feeds the persisted per-run `RunUsage` for the budget view.
+    pub tool_call_count: u32,
     pub usage: CompletionUsageSummary,
 }
 
@@ -931,25 +943,27 @@ pub trait SubAgentChildRunner: Send + Sync {
     ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>>;
 }
 
-/// Default production runner that drives a sub-agent through a
-/// single-shot completion call.
+/// Default production runner that drives a sub-agent through the
+/// normal tool loop.
 ///
-/// This is the OC-Phase 3 P3.4 step 13 minimum viable wiring: the
-/// runner builds an [`AnyCompletionModel`] via
-/// [`DispatchContext::build_child_model`], constructs a
-/// [`CompletionRequest`] from the invocation's prompt, calls
-/// `model.completion(...).await`, and folds the assistant text into a
-/// [`TaskResult`]. Tool-loop integration (`run_tool_loop_with_history_and_observer`),
-/// `ContextHandoff` injection, and child JSONL session creation are
-/// deliberately out of scope here — they ride in follow-up PRs without
-/// changing the runner's public shape because the seam is the
-/// `SubAgentChildRunner` trait.
+/// The runner builds an [`AnyCompletionModel`] via
+/// [`DispatchContext::build_child_model`], threads any dispatcher-built
+/// handoff history into `run_tool_loop_with_history_and_observer`,
+/// enforces the child tool allow-list, forwards the inherited runtime
+/// context, and folds the assistant result into a [`TaskResult`].
 ///
 /// What this runner DOES today:
 /// - Builds the child model from `sub_spec.model` using the
 ///   resolver-aware build helper.
-/// - Sends a single user message with the invocation's `prompt`.
+/// - Sends the dispatcher-provided handoff history plus the
+///   invocation's `prompt`.
+/// - Writes a child session JSONL stream under
+///   `SessionJsonlStore::child(agent_run_id)`, with snapshots for the
+///   child prompt, assistant step text, tool calls, tool results, and
+///   final assistant response.
 /// - Aggregates assistant text content into `final_text`.
+/// - Lets the child call tools allowed by
+///   `ToolRegistry::available_for(sub_spec, effective_ruleset)`.
 /// - Surfaces provider errors verbatim as
 ///   `TaskFailure::ProviderError(CompletionError)`.
 /// - Honours `ctx.abort_token.is_cancelled()` pre-call so a parent
@@ -957,33 +971,102 @@ pub trait SubAgentChildRunner: Send + Sync {
 ///   leak a stale request to the wire.
 ///
 /// What this runner does NOT do (yet):
-/// - No tool loop. The child cannot call `read_file`, `apply_patch`,
-///   or any other tool today; that wiring lands as a follow-up.
-/// - No `ContextHandoff`. The child sees only the `invocation.prompt`
-///   user message; parent transcript replay arrives with the handoff
-///   builder integration.
-/// - No child JSONL session. The runner does not write child
-///   per-turn events; the dispatcher continues to write only the
-///   parent-side `Spawned` / terminal events.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct DefaultSubAgentChildRunner;
+/// - No byte-for-byte golden transcript fixture. The child JSONL stream
+///   stores session snapshots for each tool step; later schema work may
+///   add dedicated `ToolCall` / `ToolResult` event variants.
+#[derive(Clone, Debug, Default)]
+pub struct DefaultSubAgentChildRunner {
+    /// CEX-S2-16 live-run registry the child tool loop records its current
+    /// tool/file into (for the `/agents` pane's live fields). `None` (the
+    /// default, and every bare `new()` runner) means no live tracking — the
+    /// child loop's registry writes are inert.
+    live_run_registry: Option<crate::internal::ai::agent_run::LiveRunRegistry>,
+}
 
 impl DefaultSubAgentChildRunner {
-    /// Construct a fresh runner. Stateless — provided for ergonomics
+    /// Construct a fresh runner with no live tracking. Provided for ergonomics
     /// alongside [`Default::default`].
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Attach a [`LiveRunRegistry`] so the child tool loop records its current
+    /// tool/file (CEX-S2-16 live fields). `libra code`'s session bootstrap wires
+    /// this with the same registry instance the `/agents` pane reads, so an
+    /// in-flight sub-agent's activity becomes visible end-to-end.
+    ///
+    /// [`LiveRunRegistry`]: crate::internal::ai::agent_run::LiveRunRegistry
+    pub fn with_live_run_registry(
+        mut self,
+        registry: crate::internal::ai::agent_run::LiveRunRegistry,
+    ) -> Self {
+        self.live_run_registry = Some(registry);
+        self
     }
 }
 
 /// Lightweight tool-loop observer that accumulates the per-turn
-/// count and the total usage seen during a child run. The child
-/// runner uses this to surface real `steps_used` / `usage` on the
-/// returned `TaskResult` instead of always reporting 1 / default.
-#[derive(Debug, Default)]
+/// count, usage, and child-visible tool transcript seen during a child run.
+/// The child runner uses this to surface real `steps_used` / `usage` on the
+/// returned `TaskResult`, and to persist per-tool child session snapshots under
+/// `SessionJsonlStore::child(agent_run_id)`.
+#[derive(Debug)]
 struct ChildRunObserver {
     steps_used: u32,
+    tool_call_count: u32,
     usage: CompletionUsageSummary,
+    child_store: SessionJsonlStore,
+    child_session: Arc<Mutex<SessionState>>,
+    agent_run_id: AgentRunId,
+    subagent_name: String,
+}
+
+impl ChildRunObserver {
+    fn new(
+        child_store: SessionJsonlStore,
+        child_session: Arc<Mutex<SessionState>>,
+        agent_run_id: AgentRunId,
+        subagent_name: String,
+    ) -> Self {
+        Self {
+            steps_used: 0,
+            tool_call_count: 0,
+            usage: CompletionUsageSummary::default(),
+            child_store,
+            child_session,
+            agent_run_id,
+            subagent_name,
+        }
+    }
+
+    fn push_child_message(&self, role: &'static str, content: String, warning: &'static str) {
+        mutate_child_session_snapshot(
+            &self.child_store,
+            &self.child_session,
+            warning,
+            self.agent_run_id,
+            &self.subagent_name,
+            |state| {
+                let now = chrono::Utc::now();
+                state.messages.push(SessionMessage {
+                    role: role.to_string(),
+                    content,
+                    timestamp: now,
+                });
+                state.updated_at = now;
+            },
+        );
+    }
+
+    fn append_child_event(&self, event: SessionEvent, warning: &'static str) {
+        append_child_session_event(
+            &self.child_store,
+            event,
+            warning,
+            self.agent_run_id,
+            &self.subagent_name,
+        );
+    }
 }
 
 impl super::tool_loop::ToolLoopObserver for ChildRunObserver {
@@ -996,6 +1079,98 @@ impl super::tool_loop::ToolLoopObserver for ChildRunObserver {
         // `merge_optional_*` rule applies (saturating add, None
         // collapses to existing).
         self.usage.merge(usage);
+    }
+
+    fn on_assistant_step_text(&mut self, text: &str) {
+        self.push_child_message(
+            "assistant",
+            text.to_string(),
+            "failed to append sub-agent child assistant step snapshot",
+        );
+    }
+
+    fn on_tool_call_begin(
+        &mut self,
+        call_id: &str,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) {
+        self.tool_call_count = self.tool_call_count.saturating_add(1);
+        self.append_child_event(
+            SessionEvent::tool_call(SessionToolCallEvent {
+                event_id: uuid::Uuid::new_v4(),
+                recorded_at: chrono::Utc::now(),
+                agent_run_id: self.agent_run_id,
+                subagent_name: self.subagent_name.clone(),
+                call_id: call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                arguments: arguments.clone(),
+            }),
+            "failed to append sub-agent child tool-call event",
+        );
+        self.push_child_message(
+            "tool_call",
+            serde_json::json!({
+                "id": call_id,
+                "name": tool_name,
+                "arguments": arguments,
+            })
+            .to_string(),
+            "failed to append sub-agent child tool-call snapshot",
+        );
+    }
+
+    fn on_tool_call_end(
+        &mut self,
+        call_id: &str,
+        tool_name: &str,
+        result: &Result<ToolOutput, String>,
+    ) {
+        let (status, result_value, error_value) = match result {
+            Ok(output) => (
+                if output.is_success() {
+                    "success".to_string()
+                } else {
+                    "failure".to_string()
+                },
+                Some(output.clone().into_response()),
+                None,
+            ),
+            Err(error) => ("error".to_string(), None, Some(error.clone())),
+        };
+        self.append_child_event(
+            SessionEvent::tool_result(SessionToolResultEvent {
+                event_id: uuid::Uuid::new_v4(),
+                recorded_at: chrono::Utc::now(),
+                agent_run_id: self.agent_run_id,
+                subagent_name: self.subagent_name.clone(),
+                call_id: call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                status: status.clone(),
+                result: result_value.clone(),
+                error: error_value.clone(),
+            }),
+            "failed to append sub-agent child tool-result event",
+        );
+        let payload = match error_value.as_ref() {
+            None => serde_json::json!({
+                "id": call_id,
+                "name": tool_name,
+                "status": status,
+                "result": result_value,
+            }),
+            Some(error) => serde_json::json!({
+                "id": call_id,
+                "name": tool_name,
+                "status": status,
+                "error": error,
+            }),
+        };
+        self.push_child_message(
+            "tool_result",
+            payload.to_string(),
+            "failed to append sub-agent child tool-result snapshot",
+        );
     }
 }
 
@@ -1054,10 +1229,36 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
                 .workspace_registry
                 .as_ref()
                 .unwrap_or(request.ctx.tool_registry);
+            // Tag the child's inherited runtime context with its run id so the
+            // child's Source-Pool calls attribute their `source_call_log` rows
+            // to this run (CEX-S2-14 trace chain). Only stamps when a context
+            // was inherited — the no-context path stays `None` (unchanged).
             let child_runtime_context = request
                 .workspace_runtime_context
                 .clone()
-                .or_else(|| request.ctx.runtime_context.clone());
+                .or_else(|| request.ctx.runtime_context.clone())
+                .map(|mut ctx| {
+                    ctx.agent_run_id = Some(request.agent_run_id.0.to_string());
+                    ctx
+                });
+            let child_store = request
+                .ctx
+                .session_store
+                .child(&request.agent_run_id.0.to_string());
+            let child_session = Arc::new(Mutex::new(build_child_session_state(
+                &request,
+                child_registry.working_dir(),
+                &provider_id,
+                &model_id,
+            )));
+            mutate_child_session_snapshot(
+                &child_store,
+                &child_session,
+                "failed to append sub-agent child session start snapshot",
+                request.agent_run_id,
+                &request.sub_spec.name,
+                |state| state.add_user_message(&request.invocation.prompt),
+            );
 
             let allowed_tools: Vec<String> = child_registry
                 .available_for(request.sub_spec, request.effective_ruleset)
@@ -1086,8 +1287,46 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
                 // [workspace_root]); otherwise it is the inherited
                 // parent context verbatim.
                 runtime_context: child_runtime_context,
+                // CEX-S2-14 验收 (5) trace chain: record the child's provider
+                // calls into `agent_usage_stats` attributed to this sub-agent
+                // run (`agent_run_id`) + profile (`agent_name`), joining
+                // `thread_id → agent_run_id` so per-agent cost/usage is
+                // queryable. Before this the child loop left both `None`, so
+                // sub-agent usage never reached the table (the parent recorded
+                // only its own calls).
+                usage_recorder: Some(request.ctx.usage_recorder.clone()),
+                usage_context: Some(child_usage_context(
+                    request.agent_run_id,
+                    request.ctx.parent_thread_id,
+                    &request.sub_spec.name,
+                    &provider_id,
+                    &model_id,
+                )),
+                // CEX-S2-16 live fields: hand the child loop the session's
+                // live-run registry (when wired) so it records the tool it is
+                // currently executing, keyed by this run's `agent_run_id`. The
+                // `/agents` pane reads the same registry instance.
+                live_run_registry: self.live_run_registry.clone(),
                 ..ToolLoopConfig::default()
             };
+
+            // CEX-S2-16 live fields: register this run as in-flight so the
+            // `/agents` pane lists it immediately, and finish it on EVERY exit
+            // (completion, failure, parent-abort cancel, or panic) via the
+            // scope guard below, so the registry never retains a stale terminal
+            // run. The pane's in-flight filter already hides a lingering entry;
+            // this keeps the live map bounded to genuinely-running children.
+            if let Some(live_registry) = self.live_run_registry.as_ref() {
+                live_registry.register(request.agent_run_id);
+            }
+            let _live_run_finish = scopeguard::guard(
+                (self.live_run_registry.clone(), request.agent_run_id),
+                |(registry, run_id)| {
+                    if let Some(registry) = registry {
+                        registry.finish(&run_id);
+                    }
+                },
+            );
 
             // Drive the history-aware tool loop with our observer so
             // the returned `TaskResult` reports the real per-turn
@@ -1108,7 +1347,12 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
             // The dispatcher's `map_failure_to_terminal_event`
             // (v0.17.757) maps the returned `Cancelled` to
             // `AgentRunEvent::Cancelled { reason: UserRequested }`.
-            let mut observer = ChildRunObserver::default();
+            let mut observer = ChildRunObserver::new(
+                child_store.clone(),
+                Arc::clone(&child_session),
+                request.agent_run_id,
+                request.sub_spec.name.clone(),
+            );
             let abort_token_clone = request.ctx.abort_token.clone();
             let child_loop = run_tool_loop_with_history_and_observer(
                 &model,
@@ -1122,13 +1366,58 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
             let turn_result = tokio::select! {
                 biased;
                 _ = abort_token_clone.cancelled() => {
+                    mutate_child_session_snapshot(
+                        &child_store,
+                        &child_session,
+                        "failed to append sub-agent child session cancellation snapshot",
+                        request.agent_run_id,
+                        &request.sub_spec.name,
+                        |state| {
+                            state.summary = "Sub-agent cancelled by parent abort".to_string();
+                            state
+                                .metadata
+                                .insert("status".to_string(), serde_json::json!("cancelled"));
+                        },
+                    );
                     return Err(TaskFailure::Cancelled {
                         source: CancellationSource::ParentAbort,
                     });
                 }
                 result = child_loop => result,
             };
-            let turn = turn_result.map_err(TaskFailure::ProviderError)?;
+            let turn = match turn_result {
+                Ok(turn) => turn,
+                Err(error) => {
+                    mutate_child_session_snapshot(
+                        &child_store,
+                        &child_session,
+                        "failed to append sub-agent child session failure snapshot",
+                        request.agent_run_id,
+                        &request.sub_spec.name,
+                        |state| {
+                            state.summary = format!("Sub-agent failed: {error}");
+                            state
+                                .metadata
+                                .insert("status".to_string(), serde_json::json!("failed"));
+                        },
+                    );
+                    return Err(TaskFailure::ProviderError(error));
+                }
+            };
+            mutate_child_session_snapshot(
+                &child_store,
+                &child_session,
+                "failed to append sub-agent child session completion snapshot",
+                request.agent_run_id,
+                &request.sub_spec.name,
+                |state| {
+                    state.add_assistant_message(&turn.final_text);
+                    state.summary = "Sub-agent completed".to_string();
+                    state
+                        .metadata
+                        .insert("status".to_string(), serde_json::json!("completed"));
+                },
+            );
 
             Ok(TaskResult {
                 task_id: request.task_id,
@@ -1137,9 +1426,145 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
                 model_id,
                 final_text: turn.final_text,
                 steps_used: observer.steps_used,
+                tool_call_count: observer.tool_call_count,
                 usage: observer.usage,
             })
         })
+    }
+}
+
+/// Build the [`UsageContext`] for a sub-agent child tool loop so its provider
+/// calls land in `agent_usage_stats` attributed to the run (CEX-S2-14 验收 (5)
+/// trace chain). `session_id` = the child run id (matching the child session's
+/// `state.id` in [`build_child_session_state`]), `thread_id` = the parent
+/// thread, and `agent_run_id` / `agent_name` carry the per-agent attribution
+/// the single-agent path leaves `None`.
+fn child_usage_context(
+    agent_run_id: AgentRunId,
+    parent_thread_id: &str,
+    agent_name: &str,
+    provider_id: &str,
+    model_id: &str,
+) -> crate::internal::ai::usage::UsageContext {
+    crate::internal::ai::usage::UsageContext {
+        session_id: Some(agent_run_id.0.to_string()),
+        thread_id: Some(parent_thread_id.to_string()),
+        agent_run_id: Some(agent_run_id.0.to_string()),
+        run_id: None,
+        provider: provider_id.to_string(),
+        model: model_id.to_string(),
+        request_kind: "completion".to_string(),
+        intent: None,
+        agent_name: Some(agent_name.to_string()),
+    }
+}
+
+fn build_child_session_state(
+    request: &SubAgentChildRunRequest<'_>,
+    working_dir: &std::path::Path,
+    provider_id: &str,
+    model_id: &str,
+) -> SessionState {
+    let mut state = SessionState::new(working_dir.to_string_lossy().as_ref());
+    state.id = request.agent_run_id.0.to_string();
+    state.metadata.insert(
+        "kind".to_string(),
+        serde_json::json!("sub_agent_child_session"),
+    );
+    state.metadata.insert(
+        "agent_run_id".to_string(),
+        serde_json::json!(request.agent_run_id.0.to_string()),
+    );
+    state.metadata.insert(
+        "parent_thread_id".to_string(),
+        serde_json::json!(request.ctx.parent_thread_id),
+    );
+    state.metadata.insert(
+        "parent_session_id".to_string(),
+        serde_json::json!(request.ctx.parent_session_id.as_str()),
+    );
+    state.metadata.insert(
+        "parent_message_id".to_string(),
+        serde_json::json!(request.ctx.parent_message_id.as_str()),
+    );
+    state.metadata.insert(
+        "subagent_name".to_string(),
+        serde_json::json!(&request.sub_spec.name),
+    );
+    state.metadata.insert(
+        "subagent_type".to_string(),
+        serde_json::json!(&request.invocation.subagent_type),
+    );
+    state
+        .metadata
+        .insert("task_id".to_string(), serde_json::json!(&request.task_id));
+    state
+        .metadata
+        .insert("provider_id".to_string(), serde_json::json!(provider_id));
+    state
+        .metadata
+        .insert("model_id".to_string(), serde_json::json!(model_id));
+    state
+        .metadata
+        .insert("status".to_string(), serde_json::json!("running"));
+    state
+}
+
+fn append_child_session_snapshot(
+    store: &SessionJsonlStore,
+    state: &SessionState,
+    warning: &'static str,
+    agent_run_id: AgentRunId,
+    subagent_name: &str,
+) {
+    if let Err(error) = store.append(&SessionEvent::snapshot(state.clone())) {
+        tracing::warn!(
+            error = %error,
+            agent_run_id = %agent_run_id.0,
+            subagent = %subagent_name,
+            "{warning}",
+        );
+    }
+}
+
+fn append_child_session_event(
+    store: &SessionJsonlStore,
+    event: SessionEvent,
+    warning: &'static str,
+    agent_run_id: AgentRunId,
+    subagent_name: &str,
+) {
+    if let Err(error) = store.append(&event) {
+        tracing::warn!(
+            error = %error,
+            agent_run_id = %agent_run_id.0,
+            subagent = %subagent_name,
+            "{warning}",
+        );
+    }
+}
+
+fn mutate_child_session_snapshot(
+    store: &SessionJsonlStore,
+    state: &Arc<Mutex<SessionState>>,
+    warning: &'static str,
+    agent_run_id: AgentRunId,
+    subagent_name: &str,
+    mutate: impl FnOnce(&mut SessionState),
+) {
+    match state.lock() {
+        Ok(mut state) => {
+            mutate(&mut state);
+            append_child_session_snapshot(store, &state, warning, agent_run_id, subagent_name);
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                agent_run_id = %agent_run_id.0,
+                subagent = %subagent_name,
+                "{warning}: child session state lock poisoned",
+            );
+        }
     }
 }
 
@@ -1168,6 +1593,51 @@ pub trait SubAgentDispatcher: Send + Sync {
         invocation: TaskInvocation,
         entry_kind: TaskEntryKind,
     ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>>;
+
+    /// CEX-S2-14: dispatch a batch of `task` calls under controlled
+    /// parallelism, returning each result in input order. `max_parallel`
+    /// bounds concurrency; the implementation also serialises any pair of
+    /// tasks whose `write_scope`s overlap, so two sub-agents never co-edit
+    /// the same path. Each task carries its own fully-built
+    /// [`DispatchContext`] (its own `parent_message_id` / file-history
+    /// batch), exactly as the single [`dispatch`](Self::dispatch) path
+    /// requires.
+    ///
+    /// The default impl runs the batch **sequentially** — byte-equivalent
+    /// to awaiting [`dispatch`](Self::dispatch) once per task in order, with
+    /// `max_parallel` and `write_scope` ignored — so dispatchers that do not
+    /// implement controlled parallelism (test stubs, future backends) need
+    /// no change. [`DefaultSubAgentDispatcher`] overrides it with the
+    /// `ParallelSchedulerState`-driven executor.
+    ///
+    /// Exposing the batch entry on the trait — rather than only on the
+    /// concrete dispatcher — is what lets the parent tool loop, which holds
+    /// an `Arc<dyn SubAgentDispatcher>`, reach controlled parallelism once
+    /// the per-turn cap is unlocked (CP-S2-4). Until then the production cap
+    /// resolves to 1 and this path is byte-equivalent to the single path.
+    ///
+    /// [`DefaultSubAgentDispatcher`]: super::sub_agent_dispatcher::DefaultSubAgentDispatcher
+    fn dispatch_batch<'a>(
+        &'a self,
+        tasks: Vec<(
+            DispatchContext<'a>,
+            TaskInvocation,
+            TaskEntryKind,
+            Vec<String>,
+        )>,
+        max_parallel: usize,
+    ) -> BoxFuture<'a, Vec<Result<TaskResult, TaskFailure>>> {
+        // The default path is intentionally sequential; controlled
+        // parallelism is a `DefaultSubAgentDispatcher` capability.
+        let _ = max_parallel;
+        Box::pin(async move {
+            let mut results = Vec::with_capacity(tasks.len());
+            for (ctx, invocation, entry_kind, _write_scope) in tasks {
+                results.push(self.dispatch(ctx, invocation, entry_kind).await);
+            }
+            results
+        })
+    }
 }
 
 /// Owned runtime bundle the parent tool loop uses to intercept the
@@ -1217,6 +1687,12 @@ pub struct SubAgentToolLoopRuntime {
     /// the project level (no `.libra/hooks.json`); the child
     /// then runs without hook dispatch, matching the parent.
     pub hook_runner: Option<Arc<crate::internal::ai::hooks::HookRunner>>,
+    /// CEX-S2-14: max number of `task` calls the parent tool loop dispatches
+    /// concurrently when a single assistant turn emits several. `1` (the
+    /// production value while the CP-S2-4 cap is in force) keeps dispatch
+    /// strictly sequential — the tool loop's parallel branch only activates at
+    /// `>= 2`, so a `1` here is byte-identical to the pre-parallel behaviour.
+    pub max_parallel: usize,
 }
 
 impl std::fmt::Debug for SubAgentToolLoopRuntime {
@@ -1299,6 +1775,38 @@ impl SubAgentToolLoopRuntime {
 mod tests {
     use super::*;
 
+    /// CEX-S2-14 验收 (5): a sub-agent child loop's usage context attributes its
+    /// rows to the run (`agent_run_id`) and profile (`agent_name`) and joins the
+    /// parent thread, so `agent_usage_stats` can relate `thread_id → agent_run_id`
+    /// (the single-agent path leaves those `None`). `session_id` mirrors the
+    /// child session id (the run id) so usage and the JSONL transcript align.
+    #[test]
+    fn child_usage_context_attributes_run_thread_and_agent() {
+        let run_id = AgentRunId(uuid::Uuid::from_u128(0xc0ffee));
+        let ctx = child_usage_context(
+            run_id,
+            "parent-thread-1",
+            "explorer",
+            "deepseek",
+            "deepseek-chat",
+        );
+        assert_eq!(
+            ctx.agent_run_id.as_deref(),
+            Some(run_id.0.to_string().as_str())
+        );
+        assert_eq!(
+            ctx.session_id.as_deref(),
+            Some(run_id.0.to_string().as_str())
+        );
+        assert_eq!(ctx.thread_id.as_deref(), Some("parent-thread-1"));
+        assert_eq!(ctx.agent_name.as_deref(), Some("explorer"));
+        assert_eq!(ctx.provider, "deepseek");
+        assert_eq!(ctx.model, "deepseek-chat");
+        // `run_id` (the orchestrator object run, not the agent run) stays unset —
+        // the sub-agent path keys on `agent_run_id`.
+        assert_eq!(ctx.run_id, None);
+    }
+
     /// Scenario: `ChannelPermissionAsker` (v0.17.787) forwards every
     /// ask to its consumer channel and awaits the reply. With a
     /// consumer present that replies `Once`, the asker resolves
@@ -1320,6 +1828,7 @@ mod tests {
                 name: "explore".to_string(),
                 prompt_digest: "abc123".to_string(),
             },
+            task_id: Some("task-77"),
         };
 
         // Happy path: consumer replies with Once.
@@ -1333,6 +1842,8 @@ mod tests {
             let ask = rx.recv().await.expect("consumer should receive ask");
             assert_eq!(ask.permission, "shell");
             assert_eq!(ask.patterns, vec!["ls".to_string()]);
+            // CEX-S2-16 验收 (4): the task id rides the channel to the prompt.
+            assert_eq!(ask.task_id.as_deref(), Some("task-77"));
             ask.reply_tx
                 .send(PermissionReply::Once)
                 .expect("reply send must succeed");
@@ -1402,6 +1913,46 @@ mod tests {
 
         let late_child = root.child();
         assert!(late_child.is_cancelled());
+    }
+
+    /// Scenario: a `cancel()` racing concurrent `child()` creations must leave
+    /// **no** child un-cancelled. This pins the double-checked registration in
+    /// [`AbortToken::child`] (check-before-push, re-check-after-push): a naive
+    /// single-check implementation could register a child on a token that is
+    /// cancelled between the check and the push, leaving an orphaned live child
+    /// after the parent's `cancel()` fan-out already ran — exactly the
+    /// abort-cancel race that would let a sub-agent keep running after the user
+    /// cancelled the session.
+    #[test]
+    fn abort_token_child_creation_races_cancel_without_orphans() {
+        // Repeat to exercise many interleavings of cancel vs. child().
+        for _ in 0..200 {
+            let root = AbortToken::new();
+            let mut handles = Vec::new();
+
+            // Several threads create children concurrently...
+            for _ in 0..8 {
+                let parent = root.clone();
+                handles.push(std::thread::spawn(move || parent.child()));
+            }
+            // ...while this thread cancels the root mid-flight.
+            root.cancel();
+
+            // Every child observed by a creator thread must end cancelled:
+            // either it was created after cancel (immediate), or it was
+            // registered and reached by the fan-out, or the post-push re-check
+            // caught it. None may be left live.
+            for handle in handles {
+                let child = handle.join().expect("child creation thread panicked");
+                assert!(
+                    child.is_cancelled(),
+                    "a child created while racing cancel() must not escape cancellation",
+                );
+            }
+
+            // And any child created strictly after cancel() is immediately cancelled.
+            assert!(root.child().is_cancelled());
+        }
     }
 
     /// Scenario: async waiters are notified when a token is cancelled.
@@ -1580,6 +2131,181 @@ mod tests {
         // assertion; this drop just keeps clippy from flagging an
         // unused binding.
         drop(dispatcher);
+    }
+
+    /// CEX-S2-16: `with_live_run_registry` attaches the registry the child loop
+    /// records its current tool/file into; a bare `new()` runner carries none
+    /// (live tracking off). The child config passes this through to the loop,
+    /// closing the writer chain runner → child config → tool loop.
+    #[test]
+    fn default_child_runner_carries_live_run_registry() {
+        use crate::internal::ai::agent_run::LiveRunRegistry;
+
+        let registry = LiveRunRegistry::new();
+        let runner = DefaultSubAgentChildRunner::new().with_live_run_registry(registry);
+        assert!(runner.live_run_registry.is_some());
+        assert!(
+            DefaultSubAgentChildRunner::new()
+                .live_run_registry
+                .is_none()
+        );
+    }
+
+    /// CEX-S2-16: the runner's scope guard finishes the run on EVERY exit. This
+    /// pins that exact pattern: the run is in the registry while the guard is
+    /// alive and removed once it drops (so a terminal run never lingers).
+    #[test]
+    fn live_run_finish_guard_removes_run_on_drop() {
+        use crate::internal::ai::agent_run::{AgentRunId, LiveRunRegistry};
+
+        let registry = LiveRunRegistry::new();
+        let run_id = AgentRunId::new();
+        registry.register(run_id);
+        assert!(registry.get(&run_id).is_some(), "registered while running");
+        {
+            let _guard = scopeguard::guard((Some(registry.clone()), run_id), |(reg, id)| {
+                if let Some(reg) = reg {
+                    reg.finish(&id);
+                }
+            });
+            assert!(registry.get(&run_id).is_some(), "still present mid-run");
+        }
+        assert!(registry.is_empty(), "guard drop finishes the run");
+    }
+
+    /// CEX-S2-14: a dispatcher that does NOT override `dispatch_batch`
+    /// inherits the trait's sequential default, which must await `dispatch`
+    /// once per task **in input order** and return one result per task in
+    /// that same order. This pins the fallback contract relied on by test
+    /// stubs and any future non-parallel backend.
+    #[tokio::test]
+    async fn dispatch_batch_default_impl_runs_each_task_sequentially_in_order() {
+        use std::sync::Mutex;
+
+        use crate::internal::ai::providers::{ProviderBuildOptions, ProviderFactory};
+
+        // A stub that records the subagent_type of every dispatched task and
+        // echoes it back as the failure name, so the result order is
+        // observable. It deliberately leaves `dispatch_batch` un-overridden.
+        struct RecordingSeqDispatcher {
+            seen: Arc<Mutex<Vec<String>>>,
+        }
+        impl SubAgentDispatcher for RecordingSeqDispatcher {
+            fn dispatch<'a>(
+                &'a self,
+                _ctx: DispatchContext<'a>,
+                invocation: TaskInvocation,
+                _entry_kind: TaskEntryKind,
+            ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>> {
+                let name = invocation.subagent_type.clone();
+                self.seen.lock().expect("seen lock").push(name.clone());
+                Box::pin(async move {
+                    Err(TaskFailure::UnknownSubagent {
+                        name,
+                        suggestions: vec![],
+                    })
+                })
+            }
+        }
+
+        // Materialise every reference a `DispatchContext` borrows, then a
+        // `make_ctx` closure mints a fresh context per task (each with its
+        // own message id + abort token), mirroring the real tool-loop caller.
+        let parent_spec = AgentExecutionSpec::default();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = ModelBinding::parse("anthropic/claude-3-5-sonnet-latest")
+            .expect("parent binding must parse");
+        let permission_service =
+            PermissionService::new(Arc::new(AskerThatNeverFires) as Arc<dyn PermissionAsker>);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = SessionJsonlStore::new(temp.path().to_path_buf());
+        let provider_factory = ProviderFactory;
+        let parent_options = ProviderBuildOptions::default();
+        let tool_registry = crate::internal::ai::tools::ToolRegistry::with_working_dir(
+            std::path::PathBuf::from("/tmp"),
+        );
+        let conn = sea_orm::Database::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory db");
+        let usage_recorder = crate::internal::ai::usage::UsageRecorder::new(conn);
+        let context_frame_loader = ContextFrameLoader::default();
+        let session_id: SessionId = "session-seq".to_string();
+
+        let make_ctx = || DispatchContext {
+            parent_thread_id: "thread-seq",
+            parent_session_id: &session_id,
+            parent_agent: &parent_spec,
+            parent_ruleset: &parent_ruleset,
+            parent_model_binding: &parent_binding,
+            parent_message_id: MessageId::from("msg"),
+            permission_service: &permission_service,
+            session_store: &store,
+            provider_factory: &provider_factory,
+            provider_build_options: &parent_options,
+            provider_build_options_resolver: None,
+            tool_registry: &tool_registry,
+            runtime_context: None,
+            usage_recorder: &usage_recorder,
+            context_frame_loader: &context_frame_loader,
+            abort_token: AbortToken::new(),
+            depth: 0,
+            compaction_model: None,
+            hook_runner: None,
+        };
+
+        let mk_inv = |name: &str| TaskInvocation {
+            description: format!("desc-{name}"),
+            prompt: format!("prompt-{name}"),
+            subagent_type: name.to_string(),
+            task_id: None,
+        };
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let dispatcher = RecordingSeqDispatcher { seen: seen.clone() };
+        // Reach the default through the trait object, as the tool loop will.
+        let dyn_dispatcher: &dyn SubAgentDispatcher = &dispatcher;
+
+        let results = dyn_dispatcher
+            .dispatch_batch(
+                vec![
+                    (
+                        make_ctx(),
+                        mk_inv("alpha"),
+                        TaskEntryKind::LlmInitiated,
+                        Vec::new(),
+                    ),
+                    (
+                        make_ctx(),
+                        mk_inv("beta"),
+                        TaskEntryKind::LlmInitiated,
+                        Vec::new(),
+                    ),
+                    (
+                        make_ctx(),
+                        mk_inv("gamma"),
+                        TaskEntryKind::LlmInitiated,
+                        Vec::new(),
+                    ),
+                ],
+                4,
+            )
+            .await;
+
+        // The default impl dispatched each task exactly once, in input order.
+        assert_eq!(
+            seen.lock().expect("seen lock").as_slice(),
+            ["alpha", "beta", "gamma"],
+            "default dispatch_batch must await dispatch once per task in input order",
+        );
+        // Results come back one-per-task in the same order.
+        let result_names: Vec<&str> = results
+            .iter()
+            .map(|r| match r {
+                Err(TaskFailure::UnknownSubagent { name, .. }) => name.as_str(),
+                other => panic!("unexpected result variant: {other:?}"),
+            })
+            .collect();
+        assert_eq!(result_names, ["alpha", "beta", "gamma"]);
     }
 
     /// Scenario: a session whose JSONL has no `ContextFrame` events

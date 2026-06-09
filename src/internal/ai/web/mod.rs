@@ -1,5 +1,7 @@
 //! # Embedded Web Server for `libra code`
 //!
+//! # `libra code` 的嵌入式网络服务器
+//!
 //! This module serves the static Next.js bundle and the provider-agnostic
 //! `/api/code/*` protocol used by the browser UI.
 
@@ -960,9 +962,11 @@ fn code_ui_runtime(state: &WebAppState) -> Result<Arc<CodeUiRuntimeHandle>, WebA
 
 fn code_ui_event_to_sse(event: code_ui::CodeUiEventEnvelope) -> Event {
     Event::default()
-        .event(event.event_type.clone())
+        .event(event.event_type.as_str())
         .json_data(event)
-        .unwrap_or_else(|_| Event::default().event("session_updated"))
+        .unwrap_or_else(|_| {
+            Event::default().event(code_ui::CodeUiEventType::SessionUpdated.as_str())
+        })
 }
 
 fn ensure_loopback_api_request(remote_addr: SocketAddr) -> Result<(), WebApiError> {
@@ -1595,7 +1599,10 @@ mod tests {
                 .await
                 .expect("lagged receiver should produce recovery event");
 
-        assert_eq!(event.event_type, "session_updated");
+        assert_eq!(
+            event.event_type,
+            crate::internal::ai::web::code_ui::CodeUiEventType::SessionUpdated
+        );
         assert_eq!(event.seq, 0);
         let snapshot = crate::internal::ai::web::code_ui::snapshot_from_event(&event)
             .expect("recovery event should contain full snapshot");

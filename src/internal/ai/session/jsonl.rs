@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use super::state::SessionState;
 use crate::internal::ai::{
-    agent_run::{AgentRunEvent, AgentRunEventEnvelope},
+    agent_run::{AgentRunEvent, AgentRunEventEnvelope, AgentRunId},
     context_budget::{CompactionEvent, ContextFrameEvent, MemoryAnchorEvent, MemoryAnchorReplay},
     goal::GoalEventEnvelope,
     runtime::event::Event,
@@ -39,15 +39,23 @@ pub enum SessionEvent {
     /// projections and skipped by older binaries through the unknown
     /// event branch.
     AgentRun(AgentRunEventEnvelope),
+    /// Dedicated child tool-call transcript event. The child session
+    /// stream also carries `SessionSnapshot` rows for legacy resume,
+    /// but this event keeps tool arguments queryable without parsing
+    /// snapshot message strings.
+    ToolCall(SessionToolCallEvent),
+    /// Dedicated child tool-result transcript event. Mirrors
+    /// [`Self::ToolCall`] and does not mutate legacy `SessionState`.
+    ToolResult(SessionToolResultEvent),
     /// OC-Phase 6 Goal mode envelope. Goal supervisor wiring emits these
     /// alongside normal session events; older binaries still skip unknown
     /// `goal_event` payloads via the `parse_session_event_value` `unknown`
     /// branch.
     Goal(GoalEventEnvelope),
-    /// OC-Phase 4 ArtifactLedger JSONL projection (v0.17.810). The
-    /// `phase3.rs::write_validation_report` and
-    /// `phase4.rs::write_decision_proposal` / `write_risk_score_breakdown`
-    /// paths persist artefacts to `ai_validation_report` /
+    /// OC-Phase 4 ArtifactLedger JSONL projection. The
+    /// `ValidationReportStore::write_latest_with_session_mirror` and
+    /// `DecisionProposalStore::write_latest_with_session_mirror` paths
+    /// persist artefacts to `ai_validation_report` /
     /// `ai_decision_proposal` / `ai_risk_score_breakdown` SQLite
     /// tables; this variant projects the same write into the
     /// session JSONL stream so a single tail of the session log
@@ -94,6 +102,34 @@ pub struct AiArtifactEvent {
     pub payload: serde_json::Value,
 }
 
+/// Dedicated child tool-call transcript event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionToolCallEvent {
+    pub event_id: Uuid,
+    pub recorded_at: DateTime<Utc>,
+    pub agent_run_id: AgentRunId,
+    pub subagent_name: String,
+    pub call_id: String,
+    pub tool_name: String,
+    pub arguments: serde_json::Value,
+}
+
+/// Dedicated child tool-result transcript event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionToolResultEvent {
+    pub event_id: Uuid,
+    pub recorded_at: DateTime<Utc>,
+    pub agent_run_id: AgentRunId,
+    pub subagent_name: String,
+    pub call_id: String,
+    pub tool_name: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Full session-state snapshot event.
 ///
 /// Snapshots keep CEX-12 compatible with the existing `SessionState` resume
@@ -132,6 +168,14 @@ impl SessionEvent {
         Self::AgentRun(event.into())
     }
 
+    pub fn tool_call(event: SessionToolCallEvent) -> Self {
+        Self::ToolCall(event)
+    }
+
+    pub fn tool_result(event: SessionToolResultEvent) -> Self {
+        Self::ToolResult(event)
+    }
+
     pub fn goal(event: GoalEventEnvelope) -> Self {
         Self::Goal(event)
     }
@@ -160,6 +204,8 @@ impl SessionEvent {
             | Self::CompactionEvent(_)
             | Self::MemoryAnchor(_)
             | Self::AgentRun(_)
+            | Self::ToolCall(_)
+            | Self::ToolResult(_)
             | Self::Goal(_)
             | Self::AiArtifact(_) => {}
         }
@@ -174,6 +220,8 @@ impl Event for SessionEvent {
             Self::CompactionEvent(event) => event.event_kind(),
             Self::MemoryAnchor(event) => event.event_kind(),
             Self::AgentRun(_) => "agent_run",
+            Self::ToolCall(_) => "tool_call",
+            Self::ToolResult(_) => "tool_result",
             Self::Goal(event) => event.event_kind(),
             Self::AiArtifact(_) => "ai_artifact",
         }
@@ -189,6 +237,8 @@ impl Event for SessionEvent {
                 .known()
                 .map(crate::internal::ai::runtime::Event::event_id)
                 .unwrap_or_else(uuid::Uuid::nil),
+            Self::ToolCall(event) => event.event_id,
+            Self::ToolResult(event) => event.event_id,
             Self::Goal(event) => event.event_id(),
             Self::AiArtifact(event) => event.event_id,
         }
@@ -208,6 +258,14 @@ impl Event for SessionEvent {
                 .known()
                 .map(crate::internal::ai::runtime::Event::event_summary)
                 .unwrap_or_else(|| "unknown agent_run event".to_string()),
+            Self::ToolCall(event) => format!(
+                "sub-agent {} tool_call {} ({})",
+                event.subagent_name, event.call_id, event.tool_name
+            ),
+            Self::ToolResult(event) => format!(
+                "sub-agent {} tool_result {} ({}) status={}",
+                event.subagent_name, event.call_id, event.tool_name, event.status
+            ),
             Self::Goal(event) => event.event_summary(),
             Self::AiArtifact(event) => format!(
                 "ai_artifact {} (thread {}) {}",
@@ -263,6 +321,18 @@ impl SessionJsonlStore {
         })?;
 
         let path = self.events_path();
+
+        // Serialize the whole JSONL line (event + newline) into one buffer and
+        // emit it with a single `O_APPEND` `write_all`. Streaming the JSON
+        // straight to the file (multiple writes, then a separate `\n`) lets two
+        // concurrent appends interleave their partial JSON and corrupt both
+        // lines — which CEX-S2-14 parallel sub-agent dispatch would trigger,
+        // since concurrent child runs append `Spawned`/`Completed` events to the
+        // same parent session log. One buffered append keeps each line whole.
+        let mut line = serde_json::to_vec(event)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        line.push(b'\n');
+
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -277,9 +347,7 @@ impl SessionJsonlStore {
                 )
             })?;
 
-        serde_json::to_writer(&mut file, event)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-        file.write_all(b"\n").map_err(|err| {
+        file.write_all(&line).map_err(|err| {
             io::Error::new(
                 err.kind(),
                 format!(
@@ -373,6 +441,8 @@ impl SessionJsonlStore {
                 SessionEvent::SessionSnapshot(_) => {}
                 SessionEvent::MemoryAnchor(_) => {}
                 SessionEvent::AgentRun(_) => {}
+                SessionEvent::ToolCall(_) => {}
+                SessionEvent::ToolResult(_) => {}
                 // OC-Phase 6 P6.1: Goal envelopes do not contribute to
                 // `SessionContextReplay`. Goal state is replayed by
                 // `crate::internal::ai::goal::state::replay`, called by
@@ -398,6 +468,16 @@ impl SessionJsonlStore {
             }
         }
         Ok(replay)
+    }
+
+    pub fn load_ai_artifacts(&self) -> io::Result<Vec<AiArtifactEvent>> {
+        let mut artifacts = Vec::new();
+        for event in self.load_events()? {
+            if let SessionEvent::AiArtifact(artifact) = event {
+                artifacts.push(artifact);
+            }
+        }
+        Ok(artifacts)
     }
 
     pub fn has_events(&self) -> io::Result<bool> {
@@ -432,6 +512,8 @@ fn parse_session_event_value(value: Value) -> Result<Option<SessionEvent>, serde
         "compaction_event" => serde_json::from_value(value).map(Some),
         "memory_anchor" => serde_json::from_value(value).map(Some),
         "agent_run" => serde_json::from_value(value).map(Some),
+        "tool_call" => serde_json::from_value(value).map(Some),
+        "tool_result" => serde_json::from_value(value).map(Some),
         // OC-Phase 6 P6.1: Goal envelope. Old binaries that predate
         // P6.1 fall through to the `unknown` branch below and skip
         // the event without surfacing an error; this branch lets a
@@ -511,6 +593,57 @@ mod tests {
         use crate::internal::ai::runtime::event::Event;
         assert_eq!(event.event_kind(), "ai_artifact");
         assert!(event.event_summary().starts_with("ai_artifact "));
+    }
+
+    /// Child tool transcript events round-trip as first-class JSONL
+    /// envelopes. They intentionally do not mutate legacy
+    /// `SessionState`, but replay consumers can query arguments and
+    /// results without parsing snapshot message strings.
+    #[test]
+    fn session_tool_events_round_trip_without_mutating_session_state() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let store = SessionJsonlStore::new(tmp.path().to_path_buf());
+        let agent_run_id = AgentRunId::new();
+        let tool_call = SessionEvent::tool_call(SessionToolCallEvent {
+            event_id: Uuid::new_v4(),
+            recorded_at: Utc::now(),
+            agent_run_id,
+            subagent_name: "explore".to_string(),
+            call_id: "call_1".to_string(),
+            tool_name: "grep_files".to_string(),
+            arguments: serde_json::json!({"pattern": "TODO"}),
+        });
+        let tool_result = SessionEvent::tool_result(SessionToolResultEvent {
+            event_id: Uuid::new_v4(),
+            recorded_at: Utc::now(),
+            agent_run_id,
+            subagent_name: "explore".to_string(),
+            call_id: "call_1".to_string(),
+            tool_name: "grep_files".to_string(),
+            status: "success".to_string(),
+            result: Some(serde_json::json!({"matches": 3})),
+            error: None,
+        });
+        store.append(&tool_call).expect("append tool_call");
+        store.append(&tool_result).expect("append tool_result");
+
+        let loaded = store.load_events().expect("load events");
+        assert_eq!(loaded.len(), 2);
+        assert!(matches!(loaded[0], SessionEvent::ToolCall(_)));
+        assert!(matches!(loaded[1], SessionEvent::ToolResult(_)));
+        assert!(
+            store
+                .load_state()
+                .expect("load state should ignore tool events")
+                .is_none(),
+            "tool transcript events must not mutate legacy SessionState",
+        );
+
+        use crate::internal::ai::runtime::event::Event;
+        assert_eq!(tool_call.event_kind(), "tool_call");
+        assert_eq!(tool_result.event_kind(), "tool_result");
+        assert!(tool_call.event_summary().contains("grep_files"));
+        assert!(tool_result.event_summary().contains("status=success"));
     }
 
     /// `session_events_path` + `events_path()` must produce
@@ -598,6 +731,44 @@ mod tests {
             }
             other => panic!("expected SessionSnapshot, got {other:?}"),
         }
+    }
+
+    /// Concurrency contract (CEX-S2-14 prerequisite): many `append`s racing on
+    /// the same store each land as one whole, parseable JSONL line — none
+    /// interleave their JSON. Parallel sub-agent dispatch has concurrent child
+    /// runs appending `Spawned`/`Completed` events to the same parent session
+    /// log, so a partial-write interleave would corrupt the replay stream.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_appends_each_land_as_one_intact_line() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let store = SessionJsonlStore::new(tmp.path().to_path_buf());
+        const N: usize = 64;
+
+        let mut handles = Vec::with_capacity(N);
+        for i in 0..N {
+            let store = store.clone();
+            handles.push(tokio::spawn(async move {
+                // A sizeable, distinct summary so any partial-write interleave
+                // would corrupt the JSON detectably (load would error/miscount).
+                let mut state = SessionState::new("/tmp/work");
+                state.summary = format!("event-{i}-{}", "x".repeat(256));
+                store
+                    .append(&SessionEvent::snapshot(state))
+                    .expect("concurrent append must succeed");
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("append task must not panic");
+        }
+
+        // load_events errors on a malformed line, so a clean load of exactly N
+        // events proves every concurrent append is a whole, intact line.
+        let events = store.load_events().expect("every line parses");
+        assert_eq!(
+            events.len(),
+            N,
+            "all {N} concurrent appends survived intact (no interleave / loss)",
+        );
     }
 
     /// `load_state()` returns the latest snapshot when multiple are

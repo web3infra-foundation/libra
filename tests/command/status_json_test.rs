@@ -82,6 +82,11 @@ fn json_status_clean_repo_schema() {
 
     // is_clean
     assert_eq!(data["is_clean"], true);
+
+    assert!(
+        data["renames"].as_array().is_some_and(Vec::is_empty),
+        "clean status should expose an empty renames array, got: {data}"
+    );
 }
 
 #[tokio::test]
@@ -185,6 +190,30 @@ fn json_status_with_staged_changes() {
         "staged new: {staged_new:?}"
     );
     assert_eq!(data["is_clean"], false);
+}
+
+#[test]
+fn json_status_includes_renames_array() {
+    let repo = create_committed_repo();
+    fs::rename(
+        repo.path().join("tracked.txt"),
+        repo.path().join("renamed.txt"),
+    )
+    .unwrap();
+    let out = run_libra_command(&["add", "-A"], repo.path());
+    assert_cli_success(&out, "stage rename with add -A");
+
+    let output = run_libra_command(&["--json", "status"], repo.path());
+    assert_cli_success(&output, "json status after rename");
+
+    let parsed = parse_json_stdout(&output);
+    let renames = parsed["data"]["renames"]
+        .as_array()
+        .unwrap_or_else(|| panic!("renames should be an array, got: {}", parsed["data"]));
+    assert_eq!(renames.len(), 1, "expected one rename, got: {renames:?}");
+    assert_eq!(renames[0]["from"], "tracked.txt");
+    assert_eq!(renames[0]["to"], "renamed.txt");
+    assert_eq!(renames[0]["score"], 100);
 }
 
 // ---------------------------------------------------------------------------

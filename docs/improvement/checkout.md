@@ -77,15 +77,24 @@
 - **已落地完整 `CheckoutError` typed enum**（v0.17.372，13 个变体）；下面表格不再保留 “仍不引入” 的非目标项。
 - **不改写 `get_remote()` 的业务语义**。remote auto-track + pull 现有流程保持不变
 - **不统一 `checkout` 和 `switch` 的成功文案**。`checkout` 继续保留自己的兼容语气，例如 `Already on {branch}`（无引号）
-- **不新增 detach / commit / tag checkout 语义**
+- **不新增 detach / commit / tag checkout 语义** —— ⚠️ **已于 v0.17.1303..1305 决策反转**，见下方“决策反转”小节
 - **不把 `switch`/`checkout` 抽成共用执行层**
+
+### 决策反转（v0.17.1303..1305，`.omo/plans/checkout-improvement-plan.md`）
+
+早期“本次非目标”把 **detach / orphan checkout 语义** 列为不实现项。随着 `checkout` 兼容面正式可见（C5）并按 `.omo/plans/checkout-improvement-plan.md` 收口，这一非目标被**反转为已支持**：
+
+- **已支持（supported）**：`-B`（创建/重置分支）、`--detach [<commit-ish>]`（分离 HEAD）、`--orphan <name> [<start-point>]`（无历史分支）、`-f`/`--force`（跳过脏检查强制切换）。三处破坏性操作（`-B` 重置 ref、`--detach`/`-f` 覆盖工作区、`--orphan` 解绑历史）均经内部保留分支（`intent`/`agent-traces`）四路径硬拦截，并按第五节退出码契约（128/129/2）对齐。`--orphan` 与 stock Git 一致**不写 HEAD reflog**（目标 unborn，无提交 OID）。
+- **部分支持（partial）**：`--ours`/`--theirs` 冲突路径检出（恢复 stage #2/#3 到工作区，索引收敛为 stage #0 并保留 mode）。
+- **仍 deferred**：不带 `--detach` 的普通 `checkout <commit-ish>`/`<tag>` 检出、交互式 `-p`/`--patch`、`--conflict`。
+- 仍**不**把 `switch`/`checkout` 抽成共用执行层；新增模式各自在 `checkout.rs` 内以独立 helper（`run_force_branch_checkout` / `run_detach_checkout` / `run_orphan_checkout` / `restore_conflict_stage_paths`）实现，并扩展 `CheckoutOutput`（`reset`/`orphan` 字段）与 `CheckoutError`（`ConflictPathRequired` / `NotInMergeConflict` / `IndexReadFailed` / `WorktreeWriteFailed` / `HeadUpdateFailed`，复用现有稳定码，无新增 `StableErrorCode`）。
 
 ### 设计原则
 
 1. **switch 联动优先，checkout 行为稳定优先**：`switch` 改 helper 签名时，`checkout` 必须同步，但不能借机改掉现有命令行为
-2. **只替换脆弱实现，不扩大本批范围**：本次只把字符串匹配换成 `SwitchError` 变体匹配，不顺手做 JSON / typed error 全量重构
+2. **只替换脆弱实现，不扩大兼容收口范围**：第二批先把字符串匹配换成 `SwitchError` 变体匹配；第 30 批再独立完成 JSON / typed error 全量重构
 3. **checkout 保持自己的对外文案**：即使内部依赖 `switch`，外部仍是 `checkout` 语义，不和 `switch` 强行统一
-4. **剩余完整现代化边界**：当前文档必须显式给未来 `CheckoutError` typed enum 与更细代理错误分层留边界，避免与已落地的 JSON/render split 混淆
+4. **现代化边界已关闭**：`CheckoutError` typed enum 与 remote auto-track 代理错误分层已落地；后续新增 checkout 语义时再同步扩展文档和测试
 
 ### 特性 1：`switch::ensure_clean_status()` 新返回类型适配
 
@@ -160,11 +169,11 @@ EXAMPLES:
 - `switch.md` 负责定义 `SwitchError`、`ensure_clean_status()` 的新签名，以及 `switch` 自身输出/错误契约
 - `checkout.md` 负责定义 `checkout` 如何消费这个新接口，并保持 `checkout` 的既有对外行为
 - `run_switch()` 仍保持私有；`checkout` 不复用 `switch` 的执行层结果结构
-- `checkout` 的 JSON 成功输出与 render split 已落地；typed `CheckoutError` enum 仍不在本次联动范围内
+- `checkout` 的 JSON 成功输出、render split 与 typed `CheckoutError` enum 均已落地；本文保留边界说明以避免未来改动把 `switch` 和 `checkout` 的对外契约混在一起
 
-### 特性 4：第 30 批完整现代化的预留边界
+### 特性 4：第 30 批完整现代化的完成边界
 
-按照 [README.md](README.md#后续批次基于本轮-review-重排)，`checkout` 的完整改造仍留在第 30 批。届时再单独推进：
+按照 [README.md](README.md#后续批次基于本轮-review-重排)，`checkout` 的完整改造已在第 30 批单独推进并完成：
 
 - `CheckoutError` typed enum
 - 更细的代理错误分层（remote auto-track / pull）
@@ -174,8 +183,9 @@ EXAMPLES:
 - checkout-owned 显式 `StableErrorCode`
 - `run_checkout()` + `render_checkout_output()` 执行/渲染拆分
 - `checkout --json` / `--machine` 成功输出（覆盖 show-current / already-on / switch-local / create / remote-track）
+- `RemoteSyncFailed { stage, source }` 包裹 remote auto-track 中 `set_upstream` / `pull` 的代理失败，并保留内部 stable code
 
-本次**不提前设计这些 schema 细节**，只要求当前兼容收口不能阻碍第 30 批未来落地。
+**更新（v0.17.1303..1305 决策反转，见上方“决策反转”小节）**：`--detach` / `-B` / `--orphan` / `-f` / `--ours` / `--theirs` 已落地，并已同步扩展 `CheckoutOutput`（`reset`/`orphan`）、`CheckoutError`（新增 `ConflictPathRequired` / `NotInMergeConflict` / `IndexReadFailed` / `WorktreeWriteFailed` / `HeadUpdateFailed`）与 JSON/退出码合约测试。仍 deferred：不带 `--detach` 的普通 commit-ish/tag 检出、`-p`/`--patch`、`--conflict`；也仍不把 `checkout` 与 `switch` 抽成共用执行层。
 
 ### 本次联动中的 Cross-Cutting Improvements 约束
 

@@ -330,6 +330,69 @@ async fn branch_already_exists_with_track_returns_conflict() {
 }
 
 #[test]
+fn orphan_existing_branch_returns_conflict() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["switch", "--orphan", "main"], repo.path());
+    assert_cli_error_contract(
+        &output,
+        128,
+        StableErrorCode::ConflictOperationBlocked,
+        "a branch named 'main' already exists",
+        &[],
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn guess_ambiguous_remote_branch_returns_exit_128() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(
+            &["remote", "add", "origin", "https://example.com/origin.git"],
+            repo.path(),
+        ),
+        "remote add origin",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "https://example.com/upstream.git",
+            ],
+            repo.path(),
+        ),
+        "remote add upstream",
+    );
+    let _guard = ChangeDirGuard::new(repo.path());
+    let head = Head::current_commit().await.unwrap();
+    Branch::update_branch(
+        "refs/remotes/origin/feature",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
+    Branch::update_branch(
+        "refs/remotes/upstream/feature",
+        &head.to_string(),
+        Some("upstream"),
+    )
+    .await
+    .unwrap();
+
+    let output = run_libra_command(&["switch", "feature"], repo.path());
+    assert_cli_error_contract(
+        &output,
+        128,
+        StableErrorCode::CliInvalidTarget,
+        "branch 'feature' matched multiple remote branches",
+        &["checkout.defaultRemote"],
+    );
+}
+
+#[test]
 fn commit_resolve_returns_cli_invalid_target() {
     let repo = create_committed_repo_via_cli();
     let output = run_libra_command(&["switch", "--detach", "no-such-revision"], repo.path());

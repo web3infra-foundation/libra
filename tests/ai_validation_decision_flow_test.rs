@@ -12,12 +12,15 @@
 //! **Layer:** L1 — uses in-memory SQLite, no external dependencies.
 
 use libra::internal::{
-    ai::runtime::{
-        DecisionPolicy, DecisionProposalRoute, DecisionProposalStore, ValidationOutcome,
-        ValidationReportStore, ValidationStage, ValidationStageResult, ValidatorEngine,
-        aggregate_risk_score, build_decision_proposal,
-        contracts::{EvidenceKind, FinalDecisionVerdict},
-        phase3::ValidationStatus,
+    ai::{
+        runtime::{
+            DecisionPolicy, DecisionProposalRoute, DecisionProposalStore, ValidationOutcome,
+            ValidationReportStore, ValidationStage, ValidationStageResult, ValidatorEngine,
+            aggregate_risk_score, build_decision_proposal,
+            contracts::{EvidenceKind, FinalDecisionVerdict},
+            phase3::ValidationStatus,
+        },
+        session::jsonl::SessionJsonlStore,
     },
     model::{ai_thread, ai_validation_report},
 };
@@ -230,4 +233,74 @@ async fn derived_records_create_missing_runtime_thread_anchor() {
         .unwrap()
         .expect("latest decision proposal");
     assert_eq!(loaded_proposal.proposal_id, proposal.proposal_id);
+}
+
+/// Scenario: Phase 3/4 derived records are written through the session mirror
+/// path as well as the SQLite latest-derived tables. Asserts that a single
+/// operator tail of `events.jsonl` can consume the validation report, risk score,
+/// and decision proposal without joining the SeaORM tables.
+#[tokio::test]
+async fn validation_and_decision_writes_emit_ai_artifact_jsonl_mirror() {
+    let db = setup_db().await;
+    let thread_id = Uuid::new_v4();
+    let session_dir = tempfile::tempdir().unwrap();
+    let session_store = SessionJsonlStore::new(session_dir.path().join("session"));
+    let validator = ValidatorEngine::default_policy();
+    let validation_store = ValidationReportStore::new(db.clone());
+    let decision_store = DecisionProposalStore::new(db);
+    let policy = DecisionPolicy::default();
+
+    let report = validator.build_report(
+        thread_id,
+        None,
+        vec![ValidationStageResult {
+            stage: ValidationStage::Integration,
+            outcome: ValidationOutcome::Passed,
+            evidence: vec![EvidenceKind::Test],
+            summary: Some("integration passed".to_string()),
+        }],
+    );
+    validation_store
+        .write_latest_with_session_mirror(&report, &session_store)
+        .await
+        .unwrap();
+
+    let risk = aggregate_risk_score(&report, &policy);
+    let proposal = build_decision_proposal(&report, &risk, &policy);
+    decision_store
+        .write_latest_with_session_mirror(&risk, &proposal, &session_store)
+        .await
+        .unwrap();
+
+    let artifacts = session_store.load_ai_artifacts().unwrap();
+    let kinds = artifacts
+        .iter()
+        .map(|event| event.artifact_kind.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![
+            "validation_report",
+            "risk_score_breakdown",
+            "decision_proposal"
+        ]
+    );
+    assert!(artifacts.iter().all(|event| event.thread_id == thread_id));
+    assert_eq!(artifacts[0].artifact_id, Some(report.report_id.to_string()));
+    assert_eq!(
+        artifacts[1].artifact_id,
+        Some(risk.breakdown_id.to_string())
+    );
+    assert_eq!(
+        artifacts[2].artifact_id,
+        Some(proposal.proposal_id.to_string())
+    );
+    assert_eq!(
+        artifacts[2]
+            .payload
+            .get("summary")
+            .and_then(|summary| summary.get("route"))
+            .and_then(serde_json::Value::as_str),
+        Some("auto_accept")
+    );
 }

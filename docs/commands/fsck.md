@@ -14,6 +14,10 @@ libra fsck [OPTIONS] [OBJECT]
 It is analogous to `git fsck` and serves as the primary diagnostic tool for detecting repository
 corruption, broken references, or data inconsistencies.
 
+Global structured-error flags such as `--json` and `--machine` are honored on
+failure paths. For example, invalid object IDs return the standard Libra CLI
+error envelope on stderr instead of bypassing the dispatcher.
+
 The command performs the following checks:
 
 - **Object hash integrity**: Recomputes SHA1/SHA256 hash and verifies it matches the stored hash
@@ -83,8 +87,9 @@ libra fsck --verbose --name-objects
 ### `--lost-found`
 
 Write dangling/unreachable objects to `.libra/lost-found/` directory:
-- `lost-found/commit/<hash>`: For commit and tree objects (stores hash)
-- `lost-found/other/<hash>`: For blob objects (stores actual content)
+- `lost-found/commit/<hash>`: for commit objects (stores the object id)
+- `lost-found/other/<hash>`: for every other object — blobs store their raw
+  content, while trees and unknown-type objects store the object id
 
 This option implies `--no-reflogs` for dangling detection, matching `git fsck --lost-found` behavior.
 
@@ -114,7 +119,11 @@ libra fsck --tags
 
 ### `--connectivity-only`
 
-Only check object existence, skip content validation. Significantly faster but does NOT detect:
+Only check object existence and object type, then skip the later hash and
+content-format validation pass. This can be faster on healthy repositories, but
+it is not a guarantee that no object body bytes are read: the current
+`ClientStorage::get_object_type` path may still decode an object body to learn
+its type. It does NOT detect:
 - Hash mismatches (content corrupted but object exists)
 - Format errors (object cannot be parsed)
 
@@ -123,6 +132,47 @@ Still detects missing objects referenced by commits, trees, or refs.
 ```bash
 libra fsck --connectivity-only
 ```
+
+### `--full` / `--no-full`
+
+`--full` (the default) verifies objects stored in packfiles in addition to loose
+objects. Each `.libra/objects/pack/*.idx` (index version 1 and 2) is parsed with
+the same validated reader used by `verify-pack`, and the listed objects are
+deduplicated against loose objects before verification.
+
+Use `--no-full` to restrict the check to loose objects, skipping packfiles:
+
+```bash
+libra fsck --no-full
+```
+
+Independently of `--full` / `--no-full`, fsck always runs a **pack-integrity
+stage**: every `.libra/objects/pack/*.idx` is validated in-process by
+`verify-pack` (no subprocess is forked). A corrupt or unreadable pack is
+reported to stderr and makes fsck exit `1` — matching `git fsck` — but does not
+abort the remaining packs, so a multi-pack repository surfaces every faulty
+pack in one run. fsck only reports here; it never deletes, rewrites, or repairs
+a faulty pack. (`--no-full` only narrows *object enumeration* to loose objects;
+it does not disable pack-integrity checking.)
+
+### `--strict`
+
+Apply additional format and graph checks (these are reported as errors, so they
+cause a non-zero exit):
+
+- commit author/committer emails must contain `@`, and their timezones must be a
+  well-formed `±HHMM` offset within ±1400;
+- a commit's tree and parents must exist with the expected object types;
+- a tree's entries must exist with object types matching their mode, and be in
+  Git's canonical sort order.
+
+```bash
+libra fsck --strict
+```
+
+Note: this is an intentionally narrowed subset of `git fsck --strict`. The
+`.gitmodules`/HFS+/NTFS pathname checks and per-message `fsck.<msg-id>` severity
+configuration are not implemented.
 
 ## Examples
 
@@ -156,13 +206,15 @@ libra fsck abc123def456...
 
 ### Diagnostic Messages (stdout)
 
-Diagnostic messages are printed to stdout and do NOT cause non-zero exit codes:
+These messages are printed to **stdout** (to keep stderr free of diagnostics),
+but only `dangling`/`unreachable` are informational. `missing`/`hash mismatch`
+are integrity failures and still cause a non-zero exit:
 
 ```text
-missing <type> <object-id>
-hash mismatch <type> <object-id>
-dangling <type> <object-id>
-unreachable <type> <object-id>
+dangling <type> <object-id>       # informational — exit 0
+unreachable <type> <object-id>    # informational — exit 0
+missing <type> <object-id>        # integrity failure — exit 1
+hash mismatch <type> <object-id>  # integrity failure — exit 1
 ```
 
 ### Error Messages (stderr)
@@ -200,12 +252,14 @@ missing commit 6678874f0d5b658ae5c88b04020c64219f51f743
 | Exit Code | Meaning |
 | --------- | ------- |
 | 0 | All checks passed, or only dangling/unreachable objects found (informational) |
-| 1 | Errors found: hash mismatch, invalid format, missing objects, broken refs, index corruption |
-| 1 | Fatal error: not a repository, invalid object ID, database error |
+| 1 | Integrity errors: hash mismatch, invalid format, missing objects, broken refs, index corruption, reflog entries pointing at missing objects, and `--strict` violations |
+| 128 | Fatal error: not a repository, database error, lost-found write failure, or a malformed pack `.idx` |
+| 129 | Usage error: an invalid object ID or unknown flag |
 
-**Note**: 
-- `dangling` and `unreachable` are informational only and do NOT cause non-zero exit codes.
-- `missing`, `hash_mismatch`, and format errors cause exit code 1.
+**Note**:
+- `dangling` and `unreachable` are informational only and do NOT cause a non-zero exit code.
+- `missing` and `hash mismatch` print to stdout but DO cause exit code 1.
+- Index corruption and reflog entries that point at missing objects cause exit code 1 (aligned with `git fsck`).
 
 ## Implementation Details
 
@@ -223,6 +277,7 @@ The fsck command performs checks in the following order:
 8. **Reachability analysis**: Identify dangling and unreachable objects via BFS
 9. **Root commit report**: (with `--root`) List commits with no parents
 10. **Tag report**: (with `--tags`) List tagged commits
+11. **Pack integrity**: Validate each `objects/pack/*.idx` in-process via `verify-pack`; a corrupt/unreadable pack exits 1 without aborting the rest
 
 ### Object Types
 
@@ -231,7 +286,9 @@ Libra supports the same object types as Git:
 - **blob**: File content
 - **tree**: Directory listing with mode, name, and object references
 - **commit**: Snapshot metadata with tree, parents, author, committer
-- **tag**: Annotated tag with target, type, tagger, and message
+- **tag**: Annotated tag with required `object`, `type`, `tag`, and `tagger`
+  headers plus an optional message. Missing or malformed tag headers fail fsck
+  with tag-specific diagnostics such as `missing tagger`.
 
 ### Hash Algorithms
 

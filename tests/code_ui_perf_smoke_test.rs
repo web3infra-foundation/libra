@@ -27,10 +27,13 @@
 //!     channel directly (no PTY, no network) so the smoke
 //!     completes in seconds rather than the spec's hour, while
 //!     still proving the same broadcast contract.
+//!   * HTTP/SSE soak over the actual Code UI web server. This is
+//!     duration-gated by `LIBRA_SSE_SOAK_SECS` (default: 3600)
+//!     and is intended for the nightly workflow, not PR jobs.
 //!
 //! Coverage deferred:
-//!   * Real 1-hour SSE soak (§5.18 second bullet, full scale) —
-//!     better suited as a separate nightly job.
+//!   * External internet-backed SSE soak remains out of scope; the
+//!     nightly job exercises the real local HTTP/SSE stack.
 
 #[cfg(feature = "test-provider")]
 mod harness;
@@ -62,6 +65,40 @@ fn perf_mode_enabled() -> bool {
         .as_deref()
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false)
+}
+
+#[cfg(feature = "test-provider")]
+fn perf_env_duration(name: &str, default: Duration) -> Result<Duration> {
+    let Some(raw) = std::env::var(name).ok() else {
+        return Ok(default);
+    };
+    let seconds = raw
+        .parse::<u64>()
+        .with_context(|| format!("{name} must be an integer number of seconds, got {raw:?}"))?;
+    if seconds == 0 {
+        bail!("{name} must be greater than zero");
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
+#[cfg(feature = "test-provider")]
+fn wait_for_session_status(session: &CodeSession, expected: &str, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut last_status = None;
+    while Instant::now() < deadline {
+        let snapshot = session.snapshot()?;
+        last_status = snapshot
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        if last_status.as_deref() == Some(expected) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    bail!(
+        "session did not reach status {expected:?} within {timeout:?}; last_status={last_status:?}",
+    )
 }
 
 /// Drive 10 in-process readers against `/threads?limit=1` and
@@ -153,8 +190,8 @@ fn perf_threads_endpoint_handles_10_concurrent_readers_within_2s() -> Result<()>
 fn perf_session_snapshot_serialises_100k_entry_transcript_under_200ms() -> Result<()> {
     use chrono::Utc;
     use libra::internal::ai::web::code_ui::{
-        CodeUiCapabilities, CodeUiProviderInfo, CodeUiSession, CodeUiTranscriptEntry,
-        CodeUiTranscriptEntryKind, initial_snapshot,
+        CodeUiCapabilities, CodeUiEventType, CodeUiProviderInfo, CodeUiSession,
+        CodeUiTranscriptEntry, CodeUiTranscriptEntryKind, initial_snapshot,
     };
 
     if !perf_mode_enabled() {
@@ -188,7 +225,7 @@ fn perf_session_snapshot_serialises_100k_entry_transcript_under_200ms() -> Resul
     let now = Utc::now();
     rt.block_on(async {
         session
-            .mutate("seed", |snapshot| {
+            .mutate(CodeUiEventType::SessionUpdated, |snapshot| {
                 snapshot.transcript.reserve(100_000);
                 for idx in 0..100_000 {
                     snapshot.transcript.push(CodeUiTranscriptEntry {
@@ -265,7 +302,7 @@ fn perf_session_snapshot_serialises_100k_entry_transcript_under_200ms() -> Resul
 #[serial]
 fn perf_sse_broadcast_delivers_1k_events_in_monotonic_seq_order() -> Result<()> {
     use libra::internal::ai::web::code_ui::{
-        CodeUiCapabilities, CodeUiProviderInfo, CodeUiSession, initial_snapshot,
+        CodeUiCapabilities, CodeUiEventType, CodeUiProviderInfo, CodeUiSession, initial_snapshot,
     };
     use tokio::sync::broadcast::error::TryRecvError;
 
@@ -300,7 +337,7 @@ fn perf_sse_broadcast_delivers_1k_events_in_monotonic_seq_order() -> Result<()> 
         let mut events: Vec<u64> = Vec::with_capacity(EVENT_COUNT);
         for idx in 0..EVENT_COUNT {
             session
-                .mutate("status_changed", |snapshot| {
+                .mutate(CodeUiEventType::StatusChanged, |snapshot| {
                     snapshot.updated_at = chrono::Utc::now();
                     let _ = idx; // mutate body kept minimal; the broadcast itself is the contract under test.
                 })
@@ -354,6 +391,102 @@ fn perf_sse_broadcast_delivers_1k_events_in_monotonic_seq_order() -> Result<()> 
         }
     }
     Ok(())
+}
+
+/// Wave 12 / PR 12 closure — real HTTP/SSE soak.
+///
+/// This test opens `/api/code/events` through the same blocking SSE
+/// client used by the remote matrix, then drives periodic writes
+/// through the automation `/messages` API. It asserts that the real
+/// web-server stream stays alive and every observed event sequence is
+/// strictly monotonic for the configured soak duration.
+///
+/// Defaults are intentionally long for CI nightly use:
+///
+/// ```bash
+/// LIBRA_RUN_PERF=1 LIBRA_SSE_SOAK_SECS=3600 \
+///   cargo test --features test-provider --test code_ui_perf_smoke_test \
+///   perf_sse_http_stream_survives_configured_soak_duration \
+///   -- --ignored --test-threads=1 --nocapture
+/// ```
+#[cfg(feature = "test-provider")]
+#[test]
+#[ignore = "HTTP/SSE soak; run with LIBRA_RUN_PERF=1"]
+#[serial]
+fn perf_sse_http_stream_survives_configured_soak_duration() -> Result<()> {
+    if !perf_mode_enabled() {
+        bail!(
+            "LIBRA_RUN_PERF=1 must be set to run the SSE soak; rerun with `LIBRA_RUN_PERF=1 LIBRA_SSE_SOAK_SECS=3600 cargo test --features test-provider --test code_ui_perf_smoke_test perf_sse_http_stream_survives_configured_soak_duration -- --ignored --test-threads=1`",
+        );
+    }
+
+    let soak_duration = perf_env_duration("LIBRA_SSE_SOAK_SECS", Duration::from_secs(3600))?;
+    let heartbeat_interval =
+        perf_env_duration("LIBRA_SSE_SOAK_INTERVAL_SECS", Duration::from_secs(15))?;
+    let mut session = CodeSession::spawn(CodeSessionOptions::new(
+        "perf-sse-http-soak",
+        fixture_path(),
+    ))?;
+    session.attach_automation("perf-sse-http-soak")?;
+    let mut stream = session.open_event_stream()?;
+    let deadline = Instant::now() + soak_duration;
+    let mut next_heartbeat = Instant::now();
+    let mut last_seq: Option<u64> = None;
+    let mut observed_events = 0usize;
+    let mut observed_post_seed_events = 0usize;
+    let mut submitted_turns = 0usize;
+
+    while Instant::now() < deadline {
+        if Instant::now() >= next_heartbeat {
+            let prompt = format!("/chat hello soak-{submitted_turns}");
+            session.submit_message(&prompt)?;
+            submitted_turns += 1;
+            wait_for_session_status(&session, "idle", Duration::from_secs(15))?;
+            next_heartbeat = Instant::now() + heartbeat_interval;
+        }
+
+        if let Some(event) = stream.next_event(Duration::from_secs(1))? {
+            let payload: serde_json::Value = serde_json::from_str(&event.data)
+                .with_context(|| format!("failed to parse SSE payload: {}", event.data))?;
+            let seq = payload
+                .get("seq")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| anyhow::anyhow!("SSE payload missing numeric seq: {payload}"))?;
+            if let Some(previous) = last_seq
+                && seq <= previous
+            {
+                bail!(
+                    "SSE seq regressed or repeated during soak: previous={previous}, current={}",
+                    seq,
+                );
+            }
+            if let Some(previous) = last_seq
+                && previous != 0
+                && seq != previous + 1
+            {
+                bail!(
+                    "SSE seq gap during soak: previous={previous}, current={seq}; expected {}",
+                    previous + 1,
+                );
+            }
+            last_seq = Some(seq);
+            observed_events += 1;
+            if seq > 0 {
+                observed_post_seed_events += 1;
+            }
+        }
+    }
+
+    if submitted_turns == 0 {
+        bail!("SSE soak submitted no heartbeat turns; duration={soak_duration:?}");
+    }
+    if observed_events == 0 || observed_post_seed_events == 0 {
+        bail!(
+            "SSE soak observed no post-seed events after {submitted_turns} submitted turns; total_events={observed_events}",
+        );
+    }
+
+    session.shutdown()
 }
 
 #[cfg(not(feature = "test-provider"))]

@@ -10,7 +10,7 @@
 - Wire contract 已固定在 [src/internal/ai/web/code_ui.rs](../../src/internal/ai/web/code_ui.rs) 与 [web/src/lib/code-ui/types.ts](../../web/src/lib/code-ui/types.ts)。Rust 结构字段使用 `camelCase`，枚举使用 `snake_case`；[tests/ai_code_ui_wire_test.rs](../../tests/ai_code_ui_wire_test.rs) 覆盖 snapshot、controller、capabilities、transcript kinds、interaction kinds、thread list 等 JSON 形态。
 - 前端生产路径已改走 [web/src/lib/code-ui/client.ts](../../web/src/lib/code-ui/client.ts)、[store.tsx](../../web/src/lib/code-ui/store.tsx)、[controller.tsx](../../web/src/lib/code-ui/controller.tsx) 和 [view-model.ts](../../web/src/lib/code-ui/view-model.ts)。`web/src/lib/mock/` 已不存在；`rg 'from "@/lib/mock' web/src` 应无结果。
 - 浏览器写控制已通过 `--browser-control <off|loopback>` 落地。TUI 默认 `off`；`--web-only --provider codex` 默认 `loopback`；非 Codex web-only 默认 `off`。浏览器只持有 `X-Code-Controller-Token` lease；automation 额外需要 `X-Libra-Control-Token`。
-- `--web-only --provider <non-codex>` 已有 Phase 3 v1 的 [HeadlessCodeRuntime](../../src/internal/ai/web/headless.rs)：支持 browser submit、streaming assistant reply、cancel、只读本地工具、`web_search`、`apply_patch`、`shell`、`update_plan`、request-user-input / approval interaction surface、plan/patchset snapshot projection、session persistence/resume；暂不支持完整 IntentSpec plan approval workflow。
+- `--web-only --provider <non-codex>` 已有 Phase 3 v1 的 [HeadlessCodeRuntime](../../src/internal/ai/web/headless.rs)：支持 browser submit、streaming assistant reply、cancel、只读本地工具、`web_search`、`apply_patch`、`shell`、`update_plan`、`submit_plan_draft`、request-user-input / approval interaction surface、plan/patchset snapshot projection、session persistence/resume；暂不支持完整 IntentSpec plan approval workflow。
 
 ## 目标与非目标
 
@@ -36,8 +36,8 @@
 | API | `/api/repo/status` 复用 `libra status --json` envelope；`/api/code/threads` 复用 `ThreadProjection::list_active`，`limit` clamp 到 200；写路径统一 body limit/audit；SSE lag 已恢复为完整 `session_updated` snapshot | API client、组件、browser audit scenario 已有回归；后续新增字段/错误码时继续同步测试 |
 | Frontend data | `CodeUiProvider` 首屏拉 repo/status/session/threads，连接 SSE，status debounce 5s；Chat/Sidebar/Workflow/Summary/Diff/Terminal/Settings 都走 live store | 长 transcript、长 diff、长 tool output 已默认 collapse；旧 demo fixture 文案已从生产组件移除；loopback Web app + browser submit smoke 已纳入 scenario |
 | Browser write | `BrowserControllerProvider` lazy attach，token 只在内存；submit/respond/cancel/detach 已接线；`BROWSER_CONTROL_DISABLED` 等错误能显示 | 五类 interaction 组件测试、lease retry/conflict、audit log scenario 已落地；lease 过期/多 tab 端到端 UI 行为仍可继续扩充 |
-| TUI write bridge | `--browser-control loopback` 打开 browser write；TUI default 保持 `off`；TUI reclaim 会清 browser lease | 需要继续验证 `{off, loopback} x {host} x {TUI, web-only}` 的矩阵数据驱动化 |
-| Headless web-only | Ollama v1 可由浏览器驱动直接 turn，capabilities 为 `messageInput`、`streamingText`、`toolCalls`、`planUpdates`、`patchsets`、`interactiveApprovals`、`structuredQuestions`、`providerSessionResume`；provider bootstrap 复用 `ProviderFactory`；`web_search`、`apply_patch`、`shell` 复用 TUI 的 `ToolRuntimeContext`、sandbox、approval、network policy；`update_plan` 和 `apply_patch` 会投影到 `plans[]` / `patchsets[]`；`--resume <thread_id>` 可恢复 transcript/basic history | 缺完整 IntentSpec plan approval workflow |
+| TUI write bridge | `--browser-control loopback` 打开 browser write；TUI default 保持 `off`；TUI reclaim 会清 browser lease；v0.17.1126 已用 `browser_control_resolution_matrix_pins_mode_provider_and_host_contract` 固定 `{off, loopback} x {host} x {TUI, web-only}` 的解析矩阵 | 后续仅维护更高层 PTY/browser scenario 扩展 |
+| Headless web-only | Ollama v1 可由浏览器驱动直接 turn，capabilities 为 `messageInput`、`streamingText`、`toolCalls`、`planUpdates`、`patchsets`、`interactiveApprovals`、`structuredQuestions`、`providerSessionResume`；provider bootstrap 复用 `ProviderFactory`；`web_search`、`apply_patch`、`shell` 复用 TUI 的 `ToolRuntimeContext`、sandbox、approval、network policy；`update_plan` / `submit_plan_draft` 和 `apply_patch` 会投影到 `plans[]` / `patchsets[]`；`--resume <thread_id>` 可恢复 transcript/basic history | 缺完整 IntentSpec plan approval workflow |
 | Docs | [web/README.md](../../web/README.md) 与 [docs/commands/code.md](../commands/code.md) 已描述 live API、browser-control、token 分工、256 KiB 限制 | 本文需要作为后续 PR 的剩余工作清单；remote notice 已落地，仍需后续扩展浏览器端组件/客户端测试 |
 
 ## API 边界
@@ -64,8 +64,13 @@
 - `CodeUiProvider` 在 SSE 错误后退避重连并重新拉 `GET /api/code/session`；server 端收到 `BroadcastStream::Lagged` 时已发送一次完整 `session_updated` snapshot，避免静默丢事件。
 - `controller.canWrite` 表示当前 controller state，不等价于 capability。UI 写控件必须同时检查 `capabilities.*`、session `status`、controller ownership 和 browser hook error。
 - `LocalTui` 与 `Fixed { Tui }` 语义不同：前者是可被 browser/automation lease 接管的可见 TUI owner，后者是只读观察时的永久阻断。
-- Headless v1 注册 `read_file`、`list_dir`、`grep_files`、semantic read 类工具，以及 `web_search`、`apply_patch`、`shell`、`update_plan`。这些工具必须继续通过 `ToolRuntimeContext` 注入的 sandbox / approval / network policy 执行；`task` 和完整 IntentSpec plan approval workflow 仍保持 gated。
+- Headless v1 注册 `read_file`、`list_dir`、`grep_files`、semantic read 类工具，以及 `web_search`、`apply_patch`、`shell`、`update_plan`、`submit_plan_draft`。这些工具必须继续通过 `ToolRuntimeContext` 注入的 sandbox / approval / network policy 执行；`task`、`submit_intent_draft` 和完整 IntentSpec plan approval workflow 仍保持 gated。
 - `web/out/` 是 Rust embed 输入。任何 UI source 变更都必须 `pnpm --dir web build`，否则二进制仍服务旧页面。
+
+## 0.17.1126 增量收口（2026-05-30）
+
+- **Browser-control 解析矩阵已固定**：`src/command/code.rs` 新增 `browser_control_resolution_matrix_pins_mode_provider_and_host_contract`，覆盖 TUI 默认 off、TUI 显式 loopback、非 Codex web-only 默认 off、Codex web-only 默认 loopback、用户显式 off 覆盖默认值，以及非 loopback host 的 fail-closed 规则。
+- **文档状态调整**：上方 TUI write bridge 行不再把 `{off, loopback} x {host} x {TUI, web-only}` 解析矩阵列为待收口项；剩余工作只保留更高层 PTY / browser scenario 的 additive 扩展。
 
 ## 后续实施计划
 
@@ -123,7 +128,7 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 - [x] 为 headless runtime 接入 `ToolRuntimeContext`、sandbox、approval store、network policy；`web_search`、`apply_patch`、`shell` 通过同一 runtime context 执行，mutating tools 必须通过 `CodeUiInteractionRequest` 显示 approval，不允许静默执行。
 - [x] 支持 `request_user_input`、`approval`、`sandbox_approval` 写回 `CodeUiInteractionResponse`。
 - [x] 接入 session persistence：`--resume <thread_id>` 能恢复 transcript、pending interaction、basic history；成功 turn 写回 session store。
-- [x] 支持 plan/patchset 最小投影：headless observer 将 `update_plan` 投影到 `plans[]`，将 `apply_patch` diff metadata 投影到 `patchsets[]`，并打开 `planUpdates` / `patchsets` capability。
+- [x] 支持 plan/patchset 最小投影：headless observer 将 `update_plan` 与 `submit_plan_draft` 投影到 `plans[]`，将 `apply_patch` diff metadata 投影到 `patchsets[]`，并打开 `planUpdates` / `patchsets` capability。
 
 **验收：**
 
@@ -138,7 +143,7 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 
 **任务：**
 
-- Workflow：`plans[].steps[].status` 与 `toolCalls[].status` 已映射到 phase strip / execution runs；detail panel 不再渲染旧 optimistic-mutation demo，run output 来自 tool snapshot details。后续仍需新增 `tasks[]` 单列，并把 patchsets / richer plan metadata 映射进详情页。
+- Workflow：`plans[].steps[].status`、`tasks[]` 与 `toolCalls[].status` 已映射到 phase strip / task card / execution runs；`completed` / `succeeded` tool calls 会投影为 passed runs，`failed` / `error` / `cancelled` 投影为 failed runs；detail panel 不再渲染旧 optimistic-mutation demo，run output 来自 tool snapshot details。当前卡片与 step detail 已显示 live `Plan.title` / `Plan.summary`，review diff 按 patchset 维度展示 id / status / file counts，task/run detail output 也已按长内容折叠展开，header token badge 会在 snapshot 里存在 usage 时显示真实 token summary、否则回落到 neutral dash，sidebar 提供手动 refresh thread list affordance，Summary 也保留手动 refresh repo status affordance。
 - Summary：继续以 `/api/repo/status` 为 branch source；保留文件计数，不做 mock 的行级 `+812 -214` shortstat；PR 字段 v1 不显示。
 - Diff：统一 diff parser，支持多文件、binary/no diff、large diff collapse；解析失败 fail-open。
 - Terminal：Sandbox / Tools / Agent tab 已展示真实 tool 与 info transcript；tool details 超过 200 KiB 默认截断并可展开；v0.17.1049 已把 `/api/code/diagnostics` best-effort 映射进 Agent 行（pid、web/mcp 端口、log file、active interaction、last error）。
@@ -158,10 +163,10 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 **任务：**
 
 - [x] CI 已有 `pnpm --dir web install --frozen-lockfile`、`pnpm --dir web lint`、`pnpm --dir web build` 专门 job；`web/pnpm-workspace.yaml` 允许 `msw`、`sharp`、`unrs-resolver` build scripts，避免 pnpm 11 `ERR_PNPM_IGNORED_BUILDS`。
-- 继续检查 `web/out/` 与 source 变更同步。
+- [x] 继续检查 `web/out/` 与 source 变更同步；CI 的 compat-web-check job 在 `pnpm --dir web build` 后内联运行 `git status --porcelain -- web/out`（原 `scripts/check_web_out_clean.sh` 已移除），同时覆盖 tracked diff 与 untracked `web/out` 文件。
 - [x] 增加 browser smoke：`browser_static_app_loads_and_submit_updates_snapshot` 打开 `http://127.0.0.1:<port>`，断言页面不含旧 mock thread 内容，发送 browser message 后 snapshot 更新。
 - [x] `docs/commands/code.md` 增加 Code UI snapshot 稳定字段表、thread list envelope、error code 表、`--browser-control` 矩阵。
-- `docs/automation/local-tui-control.md` 与 `src/internal/ai/web/mod.rs` endpoint matrix 用 grep/脚本保持一致。
+- [x] `docs/commands/code-control.md` 与 `src/internal/ai/web/mod.rs` endpoint matrix 保持一致；`compat_matrix_alignment::docs_consistency_covers_code_ui_router_matrix` 会从 Rust router 提取 `/api/code/*` 路由并要求 `docs/commands/code-control.md` 覆盖全部端点（原 `scripts/check_docs_consistency.sh` 已移除，检查逻辑内联进该 Rust 测试）。
 
 **验收命令：**
 

@@ -1,4 +1,6 @@
 //! Lightweight Markdown renderer for the TUI transcript.
+//!
+//! TUI 记录的轻量级 Markdown 渲染器。
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{

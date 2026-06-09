@@ -7,15 +7,36 @@ Show commit history.
 ## Synopsis
 
 ```
-libra log [OPTIONS] [-- PATHS...]
+libra log [OPTIONS] [<revision-range>] [-- PATHS...]
 ```
 
 ## Description
 
 `libra log` displays the commit history starting from the current HEAD. It supports multiple
 output formats including oneline, custom pretty-print, graph visualization, and structured
-JSON. Commits can be filtered by author, date range, and file paths. Diff output (`--patch`,
-`--stat`, `--name-only`, `--name-status`) can be limited to specific paths.
+JSON. Commits can be filtered by author, committer, date range, message (regex), parent count,
+content (pickaxe), and file paths. Diff output (`--patch`, `--stat`, `--name-only`,
+`--name-status`) can be limited to specific paths.
+
+### Revision ranges
+
+When a positional uses explicit range/exclude syntax it selects a commit set instead of HEAD:
+
+- `A..B` — commits reachable from `B` but not from `A` (`..B` and `A..` default the empty side
+  to `HEAD`).
+- `^A B` — equivalent to `A..B`; `^X` excludes everything reachable from `X`.
+- `A...B` — the symmetric difference: commits reachable from exactly one of `A`, `B`.
+
+An unresolvable endpoint fails with `LBR-CLI-003` (exit 129) and prints nothing. Bare positional
+tokens with no range syntax are treated as pathspec (unchanged). `--first-parent` is anchored at
+HEAD and is not applied to an explicit range.
+
+```bash
+libra log main..feature
+libra log ^main feature
+libra log v1.0...v2.0
+libra log main..feature -- src/
+```
 
 Human mode preserves the current `--oneline`, `--graph`, `--pretty`, `--stat`, `--patch`, and
 related output styles. `--quiet` suppresses human output but still validates the requested
@@ -127,15 +148,120 @@ Show commits older than the specified date.
 libra log --until 2026-03-01
 ```
 
+### `--committer <PATTERN>`
+
+Filter commits to those whose committer name or email matches the given pattern
+(case-insensitive substring), symmetric with `--author`.
+
+```bash
+libra log --committer alice
+```
+
+### `--grep <PATTERN>` / `-i`, `--regexp-ignore-case`
+
+Filter commits whose message matches the given **regular expression** (regex crate
+syntax, case-sensitive by default). `^`/`$` match at line boundaries within the
+commit message (so `^fix` matches the subject and `^Signed-off-by` matches a footer).
+Add `-i` / `--regexp-ignore-case` for case-insensitive matching. Patterns are capped
+at 4 KiB; an invalid or oversized pattern fails fast with `LBR-CLI-002` (exit 129).
+
+> This is an intentional difference from older Libra behavior: `--grep` was previously
+> a plain substring match. A plain pattern (e.g. `fix`) still behaves as a literal.
+
+```bash
+libra log --grep '^fix'
+libra log --grep 'CVE-\d{4}' -i
+```
+
+### `--merges` / `--no-merges` / `--min-parents <N>` / `--max-parents <N>`
+
+Filter by parent count. `--merges` shows only merge commits (≥ 2 parents, an alias for
+`--min-parents=2`); `--no-merges` shows only non-merge commits (an alias for
+`--max-parents=1`). `--min-parents`/`--max-parents` set explicit bounds.
+
+```bash
+libra log --merges
+libra log --no-merges
+libra log --max-parents=1
+```
+
+### `--first-parent`
+
+When walking history, follow only the first parent of each merge commit, so the output
+stays on the mainline and never descends into merged side branches.
+
+```bash
+libra log --first-parent
+libra log --merges --first-parent
+```
+
+### `-S <STRING>` / `-G <REGEX>` (pickaxe)
+
+Search history by content change. These two have **different semantics**, matching `git log`:
+
+- **`-S <string>`** shows commits where the **number of occurrences** of the literal
+  `string` changed between a file's parent-side and child-side *full content*. A change
+  that leaves the count the same (e.g. editing the same line elsewhere) does **not** match.
+- **`-G <regex>`** shows commits where any **added or removed diff line** matches the regex
+  (occurrence counts are irrelevant). `-G` patterns share the regex `--grep` rules (4 KiB
+  cap; an invalid pattern fails with `LBR-CLI-002`, exit 129).
+
+`-S` and `-G` are mutually exclusive, combine with pathspec (AND), and a load/diff failure
+on a corrupt object surfaces as `LBR-REPO-002` (exit 128) rather than skipping the commit.
+
+```bash
+libra log -S secret_key            # commits that add/remove an occurrence of secret_key
+libra log -G 'TODO\(.*\)'          # commits that touch a line matching the regex
+libra log -S api_token -- src/     # scope the search to a path
+```
+
+### `--follow`
+
+Follow a single file's history across renames. `--follow` requires exactly one file
+pathspec; multiple pathspecs or a missing path fail with `LBR-CLI-002` (exit 129).
+Rename detection uses the same 50% line-similarity threshold as Libra's rename-aware
+diff and merge paths. In human `--name-status` output, a detected rename is rendered
+as `R<score>  old  new`; JSON output keeps the stable `added`/`modified`/`deleted`
+file status vocabulary.
+
+```bash
+libra log --follow renamed.txt
+libra log --follow --name-status renamed.txt
+libra --json log --follow renamed.txt
+```
+
 ### `--pretty <FORMAT>`
 
-Custom pretty-print format string. Supports placeholders like `%h` (short hash), `%s`
-(subject), `%an` (author name), `%ae` (author email), `%ad` (author date), etc.
+Custom pretty-print format string. A bare template, `format:<template>`, and
+`tformat:<template>` are all accepted; `tformat:` appends a trailing newline to each
+commit's output. Unknown `%`-escapes are preserved literally.
+
+Supported placeholders:
+
+| Placeholder | Expands to |
+|-------------|------------|
+| `%H` / `%h` | Full / abbreviated commit hash |
+| `%T` / `%t` | Full / abbreviated tree hash |
+| `%P` / `%p` | Full / abbreviated parent hashes (space-separated; empty for a root commit) |
+| `%s` / `%f` | Subject line / sanitized subject (spaces → `-`) |
+| `%b` / `%B` | Message body (subject stripped) / raw body |
+| `%an` / `%ae` / `%ad` | Author name / email / date |
+| `%cn` / `%ce` / `%cd` | Committer name / email / date |
+| `%d` | Ref decorations |
+| `%n` | A newline |
+| `%x<HH>` | The byte for the two hex digits (e.g. `%x09` → tab, `%x20` → space) |
 
 ```bash
 libra log --pretty="%h - %s (%an)"
 libra log --pretty="format:%H %s"
+libra log --pretty="tformat:%h%x09%s"   # hash <tab> subject, one per line
 ```
+
+Abbreviated hashes (`%h`/`%t`/`%p`) follow `--abbrev-commit` / `--no-abbrev-commit`.
+The abbreviation length never slices a multi-byte boundary, and every placeholder degrades
+safely (root commits, empty bodies, and malformed `%x` escapes never error). Under
+`--json` / `--machine`, `--pretty` is a no-op — the structured schema is unchanged.
+Note: Git's `--log-size` is not implemented; passing it is rejected by the argument parser.
 
 ### `--decorate[=<style>]`
 
@@ -157,17 +283,24 @@ libra log --no-decorate
 ### `--graph`
 
 Draw a text-based graphical representation of the commit history, showing branching and
-merging visually.
+merging visually. Each branch column is drawn in a rotating color, honoring the global
+`--color=<auto|always|never>` flag (and `NO_COLOR`); colors are disabled automatically when
+output is not a terminal. (Octopus-merge connector lines are not yet rendered.)
 
 ```bash
 libra log --graph
 libra log --oneline --graph
+libra --color=always log --graph   # force-colored graph
 ```
 
 ### `[PATHS...]`
 
 Limit diff output to the specified paths. Used with `-p`, `--name-only`, `--name-status`,
 or `--stat`.
+
+Pathspecs must be relative paths inside the working tree. Parent-directory escapes (`../x`),
+Windows-style parent escapes (`..\\x`), and absolute paths fail before history traversal with
+`LBR-CLI-002` (exit 129), leaving stdout empty.
 
 ```bash
 libra log -- src/
@@ -182,6 +315,7 @@ libra log -n 5
 libra log --oneline --graph
 libra log --author alice --since 2026-01-01
 libra log --name-status src/
+libra log --follow renamed.txt
 libra --json log -n 1
 ```
 
@@ -271,14 +405,12 @@ not yet implemented. The current single-HEAD walk covers the most common use cas
 (inspecting the current branch history) and avoids the complexity of multi-root graph
 merging.
 
-### No revision range (`A..B`) syntax yet
+### Limited revision range syntax
 
-Git's revision range syntax (`main..feature`, `main...feature`, `HEAD~3..HEAD`) is a
-powerful but complex feature that requires a full revision parser supporting symbolic refs,
-ancestry operators (`~`, `^`), and set operations (difference, symmetric difference). Libra
-does not yet implement a revision parser. The `-n` flag and `--since`/`--until` date filters
-provide basic history scoping. A full revision range parser is on the roadmap and will
-support both Git-compatible syntax and additional Libra-specific extensions.
+Libra supports the high-value range forms `A..B`, `A...B`, and `^A B`. Ranges can be
+combined with pathspecs by using Git's `--` separator (`A..B -- path`). Libra does not yet
+support the full Git revision language, such as ancestry suffixes (`HEAD~3`, `topic^2`) or
+multi-positive-ref union walks like `git log main dev`.
 
 ### `--graph` with text rendering
 
@@ -318,16 +450,19 @@ flag only affects the human rendering layer.
 | Custom format | `git log --pretty=<fmt>` | `jj log -T <template>` | `libra log --pretty <fmt>` |
 | Decorate refs | `git log --decorate` | Always shown | `libra log --decorate` |
 | No decorate | `git log --no-decorate` | N/A | `libra log --no-decorate` |
-| Graph view | `git log --graph` | `jj log` (default has graph) | `libra log --graph` |
+| Graph view | `git log --graph` | `jj log` (default has graph) | `libra log --graph` (per-column color via `--color`) |
 | All refs | `git log --all` | `jj log -r 'all()'` | N/A (not yet implemented) |
 | Branches only | `git log --branches` | `jj log -r 'branches()'` | N/A |
 | Remotes only | `git log --remotes` | `jj log -r 'remote_branches()'` | N/A |
-| Revision range | `git log A..B` | `jj log -r 'A..B'` | N/A (not yet implemented) |
-| Grep message | `git log --grep=<pat>` | Revset `description()` | N/A |
+| Revision range | `git log A..B` | `jj log -r 'A..B'` | `libra log A..B` / `A...B` / `^A B` |
+| Grep message | `git log --grep=<pat>` | Revset `description()` | `libra log --grep <regex>` (regex; `-i` for case-insensitive) |
+| Committer filter | `git log --committer=<pat>` | N/A | `libra log --committer <pat>` |
+| Pickaxe (string count) | `git log -S<string>` | N/A | `libra log -S <string>` |
+| Pickaxe (diff-line regex) | `git log -G<regex>` | N/A | `libra log -G <regex>` |
 | Path filter | `git log -- <paths>` | N/A (use revset) | `libra log -- <paths>` |
 | Reverse order | `git log --reverse` | `jj log --reversed` | N/A |
-| Merge commits only | `git log --merges` | N/A | N/A |
-| First parent only | `git log --first-parent` | N/A | N/A |
+| Merge commits only | `git log --merges` | N/A | `libra log --merges` (also `--no-merges`/`--min-parents`/`--max-parents`) |
+| First parent only | `git log --first-parent` | N/A | `libra log --first-parent` |
 | Structured JSON output | N/A | N/A | `--json` / `--machine` |
 | Error hints | Minimal | Minimal | Every error type has an actionable hint |
 
@@ -339,15 +474,16 @@ flag only affects the human rendering layer.
 | Empty branch or empty HEAD | `LBR-REPO-003` | 128 | "create a commit first before running 'libra log'" |
 | Invalid date argument | `LBR-CLI-002` | 129 | -- |
 | Invalid `--decorate` option | `LBR-CLI-002` | 129 | -- |
+| Pathspec escapes working tree or is absolute | `LBR-CLI-002` | 129 | Use a relative path inside the repository; use `--` to separate paths from revisions. |
 | Invalid object name | `LBR-CLI-003` | 129 | "check the revision name and try again" |
 | Corrupted commit/tree/blob | `LBR-REPO-002` | 128 | -- |
 | Failed to read historical objects | `LBR-REPO-002` | 128 | -- |
 
 ## Compatibility Notes
 
-- `--all`, `--branches`, and `--remotes` are not yet implemented; log walks from HEAD only
-- Revision range syntax (`A..B`, `A...B`) is not yet supported; use `-n` and `--since`/`--until` for scoping
+- `--all`, `--branches`, and `--remotes` are not yet implemented; without a revision range, log walks from HEAD only
+- Revision range syntax (`A..B`, `A...B`, `^A B`) is supported; use `A..B -- path` to combine a range with pathspec filtering, and escaping/absolute pathspecs fail with `LBR-CLI-002`
 - jj's log uses a template language (`-T`) for formatting; Libra uses Git-compatible `--pretty` format strings
-- `--grep` for message filtering is not yet implemented
+- `--grep` uses regular-expression matching (a semantic change from the earlier substring match); `^`/`$` are line anchors and `-i` enables case-insensitive matching
 - `--reverse` for chronological order is not yet implemented
 - In JSON mode, `files` contains structured change summaries; patch text is never included in JSON output

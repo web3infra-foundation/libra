@@ -1,11 +1,14 @@
 # 在 Libra 中集成 EntireIO 风格的"外部 Agent 会话捕获"能力
 
-> **文档定位**：把 EntireIO 的核心价值（把外部 Agent 的生命周期事件与原始 transcript 纳入版本控制）迁移到 Libra，在保留现有 `libra code` 行为不变的前提下，补齐"多外部 Agent、可恢复会话、可回放检查点、可追踪同步"的能力。
+> **文档定位**：把 EntireIO 的核心价值（把外部 Agent 的生命周期事件与原始 transcript 纳入版本控制）迁移到 Libra，在**不改变 `libra code` 写入 `refs/libra/intent` 的内容语义**的前提下，补齐"多外部 Agent、可恢复会话、可回放检查点、可追踪同步"的能力。（注：`libra code` 的**交互面形态**正在按 [../development/agent.md](../development/agent.md) 从 TUI 迁往 Web-only；本文不依赖该交互面，只依赖 intent-ref 的写入语义不变。）
 >
 > **与兄弟改进计划的边界**：
 > - [agent.md](agent.md)（Part A/B/C）：Libra 自身 Agent 子系统（`libra code` 内部运行时、Step 1/2 sub-agent、TUI Automation Control）。本文不重复。
+> - [../development/agent.md](../development/agent.md)：`libra code` 的 TUI→Web-only 迁移与 UI-neutral `AgentRuntime` 落地路线图。该计划会**删除 Code TUI、把 Web 作为唯一交互面**；本文据此**不依赖、也不扩展 TUI 作为捕获或展示面**（见 §11、§14 阶段 2 step 6）。
 > - [sandbox.md](sandbox.md)：工具执行边界与权限。本文与之正交。
 > - 本文：**外部 Agent 生命周期接入与会话对象化**。
+>
+> **术语消歧（跨文档）**：本文的"外部 Agent"指**被观测捕获的第三方编码 Agent**（Claude Code / Gemini / Cursor…），与 [../development/agent.md](../development/agent.md) 中"驱动 Libra 内部 runtime 的外部调度方/调用方"含义相反；本文的"checkpoint"指 `refs/libra/agent-traces` 上的 transcript 检查点，与 orchestrator 的 dagrs 执行 checkpoint 不同；本文的"session / `agent_session`"指外部 Agent 会话（表），与 `libra code` 内部 runtime session 不同。两者的表 / 类型 / ref / 命令命名空间均不重叠。
 
 > **改进原则（融合自前两轮迭代）**：
 > 1. **Lean v1**：仅 Claude + Gemini 上线，其余 5 个 Agent 在 v1 占位为 preview，v2 填充。
@@ -51,7 +54,7 @@
 ### 2.1 目标（v1）
 
 1. 接入 **Claude Code、Gemini** 两种外部 Agent 并持久化其原始 transcript；其余 5 种（Cursor、Codex、OpenCode、GitHub Copilot CLI、Factory AI Droid）在 v1 注册为 **preview**，CLI 可见但走存根实现。
-2. 保持 `refs/libra/intent` / `ai_session` / `libra code` 行为完全不变。
+2. 保持 `refs/libra/intent` / `ai_session` 的**写入内容语义**完全不变；不改变 `libra code` 当前对外行为（其 TUI→Web-only 交互面迁移由 [../development/agent.md](../development/agent.md) 负责，本文不依赖 TUI，也不依赖其交互面形态）。
 3. v1 强调**可观测**：可追踪会话、可查看 checkpoint 列表、可提取 transcript 快照。
 4. v1 引入 EntireIO 风格的 Subagent（子代理）级联追踪元数据（仅记录 `parent_session_id`），实际嵌套语义随各 adapter 的 `SubagentExtractor` 后续补全。
 5. 与 `subagent-scaffold` Cargo feature 无关；默认构建即可用。
@@ -62,7 +65,7 @@
 2. 不强制统一整库 transcript schema；保留 provider 原生格式（`jsonl/sqlite/markdown/binary`）的字节语义。
 3. **不建 `agent_session_event` 表**——`SessionStore` 的 JSONL 已承载事件流。
 4. **不建 shadow ref `refs/libra/agent-shadow/...`**——用 orphan commit 上的 `Libra-Scope: temporary` trailer 区分。
-5. **不实装 `libra agent checkpoint rewind` 的 transcript 覆写**——仅工作树恢复，transcript 截断需要每个 Provider 实现 `TranscriptTruncator`，归 v2。v1 命令打印明显警告。
+5. **不承诺统一 transcript 覆写**——v1 只对已实现 `TranscriptTruncator` 的 Agent 执行本地 transcript 截断（当前为 Claude Code）；其它 provider 仍只恢复工作树并打印明显 warning。
 6. 不向 D1 同步全量 `agent_session_event`（事件流量大，v1 仅同步 session/checkpoint 摘要）。
 
 ---
@@ -410,26 +413,25 @@ async fn process_hook_event_with_target(
 
 - `libra agent checkpoint show <id>`：展示 metadata + transcript 长度 + tree 摘要
 - `libra agent checkpoint rewind <id> --dry-run`：默认 dry-run，打印将影响的文件列表
-- `libra agent checkpoint rewind <id> --apply`（不带 `--apply` 时拒绝执行）：仅恢复**工作树**（复用 `restore` 路径），HEAD 与 `refs/heads/*` 不动；**不**覆写本地 transcript 文件——v1 命令明确打印：
+- `libra agent checkpoint rewind <id> --apply`（不带 `--apply` 时拒绝执行）：恢复**工作树**（复用 `restore` 路径），HEAD 与 `refs/heads/*` 不动；若 checkpoint 属于 Claude Code 且 `metadata_json.transcript_path` 可用，则把本地 transcript 截断到 checkpoint boundary；其它 agent kind 明确打印 warning 并保持 transcript 不变：
   ```
-  Note: Transcript truncation for <provider> is not yet implemented in v1.
-  The Agent's local transcript file remains unchanged. Re-running the Agent
-  may produce inconsistent context.
+  Note: agent_kind '<provider>' has no TranscriptTruncator adapter yet;
+  the agent's local transcript was left untouched.
   ```
 
 ### 7.4 清理
 
 `libra agent clean [--all]`：
-1. 查 `agent_session WHERE state='stopped'`
-2. 对每个，查 `agent_checkpoint WHERE session_id=? AND scope='temporary'`
-3. 重写 `refs/libra/agent-traces` orphan branch tip 跳过这些 commit
-4. 删 `agent_checkpoint` 对应行
+1. 默认查最近一个 `state='stopped'` session；`--all` 才扩大到所有 stopped session（v0.17.1115 已落地）。active session 永不清理，避免删掉仍在运行的外部 Agent 临时 checkpoint。
+2. 对选中 session，查 `agent_checkpoint WHERE session_id=? AND scope='temporary'`
+3. 删 `agent_checkpoint` 对应行（v0.17.1115 已加回归测试覆盖 default/`--all` 的 stopped-only 语义）
+4. v0.17.1117 已补齐 `refs/libra/agent-traces` orphan branch rewrite：clean 会按保留的 checkpoint catalog 重建可达 commit 链，跳过被删除的 temporary checkpoint；若仓库只有历史 DB 行且 ref 为空，则保持 SQLite-only cleanup。
 5. 不主动 `git gc`——交底层自然回收
 
 ### 7.5 与现有命令交互
 
-- ✅ 扩展 [`is_locked_branch`](../../src/internal/branch.rs)：已新增匹配 `AGENT_TRACES_BRANCH` 常量（branch.rs:42 / :51）；`branch`（create / delete）与 `switch`（create）均已调用
-- 部分：[`command/restore.rs`](../../src/command/restore.rs) 已通过 `RestoreError::LockedSource` 守 `--source <locked-ref>`；[`command/reset.rs`](../../src/command/reset.rs) 已通过 `ResetError::LockedTarget` 守 `reset --hard <locked-ref>`。但**cwd 当前位于锁定分支时拦截 worktree-modifying commands** 属于行为变更，仍留作独立切片，未在本批落地
+- ✅ 扩展 [`is_locked_branch`](../../src/internal/branch.rs)：已新增匹配 `AGENT_TRACES_BRANCH` 常量（branch.rs:42 / :51）；`branch`（create / delete）、`switch`（create / existing target）与 `checkout` 均已调用
+- ✅ 锁定分支互操作已收口：[`command/restore.rs`](../../src/command/restore.rs) 通过 `RestoreError::LockedSource` 守 `--source <locked-ref>`，并通过 `RestoreError::LockedCurrentBranch` 拦截当前位于 `intent` / `agent-traces` 时的 worktree restore；[`command/reset.rs`](../../src/command/reset.rs) 通过 `ResetError::LockedTarget` 守 `reset <locked-ref>`，并通过 `ResetError::LockedCurrentBranch` 拦截当前位于 `intent` / `agent-traces` 时的整树 reset。`main` 仍只在 branch-management 语义下锁定，不阻塞普通用户工作树。
 - ✅ `git log refs/libra/agent-traces` 直接可用
 
 ---
@@ -538,7 +540,7 @@ libra agent
   session resume <id>                    # 标记 metadata state=active，不恢复 transcript 上下文
   checkpoint list [--session <id>]
   checkpoint show <id>                   # metadata + diff 摘要（合并自 explain）
-  checkpoint rewind <id> [--dry-run|--apply]   # v1: --apply 仅恢复工作树，不覆写 transcript
+  checkpoint rewind <id> [--dry-run|--apply]   # --apply 恢复工作树；Claude Code transcript 会按 checkpoint 截断
   clean [--all]
   doctor                                 # 诊断 hook 安装、stuck 状态、孤儿 checkpoint
   push [--remote <name>]                 # 推送 refs/libra/agent-traces
@@ -548,7 +550,7 @@ libra agent
 **v1 不实现**：
 - `session promote <id> --as-intent`（v2 跨体系提升）
 - `checkpoint explain <id>`（合并到 `checkpoint show`）
-- `checkpoint rewind <id> --apply` 的 transcript 截断（v2 接 `TranscriptTruncator`）
+- 非 Claude Code provider 的 `checkpoint rewind <id> --apply` transcript 截断（需各 provider 接 `TranscriptTruncator`）
 
 ### 9.1 初始化
 
@@ -599,7 +601,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 
 ### 10.3 推送独立 remote
 
-`libra agent push [--remote <name>]`：scope 限定 `refs/libra/agent-traces`，对应 `[remote "agent-traces"]` 配置写在 `.libra/config`。薄包装现 push 机器，无新 transport。
+`libra agent push [--remote <name>]`：scope 限定 `refs/libra/agent-traces`；默认 remote 为 `origin`，如需专用 remote 可传 `--remote agent-traces` 并在 `.libra/config` 配置 `[remote "agent-traces"]`。v0.17.1114 已落地为现有 push 机器的薄包装，无新 transport：本地 `agent-traces` tip 通过固定 refspec `agent-traces:refs/libra/agent-traces` 推送，且不会在远端创建 `refs/heads/agent-traces`。
 
 ---
 
@@ -610,6 +612,11 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 3. `agent_session.thread_id` 在 v1 默认 NULL，除非显式 `promote`（v2）
 4. v1 不做跨模型转换；v2 可从 `agent_session` 反算 `ToolCallRecord` 回写到 `ai_thread`
 5. **资源隔离**：`SessionStore` 路径区分——`libra code` 用 `.libra/sessions/code/`，`libra agent` 用 `.libra/sessions/agent/`，避免文件锁冲突
+6. **`SessionEvent` schema 协调（跨文档硬约束）**：本文复用 `src/internal/ai/session/` 的 `SessionStore` JSONL 承载外部 Agent 事件流（§3.4 不另建 `agent_session_event` 表）。`SessionEvent` 类型的 **schema 主权属于** [../development/agent.md](../development/agent.md)（AG-01）——该计划会把它收紧为内部 runtime 契约（per-session 单调 `u64` 序号、snapshot = fold(events)、归一事件 envelope，并新增 `Workflow` variant）。据此约定：
+   - (a) 二者**仅通过 `code/` vs `agent/` 子目录隔离运行时实例与文件锁**，不共享同一 session 实例；
+   - (b) 外部 Agent 事件依赖 `SessionEvent` 保持 **serde 向后兼容 + unknown-event-safe**（`Unknown(Value)` 兜底，见 §13 风险 12）——AG-01 新增 variant 不得破坏旧 reader；
+   - (c) 若 AG-01 把 `SessionEvent` 收紧到"每条事件必须带 `turn_id`/`seq`"而**无法容纳外部 hook 生命周期事件**，则本文改用**独立 event 类型**，仅复用 `SessionStore` 的文件锁与恢复原语，不再复用 `SessionEvent` 枚举。
+   - 任何一方改动 `SessionEvent` schema 都须同步检查对方此节。
 
 ---
 
@@ -647,7 +654,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 | 7 | **CAS 风暴** | P1 | 模拟单 session 100 events/s 持续 60s，`agent-traces` 写入成功率 100%；必要时调整 `HISTORY_HEAD_CONFLICT_MAX_RETRIES`（现 32） |
 | 8 | **Hook 失败安全** | P1 | 集成测试：安装 hook 后 `mv $(which libra) /tmp` 卸载 libra，Claude Code 仍能完整跑完一个 session（`|| true` 吃错误）；libra 还原后 `libra agent doctor` 报告"未捕获的 session N 个" |
 | 9 | **多 worktree SQLite 共享** | P2 | `agent_session` 必须存于 `git rev-parse --git-common-dir` 对应的 SQLite；`worktree_id` 列允许 `list` 按需过滤；多 worktree 试跑 |
-| 10 | **v1 过度承诺 rewind** | P1 | `checkpoint rewind` 在 v1 默认 dry-run；`--apply` 时不动 transcript 文件且打印明显警告 |
+| 10 | **v1 过度承诺 rewind** | P1 | `checkpoint rewind` 在 v1 默认 dry-run；`--apply` 只对已实现 `TranscriptTruncator` 的 Agent 改写 transcript（当前 Claude Code），其它 agent kind 保持 transcript 不变并打印明显 warning |
 | 11 | **Cursor SQLite transcript 取查** | P2 | `libra agent session show --extract-transcript <path>` 把 SQLite blob 物化到指定路径，文档说明用 `sqlite3` 查看 |
 | 12 | **Unknown-event-safe envelope 兼容** | P2 | 老 reader 读包含未来虚构事件 `kind=future_event_xyz` 的 metadata.json，应落到 `Unknown(Value)` 分支不报错（与 [agent_run/event.rs](../../src/internal/ai/agent_run/event.rs) 对外承诺一致） |
 
@@ -675,10 +682,10 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 
 1. **Checkpoint commit 生成**：复用 `stash::build_tree_recursive`（排除 `protected_dirs`）构造 tree；构 metadata.json blob；transcript 经 `Redactor` → `RedactedBytes` → `write_git_object`；events.jsonl 同样作 blob；构 checkpoint tree；`HistoryManager::new_with_ref("refs/libra/agent-traces")` 追加 commit；commit message 含 `Libra-*` trailer
 2. **`agent_checkpoint` 表写入**：`scope` ∈ {temporary, committed}；`traces_commit` 指向 orphan commit；`tree_oid` / `metadata_blob_oid`
-3. **CLI**：实现 `libra agent session list/info/show/stop/resume`、`libra agent checkpoint list/show`、`libra agent doctor`、`libra agent push`
-4. **清理**：`libra agent clean`：按 `state='stopped' AND scope='temporary'` 重写 `agent-traces` tip 移除对应 commit
-5. **Rewind dry-run**：`libra agent checkpoint rewind <id> --dry-run` 列出将影响的文件；`--apply` 调 `restore` 路径仅还原工作树并打印 transcript 不变更警告
-6. **TUI/MCP 扩展（可选）**：在现有 [tui/](../../src/internal/tui/) 加一个最小 view 展示 `agent_session` 列表
+3. **CLI**：实现 `libra agent session list/info/show/stop/resume`、`libra agent checkpoint list/show`、`libra agent doctor`、`libra agent push`（v0.17.1114：`agent push` 已接入 `refs/libra/agent-traces` 推送）
+4. **清理**：`libra agent clean`：v0.17.1115 已按 `state='stopped' AND scope='temporary'` 删除 SQLite catalog 行，且 `--all` 不再触碰 active session；v0.17.1117 已补齐 agent-traces rewrite，temporary checkpoint commit 会从可达链移除，保留 checkpoint 的 `traces_commit` / `tree_oid` 同步改写。
+5. **Rewind dry-run / apply**：`libra agent checkpoint rewind <id> --dry-run` 列出将影响的文件；`--apply` 调 `restore` 路径还原工作树，并在 Claude Code checkpoint 上截断本地 transcript；其它 agent kind 打印 transcript 不变更 warning
+6. **会话列表展示面（可选）**：在 **Web Code UI**（[`src/internal/ai/web/`](../../src/internal/ai/web/)）暴露一个最小 `agent_session` 列表视图。**不要新增 TUI view**——Code TUI 将由 [../development/agent.md](../development/agent.md) 删除（Web 成为唯一交互面），新增 TUI view 会被一并孤立/移除；本文的展示面统一走 Web。
 
 **阶段 2 验收**：完整 Claude/Gemini session 能生成多个 checkpoint commit；`libra agent checkpoint list` 列出按时间排序；`git log refs/libra/agent-traces` 可读；`libra agent clean` 后 temporary commit 从 `agent-traces` 移除且 SQLite 索引同步清理。
 
@@ -695,7 +702,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 
 ### 阶段 4（v2，本次不做）
 
-1. `TranscriptTruncator` 实装 + `checkpoint rewind --apply` 支持 transcript 覆写
+1. 非 Claude Code provider 的 `TranscriptTruncator` 实装 + `checkpoint rewind --apply` transcript 覆写
 2. `session promote <id> --as-intent` 跨体系提升
 3. 从 `agent_session` 反算 `ToolCallRecord` 回写 `ai_thread`
 4. 5 个 preview adapter → stable
@@ -750,6 +757,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 | `src/command/reset.rs` | 同上 |
 | `src/internal/ai/hooks/runtime.rs:157` `process_hook_event_from_stdin` | 抽离为 `process_hook_event_with_target(..., target: HookTarget)`；旧函数 1:1 包装传 `AiIntent` |
 | `src/command/init.rs`（或对应初始化路径） | 调 `HistoryManager::new_with_ref("refs/libra/agent-traces").init_branch()` |
+| `src/command/agent/push.rs` + `src/command/push.rs` | ✅ v0.17.1114：`libra agent push` 复用 push 传输并允许显式 `refs/libra/*` 远端目的 ref；回归测试确认只写 `refs/libra/agent-traces`，不创建 `refs/heads/agent-traces` |
 | `src/internal/ai/session/store.rs`（路径子目录） | 新增 `code/` vs `agent/` 子目录区分 |
 | `tests/db_migration_test.rs:50 / :56-61 / :1040` | ✅ 已落地：注册表回归测试硬编码断言已扩展到全部七个迁移版本（`2026050301..2026052301`，含 v0.17.800 source_call_log）与对应表名 |
 | `sql/migrations/README.md` | 版本号规则改 `YYYYMMDDNN`、`include_str!` 加载示例 |
@@ -762,7 +770,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 - `src/internal/ai/hooks/providers/{claude,gemini}/` 的现有 `HookProvider` 实现（仅在外面包 wrapper）
 - `refs/libra/intent` 写入路径与 `AI_REF` 常量
 - `sqlite_20260309_init.sql` / `sqlite_20260415_ai_runtime_contract.sql`
-- 现有 `libra code` / TUI / MCP 行为
+- 现有 `libra code` 对外行为与 `refs/libra/intent` 写入语义（其 TUI→Web-only 交互面迁移由 [../development/agent.md](../development/agent.md) 负责；本文**不依赖、也不扩展** TUI/MCP 作为捕获或展示面——展示面统一走 Web，见 §14 阶段 2 step 6）
 
 ---
 
@@ -811,9 +819,14 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
   - **删除 shadow ref**：用 `agent-traces` 上的 orphan commit + scope trailer
   - **`RedactedBytes` 编译契约**：未脱敏字节类型层面无法进入持久化
   - **Adapter trait 拆分**：`ObservedAgent` 核心 + `ObservedAgentHooks` / `TranscriptTruncator` / `TranscriptChunker` 可选
-  - **v1 rewind 仅 dry-run / 工作树**：transcript 覆写归 v2
+  - **v1 rewind**：默认 dry-run；`--apply` 恢复工作树，Claude Code transcript 可截断，其它 provider transcript 覆写归 v2
   - **Migration 文件化**：`include_str!` 加载新增 `2026050303_agent_capture.sql`
   - **`is_locked_branch` 扩展**：加 `agent-traces`，并在 `restore`/`reset` 调用
   - **Phase 1 文件级落地清单**：新增第 16 章，把抽象计划落到具体文件
   - **EntireIO 差异决策表**：第 15 章
   - **基线核对验证**：所有引用的现状（迁移版本、`is_locked_branch` 范围、`Commands` 枚举无 `Hooks`/`Agent`、`tests/db_migration_test.rs` 硬编码断言行号）已对仓库做 grep 验证
+- **2026-06-05（与 dev/agent.md 对齐）**：消除与 [../development/agent.md](../development/agent.md)（`libra code` TUI→Web-only 迁移计划）的冲突假设——
+  - **TUI 冲突**：阶段 2 step 6 的可选会话列表视图从 TUI 改为 **Web Code UI**；§16.3「不动」边界与文档定位不再声称"TUI 行为不变",改为"不依赖、不扩展 TUI/MCP 作为捕获/展示面"
+  - **`SessionEvent` schema 协调**：§11 新增第 6 条,明确 `SessionEvent` schema 主权归 AG-01,本文依赖其向后兼容 + unknown-event-safe,并给出不可调和时改用独立 event 类型的退路
+  - **术语消歧**：文档头新增跨文档「外部 Agent / checkpoint / session」语义对照,避免与 dev/agent.md 同词反义
+  - **"完全不变"措辞收紧**：§2.1 改为"`refs/libra/intent` / `ai_session` **写入内容语义**不变",不再覆盖 `libra code` 交互面形态

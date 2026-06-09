@@ -82,6 +82,33 @@ fn json_switch_already_on() {
 }
 
 #[test]
+fn json_switch_orphan_reports_unborn_branch_with_empty_commit() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(
+        &["--json", "switch", "--orphan", "orphan-topic"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["data"]["branch"], "orphan-topic");
+    assert_eq!(json["data"]["commit"], "");
+    assert_eq!(json["data"]["created"], true);
+    assert_eq!(json["data"]["detached"], false);
+    assert_eq!(json["data"]["already_on"], false);
+
+    assert!(
+        !repo.path().join("tracked.txt").exists(),
+        "orphan switch should remove tracked worktree files"
+    );
+}
+
+#[test]
 fn json_switch_unborn_current_branch_reports_error() {
     let repo = tempdir().expect("failed to create repository root");
     init_repo_via_cli(repo.path());
@@ -175,6 +202,11 @@ fn json_schema_has_all_fields() {
 #[serial]
 async fn json_switch_track_has_tracking_fields() {
     let repo = create_committed_repo_via_cli();
+    let remote = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&remote, "remote add origin");
     let _guard = ChangeDirGuard::new(repo.path());
 
     let head = Head::current_commit().await.unwrap();

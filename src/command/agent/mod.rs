@@ -51,7 +51,7 @@ EXAMPLES:
     libra agent session list                        List captured sessions
     libra agent checkpoint list                     List captured checkpoints
     libra agent checkpoint show <id>                Show a single checkpoint by id
-    libra agent checkpoint rewind <id>              Replay a checkpoint as a JSONL transcript
+    libra agent checkpoint rewind <id>              Preview/apply checkpoint rewind
     libra agent clean                               Drop temporary checkpoints from the most recent stopped session
     libra agent clean --all                         Drop temporary checkpoints from every stopped session
     libra agent doctor                              Diagnose hook installation and capture state
@@ -152,11 +152,11 @@ pub enum CheckpointSubcommand {
     /// Show a single checkpoint's metadata and tree summary.
     #[command(about = "Show checkpoint metadata")]
     Show(CheckpointShowArgs),
-    /// Inspect what `rewind` would do (`--apply` to actually run; v1 only
-    /// restores the working tree and leaves the agent's own transcript file
-    /// untouched, with a warning).
+    /// Inspect what `rewind` would do (`--apply` to actually run). Apply
+    /// restores the working tree and truncates supported agent transcripts
+    /// (currently Claude Code) when metadata includes a transcript path.
     #[command(
-        about = "Rewind a checkpoint (v1: --dry-run by default; --apply restores worktree only)"
+        about = "Rewind a checkpoint (dry-run by default; --apply restores worktree and supported transcripts)"
     )]
     Rewind(CheckpointRewindArgs),
 }
@@ -183,7 +183,8 @@ pub struct CheckpointRewindArgs {
     /// Show the impact without modifying anything (default)
     #[arg(long, conflicts_with = "apply")]
     pub dry_run: bool,
-    /// Actually restore. v1 limits this to working-tree restore; the agent's transcript file is NOT rewritten and a warning is printed
+    /// Actually restore the working tree and truncate supported agent transcripts
+    /// (currently Claude Code) when metadata includes a transcript path
     #[arg(long)]
     pub apply: bool,
 }
@@ -264,10 +265,10 @@ fn install_or_uninstall(agents: &[String], output: &OutputConfig, install: bool)
             continue;
         };
         if install {
-            install_provider_hooks(provider)
+            install_agent_hooks(provider, &slug)
                 .map_err(|err| CliError::fatal(format!("failed to enable '{slug}': {err}")))?;
             if !output.quiet {
-                println!("libra agent enable: {verb_past} '{slug}' (provider hooks installed)");
+                println!("libra agent enable: {verb_past} '{slug}' (agent hooks installed)");
             }
         } else {
             provider
@@ -297,18 +298,24 @@ fn provider_name_for(kind: AgentKind) -> &'static str {
     }
 }
 
-fn install_provider_hooks(provider: &dyn HookProvider) -> anyhow::Result<()> {
+fn install_agent_hooks(provider: &dyn HookProvider, slug: &str) -> anyhow::Result<()> {
     // Use the running binary's path so installed hooks point at exactly the
     // libra the user is invoking — falling back to the bare `libra` symbol
     // (which `HookProvider`s will substitute) if `current_exe` fails.
     let binary_path = std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(str::to_string));
-    let opts = ProviderInstallOptions {
+    let opts = agent_install_options(binary_path, slug);
+    provider.install_hooks(&opts)
+}
+
+fn agent_install_options(binary_path: Option<String>, slug: &str) -> ProviderInstallOptions {
+    ProviderInstallOptions {
         binary_path,
         timeout_secs: None,
-    };
-    provider.install_hooks(&opts)
+        hook_command_prefix: Some(format!("agent hooks {slug}")),
+        fail_safe_shell: true,
+    }
 }
 
 /// Validate `agents`. Empty input expands to every stable slug; non-empty
@@ -368,5 +375,17 @@ mod tests {
     fn provider_name_for_maps_stable() {
         assert_eq!(provider_name_for(AgentKind::ClaudeCode), "claude");
         assert_eq!(provider_name_for(AgentKind::Gemini), "gemini");
+    }
+
+    #[test]
+    fn agent_install_options_route_to_agent_traces_fail_safe_entrypoint() {
+        let opts = agent_install_options(Some("/tmp/libra".to_string()), "claude-code");
+        assert_eq!(opts.binary_path.as_deref(), Some("/tmp/libra"));
+        assert_eq!(
+            opts.hook_command_prefix.as_deref(),
+            Some("agent hooks claude-code")
+        );
+        assert!(opts.fail_safe_shell);
+        assert!(opts.timeout_secs.is_none());
     }
 }

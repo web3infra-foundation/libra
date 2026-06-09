@@ -48,11 +48,11 @@ use tokio::{
 };
 
 use super::code_ui::{
-    CodeUiApplyToFuture, CodeUiCapabilities, CodeUiCommandAdapter, CodeUiInteractionKind,
-    CodeUiInteractionOption, CodeUiInteractionRequest, CodeUiInteractionResponse,
-    CodeUiInteractionStatus, CodeUiPatchChange, CodeUiPatchsetSnapshot, CodeUiPlanSnapshot,
-    CodeUiPlanStep, CodeUiReadModel, CodeUiSession, CodeUiSessionSnapshot, CodeUiSessionStatus,
-    CodeUiToolCallSnapshot, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
+    CodeUiApplyToFuture, CodeUiCapabilities, CodeUiCommandAdapter, CodeUiEventType,
+    CodeUiInteractionKind, CodeUiInteractionOption, CodeUiInteractionRequest,
+    CodeUiInteractionResponse, CodeUiInteractionStatus, CodeUiPatchChange, CodeUiPatchsetSnapshot,
+    CodeUiPlanSnapshot, CodeUiPlanStep, CodeUiReadModel, CodeUiSession, CodeUiSessionSnapshot,
+    CodeUiSessionStatus, CodeUiToolCallSnapshot, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
 };
 use crate::internal::ai::{
     agent::runtime::run_tool_loop_with_history_and_observer,
@@ -65,8 +65,8 @@ use crate::internal::ai::{
     tools::{
         ToolOutput, ToolRegistry,
         context::{
-            StepStatus, UpdatePlanArgs, UserInputAnswer, UserInputQuestion, UserInputRequest,
-            UserInputResponse,
+            StepStatus, SubmitPlanDraftArgs, UpdatePlanArgs, UserInputAnswer, UserInputQuestion,
+            UserInputRequest, UserInputResponse,
         },
     },
 };
@@ -688,7 +688,7 @@ async fn finalize_assistant_entry(
     let text = text.to_string();
     let status = status.to_string();
     session
-        .mutate("session_updated", |snapshot| {
+        .mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             if let Some(entry) = snapshot.transcript.iter_mut().find(|e| e.id == entry_id) {
                 entry.content = Some(text.clone());
                 entry.status = Some(status.clone());
@@ -987,6 +987,12 @@ impl super::super::agent::runtime::tool_loop::ToolLoopObserver for HeadlessTurnO
             {
                 session.upsert_plan(plan).await;
             }
+            if tool_name == "submit_plan_draft"
+                && let Some(plan) =
+                    plan_snapshot_from_submit_plan_draft_arguments(&call_id, "running", &arguments)
+            {
+                session.upsert_plan(plan).await;
+            }
             session.set_status(CodeUiSessionStatus::ExecutingTool).await;
         });
     }
@@ -1055,6 +1061,13 @@ impl super::super::agent::runtime::tool_loop::ToolLoopObserver for HeadlessTurnO
             {
                 session.upsert_plan(plan).await;
             }
+            if tool_name == "submit_plan_draft"
+                && let Some(arguments) = arguments.as_ref()
+                && let Some(plan) =
+                    plan_snapshot_from_submit_plan_draft_arguments(&call_id, &status, arguments)
+            {
+                session.upsert_plan(plan).await;
+            }
             session.set_status(CodeUiSessionStatus::Thinking).await;
         });
     }
@@ -1082,6 +1095,8 @@ fn headless_tool_call_summary(tool_name: &str, arguments: &serde_json::Value) ->
     match tool_name {
         "apply_patch" => "Apply patch".to_string(),
         "request_user_input" => "Ask for user input".to_string(),
+        "submit_intent_draft" => "Submit intent draft".to_string(),
+        "submit_plan_draft" => "Submit plan draft".to_string(),
         "update_plan" => "Update plan".to_string(),
         _ => tool_name.replace('_', " "),
     }
@@ -1104,6 +1119,29 @@ fn plan_snapshot_from_update_plan_arguments(
             .map(|step| CodeUiPlanStep {
                 step: step.step,
                 status: step_status_label(&step.status).to_string(),
+            })
+            .collect(),
+        updated_at: Utc::now(),
+    })
+}
+
+fn plan_snapshot_from_submit_plan_draft_arguments(
+    call_id: &str,
+    status: &str,
+    arguments: &serde_json::Value,
+) -> Option<CodeUiPlanSnapshot> {
+    let args = serde_json::from_value::<SubmitPlanDraftArgs>(arguments.clone()).ok()?;
+    Some(CodeUiPlanSnapshot {
+        id: call_id.to_string(),
+        title: Some("Draft execution plan".to_string()),
+        summary: args.explanation,
+        status: status.to_string(),
+        steps: args
+            .steps
+            .into_iter()
+            .map(|step| CodeUiPlanStep {
+                step: step.title,
+                status: "pending".to_string(),
             })
             .collect(),
         updated_at: Utc::now(),

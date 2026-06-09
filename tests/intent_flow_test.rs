@@ -12,13 +12,27 @@
 use std::sync::Arc;
 
 use git_internal::internal::object::{
+    context::SelectionStrategy,
     intent::Intent,
     intent_event::{IntentEvent, IntentEventKind},
     task::Task,
     types::ActorRef,
 };
 use libra::{
-    internal::ai::history::HistoryManager,
+    internal::ai::{
+        history::HistoryManager,
+        intentspec::{
+            ResolveContext, RiskLevel,
+            draft::{DraftAcceptance, DraftIntent, DraftRisk, IntentDraft},
+            resolve_intentspec,
+            types::{ChangeType, Objective, ObjectiveKind},
+        },
+        mcp::server::LibraMcpServer,
+        runtime::phase0::{
+            ContextSnapshotItem, ContextSnapshotRequest, write_context_snapshot_if_needed,
+            write_intent,
+        },
+    },
     utils::{storage::local::LocalStorage, storage_ext::StorageExt, test},
 };
 use serial_test::serial;
@@ -154,4 +168,115 @@ async fn test_intent_flow() {
     // 8. Verify HEAD is a single ref
     let head_hash = ai_history.resolve_history_head().await.unwrap().unwrap();
     println!("AI Branch HEAD: {}", head_hash);
+}
+
+/// Phase 0 formal helpers must preserve the intent-flow invariant that AI
+/// snapshots live on the single history branch, while skipping ContextSnapshot
+/// writes when there is no baseline content to freeze.
+#[tokio::test]
+#[serial]
+async fn phase0_runtime_helpers_persist_intent_and_context_snapshot_conditionally() {
+    let dir = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(dir.path());
+
+    test::setup_with_new_libra_in(dir.path()).await;
+
+    let libra_dir = dir.path().join(".libra");
+    let objects_dir = libra_dir.join("objects");
+    let storage = Arc::new(LocalStorage::new(objects_dir));
+    let db_path = libra_dir.join("libra.db");
+    let db_conn = Arc::new(
+        libra::internal::db::establish_connection(db_path.to_str().unwrap())
+            .await
+            .unwrap(),
+    );
+    let ai_history = Arc::new(HistoryManager::new(storage.clone(), libra_dir, db_conn));
+    let mcp_server = Arc::new(LibraMcpServer::new(
+        Some(ai_history.clone()),
+        Some(storage.clone()),
+    ));
+    let spec = sample_phase0_spec();
+    let actor = ActorRef::system("phase0-intent-flow").unwrap();
+
+    let intent = write_intent(&spec, &mcp_server)
+        .await
+        .expect("Phase 0 Intent write should persist through MCP/history");
+    assert_eq!(intent.source, spec);
+    assert_eq!(ai_history.list_objects("intent").await.unwrap().len(), 1);
+
+    let skipped = write_context_snapshot_if_needed(
+        ContextSnapshotRequest {
+            items: Vec::new(),
+            selection_strategy: SelectionStrategy::Explicit,
+            summary: None,
+            actor: actor.clone(),
+        },
+        &mcp_server,
+    )
+    .await
+    .expect("empty ContextSnapshot request should be a clean skip");
+    assert!(skipped.is_none());
+    assert_eq!(ai_history.list_objects("snapshot").await.unwrap().len(), 0);
+
+    let snapshot = write_context_snapshot_if_needed(
+        ContextSnapshotRequest {
+            items: vec![ContextSnapshotItem {
+                kind: Some("file".to_string()),
+                path: "src/main.rs".to_string(),
+                preview: Some("fn main() {}".to_string()),
+                blob_hash: None,
+            }],
+            selection_strategy: SelectionStrategy::Explicit,
+            summary: Some("Phase 0 changed worktree baseline".to_string()),
+            actor,
+        },
+        &mcp_server,
+    )
+    .await
+    .expect("dirty ContextSnapshot request should persist")
+    .expect("non-empty ContextSnapshot request should return an id");
+
+    assert_eq!(snapshot.item_count, 1);
+    assert_eq!(
+        snapshot.summary.as_deref(),
+        Some("Phase 0 changed worktree baseline")
+    );
+    assert_eq!(ai_history.list_objects("snapshot").await.unwrap().len(), 1);
+}
+
+fn sample_phase0_spec() -> libra::internal::ai::intentspec::IntentSpec {
+    resolve_intentspec(
+        IntentDraft {
+            intent: DraftIntent {
+                summary: "Capture Phase 0 context".to_string(),
+                problem_statement: "Need a frozen baseline for replay".to_string(),
+                change_type: ChangeType::Feature,
+                objectives: vec![Objective {
+                    title: "Record changed-path context".to_string(),
+                    kind: ObjectiveKind::Analysis,
+                }],
+                in_scope: vec!["src".to_string()],
+                out_of_scope: vec![],
+                touch_hints: None,
+            },
+            acceptance: DraftAcceptance {
+                success_criteria: vec!["ContextSnapshot write is conditional".to_string()],
+                fast_checks: vec![],
+                integration_checks: vec![],
+                security_checks: vec![],
+                release_checks: vec![],
+            },
+            risk: DraftRisk {
+                rationale: "test-only flow".to_string(),
+                factors: vec![],
+                level: Some(RiskLevel::Low),
+            },
+        },
+        RiskLevel::Low,
+        ResolveContext {
+            working_dir: ".".to_string(),
+            base_ref: "HEAD".to_string(),
+            created_by_id: "intent-flow-test".to_string(),
+        },
+    )
 }

@@ -8,9 +8,10 @@ use std::{
     collections::HashSet,
     env, fs, io,
     path::{Component, Path, PathBuf},
+    time::{Duration, SystemTime},
 };
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
 #[cfg(unix)]
@@ -29,15 +30,21 @@ use crate::{
 pub const WORKTREE_EXAMPLES: &str = "\
 EXAMPLES:
     libra worktree add ../feature-x                Create a linked worktree
+    libra worktree add -b feature-x ../feature-x   Create a shared branch first
+    libra worktree add --no-checkout ../empty      Register without restoring files
     libra worktree list                            List every registered worktree
+    libra worktree list --porcelain                Emit stable key-value records
     libra worktree lock ../feature-x --reason wip  Lock a worktree to prevent prune/remove
     libra worktree unlock ../feature-x             Release the lock
     libra worktree move ../old ../new              Rename a worktree
     libra worktree prune                           Drop entries whose paths vanished
+    libra worktree prune --dry-run                 Report what prune would drop, change nothing
+    libra worktree prune --expire 1.day.ago        Only prune stale missing entries
     libra worktree remove ../feature-x             Unregister, keep the directory on disk
     libra worktree remove ../feature-x --delete-dir
                                                    Unregister and delete the directory
                                                    (refused on a dirty worktree)
+    libra worktree remove -f -f ../locked          Force-unregister a locked worktree
     libra worktree repair                          Fix stale or duplicate registry rows";
 
 /// Manage multiple working trees attached to this repository.
@@ -64,9 +71,41 @@ pub enum WorktreeSubcommand {
     Add {
         /// Filesystem path at which to create the new worktree.
         path: String,
+        /// Create a new shared repository branch at the start point before adding.
+        #[clap(
+            short = 'b',
+            long = "create-branch",
+            value_name = "BRANCH",
+            conflicts_with = "force_create_branch"
+        )]
+        create_branch: Option<String>,
+        /// Create or reset a shared repository branch at the start point.
+        #[clap(short = 'B', long = "force-create-branch", value_name = "BRANCH")]
+        force_create_branch: Option<String>,
+        /// Do not create or switch a named branch for this worktree.
+        #[clap(long, conflicts_with_all = ["create_branch", "force_create_branch"])]
+        detach: bool,
+        /// Create the worktree directory and .libra link without restoring files.
+        #[clap(long = "no-checkout")]
+        no_checkout: bool,
+        /// Lock the new worktree immediately after registering it.
+        #[clap(long)]
+        lock: bool,
+        /// Optional lock reason for `--lock`.
+        #[clap(long, value_name = "TEXT", requires = "lock")]
+        reason: Option<String>,
+        /// Optional commit-ish used as the restore/start point.
+        commit_ish: Option<String>,
     },
     /// List all known worktrees and their state.
-    List,
+    List {
+        /// Emit stable key-value records for scripts.
+        #[clap(long, conflicts_with = "verbose")]
+        porcelain: bool,
+        /// Show additional shared HEAD information in human output.
+        #[clap(short, long)]
+        verbose: bool,
+    },
     /// Mark a worktree as locked to prevent it from being pruned or removed.
     Lock {
         /// Filesystem path of the worktree to lock.
@@ -88,7 +127,17 @@ pub enum WorktreeSubcommand {
         dest: String,
     },
     /// Prune worktrees that are no longer valid or reachable.
-    Prune,
+    Prune {
+        /// Report which worktrees would be pruned without modifying the registry.
+        #[clap(long = "dry-run")]
+        dry_run: bool,
+        /// Show pruned paths as they are considered.
+        #[clap(short, long)]
+        verbose: bool,
+        /// Only prune missing worktrees when the registry is older than this age.
+        #[clap(long, value_name = "TIME")]
+        expire: Option<String>,
+    },
     /// Unregister a worktree. By default the directory on disk is preserved;
     /// pass `--delete-dir` for Git-style behavior that also removes the
     /// directory after a dirty-state check.
@@ -99,6 +148,9 @@ pub enum WorktreeSubcommand {
         /// Refuses on a dirty worktree (uncommitted changes).
         #[clap(long)]
         delete_dir: bool,
+        /// Override safety checks. Use twice to remove a locked worktree.
+        #[clap(short, long, action = ArgAction::Count)]
+        force: u8,
     },
     /// Unmount a FUSE task worktree mountpoint.
     #[cfg(unix)]
@@ -181,6 +233,9 @@ struct WorktreeMoveOutput {
 struct WorktreePruneOutput {
     pruned: Vec<String>,
     pruned_count: usize,
+    /// True when `--dry-run` was given: `pruned` lists what *would* be pruned
+    /// and the registry was left untouched.
+    dry_run: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -193,6 +248,19 @@ struct WorktreeRemoveOutput {
 #[derive(Debug, Serialize)]
 struct WorktreeRepairOutput {
     changed: bool,
+    links_repaired: usize,
+    links_skipped: usize,
+}
+
+struct AddWorktreeOptions {
+    path: String,
+    create_branch: Option<String>,
+    force_create_branch: Option<String>,
+    detach: bool,
+    no_checkout: bool,
+    lock: bool,
+    reason: Option<String>,
+    commit_ish: Option<String>,
 }
 
 #[cfg(unix)]
@@ -351,13 +419,33 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
     }
 
     match command {
-        WorktreeSubcommand::Add { path } => {
-            let result = add_worktree(path)
-                .await
-                .map_err(WorktreeError::into_cli_error)?;
+        WorktreeSubcommand::Add {
+            path,
+            create_branch,
+            force_create_branch,
+            detach,
+            no_checkout,
+            lock,
+            reason,
+            commit_ish,
+        } => {
+            let result = add_worktree(AddWorktreeOptions {
+                path,
+                create_branch,
+                force_create_branch,
+                detach,
+                no_checkout,
+                lock,
+                reason,
+                commit_ish,
+            })
+            .await
+            .map_err(WorktreeError::into_cli_error)?;
             render_add_worktree(&result, output)
         }
-        WorktreeSubcommand::List => list_worktrees(output),
+        WorktreeSubcommand::List { porcelain, verbose } => {
+            list_worktrees(porcelain, verbose, output).await
+        }
         WorktreeSubcommand::Lock { path, reason } => {
             let result = lock_worktree(path, reason).map_err(WorktreeError::into_cli_error)?;
             render_lock_worktree(&result, output)
@@ -370,15 +458,23 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             let result = move_worktree(src, dest).map_err(WorktreeError::into_cli_error)?;
             render_move_worktree(&result, output)
         }
-        WorktreeSubcommand::Prune => {
-            let result = prune_worktrees().map_err(WorktreeError::into_cli_error)?;
-            render_prune_worktrees(&result, output)
+        WorktreeSubcommand::Prune {
+            dry_run,
+            verbose,
+            expire,
+        } => {
+            let result = prune_worktrees(dry_run, expire).map_err(WorktreeError::into_cli_error)?;
+            render_prune_worktrees(&result, verbose, output)
         }
-        WorktreeSubcommand::Remove { path, delete_dir } => {
-            let result = remove_worktree(path, delete_dir)
+        WorktreeSubcommand::Remove {
+            path,
+            delete_dir,
+            force,
+        } => {
+            let result = remove_worktree(path, delete_dir, force)
                 .await
                 .map_err(WorktreeError::into_cli_error)?;
-            render_remove_worktree(&result, output)
+            render_remove_worktree(&result, force, output)
         }
         #[cfg(unix)]
         WorktreeSubcommand::Umount { path, cleanup } => {
@@ -663,8 +759,10 @@ fn find_entry<'a>(state: &'a WorktreeState, path: &Path) -> Option<&'a WorktreeE
 /// - creates a `.libra` directory symlink pointing at the shared storage, and
 /// - when `HEAD` exists, populates the new worktree from committed `HEAD`
 ///   content (not staged-only index changes).
-async fn add_worktree(path: String) -> WorktreeResult<WorktreeAddOutput> {
+async fn add_worktree(options: AddWorktreeOptions) -> WorktreeResult<WorktreeAddOutput> {
     let storage = util::storage_path();
+    let path = options.path;
+    let _detach_requested = options.detach;
     let target = resolve_path(&path, "worktree path")?;
 
     if util::is_sub_path(&target, &storage) {
@@ -726,6 +824,18 @@ async fn add_worktree(path: String) -> WorktreeResult<WorktreeAddOutput> {
         )));
     }
 
+    let start_point = options.commit_ish.clone();
+    if let Some(branch) = options.create_branch.as_ref() {
+        crate::command::branch::create_branch_safe(branch.clone(), start_point.clone())
+            .await
+            .map_err(|error| WorktreeError::OperationBlocked(error.message().to_string()))?;
+    }
+    if let Some(branch) = options.force_create_branch.as_ref() {
+        crate::command::branch::create_branch_force(branch.clone(), start_point.clone())
+            .await
+            .map_err(|error| WorktreeError::OperationBlocked(error.message().to_string()))?;
+    }
+
     let mut created_target = false;
     if !target.exists() {
         fs::create_dir_all(&target).map_err(|source| {
@@ -768,7 +878,8 @@ async fn add_worktree(path: String) -> WorktreeResult<WorktreeAddOutput> {
         }
     };
 
-    if Head::current_commit().await.is_some() {
+    let restore_source = start_point.unwrap_or_else(|| "HEAD".to_string());
+    if !options.no_checkout && Head::current_commit().await.is_some() {
         let _guard = match DirGuard::change_to(&target) {
             Ok(g) => g,
             Err(e) => {
@@ -783,9 +894,10 @@ async fn add_worktree(path: String) -> WorktreeResult<WorktreeAddOutput> {
         // of carrying staged-but-uncommitted index content.
         if let Err(e) = restore::execute_checked(RestoreArgs {
             pathspec: vec![util::working_dir_string()],
-            source: Some("HEAD".to_string()),
+            source: Some(restore_source),
             worktree: true,
             staged: false,
+            ..Default::default()
         })
         .await
         {
@@ -800,8 +912,8 @@ async fn add_worktree(path: String) -> WorktreeResult<WorktreeAddOutput> {
     state.worktrees.push(WorktreeEntry {
         path: canonical_target.to_string_lossy().to_string(),
         is_main: false,
-        locked: false,
-        lock_reason: None,
+        locked: options.lock,
+        lock_reason: options.lock.then_some(options.reason).flatten(),
     });
     if let Err(e) = write_state(&state) {
         rollback_partial_add();
@@ -869,13 +981,17 @@ fn run_list_worktrees() -> WorktreeResult<WorktreeListOutput> {
     Ok(WorktreeListOutput { worktrees })
 }
 
-fn list_worktrees(output: &OutputConfig) -> CliResult<()> {
+async fn list_worktrees(porcelain: bool, verbose: bool, output: &OutputConfig) -> CliResult<()> {
     let result = run_list_worktrees().map_err(WorktreeError::into_cli_error)?;
     if output.is_json() {
         return emit_json_data("worktree.list", &result, output);
     }
     if output.quiet {
         return Ok(());
+    }
+    let head = resolve_shared_head().await;
+    if porcelain {
+        return render_porcelain_list(&result, head.as_deref());
     }
     for w in result.worktrees {
         let mut line = String::new();
@@ -895,7 +1011,38 @@ fn list_worktrees(output: &OutputConfig) -> CliResult<()> {
             }
             line.push(']');
         }
+        if verbose && let Some(head) = head.as_ref() {
+            line.push_str(" [HEAD ");
+            line.push_str(&short_hash(head));
+            line.push(']');
+        }
         println!("{}", line);
+    }
+    Ok(())
+}
+
+async fn resolve_shared_head() -> Option<String> {
+    Head::current_commit_result()
+        .await
+        .ok()
+        .flatten()
+        .map(|hash| hash.to_string())
+}
+
+fn short_hash(hash: &str) -> String {
+    hash.chars().take(7).collect()
+}
+
+fn render_porcelain_list(result: &WorktreeListOutput, head: Option<&str>) -> CliResult<()> {
+    for worktree in &result.worktrees {
+        println!("worktree {}", worktree.path);
+        if let Some(head) = head {
+            println!("HEAD {head}");
+        }
+        if worktree.locked {
+            println!("locked");
+        }
+        println!();
     }
     Ok(())
 }
@@ -1029,21 +1176,25 @@ fn move_worktree(src: String, dest: String) -> WorktreeResult<WorktreeMoveOutput
         )));
     }
 
-    let old_path = state.worktrees[index].path.clone();
-    state.worktrees[index].path = dest_path.to_string_lossy().to_string();
-    if let Err(e) = write_state(&state) {
-        state.worktrees[index].path = old_path;
-        return Err(e);
-    }
-
     if let Err(e) = fs::rename(&src_path, &dest_path) {
-        state.worktrees[index].path = old_path;
-        write_state(&state)?;
         return Err(WorktreeError::IoWrite(format!(
             "failed to move worktree directory '{}' to '{}': {e}",
             src_path.display(),
             dest_path.display()
         )));
+    }
+
+    if let Err(source) = repair_worktree_storage_link(&dest_path) {
+        let _ = fs::rename(&dest_path, &src_path);
+        return Err(WorktreeError::StateRepair { source });
+    }
+
+    let old_path = state.worktrees[index].path.clone();
+    state.worktrees[index].path = dest_path.to_string_lossy().to_string();
+    if let Err(e) = write_state(&state) {
+        state.worktrees[index].path = old_path;
+        let _ = fs::rename(&dest_path, &src_path);
+        return Err(e);
     }
 
     Ok(WorktreeMoveOutput {
@@ -1066,19 +1217,28 @@ fn render_move_worktree(result: &WorktreeMoveOutput, output: &OutputConfig) -> C
 /// Any non-main worktree whose directory no longer exists on disk is removed
 /// from the registry. Before mutating state, the function prints the set of
 /// paths that will be pruned so the user can see what is being cleaned up.
-fn prune_worktrees() -> WorktreeResult<WorktreePruneOutput> {
+fn prune_worktrees(dry_run: bool, expire: Option<String>) -> WorktreeResult<WorktreePruneOutput> {
     let mut state = load_state()?;
+    let expire_cutoff = expire.as_deref().map(parse_expire_cutoff).transpose()?;
+    let state_is_expired = match expire_cutoff {
+        Some(cutoff) => fs::metadata(state_path())
+            .and_then(|metadata| metadata.modified())
+            .map(|modified| modified <= cutoff)
+            .unwrap_or(false),
+        None => true,
+    };
     let to_prune: Vec<_> = state
         .worktrees
         .iter()
         .filter(|w| {
             let path = Path::new(&w.path);
-            !path.exists() && !w.is_main && !w.locked
+            state_is_expired && !path.exists() && !w.is_main && !w.locked
         })
         .map(|w| w.path.clone())
         .collect();
 
-    if !to_prune.is_empty() {
+    // `--dry-run` reports the prunable entries but leaves the registry intact.
+    if !to_prune.is_empty() && !dry_run {
         state.worktrees.retain(|w| {
             let path = Path::new(&w.path);
             path.exists() || w.is_main || w.locked
@@ -1089,10 +1249,15 @@ fn prune_worktrees() -> WorktreeResult<WorktreePruneOutput> {
     Ok(WorktreePruneOutput {
         pruned_count: to_prune.len(),
         pruned: to_prune,
+        dry_run,
     })
 }
 
-fn render_prune_worktrees(result: &WorktreePruneOutput, output: &OutputConfig) -> CliResult<()> {
+fn render_prune_worktrees(
+    result: &WorktreePruneOutput,
+    verbose: bool,
+    output: &OutputConfig,
+) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("worktree.prune", result, output);
     }
@@ -1105,10 +1270,52 @@ fn render_prune_worktrees(result: &WorktreePruneOutput, output: &OutputConfig) -
     }
     println!("Will prune {} worktrees:", result.pruned_count);
     for path in &result.pruned {
-        println!("  {}", path);
+        if verbose {
+            println!("  {} (missing)", path);
+        } else {
+            println!("  {}", path);
+        }
     }
-    println!("Pruned {} worktrees", result.pruned_count);
+    if result.dry_run {
+        println!("Dry run: {} worktrees would be pruned", result.pruned_count);
+    } else {
+        println!("Pruned {} worktrees", result.pruned_count);
+    }
     Ok(())
+}
+
+fn parse_expire_cutoff(raw: &str) -> WorktreeResult<SystemTime> {
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case("now") || trimmed == "0" {
+        return Ok(SystemTime::now());
+    }
+    let normalized = trimmed.strip_suffix(".ago").unwrap_or(trimmed);
+    let mut parts = normalized.split('.');
+    let amount = parts
+        .next()
+        .ok_or_else(|| invalid_expire(raw))?
+        .parse::<u64>()
+        .map_err(|_| invalid_expire(raw))?;
+    let unit = parts.next().ok_or_else(|| invalid_expire(raw))?;
+    if parts.next().is_some() {
+        return Err(invalid_expire(raw));
+    }
+    let seconds = match unit {
+        "minute" | "minutes" | "min" | "mins" => amount.saturating_mul(60),
+        "hour" | "hours" => amount.saturating_mul(60 * 60),
+        "day" | "days" => amount.saturating_mul(24 * 60 * 60),
+        "week" | "weeks" => amount.saturating_mul(7 * 24 * 60 * 60),
+        _ => return Err(invalid_expire(raw)),
+    };
+    Ok(SystemTime::now()
+        .checked_sub(Duration::from_secs(seconds))
+        .unwrap_or(SystemTime::UNIX_EPOCH))
+}
+
+fn invalid_expire(raw: &str) -> WorktreeError {
+    WorktreeError::InvalidTarget(format!(
+        "invalid worktree prune --expire value '{raw}'; expected forms like 'now', '1.hour.ago', or '2.weeks'"
+    ))
 }
 
 /// Implements `worktree remove <path> [--delete-dir]`.
@@ -1119,7 +1326,11 @@ fn render_prune_worktrees(result: &WorktreePruneOutput, output: &OutputConfig) -
 /// changes) and the directory is removed before the registry entry is dropped.
 /// Order matters: registry last — a half-completed delete cannot silently
 /// unregister a worktree whose directory is still present.
-async fn remove_worktree(path: String, delete_dir: bool) -> WorktreeResult<WorktreeRemoveOutput> {
+async fn remove_worktree(
+    path: String,
+    delete_dir: bool,
+    force: u8,
+) -> WorktreeResult<WorktreeRemoveOutput> {
     let mut state = load_state()?;
     let target = resolve_path(&path, "worktree path")?;
 
@@ -1136,7 +1347,7 @@ async fn remove_worktree(path: String, delete_dir: bool) -> WorktreeResult<Workt
             path: target.to_string_lossy().to_string(),
         });
     }
-    if entry.locked {
+    if entry.locked && force < 2 {
         return Err(WorktreeError::LockedWorktree {
             action: "remove",
             path: target.to_string_lossy().to_string(),
@@ -1151,18 +1362,20 @@ async fn remove_worktree(path: String, delete_dir: bool) -> WorktreeResult<Workt
         let _guard = DirGuard::change_to(&target).map_err(|e| {
             WorktreeError::IoRead(format!("cannot enter worktree '{}': {e}", target.display()))
         })?;
-        let staged = crate::command::status::changes_to_be_committed_safe()
-            .await
-            .map_err(|e| {
+        if force == 0 {
+            let staged = crate::command::status::changes_to_be_committed_safe()
+                .await
+                .map_err(|e| {
+                    WorktreeError::IoRead(format!("failed to inspect worktree status: {e}"))
+                })?;
+            let unstaged = crate::command::status::changes_to_be_staged().map_err(|e| {
                 WorktreeError::IoRead(format!("failed to inspect worktree status: {e}"))
             })?;
-        let unstaged = crate::command::status::changes_to_be_staged().map_err(|e| {
-            WorktreeError::IoRead(format!("failed to inspect worktree status: {e}"))
-        })?;
-        if !staged.is_empty() || !unstaged.is_empty() {
-            return Err(WorktreeError::DirtyWorktree {
-                path: target.to_string_lossy().to_string(),
-            });
+            if !staged.is_empty() || !unstaged.is_empty() {
+                return Err(WorktreeError::DirtyWorktree {
+                    path: target.to_string_lossy().to_string(),
+                });
+            }
         }
         // Drop the guard so the cwd is restored before we rm -rf the target.
         drop(_guard);
@@ -1184,7 +1397,11 @@ async fn remove_worktree(path: String, delete_dir: bool) -> WorktreeResult<Workt
     })
 }
 
-fn render_remove_worktree(result: &WorktreeRemoveOutput, output: &OutputConfig) -> CliResult<()> {
+fn render_remove_worktree(
+    result: &WorktreeRemoveOutput,
+    force: u8,
+    output: &OutputConfig,
+) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("worktree.remove", result, output);
     }
@@ -1192,6 +1409,12 @@ fn render_remove_worktree(result: &WorktreeRemoveOutput, output: &OutputConfig) 
         return Ok(());
     }
     if result.disk_directory_deleted {
+        if force > 0 {
+            eprintln!(
+                "warning: forced deletion skipped worktree safety checks for '{}'",
+                result.path
+            );
+        }
         println!(
             "Removed worktree '{}' from registry and deleted directory.",
             result.path
@@ -1270,6 +1493,8 @@ fn render_umount_fuse_path(result: &WorktreeUmountOutput, output: &OutputConfig)
 fn repair_worktrees() -> WorktreeResult<WorktreeRepairOutput> {
     let mut state = load_state()?;
     let mut changed = false;
+    let mut links_repaired = 0usize;
+    let mut links_skipped = 0usize;
 
     let mut seen = HashSet::<PathBuf>::new();
     state.worktrees.retain(|w| {
@@ -1286,11 +1511,61 @@ fn repair_worktrees() -> WorktreeResult<WorktreeRepairOutput> {
         changed = true;
     }
 
+    for entry in state.worktrees.iter().filter(|entry| !entry.is_main) {
+        match repair_worktree_storage_link(Path::new(&entry.path)) {
+            Ok(LinkRepairResult::Repaired) => {
+                links_repaired += 1;
+                changed = true;
+            }
+            Ok(LinkRepairResult::Skipped) => {
+                links_skipped += 1;
+            }
+            Ok(LinkRepairResult::Unchanged) => {}
+            Err(source) => return Err(WorktreeError::StateRepair { source }),
+        }
+    }
+
     if changed {
         write_state(&state)?;
     }
 
-    Ok(WorktreeRepairOutput { changed })
+    Ok(WorktreeRepairOutput {
+        changed,
+        links_repaired,
+        links_skipped,
+    })
+}
+
+enum LinkRepairResult {
+    Unchanged,
+    Repaired,
+    Skipped,
+}
+
+fn repair_worktree_storage_link(worktree_path: &Path) -> io::Result<LinkRepairResult> {
+    if !worktree_path.exists() {
+        return Ok(LinkRepairResult::Skipped);
+    }
+
+    let storage = util::storage_path();
+    let link_path = worktree_path.join(util::ROOT_DIR);
+    match fs::symlink_metadata(&link_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            if fs::read_link(&link_path)? == storage {
+                Ok(LinkRepairResult::Unchanged)
+            } else {
+                remove_worktree_storage_link(&link_path)?;
+                create_worktree_storage_link(&storage, &link_path)?;
+                Ok(LinkRepairResult::Repaired)
+            }
+        }
+        Ok(_) => Ok(LinkRepairResult::Skipped),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            create_worktree_storage_link(&storage, &link_path)?;
+            Ok(LinkRepairResult::Repaired)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn render_repair_worktrees(result: &WorktreeRepairOutput, output: &OutputConfig) -> CliResult<()> {

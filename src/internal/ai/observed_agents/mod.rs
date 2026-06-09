@@ -31,6 +31,10 @@ pub use adapter::{
     AgentKind, AgentSessionCtx, AgentStability, ObservedAgent, ObservedAgentHooks,
     TranscriptChunker, TranscriptTruncator,
 };
+use builtin::stable_promoted::{
+    CODEX_STABLE_PROMOTED_SPEC, COPILOT_STABLE_PROMOTED_SPEC, CURSOR_STABLE_PROMOTED_SPEC,
+    FACTORY_AI_STABLE_PROMOTED_SPEC, OPENCODE_STABLE_PROMOTED_SPEC,
+};
 pub use builtin::{
     ClaudeCodeObservedAgent, GeminiObservedAgent, STABLE_PROMOTED_SPECS, StablePromotedAgent,
     rfc3339_boundary_for_unix_seconds, stable_promoted_spec_for, write_truncated_transcript,
@@ -63,54 +67,22 @@ pub use rpc::{
 /// same patch, which is the same compile-time guard the v0.17.660+
 /// `*::all()` enumerators established.
 pub fn agent_for(kind: AgentKind) -> &'static dyn ObservedAgent {
-    // Wrappers ensure each `StablePromotedAgent` lives in `'static`
-    // storage so we can return a borrowed reference. We can't put a
-    // `StablePromotedAgent` directly in a `static` because it holds a
-    // `&'static StablePromotedSpec` (which is fine) but Rust 2024 still
-    // requires the wrapping value's address to be stable for `&'static`
-    // lifetime extension — `LazyLock<StablePromotedAgent>` provides
-    // that without an allocation.
-    use std::sync::LazyLock;
-
-    static CURSOR: LazyLock<StablePromotedAgent> = LazyLock::new(|| {
-        StablePromotedAgent(
-            stable_promoted_spec_for(AgentKind::Cursor).expect("Cursor must have a promoted spec"),
-        )
-    });
-    static CODEX: LazyLock<StablePromotedAgent> = LazyLock::new(|| {
-        StablePromotedAgent(
-            stable_promoted_spec_for(AgentKind::Codex).expect("Codex must have a promoted spec"),
-        )
-    });
-    static OPENCODE: LazyLock<StablePromotedAgent> = LazyLock::new(|| {
-        StablePromotedAgent(
-            stable_promoted_spec_for(AgentKind::OpenCode)
-                .expect("OpenCode must have a promoted spec"),
-        )
-    });
-    static COPILOT: LazyLock<StablePromotedAgent> = LazyLock::new(|| {
-        StablePromotedAgent(
-            stable_promoted_spec_for(AgentKind::Copilot)
-                .expect("Copilot must have a promoted spec"),
-        )
-    });
-    static FACTORY_AI: LazyLock<StablePromotedAgent> = LazyLock::new(|| {
-        StablePromotedAgent(
-            stable_promoted_spec_for(AgentKind::FactoryAi)
-                .expect("FactoryAi must have a promoted spec"),
-        )
-    });
+    static CURSOR: StablePromotedAgent = StablePromotedAgent(&CURSOR_STABLE_PROMOTED_SPEC);
+    static CODEX: StablePromotedAgent = StablePromotedAgent(&CODEX_STABLE_PROMOTED_SPEC);
+    static OPENCODE: StablePromotedAgent = StablePromotedAgent(&OPENCODE_STABLE_PROMOTED_SPEC);
+    static COPILOT: StablePromotedAgent = StablePromotedAgent(&COPILOT_STABLE_PROMOTED_SPEC);
+    static FACTORY_AI: StablePromotedAgent = StablePromotedAgent(&FACTORY_AI_STABLE_PROMOTED_SPEC);
     static CLAUDE_CODE: ClaudeCodeObservedAgent = ClaudeCodeObservedAgent::new();
     static GEMINI: GeminiObservedAgent = GeminiObservedAgent::new();
 
     match kind {
         AgentKind::ClaudeCode => &CLAUDE_CODE,
         AgentKind::Gemini => &GEMINI,
-        AgentKind::Cursor => &*CURSOR,
-        AgentKind::Codex => &*CODEX,
-        AgentKind::OpenCode => &*OPENCODE,
-        AgentKind::Copilot => &*COPILOT,
-        AgentKind::FactoryAi => &*FACTORY_AI,
+        AgentKind::Cursor => &CURSOR,
+        AgentKind::Codex => &CODEX,
+        AgentKind::OpenCode => &OPENCODE,
+        AgentKind::Copilot => &COPILOT,
+        AgentKind::FactoryAi => &FACTORY_AI,
     }
 }
 

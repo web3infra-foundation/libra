@@ -3,10 +3,11 @@
 use std::{
     collections::{HashMap, HashSet},
     fs, io,
+    io::{BufRead, Read},
     path::{Path, PathBuf},
 };
 
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use git_internal::{
     hash::ObjectHash,
     internal::{
@@ -17,7 +18,10 @@ use git_internal::{
 use serde::Serialize;
 
 use crate::{
-    command::{calc_file_blob_hash, load_object},
+    command::{
+        calc_file_blob_hash, load_object,
+        merge::{MergeConflictStyle, render_conflict_marker_content, resolve_merge_conflict_style},
+    },
     internal::{
         branch::{self, Branch, BranchStoreError},
         head::Head,
@@ -41,6 +45,12 @@ EXAMPLES:
     libra restore --staged file.txt       Unstage a file (restore index from HEAD)
     libra restore --source HEAD~1 .       Restore all files from a previous commit
     libra restore -S -W file.txt          Restore both worktree and index
+    libra restore --ours file.txt         Take the 'our' side of a merge conflict
+    libra restore --theirs file.txt       Take the 'their' side of a merge conflict
+    libra restore --merge file.txt        Re-create conflict markers from the index
+    libra restore --conflict=diff3 file   Re-create conflict markers with base context
+    libra restore --overlay file.txt      Keep tracked files missing from the source
+    libra restore --pathspec-from-file=-  Read pathspecs from standard input
     libra restore --json --source HEAD .  Structured JSON output for agents";
 
 // ── Typed error ──────────────────────────────────────────────────────
@@ -73,6 +83,36 @@ pub enum RestoreError {
     /// should not be able to overwrite with `restore --source`.
     #[error("refusing to restore from locked branch '{0}'")]
     LockedSource(String),
+    /// Refused to mutate the worktree while HEAD is attached to a
+    /// Libra-managed AI branch.
+    #[error("refusing to restore worktree while on locked branch '{0}'")]
+    LockedCurrentBranch(String),
+    /// A matched path is unmerged (conflict stages 1/2/3 present) and no
+    /// conflict-resolution flag was given. Mirrors Git's
+    /// `path '<file>' is unmerged`.
+    #[error("path '{0}' is unmerged")]
+    PathUnmerged(String),
+    /// `--ours`/`--theirs` asked for a conflict stage that the path does not
+    /// have. Mirrors Git's `path '<file>' does not have our/their version`.
+    #[error("path '{path}' does not have {} version", stage_side(*stage))]
+    MissingStageVersion { path: String, stage: u8 },
+    #[error("path '{0}' is binary and cannot be restored with conflict markers")]
+    MergeFileBinary(String),
+    #[error("path '{0}' is too large to restore with conflict markers")]
+    MergeFileTooLarge(String),
+    #[error("failed to read pathspecs from {path}: {detail}")]
+    PathspecFileRead { path: String, detail: String },
+    #[error("pathspec input from {0} exceeds the 128 MiB limit")]
+    PathspecFileTooLarge(String),
+}
+
+/// Human label for a conflict stage used by [`RestoreError::MissingStageVersion`].
+const fn stage_side(stage: u8) -> &'static str {
+    match stage {
+        2 => "our",
+        3 => "their",
+        _ => "a",
+    }
 }
 
 impl RestoreError {
@@ -88,6 +128,13 @@ impl RestoreError {
             Self::WriteWorktree => StableErrorCode::IoWriteFailed,
             Self::LfsDownload => StableErrorCode::NetworkUnavailable,
             Self::LockedSource(_) => StableErrorCode::CliInvalidTarget,
+            Self::LockedCurrentBranch(_) => StableErrorCode::ConflictOperationBlocked,
+            Self::PathUnmerged(_) => StableErrorCode::ConflictUnresolved,
+            Self::MissingStageVersion { .. } => StableErrorCode::ConflictUnresolved,
+            Self::MergeFileBinary(_) => StableErrorCode::ConflictUnresolved,
+            Self::MergeFileTooLarge(_) => StableErrorCode::ConflictUnresolved,
+            Self::PathspecFileRead { .. } => StableErrorCode::IoReadFailed,
+            Self::PathspecFileTooLarge(_) => StableErrorCode::CliInvalidArguments,
         }
     }
 }
@@ -119,6 +166,33 @@ impl From<RestoreError> for CliError {
                 .with_hint(
                     "Libra-managed branches like 'intent' and 'agent-traces' cannot be used as restore sources",
                 ),
+            RestoreError::LockedCurrentBranch(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("switch to a user branch before modifying the worktree"),
+            // Unresolved-conflict failures keep Git's exit 128 while exposing the
+            // ConflictUnresolved stable code for machine classification.
+            RestoreError::PathUnmerged(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_exit_code(128)
+                .with_hint(
+                    "resolve the conflict, or pass --ours/--theirs/--merge/--ignore-unmerged",
+                ),
+            RestoreError::MissingStageVersion { .. } => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_exit_code(128)
+                .with_hint("the path has no version at that conflict stage"),
+            RestoreError::MergeFileBinary(_) | RestoreError::MergeFileTooLarge(_) => {
+                CliError::fatal(message)
+                    .with_stable_code(stable_code)
+                    .with_exit_code(128)
+                    .with_hint("use --ours or --theirs for binary or very large conflicted files")
+            }
+            RestoreError::PathspecFileRead { .. } => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("check that the pathspec file exists and is readable"),
+            RestoreError::PathspecFileTooLarge(_) => CliError::command_usage(message)
+                .with_stable_code(stable_code)
+                .with_hint("split the pathspec input into smaller batches"),
             _ => CliError::fatal(message).with_stable_code(stable_code),
         }
     }
@@ -137,12 +211,23 @@ pub struct RestoreOutput {
 
 // ── Entry points ─────────────────────────────────────────────────────
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Default)]
 #[command(about = "Restore working tree files")]
 #[command(after_help = RESTORE_EXAMPLES)]
+#[command(group(
+    ArgGroup::new("pathspec_source")
+        .required(true)
+        .multiple(false)
+        .args(["pathspec", "pathspec_from_file"]),
+))]
+#[command(group(
+    ArgGroup::new("overlay_mode")
+        .multiple(false)
+        .args(["overlay", "no_overlay"]),
+))]
 pub struct RestoreArgs {
     /// files or dir to restore
-    #[clap(required = true)]
+    #[clap(conflicts_with = "pathspec_from_file")]
     pub pathspec: Vec<String>,
     /// source
     #[clap(long, short)]
@@ -153,6 +238,68 @@ pub struct RestoreArgs {
     /// staged
     #[clap(long, short = 'S')]
     pub staged: bool,
+
+    /// Restore the "our" side (conflict stage 2) of unmerged paths to the
+    /// working tree. Reads the conflict index stages and writes the worktree
+    /// only; the index is left unmerged. Mutually exclusive with `--theirs`,
+    /// `--source`, `--staged`, and `--ignore-unmerged`.
+    #[clap(
+        long,
+        short = '2',
+        conflicts_with_all = ["theirs", "merge", "conflict", "source", "staged", "ignore_unmerged"],
+    )]
+    pub ours: bool,
+
+    /// Restore the "their" side (conflict stage 3) of unmerged paths to the
+    /// working tree. Mutually exclusive with `--ours`, `--source`, `--staged`,
+    /// and `--ignore-unmerged`.
+    #[clap(
+        long,
+        short = '3',
+        conflicts_with_all = ["ours", "merge", "conflict", "source", "staged", "ignore_unmerged"],
+    )]
+    pub theirs: bool,
+
+    /// Re-create conflict markers from unmerged index stages in the working
+    /// tree. The index is left unmerged.
+    #[clap(
+        long,
+        conflicts_with_all = ["ours", "theirs", "source", "staged", "ignore_unmerged"],
+    )]
+    pub merge: bool,
+
+    /// Conflict marker style for `--merge`; accepted values are `merge` and
+    /// `diff3`. Passing this flag implies merge-style worktree restoration.
+    #[clap(
+        long,
+        value_enum,
+        conflicts_with_all = ["ours", "theirs", "source", "staged", "ignore_unmerged"],
+    )]
+    pub conflict: Option<MergeConflictStyle>,
+
+    /// Skip unmerged paths instead of erroring. Without a conflict-resolution
+    /// flag, `restore` refuses to touch unmerged paths; `--ignore-unmerged`
+    /// silently skips them and restores the rest.
+    #[clap(long)]
+    pub ignore_unmerged: bool,
+
+    /// Overlay mode: never remove tracked paths missing from the source.
+    #[clap(long)]
+    pub overlay: bool,
+
+    /// No-overlay mode: remove tracked paths missing from the source. This is
+    /// the default and exists for Git-compatible scripts.
+    #[clap(long)]
+    pub no_overlay: bool,
+
+    /// Read pathspecs from a file (`-` for stdin) instead of positional args.
+    #[clap(long = "pathspec-from-file")]
+    pub pathspec_from_file: Option<String>,
+
+    /// Treat `--pathspec-from-file` input as NUL-separated instead of
+    /// newline-separated. No-op without `--pathspec-from-file`.
+    #[clap(long = "pathspec-file-nul")]
+    pub pathspec_file_nul: bool,
 }
 
 pub async fn execute(args: RestoreArgs) {
@@ -180,9 +327,15 @@ pub async fn execute_safe(args: RestoreArgs, output: &OutputConfig) -> CliResult
     render_restore_output(&result, output)
 }
 
+pub(crate) async fn execute_to_output(args: RestoreArgs) -> CliResult<RestoreOutput> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    run_restore(args).await.map_err(CliError::from)
+}
+
 // ── Core execution ───────────────────────────────────────────────────
 
 async fn run_restore(args: RestoreArgs) -> Result<RestoreOutput, RestoreError> {
+    let effective_pathspecs = resolve_effective_pathspecs(&args)?;
     let staged = args.staged;
     let mut worktree = args.worktree;
     if !staged {
@@ -203,26 +356,72 @@ async fn run_restore(args: RestoreArgs) -> Result<RestoreOutput, RestoreError> {
     {
         return Err(RestoreError::LockedSource(src.to_string()));
     }
+    if worktree {
+        reject_restore_on_ai_managed_current_branch().await?;
+    }
+
+    // Conflict-stage restore (`--ours`/`--theirs`): read the unmerged index
+    // stages and write the working tree only, leaving the index unmerged. clap
+    // guarantees `--source`/`--staged` are absent here, so this is purely a
+    // worktree operation.
+    if args.ours || args.theirs {
+        let stage = if args.ours { 2 } else { 3 };
+        let restored = restore_conflict_stage(&effective_pathspecs, stage).await?;
+        return Ok(RestoreOutput {
+            source: None,
+            worktree: true,
+            staged: false,
+            restored_files: restored,
+            deleted_files: Vec::new(),
+        });
+    }
+
+    if args.merge || args.conflict.is_some() {
+        let style = resolve_merge_conflict_style(args.conflict).await;
+        let restored = restore_conflict_markers(&effective_pathspecs, style).await?;
+        return Ok(RestoreOutput {
+            source: None,
+            worktree: true,
+            staged: false,
+            restored_files: restored,
+            deleted_files: Vec::new(),
+        });
+    }
 
     let storage = util::objects_storage();
-    let target_blobs = resolve_target_blobs(source.as_deref(), staged, &storage).await?;
+    let mut target_blobs = resolve_target_blobs(source.as_deref(), staged, &storage).await?;
 
-    let paths = args
-        .pathspec
+    let paths = effective_pathspecs
         .iter()
         .map(PathBuf::from)
         .collect::<Vec<PathBuf>>();
+
+    // Unmerged guard: a plain restore must not silently act on a matched
+    // unmerged path. Without an exemption this is a fatal error (Git's
+    // `path '<file>' is unmerged`, exit 128); `--ignore-unmerged` instead drops
+    // the unmerged paths from the restore set so the rest still restore.
+    let unmerged_matches = collect_matched_unmerged_paths(&paths)?;
+    if !unmerged_matches.is_empty() {
+        if args.ignore_unmerged {
+            let skip: HashSet<&PathBuf> = unmerged_matches.iter().collect();
+            target_blobs.retain(|(p, _)| !skip.contains(p));
+        } else {
+            let first = path_to_utf8_typed(&unmerged_matches[0])?;
+            return Err(RestoreError::PathUnmerged(first.to_string()));
+        }
+    }
 
     let mut restored_files = Vec::new();
     let mut deleted_files = Vec::new();
 
     if worktree {
-        let (restored, deleted) = restore_worktree_tracked(&paths, &target_blobs).await?;
+        let (restored, deleted) =
+            restore_worktree_tracked(&paths, &target_blobs, args.overlay).await?;
         restored_files.extend(restored);
         deleted_files.extend(deleted);
     }
     if staged {
-        let (restored, deleted) = restore_index_tracked(&paths, &target_blobs)?;
+        let (restored, deleted) = restore_index_tracked(&paths, &target_blobs, args.overlay)?;
         let mut restored_seen: HashSet<String> = restored_files.iter().cloned().collect();
         let mut deleted_seen: HashSet<String> = deleted_files.iter().cloned().collect();
 
@@ -316,6 +515,7 @@ async fn resolve_target_blobs(
 async fn restore_worktree_tracked(
     filter: &[PathBuf],
     target_blobs: &[(PathBuf, ObjectHash)],
+    overlay: bool,
 ) -> Result<(Vec<String>, Vec<String>), RestoreError> {
     let target_map = preprocess_blobs(target_blobs);
     let deleted_files = get_worktree_deleted_files_in_filters(filter, &target_map);
@@ -349,13 +549,17 @@ async fn restore_worktree_tracked(
             }
         } else {
             let path_wd_str = path_to_utf8_typed(path_wd)?;
-            let hash = calc_file_blob_hash(&path_abs).map_err(|_| RestoreError::ReadObject)?;
             if target_map.contains_key(path_wd) {
+                // Only restore targets need hashing. Untracked files (e.g. ignored
+                // build artifacts under `target/` or `node_modules/`) are never
+                // read, so enumerating a whole-working-directory pathspec cannot
+                // blow up memory or stall the restore by SHA-1-hashing gigabytes.
+                let hash = calc_file_blob_hash(&path_abs).map_err(|_| RestoreError::ReadObject)?;
                 if hash != target_map[path_wd] {
                     restore_to_file_typed(&target_map[path_wd], path_wd).await?;
                     restored.push(path_wd.display().to_string());
                 }
-            } else if index.tracked(path_wd_str, 0) {
+            } else if !overlay && index.tracked(path_wd_str, 0) {
                 fs::remove_file(&path_abs).map_err(|_| RestoreError::WriteWorktree)?;
                 util::clear_empty_dir(&path_abs);
                 deleted.push(path_wd.display().to_string());
@@ -371,6 +575,7 @@ async fn restore_worktree_tracked(
 fn restore_index_tracked(
     filter: &[PathBuf],
     target_blobs: &[(PathBuf, ObjectHash)],
+    overlay: bool,
 ) -> Result<(Vec<String>, Vec<String>), RestoreError> {
     let target_map = preprocess_blobs(target_blobs);
 
@@ -412,7 +617,7 @@ fn restore_index_tracked(
                 ));
                 restored.push(path.display().to_string());
             }
-        } else {
+        } else if !overlay {
             index.remove(path_str, 0);
             deleted.push(path.display().to_string());
         }
@@ -649,12 +854,91 @@ async fn resolve_source_commit_io(
     Ok(objs[0])
 }
 
+const MAX_PATHSPEC_FILE_BYTES: u64 = 128 * 1024 * 1024;
+
+fn resolve_effective_pathspecs(args: &RestoreArgs) -> Result<Vec<String>, RestoreError> {
+    match args.pathspec_from_file.as_deref() {
+        Some(file) => read_pathspec_from_file(file, args.pathspec_file_nul),
+        None => Ok(args.pathspec.clone()),
+    }
+}
+
+fn read_pathspec_from_file(path: &str, nul: bool) -> Result<Vec<String>, RestoreError> {
+    let separator = if nul { b'\0' } else { b'\n' };
+    let (label, reader): (String, Box<dyn Read>) = if path == "-" {
+        ("<stdin>".to_string(), Box::new(io::stdin().lock()))
+    } else {
+        let meta = fs::metadata(path).map_err(|err| RestoreError::PathspecFileRead {
+            path: path.to_string(),
+            detail: err.to_string(),
+        })?;
+        if meta.len() > MAX_PATHSPEC_FILE_BYTES {
+            return Err(RestoreError::PathspecFileTooLarge(path.to_string()));
+        }
+        let file = fs::File::open(path).map_err(|err| RestoreError::PathspecFileRead {
+            path: path.to_string(),
+            detail: err.to_string(),
+        })?;
+        (path.to_string(), Box::new(file))
+    };
+
+    let mut reader = io::BufReader::new(reader.take(MAX_PATHSPEC_FILE_BYTES + 1));
+    let mut total = 0u64;
+    let mut chunk = Vec::new();
+    let mut out = Vec::new();
+    loop {
+        chunk.clear();
+        let read = reader.read_until(separator, &mut chunk).map_err(|err| {
+            RestoreError::PathspecFileRead {
+                path: label.clone(),
+                detail: err.to_string(),
+            }
+        })?;
+        if read == 0 {
+            break;
+        }
+        total += read as u64;
+        if total > MAX_PATHSPEC_FILE_BYTES {
+            return Err(RestoreError::PathspecFileTooLarge(label.clone()));
+        }
+        if chunk.last() == Some(&separator) {
+            chunk.pop();
+        }
+        if !nul && chunk.last() == Some(&b'\r') {
+            chunk.pop();
+        }
+        if chunk.is_empty() {
+            continue;
+        }
+        let item = std::str::from_utf8(&chunk)
+            .map_err(|_| RestoreError::InvalidPathEncoding)?
+            .to_string();
+        let item = if nul { item } else { item.trim().to_string() };
+        if !item.is_empty() {
+            out.push(item);
+        }
+    }
+    Ok(out)
+}
+
 fn map_restore_branch_store_error(error: BranchStoreError) -> RestoreError {
     match error {
         BranchStoreError::Query(_) => RestoreError::ReadObject,
         BranchStoreError::Corrupt { .. } => RestoreError::ReadObject,
         BranchStoreError::NotFound(_) => RestoreError::ResolveSource,
         BranchStoreError::Delete { .. } => RestoreError::ReadObject,
+    }
+}
+
+async fn reject_restore_on_ai_managed_current_branch() -> Result<(), RestoreError> {
+    match Head::current_result()
+        .await
+        .map_err(map_restore_branch_store_error)?
+    {
+        Head::Branch(name) if branch::is_ai_managed_branch(&name) => {
+            Err(RestoreError::LockedCurrentBranch(name))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -682,6 +966,169 @@ fn pathspec_not_matched(path: &Path) -> RestoreError {
     RestoreError::PathspecNotMatched(path.display().to_string())
 }
 
+/// Collect every path that is unmerged in `index` (i.e. has an entry at conflict
+/// stage 1, 2, or 3), de-duplicated and in first-seen order. Read-only.
+fn collect_unmerged_paths(index: &Index) -> Vec<PathBuf> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out = Vec::new();
+    for stage in 1u8..=3 {
+        for entry in index.tracked_entries(stage) {
+            if seen.insert(entry.name.clone()) {
+                out.push(PathBuf::from(&entry.name));
+            }
+        }
+    }
+    out
+}
+
+/// Unmerged paths (stages 1/2/3) that match the requested `filter` pathspecs.
+/// Empty when nothing is unmerged, so the common conflict-free path stays cheap.
+fn collect_matched_unmerged_paths(filter: &[PathBuf]) -> Result<Vec<PathBuf>, RestoreError> {
+    let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
+    let unmerged = collect_unmerged_paths(&index);
+    if unmerged.is_empty() {
+        return Ok(Vec::new());
+    }
+    let filter_vec = filter.to_vec();
+    Ok(util::filter_to_fit_paths(&unmerged, &filter_vec))
+}
+
+/// Blob OID for `path` at conflict `stage` (2 = ours, 3 = theirs). Thin wrapper
+/// over `Index::get_hash`; returns `None` when the path has no such stage.
+fn stage_blob(index: &Index, path: &str, stage: u8) -> Option<ObjectHash> {
+    index.get_hash(path, stage)
+}
+
+/// Restore the `stage` side (2 = ours, 3 = theirs) of each matched unmerged path
+/// to the working tree. Reads conflict stages only and writes the worktree; the
+/// index is intentionally left unmerged so `libra status` still shows the
+/// conflict until the user stages a resolution. Returns the restored paths.
+async fn restore_conflict_stage(
+    pathspec: &[String],
+    stage: u8,
+) -> Result<Vec<String>, RestoreError> {
+    let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
+    let unmerged = collect_unmerged_paths(&index);
+    let filter: Vec<PathBuf> = pathspec.iter().map(PathBuf::from).collect();
+    let matched = util::filter_to_fit_paths(&unmerged, &filter);
+    if matched.is_empty() {
+        let first = filter.first().cloned().unwrap_or_default();
+        return Err(pathspec_not_matched(&first));
+    }
+
+    let mut restored = Vec::new();
+    for path in &matched {
+        let path_str = path_to_utf8_typed(path)?;
+        match stage_blob(&index, path_str, stage) {
+            Some(hash) => {
+                restore_to_file_typed(&hash, path).await?;
+                restored.push(path.display().to_string());
+            }
+            None => {
+                return Err(RestoreError::MissingStageVersion {
+                    path: path_str.to_string(),
+                    stage,
+                });
+            }
+        }
+    }
+    Ok(restored)
+}
+
+const MAX_MERGE_FILE_BYTES: usize = 50 * 1024 * 1024;
+
+async fn restore_conflict_markers(
+    pathspec: &[String],
+    conflict_style: MergeConflictStyle,
+) -> Result<Vec<String>, RestoreError> {
+    let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
+    let unmerged = collect_unmerged_paths(&index);
+    let filter: Vec<PathBuf> = pathspec.iter().map(PathBuf::from).collect();
+    let matched = util::filter_to_fit_paths(&unmerged, &filter);
+    if matched.is_empty() {
+        let first = filter.first().cloned().unwrap_or_default();
+        return Err(pathspec_not_matched(&first));
+    }
+
+    let mut restored = Vec::new();
+    for path in &matched {
+        let path_str = path_to_utf8_typed(path)?;
+        let ours =
+            stage_blob(&index, path_str, 2).ok_or_else(|| RestoreError::MissingStageVersion {
+                path: path_str.to_string(),
+                stage: 2,
+            })?;
+        let theirs =
+            stage_blob(&index, path_str, 3).ok_or_else(|| RestoreError::MissingStageVersion {
+                path: path_str.to_string(),
+                stage: 3,
+            })?;
+        let base = stage_blob(&index, path_str, 1);
+        let ours_blob = load_conflict_blob(path_str, &ours)?;
+        let theirs_blob = load_conflict_blob(path_str, &theirs)?;
+        let base_blob = base
+            .map(|hash| load_conflict_blob(path_str, &hash))
+            .transpose()?;
+        ensure_text_conflict_payload(path_str, &ours_blob.data)?;
+        ensure_text_conflict_payload(path_str, &theirs_blob.data)?;
+        if let Some(blob) = &base_blob {
+            ensure_text_conflict_payload(path_str, &blob.data)?;
+        }
+        let content = render_conflict_marker_content(
+            conflict_marker_eol(),
+            "theirs",
+            base_blob.as_ref().map(|blob| blob.data.as_slice()),
+            Some(&ours_blob.data),
+            Some(&theirs_blob.data),
+            conflict_style,
+        );
+        write_worktree_bytes_atomic(path, content.as_bytes())?;
+        restored.push(path.display().to_string());
+    }
+    Ok(restored)
+}
+
+fn load_conflict_blob(path: &str, hash: &ObjectHash) -> Result<Blob, RestoreError> {
+    load_object::<Blob>(hash).map_err(|_| RestoreError::PathUnmerged(path.to_string()))
+}
+
+fn ensure_text_conflict_payload(path: &str, data: &[u8]) -> Result<(), RestoreError> {
+    if data.len() > MAX_MERGE_FILE_BYTES {
+        return Err(RestoreError::MergeFileTooLarge(path.to_string()));
+    }
+    if data.contains(&0) {
+        return Err(RestoreError::MergeFileBinary(path.to_string()));
+    }
+    Ok(())
+}
+
+fn conflict_marker_eol() -> &'static str {
+    if cfg!(windows) { "\r\n" } else { "\n" }
+}
+
+fn write_worktree_bytes_atomic(path: &Path, data: &[u8]) -> Result<(), RestoreError> {
+    let path_abs = util::workdir_to_absolute(path);
+    if let Some(parent) = path_abs.parent() {
+        fs::create_dir_all(parent).map_err(|_| RestoreError::WriteWorktree)?;
+    }
+    let file_name = path_abs
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(RestoreError::InvalidPathEncoding)?;
+    let tmp_path = path_abs.with_file_name(format!(
+        ".{file_name}.libra-restore-{}.tmp",
+        std::process::id()
+    ));
+    fs::write(&tmp_path, data).map_err(|_| RestoreError::WriteWorktree)?;
+    match fs::rename(&tmp_path, &path_abs) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let _ = fs::remove_file(&tmp_path);
+            Err(RestoreError::WriteWorktree)
+        }
+    }
+}
+
 async fn restore_to_file_typed(hash: &ObjectHash, path: &PathBuf) -> Result<(), RestoreError> {
     let blob = load_object::<Blob>(hash).map_err(|_| RestoreError::ReadObject)?;
     let path_abs = util::workdir_to_absolute(path);
@@ -698,7 +1145,7 @@ async fn restore_to_file_typed(hash: &ObjectHash, path: &PathBuf) -> Result<(), 
                 LFSClient::get()
                     .await
                     .map_err(|_| RestoreError::LfsDownload)?
-                    .download_object(&oid, size, &path_abs, None)
+                    .download_object(&oid, size, &path_abs, None, false)
                     .await
                     .map_err(|_| RestoreError::LfsDownload)?;
             }
@@ -729,7 +1176,10 @@ pub async fn restore_to_file(hash: &ObjectHash, path: &PathBuf) -> io::Result<()
                 let client = LFSClient::get()
                     .await
                     .map_err(|e| io::Error::other(e.to_string()))?;
-                if let Err(e) = client.download_object(&oid, size, &path_abs, None).await {
+                if let Err(e) = client
+                    .download_object(&oid, size, &path_abs, None, false)
+                    .await
+                {
                     return Err(io::Error::other(e.to_string()));
                 }
             }
@@ -796,9 +1246,10 @@ pub async fn restore_worktree(
             }
         } else {
             let path_wd_str = path_to_utf8(path_wd)?;
-            let hash =
-                calc_file_blob_hash(&path_abs).map_err(|e| io::Error::other(e.to_string()))?;
             if target_blobs.contains_key(path_wd) {
+                // Hash only restore targets; never read untracked/ignored files.
+                let hash =
+                    calc_file_blob_hash(&path_abs).map_err(|e| io::Error::other(e.to_string()))?;
                 if hash != target_blobs[path_wd] {
                     restore_to_file(&target_blobs[path_wd], path_wd).await?;
                 }
@@ -843,8 +1294,9 @@ async fn restore_worktree_legacy_typed(
             }
         } else {
             let path_wd_str = path_to_utf8_typed(path_wd)?;
-            let hash = calc_file_blob_hash(&path_abs).map_err(|_| RestoreError::ReadObject)?;
             if target_blobs.contains_key(path_wd) {
+                // Hash only restore targets; never read untracked/ignored files.
+                let hash = calc_file_blob_hash(&path_abs).map_err(|_| RestoreError::ReadObject)?;
                 if hash != target_blobs[path_wd] {
                     restore_to_file_typed(&target_blobs[path_wd], path_wd).await?;
                 }
@@ -1040,6 +1492,30 @@ mod tests {
             RestoreError::LockedSource("intent".to_string()).to_string(),
             "refusing to restore from locked branch 'intent'",
         );
+        assert_eq!(
+            RestoreError::LockedCurrentBranch("agent-traces".to_string()).to_string(),
+            "refusing to restore worktree while on locked branch 'agent-traces'",
+        );
+        assert_eq!(
+            RestoreError::PathUnmerged("src/conflict.rs".to_string()).to_string(),
+            "path 'src/conflict.rs' is unmerged",
+        );
+        assert_eq!(
+            RestoreError::MissingStageVersion {
+                path: "src/conflict.rs".to_string(),
+                stage: 2,
+            }
+            .to_string(),
+            "path 'src/conflict.rs' does not have our version",
+        );
+        assert_eq!(
+            RestoreError::MissingStageVersion {
+                path: "src/conflict.rs".to_string(),
+                stage: 3,
+            }
+            .to_string(),
+            "path 'src/conflict.rs' does not have their version",
+        );
     }
 
     /// Pin the `stable_code()` mapping for every variant of
@@ -1051,7 +1527,7 @@ mod tests {
     /// reroutes any of them (for example flipping `LfsDownload` from
     /// `NetworkUnavailable` to `IoReadFailed`) silently changes
     /// client retry classification unless every variant has its own
-    /// guard. Enumerate all 10 variants so a new variant trips both
+    /// guard. Enumerate all 11 variants so a new variant trips both
     /// this exhaustive list and the `stable_code()` impl's match.
     #[test]
     fn restore_error_stable_code_pins_each_variant() {
@@ -1094,6 +1570,22 @@ mod tests {
         assert_eq!(
             RestoreError::LockedSource("ignored".to_string()).stable_code(),
             StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            RestoreError::LockedCurrentBranch("ignored".to_string()).stable_code(),
+            StableErrorCode::ConflictOperationBlocked,
+        );
+        assert_eq!(
+            RestoreError::PathUnmerged("ignored".to_string()).stable_code(),
+            StableErrorCode::ConflictUnresolved,
+        );
+        assert_eq!(
+            RestoreError::MissingStageVersion {
+                path: "ignored".to_string(),
+                stage: 2,
+            }
+            .stable_code(),
+            StableErrorCode::ConflictUnresolved,
         );
     }
 }

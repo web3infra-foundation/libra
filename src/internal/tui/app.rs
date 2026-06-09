@@ -19,6 +19,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyModifiers};
+use git_internal::internal::object::context::SelectionStrategy;
 use ring::digest;
 use serde::Deserialize;
 use tokio::{
@@ -75,7 +76,6 @@ use crate::{
         },
         intentspec::{
             IntentDraft, IntentSpec, ResolveContext, RiskLevel, build_intentspec_review,
-            persistence::persist_intentspec,
             render_summary, repair_intentspec, resolve_intentspec,
             types::{
                 ConflictResolution, DecompositionMode, LibraBinding, NetworkPolicy, Objective,
@@ -101,6 +101,10 @@ use crate::{
         },
         projection::ProjectionRebuilder,
         prompt::SystemPromptBuilder,
+        runtime::phase0::{
+            ContextSnapshotItem, ContextSnapshotRequest, write_context_snapshot_if_needed,
+            write_intent,
+        },
         sandbox::{
             ApprovalMemo, ExecApprovalRequest, FileHistoryRuntimeContext, NetworkAccess,
             ReviewDecision,
@@ -445,6 +449,10 @@ pub struct AppConfig {
     pub initial_goal: Option<String>,
     /// Source Pool control surface backing `/source` commands.
     pub source_pool: SourcePool,
+    /// CEX-S2-16 live-run registry — the in-flight sub-agent runs' current
+    /// tool/file, shared with the sub-agent child runner (the writer) so the
+    /// `/agents` pane can render each running child's live activity.
+    pub live_run_registry: crate::internal::ai::agent_run::LiveRunRegistry,
 }
 
 /// The main application struct.
@@ -573,6 +581,9 @@ pub struct App<M: CompletionModel> {
     goal_session: Option<super::goal_session::GoalSession>,
     /// Source Pool control state for this TUI session.
     source_pool: SourcePool,
+    /// CEX-S2-16 live-run registry the `/agents` pane reads for in-flight runs'
+    /// current tool/file (written by the sub-agent child runner).
+    live_run_registry: crate::internal::ai::agent_run::LiveRunRegistry,
 }
 
 impl<M: CompletionModel + Clone + 'static> App<M>
@@ -751,6 +762,7 @@ where
             next_code_ui_item_id: 1,
             goal_session: initial_goal_session,
             source_pool: app_config.source_pool,
+            live_run_registry: app_config.live_run_registry,
         }
     }
 
@@ -1540,7 +1552,7 @@ where
         self.complete_running_tool_cells_with_interrupt();
         self.schedule_draw();
         if let Some(code_ui_session) = self.code_ui_session.clone() {
-            code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
+            code_ui_session.cancel_active_turn("Interrupted.").await;
         }
         Ok(())
     }
@@ -3191,10 +3203,10 @@ where
                     }
                     attach_memory_anchor_prompt_context(&mut config);
                     let result = if let Some(goal_state) = active_goal_state {
+                        let stop_policy =
+                            bind_goal_stop_policy(&mut config, goal_state.spec.goal_id);
                         let supervisor = GoalSupervisor {
-                            stop_policy: GoalStopPolicy::GoalBound {
-                                goal_id: goal_state.spec.goal_id,
-                            },
+                            stop_policy,
                             verifier: DeterministicGoalVerifier,
                             prompt_builder: DefaultGoalContinuationPromptBuilder,
                         };
@@ -5157,6 +5169,11 @@ where
                         &self.agents_config,
                     ))));
             }
+            BuiltinCommand::Agent => {
+                let message = self.format_agent_command_response(args).await;
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(message)));
+            }
             BuiltinCommand::Budget => {
                 self.widget
                     .add_cell(Box::new(AssistantHistoryCell::new(format_budget_status(
@@ -5211,6 +5228,124 @@ where
                 }
             }
             Err(err) => err.to_string(),
+        }
+    }
+
+    /// Render the response cell for an `/agent …` invocation (CEX-S2-16). The
+    /// parser lives in [`super::agent_command::parse_agent_subcommand`]; this
+    /// helper renders the typed result. `/agent list` shows the live sub-agent
+    /// **runs** projected from their persisted snapshots (distinct from
+    /// `/agents`, which shows the declarative agent config); `/agent cancel
+    /// <id>` requests cancellation of a single run without ending the session.
+    async fn format_agent_command_response(&mut self, args: &str) -> String {
+        use super::agent_command::{AgentSubcommand, parse_agent_subcommand};
+        match parse_agent_subcommand(args) {
+            Ok(AgentSubcommand::List) => self.format_agent_runs_pane().await,
+            Ok(AgentSubcommand::Cancel { run_id }) => self.cancel_agent_run(&run_id),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    /// Render the live agent-run pane for `/agent list` from the `AgentRun`
+    /// snapshots the dispatcher persisted under the repo's sessions root
+    /// (CEX-S2-16). The sessions root is resolved exactly as the dispatcher /
+    /// MCP server resolve it (`try_get_storage_path` with the `<repo>/.libra`
+    /// fallback, then `sessions`) so the same runs are surfaced. Reading is
+    /// best-effort: an unreadable store renders the empty-pane placeholder
+    /// rather than failing the command.
+    async fn format_agent_runs_pane(&self) -> String {
+        use crate::internal::ai::agent_run::event_store::AgentRunEventStore;
+
+        let working_dir = self.registry.working_dir().to_path_buf();
+        let sessions_root = crate::utils::util::try_get_storage_path(Some(working_dir.clone()))
+            .unwrap_or_else(|_| working_dir.join(".libra"))
+            .join("sessions");
+        let store = AgentRunEventStore::new(sessions_root);
+        let runs = store.list_all_snapshots().unwrap_or_default();
+        // Count persisted Source Pool / MCP / OpenAPI calls per run from
+        // `source_call_log` (CEX-S2-16 "source calls"; the per-run trace link
+        // landed v0.17.1254). Best-effort: with no usage DB or on a query error
+        // the `src` column simply renders `-`.
+        let source_call_counts = match self.config.usage_recorder.as_ref() {
+            Some(recorder) => {
+                crate::internal::model::source_call_log::count_by_agent_run(&recorder.connection())
+                    .await
+                    .unwrap_or_default()
+            }
+            None => std::collections::HashMap::new(),
+        };
+        // Snapshot the live registry once so the activity join is a cheap map
+        // lookup (CEX-S2-16 live fields). Only in-flight runs get an activity —
+        // a terminal run's lingering entry (if any) is never shown.
+        let live: std::collections::HashMap<_, _> = self
+            .live_run_registry
+            .snapshot()
+            .into_iter()
+            .map(|entry| (entry.agent_run_id, entry.state))
+            .collect();
+        // Join each run's persisted terminal usage (tokens + cost estimate), its
+        // source-call count, and — for in-flight runs — its live current
+        // tool/file; missing records leave those cells as `-`.
+        super::agent_pane::format_agent_run_pane_full(
+            &runs,
+            |run| store.read_run_usage(run.thread_id, run.id).ok().flatten(),
+            |run| source_call_counts.get(&run.id.0.to_string()).copied(),
+            |run| {
+                if !run.status.is_in_flight() {
+                    return None;
+                }
+                live.get(&run.id).map(|state| match &state.current_file {
+                    Some(file) => match &state.current_tool {
+                        Some(tool) => format!("{tool} {file}"),
+                        None => file.clone(),
+                    },
+                    None => state.current_tool.clone().unwrap_or_default(),
+                })
+            },
+        )
+    }
+
+    /// Request cancellation of a single sub-agent run by id, leaving the main
+    /// session running (CEX-S2-16 `/agent cancel <id>`).
+    ///
+    /// The id is validated against the persisted run snapshots so the abort
+    /// fires only for a genuinely in-flight run: a terminal or unknown id is
+    /// reported without touching the abort token (so a stale / mistyped id can
+    /// no longer cancel the wrong work). With the CEX-S2-12 concurrency cap of
+    /// 1 there is at most one in-flight child, so aborting it cancels exactly
+    /// the targeted run while the main session keeps running; true multi-run
+    /// targeting arrives with the S2-14 run registry.
+    fn cancel_agent_run(&self, run_id: &str) -> String {
+        use super::agent_pane::{AgentRunCancelTarget, classify_cancel_target, status_label};
+        use crate::internal::ai::agent_run::event_store::AgentRunEventStore;
+
+        let Some(runtime) = self.config.subagent_runtime.as_ref() else {
+            return format!(
+                "No sub-agent runtime is active, so run `{run_id}` cannot be cancelled. \
+                 Enable `code.multi_agent.enabled = true` in `.libra/agents.toml` first."
+            );
+        };
+
+        let working_dir = self.registry.working_dir().to_path_buf();
+        let sessions_root = crate::utils::util::try_get_storage_path(Some(working_dir.clone()))
+            .unwrap_or_else(|_| working_dir.join(".libra"))
+            .join("sessions");
+        let runs = AgentRunEventStore::new(sessions_root)
+            .list_all_snapshots()
+            .unwrap_or_default();
+
+        match classify_cancel_target(run_id, &runs) {
+            AgentRunCancelTarget::InFlight => {
+                runtime.abort_token.cancel();
+                format!("Requested cancellation of sub-agent run `{run_id}`.")
+            }
+            AgentRunCancelTarget::AlreadyTerminal(status) => format!(
+                "Sub-agent run `{run_id}` already finished ({}); nothing to cancel.",
+                status_label(status),
+            ),
+            AgentRunCancelTarget::NotFound => {
+                format!("No sub-agent run matches `{run_id}`; run `/agents` to list current runs.")
+            }
         }
     }
 
@@ -7346,7 +7481,7 @@ where
 
             let mut persistence_warning = None;
             let intent_id = if let Some(ref mcp_server) = mcp_server {
-                match persist_intentspec(&spec, mcp_server).await {
+                match persist_phase0_intent_for_review(&spec, mcp_server).await {
                     Ok(intent_id) => Some(intent_id),
                     Err(error) => {
                         persistence_warning =
@@ -7359,11 +7494,33 @@ where
                     Some("MCP server unavailable; intent not persisted.".to_string());
                 None
             };
+            let mut context_snapshot_id = None;
+            let mut context_snapshot_warning = None;
+            if let Some(ref mcp_server) = mcp_server {
+                match persist_phase0_context_snapshot_for_review(&spec, &working_dir, mcp_server)
+                    .await
+                {
+                    Ok(snapshot_id) => context_snapshot_id = snapshot_id,
+                    Err(error) => {
+                        context_snapshot_warning = Some(format!(
+                            "failed to persist Phase 0 ContextSnapshot: {error}"
+                        ));
+                    }
+                }
+            }
 
             let pretty_json =
                 serde_json::to_string_pretty(&spec).unwrap_or_else(|_| "{}".to_string());
-            let warnings = persistence_warning.into_iter().collect::<Vec<_>>();
-            let review = build_intentspec_review(&spec, intent_id.as_deref(), &warnings);
+            let warnings = persistence_warning
+                .into_iter()
+                .chain(context_snapshot_warning)
+                .collect::<Vec<_>>();
+            let review = build_intentspec_review(
+                &spec,
+                intent_id.as_deref(),
+                context_snapshot_id.as_deref(),
+                &warnings,
+            );
 
             let llm_output = turn
                 .as_ref()
@@ -8906,14 +9063,15 @@ mod tests {
         append_to_last_tool_group_cell, append_to_last_tool_group_preview_cell,
         apply_developer_network_access, apply_final_usage_update, apply_goal_tool_visibility,
         apply_streaming_usage_delta, automatic_plan_repair_request_from_report,
-        automatic_plan_repair_threshold_message, build_execution_plan_prompt,
-        build_execution_plan_revision_prompt, build_plan_prompt, build_plan_revision_prompt,
-        changed_path_from_short_status_line, classify_execution_failure_revision,
-        classify_first_turn_task_intent, code_ui_response_from_managed_selection,
-        default_chat_allowed_tools, estimate_streamed_output_tokens,
-        exec_approval_decision_from_selection, execution_failure_report,
-        execution_failure_revision_message, execution_requires_plan_repair,
-        format_decision_stage_note, format_intentspec_target_mismatch, format_orchestrator_result,
+        automatic_plan_repair_threshold_message, bind_goal_stop_policy,
+        build_execution_plan_prompt, build_execution_plan_revision_prompt, build_plan_prompt,
+        build_plan_revision_prompt, changed_path_from_short_status_line,
+        classify_execution_failure_revision, classify_first_turn_task_intent,
+        code_ui_response_from_managed_selection, default_chat_allowed_tools,
+        estimate_streamed_output_tokens, exec_approval_decision_from_selection,
+        execution_failure_report, execution_failure_revision_message,
+        execution_requires_plan_repair, format_decision_stage_note,
+        format_intentspec_target_mismatch, format_orchestrator_result,
         format_plan_compiled_stage_note, format_plan_execution_stage_note,
         format_replan_stage_note, format_system_verification_stage_note,
         graph_thread_id_from_orchestrator_result, intentspec_failure_revision_message_from_report,
@@ -8922,13 +9080,13 @@ mod tests {
         normalize_terminal_paste_text, parse_pending_plan_revision_command,
         parse_task_command_args, parse_usage_grouping,
         pending_execution_plan_revision_help_message, pending_plan_revision_help_message,
-        phase0_plan_tool_loop_config, phase1_plan_tool_loop_config, provider_plan_draft_from_args,
-        provider_plan_draft_from_plan, record_orchestrator_thread_metadata, review_scroll_action,
-        session_graph_thread_id, should_auto_classify_first_user_message,
-        should_auto_repair_execution_failure, should_forward_phase0_model_text_delta,
-        should_forward_phase1_model_text_delta, should_route_plain_message_to_plan,
-        task_description_from_prompt, undo_should_prefer_vcs_rollback,
-        usage_detail_popup_enabled_from_toml,
+        phase0_context_snapshot_request_from_changed_files, phase0_plan_tool_loop_config,
+        phase1_plan_tool_loop_config, provider_plan_draft_from_args, provider_plan_draft_from_plan,
+        record_orchestrator_thread_metadata, review_scroll_action, session_graph_thread_id,
+        should_auto_classify_first_user_message, should_auto_repair_execution_failure,
+        should_forward_phase0_model_text_delta, should_forward_phase1_model_text_delta,
+        should_route_plain_message_to_plan, task_description_from_prompt,
+        undo_should_prefer_vcs_rollback, usage_detail_popup_enabled_from_toml,
     };
     use crate::internal::{
         ai::{
@@ -8937,6 +9095,7 @@ mod tests {
                 AssistantContent, CompletionError, CompletionModel, CompletionRequest,
                 CompletionResponse, CompletionUsageSummary, Message, Text,
             },
+            goal::GoalStopPolicy,
             intentspec::{
                 ResolveContext,
                 draft::{DraftAcceptance, DraftIntent, DraftRisk, IntentDraft},
@@ -8958,7 +9117,7 @@ mod tests {
                 context::{PlanDraftStep, SubmitPlanDraftArgs},
                 spec::ToolSpec,
             },
-            usage::{UsageDisplaySnapshot, UsageGrouping},
+            usage::{UsageDisplaySnapshot, UsageGrouping, format_usage_badge},
             web::code_ui::{
                 CodeUiApplyToFuture, CodeUiCapabilities, CodeUiInteractionKind,
                 CodeUiInteractionOption, CodeUiInteractionRequest, CodeUiInteractionStatus,
@@ -9061,6 +9220,10 @@ mod tests {
         assert_eq!(estimate_streamed_output_tokens("abcdefgh"), 2);
         assert_eq!(snapshot.completion_tokens, 12);
         assert_eq!(pending, 2);
+        assert_eq!(
+            format_usage_badge(&snapshot),
+            "openai/gpt-test · 12 tok · 0.0s"
+        );
 
         apply_final_usage_update(
             &mut snapshot,
@@ -9081,6 +9244,10 @@ mod tests {
         assert_eq!(snapshot.completion_tokens, 17);
         assert_eq!(snapshot.wall_clock_ms, 1500);
         assert_eq!(snapshot.cost_usd, Some(0.01));
+        assert_eq!(
+            format_usage_badge(&snapshot),
+            "openai/gpt-test · 22 tok · 1.5s · $0.0100"
+        );
     }
 
     #[test]
@@ -9228,6 +9395,25 @@ mod tests {
         }
     }
 
+    fn function_body<'a>(source: &'a str, signature: &str) -> Option<&'a str> {
+        let start = source.find(signature)?;
+        let open = source[start..].find('{')? + start;
+        let mut depth = 0usize;
+        for (offset, ch) in source[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(&source[open..=open + offset]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     #[test]
     fn provider_plan_draft_steps_replace_objectives_for_execution_plan_compile() {
         let spec = minimal_intentspec(vec![Objective {
@@ -9363,6 +9549,70 @@ mod tests {
     }
 
     #[test]
+    fn phase0_review_persistence_uses_runtime_write_helper() {
+        let source = include_str!("app.rs");
+        let body = function_body(source, "async fn begin_plan_workflow")
+            .expect("begin_plan_workflow body should be found");
+
+        assert!(
+            body.contains("persist_phase0_intent_for_review("),
+            "Phase 0 review persistence must go through the runtime formal-write helper"
+        );
+        assert!(
+            body.contains("persist_phase0_context_snapshot_for_review("),
+            "Phase 0 review persistence must evaluate ContextSnapshot freeze through the runtime helper"
+        );
+        assert!(
+            !body.contains("persist_intentspec("),
+            "begin_plan_workflow must not call lower-level IntentSpec persistence directly"
+        );
+        assert!(
+            !body.contains("create_context_snapshot_impl("),
+            "begin_plan_workflow must not write ContextSnapshot directly through MCP"
+        );
+    }
+
+    #[test]
+    fn phase0_context_snapshot_request_skips_clean_worktree() {
+        let spec = minimal_intentspec(vec![Objective {
+            title: "inspect current flow".to_string(),
+            kind: ObjectiveKind::Analysis,
+        }]);
+        let actor = ActorRef::system("phase0-test").unwrap();
+
+        let request = phase0_context_snapshot_request_from_changed_files(&spec, Vec::new(), actor);
+
+        assert!(request.is_none());
+    }
+
+    #[test]
+    fn phase0_context_snapshot_request_captures_changed_paths() {
+        let spec = minimal_intentspec(vec![Objective {
+            title: "inspect current flow".to_string(),
+            kind: ObjectiveKind::Analysis,
+        }]);
+        let actor = ActorRef::system("phase0-test").unwrap();
+
+        let request = phase0_context_snapshot_request_from_changed_files(
+            &spec,
+            vec!["src/main.rs".to_string(), " docs/agent.md ".to_string()],
+            actor,
+        )
+        .expect("dirty worktree should produce a snapshot request");
+
+        assert_eq!(request.items.len(), 2);
+        assert_eq!(request.items[0].path, "src/main.rs");
+        assert_eq!(request.items[1].path, "docs/agent.md");
+        assert!(
+            request
+                .summary
+                .as_deref()
+                .unwrap()
+                .contains("2 changed paths")
+        );
+    }
+
+    #[test]
     fn phase1_tool_loop_config_stops_after_submit_plan_draft() {
         let config = phase1_plan_tool_loop_config(ToolLoopConfig::default());
 
@@ -9426,6 +9676,20 @@ mod tests {
                 "update_goal_progress".to_string(),
                 "submit_goal_complete".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn goal_stop_policy_is_bound_into_tool_loop_config() {
+        let goal_id = uuid::Uuid::new_v4();
+        let mut config = ToolLoopConfig::default();
+
+        let policy = bind_goal_stop_policy(&mut config, goal_id);
+
+        assert_eq!(policy, GoalStopPolicy::GoalBound { goal_id });
+        assert_eq!(
+            config.goal_stop_policy,
+            Some(GoalStopPolicy::GoalBound { goal_id })
         );
     }
 
@@ -11334,6 +11598,67 @@ fn dedupe_preserving_order(items: Vec<String>) -> Vec<String> {
     deduped
 }
 
+async fn persist_phase0_intent_for_review(
+    spec: &IntentSpec,
+    mcp_server: &Arc<LibraMcpServer>,
+) -> anyhow::Result<String> {
+    let outcome = write_intent(spec, mcp_server).await?;
+    Ok(outcome.intent_id)
+}
+
+async fn persist_phase0_context_snapshot_for_review(
+    spec: &IntentSpec,
+    working_dir: &Path,
+    mcp_server: &Arc<LibraMcpServer>,
+) -> anyhow::Result<Option<String>> {
+    let actor = mcp_server
+        .resolve_actor_from_params(Some("system"), Some("libra-plan"))
+        .map_err(|error| anyhow::anyhow!("failed to resolve actor for ContextSnapshot: {error}"))?;
+    let Some(request) = phase0_context_snapshot_request_from_changed_files(
+        spec,
+        changed_files_from_status(working_dir),
+        actor,
+    ) else {
+        return Ok(None);
+    };
+
+    let outcome = write_context_snapshot_if_needed(request, mcp_server).await?;
+    Ok(outcome.map(|snapshot| snapshot.snapshot_id))
+}
+
+fn phase0_context_snapshot_request_from_changed_files(
+    spec: &IntentSpec,
+    changed_files: Vec<String>,
+    actor: git_internal::internal::object::types::ActorRef,
+) -> Option<ContextSnapshotRequest> {
+    let items = changed_files
+        .into_iter()
+        .filter_map(|path| {
+            let path = path.trim().to_string();
+            (!path.is_empty()).then_some(ContextSnapshotItem {
+                kind: Some("file".to_string()),
+                path,
+                preview: None,
+                blob_hash: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return None;
+    }
+
+    Some(ContextSnapshotRequest {
+        summary: Some(format!(
+            "Phase 0 worktree context for IntentSpec {}: {} changed paths",
+            spec.metadata.id,
+            items.len()
+        )),
+        items,
+        selection_strategy: SelectionStrategy::Heuristic,
+        actor,
+    })
+}
+
 fn intentspec_with_plan_draft_objectives(
     spec: &IntentSpec,
     plan_draft: &ProviderPlanDraft,
@@ -11598,6 +11923,12 @@ fn apply_goal_tool_visibility(
     } else {
         allowed_tools.retain(|name| !is_goal_tool(name));
     }
+}
+
+fn bind_goal_stop_policy(config: &mut ToolLoopConfig, goal_id: uuid::Uuid) -> GoalStopPolicy {
+    let policy = GoalStopPolicy::GoalBound { goal_id };
+    config.goal_stop_policy = Some(policy);
+    policy
 }
 
 fn is_goal_tool(tool_name: &str) -> bool {

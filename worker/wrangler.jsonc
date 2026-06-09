@@ -24,8 +24,8 @@
   "d1_databases": [
     {
       "binding": "LIBRA_PUBLISH_DB",
-      "database_name": "libra-testing",
-      "database_id": "8e067bd6-f12c-4462-a536-65f8acde59ce",
+      "database_name": "libra-publish",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
       "migrations_dir": "migrations",
     },
   ],
@@ -33,7 +33,7 @@
   "r2_buckets": [
     {
       "binding": "LIBRA_PUBLISH_BUCKET",
-      "bucket_name": "libra-action",
+      "bucket_name": "REPLACE_WITH_R2_BUCKET_NAME",
     },
   ],
 

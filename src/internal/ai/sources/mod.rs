@@ -24,6 +24,7 @@ use crate::internal::ai::tools::{
 pub mod config;
 pub mod mcp;
 pub mod openapi;
+pub mod throttle;
 
 pub use config::{
     SourceConfigEntry, SourceConfigLoadReport, SourceConfigOrigin, SourceConfigView,
@@ -31,6 +32,7 @@ pub use config::{
 };
 pub use mcp::{BUILTIN_MCP_SOURCE_SLUG, McpSource};
 pub use openapi::{OpenApiToolSpecError, openapi_tool_capabilities_from_fixture};
+pub use throttle::SourceThrottle;
 
 /// Source category. This stays intentionally small for Step 1.10 Phase A.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -375,6 +377,10 @@ pub struct SourceCallRecord {
     pub tool_name: String,
     pub registered_tool_name: String,
     pub tool_call_id: String,
+    /// Owning sub-agent run id, when the call came from a sub-agent's tool loop
+    /// (CEX-S2-14 trace chain). `None` for main-session source calls. Read from
+    /// the invocation's `ToolRuntimeContext::agent_run_id`.
+    pub agent_run_id: Option<String>,
     pub credential_ref: Option<String>,
     pub latency_ms: Option<u128>,
     pub input_bytes: usize,
@@ -434,6 +440,7 @@ impl SourceCallLog {
                         in_memory_copy.registered_tool_name.clone(),
                     ),
                     tool_call_id: sea_orm::ActiveValue::Set(in_memory_copy.tool_call_id.clone()),
+                    agent_run_id: sea_orm::ActiveValue::Set(in_memory_copy.agent_run_id.clone()),
                     credential_ref: sea_orm::ActiveValue::Set(
                         in_memory_copy.credential_ref.clone(),
                     ),
@@ -523,6 +530,9 @@ pub struct SourceToolHandler {
     capability: SourceToolCapability,
     shared_state: bool,
     call_log: SourceCallLog,
+    /// Shared per-slug concurrency limiter. Disabled (`SourceThrottle::default`)
+    /// unless the owning `SourcePool` was built with a concurrency limit.
+    throttle: SourceThrottle,
 }
 
 impl SourceToolHandler {
@@ -532,6 +542,7 @@ impl SourceToolHandler {
         source_tool_name: impl Into<String>,
         registered_tool_name: impl Into<String>,
         call_log: SourceCallLog,
+        throttle: SourceThrottle,
     ) -> Result<Self, SourcePoolError> {
         let source_tool_name = source_tool_name.into();
         let (source_slug, capability, shared_state) = {
@@ -554,6 +565,7 @@ impl SourceToolHandler {
             capability,
             shared_state,
             call_log,
+            throttle,
         })
     }
 
@@ -605,6 +617,10 @@ impl ToolHandler for SourceToolHandler {
             state_namespace: self.state_namespace(),
         };
 
+        // Per-slug concurrency limit: when the owning pool set one, hold a
+        // permit across the call so concurrent sub-agents cannot overwhelm the
+        // same backend. `None` when throttling is disabled (the default).
+        let _throttle_permit = self.throttle.acquire(&self.source_slug).await;
         let result = self
             .source
             .call_tool(context.clone(), source_invocation)
@@ -622,6 +638,13 @@ impl ToolHandler for SourceToolHandler {
             tool_name: context.tool_name,
             registered_tool_name: context.registered_tool_name,
             tool_call_id: context.tool_call_id,
+            // CEX-S2-14 trace chain: attribute the source call to the owning
+            // sub-agent run (same `runtime_context` the approval read below
+            // uses); `None` for the main-session path.
+            agent_run_id: invocation
+                .runtime_context
+                .as_ref()
+                .and_then(|ctx| ctx.agent_run_id.clone()),
             credential_ref: context.credential_ref,
             latency_ms: Some(elapsed),
             input_bytes,
@@ -700,6 +723,9 @@ pub type SourceToolHandlers = Vec<(String, Arc<dyn ToolHandler>)>;
 pub struct SourcePool {
     registrations: Arc<Mutex<HashMap<String, SourceRegistration>>>,
     call_log: SourceCallLog,
+    /// Shared per-slug concurrency limiter handed to every handler this pool
+    /// builds. Disabled by default; opt in via [`SourcePool::with_source_concurrency_limit`].
+    throttle: SourceThrottle,
 }
 
 impl fmt::Debug for SourcePool {
@@ -725,7 +751,23 @@ impl SourcePool {
         Self {
             registrations: Arc::default(),
             call_log: SourceCallLog::new().with_persistence(db),
+            throttle: SourceThrottle::default(),
         }
+    }
+
+    /// Bound concurrent tool calls to at most `limit` per source slug
+    /// (CEX-S2-14, agent.md:1959) so multiple sub-agents cannot overwhelm the
+    /// same MCP / REST backend. `limit == 0` (the default) disables throttling.
+    /// The limit is shared by every handler the pool builds, so handlers for
+    /// the same slug — across sub-agents — contend on one semaphore.
+    pub fn with_source_concurrency_limit(mut self, limit: usize) -> Self {
+        self.throttle = SourceThrottle::new(limit);
+        self
+    }
+
+    /// The per-slug source-call concurrency limit (`0` == disabled).
+    pub fn source_concurrency_limit(&self) -> usize {
+        self.throttle.limit()
     }
 
     pub fn register_source(&self, source: Arc<dyn Source>) -> Result<(), SourcePoolError> {
@@ -845,6 +887,7 @@ impl SourcePool {
                     capability.name.clone(),
                     registered_name.clone(),
                     self.call_log.clone(),
+                    self.throttle.clone(),
                 )?;
                 handlers.push((registered_name, Arc::new(handler) as Arc<dyn ToolHandler>));
             }
@@ -885,9 +928,22 @@ impl SourceToolHandler {
 #[cfg(test)]
 mod tests {
     use super::{
-        ManifestValidationError, SourceCallLog, SourceCallRecord, SourceEnablement,
+        ManifestValidationError, SourceCallLog, SourceCallRecord, SourceEnablement, SourcePool,
         SourcePoolError, TrustTier,
     };
+
+    #[test]
+    fn source_pool_concurrency_limit_defaults_off_and_is_configurable() {
+        // Default pool: throttling disabled (back-compat — unbounded calls).
+        assert_eq!(SourcePool::new().source_concurrency_limit(), 0);
+        // The builder threads the per-slug limit into the pool.
+        assert_eq!(
+            SourcePool::new()
+                .with_source_concurrency_limit(3)
+                .source_concurrency_limit(),
+            3,
+        );
+    }
 
     /// v0.17.803 producer wire-up regression: a `SourceCallLog`
     /// configured with `with_persistence(conn)` inserts a row into
@@ -916,6 +972,7 @@ mod tests {
             tool_name: "git_log".to_string(),
             registered_tool_name: "git_log".to_string(),
             tool_call_id: "call_abc".to_string(),
+            agent_run_id: Some("run-trace-1".to_string()),
             credential_ref: None,
             latency_ms: Some(42),
             input_bytes: 100,
@@ -960,10 +1017,19 @@ mod tests {
         let row = &rows[0];
         assert_eq!(row.session_id, "sess-1");
         assert_eq!(row.source_slug, "mcp:git-tools");
+        assert_eq!(row.tool_name, "git_log");
+        assert_eq!(row.registered_tool_name, "git_log");
         assert_eq!(row.tool_call_id, "call_abc");
+        // CEX-S2-14: the new agent_run_id column persists + round-trips (also
+        // proves the 2026060201 migration applied on the fresh DB above).
+        assert_eq!(row.agent_run_id.as_deref(), Some("run-trace-1"));
+        assert_eq!(row.credential_ref, None);
         assert_eq!(row.latency_ms, Some(42));
         assert_eq!(row.input_bytes, 100);
         assert_eq!(row.output_bytes, 200);
+        assert_eq!(row.cost_estimate_micros, None);
+        assert_eq!(row.approval_decision.as_deref(), Some("auto"));
+        assert_eq!(row.state_namespace, "mcp:git-tools");
         assert_eq!(row.success, 1);
     }
 
@@ -980,6 +1046,7 @@ mod tests {
             tool_name: "forecast".to_string(),
             registered_tool_name: "forecast".to_string(),
             tool_call_id: "call_xyz".to_string(),
+            agent_run_id: None,
             credential_ref: Some("vault:weather-api-key".to_string()),
             latency_ms: None,
             input_bytes: 0,

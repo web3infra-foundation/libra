@@ -1918,6 +1918,7 @@ mod tests {
     use git_internal::internal::object::{
         context_frame::{ContextFrame, FrameKind},
         intent::Intent,
+        patchset::PatchSet,
         plan::Plan,
         plan_step_event::{PlanStepEvent, PlanStepStatus},
         run::Run,
@@ -1938,8 +1939,9 @@ mod tests {
             ai::{history::HistoryManager, projection::ThreadProjection},
             db,
             model::{
-                ai_index_intent_context_frame, ai_index_task_run, ai_scheduler_selected_plan,
-                ai_scheduler_state,
+                ai_index_intent_context_frame, ai_index_intent_plan, ai_index_intent_task,
+                ai_index_plan_step_task, ai_index_run_event, ai_index_run_patchset,
+                ai_index_task_run, ai_scheduler_selected_plan, ai_scheduler_state,
             },
         },
         utils::{storage::local::LocalStorage, storage_ext::StorageExt, test},
@@ -2203,6 +2205,24 @@ mod tests {
             .await
             .expect("store run");
 
+        let base_commit = "2f4f0f7d5e3942843096a6f1f8f7d1aa0b8bc4222f4f0f7d5e3942843096a6f1";
+        let mut first_patchset =
+            PatchSet::new(actor.clone(), run.header().object_id(), base_commit)
+                .expect("first patchset");
+        first_patchset.set_sequence(0);
+        storage
+            .put_tracked(&first_patchset, &history)
+            .await
+            .expect("store first patchset");
+        let mut second_patchset =
+            PatchSet::new(actor.clone(), run.header().object_id(), base_commit)
+                .expect("second patchset");
+        second_patchset.set_sequence(1);
+        storage
+            .put_tracked(&second_patchset, &history)
+            .await
+            .expect("store second patchset");
+
         let mut task_event = TaskEvent::new(
             actor.clone(),
             task.header().object_id(),
@@ -2280,10 +2300,75 @@ mod tests {
         );
         assert_eq!(rebuild.scheduler.current_plan_heads.len(), 2);
         assert_eq!(rebuild.scheduler.live_context_window.len(), 1);
+        assert_eq!(rebuild.intent_plan_index.len(), 2);
+        assert_eq!(rebuild.intent_task_index.len(), 1);
         assert_eq!(rebuild.plan_step_task_index.len(), 1);
+        assert_eq!(rebuild.task_run_index.len(), 1);
         assert_eq!(rebuild.run_event_index.len(), 1);
         assert!(rebuild.run_event_index[0].is_latest);
+        assert_eq!(rebuild.run_patchset_index.len(), 2);
+        let latest_patchset = rebuild
+            .run_patchset_index
+            .iter()
+            .find(|row| row.is_latest)
+            .expect("latest patchset index row");
+        assert_eq!(
+            latest_patchset.patchset_id,
+            second_patchset.header().object_id()
+        );
+        assert_eq!(latest_patchset.sequence, 1);
         assert_eq!(rebuild.intent_context_frame_index.len(), 1);
+
+        let intent_plan_rows = ai_index_intent_plan::Entity::find()
+            .all(db_conn.as_ref())
+            .await
+            .expect("intent plan rows");
+        assert_eq!(intent_plan_rows.len(), 2);
+        let persisted_plan_ids = intent_plan_rows
+            .iter()
+            .map(|row| row.plan_id.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            persisted_plan_ids,
+            BTreeSet::from([
+                plan.header().object_id().to_string(),
+                test_plan.header().object_id().to_string(),
+            ])
+        );
+
+        let intent_task_rows = ai_index_intent_task::Entity::find()
+            .all(db_conn.as_ref())
+            .await
+            .expect("intent task rows");
+        assert_eq!(intent_task_rows.len(), 1);
+        assert_eq!(
+            intent_task_rows[0].intent_id,
+            intent.header().object_id().to_string()
+        );
+        assert_eq!(
+            intent_task_rows[0].task_id,
+            task.header().object_id().to_string()
+        );
+        assert_eq!(intent_task_rows[0].parent_task_id, None);
+        assert_eq!(
+            intent_task_rows[0].origin_step_id,
+            Some(step_id.to_string())
+        );
+
+        let plan_step_task_rows = ai_index_plan_step_task::Entity::find()
+            .all(db_conn.as_ref())
+            .await
+            .expect("plan step task rows");
+        assert_eq!(plan_step_task_rows.len(), 1);
+        assert_eq!(
+            plan_step_task_rows[0].plan_id,
+            plan.header().object_id().to_string()
+        );
+        assert_eq!(plan_step_task_rows[0].step_id, step_id.to_string());
+        assert_eq!(
+            plan_step_task_rows[0].task_id,
+            task.header().object_id().to_string()
+        );
 
         let task_run_rows = ai_index_task_run::Entity::find()
             .all(db_conn.as_ref())
@@ -2291,6 +2376,34 @@ mod tests {
             .expect("task run rows");
         assert_eq!(task_run_rows.len(), 1);
         assert!(task_run_rows[0].is_latest);
+        assert_eq!(
+            task_run_rows[0].run_id,
+            run.header().object_id().to_string()
+        );
+
+        let run_event_rows = ai_index_run_event::Entity::find()
+            .all(db_conn.as_ref())
+            .await
+            .expect("run event rows");
+        assert_eq!(run_event_rows.len(), 1);
+        assert_eq!(run_event_rows[0].event_kind, "created");
+        assert!(run_event_rows[0].is_latest);
+
+        let run_patchset_rows = ai_index_run_patchset::Entity::find()
+            .all(db_conn.as_ref())
+            .await
+            .expect("run patchset rows");
+        assert_eq!(run_patchset_rows.len(), 2);
+        let latest_patchset_row = run_patchset_rows
+            .iter()
+            .find(|row| row.is_latest)
+            .expect("latest persisted patchset row");
+        assert_eq!(
+            latest_patchset_row.patchset_id,
+            second_patchset.header().object_id().to_string()
+        );
+        assert_eq!(latest_patchset_row.sequence, 1);
+
         let selected_plan_rows = ai_scheduler_selected_plan::Entity::find()
             .all(db_conn.as_ref())
             .await

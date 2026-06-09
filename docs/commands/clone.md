@@ -23,6 +23,40 @@ copied to matching `.libraignore` files so Libra ignore rules work immediately.
 For bare clones, no working tree checkout is performed and the repository directory itself
 becomes the object store. Bare clones do not create `.libraignore`.
 
+## Capability Matrix and Decision Ledger
+
+Libra keeps its transactional SQLite metadata (`.libra/libra.db`), vault-backed secrets, and
+tiered object storage as the authoritative implementation, while matching the protocol-layer
+behavior of common `git clone` flags. **No SQL schema migration is required for clone core**
+(metadata stays in SQLite; objects in tiered storage; partial-clone promisor state is recorded
+in `config_kv`). The authoritative compatibility levels live in
+[`COMPATIBILITY.md`](../../COMPATIBILITY.md); this table summarizes the decisions:
+
+| Capability | Flag | Libra level | Notes |
+|---|---|---|---|
+| Shallow by count | `--depth` | supported | Reuses `.libra/shallow` boundary + deepen negotiation |
+| Shallow by date | `--shallow-since` | supported | `deepen-since`; supersedes plain depth when combined |
+| Shallow by ref | `--shallow-exclude` | supported | `deepen-not`; supersedes plain depth when combined |
+| Reject shallow source | `--reject-shallow` | supported | Fails (128) on a shallow source |
+| All / single branch | `--single-branch` / `--no-single-branch` | supported | Git-style negation, last wins |
+| Custom remote name | `-o/--origin` | supported | Names the tracked remote |
+| Skip checkout | `-n/--no-checkout` | supported | Metadata only, no working tree |
+| Mirror | `--mirror` | partial | Implies bare; writes `+refs/*:refs/*` + `mirror = true`; clones branch heads (tags/exact-`refs/*` mirroring not yet implemented) |
+| Reference reuse | `--reference` / `--reference-if-able` | intentionally-different | Copy semantics (no `info/alternates` borrow) |
+| Dissociate | `--dissociate` | intentionally-different | Confirms fully-local (copy semantics) |
+| Local optimization | `-l/--local` / `--no-hardlinks` | supported | Hardlink (or copy) a local source's objects |
+| Shared objects | `-s/--shared` | intentionally-different | Copy semantics, no alternates |
+| Parallel jobs | `-j/--jobs` | intentionally-different | Validated 1..=16, reserved/no-op (serial transport) |
+| Partial clone | `--filter` | partial | Whitelist specs; promisor config; no lazy backfill |
+| Sparse checkout | `--sparse` | declined | See [declined.md#d10](../improvement/compatibility/declined.md#d10-clone---sparse-与顶层-sparse-checkout-命令) |
+| Submodules | `--recurse-submodules` | declined | See [declined.md#d4](../improvement/compatibility/declined.md#d4-clone---recurse-submodules) |
+
+**Cloud clones** (`libra+cloud://`) restore a complete published object set from Cloudflare D1/R2
+and **fail-fast (exit 129) on every Git shaping flag** above (use `?ref=<branch|tag|full-ref>` in
+the URL to select a checkout target) before any clone-domain config lookup or directory creation.
+New `StableErrorCode` variants (if any) are recorded in
+[`docs/error-codes.md`](../error-codes.md).
+
 ## Options
 
 ### `<REMOTE_REPO>` (required)
@@ -53,8 +87,12 @@ For `libra+cloud://`, the authority is the configured clone domain. The path mus
 either `/<slug>` or `/repo/<repo_id>`. Only one selector is allowed: `?ref=<branch|tag|full-ref>`
 or `?revision=<oid|latest>`.
 The first Cloudflare restore surface does not accept Git transport shaping flags:
-`--branch`, `--depth`, `--single-branch`, and `--bare` return `LBR-CLI-002`
-before clone-domain config lookup and before creating the destination directory.
+`--branch`, `--depth`, `--single-branch`, `--bare`, `--shallow-since`,
+`--shallow-exclude`, `--reject-shallow`, `--origin`, `--no-checkout`,
+`--mirror`, `--reference`, `--reference-if-able`, `--dissociate`, `--local`,
+`--shared`, `--no-hardlinks`, `--jobs`, and `--filter` return `LBR-CLI-002`
+or `LBR-CLI-003` before clone-domain config lookup and before creating the
+destination directory.
 Use `?ref=<branch|tag|full-ref>` on the source URL to select a checkout target.
 
 Required clone-domain config keys:
@@ -101,6 +139,17 @@ because the restored local repository must preserve all published refs.
 libra clone --single-branch -b main git@github.com:user/repo.git
 ```
 
+### `--no-single-branch`
+
+The opposite of `--single-branch`; clone all branches. This is a Git-style negation: when
+both `--single-branch` and `--no-single-branch` appear on the command line, the last one
+wins (handled natively by clap's `overrides_with`). It is **not** a usage conflict, so
+combining them does not return an error.
+
+```bash
+libra clone --no-single-branch git@github.com:user/repo.git
+```
+
 ### `--bare`
 
 Create a bare repository without a working tree. The destination directory becomes the
@@ -122,6 +171,150 @@ because it must download the complete published object set.
 ```bash
 libra clone --depth 1 git@github.com:user/repo.git
 libra clone --depth 50 git@github.com:user/repo.git
+```
+
+### `--shallow-since <time>`
+
+Create a shallow clone with history limited to commits newer than `<time>`. Accepts a date
+(`2024-01-01`), an RFC3339 timestamp, a Unix epoch, or a relative form like `2 weeks ago`.
+A malformed time is rejected up front with `LBR-CLI-002` (exit 129) before any network
+access. May be combined with `--depth`; because `git-upload-pack` rejects sending both a
+plain `deepen` and a `deepen-since`/`deepen-not` request together, the time/ref request
+supersedes plain depth at the protocol layer. Only Git remotes support shallow transfer;
+`libra+cloud://` restore rejects it.
+
+```bash
+libra clone --shallow-since 2024-01-01 git@github.com:user/repo.git
+```
+
+### `--shallow-exclude <revision>`
+
+Create a shallow clone that excludes history reachable from the given ref or revision
+(`deepen-not`). May be **repeated** to exclude multiple refs (one `deepen-not` frame per
+value) and combined with `--depth` (the exclude request supersedes plain depth, as with
+`--shallow-since`). Only Git remotes support it; `libra+cloud://` restore rejects it.
+
+```bash
+libra clone --shallow-exclude refs/tags/v1.0.0 git@github.com:user/repo.git
+```
+
+### `--reject-shallow`
+
+Fail (exit 128) if the source repository is itself a shallow repository, rather than
+producing a shallow clone of a shallow source. Local sources are detected before any
+directory is created; remote sources are detected from the shallow boundaries advertised
+during fetch.
+
+```bash
+libra clone --reject-shallow git@github.com:user/repo.git
+```
+
+### `-o, --origin <name>`
+
+Use `<name>` instead of `origin` for the tracked remote. The remote URL, fetch refspec, and
+`branch.<branch>.remote` configuration are all recorded under this name. `libra+cloud://`
+restore rejects it.
+
+```bash
+libra clone -o upstream git@github.com:user/repo.git
+```
+
+### `-n, --no-checkout`
+
+Do not check out HEAD after the clone. Metadata, refs, and config are still written; only
+the working-tree checkout (and the `.gitignore` → `.libraignore` conversion that depends on
+it) is skipped. `libra+cloud://` restore rejects it.
+
+```bash
+libra clone --no-checkout git@github.com:user/repo.git
+```
+
+### `--mirror`
+
+Set up a mirror of the source repository. Implies `--bare`, records the mirror refspec
+(`+refs/*:refs/*`) and `remote.<name>.mirror = true`, and clones all branch heads.
+**Known limitation (partial):** branch refs are stored as remote-tracking
+(`refs/remotes/<name>/*`) and tags/other ref namespaces are not yet mirrored at their exact
+`refs/*` names, so this is not yet a full Git-style mirror. `libra+cloud://` restore rejects it.
+
+```bash
+libra clone --mirror git@github.com:user/repo.git
+```
+
+### `--reference <repo>` / `--reference-if-able <repo>`
+
+Reuse objects from a **local** reference repository to reduce work. **Intentionally different
+from Git**: because Libra's object reader has no `info/alternates` fallback, these flags use
+**copy semantics** — the reference's objects are copied into the new clone's tiered storage and
+the clone carries no long-term alternates dependency (no `info/alternates` is written). The source
+must be a real (non-symlink) local libra or git repository; a symlinked source is rejected with
+exit 128, and the path is length-capped at 4 KiB. `--reference-if-able` degrades to a normal clone
+with a warning when the path does not exist, whereas `--reference` fails. `libra+cloud://` rejects both.
+
+```bash
+libra clone --reference /srv/mirror/repo git@github.com:user/repo.git
+libra clone --reference-if-able /srv/mirror/repo git@github.com:user/repo.git
+```
+
+### `--dissociate`
+
+Ensure the clone has no borrow dependency on the reference. With the default copy semantics the
+objects are already fully local, so this confirms that state (reported as `dissociated = true` in
+JSON) — it never leaves a dangling alternates reference. Requires `--reference` or
+`--reference-if-able`; using it alone is a usage error (exit 129).
+
+```bash
+libra clone --dissociate --reference /srv/mirror/repo git@github.com:user/repo.git
+```
+
+### `-l, --local` / `--no-hardlinks`
+
+When cloning from a **local** repository, reuse its objects directly instead of re-transferring
+them: `--local` hardlinks the source's loose objects and pack files into the new clone (sharing
+inodes), falling back to a copy across filesystems or when `--no-hardlinks` is given. Symlinked
+object sources are rejected (exit 128). If the source is not a local repository, the flag is
+ignored with a warning.
+
+```bash
+libra clone -l /srv/repos/project.git my-project
+libra clone -l --no-hardlinks /srv/repos/project.git my-project
+```
+
+### `-s, --shared`
+
+Reuse a local source repository's objects via **copy semantics** (no `info/alternates` borrow,
+same as `--reference`/`--shared` elsewhere in Libra). Intentionally different from Git's
+alternates-sharing because Libra's object reader has no alternates fallback.
+
+```bash
+libra clone -s /srv/repos/project.git my-project
+```
+
+### `-j, --jobs <n>`
+
+**Libra extension (reserved).** Validated to the range 1..=16 (0 or >16 exit 129) and retained,
+but currently a no-op — Libra's transport is serial and there is no downstream consumer. Git's
+`clone --jobs` controls submodule fetches, which Libra does not support, so the name is reserved
+for a future transport-concurrency cap.
+
+```bash
+libra clone --jobs 4 git@github.com:user/repo.git
+```
+
+### `--filter <spec>`
+
+Partial clone: ask the remote to omit objects matching `<spec>` to reduce transfer. Supported
+specs (whitelist; unknown specs exit 129, over-long specs are 4 KiB-capped): `blob:none`,
+`blob:limit=<n>[kmg]`, and `tree:<depth>`. The clone records promisor config
+(`remote.<name>.promisor = true`, `remote.<name>.partialclonefilter = <spec>`) but does **not**
+lazily backfill missing objects. Because a non-bare default checkout needs blob contents, pair
+`--filter` with `--no-checkout` or `--bare`; otherwise the checkout fails with a clear
+partial-clone diagnostic (exit 128) when it hits a filtered-out blob. Requires the server to
+allow filtering (`uploadpack.allowFilter`). `libra+cloud://` rejects it.
+
+```bash
+libra clone --filter=blob:none --no-checkout git@github.com:user/repo.git
+libra clone --filter=tree:0 --bare git@github.com:user/repo.git
 ```
 
 ## Common Commands
@@ -272,9 +465,13 @@ are preserved and surfaced as warnings; the original `.gitignore` files remain u
 Shallow clones are essential for CI/CD pipelines and large monorepos where full history is
 unnecessary. Libra supports `--depth N` with the same semantics as Git: the history is
 truncated to the specified number of commits. The depth value is validated at parse time
-(must be a positive integer) and propagated to the fetch protocol layer. Unlike Git, Libra
-does not yet support `--shallow-since` or `--shallow-exclude` for date-based or ref-based
-shallow boundaries, keeping the initial implementation focused and predictable.
+(must be a positive integer) and propagated to the fetch protocol layer. Libra additionally
+supports date-based `--shallow-since` (`deepen-since`), ref-based `--shallow-exclude`
+(`deepen-not`), and `--reject-shallow` to refuse a shallow source. `--depth` may be combined
+with `--shallow-since`/`--shallow-exclude`; because `git-upload-pack` rejects sending a plain
+`deepen` alongside `deepen-since`/`deepen-not`, the time/ref request supersedes plain depth at
+the protocol layer. After a shallow clone, `libra fetch --unshallow` restores complete history
+and `libra fetch --deepen N` extends it further.
 
 ### `--sparse` is intentionally unsupported
 
@@ -302,6 +499,22 @@ repositories with many long-lived branches where only one branch is needed for t
 workflow (e.g., CI building a specific release branch). Git supports this as well; jj does
 not, because its operation-log model fetches all refs by design.
 
+### Metadata write and credential redaction
+
+Clone metadata is written atomically: the branch ref, `HEAD`, and the
+`branch.<branch>.merge` / `branch.<branch>.remote` / `remote.<name>.url` /
+`remote.<name>.fetch` config entries are all written inside one transaction, so a failure
+rolls every entry back (no half-configured repository). An empty remote writes only
+`remote.<name>.url` and `remote.<name>.fetch` (no synthetic branch tracking). The fetch
+refspec is `+refs/heads/*:refs/remotes/<name>/*` for an ordinary clone and `+refs/*:refs/*`
+for `--mirror` (which also records `remote.<name>.mirror = true`).
+
+Credentials embedded in a clone URL (an HTTP(S) token or password) are redacted from every
+output and persistence surface — the "Connecting to …" line, the stored `remote.<name>.url`,
+the reflog `clone: from <url>` entry, the JSON `remote_url`, and error messages. SSH-style
+`git@host` user prefixes are conventional and preserved. The raw URL is used only for the
+live transport.
+
 ## Parameter Comparison: Libra vs Git vs jj
 
 | Parameter / Flag | Git | jj | Libra |
@@ -310,23 +523,29 @@ not, because its operation-log model fetches all refs by design.
 | Destination directory | `git clone <url> <dir>` | `jj git clone <url> <dir>` | `libra clone <url> <dir>` |
 | Specific branch | `-b` / `--branch` | `-b` / `--branch` (jj 0.17+) | `-b` / `--branch` |
 | Single branch | `--single-branch` | N/A | `--single-branch` |
+| All branches after single-branch default | `--no-single-branch` | N/A | `--no-single-branch` |
 | Bare clone | `--bare` | N/A | `--bare` |
 | Shallow clone (depth) | `--depth <n>` | N/A | `--depth <n>` |
-| Shallow since date | `--shallow-since=<date>` | N/A | N/A |
-| Shallow exclude | `--shallow-exclude=<rev>` | N/A | N/A |
-| Mirror clone | `--mirror` | N/A | N/A |
-| Reference repository | `--reference <repo>` | N/A | N/A |
-| Dissociate from reference | `--dissociate` | N/A | N/A |
-| No hardlinks | `--no-hardlinks` | N/A | N/A |
+| Shallow since date | `--shallow-since=<date>` | N/A | `--shallow-since <date>` |
+| Shallow exclude | `--shallow-exclude=<rev>` | N/A | `--shallow-exclude <rev>` |
+| Reject shallow source | `--reject-shallow` | N/A | `--reject-shallow` |
+| Custom remote name | `-o` / `--origin <name>` | N/A | `-o` / `--origin <name>` |
+| Mirror clone | `--mirror` | N/A | Partial: bare + mirror config; exact `refs/*` mirroring is deferred |
+| Reference repository | `--reference <repo>` / `--reference-if-able <repo>` | N/A | Copy semantics, no alternates borrow |
+| Dissociate from reference | `--dissociate` | N/A | Confirms the copy-semantics clone is fully local |
+| Local clone optimization | `-l` / `--local` | N/A | Hardlinks local objects when possible |
+| Shared clone | `-s` / `--shared` | N/A | Copy semantics, no alternates borrow |
+| No hardlinks | `--no-hardlinks` | N/A | Copies local objects |
+| Jobs | `-j` / `--jobs <n>` | N/A | Reserved/no-op, validates 1..=16 |
 | Recurse submodules | `--recurse-submodules` | N/A | N/A (no submodules) |
 | Shallow submodules | `--shallow-submodules` | N/A | N/A |
 | Separate git dir | `--separate-git-dir=<dir>` | N/A | N/A (removed) |
 | Template directory | `--template=<dir>` | N/A | N/A (handled by init internally) |
 | Quiet mode | `-q` / `--quiet` | `--quiet` | `--quiet` (global flag) |
 | Verbose / progress | `--progress` / `--verbose` | N/A | Phased stderr progress (default) |
-| No checkout | `-n` / `--no-checkout` | N/A | N/A (bare implies no checkout) |
+| No checkout | `-n` / `--no-checkout` | N/A | `-n` / `--no-checkout` |
 | Sparse checkout | `--sparse` | N/A | N/A |
-| Filter (partial clone) | `--filter=<spec>` | N/A | N/A |
+| Filter (partial clone) | `--filter=<spec>` | N/A | Partial: promisor config, no lazy backfill |
 | Bundle URI | `--bundle-uri=<uri>` | N/A | N/A |
 | Vault signing bootstrap | N/A | N/A | Always enabled (matches init) |
 | SSH key detection | N/A | N/A | Automatic detection + hint |
@@ -378,7 +597,10 @@ If checkout fails, the clone reports failure -- it does not silently succeed wit
 ## Compatibility Notes
 
 - `--recurse-submodules` is not supported; Libra does not implement submodules
-- `--mirror` and `--reference` are not supported
+- `--mirror` is partial: it implies bare and writes mirror config, but exact `refs/*` mirroring is deferred
+- `--reference`, `--reference-if-able`, `--shared`, and `--dissociate` use copy semantics and never create a long-term `info/alternates` dependency
+- `--filter` records promisor config but does not lazily backfill missing objects; use it with `--no-checkout` or `--bare`
+- `--jobs` is accepted as a reserved no-op after validating `1..=16`; transport remains serial
 - Clone always bootstraps vault signing; use `libra config` to disable after cloning if needed
 - The `--depth` value must be a positive integer; zero or negative values are rejected at parse time
-- `--no-checkout` is not available as a separate flag; use `--bare` for repositories without a working tree
+- `--no-checkout` is available when metadata should be written without materializing the working tree

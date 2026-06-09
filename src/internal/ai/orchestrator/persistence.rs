@@ -61,6 +61,7 @@ use crate::{
                 CreatePatchSetParams, CreatePlanParams, CreatePlanStepEventParams,
                 CreateProvenanceParams, CreateRunParams, CreateRunUsageParams, CreateTaskParams,
                 CreateToolInvocationParams, IoFootprintParams, PlanStepParams, TouchedFileParams,
+                UpdateIntentParams,
             },
             server::LibraMcpServer,
         },
@@ -69,12 +70,14 @@ use crate::{
             DecisionPolicy, DecisionProposal, DecisionProposalRoute, DecisionProposalStore,
             ValidationOutcome, ValidationReportStore, ValidationStage, ValidationStageResult,
             ValidatorEngine, aggregate_risk_score, build_decision_proposal,
-            contracts::{EvidenceKind, FinalDecisionVerdict},
+            contracts::{EvidenceKind, FinalDecisionVerdict, TaskExecutionStatus},
+            phase3::{ArtifactLedger, TaskArtifactRefs},
         },
+        session::{SessionStore, jsonl::SessionJsonlStore},
         tools::ToolOutput,
         workflow_objects::{build_git_intent, build_git_plan, parse_object_id},
     },
-    utils::storage_ext::StorageExt,
+    utils::{storage_ext::StorageExt, util::try_get_storage_path},
 };
 
 const ZERO_COMMIT_SHA: &str = "0000000000000000000000000000000000000000";
@@ -244,7 +247,9 @@ struct RuntimeAuditState {
     latest_task_event_kind: HashMap<Uuid, TaskEventKind>,
     latest_plan_step_status: HashMap<Uuid, &'static str>,
     latest_run_event_kind: Option<RunEventKind>,
+    latest_task_run_event_kind: HashMap<Uuid, RunEventKind>,
     preview_plan_id: Option<String>,
+    preview_test_plan_id: Option<String>,
 }
 
 enum RuntimeAuditCommand {
@@ -340,6 +345,9 @@ impl ExecutionAuditSession {
             .as_ref()
             .map(|bundle| bundle.plan_id.clone())
             .or_else(|| persisted_plan_id.map(ToString::to_string));
+        let preview_test_plan_id = persisted_plan_bundle
+            .as_ref()
+            .map(|bundle| bundle.test_plan_id.clone());
         let preview_step_ids = persisted_plan_bundle
             .as_ref()
             .map(|bundle| bundle.step_ids.clone())
@@ -368,7 +376,9 @@ impl ExecutionAuditSession {
             latest_task_event_kind: HashMap::new(),
             latest_plan_step_status: HashMap::new(),
             latest_run_event_kind: Some(RunEventKind::Created),
+            latest_task_run_event_kind: HashMap::new(),
             preview_plan_id,
+            preview_test_plan_id,
         }));
         let (tx, rx) = mpsc::unbounded_channel();
         let observer: Arc<dyn super::types::OrchestratorObserver> =
@@ -413,37 +423,69 @@ impl ExecutionAuditSession {
                 .then(|| state.preview_plan_id.clone())
                 .flatten()
         };
+        let preview_test_plan_id = {
+            let state = self.state.lock().await;
+            (plan.revision == 1 && state.plan_ids.is_empty())
+                .then(|| state.preview_test_plan_id.clone())
+                .flatten()
+        };
         let (persisted_plan_set, can_reuse_preview_tasks) = if let Some(plan_id) = preview_plan_id {
-            match bind_existing_plan_revision(&self.mcp_server, &plan_id, plan).await {
-                Ok(execution_plan) => {
-                    let test_plan = create_plan_revision_for_role(
-                        &self.mcp_server,
-                        &intent_id,
-                        parent_test_plan_id.as_deref(),
-                        plan,
-                        PersistedPlanRole::Test,
-                    )
-                    .await?;
-                    (build_plan_set(plan, execution_plan, test_plan)?, true)
+            if let Some(test_plan_id) = preview_test_plan_id {
+                match bind_existing_plan_set(&self.mcp_server, &plan_id, &test_plan_id, plan).await
+                {
+                    Ok(plan_set) => (plan_set, true),
+                    Err(error) if is_missing_persisted_plan_error(&error) => {
+                        tracing::warn!(
+                            plan_id = %plan_id,
+                            test_plan_id = %test_plan_id,
+                            "preview plan set was not found during execution; creating a new plan revision"
+                        );
+                        (
+                            create_plan_set_revision(
+                                &self.mcp_server,
+                                &intent_id,
+                                parent_execution_plan_id.as_deref(),
+                                parent_test_plan_id.as_deref(),
+                                plan,
+                            )
+                            .await?,
+                            false,
+                        )
+                    }
+                    Err(error) => return Err(error),
                 }
-                Err(error) if is_missing_persisted_plan_error(&error) => {
-                    tracing::warn!(
-                        plan_id = %plan_id,
-                        "preview plan was not found during execution; creating a new plan revision"
-                    );
-                    (
-                        create_plan_set_revision(
+            } else {
+                match bind_existing_plan_revision(&self.mcp_server, &plan_id, plan).await {
+                    Ok(execution_plan) => {
+                        let test_plan = create_plan_revision_for_role(
                             &self.mcp_server,
                             &intent_id,
-                            parent_execution_plan_id.as_deref(),
                             parent_test_plan_id.as_deref(),
                             plan,
+                            PersistedPlanRole::Test,
                         )
-                        .await?,
-                        false,
-                    )
+                        .await?;
+                        (build_plan_set(plan, execution_plan, test_plan)?, true)
+                    }
+                    Err(error) if is_missing_persisted_plan_error(&error) => {
+                        tracing::warn!(
+                            plan_id = %plan_id,
+                            "preview plan was not found during execution; creating a new plan revision"
+                        );
+                        (
+                            create_plan_set_revision(
+                                &self.mcp_server,
+                                &intent_id,
+                                parent_execution_plan_id.as_deref(),
+                                parent_test_plan_id.as_deref(),
+                                plan,
+                            )
+                            .await?,
+                            false,
+                        )
+                    }
+                    Err(error) => return Err(error),
                 }
-                Err(error) => return Err(error),
             }
         } else {
             (
@@ -553,6 +595,272 @@ impl ExecutionAuditSession {
                 .or_insert("pending");
         }
         Ok(())
+    }
+
+    pub(crate) async fn record_attempt_start(
+        &self,
+        task: &super::types::TaskSpec,
+        model_name: &str,
+        summary: Option<String>,
+    ) -> Result<crate::internal::ai::runtime::phase2::AttemptWriteOutcome, OrchestratorError> {
+        let logical_task_id = task.id();
+        let (
+            persisted_task_id,
+            existing_run_id,
+            plan_id,
+            step_id,
+            base_commit_sha,
+            initial_snapshot_id,
+            latest_task_event_kind,
+            latest_plan_step_status,
+            latest_task_run_event_kind,
+        ) = {
+            let state = self.state.lock().await;
+            (
+                state
+                    .persisted_task_ids
+                    .get(&logical_task_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        OrchestratorError::PersistenceError(format!(
+                            "cannot start Phase 2 attempt for task {logical_task_id}: \
+                             no persisted task exists; call record_plan_compiled before \
+                             write_attempt_start_with_session"
+                        ))
+                    })?,
+                state.persisted_task_run_ids.get(&logical_task_id).cloned(),
+                state
+                    .persisted_plan_ids_by_task_id
+                    .get(&logical_task_id)
+                    .cloned()
+                    .or_else(|| state.latest_plan_id.clone()),
+                state
+                    .persisted_step_ids_by_task_id
+                    .get(&logical_task_id)
+                    .copied(),
+                state.base_commit_sha.clone(),
+                state.initial_snapshot_id.clone(),
+                state.latest_task_event_kind.get(&logical_task_id).cloned(),
+                state.latest_plan_step_status.get(&logical_task_id).copied(),
+                state
+                    .latest_task_run_event_kind
+                    .get(&logical_task_id)
+                    .cloned(),
+            )
+        };
+
+        if matches!(
+            latest_task_run_event_kind,
+            Some(RunEventKind::Completed | RunEventKind::Failed)
+        ) {
+            return Err(OrchestratorError::PersistenceError(format!(
+                "cannot start Phase 2 attempt for task {logical_task_id}: \
+                 its task run is already terminal"
+            )));
+        }
+
+        let start_kind = start_run_event_kind_for_task(task);
+        let run_id = if let Some(run_id) = existing_run_id {
+            run_id
+        } else {
+            let run_id = create_task_attempt_run(
+                &self.mcp_server,
+                task,
+                &persisted_task_id,
+                plan_id.as_deref(),
+                &base_commit_sha,
+                initial_snapshot_id.as_deref(),
+                model_name,
+                start_kind.clone(),
+                summary.clone(),
+            )
+            .await?;
+            let mut state = self.state.lock().await;
+            state
+                .persisted_task_run_ids
+                .insert(logical_task_id, run_id.clone());
+            state
+                .latest_task_run_event_kind
+                .insert(logical_task_id, start_kind.clone());
+            run_id
+        };
+
+        if latest_task_event_kind.as_ref() != Some(&TaskEventKind::Running) {
+            append_task_event(
+                &self.mcp_server,
+                &self.actor,
+                &persisted_task_id,
+                Some(run_id.as_str()),
+                TaskEventKind::Running,
+                summary.clone().or_else(|| Some("task started".to_string())),
+            )
+            .await?;
+            let mut state = self.state.lock().await;
+            state
+                .latest_task_event_kind
+                .insert(logical_task_id, TaskEventKind::Running);
+        }
+
+        if latest_plan_step_status != Some("progressing")
+            && let (Some(plan_id), Some(step_id)) = (plan_id.as_deref(), step_id)
+        {
+            create_plan_step_event(
+                &self.mcp_server,
+                plan_id,
+                &step_id.to_string(),
+                &run_id,
+                "progressing",
+                &persisted_task_id,
+                summary.clone().or_else(|| Some("task started".to_string())),
+            )
+            .await?;
+            let mut state = self.state.lock().await;
+            state
+                .latest_plan_step_status
+                .insert(logical_task_id, "progressing");
+        }
+
+        let run_uuid = parse_object_id(&run_id).map_err(|e| {
+            OrchestratorError::PersistenceError(format!("invalid persisted attempt run id: {e}"))
+        })?;
+        Ok(crate::internal::ai::runtime::phase2::write_attempt_start(
+            crate::internal::ai::runtime::phase2::AttemptStartParams {
+                task_id: logical_task_id,
+                run_id: run_uuid,
+                summary,
+            },
+        ))
+    }
+
+    pub(crate) async fn record_attempt_finish(
+        &self,
+        task: &super::types::TaskSpec,
+        status: crate::internal::ai::runtime::contracts::TaskExecutionStatus,
+        summary: Option<String>,
+    ) -> Result<crate::internal::ai::runtime::phase2::AttemptWriteOutcome, OrchestratorError> {
+        let logical_task_id = task.id();
+        let (
+            persisted_task_id,
+            run_id,
+            plan_id,
+            step_id,
+            latest_task_event_kind,
+            latest_plan_step_status,
+            latest_task_run_event_kind,
+        ) = {
+            let state = self.state.lock().await;
+            (
+                state
+                    .persisted_task_ids
+                    .get(&logical_task_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        OrchestratorError::PersistenceError(format!(
+                            "cannot finish Phase 2 attempt for task {logical_task_id}: \
+                             no persisted task exists; call record_plan_compiled before \
+                             write_attempt_finish_with_session"
+                        ))
+                    })?,
+                state
+                    .persisted_task_run_ids
+                    .get(&logical_task_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        OrchestratorError::PersistenceError(format!(
+                            "cannot finish Phase 2 attempt for task {logical_task_id}: \
+                             no task run was started; call \
+                             write_attempt_start_with_session first"
+                        ))
+                    })?,
+                state
+                    .persisted_plan_ids_by_task_id
+                    .get(&logical_task_id)
+                    .cloned()
+                    .or_else(|| state.latest_plan_id.clone()),
+                state
+                    .persisted_step_ids_by_task_id
+                    .get(&logical_task_id)
+                    .copied(),
+                state.latest_task_event_kind.get(&logical_task_id).cloned(),
+                state.latest_plan_step_status.get(&logical_task_id).copied(),
+                state
+                    .latest_task_run_event_kind
+                    .get(&logical_task_id)
+                    .cloned(),
+            )
+        };
+        let task_event_kind = task_event_kind_for_attempt_status(&status);
+        let plan_status = plan_step_status_for_attempt_status(&status);
+        let run_event_kind = run_event_kind_for_attempt_status(&status);
+
+        if latest_task_event_kind.as_ref() != Some(&task_event_kind) {
+            append_task_event(
+                &self.mcp_server,
+                &self.actor,
+                &persisted_task_id,
+                Some(run_id.as_str()),
+                task_event_kind.clone(),
+                summary.clone(),
+            )
+            .await?;
+            let mut state = self.state.lock().await;
+            state
+                .latest_task_event_kind
+                .insert(logical_task_id, task_event_kind);
+        }
+
+        if latest_plan_step_status != Some(plan_status)
+            && let (Some(plan_id), Some(step_id)) = (plan_id.as_deref(), step_id)
+        {
+            create_plan_step_event(
+                &self.mcp_server,
+                plan_id,
+                &step_id.to_string(),
+                &run_id,
+                plan_status,
+                &persisted_task_id,
+                summary.clone(),
+            )
+            .await?;
+            let mut state = self.state.lock().await;
+            state
+                .latest_plan_step_status
+                .insert(logical_task_id, plan_status);
+        }
+
+        if latest_task_run_event_kind.as_ref() != Some(&run_event_kind) {
+            append_run_event(
+                &self.mcp_server,
+                &self.actor,
+                RunEventRequest {
+                    run_id: &run_id,
+                    kind: run_event_kind.clone(),
+                    reason: summary.clone(),
+                    error: (run_event_kind == RunEventKind::Failed).then(|| {
+                        summary
+                            .clone()
+                            .unwrap_or_else(|| "task execution failed".to_string())
+                    }),
+                    metrics: None,
+                    patchset_id: None,
+                },
+            )
+            .await?;
+            let mut state = self.state.lock().await;
+            state
+                .latest_task_run_event_kind
+                .insert(logical_task_id, run_event_kind);
+        }
+
+        let run_uuid = parse_object_id(&run_id).map_err(|e| {
+            OrchestratorError::PersistenceError(format!("invalid persisted attempt run id: {e}"))
+        })?;
+        Ok(crate::internal::ai::runtime::phase2::write_attempt_finish(
+            logical_task_id,
+            run_uuid,
+            status,
+            summary,
+        ))
     }
 
     pub async fn finalize(
@@ -800,11 +1108,19 @@ impl ExecutionAuditSession {
             })
             .await?,
         );
+        record_terminal_intent_event(&self.mcp_server, &thread_id, request.decision).await?;
+        let artifact_ledger = build_artifact_ledger(&thread_id, &persisted_tasks)?;
+        let release_candidate_patchset_id = parse_optional_persisted_object_id(
+            "release candidate patchset",
+            chosen_patchset_id.as_deref(),
+        )?;
         let derived_records = Some(
             persist_validation_decision_derivatives(
                 &self.mcp_server,
                 &thread_id,
                 &run_id,
+                &artifact_ledger,
+                release_candidate_patchset_id,
                 request.system_report,
                 request.decision,
             )
@@ -1268,20 +1584,23 @@ pub async fn persist_plan_review_bundle(
     intent_id: &str,
     plan: &ExecutionPlanSpec,
 ) -> Result<PersistedPlanReviewBundle, OrchestratorError> {
-    let persisted_plan = create_plan_revision(mcp_server, intent_id, None, plan).await?;
+    let persisted_plan_set =
+        create_plan_set_revision(mcp_server, intent_id, None, None, plan).await?;
     let task_ids = create_compiled_tasks_initial(
         mcp_server,
         intent_id,
         None,
         plan,
-        &persisted_plan.step_id_map,
+        &persisted_plan_set.step_id_map,
     )
     .await?;
 
     Ok(PersistedPlanReviewBundle {
-        plan_id: persisted_plan.plan_id,
-        step_ids: persisted_plan.step_id_map,
+        plan_id: persisted_plan_set.execution.plan_id,
+        test_plan_id: persisted_plan_set.test.plan_id,
+        step_ids: persisted_plan_set.step_id_map,
         task_ids,
+        plan_id_by_task_id: persisted_plan_set.plan_id_by_task_id,
     })
 }
 
@@ -1351,6 +1670,70 @@ async fn bind_existing_plan_revision(
     let step_id_map = plan
         .tasks
         .iter()
+        .zip(persisted_plan.steps().iter())
+        .map(|(task, step)| (task.step_id(), step.step_id()))
+        .collect();
+    Ok(PersistedPlanRevision {
+        plan_id: plan_id.to_string(),
+        step_id_map,
+    })
+}
+
+async fn bind_existing_plan_set(
+    mcp_server: &Arc<LibraMcpServer>,
+    execution_plan_id: &str,
+    test_plan_id: &str,
+    plan: &ExecutionPlanSpec,
+) -> Result<PersistedPlanSet, OrchestratorError> {
+    let execution = bind_existing_plan_revision_for_role(
+        mcp_server,
+        execution_plan_id,
+        plan,
+        PersistedPlanRole::Execution,
+    )
+    .await?;
+    let test = bind_existing_plan_revision_for_role(
+        mcp_server,
+        test_plan_id,
+        plan,
+        PersistedPlanRole::Test,
+    )
+    .await?;
+    build_plan_set(plan, execution, test)
+}
+
+async fn bind_existing_plan_revision_for_role(
+    mcp_server: &Arc<LibraMcpServer>,
+    plan_id: &str,
+    plan: &ExecutionPlanSpec,
+    role: PersistedPlanRole,
+) -> Result<PersistedPlanRevision, OrchestratorError> {
+    let persisted_plan = load_persisted_plan(mcp_server, plan_id).await?;
+    let role_tasks = plan
+        .tasks
+        .iter()
+        .filter(|task| plan_role_for_task(task) == role)
+        .collect::<Vec<_>>();
+    let expected_step_count = role_tasks.len().max(1);
+    if persisted_plan.steps().len() != expected_step_count {
+        return Err(OrchestratorError::PersistenceError(format!(
+            "persisted preview {} plan step count mismatch: expected {}, got {}",
+            role.label(),
+            expected_step_count,
+            persisted_plan.steps().len()
+        )));
+    }
+    for (task, step) in role_tasks.iter().zip(persisted_plan.steps().iter()) {
+        if step.description() != task.title() {
+            return Err(OrchestratorError::PersistenceError(format!(
+                "persisted preview {} plan does not match compiled execution plan at step '{}'",
+                role.label(),
+                task.title()
+            )));
+        }
+    }
+    let step_id_map = role_tasks
+        .into_iter()
         .zip(persisted_plan.steps().iter())
         .map(|(task, step)| (task.step_id(), step.step_id()))
         .collect();
@@ -2566,11 +2949,19 @@ pub async fn persist_execution(
         })
         .await?,
     );
+    record_terminal_intent_event(request.mcp_server, &intent_id, request.decision).await?;
+    let artifact_ledger = build_artifact_ledger(&intent_id, &persisted_tasks)?;
+    let release_candidate_patchset_id = parse_optional_persisted_object_id(
+        "release candidate patchset",
+        chosen_patchset_id.as_deref(),
+    )?;
     let derived_records = Some(
         persist_validation_decision_derivatives(
             request.mcp_server,
             &intent_id,
             &run_id,
+            &artifact_ledger,
+            release_candidate_patchset_id,
             request.system_report,
             request.decision,
         )
@@ -2764,6 +3155,115 @@ async fn create_task_run(
         .await
         .map_err(|e| OrchestratorError::ConfigError(format!("MCP create_run failed: {e:?}")))?;
     parse_created_id("run", &result)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_task_attempt_run(
+    mcp_server: &Arc<LibraMcpServer>,
+    task: &super::types::TaskSpec,
+    persisted_task_id: &str,
+    plan_id: Option<&str>,
+    base_commit_sha: &str,
+    context_snapshot_id: Option<&str>,
+    model_name: &str,
+    start_kind: RunEventKind,
+    summary: Option<String>,
+) -> Result<String, OrchestratorError> {
+    let status = run_event_status_label(&start_kind);
+    let metrics_json = json!({
+        "taskId": task.id(),
+        "taskTitle": task.title(),
+        "taskKind": format!("{:?}", task.kind).to_lowercase(),
+        "model": model_name,
+        "phase": "runtime_phase2_attempt_start",
+    })
+    .to_string();
+    let params = CreateRunParams {
+        task_id: persisted_task_id.to_string(),
+        base_commit_sha: base_commit_sha.to_string(),
+        plan_id: plan_id.map(ToString::to_string),
+        status: Some(status.to_string()),
+        context_snapshot_id: context_snapshot_id.map(ToString::to_string),
+        error: None,
+        agent_instances: Some(vec![AgentInstanceParams {
+            role: if task.kind == TaskKind::Gate {
+                "verifier".to_string()
+            } else {
+                "executor".to_string()
+            },
+            provider_route: Some(model_name.to_string()),
+        }]),
+        metrics_json: Some(metrics_json),
+        reason: summary.or_else(|| Some(format!("{} started", task.title()))),
+        orchestrator_version: Some("libra-runtime-phase2".to_string()),
+        tags: None,
+        external_ids: None,
+        actor_kind: Some("agent".to_string()),
+        actor_id: Some(if task.kind == TaskKind::Gate {
+            "libra-verifier".to_string()
+        } else {
+            "libra-coder".to_string()
+        }),
+    };
+    let actor = resolve_actor(
+        mcp_server,
+        params.actor_kind.as_deref(),
+        params.actor_id.as_deref(),
+    )?;
+    let result = mcp_server
+        .create_run_impl(params, actor)
+        .await
+        .map_err(|e| OrchestratorError::ConfigError(format!("MCP create_run failed: {e:?}")))?;
+    parse_created_id("run", &result)
+}
+
+fn start_run_event_kind_for_task(task: &super::types::TaskSpec) -> RunEventKind {
+    if task.kind == TaskKind::Gate {
+        RunEventKind::Validating
+    } else {
+        RunEventKind::Patching
+    }
+}
+
+fn task_event_kind_for_attempt_status(status: &TaskExecutionStatus) -> TaskEventKind {
+    match status {
+        TaskExecutionStatus::Completed => TaskEventKind::Done,
+        TaskExecutionStatus::Cancelled => TaskEventKind::Cancelled,
+        TaskExecutionStatus::Failed
+        | TaskExecutionStatus::TimedOut
+        | TaskExecutionStatus::Interrupted => TaskEventKind::Failed,
+    }
+}
+
+fn plan_step_status_for_attempt_status(status: &TaskExecutionStatus) -> &'static str {
+    match status {
+        TaskExecutionStatus::Completed => "completed",
+        TaskExecutionStatus::Cancelled => "skipped",
+        TaskExecutionStatus::Failed
+        | TaskExecutionStatus::TimedOut
+        | TaskExecutionStatus::Interrupted => "failed",
+    }
+}
+
+fn run_event_kind_for_attempt_status(status: &TaskExecutionStatus) -> RunEventKind {
+    match status {
+        TaskExecutionStatus::Completed => RunEventKind::Completed,
+        TaskExecutionStatus::Failed
+        | TaskExecutionStatus::Cancelled
+        | TaskExecutionStatus::TimedOut
+        | TaskExecutionStatus::Interrupted => RunEventKind::Failed,
+    }
+}
+
+fn run_event_status_label(kind: &RunEventKind) -> &'static str {
+    match kind {
+        RunEventKind::Created => "created",
+        RunEventKind::Patching => "patching",
+        RunEventKind::Validating => "validating",
+        RunEventKind::Completed => "completed",
+        RunEventKind::Failed => "failed",
+        RunEventKind::Checkpointed => "checkpointed",
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2988,6 +3488,7 @@ async fn create_compiled_task(
     parse_created_id("task", &result)
 }
 
+#[cfg(test)]
 async fn create_plan_revision(
     mcp_server: &Arc<LibraMcpServer>,
     intent_id: &str,
@@ -3631,10 +4132,73 @@ async fn create_decision(request: FinalDecisionRequest<'_>) -> Result<String, Or
     parse_created_id("decision", &result)
 }
 
+async fn record_terminal_intent_event(
+    mcp_server: &Arc<LibraMcpServer>,
+    intent_id: &str,
+    decision: &DecisionOutcome,
+) -> Result<(), OrchestratorError> {
+    let (status, reason) = match decision {
+        DecisionOutcome::Commit => ("completed", "orchestrator committed execution result"),
+        DecisionOutcome::HumanReviewRequired => {
+            ("completed", "orchestrator checkpointed for human review")
+        }
+        DecisionOutcome::Abandon => ("cancelled", "orchestrator abandoned execution result"),
+    };
+    mcp_server
+        .update_intent_impl(UpdateIntentParams {
+            intent_id: intent_id.to_string(),
+            status: Some(status.to_string()),
+            commit_sha: None,
+            reason: Some(reason.to_string()),
+            next_intent_id: None,
+        })
+        .await
+        .map_err(|error| {
+            OrchestratorError::ConfigError(format!("MCP update_intent failed: {error:?}"))
+        })?;
+    Ok(())
+}
+
+fn build_artifact_ledger(
+    thread_id: &str,
+    tasks: &[PersistedTaskArtifacts],
+) -> Result<ArtifactLedger, OrchestratorError> {
+    let thread_id = parse_persisted_object_id("artifact ledger thread", thread_id)?;
+    let mut ledger = ArtifactLedger::new(thread_id);
+    for task in tasks {
+        let mut refs = TaskArtifactRefs::new(task.task_id);
+        if let Some(patchset_id) = task.patchset_id.as_deref() {
+            refs.patchset_ids.push(parse_persisted_object_id(
+                "artifact ledger patchset",
+                patchset_id,
+            )?);
+        }
+        ledger.push_task(refs);
+    }
+    Ok(ledger)
+}
+
+fn parse_optional_persisted_object_id(
+    label: &str,
+    value: Option<&str>,
+) -> Result<Option<Uuid>, OrchestratorError> {
+    value
+        .map(|value| parse_persisted_object_id(label, value))
+        .transpose()
+}
+
+fn parse_persisted_object_id(label: &str, value: &str) -> Result<Uuid, OrchestratorError> {
+    parse_object_id(value).map_err(|error| {
+        OrchestratorError::ConfigError(format!("invalid {label} id '{value}': {error:#}"))
+    })
+}
+
 async fn persist_validation_decision_derivatives(
     mcp_server: &Arc<LibraMcpServer>,
     thread_id: &str,
     run_id: &str,
+    artifact_ledger: &ArtifactLedger,
+    release_candidate_patchset_id: Option<Uuid>,
     system_report: &SystemReport,
     decision: &DecisionOutcome,
 ) -> Result<PersistedDerivedRecords, OrchestratorError> {
@@ -3658,7 +4222,12 @@ async fn persist_validation_decision_derivatives(
     let report = validator.build_report(
         thread_id,
         Some(run_id),
-        validation_stages_from_system_report(system_report),
+        validation_stages_from_system_report_with_artifacts(
+            system_report,
+            artifact_ledger,
+            release_candidate_patchset_id,
+            decision,
+        ),
     );
     let policy = DecisionPolicy::default();
     let risk = aggregate_risk_score(&report, &policy);
@@ -3666,24 +4235,36 @@ async fn persist_validation_decision_derivatives(
     align_decision_proposal_with_outcome(&mut proposal, decision);
 
     let db = history.database_connection();
-    ValidationReportStore::new(db.clone())
-        .write_latest(&report)
-        .await
-        .map_err(|error| {
-            OrchestratorError::ConfigError(format!(
-                "failed to persist validation report {} for thread {}: {error}",
-                report.report_id, report.thread_id
-            ))
-        })?;
-    DecisionProposalStore::new(db)
-        .write_latest(&risk, &proposal)
-        .await
-        .map_err(|error| {
-            OrchestratorError::ConfigError(format!(
-                "failed to persist decision proposal {} for thread {}: {error}",
-                proposal.proposal_id, proposal.thread_id
-            ))
-        })?;
+    let session_mirror = session_jsonl_store_for_thread(mcp_server, thread_id);
+    let validation_store = ValidationReportStore::new(db.clone());
+    if let Some(session_mirror) = session_mirror.as_ref() {
+        validation_store
+            .write_latest_with_session_mirror(&report, session_mirror)
+            .await
+    } else {
+        validation_store.write_latest(&report).await
+    }
+    .map_err(|error| {
+        OrchestratorError::ConfigError(format!(
+            "failed to persist validation report {} for thread {}: {error}",
+            report.report_id, report.thread_id
+        ))
+    })?;
+
+    let decision_store = DecisionProposalStore::new(db);
+    if let Some(session_mirror) = session_mirror.as_ref() {
+        decision_store
+            .write_latest_with_session_mirror(&risk, &proposal, session_mirror)
+            .await
+    } else {
+        decision_store.write_latest(&risk, &proposal).await
+    }
+    .map_err(|error| {
+        OrchestratorError::ConfigError(format!(
+            "failed to persist decision proposal {} for thread {}: {error}",
+            proposal.proposal_id, proposal.thread_id
+        ))
+    })?;
 
     Ok(PersistedDerivedRecords {
         validation_report_id: report.report_id,
@@ -3715,6 +4296,40 @@ fn align_decision_proposal_with_outcome(
                 &mut proposal.summary.rationale,
                 "orchestrator decision abandoned execution",
             );
+        }
+    }
+}
+
+fn session_jsonl_store_for_thread(
+    mcp_server: &Arc<LibraMcpServer>,
+    thread_id: Uuid,
+) -> Option<SessionJsonlStore> {
+    let working_dir = mcp_server.working_dir.as_ref()?;
+    let storage_root = try_get_storage_path(Some(working_dir.clone()))
+        .unwrap_or_else(|_| working_dir.join(".libra"));
+    let session_store = SessionStore::from_storage_path(&storage_root);
+    let working_dir_str = working_dir.to_string_lossy().to_string();
+
+    match session_store.load_for_thread_id(&thread_id.to_string(), &working_dir_str) {
+        Ok(Some(session)) => Some(SessionJsonlStore::new(
+            session_store.session_root(&session.id),
+        )),
+        Ok(None) => {
+            tracing::debug!(
+                %thread_id,
+                working_dir = %working_dir.display(),
+                "skipping Phase 3/4 session artifact mirror because no matching Code session was found"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                %thread_id,
+                working_dir = %working_dir.display(),
+                error = %error,
+                "skipping Phase 3/4 session artifact mirror because the Code session could not be loaded"
+            );
+            None
         }
     }
 }
@@ -3763,10 +4378,30 @@ async fn rebuild_thread_projection(
     Ok(())
 }
 
+#[cfg(test)]
 fn validation_stages_from_system_report(
     system_report: &SystemReport,
 ) -> Vec<ValidationStageResult> {
-    let release_blockers = release_stage_blockers(system_report);
+    validation_stages_from_system_report_with_artifacts(
+        system_report,
+        &ArtifactLedger::new(Uuid::nil()),
+        None,
+        &DecisionOutcome::HumanReviewRequired,
+    )
+}
+
+fn validation_stages_from_system_report_with_artifacts(
+    system_report: &SystemReport,
+    artifact_ledger: &ArtifactLedger,
+    release_candidate_patchset_id: Option<Uuid>,
+    decision: &DecisionOutcome,
+) -> Vec<ValidationStageResult> {
+    let mut release_blockers = release_stage_blockers(system_report);
+    release_blockers.extend(release_candidate_blockers(
+        artifact_ledger,
+        release_candidate_patchset_id,
+        decision,
+    ));
     let release_passed = system_report.release.all_required_passed
         && system_report.review_passed
         && system_report.artifacts_complete
@@ -3791,6 +4426,24 @@ fn validation_stages_from_system_report(
             release_blockers,
         ),
     ]
+}
+
+fn release_candidate_blockers(
+    artifact_ledger: &ArtifactLedger,
+    release_candidate_patchset_id: Option<Uuid>,
+    decision: &DecisionOutcome,
+) -> Vec<String> {
+    if *decision != DecisionOutcome::Commit {
+        return Vec::new();
+    }
+
+    match release_candidate_patchset_id {
+        Some(patchset_id) if artifact_ledger.has_patchset(patchset_id) => Vec::new(),
+        Some(patchset_id) => vec![format!(
+            "release candidate patchset {patchset_id} is not present in the artifact ledger"
+        )],
+        None => vec!["release candidate patchset is missing for commit decision".to_string()],
+    }
 }
 
 fn validation_stage_from_gate_report(
@@ -4070,9 +4723,19 @@ fn parse_created_id(kind: &str, result: &CallToolResult) -> Result<String, Orche
         if let Some(text) = content.as_text().map(|value| value.text.as_str())
             && let Some(id) = text.split("ID:").nth(1)
         {
-            let id = id.trim();
+            let id = id
+                .trim()
+                .split(|c: char| c.is_ascii_whitespace() || c == '|')
+                .next()
+                .unwrap_or("");
             if !id.is_empty() {
-                return Ok(id.to_string());
+                return parse_object_id(id)
+                    .map(|id| id.to_string())
+                    .map_err(|error| {
+                        OrchestratorError::ConfigError(format!(
+                            "failed to parse {kind} id from MCP response: {error}"
+                        ))
+                    });
             }
         }
     }
@@ -4350,6 +5013,7 @@ mod tests {
     use std::{collections::BTreeMap, path::Path, sync::Arc};
 
     use git_internal::internal::object::{
+        intent_event::{IntentEvent, IntentEventKind},
         plan::Plan as GitPlan,
         plan_step_event::{PlanStepEvent, PlanStepStatus},
         task::Task as GitTask,
@@ -4372,6 +5036,7 @@ mod tests {
                         TaskSpec, ToolDiffRecord,
                     },
                 },
+                session::SessionState,
             },
             db,
             model::{
@@ -4581,6 +5246,75 @@ mod tests {
     }
 
     #[test]
+    fn commit_validation_requires_release_candidate_patchset_in_artifact_ledger() {
+        let system_report = SystemReport {
+            integration: GateReport::empty(),
+            security: GateReport::empty(),
+            release: GateReport::empty(),
+            review_passed: true,
+            review_findings: vec![],
+            artifacts_complete: true,
+            missing_artifacts: vec![],
+            overall_passed: true,
+        };
+        let thread_id = Uuid::new_v4();
+        let missing_patchset_id = Uuid::new_v4();
+        let empty_ledger = ArtifactLedger::new(thread_id);
+
+        let stages = validation_stages_from_system_report_with_artifacts(
+            &system_report,
+            &empty_ledger,
+            Some(missing_patchset_id),
+            &DecisionOutcome::Commit,
+        );
+        let release = stages
+            .iter()
+            .find(|stage| stage.stage == ValidationStage::Release)
+            .expect("release stage");
+
+        assert_eq!(release.outcome, ValidationOutcome::BlockingFailed);
+        assert!(
+            release
+                .summary
+                .as_deref()
+                .is_some_and(|summary| summary.contains("is not present in the artifact ledger"))
+        );
+    }
+
+    #[test]
+    fn commit_validation_accepts_release_candidate_patchset_from_artifact_ledger() {
+        let system_report = SystemReport {
+            integration: GateReport::empty(),
+            security: GateReport::empty(),
+            release: GateReport::empty(),
+            review_passed: true,
+            review_findings: vec![],
+            artifacts_complete: true,
+            missing_artifacts: vec![],
+            overall_passed: true,
+        };
+        let thread_id = Uuid::new_v4();
+        let patchset_id = Uuid::new_v4();
+        let mut ledger = ArtifactLedger::new(thread_id);
+        let mut task_refs = TaskArtifactRefs::new(Uuid::new_v4());
+        task_refs.patchset_ids.push(patchset_id);
+        ledger.push_task(task_refs);
+
+        let stages = validation_stages_from_system_report_with_artifacts(
+            &system_report,
+            &ledger,
+            Some(patchset_id),
+            &DecisionOutcome::Commit,
+        );
+        let release = stages
+            .iter()
+            .find(|stage| stage.stage == ValidationStage::Release)
+            .expect("release stage");
+
+        assert_eq!(release.outcome, ValidationOutcome::Passed);
+    }
+
+    #[test]
     fn abandon_decision_overrides_auto_accept_decision_proposal() {
         let thread_id = Uuid::new_v4();
         let run_id = Uuid::new_v4();
@@ -4613,6 +5347,34 @@ mod tests {
                 .rationale
                 .iter()
                 .any(|reason| reason.contains("abandoned execution"))
+        );
+    }
+
+    #[test]
+    fn session_jsonl_store_for_thread_loads_matching_code_session() {
+        let temp_dir = tempdir().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
+        let storage_root = working_dir.join(".libra");
+        let session_store = SessionStore::from_storage_path(&storage_root);
+        let thread_id = Uuid::new_v4();
+        let mut session = SessionState::new(&working_dir.to_string_lossy());
+        session.id = "session-jsonl-mirror-test".to_string();
+        session
+            .metadata
+            .insert("thread_id".to_string(), json!(thread_id.to_string()));
+        session_store.save(&session).unwrap();
+
+        let server = Arc::new(LibraMcpServer::new_with_working_dir(
+            None,
+            None,
+            working_dir,
+        ));
+
+        let mirror = session_jsonl_store_for_thread(&server, thread_id)
+            .expect("matching session mirror store");
+        assert_eq!(
+            mirror.events_path(),
+            session_store.session_root(&session.id).join("events.jsonl")
         );
     }
 
@@ -4795,6 +5557,18 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        let latest_report = ValidationReportStore::new(db.clone())
+            .load_latest(parse_object_id(persisted.thread_id.as_deref().unwrap()).unwrap())
+            .await
+            .unwrap()
+            .expect("latest validation report");
+        let release_stage = latest_report
+            .summary
+            .stages
+            .iter()
+            .find(|stage| stage.stage == ValidationStage::Release)
+            .expect("release validation stage");
+        assert_eq!(release_stage.outcome, ValidationOutcome::Passed);
         assert!(
             ai_risk_score_breakdown::Entity::find_by_id(
                 derived.risk_score_breakdown_id.to_string()
@@ -4826,6 +5600,18 @@ mod tests {
         assert_eq!(history.list_objects("snapshot").await.unwrap().len(), 2);
 
         let storage = server.storage.as_ref().unwrap();
+        let intent_id =
+            parse_object_id(persisted.thread_id.as_deref().expect("persisted thread id")).unwrap();
+        let mut saw_terminal_intent_event = false;
+        for (_, hash) in history.list_objects("intent_event").await.unwrap() {
+            let event = storage.get_json::<IntentEvent>(&hash).await.unwrap();
+            if event.intent_id() == intent_id && event.kind() == &IntentEventKind::Completed {
+                saw_terminal_intent_event = true;
+                break;
+            }
+        }
+        assert!(saw_terminal_intent_event);
+
         let mut persisted_step_ids = std::collections::BTreeSet::new();
         for plan_id in &persisted.plan_ids {
             let plan_hash = history
@@ -5013,11 +5799,61 @@ mod tests {
             .await
             .unwrap();
         assert!(!persisted.run_id.is_empty());
+        assert!(persisted.provenance_id.is_some());
         assert!(persisted.run_usage_id.is_some());
+        assert!(persisted.decision_id.is_some());
         assert!(persisted.derived_records.is_some());
+        assert_eq!(persisted.tasks.len(), 1);
+        let task_artifacts = &persisted.tasks[0];
+        assert_eq!(task_artifacts.task_id, impl_task_id);
+        assert!(task_artifacts.persisted_task_id.is_some());
+        assert_eq!(task_artifacts.tool_invocation_ids.len(), 1);
+        assert!(task_artifacts.patchset_id.is_some());
 
         let history = server.intent_history_manager.as_ref().unwrap();
+        let storage = server.storage.as_ref().unwrap();
+        for (object_type, object_id) in [
+            ("run", persisted.run_id.as_str()),
+            ("provenance", persisted.provenance_id.as_deref().unwrap()),
+            ("run_usage", persisted.run_usage_id.as_deref().unwrap()),
+            ("decision", persisted.decision_id.as_deref().unwrap()),
+            ("patchset", task_artifacts.patchset_id.as_deref().unwrap()),
+            ("invocation", task_artifacts.tool_invocation_ids[0].as_str()),
+        ] {
+            assert!(
+                history
+                    .get_object_hash(
+                        object_type,
+                        &parse_object_id(object_id).unwrap().to_string()
+                    )
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "expected persisted {object_type} id {object_id} to resolve in history",
+            );
+        }
         let db = history.database_connection();
+        let intent_id =
+            parse_object_id(persisted.thread_id.as_deref().expect("persisted thread id")).unwrap();
+        let derived = persisted
+            .derived_records
+            .as_ref()
+            .expect("validation decision derived records");
+        let latest_proposal = DecisionProposalStore::new(db.clone())
+            .load_latest_proposal(intent_id)
+            .await
+            .unwrap()
+            .expect("latest decision proposal");
+        assert_eq!(latest_proposal.proposal_id, derived.decision_proposal_id);
+        assert_eq!(
+            latest_proposal.summary.route,
+            DecisionProposalRoute::AutoAccept
+        );
+        assert_eq!(
+            latest_proposal.summary.proposed_verdict,
+            FinalDecisionVerdict::Accepted
+        );
+        assert!(!latest_proposal.summary.requires_human_review);
         assert!(
             !ai_scheduler_selected_plan::Entity::find()
                 .all(&db)
@@ -5093,6 +5929,15 @@ mod tests {
             1
         );
         assert_eq!(history.list_objects("run_usage").await.unwrap().len(), 1);
+        let mut saw_terminal_intent_event = false;
+        for (_, hash) in history.list_objects("intent_event").await.unwrap() {
+            let event = storage.get_json::<IntentEvent>(&hash).await.unwrap();
+            if event.intent_id() == intent_id && event.kind() == &IntentEventKind::Completed {
+                saw_terminal_intent_event = true;
+                break;
+            }
+        }
+        assert!(saw_terminal_intent_event);
         assert!(
             !history
                 .list_objects("context_frame")
@@ -5101,7 +5946,6 @@ mod tests {
                 .is_empty()
         );
         let context_frames = history.list_objects("context_frame").await.unwrap();
-        let storage = server.storage.as_ref().unwrap();
         let persisted_plan = load_persisted_plan(&server, &persisted.plan_ids[0])
             .await
             .unwrap();
@@ -5167,6 +6011,158 @@ mod tests {
         assert!(saw_sandbox_evidence);
         assert!(history.list_objects("run_event").await.unwrap().len() >= 2);
         assert!(history.list_objects("task_event").await.unwrap().len() >= 4);
+    }
+
+    #[tokio::test]
+    async fn phase2_session_bridge_persists_attempt_lifecycle_events() {
+        use crate::internal::ai::runtime::{
+            contracts::TaskExecutionStatus,
+            phase2::{write_attempt_finish_with_session, write_attempt_start_with_session},
+        };
+
+        let server = setup_server().await;
+        let spec = test_spec(vec![]);
+        let impl_task = {
+            let actor = ActorRef::agent("test-phase2-bridge").unwrap();
+            GitTask::new(actor, "Bridge runtime attempt", None).unwrap()
+        };
+        let logical_task_id = impl_task.header().object_id();
+        let plan_spec = ExecutionPlanSpec {
+            intent_spec_id: "intent-1".to_string(),
+            revision: 1,
+            parent_revision: None,
+            replan_reason: None,
+            tasks: vec![TaskSpec {
+                step: git_internal::internal::object::plan::PlanStep::new("Bridge runtime attempt"),
+                task: impl_task,
+                objective: "Persist a stateful attempt lifecycle".to_string(),
+                kind: TaskKind::Implementation,
+                gate_stage: None,
+                owner_role: Some("coder".to_string()),
+                scope_in: vec!["src/".to_string()],
+                scope_out: vec![],
+                checks: vec![],
+                contract: TaskContract::default(),
+            }],
+            max_parallel: 1,
+            checkpoints: vec![],
+        };
+        let task = &plan_spec.tasks[0];
+        let session =
+            ExecutionAuditSession::start(server.clone(), &spec, Path::new("."), None, None, None)
+                .await
+                .unwrap();
+        session.record_plan_compiled(&plan_spec).await.unwrap();
+
+        let start = write_attempt_start_with_session(
+            &session,
+            task,
+            "test-model",
+            Some("first attempt".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(start.task_id, logical_task_id);
+        assert_eq!(start.status, TaskExecutionStatus::Interrupted);
+        assert!(start.is_failure());
+        assert!(!start.is_terminal());
+
+        let finish = write_attempt_finish_with_session(
+            &session,
+            task,
+            TaskExecutionStatus::Completed,
+            Some("attempt completed".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(finish.task_id, logical_task_id);
+        assert_eq!(finish.run_id, start.run_id);
+        assert_eq!(finish.status, TaskExecutionStatus::Completed);
+        assert!(!finish.is_failure());
+        assert!(finish.is_terminal());
+
+        let history = server.intent_history_manager.as_ref().unwrap();
+        let storage = server.storage.as_ref().unwrap();
+
+        let mut run_event_kinds = Vec::new();
+        for (_, hash) in history.list_objects("run_event").await.unwrap() {
+            let event = storage.get_json::<RunEvent>(&hash).await.unwrap();
+            if event.run_id() == start.run_id {
+                run_event_kinds.push(event.kind().clone());
+            }
+        }
+        assert!(run_event_kinds.contains(&RunEventKind::Patching));
+        assert!(run_event_kinds.contains(&RunEventKind::Completed));
+
+        let mut saw_running_task_event = false;
+        let mut saw_done_task_event = false;
+        for (_, hash) in history.list_objects("task_event").await.unwrap() {
+            let event = storage.get_json::<TaskEvent>(&hash).await.unwrap();
+            if event.run_id() != Some(start.run_id) {
+                continue;
+            }
+            saw_running_task_event |= event.kind() == &TaskEventKind::Running;
+            saw_done_task_event |= event.kind() == &TaskEventKind::Done;
+        }
+        assert!(saw_running_task_event);
+        assert!(saw_done_task_event);
+
+        let mut saw_progressing_step_event = false;
+        let mut saw_completed_step_event = false;
+        for (_, hash) in history.list_objects("plan_step_event").await.unwrap() {
+            let event = storage.get_json::<PlanStepEvent>(&hash).await.unwrap();
+            if event.run_id() != start.run_id {
+                continue;
+            }
+            saw_progressing_step_event |= event.status() == &PlanStepStatus::Progressing;
+            saw_completed_step_event |= event.status() == &PlanStepStatus::Completed;
+        }
+        assert!(saw_progressing_step_event);
+        assert!(saw_completed_step_event);
+    }
+
+    #[test]
+    fn phase2_attempt_status_mappings_cover_terminal_variants() {
+        use crate::internal::ai::runtime::contracts::TaskExecutionStatus;
+
+        let cases = [
+            (
+                TaskExecutionStatus::Completed,
+                TaskEventKind::Done,
+                "completed",
+                RunEventKind::Completed,
+            ),
+            (
+                TaskExecutionStatus::Failed,
+                TaskEventKind::Failed,
+                "failed",
+                RunEventKind::Failed,
+            ),
+            (
+                TaskExecutionStatus::Cancelled,
+                TaskEventKind::Cancelled,
+                "skipped",
+                RunEventKind::Failed,
+            ),
+            (
+                TaskExecutionStatus::TimedOut,
+                TaskEventKind::Failed,
+                "failed",
+                RunEventKind::Failed,
+            ),
+            (
+                TaskExecutionStatus::Interrupted,
+                TaskEventKind::Failed,
+                "failed",
+                RunEventKind::Failed,
+            ),
+        ];
+
+        for (status, task_kind, plan_status, run_kind) in cases {
+            assert_eq!(task_event_kind_for_attempt_status(&status), task_kind);
+            assert_eq!(plan_step_status_for_attempt_status(&status), plan_status);
+            assert_eq!(run_event_kind_for_attempt_status(&status), run_kind);
+        }
     }
 
     #[tokio::test]
@@ -5327,8 +6323,26 @@ mod tests {
 
         assert_eq!(bundle.step_ids.len(), plan_spec.tasks.len());
         assert_eq!(bundle.task_ids.len(), plan_spec.tasks.len());
+        assert_ne!(
+            bundle.plan_id, bundle.test_plan_id,
+            "Phase 1 review must persist distinct execution/test plans"
+        );
+        assert_eq!(
+            bundle
+                .plan_id_by_task_id
+                .get(&plan_spec.tasks[0].id())
+                .map(String::as_str),
+            Some(bundle.plan_id.as_str())
+        );
+        assert_eq!(
+            bundle
+                .plan_id_by_task_id
+                .get(&plan_spec.tasks[1].id())
+                .map(String::as_str),
+            Some(bundle.test_plan_id.as_str())
+        );
         let history = server.intent_history_manager.as_ref().unwrap();
-        assert_eq!(history.list_objects("plan").await.unwrap().len(), 1);
+        assert_eq!(history.list_objects("plan").await.unwrap().len(), 2);
         assert_eq!(
             history.list_objects("task").await.unwrap().len(),
             plan_spec.tasks.len()

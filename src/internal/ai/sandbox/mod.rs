@@ -1,5 +1,7 @@
 //! Sandbox subsystem for AI tool calls.
 //!
+//! AI 工具调用的沙箱子系统。
+//!
 //! Boundary: exposes policy parsing, command-safety checks, and runtime enforcement;
 //! it does not decide workflow phase state. AI hardening contract tests exercise the
 //! public guarantees of this module.
@@ -67,6 +69,11 @@ pub struct ToolRuntimeContext {
     pub approval: Option<ToolApprovalContext>,
     pub file_history: Option<FileHistoryRuntimeContext>,
     pub max_output_bytes: Option<usize>,
+    /// Owning sub-agent run id, when this context drives a sub-agent's tool
+    /// calls (CEX-S2-14 trace chain). Source-Pool calls read it to attribute
+    /// the `source_call_log` row to the run (`thread → agent_run_id →
+    /// tool_call_id → source_call`). `None` on the main-session path.
+    pub agent_run_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1150,7 +1157,7 @@ pub async fn run_shell_command_with_approval(
         first_attempt_sandbox,
         sandbox_runtime.as_ref(),
         approved_network_access_upgrade,
-        evidence_sink.as_deref(),
+        evidence_sink.clone(),
     )
     .await?;
 
@@ -1196,7 +1203,7 @@ pub async fn run_shell_command_with_approval(
         None,
         sandbox_runtime.as_ref(),
         None,
-        evidence_sink.as_deref(),
+        evidence_sink,
     )
     .await
 }
@@ -1207,7 +1214,7 @@ pub async fn run_command_spec(
     sandbox: Option<ToolSandboxContext>,
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
     network_access_override: Option<NetworkAccess>,
-    evidence_sink: Option<&dyn evidence::SandboxEvidenceSink>,
+    evidence_sink: Option<std::sync::Arc<dyn evidence::SandboxEvidenceSink>>,
 ) -> Result<SandboxExecOutput, String> {
     let command_tmpdir = create_command_tmpdir()?;
     inject_command_tmp_env(&mut spec, &command_tmpdir);
@@ -1218,11 +1225,14 @@ pub async fn run_command_spec(
         sandbox,
         sandbox_runtime,
         network_access_override,
-        evidence_sink,
+        evidence_sink.clone(),
     )
     .await;
-    let runtime_evidence_sink = sandbox_runtime.and_then(|cfg| cfg.evidence_sink.as_deref());
-    cleanup_command_tmpdir(&command_tmpdir, evidence_sink.or(runtime_evidence_sink)).await;
+    let runtime_evidence_sink = sandbox_runtime.and_then(|cfg| cfg.evidence_sink.clone());
+    let cleanup_sink = evidence_sink
+        .as_deref()
+        .or(runtime_evidence_sink.as_deref());
+    cleanup_command_tmpdir(&command_tmpdir, cleanup_sink).await;
     output
 }
 
@@ -1232,17 +1242,24 @@ async fn run_command_spec_inner(
     sandbox: Option<ToolSandboxContext>,
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
     network_access_override: Option<NetworkAccess>,
-    evidence_sink: Option<&dyn evidence::SandboxEvidenceSink>,
+    evidence_sink: Option<std::sync::Arc<dyn evidence::SandboxEvidenceSink>>,
 ) -> Result<SandboxExecOutput, String> {
     let mut built = build_command_from_spec(
         spec,
         sandbox.as_ref(),
         sandbox_runtime,
         network_access_override,
-        evidence_sink,
+        evidence_sink.as_deref(),
     )?;
-    let allowlist_proxy =
-        start_allowlist_proxy_if_needed(&mut built.command, built.allowlist_proxy_services).await?;
+    let proxy_evidence_sink = evidence_sink
+        .clone()
+        .or_else(|| sandbox_runtime.and_then(|cfg| cfg.evidence_sink.clone()));
+    let allowlist_proxy = start_allowlist_proxy_if_needed(
+        &mut built.command,
+        built.allowlist_proxy_services,
+        proxy_evidence_sink,
+    )
+    .await?;
     let timeout_override = built.timeout_ms;
     let mut cmd = built.command;
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -1506,11 +1523,16 @@ struct BuiltCommand {
 async fn start_allowlist_proxy_if_needed(
     command: &mut tokio::process::Command,
     services: Option<Vec<NetworkService>>,
+    evidence_sink: Option<std::sync::Arc<dyn evidence::SandboxEvidenceSink>>,
 ) -> Result<Option<proxy_runtime::RunningAllowlistProxy>, String> {
     let Some(services) = services else {
         return Ok(None);
     };
-    let proxy = proxy_runtime::spawn_allowlist_http_proxy(services).await?;
+    let proxy = if evidence_sink.is_some() {
+        proxy_runtime::spawn_allowlist_http_proxy_with_evidence(services, evidence_sink).await?
+    } else {
+        proxy_runtime::spawn_allowlist_http_proxy(services).await?
+    };
     inject_allowlist_proxy_env(command, &proxy);
     Ok(Some(proxy))
 }
@@ -1762,13 +1784,7 @@ fn resolve_linux_sandbox_exe(sandbox_runtime: Option<&SandboxRuntimeConfig>) -> 
 
     #[cfg(target_os = "linux")]
     {
-        if candidate
-            .as_ref()
-            .is_some_and(|path| is_executable_file(path))
-        {
-            return candidate;
-        }
-        return None;
+        candidate.filter(|path| is_executable_file(path))
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -1787,13 +1803,17 @@ fn locate_bwrap_binary_for_prefer_strict() -> Option<PathBuf> {
         return None;
     }
 
-    let path_env = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_env) {
-        let candidate = dir.join("bwrap");
-        if is_executable_file(&candidate) {
-            return Some(candidate);
+    #[cfg(not(test))]
+    {
+        let path_env = std::env::var_os("PATH")?;
+        for dir in std::env::split_paths(&path_env) {
+            let candidate = dir.join("bwrap");
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
         }
     }
+
     None
 }
 
@@ -2098,6 +2118,12 @@ fn requested_network_access_upgrade(
     }
 
     Ok(None)
+}
+
+pub(crate) fn load_sandbox_config_network_access(
+    cwd: &Path,
+) -> Result<Option<NetworkAccess>, String> {
+    load_sandbox_config_file(cwd)?.network_access()
 }
 
 pub fn shell_approval_key(
@@ -2458,18 +2484,31 @@ mod tests {
     #[cfg_attr(target_os = "linux", serial)]
     #[test]
     fn seccomp_policy_env_resolves_path_only_when_non_empty() {
-        // SAFETY: test-only env mutation.
         let prior = std::env::var_os(SANDBOX_SECCOMP_POLICY_ENV);
-        let _policy = match prior {
-            Some(value) => Some(ScopedEnvVar::set(SANDBOX_SECCOMP_POLICY_ENV, value)),
-            None => {
-                // SAFETY: test-only env cleanup before running the assertion.
+
+        struct EnvRestore {
+            key: &'static str,
+            value: Option<std::ffi::OsString>,
+        }
+
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
                 unsafe {
-                    std::env::remove_var(SANDBOX_SECCOMP_POLICY_ENV);
+                    if let Some(value) = &self.value {
+                        std::env::set_var(self.key, value);
+                    } else {
+                        std::env::remove_var(self.key);
+                    }
                 }
-                None
             }
+        }
+
+        let _restore = EnvRestore {
+            key: SANDBOX_SECCOMP_POLICY_ENV,
+            value: prior,
         };
+
+        // SAFETY: test-only env mutation; restored by `_restore`.
         unsafe {
             std::env::remove_var(SANDBOX_SECCOMP_POLICY_ENV);
         }
@@ -3012,7 +3051,7 @@ mod tests {
 
         let sink = Arc::new(InMemorySandboxEvidenceSink::new());
         let sandbox_runtime = SandboxRuntimeConfig {
-            enforcement: runtime::SandboxEnforcement::Required,
+            enforcement: SandboxEnforcement::Required,
             evidence_sink: Some(sink.clone()),
             ..SandboxRuntimeConfig::default()
         };
@@ -3127,7 +3166,18 @@ mod tests {
         assert_eq!(events.len(), 1, "exactly one Evidence event per rejection");
         match &events[0] {
             SandboxEvidenceEvent::WritableRootRejected { root, reason } => {
-                assert_eq!(root, &dangerous_root);
+                // The recorded root is canonicalised before validation
+                // (see `push_root_unique` in policy.rs), so on hosts
+                // where `/var/run` is a symlink to `/run` it surfaces as
+                // `/run/docker.sock` rather than the requested
+                // `/var/run/docker.sock`. Assert the stable, symlink-
+                // independent property: the rejected root is the Docker
+                // socket by file name.
+                assert_eq!(
+                    root.file_name(),
+                    dangerous_root.file_name(),
+                    "rejected root should be the docker socket (canonicalised path may differ by host symlink layout): {root:?}"
+                );
                 assert!(
                     !reason.is_empty(),
                     "rejection must include a non-empty reason"
@@ -3311,6 +3361,31 @@ mod tests {
     }
 
     #[test]
+    fn requested_network_access_upgrade_detects_config_full_widening() {
+        let temp = tempfile::tempdir().expect("tempdir for full network config");
+        let libra_dir = temp.path().join(crate::utils::util::ROOT_DIR);
+        std::fs::create_dir_all(&libra_dir).expect("create .libra dir");
+        std::fs::write(
+            libra_dir.join(SANDBOX_CONFIG_FILE),
+            "[sandbox.network]\nmode = \"full\"\n",
+        )
+        .expect("write sandbox config");
+        let policy = SandboxPolicy::ExternalSandbox {
+            network_access: NetworkAccess::Denied,
+        };
+
+        let upgrade = requested_network_access_upgrade(
+            Some(&policy),
+            SandboxPermissions::UseDefault,
+            temp.path(),
+            false,
+        )
+        .expect("config should parse");
+
+        assert_eq!(upgrade, Some(NetworkAccess::Full));
+    }
+
+    #[test]
     fn requested_network_access_upgrade_skips_non_network_bearing_policy() {
         let temp = tempfile::tempdir().expect("tempdir for read-only network config");
         let libra_dir = temp.path().join(crate::utils::util::ROOT_DIR);
@@ -3421,6 +3496,100 @@ mod tests {
             .expect("network upgrade run task should not panic")
             .expect_err("denying network upgrade should stop execution");
         assert_eq!(error, "rejected by user");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn approved_network_access_upgrade_reaches_command_environment() {
+        let temp = tempfile::tempdir().expect("tempdir for approved network test");
+        let libra_dir = temp.path().join(crate::utils::util::ROOT_DIR);
+        std::fs::create_dir_all(&libra_dir).expect("create .libra dir");
+        std::fs::write(
+            libra_dir.join(SANDBOX_CONFIG_FILE),
+            "[sandbox.network]\n\
+             mode = \"allowlist\"\n\
+             [[sandbox.network.services]]\n\
+             host = \"registry.npmjs.org\"\n\
+             ports = [443]\n",
+        )
+        .expect("write sandbox config");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolApprovalContext {
+            policy: AskForApproval::OnRequest,
+            request_tx: tx,
+            store: Arc::new(tokio::sync::Mutex::new(ApprovalStore::default())),
+            scope_key_prefix: None,
+            approval_ttl: DEFAULT_APPROVAL_TTL,
+            cache_policy: ApprovalCachePolicy::default(),
+        };
+        let cwd = temp.path().to_path_buf();
+        let run = tokio::spawn({
+            let cwd = cwd.clone();
+            async move {
+                run_shell_command_with_approval(ShellCommandRequest {
+                    call_id: "call-approved-network-upgrade".to_string(),
+                    command: "printf '%s\n%s\n%s\n' \"$HTTPS_PROXY\" \"$NO_PROXY\" \"$LIBRA_SANDBOX_ALLOWLIST_PROXY\""
+                        .to_string(),
+                    cwd: cwd.clone(),
+                    timeout_ms: Some(5_000),
+                    max_output_bytes: 16 * 1024,
+                    sandbox: Some(ToolSandboxContext {
+                        policy: SandboxPolicy::ExternalSandbox {
+                            network_access: NetworkAccess::Denied,
+                        },
+                        permissions: SandboxPermissions::UseDefault,
+                    }),
+                    sandbox_runtime: Some(SandboxRuntimeConfig {
+                        enforcement: SandboxEnforcement::Required,
+                        ..SandboxRuntimeConfig::default()
+                    }),
+                    evidence_sink: None,
+                    approval: Some(ctx),
+                    justification: None,
+                    safety_decision: None,
+                })
+                .await
+            }
+        });
+
+        let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("network upgrade approval should be requested")
+            .expect("approval channel should stay open");
+        assert_eq!(
+            request.command,
+            "printf '%s\n%s\n%s\n' \"$HTTPS_PROXY\" \"$NO_PROXY\" \"$LIBRA_SANDBOX_ALLOWLIST_PROXY\""
+        );
+        assert_eq!(request.sandbox_label, "external-sandbox");
+        assert_eq!(
+            request.network_access,
+            NetworkAccess::Allowlist {
+                services: vec![NetworkService {
+                    host: "registry.npmjs.org".to_string(),
+                    ports: vec![443],
+                    protocol: None,
+                }],
+            }
+        );
+        request
+            .response_tx
+            .send(ReviewDecision::Approved)
+            .expect("approval receiver should be active");
+
+        let output = run
+            .await
+            .expect("approved network upgrade task should not panic")
+            .expect("approved network upgrade should run command");
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        let lines = output.stdout.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3, "stdout: {:?}", output.stdout);
+        assert!(lines[0].starts_with("http://127.0.0.1:"), "{lines:?}");
+        assert_eq!(lines[1], "");
+        assert_eq!(lines[2], lines[0]);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected)
+        ));
     }
 
     #[tokio::test]

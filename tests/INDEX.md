@@ -17,12 +17,12 @@
 
 | target | wave | one-line purpose | relevant src |
 |---|---|---|---|
-| `command_test` | 1 | Top-level dispatcher covering most `libra <subcmd>` integration paths | `src/command/`, `src/cli.rs` |
+| `command_test` | 1 | Top-level dispatcher covering most `libra <subcmd>` integration paths, including commit editor/hooks/signing/autosquash/JSON coverage | `src/command/`, `src/cli.rs`, `tests/command/commit_test.rs`, `tests/command/commit_editor_test.rs`, `tests/command/commit_sign_hooks_test.rs`, `tests/command/commit_autosquash_test.rs`, `tests/command/commit_json_test.rs`, `tests/command/commit_error_test.rs` |
 | `compat_stash_subcommand_surface` | 1 | Guards `libra stash` subcommand surface vs. git CLI | `src/command/stash.rs` |
-| `compat_bisect_subcommand_surface` | 1 | Guards `libra bisect` subcommand surface | `src/command/bisect.rs` |
+| `compat_bisect_subcommand_surface` | 1 | Guards `libra bisect` subcommand surface and declined parser-only bisect surfaces | `src/command/bisect.rs`, `src/cli.rs` |
 | `compat_worktree_delete_dir` | 1 | Guards worktree delete semantics on dir removal | `src/command/worktree.rs` |
 | `compat_checkout_alias_help` | 1 | Guards `--help` text for checkout aliases | `src/command/checkout.rs` |
-| `compat_matrix_alignment` | 1 | Guards the docs compat matrix vs. real subcommands | `docs/commands/`, `src/cli.rs` |
+| `compat_matrix_alignment` | 1 | Guards public docs/release matrices vs. real CLI/API surfaces | `COMPATIBILITY.md`, `docs/automation/local-tui-control.md`, `.github/workflows/base.yml`, `src/cli.rs`, `src/internal/ai/web/mod.rs` |
 | `compat_live_compat_workflow` | 1 | Guards optional live AI/cloud workflow remains manual/scheduled and secret-gated | `.github/workflows/live-compat.yml` |
 | `compat_branch_lossy_wrapper_guard` | 1 | Guards branch-name lossy conversion wrapper | `src/internal/branch.rs` |
 | `compat_lfs_client_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in `internal/protocol/lfs_client.rs` | `src/internal/protocol/lfs_client.rs` |
@@ -32,13 +32,14 @@
 | `compat_client_storage_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in `utils/client_storage.rs` | `src/utils/client_storage.rs` |
 | `compat_extra_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in miscellaneous modules | `src/**` |
 | `compat_all_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in general production codebase | `src/**` |
+| `compat_diff_production_expect_guard` | 1 | Bans bare `unwrap()` and unjustified production `expect()` in diff implementation files | `src/command/diff.rs`, `src/utils/blob_similarity.rs` |
 | `compat_agent_run_non_exhaustive_guard` | 1 | Enforces `#[non_exhaustive]` on every `pub enum` under `agent_run/` for additive evolution | `src/internal/ai/agent_run/` |
+| `compat_agent_docs_contract` | 1 | Guards active Agent plan claims against stale removed-provider status | `docs/improvement/agent.md`, `src/command/code.rs` |
 | `compat_help_examples_banner` | 1 | Every visible command in `src/cli.rs::Commands` renders an `EXAMPLES:` / `Examples:` section in `<cmd> --help` (cross-cutting item B) | `src/cli.rs`, `src/command/**` |
 | `compat_error_codes_doc_sync` | 1 | Every `LBR-*-NNN` literal in `src/utils/error.rs` is documented in `docs/error-codes.md` | `src/utils/error.rs`, `docs/error-codes.md` |
 | `compat_command_docs_examples_section` | 1 | Every `docs/commands/<name>.md` page carries an `## Examples` / `## Common Commands` heading | `docs/commands/**` |
 | `compat_help_flag_descriptions` | 1 | Every visible flag and positional under `Options:` / `Arguments:` carries a non-empty description; covers 42 root commands + 53 sub/sub-sub-commands (110 surfaces) | `src/cli.rs`, `src/command/**` |
 | `compat_help_no_impl_meta_leak` | 1 | No `libra <cmd> --help` body leaks contributor-facing rustdoc into clap's long_about; forbids 6 phrase classes (e.g. `Codex pass-`, raw markdown headings, code fences) | `src/cli.rs`, `src/command/**` |
-| `db_migration_test` | 1 | SQLite schema bootstrap + migration round-trip | `src/internal/db.rs`, `sql/` |
 
 ## Wave 2 — Code UI & local automation
 
@@ -48,7 +49,7 @@
 | `code_ui_scenarios` | 2 | End-to-end scenarios on the Code UI through the harness | `src/command/code.rs`, `src/internal/tui/` |
 | `code_ui_remote_lease_matrix` | 2 | Browser/automation lease lifecycle matrix | `src/command/code.rs` controller, `src/command/code_control.rs` |
 | `code_ui_remote_sse_matrix` | 2 | SSE event stream matrix from web view | `src/internal/tui/`, `src/command/code.rs` (axum) |
-| `code_ui_remote_state_matrix` | 2 | Cross-surface state replication matrix | `src/internal/tui/`, `src/command/code_control.rs` |
+| `code_ui_remote_state_matrix` | 2 | Cross-surface state replication matrix, including mid-turn detach/cancel settling | `src/internal/tui/`, `src/internal/ai/web/code_ui.rs`, `src/command/code_control.rs` |
 | `code_ui_remote_security_matrix` | 2 | Auth/token/origin enforcement matrix | `src/command/code_control*.rs` |
 | `code_ui_remote_generation_matrix` | 2 | Generation control across surfaces (no live LLM) | `src/internal/tui/app.rs` |
 | `code_ui_remote_approval_matrix` | 2 | Approval flow across TUI/Web/automation | `src/internal/ai/agent/` approvals |
@@ -59,7 +60,7 @@
 | `code_resume_test` | 2 | Session resume across restarts | `src/internal/ai/session/`, `src/command/code.rs` |
 | `code_codex_default_tui_test` | 2 | Codex runtime default TUI wiring | `src/internal/ai/agent/codex*` |
 | `code_codex_runtime_test` | 2 | Codex runtime tool loop regression | `src/internal/ai/agent/codex*`, `src/internal/ai/tools/` |
-| `ai_code_ui_headless_test` | 2 | Headless TUI rendering / event coverage | `src/internal/tui/` |
+| `ai_code_ui_headless_test` | 2 | Headless Code UI runtime and projection coverage | `src/internal/ai/web/headless.rs` |
 | `ai_code_ui_projection_test` | 2 | Projection snapshot replication | `src/internal/ai/history.rs`, `src/internal/tui/` |
 | `ai_code_ui_wire_test` | 2 | Wire-format contract for UI events | `src/internal/tui/`, `src/internal/ai/agent/` |
 | `intent_flow_test` | 2 | IntentSpec → Plan → Run pipeline (no live LLM) | `src/internal/ai/intentspec/`, `src/internal/ai/orchestrator/` |
@@ -114,11 +115,12 @@
 | `ai_subagent_llm_initiated_test` | 3 | OC-Phase 3 LlmInitiated E2E: fake provider → dispatcher → `DefaultSubAgentChildRunner` → tool loop → parent JSONL `Spawned + Completed` | `src/internal/ai/agent/runtime/`, `src/internal/ai/providers/fake/`. Gated `--features test-provider`. |
 | `ai_subagent_runtime_context_inheritance_test` | 3 | CEX-S2-12 / S2-INV-06 E2E: child tool invocation inherits the parent's `DispatchContext::runtime_context` (sandbox + approval + file-history authority + output budget) verbatim; a recording tool captures the invocation context, reverting the forward makes it observe `None` | `src/internal/ai/agent/runtime/sub_agent.rs`, `src/internal/ai/providers/fake/`. Gated `--features test-provider`. |
 | `ai_subagent_user_initiated_test` | 3 | OC-Phase 3 UserInitiated{bypass_permission_ask:true} E2E: rejecting asker proves bypass really skips step 8; rest of the chain matches the LlmInitiated sibling | `src/internal/ai/agent/runtime/`, `src/internal/ai/providers/fake/`. Gated `--features test-provider`. |
-| `ai_subagent_user_initiated_cancel_test` | 3 | OC-Phase 3 pre-flight cancel E2E: cancelled `AbortToken` short-circuits dispatch with `Cancelled { ParentAbort }`, asker never called, no JSONL bytes written | `src/internal/ai/agent/runtime/`. Gated `--features test-provider`. |
-| `ai_subagent_worktree_readonly_test` | 3 | OC-Phase 3 sub-agent registry pre-filter pins `apply_patch` + EDIT_TOOLS stripped under `[{edit:*:deny}]` | `src/internal/ai/tools/registry.rs`, `src/internal/ai/permission/` |
+| `ai_subagent_user_initiated_cancel_test` | 3 | OC-Phase 3 UserInitiated cancel E2E: pre-flight cancel short-circuits before JSONL writes; mid-flight parent abort returns `Cancelled { ParentAbort }`, parent JSONL writes `Spawned + Cancelled { UserRequested }`, and child JSONL replays to a cancelled snapshot | `src/internal/ai/agent/runtime/`. Gated `--features test-provider`. |
+| `ai_subagent_worktree_readonly_test` | 3 | Sub-agent worktree isolation guard: pins historical edit-tool pre-filter and `libra code` workspace-isolation bootstrap wiring | `src/internal/ai/tools/registry.rs`, `src/internal/ai/permission/`, `src/command/code.rs` |
 | `ai_usage_stats_test` | 2 | CEX-16 usage stats persistence and aggregation tests | `src/internal/ai/usage/` |
 | `ai_usage_tui_test` | 2 | CEX-16 usage display formatting tests | `src/internal/ai/usage/` |
 | `ai_validation_decision_flow_test` | 2 | Phase D validation and decision derived-record tests | `src/internal/ai/orchestrator/` |
+| `db_migration_test` | 2 | SQLite schema bootstrap + migration round-trip | `src/internal/db.rs`, `sql/` |
 | `diagnostics_redaction_test` | 2 | Diagnostics logs redaction and sanitization | `src/internal/ai/usage/` |
 | `local_client_test` | 2 | Local Git protocol client working directory restoration on error | `src/internal/protocol/` |
 | `publish_ai_export_test` | 2 | Publish pipeline export representation for AI tasks | `src/internal/publish/` |
@@ -159,7 +161,7 @@
 
 | target | wave | one-line purpose | relevant src |
 |---|---|---|---|
-| `code_ui_perf_smoke_test` | 6 | Code UI startup / first-token latency smoke | `src/command/code.rs`, `src/internal/tui/` |
+| `code_ui_perf_smoke_test` | 6 | Code UI perf / SSE soak smoke | `src/command/code.rs`, `src/internal/tui/`, `src/internal/ai/web/` |
 
 ---
 
@@ -172,8 +174,11 @@ relevant source entry above.
 
 ## Maintenance
 
-- Every new `tests/<name>.rs` must add a row here in the same PR (enforced by
-  §10 of `docs/development/integration-test-plan.md`).
-- Renames must update both this index and the plan; `scripts/check_integration_plan_consistency.sh`
-  will fail CI on dangling references.
+- Every new `tests/<name>.rs` must add a row here in the same PR. Black-box CLI
+  runner scenarios under `tools/integration-runner/` are not Cargo `--test`
+  targets and must not be added to this index.
+- Renames must update both this index and the relevant plan/docs. The black-box
+  CLI integration-plan consistency gate is `cargo run --manifest-path
+  tools/integration-runner/Cargo.toml -- check-plan`; keep Cargo test indexing and
+  runner scenario indexing separate.
 - TODO rows are tracked as `BASELINE_GAP-INTEG-007` — the index pass.

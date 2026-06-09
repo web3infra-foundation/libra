@@ -10,13 +10,16 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::internal::{
-    ai::runtime::{
-        contracts::FinalDecisionVerdict,
-        derived_records::ensure_runtime_thread,
-        phase3::{
-            ValidationReport, ValidationStatus, bool_to_row, deserialize_summary, parse_uuid,
-            serialize_summary, timestamp_from_row,
+    ai::{
+        runtime::{
+            contracts::FinalDecisionVerdict,
+            derived_records::ensure_runtime_thread,
+            phase3::{
+                ValidationReport, ValidationStatus, bool_to_row, deserialize_summary, parse_uuid,
+                serialize_summary, timestamp_from_row,
+            },
         },
+        session::jsonl::{AiArtifactEvent, SessionEvent, SessionJsonlStore},
     },
     model::{ai_decision_proposal, ai_risk_score_breakdown},
 };
@@ -304,6 +307,17 @@ impl DecisionProposalStore {
         Ok(())
     }
 
+    pub async fn write_latest_with_session_mirror(
+        &self,
+        risk: &RiskScoreBreakdown,
+        proposal: &DecisionProposal,
+        session_store: &SessionJsonlStore,
+    ) -> Result<()> {
+        self.write_latest(risk, proposal).await?;
+        append_decision_session_mirror(session_store, risk, proposal)?;
+        Ok(())
+    }
+
     pub async fn load_latest_risk(&self, thread_id: Uuid) -> Result<Option<RiskScoreBreakdown>> {
         ai_risk_score_breakdown::Entity::find()
             .filter(ai_risk_score_breakdown::Column::ThreadId.eq(thread_id.to_string()))
@@ -327,6 +341,72 @@ impl DecisionProposalStore {
             .map(proposal_from_model)
             .transpose()
     }
+}
+
+pub fn append_decision_session_mirror(
+    session_store: &SessionJsonlStore,
+    risk: &RiskScoreBreakdown,
+    proposal: &DecisionProposal,
+) -> Result<()> {
+    if risk.thread_id != proposal.thread_id {
+        bail!(
+            "Risk score thread {} does not match decision proposal thread {}",
+            risk.thread_id,
+            proposal.thread_id
+        );
+    }
+
+    let risk_event = SessionEvent::ai_artifact(risk_score_artifact_event(risk)?);
+    session_store.append(&risk_event).with_context(|| {
+        format!(
+            "Failed to append risk score {} session artifact mirror for thread {} to {}",
+            risk.breakdown_id,
+            risk.thread_id,
+            session_store.events_path().display()
+        )
+    })?;
+
+    let proposal_event = SessionEvent::ai_artifact(decision_proposal_artifact_event(proposal)?);
+    session_store.append(&proposal_event).with_context(|| {
+        format!(
+            "Failed to append decision proposal {} session artifact mirror for thread {} to {}",
+            proposal.proposal_id,
+            proposal.thread_id,
+            session_store.events_path().display()
+        )
+    })
+}
+
+pub fn risk_score_artifact_event(risk: &RiskScoreBreakdown) -> Result<AiArtifactEvent> {
+    Ok(AiArtifactEvent {
+        event_id: Uuid::new_v4(),
+        recorded_at: Utc::now(),
+        thread_id: risk.thread_id,
+        artifact_kind: "risk_score_breakdown".to_string(),
+        artifact_id: Some(risk.breakdown_id.to_string()),
+        payload: serde_json::to_value(risk).with_context(|| {
+            format!(
+                "Failed to serialize risk score {} for session artifact mirror",
+                risk.breakdown_id
+            )
+        })?,
+    })
+}
+
+pub fn decision_proposal_artifact_event(proposal: &DecisionProposal) -> Result<AiArtifactEvent> {
+    Ok(AiArtifactEvent {
+        event_id: Uuid::new_v4(),
+        recorded_at: Utc::now(),
+        thread_id: proposal.thread_id,
+        artifact_kind: "decision_proposal".to_string(),
+        artifact_id: Some(proposal.proposal_id.to_string()),
+        payload: serde_json::to_value(proposal).with_context(|| {
+            format!(
+                "Failed to serialize decision proposal {} for session artifact mirror",
+                proposal.proposal_id
+            )
+        })?,
+    })
 }
 
 fn risk_to_active_model(risk: &RiskScoreBreakdown) -> Result<ai_risk_score_breakdown::ActiveModel> {

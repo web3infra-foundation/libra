@@ -1,4 +1,6 @@
 //! Ignore handling utilities defining policies for .libraignore, index-aware filtering, and helpers to test whether paths are ignored.
+//!
+//! 忽略处理实用程序，定义 .libraignore 的策略、索引感知过滤和路径忽略测试的辅助程序。
 
 use std::{
     ffi::OsStr,
@@ -417,6 +419,7 @@ mod tests {
             verbose: false,
             dry_run: false,
             ignore_errors: false,
+            ..Default::default()
         })
         .await;
 
@@ -490,6 +493,7 @@ mod tests {
             verbose: false,
             dry_run: false,
             ignore_errors: false,
+            ..Default::default()
         })
         .await;
 
@@ -525,6 +529,7 @@ mod tests {
             verbose: false,
             dry_run: false,
             ignore_errors: false,
+            ..Default::default()
         })
         .await;
 

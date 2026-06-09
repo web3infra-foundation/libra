@@ -24,24 +24,39 @@
 //! pinning the doc invariant that "a budget exhaustion never
 //! marks a Goal complete".
 //!
-//! Driving the supervisor directly (without `run_tool_loop`) is
-//! sufficient for S6: the supervisor's `step()` is pure on
-//! `(state, outcome, ctx, clock)`, so the test substitutes each
-//! turn's `GoalTurnOutcome` and asserts the events + decision the
-//! supervisor produces. The `run_tool_loop` integration that
-//! actually invokes the model + tool handlers is owned by
-//! P6.5/P6.6 wiring and lands incrementally.
+//! Most S6 assertions drive the supervisor directly: `step()` is pure
+//! on `(state, outcome, ctx, clock)`, so the tests substitute each
+//! turn's `GoalTurnOutcome` and assert the events + decision the
+//! supervisor produces. The driver regression at the end exercises
+//! the real `run_goal_supervised_tool_loop` + terminal
+//! `submit_goal_complete` handler path so a successful tool call is
+//! not mistaken for plain final text.
 
-use std::cell::Cell;
+use std::{
+    cell::Cell,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use libra::internal::ai::goal::{
-    DefaultGoalContinuationPromptBuilder, DeterministicGoalVerifier, GoalActor, GoalApplyReject,
-    GoalBlockReason, GoalBudget, GoalCompletionClaim, GoalCompletionShapeError, GoalCriterion,
-    GoalEvent, GoalEventClock, GoalEventEnvelope, GoalEvidencePolicy, GoalEvidenceRef,
-    GoalEvidenceTarget, GoalLoopDecision, GoalSpec, GoalState, GoalStatus, GoalStopPolicy,
-    GoalSupervisor, GoalSupervisorStep, GoalTurnOutcome, GoalVerificationRecord,
-    GoalVerifierContext, RecentToolCall, apply,
+use libra::internal::ai::{
+    agent::runtime::{ToolLoopConfig, ToolLoopObserver},
+    completion::{
+        AssistantContent, CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
+        Function, ToolCall,
+    },
+    goal::{
+        DefaultGoalContinuationPromptBuilder, DeterministicGoalVerifier, GoalActor,
+        GoalApplyReject, GoalBlockReason, GoalBudget, GoalCompletionClaim,
+        GoalCompletionShapeError, GoalCriterion, GoalEvent, GoalEventClock, GoalEventEnvelope,
+        GoalEvidencePolicy, GoalEvidenceRef, GoalEvidenceTarget, GoalLoopDecision, GoalSpec,
+        GoalState, GoalStatus, GoalStopPolicy, GoalSupervisedToolLoopRequest, GoalSupervisor,
+        GoalSupervisorStep, GoalTurnOutcome, GoalVerificationRecord, GoalVerifierContext,
+        RecentToolCall, apply, run_goal_supervised_tool_loop,
+    },
+    tools::{ToolRegistry, handlers::SubmitGoalCompleteHandler},
 };
 use uuid::Uuid;
 
@@ -102,6 +117,30 @@ struct FixedClock {
 impl FixedClock {
     fn new() -> Self {
         Self { next: Cell::new(1) }
+    }
+}
+
+struct SyncFixedClock {
+    next: AtomicUsize,
+}
+
+impl SyncFixedClock {
+    fn new() -> Self {
+        Self {
+            next: AtomicUsize::new(1),
+        }
+    }
+}
+
+impl GoalEventClock for SyncFixedClock {
+    fn mint_envelope_id(&self) -> Uuid {
+        let n = self.next.fetch_add(1, Ordering::SeqCst);
+        Uuid::from_u128(n as u128)
+    }
+
+    fn now(&self) -> DateTime<Utc> {
+        let n = self.next.load(Ordering::SeqCst);
+        fixture_now() + Duration::seconds(n as i64)
     }
 }
 
@@ -172,6 +211,64 @@ fn fixture_supervisor()
         prompt_builder: DefaultGoalContinuationPromptBuilder,
     }
 }
+
+#[derive(Clone)]
+struct SubmitGoalCompleteModel {
+    calls: Arc<AtomicUsize>,
+}
+
+impl SubmitGoalCompleteModel {
+    fn new() -> Self {
+        Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl CompletionModel for SubmitGoalCompleteModel {
+    type Response = ();
+
+    fn completion(
+        &self,
+        request: CompletionRequest,
+    ) -> impl std::future::Future<
+        Output = Result<CompletionResponse<Self::Response>, CompletionError>,
+    > + Send {
+        let calls = self.calls.clone();
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            if !request
+                .tools
+                .iter()
+                .any(|tool| tool.name == "submit_goal_complete")
+            {
+                return Err(CompletionError::ResponseError(
+                    "submit_goal_complete was not exposed to the Goal turn".to_string(),
+                ));
+            }
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: "call-submit-goal".to_string(),
+                    name: "submit_goal_complete".to_string(),
+                    function: Function {
+                        name: "submit_goal_complete".to_string(),
+                        arguments: serde_json::to_value(complete_claim())
+                            .expect("complete_claim serializes"),
+                    },
+                })],
+                reasoning_content: None,
+                raw_response: (),
+            })
+        }
+    }
+}
+
+struct TestObserver;
+impl ToolLoopObserver for TestObserver {}
 
 /// Apply every envelope a supervisor step emitted to the live
 /// state, asserting each `apply()` succeeds. The supervisor must
@@ -256,7 +353,7 @@ fn s6_three_turn_supervisor_drives_goal_to_completed() {
     let spec = s6_spec();
     let mut state = GoalState::from_spec(spec);
     let supervisor = fixture_supervisor();
-    let clock = FixedClock::new();
+    let clock = SyncFixedClock::new();
     let ctx = AcceptingCtx;
 
     // Turn 1: model emits final text without calling
@@ -384,6 +481,64 @@ fn s6_three_turn_supervisor_drives_goal_to_completed() {
     assert_eq!(
         rejection_blockers, 1,
         "exactly one rejection blocker must survive"
+    );
+}
+
+/// P6.7 driver/tool-loop E2E: a real `submit_goal_complete` tool
+/// call must be recovered from the `ToolLoopTurn` history and fed to
+/// the supervisor as `GoalTurnOutcome::CompletionClaim`. Before this
+/// regression guard, the driver only inspected `final_text`, so the
+/// terminal tool's success text was treated as "final text without
+/// claim" and an otherwise valid Goal could not complete.
+#[tokio::test]
+async fn s6_driver_maps_submit_goal_complete_tool_call_to_completion_claim() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut registry = ToolRegistry::with_working_dir(temp.path().to_path_buf());
+    registry.register("submit_goal_complete", Arc::new(SubmitGoalCompleteHandler));
+
+    let spec = s6_spec();
+    let mut observer = TestObserver;
+    let model = SubmitGoalCompleteModel::new();
+    let supervisor = fixture_supervisor();
+    let ctx = AcceptingCtx;
+    let clock = SyncFixedClock::new();
+    let run = run_goal_supervised_tool_loop(GoalSupervisedToolLoopRequest {
+        model: &model,
+        history: Vec::new(),
+        initial_prompt: "finish the Goal".to_string(),
+        registry: &registry,
+        config: ToolLoopConfig {
+            allowed_tools: Some(vec!["submit_goal_complete".to_string()]),
+            terminal_tools: Some(vec!["submit_goal_complete".to_string()]),
+            ..ToolLoopConfig::default()
+        },
+        observer: &mut observer,
+        state: GoalState::from_spec(spec),
+        supervisor: &supervisor,
+        verifier_ctx: &ctx,
+        clock: &clock,
+    })
+    .await
+    .expect("Goal driver must run the submit_goal_complete tool loop");
+
+    assert_eq!(
+        model.call_count(),
+        1,
+        "submit_goal_complete is terminal; the driver must not ask the model for another turn"
+    );
+    assert_eq!(run.state.status, GoalStatus::Completed);
+    assert!(matches!(run.decision, GoalLoopDecision::Completed { .. }));
+    assert!(
+        run.events
+            .iter()
+            .any(|event| matches!(event.event, GoalEvent::CompletionClaimed(_))),
+        "driver must turn the successful tool call into CompletionClaimed",
+    );
+    assert!(
+        run.events
+            .iter()
+            .any(|event| matches!(event.event, GoalEvent::Completed(_))),
+        "accepted claim must finish the Goal",
     );
 }
 

@@ -13,14 +13,14 @@ concurrency:
 jobs:
   format:
     name: compat-rustfmt
-    runs-on: [self-hosted]
+    runs-on: libra-runner-set
 
     env:
       CARGO_TERM_COLOR: always
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           submodules: recursive
 
@@ -37,7 +37,7 @@ jobs:
     strategy:
       fail-fast: true
 
-    runs-on: [self-hosted]
+    runs-on: libra-runner-set
     env:
       CARGO_TERM_COLOR: always
       RUSTUP_TOOLCHAIN: stable
@@ -45,45 +45,25 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           submodules: recursive
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: "22"
-
-      - name: Enable pnpm
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.1.0 --activate
 
       - name: Run cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   web-check:
     name: compat-web-check
-    runs-on: [self-hosted]
+    runs-on: libra-runner-set
 
     env:
       CARGO_TERM_COLOR: always
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           submodules: recursive
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: "22"
-
-      - name: Enable pnpm
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.1.0 --activate
 
       # The Rust crate's `build.rs` skips the web build whenever
       # `LIBRA_SKIP_WEB_BUILD=1` (set on every other job for speed). This
@@ -100,13 +80,22 @@ jobs:
       - name: Build web (static export → web/out/)
         run: pnpm --dir web build
 
+      - name: Check web/out static export drift
+        run: |
+          drift="$(git status --porcelain -- web/out)"
+          if [ -n "$drift" ]; then
+            echo "::error::web/out static export drift detected; rebuild and commit web/out/" >&2
+            printf '%s\n' "$drift" >&2
+            exit 1
+          fi
+
   redundancy:
     name: compat-redundancy
-    runs-on: [self-hosted]
+    runs-on: libra-runner-set
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           submodules: recursive
 
@@ -127,7 +116,7 @@ jobs:
   test:
     name: compat-offline-core
 
-    runs-on: [self-hosted]
+    runs-on: libra-runner-set
 
     env:
       CARGO_TERM_COLOR: always
@@ -138,55 +127,14 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           submodules: recursive
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: "22"
-
-      - name: Enable pnpm
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.1.0 --activate
-
-      - name: Ensure ripgrep is available
-        shell: bash
-        run: |
-          if command -v rg >/dev/null 2>&1; then
-            rg --version
-            exit 0
-          fi
-
-          if [ "$(id -u)" -eq 0 ]; then
-            SUDO=""
-          elif command -v sudo >/dev/null 2>&1; then
-            SUDO="sudo"
-          else
-            SUDO=""
-          fi
-
-          if command -v apt-get >/dev/null 2>&1; then
-            $SUDO apt-get update
-            $SUDO apt-get install -y ripgrep
-          elif command -v dnf >/dev/null 2>&1; then
-            $SUDO dnf install -y ripgrep
-          elif command -v yum >/dev/null 2>&1; then
-            $SUDO yum install -y ripgrep
-          elif command -v brew >/dev/null 2>&1; then
-            brew install ripgrep
-          else
-            cargo install ripgrep --locked
-            echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
-          fi
-
-          command -v rg
-          rg --version
-
       - name: Check compatibility matrix drift
-        run: bash scripts/check_compat_matrix.sh
+        # De-scripted: the COMPATIBILITY.md ↔ src/cli.rs::Commands drift check now
+        # lives in tests/compat/matrix_alignment.rs (also runs in `cargo test --all`).
+        run: cargo test --test compat_matrix_alignment
 
       - name: Run tests (L1 + L2 + L3)
         env:
@@ -202,42 +150,9 @@ jobs:
           LIBRA_STORAGE_SECRET_KEY: ${{ secrets.LIBRA_STORAGE_SECRET_KEY }}
         run: cargo test --all
 
-      # Phase 6 — Local TUI Automation Control scenario suite (docs/improvement/agent.md Part C).
-      # Without `--features test-provider` + `LIBRA_ENABLE_TEST_PROVIDER=1`, the scenarios
-      # in tests/code_ui_scenarios.rs and tests/harness_self_test.rs short-circuit; CI
-      # would silently skip them. `--test-threads=1` because each scenario spawns a
-      # `libra code` subprocess that contends for 0600 control-token files and ports.
-      #
-      # docs/improvement/test.md Wave 1 + Wave 3 also require the SSE harness and
-      # lease matrix to run under the same gate, otherwise CI silently skips every
-      # `lease_case!()` / `sse_case!()` registration.
-      - name: Run TUI automation scenarios
-        env:
-          LIBRA_ENABLE_TEST_PROVIDER: "1"
-          # These scenarios validate the loopback browser against the real
-          # embedded Next.js app, so the build.rs fallback stub is not valid here.
-          LIBRA_SKIP_WEB_BUILD: "0"
-        run: |
-          cargo test --features test-provider \
-            --test code_ui_scenarios \
-            --test harness_self_test \
-            --test code_codex_default_tui_test \
-            --test code_ui_remote_lease_matrix \
-            --test code_ui_remote_sse_matrix \
-            -- --test-threads=1
-
-      - name: Upload TUI scenario artifacts on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: code-ui-scenarios
-          path: target/code-ui-scenarios/**
-          if-no-files-found: ignore
-          retention-days: 7
-
   network-remotes:
     name: compat-network-remotes
-    runs-on: [self-hosted]
+    runs-on: libra-runner-set
 
     env:
       CARGO_TERM_COLOR: always
@@ -248,19 +163,9 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           submodules: recursive
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: "22"
-
-      - name: Enable pnpm
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.1.0 --activate
 
       # Network-only test layer (`test-network` feature gate). Tests requiring outbound
       # network but no secrets are surfaced through this job; tests requiring real

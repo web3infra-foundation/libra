@@ -467,7 +467,7 @@ async fn ingest_agent_traces(
 ///
 /// `repo_path` is the `.libra` directory used to resolve the Git object
 /// store for checkpoint commit creation (Phase 2.1). Passing `None` skips
-/// the checkpoint commit step on `SessionEnd` and only persists the
+/// the checkpoint commit step on checkpoint-worthy lifecycle events and only persists the
 /// `agent_session` summary; tests use that path so they don't need a live
 /// `libra init` workspace.
 pub(crate) async fn ingest_agent_traces_payload(
@@ -565,7 +565,7 @@ pub(crate) async fn ingest_agent_traces_payload(
 
     let new_state = match event.kind {
         LifecycleEventKind::SessionStart => "active",
-        LifecycleEventKind::SessionEnd => "stopped",
+        LifecycleEventKind::SessionEnd | LifecycleEventKind::TurnEnd => "stopped",
         LifecycleEventKind::Compaction => "condensed",
         LifecycleEventKind::CompactionCompleted => "active",
         _ => "active",
@@ -580,7 +580,12 @@ pub(crate) async fn ingest_agent_traces_payload(
     // into `metadata_json` so `libra agent checkpoint rewind --apply`
     // can resolve the on-disk transcript file without re-running the
     // adapter's path-discovery heuristics.
-    let metadata_json = build_agent_session_metadata_json(&envelope);
+    let concurrent_active = if matches!(event.kind, LifecycleEventKind::TurnStart) {
+        has_concurrent_active_session(conn, agent_kind, &envelope).await?
+    } else {
+        false
+    };
+    let metadata_json = build_agent_session_metadata_json(&envelope, concurrent_active);
     let upsert_sql = "
         INSERT INTO agent_session (
             session_id, agent_kind, provider_session_id, state, working_dir,
@@ -598,8 +603,11 @@ pub(crate) async fn ingest_agent_traces_payload(
                 ELSE agent_session.metadata_json
             END
     ";
-    let stopped_at: Option<i64> =
-        matches!(event.kind, LifecycleEventKind::SessionEnd).then_some(now);
+    let stopped_at: Option<i64> = matches!(
+        event.kind,
+        LifecycleEventKind::SessionEnd | LifecycleEventKind::TurnEnd
+    )
+    .then_some(now);
     conn.execute(Statement::from_sql_and_values(
         backend,
         upsert_sql,
@@ -619,16 +627,14 @@ pub(crate) async fn ingest_agent_traces_payload(
     .await
     .with_context(|| format!("failed to upsert agent_session for command '{command}'"))?;
 
-    // Phase 2.1: on SessionEnd, materialise a `committed` checkpoint commit
-    // on `refs/libra/agent-traces` and index it in `agent_checkpoint`. The
-    // checkpoint's tree carries metadata.json + transcript blob; events
-    // blob inclusion lands in a follow-up alongside SessionStore JSONL
-    // wiring. Earlier-in-session events (TurnEnd) get checkpoints in a
-    // future change.
-    if matches!(event.kind, LifecycleEventKind::SessionEnd)
-        && let Some(repo) = repo_path
+    // Materialise committed checkpoints at durable agent boundaries. SessionEnd
+    // captures the final snapshot; TurnEnd captures recoverable per-turn state.
+    if matches!(
+        event.kind,
+        LifecycleEventKind::SessionEnd | LifecycleEventKind::TurnEnd
+    ) && let Some(repo) = repo_path
     {
-        write_session_end_checkpoint(
+        write_committed_checkpoint(
             conn,
             repo,
             &session_id,
@@ -650,7 +656,10 @@ pub(crate) async fn ingest_agent_traces_payload(
 /// path can locate the file without re-deriving provider conventions.
 /// Returns `"{}"` when no useful fields are populated, so the upsert
 /// CASE expression can detect the placeholder.
-fn build_agent_session_metadata_json(envelope: &SessionHookEnvelope) -> String {
+fn build_agent_session_metadata_json(
+    envelope: &SessionHookEnvelope,
+    concurrent_active: bool,
+) -> String {
     let mut obj = serde_json::Map::new();
     if let Some(path) = envelope.transcript_path.as_deref()
         && !path.is_empty()
@@ -660,19 +669,52 @@ fn build_agent_session_metadata_json(envelope: &SessionHookEnvelope) -> String {
             serde_json::Value::String(path.to_string()),
         );
     }
+    if concurrent_active {
+        obj.insert(
+            "concurrent_active".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
     if obj.is_empty() {
         return "{}".to_string();
     }
     serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string())
 }
 
-/// Write a SessionEnd checkpoint: materialise transcript + metadata blobs,
+async fn has_concurrent_active_session(
+    conn: &sea_orm::DatabaseConnection,
+    agent_kind: &str,
+    envelope: &SessionHookEnvelope,
+) -> Result<bool> {
+    use sea_orm::{ConnectionTrait, Statement};
+
+    let row = conn
+        .query_one(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT COUNT(*) AS n FROM agent_session \
+             WHERE state = 'active' AND working_dir = ? \
+               AND NOT (agent_kind = ? AND provider_session_id = ?)",
+            [
+                envelope.cwd.clone().into(),
+                agent_kind.into(),
+                envelope.session_id.clone().into(),
+            ],
+        ))
+        .await
+        .context("failed to detect concurrent active agent sessions")?;
+    let count = row
+        .and_then(|row| row.try_get_by::<i64, _>("n").ok())
+        .unwrap_or(0);
+    Ok(count > 0)
+}
+
+/// Write a committed checkpoint: materialise transcript + metadata blobs,
 /// append a commit on `refs/libra/agent-traces`, and insert the
 /// corresponding `agent_checkpoint` row. Errors are surfaced verbatim — a
-/// failure here means the SessionEnd ingest cannot acknowledge a clean
-/// shutdown to the caller.
+/// failure here means the hook ingest cannot acknowledge a clean checkpoint
+/// boundary to the caller.
 #[allow(clippy::too_many_arguments)]
-async fn write_session_end_checkpoint(
+async fn write_committed_checkpoint(
     conn: &sea_orm::DatabaseConnection,
     repo_path: &std::path::Path,
     libra_session_id: &str,
@@ -710,24 +752,10 @@ async fn write_session_end_checkpoint(
             serde_json::Value::String(checkpoint_id.clone()),
         );
     }
+    let transcript_redacted =
+        build_checkpoint_transcript_redacted(envelope, agent_kind, redacted_prompt, &mut metadata);
     let metadata_bytes =
         serde_json::to_vec_pretty(&metadata).context("serialize checkpoint metadata")?;
-
-    // Transcript bytes for this minimal checkpoint = the redacted prompt the
-    // session ended on, or an empty stream when no prompt was carried. The
-    // bytes are already redacted because the upsert path scrubs them in
-    // place; we capture the same view here so the persisted blob never
-    // contains a leaked secret. Extending to the full session transcript is
-    // adapter-specific work (Phase 2 follow-up — `read_transcript` on
-    // ObservedAgent).
-    // Wrap in `RedactedBytes` so the agent-traces write path enforces the
-    // entire.md §8.1 / §13 P0 contract at the type level: the bytes were
-    // already scrubbed by the upsert path (see above), so this uses the
-    // sanctioned in-crate `new_unchecked` "already-redacted input"
-    // constructor rather than passing raw `&[u8]`.
-    let transcript_redacted = crate::internal::ai::observed_agents::RedactedBytes::new_unchecked(
-        redacted_prompt.unwrap_or("").as_bytes().to_vec(),
-    );
 
     let provider_name = envelope_provider_slug(agent_kind);
 
@@ -813,6 +841,75 @@ async fn write_session_end_checkpoint(
     // Phase 3 enhancement that adds per-rule counters to metadata.
     let _ = redaction_matches;
     Ok(())
+}
+
+fn build_checkpoint_transcript_redacted(
+    envelope: &SessionHookEnvelope,
+    agent_kind: &str,
+    redacted_prompt: Option<&str>,
+    metadata: &mut serde_json::Value,
+) -> crate::internal::ai::observed_agents::RedactedBytes {
+    use crate::internal::ai::observed_agents::{
+        AgentKind, AgentSessionCtx, RedactedBytes, Redactor, agent_for,
+    };
+
+    let Some(kind) = AgentKind::from_db_str(agent_kind) else {
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert(
+                "transcript_source".to_string(),
+                serde_json::Value::String("fallback_prompt_unknown_agent_kind".to_string()),
+            );
+        }
+        return RedactedBytes::new_unchecked(redacted_prompt.unwrap_or("").as_bytes().to_vec());
+    };
+    let ctx = AgentSessionCtx {
+        session_id: build_ai_session_id(
+            envelope_provider_name_for_kind(kind),
+            &envelope.session_id,
+        ),
+        provider_session_id: envelope.session_id.clone(),
+        working_dir: std::path::PathBuf::from(&envelope.cwd),
+        transcript_path: envelope
+            .transcript_path
+            .as_ref()
+            .map(std::path::PathBuf::from),
+    };
+    let agent = agent_for(kind);
+    match agent.read_transcript(&ctx) {
+        Ok(Some(raw)) => {
+            let (redacted, report) = Redactor::new_default().redact(&raw);
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert(
+                    "transcript_source".to_string(),
+                    serde_json::Value::String("adapter".to_string()),
+                );
+                obj.insert(
+                    "transcript_redaction_report".to_string(),
+                    serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({})),
+                );
+            }
+            redacted
+        }
+        Ok(None) | Err(_) => {
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert(
+                    "transcript_source".to_string(),
+                    serde_json::Value::String("fallback_prompt".to_string()),
+                );
+            }
+            RedactedBytes::new_unchecked(redacted_prompt.unwrap_or("").as_bytes().to_vec())
+        }
+    }
+}
+
+fn envelope_provider_name_for_kind(
+    kind: crate::internal::ai::observed_agents::AgentKind,
+) -> &'static str {
+    match kind {
+        crate::internal::ai::observed_agents::AgentKind::ClaudeCode => "claude",
+        crate::internal::ai::observed_agents::AgentKind::Gemini => "gemini",
+        _ => kind.as_db_str(),
+    }
 }
 
 /// Map `agent_session.agent_kind` (the closed enum stored in the database)
@@ -1564,6 +1661,52 @@ mod tests {
         );
     }
 
+    /// entire.md §13 #6: concurrent TurnStart events in the same working_dir
+    /// must not block ingestion, but the later session should be marked so
+    /// operators can identify overlapping external-agent activity.
+    #[tokio::test]
+    async fn ingest_turn_start_marks_concurrent_active_session() {
+        let (_dir, conn) = ingest_fresh_conn().await;
+
+        let first = ingest_envelope("SessionStart", "S-concurrent-a", json!({}));
+        ingest_agent_traces_payload(
+            &first,
+            super::super::provider::ProviderHookCommand::SessionStart,
+            LifecycleEventKind::SessionStart,
+            claude_provider(),
+            &conn,
+            None,
+        )
+        .await
+        .expect("first session starts");
+
+        let second = ingest_envelope("UserPromptSubmit", "S-concurrent-b", json!({}));
+        ingest_agent_traces_payload(
+            &second,
+            super::super::provider::ProviderHookCommand::Prompt,
+            LifecycleEventKind::TurnStart,
+            claude_provider(),
+            &conn,
+            None,
+        )
+        .await
+        .expect("second prompt ingests despite concurrent active session");
+
+        let backend = conn.get_database_backend();
+        let row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT metadata_json FROM agent_session WHERE provider_session_id = ?",
+                ["S-concurrent-b".into()],
+            ))
+            .await
+            .expect("query")
+            .expect("second session row exists");
+        let metadata_json: String = row.try_get_by("metadata_json").unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(&metadata_json).unwrap();
+        assert_eq!(metadata["concurrent_active"], json!(true));
+    }
+
     #[tokio::test]
     async fn ingest_rejects_kind_mismatch() {
         let (_dir, conn) = ingest_fresh_conn().await;
@@ -1764,6 +1907,82 @@ mod tests {
         // via the reachability walker
     }
 
+    /// entire.md §6.3 / §7.1: Stop/TurnEnd must create an intermediate
+    /// committed checkpoint, not wait until SessionEnd, so long-running agent
+    /// sessions can rewind to turn boundaries.
+    #[tokio::test]
+    async fn ingest_turn_end_writes_checkpoint_when_repo_path_provided() {
+        let (dir, conn) = ingest_fresh_conn().await;
+        let repo_path = dir.path().to_path_buf();
+
+        let start = ingest_envelope("SessionStart", "S-turn-cp", json!({}));
+        ingest_agent_traces_payload(
+            &start,
+            super::super::provider::ProviderHookCommand::SessionStart,
+            LifecycleEventKind::SessionStart,
+            claude_provider(),
+            &conn,
+            Some(&repo_path),
+        )
+        .await
+        .expect("start ok");
+
+        let stop = ingest_envelope("Stop", "S-turn-cp", json!({}));
+        ingest_agent_traces_payload(
+            &stop,
+            super::super::provider::ProviderHookCommand::Stop,
+            LifecycleEventKind::TurnEnd,
+            claude_provider(),
+            &conn,
+            Some(&repo_path),
+        )
+        .await
+        .expect("turn end ok");
+
+        let backend = conn.get_database_backend();
+        let row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT s.state, s.stopped_at, cp.scope, cp.traces_commit, cp.tree_oid, cp.metadata_blob_oid \
+                 FROM agent_session s \
+                 JOIN agent_checkpoint cp ON cp.session_id = s.session_id \
+                 WHERE s.provider_session_id = 'S-turn-cp' LIMIT 1",
+                [],
+            ))
+            .await
+            .expect("query")
+            .expect("turn-end checkpoint row exists");
+
+        assert_eq!(row.try_get_by::<String, _>("state").unwrap(), "stopped");
+        assert!(
+            row.try_get_by::<Option<i64>, _>("stopped_at")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(row.try_get_by::<String, _>("scope").unwrap(), "committed");
+        let traces_commit: String = row.try_get_by("traces_commit").unwrap();
+        let tree_oid: String = row.try_get_by("tree_oid").unwrap();
+        let metadata_blob_oid: String = row.try_get_by("metadata_blob_oid").unwrap();
+        assert!(!traces_commit.is_empty());
+        assert!(!tree_oid.is_empty());
+        assert!(!metadata_blob_oid.is_empty());
+
+        let ref_row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT `commit` FROM reference WHERE name = ? AND kind = 'Branch' LIMIT 1",
+                [crate::internal::branch::AGENT_TRACES_BRANCH.into()],
+            ))
+            .await
+            .expect("query agent-traces ref")
+            .expect("agent-traces ref row exists");
+        let head: String = ref_row.try_get_by("commit").unwrap();
+        assert_eq!(head, traces_commit);
+
+        crate::utils::client_storage::ClientStorage::wait_for_background_tasks();
+        verify_full_reachability_indexed(&conn, &repo_path, &traces_commit).await;
+    }
+
     /// entire.md §8.1 / §13 (P0) end-to-end: a SessionEnd prompt carrying
     /// a known secret must land in the `agent-traces` transcript blob
     /// REDACTED — the raw secret never reaches durable storage. Guards the
@@ -1843,6 +2062,108 @@ mod tests {
             body.contains("deploy with") && body.contains("please"),
             "the redacted transcript must retain the non-secret text, got: {body}",
         );
+    }
+
+    /// entire.md §7.1 / §13: checkpoint transcripts should be snapshots of
+    /// the external agent's native transcript file, not just the final hook
+    /// prompt. The adapter returns raw bytes and the runtime redacts them
+    /// before writing `transcript/<provider>`.
+    #[tokio::test]
+    async fn session_end_checkpoint_transcript_blob_uses_adapter_transcript_snapshot() {
+        let (dir, conn) = ingest_fresh_conn().await;
+        let repo_path = dir.path().to_path_buf();
+        let transcript_path = dir.path().join("claude-transcript.jsonl");
+        std::fs::write(
+            &transcript_path,
+            b"full transcript body with AKIAIOSFODNN7EXAMPLE\n",
+        )
+        .expect("write transcript fixture");
+
+        let start = ingest_envelope(
+            "SessionStart",
+            "S-cp-full-transcript",
+            json!({ "transcript_path": transcript_path }),
+        );
+        ingest_agent_traces_payload(
+            &start,
+            super::super::provider::ProviderHookCommand::SessionStart,
+            LifecycleEventKind::SessionStart,
+            claude_provider(),
+            &conn,
+            Some(&repo_path),
+        )
+        .await
+        .expect("start ok");
+
+        let end = ingest_envelope(
+            "SessionEnd",
+            "S-cp-full-transcript",
+            json!({
+                "transcript_path": transcript_path,
+                "prompt": "fallback prompt must not be the transcript snapshot",
+            }),
+        );
+        ingest_agent_traces_payload(
+            &end,
+            super::super::provider::ProviderHookCommand::SessionEnd,
+            LifecycleEventKind::SessionEnd,
+            claude_provider(),
+            &conn,
+            Some(&repo_path),
+        )
+        .await
+        .expect("end ok");
+
+        crate::utils::client_storage::ClientStorage::wait_for_background_tasks();
+
+        let body = read_single_agent_transcript_blob_body(&conn, &repo_path).await;
+        assert!(
+            body.contains("full transcript body"),
+            "checkpoint transcript must come from adapter transcript file, got: {body}",
+        );
+        assert!(
+            !body.contains("fallback prompt must not"),
+            "fallback prompt leaked into transcript snapshot instead of native transcript: {body}",
+        );
+        assert!(
+            !body.contains("AKIAIOSFODNN7EXAMPLE"),
+            "raw secret leaked into adapter transcript snapshot: {body}",
+        );
+        assert!(
+            body.contains("<REDACTED:aws-access-key-id>"),
+            "adapter transcript secret should be redacted, got: {body}",
+        );
+    }
+
+    async fn read_single_agent_transcript_blob_body(
+        conn: &DatabaseConnection,
+        repo_path: &std::path::Path,
+    ) -> String {
+        let backend = conn.get_database_backend();
+        let blob_row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT o_id FROM object_index WHERE o_type = 'agent_transcript' LIMIT 1",
+                [],
+            ))
+            .await
+            .expect("query transcript blob")
+            .expect("a transcript blob must be indexed");
+        let blob_oid: String = blob_row.try_get_by("o_id").unwrap();
+
+        let object_path = repo_path
+            .join("objects")
+            .join(&blob_oid[..2])
+            .join(&blob_oid[2..]);
+        let raw = std::fs::read(&object_path).expect("read transcript blob object");
+        let mut decoder = flate2::read::ZlibDecoder::new(&raw[..]);
+        let mut decoded = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut decoded).unwrap();
+        let header_end = decoded
+            .iter()
+            .position(|&b| b == 0)
+            .expect("blob object has a header terminator");
+        String::from_utf8_lossy(&decoded[header_end + 1..]).to_string()
     }
 
     /// Walk every object reachable from the checkpoint commit (commit →

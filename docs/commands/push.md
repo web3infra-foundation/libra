@@ -2,24 +2,49 @@
 
 Send local commits and objects to a remote repository, updating remote refs.
 Supports SSH and HTTPS transports, LFS file uploads (HTTP only), fast-forward detection,
-force push, dry-run preview, and refspec mapping.
+force push, dry-run preview, multi-refspec updates, remote ref deletion, tag pushing,
+and mirror previews.
 
 ## Synopsis
 
 ```
-libra push [OPTIONS] [<repository> <refspec>]
+libra push [OPTIONS] [<repository> [<refspec>...]]
 ```
 
 ## Description
 
 `libra push` transfers commits, trees, blobs, and tags from the local repository to a
 remote. When invoked without arguments it pushes the current branch to its configured
-upstream remote. When a `repository` and `refspec` are given, the specified local ref
-is pushed to the named remote ref.
+upstream remote. When a `repository` and one or more `refspec` values are given, all
+refspecs are validated before any network write and then sent in one receive-pack
+request. `--tags` pushes all local tags, and `--mirror` mirrors local branch/tag refs
+to the remote, including deletion of remote-only refs.
 
 The command negotiates with the remote to determine which objects are missing, packs them
 into a single pack file, and sends the pack along with a ref-update request. If the remote
 ref has diverged (non-fast-forward), the push is rejected unless `--force` is used.
+
+`--force-with-lease` is the safe alternative to `--force`: it allows a non-fast-forward
+update only if the remote ref still matches the OID you expected. By default the expected
+OID is your local remote-tracking ref (`refs/remotes/<remote>/<branch>`), so a force that
+would clobber a teammate's newer commit is rejected. The check runs after discovery and
+**before** any object collection, LFS upload, or pack send — a failed lease changes nothing
+on either side.
+
+`--porcelain` prints a stable, machine-readable line per ref instead of the human summary.
+
+`--follow-tags` appends missing annotated tags that point at commits reachable from the
+refs being pushed. Lightweight tags are not included; use `--tags` to push every local
+tag.
+
+`--push-option` (`-o`) sends server-side receive-pack options when the remote advertises
+the `push-options` capability. Options are validated before transmission: no NUL/newline
+bytes and at most 1024 bytes per option.
+
+`--signed[=true|false|if-asked]` uses Libra's vault-backed PGP key to build a Git push
+certificate when the remote advertises `push-cert`. `--signed=true` requires that
+capability and a configured vault signing key; `--signed=if-asked` silently falls back to
+an unsigned push when the remote does not ask for push certificates.
 
 LFS-tracked files are transparently uploaded during HTTP pushes without requiring a
 separate `lfs push` step.
@@ -28,11 +53,21 @@ separate `lfs push` step.
 
 | Flag / Argument | Description | Example |
 |-----------------|-------------|---------|
-| `<repository>` | Remote name (e.g. `origin`). Required when `<refspec>` is given. | `libra push origin main` |
-| `<refspec>` | Local ref or `<src>:<dst>` mapping. Required when `<repository>` is given. | `libra push origin feature:release` |
-| `-u`, `--set-upstream` | Set the upstream tracking branch after a successful push. Requires both `<repository>` and `<refspec>`. | `libra push -u origin feature-x` |
+| `<repository>` | Remote name (e.g. `origin`). Required when `<refspec>`, `--tags`, or `--mirror` is used. | `libra push origin main` |
+| `<refspec>...` | Local ref, `<src>:<dst>` mapping, or `:<dst>` deletion. Multiple values are sent as one update set. | `libra push origin main feature:release` |
+| `-u`, `--set-upstream` | Set the upstream tracking branch after a successful single branch push. | `libra push -u origin feature-x` |
 | `-f`, `--force` | Allow non-fast-forward updates that overwrite remote history. | `libra push --force origin main` |
+| `--force-with-lease[=<ref>[:<expect>]]` | Allow a non-fast-forward update only if the remote ref still matches the expected OID (the tracking-ref OID by default, or an explicit `<expect>`). Conflicts with `--force`. | `libra push --force-with-lease origin main` |
+| `--force-if-includes` | Accepted for `git push` compatibility; **no-op** (the lease check uses the tracking-ref OID only). | `libra push --force-with-lease --force-if-includes origin main` |
+| `--follow-tags` / `--no-follow-tags` | Push missing annotated tags reachable from the refs being pushed, or override `push.followTags=true` off. Lightweight tags are skipped. | `libra push --follow-tags origin main` |
+| `--signed[=true\|false\|if-asked]` | Send a vault-backed Git push certificate. `true` requires remote `push-cert`; `if-asked` signs only when advertised. | `libra push --signed=if-asked origin main` |
+| `-o`, `--push-option <option>` | Send a validated server-side push option. Requires remote `push-options`; repeatable. | `libra push -o ci.skip origin main` |
+| `--atomic` | Request all remote ref updates to succeed or fail together. The remote must advertise the `atomic` receive-pack capability; local remote-tracking refs are updated in one SQLite transaction. | `libra push --atomic origin main` |
+| `--thin` / `--no-thin` | Accepted for compatibility; **no-op** (the pack encoder always produces a self-contained pack). | `libra push --thin origin main` |
+| `--porcelain` | Machine-readable output: a `To <url>` header then `<flag>\t<from>:<to>\t<summary>` per ref. Conflicts with `--json`/`--machine`. | `libra push --porcelain origin main` |
 | `-n`, `--dry-run` | Perform negotiation and object collection but skip the actual upload. Reports what would be pushed. | `libra push --dry-run` |
+| `--tags` | Push all local `refs/tags/*` refs. Existing identical remote tags are skipped. | `libra push --tags origin` |
+| `--mirror` | Mirror local `refs/heads/*` and `refs/tags/*` to the remote, deleting remote-only branch/tag refs. Use with `--dry-run` to preview. | `libra push --mirror --dry-run origin` |
 | `--json` | Emit structured JSON envelope to stdout (global flag). | `libra push --json` |
 | `--machine` | Compact single-line JSON; suppresses progress (global flag). | `libra push --machine` |
 | `--quiet` | Suppress stdout summary; warnings still go to stderr. | `libra push --quiet` |
@@ -44,8 +79,20 @@ libra push
 libra push origin main
 libra push -u origin feature-x
 libra push --force origin main
+libra push --force-with-lease origin main
+libra push --force-with-lease=main:abc123 origin main
+libra push --follow-tags origin main
+libra push -o ci.skip origin main
+libra push --signed=if-asked origin main
+libra push --atomic origin main
+libra push --porcelain origin main
 libra push --dry-run
 libra push origin local_branch:release
+libra push origin main feature:release
+libra push origin :stale-branch
+libra push origin refs/tags/v1.0:refs/tags/v1.0
+libra push --tags origin
+libra push --mirror --dry-run origin
 libra push --json
 ```
 
@@ -67,6 +114,20 @@ New branch:
 To git@github.com:user/repo.git
  * [new branch]      feature-x -> feature-x
  12 objects pushed (48.0 KiB)
+```
+
+Delete remote ref:
+
+```text
+To git@github.com:user/repo.git
+ - [deleted]         stale-branch
+```
+
+New tag:
+
+```text
+To git@github.com:user/repo.git
+ * [new tag]      v1.0 -> v1.0
 ```
 
 Up-to-date:
@@ -123,6 +184,7 @@ Example:
     "url": "git@github.com:user/repo.git",
     "updates": [
       {
+        "kind": "update",
         "local_ref": "refs/heads/main",
         "remote_ref": "refs/heads/main",
         "old_oid": "abc1234...",
@@ -173,6 +235,7 @@ Dry-run:
     "url": "git@github.com:user/repo.git",
     "updates": [
       {
+        "kind": "update",
         "local_ref": "refs/heads/main",
         "remote_ref": "refs/heads/main",
         "old_oid": "abc1234...",
@@ -202,6 +265,7 @@ Force push:
     "url": "git@github.com:user/repo.git",
     "updates": [
       {
+        "kind": "update",
         "local_ref": "refs/heads/main",
         "remote_ref": "refs/heads/main",
         "old_oid": "abc1234...",
@@ -231,6 +295,7 @@ Set upstream:
     "url": "git@github.com:user/repo.git",
     "updates": [
       {
+        "kind": "update",
         "local_ref": "refs/heads/main",
         "remote_ref": "refs/heads/main",
         "old_oid": "abc1234...",
@@ -252,24 +317,70 @@ Set upstream:
 ### Schema Notes
 
 - `updates` lists each ref update; empty when up-to-date
+- `kind` is `update` for branch/tag updates and `delete` for remote ref deletion
+- delete updates use an empty `local_ref` and the all-zero object id as `new_oid`
 - `old_oid` is `null` for new branches (no previous remote ref)
 - `forced` is `true` when the update required `--force` (non-fast-forward)
 - `bytes_pushed` is the pack data size in bytes; `0` for dry-run
 - `lfs_files_uploaded` counts LFS objects transferred (HTTP transport only)
+- `atomic` is present and `true` when `--atomic` was requested
+- `force_with_lease` is present when `--force-with-lease` was requested (`all`, `<ref>`, or `<ref>:<expect>`)
 - `upstream_set` is non-null when `-u` / `--set-upstream` was used
 - `warnings` contains force push warnings or other advisory messages
 
+## Porcelain Output
+
+`--porcelain` prints a stable, script-parseable format (mutually exclusive with
+`--json`/`--machine`). The first line is `To <url>` (credential-redacted), then one
+tab-separated line per ref:
+
+```text
+<flag>\t<from>:<to>\t<summary>
+```
+
+The leading flag follows `git push --porcelain`:
+
+| Flag | Meaning | Example summary |
+|------|---------|-----------------|
+| ` ` (space) | Fast-forward update | `abc1234..def5678` |
+| `+` | Forced (non-fast-forward) update | `abc1234...def5678 (forced update)` |
+| `*` | New ref created | `[new branch]` / `[new tag]` |
+| `-` | Ref deleted | `[deleted]` |
+
+Rejected refs (`!`) do not appear here: a rejected push fails with a typed error on
+stderr (see Error Handling) rather than a partial-success porcelain report.
+
+## Force-with-lease
+
+`--force-with-lease` accepts three forms (matching Git):
+
+- bare `--force-with-lease` — every pushed ref must still match its remote-tracking
+  ref (`refs/remotes/<remote>/<branch>`).
+- `--force-with-lease=<ref>` — only `<ref>` is checked, against its tracking ref.
+- `--force-with-lease=<ref>:<expect>` — `<ref>` is checked against the explicit
+  `<expect>` OID (which may be abbreviated).
+
+A lease mismatch is reported as a non-fast-forward rejection (`LBR-CONFLICT-002`, exit
+`128`) before any object is collected, packed, or sent. `--force` and `--force-with-lease`
+are mutually exclusive (clap rejects the combination, exit `2`).
+
 ## Refspec Semantics
 
-Three forms are supported in this version:
+The following forms are supported:
 
 | Invocation | Meaning |
 |-----------|---------|
 | `libra push` | Push current branch to its configured tracking remote |
 | `libra push origin main` | Push local `refs/heads/main` to remote `refs/heads/main` |
 | `libra push origin local:release` | Push local `refs/heads/local` to remote `refs/heads/release` |
+| `libra push origin main feature:release` | Validate and send multiple ref updates together |
+| `libra push origin :feature` | Delete remote `refs/heads/feature` |
+| `libra push origin refs/tags/v1.0:refs/tags/v1.0` | Push a tag ref |
+| `libra push --tags origin` | Push all local tag refs |
+| `libra push --mirror --dry-run origin` | Preview mirroring branch/tag refs and deleting remote-only refs |
 
-Delete syntax (`:ref`), empty source (`src:`), and multi-refspec are not supported.
+Empty destination syntax (`src:`), malformed ref names, duplicate destination refs,
+and `--mirror` combined with explicit refspecs are rejected before any network write.
 Invalid forms return `InvalidRefspec` with exit 129.
 
 ## Design Rationale
@@ -285,24 +396,21 @@ restrictive stance: when you name a remote you must also name the ref. The bare
 This eliminates an entire class of "I accidentally pushed to production" mistakes without
 reducing the expressiveness of the command for scripted or agent-driven workflows.
 
-### Why no --tags?
+### Why keep local file remotes rejected?
 
-`git push --tags` pushes all local tags to the remote, which is a frequent source of
-namespace pollution in monorepos. Tags in Libra are intended to be managed explicitly
-via `libra tag` and pushed as part of normal refspec operations. A dedicated `--tags`
-flag would encourage bulk-pushing every local tag, conflicting with Libra's design goal
-of deliberate, minimal ref updates. If tag pushing is needed, the refspec syntax
-(`libra push origin v1.0:v1.0`) provides explicit control.
+Libra still treats local file remote push as an intentionally different surface. The
+C8 ref update expansion applies to network receive-pack transports; local-path remotes
+continue to fail closed to avoid undefined concurrent filesystem mutation semantics.
 
 ### Why integrated LFS push?
 
 Git LFS requires a separate binary (`git-lfs`) and a post-push hook to upload large files.
 This two-phase design means LFS failures can leave the remote in an inconsistent state
 where commits reference LFS pointers whose backing objects have not arrived. Libra detects
-LFS pointer blobs during the object-collection phase and uploads them inline during the
-HTTP push transaction. This ensures atomicity: either all objects (including LFS) arrive,
-or the push fails cleanly. The integration is transparent -- users do not need to install
-or configure a separate LFS tool.
+LFS pointer blobs during the object-collection phase and uploads them before the
+receive-pack ref update is sent. If an LFS upload fails, Libra aborts before changing
+remote refs; `--atomic` then covers the receive-pack ref update phase. The integration
+is transparent -- users do not need to install or configure a separate LFS tool.
 
 ## Parameter Comparison: Libra vs Git vs jj
 
@@ -312,10 +420,20 @@ or configure a separate LFS tool.
 | Named remote + ref | `libra push origin main` | `git push origin main` | `jj git push --remote origin --branch main` |
 | Set upstream | `libra push -u origin main` | `git push -u origin main` | N/A (jj tracks bookmarks) |
 | Force push | `libra push --force` | `git push --force` | `jj git push --allow-new` |
+| Lease-protected force | `libra push --force-with-lease` | `git push --force-with-lease` | N/A |
+| Force-if-includes | Accepted, no-op | `git push --force-if-includes` | N/A |
+| Atomic update | `libra push --atomic` | `git push --atomic` | N/A |
+| Porcelain output | `libra push --porcelain` | `git push --porcelain` | N/A |
+| Thin pack | Accepted, no-op | `git push --thin` | N/A |
+| Follow tags | `libra push --follow-tags` | `git push --follow-tags` | N/A |
+| Push options | `libra push -o <option>` (requires `push-options`) | `git push -o <option>` | N/A |
+| Signed push | `libra push --signed[=...]` (vault + `push-cert`) | `git push --signed[=...]` | N/A |
 | Dry-run | `libra push --dry-run` | `git push --dry-run` | `jj git push --dry-run` |
 | Refspec mapping | `libra push origin src:dst` | `git push origin src:dst` | N/A |
-| Delete remote branch | Not supported | `git push origin :branch` | `jj git push --delete branch` |
-| Push tags | Not supported | `git push --tags` | N/A |
+| Multiple refspecs | `libra push origin main feature:release` | `git push origin main feature:release` | N/A |
+| Delete remote branch | `libra push origin :branch` | `git push origin :branch` | `jj git push --delete branch` |
+| Push tags | `libra push --tags origin` | `git push --tags origin` | N/A |
+| Mirror preview | `libra push --mirror --dry-run origin` | `git push --mirror --dry-run origin` | N/A |
 | Structured output | `--json` / `--machine` | No | No |
 | Remote name suggestion | Fuzzy match "did you mean?" | No | No |
 | Error hints | Every error type has an actionable hint | Minimal | Minimal |

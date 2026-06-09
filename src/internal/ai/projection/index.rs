@@ -5,8 +5,9 @@
 //! `task -> run`, and `run -> patchset` cheap without changing the underlying
 //! object graph defined in `docs/agent/agent.md`.
 //!
-//! TODO(test): add CRUD coverage for the corresponding `ai_index_*` SeaORM
-//! entities when the projector starts materializing these rows.
+//! SeaORM materialization coverage for the corresponding `ai_index_*` tables
+//! lives with `ProjectionRebuilder`, where immutable formal objects are rebuilt
+//! into these row shapes before being persisted.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

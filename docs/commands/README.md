@@ -50,6 +50,7 @@ Every Libra command accepts the following global flags:
 | `libra diff` | | Compare differences between HEAD, index, working tree, or two revisions | [diff.md](diff.md) |
 | `libra blame` | | Trace each line of a file to its introducing commit | [blame.md](blame.md) |
 | `libra describe` | `desc` | Find the nearest reachable tag and format as `tag-N-g<abbrev>` | [describe.md](describe.md) |
+| `libra notes` | | Add, show, list, or remove notes attached to commits without modifying the commits themselves | [notes.md](notes.md) |
 | `libra grep` | | Search for patterns in tracked files with regex, revision, and index support | [grep.md](grep.md) |
 | `libra reflog` | | View, delete, or check existence of reference change logs | [reflog.md](reflog.md) |
 | `libra rev-list` | | List commit objects reachable from a revision | [rev-list.md](rev-list.md) |
@@ -62,7 +63,7 @@ Every Libra command accepts the following global flags:
 | `libra branch` | `br` | Create, delete, rename, list, and inspect branches | [branch.md](branch.md) |
 | `libra tag` | | Create, list, or delete lightweight and annotated tags | [tag.md](tag.md) |
 | `libra switch` | `sw` | Switch branches, create new branches, or detach HEAD with fuzzy suggestions | [switch.md](switch.md) |
-| `libra checkout` | | Branch compatibility surface; prefer `switch` for branches and `restore` for files | [checkout.md](checkout.md) |
+| `libra checkout` | | Branch compatibility surface and explicit `--` path-restore alias; prefer `switch` / `restore` | [checkout.md](checkout.md) |
 
 ### History Manipulation
 
@@ -114,8 +115,10 @@ Every Libra command accepts the following global flags:
 |---------|-------|-------------|-----|
 | `libra cat-file` | | Inspect Git objects and AI objects by type, size, or pretty-printed content | [cat-file.md](cat-file.md) |
 | `libra fsck` | | Verify the integrity of objects, refs, and index in a Libra repository | [fsck.md](fsck.md) |
+| `libra prune` | | Prune unreachable objects from the repository | [prune.md](prune.md) |
 | `libra hash-object` | | Compute Git-compatible blob object IDs from files or standard input | [hash-object.md](hash-object.md) |
 | `libra verify-pack` | | Validate pack index files against their pack archives | [verify-pack.md](verify-pack.md) |
+| `libra archive` | | Create tar, tar.gz, tar.bz2, or zip archives from committed tree snapshots | [archive.md](archive.md) |
 | `libra show-ref` | | List local refs (branches, tags, HEAD) and their object IDs | [show-ref.md](show-ref.md) |
 | `libra symbolic-ref` | | Read or update the symbolic HEAD ref | [symbolic-ref.md](symbolic-ref.md) |
 | `libra index-pack` | | Build a `.idx` pack index file for an existing `.pack` archive (hidden) | [index-pack.md](index-pack.md) |

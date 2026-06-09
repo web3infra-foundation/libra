@@ -1,5 +1,7 @@
 //! Mutable in-memory run state used while an orchestrated AI workflow is active.
 //!
+//! 编排 AI 工作流处于活动状态时使用的可变内存运行状态。
+//!
 //! Boundary: this state coordinates phase progress before persistence snapshots are
 //! written; it should not own durable serialization formats. Scheduler and runtime
 //! tests cover transition ordering and incomplete-run recovery boundaries.
@@ -123,6 +125,25 @@ impl RunStateStore {
         let mut runtime = self.dagrs_runtime.lock().await;
         runtime.completed_nodes = completed_nodes;
         runtime.total_nodes = total_nodes;
+    }
+
+    /// Record the authoritative final counters from dagrs's
+    /// `ExecutionReport`. Event delivery can lag or drop intermediate
+    /// progress under broadcast pressure; the report is the terminal
+    /// source of truth for the graph's completed-node count.
+    pub async fn record_graph_execution_report(
+        &self,
+        succeeded_nodes: usize,
+        failed_nodes: usize,
+        skipped_nodes: usize,
+        total_nodes: usize,
+    ) {
+        let completed_nodes = succeeded_nodes
+            .saturating_add(failed_nodes)
+            .saturating_add(skipped_nodes)
+            .min(total_nodes);
+        self.record_graph_progress(completed_nodes, total_nodes)
+            .await;
     }
 
     pub async fn increment_graph_completed(&self, total_nodes: usize) -> usize {
@@ -297,5 +318,18 @@ mod tests {
 
         let metered = HashSet::from([task_id, skipped_id]);
         assert_eq!(store.metered_result_count(&metered).await, 1);
+    }
+
+    #[tokio::test]
+    async fn execution_report_is_authoritative_for_final_graph_progress() {
+        let plan = test_plan();
+        let store = RunStateStore::new();
+        store.record_graph_progress(1, 4).await;
+
+        store.record_graph_execution_report(2, 1, 1, 4).await;
+
+        let snapshot = store.snapshot(&plan).await;
+        assert_eq!(snapshot.dagrs_runtime.completed_nodes, 4);
+        assert_eq!(snapshot.dagrs_runtime.total_nodes, 4);
     }
 }

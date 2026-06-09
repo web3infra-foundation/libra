@@ -1,6 +1,6 @@
 ## Pull 命令改进详细计划
 
-> **实施状态：✅ 已落地** — `PullError`、`PullOutput`、`run_pull()` / `render_pull_output()`、JSON / machine 聚合输出、fetch/merge phase detail 和显式错误码映射均已在当前代码库完成。
+> **实施状态：✅ 已落地** — `PullError`、`PullOutput`、`run_pull()` / `render_pull_output()`、JSON / machine 聚合输出、fetch/merge phase detail、显式错误码映射和 `--ff-only` 非快进拒绝均已在当前代码库完成。
 
 > 最后编写时间：2026-03-27
 
@@ -20,15 +20,16 @@
 - Pull 已从薄包装层改为 `run_pull()` + `render_pull_output()` 的聚合命令
 - 远程/refspec 自动检测已实现：从 `branch.<name>.remote` + `branch.<name>.merge` 推导
 - pull 复用 fetch / merge 的 typed helper，而不是调用子命令 `execute_safe()` 后解析文本
-- 当前 `merge` 仅稳定支持 `Already up to date.` 和 fast-forward；非 fast-forward / three-way merge 仍返回错误，而不是生成 merge commit 或冲突状态
+- 当前 `merge` 稳定支持 `Already up to date.`、fast-forward、single-head three-way merge 和冲突状态；`pull --ff-only` 在分叉历史进入 three-way 前拒绝并保持 HEAD/worktree 不变
 
 **基于当前代码的 Review 结论（2026-05-11 复核）：**
 
-- `PullOutput` 已聚合 fetch 和 merge 结果，`--json` / `--machine` 输出单一 `pull` envelope。
+- `PullOutput` 已聚合 fetch 和 merge/rebase 结果，`--json` / `--machine` 输出单一 `pull` envelope。
 - `PullError → CliError` 已显式映射；fetch / merge 失败会保留根因并追加 `phase=fetch|merge` detail。
 - `run_pull()` 复用 fetch / merge typed helper，结构化输出不解析子命令 stdout/stderr。
 - human 成功路径已有 pull 级摘要；结构化模式抑制子级装饰输出。
-- `--rebase`、three-way merge / 冲突结构化仍按非目标保留给 rebase / merge 专项，不阻塞当前 pull 改造验收。
+- `--rebase` 已复用 rebase 专项结果；three-way merge / 冲突结构化已由 C7 merge 专项补齐，并被 pull 复用。
+- `--ff-only` 已作为 C7 后续增量落地：fetch 正常执行，merge 阶段在非 fast-forward 时返回 `LBR-CONFLICT-002` 且带 `details.phase == "merge"`，不创建 merge state。
 
 ### 目标与非目标
 
@@ -38,31 +39,31 @@
 - 拆分执行层与渲染层：新增 `run_pull(args, output) -> Result<PullOutput, PullError>` 纯执行入口
 - 复用 `fetch.rs` / `merge.rs` 已落地的 typed helper 与静默子级输出边界
 
-> **依赖现状（已变更）**：原计划把"fetch / merge 的最小 typed helper"列为前置依赖；当前 `fetch` 第五批改造已整体落地（README #22），`fetch.rs` 已暴露 `FetchOutput` 顶层结果与可静默复用的内部接口；`merge` 命令的完整改造仍归 README 第六批（merge / rebase 状态机），本批 pull 只需要 merge 的"fast-forward / already-up-to-date / requires-manual-merge"最小接口，已可直接消费。**因此 pull 不再有任何阻塞性前置依赖**，剩余工作纯粹是 pull 自身的执行/渲染拆分与错误码补齐。
+> **依赖现状（已变更）**：原计划把"fetch / merge 的最小 typed helper"列为前置依赖；当前 `fetch` 第五批改造已整体落地（README #22），`fetch.rs` 已暴露 `FetchOutput` 顶层结果与可静默复用的内部接口；C7 后 `merge.rs` 已暴露 fast-forward / already-up-to-date / single-head three-way / conflict lifecycle 结果，pull 直接消费同一 merge engine。**因此 pull 不再有任何阻塞性前置依赖**，剩余工作纯粹是 pull 自身的执行/渲染拆分与错误码补齐。
 
-- `PullOutput` 聚合 fetch 和 merge 的结构化结果，但**只覆盖当前底层真正支持的 pull 语义**（fast-forward / already-up-to-date）
+- `PullOutput` 聚合 fetch 和 merge 的结构化结果，并覆盖当前底层真正支持的 pull 语义（fast-forward / already-up-to-date / clean three-way；冲突走错误 envelope）
 - JSON 输出只承诺当前底层确定可得的数据；拿不到稳定统计值的字段不进入首版 schema
 - fetch/merge 阶段的输出经 `OutputConfig` 协调，保证 `--json` / `--machine` 成功路径 stderr 默认保持干净
 - 错误传播添加阶段上下文（"during fetch"/"during merge"）
 - 补齐 `--help` EXAMPLES 段
 
 **本批非目标：**
-- **不引入 `--rebase`**。`pull --rebase` 需要 rebase 命令的配合，留后续批次
-- **不在本批实现 three-way merge、自动冲突解决或冲突结构化输出**。这些能力依赖 `merge` 命令自身改造，留到 README 第六批统一处理
+- **`--rebase` 已由 rebase 专项补齐**。当前 pull 可用 `--rebase` 重放 local-only commits，且与 `--ff-only` 互斥
+- **本批初版未实现 three-way merge；C7 已补齐**。当前 `pull` 在 non-fast-forward 时复用 `merge` 的 single-head three-way / 冲突 lifecycle，仍不实现 `--squash` 或自定义策略
 - **不通过解析子命令 stdout/stderr 实现结构化 pull**。pull 只接受内部 typed helper / 纯执行入口，不接受“先打印再反解析”的过渡实现
 - **不改变 fetch/merge 的核心算法**。本批只做 pull 作为组合命令的执行层/渲染层拆分，以及必要的内部 helper 暴露
-- **不引入 `--ff-only` / `--no-ff`**。merge 策略选项留 merge 命令改进时一并处理
+- **`--ff-only` 已作为 C7 后续增量补齐；`--no-ff` 仍非目标**。当前 pull 支持 fast-forward-only 拒绝语义，但不强制生成 merge commit
 
 ### 设计原则
 
 1. **Pull 是组合命令，聚合而非替代**：pull 的结构化输出聚合 fetch 和 merge 的结果，而不是重新实现它们的逻辑
 2. **执行层与渲染层拆分**：`execute_safe()` 调用 `run_pull()` 收集结构化结果，再渲染
 3. **阶段性错误上下文**：fetch/merge 失败时，pull 在外层添加阶段标识（"failed during fetch phase"/"failed during merge phase"），帮助用户定位问题
-4. **JSON 只承诺当前支持语义**：`PullOutput` 覆盖 fetch + fast-forward / already-up-to-date；不伪造 three-way merge / conflicted_files 这类当前拿不到的结果
+4. **JSON 只承诺当前支持语义**：`PullOutput` 覆盖 fetch + fast-forward / already-up-to-date / clean three-way；冲突路径走标准错误 envelope 并保留 `details.phase == "merge"`
 5. **首版 schema 只包含当前稳定可得字段**：若 `fetch` / `merge` 还不能稳定返回对象数、文件变更数等统计，则这些字段不进入首版 pull JSON 契约，留后续增量扩展
 6. **禁止解析子命令文本**：`run_pull()` 依赖 fetch/merge 的内部 typed helper；不得通过捕获 `execute_safe()` 的 stdout/stderr 再解析 human 文本来组装 JSON
 7. **结构化模式默认保持 stderr 干净**：`--json` / `--machine` 成功路径只输出一个 envelope；fetch/merge progress 和 human 装饰输出必须被 pull 的子级 `OutputConfig` 抑制
-8. **hint 覆盖常见失败**：no tracking info、not on branch、manual merge required 等场景提供可操作的 hint
+8. **hint 覆盖常见失败**：no tracking info、not on branch、merge conflict / dirty worktree / untracked overwrite 等场景提供可操作的 hint
 
 ### 特性 1：PullError typed error enum
 
@@ -85,9 +86,6 @@ pub enum PullError {
     #[error("pull failed during fetch phase: {0}")]
     Fetch(#[source] fetch::FetchError),
 
-    #[error("pull requires a non-fast-forward merge from '{upstream}'")]
-    ManualMergeRequired { upstream: String },
-
     #[error("pull failed during merge phase: {0}")]
     Merge(#[source] merge::PullMergeError),
 }
@@ -101,7 +99,6 @@ pub enum PullError {
 | `NoTrackingInfo` | `RepoStateInvalid` | 128 | `specify the remote and branch: 'libra pull <remote> <branch>'` + `or set upstream with 'libra branch --set-upstream-to=<remote>/<branch>'` |
 | `RemoteNotFound` | `CliInvalidTarget` | 129 | `use 'libra remote -v' to see configured remotes` |
 | `Fetch` | 保留 fetch 映射后的根因错误码 | 128 | 保留根因 hint + 添加 `details.phase == "fetch"` |
-| `ManualMergeRequired` | `ConflictOperationBlocked` | 128 | `run 'libra fetch' first if needed, then merge manually with 'libra merge <upstream>'` |
 | `Merge` | 保留 merge 映射后的根因错误码 | 128 | 保留根因 hint + 添加 `details.phase == "merge"` |
 
 > **阶段错误透传策略：** `Fetch` 和 `Merge` 先通过 fetch / merge 的 typed error mapper 转换为根因 `StableErrorCode`，再通过 `CliError::with_detail("phase", "...")` 附加阶段信息，而不是覆盖为新的 pull 专属错误码。这样 Agent 可以同时获取根因错误码和阶段上下文。
@@ -293,7 +290,7 @@ fast-forward happened.
 }
 ```
 
-**错误 JSON：manual merge required**
+**错误 JSON：merge conflict**
 
 ```json
 {
@@ -301,9 +298,10 @@ fast-forward happened.
   "error_code": "LBR-CONFLICT-002",
   "category": "conflict",
   "exit_code": 128,
-  "message": "pull requires a non-fast-forward merge from 'origin/main'",
+  "message": "merge has conflicts in README.md",
   "hints": [
-    "run 'libra fetch' first if needed, then merge manually with 'libra merge origin/main'"
+    "resolve conflicts, then run 'libra merge --continue'",
+    "or run 'libra merge --abort' to restore the pre-merge state"
   ],
   "details": {
     "phase": "merge"
@@ -333,10 +331,10 @@ fast-forward happened.
 
 | ID | 改进 | pull 中的具体落地 |
 |----|------|-----------------|
-| **A** | 退出码 `0/128/129` | 参数错误（无效 remote 名）→ exit `129`；运行时错误（网络失败、认证失败、manual merge required、no tracking info、not on branch）→ exit `128`；成功 / already-up-to-date → exit `0` |
+| **A** | 退出码 `0/128/129` | 参数错误（无效 remote 名）→ exit `129`；运行时错误（网络失败、认证失败、merge conflict、no tracking info、not on branch）→ exit `128`；成功 / already-up-to-date / clean three-way → exit `0` |
 | **B** | `--help` EXAMPLES | 见下方 EXAMPLES 段 |
 | **F** | 拼写纠错 | remote 名不匹配时提示 `did you mean '<closest>'?`（复用 push 的 fuzzy match 逻辑） |
-| **G** | Issues URL | 仅在 merge / fetch typed mapper 判定为内部不变式或仓库损坏时输出 Issues URL。网络、认证、manual-merge-required 等用户可修复问题不输出 |
+| **G** | Issues URL | 仅在 merge / fetch typed mapper 判定为内部不变式或仓库损坏时输出 Issues URL。网络、认证、merge conflict 等用户可修复问题不输出 |
 
 ### `--help` EXAMPLES 段
 
@@ -357,7 +355,7 @@ EXAMPLES:
   - `NotOnBranch`：detached HEAD 状态下 pull 返回对应错误
   - `NoTrackingInfo`：无 tracking 配置时返回对应错误 + hint
   - `RemoteNotFound`：指定不存在的 remote 名时返回对应错误
-  - `ManualMergeRequired`：本地与远端无法 fast-forward 时返回对应错误 + hint
+  - `Merge`：merge conflict / dirty worktree / untracked overwrite 保留 merge 根因错误码 + hint + `details.phase == "merge"`
 - **已覆盖fast-forward pull**：本地落后于远端时 pull 成功，HEAD 更新到最新 commit
 - **已覆盖already-up-to-date**：本地与远端一致时返回 up-to-date 结果
 - **已覆盖`--quiet` 静默**：成功路径下 stdout 为空
@@ -373,7 +371,7 @@ EXAMPLES:
 - **fast-forward `--json`**：`merge.strategy == "fast-forward"`，`merge.up_to_date == false`
 - **already-up-to-date `--json`**：`merge.up_to_date == true`，`merge.commit == null`
 - **`--machine pull`**：stdout 按 `\n` 分割后恰好 1 行非空行，可被 `serde_json::from_str()` 解析
-- **错误 JSON 格式**：no tracking info、not on branch、manual merge required 等场景返回结构化错误 JSON 到 stderr
+- **错误 JSON 格式**：no tracking info、not on branch、merge conflict 等场景返回结构化错误 JSON 到 stderr
 - **阶段上下文**：fetch 阶段失败的错误 JSON 包含 `details.phase == "fetch"`
 - **结构化输出隔离**：`--json` / `--machine` 成功路径下 stderr 不出现 fetch/merge 的 human 输出或 progress 文本
 
@@ -382,7 +380,7 @@ EXAMPLES:
 - `NotOnBranch` 返回 `LBR-REPO-003`
 - `NoTrackingInfo` 返回 `LBR-REPO-003`
 - `RemoteNotFound` 返回 `LBR-CLI-003`
-- `ManualMergeRequired` 返回 `LBR-CONFLICT-002`
+- merge conflict 返回 `LBR-CONFLICT-002`
 
 ### 质量验收
 
@@ -399,7 +397,7 @@ EXAMPLES:
 |------|---------|------|
 | `src/command/pull.rs` | **重构** | 从 81 行薄包装扩展为完整的组合命令；新增 `PullError` typed enum；新增 `PullOutput` / `PullFetchResult` / `PullMergeResult` 结构体；新增 `run_pull()` 纯执行入口；`PullError → CliError` 显式 `StableErrorCode` 映射；fetch/merge 子级 `OutputConfig` 隔离；补齐 `--help` EXAMPLES |
 | `src/command/fetch.rs` | **复用已落地能力** | 已具备 `FetchOutput` 顶层结果（fetch.md 第五批已整体落地）；pull 直接消费现有 typed 接口与静默 child-output 边界，无需在本批额外改造 fetch |
-| `src/command/merge.rs` | **复用最小接口** | merge 当前稳定支持 `Already up to date` / fast-forward / `requires-manual-merge` 三态，pull 已可消费；three-way merge 与冲突结构化输出由 README 第六批 merge / rebase 状态机改造交付，不在本批 pull 范围 |
+| `src/command/merge.rs` | **复用 merge engine** | merge 当前稳定支持 `Already up to date` / fast-forward / single-head three-way / conflict lifecycle，pull 直接消费同一 typed 接口 |
 | `tests/command/pull_test.rs` | **已扩展** | 覆盖 `PullError` 变体、fast-forward、up-to-date、quiet、错误码和阶段上下文场景 |
 | `tests/command/pull_json_test.rs` | **已新增** | JSON schema 完整性、fast-forward / up-to-date JSON、machine 单行和结构化输出隔离验证 |
 | `tests/command/mod.rs` | **已修改** | 注册 `pull_json_test` 与 `pull_test` |

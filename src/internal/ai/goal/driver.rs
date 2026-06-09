@@ -30,17 +30,17 @@
 //!
 //! # Mapping `ToolLoopTurn` to `GoalTurnOutcome`
 //!
-//! Tool calls (`update_goal_progress` / `submit_goal_complete`) are
-//! recorded by their handlers; by the time the loop returns, the
-//! supervisor's input is purely "did the model produce final text?".
-//! [`goal_turn_outcome_from_tool_loop_turn`] therefore emits
-//! [`GoalTurnOutcome::FinalTextWithoutClaim`] for non-empty final
-//! text (the rule-4 path that must not let the session idle) and
-//! [`GoalTurnOutcome::Progressing`] for an empty final text (the
-//! model called tools and produced no closing message). Richer
-//! outcomes — `ProgressUpdate`, `CompletionClaim`, the various
-//! `Blocked*` arms — are produced inside the tool handlers and
-//! routed through the supervisor on subsequent driver invocations.
+//! Goal protocol tool calls (`update_goal_progress` /
+//! `submit_goal_complete`) are thin validators: they do not write
+//! Goal events directly. When the loop returns,
+//! [`goal_turn_outcome_from_tool_loop_turn`] recovers the latest
+//! successful Goal tool call from the tool-loop history and maps it
+//! into [`GoalTurnOutcome::ProgressUpdate`] or
+//! [`GoalTurnOutcome::CompletionClaim`]. If no successful Goal tool
+//! call exists, non-empty final text maps to
+//! [`GoalTurnOutcome::FinalTextWithoutClaim`] (rule 4: final text
+//! alone must not idle the session) and empty final text maps to
+//! [`GoalTurnOutcome::Progressing`].
 
 /// Default iteration cap for the supervisor-driven continuation
 /// loop. The supervisor itself per opencode.md rule 6 emits
@@ -61,7 +61,9 @@ use crate::internal::ai::{
     agent::runtime::{
         ToolLoopConfig, ToolLoopObserver, ToolLoopTurn, run_tool_loop_with_history_and_observer,
     },
-    completion::{CompletionError, CompletionModel, CompletionUsage, Message},
+    completion::{
+        AssistantContent, CompletionError, CompletionModel, CompletionUsage, Message, UserContent,
+    },
     tools::ToolRegistry,
 };
 
@@ -225,6 +227,10 @@ where
 /// `Progressing { last_assistant_text: None }` (the model only made
 /// tool calls; the loop ended via terminal-tool or max-turns).
 pub fn goal_turn_outcome_from_tool_loop_turn(turn: &ToolLoopTurn) -> GoalTurnOutcome {
+    if let Some(outcome) = latest_goal_tool_outcome(&turn.history) {
+        return outcome;
+    }
+
     let trimmed = turn.final_text.trim();
     if trimmed.is_empty() {
         GoalTurnOutcome::Progressing {
@@ -237,9 +243,74 @@ pub fn goal_turn_outcome_from_tool_loop_turn(turn: &ToolLoopTurn) -> GoalTurnOut
     }
 }
 
+fn latest_goal_tool_outcome(history: &[Message]) -> Option<GoalTurnOutcome> {
+    let successful_results = successful_tool_results(history);
+    for message in history.iter().rev() {
+        let Message::Assistant { content, .. } = message else {
+            continue;
+        };
+        let parts = content.iter().collect::<Vec<_>>();
+        for part in parts.into_iter().rev() {
+            let AssistantContent::ToolCall(call) = part else {
+                continue;
+            };
+            let tool_name = call.function.name.as_str();
+            if !matches!(tool_name, "submit_goal_complete" | "update_goal_progress") {
+                continue;
+            }
+            if !successful_results
+                .iter()
+                .any(|(id, name)| id == &call.id && name == tool_name)
+            {
+                continue;
+            }
+            return match tool_name {
+                "submit_goal_complete" => serde_json::from_value(call.function.arguments.clone())
+                    .ok()
+                    .map(|claim| GoalTurnOutcome::CompletionClaim { claim }),
+                "update_goal_progress" => serde_json::from_value(call.function.arguments.clone())
+                    .ok()
+                    .map(|record| GoalTurnOutcome::ProgressUpdate { record }),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
+fn successful_tool_results(history: &[Message]) -> Vec<(String, String)> {
+    history
+        .iter()
+        .filter_map(|message| {
+            let Message::User { content } = message else {
+                return None;
+            };
+            Some(content.iter().filter_map(|part| {
+                let UserContent::ToolResult(result) = part else {
+                    return None;
+                };
+                if tool_result_succeeded(&result.result) {
+                    Some((result.id.clone(), result.name.clone()))
+                } else {
+                    None
+                }
+            }))
+        })
+        .flatten()
+        .collect()
+}
+
+fn tool_result_succeeded(result: &serde_json::Value) -> bool {
+    result
+        .get("success")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::internal::ai::completion::{Function, OneOrMany, ToolCall, ToolResult};
 
     /// Non-empty final text routes through `FinalTextWithoutClaim`
     /// (rule 4) so the supervisor records a synthetic
@@ -274,6 +345,118 @@ mod tests {
                 assert!(last_assistant_text.is_none());
             }
             other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn successful_submit_goal_complete_tool_call_maps_to_completion_claim() {
+        let arguments = serde_json::json!({
+            "summary": "done",
+            "completed_criteria": ["criterion-a"],
+            "evidence_refs": [
+                {
+                    "criterion_id": "criterion-a",
+                    "target": {"kind": "tool_call", "call_id": "tc-cargo-test"},
+                    "description": "cargo test passed"
+                }
+            ],
+            "verification": [
+                {"criterion_id": "criterion-a", "method": "cargo test", "passed": true}
+            ],
+            "residual_risks": []
+        });
+        let turn = ToolLoopTurn {
+            final_text: "Completion claim submitted".to_string(),
+            history: vec![
+                tool_call_message("call-submit", "submit_goal_complete", arguments),
+                tool_result_message("call-submit", "submit_goal_complete", true),
+            ],
+        };
+
+        match goal_turn_outcome_from_tool_loop_turn(&turn) {
+            GoalTurnOutcome::CompletionClaim { claim } => {
+                assert_eq!(claim.summary, "done");
+                assert_eq!(claim.completed_criteria, vec!["criterion-a"]);
+            }
+            other => panic!("expected completion claim, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failed_submit_goal_complete_tool_result_falls_back_to_final_text() {
+        let turn = ToolLoopTurn {
+            final_text: "Completion claim failed shape validation".to_string(),
+            history: vec![
+                tool_call_message(
+                    "call-submit",
+                    "submit_goal_complete",
+                    serde_json::json!({"summary": ""}),
+                ),
+                tool_result_message("call-submit", "submit_goal_complete", false),
+            ],
+        };
+
+        match goal_turn_outcome_from_tool_loop_turn(&turn) {
+            GoalTurnOutcome::FinalTextWithoutClaim { text } => {
+                assert_eq!(text, "Completion claim failed shape validation");
+            }
+            other => panic!("expected final text fallback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn successful_update_goal_progress_tool_call_maps_to_progress_update() {
+        let turn = ToolLoopTurn {
+            final_text: "Progress recorded".to_string(),
+            history: vec![
+                tool_call_message(
+                    "call-progress",
+                    "update_goal_progress",
+                    serde_json::json!({
+                        "summary": "added the test",
+                        "completed_criteria": ["test-added"],
+                        "evidence_refs": [],
+                        "next_steps": ["run cargo test"]
+                    }),
+                ),
+                tool_result_message("call-progress", "update_goal_progress", true),
+            ],
+        };
+
+        match goal_turn_outcome_from_tool_loop_turn(&turn) {
+            GoalTurnOutcome::ProgressUpdate { record } => {
+                assert_eq!(record.summary, "added the test");
+                assert_eq!(record.completed_criteria, vec!["test-added"]);
+            }
+            other => panic!("expected progress update, got {other:?}"),
+        }
+    }
+
+    fn tool_call_message(id: &str, name: &str, arguments: serde_json::Value) -> Message {
+        Message::Assistant {
+            id: None,
+            reasoning_content: None,
+            content: OneOrMany::One(AssistantContent::ToolCall(ToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                function: Function {
+                    name: name.to_string(),
+                    arguments,
+                },
+            })),
+        }
+    }
+
+    fn tool_result_message(id: &str, name: &str, success: bool) -> Message {
+        Message::User {
+            content: OneOrMany::One(UserContent::ToolResult(ToolResult {
+                id: id.to_string(),
+                name: name.to_string(),
+                result: serde_json::json!({
+                    "content": if success { "ok" } else { "failed" },
+                    "success": success,
+                }),
+            })),
         }
     }
 }

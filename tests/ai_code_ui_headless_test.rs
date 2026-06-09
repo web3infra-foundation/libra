@@ -21,7 +21,7 @@ use libra::internal::ai::{
     tools::{
         ToolRegistryBuilder,
         context::{UserInputQuestion, UserInputRequest, UserInputResponse},
-        handlers::ReadFileHandler,
+        handlers::{PlanHandler, ReadFileHandler, SubmitPlanDraftHandler},
     },
     web::{
         code_ui::{
@@ -88,6 +88,8 @@ fn build_runtime_with_persistence(
                 Arc::new(TracingAuditSink),
             ))
             .register("read_file", Arc::new(ReadFileHandler))
+            .register("update_plan", Arc::new(PlanHandler))
+            .register("submit_plan_draft", Arc::new(SubmitPlanDraftHandler))
             .build(),
     );
 
@@ -109,6 +111,30 @@ fn build_runtime_with_persistence(
         user_input_tx,
         exec_approval_tx,
     )
+}
+
+/// The non-Codex headless runtime must expose a writable web-headless snapshot
+/// immediately, not the legacy read-only `web-ui-placeholder` snapshot.
+#[tokio::test(flavor = "multi_thread")]
+async fn initial_snapshot_is_writable_non_placeholder_runtime() {
+    let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
+    let (runtime, _, _) = build_runtime("basic_chat", workdir.path().to_path_buf());
+
+    let snapshot = runtime.snapshot().await;
+
+    assert_eq!(snapshot.status, CodeUiSessionStatus::Idle);
+    assert_eq!(snapshot.provider.provider, "fake");
+    assert_eq!(snapshot.provider.mode.as_deref(), Some("web-headless"));
+    assert!(snapshot.capabilities.message_input);
+    assert!(snapshot.capabilities.streaming_text);
+    assert!(snapshot.capabilities.tool_calls);
+    assert!(
+        snapshot
+            .transcript
+            .iter()
+            .all(|entry| entry.id != "web-ui-placeholder"),
+        "headless web-only must not expose the read-only placeholder transcript",
+    );
 }
 
 /// Submitting a plain message must produce an assistant transcript entry that
@@ -246,21 +272,104 @@ async fn submit_message_persists_resumable_session_snapshot() {
     panic!("session store did not receive the completed headless turn before deadline");
 }
 
-/// The headless runtime advertises only the surfaces it can actually deliver
-/// in v0; locking these down catches accidental capability drift (e.g.
-/// turning on `interactiveApprovals` before the InteractionPanel routing is
-/// wired into the headless path).
+/// The headless runtime advertises the Phase 3 v1 browser surfaces it can
+/// actually deliver. Locking these down catches accidental capability drift
+/// between the Rust runtime and the Web UI feature gates.
 #[test]
-fn headless_capabilities_match_phase3_v0_contract() {
+fn headless_capabilities_match_phase3_v1_contract() {
     let caps = headless_capabilities();
     assert!(caps.message_input);
     assert!(caps.streaming_text);
     assert!(caps.tool_calls);
-    assert!(!caps.plan_updates);
-    assert!(!caps.patchsets);
+    assert!(caps.plan_updates);
+    assert!(caps.patchsets);
     assert!(caps.interactive_approvals);
     assert!(caps.structured_questions);
     assert!(caps.provider_session_resume);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_plan_tool_call_projects_plan_into_snapshot() {
+    let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
+    let (runtime, _, _) = build_runtime("plan_update", workdir.path().to_path_buf());
+
+    runtime
+        .submit_message("please update the plan".to_string())
+        .await
+        .expect("headless submit should accept a prompt that triggers update_plan");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let snapshot = runtime.snapshot().await;
+        if let Some(plan) = snapshot
+            .plans
+            .iter()
+            .find(|plan| plan.id == "call_update_plan_1")
+            && plan.status == "completed"
+        {
+            assert_eq!(plan.summary.as_deref(), Some("Project the live plan"));
+            assert_eq!(plan.steps.len(), 2);
+            assert_eq!(plan.steps[0].step, "Inspect Web UI contract");
+            assert_eq!(plan.steps[0].status, "completed");
+            assert_eq!(plan.steps[1].step, "Pin snapshot projection");
+            assert_eq!(plan.steps[1].status, "in_progress");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+
+    let snapshot = runtime.snapshot().await;
+    panic!(
+        "update_plan call did not project a completed plan into snapshot: {:?}",
+        snapshot.plans
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_plan_draft_tool_call_projects_draft_plan_into_snapshot() {
+    let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
+    let (runtime, _, _) = build_runtime("plan_draft", workdir.path().to_path_buf());
+
+    runtime
+        .submit_message("please draft an execution plan".to_string())
+        .await
+        .expect("headless submit should accept a prompt that triggers submit_plan_draft");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let snapshot = runtime.snapshot().await;
+        if let Some(plan) = snapshot
+            .plans
+            .iter()
+            .find(|plan| plan.id == "call_submit_plan_draft_1")
+            && plan.status == "completed"
+        {
+            assert_eq!(
+                plan.summary.as_deref(),
+                Some("Draft from headless planning tool"),
+            );
+            assert_eq!(plan.title.as_deref(), Some("Draft execution plan"));
+            assert_eq!(plan.steps.len(), 2);
+            assert_eq!(
+                plan.steps[0].step,
+                "Inspect the current Code UI planning contract",
+            );
+            assert_eq!(plan.steps[0].status, "pending");
+            assert_eq!(
+                plan.steps[1].step,
+                "Expose planning draft projection in the browser",
+            );
+            assert_eq!(plan.steps[1].status, "pending");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+
+    let snapshot = runtime.snapshot().await;
+    panic!(
+        "submit_plan_draft call did not project a completed draft plan into snapshot: {:?}",
+        snapshot.plans
+    );
 }
 
 /// `cancel_turn` must finalize the streaming assistant entry — leaving it

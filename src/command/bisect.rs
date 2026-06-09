@@ -1,5 +1,7 @@
 //! Binary-search regression hunting (`libra bisect`).
 //!
+//! 二分搜索回归猎取（`libra bisect`）。
+//!
 //! Implements the full `bisect` subcommand family (`start`, `bad`, `good`,
 //! `reset`, `skip`, `log`) by walking the commit graph between a known "good"
 //! ancestor and a known "bad" descendant.
@@ -374,6 +376,7 @@ EXAMPLES:
     libra bisect start                         Begin a session; mark bad/good in subsequent steps
     libra bisect start <bad>                   Begin a session with the bad commit pre-marked
     libra bisect start <bad> --good <good>     Begin a session with both bounds pre-marked
+    libra bisect start <bad> <good1> <good2>   Pre-mark one bad and multiple good commits
     libra bisect bad                           Mark the current HEAD as bad
     libra bisect good                          Mark the current HEAD as good
     libra bisect skip                          Skip the current commit and continue
@@ -522,7 +525,7 @@ pub async fn execute_safe(bisect_cmd: Bisect, output: &OutputConfig) -> CliResul
 
 async fn run_bisect(bisect_cmd: Bisect) -> CliResult<BisectOutput> {
     match bisect_cmd {
-        Bisect::Start { bad, good } => run_bisect_start(bad, good).await,
+        Bisect::Start { revs, good } => run_bisect_start(revs, good).await,
         Bisect::Bad { rev } => run_bisect_bad(rev).await,
         Bisect::Good { rev } => run_bisect_good(rev).await,
         Bisect::Reset { rev } => run_bisect_reset(rev).await,
@@ -792,7 +795,7 @@ async fn is_bare_repository() -> CliResult<bool> {
 /// tests/command/bisect_test.rs:115;
 /// tests::test_bisect_start_already_in_progress_fails in
 /// tests/command/bisect_test.rs:370.
-async fn run_bisect_start(bad: Option<String>, good: Option<String>) -> CliResult<BisectOutput> {
+async fn run_bisect_start(revs: Vec<String>, good: Option<String>) -> CliResult<BisectOutput> {
     // Bare repositories have no working tree - bisect requires checkout operations
     if is_bare_repository().await? {
         return Err(CliError::fatal("bisect cannot be run in a bare repository")
@@ -832,33 +835,24 @@ async fn run_bisect_start(bad: Option<String>, good: Option<String>) -> CliResul
         Head::Detached(_) => None,
     };
 
-    // Parse optional bad and good commits
-    let bad_hash = if let Some(bad_ref) = bad {
-        Some(resolve_ref(&bad_ref).await?)
-    } else {
-        None
-    };
-
-    let good_hash = if let Some(good_ref) = good {
-        Some(resolve_ref(&good_ref).await?)
-    } else {
-        None
-    };
+    // Parse positional bounds: first rev is the bad commit, the rest are good
+    // commits; an explicit `--good` is appended after the positional goods.
+    let (bad_hash, good_hashes) = parse_start_bounds(&revs, good).await?;
 
     let mut state = BisectState {
         orig_head,
         orig_head_name,
         bad: bad_hash,
-        good: good_hash.map(|h| vec![h]).unwrap_or_default(),
+        good: good_hashes,
         current: None,
         skipped: vec![],
         steps: None,
         completed: false,
     };
 
-    // If both bad and good are provided, validate bounds before saving state
-    // This prevents leaving orphaned state if bounds are invalid
-    if bad_hash.is_some() && good_hash.is_some() {
+    // If both a bad and at least one good are provided, validate bounds before
+    // saving state. This prevents leaving orphaned state if bounds are invalid.
+    if state.bad.is_some() && !state.good.is_empty() {
         // Validate that there are commits to test between bad and good
         if let Err(e) = find_next_bisect_point(&state).await {
             // Don't save state for invalid bounds - return error immediately
@@ -868,7 +862,7 @@ async fn run_bisect_start(bad: Option<String>, good: Option<String>) -> CliResul
 
     state.save().await.map_err(CliError::fatal)?;
 
-    if bad_hash.is_some() && good_hash.is_none() {
+    if state.bad.is_some() && state.good.is_empty() {
         return Ok(BisectOutput::Start {
             status: "waiting_for_good".to_string(),
             bad: hash_to_string_opt(state.bad),
@@ -882,7 +876,7 @@ async fn run_bisect_start(bad: Option<String>, good: Option<String>) -> CliResul
     }
 
     // If good is provided but no bad, wait for bad
-    if good_hash.is_some() && bad_hash.is_none() {
+    if !state.good.is_empty() && state.bad.is_none() {
         return Ok(BisectOutput::Start {
             status: "waiting_for_bad".to_string(),
             bad: hash_to_string_opt(state.bad),
@@ -896,7 +890,7 @@ async fn run_bisect_start(bad: Option<String>, good: Option<String>) -> CliResul
     }
 
     // If both bad and good are provided, find the first bisect point (already validated above)
-    if bad_hash.is_some() && good_hash.is_some() {
+    if state.bad.is_some() && !state.good.is_empty() {
         match find_next_bisect_point(&state)
             .await
             .map_err(CliError::fatal)?
@@ -964,6 +958,34 @@ async fn run_bisect_start(bad: Option<String>, good: Option<String>) -> CliResul
         remaining: None,
         steps: state.steps,
     })
+}
+
+/// Parse the positional `start` arguments into the bad boundary and good
+/// boundaries for [`run_bisect_start`].
+///
+/// `revs[0]` (if present) is resolved as the bad commit; the remaining
+/// positionals are resolved as good commits, in order. An explicit `--good`
+/// value is appended after the positional goods. Order is preserved and
+/// duplicates are not removed — this mirrors `git bisect start <bad> <good>...`,
+/// which simply records each boundary. Each ref is resolved via [`resolve_ref`];
+/// an unresolvable ref returns a fatal error before any state is written.
+async fn parse_start_bounds(
+    revs: &[String],
+    good: Option<String>,
+) -> CliResult<(Option<ObjectHash>, Vec<ObjectHash>)> {
+    let mut iter = revs.iter();
+    let bad = match iter.next() {
+        Some(bad_ref) => Some(resolve_ref(bad_ref).await?),
+        None => None,
+    };
+    let mut goods = Vec::new();
+    for good_ref in iter {
+        goods.push(resolve_ref(good_ref).await?);
+    }
+    if let Some(good_ref) = good.as_deref() {
+        goods.push(resolve_ref(good_ref).await?);
+    }
+    Ok((bad, goods))
 }
 
 /// Handle `bisect bad` — mark `rev` (or HEAD) as containing the bug.
@@ -1477,10 +1499,15 @@ async fn run_bisect_run(cmd: Vec<String>) -> CliResult<BisectOutput> {
             });
         }
 
-        let head_short = Head::current_commit()
-            .await
-            .map(|h| h.to_string()[..7].to_string())
-            .unwrap_or_else(|| "(no HEAD)".to_string());
+        // During an in-progress bisect HEAD must point at the checked-out
+        // candidate; a missing HEAD means the session state is corrupt, so fail
+        // with a diagnostic rather than silently labelling it "(no HEAD)".
+        let head = Head::current_commit().await.ok_or_else(|| {
+            CliError::fatal("bisect is in progress but HEAD could not be resolved")
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("the bisect state may be corrupt; run 'libra bisect reset'")
+        })?;
+        let head_short = head.to_string()[..7].to_string();
 
         let status = Command::new(executable).args(args).status().map_err(|e| {
             CliError::fatal(format!("failed to spawn `{executable}`: {e}"))
@@ -1520,7 +1547,7 @@ async fn run_bisect_run(cmd: Vec<String>) -> CliResult<BisectOutput> {
             });
         }
 
-        let remaining = count_commits_to_test(&next_state).await.unwrap_or(0);
+        let remaining = map_remaining_count(count_commits_to_test(&next_state).await)?;
         if remaining == 0 {
             return Err(BisectError::NoMoreCandidates.into());
         }
@@ -1531,9 +1558,11 @@ async fn run_bisect_run(cmd: Vec<String>) -> CliResult<BisectOutput> {
 /// concrete commit it points at. Errors out fatally with the underlying
 /// resolver message if it cannot be resolved.
 async fn resolve_ref(ref_str: &str) -> CliResult<ObjectHash> {
-    util::get_commit_base(ref_str)
-        .await
-        .map_err(|e| CliError::fatal(format!("Cannot resolve '{}': {}", ref_str, e)))
+    util::get_commit_base(ref_str).await.map_err(|e| {
+        CliError::fatal(format!("Cannot resolve '{}': {}", ref_str, e))
+            .with_stable_code(StableErrorCode::CliInvalidTarget)
+            .with_hint("check the revision and try again")
+    })
 }
 
 /// Move HEAD to `commit_hash` in detached mode and lay the matching tree on
@@ -1852,4 +1881,38 @@ async fn count_commits_to_test(state: &BisectState) -> Result<usize, String> {
 
     let testable = get_testable_commits(&bad, &state.good, &state.skipped).await?;
     Ok(testable.len())
+}
+
+/// Convert a candidate-count result into a fatal error on failure.
+///
+/// `count_commits_to_test` can fail (e.g. an object becomes unreadable during
+/// the walk). Silently treating such a failure as `0` would masquerade as
+/// convergence and end the bisect with a wrong "no more candidates" result, so
+/// a count error is surfaced as a fatal [`StableErrorCode::RepoStateInvalid`].
+/// `Ok(n)` (including `Ok(0)`) passes through unchanged; the caller converts
+/// `0` into [`BisectError::NoMoreCandidates`].
+fn map_remaining_count(result: Result<usize, String>) -> CliResult<usize> {
+    result.map_err(|e| {
+        CliError::fatal(e)
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+            .with_hint("the bisect state may be corrupt; run 'libra bisect reset'")
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `map_remaining_count` must surface a count failure as a fatal
+    /// RepoStateInvalid error, pass `Ok(0)` through (the caller converts it to
+    /// NoMoreCandidates), and pass `Ok(n)` through unchanged.
+    #[test]
+    fn map_remaining_count_classifies_all_branches() {
+        let err = map_remaining_count(Err("walk failed".to_string()))
+            .expect_err("a count failure must be fatal, not silently treated as 0");
+        assert_eq!(err.stable_code(), StableErrorCode::RepoStateInvalid);
+
+        assert_eq!(map_remaining_count(Ok(0)).unwrap(), 0);
+        assert_eq!(map_remaining_count(Ok(7)).unwrap(), 7);
+    }
 }
