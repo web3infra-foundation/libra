@@ -54,7 +54,11 @@ pub(crate) fn scenario_stash_bisect_worktree(ctx: &mut ScenarioCtx<'_>) -> Resul
     fs::write(repo.join("tracked.txt"), "staged\n").context("write staged stash fixture")?;
     ctx.command(&["add", "tracked.txt"], repo.clone(), true)?;
     fs::write(repo.join("tracked.txt"), "unstaged\n").context("write unstaged stash fixture")?;
-    let keep_index = ctx.command(&["--json", "stash", "push", "--keep-index"], repo.clone(), true)?;
+    let keep_index = ctx.command(
+        &["--json", "stash", "push", "--keep-index"],
+        repo.clone(),
+        true,
+    )?;
     assert_json_ok(&keep_index, "stash")?;
     assert_stdout_contains(&keep_index, "kept_index")?;
     let kept_index =
@@ -71,17 +75,117 @@ pub(crate) fn scenario_stash_bisect_worktree(ctx: &mut ScenarioCtx<'_>) -> Resul
     ctx.command(&["bisect", "log"], repo.clone(), true)?;
     ctx.command(&["bisect", "reset"], repo.clone(), true)?;
 
+    // Multi-good positional surface (git parity for start <bad> <good1> <good2>...)
+    // Exercises the Vec revs path added for the bisect improvement plan.
+    // Use a depth guaranteed by the fixture at this point (after prior bisect reset).
+    ctx.command(&["bisect", "start", "HEAD", "HEAD~1"], repo.clone(), true)?;
+    ctx.command(&["bisect", "log"], repo.clone(), true)?;
+    ctx.command(&["bisect", "reset"], repo.clone(), true)?;
+
     let wt = ctx.run_dir.join("wt").to_string_lossy().to_string();
-    ctx.command(&["worktree", "add", &wt], repo.clone(), true)?;
-    let list = ctx.command(&["worktree", "list"], repo.clone(), true)?;
-    assert_stdout_contains(&list, &wt)?;
-    ctx.command(&["worktree", "lock", &wt], repo.clone(), true)?;
+    ctx.command(
+        &["worktree", "add", "-b", "workflow-linked", &wt],
+        repo.clone(),
+        true,
+    )?;
+    let wt_display = Path::new(&wt)
+        .canonicalize()
+        .with_context(|| format!("canonicalize worktree path {wt}"))?
+        .to_string_lossy()
+        .to_string();
+    let list = ctx.command(&["worktree", "list", "--verbose"], repo.clone(), true)?;
+    assert_stdout_contains(&list, &wt_display)?;
+    assert_stdout_contains(&list, "[HEAD ")?;
+    let porcelain = ctx.command(&["worktree", "list", "--porcelain"], repo.clone(), true)?;
+    assert_stdout_contains(&porcelain, &format!("worktree {wt_display}"))?;
+    assert_stdout_contains(&porcelain, "HEAD ")?;
+    assert_not_contains(&porcelain, "branch ")?;
+    assert_not_contains(&porcelain, "detached")?;
+    ctx.command(
+        &["worktree", "lock", &wt, "--reason", "integration smoke"],
+        repo.clone(),
+        true,
+    )?;
+    let locked_porcelain = ctx.command(&["worktree", "list", "--porcelain"], repo.clone(), true)?;
+    assert_stdout_contains(&locked_porcelain, "locked")?;
     ctx.command(&["worktree", "unlock", &wt], repo.clone(), true)?;
-    ctx.command(&["worktree", "remove", &wt], repo.clone(), true)?;
-    if !Path::new(&wt).exists() {
+    let moved = ctx.run_dir.join("wt-moved").to_string_lossy().to_string();
+    ctx.command(&["worktree", "move", &wt, &moved], repo.clone(), true)?;
+    ctx.command(&["worktree", "remove", &moved], repo.clone(), true)?;
+    if !Path::new(&moved).exists() {
         bail!("worktree remove unexpectedly deleted directory by default");
     }
-    ctx.command(&["worktree", "prune"], repo.clone(), true)?;
+
+    let stale = ctx.run_dir.join("wt-stale").to_string_lossy().to_string();
+    ctx.command(&["worktree", "add", &stale], repo.clone(), true)?;
+    let stale_display = Path::new(&stale)
+        .canonicalize()
+        .with_context(|| format!("canonicalize stale worktree path {stale}"))?
+        .to_string_lossy()
+        .to_string();
+    fs::remove_dir_all(&stale).with_context(|| format!("remove stale worktree {stale}"))?;
+    let prune_dry_run = ctx.command(&["worktree", "prune", "--dry-run"], repo.clone(), true)?;
+    assert_stdout_contains(&prune_dry_run, &stale_display)?;
+    let prune_expire = ctx.command(
+        &["worktree", "prune", "--verbose", "--expire", "now"],
+        repo.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&prune_expire, &stale_display)?;
+
+    let no_checkout = ctx
+        .run_dir
+        .join("wt-no-checkout")
+        .to_string_lossy()
+        .to_string();
+    ctx.command(
+        &[
+            "worktree",
+            "add",
+            "--no-checkout",
+            "--lock",
+            "--reason",
+            "integration no checkout",
+            &no_checkout,
+        ],
+        repo.clone(),
+        true,
+    )?;
+    if Path::new(&no_checkout).join("tracked.txt").exists() {
+        bail!("worktree add --no-checkout unexpectedly restored tracked.txt");
+    }
+    ctx.command(
+        &["worktree", "remove", "-f", "-f", &no_checkout],
+        repo.clone(),
+        true,
+    )?;
+    if !Path::new(&no_checkout).exists() {
+        bail!("worktree remove -f -f without --delete-dir unexpectedly deleted directory");
+    }
+
+    let dirty_delete = ctx
+        .run_dir
+        .join("wt-dirty-delete")
+        .to_string_lossy()
+        .to_string();
+    ctx.command(&["worktree", "add", &dirty_delete], repo.clone(), true)?;
+    fs::write(Path::new(&dirty_delete).join("dirty.txt"), "dirty\n")
+        .context("write dirty worktree fixture")?;
+    ctx.command(
+        &[
+            "worktree",
+            "remove",
+            "--delete-dir",
+            "--force",
+            &dirty_delete,
+        ],
+        repo.clone(),
+        true,
+    )?;
+    if Path::new(&dirty_delete).exists() {
+        bail!("worktree remove --delete-dir --force did not delete dirty worktree");
+    }
+
     ctx.command(&["fsck", "--connectivity-only"], repo.clone(), true)?;
     Ok(())
 }

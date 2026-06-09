@@ -43,7 +43,9 @@ pub fn append_version_control_trailer(msg: &str) -> String {
 ///   from the message body and is mandated by the Git object format.
 ///
 /// Boundary conditions:
-/// - `msg` is not trimmed; trailing whitespace inside the message is preserved as-is.
+/// - Trailing whitespace at the end of `msg` is trimmed before the
+///   `Version-control-by` trailer is appended. Interior whitespace is
+///   preserved as-is.
 /// - `gpg_sig` is treated as opaque text — no parsing is performed.
 pub fn format_commit_msg(msg: &str, gpg_sig: Option<&str>) -> String {
     let msg = append_version_control_trailer(msg);
@@ -55,6 +57,18 @@ pub fn format_commit_msg(msg: &str, gpg_sig: Option<&str>) -> String {
             format!("{gpg}\n\n{msg}")
         }
     }
+}
+
+fn strip_version_control_trailer(message: &str) -> &str {
+    let trimmed = message.trim_end();
+    let Some(without_trailer) = trimmed.strip_suffix(VERSION_CONTROL_BY_TRAILER) else {
+        return trimmed;
+    };
+
+    let without_trailer = without_trailer.trim_end();
+    without_trailer
+        .strip_suffix("\n\n")
+        .unwrap_or(without_trailer)
 }
 
 /// Split a stored commit body into `(message, optional_signature)`.
@@ -88,10 +102,12 @@ pub fn parse_commit_msg(msg_gpg: &str) -> (&str, Option<&str>) {
             .expect("SIG_PATTERN must capture the signature body")
             .as_str();
 
-        let msg = &msg_gpg[signature.len() + GPGSIG_PREFIX_LEN..].trim_start();
+        let msg = strip_version_control_trailer(
+            msg_gpg[signature.len() + GPGSIG_PREFIX_LEN..].trim_start(),
+        );
         (msg, Some(signature))
     } else {
-        (msg_gpg.trim_start(), None)
+        (strip_version_control_trailer(msg_gpg.trim_start()), None)
     }
 }
 
@@ -175,10 +191,11 @@ mod tests {
             format_commit_msg("hello", None),
             format!("\nhello\n\n{VERSION_CONTROL_BY_TRAILER}"),
         );
-        // Inner / trailing whitespace in the message is preserved.
+        // Interior whitespace is preserved; trailing whitespace before
+        // the generated trailer is normalized.
         assert_eq!(
             format_commit_msg("a\nb ", None),
-            format!("\na\nb \n\n{VERSION_CONTROL_BY_TRAILER}"),
+            format!("\na\nb\n\n{VERSION_CONTROL_BY_TRAILER}"),
         );
     }
 
@@ -215,6 +232,20 @@ mod tests {
         assert_eq!(parse_commit_msg("subject"), ("subject", None));
     }
 
+    #[test]
+    fn parse_commit_msg_hides_version_control_trailer() {
+        assert_eq!(
+            parse_commit_msg(&format!("subject\n\n{VERSION_CONTROL_BY_TRAILER}")),
+            ("subject", None)
+        );
+        assert_eq!(
+            parse_commit_msg(&format!(
+                "subject\n\nSigned-off-by: Alice <alice@example.com>\n\n{VERSION_CONTROL_BY_TRAILER}"
+            )),
+            ("subject\n\nSigned-off-by: Alice <alice@example.com>", None)
+        );
+    }
+
     /// A `gpgsig`-prefixed PGP signature block round-trips: the parsed
     /// signature is the BEGIN..END block (without the `gpgsig ` prefix)
     /// and the message is the trimmed remainder. Built via
@@ -225,7 +256,7 @@ mod tests {
         let sig = "-----BEGIN PGP SIGNATURE-----\nabcDEF123\n-----END PGP SIGNATURE-----";
         let body = format_commit_msg("the subject", Some(&format!("gpgsig {sig}")));
         let (msg, parsed_sig) = parse_commit_msg(&body);
-        assert_eq!(msg, format!("the subject\n\n{VERSION_CONTROL_BY_TRAILER}"));
+        assert_eq!(msg, "the subject");
         assert_eq!(parsed_sig, Some(sig));
     }
 

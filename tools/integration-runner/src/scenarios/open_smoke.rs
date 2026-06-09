@@ -1,7 +1,8 @@
-use super::prelude::*;
 use std::process::Output;
 
 use serde_json::Value;
+
+use super::prelude::*;
 
 pub(crate) fn scenario_open_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
     let repo = ctx.repo("repo");
@@ -25,7 +26,11 @@ pub(crate) fn scenario_open_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
         "repo",
         "github",
     )?;
-    let branch_open = ctx.command(&["--json", "open", "-b", "main", "origin"], repo.clone(), true)?;
+    let branch_open = ctx.command(
+        &["--json", "open", "-b", "main", "origin"],
+        repo.clone(),
+        true,
+    )?;
     assert_open_json(
         &branch_open,
         "origin",
@@ -34,11 +39,7 @@ pub(crate) fn scenario_open_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
         "github",
     )?;
 
-    ctx.command(
-        &["config", "open.platform", "gitlab"],
-        repo.clone(),
-        true,
-    )?;
+    ctx.command(&["config", "open.platform", "gitlab"], repo.clone(), true)?;
     let gitlab_commit = ctx.command(
         &["--json", "open", "-c", "a1b2c3d", "origin"],
         repo.clone(),
@@ -52,11 +53,7 @@ pub(crate) fn scenario_open_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
         "gitlab",
     )?;
 
-    ctx.command(
-        &["config", "open.platform", "custom"],
-        repo.clone(),
-        true,
-    )?;
+    ctx.command(&["config", "open.platform", "custom"], repo.clone(), true)?;
     ctx.command(
         &[
             "config",
@@ -79,7 +76,11 @@ pub(crate) fn scenario_open_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
         "custom",
     )?;
 
-    let bad_open = ctx.command(&["--json", "open", "nonexistent-remote"], repo.clone(), false)?;
+    let bad_open = ctx.command(
+        &["--json", "open", "nonexistent-remote"],
+        repo.clone(),
+        false,
+    )?;
     assert_json_error_code(&bad_open, "LBR-CLI-003")?;
     ctx.command(&["fsck", "--connectivity-only"], repo, true)?;
     Ok(())
@@ -94,8 +95,8 @@ fn assert_open_json(
 ) -> Result<()> {
     assert_json_ok(output, "open")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let value: Value =
-        serde_json::from_str(stdout.trim()).with_context(|| format!("parse open JSON: {stdout}"))?;
+    let value: Value = serde_json::from_str(stdout.trim())
+        .with_context(|| format!("parse open JSON: {stdout}"))?;
     let data = value
         .get("data")
         .context("open JSON envelope missing data")?;

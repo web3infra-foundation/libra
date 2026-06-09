@@ -61,7 +61,11 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
         );
     }
     assert_json_ok(
-        &ctx.command(&["--json", "rev-parse", "--verify", "HEAD"], repo.clone(), true)?,
+        &ctx.command(
+            &["--json", "rev-parse", "--verify", "HEAD"],
+            repo.clone(),
+            true,
+        )?,
         "rev-parse",
     )?;
     let quiet_verify = ctx.command(
@@ -80,6 +84,42 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     }
     let top = ctx.command(&["rev-parse", "--show-toplevel"], repo.clone(), true)?;
     assert_stdout_contains(&top, repo.to_string_lossy().as_ref())?;
+    let git_dir = ctx.command(&["rev-parse", "--git-dir"], repo.clone(), true)?;
+    assert_stdout_contains(&git_dir, ".libra")?;
+    let prefix = ctx.command(&["rev-parse", "--show-prefix"], repo.join("src"), true)?;
+    if stdout_trim(&prefix) != "src/" {
+        bail!(
+            "rev-parse --show-prefix from src returned {:?}, expected src/",
+            stdout_trim(&prefix)
+        );
+    }
+    let cdup = ctx.command(&["rev-parse", "--show-cdup"], repo.join("src"), true)?;
+    if stdout_trim(&cdup) != "../" {
+        bail!(
+            "rev-parse --show-cdup from src returned {:?}, expected ../",
+            stdout_trim(&cdup)
+        );
+    }
+    let inside_work = ctx.command(&["rev-parse", "--is-inside-work-tree"], repo.clone(), true)?;
+    if stdout_trim(&inside_work) != "true" {
+        bail!("rev-parse --is-inside-work-tree returned non-true output");
+    }
+    let inside_storage = ctx.command(
+        &["rev-parse", "--is-inside-git-dir"],
+        repo.join(".libra"),
+        true,
+    )?;
+    if stdout_trim(&inside_storage) != "true" {
+        bail!("rev-parse --is-inside-git-dir in .libra returned non-true output");
+    }
+    let sq_quote = ctx.command(
+        &["rev-parse", "--sq-quote", "-x", "a b"],
+        ctx.run_dir.clone(),
+        true,
+    )?;
+    if stdout_trim(&sq_quote) != "'-x' 'a b'" {
+        bail!("rev-parse --sq-quote returned {:?}", stdout_trim(&sq_quote));
+    }
     let rev_list = ctx.command(&["rev-list", "HEAD"], repo.clone(), true)?;
     assert_stdout_contains(&rev_list, &head_id)?;
     let show = ctx.command(&["show", "--no-patch", "HEAD"], repo.clone(), true)?;
@@ -88,7 +128,11 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     assert_stdout_contains(&guide, "object docs")?;
     ctx.command(&["show-ref", "--head"], repo.clone(), true)?;
     ctx.command(&["show-ref", "--heads"], repo.clone(), true)?;
-    ctx.command(&["show-ref", "--exists", "refs/heads/main"], repo.clone(), true)?;
+    ctx.command(
+        &["show-ref", "--exists", "refs/heads/main"],
+        repo.clone(),
+        true,
+    )?;
     let verified_show_ref = ctx.command(
         &["show-ref", "--verify", "refs/heads/main"],
         repo.clone(),
@@ -183,6 +227,15 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     let skipped = ctx.command(&["rev-list", "--skip", "1", "HEAD"], repo.clone(), true)?;
     assert_stdout_contains(&skipped, &head_id)?;
     let range_spec = format!("{head_id}..HEAD");
+    let parsed_range = ctx.command(&["rev-parse", &range_spec], repo.clone(), true)?;
+    assert_stdout_contains(&parsed_range, &second_id)?;
+    assert_stdout_contains(&parsed_range, &format!("^{head_id}"))?;
+    let parsed_range_json =
+        ctx.command(&["--json", "rev-parse", &range_spec], repo.clone(), true)?;
+    assert_json_ok(&parsed_range_json, "rev-parse")?;
+    assert_stdout_contains(&parsed_range_json, "\"values\"")?;
+    let quoted = ctx.command(&["rev-parse", "--sq", "HEAD", "HEAD~1"], repo.clone(), true)?;
+    assert_stdout_contains(&quoted, &format!("'{second_id}'"))?;
     let range = ctx.command(&["rev-list", &range_spec], repo.clone(), true)?;
     let range_stdout = stdout_trim(&range);
     if range_stdout != second_id {
@@ -212,10 +265,28 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
         true,
     )?;
     assert_stdout_contains(&timestamp, &second_id)?;
+    let objects = ctx.command(
+        &["rev-list", "--objects", "-n", "1", "HEAD"],
+        repo.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&objects, &second_id)?;
+    assert_stdout_contains(&objects, "docs/rev-list.md")?;
     assert_json_ok(
-        &ctx.command(&["--json", "rev-list", "--count", "HEAD"], repo.clone(), true)?,
+        &ctx.command(
+            &["--json", "rev-list", "--count", "HEAD"],
+            repo.clone(),
+            true,
+        )?,
         "rev-list",
     )?;
+    let json_objects = ctx.command(
+        &["--json", "rev-list", "--objects", "-n", "1", "HEAD"],
+        repo.clone(),
+        true,
+    )?;
+    assert_json_ok(&json_objects, "rev-list")?;
+    assert_stdout_contains(&json_objects, "\"objects\"")?;
     ctx.command(&["fsck"], repo.clone(), true)?;
     ctx.command(&["fsck", "--connectivity-only"], repo.clone(), true)?;
     ctx.command(&["fsck", &head_id], repo.clone(), true)?;
@@ -232,7 +303,12 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     assert_stdout_contains(&dereferenced_tag, "refs/tags/v-object")?;
     assert_stdout_contains(&dereferenced_tag, "refs/tags/v-object^{}")?;
     let verified_dereferenced_tag = ctx.command(
-        &["show-ref", "--verify", "--dereference", "refs/tags/v-object"],
+        &[
+            "show-ref",
+            "--verify",
+            "--dereference",
+            "refs/tags/v-object",
+        ],
         repo.clone(),
         true,
     )?;

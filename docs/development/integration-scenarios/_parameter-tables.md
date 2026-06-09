@@ -109,12 +109,16 @@
 | `bisect bad` / `bisect good <rev>` | `cli.stash-bisect-worktree` | 会话状态推进并可由 log/view 观察 |
 | `bisect log` / `bisect view` | `cli.stash-bisect-worktree` | 当前会话和候选状态可输出 |
 | `bisect reset` | `cli.stash-bisect-worktree` | 结束会话并恢复原 HEAD |
-| `worktree add <path>` | `cli.stash-bisect-worktree` | linked worktree 被创建并登记 |
-| `worktree list` | `cli.stash-bisect-worktree` | 主 worktree 和 linked worktree 均可列出 |
+| `worktree add -b <branch> <path>` | `cli.stash-bisect-worktree` | shared branch 被创建，linked worktree 被创建并登记 |
+| `worktree add --no-checkout --lock --reason <text> <path>` | `cli.stash-bisect-worktree` | linked worktree 仅创建目录与 `.libra` 链接，不恢复 tracked 文件，并立即登记为 locked |
+| `worktree list --verbose` | `cli.stash-bisect-worktree` | 主 worktree 和 linked worktree 均可列出，并显示 shared HEAD 短 hash |
+| `worktree list --porcelain` | `cli.stash-bisect-worktree` | 输出稳定 `worktree` / `HEAD` / `locked` 记录，不输出 Git per-worktree `branch` / `detached` |
 | `worktree lock --reason` / `unlock` | `cli.stash-bisect-worktree` | 锁状态和 reason 可观察并可解除 |
 | `worktree move <src> <dest>` | `cli.stash-bisect-worktree` | 登记路径和目录路径同步移动 |
 | `worktree remove <path>` | `cli.stash-bisect-worktree` | 默认注销登记但保留目录 |
-| `worktree prune` | `cli.stash-bisect-worktree` | 清理 stale 登记路径可执行 |
+| `worktree remove -f -f <path>` | `cli.stash-bisect-worktree` | locked worktree 需要双 force 才能注销；未带 `--delete-dir` 时仍保留目录 |
+| `worktree remove --delete-dir --force <path>` | `cli.stash-bisect-worktree` | dirty linked worktree 需显式 force 才能删盘 |
+| `worktree prune --dry-run` / `--verbose --expire now` | `cli.stash-bisect-worktree` | dry-run 仅报告 stale 登记，expire 只清理目录缺失条目 |
 
 
 
@@ -122,8 +126,9 @@
 
 | 参数或子命令 | 场景 ID | 关键断言 |
 |---|---|---|
-| `tag <name>` / `tag -m <msg>` | `cli.tag-basic` | 轻量和 annotated tag 均可创建、列出、解析 |
-| `tag -l` / `tag -l -n` / `tag -f` / `tag -d` | `cli.tag-basic` | 列表、注释摘要、强制更新和删除路径覆盖 |
+| `tag <name>` / `tag -m <msg>` / `tag -F <file>` | `cli.tag-basic` | 轻量、inline-message annotated 和 file-message annotated tag 均可创建、列出、解析 |
+| `tag -l` / `tag -l -n` / `tag --points-at` / `tag --contains` / `tag --merged` / `tag --sort` | `cli.tag-basic` | 列表、注释摘要、target/history/merged 过滤和 refname 排序覆盖 |
+| `tag -f` / `tag -d <name>...` / JSON batch delete partial failure | `cli.tag-basic` | 强制更新、批量删除、部分失败 JSON `deleted`/`failed` 契约覆盖 |
 | `merge <branch>` | `cli.merge-rebase-cherry-revert-smoke` | fast-forward 与三方无冲突 merge 均可观察 |
 | `merge --find-renames[=<n>]` | `cli.merge-rebase-cherry-revert-smoke` | 相似度阈值控制 rename+edit 是否自动合并 |
 | `merge --squash --continue` | `cli.merge-rebase-cherry-revert-smoke` | 与 lifecycle action 组合必须被拒绝 |
@@ -131,7 +136,7 @@
 | `rebase <upstream>` | `cli.merge-rebase-cherry-revert-smoke` | topic 提交重放到新 base |
 | `rebase --continue` | `cli.merge-rebase-cherry-revert-smoke` | 无会话时明确失败；冲突续跑场景另行补充 |
 | `cherry-pick <commit>` | `cli.merge-rebase-cherry-revert-smoke` | 指定提交修改被重放到当前分支 |
-| `revert <commit>` | `cli.merge-rebase-cherry-revert-smoke` | 创建反向提交并撤销目标修改 |
+| `revert <commit>` / `A..B`, `revert --continue` / `--abort` | `cli.merge-rebase-cherry-revert-smoke` | 创建反向提交、范围回滚并验证空会话控制失败 |
 | `grep` / `grep -F/-i/-n/-c/-l/-e/-f/--tree` | `cli.grep-blame-describe-shortlog` | 工作区、pathspec、pattern file 和历史 tree 搜索可观察 |
 | `blame` / `blame -L` | `cli.grep-blame-describe-shortlog` | 行级作者、提交和范围限制可观察 |
 | `describe --tags/--always/--abbrev` | `cli.grep-blame-describe-shortlog` | tag 描述和 hash fallback 可观察 |

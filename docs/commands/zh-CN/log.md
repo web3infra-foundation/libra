@@ -184,6 +184,16 @@ libra log -G 'debug_.*' -- src/
 
 `--merges` 等价于 `--min-parents=2`，`--no-merges` 等价于 `--max-parents=1`。`-S` 匹配字面字符串出现次数变化，`-G` 匹配新增/删除 diff 行的正则。
 
+### `--follow`
+
+跨 rename 追踪单个文件历史。`--follow` 必须且只能搭配一个文件 pathspec；缺少路径或传入多个 pathspec 会以 `LBR-CLI-002`（退出码 129）失败。rename 检测使用与 Libra rename-aware diff/merge 路径一致的 50% 行相似度阈值。human `--name-status` 输出会渲染为 `R<score>  old  new`；JSON 输出保持稳定的 `added` / `modified` / `deleted` 文件状态集合。
+
+```bash
+libra log --follow renamed.txt
+libra log --follow --name-status renamed.txt
+libra --json log --follow renamed.txt
+```
+
 ### `[PATHS...]`
 
 将 diff 输出限制到指定路径。与 `-p`、`--name-only`、`--name-status` 或 `--stat` 一起使用。
@@ -206,6 +216,7 @@ libra log --author alice --since 2026-01-01
 libra log --grep '^fix' -n 20
 libra log --pretty="format:%h %s"
 libra log main..feature -- src/
+libra log --follow renamed.txt
 libra log -S 'debug_flag' -- src/
 libra log --name-status src/
 libra --json log -n 1

@@ -72,9 +72,9 @@ C1（Audit P0）
 | stash | partial | push / pop / list / apply / drop / show / branch / clear supported; create / store unsupported (see [declined.md#d8-stash-create](../../improvement/compatibility/declined.md#d8) / [#d9-stash-store](../../improvement/compatibility/declined.md#d9)) |
 | lfs | partial | built-in Libra LFS command; uses `.libra_attributes`, not Git LFS filters/hooks |
 | log | supported | |
-| shortlog | supported | |
-| show | supported | |
-| show-ref | supported | |
+| shortlog | partial | `-n`/`-s`/`-e`, `-c`/`--committer`, `--no-merges`, `--since`/`--until`, single revision, `A..B` ranges, root `.mailmap`, `-w` wrapping, limited `--format`, and JSON/`--machine` supported. Unsupported: stdin log parsing, pathspecs, multi-ref traversal, `--group`, advanced range syntax, and config-backed mailmap sources |
+| show | partial | multiple objects, common `--pretty` presets, limited `--format`, and blob safety supported; full Git format mini-language, `-U`, and `diff.noprefix` deferred |
+| show-ref | partial | `--verify`, `--exists`, `-d`, and Git-style pattern matching supported; `--exclude-existing` and abbreviation width controls deferred |
 | branch | supported | |
 | tag | supported | |
 | commit | supported | |

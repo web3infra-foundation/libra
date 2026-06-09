@@ -561,6 +561,8 @@ async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
             soft: false,
             mixed: false,
             hard: true,
+            merge: false,
+            keep: false,
             pathspecs: vec![],
             pathspec_from_file: None,
             pathspec_file_nul: false,
@@ -874,6 +876,8 @@ async fn test_reset_soft() {
         soft: true,
         mixed: false,
         hard: false,
+        merge: false,
+        keep: false,
         pathspecs: vec![],
         pathspec_from_file: None,
         pathspec_file_nul: false,
@@ -921,6 +925,8 @@ async fn test_reset_mixed() {
         soft: false,
         mixed: false, // false means default (mixed)
         hard: false,
+        merge: false,
+        keep: false,
         pathspecs: vec![],
         pathspec_from_file: None,
         pathspec_file_nul: false,
@@ -972,6 +978,8 @@ async fn test_reset_hard() {
         soft: false,
         mixed: false,
         hard: true,
+        merge: false,
+        keep: false,
         pathspecs: vec![],
         pathspec_from_file: None,
         pathspec_file_nul: false,
@@ -1083,6 +1091,8 @@ async fn test_reset_mixed_same_target_resets_index_without_moving_head() {
             soft: false,
             mixed: true,
             hard: false,
+            merge: false,
+            keep: false,
             pathspecs: vec![],
             pathspec_from_file: None,
             pathspec_file_nul: false,
@@ -1166,6 +1176,8 @@ async fn test_reset_hard_same_target_restores_worktree_and_removes_staged_additi
             soft: false,
             mixed: false,
             hard: true,
+            merge: false,
+            keep: false,
             pathspecs: vec![],
             pathspec_from_file: None,
             pathspec_file_nul: false,
@@ -1281,6 +1293,8 @@ async fn test_reset_hard_removes_paths_tracked_only_by_head_tree() {
             soft: false,
             mixed: false,
             hard: true,
+            merge: false,
+            keep: false,
             pathspecs: vec![],
             pathspec_from_file: None,
             pathspec_file_nul: false,
@@ -1322,6 +1336,8 @@ async fn test_reset_with_head_reference() {
         soft: false,
         mixed: true,
         hard: false,
+        merge: false,
+        keep: false,
         pathspecs: vec![],
         pathspec_from_file: None,
         pathspec_file_nul: false,
@@ -1368,6 +1384,8 @@ async fn test_reset_on_branch() {
                 soft: true,
                 mixed: false,
                 hard: false,
+                merge: false,
+                keep: false,
                 pathspecs: vec![],
                 pathspec_from_file: None,
                 pathspec_file_nul: false,
@@ -1452,6 +1470,8 @@ async fn test_reset_hard_skips_ignored_directories() {
         soft: false,
         mixed: false,
         hard: true,
+        merge: false,
+        keep: false,
         pathspecs: vec![],
         pathspec_from_file: None,
         pathspec_file_nul: false,
@@ -1472,6 +1492,133 @@ async fn test_reset_hard_skips_ignored_directories() {
         fs::read_to_string(&ignored_file).unwrap(),
         "ignored file content\n"
     );
+}
+
+fn commit_file_via_cli(repo: &std::path::Path, path: &str, content: &str, message: &str) {
+    fs::write(repo.join(path), content).expect("failed to write committed file");
+    let output = run_libra_command(&["add", path], repo);
+    assert_cli_success(&output, "failed to add committed file");
+    let output = run_libra_command(&["commit", "-m", message, "--no-verify"], repo);
+    assert_cli_success(&output, "failed to commit file");
+}
+
+#[test]
+fn reset_merge_moves_head_when_target_ne_head() {
+    let repo = create_committed_repo_via_cli();
+    commit_file_via_cli(repo.path(), "second.txt", "second\n", "second");
+
+    let output = run_libra_command(&["--json", "reset", "--merge", "HEAD~1"], repo.path());
+    assert_cli_success(&output, "reset --merge HEAD~1 should succeed");
+    let json = parse_json_stdout(&output);
+
+    assert_eq!(json["data"]["mode"], "merge");
+    assert!(
+        repo.path().join("second.txt").metadata().is_err(),
+        "merge reset should remove paths absent from the target tree"
+    );
+}
+
+#[test]
+fn reset_merge_preserves_unstaged_when_target_eq_head() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nlocal\n")
+        .expect("failed to write unstaged change");
+
+    let output = run_libra_command(&["--json", "reset", "--merge", "HEAD"], repo.path());
+    assert_cli_success(&output, "reset --merge HEAD should preserve unstaged work");
+    let json = parse_json_stdout(&output);
+
+    assert_eq!(json["data"]["mode"], "merge");
+    assert_eq!(
+        fs::read_to_string(repo.path().join("tracked.txt")).unwrap(),
+        "tracked\nlocal\n"
+    );
+}
+
+#[test]
+fn reset_keep_preserves_unconflicted_local_changes() {
+    let repo = create_committed_repo_via_cli();
+    commit_file_via_cli(repo.path(), "second.txt", "second\n", "second");
+    fs::write(repo.path().join("tracked.txt"), "tracked\nlocal\n")
+        .expect("failed to write local change");
+
+    let output = run_libra_command(&["--json", "reset", "--keep", "HEAD~1"], repo.path());
+    assert_cli_success(
+        &output,
+        "reset --keep should preserve non-overlapping local work",
+    );
+    let json = parse_json_stdout(&output);
+
+    assert_eq!(json["data"]["mode"], "keep");
+    assert_eq!(
+        fs::read_to_string(repo.path().join("tracked.txt")).unwrap(),
+        "tracked\nlocal\n"
+    );
+    assert!(
+        repo.path().join("second.txt").metadata().is_err(),
+        "keep reset should remove clean paths absent from the target"
+    );
+}
+
+#[test]
+fn reset_merge_abort_leaves_index_and_worktree_unchanged() {
+    let repo = create_committed_repo_via_cli();
+    commit_file_via_cli(repo.path(), "tracked.txt", "second\n", "second");
+    fs::write(repo.path().join("tracked.txt"), "local\n").expect("failed to write local change");
+
+    let output = run_libra_command(&["--json", "reset", "--merge", "HEAD~1"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("expected JSON error report");
+
+    assert_eq!(report["error_code"], "LBR-CONFLICT-002");
+    assert_eq!(report["details"]["conflict_files"][0], "tracked.txt");
+    assert_eq!(
+        fs::read_to_string(repo.path().join("tracked.txt")).unwrap(),
+        "local\n",
+        "conflicted merge reset must not rewrite the worktree"
+    );
+}
+
+#[test]
+fn reset_keep_abort_reports_conflict_files() {
+    let repo = create_committed_repo_via_cli();
+    commit_file_via_cli(repo.path(), "tracked.txt", "second\n", "second");
+    fs::write(repo.path().join("tracked.txt"), "local\n").expect("failed to write local change");
+
+    let output = run_libra_command(&["--json", "reset", "--keep", "HEAD~1"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("expected JSON error report");
+
+    assert_eq!(report["error_code"], "LBR-CONFLICT-002");
+    assert_eq!(report["details"]["conflict_files"][0], "tracked.txt");
+}
+
+#[test]
+fn reset_merge_with_pathspec_is_usage_error() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(
+        &["--json", "reset", "--merge", "HEAD", "--", "tracked.txt"],
+        repo.path(),
+    );
+    assert_eq!(output.status.code(), Some(129));
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("expected JSON error report");
+    assert_eq!(report["error_code"], "LBR-CLI-002");
+}
+
+#[test]
+fn reset_keep_with_pathspec_is_usage_error() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(
+        &["--json", "reset", "--keep", "HEAD", "--", "tracked.txt"],
+        repo.path(),
+    );
+    assert_eq!(output.status.code(), Some(129));
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("expected JSON error report");
+    assert_eq!(report["error_code"], "LBR-CLI-002");
 }
 
 // ---------------------------------------------------------------------------

@@ -342,12 +342,19 @@ pub async fn list() -> Result<Vec<Tag>, ListTagError> {
 /// Deletes a tag reference from the repository.
 pub async fn delete(name: &str) -> Result<(), anyhow::Error> {
     let db_conn = get_db_conn_instance().await;
+    delete_with_conn(&db_conn, name).await
+}
+
+pub async fn delete_with_conn<C>(db_conn: &C, name: &str) -> Result<(), anyhow::Error>
+where
+    C: ConnectionTrait,
+{
     let full_ref_name = format!("{}{}", TAG_REF_PREFIX, name);
 
     let result = reference::Entity::delete_many()
         .filter(reference::Column::Name.eq(full_ref_name))
         .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
-        .exec(&db_conn)
+        .exec(db_conn)
         .await?;
 
     if result.rows_affected == 0 {

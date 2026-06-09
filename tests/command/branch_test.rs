@@ -952,6 +952,7 @@ async fn test_rename_current_branch() {
         force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
 
@@ -1339,6 +1340,7 @@ async fn test_branch_delete_safe() {
         force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
 
@@ -1365,6 +1367,7 @@ async fn test_branch_delete_safe() {
         force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
 
@@ -1414,6 +1417,7 @@ async fn test_branch_delete_safe() {
         force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
 
@@ -1423,6 +1427,7 @@ async fn test_branch_delete_safe() {
         force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
 
@@ -1572,6 +1577,7 @@ async fn test_branch_contains_commit_filter() {
         force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
 
@@ -1588,6 +1594,7 @@ async fn test_branch_contains_commit_filter() {
         force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
 
@@ -2826,6 +2833,7 @@ async fn test_branch_copy_migrates_reflog_when_present() {
                 action: ReflogAction::Commit {
                     message: format!("entry {i}"),
                 },
+                message: None,
             },
             "refs/heads/src",
         )
@@ -3002,6 +3010,7 @@ async fn test_branch_rename_migrates_config_and_updates_head() {
         force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
     ConfigKv::set("branch.feature.remote", "origin", false)

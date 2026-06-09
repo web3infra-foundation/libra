@@ -26,9 +26,8 @@ use git_internal::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    commit, get_target_commit, load_object, log, merge_base, reset,
-    restore::{self, RestoreArgs},
-    save_object, stash, status, switch,
+    commit, get_target_commit, load_object, log, merge_base, reset, save_object, stash, status,
+    switch,
 };
 use crate::{
     common_utils::format_commit_msg,
@@ -542,8 +541,6 @@ pub(crate) enum PullMergeError {
     HeadResolve(String),
     #[error("failed to update HEAD during merge: {0}")]
     HeadUpdate(String),
-    #[error("failed to restore working tree after merge: {0}")]
-    Restore(String),
 }
 
 pub(crate) type MergeError = PullMergeError;
@@ -618,7 +615,7 @@ impl From<PullMergeError> for CliError {
             PullMergeError::HeadResolve(..) => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
             }
-            PullMergeError::HeadUpdate(..) | PullMergeError::Restore(..) => {
+            PullMergeError::HeadUpdate(..) => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
             }
         }
@@ -956,8 +953,14 @@ fn validate_cleanup_mode(mode: Option<&str>) -> Result<(), MergeError> {
 async fn resolve_conflict_style(
     cli_style: Option<MergeConflictStyle>,
 ) -> Result<MergeConflictStyle, PullMergeError> {
+    Ok(resolve_merge_conflict_style(cli_style).await)
+}
+
+pub(crate) async fn resolve_merge_conflict_style(
+    cli_style: Option<MergeConflictStyle>,
+) -> MergeConflictStyle {
     if let Some(style) = cli_style {
-        return Ok(style);
+        return style;
     }
     let Some(value) =
         read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.conflictstyle")
@@ -965,12 +968,12 @@ async fn resolve_conflict_style(
             .ok()
             .flatten()
     else {
-        return Ok(MergeConflictStyle::Merge);
+        return MergeConflictStyle::Merge;
     };
     match value.trim().to_ascii_lowercase().as_str() {
-        "merge" => Ok(MergeConflictStyle::Merge),
-        "diff3" => Ok(MergeConflictStyle::Diff3),
-        _ => Ok(MergeConflictStyle::Merge),
+        "merge" => MergeConflictStyle::Merge,
+        "diff3" => MergeConflictStyle::Diff3,
+        _ => MergeConflictStyle::Merge,
     }
 }
 
@@ -2017,6 +2020,7 @@ async fn apply_fast_forward_merge(
         }),
         new_oid: target_commit.id.to_string(),
         action,
+        message: None,
     };
 
     // Use `with_reflog`. A merge operation should log for the branch.
@@ -2049,19 +2053,19 @@ async fn apply_fast_forward_merge(
         return Err(PullMergeError::HeadUpdate(e.to_string()));
     }
 
-    // Only restore the working directory *after* the pointers have been updated.
-    restore::execute_safe(
-        RestoreArgs {
-            worktree: true,
-            staged: true,
-            source: None, // `restore` without source defaults to HEAD, which is now correct.
-            pathspec: vec![util::working_dir_string()],
-            ..Default::default()
-        },
-        &output.child_output_config(),
-    )
-    .await
-    .map_err(|error| PullMergeError::Restore(error.to_string()))?;
+    // Only update the working directory *after* the pointers have been updated.
+    //
+    // Sync the index and working tree to the target tree using the tracked-only
+    // reset primitive (the same one squash/rebase/cherry-pick use) rather than
+    // restoring the entire working directory. The previous approach passed the
+    // whole working directory as a `restore` pathspec, which expands (via
+    // `list_files`) to *every* file on disk — including untracked and ignored
+    // build artifacts such as `target/` and `node_modules/`. Restore then read
+    // and SHA-1-hashed each one, which on a large repository consumed gigabytes
+    // of memory and effectively hung the `libra pull` fast-forward. Operating on
+    // tracked files only bounds the work to the actual tree and never walks
+    // ignored directories.
+    reset_index_and_workdir_to_tree(&target_commit.tree_id)?;
     Ok(())
 }
 
@@ -2136,6 +2140,7 @@ async fn update_head_with_reflog(
         }),
         new_oid: new_oid.to_string(),
         action,
+        message: None,
     };
 
     let head_name = head_name.to_string();
@@ -2968,6 +2973,52 @@ fn conflict_payload(content: &[u8]) -> Cow<'_, str> {
     }
 }
 
+pub(crate) fn render_conflict_marker_content(
+    marker_eol: &str,
+    commit_abbrev: &str,
+    base: Option<&[u8]>,
+    ours: Option<&[u8]>,
+    theirs: Option<&[u8]>,
+    conflict_style: MergeConflictStyle,
+) -> String {
+    match (ours, theirs) {
+        (Some(ours), Some(theirs)) => {
+            let base_section = if conflict_style == MergeConflictStyle::Diff3 {
+                base.map(|payload| {
+                    format!(
+                        "||||||| base{marker_eol}{}{marker_eol}",
+                        conflict_payload(payload)
+                    )
+                })
+                .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            format!(
+                "<<<<<<< HEAD{marker_eol}{}{marker_eol}{base_section}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
+                conflict_payload(ours),
+                conflict_payload(theirs),
+                commit_abbrev
+            )
+        }
+        (Some(ours), None) => {
+            format!(
+                "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}>>>>>>> {} (deleted){marker_eol}",
+                conflict_payload(ours),
+                commit_abbrev
+            )
+        }
+        (None, Some(theirs)) => {
+            format!(
+                "<<<<<<< HEAD (deleted){marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
+                conflict_payload(theirs),
+                commit_abbrev
+            )
+        }
+        (None, None) => String::new(),
+    }
+}
+
 fn write_conflict_markers(
     workdir: &Path,
     path: &Path,
@@ -2981,44 +3032,45 @@ fn write_conflict_markers(
         ConflictKind::BothChanged { ours, theirs } => {
             let ours_blob: Blob = load_object(&ours).map_err(|error| error.to_string())?;
             let theirs_blob: Blob = load_object(&theirs).map_err(|error| error.to_string())?;
-            let base_section = if conflict_style == MergeConflictStyle::Diff3 {
-                base.map(load_conflict_base_payload)
+            let base_blob: Option<Blob> = if conflict_style == MergeConflictStyle::Diff3 {
+                base.map(|base| load_object(&base).map_err(|error| error.to_string()))
                     .transpose()?
-                    .map(|payload| format!("||||||| base{marker_eol}{payload}{marker_eol}"))
-                    .unwrap_or_default()
             } else {
-                String::new()
+                None
             };
-            format!(
-                "<<<<<<< HEAD{marker_eol}{}{marker_eol}{base_section}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
-                conflict_payload(&ours_blob.data),
-                conflict_payload(&theirs_blob.data),
-                commit_abbrev
+            render_conflict_marker_content(
+                marker_eol,
+                commit_abbrev,
+                base_blob.as_ref().map(|blob| blob.data.as_slice()),
+                Some(&ours_blob.data),
+                Some(&theirs_blob.data),
+                conflict_style,
             )
         }
         ConflictKind::OursModifiedTheirsDeleted { ours } => {
             let ours_blob: Blob = load_object(&ours).map_err(|error| error.to_string())?;
-            format!(
-                "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}>>>>>>> {} (deleted){marker_eol}",
-                conflict_payload(&ours_blob.data),
-                commit_abbrev
+            render_conflict_marker_content(
+                marker_eol,
+                commit_abbrev,
+                None,
+                Some(&ours_blob.data),
+                None,
+                conflict_style,
             )
         }
         ConflictKind::TheirsModifiedOursDeleted { theirs } => {
             let theirs_blob: Blob = load_object(&theirs).map_err(|error| error.to_string())?;
-            format!(
-                "<<<<<<< HEAD (deleted){marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
-                conflict_payload(&theirs_blob.data),
-                commit_abbrev
+            render_conflict_marker_content(
+                marker_eol,
+                commit_abbrev,
+                None,
+                None,
+                Some(&theirs_blob.data),
+                conflict_style,
             )
         }
     };
     write_workdir_file(workdir, path, content.as_bytes())
-}
-
-fn load_conflict_base_payload(base: ObjectHash) -> Result<Cow<'static, str>, String> {
-    let base_blob: Blob = load_object(&base).map_err(|error| error.to_string())?;
-    Ok(Cow::Owned(conflict_payload(&base_blob.data).into_owned()))
 }
 
 fn index_tree_items(index: &Index) -> Result<HashMap<PathBuf, MergeTreeEntry>, PullMergeError> {
@@ -3296,16 +3348,11 @@ async fn append_merge_shortlog(
 }
 
 fn first_non_empty_line(message: &str) -> Option<String> {
+    let (message, _) = crate::common_utils::parse_commit_msg(message);
     message
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .rev()
-        .find(|line| {
-            !line.starts_with("gpgsig")
-                && !line.starts_with("-----")
-                && !line.starts_with("Version:")
-        })
+        .find(|line| !line.is_empty())
         .map(str::to_string)
 }
 
@@ -3422,10 +3469,6 @@ mod tests {
         assert_eq!(
             PullMergeError::HeadUpdate("write failed".to_string()).to_string(),
             "failed to update HEAD during merge: write failed",
-        );
-        assert_eq!(
-            PullMergeError::Restore("checkout failed".to_string()).to_string(),
-            "failed to restore working tree after merge: checkout failed",
         );
         assert_eq!(
             PullMergeError::InvalidDiffAlgorithm {

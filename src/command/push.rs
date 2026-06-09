@@ -9,7 +9,7 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use git_internal::{
     errors::GitError,
     hash::{HashKind, ObjectHash, get_hash_kind},
@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 use url::Url;
 
 use crate::{
-    command::{branch, fetch::RemoteClient, lfs_schema::LfsUploadSummary},
+    command::{branch, commit, fetch::RemoteClient, lfs_schema::LfsUploadSummary},
     git_protocol::{ServiceType::ReceivePack, add_pkt_line_string, read_pkt_line},
     info_println,
     internal::{
@@ -44,7 +44,7 @@ use crate::{
             ssh_client::is_ssh_spec,
         },
         reflog::{Reflog, ReflogAction, ReflogContext},
-        tag,
+        tag, vault,
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode, emit_warning},
@@ -58,6 +58,7 @@ const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
 
 /// Connection/idle timeout for push network operations (discovery, send-pack, receive-pack).
 const PUSH_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_PUSH_OPTION_LEN: usize = 1024;
 
 /// Push local refs and objects to a remote repository.
 ///
@@ -83,10 +84,25 @@ EXAMPLES:
     libra push --force origin main      Force push (overwrites remote history)
     libra push --force-with-lease origin main
                                         Force push only if the remote still matches your tracking ref
+    libra push --follow-tags origin main
+                                        Include missing annotated tags reachable from the pushed commits
+    libra push -o ci.skip origin main   Send a server-side push option
+    libra push --signed=if-asked origin main
+                                        Sign the push when the remote asks for push certificates
     libra push --atomic origin main     Request all remote ref updates to succeed or fail together
     libra push --porcelain origin main  Machine-readable per-ref status lines
     libra push --dry-run                Preview what would be pushed without sending
     libra push --json                   Structured JSON output for agents";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SignedPushValue {
+    #[value(name = "true")]
+    True,
+    #[value(name = "false")]
+    False,
+    #[value(name = "if-asked")]
+    IfAsked,
+}
 
 #[derive(Parser, Debug)]
 #[command(after_help = PUSH_EXAMPLES)]
@@ -114,6 +130,28 @@ pub struct PushArgs {
     /// uses the remote-tracking ref OID only)
     #[clap(long)]
     pub force_if_includes: bool,
+
+    /// Push missing annotated tags reachable from the pushed branch tips
+    #[clap(long = "follow-tags", conflicts_with = "no_follow_tags")]
+    pub follow_tags: bool,
+
+    /// Disable `push.followTags=true`
+    #[clap(long = "no-follow-tags", conflicts_with = "follow_tags")]
+    pub no_follow_tags: bool,
+
+    /// Sign the push certificate (`true`, `false`, or `if-asked`)
+    #[clap(
+        long,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "WHEN"
+    )]
+    pub signed: Option<SignedPushValue>,
+
+    /// Transmit a server-side push option; repeatable
+    #[clap(long = "push-option", short = 'o', value_name = "OPTION")]
+    pub push_options: Vec<String>,
 
     /// Accepted for compatibility; thin-pack encoding is not implemented (no-op)
     #[clap(long, conflicts_with = "no_thin")]
@@ -155,6 +193,10 @@ impl PushArgs {
             force: false,
             force_with_lease: None,
             force_if_includes: false,
+            follow_tags: false,
+            no_follow_tags: false,
+            signed: None,
+            push_options: Vec::new(),
             thin: false,
             no_thin: false,
             atomic: false,
@@ -231,6 +273,9 @@ pub enum PushError {
 
     #[error("remote does not support required capability '{capability}'")]
     UnsupportedRemoteCapability { capability: String },
+
+    #[error("failed to sign push certificate: {0}")]
+    SigningFailed(String),
 
     #[error("network error: {0}")]
     Network(String),
@@ -316,6 +361,12 @@ impl From<PushError> for CliError {
             PushError::UnsupportedRemoteCapability { capability } => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::NetworkProtocol)
                 .with_hint(format!("retry without --{capability}, or use a remote that advertises the {capability} capability")),
+            PushError::SigningFailed(detail) => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::AuthMissingCredentials)
+                .with_detail("phase", "signed-push")
+                .with_hint(format!(
+                    "configure the Libra vault signing key or retry without --signed ({detail})"
+                )),
             PushError::Network(..) => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::NetworkUnavailable)
                 .with_hint("check network connectivity and retry"),
@@ -533,7 +584,24 @@ fn validate_push_args(args: &PushArgs) -> Result<(), PushError> {
             "--mirror cannot be combined with refspecs, --tags, or --set-upstream".to_string(),
         ));
     }
+    validate_push_options(&args.push_options)?;
 
+    Ok(())
+}
+
+fn validate_push_options(options: &[String]) -> Result<(), PushError> {
+    for option in options {
+        if option.len() > MAX_PUSH_OPTION_LEN {
+            return Err(PushError::InvalidArguments(format!(
+                "--push-option value exceeds {MAX_PUSH_OPTION_LEN} bytes"
+            )));
+        }
+        if option.bytes().any(|b| matches!(b, b'\0' | b'\n' | b'\r')) {
+            return Err(PushError::InvalidArguments(
+                "--push-option value must not contain NUL or newline characters".to_string(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -565,6 +633,8 @@ async fn validate_explicit_refspecs_before_discovery(args: &PushArgs) -> Result<
 /// on success for the caller to render.
 pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutput, PushError> {
     validate_push_args(&args)?;
+    let signed_mode = resolve_signed_push_mode(&args).await?;
+    let follow_tags = resolve_follow_tags(&args).await?;
 
     let current_branch = match Head::current().await {
         Head::Branch(name) => name,
@@ -653,6 +723,15 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     let remote_refs = remote_ref_map(&discovery.refs);
     let atomic_output = args.atomic.then_some(true);
     let force_with_lease_output = force_with_lease_output_value(&args.force_with_lease);
+    let signed_push_nonce = signed_push_nonce_for_mode(signed_mode, &discovery.capabilities)?;
+
+    if !args.push_options.is_empty()
+        && !remote_supports_capability(&discovery.capabilities, "push-options")
+    {
+        return Err(PushError::UnsupportedRemoteCapability {
+            capability: "push-options".to_string(),
+        });
+    }
 
     let mut warnings = Vec::new();
     // `--force-with-lease` permits a non-fast-forward update into the plan; the
@@ -714,6 +793,16 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             add_all_tag_update_plans(
                 &remote_refs,
                 effective_force,
+                &mut warnings,
+                &mut seen_remote_refs,
+                &mut plans,
+            )
+            .await?;
+        }
+
+        if follow_tags && !args.tags {
+            add_follow_tag_update_plans(
+                &remote_refs,
                 &mut warnings,
                 &mut seen_remote_refs,
                 &mut plans,
@@ -796,33 +885,6 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         });
     }
 
-    let mut data = BytesMut::new();
-    let capability = send_pack_capability_string(args.atomic);
-    let zero_oid = ObjectHash::zero_str(get_hash_kind());
-    for (index, plan) in plans.iter().enumerate() {
-        let old_oid = plan
-            .update
-            .old_oid
-            .as_deref()
-            .unwrap_or(&zero_oid)
-            .to_string();
-        let new_oid = match plan.update.kind {
-            PushRefUpdateKind::Update => plan.update.new_oid.clone(),
-            PushRefUpdateKind::Delete => zero_oid.clone(),
-        };
-        let suffix = if index == 0 {
-            format!("\0{capability}")
-        } else {
-            String::new()
-        };
-        add_pkt_line_string(
-            &mut data,
-            format!("{old_oid} {new_oid} {}{suffix}\n", plan.update.remote_ref),
-        );
-    }
-    data.extend_from_slice(b"0000");
-    tracing::debug!("{:?}", data);
-
     // Upload LFS files (only for HTTP remotes)
     let mut lfs_files_uploaded = 0;
     if !is_ssh && !objs.is_empty() {
@@ -882,7 +944,25 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     }
 
     let bytes_pushed = pack_data.len() as u64;
+    let mut data = BytesMut::new();
+    let capability = send_pack_capability_string(args.atomic, !args.push_options.is_empty());
+    if let Some(nonce) = signed_push_nonce.as_deref() {
+        write_push_certificate_request(
+            &mut data,
+            &capability,
+            &repo_url,
+            &plans,
+            &args.push_options,
+            nonce,
+        )
+        .await?;
+        write_push_options(&mut data, &args.push_options);
+    } else {
+        write_unsigned_command_list(&mut data, &plans, &capability);
+        write_push_options(&mut data, &args.push_options);
+    }
     data.extend_from_slice(&pack_data);
+    tracing::debug!("{:?}", data);
 
     // Send pack via the appropriate transport.
     // Idle timeouts (60s) are enforced at the transport layer: SSH wraps each
@@ -1150,6 +1230,110 @@ async fn resolve_tag_ref(short_name: &str, original: &str) -> Result<ResolvedLoc
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignedPushMode {
+    Off,
+    IfAsked,
+    Required,
+}
+
+fn parse_bool_config(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Some(true),
+        "false" | "no" | "off" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+async fn read_first_config_value(keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(value) = ConfigKv::get(key)
+            .await
+            .ok()
+            .flatten()
+            .map(|entry| entry.value)
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
+async fn resolve_follow_tags(args: &PushArgs) -> Result<bool, PushError> {
+    if args.follow_tags {
+        return Ok(true);
+    }
+    if args.no_follow_tags {
+        return Ok(false);
+    }
+    let Some(value) = read_first_config_value(&["push.followTags", "push.followtags"]).await else {
+        return Ok(false);
+    };
+    parse_bool_config(&value).ok_or_else(|| {
+        PushError::InvalidArguments(format!(
+            "invalid push.followTags value '{value}' (expected true or false)"
+        ))
+    })
+}
+
+async fn resolve_signed_push_mode(args: &PushArgs) -> Result<SignedPushMode, PushError> {
+    if let Some(value) = args.signed {
+        return Ok(match value {
+            SignedPushValue::True => SignedPushMode::Required,
+            SignedPushValue::False => SignedPushMode::Off,
+            SignedPushValue::IfAsked => SignedPushMode::IfAsked,
+        });
+    }
+
+    let Some(value) = read_first_config_value(&["push.gpgSign", "push.gpgsign"]).await else {
+        return Ok(SignedPushMode::Off);
+    };
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "if-asked" => Ok(SignedPushMode::IfAsked),
+        _ => parse_bool_config(&value)
+            .map(|enabled| {
+                if enabled {
+                    SignedPushMode::Required
+                } else {
+                    SignedPushMode::Off
+                }
+            })
+            .ok_or_else(|| {
+                PushError::InvalidArguments(format!(
+                    "invalid push.gpgSign value '{value}' (expected true, false, or if-asked)"
+                ))
+            }),
+    }
+}
+
+fn push_cert_nonce(capabilities: &[String]) -> Option<String> {
+    capabilities.iter().find_map(|capability| {
+        capability
+            .strip_prefix("push-cert=")
+            .map(str::to_string)
+            .or_else(|| (capability == "push-cert").then(String::new))
+    })
+}
+
+fn signed_push_nonce_for_mode(
+    mode: SignedPushMode,
+    capabilities: &[String],
+) -> Result<Option<String>, PushError> {
+    let nonce = push_cert_nonce(capabilities);
+    match mode {
+        SignedPushMode::Off => Ok(None),
+        SignedPushMode::IfAsked => Ok(nonce),
+        SignedPushMode::Required => {
+            nonce
+                .map(Some)
+                .ok_or_else(|| PushError::UnsupportedRemoteCapability {
+                    capability: "push-cert".to_string(),
+                })
+        }
+    }
+}
+
 /// One-time warning emitted when `--force-if-includes` is paired with
 /// `--force-with-lease` (the flag is accepted but not yet implemented).
 const FORCE_IF_INCLUDES_NOOP_WARNING: &str =
@@ -1190,15 +1374,151 @@ fn remote_supports_capability(capabilities: &[String], capability: &str) -> bool
     capabilities.iter().any(|item| item == capability)
 }
 
-fn send_pack_capability_string(atomic: bool) -> String {
+fn send_pack_capability_string(atomic: bool, push_options: bool) -> String {
     let mut capabilities = vec!["report-status"];
     if atomic {
         capabilities.push("atomic");
+    }
+    if push_options {
+        capabilities.push("push-options");
     }
     if get_wire_hash_kind() == HashKind::Sha256 {
         capabilities.push("object-format=sha256");
     }
     capabilities.join(" ")
+}
+
+fn write_unsigned_command_list(data: &mut BytesMut, plans: &[RefUpdatePlan], capability: &str) {
+    let zero_oid = ObjectHash::zero_str(get_hash_kind());
+    for (index, plan) in plans.iter().enumerate() {
+        let old_oid = plan
+            .update
+            .old_oid
+            .as_deref()
+            .unwrap_or(&zero_oid)
+            .to_string();
+        let new_oid = match plan.update.kind {
+            PushRefUpdateKind::Update => plan.update.new_oid.clone(),
+            PushRefUpdateKind::Delete => zero_oid.clone(),
+        };
+        let suffix = if index == 0 {
+            format!("\0{capability}")
+        } else {
+            String::new()
+        };
+        add_pkt_line_string(
+            data,
+            format!("{old_oid} {new_oid} {}{suffix}\n", plan.update.remote_ref),
+        );
+    }
+    data.extend_from_slice(b"0000");
+}
+
+fn write_push_options(data: &mut BytesMut, options: &[String]) {
+    if options.is_empty() {
+        return;
+    }
+    for option in options {
+        add_pkt_line_string(data, format!("{option}\n"));
+    }
+    data.extend_from_slice(b"0000");
+}
+
+async fn write_push_certificate_request(
+    data: &mut BytesMut,
+    capability: &str,
+    repo_url: &str,
+    plans: &[RefUpdatePlan],
+    push_options: &[String],
+    nonce: &str,
+) -> Result<(), PushError> {
+    add_pkt_line_string(data, format!("push-cert\0{capability}\n"));
+    let payload = push_certificate_payload(repo_url, plans, push_options, nonce).await?;
+    let signature = sign_push_certificate_payload(payload.as_bytes()).await?;
+    for line in payload.lines() {
+        add_pkt_line_string(data, format!("{line}\n"));
+    }
+    for line in signature.lines() {
+        add_pkt_line_string(data, format!("{line}\n"));
+    }
+    add_pkt_line_string(data, "push-cert-end\n".to_string());
+    data.extend_from_slice(b"0000");
+    Ok(())
+}
+
+async fn push_certificate_payload(
+    repo_url: &str,
+    plans: &[RefUpdatePlan],
+    push_options: &[String],
+    nonce: &str,
+) -> Result<String, PushError> {
+    let committer = commit::current_committer_signature()
+        .await
+        .map_err(PushError::SigningFailed)?;
+    let signature_data = committer.to_data().map_err(|error| {
+        PushError::SigningFailed(format!("failed to serialize pusher identity: {error}"))
+    })?;
+    let signature_line = std::str::from_utf8(&signature_data).map_err(|error| {
+        PushError::SigningFailed(format!("pusher identity is not UTF-8: {error}"))
+    })?;
+    let pusher = signature_line
+        .trim_end()
+        .strip_prefix("committer ")
+        .unwrap_or_else(|| signature_line.trim_end());
+    let redacted_url = crate::command::fetch::redact_url_credentials(repo_url);
+
+    let mut payload = String::new();
+    payload.push_str("certificate version 0.1\n");
+    payload.push_str(&format!("pusher {pusher}\n"));
+    payload.push_str(&format!("pushee {redacted_url}\n"));
+    if !nonce.is_empty() {
+        payload.push_str(&format!("nonce {nonce}\n"));
+    }
+    for option in push_options {
+        payload.push_str(&format!("push-option {option}\n"));
+    }
+    payload.push('\n');
+
+    let zero_oid = ObjectHash::zero_str(get_hash_kind());
+    for plan in plans {
+        let old_oid = plan.update.old_oid.as_deref().unwrap_or(&zero_oid);
+        let new_oid = match plan.update.kind {
+            PushRefUpdateKind::Update => plan.update.new_oid.as_str(),
+            PushRefUpdateKind::Delete => zero_oid.as_str(),
+        };
+        payload.push_str(&format!("{old_oid} {new_oid} {}\n", plan.update.remote_ref));
+    }
+    Ok(payload)
+}
+
+async fn sign_push_certificate_payload(payload: &[u8]) -> Result<String, PushError> {
+    let unseal_key = vault::load_unseal_key().await.ok_or_else(|| {
+        PushError::SigningFailed("vault signing enabled but no unseal key found".to_string())
+    })?;
+    let root_dir = crate::utils::util::storage_path();
+    let signature_hex = vault::pgp_sign(&root_dir, &unseal_key, payload)
+        .await
+        .map_err(|error| PushError::SigningFailed(format!("vault PGP signing failed: {error}")))?;
+    armor_pgp_signature(&signature_hex)
+}
+
+fn armor_pgp_signature(signature_hex: &str) -> Result<String, PushError> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    let sig_bytes = hex::decode(signature_hex).map_err(|error| {
+        PushError::SigningFailed(format!("failed to decode vault signature: {error}"))
+    })?;
+    let b64 = STANDARD.encode(&sig_bytes);
+    let mut armored = String::from("-----BEGIN PGP SIGNATURE-----\n\n");
+    for chunk in b64.as_bytes().chunks(76) {
+        let line = std::str::from_utf8(chunk).map_err(|error| {
+            PushError::SigningFailed(format!("base64 signature chunk is not UTF-8: {error}"))
+        })?;
+        armored.push_str(line);
+        armored.push('\n');
+    }
+    armored.push_str("-----END PGP SIGNATURE-----");
+    Ok(armored)
 }
 
 /// Whether a full remote ref (`refs/heads/main`) is named by a lease `<refname>`
@@ -1400,6 +1720,85 @@ async fn add_all_tag_update_plans(
         )?;
     }
     Ok(())
+}
+
+async fn add_follow_tag_update_plans(
+    remote_refs: &HashMap<String, String>,
+    warnings: &mut Vec<String>,
+    seen_remote_refs: &mut HashSet<String>,
+    plans: &mut Vec<RefUpdatePlan>,
+) -> Result<(), PushError> {
+    let branch_tips: Vec<ObjectHash> = plans
+        .iter()
+        .filter(|plan| {
+            plan.local_kind == Some(LocalRefKind::Branch)
+                && plan.update.kind == PushRefUpdateKind::Update
+        })
+        .filter_map(|plan| plan.new_oid)
+        .collect();
+    if branch_tips.is_empty() {
+        return Ok(());
+    }
+
+    let tags = tag::list()
+        .await
+        .map_err(|error| PushError::RepoState(error.to_string()))?;
+    for local_tag in tags {
+        let tag::Tag { name, object } = local_tag;
+        let tag_object = match &object {
+            tag::TagObject::Tag(tag_object) => tag_object,
+            _ => continue,
+        };
+        let Some(target_commit) = peel_tag_to_commit(tag_object).await? else {
+            continue;
+        };
+        if !branch_tips
+            .iter()
+            .any(|tip| is_ancestor(&target_commit, tip))
+        {
+            continue;
+        }
+
+        let full_ref = normalize_tag_ref(&name)?;
+        if remote_refs.contains_key(&full_ref) || seen_remote_refs.contains(&full_ref) {
+            continue;
+        }
+        add_update_ref_plan(
+            ResolvedLocalRef {
+                full_ref: full_ref.clone(),
+                oid: tag_object_hash(&object),
+                kind: LocalRefKind::Tag,
+            },
+            full_ref,
+            remote_refs,
+            false,
+            warnings,
+            seen_remote_refs,
+            plans,
+        )?;
+    }
+    Ok(())
+}
+
+async fn peel_tag_to_commit(tag_object: &GitTagObject) -> Result<Option<ObjectHash>, PushError> {
+    let mut target = tag_object.object_hash;
+    let mut seen = HashSet::new();
+    loop {
+        if !seen.insert(target) {
+            return Err(PushError::ObjectCollection(format!(
+                "detected cycle while peeling tag '{}'",
+                tag_object.id
+            )));
+        }
+        match tag::load_object_trait(&target)
+            .await
+            .map_err(|error| PushError::ObjectCollection(error.to_string()))?
+        {
+            tag::TagObject::Commit(commit) => return Ok(Some(commit.id)),
+            tag::TagObject::Tag(next) => target = next.object_hash,
+            tag::TagObject::Tree(_) | tag::TagObject::Blob(_) => return Ok(None),
+        }
+    }
 }
 
 async fn build_mirror_update_plan(
@@ -1711,6 +2110,7 @@ async fn update_remote_tracking_refs_atomic(
                                 }),
                                 new_oid: plan.update.new_oid.clone(),
                                 action: ReflogAction::Push,
+                                message: None,
                             };
                             Reflog::insert_single_entry(txn, &context, &remote_tracking_branch)
                                 .await
@@ -1744,6 +2144,7 @@ async fn update_remote_tracking_refs_atomic(
                                 old_oid,
                                 new_oid: ObjectHash::zero_str(get_hash_kind()).to_string(),
                                 action: ReflogAction::Push,
+                                message: None,
                             };
                             Reflog::insert_single_entry(txn, &context, &remote_tracking_branch)
                                 .await
@@ -2115,6 +2516,7 @@ async fn update_remote_tracking(
                     old_oid,
                     new_oid: commit_hash.clone(),
                     action: ReflogAction::Push,
+                    message: None,
                 };
                 Reflog::insert_single_entry(txn, &context, &remote_tracking_branch)
                     .await
@@ -2578,10 +2980,76 @@ mod test {
         assert_eq!(args.repository.as_deref(), Some("origin"));
         assert_eq!(args.refspecs, vec!["main".to_string()]);
 
-        let capability = send_pack_capability_string(true);
+        let capability = send_pack_capability_string(true, false);
         assert!(capability.split(' ').any(|item| item == "atomic"));
-        let capability = send_pack_capability_string(false);
+        let capability = send_pack_capability_string(false, false);
         assert!(!capability.split(' ').any(|item| item == "atomic"));
+    }
+
+    #[test]
+    fn push_option_and_signed_flags_do_not_swallow_positionals() {
+        use clap::Parser as _;
+        let args = PushArgs::try_parse_from([
+            "push",
+            "-o",
+            "ci.skip",
+            "--push-option=trace=1",
+            "--signed",
+            "origin",
+            "main",
+        ])
+        .expect("push options and bare --signed should parse");
+        assert_eq!(args.push_options, vec!["ci.skip", "trace=1"]);
+        assert_eq!(args.signed, Some(SignedPushValue::True));
+        assert_eq!(args.repository.as_deref(), Some("origin"));
+        assert_eq!(args.refspecs, vec!["main".to_string()]);
+
+        let args = PushArgs::try_parse_from(["push", "--signed=if-asked", "origin", "main"])
+            .expect("--signed=if-asked should parse");
+        assert_eq!(args.signed, Some(SignedPushValue::IfAsked));
+    }
+
+    #[test]
+    fn follow_tags_flags_parse_and_conflict() {
+        use clap::Parser as _;
+        let args = PushArgs::try_parse_from(["push", "--follow-tags", "origin", "main"])
+            .expect("--follow-tags should parse");
+        assert!(args.follow_tags);
+        assert!(!args.no_follow_tags);
+        assert!(
+            PushArgs::try_parse_from([
+                "push",
+                "--follow-tags",
+                "--no-follow-tags",
+                "origin",
+                "main"
+            ])
+            .is_err(),
+            "--follow-tags and --no-follow-tags must conflict"
+        );
+    }
+
+    #[test]
+    fn push_option_validation_rejects_control_bytes_and_oversize() {
+        assert!(validate_push_options(&["ci.skip".to_string()]).is_ok());
+        assert!(matches!(
+            validate_push_options(&["bad\noption".to_string()]),
+            Err(PushError::InvalidArguments(message))
+                if message.contains("NUL or newline")
+        ));
+        assert!(matches!(
+            validate_push_options(&["x".repeat(MAX_PUSH_OPTION_LEN + 1)]),
+            Err(PushError::InvalidArguments(message))
+                if message.contains("exceeds")
+        ));
+    }
+
+    #[test]
+    fn push_options_are_advertised_when_present() {
+        let capability = send_pack_capability_string(false, true);
+        assert!(capability.split(' ').any(|item| item == "push-options"));
+        let capability = send_pack_capability_string(false, false);
+        assert!(!capability.split(' ').any(|item| item == "push-options"));
     }
 
     #[test]
@@ -2593,6 +3061,36 @@ mod test {
         ];
         assert!(remote_supports_capability(&capabilities, "atomic"));
         assert!(!remote_supports_capability(&capabilities, "atom"));
+    }
+
+    #[test]
+    fn signed_push_nonce_respects_required_and_if_asked_modes() {
+        let unsupported = vec!["report-status".to_string()];
+        assert_eq!(
+            signed_push_nonce_for_mode(SignedPushMode::IfAsked, &unsupported)
+                .expect("if-asked without push-cert should skip"),
+            None
+        );
+        assert!(matches!(
+            signed_push_nonce_for_mode(SignedPushMode::Required, &unsupported),
+            Err(PushError::UnsupportedRemoteCapability { capability })
+                if capability == "push-cert"
+        ));
+
+        let supported = vec!["push-cert=nonce123".to_string()];
+        assert_eq!(
+            signed_push_nonce_for_mode(SignedPushMode::Required, &supported)
+                .expect("push-cert nonce should be accepted"),
+            Some("nonce123".to_string())
+        );
+    }
+
+    #[test]
+    fn armor_pgp_signature_returns_plain_armored_block() {
+        let armored = armor_pgp_signature("01020304").expect("hex signature should armor");
+        assert!(armored.starts_with("-----BEGIN PGP SIGNATURE-----"));
+        assert!(armored.ends_with("-----END PGP SIGNATURE-----"));
+        assert!(!armored.starts_with("gpgsig "));
     }
 
     #[test]
@@ -3131,6 +3629,10 @@ mod test {
             force: false,
             force_with_lease: None,
             force_if_includes: false,
+            follow_tags: false,
+            no_follow_tags: false,
+            signed: None,
+            push_options: Vec::new(),
             thin: false,
             no_thin: false,
             atomic: false,

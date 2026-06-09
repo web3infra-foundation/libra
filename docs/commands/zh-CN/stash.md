@@ -10,7 +10,7 @@ libra stash pop [<stash>]
 libra stash list
 libra stash apply [<stash>]
 libra stash drop [<stash>]
-libra stash show [<stash>] [--name-only | --name-status]
+libra stash show [<stash>] [--name-only | --name-status | --stat | -p]
 libra stash branch <branch> [<stash>]
 libra stash clear [--force]
 ```
@@ -112,8 +112,14 @@ libra stash drop stash@{1}
 | `<stash>` | Stash 引用，例如 `stash@{1}`。默认是 `stash@{0}`。 |
 | `--name-only` | 只显示已更改文件名，每行一个。 |
 | `--name-status` | 显示带状态码前缀的文件名（`A` / `M` / `D`）。 |
+| `--stat` | 显式显示文件级摘要。 |
+| `-p`, `--patch` | 以统一 diff 显示 stash 中的更改。二进制或非 UTF-8 文件会显示 `Binary files ... differ`。 |
 
-`--name-only` 和 `--name-status` 在人工渲染模式下互斥；无论设置哪个提示，JSON 信封始终携带包含状态的完整 `files` 列表。
+多个 show 模式标志同时出现时，Libra 使用固定优先级：
+`-p` / `--patch` > `--stat` > `--name-status` > `--name-only`。没有显式模式标志时，
+`stash.showPatch=true` 会默认显示 patch；否则由 `stash.showStat` 控制是否显示文件级摘要，
+默认值为 true。非法布尔值回退默认值。无论人类输出模式如何，JSON 信封始终携带包含状态的完整
+`files` 列表；使用 `-p` / `--patch` 时，JSON 会额外包含 `patch` 字段。
 
 ```bash
 # stash@{0} 的文件级摘要
@@ -124,6 +130,12 @@ libra stash show stash@{1}
 
 # 只显示文件名
 libra stash show --name-only
+
+# 显式文件级摘要
+libra stash show --stat
+
+# 完整统一 diff
+libra stash show -p
 ```
 
 #### `branch`

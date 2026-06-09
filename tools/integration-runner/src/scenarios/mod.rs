@@ -1,3 +1,4 @@
+mod archive_smoke;
 mod branch_switch_checkout;
 mod clean_rm_mv_lfs_basic;
 mod clone_fetch_pull_local;
@@ -55,6 +56,7 @@ pub(crate) mod prelude {
     };
 }
 
+pub(crate) use archive_smoke::scenario_archive_smoke;
 pub(crate) use branch_switch_checkout::scenario_branch_switch_checkout;
 pub(crate) use clean_rm_mv_lfs_basic::scenario_clean_rm_mv_lfs_basic;
 pub(crate) use clone_fetch_pull_local::scenario_clone_fetch_pull_local;

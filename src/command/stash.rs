@@ -36,6 +36,7 @@ use crate::{
     },
     internal::{
         branch::{Branch as InternalBranch, BranchStoreError},
+        config::{ConfigKv, parse_config_bool},
         head::Head,
     },
     utils::{
@@ -212,6 +213,8 @@ pub enum StashOutput {
         // when absent so the structured `files` list stays the stable contract.
         #[serde(skip_serializing_if = "Option::is_none")]
         patch: Option<String>,
+        #[serde(skip)]
+        show_stat: bool,
     },
     #[serde(rename = "branch")]
     Branch {
@@ -263,6 +266,8 @@ EXAMPLES:
     libra stash push --keep-index     Keep staged changes in place
     libra stash list                  Show all stash entries
     libra stash show                  File-level summary of stash@{0}
+    libra stash show --stat           Explicit file-level summary of stash@{0}
+    libra stash show -p               Show stash@{0} as a unified diff
     libra stash show stash@{1}        Inspect a specific stash entry
     libra stash branch hotfix         Branch off the latest stash and drop it
     libra stash apply                 Re-apply stash@{0} without dropping
@@ -313,8 +318,9 @@ async fn run_stash(stash_cmd: Stash, output: &OutputConfig) -> Result<StashOutpu
             stash,
             name_only,
             name_status,
+            stat,
             patch,
-        } => run_show(stash, name_only, name_status, patch).await,
+        } => run_show(stash, name_only, name_status, stat, patch).await,
         Stash::Branch { branch, stash } => run_branch(branch, stash).await,
         Stash::Clear { force } => run_clear(force, output).await,
     }
@@ -492,8 +498,14 @@ async fn run_pop(stash: Option<String>) -> Result<StashOutput, StashError> {
 /// stash commit id when something was saved, or `None` when the tree was
 /// already clean. The working tree is left clean at HEAD on success.
 pub(crate) async fn autostash_push() -> Result<Option<String>, String> {
+    autostash_push_with_message("merge: autostash").await
+}
+
+pub(crate) async fn autostash_push_with_message(
+    message: impl Into<String>,
+) -> Result<Option<String>, String> {
     match run_push(StashPushOptions {
-        message: Some("merge: autostash".to_string()),
+        message: Some(message.into()),
         ..Default::default()
     })
     .await
@@ -511,6 +523,33 @@ pub(crate) async fn autostash_pop() -> Result<(), String> {
         Ok(_) => Ok(()),
         Err(error) => Err(error.to_string()),
     }
+}
+
+pub(crate) async fn autostash_pop_by_oid(stash_id: &str) -> Result<(), String> {
+    let index = resolve_stash_index_by_oid(stash_id).map_err(|error| error.to_string())?;
+    match run_pop(Some(format!("stash@{{{index}}}"))).await {
+        Ok(_) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn resolve_stash_index_by_oid(stash_id: &str) -> Result<usize, StashError> {
+    if !has_stash() {
+        return Err(StashError::NoStashFound);
+    }
+
+    let git_dir =
+        util::try_get_storage_path(None).map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let stash_log_path = git_dir.join("logs/refs/stash");
+    if !stash_log_path.exists() {
+        return Err(StashError::NoStashFound);
+    }
+
+    let entries = parse_stash_log_entries(read_stash_log_lines(&stash_log_path)?)?;
+    entries
+        .iter()
+        .position(|entry| entry.stash_id == stash_id)
+        .ok_or_else(|| StashError::InvalidStashRef(stash_id.to_string()))
 }
 
 async fn run_list() -> Result<StashOutput, StashError> {
@@ -553,8 +592,10 @@ async fn run_show(
     stash: Option<String>,
     name_only: bool,
     name_status: bool,
+    stat: bool,
     patch: bool,
 ) -> Result<StashOutput, StashError> {
+    let mode = resolve_stash_show_mode(name_only, name_status, stat, patch).await?;
     let (index, stash_id_str) = resolve_stash_to_commit_hash(stash)?;
     let git_dir =
         util::try_get_storage_path(None).map_err(|e| StashError::ReadObject(e.to_string()))?;
@@ -629,7 +670,7 @@ async fn run_show(
     // `-p`/`--patch` renders a real unified diff between the base tree and the
     // stash tree for each changed file (binary/undecodable files report
     // "Binary files ... differ", matching Git).
-    let patch_output = if patch {
+    let patch_output = if matches!(mode, StashShowMode::Patch) {
         Some(build_stash_patch(
             &git_dir,
             &files,
@@ -645,10 +686,58 @@ async fn run_show(
         stash_id: stash_id_str,
         files,
         files_changed: stats,
-        name_only,
-        name_status,
+        name_only: matches!(mode, StashShowMode::NameOnly),
+        name_status: matches!(mode, StashShowMode::NameStatus),
         patch: patch_output,
+        show_stat: matches!(mode, StashShowMode::Stat),
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StashShowMode {
+    NameOnly,
+    NameStatus,
+    Stat,
+    Patch,
+    None,
+}
+
+async fn resolve_stash_show_mode(
+    name_only: bool,
+    name_status: bool,
+    stat: bool,
+    patch: bool,
+) -> Result<StashShowMode, StashError> {
+    if patch {
+        return Ok(StashShowMode::Patch);
+    }
+    if stat {
+        return Ok(StashShowMode::Stat);
+    }
+    if name_status {
+        return Ok(StashShowMode::NameStatus);
+    }
+    if name_only {
+        return Ok(StashShowMode::NameOnly);
+    }
+
+    if read_stash_show_bool_config("stash.showPatch", false).await? {
+        return Ok(StashShowMode::Patch);
+    }
+    if read_stash_show_bool_config("stash.showStat", true).await? {
+        return Ok(StashShowMode::Stat);
+    }
+
+    Ok(StashShowMode::None)
+}
+
+async fn read_stash_show_bool_config(key: &str, default: bool) -> Result<bool, StashError> {
+    let entry = ConfigKv::get(key)
+        .await
+        .map_err(|error| StashError::ReadObject(format!("failed to read config {key}: {error}")))?;
+    Ok(entry
+        .and_then(|entry| parse_config_bool(&entry.value))
+        .unwrap_or(default))
 }
 
 /// Build the `stash show -p` unified diff over every changed file, in the same
@@ -871,6 +960,7 @@ fn render_stash_output(result: &StashOutput, output: &OutputConfig) -> CliResult
             name_only,
             name_status,
             patch,
+            show_stat,
             ..
         } => {
             if let Some(patch_text) = patch {
@@ -879,19 +969,14 @@ fn render_stash_output(result: &StashOutput, output: &OutputConfig) -> CliResult
                 for change in files {
                     println!("{}", change.path);
                 }
-            } else {
-                println!("Files changed in {stash}:");
-                let prefix_len = if *name_status { 0 } else { 9 };
+            } else if *name_status {
                 for change in files {
-                    if *name_status {
-                        println!("{}\t{}", change.status, change.path);
-                    } else {
-                        println!(
-                            "  {:<prefix_len$}{}",
-                            format!("{}:", change.status),
-                            change.path
-                        );
-                    }
+                    println!("{}\t{}", change.status, change.path);
+                }
+            } else if *show_stat {
+                println!("Files changed in {stash}:");
+                for change in files {
+                    println!("  {:<9}{}", format!("{}:", change.status), change.path);
                 }
                 println!(
                     "{} files changed, {} insertions(+), {} deletions(-)",

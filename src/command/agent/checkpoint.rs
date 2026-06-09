@@ -1007,8 +1007,8 @@ mod tests {
 
         for (idx, (kind, meta, expected)) in [
             ("claude_code", path_meta.as_str(), true),
-            ("gemini", path_meta.as_str(), true),
-            ("cursor", path_meta.as_str(), true),
+            ("gemini", path_meta.as_str(), false),
+            ("cursor", path_meta.as_str(), false),
             ("cursor", "{}", false),
             ("factory_ai", path_meta.as_str(), false),
         ]

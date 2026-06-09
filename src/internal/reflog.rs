@@ -39,6 +39,7 @@ pub struct ReflogContext {
     pub old_oid: String,
     pub new_oid: String,
     pub action: ReflogAction,
+    pub message: Option<String>,
 }
 
 #[derive(Debug)]
@@ -192,7 +193,10 @@ impl Reflog {
             .flatten()
             .map(|e| e.value)
             .unwrap_or("admin@mega.org".to_string());
-        let message = context.to_string();
+        let message = context
+            .message
+            .clone()
+            .unwrap_or_else(|| context.to_string());
 
         let model = ActiveModel {
             ref_name: Set(ref_to_log.to_string()),

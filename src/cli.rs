@@ -31,12 +31,12 @@ use crate::{
 const ROOT_AFTER_HELP: &str = "\
 Command Groups:
   Repository Setup        init, clone, config
-  Working Tree            status, add, rm, mv, restore, clean, stash, lfs, worktree
+  Working Tree            status, add, rm, mv, restore, clean, stash, lfs, worktree, stats
   History Inspection      log, shortlog, show, show-ref, ls-remote, diff, grep, blame, describe
-  Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
+  Commit And Branching    commit, branch, switch, checkout, tag, notes, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent, package
-  Maintenance And Plumbing db, gc, fsck, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
+  Maintenance And Plumbing db, gc, fsck, prune, cat-file, hash-object, verify-pack, archive, rev-parse, rev-list, symbolic-ref, reflog, bisect
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -350,6 +350,8 @@ enum Commands {
     HashObject(command::hash_object::HashObjectArgs),
     #[command(about = "Validate pack index files against pack archives")]
     VerifyPack(command::verify_pack::VerifyPackArgs),
+    #[command(about = "Create an archive of files from a named tree")]
+    Archive(command::archive::ArchiveArgs),
 
     #[command(about = "Record changes to the repository", alias = "ci")]
     Commit(command::commit::CommitArgs),
@@ -363,6 +365,8 @@ enum Commands {
     Checkout(command::checkout::CheckoutArgs),
     #[command(about = "Create a new tag")]
     Tag(command::tag::TagArgs),
+    #[command(about = "Add, show, list, or remove notes attached to commits")]
+    Notes(command::notes::NotesArgs),
     #[command(about = "Merge changes")]
     Merge(command::merge::MergeArgs),
     #[command(about = "Reapply commits on top of another base tip", alias = "rb")]
@@ -384,6 +388,8 @@ enum Commands {
     Fsck(command::fsck::FsckArgs),
     #[command(about = "Prune unreachable objects and clean stale pack files")]
     Gc(command::gc::GcArgs),
+    #[command(about = "Prune unreachable objects from the repository")]
+    Prune(command::prune::PruneArgs),
     #[command(about = "Revert some existing commits")]
     Revert(command::revert::RevertArgs),
     #[command(about = "Manage the log of reference changes (e.g., HEAD, branches)")]
@@ -440,6 +446,9 @@ enum Commands {
         hide = true
     )]
     Hooks(command::hooks::HooksArgs),
+
+    #[command(about = "Show file statistics of current working directory")]
+    Stats(command::stats::StatsArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -491,6 +500,8 @@ pub enum Stash {
         name_only: bool,
         #[arg(long, help = "Show only file names with their status code")]
         name_status: bool,
+        #[arg(long, help = "Show a file-level summary of the stashed changes")]
+        stat: bool,
         #[arg(
             short = 'p',
             long = "patch",
@@ -975,7 +986,8 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
         | Commands::Open(_)
         | Commands::CodeControl(_)
         | Commands::LsRemote(_)
-        | Commands::Sandbox(_) => Ok(CommandPreflight::none()),
+        | Commands::Sandbox(_)
+        | Commands::Stats(_) => Ok(CommandPreflight::none()),
         Commands::HashObject(args) if !args.write => {
             match utils::util::try_get_storage_path(None) {
                 Ok(storage) => Ok(CommandPreflight::repo_hash_kind_without_schema_guard(
@@ -984,6 +996,7 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
                 Err(_) => Ok(CommandPreflight::sha1_without_repo()),
             }
         }
+        Commands::RevParse(args) if args.sq_quote => Ok(CommandPreflight::none()),
         Commands::VerifyPack(_) => match utils::util::try_get_storage_path(None) {
             Ok(storage) => Ok(CommandPreflight::repo_hash_kind_without_schema_guard(
                 storage,
@@ -1286,6 +1299,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Lfs(cmd) => command::lfs::execute_safe(cmd, &output).await?,
         Commands::Log(cmd_args) => command::log::execute_safe(cmd_args, &output).await?,
         Commands::Shortlog(cmd_args) => command::shortlog::execute_safe(cmd_args, &output).await?,
+        Commands::Stats(cmd_args) => command::stats::execute_safe(cmd_args, &output).await?,
         Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
         Commands::ShowRef(cmd_args) => command::show_ref::execute_safe(cmd_args, &output).await?,
         Commands::LsRemote(cmd_args) => command::ls_remote::execute_safe(cmd_args, &output).await?,
@@ -1294,6 +1308,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::Branch(cmd_args) => command::branch::execute_safe(cmd_args, &output).await?,
         Commands::Tag(cmd_args) => command::tag::execute_safe(cmd_args, &output).await?,
+        Commands::Notes(cmd_args) => command::notes::execute_safe(cmd_args, &output, &argv).await?,
         Commands::Commit(cmd_args) => command::commit::execute_safe(cmd_args, &output).await?,
         Commands::Switch(cmd_args) => command::switch::execute_safe(cmd_args, &output).await?,
         Commands::Rebase(cmd_args) => command::rebase::execute_safe(cmd_args, &output).await?,
@@ -1314,10 +1329,12 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::VerifyPack(cmd_args) => {
             command::verify_pack::execute_safe(cmd_args, &output).await?
         }
+        Commands::Archive(cmd_args) => command::archive::execute_safe(cmd_args, &output).await?,
         Commands::IndexPack(cmd_args) => command::index_pack::execute_safe(cmd_args, &output)?,
         Commands::Fetch(cmd_args) => command::fetch::execute_safe(cmd_args, &output).await?,
         Commands::Fsck(cmd_args) => command::fsck::execute_safe(cmd_args, &output).await?,
         Commands::Gc(cmd_args) => command::gc::execute_safe(cmd_args, &output).await?,
+        Commands::Prune(cmd_args) => command::prune::execute_safe(cmd_args, &output).await?,
         Commands::Diff(cmd_args) => command::diff::execute_safe(cmd_args, &output).await?,
         Commands::Grep(cmd_args) => command::grep::execute_safe(cmd_args, &output).await?,
         Commands::Blame(cmd_args) => command::blame::execute_safe(cmd_args, &output).await?,

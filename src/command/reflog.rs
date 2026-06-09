@@ -441,7 +441,10 @@ fn build_reflog_entry(
                 name: commit.author.name.clone(),
                 email: commit.author.email.clone(),
             },
-            message: commit.message.trim().to_string(),
+            message: crate::common_utils::parse_commit_msg(&commit.message)
+                .0
+                .trim()
+                .to_string(),
         },
         patch,
         stat,
@@ -904,7 +907,9 @@ impl Display for ReflogFormatter<'_> {
 
                 let author = format!("{} <{}>", commit.author.name, commit.author.email);
                 let committer = format!("{} <{}>", log.committer_name, log.committer_email);
-                let commit_msg = &commit.message.trim();
+                let commit_msg = crate::common_utils::parse_commit_msg(&commit.message)
+                    .0
+                    .trim();
                 let datetime = format_datetime(log.timestamp);
 
                 let mut output = match self.kind {

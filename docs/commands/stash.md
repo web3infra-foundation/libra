@@ -10,7 +10,7 @@ libra stash pop [<stash>]
 libra stash list
 libra stash apply [<stash>]
 libra stash drop [<stash>]
-libra stash show [<stash>] [--name-only | --name-status]
+libra stash show [<stash>] [--name-only | --name-status | --stat | -p]
 libra stash branch <branch> [<stash>]
 libra stash clear [--force]
 ```
@@ -112,9 +112,17 @@ Show the file-level changes recorded in a stash entry.
 | `<stash>` | Stash reference, e.g. `stash@{1}`. Defaults to `stash@{0}`. |
 | `--name-only` | Show only the changed file names, one per line. |
 | `--name-status` | Show file names prefixed with the status code (`A` / `M` / `D`). |
+| `--stat` | Show the file-level summary explicitly. |
 | `-p`, `--patch` | Show the stashed changes as a unified diff (`diff --git` + `@@` hunks) between the stash's base and stashed trees. Binary or non-UTF-8 files report `Binary files ... differ`. |
 
-`--name-only` and `--name-status` are mutually exclusive in human render mode; the JSON envelope always carries the full `files` list with status, regardless of which hint is set. With `-p`/`--patch`, the unified diff is also exposed as an additive `patch` field in the JSON envelope.
+When multiple show mode flags are present, Libra uses `-p` / `--patch` first,
+then `--stat`, then `--name-status`, then `--name-only`. With no mode flag,
+`stash.showPatch=true` makes patch output the default; otherwise
+`stash.showStat` controls whether the file-level summary is printed and defaults
+to true. Invalid boolean values fall back to the default. The JSON envelope
+always carries the full `files` list with status, regardless of the human mode.
+With `-p`/`--patch`, the unified diff is also exposed as an additive `patch`
+field in the JSON envelope.
 
 ```bash
 # File-level summary of stash@{0}
@@ -125,6 +133,9 @@ libra stash show stash@{1}
 
 # File names only
 libra stash show --name-only
+
+# Explicit file-level summary
+libra stash show --stat
 
 # Full unified diff of the stashed changes
 libra stash show -p
@@ -199,6 +210,9 @@ libra stash drop stash@{1}
 
 # JSON output for scripting
 libra stash list --json
+
+# Inspect the latest stash as a patch
+libra stash show -p
 ```
 
 ## Human Output
