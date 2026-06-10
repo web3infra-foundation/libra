@@ -14,6 +14,7 @@ mod config_set_input_and_encryption;
 mod config_unset_compat_flags;
 mod cross_cutting_flags;
 mod fetch_depth_local;
+mod gc_smoke;
 mod grep_blame_describe_shortlog;
 mod init_bare_and_shared;
 mod init_basic;
@@ -71,6 +72,7 @@ pub(crate) use config_set_input_and_encryption::scenario_config_set_input_and_en
 pub(crate) use config_unset_compat_flags::scenario_config_unset_compat_flags;
 pub(crate) use cross_cutting_flags::scenario_cross_cutting_flags;
 pub(crate) use fetch_depth_local::scenario_fetch_depth_local;
+pub(crate) use gc_smoke::scenario_gc_smoke;
 pub(crate) use grep_blame_describe_shortlog::scenario_grep_blame_describe_shortlog;
 pub(crate) use init_bare_and_shared::scenario_init_bare_and_shared;
 pub(crate) use init_basic::scenario_init_basic;

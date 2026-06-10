@@ -4,6 +4,12 @@
 
 ### Added
 
+- **`libra gc`**: Maintenance command that traces refs, reflogs, and index
+  entries to keep reachable objects, prunes unreachable loose objects according
+  to `--prune`, supports `--dry-run` and `--json`, and cleans stale pack
+  sidecars while preserving `.keep`-protected packs. Valid pack/index pairs are
+  verified through the existing `verify-pack` path; full Git-style repacking and
+  delta compression remain deferred.
 - **`libra archive`**: create archives from committed tree snapshots. Supports
   `tar`, `tar.gz`/`tgz`, `tar.bz2`/`tbz2`/`tbz`, and `zip`, with optional
   `--output <FILE>` and safe relative `--prefix <PREFIX>` handling. The focused

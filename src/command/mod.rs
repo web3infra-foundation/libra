@@ -31,6 +31,7 @@ pub mod describe;
 pub mod diff;
 pub mod fetch;
 pub mod fsck;
+pub mod gc;
 pub mod graph;
 pub mod grep;
 pub mod hash_object;

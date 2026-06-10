@@ -143,7 +143,7 @@ gh repo view "$REPO" --json nameWithOwner,sshUrl,url
 | History | log, shortlog, show, show-ref, ls-remote, diff, grep, blame, describe | supported | 优秀（inspection 全，含 `log --follow` 单文件 rename 追踪） | cli.commit-status-log, cli.object-readback, cli.grep-blame-describe-shortlog, cli.clone-fetch-pull-local | 真实远端 refs 见 Wave3 |
 | Branching | commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert | supported/partial | 优秀（核心闭环全） | cli.branch-switch-checkout, cli.restore-reset-diff, cli.commit-status-log, cli.tag-basic, cli.merge-rebase-cherry-revert-smoke, cli.merge-conflict-continue, cli.rebase-conflict-continue | merge/rebase 冲突续跑成功路径已有独立场景；revert 单提交/范围和空会话控制在 smoke 场景覆盖 |
 | Remote | remote, fetch, pull, push, open | supported/partial | 良好（本地 Git clone/fetch/pull + fetch 默认 tag auto-follow + 本地 file remote push 拒绝 + GitHub live push 闭环 + `clone --depth` / `fetch --deepen` 本地 shallow 实现目标，open 无副作用 smoke） | cli.clone-*, cli.push-local-file-remote-rejected, cli.open-smoke, cli.fetch-depth-local, live.github-create-push-clone-fetch | `pull --rebase` 真分叉冲突路径仍属深水区；真实 push 语义只在 Wave3 |
-| Maintenance | db, fsck, cat-file, hash-object, archive, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, index-pack | supported/partial/int-diff | 良好（index-pack 除外） | cli.schema-*, cli.object-readback, cli.sha256-object-readback, cli.archive-smoke, cli.verify-pack-smoke, cli.stash-bisect-worktree, cli.reflog-symbolic-ref | index-pack 为隐藏内部命令，仅在 verify-pack 场景的 fixture 生成中作为辅助命令使用；archive 覆盖 tar/zip 文件输出与安全 prefix；sha256 端到端读写已独立覆盖 |
+| Maintenance | db, gc, fsck, cat-file, hash-object, archive, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, index-pack | supported/partial/int-diff | 良好（index-pack 除外） | cli.schema-*, cli.gc-smoke, cli.object-readback, cli.sha256-object-readback, cli.archive-smoke, cli.verify-pack-smoke, cli.stash-bisect-worktree, cli.reflog-symbolic-ref | index-pack 为隐藏内部命令，仅在 verify-pack 场景的 fixture 生成中作为辅助命令使用；archive 覆盖 tar/zip 文件输出与安全 prefix；gc 覆盖 dry-run 与不可达 loose object prune；sha256 端到端读写已独立覆盖 |
 | Cross-cutting | --json/--machine/--quiet/--color/--progress/--exit-code-on-warning | supported | 良好（独立场景集中断言全局 flag 语义；warning=9 仍按 gap 跟踪） | cli.cross-cutting-flags | 详见下方「跨命令标志」 |
 | AI/Cloud | code*, automation, cloud, publish, agent*, hooks | intentionally-different | 显式排除（见 2.2） | — | hooks 为兼容隐藏命令，由专属测试覆盖 |
 
@@ -847,8 +847,8 @@ runner 进程退出码：`0` = 无 `fail`（`skip`/`env-skip` 不算失败）；
   "run_root": "/tmp/.../libra-integ-XXXX",
   "binary": "/abs/path/target/debug/libra",
   "redaction_self_check": "clean",
-  "totals": { "pass": 37, "fail": 0, "skip": 0, "env_skip": 0, "block": 0 },
-  "passed": 37,
+  "totals": { "pass": 38, "fail": 0, "skip": 0, "env_skip": 0, "block": 0 },
+  "passed": 38,
   "failed": 0,
   "skipped": 0,
   "results": [ /* 每场景一条 ScenarioResult */ ],
@@ -897,7 +897,7 @@ runner 进程退出码：`0` = 无 `fail`（`skip`/`env-skip` 不算失败）；
 
 ### BASELINE_GAP-INTEG-002：CLI 场景清单自动校验不足
 
-- 现状：`check-plan` 已加载 yaml，并对比 runner 已实现 key，产出"文档已定义但 runner 未实现"的 id 列表（当前 0 个）。runner 已拆成 `registry.rs` + `runner/` + `scenarios/*.rs`，三方一致性 gate 继续由 **INTEG-008** 覆盖。**断言类别覆盖启发式已落地**：`check-plan` 现在对每个已实现场景扫描其 `key_assertion_categories` 中的 source-verifiable 类别（见 §2.4 列表）是否在 `scenarios/<id>.rs` 留有断言信号，缺失即失败；现有 38 个场景已逐一补强到声明即断言（config/* 补 `--json` envelope；branch/restore/stash/merge-smoke/clean/open 补负向 `LBR-` 路径；stash 补 `fsck`）。
+- 现状：`check-plan` 已加载 yaml，并对比 runner 已实现 key，产出"文档已定义但 runner 未实现"的 id 列表（当前 0 个）。runner 已拆成 `registry.rs` + `runner/` + `scenarios/*.rs`，三方一致性 gate 继续由 **INTEG-008** 覆盖。**断言类别覆盖启发式已落地**：`check-plan` 现在对每个已实现场景扫描其 `key_assertion_categories` 中的 source-verifiable 类别（见 §2.4 列表）是否在 `scenarios/<id>.rs` 留有断言信号，缺失即失败；现有场景已逐一补强到声明即断言（config/* 补 `--json` envelope；branch/restore/stash/merge-smoke/clean/open/gc 补负向 `LBR-` 路径；stash/gc 补 `fsck`）。
 - 需要补充：把 advisory 类别（`global_db_isolation` / `vault_isolation` / `intentional_difference`）从「运行时隔离/语义保证」升级为可机器校验的更强证据（例如解析场景实际断言的 ref/文件/JSON 字段），而非仅信号子串匹配。
 - 约束：`check-plan` 可由 CI 显式执行，但不得进入 `cargo test --all` 默认测试集，不写入 `tests/INDEX.md`。三方一致性（yaml ↔ MD ↔ 矩阵）由 INTEG-008 负责。Agent 实现的 scenario fn 必须实际触发其 yaml 条目声明的 categories。
 
@@ -914,7 +914,7 @@ runner 进程退出码：`0` = 无 `fail`（`skip`/`env-skip` 不算失败）；
 
 ### BASELINE_GAP-INTEG-005：版本管理命令黑盒场景覆盖不完整
 
-- 现状：§2.3 矩阵已建立，并已为 tag、merge/rebase/cherry-pick/revert、grep/blame/describe/shortlog、clean/rm/mv/lfs、reflog/symbolic-ref、verify-pack 添加独立黑盒场景和参数表；`cli.cross-cutting-flags` 已覆盖成功 JSON envelope + 错误 JSON（`ok:false` + `LBR-*`）的基本形态。
+- 现状：§2.3 矩阵已建立，并已为 tag、merge/rebase/cherry-pick/revert、grep/blame/describe/shortlog、clean/rm/mv/lfs、reflog/symbolic-ref、gc、verify-pack 添加独立黑盒场景和参数表；`cli.cross-cutting-flags` 已覆盖成功 JSON envelope + 错误 JSON（`ok:false` + `LBR-*`）的基本形态。
 - 需要补充：继续细化未纳入默认闭环的深水区：`pull --rebase` 真分叉冲突路径、LFS 远端 lock API、更多 pack corpus 的 `index-pack`/`verify-pack` 深度 fixture、`open` JSON 无副作用行为是否足够代表真实 open；**故意差异的正向断言**（push 拒绝本地文件 remote、symbolic-ref 仅 HEAD 等）需在对应场景中显式存在并随矩阵更新。
 - 约束：任何新增场景必须是可在本机无密钥确定性复现的 `libra <cmd>` 黑盒；不得引入 live AI/cloud。
 - 跟踪：§2.3 矩阵 + 对应 Wave 场景 + PR Test Plan 清单。
