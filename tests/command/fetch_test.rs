@@ -1105,6 +1105,21 @@ fn test_fetch_shallow_since_invalid_date_exits_129() {
     );
 }
 
+#[test]
+fn test_fetch_depth_and_deepen_conflict() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(
+        &["fetch", "origin", "--depth", "1", "--deepen", "1"],
+        repo.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "--depth and --deepen must be rejected as a usage error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// End-to-end `fetch --prune`: a remote-tracking branch whose remote counterpart
 /// was deleted is removed locally; live branches and `refs/heads/*` are kept.
 #[tokio::test]
@@ -1570,6 +1585,49 @@ async fn test_fetch_tags_imports_annotated_and_lightweight() {
             "fetched annotated tag should be stored as a tag object"
         );
     }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_fetch_default_auto_follows_tags_for_fetched_commit() {
+    let fixture = setup_fetch_fixture_with_tags().await;
+
+    let output = run_libra_command(&["fetch", "origin"], &fixture.repo_dir);
+    assert_cli_success(&output, "fetch origin");
+
+    let show = run_libra_command(&["show-ref", "--tags"], &fixture.repo_dir);
+    assert_cli_success(&show, "show-ref --tags");
+    let refs = String::from_utf8_lossy(&show.stdout);
+
+    let lightweight = refs
+        .lines()
+        .find(|line| line.contains("refs/tags/lightweight-tag"))
+        .unwrap_or_else(|| panic!("lightweight tag not auto-followed: {refs}"));
+    assert!(
+        lightweight.contains(&fixture.lightweight_target),
+        "auto-followed lightweight tag points at the wrong object: {lightweight}"
+    );
+
+    let annotated = refs
+        .lines()
+        .find(|line| line.contains("refs/tags/annotated-tag"))
+        .unwrap_or_else(|| panic!("annotated tag not auto-followed: {refs}"));
+    assert!(
+        annotated.contains(&fixture.annotated_target),
+        "auto-followed annotated tag points at the wrong object: {annotated}"
+    );
+
+    let _guard = ChangeDirGuard::new(&fixture.repo_dir);
+    let storage = ClientStorage::init(path::objects());
+    let hash = ObjectHash::from_str(&fixture.annotated_target).expect("valid annotated tag hash");
+    let obj_type = storage
+        .get_object_type(&hash)
+        .expect("auto-followed annotated tag object must be present");
+    assert_eq!(
+        obj_type,
+        ObjectType::Tag,
+        "auto-follow must fetch the annotated tag object"
+    );
 }
 
 /// `--no-tags` imports no tags even when the remote advertises them.

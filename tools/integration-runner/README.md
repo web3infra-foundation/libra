@@ -13,4 +13,4 @@ cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --only cli.
 
 Per-scenario docs: `docs/development/integration-scenarios/<id>.md` (index: `integration-scenarios/README.md`). Registry: `integration-scenarios.yaml`. Plan matrix/isolation: `integration-test-plan.md`.
 
-Implemented: R0-R5 complete (`check-plan` = yaml + per-scenario MD + §2.3 matrix + registry; `run --waves 0,1,2`; `run-live` for Wave 3). All 37 scenarios in `scenario_registry()` + `src/scenarios/*.rs`.
+Implemented: R0-R5 complete (`check-plan` = yaml + per-scenario MD + §2.3 matrix + registry; `run --waves 0,1,2`; `run-live` for Wave 3). All 38 scenarios in `scenario_registry()` + `src/scenarios/*.rs`.

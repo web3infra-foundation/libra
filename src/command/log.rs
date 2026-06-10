@@ -4,7 +4,7 @@ use std::{
     cell::RefCell,
     cmp::min,
     collections::{HashMap, HashSet, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     str::FromStr,
 };
@@ -50,6 +50,10 @@ EXAMPLES:
     libra log --since 24h --until 1h       Time-window filter (relative or RFC3339)
     libra log --grep '^fix' -n 20          Filter commits by message (regex)
     libra log --merges --first-parent      Show merge commits along the first-parent line
+    libra log --pretty=format:'%h %s'      Render with a Git-style custom pretty format
+    libra log main..feature -- src/        Show range commits that touch src/
+    libra log --follow renamed.txt         Follow one file across renames
+    libra log -S 'debug_flag' -- src/      Pickaxe literal changes under src/
     libra log --name-status src/           Show changed files under src/
     libra --json log -n 1                  Structured JSON output for agents";
 
@@ -174,6 +178,8 @@ pub struct LogArgs {
     /// Files to limit diff output (used with -p, --name-only, or --stat)
     #[clap(value_name = "PATHS", num_args = 0..)]
     pathspec: Vec<String>,
+    #[clap(skip)]
+    revision_tokens: Option<Vec<String>>,
 
     /// Filter commits whose message matches PATTERN (regular expression, case-sensitive by default)
     #[clap(long, value_name = "PATTERN")]
@@ -205,6 +211,9 @@ pub struct LogArgs {
     /// Show commits with an added or removed line matching the REGEX
     #[clap(short = 'G', value_name = "REGEX")]
     pub pickaxe_regex: Option<String>,
+    /// Follow a single file's history across renames
+    #[clap(long)]
+    pub follow: bool,
 }
 
 #[derive(PartialEq, Debug)]
@@ -231,6 +240,21 @@ pub struct FileChange {
 struct SelectedLogCommit {
     commit: Commit,
     cached_changes: Option<Vec<FileChange>>,
+    path_filters: Vec<PathBuf>,
+    follow_rename: Option<FollowRename>,
+}
+
+#[derive(Debug, Clone)]
+struct FollowRename {
+    from: PathBuf,
+    to: PathBuf,
+    score: u32,
+}
+
+struct FollowCommitChanges {
+    changes: Vec<FileChange>,
+    previous_path: Option<PathBuf>,
+    rename: Option<FollowRename>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -303,10 +327,139 @@ enum RevRange {
 /// Returns whether any positional token uses explicit revision-range/exclude
 /// syntax (`..`, `...`, or a leading `^`). Bare tokens never trigger this, so
 /// pathspec-only invocations keep their existing behavior.
+fn token_has_rev_range_syntax(token: &str) -> bool {
+    if token.starts_with('^') {
+        return true;
+    }
+    if let Some((left, right)) = token.split_once("...").or_else(|| token.split_once("..")) {
+        return !left.ends_with(['/', '\\']) && !right.starts_with(['/', '\\']);
+    }
+    false
+}
+
 fn has_rev_range_syntax(tokens: &[String]) -> bool {
+    tokens.iter().any(|token| token_has_rev_range_syntax(token))
+}
+
+pub fn apply_pathspec_separator(args: &mut LogArgs, command_argv: &[String]) {
+    let Some(separator_index) = command_argv.iter().position(|arg| arg == "--") else {
+        return;
+    };
+    let trailing_pathspecs = command_argv[separator_index + 1..].to_vec();
+    if trailing_pathspecs.len() > args.pathspec.len() {
+        return;
+    }
+    let revision_count = args.pathspec.len() - trailing_pathspecs.len();
+    args.revision_tokens = Some(args.pathspec[..revision_count].to_vec());
+    args.pathspec = trailing_pathspecs;
+}
+
+struct LogPositionals {
+    rev_range: Option<RevRange>,
+    path_filters: Vec<PathBuf>,
+    explicit_revision_query: bool,
+}
+
+fn parse_log_positionals(args: &LogArgs) -> CliResult<LogPositionals> {
+    let has_separator = args.revision_tokens.is_some();
+    let revision_tokens = args.revision_tokens.as_deref().unwrap_or(&args.pathspec);
+    let explicit_revision_query =
+        (has_separator && !revision_tokens.is_empty()) || has_rev_range_syntax(revision_tokens);
+
+    let rev_range = explicit_revision_query
+        .then(|| parse_rev_range(revision_tokens))
+        .transpose()?;
+    let path_filters = if has_separator || !explicit_revision_query {
+        normalize_log_pathspecs(&args.pathspec)?
+    } else {
+        Vec::new()
+    };
+
+    Ok(LogPositionals {
+        rev_range,
+        path_filters,
+        explicit_revision_query,
+    })
+}
+
+fn invalid_pathspec_error(raw: &str, reason: &str) -> CliError {
+    CliError::command_usage(format!("invalid pathspec '{raw}': {reason}"))
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+        .with_hint("pathspecs must be relative paths that stay inside the working tree; use `--` to separate paths from revisions.")
+}
+
+fn is_windows_absolute_path(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    raw.starts_with("\\\\")
+        || raw.starts_with('\\')
+        || (bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic())
+}
+
+fn validate_log_pathspec_boundary(raw: &str) -> CliResult<()> {
+    if Path::new(raw).is_absolute() || is_windows_absolute_path(raw) {
+        return Err(invalid_pathspec_error(
+            raw,
+            "absolute paths are not accepted",
+        ));
+    }
+
+    let mut depth = 0usize;
+    for segment in raw.split(['/', '\\']) {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                if depth == 0 {
+                    return Err(invalid_pathspec_error(
+                        raw,
+                        "parent components escape the working tree",
+                    ));
+                }
+                depth -= 1;
+            }
+            _ => depth += 1,
+        }
+    }
+    Ok(())
+}
+
+fn normalize_log_pathspec(raw: &str) -> CliResult<PathBuf> {
+    validate_log_pathspec_boundary(raw)?;
+    let mut normalized = PathBuf::new();
+    for segment in raw.split(['/', '\\']) {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                normalized.pop();
+            }
+            _ => normalized.push(segment),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        Ok(PathBuf::from("."))
+    } else {
+        Ok(normalized)
+    }
+}
+
+fn normalize_log_pathspecs(tokens: &[String]) -> CliResult<Vec<PathBuf>> {
     tokens
         .iter()
-        .any(|token| token.contains("..") || token.starts_with('^'))
+        .map(|token| normalize_log_pathspec(token))
+        .collect()
+}
+
+fn resolve_follow_path(args: &LogArgs, positionals: &LogPositionals) -> CliResult<Option<PathBuf>> {
+    if !args.follow {
+        return Ok(None);
+    }
+    match positionals.path_filters.as_slice() {
+        [path] if path != Path::new(".") => Ok(Some(path.clone())),
+        _ => Err(
+            CliError::command_usage("log --follow requires exactly one file pathspec")
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("use `libra log --follow -- <path>` with one file path."),
+        ),
+    }
 }
 
 /// An empty range endpoint defaults to `HEAD` (so `..B` and `A..` work).
@@ -402,15 +555,16 @@ async fn resolve_rev_range(range: &RevRange) -> CliResult<Vec<Commit>> {
             let rb = reachable_commits_for_spec(b).await?;
             let a_oids: HashSet<String> = ra.iter().map(|c| c.id.to_string()).collect();
             let b_oids: HashSet<String> = rb.iter().map(|c| c.id.to_string()).collect();
-            let mut out: HashMap<String, Commit> = HashMap::new();
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut out = Vec::new();
             for commit in ra.into_iter().chain(rb) {
                 let oid = commit.id.to_string();
                 // Reachable from exactly one side.
-                if a_oids.contains(&oid) ^ b_oids.contains(&oid) {
-                    out.entry(oid).or_insert(commit);
+                if (a_oids.contains(&oid) ^ b_oids.contains(&oid)) && seen.insert(oid) {
+                    out.push(commit);
                 }
             }
-            Ok(out.into_values().collect())
+            Ok(out)
         }
         RevRange::Include {
             positives,
@@ -422,16 +576,17 @@ async fn resolve_rev_range(range: &RevRange) -> CliResult<Vec<Commit>> {
                     excluded.insert(commit.id.to_string());
                 }
             }
-            let mut included: HashMap<String, Commit> = HashMap::new();
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut included = Vec::new();
             for positive in positives {
                 for commit in reachable_commits_for_spec(positive).await? {
                     let oid = commit.id.to_string();
-                    if !excluded.contains(&oid) {
-                        included.entry(oid).or_insert(commit);
+                    if !excluded.contains(&oid) && seen.insert(oid) {
+                        included.push(commit);
                     }
                 }
             }
-            Ok(included.into_values().collect())
+            Ok(included)
         }
     }
 }
@@ -606,12 +761,20 @@ impl CommitFilter {
     /// rather than silently excluding the commit; only a clean "no match"
     /// excludes it.
     fn matches_pickaxe(&self, commit: &Commit) -> Result<bool, CliError> {
+        self.matches_pickaxe_with_paths(commit, &self.paths)
+    }
+
+    fn matches_pickaxe_with_paths(
+        &self,
+        commit: &Commit,
+        paths: &[PathBuf],
+    ) -> Result<bool, CliError> {
         let Some(pickaxe) = &self.pickaxe else {
             return Ok(true);
         };
         match pickaxe {
-            Pickaxe::String(needle) => commit_pickaxe_string(commit, needle, &self.paths),
-            Pickaxe::Regex(re) => commit_pickaxe_regex(commit, re, &self.paths),
+            Pickaxe::String(needle) => commit_pickaxe_string(commit, needle, paths),
+            Pickaxe::Regex(re) => commit_pickaxe_regex(commit, re, paths),
         }
     }
 
@@ -673,7 +836,7 @@ fn load_commit_blob_vecs(commit: &Commit) -> Result<(BlobList, BlobList), CliErr
     Ok((old_blobs, new_blobs))
 }
 
-fn pickaxe_path_in_scope(path: &std::path::Path, filters: &[PathBuf]) -> bool {
+fn pickaxe_path_in_scope(path: &Path, filters: &[PathBuf]) -> bool {
     filters.is_empty() || filters.iter().any(|filter| util::is_sub_path(path, filter))
 }
 
@@ -726,6 +889,107 @@ fn commit_pickaxe_regex(commit: &Commit, re: &Regex, paths: &[PathBuf]) -> Resul
     Ok(diffs
         .iter()
         .any(|item| pickaxe::diff_line_matches(&item.data, re)))
+}
+
+fn map_by_path(blobs: BlobList) -> HashMap<PathBuf, ObjectHash> {
+    blobs.into_iter().collect()
+}
+
+fn file_change_for_path(
+    path: &Path,
+    old_hash: Option<&ObjectHash>,
+    new_hash: Option<&ObjectHash>,
+) -> Option<FileChange> {
+    match (old_hash, new_hash) {
+        (None, Some(_)) => Some(FileChange {
+            path: path.to_path_buf(),
+            status: ChangeType::Added,
+        }),
+        (Some(_), None) => Some(FileChange {
+            path: path.to_path_buf(),
+            status: ChangeType::Deleted,
+        }),
+        (Some(old), Some(new)) if old != new => Some(FileChange {
+            path: path.to_path_buf(),
+            status: ChangeType::Modified,
+        }),
+        _ => None,
+    }
+}
+
+fn best_follow_rename(
+    current_path: &Path,
+    old_map: &HashMap<PathBuf, ObjectHash>,
+    new_map: &HashMap<PathBuf, ObjectHash>,
+) -> Result<Option<FollowRename>, CliError> {
+    let Some(new_hash) = new_map.get(current_path) else {
+        return Ok(None);
+    };
+    if old_map.contains_key(current_path) {
+        return Ok(None);
+    }
+
+    let mut best: Option<(PathBuf, f64)> = None;
+    let new_content = load_commit_blob_content(new_hash)?;
+    for (old_path, old_hash) in old_map {
+        if new_map.contains_key(old_path) {
+            continue;
+        }
+        let similarity = if old_hash == new_hash {
+            1.0
+        } else {
+            crate::utils::blob_similarity::blob_line_similarity(
+                &load_commit_blob_content(old_hash)?,
+                &new_content,
+            )
+        };
+        if similarity >= 0.5 && best.as_ref().is_none_or(|(_, score)| similarity > *score) {
+            best = Some((old_path.clone(), similarity));
+        }
+    }
+
+    Ok(best.map(|(from, similarity)| FollowRename {
+        from,
+        to: current_path.to_path_buf(),
+        score: ((similarity * 100.0).round() as u32).min(100),
+    }))
+}
+
+fn follow_changes_for_commit(
+    commit: &Commit,
+    current_path: &Path,
+) -> Result<FollowCommitChanges, CliError> {
+    let (old_blobs, new_blobs) = load_commit_blob_vecs(commit)?;
+    let old_map = map_by_path(old_blobs);
+    let new_map = map_by_path(new_blobs);
+    if let Some(rename) = best_follow_rename(current_path, &old_map, &new_map)? {
+        return Ok(FollowCommitChanges {
+            changes: vec![
+                FileChange {
+                    path: rename.from.clone(),
+                    status: ChangeType::Deleted,
+                },
+                FileChange {
+                    path: rename.to.clone(),
+                    status: ChangeType::Added,
+                },
+            ],
+            previous_path: Some(rename.from.clone()),
+            rename: Some(rename),
+        });
+    }
+
+    Ok(FollowCommitChanges {
+        changes: file_change_for_path(
+            current_path,
+            old_map.get(current_path),
+            new_map.get(current_path),
+        )
+        .into_iter()
+        .collect(),
+        previous_path: None,
+        rename: None,
+    })
 }
 
 fn str_to_decorate_option(s: &str) -> Result<DecorateOptions, String> {
@@ -887,14 +1151,8 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
 
     let since = args.since.as_deref().map(parse_date_arg).transpose()?;
     let until = args.until.as_deref().map(parse_date_arg).transpose()?;
-    // When explicit range syntax (`A..B`, `A...B`, `^X`) is present the
-    // positionals are revisions, not pathspec.
-    let is_range = has_rev_range_syntax(&args.pathspec);
-    let path_filters: Vec<PathBuf> = if is_range {
-        Vec::new()
-    } else {
-        args.pathspec.iter().map(util::to_workdir_path).collect()
-    };
+    let positionals = parse_log_positionals(&args)?;
+    let follow_path = resolve_follow_path(&args, &positionals)?;
     // Compile `--grep` before any traversal so an invalid/oversized pattern
     // fails fast (`LBR-CLI-002`) instead of after loading the whole history.
     let grep = args
@@ -903,14 +1161,11 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         .map(|p| compile_grep_regex(p, args.regexp_ignore_case))
         .transpose()?;
     let pickaxe = build_pickaxe(&args)?;
-    let rev_range = is_range
-        .then(|| parse_rev_range(&args.pathspec))
-        .transpose()?;
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let commit_hash = current_head_commit.to_string();
 
-    let mut reachable_commits = match &rev_range {
+    let mut reachable_commits = match &positionals.rev_range {
         Some(range) => resolve_rev_range(range).await?,
         None => get_reachable_commits(commit_hash.clone(), None).await?,
     };
@@ -921,14 +1176,14 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     // `--first-parent` restricts to the first-parent chain (computed from the
     // already-loaded history so the shared `get_reachable_commits` is untouched).
     // It is anchored at HEAD, so it is skipped for an explicit revision range.
-    let first_parents = (args.first_parent && !is_range)
+    let first_parents = (args.first_parent && !positionals.explicit_revision_query)
         .then(|| first_parent_oids(&current_head_commit, &reachable_commits));
     let filter = CommitFilter::new(
         args.author.clone(),
         args.committer.clone(),
         since,
         until,
-        path_filters.clone(),
+        positionals.path_filters.clone(),
         grep,
         effective_min_parents(&args),
         effective_max_parents(&args),
@@ -938,19 +1193,21 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
 
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
     let reuse_changed_files = name_only || name_status;
-    let selected_commits = select_log_commits(
+    let (selected_commits, _) = select_log_commits(
         reachable_commits,
         &filter,
-        &path_filters,
+        &positionals.path_filters,
         max_output_number,
         reuse_changed_files,
+        follow_path,
+        false,
     )
     .await?;
 
     if output.quiet {
         return validate_selected_log_commits(
             &selected_commits,
-            &path_filters,
+            &positionals.path_filters,
             name_only,
             name_status,
             patch,
@@ -996,6 +1253,8 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         let SelectedLogCommit {
             commit,
             mut cached_changes,
+            path_filters,
+            follow_rename,
         } = selected;
         let ref_msg = if decorate_option != DecorateOptions::No {
             let mut ref_msgs: Vec<String> = vec![];
@@ -1092,7 +1351,11 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
                 if !message.ends_with('\n') {
                     message.push('\n');
                 }
-                message.push_str(&format_changes(&changes, name_status));
+                message.push_str(&format_changes(
+                    &changes,
+                    name_status,
+                    follow_rename.as_ref(),
+                ));
             }
         } else if patch {
             let patch_output = generate_diff(&commit, path_filters.clone()).await?;
@@ -1123,40 +1386,33 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
 async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     let since = args.since.as_deref().map(parse_date_arg).transpose()?;
     let until = args.until.as_deref().map(parse_date_arg).transpose()?;
-    let is_range = has_rev_range_syntax(&args.pathspec);
-    let path_filters: Vec<PathBuf> = if is_range {
-        Vec::new()
-    } else {
-        args.pathspec.iter().map(util::to_workdir_path).collect()
-    };
+    let positionals = parse_log_positionals(args)?;
+    let follow_path = resolve_follow_path(args, &positionals)?;
     let grep = args
         .grep
         .as_deref()
         .map(|p| compile_grep_regex(p, args.regexp_ignore_case))
         .transpose()?;
     let pickaxe = build_pickaxe(args)?;
-    let rev_range = is_range
-        .then(|| parse_rev_range(&args.pathspec))
-        .transpose()?;
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let commit_hash = current_head_commit.to_string();
 
-    let mut reachable_commits = match &rev_range {
+    let mut reachable_commits = match &positionals.rev_range {
         Some(range) => resolve_rev_range(range).await?,
         None => get_reachable_commits(commit_hash, None).await?,
     };
     // newest first
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
 
-    let first_parents = (args.first_parent && !is_range)
+    let first_parents = (args.first_parent && !positionals.explicit_revision_query)
         .then(|| first_parent_oids(&current_head_commit, &reachable_commits));
     let filter = CommitFilter::new(
         args.author.clone(),
         args.committer.clone(),
         since,
         until,
-        path_filters.clone(),
+        positionals.path_filters.clone(),
         grep,
         effective_min_parents(args),
         effective_max_parents(args),
@@ -1167,26 +1423,24 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
     let include_total = args.number.is_none();
     let ref_commits = create_reference_commit_map().await;
+    let (selected_commits, total) = select_log_commits(
+        reachable_commits,
+        &filter,
+        &positionals.path_filters,
+        max_output_number,
+        true,
+        follow_path,
+        include_total,
+    )
+    .await?;
     let mut commits = Vec::new();
-    let mut total = 0usize;
-
-    for commit in reachable_commits {
-        if !include_total && commits.len() >= max_output_number {
-            break;
-        }
-        if !filter.passes_non_path_filters(&commit) {
-            continue;
-        }
-
-        let files = get_changed_files_for_commit(&commit, &path_filters).await?;
-        if !filter.matches(&commit, Some(&files)).await? {
-            continue;
-        }
-
-        total += 1;
-        if commits.len() >= max_output_number {
-            continue;
-        }
+    for selected in selected_commits {
+        let SelectedLogCommit {
+            commit,
+            cached_changes,
+            ..
+        } = selected;
+        let files = cached_changes.unwrap_or_default();
 
         let (parsed_message, _) = parse_commit_msg(&commit.message);
         let mut message_lines = parsed_message.lines();
@@ -1244,34 +1498,61 @@ async fn select_log_commits(
     path_filters: &[PathBuf],
     max_output_number: usize,
     keep_changed_files: bool,
-) -> Result<Vec<SelectedLogCommit>, CliError> {
+    follow_path: Option<PathBuf>,
+    count_all_matches: bool,
+) -> Result<(Vec<SelectedLogCommit>, usize), CliError> {
     let mut selected = Vec::new();
+    let mut total = 0usize;
+    let mut current_follow_path = follow_path;
 
     for commit in reachable_commits {
-        if selected.len() >= max_output_number {
+        if selected.len() >= max_output_number && !count_all_matches {
             break;
         }
         if !filter.passes_non_path_filters(&commit) {
             continue;
         }
 
-        let cached_changes = if filter.paths.is_empty() && !keep_changed_files {
-            None
-        } else {
-            Some(get_changed_files_for_commit(&commit, path_filters).await?)
-        };
+        let (effective_paths, cached_changes, follow_rename) =
+            if let Some(current_path) = current_follow_path.clone() {
+                let follow = follow_changes_for_commit(&commit, &current_path)?;
+                if let Some(previous_path) = follow.previous_path {
+                    current_follow_path = Some(previous_path);
+                }
+                if follow.changes.is_empty()
+                    || !filter
+                        .matches_pickaxe_with_paths(&commit, std::slice::from_ref(&current_path))?
+                {
+                    continue;
+                }
+                (vec![current_path], Some(follow.changes), follow.rename)
+            } else if filter.paths.is_empty() && !keep_changed_files {
+                if !filter.matches(&commit, None).await? {
+                    continue;
+                }
+                (path_filters.to_vec(), None, None)
+            } else {
+                let changes = get_changed_files_for_commit(&commit, path_filters).await?;
+                if !filter.matches(&commit, Some(&changes)).await? {
+                    continue;
+                }
+                (path_filters.to_vec(), Some(changes), None)
+            };
 
-        if !filter.matches(&commit, cached_changes.as_deref()).await? {
+        total += 1;
+        if selected.len() >= max_output_number {
             continue;
         }
 
         selected.push(SelectedLogCommit {
             commit,
             cached_changes,
+            path_filters: effective_paths,
+            follow_rename,
         });
     }
 
-    Ok(selected)
+    Ok((selected, total))
 }
 
 async fn validate_selected_log_commits(
@@ -1283,14 +1564,19 @@ async fn validate_selected_log_commits(
     stat: bool,
 ) -> CliResult<()> {
     for selected in selected_commits {
+        let effective_paths = if selected.path_filters.is_empty() {
+            path_filters
+        } else {
+            &selected.path_filters
+        };
         if name_only || name_status {
             if selected.cached_changes.is_none() {
-                let _ = get_changed_files_for_commit(&selected.commit, path_filters).await?;
+                let _ = get_changed_files_for_commit(&selected.commit, effective_paths).await?;
             }
         } else if patch {
-            let _ = generate_diff(&selected.commit, path_filters.to_vec()).await?;
+            let _ = generate_diff(&selected.commit, effective_paths.to_vec()).await?;
         } else if stat {
-            let _ = compute_commit_stat(&selected.commit, path_filters.to_vec()).await?;
+            let _ = compute_commit_stat(&selected.commit, effective_paths.to_vec()).await?;
         }
     }
 
@@ -1450,8 +1736,21 @@ pub(crate) async fn get_changed_files_for_commit(
     Ok(changed_files)
 }
 
-fn format_changes(changes: &[FileChange], include_status: bool) -> String {
+fn format_changes(
+    changes: &[FileChange],
+    include_status: bool,
+    follow_rename: Option<&FollowRename>,
+) -> String {
     let mut out = String::new();
+    if include_status && let Some(rename) = follow_rename {
+        out.push_str(&format!(
+            "R{}\t{}\t{}\n",
+            rename.score,
+            rename.from.display(),
+            rename.to.display()
+        ));
+        return out;
+    }
     for change in changes {
         if include_status {
             let status = match change.status {
@@ -1880,10 +2179,10 @@ mod tests {
             path: PathBuf::from("src/main.rs"),
             status: ChangeType::Added,
         }];
-        let with_status = format_changes(&changes, true);
+        let with_status = format_changes(&changes, true, None);
         assert!(with_status.contains("A\tsrc/main.rs"));
 
-        let names_only = format_changes(&changes, false);
+        let names_only = format_changes(&changes, false, None);
         assert!(names_only.contains("src/main.rs"));
         assert!(!names_only.contains("A\t"));
     }

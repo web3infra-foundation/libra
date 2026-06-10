@@ -378,7 +378,7 @@ pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<
 /// `DelegatedCli` 存在于转发已构建的 [`CliError`]s（通常来自上游帮助器
 /// 如 [`get_reachable_commits`]）而不重复包装其稳定代码。
 #[derive(Debug, thiserror::Error)]
-enum BranchError {
+pub(crate) enum BranchError {
     #[error("not a libra repository")]
     NotInRepo,
 
@@ -674,7 +674,7 @@ fn branch_config_write_error(key: &str, error: impl ToString) -> BranchError {
 /// - Returns [`BranchError::InvalidUpstream`] when `upstream` lacks a `/`.
 /// - Each underlying SQL failure becomes a [`BranchError::ConfigReadFailed`]
 ///   or [`BranchError::ConfigWriteFailed`] keyed by the config key.
-async fn set_upstream_with_conn<C: ConnectionTrait>(
+pub(crate) async fn set_upstream_with_conn<C: ConnectionTrait>(
     db: &C,
     branch: &str,
     upstream: &str,
@@ -1788,6 +1788,20 @@ pub async fn create_branch_safe(
     branch_or_commit: Option<String>,
 ) -> CliResult<()> {
     create_branch_impl(new_branch, branch_or_commit, false)
+        .await
+        .map(|_| ())
+        .map_err(CliError::from)?;
+    Ok(())
+}
+
+/// Force-create a branch (Git `switch -C` / `branch -f` semantics): create it,
+/// or reset it to the start point if it already exists. Locked branches are
+/// still refused. Mirrors [`create_branch_safe`] with `force = true`.
+pub async fn create_branch_force(
+    new_branch: String,
+    branch_or_commit: Option<String>,
+) -> CliResult<()> {
+    create_branch_impl(new_branch, branch_or_commit, true)
         .await
         .map(|_| ())
         .map_err(CliError::from)?;

@@ -249,6 +249,8 @@ mod tests {
         let global_db_path = global_dir.path().join("deepseek-global-config.db");
         let global_db_string = global_db_path.to_string_lossy().into_owned();
         let global_guard = TestEnvGuard::set("LIBRA_CONFIG_GLOBAL_DB", Some(&global_db_string));
+        let cwd_dir = tempfile::tempdir().unwrap();
+        let _cwd_guard = crate::utils::test::ChangeDirGuard::new(cwd_dir.path());
 
         let global_conn = rt
             .block_on(crate::internal::db::create_database(&global_db_string))

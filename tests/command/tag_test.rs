@@ -6,6 +6,7 @@ use std::collections::HashSet;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+use clap::Parser;
 #[cfg(unix)]
 use libra::utils::path;
 use libra::{
@@ -677,12 +678,21 @@ async fn test_force_tag() {
 
     // Use CLI path for force update to exercise both CLI and internal logic.
     tag::execute(TagArgs {
-        name: Some("v1.0".into()),
+        name: vec!["v1.0".into()],
         list: false,
         delete: false,
+        annotate: false,
+        file: None,
+        edit: false,
         message: Some("Updated".into()),
         force: true,
         n_lines: None,
+        points_at: None,
+        contains: vec![],
+        no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        sort: None,
     })
     .await;
     let after = read_tag_oid("v1.0").await;
@@ -787,12 +797,21 @@ async fn test_delete_tag() {
     assert_tag_exists("to-delete").await;
 
     tag::execute(TagArgs {
-        name: Some("to-delete".into()),
+        name: vec!["to-delete".into()],
         list: false,
         delete: true,
+        annotate: false,
+        file: None,
+        edit: false,
         message: None,
         force: false,
         n_lines: None,
+        points_at: None,
+        contains: vec![],
+        no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        sort: None,
     })
     .await;
     assert_tag_absent("to-delete").await;
@@ -838,12 +857,21 @@ async fn test_annotation_lines_tag() {
 
     // Make second tag with single line annotation
     tag::execute(TagArgs {
-        name: Some("v1.0.1".into()),
+        name: vec!["v1.0.1".into()],
         list: false,
         delete: false,
+        annotate: false,
+        file: None,
+        edit: false,
         message: Some("Single line annotation message".into()),
         force: false,
         n_lines: None,
+        points_at: None,
+        contains: vec![],
+        no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        sort: None,
     })
     .await;
 
@@ -878,12 +906,21 @@ async fn test_annotation_lines_tag() {
 
     // Make third tag with multi line annotation
     tag::execute(TagArgs {
-        name: Some("v1.0.3".into()),
+        name: vec!["v1.0.3".into()],
         list: false,
         delete: false,
+        annotate: false,
+        file: None,
+        edit: false,
         message: Some("multi\nline\nannotation\ntag".into()),
         force: false,
         n_lines: None,
+        points_at: None,
+        contains: vec![],
+        no_contains: vec![],
+        merged: None,
+        no_merged: None,
+        sort: None,
     })
     .await;
 
@@ -928,4 +965,391 @@ async fn test_annotation_lines_tag() {
     assert!(output_lines2.contains(&"line"));
     assert!(!output_lines2.contains(&"annotation"));
     assert!(!output_lines2.contains(&"tag"));
+}
+
+/// `libra rev-parse <rev>` → trimmed OID string (panics on failure).
+fn tag_rev_parse(repo: &std::path::Path, rev: &str) -> String {
+    let out = run_libra_command(&["rev-parse", rev], repo);
+    assert_cli_success(&out, "rev-parse");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Collect the `name` field of every tag in a `--json tag` list envelope.
+fn tag_list_names(output: &std::process::Output) -> HashSet<String> {
+    let json = parse_json_stdout(output);
+    json["data"]["tags"]
+        .as_array()
+        .expect("expected tags array")
+        .iter()
+        .map(|entry| {
+            entry["name"]
+                .as_str()
+                .expect("tag entry missing name")
+                .to_string()
+        })
+        .collect()
+}
+
+/// `--points-at <object>` peels each tag to its commit and keeps only those
+/// resolving to the requested object. A lightweight tag points straight at a
+/// commit; an annotated tag peels through its tag object to the same commit,
+/// so both surface when the second commit is requested.
+#[test]
+fn test_tag_points_at_filters_to_matching_commit() {
+    let repo = create_committed_repo_via_cli();
+
+    // The base commit already exists; tag it lightweight.
+    let base = tag_rev_parse(repo.path(), "HEAD");
+    assert_cli_success(
+        &run_libra_command(&["tag", "v-base"], repo.path()),
+        "tag v-base",
+    );
+
+    // Add a second commit; tag it both lightweight and annotated.
+    std::fs::write(repo.path().join("second.txt"), "second\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "second.txt"], repo.path()),
+        "add second",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path()),
+        "commit second",
+    );
+    let second = tag_rev_parse(repo.path(), "HEAD");
+    assert_cli_success(
+        &run_libra_command(&["tag", "v-second"], repo.path()),
+        "tag v-second",
+    );
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "annotated second", "a-second"], repo.path()),
+        "tag a-second",
+    );
+
+    // --points-at <base>: only the lightweight tag on the base commit.
+    let out = run_libra_command(&["--json", "tag", "--points-at", &base], repo.path());
+    assert_cli_success(&out, "tag --points-at base");
+    assert_eq!(tag_list_names(&out), HashSet::from(["v-base".to_string()]));
+
+    // --points-at <second>: lightweight v-second AND annotated a-second
+    // (the annotated tag peels through its tag object to the second commit).
+    let out = run_libra_command(&["--json", "tag", "--points-at", &second], repo.path());
+    assert_cli_success(&out, "tag --points-at second");
+    assert_eq!(
+        tag_list_names(&out),
+        HashSet::from(["v-second".to_string(), "a-second".to_string()]),
+    );
+}
+
+/// An unresolvable `--points-at` revision fails with a `not a valid object
+/// name` message rather than a raw resolver error.
+#[test]
+fn test_tag_points_at_invalid_object_errors() {
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["tag", "--points-at", "definitely-not-a-ref"], repo.path());
+    assert!(
+        !out.status.success(),
+        "expected failure for invalid --points-at object",
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not a valid object name"),
+        "expected 'not a valid object name' in stderr, got: {stderr}",
+    );
+}
+
+/// `-a`/`--annotate` creates an annotated tag when paired with `-m`. Without
+/// an explicit message source, it opens an editor; in the isolated test
+/// environment no editor is configured, so it fails as usage instead of
+/// silently creating a lightweight tag.
+#[test]
+fn test_tag_annotate_flag_requires_message() {
+    let repo = create_committed_repo_via_cli();
+
+    // -a -m creates an annotated tag.
+    let ok = run_libra_command(
+        &["--json", "tag", "-a", "-m", "Release", "v2.0"],
+        repo.path(),
+    );
+    assert_cli_success(&ok, "tag -a -m");
+    let json = parse_json_stdout(&ok);
+    assert_eq!(json["data"]["action"], "create");
+    assert_eq!(json["data"]["tag_type"], "annotated");
+    assert_eq!(json["data"]["message"], "Release");
+
+    // -a without a message source must never degrade to a lightweight tag.
+    let no_msg = run_libra_command(&["tag", "-a", "v3.0"], repo.path());
+    assert_eq!(
+        no_msg.status.code(),
+        Some(129),
+        "annotate without message should be a usage error, stderr: {}",
+        String::from_utf8_lossy(&no_msg.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&no_msg.stderr);
+    assert!(
+        stderr.contains("no editor configured for tag annotation"),
+        "expected the no-editor diagnostic, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_tag_cli_parses_multi_name_and_new_flags() {
+    let args = TagArgs::try_parse_from([
+        "tag",
+        "-d",
+        "v1.0",
+        "v1.1",
+        "--sort=-refname",
+        "--contains",
+        "HEAD",
+    ])
+    .unwrap();
+
+    assert!(args.delete);
+    assert_eq!(args.name, vec!["v1.0".to_string(), "v1.1".to_string()]);
+    assert_eq!(args.sort.as_deref(), Some("-refname"));
+    assert_eq!(args.contains, vec!["HEAD".to_string()]);
+
+    let file_args = TagArgs::try_parse_from(["tag", "-a", "-F", "release.txt", "v2.0"]).unwrap();
+    assert!(file_args.annotate);
+    assert_eq!(
+        file_args.file.as_deref(),
+        Some(std::path::Path::new("release.txt"))
+    );
+}
+
+#[test]
+fn test_tag_batch_delete_json_schema_and_partial_failure() {
+    let repo = create_committed_repo_via_cli();
+
+    assert_cli_success(
+        &run_libra_command(&["tag", "v1.0"], repo.path()),
+        "tag v1.0",
+    );
+    assert_cli_success(
+        &run_libra_command(&["tag", "v1.1"], repo.path()),
+        "tag v1.1",
+    );
+
+    let ok = run_libra_command(&["--json", "tag", "-d", "v1.0", "v1.1"], repo.path());
+    assert_cli_success(&ok, "json batch delete");
+    let json = parse_json_stdout(&ok);
+    assert_eq!(json["data"]["action"], "delete");
+    assert_eq!(json["data"]["name"], "v1.0");
+    assert!(json["data"]["hash"].is_null());
+    assert_eq!(json["data"]["deleted"], serde_json::json!(["v1.0", "v1.1"]));
+    assert!(json["data"].get("failed").is_none());
+
+    assert_cli_success(
+        &run_libra_command(&["tag", "v2.0"], repo.path()),
+        "tag v2.0",
+    );
+    let partial = run_libra_command(&["--json", "tag", "-d", "v2.0", "missing-tag"], repo.path());
+    assert_eq!(
+        partial.status.code(),
+        Some(128),
+        "partial batch delete must signal failure, stderr: {}",
+        String::from_utf8_lossy(&partial.stderr)
+    );
+    assert!(
+        partial.stderr.is_empty(),
+        "json batch delete reports per-tag failures in stdout, stderr: {}",
+        String::from_utf8_lossy(&partial.stderr)
+    );
+    let json = parse_json_stdout(&partial);
+    assert_eq!(json["data"]["action"], "delete");
+    assert_eq!(json["data"]["deleted"], serde_json::json!(["v2.0"]));
+    assert_eq!(json["data"]["failed"][0]["name"], "missing-tag");
+}
+
+#[test]
+fn test_tag_file_message_creates_annotated_tag() {
+    let repo = create_committed_repo_via_cli();
+    let message_path = repo.path().join("release.txt");
+    std::fs::write(&message_path, "Release from file\n\nDetails\n").unwrap();
+
+    let output = run_libra_command(
+        &["--json", "tag", "-F", "release.txt", "v-file"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "tag -F");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["tag_type"], "annotated");
+    assert_eq!(json["data"]["message"], "Release from file\n\nDetails\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_tag_annotate_launches_editor() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = create_committed_repo_via_cli();
+    let editor = repo.path().join("write-tag-message.sh");
+    std::fs::write(
+        &editor,
+        "#!/bin/sh\nprintf 'Edited tag message\\n' > \"$1\"\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&editor).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&editor, permissions).unwrap();
+    let editor = editor.to_string_lossy().to_string();
+
+    let output = run_libra_command_with_stdin_and_env(
+        &["tag", "-a", "v-edit"],
+        repo.path(),
+        "",
+        &[("EDITOR", editor.as_str())],
+    );
+    assert_cli_success(&output, "tag -a editor");
+
+    let listed = run_libra_command(&["--json", "tag", "-l", "-n", "1"], repo.path());
+    assert_cli_success(&listed, "tag -l -n 1");
+    let json = parse_json_stdout(&listed);
+    let tags = json["data"]["tags"].as_array().expect("tags array");
+    let edited = tags
+        .iter()
+        .find(|entry| entry["name"] == "v-edit")
+        .expect("edited tag entry");
+    assert_eq!(edited["message"], "Edited tag message");
+}
+
+#[test]
+fn test_tag_multi_name_rejected_except_delete() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["tag", "v1", "v2"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        stderr.contains("only --delete accepts multiple tag names"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_tag_contains_merged_and_sort_filters() {
+    let repo = create_committed_repo_via_cli();
+    let base = tag_rev_parse(repo.path(), "HEAD");
+    assert_cli_success(
+        &run_libra_command(&["tag", "v-base"], repo.path()),
+        "tag v-base",
+    );
+
+    std::fs::write(repo.path().join("main.txt"), "main\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "main.txt"], repo.path()),
+        "add main",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main", "--no-verify"], repo.path()),
+        "commit main",
+    );
+    let main_tip = tag_rev_parse(repo.path(), "HEAD");
+    assert_cli_success(
+        &run_libra_command(&["tag", "v-main"], repo.path()),
+        "tag v-main",
+    );
+
+    assert_cli_success(
+        &run_libra_command(&["branch", "topic", &base], repo.path()),
+        "branch topic base",
+    );
+    assert_cli_success(
+        &run_libra_command(&["switch", "topic"], repo.path()),
+        "switch topic",
+    );
+    std::fs::write(repo.path().join("topic.txt"), "topic\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "topic.txt"], repo.path()),
+        "add topic",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "topic", "--no-verify"], repo.path()),
+        "commit topic",
+    );
+    assert_cli_success(
+        &run_libra_command(&["tag", "v-topic"], repo.path()),
+        "tag v-topic",
+    );
+    assert_cli_success(
+        &run_libra_command(&["switch", "main"], repo.path()),
+        "switch main",
+    );
+
+    let contains_main = run_libra_command(&["--json", "tag", "--contains", &main_tip], repo.path());
+    assert_cli_success(&contains_main, "tag --contains main");
+    assert_eq!(
+        tag_list_names(&contains_main),
+        HashSet::from(["v-main".to_string()])
+    );
+
+    let no_contains_main =
+        run_libra_command(&["--json", "tag", "--no-contains", &main_tip], repo.path());
+    assert_cli_success(&no_contains_main, "tag --no-contains main");
+    assert_eq!(
+        tag_list_names(&no_contains_main),
+        HashSet::from(["v-base".to_string(), "v-topic".to_string()])
+    );
+
+    let merged = run_libra_command(&["--json", "tag", "--merged"], repo.path());
+    assert_cli_success(&merged, "tag --merged");
+    assert_eq!(
+        tag_list_names(&merged),
+        HashSet::from(["v-base".to_string(), "v-main".to_string()])
+    );
+
+    let no_merged = run_libra_command(&["--json", "tag", "--no-merged"], repo.path());
+    assert_cli_success(&no_merged, "tag --no-merged");
+    assert_eq!(
+        tag_list_names(&no_merged),
+        HashSet::from(["v-topic".to_string()])
+    );
+
+    let sorted = run_libra_command(&["--json", "tag", "--sort=-refname"], repo.path());
+    assert_cli_success(&sorted, "tag --sort=-refname");
+    let json = parse_json_stdout(&sorted);
+    let names: Vec<_> = json["data"]["tags"]
+        .as_array()
+        .expect("tags array")
+        .iter()
+        .map(|entry| entry["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(names, vec!["v-topic", "v-main", "v-base"]);
+
+    let bad_sort = run_libra_command(&["tag", "--sort=vger"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&bad_sort.stderr);
+    assert_eq!(bad_sort.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        stderr.contains("unsupported tag sort key"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_tag_help_and_docs_cover_new_flags() {
+    let repo = create_committed_repo_via_cli();
+    let help = run_libra_command(&["tag", "--help"], repo.path());
+    assert_cli_success(&help, "tag --help");
+    let help = String::from_utf8_lossy(&help.stdout);
+    let docs = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/commands/tag.md"),
+    )
+    .expect("read tag docs");
+
+    for needle in [
+        "-a",
+        "-F",
+        "-e",
+        "--contains",
+        "--no-contains",
+        "--points-at",
+        "--merged",
+        "--no-merged",
+        "--sort",
+    ] {
+        assert!(help.contains(needle), "tag help missing {needle}");
+        assert!(docs.contains(needle), "tag docs missing {needle}");
+    }
 }

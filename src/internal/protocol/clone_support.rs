@@ -179,7 +179,11 @@ fn reuse_dir_recursive(
         if src_path.as_os_str().len() > REFERENCE_PATH_MAX_LEN {
             return Err(CloneSupportError::PathTooLong(src_path.as_os_str().len()));
         }
-        let dest_path = dest.join(entry.file_name());
+        let file_name = entry.file_name();
+        if is_alternates_file(src, &file_name) {
+            continue;
+        }
+        let dest_path = dest.join(file_name);
         if file_type.is_dir() {
             fs::create_dir_all(&dest_path)?;
             reuse_dir_recursive(&src_path, &dest_path, hardlink, report)?;
@@ -204,6 +208,11 @@ fn reuse_dir_recursive(
         }
     }
     Ok(())
+}
+
+fn is_alternates_file(parent: &Path, file_name: &std::ffi::OsStr) -> bool {
+    parent.file_name().and_then(|name| name.to_str()) == Some("info")
+        && file_name.to_str() == Some("alternates")
 }
 
 #[cfg(test)]
@@ -273,6 +282,31 @@ mod tests {
         // Re-copy is idempotent: existing content-addressed files are skipped.
         let copied_again = copy_objects(&src_objects, &dest_objects).unwrap();
         assert_eq!(copied_again, 0);
+    }
+
+    #[test]
+    fn copy_objects_skips_alternates_file() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let src_objects = src.path().join("objects");
+        fs::create_dir_all(src_objects.join("info")).unwrap();
+        fs::create_dir_all(src_objects.join("pack")).unwrap();
+        fs::write(
+            src_objects.join("info").join("alternates"),
+            b"/borrowed/objects",
+        )
+        .unwrap();
+        fs::write(src_objects.join("pack").join("pack-1.pack"), b"PACK").unwrap();
+
+        let dest_objects = dest.path().join("objects");
+        let copied = copy_objects(&src_objects, &dest_objects).unwrap();
+
+        assert_eq!(copied, 1);
+        assert!(dest_objects.join("pack").join("pack-1.pack").exists());
+        assert!(
+            !dest_objects.join("info").join("alternates").exists(),
+            "copy semantics must not create a long-term alternates dependency"
+        );
     }
 
     #[cfg(unix)]

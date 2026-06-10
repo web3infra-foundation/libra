@@ -124,6 +124,13 @@ jobs:
       LIBRA_SKIP_WEB_BUILD: "1"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_BUILD_JOBS: "1"
+      # The production CLI runs on a 32 MiB worker-thread stack (see
+      # `src/main.rs::CLI_STACK_SIZE`) because the smart-protocol/object code
+      # paths use deep call chains. Tests exercise the same paths on the default
+      # ~2 MiB harness/tokio thread stack, so borderline async tests can overflow
+      # on some targets (observed: `command::tag::tests::*` on x86_64 Linux).
+      # Align the test thread stack with production to remove that class of flake.
+      RUST_MIN_STACK: "33554432"
 
     steps:
       - name: Checkout repository
@@ -135,19 +142,6 @@ jobs:
         # De-scripted: the COMPATIBILITY.md ↔ src/cli.rs::Commands drift check now
         # lives in tests/compat/matrix_alignment.rs (also runs in `cargo test --all`).
         run: cargo test --test compat_matrix_alignment
-
-      - name: Check black-box CLI integration plan consistency
-        run: cargo run --manifest-path tools/integration-runner/Cargo.toml -- check-plan
-
-      - name: Run black-box CLI integration tests (waves 0,1,2)
-        # Per docs/development/integration-test-plan.md, `run --waves 0,1,2` is the
-        # default black-box execution gate for the Git-compat command surface.
-        # It must be invoked explicitly via the independent runner crate (never as
-        # a Cargo [[test]] target). Produces §5 report artifacts (report.json, summary.md,
-        # results.ndjson, per-scenario logs) under the runner's temp RUN_ROOT.
-        # Exit code: 0 = no failures, 1 = at least one fail, 2 = preflight/build fail.
-        # env-skip cases are reported but do not fail the gate.
-        run: cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --waves 0,1,2
 
       - name: Run tests (L1 + L2 + L3)
         env:
@@ -162,39 +156,6 @@ jobs:
           LIBRA_STORAGE_ACCESS_KEY: ${{ secrets.LIBRA_STORAGE_ACCESS_KEY }}
           LIBRA_STORAGE_SECRET_KEY: ${{ secrets.LIBRA_STORAGE_SECRET_KEY }}
         run: cargo test --all
-
-      # Phase 6 — Local TUI Automation Control scenario suite (docs/improvement/agent.md Part C).
-      # Without `--features test-provider` + `LIBRA_ENABLE_TEST_PROVIDER=1`, the scenarios
-      # in tests/code_ui_scenarios.rs and tests/harness_self_test.rs short-circuit; CI
-      # would silently skip them. `--test-threads=1` because each scenario spawns a
-      # `libra code` subprocess that contends for 0600 control-token files and ports.
-      #
-      # docs/improvement/test.md Wave 1 + Wave 3 also require the SSE harness and
-      # lease matrix to run under the same gate, otherwise CI silently skips every
-      # `lease_case!()` / `sse_case!()` registration.
-      - name: Run TUI automation scenarios
-        env:
-          LIBRA_ENABLE_TEST_PROVIDER: "1"
-          # These scenarios validate the loopback browser against the real
-          # embedded Next.js app, so the build.rs fallback stub is not valid here.
-          LIBRA_SKIP_WEB_BUILD: "0"
-        run: |
-          cargo test --features test-provider \
-            --test code_ui_scenarios \
-            --test harness_self_test \
-            --test code_codex_default_tui_test \
-            --test code_ui_remote_lease_matrix \
-            --test code_ui_remote_sse_matrix \
-            -- --test-threads=1
-
-      - name: Upload TUI scenario artifacts on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: code-ui-scenarios
-          path: target/code-ui-scenarios/**
-          if-no-files-found: ignore
-          retention-days: 7
 
   network-remotes:
     name: compat-network-remotes

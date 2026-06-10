@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 #[cfg(not(target_os = "macos"))]
 use libfuse_fs::overlayfs::{OverlayFs, config::Config as FuseOverlayConfig};
 use libfuse_fs::passthrough::{PassthroughArgs, new_passthroughfs_layer};
@@ -71,17 +71,37 @@ pub enum WorktreeSubcommand {
         )]
         create_branch: Option<String>,
         #[clap(
+            short = 'B',
+            long = "force-create-branch",
+            help = "Create or reset a shared branch"
+        )]
+        force_create_branch: Option<String>,
+        #[clap(
             long,
-            conflicts_with = "create_branch",
+            conflicts_with = "commit_ish",
             help = "Base ref for --create-branch"
         )]
         from: Option<String>,
+        #[clap(long, conflicts_with_all = ["create_branch", "force_create_branch"])]
+        detach: bool,
+        #[clap(long = "no-checkout")]
+        no_checkout: bool,
+        #[clap(long)]
+        lock: bool,
+        #[clap(long, requires = "lock")]
+        reason: Option<String>,
         #[clap(long, help = "Use privileged mount mode")]
         privileged: bool,
         #[clap(long, help = "Allow other users to access the mounted worktree")]
         allow_other: bool,
+        commit_ish: Option<String>,
     },
-    List,
+    List {
+        #[clap(long, conflicts_with = "verbose")]
+        porcelain: bool,
+        #[clap(short, long)]
+        verbose: bool,
+    },
     Lock {
         path: String,
         #[clap(long)]
@@ -94,11 +114,21 @@ pub enum WorktreeSubcommand {
         src: String,
         dest: String,
     },
-    Prune,
+    Prune {
+        /// Report which worktrees would be pruned without modifying the registry.
+        #[clap(long = "dry-run")]
+        dry_run: bool,
+        #[clap(short, long)]
+        verbose: bool,
+        #[clap(long, value_name = "TIME")]
+        expire: Option<String>,
+    },
     Remove {
         path: String,
         #[clap(long, help = "Also delete the worktree directory on disk")]
         delete_dir: bool,
+        #[clap(short, long, action = ArgAction::Count)]
+        force: u8,
     },
     #[clap(alias = "unmount", about = "Unmount a FUSE worktree mountpoint")]
     Umount {
@@ -236,19 +266,35 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             fuse,
             branch,
             create_branch,
+            force_create_branch,
             from,
+            detach,
+            no_checkout,
+            lock,
+            reason,
             privileged,
             allow_other,
+            commit_ish,
         } => {
             if !fuse {
-                if branch.is_some() || create_branch.is_some() || from.is_some() {
+                if branch.is_some() || privileged || allow_other {
                     return Err(CliError::command_usage(
-                        "--branch/--create-branch/--from require --fuse",
+                        "--branch/--privileged/--allow-other require --fuse",
                     ));
                 }
+                let commit_ish = commit_ish.or(from);
                 legacy::execute_safe(
                     legacy::WorktreeArgs {
-                        command: legacy::WorktreeSubcommand::Add { path },
+                        command: legacy::WorktreeSubcommand::Add {
+                            path,
+                            create_branch,
+                            force_create_branch,
+                            detach,
+                            no_checkout,
+                            lock,
+                            reason,
+                            commit_ish,
+                        },
                     },
                     output,
                 )
@@ -259,9 +305,11 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
                     .map_err(|e| CliError::fatal(e.to_string()))
             }
         }
-        WorktreeSubcommand::List => list_all_worktrees(output)
-            .await
-            .map_err(|e| CliError::fatal(e.to_string())),
+        WorktreeSubcommand::List { porcelain, verbose } => {
+            list_all_worktrees(output, porcelain, verbose)
+                .await
+                .map_err(|e| CliError::fatal(e.to_string()))
+        }
         WorktreeSubcommand::Lock { path, reason } => {
             if lock_fuse_worktree(&path, reason.clone())
                 .map_err(|e| CliError::fatal(e.to_string()))?
@@ -288,8 +336,12 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             )
             .await
         }
-        WorktreeSubcommand::Remove { path, delete_dir } => {
-            if remove_fuse_worktree(&path)
+        WorktreeSubcommand::Remove {
+            path,
+            delete_dir,
+            force,
+        } => {
+            if remove_fuse_worktree(&path, force)
                 .await
                 .map_err(|e| CliError::fatal(e.to_string()))?
             {
@@ -297,7 +349,11 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             }
             legacy::execute_safe(
                 legacy::WorktreeArgs {
-                    command: legacy::WorktreeSubcommand::Remove { path, delete_dir },
+                    command: legacy::WorktreeSubcommand::Remove {
+                        path,
+                        delete_dir,
+                        force,
+                    },
                 },
                 output,
             )
@@ -318,11 +374,23 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             )
             .await
         }
-        WorktreeSubcommand::Prune => {
-            prune_fuse_worktrees().map_err(|e| CliError::fatal(e.to_string()))?;
+        WorktreeSubcommand::Prune {
+            dry_run,
+            verbose,
+            expire,
+        } => {
+            // `--dry-run` reports prunable entries without mutating either the
+            // FUSE registry or the shared worktree registry.
+            if !dry_run {
+                prune_fuse_worktrees().map_err(|e| CliError::fatal(e.to_string()))?;
+            }
             legacy::execute_safe(
                 legacy::WorktreeArgs {
-                    command: legacy::WorktreeSubcommand::Prune,
+                    command: legacy::WorktreeSubcommand::Prune {
+                        dry_run,
+                        verbose,
+                        expire,
+                    },
                 },
                 output,
             )
@@ -584,10 +652,6 @@ fn spawn_macos_fuse_daemon(
     privileged: bool,
     allow_other: bool,
 ) -> io::Result<()> {
-    use std::{
-        env,
-        process::{Command, Stdio},
-    };
     let lower_dir = lower_dirs
         .first()
         .ok_or_else(|| io::Error::other("macOS FUSE daemon requires a lower layer"))?;
@@ -822,18 +886,34 @@ async fn add_fuse_worktree(
     Ok(())
 }
 
-async fn list_all_worktrees(output: &OutputConfig) -> io::Result<()> {
+async fn list_all_worktrees(
+    output: &OutputConfig,
+    porcelain: bool,
+    verbose: bool,
+) -> io::Result<()> {
     legacy::execute_safe(
         legacy::WorktreeArgs {
-            command: legacy::WorktreeSubcommand::List,
+            command: legacy::WorktreeSubcommand::List { porcelain, verbose },
         },
         output,
     )
     .await
     .map_err(|e| io::Error::other(e.to_string()))?;
 
+    if output.is_json() || output.quiet {
+        return Ok(());
+    }
+
     let state = load_fuse_state()?;
     for entry in state.worktrees {
+        if porcelain {
+            println!("worktree {}", entry.path);
+            if entry.locked {
+                println!("locked");
+            }
+            println!();
+            continue;
+        }
         let mounted = if fuse_utils::is_mount_active(Path::new(&entry.path)) {
             "mounted"
         } else {
@@ -909,7 +989,7 @@ fn unlock_fuse_worktree(path: &str) -> io::Result<bool> {
     Ok(found)
 }
 
-async fn remove_fuse_worktree(path: &str) -> io::Result<bool> {
+async fn remove_fuse_worktree(path: &str, force: u8) -> io::Result<bool> {
     let target = canonicalize_like_worktree(path)?;
     let entry = {
         let _state_guard = fuse_state_lock()
@@ -927,7 +1007,7 @@ async fn remove_fuse_worktree(path: &str) -> io::Result<bool> {
         found
     };
 
-    if entry.locked {
+    if entry.locked && force < 2 {
         return Err(io::Error::other("cannot remove locked worktree"));
     }
 

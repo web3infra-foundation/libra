@@ -739,6 +739,7 @@ impl LFSClient {
         }
         let checksum = hex::encode(checksum.finish().as_ref());
         if checksum == oid {
+            file.flush().await?;
             if !quiet {
                 println!("Downloaded.");
             }
@@ -751,6 +752,7 @@ impl LFSClient {
             file.set_len(0).await?; // clear
             file.seek(tokio::io::SeekFrom::Start(0)).await?; // ensure
             file.write_all(pointer.as_bytes()).await?;
+            file.flush().await?;
             Err(anyhow!("Checksum mismatch, fallback to pointer file."))
         }
     }

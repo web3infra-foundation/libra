@@ -5,11 +5,13 @@ Compute the Git-compatible object ID for raw file contents or standard input.
 ```bash
 libra hash-object [OPTIONS] <PATH>...
 libra hash-object --stdin [OPTIONS]
+libra hash-object --stdin-paths [OPTIONS]
 ```
 
-This initial implementation supports blob objects. It hashes the raw bytes as a
-Git blob using the current repository object format. It does not apply clean
-filters, attributes, or LFS pointer conversion.
+This implementation supports `blob`, `commit`, `tree`, and `tag` objects. It
+hashes raw bytes using the current repository object format and validates
+`commit`/`tree`/`tag` input unless `--literally` is used. It does not apply
+clean/smudge filters, attributes, CRLF conversion, or LFS pointer conversion.
 
 Read-only hashing does not require a Libra repository and defaults to SHA-1
 when no repository object format is available. `-w` / `--write` requires a
@@ -56,6 +58,24 @@ Hash file paths listed on standard input:
 printf 'a.txt\nb.txt\n' | libra hash-object --stdin-paths
 ```
 
+Hash and write a commit object:
+
+```bash
+libra hash-object -t commit -w commit.txt
+```
+
+Hash malformed content as a commit for diagnostics:
+
+```bash
+libra hash-object -t commit --literally bad-commit.txt
+```
+
+Hash CRLF bytes verbatim while accepting Git-compatible `--no-filters`:
+
+```bash
+printf 'a\r\nb\r\n' | libra hash-object --stdin --no-filters
+```
+
 ## Output
 
 Human output prints one object ID per input:
@@ -96,6 +116,7 @@ Structured output:
 | Select object type | `blob`/`commit`/`tree`/`tag` | `-t <type>` | N/A |
 | `--path` source label | Accepted (label only) | `--path` | N/A |
 | Clean/smudge & CRLF filters | `--no-filters` accepted as a no-op (no filter infrastructure) | filters | N/A |
+| `--filters` | Not implemented | `--filters` | N/A |
 | Hash literally invalid objects | `--literally` | `--literally` | N/A |
 
 ## Errors
@@ -103,6 +124,12 @@ Structured output:
 | Condition | Stable code | Exit | Hint |
 |-----------|-------------|------|------|
 | Unsupported object type | `LBR-CLI-002` | 129 | supported object types: blob, commit, tree, tag |
+| Argument parse error or conflicting flags | `LBR-CLI-002` | 129 | inspect `libra hash-object --help` |
 | Malformed commit/tree/tag without `--literally` | `LBR-REPO-002` | 128 | pass `--literally` to hash the content as-is |
 | Input file cannot be read | `LBR-IO-001` | 128 | Verify the path exists and is readable |
 | Object cannot be written | `LBR-IO-002` | 128 | Check object storage permissions and disk space |
+
+`--path` conflicts with `--no-filters` and `--stdin-paths`. `--no-filters` is
+allowed with `--stdin-paths` and does not change the bytes being hashed. Libra
+maps command-line parse errors into `LBR-CLI-002` with exit 129; this differs
+from Git's exact usage exit codes but keeps Libra's stable error taxonomy.

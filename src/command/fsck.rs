@@ -612,10 +612,60 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         find_and_report_tags().await?;
     }
 
+    // Stage 11: Verify packfile integrity (reuses verify-pack in-process).
+    // Runs last so its per-pack hash-kind inference cannot perturb the
+    // earlier object/connectivity passes.
+    check_packs(storage, &mut result, args.verbose)?;
+
     // Print notices
     print_notices(head_is_unborn, &result);
 
     Ok(result)
+}
+
+/// Verify the integrity of every packfile by reusing verify-pack's in-process
+/// validation (no subprocess, no `process::exit`). A corrupt or unreadable
+/// pack records `has_errors` — so fsck exits 1, matching `git fsck`'s
+/// treatment of broken packs — but does not abort the pass: each `.idx` is
+/// checked independently and its diagnostic reported to stderr. An absent
+/// pack directory or a repository with no packs is a silent no-op. fsck only
+/// reports here; it never deletes, rewrites, or repairs a faulty pack.
+fn check_packs(storage: &ClientStorage, result: &mut FsckResult, verbose: bool) -> CliResult<()> {
+    let pack_dir = storage.base_path().join("pack");
+    if !pack_dir.exists() {
+        return Ok(());
+    }
+
+    let Ok(entries) = fs::read_dir(&pack_dir) else {
+        // An unreadable pack directory is reported but does not abort the
+        // remaining fsck stages.
+        eprintln!("bad pack directory: {}", pack_dir.display());
+        result.has_errors = true;
+        return Ok(());
+    };
+
+    // Collect and sort the `.idx` paths so multi-pack reporting is
+    // deterministic and every pack is checked even when an earlier one is bad.
+    let mut idx_files: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "idx"))
+        .collect();
+    idx_files.sort();
+
+    for idx in &idx_files {
+        if verbose {
+            println!("Checking pack {}", idx.display());
+        }
+        if let Err(error) = super::verify_pack::verify_pack_path(idx, None) {
+            // verify-pack's message already names the offending index and the
+            // specific corruption (checksum / offset / crc32 / decode).
+            eprintln!("error: {}", error.message());
+            result.has_errors = true;
+        }
+    }
+
+    Ok(())
 }
 
 /// Check all 256 object directories and print progress
@@ -1593,15 +1643,23 @@ async fn verify_object(
 
                     if strict && report_errors {
                         for item in &tree.tree_items {
+                            let expected_type = expected_type_for_mode(item.mode);
+                            let expected_type_label = expected_type.to_string();
                             // Each entry's target must exist with a matching type.
                             if !storage.exist(&item.id) {
-                                has_error |=
-                                    report(FsckMsgId::Missing, "tree", &item.id.to_string());
+                                has_error |= report(
+                                    FsckMsgId::Missing,
+                                    &expected_type_label,
+                                    &item.id.to_string(),
+                                );
                             } else if let Ok(actual) = storage.get_object_type(&item.id)
-                                && actual != expected_type_for_mode(item.mode)
+                                && actual != expected_type
                             {
-                                has_error |=
-                                    report(FsckMsgId::BadObjectSha1, "tree", &hash.to_string());
+                                has_error |= report(
+                                    FsckMsgId::BadObjectSha1,
+                                    &expected_type_label,
+                                    &item.id.to_string(),
+                                );
                             }
                         }
                         // Entries must be in Git's canonical sort order.
@@ -1683,7 +1741,7 @@ async fn verify_object(
                                 && parent_type != ObjectType::Commit
                             {
                                 has_error |=
-                                    report(FsckMsgId::BadObjectSha1, "commit", &hash.to_string());
+                                    report(FsckMsgId::BadObjectSha1, "commit", &parent.to_string());
                             }
                         }
                     }
@@ -1779,7 +1837,11 @@ async fn verify_object(
                 && actual_type != tag.object_type
             {
                 if report_errors {
-                    has_error |= report(FsckMsgId::BadObjectSha1, "tag", &hash.to_string());
+                    has_error |= report(
+                        FsckMsgId::BadObjectSha1,
+                        &tag.object_type.to_string(),
+                        &tag.object_hash.to_string(),
+                    );
                 }
                 return Ok((
                     ObjectCheckResult {

@@ -20,8 +20,8 @@ use crate::{
         },
         db::{create_database, establish_connection, get_db_conn_instance},
         vault::{
-            decrypt_token, encrypt_token, generate_pgp_key, generate_ssh_key_pair,
-            lazy_init_vault_for_scope, load_unseal_key_for_scope,
+            decrypt_token, encrypt_token, generate_pgp_encrypt_key, generate_pgp_key,
+            generate_ssh_key_pair, lazy_init_vault_for_scope, load_unseal_key_for_scope,
         },
     },
     utils::{
@@ -2946,11 +2946,12 @@ async fn handle_generate_gpg_key(
         .map(String::from)
         .unwrap_or_else(|| "user@libra.local".to_string());
 
-    let public_key = generate_pgp_key(&storage, &unseal_key, &user_name, &user_email)
-        .await
-        .map_err(|e| {
-            CliError::from_legacy_string(format!("error: GPG key generation failed: {e}"))
-        })?;
+    let public_key = if is_signing {
+        generate_pgp_key(&storage, &unseal_key, &user_name, &user_email).await
+    } else {
+        generate_pgp_encrypt_key(&storage, &unseal_key, &user_name, &user_email).await
+    }
+    .map_err(|e| CliError::from_legacy_string(format!("error: GPG key generation failed: {e}")))?;
 
     // Store pubkey under usage-specific dotted key
     let pubkey_config_key = if is_signing {

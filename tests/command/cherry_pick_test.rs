@@ -77,8 +77,10 @@ async fn test_basic_cherry_pick() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
     println!("Switched to new branch 'feature'.");
@@ -155,8 +157,10 @@ async fn test_basic_cherry_pick() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
     println!("Switched back to master.");
@@ -294,8 +298,10 @@ async fn test_cherry_pick_with_commit() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
 
@@ -336,8 +342,10 @@ async fn test_cherry_pick_with_commit() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
 
@@ -417,8 +425,10 @@ async fn test_cherry_pick_multiple_commits() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
 
@@ -488,8 +498,10 @@ async fn test_cherry_pick_multiple_commits() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
 
@@ -693,8 +705,10 @@ async fn test_cherry_pick_sha256_hash_handling() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".into()),
+        force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
     fs::write("feature.txt", "feature").unwrap();
@@ -732,8 +746,10 @@ async fn test_cherry_pick_sha256_hash_handling() {
     switch::execute(SwitchArgs {
         branch: Some("main".into()),
         create: None,
+        force_create: None,
         detach: false,
         track: false,
+        ..Default::default()
     })
     .await;
     let head_before = Head::current_commit().await.unwrap();
@@ -1413,10 +1429,9 @@ fn cherry_pick_continue_on_wrong_branch_rejected() {
         run_libra_command(&["cherry-pick", &feat], p).status.code(),
         Some(128)
     );
-    // Move off the sequence branch (force past the dirty conflict worktree).
     assert_cli_success(
-        &run_libra_command(&["checkout", "-f", "feature"], p),
-        "switch away",
+        &run_libra_command(&["symbolic-ref", "HEAD", "refs/heads/feature"], p),
+        "move HEAD to feature",
     );
     let out = run_libra_command(&["cherry-pick", "--continue"], p);
     assert_eq!(out.status.code(), Some(128));

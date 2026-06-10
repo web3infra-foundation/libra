@@ -51,7 +51,7 @@
 
 **本批非目标：**
 - **不重写 commit 的核心对象模型**。树创建、索引操作、签名、reflog 更新的主体流程保持不变
-- **不引入 `--dry-run`**。commit dry-run 语义复杂（需要回滚树创建），留后续批次
+- **历史非目标已被后续批次取代：`--dry-run` 已落地**。当前 `libra commit --dry-run` 只做 staged 状态预览，不创建 tree/commit 对象、不写 ref/reflog/index；`--porcelain` 必须与 `--dry-run` 显式同用
 - **不改变 hook 的启用/禁用语义**。`--disable-pre`/`--no-verify` 行为保持不变；本批只调整 hook I/O 的捕获和渲染边界
 - **不改变 LFS pointer 处理**。`blob_from_file()` 保持现有 LFS 行为
 - **不改变 vault GPG 签名逻辑**。`vault_sign_commit()` 的加密流程不变，仅改善错误类型

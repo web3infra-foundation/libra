@@ -169,7 +169,7 @@ pub async fn execute_safe(args: LsRemoteArgs, output: &OutputConfig) -> CliResul
         let (_, remote_url, _) = resolve_remote(&args.repository)
             .await
             .map_err(CliError::from)?;
-        let url = redact_url_credentials(&remote_url);
+        let url = redact_remote_spec_for_diagnostics(&remote_url);
         if output.is_json() {
             return emit_json_data("ls-remote", &LsRemoteUrlOutput { url }, output);
         }
@@ -424,19 +424,21 @@ fn render_ls_remote_output(data: &LsRemoteOutput, output: &OutputConfig) -> CliR
     } else {
         let stdout = std::io::stdout();
         let mut writer = stdout.lock();
-        // Symref lines (`ref: <target>\t<name>`) print before the SHA rows.
-        for (name, target) in &data.symrefs {
-            writeln!(writer, "ref: {target}\t{name}").map_err(|error| {
-                CliError::io(format!("failed to write ls-remote output: {error}"))
-            })?;
-        }
-        for entry in &data.entries {
-            writeln!(writer, "{}\t{}", entry.hash, entry.refname).map_err(|error| {
-                CliError::io(format!("failed to write ls-remote output: {error}"))
-            })?;
-        }
-        Ok(())
+        write_ls_remote_text(&mut writer, data)
     }
+}
+
+fn write_ls_remote_text<W: Write>(writer: &mut W, data: &LsRemoteOutput) -> CliResult<()> {
+    // Symref lines (`ref: <target>\t<name>`) print before the SHA rows.
+    for (name, target) in &data.symrefs {
+        writeln!(writer, "ref: {target}\t{name}")
+            .map_err(|error| CliError::io(format!("failed to write ls-remote output: {error}")))?;
+    }
+    for entry in &data.entries {
+        writeln!(writer, "{}\t{}", entry.hash, entry.refname)
+            .map_err(|error| CliError::io(format!("failed to write ls-remote output: {error}")))?;
+    }
+    Ok(())
 }
 
 /// Extracts `symref=<name>:<target>` advertisements from the discovered protocol
@@ -503,10 +505,13 @@ fn version_segments(refname: &str) -> Vec<(bool, String)> {
     segments
 }
 
-fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+fn version_segments_cmp(
+    sa: &[(bool, String)],
+    sb: &[(bool, String)],
+    a: &str,
+    b: &str,
+) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    let sa = version_segments(a);
-    let sb = version_segments(b);
     for (seg_a, seg_b) in sa.iter().zip(sb.iter()) {
         let ord = match (seg_a.0, seg_b.0) {
             // Two numeric runs compare by value (without overflow via u128;
@@ -527,18 +532,33 @@ fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     sa.len().cmp(&sb.len()).then_with(|| a.cmp(b))
 }
 
+fn sort_entries_by_version(entries: &mut [LsRemoteEntry], reverse: bool) {
+    let mut keyed: Vec<(Vec<(bool, String)>, LsRemoteEntry)> = entries
+        .iter()
+        .cloned()
+        .map(|entry| (version_segments(&entry.refname), entry))
+        .collect();
+    keyed.sort_by(|(segments_a, entry_a), (segments_b, entry_b)| {
+        let ord = version_segments_cmp(segments_a, segments_b, &entry_a.refname, &entry_b.refname);
+        if reverse { ord.reverse() } else { ord }
+    });
+    for (slot, (_, entry)) in entries.iter_mut().zip(keyed) {
+        *slot = entry;
+    }
+}
+
 fn sort_entries(entries: &mut [LsRemoteEntry], key: SortKey) {
     match key {
         SortKey::RefName => entries.sort_by(|a, b| a.refname.cmp(&b.refname)),
         SortKey::RefNameDesc => entries.sort_by(|a, b| b.refname.cmp(&a.refname)),
-        SortKey::Version => entries.sort_by(|a, b| version_cmp(&a.refname, &b.refname)),
-        SortKey::VersionDesc => entries.sort_by(|a, b| version_cmp(&b.refname, &a.refname)),
+        SortKey::Version => sort_entries_by_version(entries, false),
+        SortKey::VersionDesc => sort_entries_by_version(entries, true),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::BTreeMap, fs};
 
     use clap::Parser as _;
     use git_internal::errors::GitError;
@@ -546,9 +566,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CompiledPattern, LsRemoteArgs, LsRemoteEntry, LsRemoteError, SortKey, include_reference,
-        parse_sort_key, parse_symrefs, resolve_remote, sanitize_discovery_error,
+        CompiledPattern, LsRemoteArgs, LsRemoteEntry, LsRemoteError, LsRemoteOutput, SortKey,
+        include_reference, parse_sort_key, parse_symrefs, resolve_remote, sanitize_discovery_error,
         sanitize_remote_error_reason, sort_entries, visible_remote_display, visible_remote_url,
+        write_ls_remote_text,
     };
     use crate::{
         internal::protocol::DiscRef,
@@ -812,6 +833,51 @@ mod tests {
     #[test]
     fn parse_symrefs_empty_for_local() {
         assert!(parse_symrefs(&[]).is_empty());
+    }
+
+    #[test]
+    fn text_output_writes_symrefs_before_entries() {
+        let data = LsRemoteOutput {
+            remote: "origin".to_string(),
+            url: "https://example.com/repo.git".to_string(),
+            heads_only: false,
+            tags_only: false,
+            refs_only: false,
+            patterns: Vec::new(),
+            entries: vec![entry("HEAD"), entry("refs/heads/main")],
+            symrefs: BTreeMap::from([("HEAD".to_string(), "refs/heads/main".to_string())]),
+        };
+        let mut buffer = Vec::new();
+
+        write_ls_remote_text(&mut buffer, &data).unwrap();
+
+        let text = String::from_utf8(buffer).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines[0], "ref: refs/heads/main\tHEAD");
+        assert_eq!(lines[1], "1111111111111111111111111111111111111111\tHEAD");
+        assert_eq!(
+            lines[2],
+            "1111111111111111111111111111111111111111\trefs/heads/main"
+        );
+    }
+
+    #[test]
+    fn json_output_includes_symrefs_when_present() {
+        let data = LsRemoteOutput {
+            remote: "origin".to_string(),
+            url: "https://example.com/repo.git".to_string(),
+            heads_only: false,
+            tags_only: false,
+            refs_only: false,
+            patterns: Vec::new(),
+            entries: vec![entry("HEAD")],
+            symrefs: BTreeMap::from([("HEAD".to_string(), "refs/heads/main".to_string())]),
+        };
+
+        let json = serde_json::to_value(&data).unwrap();
+
+        assert_eq!(json["symrefs"]["HEAD"], "refs/heads/main");
+        assert_eq!(json["entries"][0]["refname"], "HEAD");
     }
 
     #[test]

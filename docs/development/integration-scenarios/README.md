@@ -50,9 +50,11 @@
 | Remote | `push` | `cli.push-local-file-remote-rejected`、`live.github-create-push-clone-fetch` |
 | Remote | `open` | `cli.open-smoke` |
 | Maintenance | `db` | `cli.schema-upgrade-observable` |
+| Maintenance | `gc` | `cli.gc-smoke` |
 | Maintenance | `fsck` | `cli.object-readback`（并作为多数 mutating 场景的状态断言） |
 | Maintenance | `cat-file` | `cli.object-readback`、`cli.sha256-object-readback` |
 | Maintenance | `hash-object` | `cli.object-readback`、`cli.sha256-object-readback` |
+| Maintenance | `archive` | `cli.archive-smoke` |
 | Maintenance | `verify-pack` | `cli.verify-pack-smoke` |
 | Maintenance | `rev-parse` | `cli.object-readback` |
 | Maintenance | `rev-list` | `cli.object-readback` |
@@ -103,6 +105,8 @@
 - [`cli.push-local-file-remote-rejected`](cli.push-local-file-remote-rejected.md)
 - [`cli.object-readback`](cli.object-readback.md)
 - [`cli.sha256-object-readback`](cli.sha256-object-readback.md)
+- [`cli.gc-smoke`](cli.gc-smoke.md)
+- [`cli.archive-smoke`](cli.archive-smoke.md)
 - [`cli.verify-pack-smoke`](cli.verify-pack-smoke.md)
 
 ## Wave 3

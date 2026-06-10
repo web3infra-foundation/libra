@@ -62,6 +62,8 @@ objects/pack/pack-abc123.idx: ok
 
 字段为 `<oid> <type> <size> <size-in-pack> <offset>`。version 2 索引的 CRC32 值会被验证，并且仍可在结构化输出中使用，但不会在人类可读 verbose 模式下打印。
 
+> **与 Git 的有意差异。** 对于 deltified 对象，`git verify-pack -v` 会在每行末尾追加两列 —— `<chain-depth> <base-oid>`。Libra 不打印它们：`git-internal` 解码器吐出重构后的对象流和每个对象的 `chain_len`，但不保留原始 delta 的 base 引用，因此在回调处无法获得 base OID。链深仍可通过 `--stat-only` 的直方图观察。
+
 Stat-only 模式输出 Git 兼容的聚合统计：
 
 ```text
@@ -110,3 +112,15 @@ chain length = 1: 4 objects
 | 索引格式错误 | `LBR-REPO-002` | 128 |
 | Pack 格式错误 | `LBR-REPO-002` | 128 |
 | 索引和 pack 不一致 | `LBR-REPO-002` | 128 |
+
+详细的损坏诊断会保留在人类可读错误文本中。常见示例包括
+`pack index v2 checksum mismatch`、`pack checksum mismatch: index has <hash>,
+pack has <hash>`、`offset mismatch for <oid>: index has <n>, pack has <n>`，
+以及 `crc32 mismatch for <oid>: index has <hex>, pack has <hex>`。
+
+当一次传入多个索引文件时，Libra 当前会在第一个失败索引处停止，并在
+stderr 输出共享 CLI 错误。`--json` 和 `--machine` 只会在所有请求的索引都校验通过时输出成功 payload。
+
+## 被 `fsck` 复用
+
+`verify-pack` 的核心校验逻辑被 [`libra fsck`](../fsck.md) 在进程内复用，用于体检 `objects/pack/` 下的每个 packfile。fsck 不 fork 子进程，而是直接调用同一校验逻辑：报告任何受损或不可读的 pack，并以退出码 `1`（与 `git fsck` 一致）结束，且不会因单个坏 pack 而中断对其余 pack 的检查。

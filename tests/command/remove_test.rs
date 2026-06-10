@@ -2,6 +2,8 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{fs, io::Write, path::PathBuf};
 
 use super::*;
@@ -19,6 +21,13 @@ fn create_file(path: &str, content: &str) -> PathBuf {
     let mut file = fs::File::create(&path).unwrap();
     file.write_all(content.as_bytes()).unwrap();
     path
+}
+
+#[cfg(unix)]
+fn chmod(path: impl AsRef<std::path::Path>, mode: u32) {
+    let mut permissions = fs::metadata(path.as_ref()).unwrap().permissions();
+    permissions.set_mode(mode);
+    fs::set_permissions(path, permissions).unwrap();
 }
 
 #[test]
@@ -960,4 +969,134 @@ fn test_rm_help_lists_examples_banner() {
             "rm --help should include `{invocation}`, stdout: {stdout}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Output hygiene: plain (no-ANSI) piped output and Git-aligned 4-space conflict
+// indentation.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_rm_output_plain_no_ansi_when_piped() {
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["rm", "tracked.txt"], repo.path());
+    assert_cli_success(&out, "rm tracked.txt");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout, "rm 'tracked.txt'\n",
+        "piped output must be plain text"
+    );
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "piped rm output must not contain ANSI escapes: {stdout:?}"
+    );
+}
+
+#[test]
+fn test_rm_conflict_uses_four_space_indent() {
+    let repo = create_committed_repo_via_cli();
+    // Unstaged local modification blocks `rm` without -f.
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmodified\n").unwrap();
+    let out = run_libra_command(&["rm", "tracked.txt"], repo.path());
+    assert!(
+        !out.status.success(),
+        "rm of a locally-modified file must fail without -f"
+    );
+    assert_eq!(out.status.code(), Some(9));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("local modifications"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("    tracked.txt"),
+        "conflict list must use 4-space indent: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("\ttracked.txt"),
+        "conflict list must not use tab indent: {stderr:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_rm_dry_run_does_not_save_index() {
+    if skip_permission_denied_test_if_root("test_rm_dry_run_does_not_save_index") {
+        return;
+    }
+    let repo = create_committed_repo_via_cli();
+    let index_path = repo.path().join(".libra").join("index");
+    chmod(&index_path, 0o444);
+
+    let out = run_libra_command(&["rm", "--dry-run", "tracked.txt"], repo.path());
+
+    chmod(&index_path, 0o644);
+    assert_cli_success(&out, "rm --dry-run should not save the index");
+    assert!(
+        repo.path().join("tracked.txt").exists(),
+        "dry-run must keep the file on disk"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout, "rm 'tracked.txt'\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_rm_partial_remove_failure_json_envelope_records_failed_paths() {
+    if skip_permission_denied_test_if_root(
+        "test_rm_partial_remove_failure_json_envelope_records_failed_paths",
+    ) {
+        return;
+    }
+    let repo = create_committed_repo_via_cli();
+    let locked_dir = repo.path().join("locked");
+    fs::create_dir_all(&locked_dir).unwrap();
+    fs::write(locked_dir.join("blocked.txt"), "blocked\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "locked/blocked.txt"], repo.path()),
+        "add locked/blocked.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "add blocked", "--no-verify"], repo.path()),
+        "commit locked/blocked.txt",
+    );
+    chmod(&locked_dir, 0o500);
+
+    let out = run_libra_command(&["--json", "rm", "-f", "locked/blocked.txt"], repo.path());
+
+    chmod(&locked_dir, 0o700);
+    assert_eq!(out.status.code(), Some(9));
+    assert!(
+        out.stdout.is_empty(),
+        "failed --json rm must not emit success data on stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        locked_dir.join("blocked.txt").exists(),
+        "failed physical removal should leave the file on disk"
+    );
+    let (_human, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-WARN-001");
+    assert_eq!(report.category, "warning");
+    assert_eq!(report.exit_code, 9);
+    assert!(
+        report
+            .message
+            .contains("failed to remove 'locked/blocked.txt'"),
+        "unexpected message: {}",
+        report.message
+    );
+    let failed_paths = report
+        .details
+        .get("failed_paths")
+        .and_then(serde_json::Value::as_array)
+        .expect("failed_paths detail");
+    assert_eq!(failed_paths, &[serde_json::json!("locked/blocked.txt")]);
+
+    let cached = run_libra_command(&["rm", "--cached", "locked/blocked.txt"], repo.path());
+    assert_eq!(
+        cached.status.code(),
+        Some(129),
+        "index should already be saved without locked/blocked.txt"
+    );
 }

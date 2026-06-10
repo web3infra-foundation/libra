@@ -216,6 +216,69 @@ async fn test_merge_fast_forward() {
     );
 }
 
+#[test]
+#[serial]
+/// A fast-forward merge must only touch tracked files and must never read or
+/// rewrite ignored build artifacts. Regression test for a hang where the
+/// fast-forward path restored the *entire* working directory as a pathspec,
+/// expanding to every file on disk (including ignored directories such as
+/// `target/`) and SHA-1-hashing each one.
+fn test_merge_fast_forward_leaves_ignored_artifacts_untouched() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    // Commit the `artifacts/` ignore rule on `main` *before* branching so the
+    // working tree is clean at merge time. `libra init` seeds a tracked
+    // `.libraignore`, so overwriting it without committing would leave a
+    // modified tracked file and the merge preflight would refuse the merge.
+    commit_file(
+        temp_path,
+        ".libraignore",
+        "artifacts/\n",
+        "ignore build artifacts",
+    );
+
+    // Advance `feature` one commit ahead of `main` so `main` can fast-forward.
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create branch",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature content\n", "add feature");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+
+    // An ignored "build artifact" directory that must be left completely alone.
+    std::fs::create_dir_all(temp_path.join("artifacts")).expect("create artifacts dir");
+    let artifact = temp_path.join("artifacts").join("big.bin");
+    let artifact_bytes = vec![0x5Au8; 256 * 1024];
+    std::fs::write(&artifact, &artifact_bytes).expect("write ignored artifact");
+
+    let merge_output = run_libra_command(&["merge", "feature"], temp_path);
+    assert!(
+        merge_output.status.success(),
+        "Fast-forward merge failed: {}",
+        String::from_utf8_lossy(&merge_output.stderr)
+    );
+
+    // The fast-forward applied the tracked file from `feature`.
+    assert_eq!(
+        std::fs::read_to_string(temp_path.join("feature.txt")).expect("read fast-forwarded file"),
+        "feature content\n",
+    );
+    // The ignored artifact is byte-identical and was never rewritten.
+    assert_eq!(
+        std::fs::read(&artifact).expect("read ignored artifact"),
+        artifact_bytes,
+        "fast-forward merge must not touch ignored build artifacts",
+    );
+}
+
 #[tokio::test]
 #[serial]
 /// Test merging a remote branch
@@ -922,6 +985,22 @@ fn test_merge_squash_no_ff_is_invalid() {
             .message
             .contains("--squash cannot be combined with --no-ff")
     );
+}
+
+#[test]
+fn test_merge_squash_conflicts_with_lifecycle_actions() {
+    let repo = create_committed_repo_via_cli();
+    for action in ["--continue", "--abort", "--quit"] {
+        let output = run_libra_command(&["merge", "--squash", action], repo.path());
+        let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+        assert_eq!(output.status.code(), Some(129), "{action}");
+        assert_eq!(report.error_code, "LBR-CLI-002", "{action}");
+        assert!(
+            report.message.contains("--squash") && report.message.contains(action),
+            "{action}: {}",
+            report.message
+        );
+    }
 }
 
 #[tokio::test]
@@ -2152,6 +2231,135 @@ fn test_merge_no_renames_falls_back_to_conflict() {
         Some(128),
         "--no-renames should surface the delete/modify conflict: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn setup_merge_similarity_rename_repo() -> tempfile::TempDir {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    commit_file(
+        temp_path,
+        "old.txt",
+        "line1\nline2\nline3\nline4\n",
+        "base file",
+    );
+    commit_file(temp_path, "stable.txt", "stable\n", "stable file");
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(
+        temp_path,
+        "old.txt",
+        "line1\nline2-feature\nline3\nline4\n",
+        "edit on feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    std::fs::write(
+        temp_path.join("new.txt"),
+        "line1\nline2\nline3\nline4-main\n",
+    )
+    .expect("write new.txt");
+    assert_cli_success(
+        &run_libra_command(&["add", "new.txt"], temp_path),
+        "add new",
+    );
+    assert_cli_success(&run_libra_command(&["rm", "old.txt"], temp_path), "rm old");
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "rename on main", "--no-verify"],
+            temp_path,
+        ),
+        "commit rename",
+    );
+
+    temp_repo
+}
+
+#[test]
+fn test_merge_find_renames_similarity_threshold_controls_detection() {
+    let strict_repo = setup_merge_similarity_rename_repo();
+    let strict = run_libra_command(
+        &["merge", "--find-renames=90", "feature"],
+        strict_repo.path(),
+    );
+    assert_eq!(
+        strict.status.code(),
+        Some(128),
+        "strict threshold should leave delete/modify conflict: {}",
+        String::from_utf8_lossy(&strict.stderr)
+    );
+
+    let loose_repo = setup_merge_similarity_rename_repo();
+    let loose = run_libra_command(
+        &["merge", "--find-renames=70", "feature"],
+        loose_repo.path(),
+    );
+    assert_cli_success(&loose, "merge --find-renames=70");
+    let merged = std::fs::read_to_string(loose_repo.path().join("new.txt")).expect("read new.txt");
+    assert!(merged.contains("line2-feature"), "{merged}");
+    assert!(merged.contains("line4-main"), "{merged}");
+}
+
+#[test]
+fn test_merge_find_renames_invalid_similarity_is_usage_error() {
+    let temp_repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["merge", "--find-renames=bogus", "main"], temp_repo.path());
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report.message.contains("invalid --find-renames similarity"),
+        "{}",
+        report.message
+    );
+}
+
+#[test]
+fn test_merge_rename_limit_config_can_disable_inexact_detection() {
+    let temp_repo = setup_merge_similarity_rename_repo();
+    let temp_path = temp_repo.path();
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "merge.renameLimit", "1"], temp_path),
+        "set merge.renameLimit=1",
+    );
+
+    let output = run_libra_command(&["merge", "feature"], temp_path);
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "low merge.renameLimit should skip rename detection: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_merge_invalid_rename_limit_config_is_usage_error() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "merge.renameLimit", "bogus"], temp_path),
+        "set invalid merge.renameLimit",
+    );
+
+    let output = run_libra_command(&["merge", "main"], temp_path);
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report.message.contains("invalid merge.renameLimit value"),
+        "{}",
+        report.message
     );
 }
 

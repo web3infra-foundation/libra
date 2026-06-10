@@ -8,8 +8,10 @@ use git_internal::{
     hash::{HashKind, ObjectHash, set_hash_kind_for_test},
     internal::object::{
         ObjectTrait,
+        blob::Blob,
         commit::Commit,
         signature::{Signature, SignatureType},
+        tag::Tag as GitTag,
         tree::{Tree, TreeItem, TreeItemMode},
         types::ObjectType,
     },
@@ -866,6 +868,33 @@ fn store_strict_commit(repo: &std::path::Path, email: &str, tz: &str) -> String 
     commit.id.to_string()
 }
 
+fn object_storage(repo: &std::path::Path) -> ClientStorage {
+    ClientStorage::init(repo.join(".libra/objects"))
+}
+
+fn store_git_object<T: ObjectTrait>(storage: &ClientStorage, object: &T, id: &ObjectHash) {
+    storage
+        .put(
+            id,
+            &object.to_data().expect("serialize object"),
+            object.get_type(),
+        )
+        .expect("store object");
+}
+
+fn stored_tree_with_blob(storage: &ClientStorage) -> Tree {
+    let blob = Blob::from_content("tree child");
+    store_git_object(storage, &blob, &blob.id);
+    let tree = Tree::from_tree_items(vec![TreeItem {
+        mode: TreeItemMode::Blob,
+        id: blob.id,
+        name: "file.txt".to_string(),
+    }])
+    .expect("build tree");
+    store_git_object(storage, &tree, &tree.id);
+    tree
+}
+
 /// `--strict` flags a commit whose author/committer email lacks `@`; the default
 /// (non-strict) check does not.
 #[test]
@@ -962,6 +991,122 @@ fn test_strict_tree_unsorted() {
         "strict must flag an unsorted tree: {stderr}"
     );
     assert_eq!(strict.status.code(), Some(1));
+}
+
+#[test]
+#[serial]
+fn test_strict_tree_missing_blob() {
+    let repo = tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+
+    let id = {
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let storage = object_storage(repo.path());
+        let missing_blob = ObjectHash::from_bytes(&[0x33; 20]).expect("valid missing oid");
+        let tree = Tree::from_tree_items(vec![TreeItem {
+            mode: TreeItemMode::Blob,
+            id: missing_blob,
+            name: "missing.txt".to_string(),
+        }])
+        .expect("build tree");
+        store_git_object(&storage, &tree, &tree.id);
+        tree.id.to_string()
+    };
+
+    let plain = run_libra_command(&["fsck", &id], repo.path());
+    assert!(
+        !String::from_utf8_lossy(&plain.stdout).contains("missing blob"),
+        "non-strict fsck must not validate tree entry reachability"
+    );
+
+    let strict = run_libra_command(&["fsck", "--strict", &id], repo.path());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&strict.stdout),
+        String::from_utf8_lossy(&strict.stderr)
+    );
+    assert!(
+        combined.contains("missing blob"),
+        "strict must flag the missing blob entry: {combined}"
+    );
+    assert_eq!(strict.status.code(), Some(1));
+}
+
+#[test]
+#[serial]
+fn test_strict_commit_parent_type() {
+    let repo = tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+
+    let (commit_id, parent_id) = {
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let storage = object_storage(repo.path());
+        let tree = stored_tree_with_blob(&storage);
+        let blob = Blob::from_content("not a commit parent");
+        store_git_object(&storage, &blob, &blob.id);
+        let commit = Commit::new(
+            strict_signature("test@example.com", "+0000", SignatureType::Author),
+            strict_signature("test@example.com", "+0000", SignatureType::Committer),
+            tree.id,
+            vec![blob.id],
+            "bad parent fixture",
+        );
+        store_git_object(&storage, &commit, &commit.id);
+        (commit.id.to_string(), blob.id.to_string())
+    };
+
+    let plain = run_libra_command(&["fsck", &commit_id], repo.path());
+    assert!(
+        !String::from_utf8_lossy(&plain.stderr).contains("bad object sha1"),
+        "non-strict fsck must not validate parent object types"
+    );
+
+    let strict = run_libra_command(&["fsck", "--strict", &commit_id], repo.path());
+    let stderr = String::from_utf8_lossy(&strict.stderr);
+    assert!(
+        stderr.contains(&format!("bad object sha1: commit {parent_id}")),
+        "strict must flag the non-commit parent target: {stderr}"
+    );
+    assert_eq!(strict.status.code(), Some(1));
+}
+
+#[test]
+#[serial]
+fn test_tag_target_type_mismatch_non_strict() {
+    let repo = tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+
+    let (tag_id, target_id) = {
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let storage = object_storage(repo.path());
+        let blob = Blob::from_content("tagged as the wrong type");
+        store_git_object(&storage, &blob, &blob.id);
+        let tag = GitTag::new(
+            blob.id,
+            ObjectType::Commit,
+            "wrong-type".to_string(),
+            strict_signature("test@example.com", "+0000", SignatureType::Tagger),
+            "wrong type target".to_string(),
+        );
+        let tag_data = tag.to_data().expect("serialize tag");
+        let tag_id = ObjectHash::from_type_and_data(ObjectType::Tag, &tag_data);
+        storage
+            .put(&tag_id, &tag_data, ObjectType::Tag)
+            .expect("store tag");
+        (tag_id.to_string(), blob.id.to_string())
+    };
+
+    let output = run_libra_command(&["fsck", &tag_id], repo.path());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains(&format!("bad object sha1: commit {target_id}")),
+        "non-strict fsck must flag tag target type mismatches: {combined}"
+    );
+    assert_eq!(output.status.code(), Some(1));
 }
 
 /// A corrupt index file is an integrity error and exits non-zero (1), aligned
@@ -1061,5 +1206,156 @@ fn test_lost_found_writes_dangling() {
     assert_eq!(
         staged, b"dangling blob content\n",
         "staged blob should contain the raw content"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Pack integrity tests (Stage 11 — reuses verify-pack in-process)
+// ---------------------------------------------------------------------------
+
+/// Directory holding the committed pack fixtures.
+fn fsck_packs_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/packs")
+}
+
+/// Copy a SHA-1 pack fixture (matched by `prefix`) into the repo's object pack
+/// directory and build its `.idx` in place. Returns the in-repo `.idx` and
+/// `.pack` paths.
+fn install_pack_fixture(
+    repo: &std::path::Path,
+    prefix: &str,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let pack_src = fs::read_dir(fsck_packs_dir())
+        .expect("read packs dir")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(prefix) && name.ends_with(".pack"))
+        })
+        .unwrap_or_else(|| panic!("pack fixture with prefix {prefix:?} not found"));
+
+    let pack_dir = repo.join(".libra/objects/pack");
+    fs::create_dir_all(&pack_dir).expect("create pack dir");
+    let pack_dst = pack_dir.join(pack_src.file_name().expect("fixture file name"));
+    fs::copy(&pack_src, &pack_dst).expect("copy pack fixture");
+
+    let output = run_libra_command(
+        &[
+            "index-pack",
+            pack_dst.to_str().expect("pack path utf-8"),
+            "--index-version",
+            "2",
+        ],
+        repo,
+    );
+    assert_cli_success(&output, "index-pack should build the fixture idx");
+    (pack_dst.with_extension("idx"), pack_dst)
+}
+
+/// Flip the final byte of a pack `.idx` so its trailing self-checksum no
+/// longer matches the recomputed hash. verify-pack rejects this during index
+/// parsing — before any pack decode — so the fsck pack stage surfaces a clean
+/// `pack index v2 checksum mismatch` rather than relying on the decoder.
+fn corrupt_index_checksum(idx_path: &std::path::Path) {
+    let mut bytes = fs::read(idx_path).expect("read idx");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xFF;
+    fs::write(idx_path, bytes).expect("write corrupted idx");
+}
+
+#[test]
+#[serial]
+/// A healthy pack passes the fsck pack-integrity stage; fsck still exits 0.
+fn fsck_reports_ok_with_healthy_pack() {
+    let repo = create_committed_repo_via_cli();
+    let (_idx, _pack) = install_pack_fixture(repo.path(), "small-sha1");
+
+    let output = run_libra_command(&["fsck"], repo.path());
+    assert!(
+        output.status.success(),
+        "fsck should pass with a healthy pack, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[serial]
+/// A corrupt pack index is detected by the pack-integrity stage and makes
+/// fsck exit 1 (matching `git fsck`). `--no-full` keeps object enumeration to
+/// loose objects so the pack stage is the only failing one (under default
+/// `--full`, a structurally broken index instead surfaces during enumeration).
+fn fsck_detects_corrupt_pack() {
+    let repo = create_committed_repo_via_cli();
+    let (idx, _pack) = install_pack_fixture(repo.path(), "small-sha1");
+    corrupt_index_checksum(&idx);
+
+    let output = run_libra_command(&["fsck", "--no-full"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "corrupt pack index should make fsck exit 1, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stem = idx
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .expect("idx stem utf-8");
+    assert!(
+        stderr.contains(stem) && stderr.contains("checksum mismatch"),
+        "stderr should name the corrupt pack ({stem}) and the checksum diagnostic, got: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+/// fsck keeps checking after the first corrupt pack: with two bad packs, both
+/// are reported (proving the loop does not abort on the first failure).
+fn fsck_continues_after_corrupt_pack() {
+    let repo = create_committed_repo_via_cli();
+    let (idx_a, _pack_a) = install_pack_fixture(repo.path(), "small-sha1");
+    let (idx_b, _pack_b) = install_pack_fixture(repo.path(), "ref-delta-sha1");
+    corrupt_index_checksum(&idx_a);
+    corrupt_index_checksum(&idx_b);
+
+    let output = run_libra_command(&["fsck", "--no-full"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "two corrupt packs should make fsck exit 1, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for idx in [&idx_a, &idx_b] {
+        let stem = idx
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("idx stem utf-8");
+        assert!(
+            stderr.contains(stem),
+            "fsck should report both corrupt packs; missing {stem} in: {stderr}"
+        );
+    }
+}
+
+#[test]
+#[serial]
+/// With no packfiles present the pack-integrity stage is a silent no-op and
+/// emits no spurious pack error.
+fn fsck_skips_when_no_pack_files() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["fsck"], repo.path());
+    assert!(
+        output.status.success(),
+        "fsck on a pack-less repo should pass, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("pack verification failed"),
+        "pack-less repo must not report pack errors, got: {stderr}"
     );
 }

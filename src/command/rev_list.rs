@@ -1,21 +1,16 @@
 //! Implements `rev-list` to enumerate commits reachable from a revision.
 
-use std::{
-    collections::{HashMap, HashSet},
-    io::Write,
-};
+use std::{collections::HashSet, io::Write};
 
 use clap::Parser;
 use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
 use serde::Serialize;
 
 use crate::{
-    command::{
-        log,
-        merge_base::{self, MergeBaseError},
-    },
+    command::merge_base::{self, MergeBaseError},
     utils::{
-        error::{CliError, CliResult, StableErrorCode},
+        error::{CliError, CliResult, StableErrorCode, emit_warning},
+        graph::{CommitWalker, TreeWalkObject, TreeWalkObjectKind, TreeWalker},
         output::{OutputConfig, emit_json_data},
         util::{self, CommitBaseError},
     },
@@ -37,6 +32,7 @@ EXAMPLES:
     libra rev-list main..HEAD       Commits reachable from HEAD but not main (range)
     libra rev-list -n 10 HEAD       Limit output to the 10 newest commits
     libra rev-list --count HEAD     Print only the count of reachable commits
+    libra rev-list --objects HEAD   Include reachable tree/blob object IDs
     libra rev-list --json HEAD      Structured JSON output (input + commits[] + total)
     libra rev-list --quiet HEAD     Suppress stdout (use exit code as truthy probe)";
 
@@ -83,6 +79,10 @@ pub struct RevListArgs {
     /// Prefix each line with the commit's Unix timestamp.
     #[clap(long)]
     pub timestamp: bool,
+
+    /// Print reachable tree/blob object IDs after commit IDs.
+    #[clap(long)]
+    pub objects: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,6 +90,16 @@ struct RevListOutput {
     input: String,
     commits: Vec<String>,
     total: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    objects: Vec<RevListObject>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RevListObject {
+    hash: String,
+    path: String,
+    #[serde(rename = "type")]
+    object_type: String,
 }
 
 pub async fn execute(args: RevListArgs) -> Result<(), String> {
@@ -108,10 +118,16 @@ pub async fn execute_safe(args: RevListArgs, output: &OutputConfig) -> CliResult
         // suppress the list in JSON mode), keeping the schema stable.
         let commits: Vec<String> = resolved.commits.iter().map(|c| c.id.to_string()).collect();
         let total = commits.len();
+        let objects = resolved
+            .objects_by_commit
+            .iter()
+            .flat_map(|objects| objects.iter().cloned())
+            .collect();
         let result = RevListOutput {
             input: resolved.input,
             commits,
             total,
+            objects,
         };
         return emit_json_data("rev-list", &result, output);
     }
@@ -125,7 +141,14 @@ pub async fn execute_safe(args: RevListArgs, output: &OutputConfig) -> CliResult
 
     let stdout = std::io::stdout();
     let mut writer = stdout.lock();
-    write_rev_list_lines(&mut writer, &resolved.commits, args.parents, args.timestamp)
+    write_rev_list_lines(
+        &mut writer,
+        &resolved.commits,
+        &resolved.objects_by_commit,
+        args.parents,
+        args.timestamp,
+        args.objects,
+    )
 }
 
 /// Render one commit line honoring `--timestamp` (`<ts> <hash>`) and
@@ -149,10 +172,12 @@ fn format_rev_list_line(commit: &Commit, parents: bool, timestamp: bool) -> Stri
 fn write_rev_list_lines<W: Write>(
     writer: &mut W,
     commits: &[Commit],
+    objects_by_commit: &[Vec<RevListObject>],
     parents: bool,
     timestamp: bool,
+    objects: bool,
 ) -> CliResult<()> {
-    for commit in commits {
+    for (index, commit) in commits.iter().enumerate() {
         let line = format_rev_list_line(commit, parents, timestamp);
         match writeln!(writer, "{line}") {
             Ok(()) => {}
@@ -164,8 +189,29 @@ fn write_rev_list_lines<W: Write>(
                 );
             }
         }
+        if objects && let Some(commit_objects) = objects_by_commit.get(index) {
+            for object in commit_objects {
+                write_rev_list_object_line(writer, object)?;
+            }
+        }
     }
     Ok(())
+}
+
+fn write_rev_list_object_line<W: Write>(writer: &mut W, object: &RevListObject) -> CliResult<()> {
+    let line = if object.path.is_empty() {
+        object.hash.clone()
+    } else {
+        format!("{} {}", object.hash, object.path)
+    };
+    match writeln!(writer, "{line}") {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(
+            CliError::fatal(format!("failed to write rev-list output: {error}"))
+                .with_stable_code(StableErrorCode::IoWriteFailed),
+        ),
+    }
 }
 
 /// Resolved rev-list output: the filtered, sorted, and sliced commit set plus
@@ -173,6 +219,7 @@ fn write_rev_list_lines<W: Write>(
 struct ResolvedRevList {
     input: String,
     commits: Vec<Commit>,
+    objects_by_commit: Vec<Vec<RevListObject>>,
 }
 
 /// Resolve a single endpoint of a spec (empty defaults to `HEAD`).
@@ -246,25 +293,14 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<ResolvedRevList> {
 
     // Excluded = everything reachable from any negative tip.
     let mut excluded: HashSet<ObjectHash> = HashSet::new();
-    for tip in &negative_tips {
-        for commit in log::get_reachable_commits(tip.to_string(), None).await? {
+    if !negative_tips.is_empty() {
+        for commit in CommitWalker::new(&negative_tips, HashSet::new())?.collect()? {
             excluded.insert(commit.id);
         }
     }
 
     // Included = everything reachable from a positive tip and not excluded.
-    let mut included: HashMap<ObjectHash, Commit> = HashMap::new();
-    for tip in &positive_tips {
-        for commit in log::get_reachable_commits(tip.to_string(), None).await? {
-            if excluded.contains(&commit.id) {
-                continue;
-            }
-            included.entry(commit.id).or_insert(commit);
-        }
-    }
-
-    let mut commits: Vec<Commit> = included.into_values().collect();
-    sort_rev_list_commits(&mut commits);
+    let mut commits = CommitWalker::new(&positive_tips, excluded)?.collect()?;
 
     // Parent-count predicate first, then skip/limit on the surviving stream so
     // `--skip N` counts post-filter commits (matching Git).
@@ -282,13 +318,58 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<ResolvedRevList> {
         commits.truncate(max);
     }
 
-    Ok(ResolvedRevList { input, commits })
+    let objects_by_commit = if args.objects {
+        collect_objects_by_commit(&commits)?
+    } else {
+        Vec::new()
+    };
+
+    Ok(ResolvedRevList {
+        input,
+        commits,
+        objects_by_commit,
+    })
 }
 
+#[cfg(test)]
 fn sort_rev_list_commits(commits: &mut [git_internal::internal::object::commit::Commit]) {
     // `sort_by_key` is stable, so equal timestamps keep the traversal order
     // returned by `get_reachable_commits` (HEAD before parent in linear history).
     commits.sort_by_key(|commit| std::cmp::Reverse(commit.committer.timestamp));
+}
+
+fn collect_objects_by_commit(commits: &[Commit]) -> CliResult<Vec<Vec<RevListObject>>> {
+    let mut seen_objects: HashSet<ObjectHash> = HashSet::new();
+    let mut by_commit = Vec::with_capacity(commits.len());
+    for commit in commits {
+        let mut walker = TreeWalker::new(commit.tree_id);
+        let mut objects = Vec::new();
+        while let Some(object) = walker.next_object()? {
+            for warning in walker.take_warnings() {
+                emit_warning(warning);
+            }
+            if seen_objects.insert(object.id) {
+                objects.push(rev_list_object_from_tree_walk(object));
+            }
+        }
+        for warning in walker.take_warnings() {
+            emit_warning(warning);
+        }
+        by_commit.push(objects);
+    }
+    Ok(by_commit)
+}
+
+fn rev_list_object_from_tree_walk(object: TreeWalkObject) -> RevListObject {
+    let object_type = match object.kind {
+        TreeWalkObjectKind::Tree => TreeWalkObjectKind::Tree.as_str(),
+        TreeWalkObjectKind::Blob => TreeWalkObjectKind::Blob.as_str(),
+    };
+    RevListObject {
+        hash: object.id.to_string(),
+        path: object.path,
+        object_type: object_type.to_string(),
+    }
 }
 
 fn rev_list_target_error(spec: &str, error: CommitBaseError) -> CliError {
@@ -395,12 +476,21 @@ mod tests {
 
     #[test]
     fn test_rev_list_args_filter_flags() {
-        let args =
-            RevListArgs::try_parse_from(["rev-list", "-n", "3", "--skip", "1", "--count", "HEAD"])
-                .unwrap();
+        let args = RevListArgs::try_parse_from([
+            "rev-list",
+            "-n",
+            "3",
+            "--skip",
+            "1",
+            "--count",
+            "--objects",
+            "HEAD",
+        ])
+        .unwrap();
         assert_eq!(args.max_count, Some(3));
         assert_eq!(args.skip, Some(1));
         assert!(args.count);
+        assert!(args.objects);
         assert_eq!(args.specs, vec!["HEAD".to_string()]);
     }
 
@@ -477,7 +567,7 @@ mod tests {
         };
         let commits = vec![test_commit(test_hash(0x01), 1)];
 
-        let error = write_rev_list_lines(&mut writer, &commits, false, false)
+        let error = write_rev_list_lines(&mut writer, &commits, &[], false, false, false)
             .expect_err("write should fail");
 
         assert_eq!(error.stable_code(), StableErrorCode::IoWriteFailed);
@@ -490,7 +580,7 @@ mod tests {
         };
         let commits = vec![test_commit(test_hash(0x01), 1)];
 
-        write_rev_list_lines(&mut writer, &commits, false, false)
+        write_rev_list_lines(&mut writer, &commits, &[], false, false, false)
             .expect("broken pipe should be ignored");
     }
 }

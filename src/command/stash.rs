@@ -1,7 +1,5 @@
 //! Implements stash push/pop/show/drop/apply by saving worktree/index states as commits and restoring them on demand.
 
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -25,6 +23,7 @@ use git_internal::{
     },
 };
 use serde::Serialize;
+use similar::TextDiff;
 
 use crate::{
     cli::Stash,
@@ -37,6 +36,7 @@ use crate::{
     },
     internal::{
         branch::{Branch as InternalBranch, BranchStoreError},
+        config::{ConfigKv, parse_config_bool},
         head::Head,
     },
     utils::{
@@ -46,6 +46,12 @@ use crate::{
         output::{OutputConfig, emit_json_data},
         tree, util,
     },
+};
+
+mod push;
+use push::{
+    collect_included_untracked_paths, create_untracked_parent_commit,
+    remove_included_untracked_paths, restore_worktree_to_index, tree_item_mode_from_metadata,
 };
 
 /// GitHub Issues URL surfaced on `StashError::Other` so users can report
@@ -167,7 +173,14 @@ pub enum StashOutput {
     #[serde(rename = "noop")]
     Noop { message: String },
     #[serde(rename = "push")]
-    Push { message: String, stash_id: String },
+    Push {
+        message: String,
+        stash_id: String,
+        #[serde(default, skip_serializing_if = "is_zero_usize")]
+        included_untracked: usize,
+        #[serde(default, skip_serializing_if = "is_false")]
+        kept_index: bool,
+    },
     #[serde(rename = "pop")]
     Pop {
         index: usize,
@@ -196,6 +209,12 @@ pub enum StashOutput {
         name_only: bool,
         #[serde(skip)]
         name_status: bool,
+        // Unified-diff text for `-p`/`--patch`. Additive and omitted from JSON
+        // when absent so the structured `files` list stays the stable contract.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        patch: Option<String>,
+        #[serde(skip)]
+        show_stat: bool,
     },
     #[serde(rename = "branch")]
     Branch {
@@ -230,12 +249,25 @@ pub struct StashFilesChangedStats {
     pub deleted: usize,
 }
 
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// `--help` examples shown in `libra stash --help` output.
 pub const STASH_EXAMPLES: &str = "\
 EXAMPLES:
     libra stash push -m 'WIP'         Save current changes
+    libra stash push -u               Include untracked files
+    libra stash push -a               Include untracked and ignored files
+    libra stash push --keep-index     Keep staged changes in place
     libra stash list                  Show all stash entries
     libra stash show                  File-level summary of stash@{0}
+    libra stash show --stat           Explicit file-level summary of stash@{0}
+    libra stash show -p               Show stash@{0} as a unified diff
     libra stash show stash@{1}        Inspect a specific stash entry
     libra stash branch hotfix         Branch off the latest stash and drop it
     libra stash apply                 Re-apply stash@{0} without dropping
@@ -264,7 +296,20 @@ async fn run_stash(stash_cmd: Stash, output: &OutputConfig) -> Result<StashOutpu
     util::require_repo().map_err(|_| StashError::NotInRepo)?;
 
     match stash_cmd {
-        Stash::Push { message } => run_push(message).await,
+        Stash::Push {
+            message,
+            include_untracked,
+            all,
+            keep_index,
+        } => {
+            run_push(StashPushOptions {
+                message,
+                include_untracked: include_untracked || all,
+                include_ignored: all,
+                keep_index,
+            })
+            .await
+        }
         Stash::Pop { stash } => run_pop(stash).await,
         Stash::List => run_list().await,
         Stash::Apply { stash } => run_apply(stash).await,
@@ -273,23 +318,34 @@ async fn run_stash(stash_cmd: Stash, output: &OutputConfig) -> Result<StashOutpu
             stash,
             name_only,
             name_status,
-        } => run_show(stash, name_only, name_status).await,
+            stat,
+            patch,
+        } => run_show(stash, name_only, name_status, stat, patch).await,
         Stash::Branch { branch, stash } => run_branch(branch, stash).await,
         Stash::Clear { force } => run_clear(force, output).await,
     }
 }
 
-async fn run_push(message: Option<String>) -> Result<StashOutput, StashError> {
-    if !has_changes().await {
-        return Ok(StashOutput::Noop {
-            message: "No local changes to save".to_string(),
-        });
-    }
+#[derive(Debug, Default)]
+struct StashPushOptions {
+    message: Option<String>,
+    include_untracked: bool,
+    include_ignored: bool,
+    keep_index: bool,
+}
 
+async fn run_push(options: StashPushOptions) -> Result<StashOutput, StashError> {
     let git_dir =
         util::try_get_storage_path(None).map_err(|e| StashError::ReadObject(e.to_string()))?;
     let index_path = git_dir.join("index");
     let index = Index::load(&index_path).unwrap_or_else(|_| Index::new());
+    let included_untracked_paths = collect_included_untracked_paths(&options)?;
+
+    if !has_changes().await && included_untracked_paths.is_empty() {
+        return Ok(StashOutput::Noop {
+            message: "No local changes to save".to_string(),
+        });
+    }
 
     let head_commit_hash = Head::current_commit()
         .await
@@ -320,13 +376,14 @@ async fn run_push(message: Option<String>) -> Result<StashOutput, StashError> {
         }
     };
 
+    let head_commit_short = head_commit_hash_str
+        .get(..7)
+        .unwrap_or(head_commit_hash_str.as_str());
     let wip_message = format!(
         "WIP on {}: {} {}",
-        current_branch_name,
-        &head_commit_hash_str[..7],
-        head_commit_summary
+        current_branch_name, head_commit_short, head_commit_summary
     );
-    let final_message = message.unwrap_or(wip_message);
+    let final_message = options.message.unwrap_or(wip_message);
 
     let index_commit = Commit::new(
         author.clone(),
@@ -352,11 +409,34 @@ async fn run_push(message: Option<String>) -> Result<StashOutput, StashError> {
     let worktree_tree_hash = object::write_git_object(&git_dir, "tree", &worktree_tree_data)
         .map_err(|e| StashError::WriteObject(e.to_string()))?;
 
+    let untracked_parent = if included_untracked_paths.is_empty() {
+        None
+    } else {
+        let short_head = head_commit_hash_str
+            .get(..7)
+            .unwrap_or(head_commit_hash_str.as_str());
+        let untracked_message =
+            format!("untracked files on {current_branch_name}: {short_head} {head_commit_summary}");
+        Some(create_untracked_parent_commit(
+            workdir,
+            &git_dir,
+            &included_untracked_paths,
+            &author,
+            &committer,
+            &untracked_message,
+        )?)
+    };
+
+    let mut parents = vec![head_commit_hash, index_commit_hash];
+    if let Some(untracked_commit_hash) = untracked_parent {
+        parents.push(untracked_commit_hash);
+    }
+
     let stash_commit = Commit::new(
         author,
         committer.clone(),
         worktree_tree_hash,
-        vec![head_commit_hash, index_commit_hash],
+        parents,
         &final_message,
     );
     let stash_commit_data = stash_commit
@@ -371,10 +451,21 @@ async fn run_push(message: Option<String>) -> Result<StashOutput, StashError> {
     perform_hard_reset(&head_commit_hash)
         .await
         .map_err(StashError::ResetFailed)?;
+    if options.keep_index {
+        restore_worktree_to_index(&index, &head_commit_hash, workdir, &git_dir)
+            .map_err(StashError::ResetFailed)?;
+        index
+            .save(&index_path)
+            .map_err(|e| StashError::IndexSave(e.to_string()))?;
+    }
+    remove_included_untracked_paths(workdir, &included_untracked_paths)
+        .map_err(StashError::ResetFailed)?;
 
     Ok(StashOutput::Push {
         message: final_message,
         stash_id: stash_commit_hash.to_string(),
+        included_untracked: included_untracked_paths.len(),
+        kept_index: options.keep_index,
     })
 }
 
@@ -407,7 +498,18 @@ async fn run_pop(stash: Option<String>) -> Result<StashOutput, StashError> {
 /// stash commit id when something was saved, or `None` when the tree was
 /// already clean. The working tree is left clean at HEAD on success.
 pub(crate) async fn autostash_push() -> Result<Option<String>, String> {
-    match run_push(Some("merge: autostash".to_string())).await {
+    autostash_push_with_message("merge: autostash").await
+}
+
+pub(crate) async fn autostash_push_with_message(
+    message: impl Into<String>,
+) -> Result<Option<String>, String> {
+    match run_push(StashPushOptions {
+        message: Some(message.into()),
+        ..Default::default()
+    })
+    .await
+    {
         Ok(StashOutput::Push { stash_id, .. }) => Ok(Some(stash_id)),
         Ok(_) => Ok(None),
         Err(error) => Err(error.to_string()),
@@ -421,6 +523,33 @@ pub(crate) async fn autostash_pop() -> Result<(), String> {
         Ok(_) => Ok(()),
         Err(error) => Err(error.to_string()),
     }
+}
+
+pub(crate) async fn autostash_pop_by_oid(stash_id: &str) -> Result<(), String> {
+    let index = resolve_stash_index_by_oid(stash_id).map_err(|error| error.to_string())?;
+    match run_pop(Some(format!("stash@{{{index}}}"))).await {
+        Ok(_) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn resolve_stash_index_by_oid(stash_id: &str) -> Result<usize, StashError> {
+    if !has_stash() {
+        return Err(StashError::NoStashFound);
+    }
+
+    let git_dir =
+        util::try_get_storage_path(None).map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let stash_log_path = git_dir.join("logs/refs/stash");
+    if !stash_log_path.exists() {
+        return Err(StashError::NoStashFound);
+    }
+
+    let entries = parse_stash_log_entries(read_stash_log_lines(&stash_log_path)?)?;
+    entries
+        .iter()
+        .position(|entry| entry.stash_id == stash_id)
+        .ok_or_else(|| StashError::InvalidStashRef(stash_id.to_string()))
 }
 
 async fn run_list() -> Result<StashOutput, StashError> {
@@ -463,7 +592,10 @@ async fn run_show(
     stash: Option<String>,
     name_only: bool,
     name_status: bool,
+    stat: bool,
+    patch: bool,
 ) -> Result<StashOutput, StashError> {
+    let mode = resolve_stash_show_mode(name_only, name_status, stat, patch).await?;
     let (index, stash_id_str) = resolve_stash_to_commit_hash(stash)?;
     let git_dir =
         util::try_get_storage_path(None).map_err(|e| StashError::ReadObject(e.to_string()))?;
@@ -535,14 +667,157 @@ async fn run_show(
     files.sort_by(|a, b| a.path.cmp(&b.path));
     stats.total = files.len();
 
+    // `-p`/`--patch` renders a real unified diff between the base tree and the
+    // stash tree for each changed file (binary/undecodable files report
+    // "Binary files ... differ", matching Git).
+    let patch_output = if matches!(mode, StashShowMode::Patch) {
+        Some(build_stash_patch(
+            &git_dir,
+            &files,
+            &base_files,
+            &stash_files,
+        )?)
+    } else {
+        None
+    };
+
     Ok(StashOutput::Show {
         stash: format!("stash@{{{index}}}"),
         stash_id: stash_id_str,
         files,
         files_changed: stats,
-        name_only,
-        name_status,
+        name_only: matches!(mode, StashShowMode::NameOnly),
+        name_status: matches!(mode, StashShowMode::NameStatus),
+        patch: patch_output,
+        show_stat: matches!(mode, StashShowMode::Stat),
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StashShowMode {
+    NameOnly,
+    NameStatus,
+    Stat,
+    Patch,
+    None,
+}
+
+async fn resolve_stash_show_mode(
+    name_only: bool,
+    name_status: bool,
+    stat: bool,
+    patch: bool,
+) -> Result<StashShowMode, StashError> {
+    if patch {
+        return Ok(StashShowMode::Patch);
+    }
+    if stat {
+        return Ok(StashShowMode::Stat);
+    }
+    if name_status {
+        return Ok(StashShowMode::NameStatus);
+    }
+    if name_only {
+        return Ok(StashShowMode::NameOnly);
+    }
+
+    if read_stash_show_bool_config("stash.showPatch", false).await? {
+        return Ok(StashShowMode::Patch);
+    }
+    if read_stash_show_bool_config("stash.showStat", true).await? {
+        return Ok(StashShowMode::Stat);
+    }
+
+    Ok(StashShowMode::None)
+}
+
+async fn read_stash_show_bool_config(key: &str, default: bool) -> Result<bool, StashError> {
+    let entry = ConfigKv::get(key)
+        .await
+        .map_err(|error| StashError::ReadObject(format!("failed to read config {key}: {error}")))?;
+    Ok(entry
+        .and_then(|entry| parse_config_bool(&entry.value))
+        .unwrap_or(default))
+}
+
+/// Build the `stash show -p` unified diff over every changed file, in the same
+/// (sorted) order as the file summary.
+fn build_stash_patch(
+    git_dir: &Path,
+    files: &[StashFileChange],
+    base_files: &HashMap<String, TreeItem>,
+    stash_files: &HashMap<String, TreeItem>,
+) -> Result<String, StashError> {
+    let mut out = String::new();
+    for change in files {
+        let base_id = base_files.get(&change.path).map(|item| item.id);
+        let stash_id = stash_files.get(&change.path).map(|item| item.id);
+        out.push_str(&render_stash_file_patch(
+            git_dir,
+            &change.path,
+            base_id,
+            stash_id,
+        )?);
+    }
+    Ok(out)
+}
+
+/// Read a blob's bytes by hash; an absent side (added/deleted) is empty.
+fn read_stash_blob_bytes(git_dir: &Path, id: Option<ObjectHash>) -> Result<Vec<u8>, StashError> {
+    match id {
+        Some(hash) => object::read_git_object(git_dir, &hash)
+            .map_err(|e| StashError::ReadObject(e.to_string())),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Render the unified diff for one changed path between the base and stash
+/// blobs, prefixed with a `diff --git` header. Non-UTF-8 or NUL-containing
+/// content is reported as binary without a textual diff.
+fn render_stash_file_patch(
+    git_dir: &Path,
+    path: &str,
+    base_id: Option<ObjectHash>,
+    stash_id: Option<ObjectHash>,
+) -> Result<String, StashError> {
+    let base_bytes = read_stash_blob_bytes(git_dir, base_id)?;
+    let stash_bytes = read_stash_blob_bytes(git_dir, stash_id)?;
+
+    let mut out = format!("diff --git a/{path} b/{path}\n");
+
+    let binary = base_bytes.contains(&0) || stash_bytes.contains(&0);
+    let (Ok(old_text), Ok(new_text)) = (
+        std::str::from_utf8(&base_bytes),
+        std::str::from_utf8(&stash_bytes),
+    ) else {
+        out.push_str(&format!("Binary files a/{path} and b/{path} differ\n"));
+        return Ok(out);
+    };
+    if binary {
+        out.push_str(&format!("Binary files a/{path} and b/{path} differ\n"));
+        return Ok(out);
+    }
+
+    let old_label = if base_id.is_some() {
+        format!("a/{path}")
+    } else {
+        "/dev/null".to_string()
+    };
+    let new_label = if stash_id.is_some() {
+        format!("b/{path}")
+    } else {
+        "/dev/null".to_string()
+    };
+
+    let diff = TextDiff::from_lines(old_text, new_text);
+    out.push_str(
+        &diff
+            .unified_diff()
+            .context_radius(3)
+            .header(&old_label, &new_label)
+            .to_string(),
+    );
+    Ok(out)
 }
 
 async fn run_branch(branch_name: String, stash: Option<String>) -> Result<StashOutput, StashError> {
@@ -684,25 +959,24 @@ fn render_stash_output(result: &StashOutput, output: &OutputConfig) -> CliResult
             files_changed,
             name_only,
             name_status,
+            patch,
+            show_stat,
             ..
         } => {
-            if *name_only {
+            if let Some(patch_text) = patch {
+                print!("{patch_text}");
+            } else if *name_only {
                 for change in files {
                     println!("{}", change.path);
                 }
-            } else {
-                println!("Files changed in {stash}:");
-                let prefix_len = if *name_status { 0 } else { 9 };
+            } else if *name_status {
                 for change in files {
-                    if *name_status {
-                        println!("{}\t{}", change.status, change.path);
-                    } else {
-                        println!(
-                            "  {:<prefix_len$}{}",
-                            format!("{}:", change.status),
-                            change.path
-                        );
-                    }
+                    println!("{}\t{}", change.status, change.path);
+                }
+            } else if *show_stat {
+                println!("Files changed in {stash}:");
+                for change in files {
+                    println!("  {:<9}{}", format!("{}:", change.status), change.path);
                 }
                 println!(
                     "{} files changed, {} insertions(+), {} deletions(-)",
@@ -782,6 +1056,7 @@ async fn do_apply(stash: Option<String>) -> Result<StashOutput, StashError> {
         .map_err(|e| StashError::ReadObject(e.to_string()))?;
     let stash_tree = Tree::from_bytes(&stash_tree_data, stash_commit.tree_id)
         .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let untracked_tree = load_untracked_parent_tree(&stash_commit, &git_dir)?;
 
     let merged_tree = merge_trees(&base_tree, &head_tree, &stash_tree, &git_dir)
         .map_err(StashError::MergeConflict)?;
@@ -799,6 +1074,9 @@ async fn do_apply(stash: Option<String>) -> Result<StashOutput, StashError> {
         .map_err(|e| StashError::ReadObject(e.to_string()))?;
     let merged_files = tree::get_tree_files_recursive(&merged_tree, &git_dir, &PathBuf::new())
         .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    if let Some(untracked_tree) = untracked_tree.as_ref() {
+        ensure_untracked_restore_paths_clear(untracked_tree, workdir, &git_dir)?;
+    }
 
     for path in head_files.keys() {
         if !merged_files.contains_key(path) {
@@ -812,6 +1090,10 @@ async fn do_apply(stash: Option<String>) -> Result<StashOutput, StashError> {
     restore_working_directory_from_tree(&merged_tree, workdir, "")
         .map_err(StashError::WriteObject)?;
     rebuild_index_from_tree(&merged_tree, &mut new_index, "").map_err(StashError::IndexSave)?;
+    if let Some(untracked_tree) = untracked_tree.as_ref() {
+        restore_working_directory_from_tree(untracked_tree, workdir, "")
+            .map_err(StashError::WriteObject)?;
+    }
 
     new_index
         .save(&index_path)
@@ -827,6 +1109,49 @@ async fn do_apply(stash: Option<String>) -> Result<StashOutput, StashError> {
         stash_id: hash_str,
         branch,
     })
+}
+
+fn load_untracked_parent_tree(
+    stash_commit: &Commit,
+    git_dir: &Path,
+) -> Result<Option<Tree>, StashError> {
+    let Some(untracked_commit_hash) = stash_commit.parent_commit_ids.get(2) else {
+        return Ok(None);
+    };
+
+    let untracked_commit_data = object::read_git_object(git_dir, untracked_commit_hash)
+        .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let untracked_commit = Commit::from_bytes(&untracked_commit_data, *untracked_commit_hash)
+        .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let untracked_tree_data = object::read_git_object(git_dir, &untracked_commit.tree_id)
+        .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    Tree::from_bytes(&untracked_tree_data, untracked_commit.tree_id)
+        .map(Some)
+        .map_err(|e| StashError::ReadObject(e.to_string()))
+}
+
+fn ensure_untracked_restore_paths_clear(
+    untracked_tree: &Tree,
+    workdir: &Path,
+    git_dir: &Path,
+) -> Result<(), StashError> {
+    let files = tree::get_tree_files_recursive(untracked_tree, git_dir, &PathBuf::new())
+        .map_err(StashError::ReadObject)?;
+    let mut conflicts: Vec<String> = files
+        .keys()
+        .filter(|path| workdir.join(Path::new(path)).exists())
+        .cloned()
+        .collect();
+    conflicts.sort();
+
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+
+    Err(StashError::MergeConflict(format!(
+        "untracked files would be overwritten by stash apply:\n  {}",
+        conflicts.join("\n  ")
+    )))
 }
 
 fn do_drop(stash: Option<String>) -> Result<StashOutput, StashError> {
@@ -1204,39 +1529,26 @@ fn create_tree_from_workdir(workdir: &Path, git_dir: &Path, index: &Index) -> Re
                     .to_str()
                     .ok_or_else(|| format!("invalid path encoding: {}", relative_path.display()))?;
 
-                if let Some(entry) = index.get(relative_path_str, 0) {
-                    let mtime = Time::from_system_time(
-                        metadata.modified().unwrap_or(std::time::SystemTime::now()),
-                    );
-                    let size = metadata.len() as u32;
+                let Some(entry) = index.get(relative_path_str, 0) else {
+                    continue;
+                };
 
-                    if entry.mtime == mtime && entry.size == size {
-                        #[cfg(unix)]
-                        let mode = if metadata.permissions().mode() & 0o111 != 0 {
-                            TreeItemMode::BlobExecutable
-                        } else {
-                            TreeItemMode::Blob
-                        };
-                        #[cfg(not(unix))]
-                        let mode = TreeItemMode::Blob;
-                        items.push(TreeItem::new(mode, entry.hash, file_name));
-                        continue;
-                    }
+                let mtime = Time::from_system_time(
+                    metadata.modified().unwrap_or(std::time::SystemTime::now()),
+                );
+                let size = metadata.len() as u32;
+
+                if entry.mtime == mtime && entry.size == size {
+                    let mode = tree_item_mode_from_metadata(&metadata);
+                    items.push(TreeItem::new(mode, entry.hash, file_name));
+                    continue;
                 }
 
                 let content = fs::read(&path).map_err(|e| e.to_string())?;
                 let blob_hash = object::write_git_object(git_dir, "blob", &content)
                     .map_err(|e| e.to_string())?;
 
-                #[cfg(unix)]
-                let mode = if metadata.permissions().mode() & 0o111 != 0 {
-                    TreeItemMode::BlobExecutable
-                } else {
-                    TreeItemMode::Blob
-                };
-                #[cfg(not(unix))]
-                let mode = TreeItemMode::Blob;
-
+                let mode = tree_item_mode_from_metadata(&metadata);
                 items.push(TreeItem::new(mode, blob_hash, file_name));
             }
         }

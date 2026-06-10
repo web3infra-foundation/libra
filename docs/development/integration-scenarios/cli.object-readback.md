@@ -25,13 +25,27 @@ libra commit -m "test: object readback"
 
 HEAD_ID="$(libra rev-parse HEAD)"
 libra rev-parse --short HEAD
+libra rev-parse --verify HEAD
+libra rev-parse --verify --short HEAD
+libra rev-parse --verify --default HEAD
+libra --json rev-parse --verify HEAD
+! libra --quiet rev-parse --verify no-such-revision
 libra rev-parse --show-toplevel
+libra rev-parse --git-dir
+(cd src && libra rev-parse --show-prefix)
+(cd src && libra rev-parse --show-cdup)
+libra rev-parse --is-inside-work-tree
+(cd .libra && libra rev-parse --is-inside-git-dir)
+libra rev-parse --sq-quote -x "a b"
 libra rev-list HEAD
 libra show --no-patch HEAD
 libra show --stat HEAD
 libra show HEAD:docs/guide.md
 libra show-ref --head
 libra show-ref --heads
+libra show-ref --exists refs/heads/main
+libra show-ref --verify refs/heads/main
+libra show-ref --hash --verify refs/heads/main
 libra cat-file -t "$HEAD_ID"
 libra cat-file -s "$HEAD_ID"
 libra cat-file -p "$HEAD_ID"
@@ -41,12 +55,40 @@ printf 'loose blob\n' > loose.txt
 BLOB_ID="$(libra hash-object -w loose.txt)"
 libra cat-file -t "$BLOB_ID"
 libra cat-file -p "$BLOB_ID"
+libra show "$BLOB_ID"
+printf 'binary\0blob' > binary.bin
+BINARY_BLOB_ID="$(libra hash-object -w binary.bin)"
+libra show "$BINARY_BLOB_ID"
+libra --json show "$BINARY_BLOB_ID"
 printf 'stdin blob\n' | libra hash-object --stdin
 printf 'README.md\ndocs/guide.md\n' | libra hash-object --stdin-paths
+
+printf 'rev-list second\n' > docs/rev-list.md
+libra add docs/rev-list.md
+libra commit -m "test: rev-list second"
+SECOND_ID="$(libra rev-parse HEAD)"
+libra rev-parse "$HEAD_ID..HEAD"
+libra --json rev-parse "$HEAD_ID..HEAD"
+libra rev-parse --sq HEAD HEAD~1
+libra rev-list -n 1 HEAD
+libra rev-list --skip 1 HEAD
+libra rev-list "$HEAD_ID..HEAD"
+libra rev-list HEAD "^$HEAD_ID"
+libra rev-list --count HEAD
+libra rev-list --parents -n 1 HEAD
+libra rev-list --timestamp -n 1 HEAD
+libra rev-list --objects -n 1 HEAD
+libra --json rev-list --count HEAD
+libra --json rev-list --objects -n 1 HEAD
 
 libra fsck
 libra fsck --connectivity-only
 libra fsck "$HEAD_ID"
+libra tag -m "object tag" v-object
+libra show-ref --dereference --tags v-object
+libra show-ref --verify --dereference refs/tags/v-object
+libra branch main-2
+libra show-ref --heads main
 ```
 
 负向步骤：
@@ -54,17 +96,27 @@ libra fsck "$HEAD_ID"
 ```bash
 cd "$RUN_DIR/object-repo"
 ! libra rev-parse no-such-revision
+! libra show-ref --exists refs/heads/nope
+! libra show-ref --verify refs/heads/nope
+! libra --quiet show-ref --verify refs/heads/nope
 ! libra show HEAD:no-such-path
 ! libra cat-file -p no-such-object
 ! libra hash-object missing-file.txt
 ! libra fsck no-such-object
 ```
 
-断言：`rev-parse HEAD` 输出可传递给 `cat-file`、`fsck` 等后续命令；`rev-list HEAD` 至少包含当前提交；`show --no-patch` / `show --stat` 能读回 commit 元数据和变更统计；`show HEAD:<path>` 输出内容必须与提交前文件内容一致；`show-ref --head` / `--heads` 能列出 HEAD 和本地分支；`cat-file -t/-s/-p/-e` 分别返回类型、大小、内容和存在性；`hash-object -w` 写入的 loose blob 可由 `cat-file` 读回；`hash-object --stdin` / `--stdin-paths` 可计算输入内容或路径列表；`fsck` 和 `fsck --connectivity-only` 在健康仓库中退出码为 0；缺失 revision、path、object 或 file 必须失败且不写入新对象。
+断言：`rev-parse HEAD` 输出可传递给 `cat-file`、`fsck` 等后续命令；`rev-parse --verify HEAD` 与普通解析输出一致，`--verify --short` 是 HEAD 的非空前缀，`--verify --default HEAD` 在无位置参数时回退到 HEAD，`--quiet --verify` 失败必须退出 1 且 stdout/stderr 全空；`rev-parse --git-dir` 指向 `.libra`，`--show-prefix` / `--show-cdup` 从 `src` 子目录分别输出 `src/` 与 `../`，工作树状态输出 `true`，`.libra` 内部 `--is-inside-git-dir` 输出 `true`；`rev-parse "$HEAD_ID..HEAD"` 输出第二个提交和 `^$HEAD_ID`，JSON 模式必须包含 `values`，`--sq`/`--sq-quote` 输出 shell-safe 单引号结果；`rev-list HEAD` 至少包含当前提交，`-n`/`--skip`/`--count`/`--parents`/`--timestamp` 与 `A..B`/`^A` 范围过滤输出符合两提交 fixture；`show --no-patch` / `show --stat` 能读回 commit 元数据和变更统计；`show HEAD:<path>` 输出内容必须与提交前文件内容一致；`show <blob>` 能打印文本 blob，并对含 NUL 的 binary blob 输出元数据，JSON blob envelope 仍有效；`show-ref --head` / `--heads` 能列出 HEAD 和本地分支；`show-ref --dereference --tags v-object` 和 `--verify --dereference refs/tags/v-object` 必须包含 `refs/tags/v-object^{}` peeled 行；`show-ref --heads main` 不得输出 `refs/heads/main-2`；`cat-file -t/-s/-p/-e` 分别返回类型、大小、内容和存在性；`hash-object -w` 写入的 loose blob 可由 `cat-file` 读回；`hash-object --stdin` / `--stdin-paths` 可计算输入内容或路径列表；`fsck` 和 `fsck --connectivity-only` 在健康仓库中退出码为 0；缺失 revision、path、object 或 file 必须失败且不写入新对象。
 
 补充可执行断言（plumbing 场景重点）：
 - `libra --json cat-file -p $HEAD_ID` 必须 `ok:true` 且 data 中的 commit 结构包含 `object_type == "commit"`、`tree`、`parents[]`、`message`。
-- `libra --json rev-list HEAD` 返回 `data.commits[]` 与 `data.total`，每个 commit 元素为 hash 字符串。
+- `libra --json rev-parse --verify HEAD` 必须 `ok:true`，并返回 `mode == "verify"` 的 data envelope。
+- `libra --json rev-parse "$HEAD_ID..HEAD"` 必须 `ok:true`，返回 `mode == "range"` 且 `data.values[]` 顺序为 `SECOND_ID`、`^HEAD_ID`。
+- `libra --json show $BINARY_BLOB_ID` 必须 `ok:true`，并返回 `type == "blob"`、`is_binary == true`、`content == null`。
+- `libra show-ref --exists refs/heads/main` 必须退出 0 且无 stdout；缺失 ref 必须退出 2 并返回 `reference does not exist`。
+- `libra show-ref --verify refs/heads/main` 必须只输出精确命中的 full refname；缺失 ref 默认退出 128，`--quiet` 下退出 1 且 stdout/stderr 全空。
+- `libra show-ref --dereference --tags v-object` 必须为 annotated tag 输出 tag object 行和 peeled `refs/tags/v-object^{}` 行；`--verify --dereference refs/tags/v-object` 同样输出 peeled 行。
+- `libra show-ref --heads main` 必须按 refname path-segment suffix 过滤，不得把 `refs/heads/main-2` 当作匹配。
+- `libra --json rev-list HEAD` / `libra --json rev-list --count HEAD` 返回 `data.commits[]` 与 `data.total`，每个 commit 元素为 hash 字符串；`libra rev-list --objects -n 1 HEAD` 输出当前 commit 和 `docs/rev-list.md` blob 路径，JSON 模式返回 `data.objects[]`。
+- `libra rev-list "$HEAD_ID..HEAD"` 与 `libra rev-list HEAD "^$HEAD_ID"` 只返回第二个提交；`--parents -n 1` 同时包含第二个提交和父提交；`--count HEAD` 输出 `2`。
 - 所有对象操作后 `libra fsck` 必须通过；写入 blob 后 `libra --json cat-file -t $BLOB_ID` 验证类型为 "blob"。
 - 负向 cat-file / rev-parse 错误必须返回 LBR- 码（通过 JSON error envelope 或 stderr 捕获）。
-

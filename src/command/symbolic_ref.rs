@@ -3,11 +3,18 @@
 use std::io::Write;
 
 use clap::Parser;
+use git_internal::hash::{ObjectHash, get_hash_kind};
+use sea_orm::DbErr;
 use serde::Serialize;
 
 use crate::{
     command::branch::is_valid_git_branch_name,
-    internal::{branch::BranchStoreError, head::Head},
+    internal::{
+        branch::{Branch, BranchStoreError},
+        db::get_db_conn_instance,
+        head::Head,
+        reflog::{ReflogAction, ReflogContext, ReflogError, with_reflog},
+    },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
@@ -30,6 +37,8 @@ EXAMPLES:
     libra symbolic-ref HEAD                       Print HEAD's symbolic target (refs/heads/<branch>)
     libra symbolic-ref --short HEAD               Print only the short branch name
     libra symbolic-ref HEAD refs/heads/main       Update HEAD to point at refs/heads/main
+    libra symbolic-ref -m \"manual move\" HEAD refs/heads/main
+                                                   Update HEAD and record a reflog reason
     libra symbolic-ref -q HEAD                    Suppress error output when HEAD is detached
     libra symbolic-ref --json HEAD                Structured JSON output for agents";
 
@@ -43,6 +52,15 @@ pub struct SymbolicRefArgs {
     /// Print only the short branch name.
     #[clap(long)]
     pub short: bool,
+
+    /// Delete the symbolic ref (rejected: Libra stores refs in SQLite and HEAD
+    /// is its only symbolic ref).
+    #[clap(short = 'd', long, conflicts_with_all = ["reason", "target", "short"], requires = "name")]
+    pub delete: bool,
+
+    /// Reflog reason to store when updating HEAD.
+    #[clap(short = 'm', value_name = "REASON", requires = "target")]
+    pub reason: Option<String>,
 
     /// Symbolic ref to read or update. Libra currently supports HEAD.
     #[clap(value_name = "NAME")]
@@ -89,11 +107,17 @@ async fn run_symbolic_ref(
     args: &SymbolicRefArgs,
     quiet_detached_head_is_silent: bool,
 ) -> CliResult<SymbolicRefOutput> {
+    // `-d`/`--delete` is intentionally refused: Libra keeps refs in SQLite and
+    // HEAD is the only symbolic ref, so there is no deletable symbolic ref.
+    if args.delete {
+        return Err(delete_symbolic_ref_error());
+    }
+
     let name = args.name.as_deref().unwrap_or(HEAD_REF);
     validate_name(name)?;
 
     if let Some(target) = args.target.as_deref() {
-        set_head_target(target).await?;
+        set_head_target(target, args.reason.as_deref()).await?;
         return Ok(SymbolicRefOutput {
             name: name.to_string(),
             target: target.to_string(),
@@ -127,6 +151,13 @@ async fn run_symbolic_ref(
     })
 }
 
+fn delete_symbolic_ref_error() -> CliError {
+    CliError::conflict(
+        "delete symbolic ref is intentionally unsupported in Libra because SQLite storage requires a root reference",
+    )
+    .with_hint("use 'libra switch <branch>' or 'libra checkout <branch>' to change HEAD instead.")
+}
+
 fn validate_name(name: &str) -> CliResult<()> {
     if name == HEAD_REF {
         return Ok(());
@@ -139,11 +170,58 @@ fn validate_name(name: &str) -> CliResult<()> {
     .with_hint("use 'libra symbolic-ref HEAD' to inspect the current branch."))
 }
 
-async fn set_head_target(target: &str) -> CliResult<()> {
+async fn set_head_target(target: &str, reason: Option<&str>) -> CliResult<()> {
     let branch_name = branch_name_from_full_ref(target)?;
-    Head::update_result(Head::Branch(branch_name.to_string()), None)
+    let db = get_db_conn_instance().await;
+    let target_branch = Branch::find_branch_result_with_conn(&db, branch_name, None)
         .await
         .map_err(map_head_write_error)?;
+
+    let branch_name_owned = branch_name.to_string();
+    let Some(target_branch) = target_branch else {
+        Head::update_result_with_conn(&db, Head::Branch(branch_name_owned), None)
+            .await
+            .map_err(map_head_write_error)?;
+        return Ok(());
+    };
+
+    let old_oid = Head::current_commit_result_with_conn(&db)
+        .await
+        .map_err(map_head_error)?
+        .map(|oid| oid.to_string())
+        .unwrap_or_else(|| ObjectHash::zero_str(get_hash_kind()).to_string());
+    let from_ref_name = match Head::current_result_with_conn(&db)
+        .await
+        .map_err(map_head_error)?
+    {
+        Head::Branch(name) => name,
+        Head::Detached(hash) => hash.to_string().chars().take(7).collect(),
+    };
+    let context = ReflogContext {
+        old_oid,
+        new_oid: target_branch.commit.to_string(),
+        action: ReflogAction::Switch {
+            from: from_ref_name,
+            to: branch_name_owned.clone(),
+        },
+        message: reason.map(str::to_string),
+    };
+
+    let branch_for_update = branch_name_owned;
+    with_reflog(
+        context,
+        move |txn: &sea_orm::DatabaseTransaction| {
+            Box::pin(async move {
+                Head::update_result_with_conn(txn, Head::Branch(branch_for_update), None)
+                    .await
+                    .map_err(|error| DbErr::Custom(error.to_string()))?;
+                Ok(())
+            })
+        },
+        false,
+    )
+    .await
+    .map_err(map_reflog_write_error)?;
     Ok(())
 }
 
@@ -211,6 +289,13 @@ fn map_head_write_error(error: BranchStoreError) -> CliError {
     }
 }
 
+fn map_reflog_write_error(error: ReflogError) -> CliError {
+    CliError::fatal(format!(
+        "failed to update HEAD symbolic ref reflog: {error}"
+    ))
+    .with_stable_code(StableErrorCode::IoWriteFailed)
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -239,5 +324,43 @@ mod tests {
             .unwrap();
         assert_eq!(args.name.as_deref(), Some("HEAD"));
         assert_eq!(args.target.as_deref(), Some("refs/heads/feature"));
+    }
+
+    #[test]
+    fn parses_delete_flag() {
+        let args = SymbolicRefArgs::try_parse_from(["symbolic-ref", "-d", "HEAD"]).unwrap();
+        assert!(args.delete);
+        assert_eq!(args.name.as_deref(), Some("HEAD"));
+    }
+
+    #[test]
+    fn parses_reason_with_set_target() {
+        let args = SymbolicRefArgs::try_parse_from([
+            "symbolic-ref",
+            "-m",
+            "manual branch move",
+            "HEAD",
+            "refs/heads/feature",
+        ])
+        .unwrap();
+        assert_eq!(args.reason.as_deref(), Some("manual branch move"));
+        assert_eq!(args.name.as_deref(), Some("HEAD"));
+        assert_eq!(args.target.as_deref(), Some("refs/heads/feature"));
+    }
+
+    #[test]
+    fn rejects_delete_reason_target_short_and_missing_name_forms() {
+        for argv in [
+            vec!["symbolic-ref", "-d", "-m", "reason", "HEAD"],
+            vec!["symbolic-ref", "-d", "HEAD", "refs/heads/main"],
+            vec!["symbolic-ref", "-d", "--short", "HEAD"],
+            vec!["symbolic-ref", "-m", "reason", "HEAD"],
+            vec!["symbolic-ref", "-d"],
+        ] {
+            assert!(
+                SymbolicRefArgs::try_parse_from(argv.clone()).is_err(),
+                "argv should be rejected by clap: {argv:?}"
+            );
+        }
     }
 }

@@ -2,9 +2,9 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::{fs, path::Path};
 
 use libra::{
     exec_async,
@@ -90,6 +90,27 @@ fn worktree_paths() -> Vec<String> {
         .into_iter()
         .map(|w| w.path)
         .collect()
+}
+
+async fn commit_tracked_file(repo: &Path, path: &str, content: &str, message: &str) -> String {
+    fs::write(repo.join(path), content).expect("failed to write tracked test file");
+    let add = run_libra_command(&["add", path], repo);
+    assert_cli_success(&add, "add tracked test file");
+    let commit = run_libra_command(&["commit", "-m", message, "--no-verify"], repo);
+    assert_cli_success(&commit, "commit tracked test file");
+    Head::current_commit()
+        .await
+        .expect("expected HEAD after commit")
+        .to_string()
+}
+
+async fn local_branch_commit(branch: &str) -> String {
+    Branch::find_branch_result(branch, None)
+        .await
+        .expect("failed to query branch")
+        .unwrap_or_else(|| panic!("branch {branch} should exist"))
+        .commit
+        .to_string()
 }
 
 fn assert_worktree_error(output: &std::process::Output, error_code: &str) -> CliErrorReport {
@@ -205,6 +226,173 @@ async fn test_worktree_add_json_reports_created_path() {
     assert_eq!(parsed["command"], "worktree.add");
     assert_eq!(parsed["data"]["path"], canonical.to_string_lossy().as_ref());
     assert_eq!(parsed["data"]["already_exists"], false);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_add_b_creates_branch() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    let head = commit_tracked_file(repo_dir.path(), "seed.txt", "seed\n", "seed").await;
+
+    let output = run_libra_command(
+        &["worktree", "add", "-b", "feature/wt-add", "wt_branch"],
+        repo_dir.path(),
+    );
+
+    assert_cli_success(&output, "worktree add -b");
+    assert_eq!(local_branch_commit("feature/wt-add").await, head);
+    assert!(repo_dir.path().join("wt_branch").join("seed.txt").exists());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_add_b_from_commit_ish_base() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    let first = commit_tracked_file(repo_dir.path(), "tracked.txt", "v1\n", "first").await;
+    let _second = commit_tracked_file(repo_dir.path(), "tracked.txt", "v2\n", "second").await;
+
+    let output = run_libra_command(
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/base",
+            "wt_base",
+            first.as_str(),
+        ],
+        repo_dir.path(),
+    );
+
+    assert_cli_success(&output, "worktree add -b <commit-ish>");
+    assert_eq!(local_branch_commit("feature/base").await, first);
+    let content = fs::read_to_string(repo_dir.path().join("wt_base").join("tracked.txt"))
+        .expect("worktree should restore requested commit-ish");
+    assert_eq!(content, "v1\n");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_add_b_resets_existing_branch() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    let first = commit_tracked_file(repo_dir.path(), "tracked.txt", "v1\n", "first").await;
+    let second = commit_tracked_file(repo_dir.path(), "tracked.txt", "v2\n", "second").await;
+    let create = run_libra_command(
+        &["branch", "feature/reset", first.as_str()],
+        repo_dir.path(),
+    );
+    assert_cli_success(&create, "create existing branch");
+
+    let output = run_libra_command(
+        &[
+            "worktree",
+            "add",
+            "-B",
+            "feature/reset",
+            "wt_reset",
+            second.as_str(),
+        ],
+        repo_dir.path(),
+    );
+
+    assert_cli_success(&output, "worktree add -B");
+    assert_eq!(local_branch_commit("feature/reset").await, second);
+    let content = fs::read_to_string(repo_dir.path().join("wt_reset").join("tracked.txt"))
+        .expect("worktree should restore reset branch target");
+    assert_eq!(content, "v2\n");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_add_no_checkout_skips_restore() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    commit_tracked_file(repo_dir.path(), "tracked.txt", "v1\n", "first").await;
+
+    let output = run_libra_command(
+        &["worktree", "add", "--no-checkout", "wt_no_checkout"],
+        repo_dir.path(),
+    );
+
+    assert_cli_success(&output, "worktree add --no-checkout");
+    let wt = repo_dir.path().join("wt_no_checkout");
+    assert!(wt.join(".libra").exists(), "storage link should be created");
+    assert!(
+        !wt.join("tracked.txt").exists(),
+        "--no-checkout must not restore HEAD files"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_add_lock_sets_locked_entry() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    let output = run_libra_command(
+        &[
+            "worktree",
+            "add",
+            "--lock",
+            "--reason",
+            "debugging",
+            "wt_add_locked",
+        ],
+        repo_dir.path(),
+    );
+
+    assert_cli_success(&output, "worktree add --lock");
+    let entry = read_worktree_state()
+        .worktrees
+        .into_iter()
+        .find(|entry| entry.path.ends_with("wt_add_locked"))
+        .expect("locked worktree entry should be registered");
+    assert!(entry.locked);
+    assert_eq!(entry.lock_reason.as_deref(), Some("debugging"));
+}
+
+#[test]
+#[serial]
+fn test_worktree_add_b_and_detach_conflict_clap_error() {
+    let repo_dir = tempdir().unwrap();
+    let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+    runtime.block_on(test::setup_with_new_libra_in(repo_dir.path()));
+
+    let output = run_libra_command(
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/conflict",
+            "--detach",
+            "wt_conflict",
+        ],
+        repo_dir.path(),
+    );
+
+    assert_eq!(output.status.code(), Some(129));
+}
+
+#[test]
+#[serial]
+fn test_worktree_add_reason_without_lock_clap_error() {
+    let repo_dir = tempdir().unwrap();
+    let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+    runtime.block_on(test::setup_with_new_libra_in(repo_dir.path()));
+
+    let output = run_libra_command(
+        &["worktree", "add", "--reason", "debugging", "wt_reason"],
+        repo_dir.path(),
+    );
+
+    assert_eq!(output.status.code(), Some(129));
 }
 
 #[tokio::test]
@@ -339,6 +527,71 @@ async fn test_worktree_prune_machine_reports_pruned_paths() {
     assert_eq!(
         parsed["data"]["pruned"][0],
         canonical.to_string_lossy().as_ref()
+    );
+}
+
+/// `prune --dry-run` reports the prunable entry but leaves `worktrees.json`
+/// byte-identical; a follow-up real prune then drops the entry.
+#[tokio::test]
+#[serial]
+async fn test_worktree_prune_dry_run_preserves_registry() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let add = run_libra_command(&["worktree", "add", "wt_prune_dry"], repo_dir.path());
+    assert_cli_success(&add, "worktree add");
+    let wt_path = repo_dir.path().join("wt_prune_dry");
+    let canonical = wt_path.canonicalize().unwrap();
+    fs::remove_dir_all(&wt_path).expect("failed to remove worktree directory before prune");
+
+    let state_path = repo_dir.path().join(".libra/worktrees.json");
+    let registry_before = fs::read_to_string(&state_path).expect("read worktrees.json");
+    assert!(
+        registry_before.contains(canonical.to_string_lossy().as_ref()),
+        "stale entry should still be registered before dry-run"
+    );
+
+    // Dry run: must report the prunable entry without mutating the registry.
+    let dry = run_libra_command(
+        &["--machine", "worktree", "prune", "--dry-run"],
+        repo_dir.path(),
+    );
+    assert_cli_success(&dry, "machine worktree prune --dry-run");
+    let dry_stdout = String::from_utf8_lossy(&dry.stdout);
+    let dry_line = dry_stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("dry-run machine output should have a JSON line");
+    let parsed: serde_json::Value =
+        serde_json::from_str(dry_line).expect("dry-run machine JSON line");
+    assert_eq!(parsed["command"], "worktree.prune");
+    assert_eq!(parsed["data"]["pruned_count"], 1);
+    assert_eq!(parsed["data"]["dry_run"], true);
+    assert_eq!(
+        parsed["data"]["pruned"][0],
+        canonical.to_string_lossy().as_ref()
+    );
+
+    let registry_after_dry = fs::read_to_string(&state_path).expect("read worktrees.json");
+    assert_eq!(
+        registry_before, registry_after_dry,
+        "dry-run must leave worktrees.json byte-identical"
+    );
+
+    // A real prune now actually drops the stale entry.
+    let real = run_libra_command(&["--machine", "worktree", "prune"], repo_dir.path());
+    assert_cli_success(&real, "machine worktree prune");
+    let real_stdout = String::from_utf8_lossy(&real.stdout);
+    let real_line = real_stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("prune machine output should have a JSON line");
+    let parsed_real: serde_json::Value =
+        serde_json::from_str(real_line).expect("prune machine JSON line");
+    assert_eq!(parsed_real["data"]["dry_run"], false);
+    let registry_after_real = fs::read_to_string(&state_path).expect("read worktrees.json");
+    assert!(
+        !registry_after_real.contains(canonical.to_string_lossy().as_ref()),
+        "real prune should drop the stale entry from the registry"
     );
 }
 
@@ -1337,6 +1590,108 @@ async fn test_worktree_list_includes_main_and_added_worktrees() {
 
 #[tokio::test]
 #[serial]
+async fn test_worktree_list_porcelain_emits_kv_blocks() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    let head = commit_tracked_file(repo_dir.path(), "tracked.txt", "v1\n", "first").await;
+    exec_async(vec!["worktree", "add", "wt_porcelain"])
+        .await
+        .expect("worktree add should succeed");
+    exec_async(vec![
+        "worktree",
+        "lock",
+        "wt_porcelain",
+        "--reason",
+        "human-only",
+    ])
+    .await
+    .expect("worktree lock should succeed");
+
+    let output = run_libra_command(&["worktree", "list", "--porcelain"], repo_dir.path());
+
+    assert_cli_success(&output, "worktree list --porcelain");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let main = repo_dir.path().canonicalize().unwrap();
+    let linked = repo_dir.path().join("wt_porcelain").canonicalize().unwrap();
+    assert!(
+        stdout.contains(&format!("worktree {}\nHEAD {head}", main.display())),
+        "porcelain should include main block with shared HEAD: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "worktree {}\nHEAD {head}\nlocked",
+            linked.display()
+        )),
+        "porcelain should include locked linked block: {stdout}"
+    );
+    assert!(
+        stdout.ends_with("\n\n"),
+        "porcelain should terminate the last block with a blank line: {stdout:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_list_porcelain_omits_branch_and_detached() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    commit_tracked_file(repo_dir.path(), "tracked.txt", "v1\n", "first").await;
+    exec_async(vec!["worktree", "add", "--detach", "wt_detached"])
+        .await
+        .expect("worktree add --detach should succeed");
+
+    let output = run_libra_command(&["worktree", "list", "--porcelain"], repo_dir.path());
+
+    assert_cli_success(&output, "worktree list --porcelain");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.lines().any(|line| line.starts_with("branch ")),
+        "Libra has no per-worktree branch state; porcelain must not print branch lines: {stdout}"
+    );
+    assert!(
+        !stdout.lines().any(|line| line == "detached"),
+        "Libra has no per-worktree detached state; porcelain must not print detached lines: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_list_verbose_shows_short_hash() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    let head = commit_tracked_file(repo_dir.path(), "tracked.txt", "v1\n", "first").await;
+    let short = &head[..7];
+
+    let output = run_libra_command(&["worktree", "list", "--verbose"], repo_dir.path());
+
+    assert_cli_success(&output, "worktree list --verbose");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("[HEAD {short}]")),
+        "verbose output should include shared short HEAD: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_worktree_list_porcelain_verbose_conflict_clap_error() {
+    let repo_dir = tempdir().unwrap();
+    let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+    runtime.block_on(test::setup_with_new_libra_in(repo_dir.path()));
+
+    let output = run_libra_command(
+        &["worktree", "list", "--porcelain", "--verbose"],
+        repo_dir.path(),
+    );
+
+    assert_eq!(output.status.code(), Some(129));
+}
+
+#[tokio::test]
+#[serial]
 /// Moving an unlocked, non-main worktree updates both the filesystem and state.
 async fn test_worktree_move_moves_unlocked_non_main_worktree() {
     let repo_dir = tempdir().unwrap();
@@ -1377,6 +1732,85 @@ async fn test_worktree_move_moves_unlocked_non_main_worktree() {
             .iter()
             .any(|p| p == src_canonical.to_string_lossy().as_ref()),
         "state should not contain old worktree path"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_move_rename_failure_keeps_json() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_move_rollback"])
+        .await
+        .expect("worktree add should succeed");
+    let src = repo_dir.path().join("wt_move_rollback");
+    let src_canonical = src.canonicalize().unwrap();
+    fs::write(repo_dir.path().join("blocking_parent"), "not a directory\n")
+        .expect("failed to create blocking file");
+    let before_paths = worktree_paths();
+
+    assert!(
+        exec_async(vec![
+            "worktree",
+            "move",
+            "wt_move_rollback",
+            "blocking_parent/wt_dest",
+        ])
+        .await
+        .is_err(),
+        "rename failure should be surfaced"
+    );
+
+    assert!(
+        src.is_dir(),
+        "source directory should remain after failed move"
+    );
+    assert_eq!(
+        worktree_paths(),
+        before_paths,
+        "rename failure must keep worktree registry unchanged"
+    );
+    assert!(
+        worktree_paths()
+            .iter()
+            .any(|path| path == src_canonical.to_string_lossy().as_ref()),
+        "registry should still point at source path"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_worktree_move_refreshes_libra_symlink() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_move_link"])
+        .await
+        .expect("worktree add should succeed");
+    let src = repo_dir.path().join("wt_move_link");
+    let link = src.join(".libra");
+    fs::remove_file(&link).expect("failed to remove original worktree storage symlink");
+    symlink(repo_dir.path().join("stale-storage"), &link)
+        .expect("failed to create stale storage symlink");
+
+    exec_async(vec![
+        "worktree",
+        "move",
+        "wt_move_link",
+        "wt_move_link_dest",
+    ])
+    .await
+    .expect("worktree move should succeed");
+
+    let dest_link = repo_dir.path().join("wt_move_link_dest").join(".libra");
+    assert_eq!(
+        fs::read_link(dest_link).expect("moved worktree should keep a storage symlink"),
+        util::storage_path(),
+        "move should repair stale linked-worktree storage symlink"
     );
 }
 
@@ -1641,6 +2075,80 @@ async fn test_worktree_prune_keeps_locked_worktrees() {
 
 #[tokio::test]
 #[serial]
+async fn test_worktree_prune_expire_only_targets_missing_dirs() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_expire_missing"])
+        .await
+        .expect("missing worktree add should succeed");
+    exec_async(vec!["worktree", "add", "wt_expire_alive"])
+        .await
+        .expect("alive worktree add should succeed");
+    let missing_path = repo_dir.path().join("wt_expire_missing");
+    fs::remove_dir_all(&missing_path).expect("failed to remove prunable worktree");
+
+    let too_old = run_libra_command(
+        &["worktree", "prune", "--expire", "999.weeks"],
+        repo_dir.path(),
+    );
+    assert_cli_success(&too_old, "worktree prune --expire old cutoff");
+    assert!(
+        worktree_paths()
+            .iter()
+            .any(|path| path.ends_with("wt_expire_missing")),
+        "newly modified registry should not be expired by an old cutoff"
+    );
+
+    let now = run_libra_command(
+        &["worktree", "prune", "--expire", "now", "--verbose"],
+        repo_dir.path(),
+    );
+    assert_cli_success(&now, "worktree prune --expire now");
+    let stdout = String::from_utf8_lossy(&now.stdout);
+    assert!(
+        stdout.contains("(missing)"),
+        "verbose prune should include missing reason: {stdout}"
+    );
+    let paths = worktree_paths();
+    assert!(
+        !paths.iter().any(|path| path.ends_with("wt_expire_missing")),
+        "expired missing worktree should be pruned"
+    );
+    assert!(
+        paths.iter().any(|path| path.ends_with("wt_expire_alive")),
+        "existing worktree must not be pruned by --expire"
+    );
+    assert!(
+        repo_dir.path().join("wt_expire_alive").is_dir(),
+        "existing worktree directory should remain"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_prune_expire_rejects_garbage() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+
+    let output = run_libra_command(
+        &["--json", "worktree", "prune", "--expire", "garbage"],
+        repo_dir.path(),
+    );
+
+    let report = assert_worktree_error(&output, "LBR-CLI-003");
+    assert!(
+        report
+            .message
+            .contains("invalid worktree prune --expire value"),
+        "invalid expire should explain accepted forms: {}",
+        report.message
+    );
+}
+
+#[tokio::test]
+#[serial]
 /// Removing a locked worktree is rejected without changing state or directory.
 async fn test_worktree_remove_locked_is_rejected_without_side_effects() {
     let repo_dir = tempdir().unwrap();
@@ -1719,6 +2227,65 @@ async fn test_worktree_repair_deduplicates_entries() {
         unique_paths.len(),
         paths.len(),
         "repair should remove duplicate worktree entries"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_worktree_repair_rebuilds_stale_libra_symlink() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_repair_link"])
+        .await
+        .expect("worktree add should succeed");
+    let link = repo_dir.path().join("wt_repair_link").join(".libra");
+    fs::remove_file(&link).expect("failed to remove original storage symlink");
+    symlink(repo_dir.path().join("stale-storage"), &link)
+        .expect("failed to create stale storage symlink");
+
+    let output = run_libra_command(&["--json", "worktree", "repair"], repo_dir.path());
+
+    assert_cli_success(&output, "json worktree repair stale symlink");
+    let parsed = parse_json_stdout(&output);
+    assert_eq!(parsed["command"], "worktree.repair");
+    assert_eq!(parsed["data"]["changed"], true);
+    assert_eq!(parsed["data"]["links_repaired"], 1);
+    assert_eq!(
+        fs::read_link(link).expect("repair should leave a storage symlink"),
+        util::storage_path(),
+        "repair should repoint stale .libra symlink at shared storage"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_worktree_repair_skips_real_dir_libra() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_repair_real_dir"])
+        .await
+        .expect("worktree add should succeed");
+    let libra_dir = repo_dir.path().join("wt_repair_real_dir").join(".libra");
+    fs::remove_file(&libra_dir).expect("failed to remove original storage symlink");
+    fs::create_dir(&libra_dir).expect("failed to create real .libra directory");
+    fs::write(libra_dir.join("sentinel"), "keep\n").expect("failed to seed real .libra dir");
+
+    let output = run_libra_command(&["--json", "worktree", "repair"], repo_dir.path());
+
+    assert_cli_success(&output, "json worktree repair real .libra dir");
+    let parsed = parse_json_stdout(&output);
+    assert_eq!(parsed["command"], "worktree.repair");
+    assert_eq!(parsed["data"]["links_repaired"], 0);
+    assert_eq!(parsed["data"]["links_skipped"], 1);
+    assert!(
+        libra_dir.join("sentinel").is_file(),
+        "repair must not delete a real .libra directory"
     );
 }
 
@@ -1998,5 +2565,180 @@ async fn test_worktree_remove_with_delete_dir_dirty_path_is_rejected() {
     assert!(
         paths.iter().any(|p| p.ends_with("wt_dirty_delete")),
         "dirty rejected --delete-dir must keep registry entry, paths: {paths:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_remove_dirty_force_succeeds() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_dirty_force"])
+        .await
+        .expect("worktree add should succeed");
+    let wt_path = repo_dir.path().join("wt_dirty_force");
+    fs::write(wt_path.join("dirty.txt"), "dirty\n").expect("failed to dirty worktree");
+
+    let output = run_libra_command(
+        &[
+            "worktree",
+            "remove",
+            "--delete-dir",
+            "--force",
+            "wt_dirty_force",
+        ],
+        repo_dir.path(),
+    );
+
+    assert_cli_success(&output, "worktree remove --delete-dir --force");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("warning: forced deletion"),
+        "human force delete should warn on stderr"
+    );
+    assert!(
+        !wt_path.exists(),
+        "forced --delete-dir should delete dirty worktree"
+    );
+    assert!(
+        !worktree_paths()
+            .iter()
+            .any(|path| path.ends_with("wt_dirty_force")),
+        "forced delete should remove registry entry"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_remove_main_force_still_rejected() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    exec_async(vec!["worktree", "list"])
+        .await
+        .expect("worktree list should initialize state");
+    let before_paths = worktree_paths();
+    let main = repo_dir.path().canonicalize().unwrap();
+    let main_arg = main.to_string_lossy().to_string();
+
+    let output = run_libra_command(
+        &[
+            "--json",
+            "worktree",
+            "remove",
+            "--delete-dir",
+            "--force",
+            main_arg.as_str(),
+        ],
+        repo_dir.path(),
+    );
+
+    let report = assert_worktree_error(&output, "LBR-CLI-003");
+    assert!(
+        report.message.contains("cannot remove main worktree"),
+        "force must not bypass main protection: {}",
+        report.message
+    );
+    assert_eq!(worktree_paths(), before_paths);
+    assert!(main.is_dir(), "main worktree must remain on disk");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_remove_locked_single_force_still_rejected() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_locked_single_force"])
+        .await
+        .expect("worktree add should succeed");
+    exec_async(vec!["worktree", "lock", "wt_locked_single_force"])
+        .await
+        .expect("worktree lock should succeed");
+    let before_paths = worktree_paths();
+
+    let output = run_libra_command(
+        &[
+            "--json",
+            "worktree",
+            "remove",
+            "--force",
+            "wt_locked_single_force",
+        ],
+        repo_dir.path(),
+    );
+
+    let report = assert_worktree_error(&output, "LBR-CLI-003");
+    assert!(
+        report.message.contains("cannot remove locked worktree"),
+        "single force should not bypass locked protection: {}",
+        report.message
+    );
+    assert_eq!(worktree_paths(), before_paths);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_remove_locked_double_force_succeeds() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_locked_double_force"])
+        .await
+        .expect("worktree add should succeed");
+    exec_async(vec!["worktree", "lock", "wt_locked_double_force"])
+        .await
+        .expect("worktree lock should succeed");
+    let wt_path = repo_dir.path().join("wt_locked_double_force");
+
+    let output = run_libra_command(
+        &["worktree", "remove", "-f", "-f", "wt_locked_double_force"],
+        repo_dir.path(),
+    );
+
+    assert_cli_success(&output, "worktree remove -f -f locked");
+    assert!(
+        wt_path.is_dir(),
+        "double force without --delete-dir should still keep disk directory"
+    );
+    assert!(
+        !worktree_paths()
+            .iter()
+            .any(|path| path.ends_with("wt_locked_double_force")),
+        "double force should unregister locked worktree"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_remove_force_without_delete_dir_keeps_disk() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_force_keep"])
+        .await
+        .expect("worktree add should succeed");
+    let wt_path = repo_dir.path().join("wt_force_keep");
+    fs::write(wt_path.join("dirty.txt"), "dirty\n").expect("failed to dirty worktree");
+
+    let output = run_libra_command(
+        &["worktree", "remove", "--force", "wt_force_keep"],
+        repo_dir.path(),
+    );
+
+    assert_cli_success(&output, "worktree remove --force without --delete-dir");
+    assert!(
+        wt_path.is_dir(),
+        "--force alone must not delete the worktree directory"
+    );
+    assert!(
+        !worktree_paths()
+            .iter()
+            .any(|path| path.ends_with("wt_force_keep")),
+        "--force without --delete-dir should unregister the worktree"
     );
 }

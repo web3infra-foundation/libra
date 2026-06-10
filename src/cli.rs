@@ -31,12 +31,12 @@ use crate::{
 const ROOT_AFTER_HELP: &str = "\
 Command Groups:
   Repository Setup        init, clone, config
-  Working Tree            status, add, rm, mv, restore, clean, stash, lfs, worktree
+  Working Tree            status, add, rm, mv, restore, clean, stash, lfs, worktree, stats
   History Inspection      log, shortlog, show, show-ref, ls-remote, diff, grep, blame, describe
-  Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
+  Commit And Branching    commit, branch, switch, checkout, tag, notes, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent, package
-  Maintenance And Plumbing db, fsck, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
+  Maintenance And Plumbing db, gc, fsck, prune, cat-file, hash-object, verify-pack, archive, rev-parse, rev-list, symbolic-ref, reflog, bisect
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -350,6 +350,8 @@ enum Commands {
     HashObject(command::hash_object::HashObjectArgs),
     #[command(about = "Validate pack index files against pack archives")]
     VerifyPack(command::verify_pack::VerifyPackArgs),
+    #[command(about = "Create an archive of files from a named tree")]
+    Archive(command::archive::ArchiveArgs),
 
     #[command(about = "Record changes to the repository", alias = "ci")]
     Commit(command::commit::CommitArgs),
@@ -363,6 +365,8 @@ enum Commands {
     Checkout(command::checkout::CheckoutArgs),
     #[command(about = "Create a new tag")]
     Tag(command::tag::TagArgs),
+    #[command(about = "Add, show, list, or remove notes attached to commits")]
+    Notes(command::notes::NotesArgs),
     #[command(about = "Merge changes")]
     Merge(command::merge::MergeArgs),
     #[command(about = "Reapply commits on top of another base tip", alias = "rb")]
@@ -382,6 +386,10 @@ enum Commands {
     Pull(command::pull::PullArgs),
     #[command(about = "Verify the integrity of objects, refs, and index")]
     Fsck(command::fsck::FsckArgs),
+    #[command(about = "Prune unreachable objects and clean stale pack files")]
+    Gc(command::gc::GcArgs),
+    #[command(about = "Prune unreachable objects from the repository")]
+    Prune(command::prune::PruneArgs),
     #[command(about = "Revert some existing commits")]
     Revert(command::revert::RevertArgs),
     #[command(about = "Manage the log of reference changes (e.g., HEAD, branches)")]
@@ -438,6 +446,9 @@ enum Commands {
         hide = true
     )]
     Hooks(command::hooks::HooksArgs),
+
+    #[command(about = "Show file statistics of current working directory")]
+    Stats(command::stats::StatsArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -446,6 +457,23 @@ pub enum Stash {
     Push {
         #[arg(short, long, help = "The message to display for the stash")]
         message: Option<String>,
+        #[arg(
+            short = 'u',
+            long = "include-untracked",
+            help = "Include untracked files in the stash"
+        )]
+        include_untracked: bool,
+        #[arg(
+            short = 'a',
+            long = "all",
+            help = "Include untracked and ignored files in the stash"
+        )]
+        all: bool,
+        #[arg(
+            long = "keep-index",
+            help = "Keep staged changes in the index and working tree"
+        )]
+        keep_index: bool,
     },
     #[command(about = "Remove a single stashed state from the stash list")]
     Pop {
@@ -472,6 +500,14 @@ pub enum Stash {
         name_only: bool,
         #[arg(long, help = "Show only file names with their status code")]
         name_status: bool,
+        #[arg(long, help = "Show a file-level summary of the stashed changes")]
+        stat: bool,
+        #[arg(
+            short = 'p',
+            long = "patch",
+            help = "Show the stashed changes as a unified diff"
+        )]
+        patch: bool,
     },
     #[command(about = "Create and check out a new branch from the stash, then drop it")]
     Branch {
@@ -627,6 +663,61 @@ fn rewrite_log_short_number_args(args: Vec<String>) -> Vec<String> {
     }
 
     out
+}
+
+fn rewrite_diff_similarity_short_args(args: Vec<String>) -> Vec<String> {
+    let subcommand = find_subcommand_index(&args);
+    let Some((diff_index, from_double_dash)) = subcommand else {
+        return args;
+    };
+    if !matches!(args.get(diff_index), Some(name) if name == "diff") {
+        return args;
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    if from_double_dash {
+        for (idx, arg) in args.iter().enumerate().take(diff_index + 1) {
+            if idx + 1 == diff_index && arg == "--" {
+                continue;
+            }
+            out.push(arg.clone());
+        }
+    } else {
+        out.extend(args.iter().take(diff_index + 1).cloned());
+    }
+
+    let mut after_double_dash = false;
+    for arg in args.into_iter().skip(diff_index + 1) {
+        if after_double_dash {
+            out.push(arg);
+            continue;
+        }
+        if arg == "--" {
+            after_double_dash = true;
+            out.push(arg);
+            continue;
+        }
+        out.push(rewrite_diff_similarity_short_arg(arg));
+    }
+
+    out
+}
+
+fn rewrite_diff_similarity_short_arg(arg: String) -> String {
+    for flag in ['M', 'C'] {
+        let prefix = format!("-{flag}");
+        let Some(rest) = arg.strip_prefix(&prefix) else {
+            continue;
+        };
+        if rest.is_empty() || rest.starts_with('=') {
+            return arg;
+        }
+        if rest.starts_with(|c: char| c.is_ascii_digit() || c == '.') {
+            return format!("{prefix}={rest}");
+        }
+        return arg;
+    }
+    arg
 }
 
 /// Locate the first non-flag token in `args` and return its index plus whether it was
@@ -895,7 +986,8 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
         | Commands::Open(_)
         | Commands::CodeControl(_)
         | Commands::LsRemote(_)
-        | Commands::Sandbox(_) => Ok(CommandPreflight::none()),
+        | Commands::Sandbox(_)
+        | Commands::Stats(_) => Ok(CommandPreflight::none()),
         Commands::HashObject(args) if !args.write => {
             match utils::util::try_get_storage_path(None) {
                 Ok(storage) => Ok(CommandPreflight::repo_hash_kind_without_schema_guard(
@@ -904,6 +996,7 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
                 Err(_) => Ok(CommandPreflight::sha1_without_repo()),
             }
         }
+        Commands::RevParse(args) if args.sq_quote => Ok(CommandPreflight::none()),
         Commands::VerifyPack(_) => match utils::util::try_get_storage_path(None) {
             Ok(storage) => Ok(CommandPreflight::repo_hash_kind_without_schema_guard(
                 storage,
@@ -1090,11 +1183,12 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         None => env::args().collect::<Vec<_>>(),
     };
     let argv = rewrite_log_short_number_args(argv);
+    let argv = rewrite_diff_similarity_short_args(argv);
     utils::output::reset_warning_tracker();
     if is_error_codes_help_topic(&argv) {
         return print_error_codes_help();
     }
-    let args = match Cli::try_parse_from(argv.clone()) {
+    let mut args = match Cli::try_parse_from(argv.clone()) {
         Ok(args) => args,
         Err(err) => match err.kind() {
             ErrorKind::DisplayHelp
@@ -1108,6 +1202,11 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             _ => return Err(classify_parse_error(&argv, &err)),
         },
     };
+    if let Commands::Log(log_args) = &mut args.command
+        && let Some((log_index, _)) = find_subcommand_index(&argv)
+    {
+        command::log::apply_pathspec_separator(log_args, &argv[log_index + 1..]);
+    }
     if let Commands::Tag(tag_args) = &args.command {
         command::tag::validate_cli_args(tag_args)?;
     }
@@ -1200,6 +1299,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Lfs(cmd) => command::lfs::execute_safe(cmd, &output).await?,
         Commands::Log(cmd_args) => command::log::execute_safe(cmd_args, &output).await?,
         Commands::Shortlog(cmd_args) => command::shortlog::execute_safe(cmd_args, &output).await?,
+        Commands::Stats(cmd_args) => command::stats::execute_safe(cmd_args, &output).await?,
         Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
         Commands::ShowRef(cmd_args) => command::show_ref::execute_safe(cmd_args, &output).await?,
         Commands::LsRemote(cmd_args) => command::ls_remote::execute_safe(cmd_args, &output).await?,
@@ -1208,6 +1308,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::Branch(cmd_args) => command::branch::execute_safe(cmd_args, &output).await?,
         Commands::Tag(cmd_args) => command::tag::execute_safe(cmd_args, &output).await?,
+        Commands::Notes(cmd_args) => command::notes::execute_safe(cmd_args, &output, &argv).await?,
         Commands::Commit(cmd_args) => command::commit::execute_safe(cmd_args, &output).await?,
         Commands::Switch(cmd_args) => command::switch::execute_safe(cmd_args, &output).await?,
         Commands::Rebase(cmd_args) => command::rebase::execute_safe(cmd_args, &output).await?,
@@ -1228,9 +1329,12 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::VerifyPack(cmd_args) => {
             command::verify_pack::execute_safe(cmd_args, &output).await?
         }
+        Commands::Archive(cmd_args) => command::archive::execute_safe(cmd_args, &output).await?,
         Commands::IndexPack(cmd_args) => command::index_pack::execute_safe(cmd_args, &output)?,
         Commands::Fetch(cmd_args) => command::fetch::execute_safe(cmd_args, &output).await?,
         Commands::Fsck(cmd_args) => command::fsck::execute_safe(cmd_args, &output).await?,
+        Commands::Gc(cmd_args) => command::gc::execute_safe(cmd_args, &output).await?,
+        Commands::Prune(cmd_args) => command::prune::execute_safe(cmd_args, &output).await?,
         Commands::Diff(cmd_args) => command::diff::execute_safe(cmd_args, &output).await?,
         Commands::Grep(cmd_args) => command::grep::execute_safe(cmd_args, &output).await?,
         Commands::Blame(cmd_args) => command::blame::execute_safe(cmd_args, &output).await?,

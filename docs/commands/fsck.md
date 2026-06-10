@@ -119,7 +119,11 @@ libra fsck --tags
 
 ### `--connectivity-only`
 
-Only check object existence, skip content validation. Significantly faster but does NOT detect:
+Only check object existence and object type, then skip the later hash and
+content-format validation pass. This can be faster on healthy repositories, but
+it is not a guarantee that no object body bytes are read: the current
+`ClientStorage::get_object_type` path may still decode an object body to learn
+its type. It does NOT detect:
 - Hash mismatches (content corrupted but object exists)
 - Format errors (object cannot be parsed)
 
@@ -141,6 +145,15 @@ Use `--no-full` to restrict the check to loose objects, skipping packfiles:
 ```bash
 libra fsck --no-full
 ```
+
+Independently of `--full` / `--no-full`, fsck always runs a **pack-integrity
+stage**: every `.libra/objects/pack/*.idx` is validated in-process by
+`verify-pack` (no subprocess is forked). A corrupt or unreadable pack is
+reported to stderr and makes fsck exit `1` — matching `git fsck` — but does not
+abort the remaining packs, so a multi-pack repository surfaces every faulty
+pack in one run. fsck only reports here; it never deletes, rewrites, or repairs
+a faulty pack. (`--no-full` only narrows *object enumeration* to loose objects;
+it does not disable pack-integrity checking.)
 
 ### `--strict`
 
@@ -264,6 +277,7 @@ The fsck command performs checks in the following order:
 8. **Reachability analysis**: Identify dangling and unreachable objects via BFS
 9. **Root commit report**: (with `--root`) List commits with no parents
 10. **Tag report**: (with `--tags`) List tagged commits
+11. **Pack integrity**: Validate each `objects/pack/*.idx` in-process via `verify-pack`; a corrupt/unreadable pack exits 1 without aborting the rest
 
 ### Object Types
 

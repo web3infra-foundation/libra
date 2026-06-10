@@ -805,6 +805,11 @@ fn render_pull_output(result: &PullOutput, output: &OutputConfig) -> CliResult<(
     }
     match merge.strategy.as_str() {
         "three-way" => writeln!(writer, "Merge made by the 'three-way' strategy."),
+        "squash" => writeln!(writer, "Squash commit -- not updating HEAD."),
+        "no-commit" => writeln!(
+            writer,
+            "Automatic merge went well; stopped before committing as requested."
+        ),
         _ => writeln!(writer, "Fast-forward"),
     }
     .map_err(|error| CliError::io(format!("failed to write pull summary: {error}")))?;
@@ -986,6 +991,8 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
         | merge::PullMergeError::SquashCommit
         | merge::PullMergeError::InvalidMergeFfConfig { .. }
         | merge::PullMergeError::InvalidMergeCommitConfig { .. }
+        | merge::PullMergeError::InvalidRenameSimilarity { .. }
+        | merge::PullMergeError::InvalidRenameLimitConfig { .. }
         | merge::PullMergeError::InvalidDiffAlgorithm { .. }
         | merge::PullMergeError::InvalidCleanupMode { .. } => {
             CliError::command_usage(error.to_string())
@@ -1053,7 +1060,7 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
         merge::PullMergeError::HeadResolve(..) => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
         }
-        merge::PullMergeError::HeadUpdate(..) | merge::PullMergeError::Restore(..) => {
+        merge::PullMergeError::HeadUpdate(..) => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
         }
     }

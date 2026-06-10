@@ -6,11 +6,13 @@
 //! `AgentSessionCtx.transcript_path` (when the hook envelope captured
 //! one), capped at the same 16 MB ceiling used by
 //! [`super::claude_code::ClaudeCodeObservedAgent`]. Per-agent
-//! transcript-format knowledge lives in
-//! `stable_promoted_truncation`: Cursor, Codex, OpenCode, and Copilot
-//! now carry `TranscriptTruncator` support because their formats expose
-//! stable timestamp boundaries. Factory AI Droid remains read-only for
-//! truncation until its transcript format carries an equivalent boundary.
+//! transcript-format knowledge (line schema, message-uuid pairing,
+//! tool_use semantics) is not yet implemented — that's why none of
+//! these adapters carry the `TranscriptTruncator` capability. A v2
+//! follow-up will add per-agent truncation. The adapter is still
+//! useful in the meantime: hook ingestion + restore + `agent session
+//! show --extract-transcript` (forthcoming) all rely on
+//! `read_transcript`, which is now real.
 //!
 //! All five share the same shape, so they go through one
 //! [`StablePromotedSpec`] table rather than five hand-written

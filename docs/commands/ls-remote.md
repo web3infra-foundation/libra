@@ -100,6 +100,15 @@ libra ls-remote https://example.com/repo.git
 # Restrict to branches matching a pattern
 libra ls-remote --heads origin main
 
+# Sort tags by natural version order
+libra ls-remote --sort=version:refname --tags origin
+
+# Resolve a remote URL without contacting the remote
+libra ls-remote --get-url origin
+
+# Use status 2 for "no matching ref" in scripts
+libra ls-remote --exit-code --heads origin topic
+
 # Structured JSON envelope for agents, tags only
 libra --json ls-remote --tags origin
 ```
@@ -114,6 +123,16 @@ see `docs/improvement/README.md` item B).
 - It does not write objects, remote-tracking refs, config, or working-tree files.
 - `--heads` and `--tags` can be combined to show both branch and tag refs while excluding `HEAD`.
 - With `--symref`, the JSON `data` gains a `symrefs` map (`{"HEAD": "refs/heads/main"}`), omitted when empty.
+
+## Exit Codes
+
+| Scenario | Exit |
+|----------|------|
+| Successful discovery with matching refs | `0` |
+| Successful discovery with no matching refs and no `--exit-code` | `0` |
+| Successful discovery with no matching refs and `--exit-code` | `2` (silent stdout/stderr) |
+| Invalid sort key, invalid pattern, or invalid remote argument | `129` |
+| Network, authentication, or discovery failure | `128` |
 
 ## Compatibility
 

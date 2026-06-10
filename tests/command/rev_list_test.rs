@@ -228,6 +228,7 @@ fn test_rev_list_help_lists_examples_banner() {
         "libra rev-list main..HEAD",
         "libra rev-list -n 10 HEAD",
         "libra rev-list --count HEAD",
+        "libra rev-list --objects HEAD",
         "libra rev-list --json HEAD",
         "libra rev-list --quiet HEAD",
     ] {
@@ -442,4 +443,67 @@ fn test_rev_list_merges_no_merges_conflict() {
         repo.path(),
     );
     assert_eq!(out.status.code(), Some(129));
+}
+
+#[test]
+fn test_rev_list_objects_lists_trees_and_blobs() {
+    let repo = create_committed_repo_via_cli();
+    let head = rev_parse_revlist(repo.path(), "HEAD");
+
+    let lines = rev_list_lines(repo.path(), &["--objects", "HEAD"]);
+
+    assert_eq!(lines.first().map(String::as_str), Some(head.as_str()));
+    assert!(
+        lines.iter().any(|line| line.ends_with(" tracked.txt")),
+        "--objects should list tracked blob paths: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line != &head && !line.contains(' ')),
+        "--objects should include the root tree without a path suffix: {lines:?}"
+    );
+}
+
+#[test]
+fn test_rev_list_objects_json_keeps_commits_and_adds_objects() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "rev-list", "--objects", "HEAD"], repo.path());
+    assert_cli_success(&output, "json rev-list --objects HEAD");
+
+    let json = parse_json_stdout(&output);
+    let data = &json["data"];
+    assert_eq!(data["commits"].as_array().map(Vec::len), Some(1));
+    let objects = data["objects"]
+        .as_array()
+        .expect("objects should be present in --objects JSON");
+    assert!(
+        objects
+            .iter()
+            .any(|object| object["path"] == "tracked.txt" && object["type"] == "blob"),
+        "objects should include tracked blob path: {objects:?}"
+    );
+    assert!(
+        objects
+            .iter()
+            .any(|object| object["path"] == "" && object["type"] == "tree"),
+        "objects should include root tree with empty path: {objects:?}"
+    );
+}
+
+#[test]
+fn test_rev_list_objects_respects_max_count() {
+    let repo = build_diverged_repo();
+    let p = repo.path();
+    let latest = rev_parse_revlist(p, "feature");
+    let previous = rev_parse_revlist(p, "feature~1");
+
+    let lines = rev_list_lines(p, &["--objects", "-n", "1", "feature"]);
+
+    assert_eq!(lines.first().map(String::as_str), Some(latest.as_str()));
+    assert!(
+        !lines.iter().any(|line| line == &previous),
+        "--objects -n 1 should not emit earlier commit IDs: {lines:?}"
+    );
 }

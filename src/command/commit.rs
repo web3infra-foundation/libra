@@ -28,7 +28,10 @@ use serde::Serialize;
 
 use crate::{
     command::{get_target_commit, load_object, save_object_to_storage, status},
-    common_utils::{check_conventional_commits_message, format_commit_msg, parse_commit_msg},
+    common_utils::{
+        append_version_control_trailer, check_conventional_commits_message, format_commit_msg,
+        parse_commit_msg,
+    },
     internal::{
         ai::automation::{VCS_EVENT_POST_COMMIT, dispatch_current_repo_vcs_event_to_history},
         branch::Branch,
@@ -708,6 +711,30 @@ async fn resolve_sign_decision(args: &CommitArgs) -> SignDecision {
     }
 }
 
+async fn read_commit_cleanup_config() -> Option<CleanupMode> {
+    let value = read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "commit.cleanup")
+        .await
+        .ok()
+        .flatten()?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "strip" => Some(CleanupMode::Strip),
+        "whitespace" => Some(CleanupMode::Whitespace),
+        "verbatim" => Some(CleanupMode::Verbatim),
+        "scissors" => Some(CleanupMode::Scissors),
+        "default" => Some(CleanupMode::Default),
+        _ => None,
+    }
+}
+
+async fn resolve_cleanup_mode(args: &CommitArgs) -> CleanupMode {
+    if args.cleanup != CleanupMode::Default {
+        return args.cleanup;
+    }
+    read_commit_cleanup_config()
+        .await
+        .unwrap_or(CleanupMode::Default)
+}
+
 /// Resolve a `--fixup`/`--squash` target commit-ish to the first line of its
 /// message (the `fixup!`/`squash!` subject). The `amend:`/`reword:` extended
 /// forms are rejected (deferred); a bare commit-ish is resolved via the shared
@@ -879,6 +906,7 @@ async fn resolve_commit_message(
     args: &CommitArgs,
     output: &OutputConfig,
     amend_parent_message: Option<&str>,
+    amend_source_sha: Option<&ObjectHash>,
     skip_commit_msg: bool,
     autosquash_initial: Option<String>,
     verbose: bool,
@@ -915,7 +943,9 @@ async fn resolve_commit_message(
     };
 
     // The prepare-commit-msg `source` argument, aligned with Git.
-    let source = if autosquash_initial.is_some() || has_explicit_message {
+    let source = if args.squash.is_some() {
+        "squash"
+    } else if autosquash_initial.is_some() || has_explicit_message {
         "message"
     } else if template_content.is_some() {
         "template"
@@ -969,7 +999,7 @@ async fn resolve_commit_message(
         let editor = match resolve_explicit_editor().await {
             Some(editor) => editor,
             None => {
-                if !std::io::stdin().is_terminal() {
+                if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
                     return Err(CommitError::NoEditorAvailable);
                 }
                 "vi".to_string()
@@ -981,7 +1011,16 @@ async fn resolve_commit_message(
 
     // 3. prepare-commit-msg (before cleanup; sees the raw template/comments).
     if !skip_commit_msg {
-        run_message_hook("prepare-commit-msg", &file_path, &[source], output)?;
+        let amend_sha = if source == "commit" {
+            amend_source_sha.map(|sha| sha.to_string())
+        } else {
+            None
+        };
+        let mut hook_args = vec![source];
+        if let Some(sha) = amend_sha.as_deref() {
+            hook_args.push(sha);
+        }
+        run_message_hook("prepare-commit-msg", &file_path, &hook_args, output)?;
     }
     content = std::fs::read_to_string(&file_path)
         .map_err(|e| CommitError::EditorFailed(format!("failed to read edit file: {e}")))?;
@@ -991,7 +1030,8 @@ async fn resolve_commit_message(
     if verbose {
         content = truncate_before_scissors(&content);
     }
-    let cleaned = cleanup_message(&content, args.cleanup, edited);
+    let cleanup_mode = resolve_cleanup_mode(args).await;
+    let cleaned = cleanup_message(&content, cleanup_mode, edited);
     std::fs::write(&file_path, &cleaned)
         .map_err(|e| CommitError::EditorFailed(format!("failed to write edit file: {e}")))?;
 
@@ -1060,13 +1100,14 @@ pub async fn run_commit(
     // Resolve parents and amend context before resolving the message: the
     // amended parent's message seeds the editor / is reused with --no-edit.
     let parents_commit_ids = get_parents_ids().await;
-    let (effective_parents, amend_parent_message) = if is_amend {
+    let (effective_parents, amend_parent_message, amend_source_sha) = if is_amend {
         if parents_commit_ids.is_empty() {
             return Err(CommitError::NoCommitToAmend);
         }
         if parents_commit_ids.len() > 1 {
             return Err(CommitError::AmendUnsupported);
         }
+        let amend_source_sha = parents_commit_ids[0];
         let parent_commit = load_object::<Commit>(&parents_commit_ids[0]).map_err(|e| {
             CommitError::ParentCommitLoad {
                 commit_id: parents_commit_ids[0].to_string(),
@@ -1076,9 +1117,10 @@ pub async fn run_commit(
         (
             parent_commit.parent_commit_ids.clone(),
             Some(parent_commit.message.clone()),
+            Some(amend_source_sha),
         )
     } else {
-        (parents_commit_ids, None)
+        (parents_commit_ids, None, None)
     };
 
     // Resolve `--fixup`/`--squash` autosquash message and `--verbose` before
@@ -1091,6 +1133,7 @@ pub async fn run_commit(
         &args,
         output,
         amend_parent_message.as_deref(),
+        amend_source_sha.as_ref(),
         skip_commit_msg,
         autosquash_initial,
         verbose,
@@ -1524,6 +1567,8 @@ pub(crate) async fn vault_sign_commit(
         CommitError::VaultSign("vault signing enabled but no unseal key found".to_string())
     })?;
 
+    let message = append_version_control_trailer(message);
+
     // Build the commit content to sign (same format Git uses)
     let mut content: Vec<u8> = Vec::new();
     content.extend(b"tree ");
@@ -1782,6 +1827,7 @@ async fn new_reflog_context(commit_id: &str, message: &str) -> ReflogContext {
         old_oid,
         new_oid,
         action,
+        message: None,
     }
 }
 
@@ -2312,11 +2358,6 @@ mod test {
                 e
             );
         });
-        println!(
-            "loaded index contains {} tracked entries",
-            index.tracked_entries(0).len()
-        );
-
         // 5. Initialize storage pointing at the temp repo's objects directory
         let temp_objects_dir = temp_path.path().join(".libra/objects");
         let storage = ClientStorage::init(temp_objects_dir);

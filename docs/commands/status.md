@@ -14,7 +14,8 @@ libra status [OPTIONS]
 
 `libra status` shows the state of the working tree and staging area: which files are staged
 for the next commit, which have modifications not yet staged, and which are untracked. It also
-reports the current branch, detached HEAD state, and upstream tracking information.
+reports the current branch, detached HEAD state, upstream tracking information, and active
+merge/rebase/bisect state when one is in progress.
 
 The command computes the diff between HEAD, the index, and the working tree to classify files
 into staged, unstaged, and untracked categories. It supports multiple output formats: a
@@ -91,6 +92,32 @@ and CI pipelines to detect dirty state without parsing output.
 libra status --exit-code
 libra status --quiet --exit-code   # silent dirty check
 ```
+
+### `-z`
+
+Terminate porcelain entries with a NUL byte (`\0`) instead of a newline, for safe
+machine parsing of paths. Implies `--porcelain=v1` when no other format is given;
+combine with `--short` or `--porcelain=v2` for NUL-terminated short/v2 records. In
+NUL short output, staged renames are emitted as `R  <new>\0<orig>\0`; in v2 output,
+rename rows use `<path>\0<orig_path>` instead of the non-`-z` TAB separator.
+
+```bash
+libra status -z                 # NUL-terminated porcelain v1
+libra status --porcelain=v2 -z  # NUL-terminated porcelain v2
+```
+
+## Configuration
+
+`libra status` reads these Git-compatible config keys when the matching CLI flag is not explicit:
+
+| Key | Values | Effect |
+|---|---|---|
+| `status.showUntrackedFiles` | `no`, `normal`, `all` | Default for `--untracked-files` |
+| `status.branch` | boolean | Default for `--branch` in short/porcelain output |
+| `status.short` | boolean | Default to short output when no porcelain/`-z` format is requested |
+
+Invalid `status.*` values are non-fatal: Libra emits a warning, falls back to the built-in default,
+and honors global `--exit-code-on-warning` by exiting 9 after successful command execution.
 
 ## Common Commands
 
@@ -186,6 +213,8 @@ Example:
     },
     "untracked": ["notes.txt"],
     "ignored": [],
+    "renames": [],
+    "repo_state": null,
     "is_clean": false
   }
 }
@@ -215,6 +244,8 @@ Clean working tree:
     },
     "untracked": [],
     "ignored": [],
+    "renames": [],
+    "repo_state": null,
     "is_clean": true
   }
 }
@@ -237,6 +268,8 @@ Detached HEAD:
     "unstaged": { "modified": [], "deleted": [] },
     "untracked": [],
     "ignored": [],
+    "renames": [],
+    "repo_state": null,
     "is_clean": true
   }
 }
@@ -249,6 +282,8 @@ Detached HEAD:
 - `upstream` is `null` when no tracking branch is configured or HEAD is detached
 - `upstream.gone` is `true` when the remote tracking branch no longer exists
 - `upstream.ahead` / `upstream.behind` are `null` when `gone` is `true`
+- `repo_state` is `null`, `"merge"`, `"rebase"`, or `"bisect"`. Cherry-pick has no
+  persistent sequencer state in Libra today, so status does not report it.
 - `is_clean` is `true` when all staged, unstaged, and untracked lists are empty
 - `has_commits` is `false` in a freshly initialized repository with no commits
 - `stash_entries` (optional, integer): present only when `--show-stash` is
@@ -268,20 +303,30 @@ extended v2 line layout — for each tracked file:
 
 ```text
 1 XY <sub> <mode_HEAD> <mode_index> <mode_worktree> <hash_HEAD> <hash_index> <path>
+2 XY <sub> <mode_HEAD> <mode_index> <mode_worktree> <hash_HEAD> <hash_index> R<score> <path>\t<orig_path>
+u XY <sub> <mode_stage1> <mode_stage2> <mode_stage3> <mode_worktree> <hash_stage1> <hash_stage2> <hash_stage3> <path>
 ```
 
 Untracked entries collapse to `? <path>` and ignored entries to `! <path>`,
-matching Git's own v2 encoding. The implementation lives in
-`src/command/status.rs::output_porcelain_v2` and is fed by
-`build_porcelain_v2_data`, which pulls mode + hash metadata out of the
-index and HEAD tree before rendering.
+matching Git's own v2 encoding. Staged renames are detected automatically with
+a fixed 50% similarity threshold and render as `2` rows with `R<score>`;
+unmerged index stages render as `u` rows. Type changes render with `T` in the
+short and porcelain v2 status columns.
 
 Most consumers should still prefer `--json` (or `--machine` for compact
 single-line JSON): the JSON envelope carries the same staged/unstaged/
-untracked partitioning plus upstream tracking and `stash_entries`, and
+untracked partitioning plus upstream tracking, `renames`, `repo_state`, and `stash_entries`, and
 is far easier to parse than v2's positional text columns. Use
 `--porcelain v2` only when you specifically need Git-compatible output
 for tooling that already speaks the v2 grammar.
+
+### Repository State Hints
+
+Long human output reports in-progress merge, rebase, and bisect sessions before the file list.
+Rebase hints include `libra rebase --continue` and `libra rebase --abort`; bisect output only
+states that bisect is in progress because bisect does not have `--continue`/`--abort` flags.
+Short and porcelain modes keep stdout machine-readable and omit these human hints; use JSON
+`repo_state` when scripts need the same state.
 
 ### Explicit `--exit-code` instead of implicit behavior
 
@@ -316,16 +361,17 @@ a branch needs to be pushed or pulled, without having to run separate `libra log
 | Show status | `git status` | `jj status` / `jj st` | `libra status` |
 | Short format | `git status -s` / `--short` | N/A (always short) | `libra status -s` / `--short` |
 | Porcelain v1 | `git status --porcelain` | N/A | `libra status --porcelain` |
-| Porcelain v2 | `git status --porcelain=v2` | N/A | `libra status --porcelain v2` (v1 semantics) |
+| Porcelain v2 | `git status --porcelain=v2` | N/A | `libra status --porcelain v2` |
 | Branch info in short | `git status -sb` | Always shown | `libra status --short --branch` |
 | Show stash count | `git status --show-stash` | N/A | `libra status --show-stash` (standard mode) |
 | Show ignored files | `git status --ignored` | N/A | `libra status --ignored` |
 | Untracked files control | `git status -u<mode>` | N/A (always shows) | `libra status --untracked-files=<mode>` |
+| `status.*` config | `status.showUntrackedFiles`, `status.branch`, `status.short` | N/A | supported |
 | Exit code for dirty | `git diff --exit-code` | N/A | `libra status --exit-code` |
 | Quiet mode | `git status -q` | N/A | `libra status --quiet` (global flag) |
 | Column display | `git status --column` | N/A | N/A |
 | Ahead/behind display | `git status -sb` (text only) | N/A | Human + structured `upstream` object in JSON |
-| Find renames | `git status -M` | Automatic | N/A |
+| Find renames | `git status -M` | Automatic | automatic staged rename detection (fixed 50% threshold) |
 | Ignore submodules | `git status --ignore-submodules` | N/A | N/A (no submodules) |
 | Structured JSON output | N/A | N/A | `--json` / `--machine` |
 | Error hints | Minimal | Minimal | Every error type has an actionable hint |
@@ -355,7 +401,10 @@ Every `StatusError` variant maps to an explicit `StableErrorCode`.
 
 ## Compatibility Notes
 
-- `--porcelain v2` is accepted but currently produces v1-format output; use `--json` for full structured data
+- `--porcelain v2` emits ordinary `1`, rename `2`, and unmerged `u` rows with mode/hash metadata
+- `status.showUntrackedFiles`, `status.branch`, and `status.short` config defaults are honored; CLI flags override them
+- JSON includes `repo_state` for merge/rebase/bisect, and human long output prints rebase/bisect recovery hints
 - jj's `jj status` always uses a short format and does not distinguish staged from unstaged changes (jj has no staging area)
-- Git's `--find-renames` / `-M` is not supported; rename detection is not yet implemented in Libra's status
+- Git's rename-control flags and config (`--find-renames` / `-M`, `--renames`, `--no-renames`, `status.renames`, `status.renameLimit`) are deferred; Libra status currently applies automatic staged rename detection at a fixed 50% threshold
+- Copy detection (`C` rows), pathspec filtering, and submodule status details are deferred
 - `--column` display is not supported

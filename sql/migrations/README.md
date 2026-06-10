@@ -123,6 +123,7 @@ helpers in `db.rs`. Subsequent CEXes have populated this directory.
 | `2026052301`  | `source_call_log`   | `2026052301_source_call_log{,_down}.sql`        |
 | `2026060201`  | `source_call_log_agent_run_id` | `2026060201_source_call_log_agent_run_id{,_down}.sql` |
 | `2026060401`  | `cherry_pick_state` | `2026060401_cherry_pick_state{,_down}.sql`      |
+| `2026060801`  | `revert_sequence` | `2026060801_revert_sequence{,_down}.sql`        |
 
 All registered migrations are loaded via `include_str!`. New migrations must
 follow the same pattern — inline SQL strings in `builtin_migrations()` are no

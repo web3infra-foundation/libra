@@ -30,6 +30,28 @@ use crate::utils::{
 const IDX_MAGIC: [u8; 4] = [0xFF, 0x74, 0x4F, 0x63];
 const FANOUT_LEN: usize = 256 * 4;
 
+/// RAII guard that restores the process-wide hash kind after index inspection.
+struct HashKindRestoreGuard {
+    /// Hash kind active before `verify-pack` temporarily switched formats.
+    previous: HashKind,
+}
+
+impl HashKindRestoreGuard {
+    /// Switch to `next` and remember the previous hash kind for restoration.
+    fn switch_to(next: HashKind) -> Self {
+        let previous = get_hash_kind();
+        set_hash_kind(next);
+        Self { previous }
+    }
+}
+
+impl Drop for HashKindRestoreGuard {
+    /// Restore the hash kind that was active before this guard was created.
+    fn drop(&mut self) {
+        set_hash_kind(self.previous);
+    }
+}
+
 const VERIFY_PACK_EXAMPLES: &str = "\
 EXAMPLES:
     libra verify-pack objects/pack/pack-abc123.idx                   Verify an index against its sibling .pack
@@ -59,79 +81,123 @@ pub struct VerifyPackArgs {
     pub stat_only: bool,
 }
 
+/// Full verification result used by human and JSON renderers.
 #[derive(Debug, Clone, Serialize)]
 struct VerifyPackOutput {
+    /// Pack index path shown to the caller.
     idx_file: String,
+    /// Pack data path verified against the index.
     pack_file: String,
+    /// Parsed pack-index format version.
     index_version: u8,
+    /// Number of objects listed by the index.
     object_count: usize,
+    /// Pack checksum recorded in the index trailer.
     pack_hash: String,
+    /// Index checksum recorded in the index trailer.
     index_hash: String,
+    /// Whether the pack/index pair passed validation.
     verified: bool,
+    /// Pack statistics emitted in stat-only mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     stats: Option<VerifyPackStatsOutput>,
+    /// Per-object details emitted in verbose mode.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     objects: Vec<VerifyPackObjectOutput>,
 }
 
+/// Batch verification result for multiple pack indexes.
 #[derive(Debug, Clone, Serialize)]
 struct VerifyPackBatchOutput {
+    /// Per-pack verification results.
     packs: Vec<VerifyPackOutput>,
 }
 
+/// Verbose verification details for one packed object.
 #[derive(Debug, Clone, Serialize)]
 struct VerifyPackObjectOutput {
+    /// Object ID listed in the index.
     oid: String,
+    /// Decoded object type from the pack entry.
     object_type: String,
+    /// Uncompressed object size.
     size: usize,
+    /// Number of bytes occupied by this entry in the pack file.
     size_in_pack: u64,
+    /// Offset of the entry inside the pack file.
     offset: u64,
+    /// Optional CRC32 stored by version 2 pack indexes.
     #[serde(skip_serializing_if = "Option::is_none")]
     crc32: Option<u32>,
 }
 
+/// Pack statistics reported by stat-only mode.
 #[derive(Debug, Clone, Serialize)]
 struct VerifyPackStatsOutput {
+    /// Number of packed objects that are stored without delta chains.
     non_delta_objects: usize,
+    /// Counts grouped by delta chain length.
     chain_lengths: Vec<VerifyPackChainLengthOutput>,
 }
 
+/// Count of objects sharing one delta chain length.
 #[derive(Debug, Clone, Serialize)]
 struct VerifyPackChainLengthOutput {
+    /// Delta chain length.
     chain_length: usize,
+    /// Number of objects at this chain length.
     objects: usize,
 }
 
+/// Parsed representation of a pack index file.
 #[derive(Debug, Clone)]
 struct ParsedIndex {
+    /// Pack-index version.
     version: u8,
+    /// Sorted index entries.
     entries: Vec<ParsedIndexEntry>,
+    /// Pack checksum recorded by the index.
     pack_hash: ObjectHash,
+    /// Index checksum bytes recorded by the index.
     index_hash: Vec<u8>,
 }
 
+/// One object entry parsed from a pack index.
 #[derive(Debug, Clone)]
 struct ParsedIndexEntry {
+    /// Object ID.
     hash: ObjectHash,
+    /// Pack-file offset.
     offset: u64,
+    /// Optional CRC32 for version 2 indexes.
     crc32: Option<u32>,
 }
 
+/// Pack decoding result keyed by object ID.
 #[derive(Debug, Clone)]
 struct DecodedPack {
+    /// Pack checksum computed while decoding.
     pack_hash: ObjectHash,
+    /// Pack file length in bytes.
     pack_len: u64,
+    /// Decoded entries by object ID.
     entries: BTreeMap<ObjectHash, DecodedPackEntry>,
 }
 
+/// Metadata extracted from one decoded pack entry.
 #[derive(Debug, Clone)]
 struct DecodedPackEntry {
+    /// Index metadata derived from the decoded entry.
     index: IndexEntry,
+    /// Decoded object type.
     object_type: ObjectType,
+    /// Uncompressed object size.
     size: usize,
+    /// Delta chain length.
     chain_len: usize,
 }
 
+/// Run `verify-pack` with default human-output configuration.
 pub async fn execute(args: VerifyPackArgs) -> Result<(), String> {
     execute_safe(args, &OutputConfig::default())
         .await
@@ -152,6 +218,35 @@ pub async fn execute_safe(args: VerifyPackArgs, output: &OutputConfig) -> CliRes
     render_verify_pack_outputs(&results, args.verbose, args.stat_only, output)
 }
 
+/// Minimal pack/index verification summary reused by maintenance commands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PackInspection {
+    /// Number of objects recorded in the pack index.
+    pub object_count: usize,
+    /// Pack index format version.
+    pub index_version: u8,
+    /// Hash of the verified pack payload stored in the index trailer.
+    pub pack_hash: String,
+}
+
+/// Verify an explicit `.idx` / `.pack` pair and return reusable pack metadata.
+pub(crate) fn inspect_pack_files(idx_file: &Path, pack_file: &Path) -> CliResult<PackInspection> {
+    let idx_bytes = read_file(idx_file, "pack index")?;
+    let _hash_guard = infer_idx_v2_hash_kind(&idx_bytes)
+        .map_err(|detail| invalid_index(idx_file, detail))?
+        .map(HashKindRestoreGuard::switch_to);
+    let parsed = parse_index(&idx_bytes).map_err(|detail| invalid_index(idx_file, detail))?;
+    let decoded = decode_pack(pack_file)?;
+    validate_index_against_pack(&parsed, &decoded)
+        .map_err(|detail| verification_failed(idx_file, pack_file, detail))?;
+    Ok(PackInspection {
+        object_count: parsed.entries.len(),
+        index_version: parsed.version,
+        pack_hash: parsed.pack_hash.to_string(),
+    })
+}
+
+/// Verify command arguments and build the full verification output.
 fn verify_packs(args: &VerifyPackArgs) -> CliResult<Vec<VerifyPackOutput>> {
     if args.pack.is_some() && args.idx_files.len() != 1 {
         return Err(
@@ -169,6 +264,7 @@ fn verify_packs(args: &VerifyPackArgs) -> CliResult<Vec<VerifyPackOutput>> {
         .collect()
 }
 
+/// Verify one pack index against its matching pack file.
 fn verify_pack(
     idx_file: &Path,
     explicit_pack_file: Option<&Path>,
@@ -180,11 +276,9 @@ fn verify_pack(
         .unwrap_or_else(|| idx_file.with_extension("pack"));
 
     let idx_bytes = read_file(idx_file, "pack index")?;
-    if let Some(hash_kind) =
-        infer_idx_v2_hash_kind(&idx_bytes).map_err(|detail| invalid_index(idx_file, detail))?
-    {
-        set_hash_kind(hash_kind);
-    }
+    let _hash_guard = infer_idx_v2_hash_kind(&idx_bytes)
+        .map_err(|detail| invalid_index(idx_file, detail))?
+        .map(HashKindRestoreGuard::switch_to);
     let parsed = parse_index(&idx_bytes).map_err(|detail| invalid_index(idx_file, detail))?;
     let decoded = decode_pack(&pack_file)?;
     validate_index_against_pack(&parsed, &decoded)
@@ -238,6 +332,20 @@ fn verify_pack(
     })
 }
 
+/// Validate a single pack index against its pack and discard the structured
+/// report. Used by `fsck` to fold pack-integrity checking into its
+/// object-database health pass without forking a subprocess or printing
+/// anything — fsck owns the reporting and exit-code policy.
+///
+/// Returns `Ok(())` when the pack is intact, or the same `CliError`
+/// (`RepoCorrupt` / `IoReadFailed`) `libra verify-pack` would surface on a
+/// corrupt or unreadable pack. `explicit_pack` mirrors `--pack`; pass `None`
+/// to use the index's sibling `.pack`.
+pub(crate) fn verify_pack_path(idx_file: &Path, explicit_pack: Option<&Path>) -> CliResult<()> {
+    verify_pack(idx_file, explicit_pack, false, false).map(|_| ())
+}
+
+/// Parse a pack index in either version 1 or version 2 format.
 fn parse_index(bytes: &[u8]) -> Result<ParsedIndex, String> {
     if bytes.starts_with(&IDX_MAGIC) {
         parse_idx_v2(bytes)
@@ -254,6 +362,7 @@ pub(crate) fn parse_index_object_hashes(bytes: &[u8]) -> Result<Vec<ObjectHash>,
     Ok(parsed.entries.iter().map(|entry| entry.hash).collect())
 }
 
+/// Infer SHA-1 or SHA-256 object format from a version 2 index layout.
 fn infer_idx_v2_hash_kind(bytes: &[u8]) -> Result<Option<HashKind>, String> {
     if !bytes.starts_with(&IDX_MAGIC) {
         return Ok(None);
@@ -292,6 +401,7 @@ fn infer_idx_v2_hash_kind(bytes: &[u8]) -> Result<Option<HashKind>, String> {
     }
 }
 
+/// Return whether a version 2 index can fit the requested hash length.
 fn idx_v2_layout_matches_hash_kind(bytes: &[u8], object_count: usize, kind: HashKind) -> bool {
     let hash_len = kind.size();
     let Some(mut cursor) = (8 + FANOUT_LEN).checked_add(object_count.saturating_mul(hash_len))
@@ -337,6 +447,7 @@ fn idx_v2_layout_matches_hash_kind(bytes: &[u8], object_count: usize, kind: Hash
     remaining == hash_len * 2 || remaining == hash_len + 20
 }
 
+/// Parse a version 1 pack index.
 fn parse_idx_v1(bytes: &[u8]) -> Result<ParsedIndex, String> {
     const HASH_LEN: usize = 20;
     const ENTRY_LEN: usize = 4 + HASH_LEN;
@@ -399,6 +510,7 @@ fn parse_idx_v1(bytes: &[u8]) -> Result<ParsedIndex, String> {
     })
 }
 
+/// Parse a version 2 pack index.
 fn parse_idx_v2(bytes: &[u8]) -> Result<ParsedIndex, String> {
     let hash_len = get_hash_kind().size();
     if bytes.len() < 8 + FANOUT_LEN + hash_len * 2 {
@@ -532,6 +644,7 @@ fn parse_idx_v2(bytes: &[u8]) -> Result<ParsedIndex, String> {
     })
 }
 
+/// Read the 256-entry fanout table from a pack index.
 fn parse_fanout(bytes: &[u8], offset: usize) -> Result<[u32; 256], String> {
     if bytes.len() < offset + FANOUT_LEN {
         return Err("pack index fanout table is truncated".to_string());
@@ -551,6 +664,7 @@ fn parse_fanout(bytes: &[u8], offset: usize) -> Result<[u32; 256], String> {
     Ok(fanout)
 }
 
+/// Validate that the fanout table is monotonically increasing.
 fn validate_fanout_monotonic(fanout: &[u32; 256]) -> Result<(), String> {
     for pair in fanout.windows(2) {
         if pair[0] > pair[1] {
@@ -560,6 +674,7 @@ fn validate_fanout_monotonic(fanout: &[u32; 256]) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate that pack-index object names are strictly sorted.
 fn validate_sorted_entries(entries: &[ParsedIndexEntry]) -> Result<(), String> {
     for pair in entries.windows(2) {
         if pair[0].hash >= pair[1].hash {
@@ -572,6 +687,7 @@ fn validate_sorted_entries(entries: &[ParsedIndexEntry]) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate fanout bucket counts against parsed index entries.
 fn validate_fanout_matches_entries(
     fanout: &[u32; 256],
     entries: &[ParsedIndexEntry],
@@ -589,6 +705,7 @@ fn validate_fanout_matches_entries(
     Ok(())
 }
 
+/// Decode a pack archive into objects and packed sizes.
 fn decode_pack(pack_file: &Path) -> CliResult<DecodedPack> {
     let file = fs::File::open(pack_file).map_err(|error| {
         CliError::fatal(format!(
@@ -672,6 +789,7 @@ fn decode_pack(pack_file: &Path) -> CliResult<DecodedPack> {
     })
 }
 
+/// Build object and delta-chain counts for stat-only output.
 fn verify_pack_stats(decoded: &DecodedPack) -> VerifyPackStatsOutput {
     let mut non_delta_objects = 0usize;
     let mut chain_lengths = BTreeMap::new();
@@ -695,6 +813,7 @@ fn verify_pack_stats(decoded: &DecodedPack) -> VerifyPackStatsOutput {
     }
 }
 
+/// Insert a decoded pack entry while rejecting duplicate object IDs.
 fn insert_decoded_pack_entry(
     entries: &mut BTreeMap<ObjectHash, DecodedPackEntry>,
     entry: DecodedPackEntry,
@@ -706,6 +825,7 @@ fn insert_decoded_pack_entry(
     Ok(())
 }
 
+/// Compute packed entry sizes from index offsets and pack length.
 fn pack_entry_sizes(index: &ParsedIndex, pack_len: u64) -> CliResult<BTreeMap<ObjectHash, u64>> {
     let trailer_start = pack_len
         .checked_sub(get_hash_kind().size() as u64)
@@ -735,6 +855,7 @@ fn pack_entry_sizes(index: &ParsedIndex, pack_len: u64) -> CliResult<BTreeMap<Ob
     Ok(sizes)
 }
 
+/// Extract a value from an `Arc<Mutex<_>>` after pack decoding completes.
 fn take_mutex<T>(arc: Arc<Mutex<T>>, label: &str) -> Result<T, String> {
     let mutex =
         Arc::try_unwrap(arc).map_err(|_| format!("{label} still has outstanding references"))?;
@@ -743,6 +864,7 @@ fn take_mutex<T>(arc: Arc<Mutex<T>>, label: &str) -> Result<T, String> {
         .map_err(|_| format!("{label} mutex poisoned"))
 }
 
+/// Compare parsed index metadata with decoded pack contents.
 fn validate_index_against_pack(index: &ParsedIndex, pack: &DecodedPack) -> Result<(), String> {
     if index.pack_hash != pack.pack_hash {
         return Err(format!(
@@ -785,6 +907,7 @@ fn validate_index_against_pack(index: &ParsedIndex, pack: &DecodedPack) -> Resul
     Ok(())
 }
 
+/// Render one verification result as human output or JSON.
 fn render_verify_pack_output(
     result: &VerifyPackOutput,
     verbose: bool,
@@ -831,6 +954,7 @@ fn render_verify_pack_output(
     Ok(())
 }
 
+/// Render one or more verification results.
 fn render_verify_pack_outputs(
     results: &[VerifyPackOutput],
     verbose: bool,
@@ -856,10 +980,12 @@ fn render_verify_pack_outputs(
     Ok(())
 }
 
+/// Return the singular or plural label for an object count.
 fn object_count_label(count: usize) -> &'static str {
     if count == 1 { "object" } else { "objects" }
 }
 
+/// Read a file and convert failures into stable CLI I/O errors.
 fn read_file(path: &Path, label: &str) -> CliResult<Vec<u8>> {
     fs::read(path).map_err(|error| {
         CliError::fatal(format!(
@@ -871,11 +997,13 @@ fn read_file(path: &Path, label: &str) -> CliResult<Vec<u8>> {
     })
 }
 
+/// Build the structured error used for malformed index files.
 fn invalid_index(path: &Path, detail: String) -> CliError {
     CliError::fatal(format!("invalid pack index '{}': {detail}", path.display()))
         .with_stable_code(StableErrorCode::RepoCorrupt)
 }
 
+/// Build the structured error used for pack/index verification failures.
 fn verification_failed(idx_file: &Path, pack_file: &Path, detail: String) -> CliError {
     CliError::fatal(format!(
         "pack verification failed for '{}' against '{}': {detail}",
@@ -885,16 +1013,19 @@ fn verification_failed(idx_file: &Path, pack_file: &Path, detail: String) -> Cli
     .with_stable_code(StableErrorCode::RepoCorrupt)
 }
 
+/// Hash bytes using the repository's active object format.
 fn hash_bytes(bytes: &[u8]) -> Vec<u8> {
     let mut hash = HashAlgorithm::new();
     hash.update(bytes);
     hash.finalize()
 }
 
+/// Compute a SHA-1 digest for version 1 pack-index checksums.
 fn sha1_bytes(bytes: &[u8]) -> Vec<u8> {
     Sha1::digest(bytes).to_vec()
 }
 
+/// Convert bytes to lowercase hexadecimal text.
 fn bytes_to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -905,10 +1036,12 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// Convert a path to a display string for command output.
 fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// Normalize common filesystem errors for human-readable messages.
 fn format_io_error(err: &io::Error) -> String {
     match err.kind() {
         io::ErrorKind::NotFound => "No such file or directory".to_string(),
@@ -923,6 +1056,7 @@ mod tests {
 
     use super::*;
 
+    /// Build a decoded pack entry for unit tests.
     fn decoded_entry(hash: ObjectHash) -> DecodedPackEntry {
         DecodedPackEntry {
             index: IndexEntry {
@@ -937,6 +1071,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers duplicate object detection while inserting decoded entries.
     fn insert_decoded_pack_entry_rejects_duplicate_hashes() {
         let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
         let hash = ObjectHash::new(b"duplicate");
@@ -947,5 +1082,16 @@ mod tests {
             .expect_err("duplicate hash should fail");
 
         assert!(err.contains("duplicate object ID"));
+    }
+
+    #[test]
+    /// Covers temporary hash-kind switches being restored on drop.
+    fn hash_kind_restore_guard_restores_previous_kind() {
+        let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
+        {
+            let _restore = HashKindRestoreGuard::switch_to(HashKind::Sha256);
+            assert_eq!(get_hash_kind(), HashKind::Sha256);
+        }
+        assert_eq!(get_hash_kind(), HashKind::Sha1);
     }
 }

@@ -468,6 +468,53 @@ fn test_reinit_adds_missing_template() {
 }
 
 #[test]
+fn test_reinit_custom_template_adds_missing_file_without_overwriting_existing() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let template = temp.path().join("template");
+    fs::create_dir_all(template.join("hooks")).unwrap();
+    fs::create_dir_all(template.join("info")).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(
+        template.join("hooks").join("custom.sh"),
+        "#!/bin/sh\necho custom\n",
+    )
+    .unwrap();
+    fs::write(template.join("info").join("exclude"), "custom exclude\n").unwrap();
+
+    assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false"], &repo),
+        "first init",
+    );
+    let exclude = repo.join(".libra").join("info").join("exclude");
+    let original_exclude = fs::read_to_string(&exclude).unwrap();
+
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "init",
+                "--template",
+                template.to_str().unwrap(),
+                "--vault",
+                "false",
+            ],
+            &repo,
+        ),
+        "re-init with custom template",
+    );
+
+    assert_eq!(
+        fs::read_to_string(repo.join(".libra").join("hooks").join("custom.sh")).unwrap(),
+        "#!/bin/sh\necho custom\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&exclude).unwrap(),
+        original_exclude,
+        "re-init with custom template must not overwrite existing files"
+    );
+}
+
+#[test]
 fn test_reinit_keeps_user_modified_hook() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");

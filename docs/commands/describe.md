@@ -42,7 +42,7 @@ actionable hint suggesting `--tags` or `--always`.
 | `--exclude <PATTERN>` | Exclude tags whose name matches the glob (repeatable; takes precedence over `--match`). | — |
 | `--dirty[=<MARK>]` | Append a marker (default `-dirty`) when the worktree has tracked changes. Untracked-only changes never count. | Off |
 | `--contains` | Reverse search: print which ref's history contains the commit as `<refname>~<offset>`. Includes lightweight tags by default. | Off |
-| `--candidates <N>` | Consider at most `N` candidate tags (rejects `0`; overridable via `describe.maxCandidates`). | `describe.maxCandidates` |
+| `--candidates <N>` | Consider at most `N` candidate tags (rejects `0`; overridable via `describe.maxCandidates`). | `describe.maxCandidates`, then `10` |
 | `--all` | With `--contains`, also search local branch heads and remote-tracking branches (not just tags). | Off |
 
 Glob patterns use [`wax`](https://docs.rs/wax) syntax and are capped at 256 characters; a longer
@@ -131,7 +131,12 @@ libra describe --candidates 5
     "distance": 0,
     "abbreviated_commit": null,
     "exact_match": true,
-    "used_always": false
+    "used_always": false,
+    "dirty": false,
+    "dirty_suffix": null,
+    "contains_offset": null,
+    "ref_kind": null,
+    "ref_name": null
   }
 }
 ```
@@ -150,7 +155,12 @@ libra describe --candidates 5
     "distance": 4,
     "abbreviated_commit": "abc1234",
     "exact_match": false,
-    "used_always": false
+    "used_always": false,
+    "dirty": false,
+    "dirty_suffix": null,
+    "contains_offset": null,
+    "ref_kind": null,
+    "ref_name": null
   }
 }
 ```
@@ -169,7 +179,12 @@ libra describe --candidates 5
     "distance": null,
     "abbreviated_commit": "abc1234",
     "exact_match": false,
-    "used_always": true
+    "used_always": true,
+    "dirty": false,
+    "dirty_suffix": null,
+    "contains_offset": null,
+    "ref_kind": null,
+    "ref_name": null
   }
 }
 ```
@@ -285,7 +300,7 @@ output is a Libra extension with no Git equivalent.
 |----------|-----------------|------|
 | Invalid revision / commit-ish | `LBR-CLI-003` | 129 |
 | Invalid argument (`--match`/`--exclude` glob too long or malformed; `--candidates=0`) | `LBR-CLI-002` | 129 |
-| `--abbrev=-1` and other clap parse errors | (clap) | 2 |
+| `--abbrev=-1` and other usage parse errors | `LBR-CLI-002` | 129 |
 | `HEAD` has no commit | `LBR-REPO-003` | 128 |
 | No tag/ref can describe the target and `--always` is absent | `LBR-REPO-003` | 128 |
 | `--exact-match` with no exact tag | `LBR-REPO-003` | 128 |
