@@ -39,6 +39,7 @@ On macOS the command uses `open`, on Linux `xdg-open`, and on Windows `cmd /C st
 | `--json` | Emit structured JSON envelope to stdout instead of opening a browser (global flag). | `libra open --json` |
 | `--machine` | Compact single-line JSON without launching a browser (global flag). | `libra open --machine` |
 | `--quiet` | Suppress the "Opening ..." message on stdout. | `libra open --quiet` |
+| `--print-only` | Print the resolved URL to stdout without opening the browser. | `libra open --print-only` |
 
 The four target flags (`--branch`, `--commit`, `--issue`, `--pr`) are **mutually
 exclusive**; supplying more than one is a usage error (exit `129`,
@@ -92,6 +93,8 @@ libra open -c a1b2c3d origin
 libra open --issue=42 origin
 libra open --pr=7 origin
 libra open --json
+libra open --print-only
+libra open origin --print-only
 ```
 
 ## Human Output
@@ -137,7 +140,7 @@ sub-page and `target_type` reflects the kind:
 }
 ```
 
-When the argument is a direct URL instead of a remote name, `remote` is `null`:
+When the argument is a direct URL instead of a remote name, `remote` is `null` and `resolved_from_remote` is `false`:
 
 ```json
 {
@@ -148,6 +151,7 @@ When the argument is a direct URL instead of a remote name, `remote` is `null`:
     "remote_url": "https://github.com/web3infra-foundation/libra",
     "web_url": "https://github.com/web3infra-foundation/libra",
     "launched": false,
+    "resolved_from_remote": false
     "target_type": "repo",
     "platform": "github"
   }
@@ -225,6 +229,7 @@ and deliberate attacks via crafted remote URLs.
 | Multi-platform paths | github/gitlab/gitea/bitbucket + `open.platform` | N/A | N/A |
 | Custom URL templates | `open.template.<kind>` | N/A | N/A |
 | Structured output | `--json` / `--machine` | No | No |
+| Print-only mode | `--print-only` | No | No |
 | Auto-detect remote | Tracking -> origin -> first | N/A | N/A |
 
 ## Error Handling

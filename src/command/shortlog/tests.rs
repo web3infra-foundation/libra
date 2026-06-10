@@ -45,6 +45,24 @@ fn test_parse_new_args() {
 }
 
 #[test]
+fn test_parse_top_arg() {
+    let args = ShortlogArgs::parse_from(["shortlog", "--top", "3"]);
+    assert_eq!(args.top, Some(3));
+}
+
+#[test]
+fn test_parse_min_count_arg() {
+    let args = ShortlogArgs::parse_from(["shortlog", "--min-count", "5"]);
+    assert_eq!(args.min_count, Some(5));
+}
+
+#[test]
+fn test_parse_reverse_arg() {
+    let args = ShortlogArgs::parse_from(["shortlog", "--reverse"]);
+    assert!(args.reverse);
+}
+
+#[test]
 fn broken_pipe_writer_is_ignored() {
     struct BrokenPipeWriter;
 

@@ -433,7 +433,7 @@ pub enum WorkflowEvent {
           let draft_ctx = ctx.create_child_dispatch_context();
           // role = "draft" 写入 WorkflowEvent；不要新增 TaskEntryKind variant
           let draft_res = ctx.dispatcher.dispatch(draft_ctx, current_input.clone(), TaskEntryKind::LlmInitiated).await?;
-          
+
           // 2. 派生独立 Verifier 审查
           let verifier_ctx = ctx.create_child_dispatch_context();
           let verify_task = TaskInvocation {
@@ -443,13 +443,13 @@ pub enum WorkflowEvent {
           // role = "verify" 写入 WorkflowEvent；不要新增 TaskEntryKind variant
           let verify_res = ctx.dispatcher.dispatch(verifier_ctx, verify_task, TaskEntryKind::LlmInitiated).await?;
           let verifier_verdict = VerifierVerdict::parse(&verify_res.final_text)?;
-          
+
           // 3. 评估裁决。注意：模型自评仅 advisory，必须通过 Objective Gate / Deterministic verification
           let deterministic_pass = ctx.deterministic_verifier.check(&draft_res)?;
           if verifier_verdict.approved && deterministic_pass {
               return Ok(draft_res);
           }
-          
+
           retries += 1;
           if retries >= ctx.max_retries {
               return Err(WorkflowError::VerificationLimitExceeded { attempts: retries }.into_task_failure());
@@ -470,7 +470,7 @@ pub enum WorkflowEvent {
           (ctx.create_child_dispatch_context(), input.clone(), TaskEntryKind::LlmInitiated, vec![])
       }).collect();
       let candidates = ctx.dispatcher.dispatch_batch(batch_inputs, ctx.max_parallel).await;
-      
+
       // 2. 过滤查重与客观条件筛选
       let mut filtered = Vec::new();
       for res in candidates.into_iter().filter_map(|r| r.ok()) {
@@ -496,7 +496,7 @@ pub enum WorkflowEvent {
           let mut next_round = Vec::new();
           let chunks = competitors.chunks_exact_mut(2);
           let remainder = chunks.remainder();
-          
+
           for pair in chunks {
               // 让 Judge 评估两两对比胜负（比绝对打分更鲁棒）
               let winner = ctx.judge.pairwise_compare(&pair[0], &pair[1]).await?;
@@ -1805,7 +1805,7 @@ pub async fn run_tournament<'a>(
     while competitors.len() > 1 {
         let mut next_round = Vec::new();
         let mut chunks = competitors.into_iter().peekable();
-        
+
         while let Some(c1) = chunks.next() {
             if let Some(c2) = chunks.next() {
                 // 两两对比

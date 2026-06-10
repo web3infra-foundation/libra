@@ -31,12 +31,12 @@ use crate::{
 const ROOT_AFTER_HELP: &str = "\
 Command Groups:
   Repository Setup        init, clone, config
-  Working Tree            status, add, rm, mv, restore, clean, stash, lfs, worktree
+  Working Tree            status, add, rm, mv, restore, clean, stash, lfs, worktree, stats
   History Inspection      log, shortlog, show, show-ref, ls-remote, ls-tree, diff, grep, blame, describe
   Commit And Branching    commit, branch, switch, checkout, tag, notes, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent, package
-  Maintenance And Plumbing db, fsck, prune, cat-file, hash-object, verify-pack, archive, rev-parse, rev-list, symbolic-ref, reflog, bisect
+  Maintenance And Plumbing db, gc, fsck, prune, cat-file, hash-object, verify-pack, archive, rev-parse, rev-list, symbolic-ref, reflog, bisect
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -388,6 +388,8 @@ enum Commands {
     Pull(command::pull::PullArgs),
     #[command(about = "Verify the integrity of objects, refs, and index")]
     Fsck(command::fsck::FsckArgs),
+    #[command(about = "Prune unreachable objects and clean stale pack files")]
+    Gc(command::gc::GcArgs),
     #[command(about = "Prune unreachable objects from the repository")]
     Prune(command::prune::PruneArgs),
     #[command(about = "Revert some existing commits")]
@@ -446,6 +448,9 @@ enum Commands {
         hide = true
     )]
     Hooks(command::hooks::HooksArgs),
+
+    #[command(about = "Show file statistics of current working directory")]
+    Stats(command::stats::StatsArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -983,7 +988,8 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
         | Commands::Open(_)
         | Commands::CodeControl(_)
         | Commands::LsRemote(_)
-        | Commands::Sandbox(_) => Ok(CommandPreflight::none()),
+        | Commands::Sandbox(_)
+        | Commands::Stats(_) => Ok(CommandPreflight::none()),
         Commands::HashObject(args) if !args.write => {
             match utils::util::try_get_storage_path(None) {
                 Ok(storage) => Ok(CommandPreflight::repo_hash_kind_without_schema_guard(
@@ -1295,6 +1301,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Lfs(cmd) => command::lfs::execute_safe(cmd, &output).await?,
         Commands::Log(cmd_args) => command::log::execute_safe(cmd_args, &output).await?,
         Commands::Shortlog(cmd_args) => command::shortlog::execute_safe(cmd_args, &output).await?,
+        Commands::Stats(cmd_args) => command::stats::execute_safe(cmd_args, &output).await?,
         Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
         Commands::ShowRef(cmd_args) => command::show_ref::execute_safe(cmd_args, &output).await?,
         Commands::LsRemote(cmd_args) => command::ls_remote::execute_safe(cmd_args, &output).await?,
@@ -1329,6 +1336,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::IndexPack(cmd_args) => command::index_pack::execute_safe(cmd_args, &output)?,
         Commands::Fetch(cmd_args) => command::fetch::execute_safe(cmd_args, &output).await?,
         Commands::Fsck(cmd_args) => command::fsck::execute_safe(cmd_args, &output).await?,
+        Commands::Gc(cmd_args) => command::gc::execute_safe(cmd_args, &output).await?,
         Commands::Prune(cmd_args) => command::prune::execute_safe(cmd_args, &output).await?,
         Commands::Diff(cmd_args) => command::diff::execute_safe(cmd_args, &output).await?,
         Commands::Grep(cmd_args) => command::grep::execute_safe(cmd_args, &output).await?,

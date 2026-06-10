@@ -381,6 +381,14 @@ scenarios:
     key_assertion_categories: [json_envelope, fsck]
     doc_section: "cli.sha256-object-readback"
 
+  - id: cli.gc-smoke
+    wave: 2
+    group: maintenance
+    purpose: "Smoke gc dry-run and --prune=now on an unreachable loose object; verifies prune, JSON envelope, and post-GC connectivity."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck, negative_exit, lbr_error]
+    doc_section: "cli.gc-smoke"
   - id: cli.archive-smoke
     wave: 2
     group: maintenance

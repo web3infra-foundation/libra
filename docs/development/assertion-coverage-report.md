@@ -8,18 +8,18 @@
 
 ## Executive Summary
 
-The integration test plan has undergone a comprehensive assertion-strengthening pass. All **37** defined scenarios (`cli.*` + `live.*`) now contain explicit **"补充可执行断言"** sections with machine-verifiable checks and Rust runner implementations.
+The integration test plan has undergone a comprehensive assertion-strengthening pass. All **38** defined scenarios (`cli.*` + `live.*`) now contain explicit **"补充可执行断言"** sections with machine-verifiable checks and Rust runner implementations.
 
 ### Key Highlights
 
 | Metric                        | Value | Status     |
 |-------------------------------|-------|------------|
-| Total scenarios               | 37    | Complete   |
-| With `补充可执行断言` block   | 37    | 100%       |
-| With `--json` / machine checks| 37    | 100%       |
-| With `fsck` verification      | 25    | 69%        |
-| With `LBR-` stable error codes| 18    | 50%        |
-| With explicit isolation checks| 37    | 100%       |
+| Total scenarios               | 38    | Complete   |
+| With `补充可执行断言` block   | 38    | 100%       |
+| With `--json` / machine checks| 38    | 100%       |
+| With `fsck` verification      | 26    | 70%        |
+| With `LBR-` stable error codes| 19    | 51%        |
+| With explicit isolation checks| 38    | 100%       |
 
 The plan is now in a strong position for human review and automated black-box runner enforcement.
 
@@ -27,8 +27,8 @@ The plan is now in a strong position for human review and automated black-box ru
 
 ## Overall Statistics
 
-- **Total defined scenarios**: 37
-- **Scenarios with strengthened executable assertions**: 37 (100%)
+- **Total defined scenarios**: 38
+- **Scenarios with strengthened executable assertions**: 38 (100%)
 - **Document growth during campaign**: ~1,800 → 3,353 lines (significant addition of concrete checks)
 
 All scenarios now follow the **Assertion Strengthening Standard** defined in §2.3 of the plan:
@@ -84,11 +84,11 @@ All scenarios now follow the **Assertion Strengthening Standard** defined in §2
 
 | Assertion Type                    | Coverage | Notes |
 |-----------------------------------|----------|-------|
-| JSON envelope (`ok`, `data`)      | 37/37    | Universal |
+| JSON envelope (`ok`, `data`)      | 38/38    | Universal |
 | `--machine` / ndjson validation   | High     | Especially in cross-cutting |
-| `fsck --connectivity-only`        | 25/36    | Core mutation paths prioritized |
-| Explicit `LBR-*` error expectations | 18/36  | Growing; still room in older scenarios |
-| Isolation (HOME / global DB)      | 37/37    | Now a baseline requirement |
+| `fsck --connectivity-only`        | 26/37    | Core mutation paths prioritized |
+| Explicit `LBR-*` error expectations | 19/37  | Growing; still room in older scenarios |
+| Isolation (HOME / global DB)      | 38/38    | Now a baseline requirement |
 | Intentional difference guards     | Good     | Worktree, push local-file rejection, etc. |
 | Negative path + error message     | Very Good| Most scenarios now require specific text or code |
 

@@ -31,6 +31,7 @@ pub mod describe;
 pub mod diff;
 pub mod fetch;
 pub mod fsck;
+pub mod gc;
 pub mod graph;
 pub mod grep;
 pub mod hash_object;
@@ -76,6 +77,7 @@ pub mod worktree;
 pub mod worktree;
 
 pub mod stash;
+pub mod stats;
 pub mod status;
 pub mod switch;
 pub mod web_assets;

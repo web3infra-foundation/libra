@@ -51,6 +51,7 @@
 | Remote | `push` | `cli.push-local-file-remote-rejected`、`live.github-create-push-clone-fetch` |
 | Remote | `open` | `cli.open-smoke` |
 | Maintenance | `db` | `cli.schema-upgrade-observable` |
+| Maintenance | `gc` | `cli.gc-smoke` |
 | Maintenance | `fsck` | `cli.object-readback`（并作为多数 mutating 场景的状态断言） |
 | Maintenance | `cat-file` | `cli.object-readback`、`cli.sha256-object-readback` |
 | Maintenance | `hash-object` | `cli.object-readback`、`cli.sha256-object-readback` |
@@ -106,6 +107,7 @@
 - [`cli.object-readback`](cli.object-readback.md)
 - [`cli.ls-tree-smoke`](cli.ls-tree-smoke.md)
 - [`cli.sha256-object-readback`](cli.sha256-object-readback.md)
+- [`cli.gc-smoke`](cli.gc-smoke.md)
 - [`cli.archive-smoke`](cli.archive-smoke.md)
 - [`cli.verify-pack-smoke`](cli.verify-pack-smoke.md)
 
