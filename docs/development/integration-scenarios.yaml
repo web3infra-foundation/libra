@@ -363,6 +363,15 @@ scenarios:
     key_assertion_categories: [json_envelope, fsck, negative_exit]
     doc_section: "cli.object-readback"
 
+  - id: cli.ls-tree-smoke
+    wave: 2
+    group: objects
+    purpose: "Smoke ls-tree over committed tree contents: default output, recursive path filtering, -d -r directory recursion, JSON envelope, missing path error, and fsck."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck, file_exists, negative_exit, lbr_error]
+    doc_section: "cli.ls-tree-smoke"
+
   - id: cli.sha256-object-readback
     wave: 2
     group: objects
