@@ -88,6 +88,16 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
         true,
     )?;
     assert_stdout_contains(&get_url, &remote)?;
+    // `--symref` renders the HEAD symref advertised by the git fixture's
+    // upload-pack capabilities; `-o/--server-option` is parsed-but-not-
+    // forwarded and must not fail.
+    let symref = ctx.command(
+        &["ls-remote", "--symref", "-o", "trace=1", &remote],
+        ctx.run_dir.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&symref, "ref: refs/heads/main")?;
+    assert_stdout_contains(&symref, "refs/heads/main")?;
     let invalid_sort = ctx.command(
         &["ls-remote", "--sort=objectname", &remote],
         ctx.run_dir.clone(),
@@ -120,6 +130,15 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
     )?;
     assert_stdout_contains(&show_origin, "* remote origin")?;
     assert_stdout_contains(&show_origin, "HEAD branch: main")?;
+    // `show -v` is accepted for Git compatibility and currently does not alter
+    // the named-remote detail output; lock that contract black-box.
+    let show_origin_verbose = ctx.command(
+        &["remote", "show", "-v", "--no-query", "origin"],
+        clone_dir.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&show_origin_verbose, "* remote origin")?;
+    assert_stdout_contains(&show_origin_verbose, "HEAD branch: main")?;
     ctx.command(
         &["remote", "set-head", "origin", "-d"],
         clone_dir.clone(),
@@ -234,6 +253,7 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
             "clone",
             "--reference",
             &clone,
+            "--dissociate",
             &remote,
             &reference_clone_arg,
         ],
@@ -241,6 +261,29 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
         true,
     )?;
     ctx.command(&["fsck", "--connectivity-only"], reference_clone, true)?;
+
+    // `--reference-if-able` with a missing path must degrade to a normal clone.
+    let missing_reference = ctx
+        .run
+        .run_root
+        .join("fixtures")
+        .join(&ctx.id)
+        .join("missing-reference");
+    let missing_reference_arg = missing_reference.to_string_lossy().to_string();
+    let ref_if_able = ctx.run_dir.join("ref-if-able-clone");
+    let ref_if_able_arg = ref_if_able.to_string_lossy().to_string();
+    ctx.command(
+        &[
+            "clone",
+            "--reference-if-able",
+            &missing_reference_arg,
+            &remote,
+            &ref_if_able_arg,
+        ],
+        ctx.run_dir.clone(),
+        true,
+    )?;
+    ctx.command(&["fsck", "--connectivity-only"], ref_if_able, true)?;
 
     let local_copy = ctx.run_dir.join("local-copy");
     let local_copy_arg = local_copy.to_string_lossy().to_string();
@@ -294,10 +337,33 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
 
     // advanced fetch flags for plan maintenance (prune/porcelain/dry-run/tags per "继续维护" in improvement/fetch.md)
     ctx.command(&["fetch", "--prune", "origin"], clone_dir.clone(), true)?;
-    let porcelain = ctx.command(&["fetch", "--porcelain", "origin", "main"], clone_dir.clone(), true)?;
-    assert_stdout_contains(&porcelain, "From ") ?;
-    ctx.command(&["fetch", "--dry-run", "origin", "main"], clone_dir.clone(), true)?;
-    ctx.command(&["fetch", "--tags", "--force", "origin"], clone_dir.clone(), true)?;
+    // Advance the remote so the porcelain fetch observes a real fast-forward
+    // (`--porcelain` prints nothing when every ref is already up to date).
+    fs::write(remote_dir.join("porcelain.txt"), "porcelain seed\n")
+        .context("write porcelain seed commit")?;
+    ctx.gitfix(&["add", "porcelain.txt"], remote_dir.clone(), true)?;
+    ctx.gitfix(
+        &["commit", "-m", "test: porcelain seed commit"],
+        remote_dir.clone(),
+        true,
+    )?;
+    let porcelain = ctx.command(
+        &["fetch", "--porcelain", "origin", "main"],
+        clone_dir.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&porcelain, "refs/remotes/origin/main")?;
+    ctx.command(
+        &["fetch", "--dry-run", "origin", "main"],
+        clone_dir.clone(),
+        true,
+    )?;
+    ctx.command(
+        &["fetch", "--tags", "--force", "origin"],
+        clone_dir.clone(),
+        true,
+    )?;
+    ctx.command(&["fetch", "--no-tags", "origin"], clone_dir.clone(), true)?;
     ctx.command(
         &["pull", "--ff-only", "origin", "main"],
         clone_dir.clone(),
@@ -395,6 +461,27 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
         &ctx.command(&["--json", "log", "-n", "5"], clone_dir.clone(), true)?,
         "log",
     )?;
+
+    // `pull --ff` must override a configured `pull.ff=false` and fast-forward;
+    // `--no-squash` / `--commit` ride along as accepted merge-flag overrides
+    // (no-ops once the fast-forward resolution wins).
+    ctx.command(
+        &["config", "set", "pull.ff", "false"],
+        json_clone.clone(),
+        true,
+    )?;
+    let ff_pull = ctx.command(
+        &["pull", "--ff", "--no-squash", "--commit", "origin", "main"],
+        json_clone.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&ff_pull, "Fast-forward")?;
+    let ff_readme =
+        fs::read_to_string(json_clone.join("README.md")).context("read ff-pulled README")?;
+    if !ff_readme.contains("third") {
+        bail!("pull --ff README did not contain third commit content: {ff_readme}");
+    }
+    ctx.command(&["fsck", "--connectivity-only"], json_clone.clone(), true)?;
 
     let bad_fetch = ctx.command(
         &["fetch", "origin", "no-such-branch"],

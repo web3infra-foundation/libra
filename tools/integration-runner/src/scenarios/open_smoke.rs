@@ -4,11 +4,12 @@ use serde_json::Value;
 
 use super::prelude::*;
 
+const ORIGIN_URL: &str = "git@github.com:example/open-repo.git";
+
 pub(crate) fn scenario_open_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
     let repo = ctx.repo("repo");
     create_committed_repo(ctx, &repo)?;
-    let origin = "git@github.com:example/open-repo.git";
-    ctx.command(&["remote", "add", "origin", origin], repo.clone(), true)?;
+    ctx.command(&["remote", "add", "origin", ORIGIN_URL], repo.clone(), true)?;
 
     let default_open = ctx.command(&["--json", "open"], repo.clone(), true)?;
     assert_open_json(
@@ -36,6 +37,36 @@ pub(crate) fn scenario_open_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
         "origin",
         "https://github.com/example/open-repo/tree/main",
         "branch",
+        "github",
+    )?;
+
+    // --print-only (text mode): prints exactly the resolved URL, never launches.
+    let print_only = ctx.command(&["open", "--print-only", "origin"], repo.clone(), true)?;
+    let print_only_stdout = stdout_trim(&print_only);
+    if print_only_stdout != "https://github.com/example/open-repo" {
+        bail!("open --print-only stdout mismatch: got {print_only_stdout:?}");
+    }
+    assert_not_contains(&print_only, "Opening")?;
+
+    // --pr deep links (mutually exclusive with -b/-c/--issue: separate invocations).
+    let pr_open = ctx.command(
+        &["--json", "open", "--pr=123", "--print-only", "origin"],
+        repo.clone(),
+        true,
+    )?;
+    assert_open_json(
+        &pr_open,
+        "origin",
+        "https://github.com/example/open-repo/pull/123",
+        "pull_request",
+        "github",
+    )?;
+    let pr_list = ctx.command(&["--json", "open", "-p", "origin"], repo.clone(), true)?;
+    assert_open_json(
+        &pr_list,
+        "origin",
+        "https://github.com/example/open-repo/pulls",
+        "pull_request",
         "github",
     )?;
 
@@ -102,6 +133,9 @@ fn assert_open_json(
         .context("open JSON envelope missing data")?;
     if data.get("remote").and_then(Value::as_str) != Some(remote) {
         bail!("open JSON remote mismatch: expected {remote:?}, got {data}");
+    }
+    if data.get("remote_url").and_then(Value::as_str) != Some(ORIGIN_URL) {
+        bail!("open JSON remote_url mismatch: expected {ORIGIN_URL:?}, got {data}");
     }
     if data.get("web_url").and_then(Value::as_str) != Some(web_url) {
         bail!("open JSON web_url mismatch: expected {web_url:?}, got {data}");

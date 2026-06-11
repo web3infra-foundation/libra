@@ -27,6 +27,10 @@ pub(crate) fn scenario_branch_switch_checkout(ctx: &mut ScenarioCtx<'_>) -> Resu
         repo.clone(),
         true,
     )?;
+    ctx.command(&["checkout", "-b", "compat-checkout"], repo.clone(), true)?;
+    let compat_current = ctx.command(&["branch", "--show-current"], repo.clone(), true)?;
+    assert_stdout_contains(&compat_current, "compat-checkout")?;
+    ctx.command(&["checkout", "main"], repo.clone(), true)?;
     ctx.command(
         &["switch", "-C", "reset-feature", "main"],
         repo.clone(),
@@ -71,6 +75,7 @@ pub(crate) fn scenario_branch_switch_checkout(ctx: &mut ScenarioCtx<'_>) -> Resu
         remote.clone(),
         true,
     )?;
+    ctx.command(&["switch", "-c", "guessed-two"], remote.clone(), true)?;
     let remote_arg = remote.display().to_string();
     ctx.command(
         &["remote", "add", "origin", &remote_arg],
@@ -78,9 +83,26 @@ pub(crate) fn scenario_branch_switch_checkout(ctx: &mut ScenarioCtx<'_>) -> Resu
         true,
     )?;
     ctx.command(&["fetch", "origin"], repo.clone(), true)?;
+    let remote_branches = ctx.command(&["branch", "-r"], repo.clone(), true)?;
+    assert_stdout_contains(&remote_branches, "origin/guessed")?;
+    let all_branches = ctx.command(&["branch", "-a"], repo.clone(), true)?;
+    assert_stdout_contains(&all_branches, "origin/guessed")?;
+    assert_stdout_contains(&all_branches, "main")?;
     ctx.command(&["switch", "guessed"], repo.clone(), true)?;
     let guessed_current = ctx.command(&["branch", "--show-current"], repo.clone(), true)?;
     assert_stdout_contains(&guessed_current, "guessed")?;
+    ctx.command(&["switch", "main"], repo.clone(), true)?;
+    let no_guess = ctx.command(&["switch", "--no-guess", "guessed-two"], repo.clone(), false)?;
+    assert_lbr_or_text(&no_guess, "not found")?;
+    ctx.command(&["switch", "--guess", "guessed-two"], repo.clone(), true)?;
+    let guessed_two = ctx.command(&["branch", "--show-current"], repo.clone(), true)?;
+    assert_stdout_contains(&guessed_two, "guessed-two")?;
+    ctx.command(&["switch", "main"], repo.clone(), true)?;
+
+    let base_commit = stdout_trim(&ctx.command(&["rev-parse", "HEAD"], repo.clone(), true)?);
+    ctx.command(&["switch", "--detach", &base_commit], repo.clone(), true)?;
+    let detached_sym = ctx.command(&["symbolic-ref", "HEAD"], repo.clone(), false)?;
+    assert_lbr_or_text(&detached_sym, "not a symbolic ref")?;
     ctx.command(&["switch", "main"], repo.clone(), true)?;
 
     ctx.command(
@@ -88,8 +110,12 @@ pub(crate) fn scenario_branch_switch_checkout(ctx: &mut ScenarioCtx<'_>) -> Resu
         repo.clone(),
         true,
     )?;
-    let branches = ctx.command(&["branch"], repo.clone(), true)?;
+    let branches = ctx.command(&["branch", "--list"], repo.clone(), true)?;
     assert_stdout_contains(&branches, "renamed-feature")?;
+    let json_branches = ctx.command(&["--json", "branch", "--list"], repo.clone(), true)?;
+    assert_json_ok(&json_branches, "branch --list")?;
+    assert_stdout_contains(&json_branches, "branches")?;
+    assert_stdout_contains(&json_branches, "renamed-feature")?;
     ctx.command(&["switch", "renamed-feature"], repo.clone(), true)?;
     ctx.command(&["checkout", "--detach", "HEAD"], repo.clone(), true)?;
     assert_json_ok(
@@ -98,6 +124,9 @@ pub(crate) fn scenario_branch_switch_checkout(ctx: &mut ScenarioCtx<'_>) -> Resu
     )?;
     ctx.command(&["switch", "main"], repo.clone(), true)?;
     ctx.command(&["branch", "-D", "renamed-feature"], repo.clone(), true)?;
+    ctx.command(&["branch", "-d", "reset-feature"], repo.clone(), true)?;
+    let after_safe_delete = ctx.command(&["branch"], repo.clone(), true)?;
+    assert_not_contains(&after_safe_delete, "reset-feature")?;
     let bad_delete = ctx.command(&["branch", "-d", "nonexistent"], repo.clone(), false)?;
     assert_lbr_or_text(&bad_delete, "not found")?;
     ctx.command(&["fsck", "--connectivity-only"], repo, true)?;

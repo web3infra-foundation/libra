@@ -154,3 +154,101 @@
 | `reflog show` / `reflog show --stat` / `reflog exists` / `reflog expire --dry-run` | `cli.reflog-symbolic-ref` | HEAD/ref 更新记录可读，exists 可脚本探测，expire 可预览清理并对无 ref 入参返回稳定错误 |
 | `symbolic-ref` / `symbolic-ref --short` / `symbolic-ref HEAD <target>` | `cli.reflog-symbolic-ref` | HEAD 符号引用读写可观察 |
 | `--json open` | `cli.open-smoke` | 只输出 URL 和 `launched=false`，不启动外部程序 |
+
+
+
+### `libra config` 参数覆盖表
+
+| 参数或子命令 | 场景 ID | 关键断言 |
+|---|---|---|
+| `config set/get/list/unset` | `cli.config-basic-kv` | local scope 默认写入当前 repo，读写删闭环可观察 |
+| `config --local` / `--global` / `--system` | `cli.config-scopes` | scope 隔离，system 在隔离环境中按权限/路径失败或成功 |
+| `config set --add` | `cli.config-set-input-and-encryption` | 多值 key 可保留并由 `get --all` 读取 |
+| `config set --stdin` | `cli.config-set-input-and-encryption` | stdin value 写入配置，空输入/互斥 flag 失败 |
+| `config set --encrypt` / `--plaintext` | `cli.config-set-input-and-encryption` | vault 加密值不明文泄漏，reveal/plaintext 路径符合预期 |
+| `config get --all` / `--regexp` / `--default` / `-d` / `--reveal` | `cli.config-get-default-and-patterns` | 多值、正则、默认值和密文 reveal 语义可观察 |
+| `config list --name-only` / `--show-origin` / `--vault` | `cli.config-list-variants` | 列表形态、来源、vault 内容脱敏契约可观察 |
+| `config list --ssh-keys` / `--gpg-keys` | `cli.config-list-variants`、`cli.config-key-generation` | 生成后的 key 元数据可列出且不泄漏私钥 |
+| `config unset` / `--unset` / `--unset-all` | `cli.config-unset-compat-flags` | 单值/多值删除和兼容 hidden flag 翻译可观察 |
+| `config import` / `--import` / `path` / `edit` | `cli.config-import-path-edit` | Git config fixture 导入、配置路径输出和编辑器失败路径可观察 |
+| `config generate-ssh-key` / `generate-gpg-key` | `cli.config-key-generation` | remote/name/email/usage 参数写入 vault 元数据，非法输入失败 |
+| Git 兼容 positional forms (`--get`, `--get-all`, `--get-regexp`, `--list`) | `cli.config-git-compat-mode` | hidden Git forms 翻译为 Libra 子命令，互斥/缺参负向可观察 |
+
+
+
+### `libra clone/remote/fetch/pull/push/ls-remote` 参数覆盖表
+
+| 参数或子命令 | 场景 ID | 关键断言 |
+|---|---|---|
+| `clone <repo> [path]` | `cli.clone-fetch-pull-local` | 本地 Git fixture 克隆后文件、refs、remote config 可观察 |
+| `clone -b/--branch` / `--single-branch` / `--no-single-branch` | `cli.clone-fetch-pull-local` | 指定分支 checkout 与分支范围配置可观察 |
+| `clone --depth` | `cli.fetch-depth-local` | shallow 边界写入，`fetch --deepen` 后历史扩展 |
+| `clone --shallow-since` / `--shallow-exclude` / `--reject-shallow` | `cli.fetch-depth-local` | shallow 参数解析和非法/不满足条件路径失败 |
+| `clone --origin` | `cli.clone-fetch-pull-local` | 自定义 remote 名称写入配置并供 fetch/pull 使用 |
+| `clone --bare` / `--mirror` | `cli.clone-fetch-pull-local` | bare/mirror 布局与 mirror refspec/config 可观察 |
+| `clone --no-checkout` | `cli.clone-fetch-pull-local` | metadata/refs 写入但工作区不 checkout |
+| `clone --reference` / `--reference-if-able` / `--dissociate` | `cli.clone-fetch-pull-local` | reference object copy、missing reference 降级和 dissociate 输出可观察 |
+| `clone --local` / `--no-hardlinks` / `--shared` / `--jobs` | `cli.clone-fetch-pull-local` | local clone 安全路径、copy/hardlink 兼容 no-op 参数可传入 |
+| `clone --filter` | `cli.clone-fetch-pull-local` | partial clone promisor/filter 配置和缺 blob checkout 风险可观察 |
+| `remote add/remove/rename/-v` | `cli.clone-fetch-pull-local` | remote 增删改列闭环可观察 |
+| `remote show [-n/--no-query] [-v]` | `cli.clone-fetch-pull-local` | cached/query 输出和 verbose 详情可观察 |
+| `remote get-url --push --all` | `cli.clone-fetch-pull-local` | fetch URL / push URL / all URL 输出可观察 |
+| `remote set-url --add --delete --push --all` | `cli.clone-fetch-pull-local` | URL 列表追加、替换、删除和 pushurl 分离可观察 |
+| `remote prune --dry-run` | `cli.clone-fetch-pull-local` | stale tracking refs 预览和删除语义可观察 |
+| `remote set-branches --add` | `cli.clone-fetch-pull-local` | fetch refspec 被改写/追加 |
+| `remote set-head -a/-d <branch>` | `cli.clone-fetch-pull-local` | remote HEAD 自动、手动、删除路径可观察 |
+| `remote update [remote...]` | `cli.clone-fetch-pull-local` | 指定/全部 remote fetch 调用可观察 |
+| `ls-remote --heads --tags --refs --symref` | `cli.clone-fetch-pull-local` | refs 过滤、HEAD symref 和 peeled tag 抑制可观察 |
+| `ls-remote --exit-code --get-url --sort -o/--server-option <pattern>` | `cli.clone-fetch-pull-local` | URL 解析、不匹配退出码、排序和兼容 server-option 可观察 |
+| `fetch [remote] [refspec]` / `fetch --all` | `cli.clone-fetch-pull-local` | 默认 remote、显式 refspec 和 all-remotes 更新 refs |
+| `fetch --depth` / `--deepen` / `--unshallow` | `cli.fetch-depth-local` | shallow 边界创建、扩展、移除语义可观察 |
+| `fetch --shallow-since` / `--shallow-exclude` / `--update-shallow` | `cli.fetch-depth-local` | shallow shape 参数解析和边界更新可观察 |
+| `fetch --recurse-submodules[=<mode>]` | `cli.clone-fetch-pull-local` | 明确拒绝或友好 usage 错误，不退化为未知参数 |
+| `fetch --porcelain` / `--dry-run` / `--append` / `-v` | `cli.clone-fetch-pull-local` | 机器输出、无写入预览、FETCH_HEAD append 和 stderr 诊断可观察 |
+| `fetch --prune` / `--tags` / `--no-tags` / `--force` | `cli.clone-fetch-pull-local` | tracking ref 清理、tag auto-follow/强制覆盖语义可观察 |
+| `fetch --atomic` / `--refmap` | `cli.clone-fetch-pull-local` | ref 更新事务和自定义 tracking 目标可观察 |
+| `pull [remote] [refspec]` | `cli.clone-fetch-pull-local` | fetch + integrate 闭环，tracking 缺失负向可观察 |
+| `pull --ff-only` / `--ff` / `--no-ff` | `cli.clone-fetch-pull-local` | fast-forward 策略选择和冲突 flag 拒绝可观察 |
+| `pull --squash` / `--no-squash` / `--no-commit` / `--commit` | `cli.clone-fetch-pull-local` | merge path 的 index/commit 副作用可观察 |
+| `pull --rebase[=<when>]` / `-r` | `cli.clone-fetch-pull-local` | linear rebase 成功，unsupported `merges/interactive` 失败 |
+| `pull --autostash` / `--no-autostash` / `--depth` | `cli.clone-fetch-pull-local`、`cli.fetch-depth-local` | dirty worktree integration 与 shallow fetch 参数可观察 |
+| `push <remote> [refspec...]` | `live.github-create-push-clone-fetch` | 真实 GitHub remote ref 更新和 clone/fetch readback 可观察 |
+| `push --dry-run` / `--porcelain` | `live.github-create-push-clone-fetch`、`cli.push-local-file-remote-rejected` | 预览/机器输出语义；本地 file remote fail-closed |
+| `push -u/--set-upstream` | `live.github-create-push-clone-fetch` | upstream tracking config 写入 |
+| `push -f/--force` / `--force-with-lease[=<lease>]` / `--force-if-includes` | `live.github-create-push-clone-fetch`、`cli.push-local-file-remote-rejected` | force/lease 语义或本地 remote 拒绝均可观察 |
+| `push --follow-tags` / `--no-follow-tags` / `--tags` / `--mirror` | `live.github-create-push-clone-fetch`、`cli.push-local-file-remote-rejected` | tag 推送、mirror/delete 语义或本地 remote 拒绝可观察 |
+| `push --signed[=<when>]` / `-o/--push-option` | `live.github-create-push-clone-fetch` | remote capability/option 处理和无支持路径错误可观察 |
+| `push --thin` / `--no-thin` / `--atomic` | `live.github-create-push-clone-fetch`、`cli.push-local-file-remote-rejected` | 兼容 no-op/capability 要求或本地 remote 拒绝可观察 |
+
+
+
+### `libra notes/object/plumbing/maintenance` 参数覆盖表
+
+| 参数或子命令 | 场景 ID | 关键断言 |
+|---|---|---|
+| `notes add -m/-F/-f --ref` | `cli.notes-smoke` | 默认和自定义 notes ref 写入、强制覆盖和消息来源可观察 |
+| `notes list/show/remove --ref` | `cli.notes-smoke` | note ref 列表、读取、删除和删除后负向可观察 |
+| `ls-tree -r -t -d -l -z --name-only --name-status --object-only --abbrev[=N] <tree> [path...]` | `cli.ls-tree-smoke` | tree/path 过滤、递归、大小、NUL、仅路径/对象输出和缺失路径错误可观察 |
+| `cat-file -t/-s/-p/-e <object>` | `cli.object-readback` | object 类型、大小、内容和存在性退出码可观察 |
+| `cat-file --batch[=<fmt>]` / `--batch-check[=<fmt>]` / `-Z` / `--buffer` / `--batch-all-objects` / `--unordered` / `--follow-symlinks` | `cli.object-readback` | stdin/batch、all-objects、NUL 和格式化输出契约可观察 |
+| `cat-file --textconv` / `--filters` | `cli.object-readback` | unsupported flag 返回稳定错误 |
+| `cat-file --ai*` | 无（显式排除） | AI object inspection 属 Libra AI 扩展，不纳入 Git 兼容黑盒计划 |
+| `hash-object -w --stdin --stdin-paths -t/--type --literally --path --no-filters <path...>` | `cli.object-readback`、`cli.sha256-object-readback` | blob 写入、stdin/path 输入、类型校验、literal 和 sha256 object id 可观察 |
+| `fsck [object] --no-reflogs -v/--verbose --unreachable --dangling[=BOOL] --no-dangling --name-objects --lost-found --root --tags --connectivity-only --full --no-full --strict` | `cli.object-readback`、`cli.gc-smoke` | 默认/严格/连通性检查、dangling/unreachable 输出和 lost-found 副作用可观察 |
+| `gc --dry-run --prune=<when>` | `cli.gc-smoke` | unreachable loose object 预览和真实清理后 fsck 通过 |
+| `prune --dry-run --expire <when> -v/--verbose` | `cli.gc-smoke` | prune 预览、保留、verbose 删除输出可观察 |
+| `archive [treeish] --format/-f --output/-o --prefix` | `cli.archive-smoke` | tar/tar.gz/tar.bz2/zip 输出、路径 prefix 和 unsafe prefix/format 失败可观察 |
+| `verify-pack [-v/--verbose] [-s/--stat-only] --pack <pack> <idx...>` | `cli.verify-pack-smoke` | idx/pack 对应校验、verbose/stat-only 和缺失/错误 pack 失败可观察 |
+| `db status` / `db upgrade` / `db --json status` | `cli.schema-upgrade-observable` | fresh/current schema 状态、升级 no-op 和非 repo 失败可观察 |
+| hidden `index-pack` | `cli.verify-pack-smoke` | 仅作为 pack fixture 辅助生成，不作为独立用户命令场景 |
+
+
+
+### 明确排除的命令面
+
+| 命令 | 原因 | 替代保障 |
+|---|---|---|
+| `agent` / `automation` / `code` / `code-control` / `graph` / `sandbox` / `usage` | AI/交互/运行时扩展，不属于 Git 兼容版本管理黑盒计划 | 专属 TUI、provider、runtime 或命令测试 |
+| `cloud` / `publish` / `package` | Cloud/发布/能力包扩展，需要真实云或非 Git 兼容语义 | 专属 cloud/publish/worker 测试和 live gate |
+| `hooks` | hidden 兼容入口，由 `agent enable` 安装路径使用 | 专属 cargo 测试 |
+| `stats` | Libra-only 只读统计命令，无自有 Git 兼容参数 | `tests/command/stats_test.rs` |

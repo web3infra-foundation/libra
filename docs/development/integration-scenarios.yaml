@@ -281,6 +281,15 @@ scenarios:
     key_assertion_categories: [json_envelope, negative_exit]
     doc_section: "cli.grep-blame-describe-shortlog"
 
+  - id: cli.notes-smoke
+    wave: 1
+    group: history
+    purpose: "Cover notes add/list/show/remove, -m/-F/-f message sources, --ref custom notes refs, JSON envelopes, and negatives (re-add without -f, show-after-remove, empty message)."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck, negative_exit, lbr_error]
+    doc_section: "cli.notes-smoke"
+
   - id: cli.clean-rm-mv-lfs-basic
     wave: 1
     group: working_tree
@@ -384,7 +393,7 @@ scenarios:
   - id: cli.gc-smoke
     wave: 2
     group: maintenance
-    purpose: "Smoke gc dry-run and --prune=now on an unreachable loose object; verifies prune, JSON envelope, and post-GC connectivity."
+    purpose: "Smoke gc dry-run and --prune=now on an unreachable loose object, plus standalone `prune` (--dry-run JSON, --expire keep, verbose real prune); verifies prune, JSON envelope, and post-GC/post-prune connectivity."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck, negative_exit, lbr_error]

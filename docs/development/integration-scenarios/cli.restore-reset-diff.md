@@ -86,6 +86,10 @@ grep 'overlay' overlay.txt
 libra --json restore --source HEAD~1 overlay.txt
 test ! -e overlay.txt
 libra reset --hard HEAD
+# 显式 --no-overlay 与默认行为一致：source 中不存在的路径被删除
+libra --json restore --source HEAD~1 --no-overlay overlay.txt
+test ! -e overlay.txt
+libra reset --hard HEAD
 
 printf 'l1\nl2\nl3\nl4\n' > orig.txt
 libra add orig.txt
@@ -142,10 +146,24 @@ libra fsck --connectivity-only
 cd "$RUN_DIR/restore-repo"
 ! libra restore --source no-such-revision src/app.txt
 ! libra reset no-such-revision
+! libra reset --hard no-such-rev
 ! libra diff --old no-such-revision --new HEAD
+! libra diff --algorithm myers tracked.txt
 ```
 
-断言：unstaged diff、staged diff、pathspec、name-only、name-status、numstat、stat、raw、`-w -U0` 和 `--exit-code` 输出/退码都能反映同一修改；`-M70 --name-status` 能识别 75% 相似的重命名；`restore --staged` 只取消暂存，不丢弃工作区修改；`restore --worktree` 与 `restore --pathspec-from-file=<file>`/`--pathspec-file-nul` 恢复工作区内容；`restore --overlay` 保留 source 中不存在的已追踪文件，默认 no-overlay 删除该工作区文件；冲突阶段 `restore --ours`/`--theirs` 只写工作区且 index 保持 unmerged，`restore --merge`/`--conflict=diff3` 能重建冲突标记，plain restore over unmerged path 以 128 阻断，`--ignore-unmerged` 跳过该路径；路径级 `reset HEAD -- <path>` 与 `reset --pathspec-from-file=<file>`/`--pathspec-file-nul` 只影响 index；`reset --no-refresh` 被接受并保持 mixed reset 语义；`reset --soft` 保留 index/工作区变化，`reset --mixed` 重置 index，`reset --hard` 重置 HEAD/index/工作区；`reset --keep` 保留与目标差异不重叠的本地修改，`reset --merge` 能安全移动 HEAD 并删除目标树外的干净路径；无效 revision 必须失败且不改变当前 HEAD。
+正向补充步骤（diff 输出重定向与算法选择）：
+
+```bash
+cd "$RUN_DIR/restore-repo"
+printf 'diff output probe\n' > tracked.txt
+libra diff --output diff-out.patch tracked.txt
+grep '@@' diff-out.patch
+libra diff --algorithm=histogram tracked.txt | grep 'diff output probe'
+rm diff-out.patch
+libra reset --hard HEAD
+```
+
+断言：unstaged diff、staged diff、pathspec、name-only、name-status、numstat、stat、raw、`-w -U0` 和 `--exit-code` 输出/退码都能反映同一修改；`-M70 --name-status` 能识别 75% 相似的重命名；`restore --staged` 只取消暂存，不丢弃工作区修改；`restore --worktree` 与 `restore --pathspec-from-file=<file>`/`--pathspec-file-nul` 恢复工作区内容；`restore --overlay` 保留 source 中不存在的已追踪文件，默认 no-overlay 删除该工作区文件；冲突阶段 `restore --ours`/`--theirs` 只写工作区且 index 保持 unmerged，`restore --merge`/`--conflict=diff3` 能重建冲突标记，plain restore over unmerged path 以 128 阻断，`--ignore-unmerged` 跳过该路径；路径级 `reset HEAD -- <path>` 与 `reset --pathspec-from-file=<file>`/`--pathspec-file-nul` 只影响 index；`reset --no-refresh` 被接受并保持 mixed reset 语义；`reset --soft` 保留 index/工作区变化，`reset --mixed` 重置 index，`reset --hard` 重置 HEAD/index/工作区；`reset --keep` 保留与目标差异不重叠的本地修改，`reset --merge` 能安全移动 HEAD 并删除目标树外的干净路径；显式 `restore --no-overlay` 与默认 no-overlay 语义一致；`restore --source <坏修订>` 以 `failed to resolve checkout source` 失败且不改写工作区；`diff --output <file>` 把补丁写入文件、stdout 不含 hunk，`--algorithm=histogram` 输出与默认一致、非 histogram 算法明确报错 `not supported yet`；无效 revision 必须失败且不改变当前 HEAD（含 `reset --hard`）。
 
 补充可执行断言：
 - `libra --json diff --staged` 和 `libra --json diff` 必须返回结构化数据（files 或 changes）。

@@ -16,8 +16,11 @@ cd schema-repo
 
 libra db status
 libra db --json status >db-status.json
-python3 -c "import json; d=json.load(open('db-status.json')); assert d['ok'] is True; assert 'current_version' in d['data']; assert 'latest_version' in d['data']; assert 'state' in d['data']"
+python3 -c "import json; d=json.load(open('db-status.json')); assert d['ok'] is True; assert d['data']['state'] == 'compatible'; assert d['data']['current_version'] is not None; assert d['data']['current_version'] == d['data']['latest_version']"
 libra db upgrade
+libra db upgrade
+libra db --json upgrade >db-upgrade.json
+python3 -c "import json; d=json.load(open('db-upgrade.json')); assert d['ok'] is True; assert d['data']['upgraded'] is False; assert d['data']['applied_versions'] == []; assert d['data']['current_version'] == d['data']['latest_version']"
 libra db status
 
 libra config set user.name "Libra Schema Test"
@@ -43,7 +46,7 @@ cd not-a-repo
 
 补充可执行断言：
 - `libra --json db status` 必须 `ok:true`，`data.current_version == data.latest_version` 且 `data.state` 为兼容状态。
-- 非仓库目录执行 `libra db status` 必须非 0，stderr 包含 "not a libra repository" 或 LBR-REPO-001。
+- 非仓库目录执行 `libra db status` / `libra db upgrade` 必须非 0，stderr 包含 "not a libra repository" 或 LBR-REPO-001。
 - 操作后 `libra fsck --connectivity-only` 必须 0 退出。
-- 验证 schema 升级幂等：连续两次 `libra db upgrade` 均成功且无副作用。
+- 验证 schema 升级幂等：连续两次 `libra db upgrade` 均成功且无副作用；`libra --json db upgrade` 在已最新仓库上返回 `upgraded:false` 且 `applied_versions == []`。
 

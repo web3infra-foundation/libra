@@ -101,6 +101,12 @@ pub(crate) fn scenario_config_key_generation(ctx: &mut ScenarioCtx<'_>) -> Resul
         false,
     )?;
     assert_lbr_or_text(&bad_remote, "remote")?;
+    let missing_remote = ctx.command(
+        &["config", "generate-ssh-key", "--remote", "no-such-remote"],
+        repo.clone(),
+        false,
+    )?;
+    assert_lbr_or_text(&missing_remote, "remote")?;
     let bad_usage = ctx.command(
         &["config", "generate-gpg-key", "--usage", "archive"],
         repo.clone(),

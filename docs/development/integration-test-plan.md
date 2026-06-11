@@ -7,7 +7,7 @@
 
 ## 0. TL;DR
 
-**完整性结论**：本计划作为“人工黑盒执行规范”和“runner 的需求说明”已可落地（覆盖矩阵、隔离安全模型、38 个具体场景 + 参数表 + 断言强化标准 + 输出契约 + PR/Review 协议 + 维护规则均已定义）。R0-R5 切片已全部落地：`tools/integration-runner/` 独立 crate、`list`、`check-plan`（yaml+MD+矩阵+registry 三方一致 + 收敛短形式 gate）、Wave 0 preflight、隔离 env_clear + SAFE_PATH + gitfix + gh 探针、38/38 场景（含 Wave 3 live 的 `run-live` + GhRepoCleanupGuard + delete_repo scope 预检 + 脱敏自检）的 typed Rust 执行 + 报告产出；`run --waves 0,1,2` / `run-live --only live.*` 均可执行并满足 §5 契约。check-plan 是稳定的一致性门，`run --waves 0,1,2` 是默认黑盒执行门（两者均在 CI 的 compat-offline-core 显式调用）。
+**完整性结论**：本计划作为“人工黑盒执行规范”和“runner 的需求说明”已可落地（覆盖矩阵、隔离安全模型、41 个具体场景 + 参数表 + 断言强化标准 + 输出契约 + PR/Review 协议 + 维护规则均已定义）。R0-R5 切片已全部落地：`tools/integration-runner/` 独立 crate、`list`、`check-plan`（yaml+MD+矩阵+registry 三方一致 + 收敛短形式 gate）、Wave 0 preflight、隔离 env_clear + SAFE_PATH + gitfix + gh 探针、41/41 场景（含 Wave 3 live 的 `run-live` + GhRepoCleanupGuard + delete_repo scope 预检 + 脱敏自检）的 typed Rust 执行 + 报告产出；`run --waves 0,1,2` / `run-live --only live.*` 均可执行并满足 §5 契约。check-plan 是稳定的一致性门，`run --waves 0,1,2` 是默认黑盒执行门（两者均在 CI 的 compat-offline-core 显式调用）。
 
 场景登记使用 `docs/development/integration-scenarios.yaml`（元数据）+ `docs/development/integration-scenarios/<id>.md`（按场景拆分的可执行步骤与断言）+ 本文件（计划总则与 §2.3 矩阵）。`check-plan` 校验 yaml ↔ 拆分 MD ↔ runner registry 一致。
 
@@ -15,7 +15,7 @@
 
 Agent 仍**不得**把 Wave 1/2 全矩阵一次性作为首个实现任务；必须按 §3.3.3 的 R0-R5 切片分批交付，每批可独立验证。
 
-**推荐落地方式**：R0-R2 切片（骨架 + check-plan + 隔离运行时 + 初始 smoke）已实现；当前通过 R3+ 垂直迁移已覆盖 38/38 场景。Agent 必须按 §3.3.3 切片分批交付，每批独立可 `cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --only <ids>` + `check-plan` 全绿，产出 §5 报告，并保持黑盒边界（只执行编译后的 `libra`）。
+**推荐落地方式**：R0-R2 切片（骨架 + check-plan + 隔离运行时 + 初始 smoke）已实现；当前通过 R3+ 垂直迁移已覆盖 41/41 场景。Agent 必须按 §3.3.3 切片分批交付，每批独立可 `cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --only <ids>` + `check-plan` 全绿，产出 §5 报告，并保持黑盒边界（只执行编译后的 `libra`）。
 
 **默认阻断门**：Wave 0 编译产物可用 + Wave 1 CLI 核心版本管理场景全绿 + Wave 2 CLI 兼容/存储场景全绿。
 
@@ -105,7 +105,7 @@ gh repo view "$REPO" --json nameWithOwner,sshUrl,url
 | 本地仓库状态 | 已存在 | `.libra/libra.db`、`.libra/objects`、工作区文件 |
 | 文档一致性检查 | 已落地（去脚本化） | Code UI 路由 ↔ `docs/commands/code-control.md` 覆盖检查在 `tests/compat/matrix_alignment.rs::docs_consistency_covers_code_ui_router_matrix`；仓库无 `scripts/` 目录 |
 | 兼容矩阵一致性检查 | 已落地（去脚本化） | `COMPATIBILITY.md` ↔ `src/cli.rs::Commands` 漂移检查在 `tests/compat/matrix_alignment.rs::compatibility_matrix_matches_cli_commands`；CI 以 `cargo test --test compat_matrix_alignment` 运行 |
-| 集成计划自检工具 | R0-R5 + 38/38 场景已落地 | `docs/development/integration-scenarios.yaml` 是 runner / check-plan 的**唯一事实来源**（id、wave、gh_required、key_assertion_categories 等）；`tools/integration-runner` 提供 `check-plan`（结构一致性 + gh 规则 + 矩阵引用 + implemented 子集收敛 gate）和可执行 `run --only` / `run-live --only`，产出 §5 report。当前 38 个场景均有完整 Rust typed 实现 + 断言；compat_matrix_alignment 已去脚本化落地。 |
+| 集成计划自检工具 | R0-R5 + 41/41 场景已落地 | `docs/development/integration-scenarios.yaml` 是 runner / check-plan 的**唯一事实来源**（id、wave、gh_required、key_assertion_categories 等）；`tools/integration-runner` 提供 `check-plan`（结构一致性 + gh 规则 + 矩阵引用 + implemented 子集收敛 gate）和可执行 `run --only` / `run-live --only`，产出 §5 report。当前 41 个场景均有完整 Rust typed 实现 + 断言；compat_matrix_alignment 已去脚本化落地。 |
 | GitHub CLI 操作面 | 外部前置条件 | Wave 3 使用 `gh auth status`、`gh repo create`、`gh repo view`、`gh api`、`gh repo delete` |
 | 覆盖矩阵 + 安全清单 | 本次改进新增 | §2.3 命令覆盖矩阵 + §3.6 安全自检清单（重点解决覆盖完整性与测试环境安全问题） |
 
@@ -140,12 +140,13 @@ gh repo view "$REPO" --json nameWithOwner,sshUrl,url
 |--------|----------|----------|----------------|-------------|------|
 | Setup | init, clone, config | supported/partial | 优秀（参数矩阵全） | cli.init-*, cli.config-*, cli.clone-fetch-pull-local | clone 仅本地+Wave3 |
 | Working Tree | status, add, rm, mv, restore, clean, stash, lfs, worktree | supported/partial/int-diff | 优秀（本地确定性命令全） | cli.commit-status-log, cli.restore-reset-diff, cli.stash-bisect-worktree, cli.clean-rm-mv-lfs-basic | `cli.stash-bisect-worktree` 覆盖 `stash push -u` / `-a` / `--all` / `--keep-index`，以及 `worktree add -b` / `--no-checkout`、`list --porcelain` / `--verbose`、`remove --force` / `--delete-dir --force`、`prune --dry-run` / `--expire`；LFS 远端 lock API 不进默认 Wave |
-| History | log, shortlog, show, show-ref, ls-remote, ls-tree, diff, grep, blame, describe | supported | 优秀（inspection 全，含 `log --follow` 单文件 rename 追踪） | cli.commit-status-log, cli.object-readback, cli.grep-blame-describe-shortlog, cli.clone-fetch-pull-local | 真实远端 refs 见 Wave3 |
+| History | log, shortlog, show, show-ref, ls-remote, ls-tree, diff, grep, blame, describe, notes | supported/partial | 优秀（inspection 全，含 `log --follow` 单文件 rename 追踪；`notes` add/list/show/remove 闭环） | cli.commit-status-log, cli.object-readback, cli.grep-blame-describe-shortlog, cli.notes-smoke, cli.clone-fetch-pull-local | 真实远端 refs 见 Wave3；notes refs 仅本地 |
 | Branching | commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert | supported/partial | 优秀（核心闭环全） | cli.branch-switch-checkout, cli.restore-reset-diff, cli.commit-status-log, cli.tag-basic, cli.merge-rebase-cherry-revert-smoke, cli.merge-conflict-continue, cli.rebase-conflict-continue | merge/rebase 冲突续跑成功路径已有独立场景；revert 单提交/范围和空会话控制在 smoke 场景覆盖 |
 | Remote | remote, fetch, pull, push, open | supported/partial | 良好（本地 Git clone/fetch/pull + fetch 默认 tag auto-follow + 本地 file remote push 拒绝 + GitHub live push 闭环 + `clone --depth` / `fetch --deepen` 本地 shallow 实现目标，open 无副作用 smoke） | cli.clone-*, cli.push-local-file-remote-rejected, cli.open-smoke, cli.fetch-depth-local, live.github-create-push-clone-fetch | `pull --rebase` 真分叉冲突路径仍属深水区；真实 push 语义只在 Wave3 |
-| Maintenance | db, gc, fsck, cat-file, hash-object, archive, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, index-pack | supported/partial/int-diff | 良好（index-pack 除外） | cli.schema-*, cli.gc-smoke, cli.object-readback, cli.sha256-object-readback, cli.archive-smoke, cli.verify-pack-smoke, cli.stash-bisect-worktree, cli.reflog-symbolic-ref | index-pack 为隐藏内部命令，仅在 verify-pack 场景的 fixture 生成中作为辅助命令使用；archive 覆盖 tar/zip 文件输出与安全 prefix；gc 覆盖 dry-run 与不可达 loose object prune；sha256 端到端读写已独立覆盖 |
+| Maintenance | db, gc, prune, fsck, cat-file, hash-object, archive, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, index-pack | supported/partial/int-diff | 良好（index-pack 除外） | cli.schema-*, cli.gc-smoke, cli.object-readback, cli.sha256-object-readback, cli.archive-smoke, cli.verify-pack-smoke, cli.stash-bisect-worktree, cli.reflog-symbolic-ref | index-pack 为隐藏内部命令，仅在 verify-pack 场景的 fixture 生成中作为辅助命令使用；archive 覆盖 tar/zip 文件输出与安全 prefix；`cli.gc-smoke` 覆盖 `gc --dry-run`/`--prune=now` 与同族 `prune --dry-run`/`--expire`/`-v` 对不可达 loose object 的清理；`fsck` 默认/`--no-full`/`--strict`/`--connectivity-only` 与 `hash-object -w`/`--stdin`/`-t`/`--literally` 在 `cli.object-readback` 覆盖；sha256 端到端读写已独立覆盖 |
 | Cross-cutting | --json/--machine/--quiet/--color/--progress/--exit-code-on-warning | supported | 良好（独立场景集中断言全局 flag 语义；warning=9 仍按 gap 跟踪） | cli.cross-cutting-flags | 详见下方「跨命令标志」 |
 | AI/Cloud | code*, automation, cloud, publish, agent*, hooks | intentionally-different | 显式排除（见 2.2） | — | hooks 为兼容隐藏命令，由专属测试覆盖 |
+| Libra-only | stats | intentionally-different | 显式排除（非 Git 命令） | — | 只读工作区文件统计扩展（无自有参数，仅全局 `--json`/`--machine`），由 `tests/command/stats_test.rs` 专属覆盖 |
 
 **剩余覆盖缺口（BASELINE_GAP-INTEG-005）**：本次计划已补齐 tag、merge/rebase/cherry-pick/revert、merge/rebase 冲突续跑成功路径、grep/blame/describe/shortlog、clean/rm/mv/lfs、本地 reflog/symbolic-ref、verify-pack 的独立场景 + 参数表；本轮改进又补齐 **本地 file remote push 拒绝（`cli.push-local-file-remote-rejected`，覆盖 normal / dry-run / force / atomic / tags / mirror 的 fail-closed 形态）**、**GitHub live push（`push --dry-run` / `push -u` / refspec / `--tags` / delete / `--force` / `--mirror`）**、**`fetch --all`**、**fetch shallow 本地闭环（`clone --depth` + `fetch --deepen`）**、**`pull --rebase`**、**sha256 端到端对象读写（`cli.sha256-object-readback`）** 与 **全局 flag 集中断言（`cli.cross-cutting-flags`）**。仍需后续细化（按风险排序）：`pull --rebase` 真分叉路径、LFS 远端 lock API、更多 pack corpus 的 `index-pack`/`verify-pack` 深度 fixture、以及 `open` 的 JSON 无副作用行为是否足够覆盖真实系统 open。`cli.fetch-depth-local` 已定义本地 Git fixture 的 `clone --depth` 与 `fetch --deepen` 目标断言；若当前实现返回 `LBR-REPO-002 object not found`，应作为 shallow 对象闭包缺陷处理。注意 `push` 当前已有 `--force`/`-f`、`--force-with-lease`、`--force-if-includes`、`--atomic`、`--porcelain`、`--thin`/`--no-thin`、`--tags`、`--mirror`；`fetch` 当前已有 `--all`/`--depth`/`--deepen`/`--prune`/`--tags` 等关键 flags，本矩阵只登记已存在的 flag，避免引用不存在的参数。新增命令到 `src/cli.rs` 时必须同步更新本矩阵并至少添加一个 `cli.<cmd>-smoke` 场景。
 
@@ -891,7 +892,7 @@ runner 进程退出码：`0` = 无 `fail`（`skip`/`env-skip` 不算失败）；
 
 ### BASELINE_GAP-INTEG-001：CLI 场景 runner 基础设施已落地
 
-- 现状：R0-R5 全部切片已落地。`tools/integration-runner/` 提供 list、check-plan（含收敛 gate）、Wave0 preflight、完整隔离执行（env_clear + SAFE_PATH + SSH_AUTH_SOCK + gitfix + gh 带 host-auth 的 ctx.gh + 原始 secret 泄漏前置检查 + 报告 §5 契约）、38/38 场景的 Rust typed 实现（含 Wave 3 的 run-live + GhRepoCleanupGuard + delete_repo scope 预检）。`run --waves 0,1,2` 与 `run-live --only live.github-create-push-clone-fetch` 均可产出完整可归档报告。check-plan 强制 yaml/MD/矩阵/registry 一致 + 短形式收敛。
+- 现状：R0-R5 全部切片已落地。`tools/integration-runner/` 提供 list、check-plan（含收敛 gate）、Wave0 preflight、完整隔离执行（env_clear + SAFE_PATH + SSH_AUTH_SOCK + gitfix + gh 带 host-auth 的 ctx.gh + 原始 secret 泄漏前置检查 + 报告 §5 契约）、41/41 场景的 Rust typed 实现（含 Wave 3 的 run-live + GhRepoCleanupGuard + delete_repo scope 预检）。`run --waves 0,1,2` 与 `run-live --only live.github-create-push-clone-fetch` 均可产出完整可归档报告。check-plan 强制 yaml/MD/矩阵/registry 一致 + 短形式收敛。
 - 需要补充：可选的 plan-waves（BASELINE_GAP-INTEG-003）、并发执行、key_assertion_categories 更深语义扫描（当前结构 gate 已覆盖主要类别）。深水区语义（pull --rebase 真分叉、fetch --depth 真实远端对等、更多 pack corpus、--force-with-lease、warning=9 确定源）仍按 GAP-005/009 跟踪，不属于 runner 基础设施。
 - 约束：runner 始终黑盒驱动 `target/debug/libra`（或 --binary）；不得注册到根 Cargo / tests/INDEX；写盘先过 §3.6 脱敏；任何变更必须使 check-plan + 对应 run/run-live 全绿。
 
@@ -921,7 +922,7 @@ runner 进程退出码：`0` = 无 `fail`（`skip`/`env-skip` 不算失败）；
 
 ### BASELINE_GAP-INTEG-008：集成计划一致性检查已落地基础版
 
-- 现状：兼容矩阵与 Code UI docs 在 `tests/compat/matrix_alignment.rs`。`check-plan` 加载 yaml，扫描 `docs/development/integration-scenarios/<id>.md`，交叉验证 §2.3 矩阵与 `scenario_registry()`（当前 38/38 已实现）。CI 在 compat-offline-core 显式运行 `check-plan` 以及 `run --waves 0,1,2`（默认黑盒执行门）。**断言强化模式校验已落地基础版**：`check-plan` 现在对每个已实现场景启发式校验其 source-verifiable `key_assertion_categories`（JSON envelope / fsck / negative LBR- / conflict / gitfix_isolation / gh_lifecycle / cleanup_guard / file_exists）是否在 `scenarios/<id>.rs` 留有断言信号（落实 §8.4 第 9、11 项的 fn 级证据），缺失即失败。
+- 现状：兼容矩阵与 Code UI docs 在 `tests/compat/matrix_alignment.rs`。`check-plan` 加载 yaml，扫描 `docs/development/integration-scenarios/<id>.md`，交叉验证 §2.3 矩阵与 `scenario_registry()`（当前 41/41 已实现）。CI 在 compat-offline-core 显式运行 `check-plan` 以及 `run --waves 0,1,2`（默认黑盒执行门）。**断言强化模式校验已落地基础版**：`check-plan` 现在对每个已实现场景启发式校验其 source-verifiable `key_assertion_categories`（JSON envelope / fsck / negative LBR- / conflict / gitfix_isolation / gh_lifecycle / cleanup_guard / file_exists）是否在 `scenarios/<id>.rs` 留有断言信号（落实 §8.4 第 9、11 项的 fn 级证据），缺失即失败。
 - 需要补充：quarantine / exit-code 细节检查，以及 advisory 类别（global_db_isolation / vault_isolation / intentional_difference）的更深语义校验。计划未来 CI 显式运行 check-plan 作为兼容门之一。
 - 约束：不得为此新建 `scripts/` 目录，不得把该检查加入根 `Cargo.toml` 或 `tests/INDEX.md`。新增场景必须同时编辑 yaml + MD（短形式）+ runner `scenario_registry()` 数组，否则 `check-plan` 会失败或 run 会 skip。Agent 任务必须把 yaml 当 list of record。
 

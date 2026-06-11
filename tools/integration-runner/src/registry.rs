@@ -84,6 +84,7 @@ pub(crate) fn scenario_registry() -> &'static [(&'static str, ScenarioFn)] {
         ("cli.reflog-symbolic-ref", scenario_reflog_symbolic_ref),
         ("cli.open-smoke", scenario_open_smoke),
         ("cli.cross-cutting-flags", scenario_cross_cutting_flags),
+        ("cli.notes-smoke", scenario_notes_smoke),
         ("cli.object-readback", scenario_object_readback),
         ("cli.ls-tree-smoke", scenario_ls_tree_smoke),
         (

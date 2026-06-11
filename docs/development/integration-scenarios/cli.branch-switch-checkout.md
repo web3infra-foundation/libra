@@ -1,6 +1,6 @@
 ### `cli.branch-switch-checkout`
 
-目的：覆盖 `branch`、`switch`、`checkout` 的分支创建、切换、`switch -C`、`switch -f`、`switch --orphan`、远端分支 guess、detached HEAD、兼容 alias、分支重命名/删除和路径恢复行为。
+目的：覆盖 `branch`、`switch`、`checkout` 的分支创建、切换、`switch -C`、`switch -f`、`switch --orphan`、远端分支 guess（默认 / `--guess` / `--no-guess`）、`branch -r`/`-a` 远端列出、detached HEAD（`switch --detach` 与 `checkout --detach`）、兼容 alias、分支重命名/删除和路径恢复行为。
 
 最小步骤：
 
@@ -53,16 +53,23 @@ libra switch --orphan orphan-root
 test ! -e tracked.txt
 libra switch main
 
-# Remote guessing uses a local remote fixture in the runner.
+# Remote guessing uses a local remote fixture in the runner
+# (the fixture carries two remote-only branches: guessed / guessed-two).
 libra remote add origin "$RUN_ROOT/repos/cli.branch-switch-checkout/guess-remote"
 libra fetch origin
+libra branch -r
+libra branch -a
 libra switch guessed
+libra branch --show-current
+libra switch main
+! libra switch --no-guess guessed-two
+libra switch --guess guessed-two
 libra branch --show-current
 libra switch main
 
 BASE_COMMIT="$(libra rev-parse HEAD)"
 libra switch --detach "$BASE_COMMIT"
-libra rev-parse --abbrev-ref HEAD
+! libra symbolic-ref HEAD
 libra switch main
 
 libra branch -m feature/from-main feature/renamed
@@ -89,7 +96,7 @@ cd "$RUN_DIR/branch-repo"
 ! libra branch -d no-such-branch
 ```
 
-断言：`branch --show-current` 输出当前分支；从 HEAD 和指定 base 创建分支成功；`switch` / `checkout` 都能切换到已存在分支；`switch -C` 能创建或重置目标分支；`switch -f` 能丢弃 tracked dirty 内容但恢复到目标分支内容；`switch --orphan` 进入 unborn branch、`rev-parse HEAD` 失败且原 tracked 文件从 index/worktree 移除；本地 remote fetch 后 `switch guessed` 能通过唯一 remote-tracking ref 自动创建 tracking 分支；`checkout -b` 与 `switch -c` 都能创建并切换分支；detached HEAD 下 `rev-parse --abbrev-ref HEAD` 输出 detached 语义或 `HEAD`；`branch -m` 后旧名消失、新名可列出；安全删除已合并分支成功，强制删除未合并分支成功；`checkout -- <path>` 能恢复工作区文件；非法分支名、缺失分支或缺失删除目标必须非 0 退出并保留现有分支状态。
+断言：`branch --show-current` 输出当前分支；从 HEAD 和指定 base 创建分支成功；`switch` / `checkout` 都能切换到已存在分支；`switch -C` 能创建或重置目标分支；`switch -f` 能丢弃 tracked dirty 内容但恢复到目标分支内容；`switch --orphan` 进入 unborn branch、`rev-parse HEAD` 失败且原 tracked 文件从 index/worktree 移除；本地 remote fetch 后 `branch -r` 列出 `origin/<branch>`、`branch -a` 同时列出本地与远端分支；`switch guessed` 能通过唯一 remote-tracking ref 自动创建 tracking 分支；`switch --no-guess <remote-only>` 必须以 branch-not-found 非 0 退出；`switch --guess <remote-only>` 显式创建 tracking 分支；`checkout -b` 与 `switch -c` 都能创建并切换分支；`switch --detach <commit>` 后 `symbolic-ref HEAD` 必须失败（HEAD is not a symbolic ref）；`branch -m` 后旧名消失、新名可通过 `branch --list` 列出且 `--json branch --list` 含 branches 数组；安全删除已合并分支成功且列表不再包含该分支，强制删除未合并分支成功；`checkout -- <path>` 能恢复工作区文件；非法分支名、缺失分支或缺失删除目标必须非 0 退出并保留现有分支状态。
 
 补充可执行断言：
 - 关键分支操作后 `libra --json branch --list` 解析验证新分支出现。

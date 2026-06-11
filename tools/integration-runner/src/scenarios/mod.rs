@@ -27,6 +27,7 @@ mod live_github_create_push_clone_fetch;
 mod ls_tree_smoke;
 mod merge_conflict_continue;
 mod merge_rebase_cherry_revert_smoke;
+mod notes_smoke;
 mod object_readback;
 mod open_smoke;
 mod push_local_file_remote_rejected;
@@ -86,6 +87,7 @@ pub(crate) use live_github_create_push_clone_fetch::scenario_live_github_create_
 pub(crate) use ls_tree_smoke::scenario_ls_tree_smoke;
 pub(crate) use merge_conflict_continue::scenario_merge_conflict_continue;
 pub(crate) use merge_rebase_cherry_revert_smoke::scenario_merge_rebase_cherry_revert_smoke;
+pub(crate) use notes_smoke::scenario_notes_smoke;
 pub(crate) use object_readback::scenario_object_readback;
 pub(crate) use open_smoke::scenario_open_smoke;
 pub(crate) use push_local_file_remote_rejected::scenario_push_local_file_remote_rejected;

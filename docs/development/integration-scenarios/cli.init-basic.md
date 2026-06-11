@@ -18,6 +18,12 @@ cd repo
 libra status
 libra db status
 libra fsck --connectivity-only
+
+# DIRECTORY 位置参数默认值 "."：在目标目录内不带参数执行 init
+mkdir -p "$RUN_DIR/default-dir"
+cd "$RUN_DIR/default-dir"
+libra init
+test -f .libra/libra.db
 ```
 
 负向步骤：
