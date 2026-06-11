@@ -1,7 +1,0 @@
-[env]
-OPENSSL_DIR = "D:\\OpenSSL-Win64"
-OPENSSL_LIB_DIR = "D:\\OpenSSL-Win64\\lib\\VC\\x64\\MD"
-OPENSSL_INCLUDE_DIR = "D:\\OpenSSL-Win64\\include"
-OPENSSL_NO_VENDOR = "1"
-LIBCLANG_PATH = "D:\\LLVM\\bin"
-CLANG_PATH = "D:\\LLVM\\bin\\clang.exe"
