@@ -104,6 +104,8 @@ pub enum RestoreError {
     PathspecFileRead { path: String, detail: String },
     #[error("pathspec input from {0} exceeds the 128 MiB limit")]
     PathspecFileTooLarge(String),
+    #[error("restore -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope.")]
+    PatchUiDeclined,
 }
 
 /// Human label for a conflict stage used by [`RestoreError::MissingStageVersion`].
@@ -135,6 +137,7 @@ impl RestoreError {
             Self::MergeFileTooLarge(_) => StableErrorCode::ConflictUnresolved,
             Self::PathspecFileRead { .. } => StableErrorCode::IoReadFailed,
             Self::PathspecFileTooLarge(_) => StableErrorCode::CliInvalidArguments,
+            Self::PatchUiDeclined => StableErrorCode::Unsupported,
         }
     }
 }
@@ -193,6 +196,11 @@ impl From<RestoreError> for CliError {
             RestoreError::PathspecFileTooLarge(_) => CliError::command_usage(message)
                 .with_stable_code(stable_code)
                 .with_hint("split the pathspec input into smaller batches"),
+            RestoreError::PatchUiDeclined => CliError::command_usage(message)
+                .with_stable_code(stable_code)
+                .with_hint(
+                    "stage or restore whole files; see docs/improvement/compatibility/declined.md for details",
+                ),
             _ => CliError::fatal(message).with_stable_code(stable_code),
         }
     }
@@ -300,6 +308,10 @@ pub struct RestoreArgs {
     /// newline-separated. No-op without `--pathspec-from-file`.
     #[clap(long = "pathspec-file-nul")]
     pub pathspec_file_nul: bool,
+
+    /// (declined) Interactive patch-selection UI — not supported in Libra.
+    #[clap(short = 'p', long = "patch")]
+    pub patch: bool,
 }
 
 pub async fn execute(args: RestoreArgs) {
@@ -335,6 +347,11 @@ pub(crate) async fn execute_to_output(args: RestoreArgs) -> CliResult<RestoreOut
 // ── Core execution ───────────────────────────────────────────────────
 
 async fn run_restore(args: RestoreArgs) -> Result<RestoreOutput, RestoreError> {
+    // Reject -p/--patch early before any state changes
+    if args.patch {
+        return Err(RestoreError::PatchUiDeclined);
+    }
+
     let effective_pathspecs = resolve_effective_pathspecs(&args)?;
     let staged = args.staged;
     let mut worktree = args.worktree;

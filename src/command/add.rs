@@ -153,6 +153,12 @@ pub struct AddArgs {
     /// model it yet.
     #[clap(short = 'N', long = "intent-to-add")]
     pub intent_to_add: bool,
+
+    /// (declined) Interactive patch-selection UI — not supported in Libra.
+    /// Use `libra add <path>` to stage whole files, or the `libra code` TUI
+    /// for interactive selection.
+    #[clap(short = 'p', long = "patch")]
+    pub patch: bool,
 }
 
 /// Domain error for `libra add`.
@@ -212,6 +218,10 @@ pub enum AddError {
     /// `git-internal` cannot model an intent-to-add entry, so it is declined.
     #[error("intent-to-add (-N/--intent-to-add) is not supported")]
     IntentToAddDeclined,
+    /// `-p` / `--patch` was requested. Interactive patch-selection UI is a
+    /// non-goal in Libra; declined per docs/improvement/compatibility/declined.md.
+    #[error("add -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope.")]
+    PatchUiDeclined,
     /// `--chmod` was given a value other than `+x` / `-x`.
     #[error("invalid --chmod value '{spec}' (expected '+x' or '-x')")]
     InvalidChmod { spec: String },
@@ -284,6 +294,11 @@ impl From<AddError> for CliError {
                 .with_stable_code(StableErrorCode::CliInvalidTarget)
                 .with_hint(
                     "intent-to-add needs extended index capabilities, currently unsupported",
+                ),
+            AddError::PatchUiDeclined => CliError::command_usage(error.to_string())
+                .with_stable_code(StableErrorCode::Unsupported)
+                .with_hint(
+                    "use 'libra add <path>' to stage whole files; see docs/improvement/compatibility/declined.md for details",
                 ),
             AddError::InvalidChmod { .. } => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::CliInvalidTarget)
@@ -529,6 +544,9 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
     }
     if args.intent_to_add {
         return Err(AddError::IntentToAddDeclined.into());
+    }
+    if args.patch {
+        return Err(AddError::PatchUiDeclined.into());
     }
     if args.ignore_missing && !args.dry_run {
         return Err(

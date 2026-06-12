@@ -766,6 +766,7 @@ async fn reset_hard(target: &str, output: &OutputConfig) -> Result<(), RevertErr
             pathspec_from_file: None,
             pathspec_file_nul: false,
             no_refresh: false,
+            patch: false,
         },
         &child,
     )

@@ -188,6 +188,10 @@ pub struct CommitArgs {
     /// Show a unified diff of the staged changes in the commit message editor
     #[arg(short = 'v', long)]
     pub verbose: bool,
+
+    /// (declined) Interactive patch-selection UI — not supported in Libra.
+    #[clap(short = 'p', long = "patch")]
+    pub patch: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +275,9 @@ pub enum CommitError {
         "the --fixup={prefix}:<commit> form is not supported; use a bare commit-ish (e.g. --fixup=<commit>)"
     )]
     UnsupportedAutosquashPrefix { prefix: String },
+
+    #[error("commit -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope.")]
+    PatchUiDeclined,
 }
 
 impl From<CommitError> for CliError {
@@ -352,6 +359,11 @@ impl From<CommitError> for CliError {
                     .with_stable_code(StableErrorCode::CliInvalidArguments)
                     .with_hint("the amend:/reword: autosquash forms are not supported yet")
             }
+            CommitError::PatchUiDeclined => CliError::command_usage(error.to_string())
+                .with_stable_code(StableErrorCode::Unsupported)
+                .with_hint(
+                    "stage changes with 'libra add', then commit them; see docs/improvement/compatibility/declined.md for details",
+                ),
         }
     }
 }
@@ -1049,6 +1061,11 @@ pub async fn run_commit(
     args: CommitArgs,
     output: &OutputConfig,
 ) -> Result<CommitResult, CommitError> {
+    // Reject -p/--patch early before any state changes
+    if args.patch {
+        return Err(CommitError::PatchUiDeclined);
+    }
+
     // `--dry-run` previews the would-commit set and returns before writing any
     // object/index/reflog state (no auto-stage, no tree, no commit object).
     if args.dry_run {

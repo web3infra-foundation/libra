@@ -1047,6 +1047,12 @@ fn map_checkout_error(source: RestoreError) -> CliError {
             CliError::fatal("internal error: clone checkout attempted to read pathspecs from a file")
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
         }
+        // `clone` never uses `--patch`, so this is unreachable. Surface a fatal
+        // diagnostic to keep the match exhaustive.
+        RestoreError::PatchUiDeclined => CliError::fatal(
+            "internal error: clone checkout attempted to use interactive patch UI",
+        )
+        .with_stable_code(StableErrorCode::RepoStateInvalid),
     }
 }
 

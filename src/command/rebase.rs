@@ -836,6 +836,10 @@ pub struct RebaseArgs {
         ]
     )]
     pub skip: bool,
+
+    /// (declined) Interactive rebase todo-editor workflow — not supported in Libra.
+    #[clap(short = 'i', long = "interactive")]
+    pub interactive: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -958,6 +962,8 @@ pub(crate) enum RebaseError {
     StateSave(String),
     #[error("failed to finalize rebase: {0}")]
     Finalize(String),
+    #[error("rebase -i/--interactive is not supported in Libra: interactive rebase todo-editor workflow is out of scope.")]
+    InteractiveDeclined,
 }
 
 impl From<RebaseError> for CliError {
@@ -1069,6 +1075,11 @@ impl From<RebaseError> for CliError {
             RebaseError::IndexLoad(..) => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
             }
+            RebaseError::InteractiveDeclined => CliError::command_usage(error.to_string())
+                .with_stable_code(StableErrorCode::Unsupported)
+                .with_hint(
+                    "use 'libra rebase <upstream>' for non-interactive linear rebase; see docs/improvement/compatibility/declined.md for details",
+                ),
         }
     }
 }
@@ -1093,6 +1104,11 @@ pub async fn execute(args: RebaseArgs) {
 /// Safe CLI entry point with preflight validation for argument and state errors.
 pub async fn execute_safe(args: RebaseArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
+
+    // Reject -i/--interactive early before any state changes
+    if args.interactive {
+        return Err(RebaseError::InteractiveDeclined.into());
+    }
 
     // Refuse to start a NEW rebase while a cherry-pick sequence is in progress
     // (rebase's own --continue/--abort/--skip operate on rebase state, not

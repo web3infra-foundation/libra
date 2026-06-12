@@ -567,6 +567,7 @@ async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
             pathspec_from_file: None,
             pathspec_file_nul: false,
             no_refresh: false,
+            patch: false,
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -882,6 +883,7 @@ async fn test_reset_soft() {
         pathspec_from_file: None,
         pathspec_file_nul: false,
         no_refresh: false,
+        patch: false,
     })
     .await;
 
@@ -931,6 +933,7 @@ async fn test_reset_mixed() {
         pathspec_from_file: None,
         pathspec_file_nul: false,
         no_refresh: false,
+        patch: false,
     })
     .await;
 
@@ -984,6 +987,7 @@ async fn test_reset_hard() {
         pathspec_from_file: None,
         pathspec_file_nul: false,
         no_refresh: false,
+        patch: false,
     })
     .await;
 
@@ -1097,6 +1101,7 @@ async fn test_reset_mixed_same_target_resets_index_without_moving_head() {
             pathspec_from_file: None,
             pathspec_file_nul: false,
             no_refresh: false,
+            patch: false,
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -1182,6 +1187,7 @@ async fn test_reset_hard_same_target_restores_worktree_and_removes_staged_additi
             pathspec_from_file: None,
             pathspec_file_nul: false,
             no_refresh: false,
+            patch: false,
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -1299,6 +1305,7 @@ async fn test_reset_hard_removes_paths_tracked_only_by_head_tree() {
             pathspec_from_file: None,
             pathspec_file_nul: false,
             no_refresh: false,
+            patch: false,
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -1342,6 +1349,7 @@ async fn test_reset_with_head_reference() {
         pathspec_from_file: None,
         pathspec_file_nul: false,
         no_refresh: false,
+        patch: false,
     })
     .await;
 
@@ -1390,6 +1398,7 @@ async fn test_reset_on_branch() {
                 pathspec_from_file: None,
                 pathspec_file_nul: false,
                 no_refresh: false,
+                patch: false,
             })
             .await;
 
@@ -1476,6 +1485,7 @@ async fn test_reset_hard_skips_ignored_directories() {
         pathspec_from_file: None,
         pathspec_file_nul: false,
         no_refresh: false,
+        patch: false,
     })
     .await;
 

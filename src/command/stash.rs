@@ -102,6 +102,9 @@ enum StashError {
     #[error("failed to reset working directory: {0}")]
     ResetFailed(String),
 
+    #[error("stash -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope.")]
+    PatchUiDeclined,
+
     #[error("{0}")]
     Other(String),
 }
@@ -122,6 +125,7 @@ impl StashError {
             Self::WriteObject(_) => StableErrorCode::IoWriteFailed,
             Self::IndexSave(_) => StableErrorCode::IoWriteFailed,
             Self::ResetFailed(_) => StableErrorCode::IoWriteFailed,
+            Self::PatchUiDeclined => StableErrorCode::Unsupported,
             Self::Other(_) => StableErrorCode::InternalInvariant,
         }
     }
@@ -157,6 +161,11 @@ impl From<StashError> for CliError {
             StashError::ClearRequiresForce => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("re-run with --force, or use --json / --machine for scripted use"),
+            StashError::PatchUiDeclined => CliError::command_usage(message)
+                .with_stable_code(stable_code)
+                .with_hint(
+                    "stage or stash whole files; see docs/improvement/compatibility/declined.md for details",
+                ),
             StashError::Other(_) => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint(format!("this is a bug; please report it at {ISSUE_URL}")),
@@ -301,7 +310,12 @@ async fn run_stash(stash_cmd: Stash, output: &OutputConfig) -> Result<StashOutpu
             include_untracked,
             all,
             keep_index,
+            patch,
         } => {
+            // Reject -p/--patch early before any state changes
+            if patch {
+                return Err(StashError::PatchUiDeclined);
+            }
             run_push(StashPushOptions {
                 message,
                 include_untracked: include_untracked || all,

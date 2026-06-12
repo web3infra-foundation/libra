@@ -476,6 +476,12 @@ pub enum Stash {
             help = "Keep staged changes in the index and working tree"
         )]
         keep_index: bool,
+        #[arg(
+            short = 'p',
+            long = "patch",
+            help = "(declined) Interactive patch-selection UI — not supported in Libra"
+        )]
+        patch: bool,
     },
     #[command(about = "Remove a single stashed state from the stash list")]
     Pop {

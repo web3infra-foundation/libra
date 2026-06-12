@@ -1450,6 +1450,7 @@ async fn test_status_show_stash_with_existing_stash() {
         include_untracked: false,
         all: false,
         keep_index: false,
+        patch: false,
     })
     .await;
 

@@ -95,6 +95,10 @@ pub struct ResetArgs {
     /// so this flag is a no-op.
     #[clap(long)]
     pub no_refresh: bool,
+
+    /// (declined) Interactive patch-selection UI — not supported in Libra.
+    #[clap(short = 'p', long = "patch")]
+    pub patch: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -275,6 +279,9 @@ enum ResetError {
         primary: Box<ResetError>,
         rollback: Box<ResetError>,
     },
+
+    #[error("reset -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope.")]
+    PatchUiDeclined,
 }
 
 impl ResetError {
@@ -306,6 +313,7 @@ impl ResetError {
             Self::LockedCurrentBranch(_) => StableErrorCode::ConflictOperationBlocked,
             Self::ConflictPrevented { .. } => StableErrorCode::ConflictOperationBlocked,
             Self::Rollback { primary, .. } => primary.stable_code(),
+            Self::PatchUiDeclined => StableErrorCode::Unsupported,
         }
     }
 
@@ -362,6 +370,9 @@ impl ResetError {
             | Self::HeadUpdate(_)
             | Self::WorktreeRead(_)
             | Self::WorktreeRestore(_) => None,
+            Self::PatchUiDeclined => Some(
+                "reset whole files with 'libra reset <target> -- <path>', or stage changes with 'libra add'",
+            ),
             Self::Rollback { primary, .. } => primary.hint(),
         }
     }
@@ -373,7 +384,8 @@ impl ResetError {
             | Self::PathspecWithMerge(_)
             | Self::PathspecWithKeep(_)
             | Self::PathspecSourceConflict
-            | Self::PathspecOutsideWorkdir(_) => true,
+            | Self::PathspecOutsideWorkdir(_)
+            | Self::PatchUiDeclined => true,
             Self::Rollback { primary, .. } => primary.is_command_usage(),
             _ => false,
         }
@@ -444,6 +456,11 @@ async fn reject_reset_on_ai_managed_current_branch() -> Result<(), ResetError> {
 
 async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError> {
     util::require_repo().map_err(|_| ResetError::NotInRepo)?;
+
+    // Reject -p/--patch early before any state changes
+    if args.patch {
+        return Err(ResetError::PatchUiDeclined);
+    }
 
     // Refuse to reset onto a Libra-managed locked branch. `is_locked_revision`
     // strips `~` / `^` / `@` suffixes so attempts like `agent-traces~1` or

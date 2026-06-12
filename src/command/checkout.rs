@@ -93,6 +93,10 @@ pub struct CheckoutArgs {
     /// Paths to restore after an explicit `--` separator
     #[clap(last = true, value_name = "pathspec")]
     pathspec: Vec<String>,
+
+    /// (declined) Interactive patch-selection UI — not supported in Libra.
+    #[clap(short = 'p', long = "patch")]
+    patch: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -186,6 +190,9 @@ enum CheckoutError {
         #[source]
         source: Box<CliError>,
     },
+
+    #[error("checkout -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope.")]
+    PatchUiDeclined,
 
     #[error(transparent)]
     DelegatedCli(#[from] CliError),
@@ -292,6 +299,11 @@ impl From<CheckoutError> for CliError {
                 };
                 wrapped.with_stable_code(stable_code)
             }
+            CheckoutError::PatchUiDeclined => CliError::command_usage("checkout -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope.")
+                .with_stable_code(StableErrorCode::Unsupported)
+                .with_hint(
+                    "check out whole branches or restore whole files; see docs/improvement/compatibility/declined.md for details",
+                ),
             CheckoutError::DelegatedCli(err) => err,
         }
     }
@@ -325,6 +337,11 @@ async fn run_checkout(
     args: CheckoutArgs,
     output: &OutputConfig,
 ) -> Result<CheckoutOutput, CheckoutError> {
+    // Reject -p/--patch early before any state changes
+    if args.patch {
+        return Err(CheckoutError::PatchUiDeclined);
+    }
+
     // `--ours`/`--theirs` operate on conflicted paths only; without a pathspec
     // after `--` they are a usage error (mirrors Git's "no paths given").
     if (args.ours || args.theirs) && args.pathspec.is_empty() {
