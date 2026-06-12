@@ -167,15 +167,26 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     let indexed = ctx.command(&["ls-files"], repo.clone(), true)?;
     assert_stdout_contains(&indexed, "README.md")?;
     assert_stdout_contains(&indexed, "docs/guide.md")?;
+    let cached = ctx.command(&["ls-files", "--cached"], repo.clone(), true)?;
+    assert_stdout_contains(&cached, "README.md")?;
+    assert_stdout_contains(&cached, "src/main.rs")?;
     let staged = ctx.command(&["ls-files", "--stage"], repo.clone(), true)?;
     assert_stdout_contains(&staged, "README.md")?;
     assert_stdout_contains(&staged, " 0\tREADME.md")?;
     fs::write(repo.join("README.md"), "object root changed\n").context("modify README fixture")?;
     let modified = ctx.command(&["ls-files", "--modified"], repo.clone(), true)?;
     assert_stdout_contains(&modified, "README.md")?;
+    fs::remove_file(repo.join("src/main.rs")).context("delete indexed src fixture")?;
+    let deleted = ctx.command(&["ls-files", "--deleted"], repo.clone(), true)?;
+    assert_stdout_contains(&deleted, "src/main.rs")?;
     fs::write(repo.join("untracked.txt"), "untracked\n").context("write untracked fixture")?;
+    fs::write(repo.join("ignored.tmp"), "ignored\n").context("write ignored fixture")?;
+    fs::write(repo.join(".libraignore"), "ignored.tmp\n").context("write ignore fixture")?;
+    let all_others = ctx.command(&["ls-files", "--others"], repo.clone(), true)?;
+    assert_stdout_contains(&all_others, "ignored.tmp")?;
     let others = ctx.command(&["ls-files", "--others", "--exclude-standard"], repo.clone(), true)?;
     assert_stdout_contains(&others, "untracked.txt")?;
+    assert_not_contains(&others, "ignored.tmp")?;
     assert_json_ok(
         &ctx.command(&["--json", "ls-files", "--modified"], repo.clone(), true)?,
         "ls-files",
@@ -334,6 +345,9 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     ctx.command(&["tag", "-m", "object tag", "v-object"], repo.clone(), true)?;
     let tag_refs = ctx.command(&["for-each-ref", "--tags"], repo.clone(), true)?;
     assert_stdout_contains(&tag_refs, "refs/tags/v-object")?;
+    let all_refs = ctx.command(&["for-each-ref", "--all"], repo.clone(), true)?;
+    assert_stdout_contains(&all_refs, "refs/heads/main")?;
+    assert_stdout_contains(&all_refs, "refs/tags/v-object")?;
     let dereferenced_tag = ctx.command(
         &["show-ref", "--dereference", "--tags", "v-object"],
         repo.clone(),
@@ -353,6 +367,18 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     )?;
     assert_stdout_contains(&verified_dereferenced_tag, "refs/tags/v-object^{}")?;
     ctx.command(&["branch", "main-2"], repo.clone(), true)?;
+    let counted_refs = ctx.command(
+        &["for-each-ref", "--heads", "--sort=-refname", "--count=1"],
+        repo.clone(),
+        true,
+    )?;
+    let counted_stdout = stdout_trim(&counted_refs);
+    if !counted_stdout.contains("refs/heads/main-2") || counted_stdout.contains("refs/heads/main\n") {
+        bail!("for-each-ref --sort=-refname --count=1 returned {counted_stdout:?}");
+    }
+    let pattern_refs = ctx.command(&["for-each-ref", "main-2"], repo.clone(), true)?;
+    assert_stdout_contains(&pattern_refs, "refs/heads/main-2")?;
+    assert_not_contains(&pattern_refs, "refs/heads/main\n")?;
     let main_pattern = ctx.command(&["show-ref", "--heads", "main"], repo.clone(), true)?;
     assert_stdout_contains(&main_pattern, "refs/heads/main")?;
     assert_not_contains(&main_pattern, "refs/heads/main-2")?;
