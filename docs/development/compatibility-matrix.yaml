@@ -342,27 +342,31 @@ entries:
     priority: P0
     phase: 0
     status: done
-    declined_ref: null
+    declined_ref: ""
     risk: low
     compat_contract: intentional-difference
     source_of_truth: [libra-test, compat-docs]
     owner_scenario: cli.clean-rm-mv-lfs-basic
-    tests: tests/compat/P0_intentional_differences.rs::test_clean_interactive_libra_native
-    test_evidence: tests/compat/P0_intentional_differences.rs::test_clean_interactive_libra_native
-    verification_command: cargo test --test P0_intentional_differences test_clean_interactive_libra_native
+    tests: tests/compat/clean_intentional_diff.rs::*
+    test_evidence: tests/compat/clean_intentional_diff.rs::clean_interactive_not_marked_supported + clean_interactive_rejects_dry_run + clean_interactive_rejects_json
+    verification_command: cargo test --test compat_clean_intentional_diff
     last_verified: "2026-06-12"
-    status_source: manual-bootstrap
+    status_source: generated
     expected_failure_handling: not-applicable
     host_dependencies: none
-    data_flow: Worktree enumeration + user selection loop
-    control_flow: Interactive loop (pattern-based filtering, numbered selection, help) -> deletion
-    risk_controls: Fail-closed on selection errors; no external command execution
-    compliance_note: Libra has native implementation; intentionally not Git-compatible
+    data_flow: CLI parsing + interactive worktree enumeration + user selection
+    control_flow: clap parser -> interactive mode handler -> menu loop -> action dispatch
+    risk_controls: Interactive I/O bounded by error handling; mutual exclusivity enforced at parser level
+    compliance_note: Libra has intentional native implementation; not Git-compatible by design
     notes: |
-      Git's `clean -i` is an interactive prompt in the Git CLI itself.
-      Libra implements a native interactive selection loop with pattern/number-based filtering
-      and help menu. Mutually exclusive with -n (no-op mode) and --json (structured output).
-      User can choose to delete/filter by pattern/select by number/ask each/quit/help.
+      Git's `clean -i` is an interactive regex-filter prompt in the Git CLI.
+      Libra implements a native interactive selection loop with menu-based
+      filtering and numbered/pattern-based selection (clean/filter/select/ask/quit/help).
+
+      Mutually exclusive with -n (dry-run) and --json (structured output) per LBR-CLI-002.
+      This is an intentional design difference; recommended alternative for Git
+      filter semantics: use explicit pathspec with `clean <pattern>`.
+
       See COMPATIBILITY.md clean row for full details.
 
   # ============================================================================

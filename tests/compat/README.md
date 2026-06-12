@@ -34,6 +34,7 @@ top-level `[[test]]` entries in `Cargo.toml`.
 | `checkout_alias_help.rs` | C5 | top-level `--help` includes `checkout`; the help banner mentions `switch` / `restore` |
 | `matrix_alignment.rs` | C2 / Web Phase E | `COMPATIBILITY.md` ↔ `src/cli.rs::Commands` enum drift detection; `local-tui-control.md` docs script coverage for every `/api/code/*` router endpoint; Web CI checks `web/out` drift after static export |
 | `parameter_matrix_alignment.rs` | PRE-2 (Phase 0 guard) | validates `docs/development/compatibility-matrix.yaml` schema and cross-references: 16 requirements (a–p) cover command existence, enum validity, test evidence, declined-ref resolution, scenario mapping, dates, risk controls, phase constraints |
+| `clean_intentional_diff.rs` | Phase 0 / Intentional-Diff | `libra clean -i` provides Libra-native interactive selection menu (not Git's filter-by-pattern model); validates mutual exclusivity with `-n` and `--json` (LBR-CLI-002); ensures COMPATIBILITY.md documents intentional difference and matrix marks status=done |
 | `live_compat_workflow.rs` | C2 | optional `compat-live-ai` / `compat-live-cloud` workflow stays manual/scheduled, secret-gated, and outside `base.yml` |
 | `branch_lossy_wrapper_guard.rs` | branch follow-up | `src/` production code must use branch `*_result` APIs instead of lossy compatibility wrappers |
 | `lfs_client_production_unwrap_guard.rs` | unwrap audit (v0.17.260) | `src/internal/protocol/lfs_client.rs` must not regress on bare `.unwrap()` |

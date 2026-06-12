@@ -193,6 +193,10 @@ name = "compat_parameter_matrix_alignment"
 path = "tests/compat/parameter_matrix_alignment.rs"
 
 [[test]]
+name = "compat_clean_intentional_diff"
+path = "tests/compat/clean_intentional_diff.rs"
+
+[[test]]
 name = "compat_live_compat_workflow"
 path = "tests/compat/live_compat_workflow.rs"
 
