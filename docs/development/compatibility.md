@@ -58,8 +58,8 @@
 
 | 项 | 值 |
 |----|----|
-| 状态 | 规划中 — 前置条件 PRE-1～PRE-5 完成前，不得进入批量实现；只允许做事实核对、矩阵建模、拒绝项登记、守护测试建设和状态视图生成 |
-| 最后核对代码现状日期 | 2026-06-12（工具复核：compat guard 23 个、declined D1–D10、39 个集成场景、`compatibility-matrix.yaml` 仍未建、`StableErrorCode`/`LBR-UNSUPPORTED-001`、`cherry_pick_state`/`revert_sequence` 迁移、`.libra_attributes` 仅承载 LFS，均与本文一致） |
+| 状态 | 规划中 — 前置条件 PRE-1、PRE-2、PRE-3 待完成；PRE-4 和 PRE-5 已完成；进入批量实现前仍需全部 PRE 前置条件完成 |
+| 最后核对代码现状日期 | 2026-06-12（工具复核：compat guard 23 个、declined D1–D16、39 个集成场景、`compatibility-matrix.yaml` 已建、`StableErrorCode`/`LBR-UNSUPPORTED-001`、`cherry_pick_state`/`revert_sequence` 迁移、`.libra_attributes` 仅承载 LFS，均与本文一致；PRE-4 完成：D15、D16 拒绝项已补充；PRE-5 完成：状态视图生成工具已建） |
 | Grit 参考版本 | **可选补充**（见 PRE-1 修订；主要参考为公开的 upstream Git 文档与 git.git `t/` 测试套件；Grit 如可用则作为额外测试思路来源，但不作为前置阻塞项）。已核对实体：`/run/media/eli/data/gitbutler/grit` @ `166c45534319cb280e7a026336a8a06c53cea30f`（2026-06-12 复核，workspace `0.3.99`，169 个 `grit/src/commands/*.rs`，1,605 个 per-test TOML，46,364 个 `tests_total`，42,295 个 `passed_last`，1,303 个文件全绿，98 个 `expect_failure`，约 91.2% 通过） |
 | 参数矩阵（规范来源） | 待建：`docs/development/compatibility-matrix.yaml`（见 PRE-2；建成前以 `COMPATIBILITY.md`、`src/cli.rs`、`docs/development/integration-scenarios/_parameter-tables.md` 和本文种子清单联合核对；不得把本文占位摘要当作完整规范） |
 
