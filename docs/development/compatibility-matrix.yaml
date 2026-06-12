@@ -366,26 +366,501 @@ entries:
       See COMPATIBILITY.md clean row for full details.
 
   # ============================================================================
-  # SEED ENTRIES (To be populated during Phase 0 via integration-scenarios.yaml)
+  # Phase 1-5 SEED ENTRIES (from docs/development/compatibility.md §seed matrix)
   # ============================================================================
-  # The following categories represent seed data structures that will be filled
-  # during Phase 0 as the matrix is bootstrapped from command docs and integration scenarios.
-  # Each placeholder will be replaced with actual entries, grouped by:
-  #   - Working tree (status, add, restore, checkout, reset, clean, rm, mv)
-  #   - Commit (commit, message editing, fixup, autosquash)
-  #   - History/Diff (log, show, diff, grep, blame, shortlog, describe)
-  #   - Branch/Ref (branch, tag, show-ref, for-each-ref, update-ref, symbolic-ref)
-  #   - Sequencer (merge, rebase, cherry-pick, revert, bisect)
-  #   - Remote (clone, fetch, pull, push, remote, ls-remote)
-  #   - Object/Plumbing (cat-file, hash-object, ls-files, ls-tree, update-index, etc.)
+  # The following entries are seed data extracted from compatibility.md parameter
+  # tables (§576+). All Phase 1-5 entries have status=planned; test_evidence=TBD
+  # unless noted otherwise. These will be refined during their respective phase.
 
-  # Placeholders for P1+ entries (will be filled in Phase 0 during matrix bootstrap):
-  # - status: owner_scenario mapping, repo_state flags, pathspec filtering
-  # - add: pathspec-from-file, force modes, intent-to-add handling
-  # - log: --all, --branches, --tags, -L, pretty format long-tail
-  # - branch: --sort, --format, custom atoms
-  # - rebase: --autosquash completion, --empty handling, state transitions
-  # - etc.
+  # --- Phase 1: Working tree & Commit ---
+
+  - command: status
+    flag: --pathspec
+    action: enhance
+    priority: P1
+    phase: 1
+    status: planned
+    declined_ref: ""
+    risk: medium
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: TBD
+    test_evidence: TBD
+    verification_command: TBD
+    last_verified: ""
+    status_source: manual-bootstrap
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Pathspec matching against worktree files
+    control_flow: status command -> pathspec filter -> file enumeration
+    risk_controls: Path validation to prevent worktree escape
+    compliance_note: Enhances existing status filtering capability
+    notes: |
+      COMPATIBILITY.md: "pathspec filtering" is deferred.
+      Adds ability to filter status output by path patterns.
+
+  - command: status
+    flag: cherry-pick in-progress indicator
+    action: enhance
+    priority: P1
+    phase: 1
+    status: planned
+    declined_ref: ""
+    risk: medium
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs]
+    owner_scenario: ""
+    tests: TBD
+    test_evidence: TBD
+    verification_command: TBD
+    last_verified: ""
+    status_source: manual-bootstrap
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: SQLite cherry_pick_state query
+    control_flow: status query -> sequencer state check -> output repo_state
+    risk_controls: Status view generated from SQLite transactional state
+    compliance_note: Requires cherry_pick_state migration in place
+    notes: |
+      SQLite cherry_pick_state table exists but visibility in status output needs implementation.
+      Should display similar to merge/rebase in-progress hints.
+
+  - command: add
+    flag: --pathspec-from-file
+    action: enhance
+    priority: P1
+    phase: 1
+    status: planned
+    declined_ref: ""
+    risk: medium
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: TBD
+    test_evidence: TBD
+    verification_command: TBD
+    last_verified: ""
+    status_source: manual-bootstrap
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Pathspec file reading (128 MiB cap)
+    control_flow: flag parsing -> file read -> pathspec parsing -> add processing
+    risk_controls: File size limit; no C-quoting decoding (intentional)
+    compliance_note: Partial implementation; no quoted-path decoding
+    notes: |
+      COMPATIBILITY.md: "--pathspec-from-file / --pathspec-file-nul partial".
+      Enhancement focuses on correctness and boundary documentation.
+
+  - command: clean
+    flag: <pathspec> positional
+    action: reject
+    priority: P1
+    phase: 1
+    status: planned
+    declined_ref: D-clean-pathspec
+    risk: low
+    compat_contract: explicitly-rejected
+    source_of_truth: [compatibility-docs]
+    owner_scenario: ""
+    tests: TBD
+    test_evidence: TBD
+    verification_command: TBD
+    last_verified: ""
+    status_source: manual-bootstrap
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: CLI parsing only
+    control_flow: clap parser -> error handler -> LBR-CLI-002 exit
+    risk_controls: Early parser rejection
+    compliance_note: Libra intentional non-goal
+    notes: |
+      COMPATIBILITY.md: "positional `<pathspec>...` filter is **not supported** (declined)".
+      Deferred; requires separate planning if adopted.
+
+  - command: commit
+    flag: --allow-empty-message
+    action: reject
+    priority: P1
+    phase: 1
+    status: planned
+    declined_ref: D-empty-message
+    risk: low
+    compat_contract: explicitly-rejected
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: TBD
+    test_evidence: TBD
+    verification_command: TBD
+    last_verified: ""
+    status_source: manual-bootstrap
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: CLI parsing
+    control_flow: flag validation -> early rejection
+    risk_controls: Parser-level rejection
+    compliance_note: Libra requires meaningful commit messages
+    notes: |
+      COMPATIBILITY.md: "--allow-empty-message" deferred/unsupported.
+      Policy: commits must have human-readable messages.
+
+  # --- Phase 2: History/Diff ---
+
+  - command: log
+    flag: --all
+    action: enhance
+    priority: P1
+    phase: 2
+    status: planned
+    declined_ref: ""
+    risk: medium
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: TBD
+    test_evidence: TBD
+    verification_command: TBD
+    last_verified: ""
+    status_source: manual-bootstrap
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Multi-ref history walk
+    control_flow: log collector -> all-refs lookup -> history walk
+    risk_controls: Walk bounded by reasonable history limits
+    performance_note: Large histories may require pagination or streaming output
+    compliance_note: Complements existing single-ref and range modes
+    notes: |
+      COMPATIBILITY.md: "multi-root, --all/--branches/--tags" deferred.
+      Enhancement extends to show all branches in single output.
+
+  - command: log
+    flag: --all / --branches / --tags
+    action: enhance
+    priority: P1
+    phase: 2
+    status: planned
+    declined_ref: ""
+    risk: medium
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: TBD
+    test_evidence: TBD
+    verification_command: TBD
+    last_verified: ""
+    status_source: manual-bootstrap
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Ref-set enumeration + history walk
+    control_flow: flag resolution -> ref lookup -> walk
+    risk_controls: Bounded multi-root walk
+    performance_note: Requires optimization for repos with many refs
+    compliance_note: Extends filtering to multiple root revisions
+    notes: |
+      Three-way enhancement allowing explicit branch/tag set selection.
+      Differs from --all in precision and use-case clarity.
+
+  - command: diff
+    flag: --cc / --combined
+    action: enhance
+    priority: P2
+    phase: 2
+    status: planned
+    declined_ref: ""
+    risk: medium
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: TBD
+    test_evidence: TBD
+    verification_command: TBD
+    last_verified: ""
+    status_source: manual-bootstrap
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Multi-parent diff computation
+    control_flow: merge commit detection -> combined diff engine
+    risk_controls: Output bounded by file size limits
+    compliance_note: Requires multi-parent diff infrastructure
+    notes: |
+      COMPATIBILITY.md: "--cc/--combined" deferred.
+      Combined diff format for merge conflicts and octopus merges.
+
+  - command: grep
+    flag: regex dialect / --perl-regexp
+    action: evaluate
+    priority: P2
+    phase: 2
+    status: planned
+    declined_ref: ""
+    risk: medium
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: TBD
+    test_evidence: TBD
+    verification_command: TBD
+    last_verified: ""
+    status_source: manual-bootstrap
+    expected_failure_handling: not-applicable
+    decision_deadline: "2026-07-12"
+    decision_owner: ""
+    host_dependencies: regex engine (currently Rust built-in)
+    data_flow: Regex compilation + file content matching
+    control_flow: pattern parsing -> compilation -> line search -> output
+    risk_controls: Regex complexity limits; timeout on pathological inputs
+    compliance_note: Current engine differs from Git's ERE/BRE
+    notes: |
+      COMPATIBILITY.md: "-P/--perl-regexp declined" (no backreferences).
+      Decision: evaluate compatibility cost vs. implementation complexity.
+
+  # --- Phase 3: Branch/Ref ---
+
+  - command: branch
+    flag: --sort / --format
+    action: enhance
+    priority: P1
+    phase: 2
+    status: planned
+    declined_ref: ""
+    risk: medium
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: TBD
+    test_evidence: TBD
+    verification_command: TBD
+    last_verified: ""
+    status_source: manual-bootstrap
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Ref metadata query + sort/format
+    control_flow: ref enumeration -> filter -> sort -> format
+    risk_controls: Unknown atom fail-closed (no error data output)
+    compliance_note: Partial implementation of atom set
+    notes: |
+      COMPATIBILITY.md: "accepted-but-ignored".
+      Enhancement implements subset of sort keys based on SQLite ref metadata.
+
+  - command: for-each-ref
+    flag: (command skeleton)
+    action: implement
+    priority: P2
+    phase: 3
+    status: planned
+    declined_ref: ""
+    risk: medium
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: TBD
+    test_evidence: TBD
+    verification_command: TBD
+    last_verified: ""
+    status_source: manual-bootstrap
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Ref enumeration + filtering + formatting
+    control_flow: ref query -> filter/sort -> output format
+    risk_controls: Unknown atoms fail-closed
+    compliance_note: New Libra plumbing command
+    notes: |
+      New plumbing command for ref enumeration with filters and formatting.
+      Builds on existing ref metadata and sort/format infrastructure.
+
+  # --- Phase 3: Sequencer ---
+
+  - command: rebase
+    flag: --exec
+    action: evaluate
+    priority: P2
+    phase: 3
+    status: planned
+    declined_ref: ""
+    risk: high
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: TBD
+    test_evidence: TBD
+    verification_command: TBD
+    last_verified: ""
+    status_source: manual-bootstrap
+    expected_failure_handling: not-applicable
+    decision_deadline: "2026-07-12"
+    decision_owner: ""
+    host_dependencies: shell execution (high security concern)
+    data_flow: Rebase state + exec command invocation
+    control_flow: rebase loop -> per-commit exec -> output capture
+    risk_controls: Command allowlist, timeout, environment isolation
+    compliance_note: Requires safe subprocess execution design
+    notes: |
+      COMPATIBILITY.md: "--exec" unsupported.
+      Decision needed: interactive rebase dependency and subprocess safety constraints.
+
+  - command: cherry-pick
+    flag: --strategy / -X
+    action: evaluate
+    priority: P2
+    phase: 3
+    status: planned
+    declined_ref: ""
+    risk: medium
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: TBD
+    test_evidence: TBD
+    verification_command: TBD
+    last_verified: ""
+    status_source: manual-bootstrap
+    expected_failure_handling: not-applicable
+    decision_deadline: "2026-07-12"
+    decision_owner: ""
+    host_dependencies: merge strategy implementation
+    data_flow: Cherry-pick sequencer + merge strategy selector
+    control_flow: sequencer -> strategy resolution -> merge/conflict
+    risk_controls: Unsupported strategies rejected with clear error
+    compliance_note: Currently only ours strategy supported
+    notes: |
+      COMPATIBILITY.md: "--strategy/--empty" unsupported.
+      Custom merge strategies and advanced empty handling deferred.
+
+  # --- Phase 3: Remote ---
+
+  - command: clone
+    flag: --template / -c
+    action: evaluate
+    priority: P2
+    phase: 3
+    status: planned
+    declined_ref: ""
+    risk: medium
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: TBD
+    test_evidence: TBD
+    verification_command: TBD
+    last_verified: ""
+    status_source: manual-bootstrap
+    expected_failure_handling: not-applicable
+    decision_deadline: "2026-07-12"
+    decision_owner: ""
+    host_dependencies: none
+    data_flow: Config initialization + template application
+    control_flow: clone -> template copy -> config merge
+    risk_controls: Path validation for template source
+    compliance_note: Advanced clone configuration
+    notes: |
+      COMPATIBILITY.md: "template, -c (initial config)" deferred.
+      Decision: evaluate implementation cost vs. user demand.
+
+  - command: push
+    flag: --force-with-lease
+    action: enhance
+    priority: P1
+    phase: 3
+    status: planned
+    declined_ref: ""
+    risk: medium
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: TBD
+    test_evidence: TBD
+    verification_command: TBD
+    last_verified: ""
+    status_source: manual-bootstrap
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Remote-tracking ref validation + push
+    control_flow: lease check -> conditional force push
+    risk_controls: Lease validation prevents force rewrite of stale refs
+    compliance_note: Already partially supported; enhancement for edge cases
+    notes: |
+      COMPATIBILITY.md: "--force-with-lease" already documented as supported.
+      Enhancement: improve documentation and edge case handling.
+
+  # --- Phase 4: Object/Plumbing ---
+
+  - command: cat-file
+    flag: --batch-command
+    action: implement
+    priority: P2
+    phase: 4
+    status: planned
+    declined_ref: ""
+    risk: medium
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: TBD
+    test_evidence: TBD
+    verification_command: TBD
+    last_verified: ""
+    status_source: manual-bootstrap
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Batch command protocol + object lookup
+    control_flow: command parser -> object fetch -> output
+    risk_controls: Input size bounds; command allowlist
+    compliance_note: Advanced batch API for scripted workflows
+    notes: |
+      COMPATIBILITY.md: "--batch-command" not yet implemented.
+      Enables complex scripted object queries.
+
+  - command: ls-files
+    flag: (command skeleton)
+    action: implement
+    priority: P2
+    phase: 4
+    status: planned
+    declined_ref: ""
+    risk: medium
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: TBD
+    test_evidence: TBD
+    verification_command: TBD
+    last_verified: ""
+    status_source: manual-bootstrap
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Index enumeration
+    control_flow: index query -> filter/sort -> output
+    risk_controls: Index consistency checks
+    compliance_note: New plumbing command
+    notes: |
+      New plumbing command to list tracked files from index.
+      Complements status porcelain for scripting.
+
+  - command: ls-tree
+    flag: --format / --json extensions
+    action: enhance
+    priority: P2
+    phase: 4
+    status: planned
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: TBD
+    test_evidence: TBD
+    verification_command: TBD
+    last_verified: ""
+    status_source: manual-bootstrap
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Tree traversal + format rendering
+    control_flow: tree query -> recursion/filtering -> output format
+    risk_controls: Depth limits for recursive traversal
+    compliance_note: Extends existing command with format options
+    notes: |
+      COMPATIBILITY.md: "ls-tree" is partial.
+      Enhancement: --format and improved --json support.
 
 notes: |
   ## Phase 0 Bootstrap (2026-06-12)
