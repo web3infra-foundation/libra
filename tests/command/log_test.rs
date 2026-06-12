@@ -2606,14 +2606,8 @@ fn test_log_reverse_shows_oldest_first() {
     let repo = tempdir().unwrap();
     init_repo_via_cli(repo.path());
 
-    run_libra_command(
-        &["config", "user.name", "Test User"],
-        repo.path(),
-    );
-    run_libra_command(
-        &["config", "user.email", "test@example.com"],
-        repo.path(),
-    );
+    run_libra_command(&["config", "user.name", "Test User"], repo.path());
+    run_libra_command(&["config", "user.email", "test@example.com"], repo.path());
 
     run_libra_command(
         &["commit", "--allow-empty", "-m", "first commit"],
@@ -2628,28 +2622,40 @@ fn test_log_reverse_shows_oldest_first() {
         repo.path(),
     );
 
-    let forward = run_libra_command(
-        &["log", "--oneline"],
-        repo.path(),
+    let forward = run_libra_command(&["log", "--oneline"], repo.path());
+    let forward_stdout = String::from_utf8_lossy(&forward.stdout);
+    let forward_lines: Vec<&str> = forward_stdout.lines().collect();
+
+    let reverse = run_libra_command(&["log", "--oneline", "--reverse"], repo.path());
+    let reverse_stdout = String::from_utf8_lossy(&reverse.stdout);
+    let reverse_lines: Vec<&str> = reverse_stdout.lines().collect();
+
+    assert_eq!(
+        forward.status.code(),
+        Some(0),
+        "forward: {}",
+        String::from_utf8_lossy(&forward.stderr)
     );
-    let forward_lines: Vec<&str> = String::from_utf8_lossy(&forward.stdout)
-        .lines()
-        .collect();
-
-    let reverse = run_libra_command(
-        &["log", "--oneline", "--reverse"],
-        repo.path(),
+    assert_eq!(
+        reverse.status.code(),
+        Some(0),
+        "reverse: {}",
+        String::from_utf8_lossy(&reverse.stderr)
     );
-    let reverse_lines: Vec<&str> = String::from_utf8_lossy(&reverse.stdout)
-        .lines()
-        .collect();
 
-    assert_eq!(forward.status.code(), Some(0), "forward: {}", String::from_utf8_lossy(&forward.stderr));
-    assert_eq!(reverse.status.code(), Some(0), "reverse: {}", String::from_utf8_lossy(&reverse.stderr));
-
-    assert!(!forward_lines.is_empty(), "forward output should not be empty");
-    assert!(!reverse_lines.is_empty(), "reverse output should not be empty");
-    assert_eq!(forward_lines.len(), reverse_lines.len(), "line counts must match");
+    assert!(
+        !forward_lines.is_empty(),
+        "forward output should not be empty"
+    );
+    assert!(
+        !reverse_lines.is_empty(),
+        "reverse output should not be empty"
+    );
+    assert_eq!(
+        forward_lines.len(),
+        reverse_lines.len(),
+        "line counts must match"
+    );
 
     assert!(
         forward_lines[0].contains("third commit"),

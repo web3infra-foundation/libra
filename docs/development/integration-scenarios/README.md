@@ -29,6 +29,8 @@
 | History | `shortlog` | `cli.grep-blame-describe-shortlog` |
 | History | `show` | `cli.object-readback` |
 | History | `show-ref` | `cli.object-readback`、`cli.clone-fetch-pull-local` |
+| History | `for-each-ref` | `cli.object-readback` |
+| History | `ls-files` | `cli.object-readback` |
 | History | `ls-remote` | `cli.clone-fetch-pull-local` |
 | History | `ls-tree` | `cli.ls-tree-smoke` |
 | History | `diff` | `cli.restore-reset-diff` |

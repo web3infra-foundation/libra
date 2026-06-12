@@ -12,7 +12,7 @@ use std::path::PathBuf;
 fn clean_interactive_flag_recognized() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let help = std::process::Command::new("cargo")
-        .args(&["run", "--", "clean", "--help"])
+        .args(["run", "--", "clean", "--help"])
         .current_dir(&repo)
         .output()
         .expect("run 'cargo run -- clean --help'");
@@ -32,7 +32,7 @@ fn clean_interactive_flag_recognized() {
 fn clean_interactive_mode_documented() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let help = std::process::Command::new("cargo")
-        .args(&["run", "--", "clean", "--help"])
+        .args(["run", "--", "clean", "--help"])
         .current_dir(&repo)
         .output()
         .expect("run 'cargo run -- clean --help'");
@@ -57,7 +57,7 @@ fn clean_interactive_rejects_dry_run() {
     // Try to run: libra clean -i -n
     // This should fail with LBR-CLI-002 (mutual exclusion error)
     let output = std::process::Command::new("cargo")
-        .args(&["run", "--", "clean", "-i", "-n"])
+        .args(["run", "--", "clean", "-i", "-n"])
         .current_dir(&repo)
         .env("LIBRA_SKIP_WEB_BUILD", "1")
         .output()
@@ -78,7 +78,8 @@ fn clean_interactive_rejects_dry_run() {
         combined.to_lowercase().contains("mutual")
             || combined.contains("LBR-CLI-002")
             || combined.to_lowercase().contains("exclusive"),
-        "Error message should explain mutual exclusion: got {}", combined
+        "Error message should explain mutual exclusion: got {}",
+        combined
     );
 }
 
@@ -91,7 +92,7 @@ fn clean_interactive_rejects_json() {
     // Try to run: libra clean -i --json
     // This should fail with LBR-CLI-002 (mutual exclusion error)
     let output = std::process::Command::new("cargo")
-        .args(&["run", "--", "clean", "-i", "--json"])
+        .args(["run", "--", "clean", "-i", "--json"])
         .current_dir(&repo)
         .env("LIBRA_SKIP_WEB_BUILD", "1")
         .output()
@@ -112,7 +113,8 @@ fn clean_interactive_rejects_json() {
         combined.to_lowercase().contains("mutual")
             || combined.contains("LBR-CLI-002")
             || combined.to_lowercase().contains("exclusive"),
-        "Error message should explain mutual exclusion: got {}", combined
+        "Error message should explain mutual exclusion: got {}",
+        combined
     );
 }
 
@@ -125,18 +127,14 @@ fn clean_command_docs_mention_interactive_difference() {
 
     // Read docs/commands/clean.md if it exists, or COMPATIBILITY.md
     let compat_path = repo.join("COMPATIBILITY.md");
-    let compat_content =
-        std::fs::read_to_string(&compat_path).expect("read COMPATIBILITY.md");
+    let compat_content = std::fs::read_to_string(&compat_path).expect("read COMPATIBILITY.md");
 
     // The clean row must document the -i intentional difference
     let clean_section = compat_content
         .split("| clean")
         .nth(1)
         .expect("COMPATIBILITY.md must have clean command row");
-    let clean_row = clean_section
-        .lines()
-        .next()
-        .unwrap_or("");
+    let clean_row = clean_section.lines().next().unwrap_or("");
 
     // Should mention -i / interactive and its intentional difference
     assert!(
@@ -148,7 +146,8 @@ fn clean_command_docs_mention_interactive_difference() {
         clean_row.contains("intentionally-different")
             || clean_row.contains("LBR-CLI-002")
             || clean_row.contains("mutually exclusive"),
-        "COMPATIBILITY.md clean row must document intentional difference: {}", clean_row
+        "COMPATIBILITY.md clean row must document intentional difference: {}",
+        clean_row
     );
 }
 
@@ -158,7 +157,7 @@ fn clean_command_docs_mention_interactive_difference() {
 fn clean_help_distinguishes_libra_behavior() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let help = std::process::Command::new("cargo")
-        .args(&["run", "--", "clean", "--help"])
+        .args(["run", "--", "clean", "--help"])
         .current_dir(&repo)
         .output()
         .expect("run 'cargo run -- clean --help'");
@@ -195,9 +194,10 @@ fn clean_interactive_marked_done_in_matrix() {
             .windows(20)
             .filter_map(|window| {
                 let window_str = window.join("\n");
-                if window_str.contains("command: clean") && window_str.contains("flag:") && (
-                    window_str.contains("-i") || window_str.contains("interactive")
-                ) {
+                if window_str.contains("command: clean")
+                    && window_str.contains("flag:")
+                    && (window_str.contains("-i") || window_str.contains("interactive"))
+                {
                     Some(window_str)
                 } else {
                     None
@@ -207,7 +207,7 @@ fn clean_interactive_marked_done_in_matrix() {
 
         if !clean_i_entries.is_empty() {
             // At least one clean -i entry should exist
-            let matrix_has_entry = clean_i_entries.len() > 0;
+            let matrix_has_entry = !clean_i_entries.is_empty();
             assert!(
                 matrix_has_entry,
                 "docs/development/compatibility-matrix.yaml should have a clean -i entry"
@@ -222,8 +222,7 @@ fn clean_interactive_marked_done_in_matrix() {
 fn clean_interactive_not_marked_supported() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let compat_path = repo.join("COMPATIBILITY.md");
-    let compat_content =
-        std::fs::read_to_string(&compat_path).expect("read COMPATIBILITY.md");
+    let compat_content = std::fs::read_to_string(&compat_path).expect("read COMPATIBILITY.md");
 
     // Find the clean command row
     let clean_section = compat_content

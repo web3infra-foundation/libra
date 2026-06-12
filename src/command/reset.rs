@@ -280,7 +280,9 @@ enum ResetError {
         rollback: Box<ResetError>,
     },
 
-    #[error("reset -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope.")]
+    #[error(
+        "reset -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope."
+    )]
     PatchUiDeclined,
 }
 

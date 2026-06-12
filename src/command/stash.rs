@@ -102,7 +102,9 @@ enum StashError {
     #[error("failed to reset working directory: {0}")]
     ResetFailed(String),
 
-    #[error("stash -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope.")]
+    #[error(
+        "stash -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope."
+    )]
     PatchUiDeclined,
 
     #[error("{0}")]

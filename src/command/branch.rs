@@ -1615,6 +1615,7 @@ async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
 /// - Human mode formats the list with a `*` prefix on the current branch,
 ///   sorts so the current branch sits at the top, prints a "detached at"
 ///   banner when relevant, and shows an unborn HEAD label as appropriate.
+///
 /// Format a branch according to a format string with %(atom) placeholders
 fn format_branch_output(branch: &BranchListEntry, format_str: &str) -> String {
     let mut result = format_str.to_string();
@@ -1623,16 +1624,25 @@ fn format_branch_output(branch: &BranchListEntry, format_str: &str) -> String {
     result = result.replace("%(refname)", &branch.name);
     result = result.replace("%(objectname)", &branch.commit);
     result = result.replace("%(display_name)", &branch.display_name);
-    result = result.replace("%(tracking)",
-        branch.tracking.as_ref()
+    result = result.replace(
+        "%(tracking)",
+        branch
+            .tracking
+            .as_ref()
             .map(|t| format!("[{}/{}]", t.remote, t.merge))
-            .unwrap_or_default().as_str());
+            .unwrap_or_default()
+            .as_str(),
+    );
 
     // Unknown atoms are left as-is (Git behavior)
     result
 }
 
-fn render_branch_output(args: &BranchArgs, result: &BranchOutput, output: &OutputConfig) -> CliResult<()> {
+fn render_branch_output(
+    args: &BranchArgs,
+    result: &BranchOutput,
+    output: &OutputConfig,
+) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("branch", result, output);
     }

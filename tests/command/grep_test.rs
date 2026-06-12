@@ -1161,10 +1161,7 @@ fn test_grep_extended_regexp_alias_works() {
     super::init_repo_via_cli(repo.path());
     fs::write(repo.path().join("test.txt"), "foobar\nbaz\nquux").unwrap();
     super::run_libra_command(&["add", "test.txt"], repo.path());
-    super::run_libra_command(
-        &["commit", "--allow-empty", "-m", "initial"],
-        repo.path(),
-    );
+    super::run_libra_command(&["commit", "--allow-empty", "-m", "initial"], repo.path());
 
     // Test --extended-regexp (should be no-op since Rust regex is already ERE-style)
     let extended = super::run_libra_command(
@@ -1176,7 +1173,10 @@ fn test_grep_extended_regexp_alias_works() {
         "grep --extended-regexp must succeed"
     );
     let output = String::from_utf8_lossy(&extended.stdout);
-    assert!(output.contains("foobar") || output.contains("baz"), "must find matches with ERE pattern");
+    assert!(
+        output.contains("foobar") || output.contains("baz"),
+        "must find matches with ERE pattern"
+    );
 }
 
 #[test]
@@ -1185,22 +1185,20 @@ fn test_grep_basic_regexp_alias_works() {
     super::init_repo_via_cli(repo.path());
     fs::write(repo.path().join("test.txt"), "foobar\nbaz\nquux").unwrap();
     super::run_libra_command(&["add", "test.txt"], repo.path());
-    super::run_libra_command(
-        &["commit", "--allow-empty", "-m", "initial"],
-        repo.path(),
-    );
+    super::run_libra_command(&["commit", "--allow-empty", "-m", "initial"], repo.path());
 
     // Test --basic-regexp (should accept the flag as alias, pattern still interpreted as Rust regex)
-    let basic = super::run_libra_command(
-        &["grep", "--basic-regexp", "foo", "test.txt"],
-        repo.path(),
-    );
+    let basic =
+        super::run_libra_command(&["grep", "--basic-regexp", "foo", "test.txt"], repo.path());
     assert!(
         basic.status.success(),
         "grep --basic-regexp must accept the flag"
     );
     let output = String::from_utf8_lossy(&basic.stdout);
-    assert!(output.contains("foobar"), "must find matches with basic pattern");
+    assert!(
+        output.contains("foobar"),
+        "must find matches with basic pattern"
+    );
 }
 
 #[test]
@@ -1210,10 +1208,7 @@ fn test_grep_perl_regexp_rejected() {
     fs::write(repo.path().join("test.txt"), "foobar").unwrap();
 
     // Test -P/--perl-regexp (should be rejected)
-    let perl = super::run_libra_command(
-        &["grep", "--perl-regexp", "foo", "test.txt"],
-        repo.path(),
-    );
+    let perl = super::run_libra_command(&["grep", "--perl-regexp", "foo", "test.txt"], repo.path());
     assert!(
         !perl.status.success(),
         "grep --perl-regexp must be rejected"

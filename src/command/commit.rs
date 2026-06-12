@@ -280,10 +280,14 @@ pub enum CommitError {
     )]
     UnsupportedAutosquashPrefix { prefix: String },
 
-    #[error("commit -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope.")]
+    #[error(
+        "commit -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope."
+    )]
     PatchUiDeclined,
 
-    #[error("libra: commit --allow-empty-message is not supported (see declined.md#D18); all commits must have meaningful messages for AI analysis and auditing.")]
+    #[error(
+        "libra: commit --allow-empty-message is not supported (see declined.md#D18); all commits must have meaningful messages for AI analysis and auditing."
+    )]
     AllowEmptyMessageDeclined,
 }
 

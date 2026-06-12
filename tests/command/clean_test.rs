@@ -1129,7 +1129,10 @@ async fn test_clean_pathspec_positional_rejected() {
     let _guard = test::ChangeDirGuard::new(test_dir.path());
 
     // Create an untracked file
-    fs::File::create("untracked.txt").unwrap().write_all(b"content").unwrap();
+    fs::File::create("untracked.txt")
+        .unwrap()
+        .write_all(b"content")
+        .unwrap();
 
     // Attempt to clean with a pathspec argument (should be rejected)
     let result = tokio::task::spawn_blocking(move || {

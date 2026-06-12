@@ -23,9 +23,9 @@
 //! (Remaining requirements e, d, h, n, o, p are advisory or require external
 //! integration-scenarios.rs source analysis; tests note these as deferred.)
 
+use std::{collections::HashSet, path::PathBuf};
+
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct MatrixEntry {
@@ -93,8 +93,7 @@ fn load_matrix() -> CompatibilityMatrix {
     let matrix_path = repo.join("docs/development/compatibility-matrix.yaml");
     let content = std::fs::read_to_string(&matrix_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {}", matrix_path.display(), e));
-    serde_yaml::from_str(&content)
-        .unwrap_or_else(|e| panic!("failed to parse YAML: {}", e))
+    serde_yaml::from_str(&content).unwrap_or_else(|e| panic!("failed to parse YAML: {}", e))
 }
 
 fn load_integration_scenarios() -> IntegrationScenarios {
@@ -144,8 +143,8 @@ fn declined_refs_from_declined_md() -> HashSet<String> {
 
 fn extract_cli_commands() -> HashSet<String> {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let cli_rs = std::fs::read_to_string(repo.join("src/cli.rs"))
-        .expect("failed to read src/cli.rs");
+    let cli_rs =
+        std::fs::read_to_string(repo.join("src/cli.rs")).expect("failed to read src/cli.rs");
 
     let start = cli_rs
         .find("enum Commands {")
@@ -252,7 +251,11 @@ fn parameter_matrix_enum_values_valid() {
     let matrix = load_matrix();
 
     let valid_actions: HashSet<&str> = [
-        "implement", "enhance", "reject", "intentional-diff", "evaluate"
+        "implement",
+        "enhance",
+        "reject",
+        "intentional-diff",
+        "evaluate",
     ]
     .iter()
     .copied()
@@ -262,10 +265,7 @@ fn parameter_matrix_enum_values_valid() {
 
     let valid_statuses: HashSet<&str> = ["done", "planned", "deferred"].iter().copied().collect();
 
-    let valid_risks: HashSet<&str> = ["low", "medium", "high"]
-        .iter()
-        .copied()
-        .collect();
+    let valid_risks: HashSet<&str> = ["low", "medium", "high"].iter().copied().collect();
 
     let mut errors = Vec::new();
 
@@ -413,7 +413,7 @@ fn parameter_matrix_date_constraints() {
     for entry in &matrix.entries {
         if !entry.last_verified.is_empty() {
             // Try to parse as ISO 8601 date (YYYY-MM-DD)
-            if let Err(_) = chrono::NaiveDate::parse_from_str(&entry.last_verified, "%Y-%m-%d") {
+            if chrono::NaiveDate::parse_from_str(&entry.last_verified, "%Y-%m-%d").is_err() {
                 errors.push(format!(
                     "{} {}: last_verified '{}' is not valid ISO 8601 (use YYYY-MM-DD)",
                     entry.command, entry.flag, entry.last_verified
@@ -512,7 +512,7 @@ fn parameter_matrix_phase_0_bootstrap_allowed() {
 ///
 /// - **(p)** compliance_note non-empty for rows copying/referencing upstream code:
 ///   requires source code analysis.
-
+///
 /// Light check for (h): action=evaluate rows should have decision metadata
 #[test]
 fn parameter_matrix_evaluate_rows_have_decision_metadata() {

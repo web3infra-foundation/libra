@@ -107,7 +107,11 @@ pub struct StatusArgs {
     pub z: bool,
 
     /// Show only changes for paths matching this pattern (Phase 1 enhancement)
-    #[clap(value_name = "pathspec", trailing_var_arg = true, allow_hyphen_values = true)]
+    #[clap(
+        value_name = "pathspec",
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
     pub pathspec: Vec<String>,
 }
 
@@ -1215,16 +1219,10 @@ fn render_repo_state_human(repo_state: &RepoState, buffer: &mut Vec<u8>) -> CliR
         }
         RepoState::CherryPick => {
             writeln!(buffer, "cherry-pick in progress").map_err(write_error)?;
-            writeln!(
-                buffer,
-                "  (use \"libra cherry-pick --continue\" to resume)"
-            )
-            .map_err(write_error)?;
-            writeln!(
-                buffer,
-                "  (use \"libra cherry-pick --abort\" to cancel)"
-            )
-            .map_err(write_error)?;
+            writeln!(buffer, "  (use \"libra cherry-pick --continue\" to resume)")
+                .map_err(write_error)?;
+            writeln!(buffer, "  (use \"libra cherry-pick --abort\" to cancel)")
+                .map_err(write_error)?;
         }
     }
     Ok(())

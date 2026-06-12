@@ -1523,13 +1523,16 @@ pub async fn execute_safe(args: CloneArgs, output: &OutputConfig) -> CliResult<(
 
                 // Change to repo directory to set config
                 if let Err(e) = env::set_current_dir(repo_path) {
-                    eprintln!("warning: failed to change to repo directory for config: {}", e);
+                    eprintln!(
+                        "warning: failed to change to repo directory for config: {}",
+                        e
+                    );
                 } else {
                     for config_value in &args.config {
-                        if let Some((key, value)) = config_value.split_once('=') {
-                            if let Err(e) = set_config_value(key, value).await {
-                                eprintln!("warning: failed to set config {}: {}", key, e);
-                            }
+                        if let Some((key, value)) = config_value.split_once('=')
+                            && let Err(e) = set_config_value(key, value).await
+                        {
+                            eprintln!("warning: failed to set config {}: {}", key, e);
                         }
                     }
                     // Restore original directory

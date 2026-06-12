@@ -967,7 +967,9 @@ pub(crate) enum RebaseError {
     StateSave(String),
     #[error("failed to finalize rebase: {0}")]
     Finalize(String),
-    #[error("rebase -i/--interactive is not supported in Libra: interactive rebase todo-editor workflow is out of scope.")]
+    #[error(
+        "rebase -i/--interactive is not supported in Libra: interactive rebase todo-editor workflow is out of scope."
+    )]
     InteractiveDeclined,
 }
 

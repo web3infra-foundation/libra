@@ -122,6 +122,8 @@ Every Libra command accepts the following global flags:
 | `libra verify-pack` | | Validate pack index files against their pack archives | [verify-pack.md](verify-pack.md) |
 | `libra archive` | | Create tar, tar.gz, tar.bz2, or zip archives from committed tree snapshots | [archive.md](archive.md) |
 | `libra show-ref` | | List local refs (branches, tags, HEAD) and their object IDs | [show-ref.md](show-ref.md) |
+| `libra for-each-ref` | | Enumerate refs with filtering, sorting, and simple format atoms | [for-each-ref.md](for-each-ref.md) |
+| `libra ls-files` | | List files from the index and selected working-tree states | [ls-files.md](ls-files.md) |
 | `libra ls-tree` | | List the contents of a commit or tree object | [ls-tree.md](ls-tree.md) |
 | `libra symbolic-ref` | | Read or update the symbolic HEAD ref | [symbolic-ref.md](symbolic-ref.md) |
 | `libra index-pack` | | Build a `.idx` pack index file for an existing `.pack` archive (hidden) | [index-pack.md](index-pack.md) |

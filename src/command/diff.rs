@@ -315,7 +315,8 @@ pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()
         // Full implementation with merge detection deferred
         if args.old.is_none() {
             return Err(CliError::from(DiffError::InvalidArgument(
-                "--cc/--combined requires explicit --old and --new commit specification".to_string()
+                "--cc/--combined requires explicit --old and --new commit specification"
+                    .to_string(),
             )));
         }
     }

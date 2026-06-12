@@ -104,7 +104,9 @@ pub enum RestoreError {
     PathspecFileRead { path: String, detail: String },
     #[error("pathspec input from {0} exceeds the 128 MiB limit")]
     PathspecFileTooLarge(String),
-    #[error("restore -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope.")]
+    #[error(
+        "restore -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope."
+    )]
     PatchUiDeclined,
 }
 

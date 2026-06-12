@@ -220,7 +220,9 @@ pub enum AddError {
     IntentToAddDeclined,
     /// `-p` / `--patch` was requested. Interactive patch-selection UI is a
     /// non-goal in Libra; declined per docs/improvement/compatibility/declined.md.
-    #[error("add -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope.")]
+    #[error(
+        "add -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope."
+    )]
     PatchUiDeclined,
     /// `--chmod` was given a value other than `+x` / `-x`.
     #[error("invalid --chmod value '{spec}' (expected '+x' or '-x')")]

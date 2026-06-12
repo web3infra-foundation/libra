@@ -191,7 +191,9 @@ enum CheckoutError {
         source: Box<CliError>,
     },
 
-    #[error("checkout -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope.")]
+    #[error(
+        "checkout -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope."
+    )]
     PatchUiDeclined,
 
     #[error(transparent)]

@@ -1119,8 +1119,9 @@ async fn get_all_reachable_commits(
     branches: bool,
     tags: bool,
 ) -> Result<Vec<Commit>, CliError> {
-    use crate::internal::branch::Branch;
     use std::collections::HashSet;
+
+    use crate::internal::branch::Branch;
 
     let mut all_commits: Vec<Commit> = Vec::new();
     let mut seen_hashes: HashSet<String> = HashSet::new();
@@ -1130,10 +1131,10 @@ async fn get_all_reachable_commits(
         let all_branches = Branch::list_branches_best_effort(None).await;
         for branch in all_branches {
             let commit_hash = branch.commit.to_string();
-            if seen_hashes.insert(commit_hash.clone()) {
-                if let Ok(commits) = get_reachable_commits(commit_hash, None).await {
-                    all_commits.extend(commits);
-                }
+            if seen_hashes.insert(commit_hash.clone())
+                && let Ok(commits) = get_reachable_commits(commit_hash, None).await
+            {
+                all_commits.extend(commits);
             }
         }
     }
@@ -1147,10 +1148,10 @@ async fn get_all_reachable_commits(
                 TagObject::Tag(t) => t.object_hash.to_string(),
                 _ => continue,
             };
-            if seen_hashes.insert(commit_hash.clone()) {
-                if let Ok(commits) = get_reachable_commits(commit_hash, None).await {
-                    all_commits.extend(commits);
-                }
+            if seen_hashes.insert(commit_hash.clone())
+                && let Ok(commits) = get_reachable_commits(commit_hash, None).await
+            {
+                all_commits.extend(commits);
             }
         }
     }

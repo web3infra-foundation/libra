@@ -1153,7 +1153,10 @@ fn test_commit_allow_empty_message_rejected() {
     let output = run_libra_command(&["commit", "--allow-empty-message", "-m", "test"], p);
 
     // Verify the command fails
-    assert!(!output.status.success(), "commit --allow-empty-message should fail");
+    assert!(
+        !output.status.success(),
+        "commit --allow-empty-message should fail"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("not supported") || stderr.contains("declined"),

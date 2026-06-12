@@ -148,6 +148,38 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     if verified_hash_stdout != head_id {
         bail!("show-ref --hash --verify returned {verified_hash_stdout:?}, expected {head_id}");
     }
+    let refs = ctx.command(&["for-each-ref", "--heads"], repo.clone(), true)?;
+    assert_stdout_contains(&refs, "refs/heads/main")?;
+    let formatted_refs = ctx.command(
+        &[
+            "for-each-ref",
+            "--heads",
+            "--format=%(refname) %(objecttype)",
+        ],
+        repo.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&formatted_refs, "refs/heads/main commit")?;
+    assert_json_ok(
+        &ctx.command(&["--json", "for-each-ref", "--heads"], repo.clone(), true)?,
+        "for-each-ref",
+    )?;
+    let indexed = ctx.command(&["ls-files"], repo.clone(), true)?;
+    assert_stdout_contains(&indexed, "README.md")?;
+    assert_stdout_contains(&indexed, "docs/guide.md")?;
+    let staged = ctx.command(&["ls-files", "--stage"], repo.clone(), true)?;
+    assert_stdout_contains(&staged, "README.md")?;
+    assert_stdout_contains(&staged, " 0\tREADME.md")?;
+    fs::write(repo.join("README.md"), "object root changed\n").context("modify README fixture")?;
+    let modified = ctx.command(&["ls-files", "--modified"], repo.clone(), true)?;
+    assert_stdout_contains(&modified, "README.md")?;
+    fs::write(repo.join("untracked.txt"), "untracked\n").context("write untracked fixture")?;
+    let others = ctx.command(&["ls-files", "--others", "--exclude-standard"], repo.clone(), true)?;
+    assert_stdout_contains(&others, "untracked.txt")?;
+    assert_json_ok(
+        &ctx.command(&["--json", "ls-files", "--modified"], repo.clone(), true)?,
+        "ls-files",
+    )?;
     let missing_show_ref = ctx.command(
         &["show-ref", "--exists", "refs/heads/nope"],
         repo.clone(),
@@ -300,6 +332,8 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
         "show-ref",
     )?;
     ctx.command(&["tag", "-m", "object tag", "v-object"], repo.clone(), true)?;
+    let tag_refs = ctx.command(&["for-each-ref", "--tags"], repo.clone(), true)?;
+    assert_stdout_contains(&tag_refs, "refs/tags/v-object")?;
     let dereferenced_tag = ctx.command(
         &["show-ref", "--dereference", "--tags", "v-object"],
         repo.clone(),
