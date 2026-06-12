@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.1450"
+version = "0.17.1451"
 edition = "2024"
 license = "MIT"
 description = "AI agent-native version control system with Git on-disk compatibility, SQLite-backed metadata, and tiered cloud storage"
@@ -64,6 +64,7 @@ sea-orm = { version = "1.1.20", features = [
 ]}
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+serde_yaml = "0.9"
 sha1 = "0.11.0"
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = [
@@ -186,6 +187,10 @@ path = "tests/compat/checkout_alias_help.rs"
 [[test]]
 name = "compat_matrix_alignment"
 path = "tests/compat/matrix_alignment.rs"
+
+[[test]]
+name = "compat_parameter_matrix_alignment"
+path = "tests/compat/parameter_matrix_alignment.rs"
 
 [[test]]
 name = "compat_live_compat_workflow"
