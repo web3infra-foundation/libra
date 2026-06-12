@@ -360,7 +360,7 @@ pub async fn execute(args: BranchArgs) {
 ///   其设置稳定代码和提示。
 pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_branch(&args).await.map_err(CliError::from)?;
-    render_branch_output(&result, output)?;
+    render_branch_output(&args, &result, output)?;
     if result.mutated_repo_state() {
         dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_BRANCH).await;
     }
@@ -1615,7 +1615,24 @@ async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
 /// - Human mode formats the list with a `*` prefix on the current branch,
 ///   sorts so the current branch sits at the top, prints a "detached at"
 ///   banner when relevant, and shows an unborn HEAD label as appropriate.
-fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResult<()> {
+/// Format a branch according to a format string with %(atom) placeholders
+fn format_branch_output(branch: &BranchListEntry, format_str: &str) -> String {
+    let mut result = format_str.to_string();
+
+    // Replace common atoms
+    result = result.replace("%(refname)", &branch.name);
+    result = result.replace("%(objectname)", &branch.commit);
+    result = result.replace("%(display_name)", &branch.display_name);
+    result = result.replace("%(tracking)",
+        branch.tracking.as_ref()
+            .map(|t| format!("[{}/{}]", t.remote, t.merge))
+            .unwrap_or_default().as_str());
+
+    // Unknown atoms are left as-is (Git behavior)
+    result
+}
+
+fn render_branch_output(args: &BranchArgs, result: &BranchOutput, output: &OutputConfig) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("branch", result, output);
     }
@@ -1646,18 +1663,26 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
 
             let ignore_case = *ignore_case;
             let mut sorted = branches.clone();
+
+            // Apply --sort flag if specified (currently supports refname mode)
             sorted.sort_by(|a, b| {
-                if a.current {
-                    std::cmp::Ordering::Less
-                } else if b.current {
-                    std::cmp::Ordering::Greater
-                } else if ignore_case {
-                    a.name
-                        .to_lowercase()
-                        .cmp(&b.name.to_lowercase())
-                        .then_with(|| a.name.cmp(&b.name))
-                } else {
-                    a.name.cmp(&b.name)
+                // Current branch always first
+                match (a.current, b.current) {
+                    (true, true) => std::cmp::Ordering::Equal,
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    (false, false) => {
+                        // All modes fall back to refname sorting for now
+                        // committerdate and version:refname require additional work
+                        if ignore_case {
+                            a.name
+                                .to_lowercase()
+                                .cmp(&b.name.to_lowercase())
+                                .then_with(|| a.name.cmp(&b.name))
+                        } else {
+                            a.name.cmp(&b.name)
+                        }
+                    }
                 }
             });
 
@@ -1667,10 +1692,19 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
                     .as_ref()
                     .map(|t| format!(" [{}/{}]", t.remote, t.merge))
                     .unwrap_or_default();
-                if branch.current {
-                    println!("* {}{tracking}", branch.display_name.green());
+
+                // Format output if --format specified
+                let output = if let Some(format_str) = &args.format {
+                    format_branch_output(&branch, format_str)
                 } else {
-                    println!("  {}{tracking}", branch.display_name);
+                    // Default format with tracking info
+                    format!("{}{tracking}", branch.display_name)
+                };
+
+                if branch.current {
+                    println!("* {}", output.green());
+                } else {
+                    println!("  {}", output);
                 }
             }
         }
@@ -1872,7 +1906,7 @@ pub async fn list_branches(
         no_track: false,
     };
     let result = collect_branch_output(&args).await.map_err(CliError::from)?;
-    render_branch_output(&result, &OutputConfig::default())
+    render_branch_output(&args, &result, &OutputConfig::default())
 }
 
 /// Filter given branches by whether they contain or don't contain certain commits.

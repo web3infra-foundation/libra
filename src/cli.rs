@@ -327,6 +327,8 @@ enum Commands {
     ShowRef(command::show_ref::ShowRefArgs),
     #[command(about = "List references in a remote repository")]
     LsRemote(command::ls_remote::LsRemoteArgs),
+    #[command(about = "List files in the index with various filters")]
+    LsFiles(command::ls_files::LsFilesArgs),
     #[command(about = "List the contents of a tree object")]
     LsTree(command::ls_tree::LsTreeArgs),
     #[command(about = "Read or update the symbolic HEAD ref")]
@@ -386,6 +388,8 @@ enum Commands {
     Fetch(command::fetch::FetchArgs),
     #[command(about = "Fetch from and integrate with another repository or a local branch")]
     Pull(command::pull::PullArgs),
+    #[command(about = "Enumerate refs with filtering and formatting")]
+    ForEachRef(command::for_each_ref::ForEachRefArgs),
     #[command(about = "Verify the integrity of objects, refs, and index")]
     Fsck(command::fsck::FsckArgs),
     #[command(about = "Prune unreachable objects and clean stale pack files")]
@@ -1311,6 +1315,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
         Commands::ShowRef(cmd_args) => command::show_ref::execute_safe(cmd_args, &output).await?,
         Commands::LsRemote(cmd_args) => command::ls_remote::execute_safe(cmd_args, &output).await?,
+        Commands::LsFiles(cmd_args) => command::ls_files::execute_safe(cmd_args, &output).await?,
         Commands::LsTree(cmd_args) => command::ls_tree::execute_safe(cmd_args, &output).await?,
         Commands::SymbolicRef(cmd_args) => {
             command::symbolic_ref::execute_safe(cmd_args, &output).await?
@@ -1341,6 +1346,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Archive(cmd_args) => command::archive::execute_safe(cmd_args, &output).await?,
         Commands::IndexPack(cmd_args) => command::index_pack::execute_safe(cmd_args, &output)?,
         Commands::Fetch(cmd_args) => command::fetch::execute_safe(cmd_args, &output).await?,
+        Commands::ForEachRef(cmd_args) => command::for_each_ref::execute_safe(cmd_args, &output).await?,
         Commands::Fsck(cmd_args) => command::fsck::execute_safe(cmd_args, &output).await?,
         Commands::Gc(cmd_args) => command::gc::execute_safe(cmd_args, &output).await?,
         Commands::Prune(cmd_args) => command::prune::execute_safe(cmd_args, &output).await?,

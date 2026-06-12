@@ -210,6 +210,11 @@ pub struct CloneArgs {
     /// pair with `--no-checkout`/`--bare` to avoid a missing-blob checkout error.
     #[clap(long, value_name = "spec")]
     pub filter: Option<String>,
+
+    /// Set a config value after clone completes. Can be specified multiple times.
+    /// Format: -c <key>=<value> (e.g., -c user.name="John Doe")
+    #[clap(short = 'c', long = "config", value_name = "key=value", action = clap::ArgAction::Append)]
+    pub config: Vec<String>,
 }
 
 const REPO_MARKERS: &[&str] = &["description", "libra.db", "info/exclude", "objects"];
@@ -1484,6 +1489,13 @@ pub async fn execute(args: CloneArgs) {
 ///
 /// This is the **rendering layer**: it calls `execute_clone()` to get a
 /// `CloneOutput` and then renders it according to the `OutputConfig`.
+/// Apply a single config value using ConfigKv
+async fn set_config_value(key: &str, value: &str) -> Result<(), String> {
+    ConfigKv::set(key, value, false)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 pub async fn execute_safe(args: CloneArgs, output: &OutputConfig) -> CliResult<()> {
     // Fail-fast semantic validation before any directory creation, DB
     // connection, or remote discovery.
@@ -1503,7 +1515,32 @@ pub async fn execute_safe(args: CloneArgs, output: &OutputConfig) -> CliResult<(
     }
 
     match result {
-        Ok(clone_output) => render_clone_result(&clone_output, output),
+        Ok(clone_output) => {
+            // Apply post-clone config values if -c flags were provided
+            if !args.config.is_empty() {
+                let repo_path = &clone_output.path;
+                let saved_dir = env::current_dir().ok();
+
+                // Change to repo directory to set config
+                if let Err(e) = env::set_current_dir(repo_path) {
+                    eprintln!("warning: failed to change to repo directory for config: {}", e);
+                } else {
+                    for config_value in &args.config {
+                        if let Some((key, value)) = config_value.split_once('=') {
+                            if let Err(e) = set_config_value(key, value).await {
+                                eprintln!("warning: failed to set config {}: {}", key, e);
+                            }
+                        }
+                    }
+                    // Restore original directory
+                    if let Some(dir) = saved_dir {
+                        let _ = env::set_current_dir(dir);
+                    }
+                }
+            }
+
+            render_clone_result(&clone_output, output)
+        }
         Err(error) => {
             let mut cli_error = CliError::from(error);
             if let Some(warning) = cleanup_warning {

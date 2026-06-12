@@ -1316,6 +1316,7 @@ async fn test_status_short_format_with_branch() {
             untracked_files: Some(UntrackedFiles::Normal),
             exit_code: false,
             z: false,
+            pathspec: vec![],
         },
         &mut output,
     )
@@ -1380,6 +1381,7 @@ async fn test_status_porcelain_format_with_branch() {
             untracked_files: Some(UntrackedFiles::Normal),
             exit_code: false,
             z: false,
+            pathspec: vec![],
         },
         &mut output,
     )
@@ -1466,6 +1468,7 @@ async fn test_status_show_stash_with_existing_stash() {
             untracked_files: Some(UntrackedFiles::Normal),
             exit_code: false,
             z: false,
+            pathspec: vec![],
         },
         &mut output,
     )
@@ -1494,6 +1497,7 @@ async fn test_status_show_stash_with_existing_stash() {
             untracked_files: Some(UntrackedFiles::Normal),
             exit_code: false,
             z: false,
+            pathspec: vec![],
         },
         &mut output,
     )
@@ -1522,6 +1526,7 @@ async fn test_status_show_stash_with_existing_stash() {
             untracked_files: Some(UntrackedFiles::Normal),
             exit_code: false,
             z: false,
+            pathspec: vec![],
         },
         &mut output,
     )
@@ -1578,6 +1583,7 @@ async fn test_status_show_stash_without_stash() {
             untracked_files: Some(UntrackedFiles::Normal),
             exit_code: false,
             z: false,
+            pathspec: vec![],
         },
         &mut output,
     )
@@ -1666,6 +1672,7 @@ async fn test_status_branch_detached_head() {
             untracked_files: Some(UntrackedFiles::Normal),
             exit_code: false,
             z: false,
+            pathspec: vec![],
         },
         &mut output,
     )

@@ -117,6 +117,10 @@ pub struct CommitArgs {
     #[arg(long)]
     pub allow_empty: bool,
 
+    /// (declined) Allow commit with empty message — not supported in Libra (Phase 1 rejection)
+    #[arg(long)]
+    pub allow_empty_message: bool,
+
     /// check if the commit message follows conventional commits
     #[arg(long)]
     pub conventional: bool,
@@ -278,6 +282,9 @@ pub enum CommitError {
 
     #[error("commit -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope.")]
     PatchUiDeclined,
+
+    #[error("libra: commit --allow-empty-message is not supported (see declined.md#D18); all commits must have meaningful messages for AI analysis and auditing.")]
+    AllowEmptyMessageDeclined,
 }
 
 impl From<CommitError> for CliError {
@@ -364,6 +371,10 @@ impl From<CommitError> for CliError {
                 .with_hint(
                     "stage changes with 'libra add', then commit them; see docs/improvement/compatibility/declined.md for details",
                 ),
+            CommitError::AllowEmptyMessageDeclined => CliError::command_usage(error.to_string())
+                .with_stable_code(StableErrorCode::Unsupported)
+                .with_hint("all commits must have meaningful messages for AI analysis and auditing")
+                .with_hint("see docs/improvement/compatibility/declined.md#D18 for details"),
         }
     }
 }
@@ -1540,6 +1551,10 @@ pub async fn execute(args: CommitArgs) {
 /// nothing to commit, identity/signing setup fails, object writes fail, or HEAD
 /// cannot be updated.
 pub async fn execute_safe(args: CommitArgs, output: &OutputConfig) -> CliResult<()> {
+    if args.allow_empty_message {
+        return Err(CliError::from(CommitError::AllowEmptyMessageDeclined));
+    }
+
     let result = run_commit(args, output).await.map_err(CliError::from)?;
     render_commit_output(&result, output)?;
     // A `--dry-run` writes nothing, so it must not fire post-commit automation.

@@ -189,7 +189,7 @@ fn clean_interactive_marked_done_in_matrix() {
     // Check if the matrix file exists and can be parsed
     if let Ok(matrix_content) = std::fs::read_to_string(&matrix_path) {
         // Look for clean -i entry with status: done
-        let clean_i_entries: Vec<&str> = matrix_content
+        let clean_i_entries: Vec<String> = matrix_content
             .lines()
             .collect::<Vec<_>>()
             .windows(20)
@@ -198,7 +198,7 @@ fn clean_interactive_marked_done_in_matrix() {
                 if window_str.contains("command: clean") && window_str.contains("flag:") && (
                     window_str.contains("-i") || window_str.contains("interactive")
                 ) {
-                    Some(window_str.as_str())
+                    Some(window_str)
                 } else {
                     None
                 }

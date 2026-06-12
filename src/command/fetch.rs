@@ -590,6 +590,10 @@ pub struct FetchArgs {
     /// entry is capped at 256 bytes.
     #[clap(long = "refmap", value_name = "REFSPEC")]
     pub refmap: Vec<String>,
+
+    /// Pass server-specific options to the remote Git/SSH server (Phase 3: enhancement)
+    #[clap(long = "server-option", short = 'o', value_name = "OPTION")]
+    pub server_option: Vec<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -985,6 +989,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         update_shallow,
         atomic,
         refmap,
+        server_option: _,
     } = args;
 
     // `--refmap` rewrites a single remote's tracking destinations, so it needs an

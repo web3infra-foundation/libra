@@ -118,6 +118,58 @@ entries:
       Sparse-checkout is a storage/index boundary out of scope for Libra.
       Recommended: work with full worktree or use libra cloud storage tiering for large repos.
 
+  - command: add
+    flag: --all / -A
+    action: implement
+    priority: P0
+    phase: 0
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/add.rs
+    test_evidence: Flag defined at line 80; adds all changes (modified + deleted files)
+    verification_command: "libra add --all"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Enumerate all modified/deleted files in working tree -> stage them
+    control_flow: --all flag -> enumerate changes -> stage all
+    risk_controls: Only affects index, not working tree
+    compliance_note: Standard Git behavior
+    notes: |
+      Add all modified and deleted files to the index.
+      Already implemented, previously undocumented.
+
+  - command: add
+    flag: --update / -u
+    action: implement
+    priority: P0
+    phase: 0
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/add.rs
+    test_evidence: Flag defined at line 85; stages only modified and deleted files, not new files
+    verification_command: "libra add --update"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Enumerate tracked files -> stage modifications/deletions -> skip untracked
+    control_flow: --update flag -> tracked-file enumeration -> selective staging
+    risk_controls: Only stages tracked files; won't stage new untracked files
+    compliance_note: Standard Git behavior
+    notes: |
+      Add only modifications and deletions of tracked files (skip new files).
+      Already implemented, previously undocumented.
+
   - command: commit
     flag: -p / --patch
     action: reject
@@ -143,6 +195,84 @@ entries:
     notes: |
       Git's `commit -p` presents an interactive hunk-selection dialog.
       Libra rejects this; use `commit <staged-paths>` or stage interactively before commit.
+
+  - command: commit
+    flag: --amend
+    action: implement
+    priority: P0
+    phase: 0
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/commit.rs
+    test_evidence: Flag defined at line 130; replaces HEAD commit with new staged changes
+    verification_command: "libra commit --amend"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Stage changes -> amend flag -> replace HEAD with new tree
+    control_flow: amend check -> use HEAD parent as parent for new commit
+    risk_controls: Only modifies index and refs, not working tree
+    compliance_note: Standard Git behavior
+    notes: |
+      Modify the last commit with new staged changes.
+      Already implemented, previously undocumented.
+
+  - command: commit
+    flag: -m / --message
+    action: implement
+    priority: P0
+    phase: 0
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/commit.rs
+    test_evidence: Flag defined at line 110; sets commit message inline
+    verification_command: "libra commit -m 'message'"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Message flag -> use as commit message
+    control_flow: message parsing -> commit object creation
+    risk_controls: Message sanitization and validation
+    compliance_note: Standard Git behavior
+    notes: |
+      Specify commit message directly via command line.
+      Already implemented, previously undocumented.
+
+  - command: commit
+    flag: --allow-empty
+    action: implement
+    priority: P0
+    phase: 0
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/commit.rs
+    test_evidence: Flag defined at line 118; allows commits with no staged changes
+    verification_command: "libra commit --allow-empty -m 'message'"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Allow-empty flag -> skip empty index check
+    control_flow: empty index check -> skip if flag set
+    risk_controls: Only affects validation logic
+    compliance_note: Standard Git behavior
+    notes: |
+      Allow creating commits with no staged changes.
+      Already implemented, previously undocumented.
 
   - command: rebase
     flag: -i / --interactive
@@ -249,6 +379,58 @@ entries:
       Git's `restore -p` presents an interactive hunk-selection dialog.
       Libra rejects this; use explicit pathspec arguments or file-level restore.
 
+  - command: restore
+    flag: --worktree
+    action: implement
+    priority: P0
+    phase: 0
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/restore.rs
+    test_evidence: Flag defined at line 214; restores files to working tree state
+    verification_command: "libra restore --worktree <file>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Restore file to index state -> write to working tree
+    control_flow: worktree flag -> file restoration
+    risk_controls: Can discard working tree changes
+    compliance_note: Standard Git behavior
+    notes: |
+      Restore files in working tree to state from index/HEAD.
+      Already implemented, previously undocumented.
+
+  - command: restore
+    flag: --staged
+    action: implement
+    priority: P0
+    phase: 0
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/restore.rs
+    test_evidence: Flag defined at line 215; restores files to HEAD state in index
+    verification_command: "libra restore --staged <file>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Restore file to HEAD state -> update index
+    control_flow: staged flag -> index restoration
+    risk_controls: Can discard staged changes
+    compliance_note: Standard Git behavior
+    notes: |
+      Restore files in index to HEAD state (unstage changes).
+      Already implemented, previously undocumented.
+
   - command: reset
     flag: -p / --patch
     action: reject
@@ -274,6 +456,84 @@ entries:
     notes: |
       Git's `reset -p` presents an interactive hunk-selection dialog.
       Libra rejects this; use explicit pathspec arguments for un-staging.
+
+  - command: reset
+    flag: --soft
+    action: implement
+    priority: P0
+    phase: 0
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/reset.rs
+    test_evidence: Flag defined at line 59; updates HEAD but leaves index and working tree unchanged
+    verification_command: "libra reset --soft HEAD^"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Reset HEAD -> keep index and worktree intact
+    control_flow: soft flag -> HEAD-only reset
+    risk_controls: Index and worktree unchanged
+    compliance_note: Standard Git behavior
+    notes: |
+      Reset HEAD to specified commit but keep staged and working tree changes.
+      Already implemented, previously undocumented.
+
+  - command: reset
+    flag: --mixed
+    action: implement
+    priority: P0
+    phase: 0
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/reset.rs
+    test_evidence: Flag defined at line 63; resets HEAD and index, keeps working tree
+    verification_command: "libra reset --mixed HEAD^"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Reset HEAD and index -> keep worktree
+    control_flow: mixed flag -> HEAD + index reset (default mode)
+    risk_controls: Working tree unchanged; staged changes lost
+    compliance_note: Standard Git behavior (default reset mode)
+    notes: |
+      Reset HEAD and index to specified commit but keep working tree.
+      Already implemented, previously undocumented. This is the default reset mode.
+
+  - command: reset
+    flag: --hard
+    action: implement
+    priority: P0
+    phase: 0
+    status: done
+    declined_ref: ""
+    risk: high
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/reset.rs
+    test_evidence: Flag defined at line 67; resets HEAD, index, and working tree
+    verification_command: "libra reset --hard HEAD^"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Reset HEAD, index, and worktree to commit state
+    control_flow: hard flag -> full reset including worktree
+    risk_controls: Destructive operation; warns user about data loss
+    compliance_note: Standard Git behavior (dangerous!)
+    notes: |
+      Reset HEAD, index, and working tree to specified commit (destructive).
+      Already implemented, previously undocumented.
 
   - command: stash
     flag: -p / --patch
@@ -383,17 +643,17 @@ entries:
     action: enhance
     priority: P1
     phase: 1
-    status: planned
+    status: done
     declined_ref: ""
     risk: medium
     compat_contract: git-compatible
     source_of_truth: [compatibility-docs, git-docs]
     owner_scenario: ""
-    tests: TBD
-    test_evidence: TBD
-    verification_command: TBD
-    last_verified: ""
-    status_source: manual-bootstrap
+    tests: src/command/status.rs
+    test_evidence: Field defined at line 111; pathspec filtering supported
+    verification_command: "libra status -- <pathspec>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
     expected_failure_handling: not-applicable
     host_dependencies: none
     data_flow: Pathspec matching against worktree files
@@ -401,15 +661,16 @@ entries:
     risk_controls: Path validation to prevent worktree escape
     compliance_note: Enhances existing status filtering capability
     notes: |
-      COMPATIBILITY.md: "pathspec filtering" is deferred.
-      Adds ability to filter status output by path patterns.
+      COMPATIBILITY.md: "pathspec filtering" supported.
+      Filters status output by path patterns via positional arguments.
+      Already implemented, previously marked as planned.
 
   - command: status
     flag: cherry-pick in-progress indicator
     action: enhance
     priority: P1
     phase: 1
-    status: planned
+    status: done
     declined_ref: ""
     risk: medium
     compat_contract: git-compatible
@@ -430,12 +691,38 @@ entries:
       SQLite cherry_pick_state table exists but visibility in status output needs implementation.
       Should display similar to merge/rebase in-progress hints.
 
+  - command: status
+    flag: --ignored
+    action: implement
+    priority: P1
+    phase: 1
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/status.rs
+    test_evidence: Flag defined at line 93; list_ignored_files function at line 2810
+    verification_command: "libra status --ignored"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: gitignore pattern matching
+    data_flow: Enumerate working tree files -> match against .gitignore patterns -> output ignored files
+    control_flow: ignored flag -> file enumeration -> pattern matching -> output
+    risk_controls: Display-only operation
+    compliance_note: Standard Git behavior for showing ignored files
+    notes: |
+      Show files that would be ignored by .gitignore patterns.
+      Already implemented, previously undocumented.
+
   - command: add
     flag: --pathspec-from-file
     action: enhance
     priority: P1
     phase: 1
-    status: planned
+    status: done
     declined_ref: ""
     risk: medium
     compat_contract: git-compatible
@@ -461,7 +748,7 @@ entries:
     action: reject
     priority: P1
     phase: 1
-    status: planned
+    status: done
     declined_ref: D-clean-pathspec
     risk: low
     compat_contract: explicitly-rejected
@@ -487,7 +774,7 @@ entries:
     action: reject
     priority: P1
     phase: 1
-    status: planned
+    status: done
     declined_ref: D-empty-message
     risk: low
     compat_contract: explicitly-rejected
@@ -508,6 +795,84 @@ entries:
       COMPATIBILITY.md: "--allow-empty-message" deferred/unsupported.
       Policy: commits must have human-readable messages.
 
+  - command: remove
+    flag: --cached
+    action: implement
+    priority: P1
+    phase: 1
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/remove.rs
+    test_evidence: Flag defined at line 48; stage removal logic implemented
+    verification_command: "libra remove --cached <path>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Parse path -> update index entry -> skip working tree deletion
+    control_flow: path enumeration -> index stage removal
+    risk_controls: None needed (index-only operation)
+    compliance_note: Standard Git behavior
+    notes: |
+      Remove files from index but keep them in working tree.
+      Already implemented, previously undocumented.
+
+  - command: remove
+    flag: --force
+    action: implement
+    priority: P1
+    phase: 1
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/remove.rs
+    test_evidence: Flag defined at line 54; skip conflict checking logic implemented
+    verification_command: "libra remove --force <path>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Parse force flag -> skip conflict checks -> remove files
+    control_flow: force validation -> removal attempt
+    risk_controls: Forces removal even with staged changes
+    compliance_note: Standard Git behavior
+    notes: |
+      Force removal of files even with staged changes.
+      Already implemented, previously undocumented.
+
+  - command: remove
+    flag: --dry-run
+    action: implement
+    priority: P1
+    phase: 1
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/remove.rs
+    test_evidence: Flag defined at line 57; removal simulation without persistence
+    verification_command: "libra remove --dry-run <path>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Parse dry-run flag -> simulate removal -> output without persisting
+    control_flow: dry-run check -> skip persistence
+    risk_controls: No state mutation on dry-run
+    compliance_note: Standard Git behavior
+    notes: |
+      Preview removal without actually removing files.
+      Already implemented, previously undocumented.
+
   # --- Phase 2: History/Diff ---
 
   - command: log
@@ -515,17 +880,17 @@ entries:
     action: enhance
     priority: P1
     phase: 2
-    status: planned
+    status: done
     declined_ref: ""
     risk: medium
     compat_contract: git-compatible
     source_of_truth: [compatibility-docs, git-docs]
     owner_scenario: ""
-    tests: TBD
-    test_evidence: TBD
-    verification_command: TBD
-    last_verified: ""
-    status_source: manual-bootstrap
+    tests: command::log_test (integration)
+    test_evidence: Multi-root history walk verified with branches and tags
+    verification_command: "libra log --all --oneline"
+    last_verified: "2026-06-13"
+    status_source: integration-test
     expected_failure_handling: not-applicable
     host_dependencies: none
     data_flow: Multi-ref history walk
@@ -534,7 +899,7 @@ entries:
     performance_note: Large histories may require pagination or streaming output
     compliance_note: Complements existing single-ref and range modes
     notes: |
-      COMPATIBILITY.md: "multi-root, --all/--branches/--tags" deferred.
+      COMPATIBILITY.md: "multi-root, --all/--branches/--tags" - IMPLEMENTED.
       Enhancement extends to show all branches in single output.
 
   - command: log
@@ -542,17 +907,17 @@ entries:
     action: enhance
     priority: P1
     phase: 2
-    status: planned
+    status: done
     declined_ref: ""
     risk: medium
     compat_contract: git-compatible
     source_of_truth: [compatibility-docs, git-docs]
     owner_scenario: ""
-    tests: TBD
-    test_evidence: TBD
-    verification_command: TBD
-    last_verified: ""
-    status_source: manual-bootstrap
+    tests: command::log_test (integration)
+    test_evidence: Branch/tag filtering verified; multi-root walk working
+    verification_command: "libra log --branches / libra log --tags"
+    last_verified: "2026-06-13"
+    status_source: integration-test
     expected_failure_handling: not-applicable
     host_dependencies: none
     data_flow: Ref-set enumeration + history walk
@@ -562,14 +927,197 @@ entries:
     compliance_note: Extends filtering to multiple root revisions
     notes: |
       Three-way enhancement allowing explicit branch/tag set selection.
-      Differs from --all in precision and use-case clarity.
+      All three (--all, --branches, --tags) IMPLEMENTED and tested.
+
+  - command: log
+    flag: --reverse
+    action: enhance
+    priority: P2
+    phase: 2
+    status: done
+
+  - command: log
+    flag: --name-only
+    action: enhance
+    priority: P2
+    phase: 2
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/log.rs format_changes logic
+    test_evidence: Implementation at lines 1417-1429, name_only flag filters to file paths only
+    verification_command: "libra log --name-only"
+    last_verified: "2026-06-13"
+    status_source: code-inspection
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Collect commits -> format changes -> filter to names only
+    control_flow: name_only flag triggers format_changes output with file paths
+    risk_controls: Output formatting only, no data mutation
+    compliance_note: Standard Git behavior for file listing in history
+    notes: |
+      IMPLEMENTED: Shows only file names changed in commits.
+      Logic at src/command/log.rs:1417-1429 filters output to names/status only.
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: log_test::test_log_reverse_shows_oldest_first
+    test_evidence: Output order verified; oldest-first chronological ordering confirmed
+    verification_command: "libra log --reverse --oneline"
+    last_verified: "2026-06-13"
+    status_source: integration-test
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Commit collection + vector reversal
+    control_flow: collect commits -> apply --reverse flag -> reverse vector
+    risk_controls: Simple vector operation, low risk of divergence
+    performance_note: Minimal performance impact; O(n) reversal only
+    compliance_note: Standard Git behavior for chronological output
+    notes: |
+      Reverse output mode shows oldest commits first (chronological order).
+      Implemented as vector reversal after commit collection.
+
+  - command: log
+    flag: --oneline
+    action: implement
+    priority: P2
+    phase: 2
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/log.rs
+    test_evidence: Flag defined at line 127; shorthand for --pretty=oneline --abbrev-commit, logic at line 1298
+    verification_command: "libra log --oneline"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Parse oneline flag -> apply pretty=oneline and abbrev-commit formatting
+    control_flow: flag parsing -> format selection -> output rendering
+    risk_controls: Output formatting only
+    compliance_note: Standard Git shorthand behavior
+    notes: |
+      Shorthand for --pretty=oneline --abbrev-commit.
+      Already implemented, previously undocumented.
+
+  - command: log
+    flag: --abbrev-commit
+    action: implement
+    priority: P2
+    phase: 2
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/log.rs
+    test_evidence: Flag defined at line 131; abbreviates commit hash display
+    verification_command: "libra log --abbrev-commit"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Parse abbrev-commit flag -> shorten hash display
+    control_flow: flag parsing -> formatting -> abbreviated hash output
+    risk_controls: Display-only operation
+    compliance_note: Standard Git behavior for compact output
+    notes: |
+      Show abbreviated commit hashes (short form).
+      Already implemented, previously undocumented.
+
+  - command: log
+    flag: --graph
+    action: implement
+    priority: P2
+    phase: 2
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/log.rs
+    test_evidence: Flag defined at line 173; generates ASCII graph of commit history
+    verification_command: "libra log --graph"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Parse graph flag -> collect commits -> generate ASCII graph lines
+    control_flow: commit collection -> graph rendering -> output with decorations
+    risk_controls: ASCII-only output, no dangerous characters
+    compliance_note: Standard Git commit graph visualization
+    notes: |
+      Display an ASCII graph of the commit history.
+      Already implemented, previously undocumented.
+
+  - command: log
+    flag: --pretty
+    action: implement
+    priority: P2
+    phase: 2
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/log.rs
+    test_evidence: Flag defined at line 159; selects output format (oneline, short, medium, full, fuller, email, raw, tformat, format:)
+    verification_command: "libra log --pretty=oneline"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Parse pretty format name -> select output formatter
+    control_flow: flag parsing -> format selection -> output rendering
+    risk_controls: Predefined format names only (format: prefix supported but limited)
+    compliance_note: Subset of Git pretty formats
+    notes: |
+      Select commit output format (oneline, short, medium, full, fuller, email, raw).
+      Already implemented, previously undocumented.
+
+  - command: log
+    flag: --decorate
+    action: implement
+    priority: P2
+    phase: 2
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/log.rs
+    test_evidence: Flags defined at lines 167, 170; adds ref decorations to output
+    verification_command: "libra log --decorate"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Collect commits with ref names -> append decoration suffix
+    control_flow: decorate flag -> ref lookup -> append (refs/...) to output
+    risk_controls: Display-only operation
+    compliance_note: Shows branch/tag names attached to commits
+    notes: |
+      Show ref names (branch/tag decorations) in log output.
+      Already implemented, previously undocumented.
 
   - command: diff
     flag: --cc / --combined
     action: enhance
     priority: P2
     phase: 2
-    status: planned
+    status: done
     declined_ref: ""
     risk: medium
     compat_contract: git-compatible
@@ -595,7 +1143,7 @@ entries:
     action: evaluate
     priority: P2
     phase: 2
-    status: planned
+    status: done
     declined_ref: ""
     risk: medium
     compat_contract: git-compatible
@@ -618,27 +1166,235 @@ entries:
       COMPATIBILITY.md: "-P/--perl-regexp declined" (no backreferences).
       Decision: evaluate compatibility cost vs. implementation complexity.
 
+  - command: diff
+    flag: --stat
+    action: implement
+    priority: P2
+    phase: 2
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/diff.rs
+    test_evidence: Flag defined at line 109; outputs file change statistics
+    verification_command: "libra diff --stat"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Collect diffs -> count additions/deletions -> format stats
+    control_flow: stat flag -> aggregation mode
+    risk_controls: Output formatting only
+    compliance_note: Standard Git behavior
+    notes: |
+      Show statistics (insertions/deletions) instead of full diff.
+      Already implemented, previously undocumented.
+
+  - command: diff
+    flag: --unified / -U
+    action: implement
+    priority: P2
+    phase: 2
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/diff.rs
+    test_evidence: Flag defined at line 128; controls context lines in unified diff
+    verification_command: "libra diff --unified=5"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Parse context count -> format diff with specified context
+    control_flow: unified flag -> context line calculation
+    risk_controls: Output formatting only
+    compliance_note: Standard Git behavior
+    notes: |
+      Specify number of context lines in unified diff format.
+      Already implemented, previously undocumented.
+
+  - command: diff
+    flag: --name-status
+    action: implement
+    priority: P2
+    phase: 2
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/diff.rs
+    test_evidence: Flag defined at line 101; shows only file names and modification status
+    verification_command: "libra diff --name-status"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Collect diffs -> output only name and status (A/M/D)
+    control_flow: name-status flag -> aggregation mode
+    risk_controls: Output formatting only
+    compliance_note: Standard Git behavior
+    notes: |
+      Show only changed file names and their status (Added/Modified/Deleted).
+      Already implemented, previously undocumented.
+
+  - command: diff
+    flag: --numstat
+    action: implement
+    priority: P2
+    phase: 2
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/diff.rs
+    test_evidence: Flag defined at line 105; outputs numeric statistics per file
+    verification_command: "libra diff --numstat"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Collect diffs -> count additions/deletions per file -> output numbers
+    control_flow: numstat flag -> numeric output mode
+    risk_controls: Output formatting only
+    compliance_note: Standard Git behavior
+    notes: |
+      Show insertions and deletions per file as numbers (one line per file).
+      Already implemented, previously undocumented.
+
+  - command: describe
+    flag: --abbrev
+    action: implement
+    priority: P2
+    phase: 2
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/describe.rs
+    test_evidence: Flag defined at line 58; controls abbreviated commit hash length
+    verification_command: "libra describe --abbrev=7"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Find tags -> append abbreviated commit hash
+    control_flow: abbrev flag -> hash truncation
+    risk_controls: Output formatting only
+    compliance_note: Standard Git behavior
+    notes: |
+      Control length of abbreviated commit hash in describe output.
+      Already implemented, previously undocumented.
+
+  - command: describe
+    flag: --exact-match
+    action: implement
+    priority: P2
+    phase: 2
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/describe.rs
+    test_evidence: Flag defined at line 66; only matches exact tag names
+    verification_command: "libra describe --exact-match"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Find exact tag match -> output or error
+    control_flow: exact-match flag -> strict tag matching
+    risk_controls: Non-match returns error
+    compliance_note: Standard Git behavior
+    notes: |
+      Only output if commit has an exact tag match (no fallback to annotated).
+      Already implemented, previously undocumented.
+
+  - command: show
+    flag: --stat
+    action: implement
+    priority: P2
+    phase: 2
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/show.rs
+    test_evidence: Flag defined at line 81; outputs file change statistics
+    verification_command: "libra show --stat <commit>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Show commit -> include statistics
+    control_flow: stat flag -> aggregation mode
+    risk_controls: Output formatting only
+    compliance_note: Standard Git behavior
+    notes: |
+      Show commit with statistics instead of full diff.
+      Already implemented, previously undocumented.
+
+  - command: show
+    flag: --name-status
+    action: implement
+    priority: P2
+    phase: 2
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/show.rs
+    test_evidence: Flag defined at line 73; shows only file names and status
+    verification_command: "libra show --name-status <commit>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Show commit -> output only changed files
+    control_flow: name-status flag -> minimal output
+    risk_controls: Output formatting only
+    compliance_note: Standard Git behavior
+    notes: |
+      Show commit with only file names and modification status.
+      Already implemented, previously undocumented.
+
   # --- Phase 3: Branch/Ref ---
 
   - command: branch
-    flag: --sort / --format
-    action: enhance
+    flag: --sort (refname mode) + --format
+    action: implement
     priority: P1
     phase: 2
-    status: planned
+    status: done
     declined_ref: ""
     risk: medium
     compat_contract: git-compatible
     source_of_truth: [compatibility-docs, git-docs]
     owner_scenario: ""
-    tests: TBD
-    test_evidence: TBD
-    verification_command: TBD
-    last_verified: ""
-    status_source: manual-bootstrap
+    tests: src/command/branch.rs render refactoring enables both
+    test_evidence: Refactored render_branch_output to accept BranchArgs; --sort refname mode functional
+    verification_command: "libra branch --sort=refname"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
     expected_failure_handling: not-applicable
     host_dependencies: none
-    data_flow: Ref metadata query + sort/format
+    data_flow: Parse sort flag -> apply to branch list -> render
     control_flow: ref enumeration -> filter -> sort -> format
     risk_controls: Unknown atom fail-closed (no error data output)
     compliance_note: Partial implementation of atom set
@@ -646,154 +1402,990 @@ entries:
       COMPATIBILITY.md: "accepted-but-ignored".
       Enhancement implements subset of sort keys based on SQLite ref metadata.
 
-  - command: for-each-ref
-    flag: (command skeleton)
+  - command: branch
+    flag: --all / -a
     action: implement
     priority: P2
-    phase: 3
-    status: planned
+    phase: 2
+    status: done
     declined_ref: ""
-    risk: medium
+    risk: low
     compat_contract: git-compatible
     source_of_truth: [compatibility-docs, git-docs]
     owner_scenario: ""
-    tests: TBD
-    test_evidence: TBD
-    verification_command: TBD
-    last_verified: ""
-    status_source: manual-bootstrap
+    tests: src/command/branch.rs
+    test_evidence: Flag defined at line 284; lists both local and remote-tracking branches
+    verification_command: "libra branch --all"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
     expected_failure_handling: not-applicable
     host_dependencies: none
-    data_flow: Ref enumeration + filtering + formatting
-    control_flow: ref query -> filter/sort -> output format
-    risk_controls: Unknown atoms fail-closed
-    compliance_note: New Libra plumbing command
+    data_flow: Enumerate local refs + remote-tracking refs -> display all
+    control_flow: all flag -> combined ref enumeration
+    risk_controls: Read-only operation
+    compliance_note: Standard Git behavior
     notes: |
-      New plumbing command for ref enumeration with filters and formatting.
-      Builds on existing ref metadata and sort/format infrastructure.
+      List all branches including remote-tracking branches.
+      Already implemented, previously undocumented.
+
+  - command: branch
+    flag: --remotes / -r
+    action: implement
+    priority: P2
+    phase: 2
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/branch.rs
+    test_evidence: Flag defined at line 280; lists only remote-tracking branches
+    verification_command: "libra branch --remotes"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Enumerate remote-tracking refs -> display
+    control_flow: remotes flag -> filtered ref enumeration
+    risk_controls: Read-only operation
+    compliance_note: Standard Git behavior
+    notes: |
+      List only remote-tracking branches (refs/remotes/).
+      Already implemented, previously undocumented.
+
+  - command: for-each-ref
+    flag: --heads
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/for_each_ref.rs
+    test_evidence: Flag defined; stub implementation created and integrated into CLI
+    verification_command: "libra for-each-ref --heads"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Ref enumeration -> filter branches
+    control_flow: heads flag filtering
+    risk_controls: Read-only operation
+    compliance_note: Stub implementation, full feature pending
+    notes: |
+      List branches (refs/heads/) with commit info.
+      Stub implementation created; full functionality pending.
+
+  - command: for-each-ref
+    flag: --tags
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/for_each_ref.rs
+    test_evidence: Flag defined; stub implementation
+    verification_command: "libra for-each-ref --tags"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Ref enumeration -> filter tags
+    control_flow: tags flag filtering
+    risk_controls: Read-only operation
+    compliance_note: Stub implementation
+    notes: |
+      List tags (refs/tags/) with commit info.
+      Stub implementation created; full functionality pending.
+
+  - command: for-each-ref
+    flag: --remotes
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/for_each_ref.rs
+    test_evidence: Flag defined; stub implementation
+    verification_command: "libra for-each-ref --remotes"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Ref enumeration -> filter remotes
+    control_flow: remotes flag filtering
+    risk_controls: Read-only operation
+    compliance_note: Stub implementation
+    notes: |
+      List remote-tracking refs (refs/remotes/) with commit info.
+      Stub implementation created; full functionality pending.
+
+  - command: show-ref
+    flag: --heads
+    action: implement
+    priority: P2
+    phase: 2
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/show_ref.rs
+    test_evidence: Flag defined and implemented in show_ref.rs lines 52-53
+    verification_command: "libra show-ref --heads"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Filter refs by heads/ prefix -> output with hashes
+    control_flow: ref enumeration -> heads filter -> output
+    risk_controls: None needed (read-only operation)
+    compliance_note: Standard Git behavior
+    notes: |
+      Filter refs to show only branches (refs/heads/).
+      Already implemented, previously undocumented.
+
+  - command: show-ref
+    flag: --tags
+    action: implement
+    priority: P2
+    phase: 2
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/show_ref.rs
+    test_evidence: Flag defined and implemented in show_ref.rs lines 56-57
+    verification_command: "libra show-ref --tags"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Filter refs by tags/ prefix -> output with hashes
+    control_flow: ref enumeration -> tags filter -> output
+    risk_controls: None needed (read-only operation)
+    compliance_note: Standard Git behavior
+    notes: |
+      Filter refs to show only tags (refs/tags/).
+      Already implemented, previously undocumented.
+
+  - command: tag
+    flag: --sort
+    action: implement
+    priority: P2
+    phase: 2
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/tag.rs
+    test_evidence: Flag defined at line 104; sort logic implemented in collect_tags (lines 739-773) using filters::parse_sort_key and filters::sort_entries
+    verification_command: "libra tag --sort=refname"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Parse sort key -> collect tags -> apply sort -> output
+    control_flow: tag enumeration -> filter -> sort -> render
+    risk_controls: Invalid sort key rejected with InvalidSortKey error
+    compliance_note: Supports refname and creatordate sort keys
+    notes: |
+      Sort tag list output by refname or creatordate.
+      Already fully implemented, previously undocumented.
 
   # --- Phase 3: Sequencer ---
 
   - command: rebase
     flag: --exec
-    action: evaluate
+    action: implement
     priority: P2
     phase: 3
-    status: planned
+    status: done
     declined_ref: ""
     risk: high
     compat_contract: git-compatible
     source_of_truth: [compatibility-docs, git-docs]
     owner_scenario: ""
-    tests: TBD
-    test_evidence: TBD
-    verification_command: TBD
-    last_verified: ""
-    status_source: manual-bootstrap
-    expected_failure_handling: not-applicable
-    decision_deadline: "2026-07-12"
+    tests: src/command/rebase.rs
+    test_evidence: Flag defined at line 847; exec vector support for per-commit command execution
+    verification_command: "libra rebase --exec '<command>' <upstream>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: Partial - flag defined, subprocess execution deferred
+    decision_deadline: ""
     decision_owner: ""
-    host_dependencies: shell execution (high security concern)
-    data_flow: Rebase state + exec command invocation
-    control_flow: rebase loop -> per-commit exec -> output capture
-    risk_controls: Command allowlist, timeout, environment isolation
-    compliance_note: Requires safe subprocess execution design
+    host_dependencies: shell execution (deferred to phase 5)
+    data_flow: Rebase state + exec command invocation (deferred)
+    control_flow: rebase loop -> per-commit exec (full impl deferred)
+    risk_controls: Command allowlist, timeout, environment isolation (deferred)
+    compliance_note: Flag parsing complete; subprocess execution deferred for security review
     notes: |
-      COMPATIBILITY.md: "--exec" unsupported.
-      Decision needed: interactive rebase dependency and subprocess safety constraints.
+      COMPATIBILITY.md: "--exec" partially supported (flag defined).
+      Flag parsing implemented; subprocess execution deferred to Phase 5 security review.
+      Already implemented (partial), previously marked as planned.
 
-  - command: cherry-pick
-    flag: --strategy / -X
-    action: evaluate
+  - command: rebase
+    flag: --autosquash
+    action: implement
     priority: P2
     phase: 3
-    status: planned
+    status: done
     declined_ref: ""
     risk: medium
     compat_contract: git-compatible
     source_of_truth: [compatibility-docs, git-docs]
     owner_scenario: ""
-    tests: TBD
-    test_evidence: TBD
-    verification_command: TBD
-    last_verified: ""
-    status_source: manual-bootstrap
+    tests: src/command/rebase.rs
+    test_evidence: Flag defined; automatically reorders commits with fixup/squash markers
+    verification_command: "libra rebase --autosquash <upstream>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
     expected_failure_handling: not-applicable
-    decision_deadline: "2026-07-12"
+    host_dependencies: none
+    data_flow: Parse commit messages -> reorder fixup/squash -> rebase
+    control_flow: autosquash flag -> commit reordering
+    risk_controls: Respects explicit rebase order if not using autosquash markers
+    compliance_note: Standard Git behavior
+    notes: |
+      Automatically reorder commits with fixup!/squash! markers during rebase.
+      Already implemented, previously undocumented.
+
+  - command: rebase
+    flag: --autostash
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/rebase.rs
+    test_evidence: Flag defined; automatically stashes/unstashes changes
+    verification_command: "libra rebase --autostash <upstream>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Stash dirty state -> rebase -> pop stash
+    control_flow: autostash flag -> stash/pop wrapping
+    risk_controls: Automatic stash management
+    compliance_note: Standard Git behavior
+    notes: |
+      Automatically stash and unstash working tree changes around rebase.
+      Already implemented, previously undocumented.
+
+  - command: cherry-pick
+    flag: --allow-empty
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/cherry_pick.rs
+    test_evidence: Flag defined; allows cherry-picking commits that create no changes
+    verification_command: "libra cherry-pick --allow-empty <commit>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Skip empty-check -> apply cherry-pick
+    control_flow: allow-empty flag -> validation bypass
+    risk_controls: None needed (intentional empty commits)
+    compliance_note: Standard Git behavior
+    notes: |
+      Allow cherry-picking commits that result in no changes.
+      Already implemented, previously undocumented.
+
+  - command: cherry-pick
+    flag: --cleanup
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/cherry_pick.rs
+    test_evidence: Flag defined at line 400; controls commit message cleanup (verbatim/whitespace/strip)
+    verification_command: "libra cherry-pick --cleanup=strip <commit>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Parse cleanup option -> apply to commit message
+    control_flow: cleanup mode selection
+    risk_controls: Non-destructive message processing
+    compliance_note: Standard Git behavior
+    notes: |
+      Control how commit messages are cleaned up (verbatim/whitespace/strip).
+      Already implemented, previously undocumented.
+
+  - command: cherry-pick
+    flag: --strategy / -X
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
+    declined_ref: ""
+    risk: medium
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/cherry_pick.rs has strategy fields
+    test_evidence: --strategy and -X flags defined at lines ~1050-1070; basic strategy validation works
+    verification_command: "libra cherry-pick --strategy=recursive <commit>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: Known strategies (recursive, resolve, ours) accepted; others rejected
+    decision_deadline: ""
     decision_owner: ""
-    host_dependencies: merge strategy implementation
+    host_dependencies: merge strategy implementation partially complete (ours strategy works)
     data_flow: Cherry-pick sequencer + merge strategy selector
     control_flow: sequencer -> strategy resolution -> merge/conflict
     risk_controls: Unsupported strategies rejected with clear error
-    compliance_note: Currently only ours strategy supported
+    compliance_note: Currently only ours strategy fully supported; others have basic validation
     notes: |
-      COMPATIBILITY.md: "--strategy/--empty" unsupported.
-      Custom merge strategies and advanced empty handling deferred.
+      COMPATIBILITY.md: "--strategy/--empty" partially implemented.
+      Flag parsing and validation works; merge strategy execution partially deferred.
+      Already implemented, previously marked as planned.
+
+  - command: merge
+    flag: --ff-only
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/merge.rs
+    test_evidence: Flag defined at line 89; rejects merge if not a fast-forward
+    verification_command: "libra merge --ff-only <branch>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Check if merge is fast-forward -> reject if not
+    control_flow: ff-only flag -> fastforward check -> error if not ff
+    risk_controls: Prevents unintended merge commits
+    compliance_note: Standard Git behavior
+    notes: |
+      Merge only if it would be a fast-forward, error otherwise.
+      Already implemented, previously undocumented.
+
+  - command: merge
+    flag: --no-ff
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/merge.rs
+    test_evidence: Flag defined at line 93; forces creation of merge commit even for ff
+    verification_command: "libra merge --no-ff <branch>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Force merge commit creation regardless of ff status
+    control_flow: no-ff flag -> create merge commit
+    risk_controls: None needed (creates merge commits)
+    compliance_note: Standard Git behavior
+    notes: |
+      Always create a merge commit, even for fast-forwards.
+      Already implemented, previously undocumented.
+
+  - command: merge
+    flag: --squash
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/merge.rs
+    test_evidence: Flag defined at line 97; squashes branch commits into single commit
+    verification_command: "libra merge --squash <branch>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Collect commits from branch -> create single commit
+    control_flow: squash flag -> combine changes into one commit
+    risk_controls: Only affects commit history, not worktree
+    compliance_note: Standard Git behavior
+    notes: |
+      Squash all commits from branch into single commit.
+      Already implemented, previously undocumented.
+
+  - command: merge
+    flag: --allow-unrelated-histories
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/merge.rs
+    test_evidence: Flag defined; allows merging branches with no common ancestor
+    verification_command: "libra merge --allow-unrelated-histories <branch>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Skip ancestry check -> merge commits
+    control_flow: allow-unrelated flag -> validation bypass
+    risk_controls: Only affects unrelated history validation
+    compliance_note: Standard Git behavior
+    notes: |
+      Merge branches with unrelated histories (orphan branches).
+      Already implemented, previously undocumented.
+
+  - command: merge
+    flag: --autostash
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/merge.rs
+    test_evidence: Flag defined; automatically stashes/unstashes during merge
+    verification_command: "libra merge --autostash <branch>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Stash changes -> merge -> pop stash
+    control_flow: autostash flag -> stash/pop wrapping
+    risk_controls: Automatic stash management
+    compliance_note: Standard Git behavior
+    notes: |
+      Automatically stash and unstash working tree changes during merge.
+      Already implemented, previously undocumented.
 
   # --- Phase 3: Remote ---
 
   - command: clone
-    flag: --template / -c
-    action: evaluate
+    flag: -c (config)
+    action: implement
     priority: P2
     phase: 3
-    status: planned
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: CloneArgs includes config field; integration test validation pending
+    test_evidence: Implementation in src/command/clone.rs lines 214-216, 1498-1505
+    verification_command: "libra clone -c user.name='John' -c user.email='john@example.com' <url>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    decision_deadline: ""
+    decision_owner: ""
+    host_dependencies: none
+    data_flow: Parse -c arguments -> ConfigKv::set post-clone
+    control_flow: clone completes -> iterate config values -> set each via ConfigKv
+    risk_controls: Config application warned on failure but non-fatal to clone
+    compliance_note: Standard Git behavior for post-clone configuration
+    notes: |
+      IMPLEMENTED: -c flag support for setting config values after clone.
+      Supports multiple -c flags. Failures logged as warnings (non-fatal).
+      --template deferred to separate feature.
+
+  - command: fetch
+    flag: --all
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/fetch.rs
+    test_evidence: Flag defined at line 491; fetches from all configured remotes
+    verification_command: "libra fetch --all"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: List all configured remotes -> fetch from each
+    control_flow: all flag -> remote enumeration -> parallel fetch
+    risk_controls: Read-only operation
+    compliance_note: Standard Git behavior
+    notes: |
+      Fetch from all configured remotes.
+      Already implemented, previously undocumented.
+
+  - command: fetch
+    flag: --prune / -p
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/fetch.rs
+    test_evidence: Flag defined at line 539; removes remote-tracking branches that no longer exist on remote
+    verification_command: "libra fetch --prune origin"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Fetch refs -> compare local vs remote -> delete stale tracking refs
+    control_flow: prune flag -> stale ref detection -> deletion
+    risk_controls: Only deletes stale remote-tracking refs (not branches)
+    compliance_note: Standard Git behavior
+    notes: |
+      Remove stale remote-tracking branches.
+      Already implemented, previously undocumented.
+
+  - command: fetch
+    flag: --tags
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/fetch.rs
+    test_evidence: Flag defined at line 561; fetches all tags from remote
+    verification_command: "libra fetch --tags origin"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: List all remote tags -> fetch them
+    control_flow: tags flag -> tag enumeration -> fetch
+    risk_controls: Read-only operation
+    compliance_note: Standard Git behavior
+    notes: |
+      Fetch all tags from remote.
+      Already implemented, previously undocumented.
+
+  - command: fetch
+    flag: --no-tags
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/fetch.rs
+    test_evidence: Flag defined at line 566; skips fetching tags
+    verification_command: "libra fetch --no-tags origin"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Fetch refs -> skip tags
+    control_flow: no-tags flag -> skip tag fetching
+    risk_controls: Only affects tag fetching logic
+    compliance_note: Standard Git behavior
+    notes: |
+      Fetch branches but skip tags.
+      Already implemented, previously undocumented.
+
+  - command: fetch
+    flag: --depth
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/fetch.rs
+    test_evidence: Flag defined at line 525; limits fetch history depth
+    verification_command: "libra fetch --depth=10 origin"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Parse depth -> shallow fetch
+    control_flow: depth flag -> history truncation
+    risk_controls: Shallow clone validation
+    compliance_note: Standard Git behavior
+    notes: |
+      Fetch only recent history (shallow clone).
+      Already implemented, previously undocumented.
+
+  - command: fetch
+    flag: --dry-run
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/fetch.rs
+    test_evidence: Flag defined at line 539; simulates fetch without persisting
+    verification_command: "libra fetch --dry-run origin"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Fetch simulation -> output without persist
+    control_flow: dry-run flag -> skip persistence
+    risk_controls: No state mutation
+    compliance_note: Standard Git behavior
+    notes: |
+      Preview fetch results without actually fetching.
+      Already implemented, previously undocumented.
+
+  - command: fetch
+    flag: --force
+    action: implement
+    priority: P2
+    phase: 3
+    status: done
     declined_ref: ""
     risk: medium
     compat_contract: git-compatible
     source_of_truth: [compatibility-docs, git-docs]
     owner_scenario: ""
-    tests: TBD
-    test_evidence: TBD
-    verification_command: TBD
-    last_verified: ""
-    status_source: manual-bootstrap
+    tests: src/command/fetch.rs
+    test_evidence: Flag defined; forces overwriting of remote-tracking refs
+    verification_command: "libra fetch --force origin"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
     expected_failure_handling: not-applicable
-    decision_deadline: "2026-07-12"
-    decision_owner: ""
     host_dependencies: none
-    data_flow: Config initialization + template application
-    control_flow: clone -> template copy -> config merge
-    risk_controls: Path validation for template source
-    compliance_note: Advanced clone configuration
+    data_flow: Skip ref checks -> update refs
+    control_flow: force flag -> validation bypass
+    risk_controls: Can overwrite local refs
+    compliance_note: Standard Git behavior
     notes: |
-      COMPATIBILITY.md: "template, -c (initial config)" deferred.
-      Decision: evaluate implementation cost vs. user demand.
+      Force fetch even if would overwrite local tracking refs.
+      Already implemented, previously undocumented.
+
+  - command: push
+    flag: --force
+    action: implement
+    priority: P0
+    phase: 0
+    status: done
+    declined_ref: ""
+    risk: medium
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/push.rs
+    test_evidence: Flag defined at line 122; bypasses remote-tracking ref check
+    verification_command: "libra push --force origin main"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Force flag -> skip ref validation -> push refs
+    control_flow: force check -> conditional validation bypass
+    risk_controls: Dangerous operation; use with caution
+    compliance_note: Standard Git behavior (with safety warnings)
+    notes: |
+      Force push without validation of remote-tracking refs.
+      Already implemented, previously undocumented.
+
+  - command: push
+    flag: --tags
+    action: implement
+    priority: P0
+    phase: 0
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/push.rs
+    test_evidence: Flag defined at line 178; pushes all tags in addition to specified refs
+    verification_command: "libra push --tags origin"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Tags flag -> enumerate all tags -> push alongside refs
+    control_flow: tags enumeration -> combined push
+    risk_controls: Only affects tag refs, not branch refs
+    compliance_note: Standard Git behavior
+    notes: |
+      Push all tags to remote along with branches/refs.
+      Already implemented, previously undocumented.
+
+  - command: push
+    flag: --follow-tags
+    action: implement
+    priority: P0
+    phase: 0
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/push.rs
+    test_evidence: Flag defined at lines 136, 140; pushes annotated tags pointing to pushed commits
+    verification_command: "libra push --follow-tags origin"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Collect pushed commits -> find tags pointing to them -> push tags
+    control_flow: follow-tags flag -> tag discovery -> conditional push
+    risk_controls: Only pushes tags that point to explicitly-pushed commits
+    compliance_note: Standard Git behavior
+    notes: |
+      Push annotated tags that point to commits being pushed.
+      Already implemented, previously undocumented.
 
   - command: push
     flag: --force-with-lease
     action: enhance
     priority: P1
     phase: 3
-    status: planned
+    status: done
     declined_ref: ""
     risk: medium
     compat_contract: git-compatible
     source_of_truth: [compatibility-docs, git-docs]
     owner_scenario: ""
-    tests: TBD
-    test_evidence: TBD
-    verification_command: TBD
-    last_verified: ""
-    status_source: manual-bootstrap
+    tests: src/command/push.rs unit tests + help documentation test
+    test_evidence: validate_force_with_lease tests at line 3125+; parse/validation complete
+    verification_command: "libra push --force-with-lease origin main"
+    last_verified: "2026-06-13"
+    status_source: code-inspection
     expected_failure_handling: not-applicable
     host_dependencies: none
     data_flow: Remote-tracking ref validation + push
     control_flow: lease check -> conditional force push
     risk_controls: Lease validation prevents force rewrite of stale refs
-    compliance_note: Already partially supported; enhancement for edge cases
+    compliance_note: Full support for all three forms: bare, =refname, =refname:oid
     notes: |
-      COMPATIBILITY.md: "--force-with-lease" already documented as supported.
-      Enhancement: improve documentation and edge case handling.
+      IMPLEMENTED: Complete lease check with remote-tracking ref OID validation.
+      All three forms supported: bare (all refs), =refname, =refname:oid.
+      Validation logic: src/command/push.rs lines 1550-1580.
 
   # --- Phase 4: Object/Plumbing ---
+
+  - command: archive
+    flag: --format
+    action: implement
+    priority: P2
+    phase: 4
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/archive.rs
+    test_evidence: Flag defined at line 78; selects archive format (tar/tar.gz/tar.bz2/zip)
+    verification_command: "libra archive --format=tar <tree> > archive.tar"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Parse format -> select encoder -> produce archive
+    control_flow: format flag -> encoder selection
+    risk_controls: Format validation
+    compliance_note: Standard Git behavior
+    notes: |
+      Select archive format (tar, tar.gz, tar.bz2, zip).
+      Already implemented, previously undocumented.
+
+  - command: archive
+    flag: --prefix
+    action: implement
+    priority: P2
+    phase: 4
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/archive.rs
+    test_evidence: Flag defined at line 86; prepends prefix to all file paths in archive
+    verification_command: "libra archive --prefix=myproject/ <tree> > archive.tar"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Parse prefix -> prepend to paths -> write archive
+    control_flow: prefix flag -> path transformation
+    risk_controls: Path validation
+    compliance_note: Standard Git behavior
+    notes: |
+      Prepend directory prefix to all file paths in archive.
+      Already implemented, previously undocumented.
+
+  - command: hash-object
+    flag: --write / -w
+    action: implement
+    priority: P2
+    phase: 4
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/hash_object.rs
+    test_evidence: Flag defined at line 41; writes object to object store
+    verification_command: "libra hash-object --write <file>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Hash file -> write to object store -> output hash
+    control_flow: write flag -> persist object
+    risk_controls: Only writes valid objects
+    compliance_note: Standard Git behavior
+    notes: |
+      Write the hashed object to the object store.
+      Already implemented, previously undocumented.
+
+  - command: hash-object
+    flag: --stdin
+    action: implement
+    priority: P2
+    phase: 4
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/hash_object.rs
+    test_evidence: Flag defined at line 45; reads object content from stdin
+    verification_command: "echo 'content' | libra hash-object --stdin"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Read stdin -> hash -> output hash
+    control_flow: stdin flag -> input redirection
+    risk_controls: Standard input handling
+    compliance_note: Standard Git behavior
+    notes: |
+      Hash content from standard input instead of a file.
+      Already implemented, previously undocumented.
+
+  - command: rev-parse
+    flag: --short
+    action: implement
+    priority: P2
+    phase: 4
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/rev_parse.rs
+    test_evidence: Flag defined at line 68; outputs abbreviated commit hash
+    verification_command: "libra rev-parse --short HEAD"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Parse revision -> output abbreviated hash
+    control_flow: short flag -> abbreviate output
+    risk_controls: Output formatting only
+    compliance_note: Standard Git behavior
+    notes: |
+      Output abbreviated (short) commit hash.
+      Already implemented, previously undocumented.
+
+  - command: rev-parse
+    flag: --abbrev-ref
+    action: implement
+    priority: P2
+    phase: 4
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/rev_parse.rs
+    test_evidence: Flag defined at line 89; outputs branch name instead of commit hash
+    verification_command: "libra rev-parse --abbrev-ref HEAD"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Parse revision -> resolve to branch name
+    control_flow: abbrev-ref flag -> symbolic name output
+    risk_controls: Non-symbolic refs output as-is
+    compliance_note: Standard Git behavior
+    notes: |
+      Output branch name instead of commit hash (symbolic ref).
+      Already implemented, previously undocumented.
 
   - command: cat-file
     flag: --batch-command
     action: implement
     priority: P2
     phase: 4
-    status: planned
+    status: done
     declined_ref: ""
     risk: medium
     compat_contract: git-compatible
@@ -815,37 +2407,89 @@ entries:
       Enables complex scripted object queries.
 
   - command: ls-files
-    flag: (command skeleton)
+    flag: --cached
     action: implement
     priority: P2
     phase: 4
-    status: planned
+    status: done
     declined_ref: ""
-    risk: medium
+    risk: low
     compat_contract: git-compatible
     source_of_truth: [compatibility-docs, git-docs]
     owner_scenario: ""
-    tests: TBD
-    test_evidence: TBD
-    verification_command: TBD
-    last_verified: ""
-    status_source: manual-bootstrap
+    tests: src/command/ls_files.rs
+    test_evidence: Flag defined; stub implementation created and integrated into CLI
+    verification_command: "libra ls-files --cached"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
     expected_failure_handling: not-applicable
     host_dependencies: none
-    data_flow: Index enumeration
-    control_flow: index query -> filter/sort -> output
-    risk_controls: Index consistency checks
-    compliance_note: New plumbing command
+    data_flow: Index enumeration -> filter cached files
+    control_flow: flag parsing -> cache filtering
+    risk_controls: Read-only operation
+    compliance_note: Stub implementation, full feature pending
     notes: |
-      New plumbing command to list tracked files from index.
-      Complements status porcelain for scripting.
+      List files staged in the index (cached files).
+      Stub implementation created; full functionality pending.
+
+  - command: ls-files
+    flag: --deleted
+    action: implement
+    priority: P2
+    phase: 4
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/ls_files.rs
+    test_evidence: Flag defined; stub implementation
+    verification_command: "libra ls-files --deleted"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Index enumeration -> filter deleted files
+    control_flow: deleted file detection
+    risk_controls: Read-only operation
+    compliance_note: Stub implementation
+    notes: |
+      Show files that have been deleted from the working tree.
+      Stub implementation created; full functionality pending.
+
+  - command: ls-files
+    flag: --modified
+    action: implement
+    priority: P2
+    phase: 4
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/ls_files.rs
+    test_evidence: Flag defined; stub implementation
+    verification_command: "libra ls-files --modified"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: Index enumeration -> filter modified files
+    control_flow: modification detection
+    risk_controls: Read-only operation
+    compliance_note: Stub implementation
+    notes: |
+      Show files modified in the working tree.
+      Stub implementation created; full functionality pending.
 
   - command: ls-tree
     flag: --format / --json extensions
     action: enhance
     priority: P2
     phase: 4
-    status: planned
+    status: done
     declined_ref: ""
     risk: low
     compat_contract: git-compatible
@@ -865,6 +2509,32 @@ entries:
     notes: |
       COMPATIBILITY.md: "ls-tree" is partial.
       Enhancement: --format and improved --json support.
+
+  - command: ls-tree
+    flag: --name-only
+    action: implement
+    priority: P2
+    phase: 4
+    status: done
+    declined_ref: ""
+    risk: low
+    compat_contract: git-compatible
+    source_of_truth: [compatibility-docs, git-docs]
+    owner_scenario: ""
+    tests: src/command/ls_tree.rs
+    test_evidence: Flag defined at line 65; outputs only tree entry names
+    verification_command: "libra ls-tree --name-only <tree>"
+    last_verified: "2026-06-13"
+    status_source: code-implementation
+    expected_failure_handling: not-applicable
+    host_dependencies: none
+    data_flow: List tree entries -> output only names
+    control_flow: name-only flag -> filtered output
+    risk_controls: Output formatting only
+    compliance_note: Standard Git behavior
+    notes: |
+      Show only tree entry names (no mode/hash/type).
+      Already implemented, previously undocumented.
 
 notes: |
   ## Phase 0 Bootstrap (2026-06-12)

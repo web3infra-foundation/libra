@@ -53,6 +53,9 @@ pub struct CleanArgs {
     /// Exclude files matching the given pattern (can be repeated)
     #[clap(short = 'e', long = "exclude", value_name = "pattern")]
     pub exclude: Vec<String>,
+    /// Pathspec filter (not supported; Phase 1 / Phase 1 rejection)
+    #[clap(value_name = "pathspec", trailing_var_arg = true, allow_hyphen_values = true)]
+    pub pathspec: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -87,6 +90,8 @@ enum CleanError {
     RemoveFile { path: String, detail: String },
     #[error("interactive clean I/O error: {detail}")]
     Io { detail: String },
+    #[error("libra: clean <pathspec> is not supported (see declined.md#D17); use -f or explicit file removal instead")]
+    PathspecDeclined,
 }
 
 pub async fn execute(args: CleanArgs) {
@@ -109,6 +114,10 @@ pub async fn execute(args: CleanArgs) {
 /// fails.
 pub async fn execute_safe(args: CleanArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
+
+    if !args.pathspec.is_empty() {
+        return Err(clean_cli_error(CleanError::PathspecDeclined));
+    }
 
     preflight(&args, output).await.map_err(clean_cli_error)?;
 
@@ -868,6 +877,12 @@ fn clean_cli_error(error: CleanError) -> CliError {
         CleanError::Io { detail } => {
             CliError::fatal(format!("interactive clean I/O error: {detail}"))
                 .with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        CleanError::PathspecDeclined => {
+            CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::Unsupported)
+                .with_hint("to remove files, use: libra clean -f")
+                .with_hint("to remove interactively, use: libra clean -i")
         }
     }
 }

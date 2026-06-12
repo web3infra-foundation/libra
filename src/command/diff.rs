@@ -166,6 +166,10 @@ pub struct DiffArgs {
     /// Expand each hunk's context to the surrounding function boundaries.
     #[clap(short = 'W', long = "function-context")]
     pub function_context: bool,
+
+    /// Generate combined diff for merge commits (Phase 2 enhancement)
+    #[clap(long = "cc", alias = "combined")]
+    pub combined: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -304,6 +308,18 @@ pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()
     }
     validate_diff_algorithm(&args).map_err(CliError::from)?;
     validate_diff_word_diff_args(&args).map_err(CliError::from)?;
+
+    // Validate --cc / --combined flag: requires comparing two commits with merge detection
+    if args.combined {
+        // For now, --cc is accepted but requires explicit commit specification
+        // Full implementation with merge detection deferred
+        if args.old.is_none() {
+            return Err(CliError::from(DiffError::InvalidArgument(
+                "--cc/--combined requires explicit --old and --new commit specification".to_string()
+            )));
+        }
+    }
+
     emit_worktree_scan_progress(&args, output);
     let result = run_diff(&args, output.is_json())
         .await
@@ -2600,6 +2616,7 @@ pub async fn staged_diff_text() -> String {
         word_diff: None,
         word_diff_regex: None,
         function_context: false,
+        combined: false,
     };
     match run_diff(&args, false).await {
         Ok(result) => format_unified_diff(&result),

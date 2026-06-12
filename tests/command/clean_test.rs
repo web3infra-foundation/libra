@@ -31,6 +31,7 @@ async fn test_clean_dry_run_keeps_files() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -56,6 +57,7 @@ async fn test_clean_force_removes_files() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -120,6 +122,7 @@ async fn test_clean_force_keeps_tracked_files() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -146,6 +149,7 @@ async fn test_clean_force_removes_nested_untracked() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -186,6 +190,7 @@ async fn test_clean_force_respects_ignore_rules() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -227,6 +232,7 @@ async fn test_clean_force_multiple_untracked_with_tracked() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -258,6 +264,7 @@ async fn test_clean_force_with_missing_index() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -378,6 +385,7 @@ async fn test_clean_force_with_long_path() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -407,6 +415,7 @@ async fn test_clean_force_does_not_follow_symlink_dirs() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -491,6 +500,7 @@ async fn test_clean_d_flag_removes_untracked_dirs() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -532,6 +542,7 @@ async fn test_clean_d_flag_keeps_dirs_with_tracked_files() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -576,6 +587,7 @@ async fn test_clean_x_flag_removes_ignored_files() {
         ignored: true,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -619,6 +631,7 @@ async fn test_clean_x_flag_removes_only_ignored_files() {
         ignored: false,
         only_ignored: true,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -647,6 +660,7 @@ async fn test_clean_exclude_flag_excludes_patterns() {
         ignored: false,
         only_ignored: false,
         exclude: vec!["*.txt".to_string()],
+        pathspec: vec![],
     })
     .await;
 
@@ -676,6 +690,7 @@ async fn test_clean_exclude_multiple_patterns() {
         ignored: false,
         only_ignored: false,
         exclude: vec!["*.txt".to_string(), "*.log".to_string()],
+        pathspec: vec![],
     })
     .await;
 
@@ -762,6 +777,7 @@ async fn test_clean_dx_removes_ignored_directories() {
         ignored: true,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -1101,5 +1117,44 @@ fn test_clean_interactive_filter_keeps_named_file_via_stdin() {
     assert!(
         !repo.path().join("remove_me.txt").exists(),
         "unfiltered candidate must be removed"
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// Phase 1 rejection: clean <pathspec> positional arguments are not supported.
+async fn test_clean_pathspec_positional_rejected() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create an untracked file
+    fs::File::create("untracked.txt").unwrap().write_all(b"content").unwrap();
+
+    // Attempt to clean with a pathspec argument (should be rejected)
+    let result = tokio::task::spawn_blocking(move || {
+        Command::new(env!("CARGO_BIN_EXE_libra"))
+            .arg("clean")
+            .arg("-f")
+            .arg("untracked.txt")
+            .output()
+    })
+    .await
+    .unwrap()
+    .unwrap();
+
+    // Verify the command fails with an unsupported error
+    assert!(!result.status.success(), "clean with pathspec should fail");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("not supported") || stderr.contains("declined"),
+        "error message should mention unsupported/declined: {}",
+        stderr
+    );
+
+    // Verify the file is not removed (pathspec was rejected, not applied)
+    assert!(
+        std::path::Path::new("untracked.txt").exists(),
+        "file should not be removed when pathspec is rejected"
     );
 }

@@ -1138,3 +1138,26 @@ fn test_commit_help_lists_examples_banner() {
         );
     }
 }
+
+#[test]
+/// Phase 1 rejection: commit --allow-empty-message is not supported.
+fn test_commit_allow_empty_message_rejected() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // Stage a change
+    std::fs::write(p.join("file.txt"), "content\n").unwrap();
+    run_libra_command(&["add", "file.txt"], p);
+
+    // Attempt to commit with --allow-empty-message (should be rejected)
+    let output = run_libra_command(&["commit", "--allow-empty-message", "-m", "test"], p);
+
+    // Verify the command fails
+    assert!(!output.status.success(), "commit --allow-empty-message should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not supported") || stderr.contains("declined"),
+        "error message should mention unsupported/declined: {}",
+        stderr
+    );
+}

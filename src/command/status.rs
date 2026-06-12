@@ -23,7 +23,7 @@ use git_internal::{
 };
 use serde::Serialize;
 
-use super::{bisect, merge, rebase, stash};
+use super::{bisect, cherry_pick, merge, rebase, stash};
 use crate::{
     command::{calc_file_blob_hash, load_object},
     internal::{
@@ -105,6 +105,10 @@ pub struct StatusArgs {
     /// Implies `--porcelain=v1` when no other format is given.
     #[clap(short = 'z')]
     pub z: bool,
+
+    /// Show only changes for paths matching this pattern (Phase 1 enhancement)
+    #[clap(value_name = "pathspec", trailing_var_arg = true, allow_hyphen_values = true)]
+    pub pathspec: Vec<String>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -250,6 +254,7 @@ enum RepoState {
     Merge,
     Rebase { onto: String, head_name: String },
     Bisect,
+    CherryPick,
 }
 
 impl RepoState {
@@ -258,6 +263,7 @@ impl RepoState {
             RepoState::Merge => "merge",
             RepoState::Rebase { .. } => "rebase",
             RepoState::Bisect => "bisect",
+            RepoState::CherryPick => "cherry-pick",
         }
     }
 }
@@ -430,6 +436,26 @@ async fn collect_status_data(
         None => None,
     };
     let repo_state = detect_repo_state(merge_state.as_ref()).await?;
+
+    // Apply pathspec filtering if provided
+    let (staged, unstaged, ignored_files) = if !args.pathspec.is_empty() {
+        (
+            Changes {
+                new: filter_paths_by_pathspec(&staged.new, &args.pathspec),
+                modified: filter_paths_by_pathspec(&staged.modified, &args.pathspec),
+                deleted: filter_paths_by_pathspec(&staged.deleted, &args.pathspec),
+            },
+            Changes {
+                new: filter_paths_by_pathspec(&unstaged.new, &args.pathspec),
+                modified: filter_paths_by_pathspec(&unstaged.modified, &args.pathspec),
+                deleted: filter_paths_by_pathspec(&unstaged.deleted, &args.pathspec),
+            },
+            filter_paths_by_pathspec(&ignored_files, &args.pathspec),
+        )
+    } else {
+        (staged, unstaged, ignored_files)
+    };
+
     let porcelain_v2 = if matches!(args.porcelain, Some(PorcelainVersion::V2)) {
         Some(PorcelainV2Data {
             index: status_index,
@@ -480,6 +506,13 @@ async fn detect_repo_state(merge_state: Option<&MergeStatusInfo>) -> CliResult<O
 
     if merge_state.is_some() {
         return Ok(Some(RepoState::Merge));
+    }
+
+    if cherry_pick::CherryPickState::is_in_progress()
+        .await
+        .map_err(|detail| repo_state_inspect_error("inspect cherry-pick state", detail))?
+    {
+        return Ok(Some(RepoState::CherryPick));
     }
 
     Ok(None)
@@ -806,6 +839,24 @@ fn unmerged_stage_info(index: &Index, path_name: &str, stage: u8) -> Option<Unme
         mode: entry.mode,
         hash: entry.hash.to_string(),
     })
+}
+
+/// Filter paths by pathspec patterns (Phase 1: basic glob-style matching).
+fn filter_paths_by_pathspec(paths: &[PathBuf], pathspecs: &[String]) -> Vec<PathBuf> {
+    if pathspecs.is_empty() {
+        return paths.to_vec();
+    }
+
+    paths
+        .iter()
+        .filter(|path| {
+            let path_str = path.to_string_lossy();
+            pathspecs.iter().any(|pattern| {
+                path_str.contains(pattern.as_str()) || path_str.starts_with(pattern.as_str())
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1161,6 +1212,19 @@ fn render_repo_state_human(repo_state: &RepoState, buffer: &mut Vec<u8>) -> CliR
         }
         RepoState::Bisect => {
             writeln!(buffer, "bisect in progress").map_err(write_error)?;
+        }
+        RepoState::CherryPick => {
+            writeln!(buffer, "cherry-pick in progress").map_err(write_error)?;
+            writeln!(
+                buffer,
+                "  (use \"libra cherry-pick --continue\" to resume)"
+            )
+            .map_err(write_error)?;
+            writeln!(
+                buffer,
+                "  (use \"libra cherry-pick --abort\" to cancel)"
+            )
+            .map_err(write_error)?;
         }
     }
     Ok(())

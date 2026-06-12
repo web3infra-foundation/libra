@@ -1155,6 +1155,76 @@ async fn test_grep_untracked_respects_libraignore() {
     );
 }
 
+#[test]
+fn test_grep_extended_regexp_alias_works() {
+    let repo = tempdir().unwrap();
+    super::init_repo_via_cli(repo.path());
+    fs::write(repo.path().join("test.txt"), "foobar\nbaz\nquux").unwrap();
+    super::run_libra_command(&["add", "test.txt"], repo.path());
+    super::run_libra_command(
+        &["commit", "--allow-empty", "-m", "initial"],
+        repo.path(),
+    );
+
+    // Test --extended-regexp (should be no-op since Rust regex is already ERE-style)
+    let extended = super::run_libra_command(
+        &["grep", "--extended-regexp", "foo|baz", "test.txt"],
+        repo.path(),
+    );
+    assert!(
+        extended.status.success(),
+        "grep --extended-regexp must succeed"
+    );
+    let output = String::from_utf8_lossy(&extended.stdout);
+    assert!(output.contains("foobar") || output.contains("baz"), "must find matches with ERE pattern");
+}
+
+#[test]
+fn test_grep_basic_regexp_alias_works() {
+    let repo = tempdir().unwrap();
+    super::init_repo_via_cli(repo.path());
+    fs::write(repo.path().join("test.txt"), "foobar\nbaz\nquux").unwrap();
+    super::run_libra_command(&["add", "test.txt"], repo.path());
+    super::run_libra_command(
+        &["commit", "--allow-empty", "-m", "initial"],
+        repo.path(),
+    );
+
+    // Test --basic-regexp (should accept the flag as alias, pattern still interpreted as Rust regex)
+    let basic = super::run_libra_command(
+        &["grep", "--basic-regexp", "foo", "test.txt"],
+        repo.path(),
+    );
+    assert!(
+        basic.status.success(),
+        "grep --basic-regexp must accept the flag"
+    );
+    let output = String::from_utf8_lossy(&basic.stdout);
+    assert!(output.contains("foobar"), "must find matches with basic pattern");
+}
+
+#[test]
+fn test_grep_perl_regexp_rejected() {
+    let repo = tempdir().unwrap();
+    super::init_repo_via_cli(repo.path());
+    fs::write(repo.path().join("test.txt"), "foobar").unwrap();
+
+    // Test -P/--perl-regexp (should be rejected)
+    let perl = super::run_libra_command(
+        &["grep", "--perl-regexp", "foo", "test.txt"],
+        repo.path(),
+    );
+    assert!(
+        !perl.status.success(),
+        "grep --perl-regexp must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&perl.stderr);
+    assert!(
+        stderr.contains("not supported") || stderr.contains("Perl"),
+        "error must mention Perl regex not supported: {stderr}"
+    );
+}
+
 /// Collect the `path` of each match in a `--json` grep output.
 fn json_match_paths(output: &std::process::Output) -> Vec<String> {
     let json = parse_json_stdout(output);

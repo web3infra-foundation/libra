@@ -840,6 +840,11 @@ pub struct RebaseArgs {
     /// (declined) Interactive rebase todo-editor workflow — not supported in Libra.
     #[clap(short = 'i', long = "interactive")]
     pub interactive: bool,
+
+    /// Execute shell command after each commit. Can be specified multiple times.
+    /// The shell command receives the commit message and is expected to exit with 0 for success.
+    #[clap(long = "exec", value_name = "cmd", action = clap::ArgAction::Append)]
+    pub exec: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

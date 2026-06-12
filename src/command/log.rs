@@ -214,6 +214,22 @@ pub struct LogArgs {
     /// Follow a single file's history across renames
     #[clap(long)]
     pub follow: bool,
+
+    /// Show log for all branches (Phase 2: multi-root history walk)
+    #[clap(long)]
+    pub all: bool,
+
+    /// Show log for all branches only (Phase 2: enhancement)
+    #[clap(long)]
+    pub branches: bool,
+
+    /// Show log for all tags (Phase 2: enhancement)
+    #[clap(long)]
+    pub tags: bool,
+
+    /// Show commits in reverse order (oldest first) (Phase 2: enhancement)
+    #[clap(long)]
+    pub reverse: bool,
 }
 
 #[derive(PartialEq, Debug)]
@@ -1097,6 +1113,51 @@ pub async fn get_reachable_commits(
     Ok(reachable_commits)
 }
 
+/// Phase 2 enhancement: collect commits reachable from all branches and/or tags.
+async fn get_all_reachable_commits(
+    all: bool,
+    branches: bool,
+    tags: bool,
+) -> Result<Vec<Commit>, CliError> {
+    use crate::internal::branch::Branch;
+    use std::collections::HashSet;
+
+    let mut all_commits: Vec<Commit> = Vec::new();
+    let mut seen_hashes: HashSet<String> = HashSet::new();
+
+    // Collect branch refs if --all or --branches
+    if all || branches {
+        let all_branches = Branch::list_branches_best_effort(None).await;
+        for branch in all_branches {
+            let commit_hash = branch.commit.to_string();
+            if seen_hashes.insert(commit_hash.clone()) {
+                if let Ok(commits) = get_reachable_commits(commit_hash, None).await {
+                    all_commits.extend(commits);
+                }
+            }
+        }
+    }
+
+    // Collect tag refs if --all or --tags
+    if all || tags {
+        let all_tags = tag::list().await.unwrap_or_default();
+        for tag in all_tags {
+            let commit_hash = match tag.object {
+                TagObject::Commit(c) => c.id.to_string(),
+                TagObject::Tag(t) => t.object_hash.to_string(),
+                _ => continue,
+            };
+            if seen_hashes.insert(commit_hash.clone()) {
+                if let Ok(commits) = get_reachable_commits(commit_hash, None).await {
+                    all_commits.extend(commits);
+                }
+            }
+        }
+    }
+
+    Ok(all_commits)
+}
+
 // Ordered as they should appear in log
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
 enum ReferenceKind {
@@ -1165,12 +1226,21 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let commit_hash = current_head_commit.to_string();
 
-    let mut reachable_commits = match &positionals.rev_range {
-        Some(range) => resolve_rev_range(range).await?,
-        None => get_reachable_commits(commit_hash.clone(), None).await?,
+    let mut reachable_commits = if args.all || args.branches || args.tags {
+        // Phase 2: Multi-root history walk for --all/--branches/--tags
+        get_all_reachable_commits(args.all, args.branches, args.tags).await?
+    } else {
+        match &positionals.rev_range {
+            Some(range) => resolve_rev_range(range).await?,
+            None => get_reachable_commits(commit_hash.clone(), None).await?,
+        }
     };
     // newest first
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
+    // Phase 2: --reverse shows oldest first
+    if args.reverse {
+        reachable_commits.reverse();
+    }
     let default_abbrev = util::get_min_unique_hash_length(&reachable_commits).max(7);
 
     // `--first-parent` restricts to the first-parent chain (computed from the
