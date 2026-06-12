@@ -13,6 +13,14 @@ pub(crate) fn scenario_tag_basic(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
     fs::write(repo.join("release.txt"), "release v1.2.0\n")
         .context("write release note fixture")?;
     ctx.command(&["tag", "-F", "release.txt", "v1.2.0"], repo.clone(), true)?;
+    ctx.command(
+        &["tag", "-a", "-m", "annotated via -a", "v1.5.0"],
+        repo.clone(),
+        true,
+    )?;
+    let listed = ctx.command(&["tag", "-l", "-n", "1"], repo.clone(), true)?;
+    assert_stdout_contains(&listed, "release v1.1.0")?;
+    assert_stdout_contains(&listed, "annotated via -a")?;
     assert_stdout_contains(
         &ctx.command(&["tag", "--points-at", "HEAD"], repo.clone(), true)?,
         "v1.0.0",

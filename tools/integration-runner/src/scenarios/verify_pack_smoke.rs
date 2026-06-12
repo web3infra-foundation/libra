@@ -27,10 +27,54 @@ pub(crate) fn scenario_verify_pack_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()
         &ctx.command(&["verify-pack", &idx_arg], repo.clone(), true)?,
         ": ok",
     )?;
+
+    // --pack: an explicit pack path must verify the same idx instead of the
+    // derived `.pack` sibling.
+    assert_stdout_contains(
+        &ctx.command(
+            &["verify-pack", "--pack", &pack, &idx_arg],
+            repo.clone(),
+            true,
+        )?,
+        ": ok",
+    )?;
+
+    // -v prints one `<oid> <type> <size> <size-in-pack> <offset>` row per
+    // indexed object before the trailing ok line.
+    let verbose = ctx.command(&["verify-pack", "-v", &idx_arg], repo.clone(), true)?;
+    assert_stdout_contains(&verbose, " commit ")?;
+    assert_stdout_contains(&verbose, " blob ")?;
+    assert_stdout_contains(&verbose, ": ok")?;
+
+    // -s/--stat-only replaces the per-object listing and the ok line with a
+    // delta-chain statistics summary.
+    let stats = ctx.command(&["verify-pack", "-s", &idx_arg], repo.clone(), true)?;
+    assert_stdout_contains(&stats, "non delta:")?;
+    assert_not_contains(&stats, ": ok")?;
+
     assert_json_ok(
         &ctx.command(&["--json", "verify-pack", &idx_arg], repo.clone(), true)?,
         "verify-pack",
     )?;
+
+    // Negative paths: a missing idx and a corrupted idx must both fail with a
+    // stable error naming the affected path.
+    let missing_arg = ctx.run_dir.join("missing.idx").to_string_lossy().to_string();
+    let missing = ctx.command(&["verify-pack", &missing_arg], repo.clone(), false)?;
+    assert_lbr_or_text(&missing, "could not open pack index")?;
+
+    let corrupt_idx = ctx.run_dir.join("corrupt.idx");
+    fs::copy(&idx, &corrupt_idx)
+        .with_context(|| format!("copy idx to {}", corrupt_idx.display()))?;
+    let mut corrupt_bytes =
+        fs::read(&corrupt_idx).with_context(|| format!("read {}", corrupt_idx.display()))?;
+    corrupt_bytes.extend_from_slice(b"corrupt");
+    fs::write(&corrupt_idx, corrupt_bytes)
+        .with_context(|| format!("append corruption to {}", corrupt_idx.display()))?;
+    let corrupt_arg = corrupt_idx.to_string_lossy().to_string();
+    let corrupt = ctx.command(&["verify-pack", &corrupt_arg], repo.clone(), false)?;
+    assert_lbr_or_text(&corrupt, "invalid pack index")?;
+
     ctx.command(&["fsck", "--connectivity-only"], repo, true)?;
     Ok(())
 }

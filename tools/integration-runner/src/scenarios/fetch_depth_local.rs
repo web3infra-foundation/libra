@@ -56,6 +56,21 @@ pub(crate) fn scenario_fetch_depth_local(ctx: &mut ScenarioCtx<'_>) -> Result<()
     {
         bail!("fetch --deepen 1 did not reveal exactly two visible commits");
     }
+    ctx.command(&["fsck", "--connectivity-only"], shallow1.clone(), true)?;
+    // `--unshallow` completes the remaining history and removes the
+    // `.libra/shallow` boundary file.
+    ctx.command(
+        &["fetch", "origin", "--unshallow"],
+        shallow1.clone(),
+        true,
+    )?;
+    let full_log = ctx.command(&["log", "--oneline"], shallow1.clone(), true)?;
+    if String::from_utf8_lossy(&full_log.stdout).lines().count() != 3 {
+        bail!("fetch --unshallow did not reveal all three commits");
+    }
+    if shallow1.join(".libra").join("shallow").exists() {
+        bail!("fetch --unshallow left the .libra/shallow boundary file behind");
+    }
     ctx.command(&["fsck", "--connectivity-only"], shallow1, true)?;
     ctx.command(
         &["clone", "--depth", "2", &remote, "shallow-2"],

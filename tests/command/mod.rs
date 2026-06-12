@@ -2,7 +2,7 @@
 
 use std::{
     collections::BTreeMap,
-    fs,
+    env, fs,
     io::Write,
     path::Path,
     process::{Command, Output, Stdio},
@@ -83,7 +83,14 @@ fn base_libra_command(args: &[&str], cwd: &Path) -> Command {
         .env("LANG", "C")
         .env("LC_ALL", "C")
         .env(LIBRA_TEST_ENV, "1");
+    preserve_coverage_env(&mut command);
     command
+}
+
+fn preserve_coverage_env(command: &mut Command) {
+    if let Some(profile_file) = env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile_file);
+    }
 }
 
 /// Build a Libra command with the same isolated process environment as
@@ -313,6 +320,7 @@ mod init_test;
 mod lfs_test;
 mod log_test;
 mod ls_remote_test;
+mod ls_tree_test;
 mod merge_test;
 mod mv_test;
 mod notes_test;

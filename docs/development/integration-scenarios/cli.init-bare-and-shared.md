@@ -27,6 +27,13 @@ libra init --shared=all shared-all
 libra init --shared=world shared-world
 libra init --shared=everybody shared-everybody
 libra init --shared=0770 shared-octal
+
+# 无值 --shared 形式（require_equals）默认折算为 group；尾词是 DIRECTORY 位置参数
+libra init --shared shared-default
+cd shared-default
+libra config get core.sharedRepository | grep group
+libra fsck --connectivity-only
+cd "$RUN_DIR"
 ```
 
 负向步骤：

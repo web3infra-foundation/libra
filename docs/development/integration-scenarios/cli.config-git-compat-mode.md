@@ -28,6 +28,20 @@ libra config --unset user.compat
 libra config --unset-all remote.origin.fetch
 libra config --get -d fallback missing.compat
 libra config --get --default fallback-long missing.compat.long
+
+# 类型别名（--bool/--int/--path 等价于 --type=<t>；--type 语义细节由 cargo 命令测试覆盖）
+libra config set custom.boolflag yes
+libra config --bool --get custom.boolflag        # 输出 true
+libra config set custom.intval 1k
+libra config --int --get custom.intval           # 输出 1024
+libra config set custom.pathval /tmp/typed-path
+libra config --path --get custom.pathval         # 无 ~ 时原样输出
+
+# --remove-section 的 flag 拼写（subcommand 形式由 cargo 命令测试覆盖）
+libra config set temp.section.alpha one
+libra config set temp.section.beta two
+libra config --remove-section temp.section
+! libra config --get temp.section.alpha
 ```
 
 负向步骤：
@@ -36,9 +50,11 @@ libra config --get --default fallback-long missing.compat.long
 ! libra config --default fallback user.bad-default value
 ! libra config init value
 ! libra config --import user.name
+! libra config --url https://example.invalid --get user.compat
+! libra config --no-show-names --get user.compat
 ```
 
-断言：位置参数 `key valuepattern` 的默认模式等价于 set；`--get` / `--get-all` / `--get-regexp` / `--list` / `-l` / `--show-origin` / `--add` / `--unset` / `--unset-all` / `-d` / `--default` 均至少有一个直接 invocation 覆盖；`--default` 只能与 get 类模式组合；不含 section 的 key 非 0 退出并对 `init` / `clone` 给出“这是顶层命令”的提示。`--import` 的正向导入路径依赖系统 `git`，由 `cli.config-import-path-edit` 覆盖；本场景只保留 `--import <key>` 的参数拒绝路径，避免把普通 compat 场景误标为 `requires_git`。
+断言：位置参数 `key valuepattern` 的默认模式等价于 set；`--get` / `--get-all` / `--get-regexp` / `--list` / `-l` / `--show-origin` / `--add` / `--unset` / `--unset-all` / `-d` / `--default` 均至少有一个直接 invocation 覆盖；`--default` 只能与 get 类模式组合；不含 section 的 key 非 0 退出并对 `init` / `clone` 给出“这是顶层命令”的提示。`--import` 的正向导入路径依赖系统 `git`，由 `cli.config-import-path-edit` 覆盖；本场景只保留 `--import <key>` 的参数拒绝路径，避免把普通 compat 场景误标为 `requires_git`。类型别名 `--bool` / `--int` / `--path` 输出与 `--type=<t>` 等价的规范化值（true / 1024 / 原样路径）；`--remove-section <section>` flag 拼写删除整个 section，删除后 `--get` 该 section 下的 key 非 0；被拒绝的 `--url` 与 `--no-show-names` 必须非 0 退出并给出明确不支持提示。
 
 补充可执行断言：
 - `libra --json config --get user.compat` 必须 `ok:true`，且 `data.value == "value-from-positional"`。

@@ -100,5 +100,17 @@ pub(crate) fn scenario_config_set_input_and_encryption(ctx: &mut ScenarioCtx<'_>
         false,
     )?;
     assert_lbr_or_text(&bad_stdin, "stdin")?;
+    let bad_vault_plaintext = ctx.command(
+        &[
+            "config",
+            "set",
+            "--plaintext",
+            "vault.env.TEST_SECRET",
+            "value",
+        ],
+        repo.clone(),
+        false,
+    )?;
+    assert_lbr_or_text(&bad_vault_plaintext, "plaintext")?;
     Ok(())
 }

@@ -4,6 +4,10 @@
 
 ### Added
 
+- **`libra ls-tree`**: partial Git-compatible tree inspection command for
+  listing commit/tree contents with default Git-style output, recursive
+  traversal, tree-only and long modes, NUL records, path-only/object-only
+  output, object ID abbreviation, path prefix filters, and structured JSON.
 - **`libra gc`**: Maintenance command that traces refs, reflogs, and index
   entries to keep reachable objects, prunes unreachable loose objects according
   to `--prune`, supports `--dry-run` and `--json`, and cleans stale pack

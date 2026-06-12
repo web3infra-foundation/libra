@@ -1,6 +1,6 @@
 ### `cli.tag-basic`
 
-目的：覆盖 `tag` 创建（轻量/附注/文件消息）、列表、`--points-at` / `--contains` / `--merged` / `--sort` 过滤排序、强制更新、批量删除、ref 指向和 describe 依赖的 tag 可见性。
+目的：覆盖 `tag` 创建（轻量/`-m` 附注/`-F` 文件消息/`-a -m` 显式附注）、列表与 `-n` 注释摘要、`--points-at` / `--contains` / `--merged` / `--sort` 过滤排序、强制更新、批量删除、ref 指向和 describe 依赖的 tag 可见性。
 
 最小步骤：
 
@@ -24,6 +24,7 @@ libra tag v0.1.0
 libra tag -m "release v0.2.0" v0.2.0
 printf 'release v0.3.0\n' > release.txt
 libra tag -F release.txt v0.3.0
+libra tag -a -m "annotated via -a" v0.6.0
 libra tag -l
 libra tag -l -n 1
 libra tag --points-at HEAD
@@ -53,7 +54,7 @@ cd "$RUN_DIR/tag-repo"
 ! libra tag -d no-such-tag
 ```
 
-断言：轻量 tag、`-m` annotated tag 与 `-F` 文件消息 tag 均可创建并被 `rev-parse` / list 观察；`tag -l` / `tag -l -n` 可观察 tag 名称和注释摘要；`--points-at` / `--contains` / `--merged` / `--sort=-refname` 可执行并包含预期 tag；`describe --tags --always` 能使用可达 tag 描述 HEAD；`tag -f` 可更新现有 tag 指向（新提交 != BASE）；批量 `tag -d` 删除后原名不可解析；JSON 批量删除的部分失败在 stdout 返回 `deleted`/`failed`，进程退出 128；多 name 创建和删除缺失 tag 必须非 0 退出且不影响已有 tag。
+断言：轻量 tag、`-m` annotated tag、`-F` 文件消息 tag 与 `-a -m` annotated tag 均可创建并被 `rev-parse` / list 观察；`tag -l` / `tag -l -n 1` 可观察 tag 名称和注释摘要（输出须包含 `-m` 与 `-a -m` 的消息首行）；`--points-at` / `--contains` / `--merged` / `--sort=-refname` 可执行并包含预期 tag；`describe --tags --always` 能使用可达 tag 描述 HEAD；`tag -f` 可更新现有 tag 指向（新提交 != BASE）；批量 `tag -d` 删除后原名不可解析；JSON 批量删除的部分失败在 stdout 返回 `deleted`/`failed`，进程退出 128；多 name 创建和删除缺失 tag 必须非 0 退出且不影响已有 tag。
 
 补充可执行断言（使用 `libra()` + python）：
 - `libra --json tag -l` 必须返回 `ok:true`，且 `data.tags[]` 包含 v0.2.0。

@@ -30,10 +30,12 @@
 | History | `show` | `cli.object-readback` |
 | History | `show-ref` | `cli.object-readback`、`cli.clone-fetch-pull-local` |
 | History | `ls-remote` | `cli.clone-fetch-pull-local` |
+| History | `ls-tree` | `cli.ls-tree-smoke` |
 | History | `diff` | `cli.restore-reset-diff` |
 | History | `grep` | `cli.grep-blame-describe-shortlog` |
 | History | `blame` | `cli.grep-blame-describe-shortlog` |
 | History | `describe` | `cli.grep-blame-describe-shortlog` |
+| History | `notes` | `cli.notes-smoke` |
 | Branching | `commit` | `cli.commit-status-log` |
 | Branching | `branch` | `cli.branch-switch-checkout` |
 | Branching | `switch` | `cli.branch-switch-checkout` |
@@ -51,6 +53,7 @@
 | Remote | `open` | `cli.open-smoke` |
 | Maintenance | `db` | `cli.schema-upgrade-observable` |
 | Maintenance | `gc` | `cli.gc-smoke` |
+| Maintenance | `prune` | `cli.gc-smoke` |
 | Maintenance | `fsck` | `cli.object-readback`（并作为多数 mutating 场景的状态断言） |
 | Maintenance | `cat-file` | `cli.object-readback`、`cli.sha256-object-readback` |
 | Maintenance | `hash-object` | `cli.object-readback`、`cli.sha256-object-readback` |
@@ -63,7 +66,7 @@
 | Maintenance | `bisect` | `cli.stash-bisect-worktree` |
 | Cross-cutting | `--json` / `--machine` / `--quiet` / `--color` / `--progress` | `cli.cross-cutting-flags` |
 
-**无独立场景（有意排除，见计划 §2.2 / §2.3）**：`index-pack`（隐藏内部命令，仅作为 `cli.verify-pack-smoke` 的 fixture 辅助）；`hooks`（隐藏兼容命令，由专属 cargo 测试覆盖）；`cloud` / `publish` / `code` / `code-control` / `automation` / `usage` / `graph` / `sandbox` / `agent` / `package`（AI/Cloud 扩展，不属于本黑盒版本管理计划）。新增 **Git 兼容** 命令时不得落到此列表——必须新增 owner 场景。
+**无独立场景（有意排除，见计划 §2.2 / §2.3）**：`index-pack`（隐藏内部命令，仅作为 `cli.verify-pack-smoke` 的 fixture 辅助）；`hooks`（隐藏兼容命令，由专属 cargo 测试覆盖）；`stats`（Libra-only 只读工作区文件统计扩展，非 Git 命令，无自有参数，由 `tests/command/stats_test.rs` 专属覆盖）；`cloud` / `publish` / `code` / `code-control` / `automation` / `usage` / `graph` / `sandbox` / `agent` / `package`（AI/Cloud 扩展，不属于本黑盒版本管理计划）。新增 **Git 兼容** 命令时不得落到此列表——必须新增 owner 场景。
 
 ## Wave 1
 
@@ -104,6 +107,7 @@
 - [`cli.fetch-depth-local`](cli.fetch-depth-local.md)
 - [`cli.push-local-file-remote-rejected`](cli.push-local-file-remote-rejected.md)
 - [`cli.object-readback`](cli.object-readback.md)
+- [`cli.ls-tree-smoke`](cli.ls-tree-smoke.md)
 - [`cli.sha256-object-readback`](cli.sha256-object-readback.md)
 - [`cli.gc-smoke`](cli.gc-smoke.md)
 - [`cli.archive-smoke`](cli.archive-smoke.md)

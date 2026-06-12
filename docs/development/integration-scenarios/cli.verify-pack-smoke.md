@@ -27,7 +27,7 @@ mkdir -p "$RUN_ROOT/fixtures/$SCENARIO"
 PACK_FILE="$RUN_ROOT/fixtures/$SCENARIO/small-sha1.pack"
 PACK_IDX="$RUN_ROOT/fixtures/$SCENARIO/small-sha1.idx"
 cp "$REPO_ROOT/tests/data/packs/small-sha1.pack" "$PACK_FILE"
-libra index-pack "$PACK_FILE" -o "$PACK_IDX"
+libra index-pack "$PACK_FILE" --index-version 1   # idx 写到 pack 同目录同名 .idx（即 $PACK_IDX）
 test -f "$PACK_IDX"
 libra verify-pack "$PACK_IDX"
 libra verify-pack --pack "$PACK_FILE" "$PACK_IDX"
@@ -51,7 +51,11 @@ printf 'corrupt' >> "$RUN_ROOT/fixtures/$SCENARIO/corrupt.idx"
 
 补充可执行断言：
 - `libra --json verify-pack "$PACK_IDX"` 必须 `ok:true`；单 idx 时 `data.verified == true`，多 idx 时 `data.packs[].verified` 全为 true。
-- 损坏 idx 场景 `libra verify-pack corrupt.idx` 必须非 0，stderr 包含路径或 corrupt 信息。
+- `verify-pack --pack "$PACK_FILE" "$PACK_IDX"` 输出与 sibling 推导一致的 `<idx>: ok`。
+- `verify-pack -v` 输出 `<oid> <type> <size> <size-in-pack> <offset>` 对象行（含 `commit` 和 `blob`）并以 `: ok` 结尾。
+- `verify-pack -s` 输出 `non delta:` 统计摘要且不打印 `: ok` 行。
+- 缺失 idx 场景 `libra verify-pack missing.idx` 必须非 0，错误包含 `could not open pack index` 与路径。
+- 损坏 idx 场景 `libra verify-pack corrupt.idx` 必须非 0，stderr 包含 `invalid pack index` 路径或 corrupt 信息。
 - 操作后在生成 pack 的仓库执行 `libra fsck` 通过。
 - 验证 `--json` 输出包含 "objects" 数组。
 

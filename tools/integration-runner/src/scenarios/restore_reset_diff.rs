@@ -211,6 +211,25 @@ pub(crate) fn scenario_restore_reset_diff(ctx: &mut ScenarioCtx<'_>) -> Result<(
         bail!("default restore no-overlay should remove overlay.txt");
     }
     ctx.command(&["reset", "--hard", "HEAD"], repo.clone(), true)?;
+    // Explicit --no-overlay must behave like the default: paths absent in the
+    // source are removed from the worktree.
+    let explicit_no_overlay = ctx.command(
+        &[
+            "--json",
+            "restore",
+            "--source",
+            "HEAD~1",
+            "--no-overlay",
+            "overlay.txt",
+        ],
+        repo.clone(),
+        true,
+    )?;
+    assert_json_ok(&explicit_no_overlay, "restore")?;
+    if repo.join("overlay.txt").exists() {
+        bail!("restore --no-overlay should remove overlay.txt");
+    }
+    ctx.command(&["reset", "--hard", "HEAD"], repo.clone(), true)?;
     fs::write(repo.join("orig.txt"), "l1\nl2\nl3\nl4\n").context("write rename source")?;
     ctx.command(&["add", "orig.txt"], repo.clone(), true)?;
     ctx.command(
@@ -237,6 +256,62 @@ pub(crate) fn scenario_restore_reset_diff(ctx: &mut ScenarioCtx<'_>) -> Result<(
     assert_lbr_or_text(&bad_diff, "invalid revision")?;
     let bad_restore = ctx.command(&["restore", "nonexistent.txt"], repo.clone(), false)?;
     assert_lbr_or_text(&bad_restore, "pathspec")?;
+    // --source pointing at a revision that does not exist must fail without
+    // touching the worktree.
+    let tracked_before =
+        fs::read_to_string(repo.join("tracked.txt")).context("read tracked before bad source")?;
+    let bad_source = ctx.command(
+        &["restore", "--source", "no-such-revision", "tracked.txt"],
+        repo.clone(),
+        false,
+    )?;
+    assert_lbr_or_text(&bad_source, "failed to resolve checkout source")?;
+    let tracked_after =
+        fs::read_to_string(repo.join("tracked.txt")).context("read tracked after bad source")?;
+    if tracked_before != tracked_after {
+        bail!("restore --source <bad revision> must not modify the worktree");
+    }
+    // reset with an unresolvable target must fail and leave HEAD untouched.
+    let head_before = stdout_trim(&ctx.command(&["rev-parse", "HEAD"], repo.clone(), true)?);
+    let bad_reset = ctx.command(&["reset", "--hard", "no-such-rev"], repo.clone(), false)?;
+    assert_lbr_or_text(&bad_reset, "invalid reference")?;
+    let head_after = stdout_trim(&ctx.command(&["rev-parse", "HEAD"], repo.clone(), true)?);
+    if head_before != head_after {
+        bail!("reset --hard <bad revision> must not move HEAD");
+    }
+    // diff --output writes the patch to a file instead of stdout, and
+    // --algorithm=histogram (the only implemented backend) matches plain diff.
+    fs::write(repo.join("tracked.txt"), "diff output probe\n")
+        .context("dirty tracked for --output")?;
+    let diff_to_file = ctx.command(
+        &["diff", "--output", "diff-out.patch", "tracked.txt"],
+        repo.clone(),
+        true,
+    )?;
+    if String::from_utf8_lossy(&diff_to_file.stdout).contains("@@") {
+        bail!("diff --output must not emit hunks on stdout");
+    }
+    let patch =
+        fs::read_to_string(repo.join("diff-out.patch")).context("read diff --output file")?;
+    if !patch.contains("diff --git") || !patch.contains("@@") {
+        bail!("diff --output file should contain the patch, got: {patch:?}");
+    }
+    assert_stdout_contains(
+        &ctx.command(
+            &["diff", "--algorithm=histogram", "tracked.txt"],
+            repo.clone(),
+            true,
+        )?,
+        "diff output probe",
+    )?;
+    let bad_algorithm = ctx.command(
+        &["diff", "--algorithm", "myers", "tracked.txt"],
+        repo.clone(),
+        false,
+    )?;
+    assert_lbr_or_text(&bad_algorithm, "not supported yet")?;
+    fs::remove_file(repo.join("diff-out.patch")).context("remove diff --output file")?;
+    ctx.command(&["reset", "--hard", "HEAD"], repo.clone(), true)?;
     ctx.command(&["fsck", "--connectivity-only"], repo, true)?;
 
     let conflict_repo = ctx.repo("restore-conflict");

@@ -287,7 +287,12 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     )?;
     assert_json_ok(&json_objects, "rev-list")?;
     assert_stdout_contains(&json_objects, "\"objects\"")?;
+    // fsck flag coverage on the healthy committed history: default (`--full`),
+    // `--no-full` (loose objects only), `--strict` (commit/tree structural checks),
+    // `--connectivity-only`, and a single-object check.
     ctx.command(&["fsck"], repo.clone(), true)?;
+    ctx.command(&["fsck", "--no-full"], repo.clone(), true)?;
+    ctx.command(&["fsck", "--strict"], repo.clone(), true)?;
     ctx.command(&["fsck", "--connectivity-only"], repo.clone(), true)?;
     ctx.command(&["fsck", &head_id], repo.clone(), true)?;
     assert_json_ok(
@@ -317,6 +322,79 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     let main_pattern = ctx.command(&["show-ref", "--heads", "main"], repo.clone(), true)?;
     assert_stdout_contains(&main_pattern, "refs/heads/main")?;
     assert_not_contains(&main_pattern, "refs/heads/main-2")?;
+
+    // --- hash-object parameter coverage (beyond the `-w <file>` blob writes above) ---
+    // `--stdin` computes the id for piped bytes; identical content to loose.txt
+    // must yield the identical object id.
+    let stdin_blob = ctx.command_with_stdin(
+        &["hash-object", "--stdin"],
+        repo.clone(),
+        "loose blob\n",
+        true,
+    )?;
+    let stdin_blob_id = stdout_trim(&stdin_blob);
+    if stdin_blob_id != blob_id {
+        bail!("hash-object --stdin id {stdin_blob_id:?} did not match -w id {blob_id}");
+    }
+    // Explicit `-t blob` with `--stdin -w` persists and reads back as a blob.
+    let typed_blob = ctx.command_with_stdin(
+        &["hash-object", "-t", "blob", "-w", "--stdin"],
+        repo.clone(),
+        "typed stdin blob\n",
+        true,
+    )?;
+    let typed_blob_id = stdout_trim(&typed_blob);
+    assert_stdout_contains(
+        &ctx.command(&["cat-file", "-t", &typed_blob_id], repo.clone(), true)?,
+        "blob",
+    )?;
+    // `--stdin-paths` hashes newline-separated worktree paths read from stdin.
+    let paths_out = ctx.command_with_stdin(
+        &["hash-object", "--stdin-paths"],
+        repo.clone(),
+        "loose.txt\n",
+        true,
+    )?;
+    assert_stdout_contains(&paths_out, &blob_id)?;
+    // `--path` is an accepted source label for `--stdin`.
+    ctx.command_with_stdin(
+        &["hash-object", "--path", "labelled.txt", "--stdin"],
+        repo.clone(),
+        "labelled stdin blob\n",
+        true,
+    )?;
+    // `--no-filters` is an accepted no-op (Libra has no clean/smudge filters).
+    ctx.command_with_stdin(
+        &["hash-object", "--no-filters", "--stdin"],
+        repo.clone(),
+        "unfiltered stdin blob\n",
+        true,
+    )?;
+    // `--literally` skips object-format validation, allowing a non-standard body.
+    // Computed only (no `-w`), so the malformed object never enters the store and
+    // cannot break the fsck runs below.
+    ctx.command_with_stdin(
+        &["hash-object", "-t", "tag", "--literally", "--stdin"],
+        repo.clone(),
+        "not a real tag object\n",
+        true,
+    )?;
+    // Without `--literally` the same malformed tag body is rejected (exit 128).
+    let bad_tag = ctx.command_with_stdin(
+        &["hash-object", "-t", "tag", "--stdin"],
+        repo.clone(),
+        "not a real tag object\n",
+        false,
+    )?;
+    assert_lbr_or_text(&bad_tag, "literally")?;
+    // An unsupported `-t <type>` is a usage error (intentionally-different exit 129).
+    let bad_type = ctx.command(
+        &["hash-object", "-t", "bogus", "loose.txt"],
+        repo.clone(),
+        false,
+    )?;
+    assert_lbr_or_text(&bad_type, "unsupported object type")?;
+
     let missing = ctx.command(&["cat-file", "-t", "deadbeef"], repo.clone(), false)?;
     assert_lbr_or_text(&missing, "object not found")?;
     Ok(())
