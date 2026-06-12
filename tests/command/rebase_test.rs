@@ -6,7 +6,7 @@
 use std::{collections::VecDeque, fs, path::Path};
 
 use libra::{
-    command::rebase::{RebaseArgs, RebaseRuntimeOptions, execute},
+    command::rebase::{RebaseArgs, execute},
     common_utils::parse_commit_msg,
 };
 use serial_test::serial;
@@ -50,210 +50,6 @@ fn test_rebase_cli_invalid_upstream_returns_fatal_128() {
     assert!(
         stderr.contains("nonexistent-upstream"),
         "stderr should include invalid ref name, got: {stderr}"
-    );
-}
-
-#[test]
-fn test_rebase_onto_replays_branch_range_to_newbase() {
-    let repo = tempdir().expect("failed to create temp repo");
-    let repo_path = repo.path();
-    init_repo_via_cli(repo_path);
-    configure_identity_via_cli(repo_path);
-
-    commit_file_via_cli(repo_path, "base.txt", "base\n", "base");
-
-    let output = run_libra_command(&["switch", "-c", "topic"], repo_path);
-    assert_cli_success(&output, "failed to create topic branch");
-    commit_file_via_cli(repo_path, "topic.txt", "topic\n", "topic change");
-
-    let output = run_libra_command(&["switch", "main"], repo_path);
-    assert_cli_success(&output, "failed to switch to main");
-    let output = run_libra_command(&["switch", "-c", "next"], repo_path);
-    assert_cli_success(&output, "failed to create next branch");
-    commit_file_via_cli(repo_path, "next.txt", "next\n", "next base");
-
-    let output = run_libra_command(&["switch", "main"], repo_path);
-    assert_cli_success(&output, "failed to switch back to main");
-    commit_file_via_cli(repo_path, "main.txt", "main\n", "main change");
-
-    let output = run_libra_command(&["rebase", "--onto", "next", "main", "topic"], repo_path);
-    assert_cli_success(&output, "rebase --onto should succeed");
-    assert!(output.stderr.is_empty());
-
-    let output = run_libra_command(&["branch", "--show-current"], repo_path);
-    assert_cli_success(&output, "failed to read current branch");
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "topic");
-
-    assert_eq!(
-        fs::read_to_string(repo_path.join("base.txt")).expect("base.txt should exist"),
-        "base\n"
-    );
-    assert_eq!(
-        fs::read_to_string(repo_path.join("next.txt")).expect("next.txt should exist"),
-        "next\n"
-    );
-    assert_eq!(
-        fs::read_to_string(repo_path.join("topic.txt")).expect("topic.txt should exist"),
-        "topic\n"
-    );
-    assert!(
-        !repo_path.join("main.txt").exists(),
-        "main-only changes should stay outside the --onto replay target"
-    );
-}
-
-#[test]
-fn test_rebase_autostash_restores_dirty_tracked_file() {
-    let repo = create_cli_rebase_success_repo();
-    let repo_path = repo.path();
-    fs::write(repo_path.join("feature.txt"), "dirty feature\n").expect("write dirty file");
-
-    let output = run_libra_command(&["--json", "rebase", "--autostash", "main"], repo_path);
-    assert_cli_success(&output, "json rebase --autostash should succeed");
-    assert!(output.stderr.is_empty());
-
-    let json = parse_json_stdout(&output);
-    assert_eq!(json["data"]["status"], "completed");
-    assert_eq!(json["data"]["autostashed"], true);
-    assert_eq!(
-        fs::read_to_string(repo_path.join("feature.txt")).expect("feature.txt should exist"),
-        "dirty feature\n"
-    );
-
-    let status = run_libra_command(&["status", "--short"], repo_path);
-    assert_cli_success(&status, "status after autostash rebase");
-    assert!(
-        !String::from_utf8_lossy(&status.stdout).trim().is_empty(),
-        "autostash should restore the tracked dirty change"
-    );
-}
-
-#[test]
-fn test_rebase_autosquash_folds_fixup_commit() {
-    let repo = tempdir().expect("failed to create temp repo");
-    let repo_path = repo.path();
-    init_repo_via_cli(repo_path);
-    configure_identity_via_cli(repo_path);
-
-    commit_file_via_cli(repo_path, "base.txt", "base\n", "Base");
-
-    let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
-    assert_cli_success(&output, "failed to create feature branch");
-    commit_file_via_cli(repo_path, "feature.txt", "feature\n", "Feature base");
-    commit_file_via_cli(
-        repo_path,
-        "feature.txt",
-        "feature\nfixup\n",
-        "fixup! Feature base",
-    );
-
-    let output = run_libra_command(&["switch", "main"], repo_path);
-    assert_cli_success(&output, "failed to switch to main");
-    commit_file_via_cli(repo_path, "main.txt", "main\n", "Main adds file");
-
-    let output = run_libra_command(&["switch", "feature"], repo_path);
-    assert_cli_success(&output, "failed to switch to feature");
-    let output = run_libra_command(&["--json", "rebase", "--autosquash", "main"], repo_path);
-    assert_cli_success(&output, "json rebase --autosquash should succeed");
-
-    let json = parse_json_stdout(&output);
-    assert_eq!(json["data"]["autosquashed"], 1);
-    assert_eq!(
-        fs::read_to_string(repo_path.join("feature.txt")).expect("feature.txt should exist"),
-        "feature\nfixup\n"
-    );
-    assert_eq!(
-        commit_messages_from_current_head(repo_path, 3),
-        vec!["Feature base", "Main adds file", "Base"]
-    );
-}
-
-#[test]
-fn test_rebase_signoff_appends_trailer() {
-    let repo = create_cli_rebase_success_repo();
-    let repo_path = repo.path();
-
-    let output = run_libra_command(&["rebase", "--signoff", "main"], repo_path);
-    assert_cli_success(&output, "rebase --signoff should succeed");
-
-    let (_head, commit) = current_head_commit(repo_path);
-    assert!(
-        commit
-            .message
-            .contains("Signed-off-by: Test User <test@example.com>"),
-        "rebased commit should carry a Signed-off-by trailer: {}",
-        commit.message
-    );
-}
-
-#[test]
-fn test_rebase_root_without_onto_keeps_rewritten_root_parentless() {
-    let repo = tempdir().expect("failed to create temp repo");
-    let repo_path = repo.path();
-    init_repo_via_cli(repo_path);
-    configure_identity_via_cli(repo_path);
-
-    commit_file_via_cli(repo_path, "base.txt", "base\n", "Base");
-    let old_root = current_head_commit(repo_path).0;
-    commit_file_via_cli(repo_path, "second.txt", "second\n", "Second");
-
-    let output = run_libra_command(&["rebase", "--root", "--signoff"], repo_path);
-    assert_cli_success(&output, "rebase --root should succeed");
-
-    let (_head, second) = current_head_commit(repo_path);
-    let new_root_id = second
-        .parent_commit_ids
-        .first()
-        .copied()
-        .expect("second commit should have rewritten root parent");
-    let new_root = load_commit(repo_path, &new_root_id);
-    assert_ne!(new_root_id, old_root);
-    assert!(new_root.parent_commit_ids.is_empty());
-    assert!(
-        new_root
-            .message
-            .contains("Signed-off-by: Test User <test@example.com>"),
-        "rewritten root should carry signoff trailer: {}",
-        new_root.message
-    );
-}
-
-#[test]
-fn test_rebase_no_keep_empty_drops_originally_empty_commit() {
-    let repo = tempdir().expect("failed to create temp repo");
-    let repo_path = repo.path();
-    init_repo_via_cli(repo_path);
-    configure_identity_via_cli(repo_path);
-
-    commit_file_via_cli(repo_path, "base.txt", "base\n", "Base");
-    let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
-    assert_cli_success(&output, "failed to create feature branch");
-    let output = run_libra_command(
-        &[
-            "commit",
-            "--allow-empty",
-            "-m",
-            "Empty feature",
-            "--no-verify",
-        ],
-        repo_path,
-    );
-    assert_cli_success(&output, "failed to create empty feature commit");
-
-    let output = run_libra_command(&["switch", "main"], repo_path);
-    assert_cli_success(&output, "failed to switch to main");
-    commit_file_via_cli(repo_path, "main.txt", "main\n", "Main adds file");
-
-    let output = run_libra_command(&["switch", "feature"], repo_path);
-    assert_cli_success(&output, "failed to switch to feature");
-    let output = run_libra_command(&["--json", "rebase", "--no-keep-empty", "main"], repo_path);
-    assert_cli_success(&output, "json rebase --no-keep-empty should succeed");
-
-    let json = parse_json_stdout(&output);
-    assert_eq!(json["data"]["dropped_empty"], 1);
-    assert_eq!(
-        commit_messages_from_current_head(repo_path, 3),
-        vec!["Main adds file", "Base"]
     );
 }
 
@@ -306,8 +102,6 @@ async fn test_rebase_json_abort_outputs_restored_branch() {
         done: Vec::new(),
         stopped_sha: None,
         current_head: head,
-        autostash_ref: None,
-        options: RebaseRuntimeOptions::default(),
     }
     .save()
     .await
@@ -382,8 +176,6 @@ fn test_rebase_machine_abort_outputs_restored_branch() {
                 done: Vec::new(),
                 stopped_sha: None,
                 current_head: head,
-                autostash_ref: None,
-                options: RebaseRuntimeOptions::default(),
             }
             .save()
             .await
@@ -587,82 +379,6 @@ fn test_rebase_preserves_executable_mode_in_rewritten_commit() {
         String::from_utf8_lossy(&status.stdout).trim().is_empty(),
         "mode loss should not leave the worktree dirty: {}",
         String::from_utf8_lossy(&status.stdout)
-    );
-}
-
-#[test]
-fn test_rebase_replay_preserves_author_uses_current_committer() {
-    use git_internal::internal::object::commit::Commit;
-    use libra::{command::load_object, internal::head::Head};
-
-    let repo = tempdir().expect("failed to create temp repo");
-    let repo_path = repo.path();
-    init_repo_via_cli(repo_path);
-    configure_identity_via_cli(repo_path); // committer = Test User <test@example.com>
-
-    commit_file_via_cli(repo_path, ".libraignore", "", "Track ignore file");
-    commit_file_via_cli(repo_path, "base.txt", "base\n", "Base");
-
-    // Feature commit authored by someone other than the committer.
-    let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
-    assert_cli_success(&output, "failed to create feature branch");
-    fs::write(repo_path.join("feature.txt"), "feature\n").expect("write feature file");
-    assert_cli_success(
-        &run_libra_command(&["add", "feature.txt"], repo_path),
-        "stage feature file",
-    );
-    assert_cli_success(
-        &run_libra_command(
-            &[
-                "commit",
-                "-m",
-                "Feature work",
-                "--author",
-                "Orig Author <orig@example.com>",
-            ],
-            repo_path,
-        ),
-        "commit feature with explicit author",
-    );
-
-    // Advance main so the rebase actually replays the feature commit.
-    assert_cli_success(
-        &run_libra_command(&["switch", "main"], repo_path),
-        "switch main",
-    );
-    commit_file_via_cli(repo_path, "main.txt", "main\n", "Main adds file");
-    assert_cli_success(
-        &run_libra_command(&["switch", "feature"], repo_path),
-        "switch feature",
-    );
-
-    assert_cli_success(
-        &run_libra_command(&["rebase", "main"], repo_path),
-        "rebase feature onto main",
-    );
-
-    let _guard = ChangeDirGuard::new(repo_path);
-    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let head = runtime
-        .block_on(Head::current_commit())
-        .expect("rebased HEAD");
-    let commit: Commit = load_object(&head).expect("load rebased commit");
-
-    assert_eq!(
-        commit.author.email, "orig@example.com",
-        "rebase must preserve the original commit author"
-    );
-    assert_eq!(
-        commit.committer.email, "test@example.com",
-        "rebase must stamp the current identity as the committer"
-    );
-    assert_ne!(
-        commit.author.email, "admin@mega.org",
-        "rebase must not reset author to the git-internal placeholder"
-    );
-    assert_ne!(
-        commit.committer.email, "admin@mega.org",
-        "rebase must not reset committer to the git-internal placeholder"
     );
 }
 
@@ -947,36 +663,13 @@ fn test_rebase_machine_skip_outputs_completed_result() {
     assert!(json["data"]["onto"].as_str().unwrap().len() >= 7);
 }
 
-fn current_head_commit(repo: &Path) -> (ObjectHash, Commit) {
-    let _guard = ChangeDirGuard::new(repo);
-    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let head = runtime
-        .block_on(Head::current_commit())
-        .expect("expected HEAD commit");
-    let commit = load_object::<Commit>(&head).expect("load HEAD commit");
-    (head, commit)
-}
-
-fn load_commit(repo: &Path, commit_id: &ObjectHash) -> Commit {
-    let _guard = ChangeDirGuard::new(repo);
-    load_object::<Commit>(commit_id).expect("load commit")
-}
-
-fn commit_messages_from_current_head(repo: &Path, max: usize) -> Vec<String> {
-    let _guard = ChangeDirGuard::new(repo);
-    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let head = runtime
-        .block_on(Head::current_commit())
-        .expect("expected HEAD commit");
-    commit_messages_from_head(&head, max)
-}
-
 fn commit_messages_from_head(start: &ObjectHash, max: usize) -> Vec<String> {
     let mut messages = Vec::new();
     let mut current = Some(*start);
     while let Some(hash) = current {
         let commit = load_object::<Commit>(&hash).unwrap();
-        messages.push(test_visible_commit_message(&commit.message));
+        let (message, _) = parse_commit_msg(&commit.message);
+        messages.push(message.trim().to_string());
 
         current = commit.parent_commit_ids.first().copied();
         if messages.len() >= max {
@@ -984,20 +677,6 @@ fn commit_messages_from_head(start: &ObjectHash, max: usize) -> Vec<String> {
         }
     }
     messages
-}
-
-fn test_visible_commit_message(raw_message: &str) -> String {
-    let (message, _) = parse_commit_msg(raw_message);
-    let trimmed = message.trim();
-    let without_signature = if trimmed.starts_with("gpgsig ") {
-        trimmed
-            .split_once("\n\n")
-            .map(|(_, rest)| rest)
-            .unwrap_or(trimmed)
-    } else {
-        trimmed
-    };
-    without_signature.trim().to_string()
 }
 
 #[tokio::test]
@@ -1020,7 +699,6 @@ async fn test_basic_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1035,7 +713,6 @@ async fn test_basic_rebase() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -1049,7 +726,6 @@ async fn test_basic_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1064,7 +740,6 @@ async fn test_basic_rebase() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -1072,10 +747,8 @@ async fn test_basic_rebase() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -1090,7 +763,6 @@ async fn test_basic_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1105,7 +777,6 @@ async fn test_basic_rebase() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -1119,7 +790,6 @@ async fn test_basic_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1134,7 +804,6 @@ async fn test_basic_rebase() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -1142,10 +811,8 @@ async fn test_basic_rebase() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -1159,7 +826,6 @@ async fn test_basic_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1174,7 +840,6 @@ async fn test_basic_rebase() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -1182,21 +847,16 @@ async fn test_basic_rebase() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
     execute(RebaseArgs {
         upstream: Some("main".to_string()),
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -1259,7 +919,6 @@ async fn test_rebase_preserves_untracked_files() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1274,7 +933,6 @@ async fn test_rebase_preserves_untracked_files() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -1282,10 +940,8 @@ async fn test_rebase_preserves_untracked_files() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -1299,7 +955,6 @@ async fn test_rebase_preserves_untracked_files() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1314,7 +969,6 @@ async fn test_rebase_preserves_untracked_files() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -1322,10 +976,8 @@ async fn test_rebase_preserves_untracked_files() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -1339,7 +991,6 @@ async fn test_rebase_preserves_untracked_files() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1354,7 +1005,6 @@ async fn test_rebase_preserves_untracked_files() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -1362,10 +1012,8 @@ async fn test_rebase_preserves_untracked_files() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -1374,12 +1022,9 @@ async fn test_rebase_preserves_untracked_files() {
 
     execute(RebaseArgs {
         upstream: Some("main".to_string()),
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -1414,7 +1059,6 @@ async fn test_rebase_already_up_to_date() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1429,7 +1073,6 @@ async fn test_rebase_already_up_to_date() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -1443,7 +1086,6 @@ async fn test_rebase_already_up_to_date() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1458,7 +1100,6 @@ async fn test_rebase_already_up_to_date() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -1466,22 +1107,17 @@ async fn test_rebase_already_up_to_date() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
     // Try to rebase feature onto master (should be up to date)
     execute(RebaseArgs {
         upstream: Some("main".to_string()),
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -1508,7 +1144,6 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1523,7 +1158,6 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -1531,10 +1165,8 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -1548,7 +1180,6 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1563,7 +1194,6 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -1571,10 +1201,8 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -1588,7 +1216,6 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1603,7 +1230,6 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -1611,22 +1237,17 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
     // Start rebase
     execute(RebaseArgs {
         upstream: Some("main".to_string()),
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -1641,12 +1262,9 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
     // But let's test abort when no rebase is in progress
     execute(RebaseArgs {
         upstream: None,
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: true,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -1691,7 +1309,6 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1706,7 +1323,6 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -1714,10 +1330,8 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
     fs::write(temp_path.path().join("feature.txt"), "feature").unwrap();
@@ -1730,7 +1344,6 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1745,7 +1358,6 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
     let orig_head = Head::current_commit().await.expect("expected feature HEAD");
@@ -1754,10 +1366,8 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
     fs::write(temp_path.path().join("master.txt"), "main").unwrap();
@@ -1770,7 +1380,6 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1785,7 +1394,6 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
     let master_head = Head::current_commit().await.expect("expected master HEAD");
@@ -1794,20 +1402,15 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
     execute(RebaseArgs {
         upstream: Some("main".to_string()),
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -1833,8 +1436,6 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         done: Vec::new(),
         stopped_sha: None,
         current_head: rebased_head,
-        autostash_ref: None,
-        options: RebaseRuntimeOptions::default(),
     };
     state
         .save()
@@ -1849,12 +1450,9 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
     // Abort should restore the original branch ref.
     execute(RebaseArgs {
         upstream: None,
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: true,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -1897,7 +1495,6 @@ async fn test_rebase_continue_no_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1912,19 +1509,15 @@ async fn test_rebase_continue_no_rebase() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
     // Try to continue when no rebase is in progress
     execute(RebaseArgs {
         upstream: None,
-        branch: None,
-        onto: None,
         continue_rebase: true,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -1949,7 +1542,6 @@ async fn test_rebase_skip_no_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -1964,19 +1556,15 @@ async fn test_rebase_skip_no_rebase() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
     // Try to skip when no rebase is in progress
     execute(RebaseArgs {
         upstream: None,
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: true,
-        ..Default::default()
     })
     .await;
 
@@ -2003,7 +1591,6 @@ async fn test_rebase_with_conflict_and_abort() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2018,7 +1605,6 @@ async fn test_rebase_with_conflict_and_abort() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -2026,10 +1612,8 @@ async fn test_rebase_with_conflict_and_abort() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -2047,7 +1631,6 @@ async fn test_rebase_with_conflict_and_abort() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2062,7 +1645,6 @@ async fn test_rebase_with_conflict_and_abort() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -2070,10 +1652,8 @@ async fn test_rebase_with_conflict_and_abort() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -2087,7 +1667,6 @@ async fn test_rebase_with_conflict_and_abort() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2102,7 +1681,6 @@ async fn test_rebase_with_conflict_and_abort() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -2110,21 +1688,16 @@ async fn test_rebase_with_conflict_and_abort() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
     execute(RebaseArgs {
         upstream: Some("main".to_string()),
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -2146,12 +1719,9 @@ async fn test_rebase_with_conflict_and_abort() {
     // 6. Abort the rebase
     execute(RebaseArgs {
         upstream: None,
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: true,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -2209,7 +1779,6 @@ async fn test_rebase_binary_conflict_writes_markers() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2224,7 +1793,6 @@ async fn test_rebase_binary_conflict_writes_markers() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -2232,10 +1800,8 @@ async fn test_rebase_binary_conflict_writes_markers() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
     fs::write(&file_path, &feature_bytes).unwrap();
@@ -2248,7 +1814,6 @@ async fn test_rebase_binary_conflict_writes_markers() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2263,7 +1828,6 @@ async fn test_rebase_binary_conflict_writes_markers() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -2271,10 +1835,8 @@ async fn test_rebase_binary_conflict_writes_markers() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
     fs::write(&file_path, &master_bytes).unwrap();
@@ -2287,7 +1849,6 @@ async fn test_rebase_binary_conflict_writes_markers() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2302,7 +1863,6 @@ async fn test_rebase_binary_conflict_writes_markers() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -2310,20 +1870,15 @@ async fn test_rebase_binary_conflict_writes_markers() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
     execute(RebaseArgs {
         upstream: Some("main".to_string()),
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -2348,12 +1903,9 @@ async fn test_rebase_binary_conflict_writes_markers() {
     // Cleanup: abort rebase
     execute(RebaseArgs {
         upstream: None,
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: true,
         skip: false,
-        ..Default::default()
     })
     .await;
     assert!(
@@ -2385,7 +1937,6 @@ async fn test_rebase_with_conflict_and_skip() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2400,7 +1951,6 @@ async fn test_rebase_with_conflict_and_skip() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -2408,10 +1958,8 @@ async fn test_rebase_with_conflict_and_skip() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -2430,7 +1978,6 @@ async fn test_rebase_with_conflict_and_skip() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2445,7 +1992,6 @@ async fn test_rebase_with_conflict_and_skip() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -2464,7 +2010,6 @@ async fn test_rebase_with_conflict_and_skip() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2479,7 +2024,6 @@ async fn test_rebase_with_conflict_and_skip() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -2487,10 +2031,8 @@ async fn test_rebase_with_conflict_and_skip() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -2504,7 +2046,6 @@ async fn test_rebase_with_conflict_and_skip() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2519,7 +2060,6 @@ async fn test_rebase_with_conflict_and_skip() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -2527,21 +2067,16 @@ async fn test_rebase_with_conflict_and_skip() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
     execute(RebaseArgs {
         upstream: Some("main".to_string()),
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -2555,12 +2090,9 @@ async fn test_rebase_with_conflict_and_skip() {
 
     execute(RebaseArgs {
         upstream: None,
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: true,
-        ..Default::default()
     })
     .await;
 
@@ -2597,7 +2129,6 @@ async fn test_rebase_with_conflict_and_continue() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2612,7 +2143,6 @@ async fn test_rebase_with_conflict_and_continue() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -2620,10 +2150,8 @@ async fn test_rebase_with_conflict_and_continue() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -2641,7 +2169,6 @@ async fn test_rebase_with_conflict_and_continue() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2656,7 +2183,6 @@ async fn test_rebase_with_conflict_and_continue() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -2664,10 +2190,8 @@ async fn test_rebase_with_conflict_and_continue() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -2681,7 +2205,6 @@ async fn test_rebase_with_conflict_and_continue() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2696,7 +2219,6 @@ async fn test_rebase_with_conflict_and_continue() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -2704,21 +2226,16 @@ async fn test_rebase_with_conflict_and_continue() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
     execute(RebaseArgs {
         upstream: Some("main".to_string()),
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -2747,19 +2264,15 @@ async fn test_rebase_with_conflict_and_continue() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
     // Continue the rebase
     execute(RebaseArgs {
         upstream: None,
-        branch: None,
-        onto: None,
         continue_rebase: true,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -2811,7 +2324,6 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2826,7 +2338,6 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -2834,10 +2345,8 @@ async fn test_rebase_multiple_commits_partial_conflict() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -2852,7 +2361,6 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2867,7 +2375,6 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -2886,7 +2393,6 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2901,7 +2407,6 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -2916,7 +2421,6 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2931,7 +2435,6 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -2939,10 +2442,8 @@ async fn test_rebase_multiple_commits_partial_conflict() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -2956,7 +2457,6 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -2971,7 +2471,6 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -2979,21 +2478,16 @@ async fn test_rebase_multiple_commits_partial_conflict() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
     execute(RebaseArgs {
         upstream: Some("main".to_string()),
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -3008,12 +2502,9 @@ async fn test_rebase_multiple_commits_partial_conflict() {
     // Skip the conflicting commit (F1)
     execute(RebaseArgs {
         upstream: None,
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: true,
-        ..Default::default()
     })
     .await;
 
@@ -3066,7 +2557,6 @@ async fn test_rebase_state_persistence() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3081,7 +2571,6 @@ async fn test_rebase_state_persistence() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -3089,10 +2578,8 @@ async fn test_rebase_state_persistence() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -3106,7 +2593,6 @@ async fn test_rebase_state_persistence() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3121,7 +2607,6 @@ async fn test_rebase_state_persistence() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -3129,10 +2614,8 @@ async fn test_rebase_state_persistence() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -3146,7 +2629,6 @@ async fn test_rebase_state_persistence() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3161,7 +2643,6 @@ async fn test_rebase_state_persistence() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -3169,21 +2650,16 @@ async fn test_rebase_state_persistence() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
     execute(RebaseArgs {
         upstream: Some("main".to_string()),
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -3215,12 +2691,9 @@ async fn test_rebase_state_persistence() {
     // Clean up - abort the rebase
     execute(RebaseArgs {
         upstream: None,
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: true,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -3257,7 +2730,6 @@ async fn test_rebase_fast_forward_branch_behind() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3272,7 +2744,6 @@ async fn test_rebase_fast_forward_branch_behind() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -3280,10 +2751,8 @@ async fn test_rebase_fast_forward_branch_behind() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -3291,10 +2760,8 @@ async fn test_rebase_fast_forward_branch_behind() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -3308,7 +2775,6 @@ async fn test_rebase_fast_forward_branch_behind() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3323,7 +2789,6 @@ async fn test_rebase_fast_forward_branch_behind() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -3333,21 +2798,16 @@ async fn test_rebase_fast_forward_branch_behind() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
     execute(RebaseArgs {
         upstream: Some("main".to_string()),
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -3386,7 +2846,6 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3401,7 +2860,6 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -3409,10 +2867,8 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -3420,10 +2876,8 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -3437,7 +2891,6 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3452,7 +2905,6 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -3460,10 +2912,8 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -3472,12 +2922,9 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
 
     execute(RebaseArgs {
         upstream: Some("main".to_string()),
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -3516,7 +2963,6 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3531,7 +2977,6 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -3539,10 +2984,8 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -3550,10 +2993,8 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -3567,7 +3008,6 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3582,7 +3022,6 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -3590,10 +3029,8 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -3602,12 +3039,9 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
 
     execute(RebaseArgs {
         upstream: Some("main".to_string()),
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -3646,7 +3080,6 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3661,7 +3094,6 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -3669,10 +3101,8 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -3686,7 +3116,6 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3701,7 +3130,6 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -3709,10 +3137,8 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -3726,7 +3152,6 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3741,7 +3166,6 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -3749,10 +3173,8 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -3761,12 +3183,9 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
 
     execute(RebaseArgs {
         upstream: Some("main".to_string()),
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -3812,7 +3231,6 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3827,7 +3245,6 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -3835,10 +3252,8 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -3853,7 +3268,6 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3868,7 +3282,6 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -3876,10 +3289,8 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -3893,7 +3304,6 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3908,7 +3318,6 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -3916,21 +3325,16 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
     execute(RebaseArgs {
         upstream: Some("main".to_string()),
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -3950,12 +3354,9 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
     // Clean up
     execute(RebaseArgs {
         upstream: None,
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: true,
         skip: false,
-        ..Default::default()
     })
     .await;
 }
@@ -3980,7 +3381,6 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -3995,7 +3395,6 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -4003,10 +3402,8 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -4021,7 +3418,6 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -4036,7 +3432,6 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -4054,7 +3449,6 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         all: true,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -4062,10 +3456,8 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -4079,7 +3471,6 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -4094,7 +3485,6 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -4102,10 +3492,8 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -4113,12 +3501,9 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
 
     execute(RebaseArgs {
         upstream: Some("main".to_string()),
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -4135,12 +3520,9 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
     // Clean up
     execute(RebaseArgs {
         upstream: None,
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: true,
         skip: false,
-        ..Default::default()
     })
     .await;
 }
@@ -4165,7 +3547,6 @@ async fn test_rebase_continue_requires_resolution() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -4180,7 +3561,6 @@ async fn test_rebase_continue_requires_resolution() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -4188,10 +3568,8 @@ async fn test_rebase_continue_requires_resolution() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -4205,7 +3583,6 @@ async fn test_rebase_continue_requires_resolution() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -4220,7 +3597,6 @@ async fn test_rebase_continue_requires_resolution() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -4228,10 +3604,8 @@ async fn test_rebase_continue_requires_resolution() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -4245,7 +3619,6 @@ async fn test_rebase_continue_requires_resolution() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(CommitArgs {
@@ -4260,7 +3633,6 @@ async fn test_rebase_continue_requires_resolution() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -4268,21 +3640,16 @@ async fn test_rebase_continue_requires_resolution() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
     execute(RebaseArgs {
         upstream: Some("main".to_string()),
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -4298,12 +3665,9 @@ async fn test_rebase_continue_requires_resolution() {
     // Continue without resolving conflicts
     execute(RebaseArgs {
         upstream: None,
-        branch: None,
-        onto: None,
         continue_rebase: true,
         abort: false,
         skip: false,
-        ..Default::default()
     })
     .await;
 
@@ -4319,12 +3683,9 @@ async fn test_rebase_continue_requires_resolution() {
     // Clean up
     execute(RebaseArgs {
         upstream: None,
-        branch: None,
-        onto: None,
         continue_rebase: false,
         abort: true,
         skip: false,
-        ..Default::default()
     })
     .await;
 }

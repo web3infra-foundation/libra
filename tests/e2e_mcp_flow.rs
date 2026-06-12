@@ -168,9 +168,6 @@ async fn test_e2e_mcp_flow() {
 
     println!("Starting server on MCP port {mcp_port}, Web port {web_port}");
 
-    // This flow exercises MCP task/resource endpoints and never sends a model
-    // prompt. Keep startup hermetic by satisfying Gemini bootstrap with an
-    // isolated test-only key instead of relying on CI secrets.
     let mut child = Command::new(&libra_bin)
         .args([
             "code",
@@ -184,7 +181,6 @@ async fn test_e2e_mcp_flow() {
         .env("HOME", &home_dir)
         .env("XDG_CONFIG_HOME", &config_home)
         .env("USERPROFILE", &home_dir)
-        .env("GEMINI_API_KEY", "test-only-not-used")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

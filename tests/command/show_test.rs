@@ -105,17 +105,6 @@ fn create_commit(temp_path: &std::path::Path, filename: &str, content: &str, mes
     }
 }
 
-fn write_loose_blob(temp_path: &std::path::Path, filename: &str, content: &[u8]) -> String {
-    std::fs::write(temp_path.join(filename), content).expect("failed to write blob fixture");
-    let output = run_libra_command(&["hash-object", "-w", filename], temp_path);
-    assert!(
-        output.status.success(),
-        "hash-object failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
-}
-
 /// Create a lightweight tag using CLI.
 fn create_lightweight_tag(temp_path: &std::path::Path, tag_name: &str) {
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
@@ -196,163 +185,6 @@ fn test_show_json_commit_output_includes_type_and_files() {
 }
 
 #[test]
-fn test_show_multiple_objects_render_in_order() {
-    let repo = init_temp_repo();
-    configure_user_identity(repo.path());
-    create_commit(repo.path(), "tracked.txt", "base\n", "base commit");
-    create_commit(repo.path(), "tracked.txt", "second\n", "second commit");
-
-    let output = run_libra_command(&["show", "--no-patch", "HEAD", "HEAD~1"], repo.path());
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let second_pos = stdout
-        .find("second commit")
-        .expect("expected latest commit in output");
-    let base_pos = stdout
-        .find("base commit")
-        .expect("expected parent commit in output");
-    assert!(
-        second_pos < base_pos,
-        "objects should render in command-line order, got: {stdout}"
-    );
-}
-
-#[test]
-fn test_show_json_multiple_objects_is_array() {
-    let repo = init_temp_repo();
-    configure_user_identity(repo.path());
-    create_commit(repo.path(), "tracked.txt", "base\n", "base commit");
-    create_commit(repo.path(), "tracked.txt", "second\n", "second commit");
-
-    let output = run_libra_command(
-        &["--json", "show", "--no-patch", "HEAD", "HEAD~1"],
-        repo.path(),
-    );
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let json = parse_json_stdout(&output);
-    let data = json["data"].as_array().expect("multi-object data is array");
-    assert_eq!(data.len(), 2);
-    assert_eq!(data[0]["subject"], "second commit");
-    assert_eq!(data[1]["subject"], "base commit");
-}
-
-#[test]
-fn test_show_pretty_and_format_commit_headers() {
-    let repo = create_committed_repo_via_cli();
-
-    let fuller = run_libra_command(
-        &["show", "--no-patch", "--pretty=fuller", "HEAD"],
-        repo.path(),
-    );
-    assert!(
-        fuller.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&fuller.stderr)
-    );
-    let fuller_stdout = String::from_utf8_lossy(&fuller.stdout);
-    assert!(
-        fuller_stdout.contains("AuthorDate:"),
-        "expected fuller author date, got: {fuller_stdout}"
-    );
-    assert!(
-        fuller_stdout.contains("CommitDate:"),
-        "expected fuller commit date, got: {fuller_stdout}"
-    );
-
-    let formatted = run_libra_command(
-        &["show", "--no-patch", "--format=%h: %an %s", "HEAD"],
-        repo.path(),
-    );
-    assert!(
-        formatted.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&formatted.stderr)
-    );
-    let formatted_stdout = String::from_utf8_lossy(&formatted.stdout);
-    assert!(
-        formatted_stdout.contains(": Test User base"),
-        "expected custom format output, got: {formatted_stdout}"
-    );
-    assert!(
-        !formatted_stdout.contains("Author:"),
-        "custom format should replace the default header, got: {formatted_stdout}"
-    );
-}
-
-#[test]
-fn test_show_invalid_pretty_and_format_return_cli_invalid_arguments() {
-    let repo = create_committed_repo_via_cli();
-
-    let invalid_pretty = run_libra_command(&["show", "--pretty=bogus", "HEAD"], repo.path());
-    let (_stderr, report) = parse_cli_error_stderr(&invalid_pretty.stderr);
-    assert_eq!(invalid_pretty.status.code(), Some(129));
-    assert_eq!(report.error_code, "LBR-CLI-002");
-
-    let invalid_format = run_libra_command(&["show", "--format=%b", "HEAD"], repo.path());
-    let (_stderr, report) = parse_cli_error_stderr(&invalid_format.stderr);
-    assert_eq!(invalid_format.status.code(), Some(129));
-    assert_eq!(report.error_code, "LBR-CLI-002");
-}
-
-#[test]
-fn test_show_display_mode_precedence() {
-    let repo = create_committed_repo_via_cli();
-
-    let no_patch = run_libra_command(&["show", "--no-patch", "--patch", "HEAD"], repo.path());
-    assert!(
-        no_patch.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&no_patch.stderr)
-    );
-    let no_patch_stdout = String::from_utf8_lossy(&no_patch.stdout);
-    assert!(
-        !no_patch_stdout.contains("diff --git"),
-        "--no-patch should suppress explicit --patch, got: {no_patch_stdout}"
-    );
-
-    let name_only = run_libra_command(&["show", "--stat", "--name-only", "HEAD"], repo.path());
-    assert!(
-        name_only.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&name_only.stderr)
-    );
-    let name_only_stdout = String::from_utf8_lossy(&name_only.stdout);
-    assert!(
-        name_only_stdout.contains("tracked.txt"),
-        "expected name-only file path, got: {name_only_stdout}"
-    );
-    assert!(
-        !name_only_stdout.contains("file changed"),
-        "--name-only should take precedence over --stat, got: {name_only_stdout}"
-    );
-
-    let name_status = run_libra_command(
-        &["show", "--name-status", "--name-only", "HEAD"],
-        repo.path(),
-    );
-    assert!(
-        name_status.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&name_status.stderr)
-    );
-    let name_status_stdout = String::from_utf8_lossy(&name_status.stdout);
-    assert!(
-        name_status_stdout.contains("A\ttracked.txt"),
-        "--name-status should take precedence over --name-only, got: {name_status_stdout}"
-    );
-}
-
-#[test]
 fn test_show_quiet_suppresses_human_output() {
     let repo = create_committed_repo_via_cli();
 
@@ -395,11 +227,7 @@ async fn test_show_non_quiet_uses_forced_pager() {
         no_patch: true,
         oneline: false,
         name_only: false,
-        name_status: false,
-        patch: false,
         stat: false,
-        pretty: None,
-        format: None,
         pathspec: vec![],
     };
 
@@ -446,11 +274,7 @@ async fn test_show_quiet_still_validates_patch_generation() {
         no_patch: false,
         oneline: false,
         name_only: false,
-        name_status: false,
-        patch: false,
         stat: false,
-        pretty: None,
-        format: None,
         pathspec: vec![],
     };
     let output = OutputConfig {
@@ -498,11 +322,7 @@ async fn test_show_quiet_stat_succeeds_with_missing_blob_like_human_path() {
         no_patch: false,
         oneline: false,
         name_only: false,
-        name_status: false,
-        patch: false,
         stat: true,
-        pretty: None,
-        format: None,
         pathspec: vec![],
     };
     let output = OutputConfig {
@@ -959,11 +779,7 @@ async fn test_show_execute_safe_bad_ref_returns_cli_error() {
         no_patch: false,
         oneline: false,
         name_only: false,
-        name_status: false,
-        patch: false,
         stat: false,
-        pretty: None,
-        format: None,
         pathspec: vec![],
     };
     let result = execute_safe(args, &OutputConfig::default()).await;
@@ -1002,11 +818,7 @@ async fn test_show_execute_safe_bad_rev_path_returns_cli_error() {
         no_patch: false,
         oneline: false,
         name_only: false,
-        name_status: false,
-        patch: false,
         stat: false,
-        pretty: None,
-        format: None,
         pathspec: vec![],
     };
     let result = execute_safe(args, &OutputConfig::default()).await;
@@ -1072,82 +884,6 @@ async fn test_show_json_blob_output_includes_content() {
 }
 
 #[test]
-fn test_show_large_blob_outputs_metadata_not_content() {
-    let repo = create_committed_repo_via_cli();
-    let sentinel = b"large-sentinel";
-    let mut content = vec![b'x'; 10 * 1024 * 1024 + 1];
-    content[..sentinel.len()].copy_from_slice(sentinel);
-    let blob_hash = write_loose_blob(repo.path(), "large.txt", &content);
-
-    let output = run_libra_command(&["show", &blob_hash], repo.path());
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("File content too large"),
-        "expected large blob metadata, got: {stdout}"
-    );
-    assert!(
-        stdout.contains(&content.len().to_string()),
-        "expected size in metadata, got: {stdout}"
-    );
-    assert!(
-        !stdout.contains("large-sentinel"),
-        "large blob content must not be printed"
-    );
-
-    let json_output = run_libra_command(&["--json", "show", &blob_hash], repo.path());
-    assert!(
-        json_output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&json_output.stderr)
-    );
-    let json = parse_json_stdout(&json_output);
-    assert_eq!(json["data"]["type"], "blob");
-    assert_eq!(json["data"]["size"].as_u64(), Some(content.len() as u64));
-    assert_eq!(json["data"]["is_binary"], false);
-    assert!(json["data"]["content"].is_null());
-}
-
-#[test]
-fn test_show_binary_blob_outputs_metadata() {
-    let repo = create_committed_repo_via_cli();
-    let content = b"text-prefix\0binary-suffix";
-    let blob_hash = write_loose_blob(repo.path(), "binary.bin", content);
-
-    let output = run_libra_command(&["show", &blob_hash], repo.path());
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("Binary file"),
-        "expected binary metadata, got: {stdout}"
-    );
-    assert!(
-        stdout.contains(&content.len().to_string()),
-        "expected binary size in metadata, got: {stdout}"
-    );
-
-    let json_output = run_libra_command(&["--json", "show", &blob_hash], repo.path());
-    assert!(
-        json_output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&json_output.stderr)
-    );
-    let json = parse_json_stdout(&json_output);
-    assert_eq!(json["data"]["type"], "blob");
-    assert_eq!(json["data"]["size"].as_u64(), Some(content.len() as u64));
-    assert_eq!(json["data"]["is_binary"], true);
-    assert!(json["data"]["content"].is_null());
-}
-
-#[test]
 fn test_show_json_bad_revision_returns_error() {
     let repo = create_committed_repo_via_cli();
 
@@ -1178,49 +914,4 @@ fn test_show_json_lightweight_tag_resolves_to_commit() {
     let json = parse_json_stdout(&output);
     assert_eq!(json["data"]["type"], "commit");
     assert_eq!(json["data"]["subject"], "Initial commit");
-}
-
-#[test]
-fn test_show_name_status_reports_modified() {
-    let repo = create_committed_repo_via_cli();
-    std::fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
-    let add = run_libra_command(&["add", "tracked.txt"], repo.path());
-    assert!(
-        add.status.success(),
-        "add: {}",
-        String::from_utf8_lossy(&add.stderr)
-    );
-    let commit = run_libra_command(&["commit", "-m", "modify", "--no-verify"], repo.path());
-    assert!(
-        commit.status.success(),
-        "commit: {}",
-        String::from_utf8_lossy(&commit.stderr)
-    );
-    let out = run_libra_command(&["show", "--name-status", "HEAD"], repo.path());
-    assert!(
-        out.status.success(),
-        "show: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("M\ttracked.txt"),
-        "expected 'M<tab>tracked.txt', got: {stdout}"
-    );
-}
-
-#[test]
-fn test_show_name_status_reports_added() {
-    let repo = create_committed_repo_via_cli();
-    let out = run_libra_command(&["show", "--name-status", "HEAD"], repo.path());
-    assert!(
-        out.status.success(),
-        "show: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("A\ttracked.txt"),
-        "base commit adds tracked.txt with status A, got: {stdout}"
-    );
 }

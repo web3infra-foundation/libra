@@ -1,7 +1,5 @@
 //! Provider-neutral completion abstractions used by AI clients and runtime phases.
 //!
-//! AI 客户端和运行时阶段使用的提供商中立完成抽象。
-//!
 //! Boundary: this module defines request/response/retry/throttle contracts only;
 //! provider-specific authentication and HTTP details live under `providers`.
 

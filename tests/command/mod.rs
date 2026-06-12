@@ -2,7 +2,7 @@
 
 use std::{
     collections::BTreeMap,
-    env, fs,
+    fs,
     io::Write,
     path::Path,
     process::{Command, Output, Stdio},
@@ -83,20 +83,7 @@ fn base_libra_command(args: &[&str], cwd: &Path) -> Command {
         .env("LANG", "C")
         .env("LC_ALL", "C")
         .env(LIBRA_TEST_ENV, "1");
-    preserve_coverage_env(&mut command);
     command
-}
-
-fn preserve_coverage_env(command: &mut Command) {
-    if let Some(profile_file) = env::var_os("LLVM_PROFILE_FILE") {
-        command.env("LLVM_PROFILE_FILE", profile_file);
-    }
-}
-
-/// Build a Libra command with the same isolated process environment as
-/// [`run_libra_command`], leaving arguments for the caller to append.
-fn libra_command(cwd: &Path) -> Command {
-    base_libra_command(&[], cwd)
 }
 
 /// Run the Libra binary with an isolated HOME so host config never leaks into tests.
@@ -276,11 +263,9 @@ fn skip_permission_denied_test_if_root(test_name: &str) -> bool {
 mod add_cli_test;
 mod add_json_test;
 mod add_test;
-mod agent_checkpoint_test;
 mod agent_clean_test;
 mod agent_help_test;
 mod agent_push_test;
-mod archive_test;
 mod automation_help_test;
 mod bisect_test;
 mod blame_test;
@@ -296,18 +281,14 @@ mod cloud_test;
 mod code_control_help_test;
 mod code_test;
 mod code_thread_id_test;
-mod commit_autosquash_test;
-mod commit_editor_test;
 mod commit_error_test;
 mod commit_json_test;
-mod commit_sign_hooks_test;
 mod commit_test;
 mod config_test;
 mod describe_test;
 mod diff_test;
 mod fetch_test;
 mod fsck_test;
-mod gc_test;
 mod graph_test;
 mod grep_test;
 mod hash_object_test;
@@ -320,13 +301,11 @@ mod init_test;
 mod lfs_test;
 mod log_test;
 mod ls_remote_test;
-mod ls_tree_test;
+mod maintenance_test;
 mod merge_test;
 mod mv_test;
-mod notes_test;
 mod open_test;
 mod output_flags_test;
-mod prune_test;
 mod publish_test;
 mod pull_json_test;
 mod pull_test;
@@ -345,17 +324,12 @@ mod revert_test;
 mod sandbox_status_test;
 mod schema_upgrade_test;
 mod shortlog_test;
-mod show_ref_deref_pattern_test;
-mod show_ref_exists_test;
 mod show_ref_test;
-mod show_ref_verify_test;
 mod show_test;
 mod stash_test;
-mod stats_test;
 mod status_error_test;
 mod status_json_test;
 mod status_test;
-mod status_wave0_test;
 mod switch_error_test;
 mod switch_json_test;
 mod switch_test;

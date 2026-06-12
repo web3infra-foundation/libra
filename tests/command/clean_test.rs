@@ -25,13 +25,11 @@ async fn test_clean_dry_run_keeps_files() {
 
     clean::execute(CleanArgs {
         dry_run: true,
-        force: 0,
-        interactive: false,
+        force: false,
         directories: false,
         ignored: false,
         only_ignored: false,
         exclude: vec![],
-        pathspec: vec![],
     })
     .await;
 
@@ -51,13 +49,11 @@ async fn test_clean_force_removes_files() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: 1,
-        interactive: false,
+        force: true,
         directories: false,
         ignored: false,
         only_ignored: false,
         exclude: vec![],
-        pathspec: vec![],
     })
     .await;
 
@@ -83,7 +79,7 @@ async fn test_clean_requires_flag() {
 
     assert_eq!(output.status.code(), Some(129));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("fatal: clean requires -f, -n, or -i"));
+    assert!(stderr.contains("fatal: clean requires -f or -n"));
     assert!(stderr.contains("Error-Code: LBR-CLI-002"));
     assert!(stderr.contains("Hint:"));
 
@@ -110,19 +106,16 @@ async fn test_clean_force_keeps_tracked_files() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
-        ..Default::default()
     })
     .await;
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: 1,
-        interactive: false,
+        force: true,
         directories: false,
         ignored: false,
         only_ignored: false,
         exclude: vec![],
-        pathspec: vec![],
     })
     .await;
 
@@ -143,13 +136,11 @@ async fn test_clean_force_removes_nested_untracked() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: 1,
-        interactive: false,
+        force: true,
         directories: false,
         ignored: false,
         only_ignored: false,
         exclude: vec![],
-        pathspec: vec![],
     })
     .await;
 
@@ -175,7 +166,6 @@ async fn test_clean_force_respects_ignore_rules() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
-        ..Default::default()
     })
     .await;
 
@@ -184,13 +174,11 @@ async fn test_clean_force_respects_ignore_rules() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: 1,
-        interactive: false,
+        force: true,
         directories: false,
         ignored: false,
         only_ignored: false,
         exclude: vec![],
-        pathspec: vec![],
     })
     .await;
 
@@ -217,7 +205,6 @@ async fn test_clean_force_multiple_untracked_with_tracked() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
-        ..Default::default()
     })
     .await;
 
@@ -226,13 +213,11 @@ async fn test_clean_force_multiple_untracked_with_tracked() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: 1,
-        interactive: false,
+        force: true,
         directories: false,
         ignored: false,
         only_ignored: false,
         exclude: vec![],
-        pathspec: vec![],
     })
     .await;
 
@@ -258,13 +243,11 @@ async fn test_clean_force_with_missing_index() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: 1,
-        interactive: false,
+        force: true,
         directories: false,
         ignored: false,
         only_ignored: false,
         exclude: vec![],
-        pathspec: vec![],
     })
     .await;
 
@@ -379,13 +362,11 @@ async fn test_clean_force_with_long_path() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: 1,
-        interactive: false,
+        force: true,
         directories: false,
         ignored: false,
         only_ignored: false,
         exclude: vec![],
-        pathspec: vec![],
     })
     .await;
 
@@ -409,13 +390,11 @@ async fn test_clean_force_does_not_follow_symlink_dirs() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: 1,
-        interactive: false,
+        force: true,
         directories: false,
         ignored: false,
         only_ignored: false,
         exclude: vec![],
-        pathspec: vec![],
     })
     .await;
 
@@ -494,13 +473,11 @@ async fn test_clean_d_flag_removes_untracked_dirs() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: 1,
-        interactive: false,
+        force: true,
         directories: true,
         ignored: false,
         only_ignored: false,
         exclude: vec![],
-        pathspec: vec![],
     })
     .await;
 
@@ -527,7 +504,6 @@ async fn test_clean_d_flag_keeps_dirs_with_tracked_files() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
-        ..Default::default()
     })
     .await;
 
@@ -536,13 +512,11 @@ async fn test_clean_d_flag_keeps_dirs_with_tracked_files() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: 1,
-        interactive: false,
+        force: true,
         directories: true,
         ignored: false,
         only_ignored: false,
         exclude: vec![],
-        pathspec: vec![],
     })
     .await;
 
@@ -571,7 +545,6 @@ async fn test_clean_x_flag_removes_ignored_files() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
-        ..Default::default()
     })
     .await;
 
@@ -581,13 +554,11 @@ async fn test_clean_x_flag_removes_ignored_files() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: 1,
-        interactive: false,
+        force: true,
         directories: false,
         ignored: true,
         only_ignored: false,
         exclude: vec![],
-        pathspec: vec![],
     })
     .await;
 
@@ -615,7 +586,6 @@ async fn test_clean_x_flag_removes_only_ignored_files() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
-        ..Default::default()
     })
     .await;
 
@@ -625,13 +595,11 @@ async fn test_clean_x_flag_removes_only_ignored_files() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: 1,
-        interactive: false,
+        force: true,
         directories: false,
         ignored: false,
         only_ignored: true,
         exclude: vec![],
-        pathspec: vec![],
     })
     .await;
 
@@ -654,13 +622,11 @@ async fn test_clean_exclude_flag_excludes_patterns() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: 1,
-        interactive: false,
+        force: true,
         directories: false,
         ignored: false,
         only_ignored: false,
         exclude: vec!["*.txt".to_string()],
-        pathspec: vec![],
     })
     .await;
 
@@ -684,13 +650,11 @@ async fn test_clean_exclude_multiple_patterns() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: 1,
-        interactive: false,
+        force: true,
         directories: false,
         ignored: false,
         only_ignored: false,
         exclude: vec!["*.txt".to_string(), "*.log".to_string()],
-        pathspec: vec![],
     })
     .await;
 
@@ -762,7 +726,6 @@ async fn test_clean_dx_removes_ignored_directories() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
-        ..Default::default()
     })
     .await;
 
@@ -771,393 +734,13 @@ async fn test_clean_dx_removes_ignored_directories() {
 
     clean::execute(CleanArgs {
         dry_run: false,
-        force: 1,
-        interactive: false,
+        force: true,
         directories: true,
         ignored: true,
         only_ignored: false,
         exclude: vec![],
-        pathspec: vec![],
     })
     .await;
 
     assert!(!std::path::Path::new("ignored_dir").exists());
-}
-
-// ── Batch 0: CLI arg interface + clean.requireForce preflight ──
-
-/// `-f` is counted: `-ff` → 2, `-fff` → 3 (enables nested-repo double-force).
-#[test]
-fn test_clean_force_count_increments() {
-    use clap::Parser;
-    assert_eq!(CleanArgs::try_parse_from(["clean", "-f"]).unwrap().force, 1);
-    assert_eq!(
-        CleanArgs::try_parse_from(["clean", "-ff"]).unwrap().force,
-        2
-    );
-    assert_eq!(
-        CleanArgs::try_parse_from(["clean", "-fff"]).unwrap().force,
-        3
-    );
-    assert_eq!(
-        CleanArgs::try_parse_from(["clean", "-f", "-f"])
-            .unwrap()
-            .force,
-        2
-    );
-}
-
-/// `-e <pat>` is the short alias for `--exclude`, and is repeatable.
-#[test]
-fn test_clean_exclude_short_alias_e() {
-    use clap::Parser;
-    let args = CleanArgs::try_parse_from(["clean", "-e", "*.log", "-e", "*.tmp", "-n"]).unwrap();
-    assert_eq!(args.exclude, vec!["*.log".to_string(), "*.tmp".to_string()]);
-    assert!(args.dry_run);
-    // `-i` / `--interactive` parses.
-    assert!(
-        CleanArgs::try_parse_from(["clean", "-i"])
-            .unwrap()
-            .interactive
-    );
-}
-
-/// `-i` with `--json` is rejected at preflight (LBR-CLI-002 / exit 129).
-#[test]
-fn test_clean_interactive_json_conflict_rejected() {
-    let repo = create_committed_repo_via_cli();
-    let out = run_libra_command(&["clean", "-i", "--json"], repo.path());
-    assert_eq!(out.status.code(), Some(129), "interactive+json rejected");
-    let (_h, report) = parse_cli_error_stderr(&out.stderr);
-    assert_eq!(report.error_code, "LBR-CLI-002");
-    assert!(
-        report
-            .message
-            .contains("cannot use --interactive and --json together"),
-        "message: {}",
-        report.message
-    );
-}
-
-/// `-i` with `-n` is rejected at preflight (LBR-CLI-002 / exit 129).
-#[test]
-fn test_clean_interactive_dryrun_conflict_rejected() {
-    let repo = create_committed_repo_via_cli();
-    let out = run_libra_command(&["clean", "-i", "-n"], repo.path());
-    assert_eq!(out.status.code(), Some(129), "interactive+dry-run rejected");
-    let (_h, report) = parse_cli_error_stderr(&out.stderr);
-    assert_eq!(report.error_code, "LBR-CLI-002");
-    assert!(
-        report
-            .message
-            .contains("cannot use --interactive and --dry-run together"),
-        "message: {}",
-        report.message
-    );
-}
-
-/// `clean.requireForce=false` (local) lets a bare `libra clean` proceed and remove.
-#[test]
-fn test_clean_requireforce_false_allows_no_force() {
-    let repo = create_committed_repo_via_cli();
-    let p = repo.path();
-    std::fs::write(p.join("untracked.txt"), "scratch\n").unwrap();
-    assert_cli_success(
-        &run_libra_command(&["config", "clean.requireForce", "false"], p),
-        "set clean.requireForce=false",
-    );
-    // Bare `clean` (no -f/-n/-i) must now proceed and delete the untracked file.
-    let out = run_libra_command(&["clean"], p);
-    assert_cli_success(&out, "bare clean allowed under requireForce=false");
-    assert!(
-        !p.join("untracked.txt").exists(),
-        "untracked file removed when requireForce=false"
-    );
-}
-
-/// A global `clean.requireForce=true` (local unset) still blocks a bare `clean`.
-#[test]
-fn test_clean_requireforce_true_global_blocks() {
-    let repo = create_committed_repo_via_cli();
-    let p = repo.path();
-    std::fs::write(p.join("untracked.txt"), "scratch\n").unwrap();
-    assert_cli_success(
-        &run_libra_command(
-            &["config", "set", "--global", "clean.requireForce", "true"],
-            p,
-        ),
-        "set global clean.requireForce=true",
-    );
-    let out = run_libra_command(&["clean"], p);
-    assert_eq!(out.status.code(), Some(129), "bare clean blocked");
-    let (_h, report) = parse_cli_error_stderr(&out.stderr);
-    assert_eq!(report.error_code, "LBR-CLI-002");
-    assert!(
-        p.join("untracked.txt").exists(),
-        "untracked file untouched when blocked"
-    );
-}
-
-/// Bare `libra clean` (default requireForce) is blocked with the updated message.
-#[test]
-fn test_clean_missing_mode_blocks_without_force() {
-    let repo = create_committed_repo_via_cli();
-    let p = repo.path();
-    std::fs::write(p.join("untracked.txt"), "scratch\n").unwrap();
-    let out = run_libra_command(&["clean"], p);
-    assert_eq!(out.status.code(), Some(129));
-    let (_h, report) = parse_cli_error_stderr(&out.stderr);
-    assert_eq!(report.error_code, "LBR-CLI-002");
-    assert!(
-        report.message.contains("clean requires -f, -n, or -i"),
-        "message: {}",
-        report.message
-    );
-    assert!(p.join("untracked.txt").exists(), "nothing removed");
-}
-
-// ── Batch 1: nested-repository protection + tolerant removal ──
-
-/// Lay down a nested repo `sub_repo/` (marked by `marker` = ".git" or ".libra")
-/// containing a `README.md`, in the given repo's worktree.
-fn make_nested_repo(repo: &std::path::Path, marker: &str) {
-    std::fs::create_dir_all(repo.join("sub_repo").join(marker)).unwrap();
-    std::fs::write(repo.join("sub_repo").join("README.md"), "nested\n").unwrap();
-}
-
-/// `-fd` skips a nested `.git` repo and warns on stderr (single force).
-#[test]
-fn test_clean_skips_nested_git_without_double_force() {
-    let repo = create_committed_repo_via_cli();
-    let p = repo.path();
-    make_nested_repo(p, ".git");
-    let out = run_libra_command(&["clean", "-fd"], p);
-    assert_cli_success(&out, "clean -fd");
-    assert!(p.join("sub_repo").exists(), "nested repo preserved");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("Skipping repository sub_repo"),
-        "stderr: {stderr}"
-    );
-}
-
-/// `-fd` skips a nested `.libra` repo and warns on stderr.
-#[test]
-fn test_clean_skips_nested_libra_without_double_force() {
-    let repo = create_committed_repo_via_cli();
-    let p = repo.path();
-    make_nested_repo(p, ".libra");
-    let out = run_libra_command(&["clean", "-fd"], p);
-    assert_cli_success(&out, "clean -fd");
-    assert!(p.join("sub_repo").exists(), "nested repo preserved");
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("Skipping repository sub_repo"),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-/// Even WITHOUT `-d`, a nested repo's working-tree files are protected from
-/// single-force `clean`; `-ff` removes them.
-#[test]
-fn test_clean_protects_nested_repo_files_without_dir_flag() {
-    let repo = create_committed_repo_via_cli();
-    let p = repo.path();
-    make_nested_repo(p, ".git");
-    // `-f` (no -d): the nested README must survive.
-    assert_cli_success(&run_libra_command(&["clean", "-f"], p), "clean -f");
-    assert!(
-        p.join("sub_repo/README.md").exists(),
-        "nested file protected under single force"
-    );
-    // `-ff` removes the nested working-tree files.
-    assert_cli_success(&run_libra_command(&["clean", "-ff"], p), "clean -ff");
-    assert!(
-        !p.join("sub_repo/README.md").exists(),
-        "nested file removed under double force"
-    );
-}
-
-/// `-ffd` removes the whole nested repo.
-#[test]
-fn test_clean_removes_nested_repo_with_double_force() {
-    let repo = create_committed_repo_via_cli();
-    let p = repo.path();
-    make_nested_repo(p, ".git");
-    assert_cli_success(&run_libra_command(&["clean", "-ffd"], p), "clean -ffd");
-    assert!(
-        !p.join("sub_repo").exists(),
-        "nested repo removed under -ff"
-    );
-}
-
-/// `-nd` (dry-run) does not list a nested repo without double force.
-#[test]
-fn test_clean_dry_run_excludes_nested_without_double_force() {
-    let repo = create_committed_repo_via_cli();
-    let p = repo.path();
-    make_nested_repo(p, ".git");
-    let out = run_libra_command(&["clean", "-nd"], p);
-    assert_cli_success(&out, "clean -nd");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        !stdout.contains("sub_repo"),
-        "nested repo must not be listed: {stdout}"
-    );
-    // `-nd -ff` DOES list it.
-    let out2 = run_libra_command(&["clean", "-nd", "-ff"], p);
-    assert!(
-        String::from_utf8_lossy(&out2.stdout).contains("sub_repo"),
-        "nested repo listed under -ff"
-    );
-}
-
-/// `--quiet` suppresses the "Skipping repository" warning.
-#[test]
-fn test_clean_quiet_suppresses_skip_warning() {
-    let repo = create_committed_repo_via_cli();
-    let p = repo.path();
-    make_nested_repo(p, ".git");
-    let out = run_libra_command(&["clean", "-fd", "--quiet"], p);
-    assert_cli_success(&out, "clean -fd --quiet");
-    assert!(
-        !String::from_utf8_lossy(&out.stderr).contains("Skipping repository"),
-        "quiet must suppress the skip warning: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(p.join("sub_repo").exists(), "still preserved");
-}
-
-/// A per-file removal failure is tolerated: other files are removed, a warning
-/// is printed, and the command exits 128.
-#[cfg(unix)]
-#[test]
-fn test_clean_tolerant_removal_continues_after_failure() {
-    use std::os::unix::fs::PermissionsExt;
-    if skip_permission_denied_test_if_root("test_clean_tolerant_removal_continues_after_failure") {
-        return;
-    }
-    let repo = create_committed_repo_via_cli();
-    let p = repo.path();
-    std::fs::write(p.join("free.txt"), "removable\n").unwrap();
-    std::fs::create_dir_all(p.join("locked")).unwrap();
-    std::fs::write(p.join("locked/file.txt"), "stuck\n").unwrap();
-    // Read-only parent dir → unlink of the file inside fails.
-    std::fs::set_permissions(p.join("locked"), std::fs::Permissions::from_mode(0o555)).unwrap();
-
-    let out = run_libra_command(&["clean", "-f"], p);
-
-    // Restore perms so the TempDir can be cleaned up.
-    let _ = std::fs::set_permissions(p.join("locked"), std::fs::Permissions::from_mode(0o755));
-
-    assert_eq!(out.status.code(), Some(128), "partial failure → exit 128");
-    assert!(
-        !p.join("free.txt").exists(),
-        "removable file still cleaned despite the failure"
-    );
-    assert!(p.join("locked/file.txt").exists(), "locked file remains");
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("warning: failed to remove"),
-        "stderr should warn: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-/// End-to-end `clean -i`: typing `clean` at the menu confirms removal of the
-/// initially all-selected candidate. Drives the real binary via piped stdin so
-/// the interactive loop is exercised through `execute` (no isatty gating).
-#[test]
-fn test_clean_interactive_clean_removes_via_stdin() {
-    let repo = create_committed_repo_via_cli();
-    fs::write(repo.path().join("scratch.txt"), "content").unwrap();
-
-    let output = run_libra_command_with_stdin(&["clean", "-i"], repo.path(), "clean\n");
-    assert_cli_success(&output, "clean -i + 'clean' should succeed");
-    assert!(
-        !repo.path().join("scratch.txt").exists(),
-        "interactive 'clean' should remove the candidate"
-    );
-}
-
-/// End-to-end `clean -i`: typing `quit` leaves every candidate untouched.
-#[test]
-fn test_clean_interactive_quit_keeps_files_via_stdin() {
-    let repo = create_committed_repo_via_cli();
-    fs::write(repo.path().join("scratch.txt"), "content").unwrap();
-
-    let output = run_libra_command_with_stdin(&["clean", "-i"], repo.path(), "quit\n");
-    assert_cli_success(&output, "clean -i + 'quit' should succeed");
-    assert!(
-        repo.path().join("scratch.txt").exists(),
-        "interactive 'quit' must not remove anything"
-    );
-}
-
-/// End-to-end `clean -i`: `filter by pattern` deselects a named candidate, so
-/// the following `clean` removes only the remaining one.
-#[test]
-fn test_clean_interactive_filter_keeps_named_file_via_stdin() {
-    let repo = create_committed_repo_via_cli();
-    fs::write(repo.path().join("keep_me.txt"), "a").unwrap();
-    fs::write(repo.path().join("remove_me.txt"), "b").unwrap();
-
-    // filter -> exclude "keep_me.txt" -> blank to return -> clean. Using a name
-    // filter (not a positional index) keeps this independent of the
-    // platform-dependent candidate ordering.
-    let output = run_libra_command_with_stdin(
-        &["clean", "-i"],
-        repo.path(),
-        "filter\nkeep_me.txt\n\nclean\n",
-    );
-    assert_cli_success(&output, "clean -i filter subset should succeed");
-    assert!(
-        repo.path().join("keep_me.txt").exists(),
-        "filtered candidate must survive"
-    );
-    assert!(
-        !repo.path().join("remove_me.txt").exists(),
-        "unfiltered candidate must be removed"
-    );
-}
-
-#[tokio::test]
-#[serial]
-/// Phase 1 rejection: clean <pathspec> positional arguments are not supported.
-async fn test_clean_pathspec_positional_rejected() {
-    let test_dir = tempdir().unwrap();
-    test::setup_with_new_libra_in(test_dir.path()).await;
-    let _guard = test::ChangeDirGuard::new(test_dir.path());
-
-    // Create an untracked file
-    fs::File::create("untracked.txt")
-        .unwrap()
-        .write_all(b"content")
-        .unwrap();
-
-    // Attempt to clean with a pathspec argument (should be rejected)
-    let result = tokio::task::spawn_blocking(move || {
-        Command::new(env!("CARGO_BIN_EXE_libra"))
-            .arg("clean")
-            .arg("-f")
-            .arg("untracked.txt")
-            .output()
-    })
-    .await
-    .unwrap()
-    .unwrap();
-
-    // Verify the command fails with an unsupported error
-    assert!(!result.status.success(), "clean with pathspec should fail");
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(
-        stderr.contains("not supported") || stderr.contains("declined"),
-        "error message should mention unsupported/declined: {}",
-        stderr
-    );
-
-    // Verify the file is not removed (pathspec was rejected, not applied)
-    assert!(
-        std::path::Path::new("untracked.txt").exists(),
-        "file should not be removed when pathspec is rejected"
-    );
 }

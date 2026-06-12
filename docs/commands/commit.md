@@ -20,18 +20,9 @@ and updates HEAD and refs.
 
 The command reads the index to determine which files are staged, constructs a tree object
 hierarchy matching the staged content, creates a commit object with the provided message and
-author/committer metadata, and advances the current branch ref.
-
-**Hook lifecycle.** Libra-native hooks under `.libra/hooks/` run at the matching points:
-`pre-commit` (skipped by `--disable-pre` or `--no-verify`), then `prepare-commit-msg`
-(receives the message file and may edit it), then `commit-msg` (receives the final message
-file and may rewrite it or abort by exiting non-zero). `--no-verify` skips every hook;
-`--disable-pre` skips only `pre-commit`, leaving the message hooks active.
-
-**Signing precedence.** A commit is GPG-signed (vault-backed) when, in order:
-`--no-gpg-sign` forces *off*; otherwise `-S`/`--gpg-sign` or `commit.gpgSign true` forces
-*on* (bypassing the `vault.signing` gate); otherwise the commit is signed only when
-`vault.signing` is enabled.
+author/committer metadata, and advances the current branch ref. When vault signing is enabled,
+the commit is automatically GPG-signed. Pre-commit and commit-msg hooks are executed unless
+bypassed with `--no-verify`.
 
 ## Options
 
@@ -63,49 +54,13 @@ libra commit --amend
 libra commit --amend -m "Updated message"
 ```
 
-### `-e, --edit`
-
-Open the configured editor to edit the commit message, even when a message is already
-supplied via `-m`/`-F`/`-t` or reused from `--amend`. The supplied message becomes the
-editor's initial content. Conflicts with `--no-edit`.
-
-```bash
-libra commit -e -m "wip: refine later"
-```
-
 ### `--no-edit`
 
-Do not launch the editor; use the supplied/template/amended message as-is. With `--amend`
-it reuses the original commit's message. Unlike Git's narrower behavior, Libra allows
-`--no-edit` outside `--amend` and alongside `-m`/`-F`/`-t` (it simply suppresses the editor).
-A bare `libra commit --no-edit` with no message source aborts with an empty-message error.
+When used with `--amend`, reuse the message from the original commit without prompting for
+changes. Conflicts with `-m` and `-F`.
 
 ```bash
 libra commit --amend --no-edit
-libra commit --no-edit -m "use this exactly"
-```
-
-### `--cleanup <MODE>`
-
-Control how the commit message is cleaned before committing (mirrors `git commit --cleanup`).
-Modes: `strip` (drop `#` comment lines, trailing whitespace, leading/trailing blanks),
-`whitespace` (trim only, keep `#` lines), `verbatim` (no changes), `scissors` (truncate at the
-`# ----- >8 -----` cut line then apply `whitespace`), and `default` (`strip` when an editor was
-used, `whitespace` otherwise). When `--cleanup` is omitted, `commit.cleanup` supplies the default
-mode. An unknown mode is a parse error (exit 129).
-
-```bash
-libra commit --cleanup=verbatim -m "#1234 keep this literal"
-```
-
-### `-t, --template <FILE>`
-
-Use the contents of `<FILE>` as the initial commit message (seeds the editor, or — with
-`--no-edit` — is used directly). The `commit.template` config provides the same behavior when
-no `-t` is given. A missing/unreadable template file produces a readable error.
-
-```bash
-libra commit -t .commit-template.txt
 ```
 
 ### `--conventional`
@@ -135,27 +90,6 @@ identity.
 
 ```bash
 libra commit -s -m "Add feature"
-```
-
-### `-S, --gpg-sign`
-
-Force a vault-backed PGP signature on this commit, bypassing the `vault.signing` gate. This
-is the explicit opt-in equivalent of Git's `-S` and is useful when signing is otherwise
-disabled. The same effect is obtained repository-wide by setting `commit.gpgSign true`
-(either casing — `commit.gpgsign` is also honored).
-
-```bash
-libra commit -S -m "Signed release"
-```
-
-### `--no-gpg-sign`
-
-Suppress signing for this commit even when `vault.signing` or `commit.gpgSign` would
-otherwise sign it. Mutually exclusive with `-S`/`--gpg-sign` (passing both is a parse error,
-exit 129).
-
-```bash
-libra commit --no-gpg-sign -m "Unsigned quick fix"
 ```
 
 ### `--allow-empty`
@@ -192,62 +126,6 @@ Override the commit author. Must use the standard `A U Thor <author@example.com>
 libra commit --author "Jane Doe <jane@example.com>" -m "Patch"
 ```
 
-### `--fixup <commit>`
-
-Create a commit whose message is `fixup! <subject of commit>`, ready for
-`libra rebase -i --autosquash`. The editor is not opened and the conventional-commit
-check is skipped (the `fixup!` prefix is exempt). Mutually exclusive with `-m`/`-F`,
-`--amend`, and `--squash`. Only a bare commit-ish is accepted; the Git `amend:`/`reword:`
-extended forms are not supported (a usage error, exit 129).
-
-```bash
-libra commit --fixup HEAD
-libra commit --fixup a1b2c3d
-```
-
-### `--squash <commit>`
-
-Create a commit whose message is `squash! <subject of commit>`, ready for autosquash. The
-editor opens by default so you can add a body (suppress it with `--no-edit`); a `-m` message
-is appended as the body. Mutually exclusive with `--amend`, `-F`, and `--fixup`.
-
-```bash
-libra commit --squash HEAD
-libra commit --squash HEAD -m "extra context"
-```
-
-### `--dry-run`
-
-Show what would be committed without creating a commit — no objects, index, reflog, or
-post-commit automation are written. Exits `0` when there is something to commit and `128`
-when there is nothing (the same code the real commit path uses).
-
-```bash
-libra commit --dry-run
-libra commit --dry-run -a
-```
-
-### `--porcelain`
-
-Emit the dry-run preview in `status`'s machine-readable `XY <path>` format. **Must be used
-with `--dry-run`** (this is an intentional difference from Git, whose `--porcelain` implies
-dry-run); using it alone is a usage error (exit 129).
-
-```bash
-libra commit --dry-run --porcelain
-```
-
-### `-v, --verbose`
-
-Append a unified diff of the staged changes to the commit-message editor, below a scissors
-cut line (`# ------ >8 ------`). Everything from the cut line down is stripped before the
-commit, so the diff never lands in the message. The `commit.verbose=true` config enables this
-by default.
-
-```bash
-libra commit -v
-```
-
 ## Common Commands
 
 ```bash
@@ -258,10 +136,6 @@ libra commit --amend --no-edit
 libra commit -a -m "Fix typo"
 libra commit -F message.txt
 libra commit -s -m "Add feature"
-libra commit --fixup HEAD
-libra commit --squash HEAD -m "extra context"
-libra commit --dry-run --porcelain
-libra commit -v -m "Add feature"
 libra commit --allow-empty -m "Trigger CI"
 libra commit --json -m "Add feature"
 ```
@@ -433,20 +307,17 @@ switching from Git do not need to learn a new flag name.
 | Auto-stage tracked | `git commit -a` | N/A (automatic tracking) | `libra commit -a` |
 | Allow empty commit | `git commit --allow-empty` | `jj commit --allow-empty` | `libra commit --allow-empty` |
 | Signoff trailer | `git commit -s` / `--signoff` | N/A | `libra commit -s` / `--signoff` |
-| GPG sign commit | `git commit -S` (manual GPG) | N/A (no signing) | `libra commit -S` / automatic (vault-backed) |
-| Suppress signing | `git commit --no-gpg-sign` | N/A | `libra commit --no-gpg-sign` |
+| GPG sign commit | `git commit -S` (manual GPG) | N/A (no signing) | Automatic (vault-backed) |
 | Override author | `git commit --author="..."` | N/A | `libra commit --author="..."` |
 | Conventional check | External tool (commitlint) | N/A | `libra commit --conventional` |
 | Skip pre-commit only | N/A | N/A | `libra commit --disable-pre` |
 | Skip all hooks | `git commit --no-verify` | N/A | `libra commit --no-verify` |
-| Fixup commit | `git commit --fixup=<commit>` | N/A | `libra commit --fixup <commit>` (bare commit-ish; no `amend:`/`reword:`) |
-| Squash commit | `git commit --squash=<commit>` | `jj squash` | `libra commit --squash <commit>` |
-| Interactive message | `git commit` (opens editor) | `jj commit` (opens editor) | `libra commit` (opens editor) |
-| Verbose diff in editor | `git commit -v` | N/A | `libra commit -v` |
-| Dry-run preview | `git commit --dry-run` | N/A | `libra commit --dry-run` |
-| Porcelain status | `git commit --porcelain` (implies dry-run) | N/A | `libra commit --dry-run --porcelain` |
+| Fixup commit | `git commit --fixup=<commit>` | N/A | N/A |
+| Squash commit | `git commit --squash=<commit>` | `jj squash` | N/A |
+| Interactive message | `git commit` (opens editor) | `jj commit` (opens editor) | N/A (message required via -m or -F) |
+| Verbose diff in editor | `git commit -v` | N/A | N/A |
 | Reset author date | `git commit --reset-author` | N/A | N/A |
-| Cleanup mode | `git commit --cleanup=<mode>` | N/A | `libra commit --cleanup=<mode>` |
+| Cleanup mode | `git commit --cleanup=<mode>` | N/A | N/A |
 | Trailer | `git commit --trailer="..."` | N/A | N/A |
 | Structured JSON output | N/A | N/A | `--json` / `--machine` |
 | Error hints | Minimal | Minimal | Every error type has an actionable hint |
@@ -465,8 +336,6 @@ Every `CommitError` variant maps to an explicit `StableErrorCode`.
 | No commit to amend | `LBR-REPO-003` | 128 | "create a commit before using --amend" |
 | Amend merge commit | `LBR-REPO-003` | 128 | "create a new commit instead of amending a merge commit" |
 | Invalid author format | `LBR-CLI-002` | 129 | "expected format: 'Name <email>'" |
-| `--fixup`/`--squash` target not found | `LBR-CLI-003` | 129 | "check the target with 'libra log' and pass an existing commit-ish" |
-| Unsupported `--fixup=amend:/reword:` form | `LBR-CLI-002` | 129 | "the amend:/reword: autosquash forms are not supported yet" |
 | Message file unreadable | `LBR-IO-001` | 128 | -- |
 | Empty commit message | `LBR-REPO-003` | 128 | "use -m to provide a commit message" |
 | Tree creation failed | `LBR-INTERNAL-001` | 128 | Issues URL |
@@ -474,9 +343,6 @@ Every `CommitError` variant maps to an explicit `StableErrorCode`.
 | Parent commit missing | `LBR-REPO-002` | 128 | "the parent commit is missing or corrupted" |
 | HEAD update failed | `LBR-IO-002` | 128 | -- |
 | Pre-commit hook failed | `LBR-REPO-003` | 128 | "use --no-verify to bypass the hook" |
-| Commit-msg hook failed | `LBR-REPO-003` | 128 | "fix the commit message, or use --no-verify to bypass the hook" |
-| Editor failed / spawn error | `LBR-REPO-003` | 128 | "set $EDITOR / core.editor, or provide the message with -m/-F" |
-| No editor available (non-TTY) | `LBR-REPO-003` | 128 | "provide a message with -m/-F, or run in a terminal with an editor" |
 | Conventional commit invalid | `LBR-CLI-002` | 129 | "see https://www.conventionalcommits.org for format rules" |
 | Vault signing failed | `LBR-AUTH-001` | 128 | "check vault configuration with 'libra config --list'" |
 | Auto-stage failed | `LBR-IO-001` | 128 | -- |
@@ -484,11 +350,8 @@ Every `CommitError` variant maps to an explicit `StableErrorCode`.
 
 ## Compatibility Notes
 
-- Libra opens an editor (`$GIT_EDITOR` → `core.editor` → `$VISUAL` → `$EDITOR` → `vi`) when no message is supplied and `--no-edit` is not given; in a non-TTY with no editor configured it errors instead of hanging
-- `prepare-commit-msg` and `commit-msg` hooks (under `.libra/hooks/`) run on the message file; a non-zero `commit-msg` hook aborts the commit. `--no-verify` skips all hooks; `--disable-pre` skips only `pre-commit`
+- Libra does not open an editor for interactive message composition; `-m` or `-F` is always required (except with `--amend --no-edit`)
 - jj does not have a traditional `commit` command with staging; `jj commit` finalizes the working copy commit
-- `--fixup <commit>` / `--squash <commit>` generate `fixup!`/`squash!` messages for `libra rebase -i --autosquash`; only a bare commit-ish is accepted — the Git `amend:`/`reword:` extended forms are not supported (a usage error)
-- `--dry-run` previews the would-commit set without writing anything; `--porcelain` reuses `status`'s `XY <path>` format and **must** be combined with `--dry-run` (intentional difference: Git's `--porcelain` implies dry-run)
-- `-v`/`--verbose` shows the staged diff under a scissors line in the editor (stripped before commit); `commit.verbose=true` enables it by default
-- `-S`/`--gpg-sign` forces vault-backed signing (and `commit.gpgSign true` does so repository-wide); `--no-gpg-sign` suppresses it. These layer over Libra's default vault signing, which replaces Git's `user.signingkey` configuration
-- `--cleanup` modes (`strip`/`whitespace`/`verbatim`/`scissors`/`default`) are supported; `--allow-empty-message` is not
+- `--fixup` and `--squash` are not supported; use `libra rebase -i` for commit restructuring
+- Vault signing replaces Git's `commit.gpgsign` and `user.signingkey` configuration
+- `--cleanup` mode for comment stripping is not supported; messages are used as-is

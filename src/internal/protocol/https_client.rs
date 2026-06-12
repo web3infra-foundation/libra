@@ -8,7 +8,7 @@ use reqwest::{Body, RequestBuilder, Response, StatusCode, header::CONTENT_TYPE};
 use url::Url;
 
 use super::{
-    DiscoveryResult, FetchStream, ProtocolClient, ShallowOptions, generate_upload_pack_content,
+    DiscoveryResult, FetchStream, ProtocolClient, generate_upload_pack_content,
     parse_discovered_references,
 };
 use crate::{command::ask_basic_auth, git_protocol::ServiceType, utils::error::emit_warning};
@@ -178,7 +178,7 @@ impl HttpsClient {
         have: &[String],
         want: &[String],
         shallow: &[String],
-        options: &ShallowOptions,
+        depth: Option<usize>,
     ) -> Result<FetchStream, IoError> {
         // POST $GIT_URL/git-upload-pack HTTP/1.0
         // INVARIANT: "git-upload-pack" is a valid relative URL onto self.url.
@@ -186,7 +186,7 @@ impl HttpsClient {
             .url
             .join("git-upload-pack")
             .expect("'git-upload-pack' is a valid relative URL");
-        let body = generate_upload_pack_content(have, want, shallow, options);
+        let body = generate_upload_pack_content(have, want, shallow, depth);
         tracing::debug!("fetch_objects with body: {:?}", body);
 
         let res = BasicAuth::send(|| async {

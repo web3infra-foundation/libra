@@ -12,7 +12,7 @@ libra mv [<options>] <source>... <destination>
 
 `libra mv` moves or renames files and directories in the working tree and updates the index accordingly. The last argument is always the destination; all preceding arguments are sources. When there are multiple sources, the destination must be an existing directory.
 
-The command validates that all source paths exist, are tracked in the index, are not in a conflicted state, and reside within the repository working directory. Directory moves are performed as a single filesystem rename, with individual index entries updated for each tracked file within the directory. A directory source must contain at least one tracked entry; untracked files inside an otherwise tracked directory are carried along by the filesystem rename but are not added to the index.
+The command validates that all source paths exist, are tracked in the index, are not in a conflicted state, and reside within the repository working directory. Directory moves are performed as a single filesystem rename, with individual index entries updated for each tracked file within the directory. Untracked files inside a moved directory are carried along by the filesystem rename but are not added to the index.
 
 After all filesystem moves succeed, the index is updated atomically: old entries are removed and new entries (with recalculated blob hashes) are inserted. The index is saved only after all operations complete successfully.
 
@@ -23,8 +23,6 @@ After all filesystem moves succeed, the index is updated atomically: old entries
 | Verbose | `-v` | `--verbose` | Print each rename operation as it happens. |
 | Dry run | `-n` | `--dry-run` | Show what would be moved without actually performing any moves. |
 | Force | `-f` | `--force` | Overwrite an existing destination file instead of reporting an error. Only works for regular files and symlinks; directories cannot be overwritten. |
-| Skip errors | `-k` | `--skip-errors` | Skip individual source moves that would fail validation and continue with valid sources. |
-| Sparse | | `--sparse` | Accepted as a **no-op** for `git mv --sparse` script compatibility. Libra has no sparse-checkout cone, so every path is always considered present and the flag changes nothing. |
 
 ### Option Details
 
@@ -57,26 +55,6 @@ Allows overwriting an existing destination. Without this flag, moving to an exis
 $ libra mv -f src/old.rs src/new.rs
 ```
 
-**`-k` / `--skip-errors`**
-
-Skips invalid source moves and applies the remaining valid moves:
-
-```bash
-$ libra mv -k missing.rs tracked.rs src/
-```
-
-This flag is useful for batch moves where some pathspecs may be absent or otherwise invalid. Invocation-shape errors still fail, such as passing multiple sources with a destination that is not an existing directory.
-
-**`--sparse`**
-
-Accepted and ignored (a no-op) so that third-party scripts written against `git mv --sparse` do not fail to parse. Git's `--sparse` lets you move files that lie outside the sparse-checkout cone; Libra has no sparse-checkout cone (every path is always considered present), so the flag has no effect on the move, the index, or the `MvOutput` JSON. This is an **intentional difference** — the flag is parsed for compatibility, not implemented:
-
-```bash
-$ libra mv --sparse old.rs new.rs   # behaves identically to `libra mv old.rs new.rs`
-```
-
-Without this flag, an unknown argument would be rejected by the CLI parser and exit with `129` (`LBR-CLI-002`), which would break a `git mv --sparse` invocation embedded in a build/monorepo script.
-
 ## Common Commands
 
 ```bash
@@ -97,9 +75,6 @@ libra mv -n old.rs new.rs
 
 # Force overwrite
 libra mv -f src/draft.rs src/final.rs
-
-# Skip invalid sources in a batch
-libra mv -k missing.rs tracked.rs src/
 
 # Verbose output
 libra mv -v old.rs new.rs
@@ -125,9 +100,6 @@ Dry-run mode:
 Checking rename of 'old.rs' to 'new.rs'
 Renaming old.rs to new.rs
 ```
-
-Control characters inside printed path fields are escaped (for example a newline
-inside a filename is rendered as `\n`) so the human output remains line-oriented.
 
 Global `--quiet` suppresses dry-run and verbose human output while keeping
 warnings and errors on stderr.
@@ -162,7 +134,6 @@ Example:
     ],
     "dry_run": false,
     "forced": false,
-    "skip_errors": false,
     "verbose": false
   }
 }
@@ -189,7 +160,6 @@ Dry-run:
     ],
     "dry_run": true,
     "forced": false,
-    "skip_errors": false,
     "verbose": false
   }
 }
@@ -203,13 +173,9 @@ Libra follows the same convention as Git's `mv` and the Unix `mv` command: the l
 
 The trade-off is that the command requires at least two arguments and the semantics change depending on whether the destination is an existing directory. This is the same trade-off that Unix `mv` and Git `mv` make, and decades of usage have shown it to be intuitive in practice.
 
-### Why is `--sparse` a no-op?
+### Why no `--sparse`?
 
-Git's `mv` supports `--sparse` to allow moving files outside the sparse-checkout cone. Libra does not implement sparse checkout, so the flag has no semantic effect. Rather than rejecting it (which would make any `git mv --sparse` script exit non-zero — `129`/`LBR-CLI-002` — and abort a CI pipeline), Libra **accepts and ignores** it. This is recorded as an *intentional difference* in `COMPATIBILITY.md`: the flag is parsed for script compatibility, not implemented. If real sparse-checkout support is ever added, `--sparse` will gain meaning without a breaking change to the surface.
-
-### Submodule cascade rename (out of scope)
-
-`git mv` updates `.gitmodules` when renaming a submodule path. Libra does **not** perform submodule cascade renames — moving a submodule path with `libra mv` moves the working-tree entry and index entry only and does not rewrite `.gitmodules`. This is an intentional out-of-scope decision to keep the VCS core simple.
+Git's `mv` supports `--sparse` to allow moving files outside the sparse-checkout cone. Libra does not yet implement sparse checkout, so this flag has no meaning. It will be added if and when sparse checkout support is implemented.
 
 ### Why validate tracked status?
 
@@ -221,7 +187,7 @@ Moving a file that is in a conflicted state (stages 1-3 in the index) would lose
 
 ### How does this compare to Git and jj?
 
-Git's `mv` command is similar in design: it moves files in the working tree and updates the index. It supports `-k` to skip move errors and also supports `--sparse`; Libra accepts `--sparse` as a no-op because sparse checkout is not implemented.
+Git's `mv` command is similar in design: it moves files in the working tree and updates the index. It supports a few additional flags (`-k` to skip move errors, `--sparse`) but is otherwise straightforward.
 
 jj does not have a `mv` command. Because jj uses automatic snapshotting of the working tree, file moves are detected automatically by the working-copy scanner. Users simply move files with the system `mv` command and jj records the change on the next snapshot. This works well for simple renames but cannot reliably detect moves (as opposed to delete-then-create) for large refactors.
 
@@ -237,9 +203,8 @@ Libra provides an explicit `mv` command (like Git) because its index-based model
 | Dry run | `-n` / `--dry-run` | `-n` / `--dry-run` | N/A |
 | Force overwrite | `-f` / `--force` | `-f` / `--force` | N/A |
 | Structured JSON output | `--json` / `--machine` | N/A | N/A |
-| Skip errors | `-k` / `--skip-errors` | `-k` | N/A |
-| Sparse checkout | `--sparse` accepted as no-op | `--sparse` | N/A |
-| Submodule cascade rename | Out of scope (not performed) | Updates `.gitmodules` | N/A |
+| Skip errors | Not supported | `-k` | N/A |
+| Sparse checkout | Not supported | `--sparse` | N/A |
 
 Note: jj does not have a dedicated mv command. File renames are detected automatically by the working-copy snapshot mechanism.
 
@@ -259,27 +224,3 @@ Note: jj does not have a dedicated mv command. File renames are detected automat
 | Multiple sources targeting the same path | `fatal: multiple sources moving to the same target path` |
 | Filesystem rename failed | `fatal: failed to move, source=<src>, destination=<dst>, error=<err>` |
 | Index save failed | `fatal: failed to save index after mv: <err>` |
-
-## Exit Codes
-
-Libra never lets the argument parser exit with a bare `2`; CLI usage errors are
-remapped to the stable code table below. Coarse codes are the default; set
-`LIBRA_FINE_EXIT_CODES=1` for the fine-grained (`2`–`9`) variants.
-
-| Scenario | Coarse exit | Stable code |
-|----------|-------------|-------------|
-| Success (including `-n` dry-run and `--sparse` no-op) | `0` | — |
-| Too few arguments (`usage:`) | `129` | `LBR-CLI-002` |
-| Unknown flag / parse error (located to `mv`) | `129` | `LBR-CLI-002` |
-| Source/destination outside the repository | `129` | `LBR-CLI-003` |
-| Multiple sources with a non-directory destination | `129` | `LBR-CLI-003` |
-| Source does not exist (`bad source`) | `129` | `LBR-CLI-003` |
-| Move a directory into itself | `129` | `LBR-CLI-003` |
-| Untracked source / duplicate target | `128` | `LBR-CONFLICT-002` |
-| Conflicted (unmerged) source | `128` | `LBR-CONFLICT-001` |
-| Destination exists without `-f` | `128` | `LBR-CONFLICT-002` |
-| Filesystem rename / `create_dir_all` / index-save failure | `128` | (runtime `fatal:`) |
-| Not inside a Libra repository | `128` | `LBR-REPO-001` |
-
-The `mv` happy path emits no warnings, so it never triggers the
-`--exit-code-on-warning` warning exit (`9`).

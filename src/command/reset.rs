@@ -1,9 +1,8 @@
 //! Reset command covering soft/mixed/hard behaviors to move HEAD and align the index or working tree to a chosen commit.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::HashSet,
     fs, io,
-    io::{BufRead, Read},
     path::{Path, PathBuf},
 };
 
@@ -12,7 +11,7 @@ use git_internal::{
     hash::ObjectHash,
     internal::{
         index::{Index, IndexEntry},
-        object::{commit::Commit, tree::Tree, types::ObjectType},
+        object::{commit::Commit, tree::Tree},
     },
 };
 use serde::Serialize;
@@ -41,10 +40,7 @@ EXAMPLES:
     libra reset HEAD~1                    Move HEAD and reset index to the previous commit
     libra reset --soft HEAD~2             Move HEAD only, keep index and worktree
     libra reset --hard main               Reset HEAD, index, and worktree to branch 'main'
-    libra reset --merge HEAD~1            Reset while preserving unstaged changes that do not conflict
-    libra reset --keep HEAD~1             Reset while keeping local changes that do not overlap
     libra reset HEAD -- src/lib.rs        Unstage a path back to HEAD
-    libra reset --pathspec-from-file=paths.txt   Unstage paths read from a file ('-' for stdin)
     libra reset --json --hard HEAD~1      Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -66,39 +62,9 @@ pub struct ResetArgs {
     #[clap(long, group = "mode")]
     pub hard: bool,
 
-    /// Merge reset: move HEAD, reset index and worktree while preserving
-    /// unstaged changes that do not conflict with the target.
-    #[clap(long, group = "mode")]
-    pub merge: bool,
-
-    /// Keep reset: move HEAD, reset index and worktree while keeping local
-    /// changes that do not overlap with changes between HEAD and target.
-    #[clap(long, group = "mode")]
-    pub keep: bool,
-
     /// Pathspecs to reset specific files
     #[clap(value_name = "PATH")]
     pub pathspecs: Vec<String>,
-
-    /// Read pathspecs from the given file (`-` for stdin), one per line (or
-    /// NUL-separated with --pathspec-file-nul). Mutually exclusive with
-    /// command-line pathspecs.
-    #[clap(long, value_name = "FILE")]
-    pub pathspec_from_file: Option<String>,
-
-    /// Treat --pathspec-from-file input as NUL-separated instead of
-    /// line-separated. No-op without --pathspec-from-file.
-    #[clap(long)]
-    pub pathspec_file_nul: bool,
-
-    /// Accepted for Git compatibility. Libra's reset never refreshes the index,
-    /// so this flag is a no-op.
-    #[clap(long)]
-    pub no_refresh: bool,
-
-    /// (declined) Interactive patch-selection UI — not supported in Libra.
-    #[clap(short = 'p', long = "patch")]
-    pub patch: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -106,8 +72,6 @@ enum ResetMode {
     Soft,
     Mixed,
     Hard,
-    Merge,
-    Keep,
 }
 
 impl ResetMode {
@@ -116,15 +80,8 @@ impl ResetMode {
             Self::Soft => "soft",
             Self::Mixed => "mixed",
             Self::Hard => "hard",
-            Self::Merge => "merge",
-            Self::Keep => "keep",
         }
     }
-}
-
-#[derive(Debug, Default)]
-struct ResetPlan {
-    preserve_paths: HashSet<PathBuf>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -238,27 +195,8 @@ enum ResetError {
     #[error("Cannot do hard reset with paths.")]
     PathspecWithHard,
 
-    #[error("Cannot do merge reset with paths: {0}")]
-    PathspecWithMerge(String),
-
-    #[error("Cannot do keep reset with paths: {0}")]
-    PathspecWithKeep(String),
-
     #[error("pathspec '{0}' did not match any file(s) known to libra")]
     PathspecNotMatched(String),
-
-    #[error("--pathspec-from-file cannot be combined with command-line pathspecs")]
-    PathspecSourceConflict,
-
-    #[error("pathspec '{0}' is outside the repository working directory")]
-    PathspecOutsideWorkdir(String),
-
-    #[error("failed to read pathspecs from {path}: {source}")]
-    PathspecFileRead {
-        path: String,
-        #[source]
-        source: io::Error,
-    },
 
     /// Refused to reset onto a Libra-managed locked branch (`intent`,
     /// `agent-traces`, …). These refs hold AI-agent state that the user
@@ -271,19 +209,11 @@ enum ResetError {
     #[error("refusing to reset locked current branch '{0}'")]
     LockedCurrentBranch(String),
 
-    #[error("Entry '{path}' not uptodate. Cannot merge.")]
-    ConflictPrevented { path: String, files: Vec<String> },
-
     #[error("{primary}; rollback failed: {rollback}")]
     Rollback {
         primary: Box<ResetError>,
         rollback: Box<ResetError>,
     },
-
-    #[error(
-        "reset -p/--patch is not supported in Libra: interactive patch-selection UI is out of scope."
-    )]
-    PatchUiDeclined,
 }
 
 impl ResetError {
@@ -305,17 +235,10 @@ impl ResetError {
             Self::InvalidPathspecEncoding(_) => StableErrorCode::CliInvalidArguments,
             Self::PathspecWithSoft(_) => StableErrorCode::CliInvalidArguments,
             Self::PathspecWithHard => StableErrorCode::CliInvalidArguments,
-            Self::PathspecWithMerge(_) => StableErrorCode::CliInvalidArguments,
-            Self::PathspecWithKeep(_) => StableErrorCode::CliInvalidArguments,
             Self::PathspecNotMatched(_) => StableErrorCode::CliInvalidTarget,
-            Self::PathspecSourceConflict => StableErrorCode::CliInvalidArguments,
-            Self::PathspecOutsideWorkdir(_) => StableErrorCode::CliInvalidArguments,
-            Self::PathspecFileRead { .. } => StableErrorCode::IoReadFailed,
             Self::LockedTarget(_) => StableErrorCode::CliInvalidTarget,
             Self::LockedCurrentBranch(_) => StableErrorCode::ConflictOperationBlocked,
-            Self::ConflictPrevented { .. } => StableErrorCode::ConflictOperationBlocked,
             Self::Rollback { primary, .. } => primary.stable_code(),
-            Self::PatchUiDeclined => StableErrorCode::Unsupported,
         }
     }
 
@@ -339,22 +262,7 @@ impl ResetError {
             Self::PathspecWithHard => Some(
                 "--hard updates the working tree; omit pathspecs or use --mixed for specific paths.",
             ),
-            Self::PathspecWithMerge(_) => Some(
-                "--merge updates the whole tree; omit pathspecs or use --mixed for specific paths.",
-            ),
-            Self::PathspecWithKeep(_) => Some(
-                "--keep updates the whole tree; omit pathspecs or use --mixed for specific paths.",
-            ),
             Self::PathspecNotMatched(_) => Some("check the path and try again."),
-            Self::PathspecSourceConflict => Some(
-                "provide pathspecs either on the command line or via --pathspec-from-file, not both.",
-            ),
-            Self::PathspecOutsideWorkdir(_) => {
-                Some("pathspecs must stay within the repository working directory.")
-            }
-            Self::PathspecFileRead { .. } => {
-                Some("check that the pathspec file exists and is readable.")
-            }
             Self::LockedTarget(_) => Some(
                 "Libra-managed branches like 'intent' and 'agent-traces' cannot be used as reset targets",
             ),
@@ -365,29 +273,17 @@ impl ResetError {
             Self::RevisionCorrupt(_) => {
                 Some("the referenced branch, tag, or object metadata may be corrupted.")
             }
-            Self::ConflictPrevented { .. } => {
-                Some("commit, stash, or discard the listed local changes before retrying.")
-            }
             Self::IndexSave(_)
             | Self::HeadUpdate(_)
             | Self::WorktreeRead(_)
             | Self::WorktreeRestore(_) => None,
-            Self::PatchUiDeclined => Some(
-                "reset whole files with 'libra reset <target> -- <path>', or stage changes with 'libra add'",
-            ),
             Self::Rollback { primary, .. } => primary.hint(),
         }
     }
 
     fn is_command_usage(&self) -> bool {
         match self {
-            Self::PathspecWithSoft(_)
-            | Self::PathspecWithHard
-            | Self::PathspecWithMerge(_)
-            | Self::PathspecWithKeep(_)
-            | Self::PathspecSourceConflict
-            | Self::PathspecOutsideWorkdir(_)
-            | Self::PatchUiDeclined => true,
+            Self::PathspecWithSoft(_) | Self::PathspecWithHard => true,
             Self::Rollback { primary, .. } => primary.is_command_usage(),
             _ => false,
         }
@@ -398,13 +294,6 @@ impl From<ResetError> for CliError {
     fn from(error: ResetError) -> Self {
         match error {
             ResetError::NotInRepo => CliError::repo_not_found(),
-            ResetError::ConflictPrevented { path, files } => {
-                CliError::conflict(format!("Entry '{path}' not uptodate. Cannot merge."))
-                    .with_hint(
-                        "commit, stash, or discard the listed local changes before retrying.",
-                    )
-                    .with_detail("conflict_files", serde_json::json!(files))
-            }
             other => {
                 let message = other.to_string();
                 let stable_code = other.stable_code();
@@ -459,11 +348,6 @@ async fn reject_reset_on_ai_managed_current_branch() -> Result<(), ResetError> {
 async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError> {
     util::require_repo().map_err(|_| ResetError::NotInRepo)?;
 
-    // Reject -p/--patch early before any state changes
-    if args.patch {
-        return Err(ResetError::PatchUiDeclined);
-    }
-
     // Refuse to reset onto a Libra-managed locked branch. `is_locked_revision`
     // strips `~` / `^` / `@` suffixes so attempts like `agent-traces~1` or
     // `intent^` are still rejected.
@@ -475,37 +359,21 @@ async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError> {
         ResetMode::Soft
     } else if args.hard {
         ResetMode::Hard
-    } else if args.merge {
-        ResetMode::Merge
-    } else if args.keep {
-        ResetMode::Keep
     } else {
         ResetMode::Mixed
     };
     let previous_commit = Head::current_commit().await.map(|hash| hash.to_string());
 
-    // Effective pathspecs may come from the command line or from
-    // `--pathspec-from-file` (mutually exclusive; `-` reads stdin). Both
-    // sources flow through the same `reset_pathspecs` execution and
-    // containment checks below.
-    let effective_pathspecs = resolve_effective_pathspecs(&args)?;
-
-    if !effective_pathspecs.is_empty() {
+    if !args.pathspecs.is_empty() {
         if matches!(mode, ResetMode::Soft) {
-            return Err(ResetError::PathspecWithSoft(effective_pathspecs.join(" ")));
+            return Err(ResetError::PathspecWithSoft(args.pathspecs.join(" ")));
         }
         if matches!(mode, ResetMode::Hard) {
             return Err(ResetError::PathspecWithHard);
         }
-        if matches!(mode, ResetMode::Merge) {
-            return Err(ResetError::PathspecWithMerge(effective_pathspecs.join(" ")));
-        }
-        if matches!(mode, ResetMode::Keep) {
-            return Err(ResetError::PathspecWithKeep(effective_pathspecs.join(" ")));
-        }
 
         let target_commit_id = resolve_commit(&args.target).await?;
-        let changed_paths = reset_pathspecs(&effective_pathspecs, &target_commit_id).await?;
+        let changed_paths = reset_pathspecs(&args.pathspecs, &target_commit_id).await?;
         let subject = load_commit_summary_or_warn(&target_commit_id);
         let commit = target_commit_id.to_string();
 
@@ -569,16 +437,6 @@ async fn reset_pathspecs(
     let mut changed_paths = Vec::new();
 
     for pathspec in pathspecs {
-        // Containment: a pathspec is workdir-relative, so resolve it against the
-        // working directory and reject anything that escapes the repository (a
-        // `../` traversal). This applies uniformly to command-line and
-        // `--pathspec-from-file` sources. `is_sub_path` normalises `..`
-        // components without touching the filesystem.
-        let absolute = util::workdir_to_absolute(PathBuf::from(pathspec));
-        if !util::is_sub_path(&absolute, util::working_dir()) {
-            return Err(ResetError::PathspecOutsideWorkdir(pathspec.clone()));
-        }
-
         let relative_path = util::workdir_to_current(PathBuf::from(pathspec));
         let path_str = relative_path.to_str().ok_or_else(|| {
             ResetError::InvalidPathspecEncoding(relative_path.display().to_string())
@@ -617,113 +475,6 @@ async fn reset_pathspecs(
     Ok(changed_paths)
 }
 
-/// Upper bound on `--pathspec-from-file` input (file or stdin) to guard against
-/// OOM / DoS from a pathological input. Matches `libra add`'s limit so both
-/// commands share one ceiling.
-const MAX_PATHSPEC_FILE_BYTES: u64 = 128 * 1024 * 1024;
-
-/// Resolve the pathspecs the reset should operate on.
-///
-/// Pathspecs come from exactly one source: the command line, or
-/// `--pathspec-from-file` (`-` reads stdin). Supplying both is a usage error
-/// ([`ResetError::PathspecSourceConflict`], exit 129) so a script cannot
-/// silently merge two lists. `--pathspec-file-nul` only switches the separator
-/// and is an inert no-op when `--pathspec-from-file` is absent (matching Git).
-fn resolve_effective_pathspecs(args: &ResetArgs) -> Result<Vec<String>, ResetError> {
-    match args.pathspec_from_file.as_deref() {
-        Some(file) => {
-            if !args.pathspecs.is_empty() {
-                return Err(ResetError::PathspecSourceConflict);
-            }
-            read_pathspec_from_file(file, args.pathspec_file_nul)
-        }
-        None => Ok(args.pathspecs.clone()),
-    }
-}
-
-/// Read pathspecs from `path` (a file, or `-` for stdin), streaming.
-///
-/// Items are separated by NUL when `nul` is set (`--pathspec-file-nul`),
-/// otherwise by newline (a trailing `\r` is stripped so CRLF files work). Empty
-/// items are dropped. Input is read incrementally via [`BufRead::read_until`]
-/// and bounded at [`MAX_PATHSPEC_FILE_BYTES`] as it is consumed, so even an
-/// unbounded stdin pipe cannot exhaust memory; exceeding the cap (or any read
-/// failure) returns [`ResetError::PathspecFileRead`] and non-UTF-8 input
-/// returns [`ResetError::InvalidPathspecEncoding`].
-///
-/// Each item is taken verbatim — Git's default-mode C-style quoted-path
-/// decoding is intentionally not performed (use `--pathspec-file-nul` for paths
-/// with special characters); the returned raw pathspecs are still normalised
-/// and containment-checked by [`reset_pathspecs`].
-fn read_pathspec_from_file(path: &str, nul: bool) -> Result<Vec<String>, ResetError> {
-    let separator = if nul { b'\0' } else { b'\n' };
-    let (label, reader): (String, Box<dyn Read>) = if path == "-" {
-        ("<stdin>".to_string(), Box::new(io::stdin().lock()))
-    } else {
-        // Fail fast on an oversized file without opening/reading it.
-        let meta = fs::metadata(path).map_err(|source| ResetError::PathspecFileRead {
-            path: path.to_string(),
-            source,
-        })?;
-        if meta.len() > MAX_PATHSPEC_FILE_BYTES {
-            return Err(ResetError::PathspecFileRead {
-                path: path.to_string(),
-                source: io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "pathspec file exceeds the 128 MiB limit",
-                ),
-            });
-        }
-        let file = fs::File::open(path).map_err(|source| ResetError::PathspecFileRead {
-            path: path.to_string(),
-            source,
-        })?;
-        (path.to_string(), Box::new(file))
-    };
-
-    // `take` bounds the total read so an unbounded stdin pipe cannot exhaust
-    // memory; `total` enforces the cap precisely as bytes are consumed.
-    let mut reader = io::BufReader::new(reader.take(MAX_PATHSPEC_FILE_BYTES + 1));
-    let mut items = Vec::new();
-    let mut chunk = Vec::new();
-    let mut total: u64 = 0;
-    loop {
-        chunk.clear();
-        let read = reader.read_until(separator, &mut chunk).map_err(|source| {
-            ResetError::PathspecFileRead {
-                path: label.clone(),
-                source,
-            }
-        })?;
-        if read == 0 {
-            break;
-        }
-        total += read as u64;
-        if total > MAX_PATHSPEC_FILE_BYTES {
-            return Err(ResetError::PathspecFileRead {
-                path: label.clone(),
-                source: io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "pathspec input exceeds the 128 MiB limit",
-                ),
-            });
-        }
-        if chunk.last() == Some(&separator) {
-            chunk.pop();
-        }
-        if !nul && chunk.last() == Some(&b'\r') {
-            chunk.pop();
-        }
-        if chunk.is_empty() {
-            continue;
-        }
-        let item = std::str::from_utf8(&chunk)
-            .map_err(|_| ResetError::InvalidPathspecEncoding(label.clone()))?;
-        items.push(item.to_string());
-    }
-    Ok(items)
-}
-
 /// Perform the actual reset operation based on the specified mode.
 /// Updates HEAD pointer and optionally resets index and working directory.
 async fn perform_reset(
@@ -742,31 +493,22 @@ async fn perform_reset(
     } else {
         None
     };
-    let previously_tracked_paths =
-        if matches!(mode, ResetMode::Hard | ResetMode::Merge | ResetMode::Keep) {
-            tracked_paths_for_hard_reset(&old_oid)?
-        } else {
-            HashSet::new()
-        };
-    let reset_plan = build_reset_plan(mode, &old_oid, &target_commit_id)?;
+    let previously_tracked_paths = if matches!(mode, ResetMode::Hard) {
+        tracked_paths_for_hard_reset(&old_oid)?
+    } else {
+        HashSet::new()
+    };
     // INVARIANT: apply index/worktree changes before moving HEAD. If a
     // filesystem write fails, rollback can still restore the old index/worktree
     // while refs continue to point at the previous commit.
-    let stats = match apply_reset_side_effects(
-        mode,
-        &target_commit_id,
-        &previously_tracked_paths,
-        &reset_plan,
-    )
-    .await
-    {
-        Ok(stats) => stats,
-        Err(error) => {
-            let rollback =
-                rollback_reset_side_effects(mode, &old_oid, &target_commit_id, &reset_plan).await;
-            return Err(merge_reset_failure(error, rollback));
-        }
-    };
+    let stats =
+        match apply_reset_side_effects(mode, &target_commit_id, &previously_tracked_paths).await {
+            Ok(stats) => stats,
+            Err(error) => {
+                let rollback = rollback_reset_side_effects(mode, &old_oid, &target_commit_id).await;
+                return Err(merge_reset_failure(error, rollback));
+            }
+        };
 
     if let Some(current_head_state) = current_head_state
         && let Err(error) = update_reset_reference(
@@ -780,8 +522,7 @@ async fn perform_reset(
         // INVARIANT: if the final ref move fails after side effects, restore the
         // index/worktree to match the old commit so the visible checkout does
         // not diverge from HEAD.
-        let rollback =
-            rollback_reset_side_effects(mode, &old_oid, &target_commit_id, &reset_plan).await;
+        let rollback = rollback_reset_side_effects(mode, &old_oid, &target_commit_id).await;
         return Err(merge_reset_failure(error, rollback));
     }
 
@@ -792,7 +533,6 @@ async fn apply_reset_side_effects(
     mode: ResetMode,
     target_commit_id: &ObjectHash,
     previously_tracked_paths: &HashSet<PathBuf>,
-    reset_plan: &ResetPlan,
 ) -> Result<ResetStats, ResetError> {
     let mut stats = ResetStats::default();
     match mode {
@@ -808,17 +548,6 @@ async fn apply_reset_side_effects(
             stats.files_restored = worktree_stats.files_restored;
             stats.warnings = worktree_stats.warnings;
         }
-        ResetMode::Merge | ResetMode::Keep => {
-            reset_index_to_commit_typed(target_commit_id)?;
-            let worktree_stats = reset_working_directory_to_commit_filtered(
-                target_commit_id,
-                previously_tracked_paths,
-                &reset_plan.preserve_paths,
-            )
-            .await?;
-            stats.files_restored = worktree_stats.files_restored;
-            stats.warnings = worktree_stats.warnings;
-        }
     }
     Ok(stats)
 }
@@ -827,20 +556,15 @@ async fn rollback_reset_side_effects(
     mode: ResetMode,
     old_oid: &ObjectHash,
     target_commit_id: &ObjectHash,
-    reset_plan: &ResetPlan,
 ) -> Result<(), ResetError> {
     match mode {
         ResetMode::Soft => Ok(()),
         ResetMode::Mixed => reset_index_to_commit_typed(old_oid),
-        ResetMode::Hard | ResetMode::Merge | ResetMode::Keep => {
+        ResetMode::Hard => {
             reset_index_to_commit_typed(old_oid)?;
             let rollback_paths = tracked_paths_for_hard_reset(target_commit_id)?;
-            let rollback_stats = reset_working_directory_to_commit_filtered(
-                old_oid,
-                &rollback_paths,
-                &reset_plan.preserve_paths,
-            )
-            .await?;
+            let rollback_stats =
+                reset_working_directory_to_commit(old_oid, &rollback_paths).await?;
             if !rollback_stats.warnings.is_empty() {
                 tracing::warn!(
                     warnings = ?rollback_stats.warnings,
@@ -872,7 +596,6 @@ async fn update_reset_reference(
         old_oid: old_oid.to_string(),
         new_oid: target_commit_id.to_string(),
         action,
-        message: None,
     };
 
     with_reflog(
@@ -913,199 +636,6 @@ fn merge_reset_failure(error: ResetError, rollback: Result<(), ResetError>) -> R
     }
 }
 
-fn build_reset_plan(
-    mode: ResetMode,
-    old_oid: &ObjectHash,
-    target_commit_id: &ObjectHash,
-) -> Result<ResetPlan, ResetError> {
-    match mode {
-        ResetMode::Merge => ResetValidator::new(old_oid, target_commit_id)?.validate_merge(),
-        ResetMode::Keep => ResetValidator::new(old_oid, target_commit_id)?.validate_keep(),
-        ResetMode::Soft | ResetMode::Mixed | ResetMode::Hard => Ok(ResetPlan::default()),
-    }
-}
-
-struct ResetValidator {
-    head: BTreeMap<PathBuf, ObjectHash>,
-    target: BTreeMap<PathBuf, ObjectHash>,
-    index: BTreeMap<PathBuf, ObjectHash>,
-}
-
-impl ResetValidator {
-    fn new(head_commit_id: &ObjectHash, target_commit_id: &ObjectHash) -> Result<Self, ResetError> {
-        let index = Index::load(path::index()).map_err(|e| ResetError::IndexLoad(e.to_string()))?;
-        Ok(Self {
-            head: tree_map_from_commit(head_commit_id)?,
-            target: tree_map_from_commit(target_commit_id)?,
-            index: index_blob_map(&index)?,
-        })
-    }
-
-    fn validate_merge(&self) -> Result<ResetPlan, ResetError> {
-        let mut conflicts = Vec::new();
-        let mut preserve_paths = HashSet::new();
-        for path in self.target_index_paths() {
-            let target_hash = self.target.get(&path).copied();
-            let index_hash = self.index.get(&path).copied();
-            let worktree_hash = worktree_blob_hash(&path)?;
-
-            if target_hash != index_hash && worktree_hash != index_hash {
-                conflicts.push(path_to_display(&path)?);
-            } else if target_hash == index_hash && worktree_hash != index_hash {
-                preserve_paths.insert(path);
-            }
-        }
-        if conflicts.is_empty() {
-            Ok(ResetPlan { preserve_paths })
-        } else {
-            Err(conflict_prevented(conflicts))
-        }
-    }
-
-    fn validate_keep(&self) -> Result<ResetPlan, ResetError> {
-        let mut conflicts = Vec::new();
-        let mut preserve_paths = HashSet::new();
-        for path in self.head_target_index_paths() {
-            let head_hash = self.head.get(&path).copied();
-            let target_hash = self.target.get(&path).copied();
-            let index_hash = self.index.get(&path).copied();
-            let worktree_hash = worktree_blob_hash(&path)?;
-            let local_dirty = index_hash != head_hash || worktree_hash != index_hash;
-
-            if target_hash != head_hash && local_dirty {
-                conflicts.push(path_to_display(&path)?);
-            } else if target_hash == head_hash && local_dirty {
-                preserve_paths.insert(path);
-            }
-        }
-        if conflicts.is_empty() {
-            Ok(ResetPlan { preserve_paths })
-        } else {
-            Err(conflict_prevented(conflicts))
-        }
-    }
-
-    fn target_index_paths(&self) -> BTreeSet<PathBuf> {
-        self.target
-            .keys()
-            .chain(self.index.keys())
-            .cloned()
-            .collect()
-    }
-
-    fn head_target_index_paths(&self) -> BTreeSet<PathBuf> {
-        self.head
-            .keys()
-            .chain(self.target.keys())
-            .chain(self.index.keys())
-            .cloned()
-            .collect()
-    }
-}
-
-fn conflict_prevented(files: Vec<String>) -> ResetError {
-    let path = files
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "<unknown>".to_string());
-    ResetError::ConflictPrevented { path, files }
-}
-
-fn path_to_display(path: &Path) -> Result<String, ResetError> {
-    path.to_str()
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| ResetError::InvalidPathspecEncoding(path.display().to_string()))
-}
-
-fn tree_map_from_commit(
-    commit_id: &ObjectHash,
-) -> Result<BTreeMap<PathBuf, ObjectHash>, ResetError> {
-    let commit: Commit = load_object(commit_id)
-        .map_err(|e| object_load_error("commit", commit_id.to_string(), e.to_string()))?;
-    let tree: Tree = load_object(&commit.tree_id)
-        .map_err(|e| object_load_error("tree", commit.tree_id.to_string(), e.to_string()))?;
-    let mut files = BTreeMap::new();
-    collect_tree_map(&tree, Path::new(""), &mut files)?;
-    Ok(files)
-}
-
-fn collect_tree_map(
-    tree: &Tree,
-    prefix: &Path,
-    files: &mut BTreeMap<PathBuf, ObjectHash>,
-) -> Result<(), ResetError> {
-    for item in &tree.tree_items {
-        let item_path = if prefix.as_os_str().is_empty() {
-            PathBuf::from(&item.name)
-        } else {
-            prefix.join(&item.name)
-        };
-        if item.mode == git_internal::internal::object::tree::TreeItemMode::Tree {
-            let subtree: Tree = load_object(&item.id)
-                .map_err(|e| object_load_error("tree", item.id.to_string(), e.to_string()))?;
-            collect_tree_map(&subtree, &item_path, files)?;
-        } else {
-            files.insert(item_path, item.id);
-        }
-    }
-    Ok(())
-}
-
-fn index_blob_map(index: &Index) -> Result<BTreeMap<PathBuf, ObjectHash>, ResetError> {
-    let mut files = BTreeMap::new();
-    for path in index.tracked_files() {
-        let name = path_to_display(&path)?;
-        let entry = index
-            .get(&name, 0)
-            .ok_or_else(|| ResetError::IndexLoad(format!("missing stage-0 entry for {name}")))?;
-        files.insert(path, entry.hash);
-    }
-    Ok(files)
-}
-
-fn worktree_blob_hash(path: &Path) -> Result<Option<ObjectHash>, ResetError> {
-    let full_path = util::working_dir().join(path);
-    let meta = match fs::symlink_metadata(&full_path) {
-        Ok(meta) => meta,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            return Err(ResetError::WorktreeRead(format!(
-                "failed to inspect file {}: {}",
-                full_path.display(),
-                err
-            )));
-        }
-    };
-
-    let data = if meta.file_type().is_symlink() {
-        fs::read_link(&full_path)
-            .map_err(|err| {
-                ResetError::WorktreeRead(format!(
-                    "failed to read symlink {}: {}",
-                    full_path.display(),
-                    err
-                ))
-            })?
-            .to_string_lossy()
-            .into_owned()
-            .into_bytes()
-    } else if meta.is_file() {
-        fs::read(&full_path).map_err(|err| {
-            ResetError::WorktreeRead(format!(
-                "failed to read file {}: {}",
-                full_path.display(),
-                err
-            ))
-        })?
-    } else {
-        Vec::new()
-    };
-    Ok(Some(ObjectHash::from_type_and_data(
-        ObjectType::Blob,
-        &data,
-    )))
-}
-
 /// Reset the index to match the specified commit's tree.
 /// Clears the current index and rebuilds it from the commit's tree structure.
 pub(crate) fn reset_index_to_commit(commit_id: &ObjectHash) -> Result<(), String> {
@@ -1119,15 +649,6 @@ async fn reset_working_directory_to_commit(
     commit_id: &ObjectHash,
     previously_tracked_paths: &HashSet<PathBuf>,
 ) -> Result<ResetStats, ResetError> {
-    reset_working_directory_to_commit_filtered(commit_id, previously_tracked_paths, &HashSet::new())
-        .await
-}
-
-async fn reset_working_directory_to_commit_filtered(
-    commit_id: &ObjectHash,
-    previously_tracked_paths: &HashSet<PathBuf>,
-    preserve_paths: &HashSet<PathBuf>,
-) -> Result<ResetStats, ResetError> {
     let commit: Commit = load_object(commit_id)
         .map_err(|e| object_load_error("commit", commit_id.to_string(), e.to_string()))?;
 
@@ -1135,14 +656,13 @@ async fn reset_working_directory_to_commit_filtered(
         .map_err(|e| object_load_error("tree", commit.tree_id.to_string(), e.to_string()))?;
 
     let workdir = util::working_dir();
-    let mut target_files = BTreeMap::new();
-    collect_tree_map(&tree, Path::new(""), &mut target_files)?;
-    let target_files_set: HashSet<_> = target_files.keys().cloned().collect();
+    let target_files = tree.get_plain_items();
+    let target_files_set: HashSet<_> = target_files.iter().map(|(path, _)| path.clone()).collect();
     let mut files_restored = 0;
 
     // Remove tracked files that should not exist in the target tree.
     for file_path in previously_tracked_paths {
-        if !target_files_set.contains(file_path) && !preserve_paths.contains(file_path) {
+        if !target_files_set.contains(file_path) {
             let full_path = workdir.join(file_path);
             if full_path.exists() {
                 fs::remove_file(&full_path).map_err(|e| {
@@ -1161,8 +681,7 @@ async fn reset_working_directory_to_commit_filtered(
     let warnings = remove_empty_directories_with_warnings(&workdir)?;
 
     // Restore files from target tree
-    files_restored +=
-        restore_working_directory_from_tree_counted_filtered(&tree, &workdir, "", preserve_paths)?;
+    files_restored += restore_working_directory_from_tree_counted_typed(&tree, &workdir, "")?;
 
     Ok(ResetStats {
         files_restored,
@@ -1249,15 +768,6 @@ fn restore_working_directory_from_tree_counted_typed(
     workdir: &Path,
     prefix: &str,
 ) -> Result<usize, ResetError> {
-    restore_working_directory_from_tree_counted_filtered(tree, workdir, prefix, &HashSet::new())
-}
-
-fn restore_working_directory_from_tree_counted_filtered(
-    tree: &Tree,
-    workdir: &Path,
-    prefix: &str,
-    preserve_paths: &HashSet<PathBuf>,
-) -> Result<usize, ResetError> {
     let mut files_restored = 0;
     for item in &tree.tree_items {
         let full_path = if prefix.is_empty() {
@@ -1281,17 +791,11 @@ fn restore_working_directory_from_tree_counted_filtered(
 
                 let subtree: Tree = load_object(&item.id)
                     .map_err(|e| object_load_error("tree", item.id.to_string(), e.to_string()))?;
-                files_restored += restore_working_directory_from_tree_counted_filtered(
-                    &subtree,
-                    workdir,
-                    &full_path,
-                    preserve_paths,
+                files_restored += restore_working_directory_from_tree_counted_typed(
+                    &subtree, workdir, &full_path,
                 )?;
             }
             _ => {
-                if preserve_paths.contains(&PathBuf::from(&full_path)) {
-                    continue;
-                }
                 // Restore file
                 let blob = load_object::<git_internal::internal::object::blob::Blob>(&item.id)
                     .map_err(|e| object_load_error("blob", item.id.to_string(), e.to_string()))?;
@@ -1307,23 +811,12 @@ fn restore_working_directory_from_tree_counted_filtered(
                     })?;
                 }
 
-                let needs_write = match fs::symlink_metadata(&file_path) {
-                    Ok(meta) if meta.file_type().is_symlink() => true,
-                    Ok(meta) if meta.is_file() => match fs::read(&file_path) {
-                        Ok(existing) => existing != blob.data,
-                        Err(err) => {
-                            return Err(ResetError::WorktreeRead(format!(
-                                "failed to read file {}: {}",
-                                file_path.display(),
-                                err
-                            )));
-                        }
-                    },
-                    Ok(_) => true,
+                let needs_write = match fs::read(&file_path) {
+                    Ok(existing) => existing != blob.data,
                     Err(err) if err.kind() == io::ErrorKind::NotFound => true,
                     Err(err) => {
                         return Err(ResetError::WorktreeRead(format!(
-                            "failed to inspect file {}: {}",
+                            "failed to read file {}: {}",
                             file_path.display(),
                             err
                         )));
@@ -1331,34 +824,19 @@ fn restore_working_directory_from_tree_counted_filtered(
                 };
 
                 if needs_write {
-                    write_worktree_blob(&file_path, &blob.data)?;
+                    fs::write(&file_path, blob.data).map_err(|e| {
+                        ResetError::WorktreeRestore(format!(
+                            "failed to write file {}: {}",
+                            file_path.display(),
+                            e
+                        ))
+                    })?;
                     files_restored += 1;
                 }
             }
         }
     }
     Ok(files_restored)
-}
-
-fn write_worktree_blob(file_path: &Path, data: &[u8]) -> Result<(), ResetError> {
-    if let Ok(meta) = fs::symlink_metadata(file_path)
-        && meta.file_type().is_symlink()
-    {
-        fs::remove_file(file_path).map_err(|e| {
-            ResetError::WorktreeRestore(format!(
-                "failed to replace symlink {}: {}",
-                file_path.display(),
-                e
-            ))
-        })?;
-    }
-    fs::write(file_path, data).map_err(|e| {
-        ResetError::WorktreeRestore(format!(
-            "failed to write file {}: {}",
-            file_path.display(),
-            e
-        ))
-    })
 }
 
 /// Remove empty directories from the working directory.
@@ -1609,14 +1087,6 @@ mod tests {
             ResetError::PathspecWithHard.to_string(),
             "Cannot do hard reset with paths.",
         );
-        assert_eq!(
-            ResetError::PathspecWithMerge("src/foo.rs".to_string()).to_string(),
-            "Cannot do merge reset with paths: src/foo.rs",
-        );
-        assert_eq!(
-            ResetError::PathspecWithKeep("src/foo.rs".to_string()).to_string(),
-            "Cannot do keep reset with paths: src/foo.rs",
-        );
         // {0}-prefixed variants where the inner string IS the message.
         assert_eq!(
             ResetError::InvalidRevision("ambiguous revision 'a'".to_string()).to_string(),
@@ -1640,24 +1110,8 @@ mod tests {
             "pathspec 'src/missing.rs' did not match any file(s) known to libra",
         );
         assert_eq!(
-            ResetError::PathspecSourceConflict.to_string(),
-            "--pathspec-from-file cannot be combined with command-line pathspecs",
-        );
-        assert_eq!(
-            ResetError::PathspecOutsideWorkdir("../escape.txt".to_string()).to_string(),
-            "pathspec '../escape.txt' is outside the repository working directory",
-        );
-        assert_eq!(
             ResetError::LockedCurrentBranch("agent-traces".to_string()).to_string(),
             "refusing to reset locked current branch 'agent-traces'",
-        );
-        assert_eq!(
-            ResetError::ConflictPrevented {
-                path: "src/foo.rs".to_string(),
-                files: vec!["src/foo.rs".to_string()],
-            }
-            .to_string(),
-            "Entry 'src/foo.rs' not uptodate. Cannot merge.",
         );
         // ObjectLoad — three structured fields.
         assert_eq!(
@@ -1758,32 +1212,8 @@ mod tests {
             StableErrorCode::CliInvalidArguments,
         );
         assert_eq!(
-            ResetError::PathspecWithMerge("ignored".to_string()).stable_code(),
-            StableErrorCode::CliInvalidArguments,
-        );
-        assert_eq!(
-            ResetError::PathspecWithKeep("ignored".to_string()).stable_code(),
-            StableErrorCode::CliInvalidArguments,
-        );
-        assert_eq!(
             ResetError::PathspecNotMatched("ignored".to_string()).stable_code(),
             StableErrorCode::CliInvalidTarget,
-        );
-        assert_eq!(
-            ResetError::PathspecSourceConflict.stable_code(),
-            StableErrorCode::CliInvalidArguments,
-        );
-        assert_eq!(
-            ResetError::PathspecOutsideWorkdir("ignored".to_string()).stable_code(),
-            StableErrorCode::CliInvalidArguments,
-        );
-        assert_eq!(
-            ResetError::PathspecFileRead {
-                path: "ignored".to_string(),
-                source: io::Error::new(io::ErrorKind::NotFound, "ignored"),
-            }
-            .stable_code(),
-            StableErrorCode::IoReadFailed,
         );
         assert_eq!(
             ResetError::LockedTarget("ignored".to_string()).stable_code(),
@@ -1791,14 +1221,6 @@ mod tests {
         );
         assert_eq!(
             ResetError::LockedCurrentBranch("ignored".to_string()).stable_code(),
-            StableErrorCode::ConflictOperationBlocked,
-        );
-        assert_eq!(
-            ResetError::ConflictPrevented {
-                path: "tracked.txt".to_string(),
-                files: vec!["tracked.txt".to_string()],
-            }
-            .stable_code(),
             StableErrorCode::ConflictOperationBlocked,
         );
         // Rollback delegates to its primary error's stable_code via
@@ -1810,23 +1232,6 @@ mod tests {
             rollback: Box::new(ResetError::IndexSave("ignored".to_string())),
         };
         assert_eq!(rollback.stable_code(), StableErrorCode::RepoStateInvalid);
-    }
-
-    #[test]
-    fn reset_conflict_prevented_cli_error_carries_conflict_files() {
-        let cli_error = CliError::from(ResetError::ConflictPrevented {
-            path: "tracked.txt".to_string(),
-            files: vec!["tracked.txt".to_string(), "src/lib.rs".to_string()],
-        });
-
-        assert_eq!(
-            cli_error.stable_code(),
-            StableErrorCode::ConflictOperationBlocked
-        );
-        assert_eq!(
-            cli_error.details().get("conflict_files"),
-            Some(&serde_json::json!(["tracked.txt", "src/lib.rs"]))
-        );
     }
 
     #[test]

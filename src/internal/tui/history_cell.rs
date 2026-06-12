@@ -1,7 +1,5 @@
 //! History cells for the chat transcript.
 //!
-//! 聊天记录的历史单元格。
-//!
 //! A `HistoryCell` is the unit of display in the conversation UI, representing
 //! user messages, assistant responses, and tool calls.
 

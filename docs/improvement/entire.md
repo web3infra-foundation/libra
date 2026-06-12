@@ -1,14 +1,11 @@
 # 在 Libra 中集成 EntireIO 风格的"外部 Agent 会话捕获"能力
 
-> **文档定位**：把 EntireIO 的核心价值（把外部 Agent 的生命周期事件与原始 transcript 纳入版本控制）迁移到 Libra，在**不改变 `libra code` 写入 `refs/libra/intent` 的内容语义**的前提下，补齐"多外部 Agent、可恢复会话、可回放检查点、可追踪同步"的能力。（注：`libra code` 的**交互面形态**正在按 [../development/agent.md](../development/agent.md) 从 TUI 迁往 Web-only；本文不依赖该交互面，只依赖 intent-ref 的写入语义不变。）
+> **文档定位**：把 EntireIO 的核心价值（把外部 Agent 的生命周期事件与原始 transcript 纳入版本控制）迁移到 Libra，在保留现有 `libra code` 行为不变的前提下，补齐"多外部 Agent、可恢复会话、可回放检查点、可追踪同步"的能力。
 >
 > **与兄弟改进计划的边界**：
 > - [agent.md](agent.md)（Part A/B/C）：Libra 自身 Agent 子系统（`libra code` 内部运行时、Step 1/2 sub-agent、TUI Automation Control）。本文不重复。
-> - [../development/agent.md](../development/agent.md)：`libra code` 的 TUI→Web-only 迁移与 UI-neutral `AgentRuntime` 落地路线图。该计划会**删除 Code TUI、把 Web 作为唯一交互面**；本文据此**不依赖、也不扩展 TUI 作为捕获或展示面**（见 §11、§14 阶段 2 step 6）。
 > - [sandbox.md](sandbox.md)：工具执行边界与权限。本文与之正交。
 > - 本文：**外部 Agent 生命周期接入与会话对象化**。
->
-> **术语消歧（跨文档）**：本文的"外部 Agent"指**被观测捕获的第三方编码 Agent**（Claude Code / Gemini / Cursor…），与 [../development/agent.md](../development/agent.md) 中"驱动 Libra 内部 runtime 的外部调度方/调用方"含义相反；本文的"checkpoint"指 `refs/libra/agent-traces` 上的 transcript 检查点，与 orchestrator 的 dagrs 执行 checkpoint 不同；本文的"session / `agent_session`"指外部 Agent 会话（表），与 `libra code` 内部 runtime session 不同。两者的表 / 类型 / ref / 命令命名空间均不重叠。
 
 > **改进原则（融合自前两轮迭代）**：
 > 1. **Lean v1**：仅 Claude + Gemini 上线，其余 5 个 Agent 在 v1 占位为 preview，v2 填充。
@@ -54,7 +51,7 @@
 ### 2.1 目标（v1）
 
 1. 接入 **Claude Code、Gemini** 两种外部 Agent 并持久化其原始 transcript；其余 5 种（Cursor、Codex、OpenCode、GitHub Copilot CLI、Factory AI Droid）在 v1 注册为 **preview**，CLI 可见但走存根实现。
-2. 保持 `refs/libra/intent` / `ai_session` 的**写入内容语义**完全不变；不改变 `libra code` 当前对外行为（其 TUI→Web-only 交互面迁移由 [../development/agent.md](../development/agent.md) 负责，本文不依赖 TUI，也不依赖其交互面形态）。
+2. 保持 `refs/libra/intent` / `ai_session` / `libra code` 行为完全不变。
 3. v1 强调**可观测**：可追踪会话、可查看 checkpoint 列表、可提取 transcript 快照。
 4. v1 引入 EntireIO 风格的 Subagent（子代理）级联追踪元数据（仅记录 `parent_session_id`），实际嵌套语义随各 adapter 的 `SubagentExtractor` 后续补全。
 5. 与 `subagent-scaffold` Cargo feature 无关；默认构建即可用。
@@ -612,11 +609,6 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 3. `agent_session.thread_id` 在 v1 默认 NULL，除非显式 `promote`（v2）
 4. v1 不做跨模型转换；v2 可从 `agent_session` 反算 `ToolCallRecord` 回写到 `ai_thread`
 5. **资源隔离**：`SessionStore` 路径区分——`libra code` 用 `.libra/sessions/code/`，`libra agent` 用 `.libra/sessions/agent/`，避免文件锁冲突
-6. **`SessionEvent` schema 协调（跨文档硬约束）**：本文复用 `src/internal/ai/session/` 的 `SessionStore` JSONL 承载外部 Agent 事件流（§3.4 不另建 `agent_session_event` 表）。`SessionEvent` 类型的 **schema 主权属于** [../development/agent.md](../development/agent.md)（AG-01）——该计划会把它收紧为内部 runtime 契约（per-session 单调 `u64` 序号、snapshot = fold(events)、归一事件 envelope，并新增 `Workflow` variant）。据此约定：
-   - (a) 二者**仅通过 `code/` vs `agent/` 子目录隔离运行时实例与文件锁**，不共享同一 session 实例；
-   - (b) 外部 Agent 事件依赖 `SessionEvent` 保持 **serde 向后兼容 + unknown-event-safe**（`Unknown(Value)` 兜底，见 §13 风险 12）——AG-01 新增 variant 不得破坏旧 reader；
-   - (c) 若 AG-01 把 `SessionEvent` 收紧到"每条事件必须带 `turn_id`/`seq`"而**无法容纳外部 hook 生命周期事件**，则本文改用**独立 event 类型**，仅复用 `SessionStore` 的文件锁与恢复原语，不再复用 `SessionEvent` 枚举。
-   - 任何一方改动 `SessionEvent` schema 都须同步检查对方此节。
 
 ---
 
@@ -685,7 +677,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 3. **CLI**：实现 `libra agent session list/info/show/stop/resume`、`libra agent checkpoint list/show`、`libra agent doctor`、`libra agent push`（v0.17.1114：`agent push` 已接入 `refs/libra/agent-traces` 推送）
 4. **清理**：`libra agent clean`：v0.17.1115 已按 `state='stopped' AND scope='temporary'` 删除 SQLite catalog 行，且 `--all` 不再触碰 active session；v0.17.1117 已补齐 agent-traces rewrite，temporary checkpoint commit 会从可达链移除，保留 checkpoint 的 `traces_commit` / `tree_oid` 同步改写。
 5. **Rewind dry-run / apply**：`libra agent checkpoint rewind <id> --dry-run` 列出将影响的文件；`--apply` 调 `restore` 路径还原工作树，并在 Claude Code checkpoint 上截断本地 transcript；其它 agent kind 打印 transcript 不变更 warning
-6. **会话列表展示面（可选）**：在 **Web Code UI**（[`src/internal/ai/web/`](../../src/internal/ai/web/)）暴露一个最小 `agent_session` 列表视图。**不要新增 TUI view**——Code TUI 将由 [../development/agent.md](../development/agent.md) 删除（Web 成为唯一交互面），新增 TUI view 会被一并孤立/移除；本文的展示面统一走 Web。
+6. **TUI/MCP 扩展（可选）**：在现有 [tui/](../../src/internal/tui/) 加一个最小 view 展示 `agent_session` 列表
 
 **阶段 2 验收**：完整 Claude/Gemini session 能生成多个 checkpoint commit；`libra agent checkpoint list` 列出按时间排序；`git log refs/libra/agent-traces` 可读；`libra agent clean` 后 temporary commit 从 `agent-traces` 移除且 SQLite 索引同步清理。
 
@@ -770,7 +762,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 - `src/internal/ai/hooks/providers/{claude,gemini}/` 的现有 `HookProvider` 实现（仅在外面包 wrapper）
 - `refs/libra/intent` 写入路径与 `AI_REF` 常量
 - `sqlite_20260309_init.sql` / `sqlite_20260415_ai_runtime_contract.sql`
-- 现有 `libra code` 对外行为与 `refs/libra/intent` 写入语义（其 TUI→Web-only 交互面迁移由 [../development/agent.md](../development/agent.md) 负责；本文**不依赖、也不扩展** TUI/MCP 作为捕获或展示面——展示面统一走 Web，见 §14 阶段 2 step 6）
+- 现有 `libra code` / TUI / MCP 行为
 
 ---
 
@@ -825,8 +817,3 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
   - **Phase 1 文件级落地清单**：新增第 16 章，把抽象计划落到具体文件
   - **EntireIO 差异决策表**：第 15 章
   - **基线核对验证**：所有引用的现状（迁移版本、`is_locked_branch` 范围、`Commands` 枚举无 `Hooks`/`Agent`、`tests/db_migration_test.rs` 硬编码断言行号）已对仓库做 grep 验证
-- **2026-06-05（与 dev/agent.md 对齐）**：消除与 [../development/agent.md](../development/agent.md)（`libra code` TUI→Web-only 迁移计划）的冲突假设——
-  - **TUI 冲突**：阶段 2 step 6 的可选会话列表视图从 TUI 改为 **Web Code UI**；§16.3「不动」边界与文档定位不再声称"TUI 行为不变",改为"不依赖、不扩展 TUI/MCP 作为捕获/展示面"
-  - **`SessionEvent` schema 协调**：§11 新增第 6 条,明确 `SessionEvent` schema 主权归 AG-01,本文依赖其向后兼容 + unknown-event-safe,并给出不可调和时改用独立 event 类型的退路
-  - **术语消歧**：文档头新增跨文档「外部 Agent / checkpoint / session」语义对照,避免与 dev/agent.md 同词反义
-  - **"完全不变"措辞收紧**：§2.1 改为"`refs/libra/intent` / `ai_session` **写入内容语义**不变",不再覆盖 `libra code` 交互面形态

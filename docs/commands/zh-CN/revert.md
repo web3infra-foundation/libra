@@ -1,129 +1,94 @@
 # `libra revert`
 
-通过创建新的反向提交来回滚一个或多个已有提交。
+回滚一些已有提交。
 
 ## 概要
 
-```bash
-libra revert [options] <commit>...
-libra revert --continue
-libra revert --skip
-libra revert --abort
-libra revert --quit
+```
+libra revert [-n | --no-commit] [--json] [--quiet] <commit>
 ```
 
 ## 说明
 
-`libra revert` 会应用已有提交的反向变更，但不会重写历史。干净回滚会在当前 `HEAD` 之上创建新的 revert 提交；`-n` / `--no-commit` 只对单个提交应用反向变更到索引和工作树，不自动提交。
+`libra revert` 会创建一个新提交，用于撤销指定提交引入的更改。与会重写历史的 `reset` 不同，`revert` 对共享分支是安全的，因为它保留原始提交，并在其上方添加一个新提交。
 
-位置参数可以是单个提交引用，也可以是 `HEAD~3..HEAD` 这样的双点范围。范围按 newest-first 顺序回滚，与 Git revert 的顺序一致。重复提交只处理第一次出现的条目。
+该命令通过计算目标提交与其父提交之间的 diff，然后将该 diff 的逆应用到当前工作树和索引来工作。如果结果状态干净，会记录一个新提交，消息格式为 `Revert "<original subject>"`。
 
-如果发生冲突，Libra 会写入冲突标记、记录非零 index stage，并把进行中的操作持久化到 `.libra/libra.db` 的 `revert_sequence`。解决文件冲突后运行 `libra add <path>`，再运行 `libra revert --continue`。也可以使用 `--abort`、`--skip` 或 `--quit` 控制序列。
+回滚 root 提交（没有父提交的提交）会产生空树，实际效果是撤销初始提交的更改。
 
-支持 detached `HEAD`。在 detached 模式下，生成的 revert 提交会直接前推 detached `HEAD`，不会更新分支。
+该命令要求处于活动分支（不是 detached HEAD），并且只接受一个提交引用。
 
 ## 选项
 
-### `<commit>...`
-
-一个或多个要回滚的提交或 `A..B` 范围。
-
-```bash
-libra revert HEAD
-libra revert abc1234 def5678
-libra revert HEAD~3..HEAD
-```
-
 ### `-n`, `--no-commit`
 
-只把单个提交的反向变更应用到索引和工作树，不创建提交。
-
-`--no-commit` 有意限制为单提交模式。与多个提交或范围组合会以 128 退出。
-
-### `-m`, `--mainline <parent-number>`
-
-回滚 merge commit 时，选择 1-based 父提交作为 mainline。
+将逆向更改应用到索引和工作树，但**不**创建新提交。当你想检查结果、组合多个 revert，或在提交前调整更改时，这很有用。
 
 ```bash
-libra revert -m 1 <merge-commit>
+# 暂存 revert 但不提交
+libra revert -n abc1234
+
+# 查看发生了什么变化
+libra diff --cached
+
+# 使用自定义消息提交
+libra commit -m "revert abc1234 with adjustments"
 ```
 
-merge commit 必须传 `-m`。对非 merge commit 传 `-m`，或选择超出父提交数量的编号，都会以 128 退出。
+### `<commit>`（位置参数，必需）
 
-### `-s`, `--signoff`
+要回滚的单个提交引用。可以是完整 SHA-1 哈希、缩写哈希、分支名、`HEAD`，或任何解析为提交的引用。
 
-为生成的 revert 提交追加 `Signed-off-by: <name> <email>` trailer。
+```bash
+# 回滚最近一次提交
+libra revert HEAD
 
-### `-e`, `--edit`; `--no-edit`
+# 按哈希回滚
+libra revert abc1234
 
-为保持 Git 兼容的命令形状而接受。Libra 当前直接使用生成的提交消息；编辑器集成后续再补。
-
-### `--continue`
-
-冲突解决并暂存后，继续进行中的 revert 序列。
-
-### `--skip`
-
-跳过当前冲突提交，把工作树重置到该步骤开始时的状态，然后继续处理剩余提交。
-
-### `--abort`
-
-取消进行中的序列，并把已追踪文件和索引重置到序列开始时记录的原始 `HEAD`。未追踪文件会保留。
-
-### `--quit`
-
-只清除持久化的 revert 序列，保留当前工作树和索引不变。
+# 回滚某个分支指向的提交
+libra revert feature-branch
+```
 
 ### `--json`
 
-输出标准 Libra JSON envelope。
+输出机器可读 JSON，而不是人类可读文本。见下方[结构化输出](#结构化输出-json-示例)。
+
+### `--quiet`
+
+抑制所有人类可读输出。退出码仍然表示成功或失败。
 
 ## 常用命令
 
 ```bash
-# 回滚最新提交
+# 回滚最近一次提交
 libra revert HEAD
 
-# 按 newest-first 回滚一个范围
-libra revert HEAD~3..HEAD
+# 按哈希回滚特定提交
+libra revert abc1234
 
-# 以第一个父提交为 mainline 回滚 merge commit
-libra revert -m 1 <merge-commit>
+# 回滚但不自动提交（用于编辑或组合）
+libra revert -n HEAD
 
-# 解决冲突、暂存并继续
-libra add conflicted.txt
-libra revert --continue
-
-# 取消进行中的 revert 序列
-libra revert --abort
+# 为 AI 代理或脚本输出 JSON
+libra revert --json HEAD
 ```
 
 ## 人类可读输出
 
-干净自动提交：
+使用自动提交（默认）进行 revert 时：
 
-```text
+```
 [def5678] Revert commit abc1234
 ```
 
-No-commit 模式：
+不使用自动提交（`-n`）进行 revert 时：
 
-```text
+```
 Changes staged for revert. Use 'libra commit' to finalize.
 ```
 
-序列控制：
-
-```text
-revert sequence continued
-revert skipped current commit
-revert aborted; HEAD reset to abc1234
-revert state cleared; working tree left unchanged
-```
-
-## 结构化输出
-
-单个干净回滚：
+## 结构化输出（JSON 示例）
 
 ```json
 {
@@ -134,35 +99,87 @@ revert state cleared; working tree left unchanged
     "new_commit": "def5678abcdef1234567890abcdef1234567890ab",
     "short_new": "def5678",
     "no_commit": false,
-    "files_changed": 1,
-    "reverted_commits": [
-      "abc1234abcdef1234567890abcdef1234567890ab"
-    ],
-    "new_commits": [
-      "def5678abcdef1234567890abcdef1234567890ab"
-    ]
+    "files_changed": 3
   }
 }
 ```
 
-使用 `--no-commit` 时，`new_commit` 和 `short_new` 为 `null`。
+使用 `--no-commit` 时，`new_commit` 和 `short_new` 为 `null`：
 
-序列控制输出会额外包含 `action`；`--abort` 还会包含 `restored_head`。
+```json
+{
+  "command": "revert",
+  "data": {
+    "reverted_commit": "abc1234abcdef1234567890abcdef1234567890ab",
+    "short_reverted": "abc1234",
+    "new_commit": null,
+    "short_new": null,
+    "no_commit": true,
+    "files_changed": 3
+  }
+}
+```
 
-## 兼容性
+## 设计理由（为什么不同于 Git/jj）
 
-`libra revert` 是 partial Git 兼容。已支持：多个提交、`A..B` 范围、detached `HEAD`、单提交 `-n`、merge revert 的 `-m`、`--signoff`、冲突 sequencer 控制、JSON 输出和 quiet 输出。
+### 为什么只支持单个提交（没有 `<commit>...`）？
 
-暂缓支持：策略选择（`--strategy`、`-X`）、外部 GPG 签名（`-S` / `--gpg-sign`）、`--cleanup`、`--commit`、`--rerere-autoupdate`、`--reference`、`--edit` 的编辑器启动，以及 Git 的完整 `--no-*` 别名集合。
+Git 允许 `git revert <commit1> <commit2> ...` 回滚一系列提交。Libra 将 `revert` 限制为单个提交，原因是：
+
+1. **原子操作。** 每次 revert 都是自包含的：要么成功，要么失败，不会留下部分状态。Git 的多提交 revert 需要 sequencer 状态（`REVERT_HEAD`、`sequencer/`），如果用户放弃操作，这些状态可能变旧或损坏。
+2. **显式更好。** 在 trunk-based monorepo 工作流中，回滚多个提交是重要动作，值得逐提交地有意处理。运行 `libra revert A && libra revert B` 会在 reflog 中明确表达意图，并且非常容易脚本化。
+3. **代理简单性。** AI 代理可以循环处理提交，并独立处理每个 revert 结果，这比管理 sequencer 状态转换更简单。
+
+### 为什么不支持合并提交（`--mainline`）？
+
+Git 的 `--mainline <parent-number>` 会选择合并提交的某个父提交，用于计算逆向 diff。Libra 拒绝合并提交，原因是：
+
+1. **父提交歧义很危险。** 选错父提交会静默地产生截然不同的 changeset。在 trunk-based 开发中，合并内部的单个提交才是有意义的单元；应回滚那些提交。
+2. **复杂度成本。** 支持 `--mainline` 要求用户了解合并的父提交顺序，而这很少直观。该功能为 trunk-based 工作流自然避开的边缘场景增加了显著代码复杂度。
+
+### 为什么没有 `--continue`、`--abort`？
+
+与 cherry-pick 一样，Libra 的 revert 是无状态的：
+
+1. **没有隐藏状态文件。** Git 的 `REVERT_HEAD` 和 `sequencer/` 目录是隐式状态，可能让用户和代理困惑。Libra 完全避免这种状态。
+2. **冲突解决是显式的。** 当检测到冲突（文件已被后续提交修改）时，Libra 会报告具体路径和错误码（`LBR-CONFLICT-001`）。用户解决冲突后运行 `libra commit`。这在功能上等价于 `git revert --continue`，但没有隐藏状态。
+3. **便于自动化预测。** 代理检测错误码、以编程方式解决冲突并提交，不需要管理状态机。
+
+### 为什么使用冲突检测而不是三方合并？
+
+Libra 的 revert 使用比 Git 三方合并更简单的冲突模型：如果目标路径上的文件自待回滚提交以来已被修改，Libra 会引发冲突，而不是尝试自动解决。这是有意保守的，因为：
+
+1. **安全优先于便利。** 当更改的语义上下文已改变时，自动合并可能静默产生错误结果。大声失败能确保用户审查交互。
+2. **确定性行为。** 相同输入始终产生相同输出：要么干净 revert，要么冲突错误，绝不会是引入细微 bug 的“成功”合并。
+
+## 参数对比：Libra vs Git vs jj
+
+| 参数 | Git | jj | Libra |
+|-----------|-----|-----|-------|
+| 位置提交 | `git revert <commit>...` | N/A（使用 `jj backout`） | `libra revert <commit>`（单个） |
+| No-commit 模式 | `--no-commit` / `-n` | N/A | `--no-commit` / `-n` |
+| 编辑消息 | `--edit` / `--no-edit` | N/A | 不支持（使用 `-n` 后再 `commit -m`） |
+| Mainline 父提交 | `--mainline <n>` / `-m <n>` | N/A | 不支持（拒绝合并提交） |
+| 冲突后继续 | `--continue` | N/A | 不支持（解决后 `commit`） |
+| 中止进行中操作 | `--abort` | N/A | 不支持（无 sequencer 状态） |
+| 跳过当前提交 | `--skip` | N/A | 不支持 |
+| 策略 | `--strategy <s>` | N/A | 不支持 |
+| 策略选项 | `-X <option>` | N/A | 不支持 |
+| GPG 签名 | `--gpg-sign` / `-S` | N/A | 不支持（计划中） |
+| JSON 输出 | N/A | N/A | `--json` |
+| Quiet 模式 | `--quiet` | N/A | `--quiet` |
+| 变更文件数量 | N/A | N/A | 包含在 JSON 输出中 |
+
+**注意：** jj 使用 `jj backout -r <rev>` 作为 `git revert` 的等价操作。它会创建一个新提交，该提交是目标修订的逆。
 
 ## 错误处理
 
 | 代码 | 条件 | 提示 |
-|------|------|------|
-| `LBR-REPO-001` | 不在 Libra 仓库内 | 使用 `libra init` 初始化或进入仓库 |
-| `LBR-REPO-003` | revert 状态冲突、无进行中序列，或已有活动序列 | 使用 `--continue`、`--skip`、`--abort` 或 `--quit` 完成/清理 |
-| `LBR-CLI-003` | 无法解析提交引用 | 使用 `libra log` 查找有效提交 |
-| `LBR-CLI-002` | 参数无效、mainline 无效，或 `--no-commit` 与多个提交组合 | 调整参数 |
-| `LBR-CONFLICT-001` | 存在 revert 冲突 | 解决冲突，运行 `libra add`，再运行 `libra revert --continue` |
-| `LBR-IO-001` | 无法加载对象或序列 | 检查仓库完整性 |
-| `LBR-IO-002` | 无法保存对象、索引、序列或更新 `HEAD` | 检查文件系统和数据库可写性 |
+|------|-----------|------|
+| `LBR-REPO-001` | 不在 libra 仓库内 | 使用 `libra init` 初始化或进入仓库 |
+| `LBR-REPO-003` | HEAD detached（不在分支上） | 使用 `libra switch <branch>` 切换到分支 |
+| `LBR-CLI-003` | 无法解析提交引用 | 使用 `libra log` 查找有效提交引用 |
+| `LBR-CLI-002` | 不支持回滚合并提交 | 选择非合并提交；合并提交支持已规划 |
+| `LBR-CONFLICT-001` | 文件已被后续提交修改，产生冲突 | 手动解决冲突，然后使用 `libra commit` |
+| `LBR-IO-001` | 无法加载对象（提交、树、blob） | 检查仓库完整性 |
+| `LBR-IO-002` | 无法保存对象、索引或更新 HEAD | 检查文件系统权限和仓库可写性 |

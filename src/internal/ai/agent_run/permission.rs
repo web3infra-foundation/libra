@@ -98,24 +98,6 @@ impl AgentPermissionProfile {
     pub fn permits_tool(&self, tool: &str) -> bool {
         !self.denied_tools.contains(tool) && self.allowed_tools.contains(tool)
     }
-
-    /// Whether the sub-agent may read from the Source Pool slug `slug`.
-    ///
-    /// The source-slug analogue of [`permits_tool`](Self::permits_tool) and the
-    /// enforcement point for the S2-INV-05 rule that "sub-agent 可访问的 Source
-    /// 必须由 `AgentPermissionProfile` 显式列出 source slug" (agent.md Step 2.2):
-    ///
-    /// - **default deny** — an empty profile authorizes no source; a slug must
-    ///   be explicitly listed in `allowed_source_slugs`.
-    /// - matched **exactly** against the set — no glob / prefix matching, so a
-    ///   grant of `acme` does not cover `acme-staging`.
-    ///
-    /// Exposing this as a method (rather than letting callers read
-    /// `allowed_source_slugs` directly) keeps the default-deny semantics in one
-    /// place so a caller cannot accidentally treat an empty set as "allow all".
-    pub fn permits_source(&self, slug: &str) -> bool {
-        self.allowed_source_slugs.contains(slug)
-    }
 }
 
 #[cfg(test)]
@@ -190,34 +172,5 @@ mod tests {
         assert!(!profile.permits_tool("spawn_subagent"));
         // And default deny still covers everything else.
         assert!(!profile.permits_tool("read_file"));
-    }
-
-    /// S2-INV-05 default deny for sources: the `Default` (empty) profile
-    /// authorizes no source slug. Pin so a future `Default` that pre-populates
-    /// `allowed_source_slugs` can't silently widen sub-agent source access.
-    #[test]
-    fn default_profile_permits_no_source() {
-        let profile = AgentPermissionProfile::default();
-        for slug in ["builtin", "acme-mcp", "github"] {
-            assert!(
-                !profile.permits_source(slug),
-                "default-deny profile must reject source `{slug}`",
-            );
-        }
-    }
-
-    /// Only explicitly-listed source slugs are permitted, matched exactly —
-    /// a grant of `acme` does not cover the differently-named `acme-staging`.
-    #[test]
-    fn permits_only_explicitly_allowed_sources() {
-        let profile = AgentPermissionProfile {
-            allowed_source_slugs: ["builtin", "acme"].iter().map(|s| s.to_string()).collect(),
-            ..AgentPermissionProfile::default()
-        };
-        assert!(profile.permits_source("builtin"));
-        assert!(profile.permits_source("acme"));
-        // Not listed → default deny; exact-match means no prefix coverage.
-        assert!(!profile.permits_source("acme-staging"));
-        assert!(!profile.permits_source("github"));
     }
 }

@@ -3,118 +3,32 @@
     "mismatch_action": "allow",
     "match_action": "kill_process",
     "filter": [
-      {
-        "syscall": "mount",
-        "comment": "Mount manipulation could remount /proc or escape the bwrap mount namespace."
-      },
-      {
-        "syscall": "umount2",
-        "comment": "Mount manipulation could remount /proc or escape the bwrap mount namespace."
-      },
-      {
-        "syscall": "pivot_root",
-        "comment": "Mount manipulation could remount /proc or escape the bwrap mount namespace."
-      },
-      {
-        "syscall": "open_tree",
-        "comment": "Mount manipulation could remount /proc or escape the bwrap mount namespace."
-      },
-      {
-        "syscall": "move_mount",
-        "comment": "Mount manipulation could remount /proc or escape the bwrap mount namespace."
-      },
-      {
-        "syscall": "fsopen",
-        "comment": "Mount manipulation could remount /proc or escape the bwrap mount namespace."
-      },
-      {
-        "syscall": "fsmount",
-        "comment": "Mount manipulation could remount /proc or escape the bwrap mount namespace."
-      },
-      {
-        "syscall": "fsconfig",
-        "comment": "Mount manipulation could remount /proc or escape the bwrap mount namespace."
-      },
-      {
-        "syscall": "fspick",
-        "comment": "Mount manipulation could remount /proc or escape the bwrap mount namespace."
-      },
-      {
-        "syscall": "init_module",
-        "comment": "Kernel module and kexec calls are direct kernel-mode escalation surfaces."
-      },
-      {
-        "syscall": "finit_module",
-        "comment": "Kernel module and kexec calls are direct kernel-mode escalation surfaces."
-      },
-      {
-        "syscall": "delete_module",
-        "comment": "Kernel module and kexec calls are direct kernel-mode escalation surfaces."
-      },
-      {
-        "syscall": "kexec_load",
-        "comment": "Kernel module and kexec calls are direct kernel-mode escalation surfaces."
-      },
-      {
-        "syscall": "kexec_file_load",
-        "comment": "Kernel module and kexec calls are direct kernel-mode escalation surfaces."
-      },
-      {
-        "syscall": "ptrace",
-        "comment": "Process tampering can inspect or modify another process."
-      },
-      {
-        "syscall": "process_vm_writev",
-        "comment": "Process tampering can inspect or modify another process."
-      },
-      {
-        "syscall": "process_vm_readv",
-        "comment": "Process tampering can inspect or modify another process."
-      },
-      {
-        "syscall": "reboot",
-        "comment": "Host control calls affect system-wide identity, power, or kernel logs."
-      },
-      {
-        "syscall": "setdomainname",
-        "comment": "Host control calls affect system-wide identity, power, or kernel logs."
-      },
-      {
-        "syscall": "sethostname",
-        "comment": "Host control calls affect system-wide identity, power, or kernel logs."
-      },
-      {
-        "syscall": "syslog",
-        "comment": "Host control calls affect system-wide identity, power, or kernel logs."
-      },
-      {
-        "syscall": "iopl",
-        "comment": "Raw I/O-port access can bypass device isolation on x86 hosts."
-      },
-      {
-        "syscall": "ioperm",
-        "comment": "Raw I/O-port access can bypass device isolation on x86 hosts."
-      },
-      {
-        "syscall": "setns",
-        "comment": "Namespace calls can re-enter namespaces or create new ones for escape."
-      },
-      {
-        "syscall": "unshare",
-        "comment": "Namespace calls can re-enter namespaces or create new ones for escape."
-      },
-      {
-        "syscall": "perf_event_open",
-        "comment": "Kernel-introspection surfaces are common local privilege escalation rungs."
-      },
-      {
-        "syscall": "bpf",
-        "comment": "Kernel-introspection surfaces are common local privilege escalation rungs."
-      },
-      {
-        "syscall": "userfaultfd",
-        "comment": "Kernel-introspection surfaces are common local privilege escalation rungs."
-      }
+      { "syscall": "mount", "comment": "Mount manipulation — could remount /proc or escape the bwrap mount namespace." },
+      { "syscall": "umount2", "comment": "Mount manipulation — unmount filesystems to escape the bwrap mount namespace." },
+      { "syscall": "pivot_root", "comment": "Mount manipulation — swap the root mount to escape the sandbox." },
+      { "syscall": "open_tree", "comment": "Mount manipulation — new mount API surface (open_tree / move_mount / fs*)." },
+      { "syscall": "move_mount", "comment": "Mount manipulation — relocate mounts to escape the namespace." },
+      { "syscall": "fsopen", "comment": "Mount manipulation — new filesystem-context mount API." },
+      { "syscall": "fsmount", "comment": "Mount manipulation — new filesystem-context mount API." },
+      { "syscall": "fsconfig", "comment": "Mount manipulation — new filesystem-context mount API." },
+      { "syscall": "fspick", "comment": "Mount manipulation — new filesystem-context mount API." },
+      { "syscall": "init_module", "comment": "Kernel module + kexec — direct kernel-mode escalation." },
+      { "syscall": "finit_module", "comment": "Kernel module + kexec — direct kernel-mode escalation." },
+      { "syscall": "delete_module", "comment": "Kernel module + kexec — direct kernel-mode escalation." },
+      { "syscall": "kexec_load", "comment": "Kernel module + kexec — direct kernel-mode escalation." },
+      { "syscall": "kexec_file_load", "comment": "Kernel module + kexec — direct kernel-mode escalation." },
+      { "syscall": "ptrace", "comment": "Process tampering — ptrace ATTACH and cross-process memory access." },
+      { "syscall": "process_vm_writev", "comment": "Process tampering — cross-process memory write." },
+      { "syscall": "process_vm_readv", "comment": "Process tampering — cross-process memory read." },
+      { "syscall": "reboot", "comment": "Host control — system-wide power state." },
+      { "syscall": "setdomainname", "comment": "Host control — system-wide identity." },
+      { "syscall": "sethostname", "comment": "Host control — system-wide identity." },
+      { "syscall": "syslog", "comment": "Host control — kernel ring buffer access." },
+      { "syscall": "setns", "comment": "Sandbox-bypass primitives — re-enter namespaces for escape." },
+      { "syscall": "unshare", "comment": "Sandbox-bypass primitives — create new namespaces for escape." },
+      { "syscall": "perf_event_open", "comment": "Kernel-introspection surfaces — common local-privilege-escalation rung." },
+      { "syscall": "bpf", "comment": "Kernel-introspection surfaces — BPF program load is a common LPE rung." },
+      { "syscall": "userfaultfd", "comment": "Kernel-introspection surfaces — userfaultfd is a common LPE rung." }
     ]
   }
 }

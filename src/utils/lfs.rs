@@ -4,7 +4,7 @@ use std::{
     fs,
     fs::File,
     io,
-    io::{BufReader, Read},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
 };
 
@@ -55,32 +55,14 @@ pub fn is_lfs_tracked<P>(path: P) -> bool
 where
     P: AsRef<Path>,
 {
-    path_matches_lfs_patterns(path, &LFS_PATTERNS)
-}
-
-/// Returns whether `path` matches any of the supplied LFS `patterns`, using the
-/// same glob (wax) + gitignore-style matching as [`is_lfs_tracked`] but against
-/// an explicit, caller-supplied pattern set rather than the cached working-tree
-/// patterns.
-///
-/// This lets the commit-graph LFS scanner judge historical paths with each
-/// commit's *own* `.libra_attributes` patterns (parsed via
-/// [`parse_lfs_patterns_from_bytes`]) instead of the working tree's. `path`
-/// should be absolute (the gitignore base is the working directory); matching is
-/// purely structural and never touches the filesystem. Returns `false` on any
-/// internal failure so a corrupt pattern set cannot crash LFS-aware flows.
-pub fn path_matches_lfs_patterns<P>(path: P, patterns: &[String]) -> bool
-where
-    P: AsRef<Path>,
-{
-    if patterns.is_empty() {
+    if LFS_PATTERNS.is_empty() {
         return false;
     }
 
-    let pattern_strs = patterns.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+    let patterns = LFS_PATTERNS.iter().map(|s| s.as_str()).collect::<Vec<_>>();
 
     let mut gitignore = GitignoreBuilder::new(util::working_dir());
-    pattern_strs.iter().for_each(|&s| {
+    patterns.iter().for_each(|&s| {
         let _ = gitignore.add_line(None, s);
     });
     let gitignore_matched = match gitignore.build() {
@@ -95,7 +77,7 @@ where
     };
 
     let path = util::to_workdir_path(path);
-    let glob = match wax::any(pattern_strs) {
+    let glob = match wax::any(patterns) {
         Ok(glob) => glob,
         Err(err) => {
             tracing::warn!(
@@ -382,14 +364,15 @@ pub fn parse_pointer_file(path: impl AsRef<Path>) -> io::Result<(String, u64)> {
     ))
 }
 
-/// Parse LFS glob patterns from raw `.libra_attributes` bytes.
-///
-/// This is the shared parsing core for both [`extract_lfs_patterns`] (which
-/// reads the working-tree file) and the commit-graph scanner (which reads a
-/// historical `.libra_attributes` blob straight from the object store, so it
-/// must work on in-memory bytes rather than a filesystem path). Non-UTF-8 bytes
-/// are decoded lossily so a malformed attributes blob never aborts a scan.
-pub fn parse_lfs_patterns_from_bytes(data: &[u8]) -> Vec<String> {
+/// Extract LFS patterns from `.libra_attributes` file
+pub fn extract_lfs_patterns(file_path: &str) -> io::Result<Vec<String>> {
+    let path = Path::new(file_path);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+
     // ' ' needs '\' before it to be escaped
     // INVARIANT: this regex is a compile-time literal; `Regex::new` only
     // returns Err for syntactically invalid patterns, which is caught by
@@ -397,29 +380,22 @@ pub fn parse_lfs_patterns_from_bytes(data: &[u8]) -> Vec<String> {
     let re = Regex::new(r"^\s*(([^\s#\\]|\\ )+)")
         .expect("LFS attributes regex is a valid hardcoded pattern");
 
-    let text = String::from_utf8_lossy(data);
     let mut patterns = Vec::new();
-    for line in text.lines() {
+
+    for line in reader.lines() {
+        let line = line?;
         if !line.contains("filter=lfs") {
             continue;
         }
-        if let Some(cap) = re.captures(line)
+        if let Some(cap) = re.captures(&line)
             && let Some(pattern) = cap.get(1)
         {
-            patterns.push(pattern.as_str().replace(r"\ ", " "));
+            let pattern = pattern.as_str().replace(r"\ ", " ");
+            patterns.push(pattern);
         }
     }
-    patterns
-}
 
-/// Extract LFS patterns from a `.libra_attributes` file on disk.
-pub fn extract_lfs_patterns(file_path: &str) -> io::Result<Vec<String>> {
-    let path = Path::new(file_path);
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let data = std::fs::read(path)?;
-    Ok(parse_lfs_patterns_from_bytes(&data))
+    Ok(patterns)
 }
 
 #[cfg(test)]

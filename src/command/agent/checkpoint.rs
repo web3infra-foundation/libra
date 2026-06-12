@@ -122,14 +122,7 @@ async fn show(args: CheckpointShowArgs, output: &OutputConfig) -> CliResult<()> 
             // path resolution fails (e.g. running from outside any libra
             // repo), fall back to the row-only render rather than erroring.
             let metadata = load_metadata_blob(&payload.metadata_blob_oid).ok();
-            // Best-effort tree summary: walk the checkpoint commit's root
-            // tree to surface its leaf blobs (metadata.json,
-            // transcript/<provider>, optional events/<provider>.jsonl) plus
-            // the redacted transcript's byte length, per entire.md §7.3
-            // ("metadata + transcript 长度 + tree 摘要"). Swallow errors so
-            // running outside a workspace still renders the row.
-            let tree_summary = summarize_checkpoint_tree(&payload.tree_oid).ok();
-            emit_one(&payload, metadata.as_deref(), tree_summary.as_ref(), output)
+            emit_one(&payload, metadata.as_deref(), output)
         }
         None => Err(CliError::fatal(format!(
             "no checkpoint matches id '{}'",
@@ -263,7 +256,6 @@ async fn rewind(args: CheckpointRewindArgs, output: &OutputConfig) -> CliResult<
         source: Some(parent_commit.clone()),
         worktree: true,
         staged: false,
-        ..Default::default()
     };
     execute_checked_typed(restore_args)
         .await
@@ -413,12 +405,12 @@ async fn truncate_agent_transcript_for_checkpoint(
 /// `transcript_truncation_supported` flag matches what `--apply` will
 /// actually do.
 ///
-/// Codex round-3 follow-up: this now considers BOTH conditions — the
-/// adapter registry exposes a `TranscriptTruncator` for `agent_kind`
-/// AND `metadata_json` has a non-empty `transcript_path`. Previously a
-/// supported session whose `metadata_json` lacked `transcript_path`
-/// would report `supported: true` but apply would short-circuit to
-/// `SkippedNoPath`, contradicting the dry-run preview.
+/// Codex round-3 follow-up: this now considers BOTH conditions —
+/// `agent_kind == "claude_code"` AND a non-empty `transcript_path`
+/// in `metadata_json`. Previously a Claude Code session whose
+/// `metadata_json` lacked `transcript_path` would report `supported:
+/// true` but apply would short-circuit to `SkippedNoPath`,
+/// contradicting the dry-run preview.
 async fn lookup_truncation_support(
     conn: &sea_orm::DatabaseConnection,
     checkpoint_id: &str,
@@ -533,8 +525,8 @@ async fn truncate_agent_transcript_for_checkpoint_with_conn(
     //   * `AgentKind::from_db_str` fails for unknown tags (schema
     //     mismatch — unsupported kind for this row).
     //   * `truncator_for` returns `None` for kinds whose adapter
-    //     doesn't implement `TranscriptTruncator` (Factory AI Droid
-    //     today). Adding another truncator implementation is a
+    //     doesn't implement `TranscriptTruncator` (the six non-Claude
+    //     kinds today). Adding a second truncator implementation is a
     //     single-arm change in `observed_agents::mod.rs::truncator_for`
     //     and the new kind is dispatched here automatically.
     use crate::internal::ai::observed_agents::{AgentKind, truncator_for};
@@ -676,73 +668,6 @@ fn build_rewind_plan(commit_oid: &ObjectHash) -> Result<RewindPlan, anyhow::Erro
     Ok(RewindPlan { restore, delete })
 }
 
-/// One leaf blob in a checkpoint commit's tree.
-#[derive(Debug, Serialize)]
-struct CheckpointTreeEntry {
-    /// Full path within the checkpoint commit tree, e.g.
-    /// `checkpoint/<ab>/<rest>/transcript/claude_code`.
-    path: String,
-    /// Blob size in bytes.
-    size: usize,
-}
-
-/// Summary of a checkpoint commit's tree contents — the per-checkpoint
-/// `metadata.json`, the redacted `transcript/<provider>` blob, and any
-/// `events/<provider>.jsonl` — surfaced by `checkpoint show` per
-/// entire.md §7.3 ("metadata + transcript 长度 + tree 摘要").
-#[derive(Debug, Serialize)]
-struct CheckpointTreeSummary {
-    entries: Vec<CheckpointTreeEntry>,
-    /// Byte length of the redacted transcript blob (the entry whose parent
-    /// directory is `transcript`), if the tree carries one.
-    transcript_bytes: Option<usize>,
-}
-
-/// Walk a checkpoint commit's root tree (`tree_oid`) and summarise the leaf
-/// blobs it carries plus the redacted transcript's byte length.
-///
-/// Best-effort: returns `Err` when not inside a libra workspace or when the
-/// objects cannot be read, so `checkpoint show` falls back to a row-only
-/// render rather than failing. The transcript blob lives at
-/// `checkpoint/<ab>/<rest>/transcript/<provider>` (see
-/// `HistoryManager::append_checkpoint_commit`), so it is identified by a
-/// parent directory named `transcript`.
-fn summarize_checkpoint_tree(tree_oid: &str) -> Result<CheckpointTreeSummary, anyhow::Error> {
-    use std::path::Path;
-
-    let oid = ObjectHash::from_str(tree_oid)
-        .map_err(|e| anyhow::anyhow!("invalid tree_oid '{tree_oid}': {e}"))?;
-    let tree: Tree = load_object(&oid)
-        .map_err(|e| anyhow::anyhow!("failed to load checkpoint tree {tree_oid}: {e}"))?;
-    let storage = util::try_get_storage_path(None)
-        .map_err(|e| anyhow::anyhow!("not in a libra repository: {e}"))?;
-
-    let items = tree.get_plain_items();
-    let mut entries = Vec::with_capacity(items.len());
-    let mut transcript_bytes = None;
-    for (path, hash) in &items {
-        let size = read_git_object(&storage, hash)
-            .map_err(|e| anyhow::anyhow!("failed to read blob {hash}: {e}"))?
-            .len();
-        if path
-            .parent()
-            .and_then(Path::file_name)
-            .is_some_and(|name| name == "transcript")
-        {
-            transcript_bytes = Some(size);
-        }
-        entries.push(CheckpointTreeEntry {
-            path: path.display().to_string(),
-            size,
-        });
-    }
-    entries.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(CheckpointTreeSummary {
-        entries,
-        transcript_bytes,
-    })
-}
-
 fn load_metadata_blob(oid: &str) -> Result<String, CliError> {
     let hash = ObjectHash::from_str(oid)
         .map_err(|e| CliError::fatal(format!("invalid metadata_blob_oid '{oid}': {e}")))?;
@@ -784,7 +709,6 @@ fn emit_list(rows: &[CheckpointRow], output: &OutputConfig) -> CliResult<()> {
 fn emit_one(
     row: &CheckpointRow,
     metadata_blob: Option<&str>,
-    tree: Option<&CheckpointTreeSummary>,
     output: &OutputConfig,
 ) -> CliResult<()> {
     if output.is_json() {
@@ -796,8 +720,6 @@ fn emit_one(
         let payload = serde_json::json!({
             "checkpoint": row,
             "metadata": metadata_json,
-            "tree": tree,
-            "transcript_bytes": tree.and_then(|t| t.transcript_bytes),
         });
         return emit_json_data("agent_checkpoint", &payload, output);
     }
@@ -816,18 +738,6 @@ fn emit_one(
     println!("metadata_blob_oid : {}", row.metadata_blob_oid);
     println!("traces_commit     : {}", row.traces_commit);
     println!("created_at        : {}", row.created_at);
-    if let Some(tree) = tree {
-        match tree.transcript_bytes {
-            Some(n) => println!("transcript_bytes  : {n}"),
-            None => println!("transcript_bytes  : (no transcript entry in tree)"),
-        }
-        println!("tree summary ({} entr{}):", tree.entries.len(), {
-            if tree.entries.len() == 1 { "y" } else { "ies" }
-        });
-        for e in &tree.entries {
-            println!("  {:>10}  {}", e.size, e.path);
-        }
-    }
     if let Some(metadata) = metadata_blob {
         println!("---");
         println!("metadata.json:");
@@ -1005,12 +915,12 @@ mod tests {
         })
         .to_string();
 
-        for (idx, (kind, meta, expected)) in [
-            ("claude_code", path_meta.as_str(), true),
-            ("gemini", path_meta.as_str(), false),
-            ("cursor", path_meta.as_str(), false),
-            ("cursor", "{}", false),
-            ("factory_ai", path_meta.as_str(), false),
+        // Claude Code + transcript_path → supported.
+        for (idx, (kind, meta)) in [
+            ("claude_code", path_meta.as_str()), // supported
+            ("claude_code", "{}"),               // skipped (no path)
+            ("cursor", path_meta.as_str()),      // skipped (kind)
+            ("cursor", "{}"),                    // skipped (both)
         ]
         .iter()
         .enumerate()
@@ -1047,14 +957,16 @@ mod tests {
             let supported = super::lookup_truncation_support(&conn, &checkpoint_id)
                 .await
                 .unwrap();
+            let expected = idx == 0;
             assert_eq!(
-                supported, *expected,
+                supported, expected,
                 "case {idx} (kind={kind}, meta={meta}) supported={supported}, expected={expected}"
             );
         }
     }
 
-    /// When `agent_kind` has no truncator, the helper must report
+    /// When `agent_kind` isn't `claude_code` (e.g. preview adapters that
+    /// have no truncator yet), the helper must report
     /// `SkippedUnsupportedKind` so the operator knows the transcript
     /// was deliberately not touched.
     #[tokio::test]
@@ -1073,7 +985,7 @@ mod tests {
             "INSERT INTO agent_session (
                 session_id, agent_kind, provider_session_id, state, working_dir,
                 metadata_json, redaction_report, started_at, last_event_at
-             ) VALUES ('s-3', 'factory_ai', 'p-3', 'stopped', '/tmp', ?, '{}', 0, 0)",
+             ) VALUES ('s-3', 'cursor', 'p-3', 'stopped', '/tmp', ?, '{}', 0, 0)",
             [metadata_json.into()],
         ))
         .await
@@ -1093,7 +1005,7 @@ mod tests {
             super::truncate_agent_transcript_for_checkpoint_with_conn(&conn, "cp-3").await;
         match outcome {
             super::TranscriptTruncationOutcome::SkippedUnsupportedKind { agent_kind } => {
-                assert_eq!(agent_kind, "factory_ai");
+                assert_eq!(agent_kind, "cursor");
             }
             other => panic!("expected SkippedUnsupportedKind, got {:?}", other.as_json()),
         }

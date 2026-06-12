@@ -11,7 +11,7 @@ C8（后续 Git surface P1）
 - receive-pack 请求现在一次发送完整 update set；delete 使用 zero oid；branch/tag 更新、mirror delete 和 dry-run 共享同一 `PushRefUpdate` schema。服务端逐 ref status 行会被校验，缺失/拒绝状态不会被渲染成全成功。
 - `validate_receive_pack_response` 已有回归契约覆盖：所有 expected refs 必须收到 `ok`，服务端 `ng` 会保留 ref 与原因，缺失 expected status 或未知 status 行会 fail closed。
 - 本地 file remote push 仍显式拒绝，并继续由 [`declined.md`](declined.md#d2-本地-file-remote-的-push) 记录为 intentionally-different。
-- [`COMPATIBILITY.md`](../../../COMPATIBILITY.md) 中 `push` 仍为 `partial`，notes 已更新为 C8 已支持的 branch/tag update、multi-refspec、delete、`--tags`、`--mirror`、`--force-with-lease`、`--atomic` 与 `--porcelain`。
+- [`COMPATIBILITY.md`](../../../COMPATIBILITY.md) 中 `push` 仍为 `partial`，notes 已更新为 C8 已支持的 branch/tag update、multi-refspec、delete、`--tags` 与 `--mirror`。
 
 ## 为什么排第二
 
@@ -66,7 +66,7 @@ C8 落地后更新 `push` 行：
 | push | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected intentionally |
 ```
 
-`push` 仍保持 `partial`，因为本地 file remote push 继续是有意差异，且完整 Git push 还包含更多 server-option / signed push / push-option / follow-tags 等高级 surface。
+`push` 仍保持 `partial`，因为本地 file remote push 继续是有意差异，且完整 Git push 还包含更多 server-option / atomic / signed push 等高级 surface。
 
 ## 关键文件与改动
 

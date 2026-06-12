@@ -105,138 +105,30 @@ impl CommitFormatter {
     }
 
     fn format_custom(&self, commit: &Commit, ctx: &FormatContext<'_>, template: &str) -> String {
-        // `format:<str>` and `tformat:<str>` select the template; `tformat`
-        // additionally appends a trailing newline to each commit's output. A bare
-        // template (no prefix) behaves like `format:`.
-        let (template, trailing_newline) = if let Some(rest) = template.strip_prefix("tformat:") {
-            (rest, true)
-        } else if let Some(rest) = template.strip_prefix("format:") {
-            (rest, false)
-        } else {
-            (template, false)
-        };
-
-        let body = self.expand_placeholders(commit, ctx, template);
-        let mut out = format!("{}{}", ctx.graph_prefix, body);
-        if trailing_newline {
-            out.push('\n');
-        }
-        out
-    }
-
-    /// Expands the git `--pretty=format:` placeholders in `template` against
-    /// `commit`. Unknown `%`-escapes are preserved literally. No expansion path
-    /// panics: root commits (`%P` empty), empty bodies, and malformed `%x` byte
-    /// escapes all degrade safely.
-    fn expand_placeholders(
-        &self,
-        commit: &Commit,
-        ctx: &FormatContext<'_>,
-        template: &str,
-    ) -> String {
+        let mut result = template.to_string();
         let commit_id = commit.id.to_string();
-        let tree_id = commit.tree_id.to_string();
-        let (raw_body, _) = parse_commit_msg(&commit.message);
-        let subject_line = raw_body.lines().next().unwrap_or("");
-        // %b: the message body — everything after the subject line, with the
-        // blank separator line stripped.
-        let body = raw_body
-            .split_once('\n')
-            .map(|(_, rest)| rest.trim_start_matches('\n'))
-            .unwrap_or("");
-        let abbrev = |hash: &str| hash.chars().take(ctx.abbrev_len).collect::<String>();
-        let parents: Vec<String> = commit
-            .parent_commit_ids
-            .iter()
-            .map(|p| p.to_string())
-            .collect();
+        let short_hash = commit_id.chars().take(ctx.abbrev_len).collect::<String>();
+        let (subject, _) = parse_commit_msg(&commit.message);
+        let subject_line = subject.lines().next().unwrap_or("");
         let decoration = if ctx.decoration.is_empty() {
             String::new()
         } else {
             format!(" ({})", ctx.decoration)
         };
 
-        let mut out = String::with_capacity(template.len());
-        let mut chars = template.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c != '%' {
-                out.push(c);
-                continue;
-            }
-            match chars.next() {
-                None => out.push('%'),
-                Some('H') => out.push_str(&commit_id),
-                Some('h') => out.push_str(&abbrev(&commit_id)),
-                Some('T') => out.push_str(&tree_id),
-                Some('t') => out.push_str(&abbrev(&tree_id)),
-                Some('P') => out.push_str(&parents.join(" ")),
-                Some('p') => {
-                    let joined = parents
-                        .iter()
-                        .map(|p| abbrev(p))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    out.push_str(&joined);
-                }
-                Some('s') => out.push_str(subject_line),
-                Some('f') => out.push_str(&subject_line.replace(' ', "-")),
-                Some('b') => out.push_str(body),
-                Some('B') => out.push_str(raw_body),
-                Some('d') => out.push_str(&decoration),
-                Some('n') => out.push('\n'),
-                // %an / %ae / %ad
-                Some('a') => match chars.next() {
-                    Some('n') => out.push_str(commit.author.name.trim()),
-                    Some('e') => out.push_str(commit.author.email.trim()),
-                    Some('d') => out.push_str(&format_timestamp(commit.author.timestamp as i64)),
-                    Some(other) => {
-                        out.push('%');
-                        out.push('a');
-                        out.push(other);
-                    }
-                    None => out.push_str("%a"),
-                },
-                // %cn / %ce / %cd
-                Some('c') => match chars.next() {
-                    Some('n') => out.push_str(commit.committer.name.trim()),
-                    Some('e') => out.push_str(commit.committer.email.trim()),
-                    Some('d') => out.push_str(&format_timestamp(commit.committer.timestamp as i64)),
-                    Some(other) => {
-                        out.push('%');
-                        out.push('c');
-                        out.push(other);
-                    }
-                    None => out.push_str("%c"),
-                },
-                // %x<HH>: literal byte from two hex digits.
-                Some('x') => {
-                    let h1 = chars.peek().copied().filter(|c| c.is_ascii_hexdigit());
-                    if let Some(h1) = h1 {
-                        chars.next();
-                        let h2 = chars.peek().copied().filter(|c| c.is_ascii_hexdigit());
-                        if let Some(h2) = h2 {
-                            chars.next();
-                            let byte = (h1.to_digit(16).unwrap_or(0) * 16
-                                + h2.to_digit(16).unwrap_or(0))
-                                as u8;
-                            out.push(byte as char);
-                        } else {
-                            out.push('%');
-                            out.push('x');
-                            out.push(h1);
-                        }
-                    } else {
-                        out.push('%');
-                        out.push('x');
-                    }
-                }
-                Some(other) => {
-                    out.push('%');
-                    out.push(other);
-                }
-            }
-        }
-        out
+        result = result.replace("%H", &commit_id);
+        result = result.replace("%h", &short_hash);
+        result = result.replace("%s", subject_line);
+        result = result.replace("%f", &subject_line.replace(' ', "-"));
+        result = result.replace("%an", commit.author.name.trim());
+        result = result.replace("%ae", commit.author.email.trim());
+        result = result.replace("%ad", &format_timestamp(commit.author.timestamp as i64));
+        result = result.replace("%cn", commit.committer.name.trim());
+        result = result.replace("%ce", commit.committer.email.trim());
+        result = result.replace("%cd", &format_timestamp(commit.committer.timestamp as i64));
+        result = result.replace("%d", &decoration);
+
+        format!("{}{}", ctx.graph_prefix, result)
     }
 }
 
@@ -315,106 +207,5 @@ mod tests {
         assert!(out.contains(&committer_date));
         assert!(out.contains(" (tag: v1.0)"));
         assert_ne!(author_date, committer_date);
-    }
-
-    fn ctx7() -> FormatContext<'static> {
-        FormatContext {
-            graph_prefix: "",
-            decoration: "",
-            abbrev_len: 7,
-        }
-    }
-
-    fn render(template: &str, commit: &Commit) -> String {
-        CommitFormatter::new(FormatType::Custom(template.into())).format(commit, &ctx7())
-    }
-
-    #[test]
-    fn test_pretty_format_full_hash() {
-        let commit = build_commit("subject");
-        assert_eq!(render("%H", &commit), commit.id.to_string());
-    }
-
-    #[test]
-    fn test_pretty_format_abbrev_hash() {
-        let commit = build_commit("subject");
-        let out = render("%h", &commit);
-        assert_eq!(out.len(), 7);
-        assert!(commit.id.to_string().starts_with(&out));
-    }
-
-    #[test]
-    fn test_pretty_format_tree() {
-        let commit = build_commit("subject");
-        assert_eq!(render("%T", &commit), commit.tree_id.to_string());
-        assert_eq!(
-            render("%t", &commit),
-            commit
-                .tree_id
-                .to_string()
-                .chars()
-                .take(7)
-                .collect::<String>()
-        );
-    }
-
-    #[test]
-    fn test_pretty_format_parents_root_empty() {
-        // Root commit: %P / %p expand to the empty string (no panic).
-        let root = build_commit("root");
-        assert_eq!(render("%P", &root), "");
-        assert_eq!(render("%p", &root), "");
-
-        // Merge commit with two parents: space-separated.
-        let p1 = ObjectHash::new(&[2; 20]);
-        let p2 = ObjectHash::new(&[3; 20]);
-        let merge = Commit::from_tree_id(ObjectHash::new(&[1; 20]), vec![p1, p2], "merge");
-        assert_eq!(render("%P", &merge), format!("{p1} {p2}"));
-        let abbrev = render("%p", &merge);
-        assert_eq!(
-            abbrev,
-            format!(
-                "{} {}",
-                p1.to_string().chars().take(7).collect::<String>(),
-                p2.to_string().chars().take(7).collect::<String>()
-            )
-        );
-    }
-
-    #[test]
-    fn test_pretty_format_body_subject() {
-        let commit = build_commit("Subject line\n\nBody paragraph one.\nBody line two.");
-        assert_eq!(render("%s", &commit), "Subject line");
-        assert_eq!(render("%b", &commit), "Body paragraph one.\nBody line two.");
-        assert_eq!(
-            render("%B", &commit),
-            "Subject line\n\nBody paragraph one.\nBody line two."
-        );
-    }
-
-    #[test]
-    fn test_pretty_format_newline_and_hexbyte() {
-        let commit = build_commit("s");
-        assert_eq!(render("a%nb", &commit), "a\nb");
-        assert_eq!(render("a%x20b", &commit), "a b");
-        assert_eq!(render("%x00", &commit), "\0");
-        // Malformed %x (not two hex digits) is preserved literally.
-        assert_eq!(render("%xZZ", &commit), "%xZZ");
-    }
-
-    #[test]
-    fn test_pretty_tformat_trailing_newline() {
-        let commit = build_commit("hello");
-        assert_eq!(render("tformat:%s", &commit), "hello\n");
-        assert_eq!(render("format:%s", &commit), "hello");
-        assert_eq!(render("%s", &commit), "hello");
-    }
-
-    #[test]
-    fn test_pretty_unknown_placeholder_literal() {
-        let commit = build_commit("s");
-        // Unknown placeholders are kept verbatim (no panic).
-        assert_eq!(render("%Q", &commit), "%Q");
-        assert_eq!(render("%aZ", &commit), "%aZ");
     }
 }

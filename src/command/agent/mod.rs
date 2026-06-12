@@ -265,10 +265,10 @@ fn install_or_uninstall(agents: &[String], output: &OutputConfig, install: bool)
             continue;
         };
         if install {
-            install_agent_hooks(provider, &slug)
+            install_provider_hooks(provider)
                 .map_err(|err| CliError::fatal(format!("failed to enable '{slug}': {err}")))?;
             if !output.quiet {
-                println!("libra agent enable: {verb_past} '{slug}' (agent hooks installed)");
+                println!("libra agent enable: {verb_past} '{slug}' (provider hooks installed)");
             }
         } else {
             provider
@@ -298,24 +298,18 @@ fn provider_name_for(kind: AgentKind) -> &'static str {
     }
 }
 
-fn install_agent_hooks(provider: &dyn HookProvider, slug: &str) -> anyhow::Result<()> {
+fn install_provider_hooks(provider: &dyn HookProvider) -> anyhow::Result<()> {
     // Use the running binary's path so installed hooks point at exactly the
     // libra the user is invoking — falling back to the bare `libra` symbol
     // (which `HookProvider`s will substitute) if `current_exe` fails.
     let binary_path = std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(str::to_string));
-    let opts = agent_install_options(binary_path, slug);
-    provider.install_hooks(&opts)
-}
-
-fn agent_install_options(binary_path: Option<String>, slug: &str) -> ProviderInstallOptions {
-    ProviderInstallOptions {
+    let opts = ProviderInstallOptions {
         binary_path,
         timeout_secs: None,
-        hook_command_prefix: Some(format!("agent hooks {slug}")),
-        fail_safe_shell: true,
-    }
+    };
+    provider.install_hooks(&opts)
 }
 
 /// Validate `agents`. Empty input expands to every stable slug; non-empty
@@ -375,17 +369,5 @@ mod tests {
     fn provider_name_for_maps_stable() {
         assert_eq!(provider_name_for(AgentKind::ClaudeCode), "claude");
         assert_eq!(provider_name_for(AgentKind::Gemini), "gemini");
-    }
-
-    #[test]
-    fn agent_install_options_route_to_agent_traces_fail_safe_entrypoint() {
-        let opts = agent_install_options(Some("/tmp/libra".to_string()), "claude-code");
-        assert_eq!(opts.binary_path.as_deref(), Some("/tmp/libra"));
-        assert_eq!(
-            opts.hook_command_prefix.as_deref(),
-            Some("agent hooks claude-code")
-        );
-        assert!(opts.fail_safe_shell);
-        assert!(opts.timeout_secs.is_none());
     }
 }

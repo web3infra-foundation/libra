@@ -20,9 +20,6 @@ libra code-control --stdio \
 process-level token created by `libra code --control write`; the token is sent as
 `X-Libra-Control-Token` for write-control HTTP requests.
 
-Methods that require an active controller lease accept `controllerToken` in their
-JSON-RPC params. The shim forwards that value as `X-Code-Controller-Token`.
-
 ## Methods
 
 | JSON-RPC method | HTTP equivalent |
@@ -30,7 +27,6 @@ JSON-RPC params. The shim forwards that value as `X-Code-Controller-Token`.
 | `session.get` | `GET /api/code/session` |
 | `events.subscribe` | `GET /api/code/events` as JSON-RPC notifications |
 | `diagnostics.get` | `GET /api/code/diagnostics` |
-| `threads.list` | `GET /api/code/threads` (`limit` / `offset` params optional) |
 | `controller.attach` | `POST /api/code/controller/attach` |
 | `controller.detach` | `POST /api/code/controller/detach` |
 | `message.submit` | `POST /api/code/messages` |
@@ -55,28 +51,22 @@ Submit a message after attach returns `controllerToken`:
 {"jsonrpc":"2.0","id":2,"method":"message.submit","params":{"controllerToken":"...","text":"/chat hello"}}
 ```
 
-List active threads:
-
-```json
-{"jsonrpc":"2.0","id":3,"method":"threads.list","params":{"limit":20,"offset":0}}
-```
-
 Dispatch a sub-agent explicitly:
 
 ```json
-{"jsonrpc":"2.0","id":4,"method":"task.dispatch","params":{"controllerToken":"...","agent":"explorer","prompt":"grep TODO src/"}}
+{"jsonrpc":"2.0","id":3,"method":"task.dispatch","params":{"controllerToken":"...","agent":"explorer","prompt":"grep TODO src/"}}
 ```
 
 Respond to a pending interaction:
 
 ```json
-{"jsonrpc":"2.0","id":5,"method":"interaction.respond","params":{"controllerToken":"...","interactionId":"interaction-1","response":{"approved":true}}}
+{"jsonrpc":"2.0","id":4,"method":"interaction.respond","params":{"controllerToken":"...","interactionId":"interaction-1","response":{"approved":true}}}
 ```
 
 Subscribe to events:
 
 ```json
-{"jsonrpc":"2.0","id":6,"method":"events.subscribe"}
+{"jsonrpc":"2.0","id":5,"method":"events.subscribe"}
 ```
 
 The shim first returns `{"subscribed":true}` and then emits notifications:

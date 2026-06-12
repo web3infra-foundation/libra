@@ -1,7 +1,5 @@
 //! Utility functions for the AI module: hash anchor normalisation.
 //!
-//! AI 模块的实用函数：哈希锚点归一化。
-//!
 //! AI workflow records (intents, plans, tasks, evidence) frequently reference
 //! commits that may be hashed under either SHA-1 or SHA-256 depending on the
 //! repository's `core.objectformat`. To keep the AI history portable between

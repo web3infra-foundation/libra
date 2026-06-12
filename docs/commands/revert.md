@@ -1,129 +1,94 @@
 # `libra revert`
 
-Revert one or more existing commits by creating new inverse commits.
+Revert some existing commits.
 
 ## Synopsis
 
-```bash
-libra revert [options] <commit>...
-libra revert --continue
-libra revert --skip
-libra revert --abort
-libra revert --quit
+```
+libra revert [-n | --no-commit] [--json] [--quiet] <commit>
 ```
 
 ## Description
 
-`libra revert` applies the inverse of existing commits without rewriting history. Clean reverts create new commits on top of the current `HEAD`; `-n` / `--no-commit` applies a single inverse change to the index and working tree without committing it.
+`libra revert` creates a new commit that undoes the changes introduced by the specified commit. Unlike `reset`, which rewrites history, `revert` is safe for shared branches because it preserves the original commit and adds a new one on top.
 
-The positional arguments may be individual commit references or double-dot ranges such as `HEAD~3..HEAD`. Ranges are reverted newest-first, matching Git's revert order. Duplicate commits are ignored after their first occurrence.
+The command works by computing the diff between the target commit and its parent, then applying the inverse of that diff to the current working tree and index. If the resulting state is clean, a new commit is recorded with a message of the form `Revert "<original subject>"`.
 
-If a revert conflicts, Libra writes conflict markers, records non-zero index stages, and persists the in-progress operation in `.libra/libra.db` as `revert_sequence`. Resolve the file, run `libra add <path>`, then continue with `libra revert --continue`. Use `--abort`, `--skip`, or `--quit` to control the sequence.
+Reverting a root commit (one with no parent) produces an empty tree, effectively undoing the initial commit's changes.
 
-Detached `HEAD` is supported. In detached mode, the generated revert commit advances the detached `HEAD` directly instead of updating a branch.
+The command requires an active branch (not detached HEAD) and accepts exactly one commit reference.
 
 ## Options
 
-### `<commit>...`
-
-One or more commits or `A..B` ranges to revert.
-
-```bash
-libra revert HEAD
-libra revert abc1234 def5678
-libra revert HEAD~3..HEAD
-```
-
 ### `-n`, `--no-commit`
 
-Apply one commit's inverse change to the index and working tree without creating a commit.
-
-`--no-commit` is intentionally limited to a single commit. Combining it with multiple commits or a range fails with exit 128.
-
-### `-m`, `--mainline <parent-number>`
-
-Select the 1-based parent to use as the mainline when reverting a merge commit.
+Apply the inverse changes to the index and working tree but do **not** create a new commit. This is useful when you want to inspect the result, combine multiple reverts, or adjust the changes before committing.
 
 ```bash
-libra revert -m 1 <merge-commit>
+# Stage the revert without committing
+libra revert -n abc1234
+
+# Review what changed
+libra diff --cached
+
+# Commit with a custom message
+libra commit -m "revert abc1234 with adjustments"
 ```
 
-A merge commit requires `-m`. Passing `-m` for a non-merge commit, or selecting a parent outside the merge's parent count, fails with exit 128.
+### `<commit>` (positional, required)
 
-### `-s`, `--signoff`
+A single commit reference to revert. Can be a full SHA-1 hash, an abbreviated hash, a branch name, `HEAD`, or any ref that resolves to a commit.
 
-Append a `Signed-off-by: <name> <email>` trailer to generated revert commits.
+```bash
+# Revert the most recent commit
+libra revert HEAD
 
-### `-e`, `--edit`; `--no-edit`
+# Revert by hash
+libra revert abc1234
 
-Accepted for Git-compatible command shape. Libra currently uses the generated message directly; editor integration is deferred.
-
-### `--continue`
-
-Continue an in-progress revert after conflicts have been resolved and staged.
-
-### `--skip`
-
-Drop the currently conflicted commit from the sequence, reset the worktree to the step start, and continue with the remaining commits.
-
-### `--abort`
-
-Cancel the in-progress sequence and reset tracked files plus the index back to the original `HEAD` recorded when the sequence started. Untracked files are preserved.
-
-### `--quit`
-
-Clear the persisted revert sequence while leaving the current working tree and index untouched.
+# Revert the commit a branch points to
+libra revert feature-branch
+```
 
 ### `--json`
 
-Emit the normal Libra JSON envelope.
+Emit machine-readable JSON output instead of human-readable text. See [Structured Output](#structured-output-json-examples) below.
+
+### `--quiet`
+
+Suppress all human-readable output. Exit code still indicates success or failure.
 
 ## Common Commands
 
 ```bash
-# Revert the latest commit
+# Revert the most recent commit
 libra revert HEAD
 
-# Revert a range newest-first
-libra revert HEAD~3..HEAD
+# Revert a specific commit by hash
+libra revert abc1234
 
-# Revert a merge commit relative to the first parent
-libra revert -m 1 <merge-commit>
+# Revert without auto-committing (to edit or combine)
+libra revert -n HEAD
 
-# Resolve a conflict, stage it, and continue
-libra add conflicted.txt
-libra revert --continue
-
-# Cancel an in-progress revert sequence
-libra revert --abort
+# Revert with JSON output for AI agents or scripts
+libra revert --json HEAD
 ```
 
 ## Human Output
 
-Clean auto-commit:
+When reverting **with** auto-commit (default):
 
-```text
+```
 [def5678] Revert commit abc1234
 ```
 
-No-commit mode:
+When reverting **without** auto-commit (`-n`):
 
-```text
+```
 Changes staged for revert. Use 'libra commit' to finalize.
 ```
 
-Sequence controls:
-
-```text
-revert sequence continued
-revert skipped current commit
-revert aborted; HEAD reset to abc1234
-revert state cleared; working tree left unchanged
-```
-
-## Structured Output
-
-Single clean revert:
+## Structured Output (JSON examples)
 
 ```json
 {
@@ -134,35 +99,87 @@ Single clean revert:
     "new_commit": "def5678abcdef1234567890abcdef1234567890ab",
     "short_new": "def5678",
     "no_commit": false,
-    "files_changed": 1,
-    "reverted_commits": [
-      "abc1234abcdef1234567890abcdef1234567890ab"
-    ],
-    "new_commits": [
-      "def5678abcdef1234567890abcdef1234567890ab"
-    ]
+    "files_changed": 3
   }
 }
 ```
 
-`--no-commit` keeps `new_commit` and `short_new` as `null`.
+When `--no-commit` is used, `new_commit` and `short_new` are `null`:
 
-Sequence control output adds `action` and, for `--abort`, `restored_head`.
+```json
+{
+  "command": "revert",
+  "data": {
+    "reverted_commit": "abc1234abcdef1234567890abcdef1234567890ab",
+    "short_reverted": "abc1234",
+    "new_commit": null,
+    "short_new": null,
+    "no_commit": true,
+    "files_changed": 3
+  }
+}
+```
 
-## Compatibility
+## Design Rationale (Why different from Git/jj)
 
-`libra revert` is partial Git compatibility. Supported: multiple commits, `A..B` ranges, detached `HEAD`, `-n` for a single commit, merge revert with `-m`, `--signoff`, conflict sequencer controls, JSON output, and quiet output.
+### Why single commit only (no `<commit>...`)?
 
-Deferred: strategy selection (`--strategy`, `-X`), external GPG signing (`-S` / `--gpg-sign`), `--cleanup`, `--commit`, `--rerere-autoupdate`, `--reference`, editor launch for `--edit`, and Git's full set of `--no-*` aliases.
+Git allows `git revert <commit1> <commit2> ...` to revert a sequence of commits. Libra restricts `revert` to a single commit because:
+
+1. **Atomic operations.** Each revert is self-contained: it either succeeds or fails without leaving partial state behind. Multi-commit revert in Git requires sequencer state (`REVERT_HEAD`, `sequencer/`) that can become stale or corrupt if the user abandons the operation.
+2. **Explicit is better.** In a trunk-based monorepo workflow, reverting multiple commits is a significant action that deserves deliberate, per-commit attention. Running `libra revert A && libra revert B` makes the intent clear in the reflog and is trivially scriptable.
+3. **Agent simplicity.** AI agents can loop over commits and handle each revert result independently, which is simpler than managing sequencer state transitions.
+
+### Why no merge commit support (`--mainline`)?
+
+Git's `--mainline <parent-number>` selects which parent of a merge commit to diff against when computing the inverse. Libra rejects merge commits because:
+
+1. **Parent ambiguity is dangerous.** Picking the wrong parent silently produces a dramatically different changeset. In trunk-based development, the individual commits within a merge are the meaningful units; revert those instead.
+2. **Complexity cost.** Supporting `--mainline` requires the user to know the parent ordering of the merge, which is rarely intuitive. The feature adds significant code complexity for an edge case that trunk-based workflows naturally avoid.
+
+### Why no `--continue`, `--abort`?
+
+Like cherry-pick, Libra's revert is stateless:
+
+1. **No hidden state files.** Git's `REVERT_HEAD` and `sequencer/` directory are implicit state that can confuse users and agents. Libra avoids this entirely.
+2. **Conflict resolution is explicit.** When a conflict is detected (a file was modified by a later commit), Libra reports the specific path and error code (`LBR-CONFLICT-001`). The user resolves the conflict, then runs `libra commit`. This is functionally equivalent to `git revert --continue` but without hidden state.
+3. **Predictable for automation.** Agents detect the error code, resolve the conflict programmatically, and commit -- no state machine to manage.
+
+### Why conflict detection instead of three-way merge?
+
+Libra's revert uses a simpler conflict model than Git's three-way merge: if the file at the target path has been modified since the commit being reverted, Libra raises a conflict rather than attempting automatic resolution. This is intentionally conservative because:
+
+1. **Safety over convenience.** Automatic merge can silently produce incorrect results when the semantic context of a change has shifted. Failing loudly ensures the user reviews the interaction.
+2. **Deterministic behavior.** The same inputs always produce the same output -- either a clean revert or a conflict error, never a "successful" merge that introduced a subtle bug.
+
+## Parameter Comparison: Libra vs Git vs jj
+
+| Parameter | Git | jj | Libra |
+|-----------|-----|-----|-------|
+| Positional commit(s) | `git revert <commit>...` | N/A (uses `jj backout`) | `libra revert <commit>` (single) |
+| No-commit mode | `--no-commit` / `-n` | N/A | `--no-commit` / `-n` |
+| Edit message | `--edit` / `--no-edit` | N/A | Not supported (use `-n` then `commit -m`) |
+| Mainline parent | `--mainline <n>` / `-m <n>` | N/A | Not supported (merge commits rejected) |
+| Continue after conflict | `--continue` | N/A | Not supported (resolve then `commit`) |
+| Abort in-progress | `--abort` | N/A | Not supported (no sequencer state) |
+| Skip current commit | `--skip` | N/A | Not supported |
+| Strategy | `--strategy <s>` | N/A | Not supported |
+| Strategy option | `-X <option>` | N/A | Not supported |
+| GPG sign | `--gpg-sign` / `-S` | N/A | Not supported (planned) |
+| JSON output | N/A | N/A | `--json` |
+| Quiet mode | `--quiet` | N/A | `--quiet` |
+| Files changed count | N/A | N/A | Included in JSON output |
+
+**Note:** jj uses `jj backout -r <rev>` as its equivalent to `git revert`. It creates a new commit that is the inverse of the target revision.
 
 ## Error Handling
 
 | Code | Condition | Hint |
 |------|-----------|------|
-| `LBR-REPO-001` | Not inside a Libra repository | Initialize with `libra init` or move into a repo |
-| `LBR-REPO-003` | Revert state conflict, no sequence, or sequence already active | Finish with `--continue`, `--skip`, `--abort`, or `--quit` |
-| `LBR-CLI-003` | Cannot resolve a commit reference | Use `libra log` to find valid commits |
-| `LBR-CLI-002` | Invalid arguments, invalid mainline, or `--no-commit` with multiple commits | Adjust the arguments |
-| `LBR-CONFLICT-001` | A revert conflict is present | Resolve conflicts, run `libra add`, then `libra revert --continue` |
-| `LBR-IO-001` | Failed to load an object or sequence | Check repository integrity |
-| `LBR-IO-002` | Failed to save objects, index, sequence, or update `HEAD` | Check filesystem and database writability |
+| `LBR-REPO-001` | Not inside a libra repository | Initialize with `libra init` or navigate to a repo |
+| `LBR-REPO-003` | HEAD is detached (not on a branch) | Switch to a branch with `libra switch <branch>` |
+| `LBR-CLI-003` | Cannot resolve the commit reference | Use `libra log` to find valid commit references |
+| `LBR-CLI-002` | Merge commit revert not supported | Choose a non-merge commit; merge commit support is planned |
+| `LBR-CONFLICT-001` | File was modified by a later commit, creating a conflict | Resolve conflicts manually, then use `libra commit` |
+| `LBR-IO-001` | Failed to load object (commit, tree, blob) | Check repository integrity |
+| `LBR-IO-002` | Failed to save object, index, or update HEAD | Check filesystem permissions and repository writability |

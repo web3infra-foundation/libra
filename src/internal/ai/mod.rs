@@ -54,7 +54,6 @@
 pub mod agent;
 // Rule-driven automation MVP for hooks, cron, and source-triggered workflows.
 pub mod automation;
-pub mod capability_package;
 // Step 2 sub-agent contracts (CEX-S2-10 schema-only scaffold) plus the
 // runtime extensions that landed with the OC orchestration runtime
 // (`feat(code): land opencode orchestration runtime`). Originally

@@ -30,8 +30,9 @@ pub use phase3::{
     ValidationStageResult, ValidatorEngine,
 };
 pub use phase4::{
-    DecisionPolicy, DecisionProposal, DecisionProposalRoute, DecisionProposalStore,
-    RiskScoreBreakdown, aggregate_risk_score, build_decision_proposal,
+    DecisionPolicy, DecisionProposal, DecisionProposalRoute, DecisionProposalStore, FinalDecision,
+    FinalDecisionStore, FinalDecisionSummary, RiskScoreBreakdown, aggregate_risk_score,
+    build_decision_proposal,
 };
 pub use prompt_builders::{IntentPromptBuilder, PlanningPromptBuilder, TaskPromptBuilder};
 pub use snapshot::Snapshot;

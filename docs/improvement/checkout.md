@@ -77,17 +77,8 @@
 - **已落地完整 `CheckoutError` typed enum**（v0.17.372，13 个变体）；下面表格不再保留 “仍不引入” 的非目标项。
 - **不改写 `get_remote()` 的业务语义**。remote auto-track + pull 现有流程保持不变
 - **不统一 `checkout` 和 `switch` 的成功文案**。`checkout` 继续保留自己的兼容语气，例如 `Already on {branch}`（无引号）
-- **不新增 detach / commit / tag checkout 语义** —— ⚠️ **已于 v0.17.1303..1305 决策反转**，见下方“决策反转”小节
+- **不新增 detach / commit / tag checkout 语义**
 - **不把 `switch`/`checkout` 抽成共用执行层**
-
-### 决策反转（v0.17.1303..1305，`.omo/plans/checkout-improvement-plan.md`）
-
-早期“本次非目标”把 **detach / orphan checkout 语义** 列为不实现项。随着 `checkout` 兼容面正式可见（C5）并按 `.omo/plans/checkout-improvement-plan.md` 收口，这一非目标被**反转为已支持**：
-
-- **已支持（supported）**：`-B`（创建/重置分支）、`--detach [<commit-ish>]`（分离 HEAD）、`--orphan <name> [<start-point>]`（无历史分支）、`-f`/`--force`（跳过脏检查强制切换）。三处破坏性操作（`-B` 重置 ref、`--detach`/`-f` 覆盖工作区、`--orphan` 解绑历史）均经内部保留分支（`intent`/`agent-traces`）四路径硬拦截，并按第五节退出码契约（128/129/2）对齐。`--orphan` 与 stock Git 一致**不写 HEAD reflog**（目标 unborn，无提交 OID）。
-- **部分支持（partial）**：`--ours`/`--theirs` 冲突路径检出（恢复 stage #2/#3 到工作区，索引收敛为 stage #0 并保留 mode）。
-- **仍 deferred**：不带 `--detach` 的普通 `checkout <commit-ish>`/`<tag>` 检出、交互式 `-p`/`--patch`、`--conflict`。
-- 仍**不**把 `switch`/`checkout` 抽成共用执行层；新增模式各自在 `checkout.rs` 内以独立 helper（`run_force_branch_checkout` / `run_detach_checkout` / `run_orphan_checkout` / `restore_conflict_stage_paths`）实现，并扩展 `CheckoutOutput`（`reset`/`orphan` 字段）与 `CheckoutError`（`ConflictPathRequired` / `NotInMergeConflict` / `IndexReadFailed` / `WorktreeWriteFailed` / `HeadUpdateFailed`，复用现有稳定码，无新增 `StableErrorCode`）。
 
 ### 设计原则
 
@@ -185,7 +176,7 @@ EXAMPLES:
 - `checkout --json` / `--machine` 成功输出（覆盖 show-current / already-on / switch-local / create / remote-track）
 - `RemoteSyncFailed { stage, source }` 包裹 remote auto-track 中 `set_upstream` / `pull` 的代理失败，并保留内部 stable code
 
-**更新（v0.17.1303..1305 决策反转，见上方“决策反转”小节）**：`--detach` / `-B` / `--orphan` / `-f` / `--ours` / `--theirs` 已落地，并已同步扩展 `CheckoutOutput`（`reset`/`orphan`）、`CheckoutError`（新增 `ConflictPathRequired` / `NotInMergeConflict` / `IndexReadFailed` / `WorktreeWriteFailed` / `HeadUpdateFailed`）与 JSON/退出码合约测试。仍 deferred：不带 `--detach` 的普通 commit-ish/tag 检出、`-p`/`--patch`、`--conflict`；也仍不把 `checkout` 与 `switch` 抽成共用执行层。
+当前仍**不新增 detach / commit / tag checkout 语义**，也不把 `checkout` 与 `switch` 抽成共用执行层；后续如果扩展 checkout 语义，需要同步扩展 `CheckoutOutput`、`CheckoutError` 和 JSON/machine 合约测试。
 
 ### 本次联动中的 Cross-Cutting Improvements 约束
 

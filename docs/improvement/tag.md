@@ -4,7 +4,7 @@
 
 同时落地 [Cross-Cutting Improvements A/B/F/G](README.md#全局层面改进贯穿所有命令)。
 
-> **实施状态：✅ 已落地（2026-06-08 更新）** — `TagError` typed enum、`TagOutput` JSON / machine schema、`run_tag()` / `render_tag_output()` 分层、human 成功确认、重复创建 hint、quiet delete、broken-ref delete 和 lightweight tag 双契约回归均已交付。2026-06-08 追加完成多标签删除、`-a`/`-F`/`-e` 附注消息录入、`--contains`/`--no-contains`/`--merged`/`--no-merged`/`--points-at` 过滤、受限 `--sort`、tag docs/compat/runner 同步。本文档保留为已交付契约的实现规格。
+> **实施状态：✅ 已落地** — `TagError` typed enum、`TagOutput` JSON / machine schema、`run_tag()` / `render_tag_output()` 分层、human 成功确认、重复创建 hint、quiet delete、broken-ref delete 和 lightweight tag 双契约回归均已交付。本文档保留为已交付契约的实现规格。
 
 ### 已完成前置条件与当前代码状态
 
@@ -19,10 +19,6 @@
 - `execute()` / `execute_safe(args, output)` 双入口已存在
 - `run_tag()` + `TagOutput` 已实现 list / create / delete 的 JSON / machine 输出
 - `-l` / `-d` / `-m` / `-f` / `-n` 短标志已实现
-- `-a` / `-F` / `-e` 附注消息录入已实现；`-a` 无消息源会走编辑器入口，不再静默降级为轻量标签
-- `name` 已扩展为 `Vec<String>`；`--delete` 支持单次删除多个标签，JSON 输出以 additive `deleted` / `failed` 数组表示批量结果
-- 列表过滤已支持 `--points-at`、`--contains`、`--no-contains`、`--merged`、`--no-merged`
-- 排序已支持 `--sort=refname|-refname|creatordate|-creatordate|taggerdate|-taggerdate`
 - 重复创建时的 hint 已在 `map_create_tag_error()` → `CliError` 映射中保留
 - `render_tags()` 支持 `-n` 控制注释行数显示
 - `internal::tag` 模块提供底层 tag API
@@ -38,7 +34,6 @@
 - **重复创建 hint 已落地**：`map_create_tag_error()` 已保留删除旧 tag 或更换 tag 名的提示
 - **human 成功反馈已统一**：lightweight / annotated create 与 delete 都已输出单行确认消息
 - **`--help` EXAMPLES 已落地**
-- **tag docs/compat/runner 同步已落地**：`docs/commands/tag.md`、`COMPATIBILITY.md`、`cli.tag-basic` 场景文档/YAML/runner 均覆盖新增 tag surface
 - **quiet / malformed ref delete 回归已覆盖**：当前测试已覆盖 quiet delete、删除损坏 tag ref、JSON delete `hash = null` 等边界
 - **human / JSON 双契约已有回归**：lightweight tag 保持 `message: null` 的 machine 契约，同时 human `-n` 列表仍显示 commit message
 
@@ -46,18 +41,16 @@
 
 **已完成目标：**
 - `TagError` typed error enum、显式 `StableErrorCode`、统一 `run_tag()` / `render_tag_output()` 分层、human 成功确认消息、create 失败来源结构化映射和 `--help` EXAMPLES 已落地
-- 多标签删除、`-a`/`-F`/`-e` 消息录入、批量删除 additive JSON、受限 `--sort`、contains/merged/points-at 过滤已落地
-- `docs/commands/tag.md`、`COMPATIBILITY.md`、integration scenario docs/YAML/runner 已同步；`tag` 兼容等级按当前功能面标为 `partial`
 
 **后续维护目标：**
 - 继续维护 lightweight tag 的 human / machine 双契约和边界回归测试
-- 后续新增 tag signing 或 `--verify` 时保持 additive JSON schema 演化
-- 扩展 Git 全量 `--sort` key、`--format` 风格输出和重型性能基准时，继续同步 `docs/commands/tag.md`、`COMPATIBILITY.md` 与 `cli.tag-basic`
+- 后续新增 tag signing、`--sort` 或 `--verify` 时保持 additive JSON schema 演化
 
 **本批非目标：**
 - **不重写 `internal::tag` 底层业务语义**。允许做类型收紧和错误建模调整（例如 `create()` 返回 `CreateTagError`），但不改变 tag 创建/删除/查询的语义行为
-- **不引入 tag 签名（GPG 签名 tag）或 `--verify`**。这是独立安全特性，依赖 Vault 全路径 reseal、PGP verify wrapper 与密钥泄露回归
-- **不承诺 Git 全量 `--sort` key**。当前仅支持 `refname`、`creatordate`、`taggerdate` 及其降序形式
+- **不引入 tag 签名（GPG 签名 tag）**。这是独立特性
+- **不引入 `--sort` 选项**。tag 排序留后续
+- **不引入 `--verify` 选项**
 
 ### 设计原则
 

@@ -9,10 +9,6 @@ Switch branches, create and switch to a new branch, or detach HEAD at a specific
 ```
 libra switch <branch>
 libra switch -c <name> [<start-point>]
-libra switch -C <name> [<start-point>]
-libra switch -f <branch>
-libra switch --orphan <name>
-libra switch [--guess|--no-guess] <branch>
 libra switch -d <commit|tag|branch>
 libra switch --track <remote/branch>
 ```
@@ -21,7 +17,7 @@ libra switch --track <remote/branch>
 
 `libra switch` is the primary command for changing branches. It validates that the working tree is clean before switching, updates HEAD and the index, and restores the working tree to match the target commit. Unlike `libra checkout`, which exists as a Git-compatibility surface, `switch` is the recommended command for branch operations.
 
-The command supports switching to an existing local branch, creating or resetting a branch with `-c`/`-C`, detaching HEAD with `-d`, creating an unborn root branch with `--orphan`, and creating a local tracking branch with `--track` or the default remote-guessing path. When the target branch is already the current branch, the command is a no-op and skips the cleanliness check entirely.
+The command supports four modes: switching to an existing local branch (default), creating a new branch with `-c`, detaching HEAD with `-d`, and tracking a remote branch with `--track`. When the target branch is already the current branch, the command is a no-op and skips the cleanliness check entirely.
 
 Fuzzy branch name suggestions are provided via Levenshtein distance when a branch is not found, helping catch typos without requiring exact matches.
 
@@ -31,37 +27,12 @@ Fuzzy branch name suggestions are provided via Levenshtein distance when a branc
 |------|------|-------|-------------|
 | | `<branch>` | positional (optional) | Target branch, commit, or remote reference to switch to |
 | `-c` | `--create` | `<name>` | Create a new branch and switch to it |
-| `-C` | `--force-create` | `<name>` | Create a new branch, or reset it to the start point if it already exists, then switch to it |
-| `-f` | `--force` | | Discard tracked working tree changes while switching |
-| | `--discard-changes` | | Alias for `--force` |
-| | `--orphan` | `<name>` | Create an unborn branch whose first commit has no parents |
-| | `--guess` | | Force remote-tracking branch guessing |
-| | `--no-guess` | | Disable remote-tracking branch guessing |
 | `-d` | `--detach` | | Detach HEAD at the given commit, tag, or branch |
 | | `--track` | | Create a local branch tracking the given remote branch and switch to it |
 
 ### Flag details
 
 **`-c / --create <name> [start-point]`**: Creates a new branch named `<name>` from `<start-point>` (or HEAD if omitted), then switches to it. Validates the name, checks that no branch with that name already exists, and rejects reserved internal branch names.
-
-**`-C / --force-create <name> [start-point]`**: Like `-c`, but if a branch named `<name>` already exists it is **reset** to the start point (or HEAD) instead of being refused. Reserved/internal branch names are still rejected. Mutually exclusive with `-c`, `-d`, and `--orphan`.
-
-```bash
-libra switch -C feature main           # Create or reset feature to main, then switch
-```
-
-**`-f / --force / --discard-changes`**: Allows tracked dirty files and staged changes to be discarded while switching. It does not allow untracked files to be overwritten by the target commit.
-
-```bash
-libra switch -f main                   # Discard tracked local changes while switching
-libra switch --discard-changes main    # Same as --force
-```
-
-**`--orphan <name>`**: Points HEAD at a new unborn branch without creating a branch ref yet. The index is cleared and files that were tracked by the previous HEAD are removed from the worktree; existing untracked or ignored files are left alone. The first commit on the orphan branch is a root commit. JSON success keeps the existing schema and reports `commit` as an empty string.
-
-```bash
-libra switch --orphan fresh-start
-```
 
 ```bash
 libra switch -c feature-x              # New branch from HEAD
@@ -76,15 +47,7 @@ libra switch --detach v1.0             # Detach at a tag
 libra switch --detach abc1234          # Detach at a commit
 ```
 
-**`--guess / --no-guess`**: By default, `libra switch feature` creates a local branch from a unique remote-tracking branch such as `origin/feature` and sets upstream tracking. `checkout.guess=false` disables that implicit behavior; `--guess` and `--no-guess` override the config. If multiple remotes match, set `checkout.defaultRemote` or use `--track <remote>/<branch>`.
-
-```bash
-libra switch feature                   # Guess origin/feature when it is unique
-libra config checkout.defaultRemote upstream
-libra switch --no-guess feature        # Do not guess; require a local branch
-```
-
-**`--track`**: Looks up the remote-tracking reference, creates a local branch with the same name, sets upstream tracking, and switches to it. Conflicts with `--create`, `--force-create`, `--orphan`, and `--detach`.
+**`--track`**: Looks up the remote-tracking reference, creates a local branch with the same name, sets upstream tracking, and switches to it. Conflicts with `--create` and `--detach`.
 
 ```bash
 libra switch --track origin/main       # Track and switch to remote branch
@@ -97,10 +60,6 @@ libra switch --track feature            # Assumes origin/feature
 libra switch main                      # Switch to an existing branch
 libra switch -c feature-x              # Create and switch to a new branch
 libra switch -c fix-123 abc1234        # Create branch from specific commit
-libra switch -C feature-x main         # Create or reset a branch and switch
-libra switch -f main                   # Discard tracked changes while switching
-libra switch --orphan fresh-start      # Start an unborn root branch
-libra switch --guess feature           # Guess a unique remote-tracking branch
 libra switch --detach v1.0             # Detach HEAD at a tag
 libra switch --track origin/main       # Track and switch to remote branch
 libra switch --json main               # Structured JSON output for agents
@@ -120,13 +79,6 @@ Create and switch to a new branch:
 
 ```text
 Switched to a new branch 'feature'
-```
-
-Create a tracking branch:
-
-```text
-Switched to a new branch 'feature'
-Branch 'feature' set up to track remote branch 'origin/feature'
 ```
 
 Detach HEAD at a commit:
@@ -230,33 +182,13 @@ Track and switch to a remote branch:
 }
 ```
 
-Create an orphan branch:
-
-```json
-{
-  "ok": true,
-  "command": "switch",
-  "data": {
-    "previous_branch": "main",
-    "previous_commit": "abc1234def5678901234567890abcdef12345678",
-    "branch": "fresh-start",
-    "commit": "",
-    "created": true,
-    "detached": false,
-    "already_on": false,
-    "tracking": null
-  }
-}
-```
-
 ### Schema Notes
 
 - `previous_branch` is `null` when HEAD was detached before the switch
 - `branch` is `null` when HEAD is now detached (`--detach`)
-- `commit` is an empty string for `--orphan` because the branch is unborn
 - `already_on` is `true` when the target branch equals the current branch (no-op)
-- `tracking` is present with `--track` or remote guessing, containing `remote` and `remote_branch`
-- `created` is `true` when `--create`, `--force-create`, `--orphan`, `--track`, or remote guessing created a local branch state
+- `tracking` is present only with `--track`, containing `remote` and `remote_branch`
+- `created` is `true` when `--create` or `--track` created a new local branch
 
 ## Design Rationale
 
@@ -272,8 +204,6 @@ When `--track origin/feature` is used, Libra automatically creates a local branc
 
 The `--track` flag defaults to the `origin` remote when only a branch name is provided (e.g., `libra switch --track feature` assumes `origin/feature`), which matches the most common remote setup.
 
-Remote guessing applies the same tracking setup automatically when a plain branch name has exactly one remote-tracking match. It is on by default to match Git; use `checkout.guess=false` or `--no-guess` when scripts require local-only branch resolution.
-
 ### Why fuzzy suggestions?
 
 When a branch name is not found, Libra computes Levenshtein distance against all known branches and suggests matches within edit distance 2. This catches common typos (`faeture` instead of `feature`) without requiring glob patterns or regex. The suggestions appear as actionable hints in the error output, reducing round-trips for both human users and AI agents that can parse hint text.
@@ -287,10 +217,8 @@ When a branch name is not found, Libra computes Levenshtein distance against all
 | Create from commit | `git switch -c fix abc1234` | `libra switch -c fix abc1234` | `jj new abc1234` + `jj branch create fix` |
 | Detach HEAD | `git switch --detach v1.0` | `libra switch --detach v1.0` | `jj edit <rev>` (always detached-like) |
 | Track remote | `git switch --track origin/main` | `libra switch --track origin/main` | N/A (jj tracks all remotes) |
-| Guess remote | `git switch feature` | `libra switch feature` when a unique remote-tracking branch exists | N/A |
-| Force switch | `git switch -f main` | `libra switch -f main` | N/A |
-| Force create | `git switch -C feature` | `libra switch -C feature` | N/A |
-| Orphan branch | `git switch --orphan <name>` | `libra switch --orphan <name>` | `jj new root()` |
+| Force create | `git switch -C feature` | Not supported (delete first) | N/A |
+| Orphan branch | `git switch --orphan <name>` | Not supported | `jj new root()` |
 | Structured output | No | `--json` / `--machine` | `--template` |
 | Fuzzy suggestions | No | Levenshtein-based "did you mean" hints | No |
 | Clean-state validation | Warns but proceeds (sometimes) | Blocks switch with actionable error | No dirty state concept |
@@ -305,7 +233,6 @@ Every `SwitchError` variant maps to an explicit `StableErrorCode`.
 | Missing detach target | `LBR-CLI-002` | 129 | "provide a commit, tag, or branch to detach at." |
 | Missing branch name | `LBR-CLI-002` | 129 | "provide a branch name." |
 | Branch not found | `LBR-CLI-003` | 129 | "create it with 'libra switch -c {name}'." + fuzzy suggestions |
-| Guess matched multiple remotes | `LBR-CLI-003` | 128 | "set checkout.defaultRemote or pass --no-guess and use --track explicitly." |
 | Got remote branch | `LBR-CLI-003` | 129 | "use 'libra switch --track ...' to create a local tracking branch." |
 | Remote branch not found | `LBR-CLI-003` | 129 | "Run 'libra fetch {remote}' to update remote-tracking branches." |
 | Invalid remote branch | `LBR-CLI-003` | 129 | "expected format: 'remote/branch'." |
@@ -318,7 +245,6 @@ Every `SwitchError` variant maps to an explicit `StableErrorCode`.
 | Commit resolve failed | `LBR-CLI-003` | 129 | "check the revision name and try again." |
 | Branch creation failed | `LBR-IO-002` | 128 | -- |
 | HEAD update failed | `LBR-IO-002` | 128 | -- |
-| Orphan cleanup failed | `LBR-IO-002` | 128 | "inspect the worktree, then retry or restore files manually." |
 | Delegated (branch/restore) | Original code | Original | Original hints |
 
 `switch -c <existing-branch>` currently preserves the original `branch`

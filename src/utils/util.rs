@@ -1384,7 +1384,6 @@ mod test {
             force: false,
             dry_run: false,
             ignore_errors: false,
-            ..Default::default()
         })
         .await;
         commit::execute(CommitArgs {
@@ -1454,7 +1453,6 @@ mod test {
             force: false,
             dry_run: false,
             ignore_errors: false,
-            ..Default::default()
         })
         .await;
         commit::execute(CommitArgs {
@@ -1495,7 +1493,6 @@ mod test {
             force: false,
             dry_run: false,
             ignore_errors: false,
-            ..Default::default()
         })
         .await;
         commit::execute(CommitArgs {
@@ -1539,7 +1536,6 @@ mod test {
             force: false,
             dry_run: false,
             ignore_errors: false,
-            ..Default::default()
         })
         .await;
         commit::execute(CommitArgs {

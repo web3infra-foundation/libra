@@ -1,7 +1,5 @@
 //! R2 upload helpers for publish snapshot artefacts.
 //!
-//! 发布快照工件的 R2 上传助手。
-//!
 //! The snapshot builder produces pure data plans. This module is the
 //! small I/O boundary that writes those plans into
 //! [`PublishStorage`]: text file previews as raw bytes and the

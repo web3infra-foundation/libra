@@ -1,6 +1,6 @@
 ## Status 命令改进详细计划
 
-> **实施状态：✅ 已落地（2026-06-08 复核）** — `StatusData` 共享数据层、显式 `StatusError → CliError`、upstream tracking、`--exit-code`、JSON/porcelain v2 upstream 字段、全局颜色控制、porcelain v2 rename/typechange/unmerged 行、`-z` NUL 输出、`status.*` 配置默认值、rebase/bisect 状态提示均已在当前代码库完成。
+> **实施状态：✅ 已落地** — `StatusData` 共享数据层、显式 `StatusError → CliError`、upstream tracking、`--exit-code`、JSON/porcelain v2 upstream 字段和全局颜色控制均已在当前代码库完成。
 
 > 最后编写时间：2026-03-26
 
@@ -43,14 +43,12 @@
 - 消除 `execute_to()` 与 `collect_status_json()` 的逻辑重复
 - 新增 `--exit-code` 专用标志（dirty → exit `1`），不复用全局 `--quiet` 语义
 - 统一颜色控制与全局 `--color` / `NO_COLOR` 标志
-- 补齐 staged rename 检测与评分，short 输出 `R  old -> new`，porcelain v2 输出 `2 ... R<score> <new><TAB><old>`，JSON 输出 `renames[]`
-- 补齐 typechange `T` 状态、unmerged index stage 的 porcelain v2 `u` 行、`-z` NUL 终止输出、`status.showUntrackedFiles` / `status.branch` / `status.short` 配置默认值、rebase/bisect human/JSON 状态提示
 
 **本批非目标：**
 - **不改变 JSON schema 的已有字段**。已有 JSON 输出已面向用户，本批只做**向后兼容的增量扩展**（新增字段），不修改/删除现有字段
-- **不引入 copy 检测与 Git rename 控制面**。当前支持固定 50% 阈值的自动 staged rename 检测；`--find-renames` / `-M`、`--renames`、`--no-renames`、`status.renames`、`status.renameLimit` 仍延后
+- **不引入 rename/copy 检测**。当前 `Changes` 结构不区分 rename，这是独立特性
 - **不改变 porcelain v1 格式**。v1 是稳定的机器接口，与 Git 保持严格兼容
-- **不新增 pathspec / submodule / cherry-pick in-progress surface**。`status -- <pathspec>`、copy `C` 行、submodule `S<c><m><u>` 细节和 cherry-pick sequencer 状态仍延后
+- **不改变核心 diff 逻辑**。`changes_to_be_committed_safe()` / `changes_to_be_staged()` 的算法保持不变
 
 ### 设计原则
 

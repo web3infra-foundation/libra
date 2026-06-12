@@ -7,30 +7,6 @@ The single source of truth for agent/review guidance is the repo-root
 If you need to update or extend the guidelines, edit `AGENTS.md` in the
 repository root. Keep this file as a thin pointer to avoid the two copies
 drifting out of sync over time.
-
-## Integration tests & docs sync (do not skip)
-
-Changing any **Git-compatible command** (`src/cli.rs`, `src/command/<name>.rs`,
-or protocol/storage code that affects CLI output) obliges you to keep both the
-black-box integration test scheme and the command docs in sync — this is a
-review-blocking requirement:
-
-1. Find the command's owner scenario in the **Command → Scenario Map** at
-   `docs/development/integration-scenarios/README.md`.
-2. Update, together: `COMPATIBILITY.md`, the §2.3 matrix in
-   `docs/development/integration-test-plan.md`, `docs/commands/<name>.md`, the
-   owner `docs/development/integration-scenarios/<id>.md` + `integration-scenarios.yaml`,
-   and the runner scenario in `tools/integration-runner/src/scenarios/<file>`.
-3. Both `cargo run --manifest-path tools/integration-runner/Cargo.toml -- check-plan`
-   and `... run --only <owner-scenario-ids>` must pass.
-
-A new Git-compat command must add a map row + at least one `cli.<cmd>-smoke`
-scenario; no Git-compat command may ship without an owner scenario. Treat a PR
-that changes command behavior without updating its scenario + docs as incomplete.
-See root `AGENTS.md` ("Black-box CLI integration tests") for the full contract.
-
-## Review guidelines (severity reference)
-
 - changes likely to cause major outage, irreversible corruption, or widespread security exposure
 
 ### P1

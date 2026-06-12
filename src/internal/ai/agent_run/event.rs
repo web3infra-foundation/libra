@@ -1,7 +1,5 @@
 //! Append-only event types for sub-agent runs.
 //!
-//! 子代理运行的仅追加事件类型。
-//!
 //! # Unknown-event-safe envelope (S2-INV-10 / R-A3)
 //!
 //! Two-layer pattern:
@@ -216,41 +214,6 @@ impl RunUsage {
             .saturating_add(self.completion_tokens)
             .saturating_add(self.cached_tokens)
             .saturating_add(self.reasoning_tokens)
-    }
-
-    /// Accumulate another usage record into this one, dimension by dimension
-    /// (CEX-S2-14: "per-agent cost attribution：token、tool latency、source
-    /// bytes、MCP calls 都归属到 agent run").
-    ///
-    /// A sub-agent run makes many provider / tool calls; rolling their
-    /// [`RunUsage`] records up with this gives the run's total attribution. Every
-    /// dimension uses **saturating** addition so a pathological provider report
-    /// can never wrap a counter and under-report the run's true cost.
-    pub fn accumulate(&mut self, other: &RunUsage) {
-        self.prompt_tokens = self.prompt_tokens.saturating_add(other.prompt_tokens);
-        self.completion_tokens = self
-            .completion_tokens
-            .saturating_add(other.completion_tokens);
-        self.cached_tokens = self.cached_tokens.saturating_add(other.cached_tokens);
-        self.reasoning_tokens = self.reasoning_tokens.saturating_add(other.reasoning_tokens);
-        self.wall_clock_ms = self.wall_clock_ms.saturating_add(other.wall_clock_ms);
-        self.provider_latency_ms = self
-            .provider_latency_ms
-            .saturating_add(other.provider_latency_ms);
-        self.cost_estimate_micro_dollars = self
-            .cost_estimate_micro_dollars
-            .saturating_add(other.cost_estimate_micro_dollars);
-        self.tool_call_count = self.tool_call_count.saturating_add(other.tool_call_count);
-    }
-
-    /// Sum a sequence of [`RunUsage`] records into a single attributed total for
-    /// one agent run. The identity (empty input) is the all-zero default.
-    pub fn total<'a>(usages: impl IntoIterator<Item = &'a RunUsage>) -> RunUsage {
-        let mut acc = RunUsage::default();
-        for usage in usages {
-            acc.accumulate(usage);
-        }
-        acc
     }
 }
 
@@ -622,89 +585,5 @@ mod tests {
             ..RunUsage::default()
         };
         assert_eq!(usage.total_tokens(), u64::MAX);
-    }
-
-    /// `accumulate` rolls every dimension up (CEX-S2-14 per-agent attribution):
-    /// two tool-call usages sum field-by-field into the run total.
-    #[test]
-    fn run_usage_accumulate_sums_every_dimension() {
-        let mut acc = RunUsage {
-            prompt_tokens: 10,
-            completion_tokens: 20,
-            cached_tokens: 1,
-            reasoning_tokens: 2,
-            wall_clock_ms: 100,
-            provider_latency_ms: 50,
-            cost_estimate_micro_dollars: 1_000,
-            tool_call_count: 3,
-        };
-        acc.accumulate(&RunUsage {
-            prompt_tokens: 5,
-            completion_tokens: 6,
-            cached_tokens: 7,
-            reasoning_tokens: 8,
-            wall_clock_ms: 9,
-            provider_latency_ms: 10,
-            cost_estimate_micro_dollars: 11,
-            tool_call_count: 12,
-        });
-        assert_eq!(
-            acc,
-            RunUsage {
-                prompt_tokens: 15,
-                completion_tokens: 26,
-                cached_tokens: 8,
-                reasoning_tokens: 10,
-                wall_clock_ms: 109,
-                provider_latency_ms: 60,
-                cost_estimate_micro_dollars: 1_011,
-                tool_call_count: 15,
-            },
-        );
-    }
-
-    /// `accumulate` saturates per dimension — no wrap-around under-reporting.
-    #[test]
-    fn run_usage_accumulate_saturates() {
-        let mut acc = RunUsage {
-            cost_estimate_micro_dollars: u64::MAX,
-            tool_call_count: u32::MAX,
-            ..RunUsage::default()
-        };
-        acc.accumulate(&RunUsage {
-            cost_estimate_micro_dollars: 100,
-            tool_call_count: 5,
-            ..RunUsage::default()
-        });
-        assert_eq!(acc.cost_estimate_micro_dollars, u64::MAX);
-        assert_eq!(acc.tool_call_count, u32::MAX);
-    }
-
-    /// `total` sums a sequence; the empty input is the all-zero identity.
-    #[test]
-    fn run_usage_total_sums_a_sequence() {
-        let usages = [
-            RunUsage {
-                prompt_tokens: 1,
-                tool_call_count: 1,
-                ..RunUsage::default()
-            },
-            RunUsage {
-                prompt_tokens: 2,
-                tool_call_count: 1,
-                ..RunUsage::default()
-            },
-            RunUsage {
-                prompt_tokens: 3,
-                tool_call_count: 1,
-                ..RunUsage::default()
-            },
-        ];
-        let total = RunUsage::total(&usages);
-        assert_eq!(total.prompt_tokens, 6);
-        assert_eq!(total.tool_call_count, 3);
-
-        // Empty input is the zero identity.
-        assert_eq!(RunUsage::total(std::iter::empty()), RunUsage::default());
     }
 }

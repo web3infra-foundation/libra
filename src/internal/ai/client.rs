@@ -1,7 +1,5 @@
 //! Generic AI provider HTTP client wrapper.
 //!
-//! 通用 AI 提供商 HTTP 客户端包装器。
-//!
 //! Every concrete provider (OpenAI, Anthropic, Gemini, DeepSeek, Kimi, Zhipu,
 //! Ollama, etc.) shares the same set of cross-cutting concerns: a base URL,
 //! a tuned `reqwest` client with sane timeouts, and a hook for injecting

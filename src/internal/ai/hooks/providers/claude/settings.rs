@@ -68,17 +68,7 @@ pub(super) fn install_claude_hooks(options: &ProviderInstallOptions) -> Result<(
 
     let settings_path = claude_settings_path()?;
     let mut settings = load_claude_settings(&settings_path)?;
-    let command_prefix = options
-        .hook_command_prefix
-        .as_deref()
-        .unwrap_or("hooks claude");
-    let changed = upsert_claude_hooks(
-        &mut settings,
-        &binary_path,
-        command_prefix,
-        options.fail_safe_shell,
-        timeout,
-    );
+    let changed = upsert_claude_hooks(&mut settings, &binary_path, timeout);
 
     if changed {
         write_json_settings(&settings_path, &settings, "Claude")?;
@@ -129,12 +119,7 @@ pub(super) fn claude_hooks_are_installed() -> Result<bool> {
     }
     let settings = load_claude_settings(&settings_path)?;
     let binary_path = resolve_hook_binary_path(None)?;
-    Ok(all_claude_specs_installed(
-        &settings,
-        &binary_path,
-        "hooks claude",
-        false,
-    ))
+    Ok(all_claude_specs_installed(&settings, &binary_path))
 }
 
 fn claude_settings_path() -> Result<PathBuf> {
@@ -147,19 +132,13 @@ fn load_claude_settings(path: &Path) -> Result<ClaudeSettings> {
     load_json_settings(path, "Claude")
 }
 
-fn upsert_claude_hooks(
-    settings: &mut ClaudeSettings,
-    binary_path: &str,
-    command_prefix: &str,
-    fail_safe_shell: bool,
-    timeout: u64,
-) -> bool {
+fn upsert_claude_hooks(settings: &mut ClaudeSettings, binary_path: &str, timeout: u64) -> bool {
     let mut changed = false;
 
     for (event_name, subcommand) in CLAUDE_HOOK_FORWARD_MAP {
         let desired_entry = ClaudeHookEntry {
             entry_type: "command".to_string(),
-            command: build_hook_command(binary_path, command_prefix, subcommand, fail_safe_shell),
+            command: format!("{binary_path} hooks claude {subcommand}"),
             timeout: Some(timeout),
             extra: BTreeMap::new(),
         };
@@ -233,31 +212,11 @@ fn remove_libra_claude_hooks(settings: &mut ClaudeSettings) -> bool {
     changed
 }
 
-fn build_hook_command(
-    binary_path: &str,
-    command_prefix: &str,
-    subcommand: &str,
-    fail_safe_shell: bool,
-) -> String {
-    let command = format!("{binary_path} {command_prefix} {subcommand}");
-    if fail_safe_shell {
-        format!("{command} || true")
-    } else {
-        command
-    }
-}
-
-fn all_claude_specs_installed(
-    settings: &ClaudeSettings,
-    binary_path: &str,
-    command_prefix: &str,
-    fail_safe_shell: bool,
-) -> bool {
+fn all_claude_specs_installed(settings: &ClaudeSettings, binary_path: &str) -> bool {
     CLAUDE_HOOK_FORWARD_MAP
         .iter()
         .all(|(event_name, subcommand)| {
-            let expected_command =
-                build_hook_command(binary_path, command_prefix, subcommand, fail_safe_shell);
+            let expected_command = format!("{binary_path} hooks claude {subcommand}");
             settings.hooks.get(*event_name).is_some_and(|matchers| {
                 matchers.iter().any(|matcher| {
                     matcher.matcher.is_none()
@@ -287,14 +246,8 @@ fn is_replaced_managed_claude_hook(
 }
 
 fn is_managed_claude_command_for_subcommand(command: &str, subcommand: &str) -> bool {
-    let command = command.strip_suffix(" || true").unwrap_or(command);
-    let legacy_suffix = format!(" hooks claude {subcommand}");
-    let agent_suffix = format!(" agent hooks claude-code {subcommand}");
-    let executable = command
-        .strip_suffix(&legacy_suffix)
-        .or_else(|| command.strip_suffix(&agent_suffix))
-        .map(str::trim);
-    let Some(executable) = executable else {
+    let suffix = format!(" hooks claude {subcommand}");
+    let Some(executable) = command.strip_suffix(&suffix).map(str::trim) else {
         return false;
     };
     if executable.is_empty() {
@@ -327,50 +280,9 @@ mod tests {
     #[test]
     fn upsert_claude_hooks_is_idempotent() {
         let mut settings = ClaudeSettings::default();
-        assert!(upsert_claude_hooks(
-            &mut settings,
-            "/tmp/libra",
-            "hooks claude",
-            false,
-            10
-        ));
-        assert!(!upsert_claude_hooks(
-            &mut settings,
-            "/tmp/libra",
-            "hooks claude",
-            false,
-            10
-        ));
-        assert!(all_claude_specs_installed(
-            &settings,
-            "/tmp/libra",
-            "hooks claude",
-            false
-        ));
-    }
-
-    #[test]
-    fn upsert_claude_hooks_can_target_agent_traces_fail_safe_entrypoint() {
-        let mut settings = ClaudeSettings::default();
-        assert!(upsert_claude_hooks(
-            &mut settings,
-            "/tmp/libra",
-            "agent hooks claude-code",
-            true,
-            10
-        ));
-
-        assert!(all_claude_specs_installed(
-            &settings,
-            "/tmp/libra",
-            "agent hooks claude-code",
-            true
-        ));
-        let stop = settings.hooks.get("Stop").expect("Stop hook");
-        assert_eq!(
-            stop[0].hooks[0].command,
-            "/tmp/libra agent hooks claude-code stop || true"
-        );
+        assert!(upsert_claude_hooks(&mut settings, "/tmp/libra", 10));
+        assert!(!upsert_claude_hooks(&mut settings, "/tmp/libra", 10));
+        assert!(all_claude_specs_installed(&settings, "/tmp/libra"));
     }
 
     #[test]
@@ -431,26 +343,5 @@ mod tests {
             session_start[0].hooks[0].command,
             "/tmp/custom-wrapper hooks claude session-start"
         );
-    }
-
-    #[test]
-    fn remove_claude_hooks_removes_agent_traces_fail_safe_commands() {
-        let mut settings = ClaudeSettings::default();
-        settings.hooks.insert(
-            "Stop".to_string(),
-            vec![ClaudeHookMatcher {
-                matcher: None,
-                hooks: vec![ClaudeHookEntry {
-                    entry_type: "command".to_string(),
-                    command: "/tmp/libra agent hooks claude-code stop || true".to_string(),
-                    timeout: Some(10),
-                    extra: BTreeMap::new(),
-                }],
-                extra: BTreeMap::new(),
-            }],
-        );
-
-        assert!(remove_libra_claude_hooks(&mut settings));
-        assert!(!settings.hooks.contains_key("Stop"));
     }
 }

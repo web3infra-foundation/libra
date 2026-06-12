@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use libra::{
     git_protocol::ServiceType::UploadPack,
     internal::protocol::{
-        ProtocolClient, ShallowOptions,
+        ProtocolClient,
         https_client::HttpsClient,
         lfs_client::{LFSClient, LfsBatchResponse},
     },
@@ -51,7 +51,7 @@ async fn https_upload_pack_returns_pack_data() {
 
     let have = Vec::new();
     let mut result_stream = client
-        .fetch_objects(&have, &want, &[], &ShallowOptions::from_depth(Some(1)))
+        .fetch_objects(&have, &want, &[], Some(1))
         .await
         .expect("upload-pack request should succeed");
 

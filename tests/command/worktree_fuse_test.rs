@@ -1,10 +1,13 @@
 //! FUSE worktree tests (feature-gated).
 
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use libra::{
     exec_async,
-    utils::{test, util},
+    utils::{fuse, test, util},
 };
 use serial_test::serial;
 use tempfile::tempdir;
@@ -35,24 +38,11 @@ fn read_fuse_state() -> FuseState {
 }
 
 fn can_run_fuse_tests() -> bool {
-    has_fuse_device_or_helper() && fuse_tests_enabled()
-}
-
-fn fuse_tests_enabled() -> bool {
-    std::env::var("LIBRA_RUN_FUSE_TESTS")
-        .ok()
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-        .unwrap_or(false)
-}
-
-#[cfg(target_os = "macos")]
-fn has_fuse_device_or_helper() -> bool {
-    Path::new("/Library/Filesystems/macfuse.fs/Contents/Resources/mount_macfuse").exists()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn has_fuse_device_or_helper() -> bool {
     Path::new("/dev/fuse").exists()
+        && std::env::var("LIBRA_RUN_FUSE_TESTS")
+            .ok()
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false)
 }
 
 fn is_known_fuse_env_error(message: &str) -> bool {
@@ -71,39 +61,35 @@ fn try_write_probe(path: &Path) -> bool {
 }
 
 fn is_mounted(path: &Path) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        macos_mount_command_contains(path)
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let Ok(content) = fs::read_to_string("/proc/self/mountinfo") else {
+    let Ok(content) = fs::read_to_string("/proc/self/mountinfo") else {
+        return false;
+    };
+    let target = path.to_string_lossy().to_string();
+    content.lines().any(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 5 {
             return false;
-        };
-        let target = path.to_string_lossy().to_string();
-        content.lines().any(|line| {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() < 5 {
-                return false;
-            }
-            fields[4].replace("\\040", " ") == target
-        })
+        }
+        fields[4].replace("\\040", " ") == target
+    })
+}
+
+struct FuseMountCleanup {
+    paths: Vec<PathBuf>,
+}
+
+impl FuseMountCleanup {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self { paths }
     }
 }
 
-#[cfg(target_os = "macos")]
-fn macos_mount_command_contains(path: &Path) -> bool {
-    let Ok(output) = std::process::Command::new("mount").output() else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
+impl Drop for FuseMountCleanup {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = fuse::force_unmount_path(path);
+        }
     }
-    let target = path.to_string_lossy();
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .any(|line| line.contains(" on ") && line.contains(target.as_ref()))
 }
 
 #[test]
@@ -157,87 +143,6 @@ fn test_fuse_worktree_umount_json_reports_cleanup_without_repo() {
 
 #[tokio::test]
 #[serial]
-async fn test_fuse_worktree_non_fuse_add_forwards_standard_flags() {
-    let repo_dir = tempdir().expect("create temp repo");
-    test::setup_with_new_libra_in(repo_dir.path()).await;
-
-    fs::write(repo_dir.path().join("seed.txt"), "seed\n").expect("write seed");
-    let add = run_libra_command(&["add", "seed.txt"], repo_dir.path());
-    assert_cli_success(&add, "add seed");
-    let commit = run_libra_command(&["commit", "-m", "seed", "--no-verify"], repo_dir.path());
-    assert_cli_success(&commit, "commit seed");
-
-    let output = run_libra_command(
-        &[
-            "worktree",
-            "add",
-            "--no-checkout",
-            "--lock",
-            "--reason",
-            "delegated",
-            "wt-delegated",
-        ],
-        repo_dir.path(),
-    );
-    assert_cli_success(
-        &output,
-        "feature worktree add standard flags without --fuse",
-    );
-
-    let wt_path = repo_dir.path().join("wt-delegated");
-    assert!(
-        !wt_path.join("seed.txt").exists(),
-        "non-FUSE wrapper should forward --no-checkout"
-    );
-    let list = run_libra_command(&["--json", "worktree", "list"], repo_dir.path());
-    assert_cli_success(&list, "json worktree list");
-    let parsed = parse_json_stdout(&list);
-    let entries = parsed["data"]["worktrees"]
-        .as_array()
-        .expect("worktrees should be an array");
-    let delegated = entries
-        .iter()
-        .find(|entry| {
-            entry["path"]
-                .as_str()
-                .is_some_and(|path| path.ends_with("wt-delegated"))
-        })
-        .expect("delegated worktree should be listed");
-    assert_eq!(delegated["locked"], true);
-    assert_eq!(delegated["lock_reason"], "delegated");
-}
-
-#[tokio::test]
-#[serial]
-async fn test_fuse_worktree_non_fuse_remove_forwards_force() {
-    let repo_dir = tempdir().expect("create temp repo");
-    test::setup_with_new_libra_in(repo_dir.path()).await;
-
-    let add = run_libra_command(&["worktree", "add", "wt-force-delegated"], repo_dir.path());
-    assert_cli_success(&add, "worktree add");
-    let wt_path = repo_dir.path().join("wt-force-delegated");
-    fs::write(wt_path.join("dirty.txt"), "dirty\n").expect("dirty delegated worktree");
-
-    let remove = run_libra_command(
-        &[
-            "worktree",
-            "remove",
-            "--delete-dir",
-            "--force",
-            "wt-force-delegated",
-        ],
-        repo_dir.path(),
-    );
-
-    assert_cli_success(&remove, "feature worktree remove forwards --force");
-    assert!(
-        !wt_path.exists(),
-        "non-FUSE wrapper should forward --delete-dir --force to legacy remove"
-    );
-}
-
-#[tokio::test]
-#[serial]
 async fn test_fuse_worktree_metadata_management() {
     if !can_run_fuse_tests() {
         return;
@@ -246,6 +151,7 @@ async fn test_fuse_worktree_metadata_management() {
     let repo_dir = tempdir().expect("create temp repo");
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    let _cleanup = FuseMountCleanup::new(vec![repo_dir.path().join("wt-fuse-meta")]);
 
     if let Err(err) = exec_async(vec!["worktree", "add", "wt-fuse-meta", "--fuse"]).await {
         if is_known_fuse_env_error(&err.to_string()) {
@@ -278,6 +184,7 @@ async fn test_fuse_worktree_add_list_remove_flow() {
     let repo_dir = tempdir().expect("create temp repo");
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    let _cleanup = FuseMountCleanup::new(vec![repo_dir.path().join("wt-fuse-flow")]);
 
     if let Err(err) = exec_async(vec!["worktree", "add", "wt-fuse-flow", "--fuse"]).await {
         if is_known_fuse_env_error(&err.to_string()) {
@@ -312,7 +219,7 @@ async fn test_fuse_worktree_add_list_remove_flow() {
 
 #[tokio::test]
 #[serial]
-async fn test_fuse_worktree_exposes_committed_files_immediately_after_add() {
+async fn test_fuse_worktree_list_json_includes_fuse_entry() {
     if !can_run_fuse_tests() {
         return;
     }
@@ -320,38 +227,35 @@ async fn test_fuse_worktree_exposes_committed_files_immediately_after_add() {
     let repo_dir = tempdir().expect("create temp repo");
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    let _cleanup = FuseMountCleanup::new(vec![repo_dir.path().join("wt-fuse-json")]);
 
-    fs::write(repo_dir.path().join("seed.txt"), "seed\n").expect("write seed");
-    let add_output = run_libra_command(&["add", "seed.txt"], repo_dir.path());
-    assert_cli_success(&add_output, "add seed");
-    let commit_output =
-        run_libra_command(&["commit", "-m", "seed", "--no-verify"], repo_dir.path());
-    assert_cli_success(&commit_output, "commit seed");
-
-    if let Err(err) = exec_async(vec!["worktree", "add", "wt-fuse-visible", "--fuse"]).await {
+    if let Err(err) = exec_async(vec!["worktree", "add", "wt-fuse-json", "--fuse"]).await {
         if is_known_fuse_env_error(&err.to_string()) {
             return;
         }
         panic!("fuse add should succeed: {err}");
     }
 
-    let mount_path = repo_dir.path().join("wt-fuse-visible");
-    if !is_mounted(&mount_path) || !try_write_probe(&mount_path) {
-        return;
-    }
-
-    assert_eq!(
-        fs::read_to_string(mount_path.join("seed.txt"))
-            .expect("read committed seed from FUSE worktree"),
-        "seed\n",
+    let output = run_libra_command(&["--json", "worktree", "list"], repo_dir.path());
+    assert_cli_success(&output, "json worktree list with fuse entry");
+    assert!(
+        output.stderr.is_empty(),
+        "json worktree list should keep stderr clean: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-
-    if let Err(err) = exec_async(vec!["worktree", "remove", "wt-fuse-visible"]).await {
-        if is_known_fuse_env_error(&err.to_string()) {
-            return;
-        }
-        panic!("fuse remove should succeed: {err}");
-    }
+    let parsed = parse_json_stdout(&output);
+    assert_eq!(parsed["command"], "worktree.list");
+    let worktrees = parsed["data"]["worktrees"]
+        .as_array()
+        .expect("worktrees should be an array");
+    let fuse_path = repo_dir.path().join("wt-fuse-json").canonicalize().unwrap();
+    assert!(
+        worktrees
+            .iter()
+            .any(|entry| entry["path"] == fuse_path.to_string_lossy().as_ref()),
+        "json list should include FUSE worktree: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 #[tokio::test]
@@ -364,6 +268,10 @@ async fn test_fuse_multiple_worktrees_mount_and_access() {
     let repo_dir = tempdir().expect("create temp repo");
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    let _cleanup = FuseMountCleanup::new(vec![
+        repo_dir.path().join("wt-fuse-a"),
+        repo_dir.path().join("wt-fuse-b"),
+    ]);
 
     if let Err(err) = exec_async(vec!["worktree", "add", "wt-fuse-a", "--fuse"]).await {
         if is_known_fuse_env_error(&err.to_string()) {
@@ -404,6 +312,10 @@ async fn test_fuse_worktree_parallel_add_remove() {
     let repo_dir = tempdir().expect("create temp repo");
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    let _cleanup = FuseMountCleanup::new(vec![
+        repo_dir.path().join("wt-par-1"),
+        repo_dir.path().join("wt-par-2"),
+    ]);
 
     let (r1, r2) = tokio::join!(
         exec_async(vec!["worktree", "add", "wt-par-1", "--fuse"]),
@@ -455,6 +367,7 @@ async fn test_fuse_worktree_add_with_branch_and_create_branch() {
     let repo_dir = tempdir().expect("create temp repo");
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    let _cleanup = FuseMountCleanup::new(vec![repo_dir.path().join("wt-fuse-branch")]);
 
     fs::write(repo_dir.path().join("seed.txt"), "seed\n").expect("write seed");
     let add_output = run_libra_command(&["add", "seed.txt"], repo_dir.path());

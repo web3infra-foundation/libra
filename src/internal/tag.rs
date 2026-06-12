@@ -15,9 +15,7 @@ use git_internal::{
         types::ObjectType,
     },
 };
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, Set,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DbErr, EntityTrait, QueryFilter, Set};
 
 use crate::{
     command::load_object,
@@ -207,76 +205,6 @@ pub async fn create(
     })
 }
 
-/// The result of importing a single fetched tag.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TagImportOutcome {
-    /// A new tag ref was created.
-    Created,
-    /// An existing tag was force-updated; carries its previous target.
-    Updated { previous: Option<String> },
-    /// An existing tag was preserved (not forced) and left untouched.
-    Preserved,
-}
-
-/// Persist a tag fetched from a remote (`full_ref_name` is the fully-qualified
-/// `refs/tags/<name>`) pointing at `target` (a tag-object hash for annotated
-/// tags, or the commit hash for lightweight ones), reusing the caller's
-/// transaction so the write participates in the surrounding fetch ref update.
-///
-/// Tags are immutable by default: when one already exists locally it is left
-/// untouched unless `force` is set, mirroring `git fetch`'s tag-clobbering
-/// policy.
-///
-/// # Arguments
-/// * `db` - Any active connection or transaction implementing `ConnectionTrait`.
-/// * `full_ref_name` - Fully-qualified ref, e.g. `refs/tags/v1.0`.
-/// * `target` - Object hash the tag should point at.
-/// * `force` - Overwrite an existing tag instead of preserving it.
-///
-/// # Returns
-/// A [`TagImportOutcome`] describing whether the tag was created, force-updated
-/// (with its previous target), or preserved.
-pub async fn import_fetched_tag_with_conn<C>(
-    db: &C,
-    full_ref_name: &str,
-    target: &str,
-    force: bool,
-) -> Result<TagImportOutcome, DbErr>
-where
-    C: ConnectionTrait,
-{
-    let existing = reference::Entity::find()
-        .filter(reference::Column::Name.eq(full_ref_name))
-        .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
-        .one(db)
-        .await?;
-
-    match existing {
-        Some(model) => {
-            if !force {
-                return Ok(TagImportOutcome::Preserved);
-            }
-            let previous = model.commit.clone();
-            let mut active: reference::ActiveModel = model.into();
-            active.commit = Set(Some(target.to_owned()));
-            active.update(db).await?;
-            Ok(TagImportOutcome::Updated { previous })
-        }
-        None => {
-            reference::ActiveModel {
-                name: Set(Some(full_ref_name.to_owned())),
-                kind: Set(reference::ConfigKind::Tag),
-                commit: Set(Some(target.to_owned())),
-                remote: Set(None),
-                ..Default::default()
-            }
-            .insert(db)
-            .await?;
-            Ok(TagImportOutcome::Created)
-        }
-    }
-}
-
 /// Typed failures from [`list`]. Lets callers distinguish a transient SQLite
 /// read failure (mapped to `IoReadFailed`) from a genuinely corrupt tag row
 /// (`RepoCorrupt`) without parsing the underlying error string.
@@ -342,19 +270,12 @@ pub async fn list() -> Result<Vec<Tag>, ListTagError> {
 /// Deletes a tag reference from the repository.
 pub async fn delete(name: &str) -> Result<(), anyhow::Error> {
     let db_conn = get_db_conn_instance().await;
-    delete_with_conn(&db_conn, name).await
-}
-
-pub async fn delete_with_conn<C>(db_conn: &C, name: &str) -> Result<(), anyhow::Error>
-where
-    C: ConnectionTrait,
-{
     let full_ref_name = format!("{}{}", TAG_REF_PREFIX, name);
 
     let result = reference::Entity::delete_many()
         .filter(reference::Column::Name.eq(full_ref_name))
         .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
-        .exec(db_conn)
+        .exec(&db_conn)
         .await?;
 
     if result.rows_affected == 0 {

@@ -2,20 +2,11 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use libra::{
-    common_utils::{VERSION_CONTROL_BY_TRAILER, parse_commit_msg},
-    utils::{object_ext::TreeExt, output::OutputConfig},
-};
+use libra::utils::{object_ext::TreeExt, output::OutputConfig};
 use serial_test::serial;
 use tempfile::tempdir;
 
 use super::*;
-
-fn assert_commit_user_message(commit: &Commit, expected: &str) {
-    let (message, _) = parse_commit_msg(&commit.message);
-    assert_eq!(message.trim(), expected);
-    assert!(commit.message.contains(VERSION_CONTROL_BY_TRAILER));
-}
 #[tokio::test]
 #[serial]
 /// A commit with no file changes should fail if `allow_empty` is false.
@@ -38,7 +29,6 @@ async fn test_execute_commit_with_empty_index_fail() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     };
     let result = execute_safe(args, &OutputConfig::default()).await;
     assert!(result.is_err());
@@ -80,7 +70,6 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
         force: false,
         dry_run: false,
         ignore_errors: false,
-        ..Default::default()
     })
     .await;
 
@@ -97,7 +86,6 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
             all: false,
             no_verify: false,
             author: None,
-            ..Default::default()
         },
         &OutputConfig::default(),
     )
@@ -182,7 +170,6 @@ async fn test_execute_commit() {
             all: false,
             no_verify: false,
             author: None,
-            ..Default::default()
         };
         commit::execute(args).await;
 
@@ -199,7 +186,7 @@ async fn test_execute_commit() {
             .expect("branch should exist");
         let commit: Commit = load_object(&branch.commit).unwrap();
 
-        assert_commit_user_message(&commit, "init");
+        assert_eq!(commit.message.trim(), "init");
         // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
         let branch = Branch::find_branch_result(&branch_name, None)
             .await
@@ -222,7 +209,6 @@ async fn test_execute_commit() {
             all: false,
             no_verify: false,
             author: None,
-            ..Default::default()
         };
         commit::execute(args).await;
 
@@ -239,7 +225,7 @@ async fn test_execute_commit() {
             .expect("branch should exist");
         let commit: Commit = load_object(&branch.commit).unwrap();
 
-        assert_commit_user_message(&commit, "init commit");
+        assert_eq!(commit.message.trim(), "init commit");
         // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
         let branch = Branch::find_branch_result(&branch_name, None)
             .await
@@ -263,7 +249,6 @@ async fn test_execute_commit() {
             ignore_errors: false,
             refresh: false,
             force: false,
-            ..Default::default()
         };
         add::execute(args).await;
     }
@@ -281,17 +266,21 @@ async fn test_execute_commit() {
             all: false,
             no_verify: false,
             author: None,
-            ..Default::default()
         };
         commit::execute(args).await;
 
         let commit_id = Head::current_commit().await.unwrap();
         let commit: Commit = load_object(&commit_id).unwrap();
-        assert_commit_user_message(&commit, "add some files");
+        assert_eq!(
+            commit.message.trim(),
+            "add some files",
+            "{}",
+            commit.message
+        );
 
         let pre_commit_id = commit.parent_commit_ids[0];
         let pre_commit: Commit = load_object(&pre_commit_id).unwrap();
-        assert_commit_user_message(&pre_commit, "init commit");
+        assert_eq!(pre_commit.message.trim(), "init commit");
 
         let tree_id = commit.tree_id;
         let tree: Tree = load_object(&tree_id).unwrap();
@@ -311,17 +300,21 @@ async fn test_execute_commit() {
             all: false,
             no_verify: false,
             author: None,
-            ..Default::default()
         };
         commit::execute(args).await;
 
         let commit_id = Head::current_commit().await.unwrap();
         let commit: Commit = load_object(&commit_id).unwrap();
-        assert_commit_user_message(&commit, "add some txt files");
+        assert_eq!(
+            commit.message.trim(),
+            "add some txt files",
+            "{}",
+            commit.message
+        );
 
         let pre_commit_id = commit.parent_commit_ids[0];
         let pre_commit: Commit = load_object(&pre_commit_id).unwrap();
-        assert_commit_user_message(&pre_commit, "init commit");
+        assert_eq!(pre_commit.message.trim(), "init commit");
 
         let tree_id = commit.tree_id;
         let tree: Tree = load_object(&tree_id).unwrap();
@@ -346,7 +339,6 @@ async fn test_commit_with_all_flag_stages_tracked_changes() {
         force: false,
         dry_run: false,
         ignore_errors: false,
-        ..Default::default()
     })
     .await;
 
@@ -362,7 +354,6 @@ async fn test_commit_with_all_flag_stages_tracked_changes() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -381,13 +372,12 @@ async fn test_commit_with_all_flag_stages_tracked_changes() {
         all: true,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
     let head_id = Head::current_commit().await.unwrap();
     let commit: Commit = load_object(&head_id).unwrap();
-    assert_commit_user_message(&commit, "with -a");
+    assert_eq!(commit.message.trim(), "with -a");
     let tree: Tree = load_object(&commit.tree_id).unwrap();
     let entries = tree.get_plain_items();
     let tracked_blob_hash = calc_file_blob_hash("tracked.txt").unwrap();
@@ -421,7 +411,6 @@ async fn test_commit_with_all_flag_records_deletions() {
         force: false,
         dry_run: false,
         ignore_errors: false,
-        ..Default::default()
     })
     .await;
 
@@ -437,7 +426,6 @@ async fn test_commit_with_all_flag_records_deletions() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -456,13 +444,12 @@ async fn test_commit_with_all_flag_records_deletions() {
         all: true,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
     let head_id = Head::current_commit().await.unwrap();
     let commit: Commit = load_object(&head_id).unwrap();
-    assert_commit_user_message(&commit, "remove tracked");
+    assert_eq!(commit.message.trim(), "remove tracked");
     let tree: Tree = load_object(&commit.tree_id).unwrap();
     let entries = tree.get_plain_items();
     assert!(
@@ -521,7 +508,6 @@ async fn test_commit_sha256() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
-        ..Default::default()
     })
     .await;
 
@@ -538,7 +524,6 @@ async fn test_commit_sha256() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -563,7 +548,6 @@ async fn test_commit_sha256() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -610,7 +594,6 @@ async fn test_commit_with_custom_author() {
         force: false,
         dry_run: false,
         ignore_errors: false,
-        ..Default::default()
     })
     .await;
 
@@ -627,7 +610,6 @@ async fn test_commit_with_custom_author() {
         all: false,
         no_verify: false,
         author: Some("Custom Author <custom@example.com>".to_string()),
-        ..Default::default()
     })
     .await;
 
@@ -642,7 +624,7 @@ async fn test_commit_with_custom_author() {
     assert_eq!(commit.committer.name, "Default User");
     assert_eq!(commit.committer.email, "default@example.com");
 
-    assert_commit_user_message(&commit, "commit with custom author");
+    assert_eq!(commit.message.trim(), "commit with custom author");
 }
 
 #[tokio::test]
@@ -677,7 +659,6 @@ async fn test_commit_amend_with_custom_author() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -699,7 +680,6 @@ async fn test_commit_amend_with_custom_author() {
         all: false,
         no_verify: false,
         author: Some("Amend Author <amend@example.com>".to_string()),
-        ..Default::default()
     })
     .await;
 
@@ -709,7 +689,7 @@ async fn test_commit_amend_with_custom_author() {
 
     assert_eq!(amended_commit.author.name, "Amend Author");
     assert_eq!(amended_commit.author.email, "amend@example.com");
-    assert_commit_user_message(&amended_commit, "amended with custom author");
+    assert_eq!(amended_commit.message.trim(), "amended with custom author");
 
     // Should be a different commit
     assert_ne!(initial_commit_id, amended_commit_id);
@@ -734,7 +714,6 @@ async fn test_commit_empty_working_tree() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     };
 
     let result = execute_safe(args, &OutputConfig::default()).await;
@@ -761,7 +740,6 @@ async fn test_commit_with_actual_changes() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     };
     commit::execute(init_args).await;
 
@@ -777,7 +755,6 @@ async fn test_commit_with_actual_changes() {
         force: false,
         dry_run: false,
         ignore_errors: false,
-        ..Default::default()
     };
     add::execute(add_args).await;
 
@@ -793,7 +770,6 @@ async fn test_commit_with_actual_changes() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     };
 
     commit::execute(args).await;
@@ -819,7 +795,6 @@ async fn test_commit_amend_without_changes() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     };
     commit::execute(init_args).await;
 
@@ -836,7 +811,6 @@ async fn test_commit_amend_without_changes() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     };
 
     // This should succeed even without staged changes
@@ -860,7 +834,6 @@ async fn test_commit_signoff_persists_trailer() {
         force: false,
         dry_run: false,
         ignore_errors: false,
-        ..Default::default()
     })
     .await;
 
@@ -876,7 +849,6 @@ async fn test_commit_signoff_persists_trailer() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -888,48 +860,6 @@ async fn test_commit_signoff_persists_trailer() {
             .message
             .contains("Signed-off-by: Libra Test User <libra-test@example.com>"),
         "signoff trailer missing from commit message: {}",
-        commit.message
-    );
-}
-
-#[tokio::test]
-#[serial]
-async fn test_commit_appends_version_control_by_trailer() {
-    let temp_path = tempdir().unwrap();
-    test::setup_with_new_libra_in(temp_path.path()).await;
-    let _guard = ChangeDirGuard::new(temp_path.path());
-
-    commit::execute(CommitArgs {
-        message: Some("docs: note trailer".to_string()),
-        file: None,
-        allow_empty: true,
-        conventional: false,
-        no_edit: false,
-        amend: false,
-        signoff: true,
-        disable_pre: true,
-        all: false,
-        no_verify: false,
-        author: None,
-        ..Default::default()
-    })
-    .await;
-
-    let head_id = Head::current_commit().await.unwrap();
-    let commit: Commit = load_object(&head_id).unwrap();
-    assert!(
-        commit
-            .message
-            .contains("Version-control-by: Libra <https://libra.tools>"),
-        "version-control trailer missing from commit message: {}",
-        commit.message
-    );
-    assert!(
-        commit
-            .message
-            .trim_end()
-            .ends_with("Version-control-by: Libra <https://libra.tools>"),
-        "version-control trailer must be the last line: {}",
         commit.message
     );
 }
@@ -953,7 +883,6 @@ async fn test_commit_amend_signoff_persists_trailer() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -969,7 +898,6 @@ async fn test_commit_amend_signoff_persists_trailer() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     })
     .await;
 
@@ -1010,7 +938,6 @@ async fn test_commit_amend_without_existing_commit_returns_repo_state_error() {
             all: false,
             no_verify: false,
             author: None,
-            ..Default::default()
         },
         &OutputConfig::default(),
     )
@@ -1067,7 +994,6 @@ async fn test_commit_without_identity_fails_by_default() {
         force: false,
         dry_run: false,
         ignore_errors: false,
-        ..Default::default()
     })
     .await;
 
@@ -1084,7 +1010,6 @@ async fn test_commit_without_identity_fails_by_default() {
             all: false,
             no_verify: false,
             author: None,
-            ..Default::default()
         },
         &OutputConfig::default(),
     )
@@ -1137,30 +1062,4 @@ fn test_commit_help_lists_examples_banner() {
             "commit --help should include `{invocation}`, stdout: {stdout}"
         );
     }
-}
-
-#[test]
-/// Phase 1 rejection: commit --allow-empty-message is not supported.
-fn test_commit_allow_empty_message_rejected() {
-    let repo = create_committed_repo_via_cli();
-    let p = repo.path();
-
-    // Stage a change
-    std::fs::write(p.join("file.txt"), "content\n").unwrap();
-    run_libra_command(&["add", "file.txt"], p);
-
-    // Attempt to commit with --allow-empty-message (should be rejected)
-    let output = run_libra_command(&["commit", "--allow-empty-message", "-m", "test"], p);
-
-    // Verify the command fails
-    assert!(
-        !output.status.success(),
-        "commit --allow-empty-message should fail"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("not supported") || stderr.contains("declined"),
-        "error message should mention unsupported/declined: {}",
-        stderr
-    );
 }

@@ -30,7 +30,6 @@ async fn setup_repo_with_commit(temp: &tempfile::TempDir) -> ChangeDirGuard {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
-        ..Default::default()
     })
     .await;
 
@@ -465,32 +464,4 @@ fn test_show_ref_help_lists_examples_banner() {
             "show-ref --help should include `{invocation}`, stdout: {stdout}"
         );
     }
-}
-
-#[test]
-fn test_show_ref_exists_present_is_silent_exit_0() {
-    let repo = create_committed_repo_via_cli();
-    let out = run_libra_command(&["show-ref", "--exists", "refs/heads/main"], repo.path());
-    assert_eq!(out.status.code(), Some(0), "existing ref exits 0");
-    assert!(out.stdout.is_empty(), "--exists prints nothing on success");
-}
-
-#[test]
-fn test_show_ref_exists_head_present() {
-    let repo = create_committed_repo_via_cli();
-    let out = run_libra_command(&["show-ref", "--exists", "HEAD"], repo.path());
-    assert_eq!(out.status.code(), Some(0), "HEAD exists");
-}
-
-#[test]
-fn test_show_ref_exists_missing_exit_2() {
-    let repo = create_committed_repo_via_cli();
-    let out = run_libra_command(&["show-ref", "--exists", "refs/heads/nope"], repo.path());
-    assert_eq!(out.status.code(), Some(2), "missing ref exits 2");
-    assert!(out.stdout.is_empty(), "--exists prints nothing to stdout");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("reference does not exist"),
-        "unexpected stderr: {stderr}"
-    );
 }

@@ -31,7 +31,6 @@ const TARGET_FILES: &[(&str, &str)] = &[
     ("src/git_protocol.rs", "v0.17.242"),
     ("src/lfs_structs.rs", "v0.17.242"),
     ("src/command/reflog.rs", "v0.17.251"),
-    ("src/internal/reflog.rs", "v0.17.1391"),
 ];
 
 #[test]

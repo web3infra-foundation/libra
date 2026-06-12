@@ -1,7 +1,5 @@
 //! Built-in TUI commands that are intercepted before reaching the AI model.
 //!
-//! 在到达 AI 模型之前被拦截的内置 TUI 命令。
-//!
 //! These are distinct from the YAML-defined slash commands in `ai::commands`,
 //! which expand into prompts sent to the model. Built-in commands perform
 //! direct TUI actions (clear history, quit, show info, etc.) and never touch
@@ -59,11 +57,6 @@ pub enum BuiltinCommand {
     /// `/agents` — show declarative `[code.agents.<name>]` table from
     /// `agents.toml` (OC-Phase 5 P5.4).
     Agents,
-    /// `/agent` — control a single sub-agent run (`list` / `cancel <id>`).
-    /// The subcommand parser lives in
-    /// [`super::agent_command::parse_agent_subcommand`]; `/agent cancel
-    /// <id>` cancels one run without ending the main session (CEX-S2-16).
-    Agent,
     /// `/budget` — show running session/per-agent/goal budget totals
     /// against the configured `[code.budget]` thresholds (OC-Phase 5
     /// P5.4).
@@ -104,7 +97,6 @@ impl BuiltinCommand {
             Self::Undo => "undo",
             Self::Task => "task",
             Self::Agents => "agents",
-            Self::Agent => "agent",
             Self::Budget => "budget",
             Self::Goal => "goal",
             Self::Quit => "quit",
@@ -136,7 +128,6 @@ impl BuiltinCommand {
             Self::Undo => "Undo latest AI file edit batch",
             Self::Task => "Dispatch a sub-agent explicitly",
             Self::Agents => "Show declarative agents.toml table",
-            Self::Agent => "Control a sub-agent run: list or cancel <id>",
             Self::Budget => "Show running budget totals vs configured caps",
             Self::Goal => "Goal mode controls: start/status/cancel/criteria",
             Self::Quit => "Quit the application",
@@ -169,7 +160,6 @@ impl BuiltinCommand {
             Self::Undo,
             Self::Task,
             Self::Agents,
-            Self::Agent,
             Self::Budget,
             Self::Goal,
             Self::Quit,
@@ -292,16 +282,6 @@ mod tests {
             Some((BuiltinCommand::Task, "explorer grep TODO src/"))
         );
         assert_eq!(parse_builtin("/agents"), Some((BuiltinCommand::Agents, "")));
-        // `/agent` (singular) is a distinct command from `/agents` (plural);
-        // exact-name matching keeps them apart and threads the argument tail.
-        assert_eq!(
-            parse_builtin("/agent list"),
-            Some((BuiltinCommand::Agent, "list"))
-        );
-        assert_eq!(
-            parse_builtin("/agent cancel run-7"),
-            Some((BuiltinCommand::Agent, "cancel run-7"))
-        );
         assert_eq!(parse_builtin("/budget"), Some((BuiltinCommand::Budget, "")));
         assert_eq!(
             parse_builtin("/goal start ship feature X"),
@@ -378,16 +358,11 @@ mod tests {
                 BuiltinCommand::Undo,
                 BuiltinCommand::Task,
                 BuiltinCommand::Agents,
-                BuiltinCommand::Agent,
                 BuiltinCommand::Budget,
                 BuiltinCommand::Goal,
                 BuiltinCommand::Quit,
             ]
         );
-
-        // `/agent` (singular, CEX-S2-16) is distinct from `/agents`.
-        assert_eq!(BuiltinCommand::Agent.name(), "agent");
-        assert!(BuiltinCommand::Agent.description().contains("cancel"));
     }
 
     /// Scenario: the autocomplete popup must list every built-in command. This
@@ -396,7 +371,7 @@ mod tests {
     #[test]
     fn all_hints_returns_all() {
         let hints = BuiltinCommand::all_hints();
-        assert_eq!(hints.len(), 22);
+        assert_eq!(hints.len(), 21);
         assert!(hints.iter().any(|(n, _)| n == "help"));
         assert!(hints.iter().any(|(n, _)| n == "chat"));
         assert!(hints.iter().any(|(n, _)| n == "run"));

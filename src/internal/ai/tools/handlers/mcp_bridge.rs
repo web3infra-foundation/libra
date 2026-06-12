@@ -13,7 +13,7 @@ use async_trait::async_trait;
 
 use crate::internal::ai::{
     mcp::server::LibraMcpServer,
-    sources::{McpSource, Source, SourceCallLog, SourceThrottle, SourceToolHandler},
+    sources::{McpSource, Source, SourceCallLog, SourceToolHandler},
     tools::{
         context::{ToolInvocation, ToolKind, ToolOutput},
         error::ToolResult,
@@ -38,9 +38,6 @@ impl McpBridgeHandler {
             tool_name,
             tool_name,
             SourceCallLog::new(),
-            // The legacy bridge is not pool-managed; per-slug throttling is a
-            // Source Pool concern, so this delegate is unthrottled.
-            SourceThrottle::default(),
         )
         .map_err(|error| error.to_string())?;
         Ok(Self { delegate })

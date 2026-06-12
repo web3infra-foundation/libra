@@ -1,6 +1,4 @@
-//! Cross-phase revision-chain helpers.
-//!
-//! 跨阶段修订链助手。
+//! Cross-phase revision-chain helper (schema-only landing).
 //!
 //! Phase 0 (Intent), Phase 1 (Plan) and Phase 2 (Execution) all participate
 //! in **revision chains**: every modification produces a new immutable
@@ -8,9 +6,10 @@
 //! stays append-only and downstream verifiers / observers can reconstruct
 //! the decision path.
 //!
-//! This module hosts the shared helpers for that chain so the coordinator
-//! rules sit beside the data types instead of being scattered across
-//! `orchestrator/`, `intentspec/` and `runtime/phase{0,1,2}.rs`.
+//! This module hosts the shared helpers for that chain — currently
+//! schema-only — so the eventual implementations can sit beside the data
+//! types instead of being scattered across `orchestrator/`, `intentspec/`
+//! and `runtime/phase{0,1,2}.rs`.
 //!
 //! # Schema vs. wiring
 //!
@@ -25,8 +24,8 @@
 //!   `create_plan_set_revision`, threading `parent_execution_plan_id` /
 //!   `parent_test_plan_id` to keep the chain explicit.
 //!
-//! The shared helpers capture the rules below (per
-//! [`docs/improvement/agent.md`](../../../../../docs/improvement/agent.md)
+//! What's missing is a **shared** helper that captures the rules below
+//! (per [`docs/improvement/agent.md`](../../../../../docs/improvement/agent.md)
 //! Part B revision chain section):
 //!
 //! 1. `Modify Plan` requests must not edit `Plan` / `Task` in place; they
@@ -38,14 +37,8 @@
 //!    that the (n)-th execution-plan revision pairs with the (n)-th
 //!    test-plan revision, never (n−1) or (n+1).
 //!
-//! `handle_modify_request()` is the fail-closed entry point for user-driven
-//! modifications. `derive_next_revision_skeleton()` is also fallible, so an
-//! exhausted revision counter never yields a persistable skeleton with an
-//! ambiguous ordinal.
-//!
-//! These coordinator helpers are crate-internal while the formal-write call
-//! sites are still being cut over; embedders should not depend on their
-//! signatures as part of Libra's public API.
+//! Once these rules graduate from prose to code (`handle_modify_request()`
+//! + `derive_next_revision_skeleton()`), they will land in this module.
 
 use uuid::Uuid;
 
@@ -84,9 +77,10 @@ impl RevisionKind {
 /// test-plan revision per the cross-phase rule.
 ///
 /// **Stability contract:** field names are part of the public Runtime
-/// surface; downstream observers key off `previous_id` / `revision`. New
-/// fields may be added as `Option<...>`; existing fields cannot be renamed
-/// or removed without a parallel deprecation.
+/// surface; once `handle_modify_request()` ships, downstream observers will
+/// key off `previous_id` / `revision`. New fields may be added as
+/// `Option<...>`; existing fields cannot be renamed or removed without a
+/// parallel deprecation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RevisionChainEntry {
     pub kind: RevisionKind,
@@ -105,8 +99,9 @@ impl RevisionChainEntry {
     }
 
     /// `true` when this entry is a continuation (rev > 1) of an existing
-    /// chain. Coordinator helpers branch on this to either create the first
-    /// revision or derive a skeleton from the `previous_id` link.
+    /// chain. Helpers like `handle_modify_request` will branch on this to
+    /// either create the first revision or derive a skeleton from the
+    /// `previous_id` link.
     pub fn is_continuation(&self) -> bool {
         self.revision > 1 && self.previous_id.is_some()
     }
@@ -149,8 +144,8 @@ impl RevisionChainEntry {
 /// User-facing payload for a "modify the current revision" request.
 ///
 /// `kind` and `logical_id` identify which chain entry the modify is
-/// against; coordinator validation requires both fields to match the chain's
-/// existing identity. `reason` is a free-form
+/// against (they must match the chain's existing identity — see
+/// [`handle_modify_request`] for the rule). `reason` is a free-form
 /// human-readable string that gets audited alongside the resulting
 /// formal-write event so downstream review can reconstruct *why* the
 /// modify was requested.
@@ -164,7 +159,7 @@ impl RevisionChainEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModifyRequest {
     /// Which chain this modify targets — must match the input
-    /// [`RevisionChainEntry::kind`] passed to the modify coordinator.
+    /// [`RevisionChainEntry::kind`] passed to [`handle_modify_request`].
     pub kind: RevisionKind,
     /// Stable logical entity id of the chain — must match the input
     /// [`RevisionChainEntry::logical_id`].
@@ -175,8 +170,8 @@ pub struct ModifyRequest {
     pub reason: String,
 }
 
-/// Validation errors that prevent a modify request from targeting the
-/// supplied chain.
+/// Errors that prevent [`handle_modify_request`] from producing a valid
+/// next-revision skeleton.
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ModifyRequestError {
     /// The request's `kind` doesn't match the chain's `kind`. Chains
@@ -201,47 +196,6 @@ pub enum ModifyRequestError {
     },
 }
 
-/// Errors that prevent deriving a valid next-revision skeleton.
-///
-/// Kept separate from [`ModifyRequestError`] so the existing validation enum
-/// remains exhaustive for embedders that match on its two request-validation
-/// variants.
-#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
-#[non_exhaustive]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "staged runtime revision helper is covered by unit tests before production call-site cutover"
-    )
-)]
-pub(crate) enum RevisionDeriveError {
-    /// The next 1-based revision ordinal would overflow `u32`. A wrapped
-    /// counter would make the formal history ambiguous, so callers must
-    /// fail closed instead of deriving a malformed skeleton.
-    #[error("revision counter overflow after revision {previous_revision}")]
-    RevisionOverflow { previous_revision: u32 },
-}
-
-/// Errors from the user-driven modify coordinator.
-#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
-#[non_exhaustive]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "staged runtime revision helper is covered by unit tests before production call-site cutover"
-    )
-)]
-pub(crate) enum HandleModifyRequestError {
-    /// The request envelope does not target the supplied chain.
-    #[error(transparent)]
-    Validation(#[from] ModifyRequestError),
-    /// A matching request could not derive the next chain skeleton.
-    #[error(transparent)]
-    Derive(#[from] RevisionDeriveError),
-}
-
 /// Coordinator for the modify path of a revision chain.
 ///
 /// Validates that the `request` actually targets the supplied `previous`
@@ -255,46 +209,38 @@ pub(crate) enum HandleModifyRequestError {
 ///
 /// # Errors
 ///
-/// Returns [`HandleModifyRequestError::Validation`] if the request targets a
-/// different chain than `previous` describes. Returns
-/// [`HandleModifyRequestError::Derive`] if the next revision skeleton cannot
-/// be derived, including revision-counter overflow. Both paths fail closed:
-/// cross-chain id leakage and ambiguous revision ordinals are never converted
-/// into persistable skeletons.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "staged runtime revision helper is covered by unit tests before production call-site cutover"
-    )
-)]
-pub(crate) fn handle_modify_request(
+/// Returns [`ModifyRequestError::KindMismatch`] or
+/// [`ModifyRequestError::LogicalIdMismatch`] if the request targets a
+/// different chain than `previous` describes — these are caller bugs and
+/// the function fails-closed to prevent cross-chain id leakage.
+pub fn handle_modify_request(
     previous: &RevisionChainEntry,
     previous_persisted_id: String,
     request: &ModifyRequest,
-) -> Result<RevisionChainEntry, HandleModifyRequestError> {
+) -> Result<RevisionChainEntry, ModifyRequestError> {
     if request.kind != previous.kind {
         return Err(ModifyRequestError::KindMismatch {
             request_kind: request.kind,
             chain_kind: previous.kind,
-        }
-        .into());
+        });
     }
     if request.logical_id != previous.logical_id {
         return Err(ModifyRequestError::LogicalIdMismatch {
             request_logical_id: request.logical_id,
             chain_logical_id: previous.logical_id,
-        }
-        .into());
+        });
     }
-    derive_next_revision_skeleton(previous, previous_persisted_id).map_err(Into::into)
+    Ok(derive_next_revision_skeleton(
+        previous,
+        previous_persisted_id,
+    ))
 }
 
 /// Derive the metadata for the **next** revision in a chain, given the
 /// previous link's own persisted id.
 ///
-/// This is the pure half of [`handle_modify_request`]: it answers the
-/// question "if I just persisted revision N as
+/// This is the pure half of [`handle_modify_request`] (still TBD): it
+/// answers the question "if I just persisted revision N as
 /// `previous_persisted_id`, what should the metadata for revision N+1
 /// look like?" without touching the actual persistence layer. The
 /// resulting skeleton:
@@ -303,8 +249,8 @@ pub(crate) fn handle_modify_request(
 ///   stable),
 /// - points `previous_id` at the just-persisted id (so the chain stays
 ///   linked),
-/// - sets `revision = previous.revision + 1`, failing closed before
-///   producing any skeleton if the counter would overflow.
+/// - sets `revision = previous.revision + 1` (1-based ordinal, see the
+///   [`RevisionChainEntry`] docs).
 ///
 /// Callers that need the **persisted** version of the next revision can
 /// pass the skeleton into the appropriate Phase 0 / Phase 1 formal-write
@@ -319,38 +265,16 @@ pub(crate) fn handle_modify_request(
 /// that id explicitly keeps this function pure and side-effect free, and
 /// makes the rule "the formal-write helper owns assignment of persisted
 /// ids" explicit at the type system level.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "staged runtime revision helper is covered by unit tests before production call-site cutover"
-    )
-)]
-pub(crate) fn derive_next_revision_skeleton(
+pub fn derive_next_revision_skeleton(
     previous: &RevisionChainEntry,
     previous_persisted_id: String,
-) -> Result<RevisionChainEntry, RevisionDeriveError> {
-    let revision =
-        next_revision(previous.revision).ok_or(RevisionDeriveError::RevisionOverflow {
-            previous_revision: previous.revision,
-        })?;
-    Ok(RevisionChainEntry {
+) -> RevisionChainEntry {
+    RevisionChainEntry {
         kind: previous.kind,
         previous_id: Some(previous_persisted_id),
-        revision,
+        revision: previous.revision + 1,
         logical_id: previous.logical_id,
-    })
-}
-
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "staged runtime revision helper is covered by unit tests before production call-site cutover"
-    )
-)]
-fn next_revision(previous_revision: u32) -> Option<u32> {
-    previous_revision.checked_add(1)
+    }
 }
 
 /// Errors that prevent [`validate_paired_plan_revisions`] from succeeding.
@@ -361,14 +285,7 @@ fn next_revision(previous_revision: u32) -> Option<u32> {
 /// the three failure shapes so callers can surface a precise error message
 /// rather than a generic "not paired".
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "staged runtime revision helper is covered by unit tests before production call-site cutover"
-    )
-)]
-pub(crate) enum PairingError {
+pub enum PairingError {
     /// The supposed-execution-plan argument actually carries a different
     /// `kind`. Caught first because the rest of the checks assume the
     /// argument really is an execution plan.
@@ -411,14 +328,7 @@ pub(crate) enum PairingError {
 /// checked first, then test-plan kind, then revision parity. Callers that
 /// pass two malformed inputs will see the execution-side error first; this
 /// is deterministic so audit logs stay stable.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "staged runtime revision helper is covered by unit tests before production call-site cutover"
-    )
-)]
-pub(crate) fn validate_paired_plan_revisions(
+pub fn validate_paired_plan_revisions(
     execution: &RevisionChainEntry,
     test: &RevisionChainEntry,
 ) -> Result<(), PairingError> {
@@ -519,8 +429,7 @@ mod tests {
             logical_id,
         };
 
-        let next = derive_next_revision_skeleton(&previous, "plan-rev-2".to_string())
-            .expect("valid revision should derive next skeleton");
+        let next = derive_next_revision_skeleton(&previous, "plan-rev-2".to_string());
 
         assert_eq!(next.kind, RevisionKind::ExecutionPlan);
         assert_eq!(next.logical_id, logical_id);
@@ -545,8 +454,7 @@ mod tests {
             logical_id,
         };
 
-        let next = derive_next_revision_skeleton(&head, "intent-rev-1".to_string())
-            .expect("first link should derive continuation skeleton");
+        let next = derive_next_revision_skeleton(&head, "intent-rev-1".to_string());
 
         assert_eq!(next.revision, 2);
         assert_eq!(next.previous_id.as_deref(), Some("intent-rev-1"));
@@ -555,42 +463,6 @@ mod tests {
         assert!(head.is_first());
         // The new skeleton is a continuation.
         assert!(next.is_continuation());
-    }
-
-    /// The derivation helper must reject `u32::MAX` instead of wrapping to
-    /// 0 or returning a second persistable skeleton at the same ordinal.
-    #[test]
-    fn derive_next_revision_skeleton_rejects_revision_overflow() {
-        let previous = RevisionChainEntry {
-            kind: RevisionKind::ExecutionPlan,
-            previous_id: Some("plan-rev-prev".to_string()),
-            revision: u32::MAX,
-            logical_id: Uuid::new_v4(),
-        };
-
-        let error = derive_next_revision_skeleton(&previous, "plan-rev-max".to_string())
-            .expect_err("fallible helper must reject exhausted revision counters");
-
-        assert_eq!(
-            error,
-            RevisionDeriveError::RevisionOverflow {
-                previous_revision: u32::MAX,
-            }
-        );
-    }
-
-    /// Display text is user-facing through coordinator errors; pin it so
-    /// overflow remains actionable instead of becoming a generic failure.
-    #[test]
-    fn revision_derive_error_display_is_stable() {
-        let error = RevisionDeriveError::RevisionOverflow {
-            previous_revision: u32::MAX,
-        };
-
-        assert_eq!(
-            error.to_string(),
-            "revision counter overflow after revision 4294967295"
-        );
     }
 
     /// Happy path: request targets the matching chain → returns Ok with
@@ -643,61 +515,10 @@ mod tests {
             .expect_err("kind mismatch must fail-closed");
         assert_eq!(
             error,
-            HandleModifyRequestError::Validation(ModifyRequestError::KindMismatch {
+            ModifyRequestError::KindMismatch {
                 request_kind: RevisionKind::TestPlan,
                 chain_kind: RevisionKind::ExecutionPlan,
-            })
-        );
-    }
-
-    /// `handle_modify_request` is the crate-internal coordinator path for user
-    /// modifications, so it must use the fail-closed derivation helper
-    /// and reject overflow before returning a skeleton.
-    #[test]
-    fn handle_modify_request_rejects_revision_overflow() {
-        let logical_id = Uuid::new_v4();
-        let previous = RevisionChainEntry {
-            kind: RevisionKind::ExecutionPlan,
-            previous_id: Some("plan-rev-prev".to_string()),
-            revision: u32::MAX,
-            logical_id,
-        };
-        let request = ModifyRequest {
-            kind: RevisionKind::ExecutionPlan,
-            logical_id,
-            reason: "modify at revision limit".to_string(),
-        };
-
-        let error = handle_modify_request(&previous, "plan-rev-max".to_string(), &request)
-            .expect_err("modify coordinator must reject revision overflow");
-
-        assert_eq!(
-            error,
-            HandleModifyRequestError::Derive(RevisionDeriveError::RevisionOverflow {
-                previous_revision: u32::MAX,
-            })
-        );
-    }
-
-    /// The coordinator wrapper is transparent when rendered, preserving the
-    /// actionable validation and derivation messages for CLI callers.
-    #[test]
-    fn handle_modify_request_error_display_is_transparent() {
-        let validation = HandleModifyRequestError::from(ModifyRequestError::KindMismatch {
-            request_kind: RevisionKind::TestPlan,
-            chain_kind: RevisionKind::ExecutionPlan,
-        });
-        assert_eq!(
-            validation.to_string(),
-            "modify request kind mismatch: request says TestPlan but chain is ExecutionPlan",
-        );
-
-        let derive = HandleModifyRequestError::from(RevisionDeriveError::RevisionOverflow {
-            previous_revision: u32::MAX,
-        });
-        assert_eq!(
-            derive.to_string(),
-            "revision counter overflow after revision 4294967295",
+            }
         );
     }
 
@@ -958,10 +779,10 @@ mod tests {
             .expect_err("logical_id mismatch must fail-closed");
         assert_eq!(
             error,
-            HandleModifyRequestError::Validation(ModifyRequestError::LogicalIdMismatch {
+            ModifyRequestError::LogicalIdMismatch {
                 request_logical_id: stranger_logical_id,
                 chain_logical_id,
-            })
+            }
         );
     }
 }

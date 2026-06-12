@@ -9,14 +9,10 @@ Create, delete, rename, inspect, or list branches.
 ```
 libra branch [<new_branch>] [<commit_hash>]
 libra branch -l [-r | -a] [--contains <commit>] [--no-contains <commit>]
-libra branch -l [--merged [<commit>] | --no-merged [<commit>]] [--points-at <object>] [--ignore-case]
 libra branch -d <name>
 libra branch -D <name>
 libra branch -m [<old>] <new>
-libra branch (-c | -C) [<old>] <new>
 libra branch -u <upstream>
-libra branch --unset-upstream [<branch>]
-libra branch --edit-description [<branch>]
 libra branch --show-current
 ```
 
@@ -38,26 +34,12 @@ The `--contains` and `--no-contains` filters (aliased as `--with` and `--without
 | `-D` | `--delete-force` | `<name>` | Force-delete a branch, even if not fully merged |
 | `-d` | `--delete` | `<name>` | Safe-delete a branch (must be fully merged) |
 | `-u` | `--set-upstream-to` | `<upstream>` | Set upstream tracking for the current branch |
-| | `--unset-upstream` | `[branch]` | Remove upstream tracking (the current branch when no name is given) |
-| | `--edit-description` | `[branch]` | Edit a branch's description in `$EDITOR`/`core.editor` (the current branch when no name is given) |
 | | `--show-current` | | Print the current branch name or detached HEAD state |
 | `-m` | `--move` | `<old> <new>` or `<new>` | Rename a branch; with one argument renames the current branch |
-| `-c` | `--copy` | `<old> <new>` or `<new>` | Copy a branch (and its tracking/description config); with one argument copies the current branch |
-| `-C` | | `<old> <new>` or `<new>` | Copy a branch, overwriting the destination if it exists (force copy) |
-| `-f` | `--force` | | Allow create/copy to overwrite an existing branch by resetting its tip (locked branches still refused; ignored by other actions) |
-| | `--create-reflog` | | Accepted for Git compatibility; has no effect (Libra `branch` does not maintain per-branch reflogs) |
-| | `--track[=<mode>]` | | **Declined** (exit 129): Libra keeps creation and tracking separate. Use `libra switch --track` or `libra branch -u <remote>/<branch>` |
-| | `--no-track` | | **Declined** (exit 129): see `--track` |
-| | `--sort` | `<key>` | Accepted but ignored (list prints in default order); use `--json` for structured output |
-| | `--format` | `<format>` | Accepted but ignored (list prints in default format); use `--json` |
 | `-r` | `--remotes` | | Show remote-tracking branches only |
 | `-a` | `--all` | | Show local and remote-tracking branches |
 | | `--contains` | `[commit]` (default HEAD) | Only list branches containing the commit. Alias: `--with` |
 | | `--no-contains` | `[commit]` (default HEAD) | Only list branches not containing the commit. Alias: `--without` |
-| | `--merged` | `[commit]` (default HEAD) | Only list branches whose tip is merged into the commit. Mutually exclusive with `--no-merged` |
-| | `--no-merged` | `[commit]` (default HEAD) | Only list branches whose tip is not merged into the commit |
-| | `--points-at` | `<object>` | Only list branches whose tip points exactly at the object |
-| | `--ignore-case` | | Sort branch names case-insensitively in list output |
 
 ### Flag examples
 
@@ -81,18 +63,6 @@ libra branch --contains v2.0
 # List branches that do NOT contain HEAD
 libra branch --no-contains
 
-# List branches already merged into HEAD (safe to delete)
-libra branch --merged
-
-# List branches not yet merged into main
-libra branch --no-merged main
-
-# List branches whose tip is exactly at HEAD
-libra branch --points-at HEAD
-
-# List branches sorted case-insensitively
-libra branch --ignore-case
-
 # Safe-delete a merged branch
 libra branch -d topic
 
@@ -105,29 +75,8 @@ libra branch -m new-name
 # Rename any branch
 libra branch -m old-name new-name
 
-# Copy a branch (duplicates its tracking/description config)
-libra branch -c old-name new-name
-
-# Force-copy, overwriting an existing destination
-libra branch -C old-name existing-name
-
-# Force-create / force-copy by resetting an existing branch's tip
-libra branch -f new-name base-ref
-
 # Set upstream tracking
 libra branch -u origin/main
-
-# Remove upstream tracking (current branch)
-libra branch --unset-upstream
-
-# Remove upstream tracking for a named branch
-libra branch --unset-upstream feature
-
-# Edit the current branch's description in your editor
-libra branch --edit-description
-
-# Edit a named branch's description
-libra branch --edit-description feature
 
 # Show current branch name
 libra branch --show-current
@@ -143,12 +92,6 @@ libra branch feature-x                  # Create a branch from HEAD
 libra branch feature-x main             # Create a branch from another branch
 libra branch -d topic                   # Delete a fully merged branch
 libra branch -D topic                   # Force-delete a branch
-libra branch -c old new                 # Copy a branch with its config
-libra branch -C old existing            # Force-copy, overwriting the destination
-libra branch --merged                   # List branches merged into HEAD
-libra branch --no-merged main           # List branches not yet merged into main
-libra branch --points-at HEAD           # List branches whose tip is at HEAD
-libra branch --unset-upstream           # Remove tracking for the current branch
 libra branch --set-upstream-to origin/main
                                         # Set upstream for the current branch
 libra branch --json --show-current      # Structured JSON output for agents
@@ -156,11 +99,9 @@ libra branch --json --show-current      # Structured JSON output for agents
 
 ## Human Output
 
-- List: prints the branch list with `*` marking the current branch. Branches with upstream tracking show a `[<remote>/<branch>]` suffix (e.g. `* main [origin/main]`).
+- List: prints the branch list with `*` marking the current branch
 - Safe delete: `Deleted branch feature (was abc123...)`
 - Rename: `Renamed branch 'old' to 'new'`
-- `--set-upstream-to`: `Branch 'main' set up to track remote branch 'origin/main'`
-- `--unset-upstream`: `Removed upstream tracking for branch 'main'`, or `Branch 'main' has no upstream tracking to remove` when none was configured
 - `--show-current`: prints the current branch name, or `HEAD detached at <hash>` when detached
 
 ## Structured Output (JSON examples)
@@ -188,64 +129,12 @@ List action:
   "data": {
     "action": "list",
     "branches": [
-      { "name": "main", "current": true, "commit": "abc1234...", "tracking": { "remote": "origin", "merge": "main" } },
+      { "name": "main", "current": true, "commit": "abc1234..." },
       { "name": "feature", "current": false, "commit": "def5678..." }
     ]
   }
 }
 ```
-
-The optional `tracking` object appears only for branches with upstream
-tracking configured; untracked entries omit the key entirely (backward
-compatible).
-
-Unset-upstream action (`had_upstream` is `false` for an idempotent no-op):
-
-```json
-{
-  "ok": true,
-  "command": "branch",
-  "data": {
-    "action": "unset-upstream",
-    "branch": "main",
-    "had_upstream": true
-  }
-}
-```
-
-Copy action (`force` is `true` for `-C`, or `-c` combined with `-f`):
-
-```json
-{
-  "ok": true,
-  "command": "branch",
-  "data": {
-    "action": "copy",
-    "src": "old",
-    "dst": "new",
-    "commit": "abc1234...",
-    "force": false
-  }
-}
-```
-
-Edit-description action (`description` is omitted when the description is cleared):
-
-```json
-{
-  "ok": true,
-  "command": "branch",
-  "data": {
-    "action": "edit-description",
-    "branch": "feature",
-    "description": "the feature branch"
-  }
-}
-```
-
-The editor honors `core.editor` then `$EDITOR`; with no editor configured the
-command fails with `LBR-CLI-002` (exit 129) rather than hanging. A non-zero
-editor exit is treated as a cancel (description unchanged, exit 0).
 
 Show-current action:
 
@@ -268,22 +157,14 @@ Supported actions:
 - `create`: `name`, `commit`
 - `delete`: `name`, `commit`, `force`
 - `rename`: `old_name`, `new_name`
-- `copy`: `src`, `dst`, `commit`, `force`
 - `set-upstream`: `branch`, `upstream`
-- `unset-upstream`: `branch`, `had_upstream`
-- `edit-description`: `branch`, `description` (omitted when cleared)
 - `show-current`: `name`, `detached`, `commit`
-- `list` entries optionally include `tracking`: `{ remote, merge }` and `description`
 
 ## Design Rationale
 
 ### Why no --track/--no-track?
 
-Git's `--track` and `--no-track` flags control whether a new branch automatically sets up an upstream relationship. Libra omits these from `branch` because tracking configuration is handled explicitly through `--set-upstream-to` or at switch time via `libra switch --track`. This separation keeps `branch` focused on ref creation and avoids the confusing implicit behavior where `git branch feature origin/feature` silently configures tracking. When an agent creates a branch, it should know whether tracking was configured -- explicit is better than implicit. The flags are **declined** rather than silently ignored: passing `--track`/`--no-track` exits with `LBR-CLI-002` (exit 129) and a hint pointing at `libra switch --track` / `libra branch -u`.
-
-### Why are --sort/--format accepted but ignored?
-
-Git's `--sort` and `--format` customize how the branch list is ordered and rendered. Libra does not implement a `--format` placeholder language (it overlaps with the structured `--json` output) and does not yet support custom sort keys. Rather than rejecting these flags as unknown -- which would make existing Git scripts fail hard -- Libra accepts them, prints the list in the default order, and emits an informational note to stderr suggesting `--json`. The exit code stays `0`. This contrasts with the hard-declined `--track`/`--no-track`: sort/format are *tolerated but not implemented*, whereas track is an *intentional behavioral difference*.
+Git's `--track` and `--no-track` flags control whether a new branch automatically sets up an upstream relationship. Libra omits these from `branch` because tracking configuration is handled explicitly through `--set-upstream-to` or at switch time via `libra switch --track`. This separation keeps `branch` focused on ref creation and avoids the confusing implicit behavior where `git branch feature origin/feature` silently configures tracking. When an agent creates a branch, it should know whether tracking was configured -- explicit is better than implicit.
 
 ### Why --contains/--no-contains with aliases --with/--without?
 
@@ -315,13 +196,7 @@ The trade-off is that refs are not directly inspectable as plain files. Libra co
 | Remote branches | `git branch -r` | `libra branch -r` | `jj branch list --all` |
 | All branches | `git branch -a` | `libra branch -a` | `jj branch list --all` |
 | Contains filter | `git branch --contains <commit>` | `libra branch --contains <commit>` | `jj log -r 'branches() & ancestors(<rev>)'` |
-| Merged filter | `git branch --merged [<commit>]` | `libra branch --merged [<commit>]` | `jj log -r '::<rev> & branches()'` |
-| Points-at filter | `git branch --points-at <object>` | `libra branch --points-at <object>` | N/A |
-| Copy | `git branch -c/-C <old> <new>` | `libra branch -c/-C <old> <new>` | Not supported |
-| Unset upstream | `git branch --unset-upstream` | `libra branch --unset-upstream` | N/A (no upstream concept) |
-| Edit description | `git branch --edit-description` | `libra branch --edit-description` | N/A |
-| Auto-track | `git branch --track` | Declined, exit 129 (use `switch --track` / `-u`) | N/A |
-| Sort / Format | `git branch --sort/--format` | Accepted but ignored (use `--json`) | `--template` |
+| Auto-track | `git branch --track` | N/A (use `switch --track`) | N/A |
 | Structured output | No | `--json` / `--machine` | `--template` |
 | Fuzzy suggestions | No | Levenshtein-based "did you mean" | No |
 

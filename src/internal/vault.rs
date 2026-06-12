@@ -42,7 +42,6 @@ use crate::utils::util::try_get_storage_path;
 
 const VAULT_DB_NAME: &str = "vault.db";
 const PGP_KEY_NAME: &str = "libra-signing";
-const PGP_ENCRYPT_KEY_NAME: &str = "libra-encrypt";
 const SSH_ROLE_NAME: &str = "libra-ssh";
 const PKI_MOUNT_PATH: &str = "pki";
 
@@ -167,33 +166,6 @@ pub async fn generate_pgp_key(
     user_name: &str,
     user_email: &str,
 ) -> Result<String> {
-    generate_pgp_key_named(root_dir, unseal_key, PGP_KEY_NAME, user_name, user_email).await
-}
-
-/// Generate a PGP encryption key pair in the vault.
-pub async fn generate_pgp_encrypt_key(
-    root_dir: &Path,
-    unseal_key: &[u8],
-    user_name: &str,
-    user_email: &str,
-) -> Result<String> {
-    generate_pgp_key_named(
-        root_dir,
-        unseal_key,
-        PGP_ENCRYPT_KEY_NAME,
-        user_name,
-        user_email,
-    )
-    .await
-}
-
-async fn generate_pgp_key_named(
-    root_dir: &Path,
-    unseal_key: &[u8],
-    key_name: &str,
-    user_name: &str,
-    user_email: &str,
-) -> Result<String> {
     let vault = create_vault(root_dir).await?;
 
     vault
@@ -205,7 +177,7 @@ async fn generate_pgp_key_named(
     vault.set_token(&root_token);
 
     let data = serde_json::json!({
-        "key_name": key_name,
+        "key_name": PGP_KEY_NAME,
         "key_type": "pgp",
         "name": user_name,
         "email": user_email,

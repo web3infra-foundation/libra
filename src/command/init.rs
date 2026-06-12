@@ -38,8 +38,7 @@ const EXAMPLES: &str = r#"EXAMPLES:
     libra init -b develop                      Use 'develop' as initial branch
     libra init --from-git-repository ../old    Convert from existing Git repo
     libra init --vault false                   Skip vault / GPG setup
-    libra init --object-format sha256          Use SHA-256 hashing
-    libra init --shared=group                  Share the repo with your Unix group"#;
+    libra init --object-format sha256          Use SHA-256 hashing"#;
 
 // NOTE: `src/command/init.rs` lines 3-20 are a protected merge-conflict block in this workspace.
 // The imports inside that block must stay as-is. To avoid `unused_imports` warnings without
@@ -59,7 +58,7 @@ fn _touch_conflict_imports() {
     fn _needs_transaction_trait<T: TransactionTrait>() {}
 }
 
-use crate::{internal::head::Head, utils::ignore};
+use crate::utils::ignore;
 
 const MAX_BRANCH_NAME_LENGTH: usize = 255;
 const LOCK_SUFFIX: &str = ".lock";
@@ -247,11 +246,6 @@ pub struct InitOutput {
     pub converted_from: Option<String>,
     pub ssh_key_detected: Option<String>,
     pub warnings: Vec<String>,
-    /// Non-serialized: drives the human banner (`Initialized empty ...` vs
-    /// `Reinitialized existing ...`) without changing the `--json`/`--machine`
-    /// schema, which is identical for first init and safe re-init.
-    #[serde(skip)]
-    pub reinitialized: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -277,23 +271,8 @@ pub struct InitArgs {
     #[clap(long, short = 'q', required = false)]
     pub quiet: bool,
 
-    /// Filesystem sharing mode for the repository (Git's `--shared[=<mode>]`).
-    ///
-    /// Bare `--shared` defaults to `group`. With a value, use the `=` form:
-    /// `--shared=<mode>` where `<mode>` is `umask`/`false`, `group`/`true`,
-    /// `all`/`world`/`everybody`, or a 4-digit octal such as `0660`. The
-    /// canonical mode is persisted to `core.sharedRepository` and the `.libra/`
-    /// content tree is made group/world-shareable on Unix (no-op on Windows,
-    /// where permissions follow NTFS ACLs). The vault and the `.libra/` root
-    /// directory entry stay owner-only writable to protect signing keys.
-    #[clap(
-        long,
-        required = false,
-        value_name = "MODE",
-        num_args = 0..=1,
-        default_missing_value = "group",
-        require_equals = true
-    )]
+    /// Filesystem sharing mode for the repository (placeholder — see `git init --shared`)
+    #[clap(long, required = false, value_name = "MODE")]
     pub shared: Option<String>,
 
     /// Object hash algorithm: `sha1` (default) or `sha256`
@@ -410,15 +389,11 @@ fn render_init_result(result: &InitOutput, output: &OutputConfig) -> CliResult<(
         return Ok(());
     }
 
-    if result.reinitialized {
-        println!("Reinitialized existing Libra repository in {}", result.path);
-    } else {
-        let repo_type = if result.bare { " bare" } else { "" };
-        println!(
-            "Initialized empty{repo_type} Libra repository in {}",
-            result.path
-        );
-    }
+    let repo_type = if result.bare { " bare" } else { "" };
+    println!(
+        "Initialized empty{repo_type} Libra repository in {}",
+        result.path
+    );
     println!("  branch: {}", result.initial_branch);
     println!(
         "  signing: {}",
@@ -524,19 +499,9 @@ async fn run_init_internal(
     validate_shared_mode(args.shared.as_deref())?;
 
     if is_reinit(&target_dir, args.bare) {
-        // An existing repository is safely re-initialized (template top-up,
-        // `core.sharedRepository`/permission refresh) rather than rejected — but
-        // only when no destructive conflict is requested. Identity/refs/vault
-        // are preserved; see `run_reinit`.
-        return run_reinit(
-            &root_dir,
-            &args,
-            &object_format,
-            &ref_format,
-            template_dir.as_deref(),
-            progress,
-        )
-        .await;
+        return Err(InitError::AlreadyInitialized {
+            path: root_dir.clone(),
+        });
     }
 
     if target_dir.exists() {
@@ -553,14 +518,7 @@ async fn run_init_internal(
     // vault setup run; those later stages persist their durable state through
     // this connection/path and assume schema bootstrap has completed.
     let conn = create_database_connection(&database_path).await?;
-    let repo_id = init_config(
-        &conn,
-        args.bare,
-        &object_format,
-        &ref_format,
-        args.shared.as_deref(),
-    )
-    .await?;
+    let repo_id = init_config(&conn, args.bare, &object_format, &ref_format).await?;
 
     progress.emit("Setting up refs ...");
     // INVARIANT: refs are initialized after core config so HEAD/branch rows are
@@ -569,17 +527,13 @@ async fn run_init_internal(
     initialize_refs(&conn, &initial_branch_name).await?;
 
     set_dir_hidden(&root_dir)?;
+    if let Some(shared_mode) = args.shared.as_deref() {
+        apply_shared(&root_dir, shared_mode)?;
+    }
 
     let mut warnings = Vec::new();
     if !args.bare {
         ignore::ensure_root_libraignore(&target_dir)?;
-        // Seed a project-local default skill so that `libra code` / agents
-        // immediately have high-quality guidance about this libra-format repo.
-        // Existing files are never overwritten.
-        if let Err(e) = seed_default_libra_skills(&target_dir) {
-            // Non-fatal: the embedded "libra" skill is always available as fallback.
-            tracing::warn!(error = %e, "failed to seed default .libra/skills/libra.md");
-        }
     }
 
     let target_guard_path = target_dir
@@ -614,14 +568,6 @@ async fn run_init_internal(
         set_vault_signing_value(&database_path, false).await?;
     }
 
-    // Apply `--shared` permissions last so the chmod covers the fully populated
-    // layout — including `vault.db` (forced back to owner-only `0o600`), any
-    // objects/refs copied during `--from-git-repository` conversion, and the
-    // seeded skills — and the `.libra/` root entry can be locked owner-only.
-    if let Some(shared_mode) = args.shared.as_deref() {
-        apply_shared(&root_dir, shared_mode)?;
-    }
-
     set_hash_kind(match object_format.as_str() {
         "sha1" => HashKind::Sha1,
         "sha256" => HashKind::Sha256,
@@ -644,218 +590,6 @@ async fn run_init_internal(
         converted_from,
         ssh_key_detected: detect_system_ssh_key(),
         warnings,
-        reinitialized: false,
-    })
-}
-
-/// Reads a single `config_kv` value, mapping storage failures to [`InitError`].
-async fn read_config_value(conn: &DbConn, key: &str) -> Result<Option<String>, InitError> {
-    ConfigKv::get_with_conn(conn, key)
-        .await
-        .map(|entry| entry.map(|entry| entry.value))
-        .map_err(|error| InitError::Database(DbErr::Custom(error.to_string())))
-}
-
-/// Installs `contents` at `dest` only when `dest` does not already exist, writing
-/// through a sibling temporary file and an atomic `rename` so a crash mid-write
-/// never leaves a half-written template. Returns `true` when a file was created.
-///
-/// `mode` (Unix only) is applied to the temporary file before the rename so the
-/// published file already carries the requested permissions.
-fn install_missing_file(dest: &Path, contents: &[u8], mode: Option<u32>) -> io::Result<bool> {
-    if dest.exists() {
-        return Ok(false);
-    }
-    let parent = dest.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "template destination has no parent directory",
-        )
-    })?;
-    let file_name = dest
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "template destination has no file name",
-            )
-        })?;
-    let tmp = parent.join(format!(".{file_name}.libra-tmp"));
-    fs::write(&tmp, contents)?;
-    #[cfg(not(target_os = "windows"))]
-    if let Some(mode) = mode {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
-    }
-    #[cfg(target_os = "windows")]
-    let _ = mode;
-    if let Err(error) = fs::rename(&tmp, dest) {
-        let _ = fs::remove_file(&tmp);
-        return Err(error);
-    }
-    Ok(true)
-}
-
-/// Tops up a repository layout for re-initialization: ensures the structural
-/// directories exist and installs any **missing** template files, never
-/// overwriting user-modified hooks or excludes.
-fn topup_repository_layout(root_dir: &Path, template_dir: Option<&Path>) -> io::Result<()> {
-    for dir in ["info", "hooks", "objects/pack", "objects/info"] {
-        fs::create_dir_all(root_dir.join(dir))?;
-    }
-
-    if let Some(template_dir) = template_dir {
-        // `copy_template` already skips destinations that already exist.
-        return copy_template(template_dir, root_dir);
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    let hook_mode = Some(0o755);
-    #[cfg(target_os = "windows")]
-    let hook_mode = None;
-
-    install_missing_file(
-        &root_dir.join("info/exclude"),
-        include_str!("../../template/exclude").as_bytes(),
-        None,
-    )?;
-    install_missing_file(
-        &root_dir.join("hooks").join("pre-commit.sh"),
-        include_str!("../../template/pre-commit.sh").as_bytes(),
-        hook_mode,
-    )?;
-    install_missing_file(
-        &root_dir.join("hooks").join("pre-commit.ps1"),
-        include_str!("../../template/pre-commit.ps1").as_bytes(),
-        None,
-    )?;
-    Ok(())
-}
-
-/// Safely re-initializes an existing Libra repository.
-///
-/// Contract (see `.omo/plans/init-improvement-plan.md` Batch 2):
-/// - Opens — never recreates — the existing database; preserves `libra.repoid`,
-///   `vault.db`, and existing refs/HEAD (no `initialize_refs`/vault re-seed).
-/// - Rejects destructive conflicts *before any disk mutation*: an explicit
-///   `--object-format`/`--ref-format` that disagrees with the stored value
-///   fails with `InvalidArgument` (exit 129). Omitted formats are inherited and
-///   never treated as a conflict.
-/// - Otherwise performs only additive, idempotent updates: missing template
-///   top-up, then `core.sharedRepository` upsert (single transaction), then
-///   `apply_shared` permission refresh.
-async fn run_reinit(
-    root_dir: &Path,
-    args: &InitArgs,
-    requested_object_format: &str,
-    requested_ref_format: &RefFormat,
-    template_dir: Option<&Path>,
-    progress: &InitProgress,
-) -> Result<InitOutput, InitError> {
-    let database_path = root_dir.join(DATABASE);
-    let conn = get_db_conn_instance_for_path(&database_path)
-        .await
-        .map_err(InitError::Io)?;
-
-    // ── Step 1: validate conflicts first; no disk mutation on failure ──
-    let existing_object_format = read_config_value(&conn, "core.objectformat")
-        .await?
-        .unwrap_or_else(|| "sha1".to_string());
-    if args.object_format.is_some() && requested_object_format != existing_object_format {
-        return Err(invalid_argument(
-            format!(
-                "cannot reinitialize with object format '{requested_object_format}': existing repository uses '{existing_object_format}'"
-            ),
-            Some("omit --object-format to reuse the existing object format.".to_string()),
-        ));
-    }
-
-    let existing_ref_format = read_config_value(&conn, "core.initrefformat")
-        .await?
-        .unwrap_or_else(|| RefFormat::Strict.as_str().to_string());
-    if args.ref_format.is_some() && requested_ref_format.as_str() != existing_ref_format {
-        return Err(invalid_argument(
-            format!(
-                "cannot reinitialize with ref format '{}': existing repository uses '{existing_ref_format}'",
-                requested_ref_format.as_str()
-            ),
-            Some("omit --ref-format to reuse the existing ref format.".to_string()),
-        ));
-    }
-
-    // ── Step 2: template top-up (additive, atomic, never overwrites users) ──
-    progress.emit("Reinitializing existing repository ...");
-    topup_repository_layout(root_dir, template_dir)?;
-
-    // ── Step 3: config update in a single transaction (DB written last) ──
-    if let Some(mode) = args.shared.as_deref() {
-        let txn = conn.begin().await.map_err(InitError::Database)?;
-        ConfigKv::set_with_conn(
-            &txn,
-            "core.sharedRepository",
-            &canonical_shared_value(mode),
-            false,
-        )
-        .await
-        .map_err(|error| InitError::Database(DbErr::Custom(error.to_string())))?;
-        txn.commit().await.map_err(InitError::Database)?;
-
-        // ── Step 4: permission refresh after the DB commit (idempotent) ──
-        apply_shared(root_dir, mode)?;
-    }
-
-    // Echo the existing (inherited) repository identity. `--initial-branch` is
-    // intentionally not applied on re-init: HEAD is never clobbered.
-    let repo_id = read_config_value(&conn, "libra.repoid")
-        .await?
-        .unwrap_or_default();
-    let vault_signing = read_config_value(&conn, "vault.signing")
-        .await?
-        .map(|value| value == "true")
-        .unwrap_or(false);
-    let initial_branch = match Head::current_result_with_conn(&conn).await {
-        Ok(Head::Branch(name)) => name,
-        _ => DEFAULT_BRANCH.to_string(),
-    };
-
-    let mut warnings = Vec::new();
-    if let Some(requested) = args.initial_branch.as_deref()
-        && requested != initial_branch
-    {
-        warnings.push(format!(
-            "ignored --initial-branch '{requested}': HEAD already points to '{initial_branch}'"
-        ));
-    }
-    if args.from_git_repository.is_some() {
-        warnings.push(
-            "ignored --from-git-repository: cannot convert into an existing repository".to_string(),
-        );
-    }
-
-    set_hash_kind(match existing_object_format.as_str() {
-        "sha256" => HashKind::Sha256,
-        _ => HashKind::Sha1,
-    });
-
-    let path = root_dir
-        .canonicalize()
-        .unwrap_or_else(|_| root_dir.to_path_buf())
-        .to_string_lossy()
-        .to_string();
-
-    Ok(InitOutput {
-        path,
-        bare: args.bare,
-        initial_branch,
-        object_format: existing_object_format,
-        ref_format: existing_ref_format,
-        repo_id,
-        vault_signing,
-        converted_from: None,
-        ssh_key_detected: detect_system_ssh_key(),
-        warnings,
-        reinitialized: true,
     })
 }
 
@@ -992,46 +726,10 @@ fn copy_template(src: &Path, dst: &Path) -> io::Result<()> {
             fs::create_dir_all(&dest_path)?;
             copy_template(&entry.path(), &dest_path)?;
         } else if !dest_path.exists() {
-            let source = entry.path();
-            let contents = fs::read(&source)?;
-            install_missing_file(&dest_path, &contents, template_file_mode(&source)?)?;
+            fs::copy(entry.path(), &dest_path)?;
         }
     }
     Ok(())
-}
-
-fn template_file_mode(path: &Path) -> io::Result<Option<u32>> {
-    #[cfg(not(target_os = "windows"))]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::metadata(path).map(|metadata| Some(metadata.permissions().mode() & 0o777))
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let _ = path;
-        Ok(None)
-    }
-}
-
-/// Seeds a default project-local "libra" skill into `.libra/skills/libra.md`
-/// for newly initialized (non-bare) repositories.
-///
-/// Visible to crate tests so we can verify the non-overwrite behavior in isolation.
-/// Errors from this helper are treated as non-fatal by the init flow (the
-/// embedded "libra" skill in the binary is always available as fallback).
-#[cfg_attr(test, allow(dead_code))]
-pub(crate) fn seed_default_libra_skills(worktree: &Path) -> io::Result<()> {
-    let skills_dir = worktree.join(ROOT_DIR).join("skills");
-    fs::create_dir_all(&skills_dir)?;
-
-    let target = skills_dir.join("libra.md");
-    if target.exists() {
-        return Ok(());
-    }
-
-    let content = include_str!("../../template/skills/libra.md");
-    fs::write(&target, content)
 }
 
 fn validate_shared_mode(shared_mode: Option<&str>) -> Result<(), InitError> {
@@ -1056,71 +754,15 @@ fn validate_shared_mode(shared_mode: Option<&str>) -> Result<(), InitError> {
     }
 }
 
-/// Canonicalizes a validated `--shared` mode into the value persisted to
-/// `core.sharedRepository`, mirroring Git's normalization so that
-/// `libra config get core.sharedRepository` reads back a stable name.
-///
-/// Aliases collapse as: `false`/`umask` → `umask`, `true`/`group` → `group`,
-/// `all`/`world`/`everybody` → `all`. A 4-digit octal mode (e.g. `0660`) is
-/// returned verbatim. The single source of truth for this mapping is the
-/// canonicalization table in `.omo/plans/init-improvement-plan.md` (Batch 1).
-fn canonical_shared_value(mode: &str) -> String {
-    match mode {
-        "false" | "umask" => "umask".to_string(),
-        "true" | "group" => "group".to_string(),
-        "all" | "world" | "everybody" => "all".to_string(),
-        other => other.to_string(),
-    }
-}
-
 #[cfg(not(target_os = "windows"))]
 fn apply_shared(root_dir: &Path, shared_mode: &str) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    // Vault files must never be exposed to group/world by `--shared`; they are
-    // forced to owner-only `0o600` so other users cannot read signing keys even
-    // though the SQLite backend creates `vault.db` with the process umask.
-    fn is_vault_file(path: &Path) -> bool {
-        matches!(
-            path.file_name().and_then(|name| name.to_str()),
-            Some("vault.db") | Some("vault.db-wal") | Some("vault.db-shm")
-        )
-    }
-
-    // Directories must stay searchable wherever they are readable, otherwise an
-    // octal mode such as `0660` (no execute bits) would strip the search bit and
-    // break traversal of the layout. Mirrors Git's `adjust_shared_perm`, which
-    // copies each read bit into the matching execute bit for directories.
-    fn dir_mode(mode: u32) -> u32 {
-        mode | ((mode & 0o444) >> 2)
-    }
-
-    // Applies `content_mode` to everything under `root_dir`, with these rules:
-    //   * directories propagate read→execute so the tree stays traversable;
-    //   * the `root_dir` entry keeps an owner-only-writable mode (group and world
-    //     write bits cleared) so other users cannot unlink/replace the vault file
-    //     from the repository root even when the content tree is group-shared;
-    //   * vault files are forced to `0o600` regardless of the shared mode.
-    // Symlinks are skipped to avoid TOCTOU/permission escapes.
-    fn set_recursive(root_dir: &Path, content_mode: u32) -> io::Result<()> {
-        // Root is a directory: searchable, but with group/world write stripped.
-        let root_mode = dir_mode(content_mode) & !0o022;
-        for entry in walkdir::WalkDir::new(root_dir).follow_links(false) {
+    fn set_recursive(dir: &Path, mode: u32) -> io::Result<()> {
+        for entry in walkdir::WalkDir::new(dir) {
             let entry = entry?;
             let path = entry.path();
-            if entry.file_type().is_symlink() {
-                continue;
-            }
-            let mode = if is_vault_file(path) {
-                0o600
-            } else if path == root_dir {
-                root_mode
-            } else if entry.file_type().is_dir() {
-                dir_mode(content_mode)
-            } else {
-                content_mode
-            };
-            let metadata = fs::symlink_metadata(path)?;
+            let metadata = fs::metadata(path)?;
             let mut perms = metadata.permissions();
             perms.set_mode(mode);
             fs::set_permissions(path, perms)?;
@@ -1315,7 +957,6 @@ async fn init_config(
     is_bare: bool,
     object_format: &str,
     ref_format: &RefFormat,
-    shared_mode: Option<&str>,
 ) -> Result<String, DbErr> {
     let txn = conn.begin().await?;
 
@@ -1353,21 +994,6 @@ async fn init_config(
     ConfigKv::set_with_conn(&txn, "libra.repoid", &repo_id, false)
         .await
         .map_err(|error| DbErr::Custom(error.to_string()))?;
-
-    // Persist the canonical `--shared` mode so Git-compatible tooling and a
-    // later `libra config get core.sharedRepository` can observe the setting.
-    // `umask`/`false` still records `umask` (no permission change), matching
-    // Git's `core.sharedRepository=umask` default semantics.
-    if let Some(mode) = shared_mode {
-        ConfigKv::set_with_conn(
-            &txn,
-            "core.sharedRepository",
-            &canonical_shared_value(mode),
-            false,
-        )
-        .await
-        .map_err(|error| DbErr::Custom(error.to_string()))?;
-    }
 
     txn.commit().await?;
     Ok(repo_id)
@@ -1616,142 +1242,6 @@ mod tests {
                 && !captured_stderr.contains("Converting from Git repository")
                 && !captured_stderr.contains("Generating PGP signing key ..."),
             "run_init must not render init progress to stderr for internal callers, got: {captured_stderr:?}"
-        );
-    }
-
-    /// `run_init` on a fresh non-bare directory must seed `.libra/skills/libra.md`
-    /// from the template. This gives every new libra repo a project-local
-    /// starting skill for agents.
-    #[tokio::test(flavor = "current_thread")]
-    #[serial]
-    async fn run_init_seeds_default_libra_skill() {
-        use crate::utils::test::{self, ChangeDirGuard};
-
-        let repo = tempdir().expect("failed to create temp repo");
-        test::setup_clean_testing_env_in(repo.path());
-        let _guard = ChangeDirGuard::new(repo.path());
-
-        let _ = run_init(InitArgs {
-            bare: false,
-            template: None,
-            initial_branch: None,
-            repo_directory: ".".to_string(),
-            quiet: true,
-            shared: None,
-            object_format: None,
-            ref_format: None,
-            from_git_repository: None,
-            vault: false,
-        })
-        .await
-        .expect("init must succeed");
-
-        let skill_path = repo.path().join(".libra").join("skills").join("libra.md");
-        assert!(
-            skill_path.exists(),
-            "default skill must be seeded at .libra/skills/libra.md"
-        );
-
-        let content = std::fs::read_to_string(&skill_path).expect("read seeded skill");
-        assert!(
-            content.contains("name = \"libra\""),
-            "seeded skill must declare the libra skill name"
-        );
-        assert!(
-            content.contains("This project's libra repository")
-                || content.contains("project-local"),
-            "seeded skill should contain project-oriented language"
-        );
-        // Must be a complete valid skill (frontmatter + body)
-        assert!(
-            content.starts_with("---\nname = \"libra\""),
-            "seeded file must start with valid TOML frontmatter"
-        );
-    }
-
-    /// The seeder helper itself must be idempotent / non-destructive: calling
-    /// it when a user-owned skill file already exists must leave the file
-    /// completely untouched (this can happen in conversion flows, partial
-    /// .libra/ states, or future re-init support).
-    #[test]
-    fn seed_default_libra_skills_leaves_existing_file_alone() {
-        let tmp = tempdir().expect("tmp");
-        let worktree = tmp.path();
-
-        let skills_dir = worktree.join(".libra").join("skills");
-        std::fs::create_dir_all(&skills_dir).expect("mkdir");
-        let skill_path = skills_dir.join("libra.md");
-        std::fs::write(&skill_path, "MY CUSTOM SKILL\n---\nnever overwrite").expect("pre-create");
-
-        // First call seeds nothing (file exists)
-        super::seed_default_libra_skills(worktree).expect("first call");
-        // Second call also does nothing
-        super::seed_default_libra_skills(worktree).expect("second call");
-
-        let content = std::fs::read_to_string(&skill_path).expect("read");
-        assert_eq!(content, "MY CUSTOM SKILL\n---\nnever overwrite");
-    }
-
-    #[test]
-    fn canonical_shared_value_collapses_aliases() {
-        use super::canonical_shared_value;
-        assert_eq!(canonical_shared_value("false"), "umask");
-        assert_eq!(canonical_shared_value("umask"), "umask");
-        assert_eq!(canonical_shared_value("true"), "group");
-        assert_eq!(canonical_shared_value("group"), "group");
-        assert_eq!(canonical_shared_value("all"), "all");
-        assert_eq!(canonical_shared_value("world"), "all");
-        assert_eq!(canonical_shared_value("everybody"), "all");
-        // 4-digit octal modes are recorded verbatim.
-        assert_eq!(canonical_shared_value("0660"), "0660");
-        assert_eq!(canonical_shared_value("0777"), "0777");
-    }
-
-    /// `apply_shared` must not modify the permissions of symlink entries inside
-    /// the layout (it skips them to avoid TOCTOU/permission escapes), and it
-    /// must keep the `.libra/` root entry owner-only writable while making the
-    /// content tree group-shareable.
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn apply_shared_skips_symlinks_and_protects_root() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempdir().expect("tmp");
-        let root = tmp.path().join(".libra");
-        let content_dir = root.join("objects");
-        std::fs::create_dir_all(&content_dir).expect("mkdir objects");
-
-        // An outside file the symlink will point at; its mode must be unchanged.
-        let outside = tmp.path().join("outside.txt");
-        std::fs::write(&outside, b"secret").expect("write outside");
-        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600))
-            .expect("chmod outside");
-
-        // A symlink inside the layout pointing at the outside file.
-        std::os::unix::fs::symlink(&outside, root.join("link")).expect("symlink");
-
-        super::apply_shared(&root, "group").expect("apply_shared group");
-
-        let mode = |p: &std::path::Path| {
-            std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o7777
-        };
-        // Root entry: owner-only writable (no group/world write bits).
-        assert_eq!(
-            mode(&root) & 0o022,
-            0,
-            ".libra root must stay owner-only writable"
-        );
-        // Content subtree: group-writable.
-        assert_eq!(
-            mode(&content_dir) & 0o020,
-            0o020,
-            "content dir must be group-writable under shared=group"
-        );
-        // The symlink target's mode must be untouched (symlink skipped).
-        assert_eq!(
-            mode(&outside) & 0o777,
-            0o600,
-            "apply_shared must not chmod through a symlink"
         );
     }
 }

@@ -2,8 +2,6 @@
 //! This module implements the `Storage` trait for a local filesystem backend. It supports both loose objects and packed objects, allowing for efficient storage and retrieval of Git objects on disk.
 //! The `LocalStorage` struct provides methods to read and write Git objects, as well as to search for objects by prefix. It handles the Git object storage format, including zlib compression for loose objects
 //! and the pack file format for packed objects. The implementation also includes caching mechanisms for pack objects to improve performance when accessing packed data.
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 use std::{
     fs, io,
     io::{Read, Seek, Write},
@@ -48,11 +46,9 @@ enum IdxVersion {
 pub struct LocalStorage {
     base_path: PathBuf,
     hash_kind: Option<HashKind>, // Capture hash kind from creation thread
-    rebuild_pack_indexes: bool,
 }
 
 impl LocalStorage {
-    /// Create a local object store rooted at `base_path`.
     pub fn new(base_path: PathBuf) -> Self {
         fs::create_dir_all(&base_path).unwrap_or_else(|err| {
             panic!(
@@ -63,16 +59,6 @@ impl LocalStorage {
         Self {
             base_path,
             hash_kind: Some(get_hash_kind()),
-            rebuild_pack_indexes: true,
-        }
-    }
-
-    /// Open a local object store without creating directories or rebuilding indexes.
-    pub fn open_existing(base_path: PathBuf) -> Self {
-        Self {
-            base_path,
-            hash_kind: Some(get_hash_kind()),
-            rebuild_pack_indexes: false,
         }
     }
 
@@ -98,26 +84,13 @@ impl LocalStorage {
     /// Checks if a loose object exists by looking for its file. This is a quick check before looking into packs.
     fn exist_loosely(&self, obj_id: &ObjectHash) -> bool {
         let path = self.get_obj_path(obj_id);
-        fs::symlink_metadata(path)
-            .map(|metadata| metadata.file_type().is_file())
-            .unwrap_or(false)
+        Path::exists(&path)
     }
 
     /// Reads the raw compressed data of a loose object from the filesystem. This is used when we know the object exists as a loose object.
     fn read_raw_data(&self, obj_id: &ObjectHash) -> Result<Vec<u8>, io::Error> {
         let path = self.get_obj_path(obj_id);
-        let metadata = fs::symlink_metadata(&path)?;
-        if !metadata.file_type().is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("loose object '{}' is not a regular file", path.display()),
-            ));
-        }
-        let mut options = fs::OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        options.custom_flags(libc::O_NOFOLLOW);
-        let mut file = options.open(&path)?;
+        let mut file = fs::File::open(path)?;
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)?;
         Ok(buffer)
@@ -181,51 +154,10 @@ impl LocalStorage {
 
     // --- Pack related methods ---
 
-    /// List readable pack files from the pack directory without following symlinks.
     fn list_all_packs(&self) -> Vec<PathBuf> {
-        match fs::symlink_metadata(&self.base_path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                tracing::warn!(
-                    object_dir = %self.base_path.display(),
-                    "skipping symlink object directory"
-                );
-                return Vec::new();
-            }
-            Ok(metadata) if !metadata.file_type().is_dir() => return Vec::new(),
-            Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Vec::new(),
-            Err(err) => {
-                tracing::warn!(
-                    object_dir = %self.base_path.display(),
-                    error = %err,
-                    "failed to inspect object directory, skipping packs"
-                );
-                return Vec::new();
-            }
-        }
         let pack_dir = self.base_path.join("pack");
-        match fs::symlink_metadata(&pack_dir) {
-            Ok(metadata) if metadata.file_type().is_dir() => {}
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() {
-                    tracing::warn!(
-                        pack_dir = %pack_dir.display(),
-                        "skipping symlink pack directory"
-                    );
-                }
-                return Vec::new();
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                return Vec::new();
-            }
-            Err(err) => {
-                tracing::warn!(
-                    pack_dir = %pack_dir.display(),
-                    error = %err,
-                    "failed to inspect pack directory, skipping"
-                );
-                return Vec::new();
-            }
+        if !pack_dir.exists() {
+            return Vec::new();
         }
         let mut packs = Vec::new();
         let entries = match fs::read_dir(&pack_dir) {
@@ -251,78 +183,30 @@ impl LocalStorage {
                     continue;
                 }
             };
-            let metadata = match fs::symlink_metadata(&path) {
-                Ok(metadata) => metadata,
-                Err(err) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %err,
-                        "skipping pack entry with unreadable metadata"
-                    );
-                    continue;
-                }
-            };
-            if metadata.file_type().is_file() && path.extension().is_some_and(|ext| ext == "pack") {
+            if path.is_file() && path.extension().is_some_and(|ext| ext == "pack") {
                 packs.push(path);
             }
         }
         packs
     }
 
-    /// List usable pack index files, rebuilding missing or outdated indexes conservatively.
     fn list_all_idx(&self) -> Vec<PathBuf> {
         let packs = self.list_all_packs();
         let mut idxs = Vec::new();
         for pack in packs {
             let idx = pack.with_extension("idx");
             let want_v2 = get_hash_kind() == HashKind::Sha256;
-            let idx_metadata = match fs::symlink_metadata(&idx) {
-                Ok(metadata) => Some(metadata),
-                Err(err) if err.kind() == io::ErrorKind::NotFound => None,
-                Err(err) => {
-                    tracing::warn!(
-                        idx = %idx.display(),
-                        error = %err,
-                        "skipping pack index with unreadable metadata"
-                    );
-                    continue;
+            let needs_rebuild = if idx.exists() {
+                if want_v2 {
+                    !matches!(Self::read_idx_version_path(&idx), Ok(IdxVersion::V2))
+                } else {
+                    false
                 }
-            };
-            if idx_metadata
-                .as_ref()
-                .is_some_and(|metadata| metadata.file_type().is_symlink())
-            {
-                tracing::warn!(
-                    idx = %idx.display(),
-                    "skipping symlink pack index to avoid writing outside the object database"
-                );
-                continue;
-            }
-            let needs_rebuild = if idx_metadata.is_some() {
-                want_v2 && !matches!(Self::read_idx_version_path(&idx), Ok(IdxVersion::V2))
             } else {
                 true
             };
 
             if needs_rebuild {
-                if !self.rebuild_pack_indexes {
-                    tracing::warn!(
-                        pack = %pack.display(),
-                        idx = %idx.display(),
-                        "skipping pack that needs index rebuild in read-only local storage"
-                    );
-                    continue;
-                }
-                if idx_metadata
-                    .as_ref()
-                    .is_some_and(Self::pack_index_has_multiple_links)
-                {
-                    tracing::warn!(
-                        idx = %idx.display(),
-                        "skipping hardlinked pack index to avoid rewriting outside the object database"
-                    );
-                    continue;
-                }
                 let (Some(pack_str), Some(idx_str)) = (pack.to_str(), idx.to_str()) else {
                     tracing::warn!(
                         pack = %pack.display(),
@@ -351,21 +235,6 @@ impl LocalStorage {
         idxs
     }
 
-    #[cfg(unix)]
-    /// Return whether the index metadata has more than one filesystem link.
-    fn pack_index_has_multiple_links(metadata: &fs::Metadata) -> bool {
-        use std::os::unix::fs::MetadataExt as _;
-
-        metadata.nlink() > 1
-    }
-
-    #[cfg(not(unix))]
-    /// Return whether the index metadata has more than one filesystem link.
-    fn pack_index_has_multiple_links(_metadata: &fs::Metadata) -> bool {
-        false
-    }
-
-    /// Read the pack-index format version from an opened index file.
     fn read_idx_version(file: &mut fs::File) -> Result<IdxVersion, io::Error> {
         let mut header = [0u8; 4];
         file.read_exact(&mut header)?;
@@ -386,13 +255,11 @@ impl LocalStorage {
         }
     }
 
-    /// Open an index file and read its pack-index format version.
     fn read_idx_version_path(idx_file: &Path) -> Result<IdxVersion, io::Error> {
         let mut idx_file = fs::File::open(idx_file)?;
         Self::read_idx_version(&mut idx_file)
     }
 
-    /// Read an index file's fanout table together with its format version.
     fn read_idx_fanout(idx_file: &Path) -> Result<(IdxVersion, [u32; 256]), io::Error> {
         let mut idx_file = fs::File::open(idx_file)?;
         let version = Self::read_idx_version(&mut idx_file)?;
@@ -410,7 +277,6 @@ impl LocalStorage {
         Ok((version, fanout))
     }
 
-    /// Return the pack offset for `obj_id` by searching one pack index.
     fn read_idx(idx_file: &Path, obj_id: &ObjectHash) -> Result<Option<u64>, io::Error> {
         let (version, fanout) = Self::read_idx_fanout(idx_file)?;
         let mut idx_file = fs::File::open(idx_file)?;
@@ -476,106 +342,6 @@ impl LocalStorage {
         }
     }
 
-    /// Enumerate every object id stored in a pack index, parsing only the
-    /// already-present `.idx` (read-only — never rebuilds). Supports both V1
-    /// (sha1) and V2 layouts.
-    fn read_idx_all_oids(idx_file: &Path) -> Result<Vec<ObjectHash>, io::Error> {
-        let (version, fanout) = Self::read_idx_fanout(idx_file)?;
-        let object_count = fanout[255] as u64;
-        let hash_size = get_hash_kind().size() as u64;
-        let mut file = fs::File::open(idx_file)?;
-        let mut oids = Vec::with_capacity(object_count as usize);
-        match version {
-            IdxVersion::V1 => {
-                if hash_size != 20 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "pack index v1 only supports sha1",
-                    ));
-                }
-                // After the fanout table: `object_count` entries of
-                // (4-byte offset, hash) — read each hash, skipping the offset.
-                file.seek(io::SeekFrom::Start(FANOUT))?;
-                for _ in 0..object_count {
-                    let _offset = file.read_u32::<BigEndian>()?;
-                    oids.push(read_sha(&mut file)?);
-                }
-            }
-            IdxVersion::V2 => {
-                // magic(4) + version(4) + fanout(1024); the OID table is
-                // `object_count` contiguous hashes.
-                let names_offset = FANOUT + 8;
-                file.seek(io::SeekFrom::Start(names_offset))?;
-                for _ in 0..object_count {
-                    oids.push(read_sha(&mut file)?);
-                }
-            }
-        }
-        Ok(oids)
-    }
-
-    /// List every locally-stored object id (loose ∪ pack), de-duplicated.
-    ///
-    /// This is the read-only enumeration backing `cat-file --batch-all-objects`.
-    /// It walks the loose `XX/<rest>` directories and parses each *existing*
-    /// pack `.idx`'s object-id segment. Unlike [`Self::list_all_idx`], it never
-    /// invokes `build_index_*` (no disk writes): a missing or unreadable idx is
-    /// recorded in the returned diagnostics list (so the command layer can warn
-    /// on stderr) and skipped, rather than rebuilt.
-    pub fn list_all_oids(&self) -> (Vec<ObjectHash>, Vec<String>) {
-        use std::collections::HashSet;
-
-        let mut oids: HashSet<ObjectHash> = HashSet::new();
-        let mut skipped: Vec<String> = Vec::new();
-
-        // Loose objects: base_path/[0-9a-f]{2}/<rest-of-hex>.
-        if let Ok(top_entries) = fs::read_dir(&self.base_path) {
-            for top in top_entries.flatten() {
-                let top_path = top.path();
-                let Some(prefix) = top_path.file_name().and_then(|n| n.to_str()) else {
-                    continue;
-                };
-                if prefix.len() != 2
-                    || !prefix.bytes().all(|b| b.is_ascii_hexdigit())
-                    || !top_path.is_dir()
-                {
-                    continue;
-                }
-                let Ok(files) = fs::read_dir(&top_path) else {
-                    continue;
-                };
-                for file in files.flatten() {
-                    if let Some(rest) = file.file_name().to_str() {
-                        let hex = format!("{prefix}{rest}");
-                        if let Ok(oid) = ObjectHash::from_str(&hex) {
-                            oids.insert(oid);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Packed objects: parse the OID segment of each existing idx; never
-        // rebuild a missing/corrupt one.
-        for pack in self.list_all_packs() {
-            let idx = pack.with_extension("idx");
-            if !idx.exists() {
-                skipped.push(format!(
-                    "{}: missing pack index (not rebuilt by --batch-all-objects)",
-                    idx.display()
-                ));
-                continue;
-            }
-            match Self::read_idx_all_oids(&idx) {
-                Ok(found) => oids.extend(found),
-                Err(err) => skipped.push(format!("{}: {err}", idx.display())),
-            }
-        }
-
-        (oids.into_iter().collect(), skipped)
-    }
-
-    /// Read and inflate one packed object at the given pack-file offset.
     fn read_pack_obj(pack_file: &Path, offset: u64) -> Result<CacheObject, GitError> {
         let file_name = pack_file
             .file_name()
@@ -655,7 +421,6 @@ impl LocalStorage {
         Ok(full_obj)
     }
 
-    /// Search all available pack indexes for an object and return its data.
     fn get_from_pack(
         &self,
         obj_id: &ObjectHash,
@@ -670,7 +435,6 @@ impl LocalStorage {
         Ok(None)
     }
 
-    /// Read one object from the pack paired with `idx_file`.
     fn read_pack_by_idx(
         idx_file: &Path,
         obj_id: &ObjectHash,
@@ -689,7 +453,6 @@ impl LocalStorage {
 
 #[async_trait]
 impl Storage for LocalStorage {
-    /// Load an object from loose storage or from available pack files.
     async fn get(&self, hash: &ObjectHash) -> Result<(Vec<u8>, ObjectType), GitError> {
         let self_clone = self.clone();
         let hash = *hash;
@@ -716,7 +479,6 @@ impl Storage for LocalStorage {
         .map_err(|e| GitError::IOError(io::Error::other(e)))?
     }
 
-    /// Write an object as a loose object file.
     async fn put(
         &self,
         hash: &ObjectHash,
@@ -754,7 +516,6 @@ impl Storage for LocalStorage {
         .map_err(|e| GitError::IOError(io::Error::other(e)))?
     }
 
-    /// Return whether an object exists in loose storage or a readable pack.
     async fn exist(&self, hash: &ObjectHash) -> bool {
         let self_clone = self.clone();
         let hash = *hash;
@@ -763,7 +524,8 @@ impl Storage for LocalStorage {
             if let Some(kind) = self_clone.hash_kind {
                 set_hash_kind(kind);
             }
-            if self_clone.exist_loosely(&hash) {
+            let path = self_clone.get_obj_path(&hash);
+            if Path::exists(&path) {
                 return true;
             }
             match self_clone.get_from_pack(&hash) {
@@ -785,7 +547,6 @@ impl Storage for LocalStorage {
         .unwrap_or(false)
     }
 
-    /// Search loose and packed objects by hexadecimal hash prefix.
     async fn search(&self, prefix: &str) -> Vec<ObjectHash> {
         let self_clone = self.clone();
         let prefix = prefix.to_string();
@@ -926,8 +687,6 @@ mod tests {
     //! `Result<_, GitError>` migration — each corruption shape that used to
     //! panic is now a `GitError::InvalidObjectInfo` with a descriptive detail.
 
-    use tempfile::tempdir;
-
     use super::*;
 
     /// Build a valid loose-object header for `(type, payload)`.
@@ -938,7 +697,6 @@ mod tests {
     }
 
     #[test]
-    /// Covers parsing a well-formed loose-object header.
     fn parse_header_accepts_well_formed_header() {
         let data = header_bytes("blob", b"hello world");
         let (kind, size, end) = LocalStorage::parse_header(&data).expect("valid header parses");
@@ -948,7 +706,6 @@ mod tests {
     }
 
     #[test]
-    /// Covers rejecting loose-object headers without a NUL terminator.
     fn parse_header_rejects_missing_terminator() {
         let err = LocalStorage::parse_header(b"blob 4abcd")
             .expect_err("missing NUL terminator should fail");
@@ -959,7 +716,6 @@ mod tests {
     }
 
     #[test]
-    /// Covers rejecting loose-object headers without a size segment.
     fn parse_header_rejects_missing_size_segment() {
         let mut data = b"blob\0".to_vec();
         data.extend_from_slice(b"payload");
@@ -971,7 +727,6 @@ mod tests {
     }
 
     #[test]
-    /// Covers rejecting loose-object headers with a non-numeric size.
     fn parse_header_rejects_non_numeric_size() {
         let mut data = b"blob abc\0".to_vec();
         data.extend_from_slice(b"xyz");
@@ -983,7 +738,6 @@ mod tests {
     }
 
     #[test]
-    /// Covers rejecting loose-object headers whose size does not match payload length.
     fn parse_header_rejects_size_mismatch() {
         // Header claims size 100 but only 5 payload bytes follow.
         let mut data = b"blob 100\0".to_vec();
@@ -1001,7 +755,6 @@ mod tests {
     /// minimal way to exercise the path: the position-of-\0 check passes
     /// (terminator at offset 3) and the slice [0..3] is then invalid UTF-8.
     #[test]
-    /// Covers rejecting loose-object headers with non-UTF-8 bytes.
     fn parse_header_rejects_non_utf8_header_bytes() {
         // 3 invalid-UTF-8 bytes followed by NUL terminator and a 0-length payload.
         let data = [0xFFu8, 0xFFu8, 0xFFu8, b'\0'];
@@ -1010,67 +763,5 @@ mod tests {
             matches!(&err, GitError::InvalidObjectInfo(detail) if detail.contains("non-UTF-8 header bytes")),
             "unexpected err: {err:?}"
         );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    /// Covers hardlink detection for existing pack indexes.
-    fn pack_index_has_multiple_links_detects_hardlinks() {
-        let dir = tempdir().unwrap();
-        let idx = dir.path().join("pack-test.idx");
-        let link = dir.path().join("linked.idx");
-        fs::write(&idx, b"idx").unwrap();
-
-        assert!(!LocalStorage::pack_index_has_multiple_links(
-            &fs::symlink_metadata(&idx).unwrap()
-        ));
-
-        fs::hard_link(&idx, &link).unwrap();
-
-        assert!(LocalStorage::pack_index_has_multiple_links(
-            &fs::symlink_metadata(&idx).unwrap()
-        ));
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    /// Covers loose-object symlinks being ignored by reads and existence checks.
-    async fn get_rejects_symlink_loose_objects() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempdir().unwrap();
-        let objects = dir.path().join("objects");
-        let storage = LocalStorage::open_existing(objects.clone());
-        let hash = ObjectHash::from_str(&"a".repeat(get_hash_kind().size() * 2)).unwrap();
-        let object_path = storage.get_obj_path(&hash);
-        fs::create_dir_all(object_path.parent().unwrap()).unwrap();
-        let external = dir.path().join("external-object");
-        fs::write(&external, b"blob 4\0test").unwrap();
-        symlink(&external, &object_path).unwrap();
-
-        assert!(!storage.exist_loosely(&hash));
-        assert!(!storage.exist(&hash).await);
-        let raw_error = storage.read_raw_data(&hash).unwrap_err();
-        assert_eq!(raw_error.kind(), io::ErrorKind::InvalidData);
-
-        let load_error = storage.get(&hash).await.unwrap_err();
-        assert!(matches!(load_error, GitError::ObjectNotFound(_)));
-    }
-
-    #[test]
-    /// Covers read-only local storage not rebuilding missing pack indexes.
-    fn open_existing_does_not_build_missing_pack_indexes() {
-        let dir = tempdir().unwrap();
-        let objects = dir.path().join("objects");
-        let pack_dir = objects.join("pack");
-        fs::create_dir_all(&pack_dir).unwrap();
-        let pack = pack_dir.join("pack-readonly.pack");
-        let idx = pack.with_extension("idx");
-        fs::write(&pack, b"PACK").unwrap();
-
-        let storage = LocalStorage::open_existing(objects);
-
-        assert!(storage.list_all_idx().is_empty());
-        assert!(!idx.exists());
     }
 }

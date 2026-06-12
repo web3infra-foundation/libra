@@ -1,6 +1,4 @@
 //! SeaORM entity for current scheduler plan heads.
-//!
-//! 当前调度器计划头的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 

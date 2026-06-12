@@ -434,7 +434,19 @@ where
                         TaskRuntimeEvent::AssistantMessage(turn.final_text.clone()),
                     );
                 }
-                if let Some(reason) = submit_task_complete_fail_reason(&accumulated_tool_calls) {
+                if let Some(reason) =
+                    submit_task_complete_evidence_mismatch(&accumulated_tool_calls)
+                {
+                    (
+                        Some(reason.clone()),
+                        tool_calls,
+                        policy_violations,
+                        reason,
+                        None,
+                    )
+                } else if let Some(reason) =
+                    submit_task_complete_fail_reason(&accumulated_tool_calls)
+                {
                     (
                         Some(reason.clone()),
                         tool_calls,
@@ -510,16 +522,6 @@ where
                             policy_violations,
                             reason,
                             Some(review.clone()),
-                        )
-                    } else if let Some(reason) =
-                        submit_task_complete_evidence_mismatch(&accumulated_tool_calls)
-                    {
-                        (
-                            Some(reason.clone()),
-                            tool_calls,
-                            policy_violations,
-                            reason,
-                            review,
                         )
                     } else if let Some(violation_message) = workspace_contract_failure(task, config)
                     {
@@ -2636,7 +2638,6 @@ fn runtime_context_for_task(
         sandbox_runtime: inherited_runtime.and_then(|ctx| ctx.sandbox_runtime.clone()),
         approval: inherited_runtime.and_then(|ctx| ctx.approval.clone()),
         file_history: inherited_runtime.and_then(|ctx| ctx.file_history.clone()),
-        agent_run_id: inherited_runtime.and_then(|ctx| ctx.agent_run_id.clone()),
         max_output_bytes: max_output_limit(&spec.security.tool_acl, "shell", "execute"),
     }
 }
@@ -2662,7 +2663,6 @@ fn runtime_context_for_gate_task(
         sandbox_runtime: inherited_runtime.and_then(|ctx| ctx.sandbox_runtime.clone()),
         approval: inherited_runtime.and_then(|ctx| ctx.approval.clone()),
         file_history: inherited_runtime.and_then(|ctx| ctx.file_history.clone()),
-        agent_run_id: inherited_runtime.and_then(|ctx| ctx.agent_run_id.clone()),
         max_output_bytes: max_output_limit(&spec.security.tool_acl, "shell", "execute"),
     }
 }
@@ -2689,7 +2689,6 @@ fn runtime_context_for_reviewer(
         sandbox_runtime: inherited_runtime.and_then(|ctx| ctx.sandbox_runtime.clone()),
         approval: inherited_runtime.and_then(|ctx| ctx.approval.clone()),
         file_history: inherited_runtime.and_then(|ctx| ctx.file_history.clone()),
-        agent_run_id: inherited_runtime.and_then(|ctx| ctx.agent_run_id.clone()),
         max_output_bytes: max_output_limit(&spec.security.tool_acl, "workspace.fs", "read"),
     }
 }
@@ -4550,7 +4549,10 @@ mod tests {
                             name: "submit_task_complete".to_string(),
                             arguments: serde_json::json!({
                                 "result": "pass",
-                                "summary": "implementation done"
+                                "summary": "implementation done",
+                                "evidence": [
+                                    {"command": "cargo test", "exit_code": 0}
+                                ]
                             }),
                         },
                     })],

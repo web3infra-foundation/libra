@@ -4,21 +4,12 @@
 
 ### Added
 
-- **`libra ls-tree`**: partial Git-compatible tree inspection command for
-  listing commit/tree contents with default Git-style output, recursive
-  traversal, tree-only and long modes, NUL records, path-only/object-only
-  output, object ID abbreviation, path prefix filters, and structured JSON.
-- **`libra gc`**: Maintenance command that traces refs, reflogs, and index
-  entries to keep reachable objects, prunes unreachable loose objects according
-  to `--prune`, supports `--dry-run` and `--json`, and cleans stale pack
-  sidecars while preserving `.keep`-protected packs. Valid pack/index pairs are
-  verified through the existing `verify-pack` path; full Git-style repacking and
-  delta compression remain deferred.
-- **`libra archive`**: create archives from committed tree snapshots. Supports
-  `tar`, `tar.gz`/`tgz`, `tar.bz2`/`tbz2`/`tbz`, and `zip`, with optional
-  `--output <FILE>` and safe relative `--prefix <PREFIX>` handling. The focused
-  integration coverage includes happy paths, invalid inputs, Unicode filenames,
-  spaces in paths, deeply nested files, and empty files.
+- **`libra maintenance` command**: implements Git-compatible `maintenance`
+  with subcommands `run`, `register`, `unregister`, and `status`. Supports
+  tasks `gc`, `loose-objects`, `pack-refs`, `incremental-repack`,
+  `commit-graph`, and `prefetch`. Includes dry-run mode, JSON output, and
+  26 integration tests plus 12 unit tests.
+
 - **Cross-cutting `--help` EXAMPLES rollout (v0.17.812..v0.17.836, sealed
   v0.17.837)**: every visible command in `src/cli.rs::Commands` now ends
   its `--help` output with an `EXAMPLES:` section listing the canonical
@@ -68,22 +59,6 @@
   bit 0 = object corruption, bit 1 = broken refs, bit 2 = index corruption.
 - **`docs/commands/fsck.md`**: Comprehensive documentation for the `fsck` command
   including parameter comparison with Git, design rationale, and CI/CD examples.
-- **`libra notes`**: Add, list, show, and remove Git-compatible notes attached to
-  commits. Supports `-m`/`-F` for note content, `--force` for overwriting, custom
-  notes refs via `--ref`, JSON/machine output, and stable error codes
-  (`LBR-CLI-002`/`003`, `LBR-REPO-003`, `LBR-CONFLICT-002`). Notes are stored as
-  blob objects with mappings persisted in the SQLite `notes` table.
-  `append`/`edit`/`copy`/`merge`/`prune`/`get-ref` subcommands are not implemented
-  (see `COMPATIBILITY.md`).
-- **`docs/commands/notes.md`**: Full documentation for the notes command covering
-  synopsis, CLI flags, human/JSON output examples, parameter comparison with Git
-  and jj, design rationale (SQLite-backed refs, no editor support), and error
-  handling reference.
-- **`libra prune`**: Prunes unreachable loose objects from repository. Supports `-dry-run`
-  for dry-run mode, `--verbose` for verbose report, `--expire` for expiration specification,
-  and user-specified heads as additional reachability start points.
-- **`docs/commands/prune.md`**: Comprehensive documentation for the `prune` command
-  including synopsis, CLI flags, human/JSON output examples and error handling reference.
 
 ### Documentation
 

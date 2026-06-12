@@ -1,6 +1,4 @@
 //! Phase E hardening contracts for authorization, tool boundary, redaction, and audit.
-//!
-//! 授权、工具边界、编辑和审计的 E 阶段强化契约。
 
 use std::{collections::BTreeSet, fmt, sync::Arc};
 

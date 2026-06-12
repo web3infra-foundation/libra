@@ -1,7 +1,3 @@
-//! OpenAPI source pool backend for external capability providers.
-//!
-//! 外部功能提供商的 OpenAPI 源池后端。
-
 use std::{collections::BTreeMap, fmt};
 
 use serde::Deserialize;

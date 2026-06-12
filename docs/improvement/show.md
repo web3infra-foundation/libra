@@ -8,7 +8,7 @@
 
 第一批全部 8 个命令的主改造已在当前代码库落地。`show` 是第三批（历史查询命令）中展示任意 Git 对象的通用命令。
 
-> **实施状态：✅ 已落地（用户契约 + 内部错误收口 + 2026-06-08 兼容收口）** — `run_show()` / `ShowOutput`、commit/tag/tree/blob JSON / machine 输出、稳定错误码、`--quiet`、refs best-effort、历史 blob strict failure、`--help` EXAMPLES、`ShowError` typed enum 与 human render split 均已交付。`v0.17.1131` 起，show 的主要失败路径通过 `ShowError → CliError` 集中映射。2026-06-08 追加落地多对象顺序渲染、multi-object JSON array、`-p` / `--patch`、`--pretty` 常用 preset、limited `--format` placeholder 子集，以及 show/tag 相关回归测试。
+> **实施状态：✅ 已落地（用户契约 + 内部错误收口）** — `run_show()` / `ShowOutput`、commit/tag/tree/blob JSON / machine 输出、稳定错误码、`--quiet`、refs best-effort、历史 blob strict failure、`--help` EXAMPLES、`ShowError` typed enum 与 human render split 均已交付。`v0.17.1131` 起，show 的主要失败路径通过 `ShowError → CliError` 集中映射。
 
 **已确认落地的基线：**
 
@@ -18,9 +18,6 @@
 - `CliError` 支持 `.with_hint()`、`.with_stable_code()`、`.with_detail()`
 - `execute()` / `execute_safe(args, _output)` 双入口已存在（`show.rs:141/150`）
 - `--no-patch` / `--oneline` / `--name-only` / `--stat` / pathspec 已实现
-- 多对象顺序渲染已实现：`libra show HEAD HEAD~1` 按命令行顺序背靠背输出，JSON 模式下多对象返回 `data` array
-- `--patch` / `-p` 已作为显式 patch flag 接入；commit 默认仍显示 patch，`--no-patch` 优先生效
-- `--pretty` 支持 `oneline` / `short` / `medium` / `full` / `fuller` 和 `format:<template>`；`--format` 支持 `%H` / `%h` / `%s` / `%n` / `%an` / `%ae` / `%cn` / `%ce` / `%%`
 - show 支持 commit、tag（annotated + lightweight）、tree、blob 四种对象类型
 - 复用 `log.rs` 的 `generate_diff()` 和 `get_changed_files_for_commit()` 函数
 - `run_show()` + `ShowOutput` 已落地，`--json` / `--machine` 已可返回 commit/tag/tree/blob 四类结构化结果
@@ -50,12 +47,12 @@
 - `run_show()` / `ShowOutput`、JSON / machine 输出、`show_bad_revision_error()` 的稳定错误码、`--quiet`、refs best-effort、历史 blob 损坏显式失败和 `--help` EXAMPLES 已落地
 
 **后续收口目标：**
-- 继续用回归测试锁住 refs best-effort、pathspec JSON、tree/blob schema、typed error mapping、multi-object JSON array、limited pretty/format 和 patch/stat strict failure 等对外契约
+- 继续用回归测试锁住 refs best-effort、pathspec JSON、tree/blob schema、typed error mapping 和 patch/stat strict failure 等对外契约
 
 **本批非目标：**
-- **不实现完整 Git `--pretty` / `--format` mini-language**。当前只支持 commit header 常用 subset；未知 placeholder 返回 `LBR-CLI-002`
+- **不引入 `--pretty` 格式支持**。log 的 `--pretty` 自定义模板在 show 中不适用（show 面向多种对象类型）
 - **不引入 `--decorate` 支持**。show 本身已在 commit 输出中包含 refs 信息
-- **不改变 diff 生成逻辑**。show 复用 `log.rs` 的 `generate_diff()`；`-U` / `--unified` 和 `diff.noprefix` 仍需共享 diff option 重构后再落地
+- **不改变 diff 生成逻辑**。show 复用 `log.rs` 的 `generate_diff()`
 
 ### 设计原则
 

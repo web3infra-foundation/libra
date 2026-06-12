@@ -1,6 +1,4 @@
 //! SeaORM entity for configuration key/value rows representing scoped repository settings.
-//!
-//! 表示范围内存储库设置的配置键/值行的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 

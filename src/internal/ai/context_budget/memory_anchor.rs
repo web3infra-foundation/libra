@@ -1,6 +1,4 @@
 //! Memory anchors used to carry confirmed semantic constraints across turns.
-//!
-//! 用于在轮次间传递已确认语义约束的内存锚点。
 
 use std::{collections::BTreeMap, fmt};
 

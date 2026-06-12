@@ -57,16 +57,6 @@ WHERE `remote` IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_ref_name_timestamp ON `reflog`(`ref_name`, `timestamp`);
 
-CREATE TABLE IF NOT EXISTS `notes` (
-    `id`         INTEGER PRIMARY KEY AUTOINCREMENT,
-    `notes_ref`  TEXT NOT NULL,
-    `object`     TEXT NOT NULL,
-    `blob`       TEXT NOT NULL,
-    UNIQUE(`notes_ref`, `object`)
-);
-
-CREATE INDEX IF NOT EXISTS idx_notes_ref ON `notes`(`notes_ref`);
-
 CREATE TABLE IF NOT EXISTS `object_index` (
     `id`         INTEGER PRIMARY KEY AUTOINCREMENT,
     `o_id`       TEXT NOT NULL,
@@ -310,6 +300,28 @@ CREATE INDEX IF NOT EXISTS idx_ai_decision_proposal_thread_created
     ON `ai_decision_proposal`(`thread_id`, `created_at`);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_decision_proposal_latest
     ON `ai_decision_proposal`(`thread_id`) WHERE `is_latest` = 1;
+
+-- Phase 4 completion: the formal final `Decision` artifact (terminal link in
+-- the ValidationReport -> RiskScoreBreakdown -> DecisionProposal -> Decision
+-- chain). Also shipped as migration 2026053101 for existing databases.
+CREATE TABLE IF NOT EXISTS `ai_final_decision` (
+    `decision_id` TEXT PRIMARY KEY,
+    `thread_id` TEXT NOT NULL,
+    `decision_proposal_id` TEXT,
+    `validation_report_id` TEXT,
+    `policy_version` TEXT NOT NULL,
+    `verdict` TEXT NOT NULL,
+    `stale` INTEGER NOT NULL DEFAULT 0 CHECK (`stale` IN (0, 1)),
+    `is_latest` INTEGER NOT NULL DEFAULT 0 CHECK (`is_latest` IN (0, 1)),
+    `summary_json` TEXT NOT NULL,
+    `created_at` INTEGER NOT NULL,
+    `updated_at` INTEGER NOT NULL,
+    FOREIGN KEY (`thread_id`) REFERENCES `ai_thread`(`thread_id`) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_ai_final_decision_thread_created
+    ON `ai_final_decision`(`thread_id`, `created_at`);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_final_decision_latest
+    ON `ai_final_decision`(`thread_id`) WHERE `is_latest` = 1;
 
 CREATE TABLE IF NOT EXISTS `ai_thread_provider_metadata` (
     `thread_id` TEXT PRIMARY KEY,

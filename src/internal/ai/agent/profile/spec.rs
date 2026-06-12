@@ -306,36 +306,6 @@ impl AgentPermissionSpec {
     pub fn permits_tool(&self, tool: &str) -> bool {
         !self.denied_tools.contains(tool) && self.allowed_tools.contains(tool)
     }
-
-    /// Convert this spec into the runtime
-    /// [`AgentPermissionProfile`](crate::internal::ai::agent_run::permission::AgentPermissionProfile)
-    /// the dispatcher enforces (CEX-S2-17 应该完成的功能: "package 内的 sub-agent
-    /// definitions 必须走 Step 2.2 的 `AgentPermissionProfile`，不能通过
-    /// frontmatter 继承全部工具").
-    ///
-    /// The conversion is **explicit and field-by-field** — there is no
-    /// "inherit all tools" shortcut. A spec that lists no `allowed_tools`
-    /// produces a default-deny profile (S2-INV-05), so a capability-package
-    /// sub-agent definition can never widen its authority simply by omitting the
-    /// permission block. Pure; no I/O.
-    pub fn to_permission_profile(
-        &self,
-    ) -> crate::internal::ai::agent_run::permission::AgentPermissionProfile {
-        use crate::internal::ai::agent_run::permission::{AgentPermissionProfile, ApprovalRouting};
-
-        let approval_routing = match self.approval_routing {
-            ApprovalRoutingSpec::Layer1Human => ApprovalRouting::Layer1Human,
-            ApprovalRoutingSpec::SessionPreApproved => ApprovalRouting::SessionPreApproved,
-        };
-
-        AgentPermissionProfile {
-            allowed_tools: self.allowed_tools.clone(),
-            denied_tools: self.denied_tools.clone(),
-            allowed_source_slugs: self.allowed_source_slugs.clone(),
-            approval_routing,
-            may_spawn_sub_agents: self.may_spawn_sub_agents,
-        }
-    }
 }
 
 /// The executable form of an agent profile.
@@ -816,47 +786,5 @@ mod tests {
         assert_eq!(spec.allowed_tools.len(), 2);
         assert!(spec.allowed_tools.contains("read_file"));
         assert!(spec.allowed_tools.contains("list_dir"));
-    }
-
-    /// CEX-S2-17: a default (empty) spec converts to a default-deny runtime
-    /// profile — a sub-agent definition that omits its permission block can
-    /// never inherit all tools.
-    #[test]
-    fn default_spec_converts_to_default_deny_profile() {
-        let profile = AgentPermissionSpec::default().to_permission_profile();
-        assert!(
-            !profile.permits_tool("read_file"),
-            "an empty spec must convert to a deny-everything profile",
-        );
-        assert!(!profile.may_spawn_sub_agents);
-    }
-
-    /// The conversion threads every field through verbatim, including the
-    /// approval-routing enum mapping and the deny-wins precedence.
-    #[test]
-    fn conversion_preserves_every_permission_field() {
-        let spec = AgentPermissionSpec {
-            allowed_tools: ["read_file", "grep"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-            denied_tools: ["grep"].iter().map(|s| s.to_string()).collect(),
-            allowed_source_slugs: ["acme-mcp"].iter().map(|s| s.to_string()).collect(),
-            approval_routing: ApprovalRoutingSpec::SessionPreApproved,
-            may_spawn_sub_agents: true,
-        };
-        let profile = spec.to_permission_profile();
-
-        // allowed-and-not-denied tool stays permitted; deny wins on overlap.
-        assert!(profile.permits_tool("read_file"));
-        assert!(!profile.permits_tool("grep"));
-        // Source slug + spawn flag carried over.
-        assert!(profile.permits_source("acme-mcp"));
-        assert!(profile.may_spawn_sub_agents);
-        // Approval routing enum mapped, not defaulted.
-        assert_eq!(
-            profile.approval_routing,
-            crate::internal::ai::agent_run::permission::ApprovalRouting::SessionPreApproved,
-        );
     }
 }

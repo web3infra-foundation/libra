@@ -1,6 +1,6 @@
 //! Removes paths from the index and working tree according to pathspecs, supporting recursive deletion and cache-only modes.
 
-use std::{io::IsTerminal, path::PathBuf};
+use std::path::PathBuf;
 
 use clap::Parser;
 use colored::Colorize;
@@ -11,8 +11,8 @@ use tokio::fs;
 use crate::{
     command::status::{changes_to_be_committed_safe, changes_to_be_staged},
     utils::{
-        error::{CliError, CliResult, StableErrorCode},
-        output::{ColorChoice, OutputConfig, emit_json_data},
+        error::{CliError, CliResult},
+        output::{OutputConfig, emit_json_data},
         path,
         path_ext::PathExt,
         util,
@@ -305,7 +305,7 @@ async fn run_remove(args: RemoveArgs) -> CliResult<RemoveOutput> {
                     }
                 ));
                 for file in files {
-                    error_msg.push_str(&format!("    {}\n", file));
+                    error_msg.push_str(&format!("\t{}\n", file));
                 }
                 error_msg.push_str("(use --cached to keep the file, or -f to force removal)");
             }
@@ -319,7 +319,7 @@ async fn run_remove(args: RemoveArgs) -> CliResult<RemoveOutput> {
                     }
                 ));
                 for file in files {
-                    error_msg.push_str(&format!("    {}\n", file));
+                    error_msg.push_str(&format!("\t{}\n", file));
                 }
                 error_msg.push_str("(use --cached to keep the file, or -f to force removal)");
             }
@@ -334,13 +334,12 @@ async fn run_remove(args: RemoveArgs) -> CliResult<RemoveOutput> {
                 }
             ));
             for file in diff_status.index_commit_workingtree {
-                error_msg.push_str(&format!("    {}\n", file));
+                error_msg.push_str(&format!("\t{}\n", file));
             }
             error_msg.push_str("(use -f to force removal)");
         }
         if !error_msg.is_empty() {
-            return Err(CliError::failure(error_msg.trim_end().to_string())
-                .with_stable_code(StableErrorCode::WarningEmitted));
+            return Err(CliError::failure(error_msg.trim_end().to_string()));
         }
     }
 
@@ -366,53 +365,39 @@ async fn run_remove(args: RemoveArgs) -> CliResult<RemoveOutput> {
             index.remove(&relative_path, 0);
         }
     }
-
-    if !args.dry_run {
-        // Persist the index BEFORE deleting any files. If the save fails after the
-        // physical deletion, the index would still track files that no longer
-        // exist on disk — an unrecoverable inconsistency. Saving first keeps the
-        // index and working tree in agreement on every failure path.
-        index.save(&idx_file).map_err(|e| {
-            CliError::fatal(format!(
-                "failed to save index '{}': {e}",
-                idx_file.display()
-            ))
-            .with_stable_code(StableErrorCode::IoWriteFailed)
-        })?;
-    }
-
     if !args.cached && !args.dry_run {
-        let mut failed_removals: Vec<(PathBuf, String)> = Vec::new();
         for path_str in remove_list {
             let path = PathBuf::from(&path_str);
             if let Err(e) = fs::remove_file(&path).await {
-                failed_removals.push((path, e.to_string()));
+                return Err(CliError::failure(format!(
+                    "failed to remove file '{}': {}",
+                    path.display(),
+                    e
+                )));
             }
         }
         for path_str in remove_dir_list {
             let path = PathBuf::from(&path_str);
             if args.recursive {
                 if let Err(e) = fs::remove_dir_all(&path).await {
-                    failed_removals.push((path, e.to_string()));
+                    return Err(CliError::failure(format!(
+                        "failed to remove directory '{}': {}",
+                        path.display(),
+                        e
+                    )));
                 }
             } else if let Err(e) = fs::remove_dir(&path).await {
-                failed_removals.push((path, e.to_string()));
+                return Err(CliError::failure(format!(
+                    "failed to remove directory '{}': {}",
+                    path.display(),
+                    e
+                )));
             }
         }
-        if !failed_removals.is_empty() {
-            let failed_paths = failed_removals
-                .iter()
-                .map(|(path, _)| path.display().to_string())
-                .collect::<Vec<_>>();
-            let summary = failed_removals
-                .iter()
-                .map(|(path, error)| format!("failed to remove '{}': {error}", path.display()))
-                .collect::<Vec<_>>()
-                .join("\n");
-            return Err(CliError::failure(summary)
-                .with_stable_code(StableErrorCode::WarningEmitted)
-                .with_detail("failed_paths", serde_json::json!(failed_paths)));
-        }
+    }
+
+    if index.save(&idx_file).is_err() {
+        return Err(CliError::fatal("failed to save index"));
     }
 
     Ok(RemoveOutput {
@@ -433,21 +418,8 @@ fn render_remove_output(result: &RemoveOutput, output: &OutputConfig) -> CliResu
     if output.quiet {
         return Ok(());
     }
-    // Explicitly gate ANSI color on the resolved OutputConfig so piped/`--no-color`
-    // output is plain `rm '<path>'`, rather than relying on the implicit global
-    // `colored` override (whose TTY auto-detection is unreliable under pseudo-
-    // terminals / CLICOLOR_FORCE).
-    let use_color = match output.color {
-        ColorChoice::Never => false,
-        ColorChoice::Always => true,
-        ColorChoice::Auto => std::io::stdout().is_terminal(),
-    };
     for path in &result.paths {
-        if use_color {
-            println!("rm '{}'", path.path.bright_yellow());
-        } else {
-            println!("rm '{}'", path.path);
-        }
+        println!("rm '{}'", path.path.bright_yellow());
     }
     Ok(())
 }

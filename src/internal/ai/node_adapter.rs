@@ -255,7 +255,6 @@ impl<M: CompletionModel> ToolLoopAction<M> {
                 source_session_id: None,
                 preserve_reasoning_content: false,
                 goal_stop_policy: None,
-                live_run_registry: None,
             },
         }
     }

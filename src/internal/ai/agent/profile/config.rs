@@ -122,14 +122,6 @@ pub struct MultiAgentConfig {
     /// operator opts in to duplicating the whole worktree per run.
     #[serde(default)]
     pub allow_full_copy: bool,
-
-    /// CEX-S2-14 (agent.md:1959): cap concurrent Source Pool tool calls per
-    /// source slug so multiple sub-agents cannot overwhelm one MCP / REST
-    /// backend. `0` (the default) disables throttling — back-compatible with
-    /// the pre-throttle behaviour. The session bootstrap threads this into
-    /// [`SourcePool::with_source_concurrency_limit`](crate::internal::ai::sources::SourcePool::with_source_concurrency_limit).
-    #[serde(default)]
-    pub source_concurrency_limit: u32,
 }
 
 impl Default for MultiAgentConfig {
@@ -140,7 +132,6 @@ impl Default for MultiAgentConfig {
             max_concurrent_subagents: default_max_concurrent_subagents(),
             subagent_timeout_ms: default_subagent_timeout_ms(),
             allow_full_copy: false,
-            source_concurrency_limit: 0,
         }
     }
 }

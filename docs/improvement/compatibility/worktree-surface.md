@@ -6,20 +6,10 @@ C5（Audit P2）
 
 ## 已完成前置条件与当前代码状态
 
-### 2026-06-08 worktree parity 扩展复核
-
-- `worktree add` 已补齐 `-b` / `-B` / `--detach` / `--no-checkout` / `--lock` / `--reason` / `[commit-ish]`，并在默认实现与 `worktree-fuse` wrapper 的非 FUSE 委托路径同步。
-- `worktree list` 已补 `--porcelain` 与 `--verbose`。Porcelain 只输出 `worktree`、共享 `HEAD`、`locked`，不会输出 Git 的 per-worktree `branch` / `detached` 行，因为 Libra linked worktree 共用同一个 `.libra` storage/HEAD。
-- `worktree remove` 已补 repeatable `--force`：单个 `--force` 可配合 `--delete-dir` 跳过 dirty 检查；locked worktree 需要 `-f -f` 才能注销；任何 force 都不能越过 main worktree 保护，也不会在缺少 `--delete-dir` 时删除磁盘目录。
-- `worktree prune` 已补 `--dry-run` / `--verbose` / `--expire <time>`。`--expire` 只过滤目录缺失的 stale registry entry，仍存在的 worktree 永远不会因 age 被 prune。
-- `worktree repair` 已扩展为 symlink-only 修复：重建缺失或 stale 的 linked-worktree `.libra` symlink，跳过 main worktree 和真实 `.libra` 目录，避免误删真实 storage 内容。
-- `move` 失败回滚已硬化：先重命名磁盘目录，失败时保持 registry 原样；成功后刷新 linked `.libra` symlink，再写入 registry，写入失败时尝试把目录移回原路径。
-- 覆盖测试：`cargo test --test command_test -- worktree_test --test-threads=1 --nocapture`（71 passed）与 `cargo test --test command_test --features worktree-fuse -- worktree_fuse_test --test-threads=1 --nocapture`（9 passed）。
-
 ### 已确认落地的基线（2026-05-11 复核）
 - [`src/command/worktree.rs`](../../../src/command/worktree.rs) 已实现 `add` / `list` / `lock` / `unlock` / `move` / `prune` / `remove` / `repair`，以及 Unix 下的 `umount` 子命令。
 - `worktree remove` 当前默认**不删除磁盘目录**，继续保持非破坏默认。
-- `WorktreeSubcommand::Remove { path, delete_dir, force }` 已暴露 `--delete-dir` 与 repeatable `--force`；显式 `--delete-dir` 默认会先检查脏工作树，只有 clean worktree 才删除磁盘目录并从 registry 移除，`--force` 可作为显式越权。
+- `WorktreeSubcommand::Remove { path, delete_dir }` 已暴露 `--delete-dir`；显式传入后会先检查脏工作树，只有 clean worktree 才删除磁盘目录并从 registry 移除。
 - 第 31 批"mv / rm / worktree 结构化输出"已在 `mv` / `rm` / worktree 常用成功路径上启动；当前 `mv` / `rm` 已有成功 JSON / machine schema，worktree `add` / `list` / `lock` / `unlock` / `move` / `prune` / `remove` / `repair` 已有成功 JSON / machine schema，非 FUSE worktree 错误已通过 `WorktreeError` typed enum 显式映射 `StableErrorCode`，FUSE `umount` 成功路径已有 JSON / machine schema。
 - [`tests/command/worktree_test.rs`](../../../tests/command/worktree_test.rs) 已覆盖基础 add / list / remove，包含 `--delete-dir` on/off、dirty 拒绝路径，以及 no-such/main/locked/destination-exists/storage-path/corrupt-state 的 JSON/machine 负向错误契约。
 - [`tests/compat/worktree_delete_dir.rs`](../../../tests/compat/worktree_delete_dir.rs) 已固定对外兼容契约：默认保留目录，`--delete-dir` 删除 clean 目录，dirty 时拒绝并保留 registry/目录。
@@ -31,7 +21,7 @@ C5（Audit P2）
 
 ## 目标与非目标
 
-**原 C5 目标（已完成并被 2026-06-08 parity 扩展覆盖）：**
+**目标：**
 - 在 `WorktreeSubcommand::Remove` 加 `--delete-dir` 字段（bool，默认 false）。
 - 在 `worktree remove` handler 中：
   - 默认（`--delete-dir=false`）：保持当前行为，仅从 registry 移除工作树记录，不动磁盘目录。
@@ -41,10 +31,10 @@ C5（Audit P2）
 - `COMPATIBILITY.md` 中 worktree 行更新为 `intentionally-different`，notes "remove keeps disk dir by default; --delete-dir for Git-style behavior"。
 - `docs/commands/worktree.md`（若存在）同步说明默认 vs `--delete-dir` 的差异。
 
-**原 C5 非目标（历史记录；2026-06-08 已反转其中 `--force` 项）：**
+**非目标：**
 - 不翻转默认（不切到 Git 风格删盘默认）——这会破坏现有脚本，已被用户决策排除。
 - C5 原批次不引入完整 `WorktreeOutput` / `WorktreeError` typed enum；第 31 批已经补齐非 FUSE worktree success schema 与 typed error，并补齐 FUSE `umount` success schema。
-- C5 当时不实现 `worktree remove --force`；2026-06-08 parity 扩展已实现 repeatable `--force`，并保留默认不删盘的 intentionally-different 设计。
+- 不实现 `worktree remove --force`；当前没有该 flag，本批只为 `--delete-dir` 提供最小 dirty 检查（dirty 时拒绝）。
 - 不动 `worktree add` / `list` / `lock` / `move` / `prune` / `repair` / `unlock` 的行为。
 
 ## 设计要点

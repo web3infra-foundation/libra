@@ -1,7 +1,5 @@
 //! Wave 1B `TaskExecutor` adapter structs.
 //!
-//! Wave 1B `TaskExecutor` 适配器结构体。
-//!
 //! The Code UI Phase Workflow's Wave 1B "Definition of Done #1" requires
 //! that **both** providers — Codex (`CodexTaskExecutor`) and any generic
 //! completion-model provider (`CompletionTaskExecutor<M>`) — implement the

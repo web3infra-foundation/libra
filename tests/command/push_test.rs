@@ -189,65 +189,6 @@ fn test_push_cli_without_remote_returns_fatal_128() {
     assert!(stderr.contains("Hint:"));
 }
 
-#[test]
-fn test_push_porcelain_conflicts_with_json() {
-    // `--porcelain` and a JSON mode are mutually exclusive; the check runs in
-    // `execute_safe` before any remote lookup, so a committed repo (no remote)
-    // is enough.
-    let repo = create_committed_repo_via_cli();
-
-    let output = run_libra_command(
-        &["--json", "push", "--porcelain", "origin", "main"],
-        repo.path(),
-    );
-    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
-    assert_eq!(output.status.code(), Some(129));
-    assert_eq!(report.error_code, "LBR-CLI-002");
-    assert!(
-        report.message.contains("--porcelain"),
-        "message: {}",
-        report.message
-    );
-}
-
-#[test]
-fn test_push_porcelain_conflicts_with_machine() {
-    let repo = create_committed_repo_via_cli();
-
-    let output = run_libra_command(
-        &["--machine", "push", "--porcelain", "origin", "main"],
-        repo.path(),
-    );
-    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
-    assert_eq!(output.status.code(), Some(129), "stderr: {stderr}");
-    assert_eq!(report.error_code, "LBR-CLI-002");
-}
-
-#[test]
-fn test_push_help_lists_new_flags() {
-    let repo = create_committed_repo_via_cli();
-    let output = run_libra_command(&["push", "--help"], repo.path());
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for flag in [
-        "--force-with-lease",
-        "--force-if-includes",
-        "--follow-tags",
-        "--no-follow-tags",
-        "--signed",
-        "--push-option",
-        "--thin",
-        "--no-thin",
-        "--atomic",
-        "--porcelain",
-    ] {
-        assert!(
-            stdout.contains(flag),
-            "push --help must expose `{flag}`; stdout: {stdout}"
-        );
-    }
-}
-
 #[cfg(unix)]
 fn create_fake_ssh_script(root: &Path) -> PathBuf {
     let script_path = root.join("fake_ssh.sh");

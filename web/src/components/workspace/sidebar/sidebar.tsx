@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { BrandMark } from "@/components/workspace/brand-mark";
-import { IconPlus, IconSearch, IconSettings } from "@/components/icons";
+import { IconPlus, IconRefresh, IconSearch, IconSettings } from "@/components/icons";
 import { useCodeUiStore } from "@/lib/code-ui/store";
 import { PHASES } from "@/lib/code-ui/phases";
 import { cn } from "@/lib/utils";
@@ -25,7 +25,7 @@ type Props = {
 };
 
 export function Sidebar({ width }: Props) {
-  const { snapshot, repo, status, threads, connection } = useCodeUiStore();
+  const { snapshot, repo, status, threads, connection, refreshThreads } = useCodeUiStore();
   const [toast, setToast] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
 
@@ -170,8 +170,17 @@ export function Sidebar({ width }: Props) {
         />
       </div>
 
-      <div className="px-1 pb-2 text-[10px] font-medium uppercase tracking-[0.08em] text-ink-3">
-        Threads
+      <div className="mb-1 flex items-center justify-between gap-2 px-1 pb-2 text-[10px] font-medium uppercase tracking-[0.08em] text-ink-3">
+        <span>Threads</span>
+        <button
+          type="button"
+          onClick={() => void refreshThreads()}
+          title="Refresh thread list"
+          aria-label="Refresh thread list"
+          className="grid h-6 w-6 place-items-center rounded-sm border border-rule bg-paper text-ink-3 hover:text-ink"
+        >
+          <IconRefresh size={13} />
+        </button>
       </div>
       <div className="-mx-1 flex-1 overflow-y-auto px-1">
         {visibleThreads.map((thread) => (

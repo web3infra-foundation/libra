@@ -1,7 +1,5 @@
 //! Final gate evaluation for orchestrated AI runs.
 //!
-//! 编排 AI 运行的最终门评估。
-//!
 //! Boundary: gates combine verifier output, policy violations, and timing metadata into
 //! a pass/fail result; they do not modify objects or worktrees. Validation-decision
 //! tests cover accepted, rejected, and incomplete evidence outcomes.

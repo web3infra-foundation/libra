@@ -449,10 +449,6 @@ pub struct AppConfig {
     pub initial_goal: Option<String>,
     /// Source Pool control surface backing `/source` commands.
     pub source_pool: SourcePool,
-    /// CEX-S2-16 live-run registry — the in-flight sub-agent runs' current
-    /// tool/file, shared with the sub-agent child runner (the writer) so the
-    /// `/agents` pane can render each running child's live activity.
-    pub live_run_registry: crate::internal::ai::agent_run::LiveRunRegistry,
 }
 
 /// The main application struct.
@@ -581,9 +577,6 @@ pub struct App<M: CompletionModel> {
     goal_session: Option<super::goal_session::GoalSession>,
     /// Source Pool control state for this TUI session.
     source_pool: SourcePool,
-    /// CEX-S2-16 live-run registry the `/agents` pane reads for in-flight runs'
-    /// current tool/file (written by the sub-agent child runner).
-    live_run_registry: crate::internal::ai::agent_run::LiveRunRegistry,
 }
 
 impl<M: CompletionModel + Clone + 'static> App<M>
@@ -762,7 +755,6 @@ where
             next_code_ui_item_id: 1,
             goal_session: initial_goal_session,
             source_pool: app_config.source_pool,
-            live_run_registry: app_config.live_run_registry,
         }
     }
 
@@ -5169,11 +5161,6 @@ where
                         &self.agents_config,
                     ))));
             }
-            BuiltinCommand::Agent => {
-                let message = self.format_agent_command_response(args).await;
-                self.widget
-                    .add_cell(Box::new(AssistantHistoryCell::new(message)));
-            }
             BuiltinCommand::Budget => {
                 self.widget
                     .add_cell(Box::new(AssistantHistoryCell::new(format_budget_status(
@@ -5228,124 +5215,6 @@ where
                 }
             }
             Err(err) => err.to_string(),
-        }
-    }
-
-    /// Render the response cell for an `/agent …` invocation (CEX-S2-16). The
-    /// parser lives in [`super::agent_command::parse_agent_subcommand`]; this
-    /// helper renders the typed result. `/agent list` shows the live sub-agent
-    /// **runs** projected from their persisted snapshots (distinct from
-    /// `/agents`, which shows the declarative agent config); `/agent cancel
-    /// <id>` requests cancellation of a single run without ending the session.
-    async fn format_agent_command_response(&mut self, args: &str) -> String {
-        use super::agent_command::{AgentSubcommand, parse_agent_subcommand};
-        match parse_agent_subcommand(args) {
-            Ok(AgentSubcommand::List) => self.format_agent_runs_pane().await,
-            Ok(AgentSubcommand::Cancel { run_id }) => self.cancel_agent_run(&run_id),
-            Err(err) => err.to_string(),
-        }
-    }
-
-    /// Render the live agent-run pane for `/agent list` from the `AgentRun`
-    /// snapshots the dispatcher persisted under the repo's sessions root
-    /// (CEX-S2-16). The sessions root is resolved exactly as the dispatcher /
-    /// MCP server resolve it (`try_get_storage_path` with the `<repo>/.libra`
-    /// fallback, then `sessions`) so the same runs are surfaced. Reading is
-    /// best-effort: an unreadable store renders the empty-pane placeholder
-    /// rather than failing the command.
-    async fn format_agent_runs_pane(&self) -> String {
-        use crate::internal::ai::agent_run::event_store::AgentRunEventStore;
-
-        let working_dir = self.registry.working_dir().to_path_buf();
-        let sessions_root = crate::utils::util::try_get_storage_path(Some(working_dir.clone()))
-            .unwrap_or_else(|_| working_dir.join(".libra"))
-            .join("sessions");
-        let store = AgentRunEventStore::new(sessions_root);
-        let runs = store.list_all_snapshots().unwrap_or_default();
-        // Count persisted Source Pool / MCP / OpenAPI calls per run from
-        // `source_call_log` (CEX-S2-16 "source calls"; the per-run trace link
-        // landed v0.17.1254). Best-effort: with no usage DB or on a query error
-        // the `src` column simply renders `-`.
-        let source_call_counts = match self.config.usage_recorder.as_ref() {
-            Some(recorder) => {
-                crate::internal::model::source_call_log::count_by_agent_run(&recorder.connection())
-                    .await
-                    .unwrap_or_default()
-            }
-            None => std::collections::HashMap::new(),
-        };
-        // Snapshot the live registry once so the activity join is a cheap map
-        // lookup (CEX-S2-16 live fields). Only in-flight runs get an activity —
-        // a terminal run's lingering entry (if any) is never shown.
-        let live: std::collections::HashMap<_, _> = self
-            .live_run_registry
-            .snapshot()
-            .into_iter()
-            .map(|entry| (entry.agent_run_id, entry.state))
-            .collect();
-        // Join each run's persisted terminal usage (tokens + cost estimate), its
-        // source-call count, and — for in-flight runs — its live current
-        // tool/file; missing records leave those cells as `-`.
-        super::agent_pane::format_agent_run_pane_full(
-            &runs,
-            |run| store.read_run_usage(run.thread_id, run.id).ok().flatten(),
-            |run| source_call_counts.get(&run.id.0.to_string()).copied(),
-            |run| {
-                if !run.status.is_in_flight() {
-                    return None;
-                }
-                live.get(&run.id).map(|state| match &state.current_file {
-                    Some(file) => match &state.current_tool {
-                        Some(tool) => format!("{tool} {file}"),
-                        None => file.clone(),
-                    },
-                    None => state.current_tool.clone().unwrap_or_default(),
-                })
-            },
-        )
-    }
-
-    /// Request cancellation of a single sub-agent run by id, leaving the main
-    /// session running (CEX-S2-16 `/agent cancel <id>`).
-    ///
-    /// The id is validated against the persisted run snapshots so the abort
-    /// fires only for a genuinely in-flight run: a terminal or unknown id is
-    /// reported without touching the abort token (so a stale / mistyped id can
-    /// no longer cancel the wrong work). With the CEX-S2-12 concurrency cap of
-    /// 1 there is at most one in-flight child, so aborting it cancels exactly
-    /// the targeted run while the main session keeps running; true multi-run
-    /// targeting arrives with the S2-14 run registry.
-    fn cancel_agent_run(&self, run_id: &str) -> String {
-        use super::agent_pane::{AgentRunCancelTarget, classify_cancel_target, status_label};
-        use crate::internal::ai::agent_run::event_store::AgentRunEventStore;
-
-        let Some(runtime) = self.config.subagent_runtime.as_ref() else {
-            return format!(
-                "No sub-agent runtime is active, so run `{run_id}` cannot be cancelled. \
-                 Enable `code.multi_agent.enabled = true` in `.libra/agents.toml` first."
-            );
-        };
-
-        let working_dir = self.registry.working_dir().to_path_buf();
-        let sessions_root = crate::utils::util::try_get_storage_path(Some(working_dir.clone()))
-            .unwrap_or_else(|_| working_dir.join(".libra"))
-            .join("sessions");
-        let runs = AgentRunEventStore::new(sessions_root)
-            .list_all_snapshots()
-            .unwrap_or_default();
-
-        match classify_cancel_target(run_id, &runs) {
-            AgentRunCancelTarget::InFlight => {
-                runtime.abort_token.cancel();
-                format!("Requested cancellation of sub-agent run `{run_id}`.")
-            }
-            AgentRunCancelTarget::AlreadyTerminal(status) => format!(
-                "Sub-agent run `{run_id}` already finished ({}); nothing to cancel.",
-                status_label(status),
-            ),
-            AgentRunCancelTarget::NotFound => {
-                format!("No sub-agent run matches `{run_id}`; run `/agents` to list current runs.")
-            }
         }
     }
 

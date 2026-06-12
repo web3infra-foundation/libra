@@ -3,10 +3,6 @@
 > 最后编写时间：2026-03-24
 > **实施状态：✅ 已落地** — `run_init()` 纯执行层 / `InitOutput` 结构化结果 / `InitError → StableErrorCode` 显式映射、`InitProgress` stderr 进度、`--separate-libra-dir` / `--separate-git-dir` 全链路移除、共享 identity helper（`resolve_user_identity_sources()` + `LocalIdentityTarget`）均已交付。本文档保留为已交付契约的实现规格。
 
-> **⚠️ 后续更新（2026-06-05，`.omo/plans/init-improvement-plan.md` Batch 1/2 落地后）**：本文档下方关于 `--shared`「仅占位」和「reinit 统一返回 `LBR-REPO-003`」的描述**已被取代**，以 `docs/commands/init.md` 与 `COMPATIBILITY.md` 的 `init` 行为权威：
-> - `--shared[=<mode>]` 现已**完整支持**：裸 `--shared` ⇒ `group`（`require_equals=true`），别名规范化后持久化 `core.sharedRepository`，并对 `.libra/` 内容子树放权；vault 文件强制 `0o600`、`.libra/` 顶层目录条目保持 owner-only 可写（Windows no-op）。`--shared` 的细节仍**不进** JSON schema（沿用本文非目标）。
-> - **reinit 不再统一报 `LBR-REPO-003`**：对已存在仓库重跑 `libra init` 现在执行**安全可重入 re-init**（模板补齐 + `core.sharedRepository`/权限刷新；保留 `libra.repoid`/`vault.db`/refs，`--initial-branch` 被忽略并告警），成功打印 `Reinitialized existing Libra repository in ...`、退出 0。仅当**显式** `--object-format`/`--ref-format` 与既有不一致时才拒绝（`LBR-CLI-002`，退出 129，零磁盘改动）。因此下文 §中所有「bare/worktree reinit → `LBR-REPO-003`」的步骤与断言均为历史描述，不再代表当前行为。
-
 同时落地 [Cross-Cutting Improvements A/B/F/G](README.md#第七批全局层面改进贯穿所有命令)。
 
 ### 已完成前置条件与当前代码状态

@@ -343,7 +343,6 @@ async fn test_branch() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     };
     commit::execute(commit_args).await;
     let first_commit_id = Branch::find_branch_result("main", None)
@@ -364,7 +363,6 @@ async fn test_branch() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     };
     commit::execute(commit_args).await;
     let second_commit_id = Branch::find_branch_result("main", None)
@@ -383,26 +381,12 @@ async fn test_branch() {
             delete: None,
             delete_safe: None,
             set_upstream_to: None,
-            unset_upstream: None,
             show_current: false,
             rename: vec![],
             remotes: false,
             all: false,
             contains: vec![],
             no_contains: vec![],
-            merged: None,
-            no_merged: None,
-            points_at: None,
-            ignore_case: false,
-            sort: None,
-            format: None,
-            copy: vec![],
-            force_copy: vec![],
-            edit_description: None,
-            force: false,
-            create_reflog: false,
-            track: None,
-            no_track: false,
         };
         execute(args).await;
 
@@ -432,26 +416,12 @@ async fn test_branch() {
             delete: None,
             delete_safe: None,
             set_upstream_to: None,
-            unset_upstream: None,
             show_current: false,
             rename: vec![],
             remotes: false,
             all: false,
             contains: vec![],
             no_contains: vec![],
-            merged: None,
-            no_merged: None,
-            points_at: None,
-            ignore_case: false,
-            sort: None,
-            format: None,
-            copy: vec![],
-            force_copy: vec![],
-            edit_description: None,
-            force: false,
-            create_reflog: false,
-            track: None,
-            no_track: false,
         };
         execute(args).await;
         let second_branch = Branch::find_branch_result(&second_branch_name, None)
@@ -471,26 +441,12 @@ async fn test_branch() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
-        unset_upstream: None,
         show_current: true,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
-        merged: None,
-        no_merged: None,
-        points_at: None,
-        ignore_case: false,
-        sort: None,
-        format: None,
-        copy: vec![],
-        force_copy: vec![],
-        edit_description: None,
-        force: false,
-        create_reflog: false,
-        track: None,
-        no_track: false,
     };
     execute(args).await;
 
@@ -522,7 +478,6 @@ async fn test_create_branch_from_remote() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     };
     commit::execute(args).await;
     let hash = Head::current_commit().await.unwrap();
@@ -538,26 +493,12 @@ async fn test_create_branch_from_remote() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
-        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
-        merged: None,
-        no_merged: None,
-        points_at: None,
-        ignore_case: false,
-        sort: None,
-        format: None,
-        copy: vec![],
-        force_copy: vec![],
-        edit_description: None,
-        force: false,
-        create_reflog: false,
-        track: None,
-        no_track: false,
     };
     execute(args).await;
 
@@ -606,26 +547,12 @@ async fn test_create_branch_from_remote_tracking_ref() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
-        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
-        merged: None,
-        no_merged: None,
-        points_at: None,
-        ignore_case: false,
-        sort: None,
-        format: None,
-        copy: vec![],
-        force_copy: vec![],
-        edit_description: None,
-        force: false,
-        create_reflog: false,
-        track: None,
-        no_track: false,
     })
     .await;
 
@@ -779,7 +706,6 @@ async fn test_invalid_branch_name() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     };
     commit::execute(args).await;
 
@@ -817,7 +743,6 @@ async fn test_branch_rename() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     };
     commit::execute(args).await;
     let commit_id_1 = Head::current_commit().await.unwrap();
@@ -830,26 +755,12 @@ async fn test_branch_rename() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
-        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
-        merged: None,
-        no_merged: None,
-        points_at: None,
-        ignore_case: false,
-        sort: None,
-        format: None,
-        copy: vec![],
-        force_copy: vec![],
-        edit_description: None,
-        force: false,
-        create_reflog: false,
-        track: None,
-        no_track: false,
     };
     execute(args).await;
 
@@ -868,26 +779,12 @@ async fn test_branch_rename() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
-        unset_upstream: None,
         show_current: false,
         rename: vec!["old_name".to_string(), "new_name".to_string()],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
-        merged: None,
-        no_merged: None,
-        points_at: None,
-        ignore_case: false,
-        sort: None,
-        format: None,
-        copy: vec![],
-        force_copy: vec![],
-        edit_description: None,
-        force: false,
-        create_reflog: false,
-        track: None,
-        no_track: false,
     };
     execute(args).await;
 
@@ -933,7 +830,6 @@ async fn test_rename_current_branch() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     };
     commit::execute(args).await;
     let commit_id = Head::current_commit().await.unwrap();
@@ -949,10 +845,8 @@ async fn test_rename_current_branch() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some(feature_branch.clone()),
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -971,26 +865,12 @@ async fn test_rename_current_branch() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
-        unset_upstream: None,
         show_current: false,
         rename: vec![feature_new.clone()],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
-        merged: None,
-        no_merged: None,
-        points_at: None,
-        ignore_case: false,
-        sort: None,
-        format: None,
-        copy: vec![],
-        force_copy: vec![],
-        edit_description: None,
-        force: false,
-        create_reflog: false,
-        track: None,
-        no_track: false,
     };
     execute(args).await;
 
@@ -1041,7 +921,6 @@ async fn test_rename_to_existing_branch() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     };
     commit::execute(args).await;
 
@@ -1053,26 +932,12 @@ async fn test_rename_to_existing_branch() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
-        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
-        merged: None,
-        no_merged: None,
-        points_at: None,
-        ignore_case: false,
-        sort: None,
-        format: None,
-        copy: vec![],
-        force_copy: vec![],
-        edit_description: None,
-        force: false,
-        create_reflog: false,
-        track: None,
-        no_track: false,
     };
     execute(args).await;
 
@@ -1083,26 +948,12 @@ async fn test_rename_to_existing_branch() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
-        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
-        merged: None,
-        no_merged: None,
-        points_at: None,
-        ignore_case: false,
-        sort: None,
-        format: None,
-        copy: vec![],
-        force_copy: vec![],
-        edit_description: None,
-        force: false,
-        create_reflog: false,
-        track: None,
-        no_track: false,
     };
     execute(args).await;
 
@@ -1114,26 +965,12 @@ async fn test_rename_to_existing_branch() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
-        unset_upstream: None,
         show_current: false,
         rename: vec!["branch1".to_string(), "branch2".to_string()],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
-        merged: None,
-        no_merged: None,
-        points_at: None,
-        ignore_case: false,
-        sort: None,
-        format: None,
-        copy: vec![],
-        force_copy: vec![],
-        edit_description: None,
-        force: false,
-        create_reflog: false,
-        track: None,
-        no_track: false,
     };
     execute(args).await;
 
@@ -1177,7 +1014,6 @@ async fn test_list_all_branches() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     };
     commit::execute(args).await;
 
@@ -1189,26 +1025,12 @@ async fn test_list_all_branches() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
-        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
-        merged: None,
-        no_merged: None,
-        points_at: None,
-        ignore_case: false,
-        sort: None,
-        format: None,
-        copy: vec![],
-        force_copy: vec![],
-        edit_description: None,
-        force: false,
-        create_reflog: false,
-        track: None,
-        no_track: false,
     };
     execute(args).await;
 
@@ -1230,26 +1052,12 @@ async fn test_list_all_branches() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
-        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: true,
         contains: vec![],
         no_contains: vec![],
-        merged: None,
-        no_merged: None,
-        points_at: None,
-        ignore_case: false,
-        sort: None,
-        format: None,
-        copy: vec![],
-        force_copy: vec![],
-        edit_description: None,
-        force: false,
-        create_reflog: false,
-        track: None,
-        no_track: false,
     };
     execute(args).await; // This will print to stdout, which is fine for tests
 
@@ -1298,7 +1106,6 @@ async fn test_branch_delete_safe() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     };
     commit::execute(commit_args).await;
 
@@ -1310,26 +1117,12 @@ async fn test_branch_delete_safe() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
-        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
-        merged: None,
-        no_merged: None,
-        points_at: None,
-        ignore_case: false,
-        sort: None,
-        format: None,
-        copy: vec![],
-        force_copy: vec![],
-        edit_description: None,
-        force: false,
-        create_reflog: false,
-        track: None,
-        no_track: false,
     })
     .await;
 
@@ -1337,10 +1130,8 @@ async fn test_branch_delete_safe() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -1356,7 +1147,6 @@ async fn test_branch_delete_safe() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     };
     commit::execute(commit_args).await;
 
@@ -1364,10 +1154,8 @@ async fn test_branch_delete_safe() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -1379,26 +1167,12 @@ async fn test_branch_delete_safe() {
         delete: None,
         delete_safe: Some("feature".to_string()),
         set_upstream_to: None,
-        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
-        merged: None,
-        no_merged: None,
-        points_at: None,
-        ignore_case: false,
-        sort: None,
-        format: None,
-        copy: vec![],
-        force_copy: vec![],
-        edit_description: None,
-        force: false,
-        create_reflog: false,
-        track: None,
-        no_track: false,
     })
     .await;
 
@@ -1414,20 +1188,16 @@ async fn test_branch_delete_safe() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -1449,26 +1219,12 @@ async fn test_branch_delete_safe() {
         delete: None,
         delete_safe: Some("feature".to_string()),
         set_upstream_to: None,
-        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
-        merged: None,
-        no_merged: None,
-        points_at: None,
-        ignore_case: false,
-        sort: None,
-        format: None,
-        copy: vec![],
-        force_copy: vec![],
-        edit_description: None,
-        force: false,
-        create_reflog: false,
-        track: None,
-        no_track: false,
     })
     .await;
 
@@ -1529,7 +1285,6 @@ async fn test_branch_contains_commit_filter() {
         all: false,
         no_verify: false,
         author: None,
-        ..Default::default()
     };
 
     // ================================================================
@@ -1548,36 +1303,20 @@ async fn test_branch_contains_commit_filter() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
-        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
-        merged: None,
-        no_merged: None,
-        points_at: None,
-        ignore_case: false,
-        sort: None,
-        format: None,
-        copy: vec![],
-        force_copy: vec![],
-        edit_description: None,
-        force: false,
-        create_reflog: false,
-        track: None,
-        no_track: false,
     })
     .await;
 
     switch::execute(SwitchArgs {
         branch: Some("dev".to_string()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -1591,10 +1330,8 @@ async fn test_branch_contains_commit_filter() {
     switch::execute(SwitchArgs {
         branch: Some(main_branch.clone()),
         create: None,
-        force_create: None,
         detach: false,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -1845,1887 +1582,4 @@ fn test_filter_branches_propagates_error_for_corrupt_commit() {
         "error should mention failed commit load, got: {}",
         err.message()
     );
-}
-
-// =====================================================================
-//  Wave 1 — `--merged` / `--no-merged` / `--points-at` / `--ignore-case`
-// =====================================================================
-
-/// Collect branch names from `libra branch` human output in printed order,
-/// stripping the `* ` current-branch marker and surrounding whitespace.
-fn list_names_in_order(stdout: &str) -> Vec<String> {
-    stdout
-        .lines()
-        .map(str::trim_start)
-        .filter(|line| !line.is_empty() && !line.starts_with("HEAD detached"))
-        .map(|line| line.trim_start_matches("* ").trim().to_string())
-        .collect()
-}
-
-/// Scenario: end-to-end `--merged` / `--no-merged` / `--points-at` over a
-/// divergent graph built through the real CLI:
-///
-/// ```text
-/// main:           base ← m1                (HEAD)
-/// merged-topic:   base                     (ancestor of m1 → merged)
-/// unmerged-topic: base ← m1 ← u1           (not an ancestor of m1)
-/// ```
-///
-/// `--merged` (baseline HEAD = m1) keeps branches whose tip is reachable
-/// from m1; `--no-merged` keeps the complement; `--points-at HEAD` keeps
-/// only the exact-tip match; and `--merged --contains HEAD` proves the two
-/// filters combine with AND semantics.
-#[test]
-#[serial]
-fn test_branch_merged_no_merged_points_at_cli() {
-    let repo = create_committed_repo_via_cli();
-
-    // merged-topic stays pinned at the base commit.
-    assert_cli_success(
-        &run_libra_command(&["branch", "merged-topic"], repo.path()),
-        "create merged-topic",
-    );
-    // Advance main to m1.
-    assert_cli_success(
-        &run_libra_command(
-            &["commit", "--allow-empty", "-m", "m1", "--no-verify"],
-            repo.path(),
-        ),
-        "commit m1 on main",
-    );
-    // unmerged-topic forks at m1 and gains its own commit u1.
-    assert_cli_success(
-        &run_libra_command(&["branch", "unmerged-topic"], repo.path()),
-        "create unmerged-topic",
-    );
-    assert_cli_success(
-        &run_libra_command(&["switch", "unmerged-topic"], repo.path()),
-        "switch to unmerged-topic",
-    );
-    assert_cli_success(
-        &run_libra_command(
-            &["commit", "--allow-empty", "-m", "u1", "--no-verify"],
-            repo.path(),
-        ),
-        "commit u1 on unmerged-topic",
-    );
-    assert_cli_success(
-        &run_libra_command(&["switch", "main"], repo.path()),
-        "switch back to main",
-    );
-
-    // --merged (default baseline HEAD = m1)
-    let merged = run_libra_command(&["branch", "--merged"], repo.path());
-    assert_cli_success(&merged, "branch --merged");
-    let names = list_names_in_order(&String::from_utf8_lossy(&merged.stdout));
-    assert!(
-        names.iter().any(|n| n == "main"),
-        "merged should list main: {names:?}"
-    );
-    assert!(
-        names.iter().any(|n| n == "merged-topic"),
-        "merged should list merged-topic: {names:?}"
-    );
-    assert!(
-        !names.iter().any(|n| n == "unmerged-topic"),
-        "merged must exclude unmerged-topic: {names:?}"
-    );
-
-    // --no-merged is the exact complement.
-    let no_merged = run_libra_command(&["branch", "--no-merged"], repo.path());
-    assert_cli_success(&no_merged, "branch --no-merged");
-    let names = list_names_in_order(&String::from_utf8_lossy(&no_merged.stdout));
-    assert!(
-        names.iter().any(|n| n == "unmerged-topic"),
-        "no-merged should list unmerged-topic: {names:?}"
-    );
-    assert!(
-        !names.iter().any(|n| n == "main"),
-        "no-merged must exclude main: {names:?}"
-    );
-    assert!(
-        !names.iter().any(|n| n == "merged-topic"),
-        "no-merged must exclude merged-topic: {names:?}"
-    );
-
-    // --points-at HEAD matches only the current tip (m1).
-    let points = run_libra_command(&["branch", "--points-at", "HEAD"], repo.path());
-    assert_cli_success(&points, "branch --points-at HEAD");
-    let names = list_names_in_order(&String::from_utf8_lossy(&points.stdout));
-    assert_eq!(
-        names,
-        vec!["main".to_string()],
-        "points-at HEAD should match only main: {names:?}"
-    );
-
-    // --merged AND --contains HEAD narrows {main, merged-topic} to {main}
-    // (merged-topic does not contain m1; unmerged-topic is not merged).
-    let combined = run_libra_command(&["branch", "--merged", "--contains", "HEAD"], repo.path());
-    assert_cli_success(&combined, "branch --merged --contains HEAD");
-    let names = list_names_in_order(&String::from_utf8_lossy(&combined.stdout));
-    assert_eq!(
-        names,
-        vec!["main".to_string()],
-        "merged AND contains-HEAD should match only main: {names:?}"
-    );
-}
-
-/// `--merged` and `--no-merged` are mutually exclusive. The clap conflict is
-/// surfaced through libra's parse-error path as `CliInvalidArguments`
-/// (`LBR-CLI-002`), which is coarse exit code 129 (the fine-grained `2` only
-/// applies under `LIBRA_FINE_EXIT_CODES=1`).
-#[test]
-#[serial]
-fn test_branch_merged_and_no_merged_conflict_rejected() {
-    let repo = create_committed_repo_via_cli();
-    let output = run_libra_command(&["branch", "--merged", "--no-merged"], repo.path());
-    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
-
-    assert_eq!(output.status.code(), Some(129));
-    assert_eq!(report.error_code, "LBR-CLI-002");
-    assert!(
-        stderr.contains("cannot be used with")
-            && stderr.contains("--merged")
-            && stderr.contains("--no-merged"),
-        "conflicting --merged/--no-merged should be rejected at parse time: {stderr}"
-    );
-}
-
-/// In detached-HEAD mode the default `--merged` baseline resolves to the
-/// detached commit (not an error), and branches reachable from it are listed.
-#[test]
-#[serial]
-fn test_branch_merged_detached_head_uses_detached_commit() {
-    let repo = create_committed_repo_via_cli();
-    assert_cli_success(
-        &run_libra_command(&["branch", "topic"], repo.path()),
-        "create topic at base",
-    );
-    assert_cli_success(
-        &run_libra_command(
-            &["commit", "--allow-empty", "-m", "m1", "--no-verify"],
-            repo.path(),
-        ),
-        "advance main to m1",
-    );
-    assert_cli_success(
-        &run_libra_command(&["switch", "--detach", "HEAD"], repo.path()),
-        "detach HEAD at m1",
-    );
-
-    let merged = run_libra_command(&["branch", "--merged"], repo.path());
-    assert_cli_success(&merged, "branch --merged while detached");
-    let names = list_names_in_order(&String::from_utf8_lossy(&merged.stdout));
-    assert!(
-        names.iter().any(|n| n == "main"),
-        "detached --merged should list main (reachable from detached commit): {names:?}"
-    );
-    assert!(
-        names.iter().any(|n| n == "topic"),
-        "detached --merged should list topic (base is an ancestor of m1): {names:?}"
-    );
-}
-
-/// `--ignore-case` switches the list sort from case-sensitive (ASCII, so
-/// uppercase sorts before lowercase) to case-insensitive ordering.
-#[test]
-#[serial]
-fn test_branch_ignore_case_sorts_case_insensitively() {
-    let repo = create_committed_repo_via_cli();
-    for name in ["Zebra", "apple", "Banana"] {
-        assert_cli_success(
-            &run_libra_command(&["branch", name], repo.path()),
-            "create mixed-case branch",
-        );
-    }
-
-    // Case-sensitive default: 'B'(66) < 'Z'(90) < 'a'(97).
-    let sensitive = run_libra_command(&["branch"], repo.path());
-    assert_cli_success(&sensitive, "branch (case-sensitive list)");
-    let names = list_names_in_order(&String::from_utf8_lossy(&sensitive.stdout));
-    let after_main: Vec<&String> = names.iter().filter(|n| *n != "main").collect();
-    assert_eq!(
-        after_main,
-        vec!["Banana", "Zebra", "apple"],
-        "default sort is case-sensitive: {names:?}"
-    );
-
-    // Case-insensitive: apple < Banana < Zebra.
-    let folded = run_libra_command(&["branch", "--ignore-case"], repo.path());
-    assert_cli_success(&folded, "branch --ignore-case");
-    let names = list_names_in_order(&String::from_utf8_lossy(&folded.stdout));
-    let after_main: Vec<&String> = names.iter().filter(|n| *n != "main").collect();
-    assert_eq!(
-        after_main,
-        vec!["apple", "Banana", "Zebra"],
-        "--ignore-case folds case before sorting: {names:?}"
-    );
-}
-
-/// A branch name longer than the 255-byte ref limit is rejected by the
-/// validator with `LBR-CLI-002` and no branch is created.
-#[test]
-#[serial]
-fn test_branch_overlong_name_rejected() {
-    let repo = create_committed_repo_via_cli();
-    let overlong = "x".repeat(256);
-    let output = run_libra_command(&["branch", &overlong], repo.path());
-    assert!(
-        !output.status.success(),
-        "256-byte branch name should be rejected"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("is not a valid branch name"),
-        "overlong name should report an invalid-name message, got: {stderr}"
-    );
-    assert!(
-        stderr.contains("Error-Code: LBR-CLI-002"),
-        "overlong name should surface CliInvalidArguments (LBR-CLI-002), got: {stderr}"
-    );
-}
-
-/// Unit boundary check for the 255-byte limit added in Wave 1: exactly 255
-/// bytes is accepted, 256 bytes is rejected.
-#[test]
-fn test_is_valid_git_branch_name_length_limit() {
-    use libra::command::branch::is_valid_git_branch_name;
-
-    assert!(
-        is_valid_git_branch_name(&"a".repeat(255)),
-        "255-byte name should be valid"
-    );
-    assert!(
-        !is_valid_git_branch_name(&"a".repeat(256)),
-        "256-byte name should be rejected"
-    );
-}
-
-/// Unit coverage for the pure filter helpers backing `--merged` /
-/// `--no-merged` (set membership) and `--points-at` (exact-tip match).
-#[test]
-#[serial]
-fn test_branch_filter_helpers_are_pure() {
-    use std::str::FromStr;
-
-    use libra::internal::branch::{Branch, retain_by_merge_status, retain_by_points_at};
-
-    // ObjectHash::from_str needs the repo's hash kind initialised.
-    let temp_path = tempdir().unwrap();
-    init_repo_via_cli(temp_path.path());
-    let _guard = ChangeDirGuard::new(temp_path.path());
-
-    let hash = |c: char| ObjectHash::from_str(&c.to_string().repeat(64)).expect("valid hex");
-    let merged_tip = hash('1');
-    let unmerged_tip = hash('2');
-    let baseline_anc = hash('3');
-
-    let reachable: HashSet<ObjectHash> = [merged_tip, baseline_anc].into_iter().collect();
-    let names =
-        |branches: &[Branch]| -> Vec<String> { branches.iter().map(|b| b.name.clone()).collect() };
-
-    // want_merged = true keeps only the tip inside the reachable set.
-    let mut keep_merged = vec![
-        Branch {
-            name: "merged".into(),
-            commit: merged_tip,
-            remote: None,
-        },
-        Branch {
-            name: "unmerged".into(),
-            commit: unmerged_tip,
-            remote: None,
-        },
-    ];
-    retain_by_merge_status(&mut keep_merged, &reachable, true);
-    assert_eq!(names(&keep_merged), vec!["merged".to_string()]);
-
-    // want_merged = false keeps the complement.
-    let mut keep_unmerged = vec![
-        Branch {
-            name: "merged".into(),
-            commit: merged_tip,
-            remote: None,
-        },
-        Branch {
-            name: "unmerged".into(),
-            commit: unmerged_tip,
-            remote: None,
-        },
-    ];
-    retain_by_merge_status(&mut keep_unmerged, &reachable, false);
-    assert_eq!(names(&keep_unmerged), vec!["unmerged".to_string()]);
-
-    // points-at keeps only the exact-tip match.
-    let mut points = vec![
-        Branch {
-            name: "merged".into(),
-            commit: merged_tip,
-            remote: None,
-        },
-        Branch {
-            name: "unmerged".into(),
-            commit: unmerged_tip,
-            remote: None,
-        },
-    ];
-    retain_by_points_at(&mut points, &merged_tip);
-    assert_eq!(names(&points), vec!["merged".to_string()]);
-}
-
-/// `--json branch -l` must emit the list envelope (`{"ok","command":"branch",
-/// "data":{"action":"list","branches":[...]}}`) with a stable per-branch
-/// `commit` field, and must never leak the human-only skip-serialized fields
-/// (`ignore_case`/`head_name`/`detached_head`/`show_unborn_head`/`display_name`).
-/// Pins the JSON list contract that Wave 1 extended with the `ignore_case`
-/// field — a regression that un-skipped it or renamed `commit` would otherwise
-/// pass the whole suite.
-#[test]
-#[serial]
-fn test_branch_json_list_exposes_commit_field() {
-    let repo = create_committed_repo_via_cli();
-    assert_cli_success(
-        &run_libra_command(&["branch", "topic"], repo.path()),
-        "create topic",
-    );
-
-    let output = run_libra_command(&["--json", "branch", "-l"], repo.path());
-    assert_cli_success(&output, "--json branch -l");
-    let json = parse_json_stdout(&output);
-
-    assert_eq!(json["command"], "branch");
-    assert_eq!(json["data"]["action"], "list");
-    let branches = json["data"]["branches"]
-        .as_array()
-        .expect("data.branches must be an array");
-    assert!(!branches.is_empty(), "list should not be empty");
-    for entry in branches {
-        assert!(
-            entry["name"].as_str().is_some(),
-            "entry.name must be a string"
-        );
-        assert!(
-            entry["commit"].as_str().is_some(),
-            "entry.commit must be a string"
-        );
-        assert!(
-            entry["current"].as_bool().is_some(),
-            "entry.current must be a bool"
-        );
-        // display_name is a human-only field and must stay out of JSON.
-        assert!(
-            entry.get("display_name").is_none(),
-            "display_name must not serialize"
-        );
-    }
-    // Human-only List fields must stay skip-serialized.
-    for key in [
-        "ignore_case",
-        "head_name",
-        "detached_head",
-        "show_unborn_head",
-    ] {
-        assert!(
-            json["data"].get(key).is_none(),
-            "{key} must not appear in the list JSON envelope"
-        );
-    }
-
-    // --ignore-case must not leak into the envelope either.
-    let folded = run_libra_command(&["--json", "branch", "-l", "--ignore-case"], repo.path());
-    assert_cli_success(&folded, "--json branch -l --ignore-case");
-    let folded_json = parse_json_stdout(&folded);
-    assert!(
-        folded_json["data"].get("ignore_case").is_none(),
-        "ignore_case must not leak into JSON even when set"
-    );
-}
-
-/// A bare `libra branch` (no action flag) defaults to the list action and
-/// produces the same branch set as `branch -l`; the JSON envelope reports
-/// `data.action == "list"`.
-#[test]
-#[serial]
-fn test_branch_default_no_action_is_list() {
-    let repo = create_committed_repo_via_cli();
-    for name in ["alpha", "beta"] {
-        assert_cli_success(
-            &run_libra_command(&["branch", name], repo.path()),
-            "create branch",
-        );
-    }
-
-    let bare = run_libra_command(&["branch"], repo.path());
-    assert_cli_success(&bare, "bare branch lists");
-    let listed = run_libra_command(&["branch", "-l"], repo.path());
-    assert_cli_success(&listed, "branch -l lists");
-
-    let mut bare_names = list_names_in_order(&String::from_utf8_lossy(&bare.stdout));
-    let mut l_names = list_names_in_order(&String::from_utf8_lossy(&listed.stdout));
-    bare_names.sort();
-    l_names.sort();
-    assert_eq!(bare_names, l_names, "bare `branch` must equal `branch -l`");
-    assert!(bare_names.iter().any(|n| n == "alpha"));
-    assert!(bare_names.iter().any(|n| n == "beta"));
-    assert!(bare_names.iter().any(|n| n == "main"));
-
-    // Bare invocation routes to the list action in JSON.
-    let json = run_libra_command(&["--json", "branch"], repo.path());
-    assert_cli_success(&json, "--json bare branch");
-    let v = parse_json_stdout(&json);
-    assert_eq!(
-        v["data"]["action"], "list",
-        "bare branch JSON action must be list"
-    );
-}
-
-// =====================================================================
-//  Wave 2 — `--unset-upstream` + tracking display in list
-// =====================================================================
-
-/// Build a `BranchArgs` for an `--unset-upstream` invocation with all other
-/// fields defaulted. `Some(None)` targets the current branch; `Some(Some(n))`
-/// targets the named branch.
-fn unset_upstream_args(unset_upstream: Option<Option<String>>) -> BranchArgs {
-    BranchArgs {
-        new_branch: None,
-        commit_hash: None,
-        list: false,
-        delete: None,
-        delete_safe: None,
-        set_upstream_to: None,
-        unset_upstream,
-        show_current: false,
-        rename: vec![],
-        remotes: false,
-        all: false,
-        contains: vec![],
-        no_contains: vec![],
-        merged: None,
-        no_merged: None,
-        points_at: None,
-        ignore_case: false,
-        sort: None,
-        format: None,
-        copy: vec![],
-        force_copy: vec![],
-        edit_description: None,
-        force: false,
-        create_reflog: false,
-        track: None,
-        no_track: false,
-    }
-}
-
-/// `--unset-upstream` (current branch) removes BOTH `branch.<name>.remote`
-/// and `branch.<name>.merge` from config_kv.
-#[tokio::test]
-#[serial]
-async fn test_branch_unset_upstream_removes_both_keys() {
-    let temp = tempdir().unwrap();
-    test::setup_with_new_libra_in(temp.path()).await;
-    let _guard = ChangeDirGuard::new(temp.path());
-
-    let branch = match Head::current().await {
-        Head::Branch(name) => name,
-        _ => panic!("expected to start on a branch"),
-    };
-    ConfigKv::set(&format!("branch.{branch}.remote"), "origin", false)
-        .await
-        .expect("set remote");
-    ConfigKv::set(&format!("branch.{branch}.merge"), "refs/heads/main", false)
-        .await
-        .expect("set merge");
-
-    execute(unset_upstream_args(Some(None))).await;
-
-    assert!(
-        ConfigKv::get(&format!("branch.{branch}.remote"))
-            .await
-            .expect("get remote")
-            .is_none(),
-        "branch.<name>.remote must be removed"
-    );
-    assert!(
-        ConfigKv::get(&format!("branch.{branch}.merge"))
-            .await
-            .expect("get merge")
-            .is_none(),
-        "branch.<name>.merge must be removed"
-    );
-}
-
-/// `--unset-upstream <branch>` clears tracking for a NAMED (non-current)
-/// branch's config.
-#[tokio::test]
-#[serial]
-async fn test_branch_unset_upstream_named() {
-    let temp = tempdir().unwrap();
-    test::setup_with_new_libra_in(temp.path()).await;
-    let _guard = ChangeDirGuard::new(temp.path());
-
-    ConfigKv::set("branch.feature.remote", "origin", false)
-        .await
-        .expect("set remote");
-    ConfigKv::set("branch.feature.merge", "refs/heads/feature", false)
-        .await
-        .expect("set merge");
-
-    execute(unset_upstream_args(Some(Some("feature".to_string())))).await;
-
-    assert!(
-        ConfigKv::get("branch.feature.remote")
-            .await
-            .expect("get remote")
-            .is_none(),
-        "named branch remote must be removed"
-    );
-    assert!(
-        ConfigKv::get("branch.feature.merge")
-            .await
-            .expect("get merge")
-            .is_none(),
-        "named branch merge must be removed"
-    );
-}
-
-/// `--unset-upstream` on a branch with no tracking is an idempotent no-op:
-/// it completes successfully and leaves config untouched.
-#[tokio::test]
-#[serial]
-async fn test_branch_unset_upstream_noop_when_absent() {
-    let temp = tempdir().unwrap();
-    test::setup_with_new_libra_in(temp.path()).await;
-    let _guard = ChangeDirGuard::new(temp.path());
-
-    // No tracking configured; must not panic or create keys.
-    execute(unset_upstream_args(Some(Some("ghost".to_string())))).await;
-
-    assert!(
-        ConfigKv::get("branch.ghost.remote")
-            .await
-            .expect("get remote")
-            .is_none()
-    );
-    assert!(
-        ConfigKv::get("branch.ghost.merge")
-            .await
-            .expect("get merge")
-            .is_none()
-    );
-}
-
-/// `--unset-upstream` from detached HEAD without an explicit branch name
-/// reports `LBR-REPO-003` (exit 128) and writes nothing.
-#[test]
-#[serial]
-fn test_branch_unset_upstream_detached_errors() {
-    let repo = create_committed_repo_via_cli();
-    let detach = run_libra_command(&["switch", "--detach", "HEAD"], repo.path());
-    assert!(
-        detach.status.success(),
-        "detach failed: {}",
-        String::from_utf8_lossy(&detach.stderr)
-    );
-
-    let output = run_libra_command(&["branch", "--unset-upstream"], repo.path());
-    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
-
-    assert_eq!(output.status.code(), Some(128));
-    assert_eq!(report.error_code, "LBR-REPO-003");
-    assert!(stderr.contains("HEAD is detached"));
-}
-
-/// `branch -l` renders a `[<remote>/<branch>]` tracking suffix; after
-/// `--unset-upstream` the suffix disappears. End-to-end via the binary.
-#[test]
-#[serial]
-fn test_branch_list_shows_tracking_suffix_then_unset_clears_it() {
-    let repo = create_committed_repo_via_cli();
-    assert_cli_success(
-        &run_libra_command(
-            &[
-                "remote",
-                "add",
-                "origin",
-                "https://example.invalid/repo.git",
-            ],
-            repo.path(),
-        ),
-        "remote add origin",
-    );
-    assert_cli_success(
-        &run_libra_command(&["branch", "--set-upstream-to", "origin/main"], repo.path()),
-        "set upstream",
-    );
-
-    let listed = run_libra_command(&["branch", "-l"], repo.path());
-    assert_cli_success(&listed, "branch -l with tracking");
-    let stdout = String::from_utf8_lossy(&listed.stdout);
-    assert!(
-        stdout.contains("[origin/main]"),
-        "list should show tracking suffix: {stdout}"
-    );
-
-    let unset = run_libra_command(&["branch", "--unset-upstream"], repo.path());
-    assert_cli_success(&unset, "unset upstream");
-    let stdout = String::from_utf8_lossy(&unset.stdout);
-    assert!(
-        stdout.contains("Removed upstream tracking"),
-        "unset should confirm removal: {stdout}"
-    );
-
-    let relisted = run_libra_command(&["branch", "-l"], repo.path());
-    assert_cli_success(&relisted, "branch -l after unset");
-    let stdout = String::from_utf8_lossy(&relisted.stdout);
-    assert!(
-        !stdout.contains("[origin/main]"),
-        "tracking suffix must be gone after unset: {stdout}"
-    );
-}
-
-/// JSON list output: untracked branches carry NO `tracking` key (backward
-/// compatible); a tracked branch carries `tracking: {remote, merge}`.
-#[test]
-#[serial]
-fn test_branch_list_json_tracking_backward_compatible() {
-    let repo = create_committed_repo_via_cli();
-
-    // Untracked: no `tracking` key anywhere.
-    let untracked = run_libra_command(&["--json", "branch", "-l"], repo.path());
-    assert_cli_success(&untracked, "--json branch -l untracked");
-    let json = parse_json_stdout(&untracked);
-    for entry in json["data"]["branches"].as_array().expect("branches array") {
-        assert!(
-            entry.get("tracking").is_none(),
-            "untracked entry must omit tracking: {entry}"
-        );
-    }
-
-    // Configure tracking, then the entry must expose tracking.{remote,merge}.
-    assert_cli_success(
-        &run_libra_command(
-            &[
-                "remote",
-                "add",
-                "origin",
-                "https://example.invalid/repo.git",
-            ],
-            repo.path(),
-        ),
-        "remote add origin",
-    );
-    assert_cli_success(
-        &run_libra_command(&["branch", "--set-upstream-to", "origin/main"], repo.path()),
-        "set upstream",
-    );
-
-    let tracked = run_libra_command(&["--json", "branch", "-l"], repo.path());
-    assert_cli_success(&tracked, "--json branch -l tracked");
-    let json = parse_json_stdout(&tracked);
-    let main_entry = json["data"]["branches"]
-        .as_array()
-        .expect("branches array")
-        .iter()
-        .find(|e| e["name"] == "main")
-        .expect("main entry");
-    assert_eq!(main_entry["tracking"]["remote"], "origin");
-    assert_eq!(main_entry["tracking"]["merge"], "main");
-}
-
-/// `--json branch --unset-upstream` emits the unset-upstream envelope with the
-/// exact `data` key set {action, branch, had_upstream}; the no-op case reports
-/// `had_upstream=false` and exits 0.
-#[test]
-#[serial]
-fn test_branch_unset_upstream_json_schema() {
-    let repo = create_committed_repo_via_cli();
-    assert_cli_success(
-        &run_libra_command(
-            &[
-                "remote",
-                "add",
-                "origin",
-                "https://example.invalid/repo.git",
-            ],
-            repo.path(),
-        ),
-        "remote add origin",
-    );
-    assert_cli_success(
-        &run_libra_command(&["branch", "--set-upstream-to", "origin/main"], repo.path()),
-        "set upstream",
-    );
-
-    let output = run_libra_command(&["--json", "branch", "--unset-upstream"], repo.path());
-    assert_cli_success(&output, "--json unset-upstream");
-    let json = parse_json_stdout(&output);
-    assert_eq!(json["command"], "branch");
-    assert_eq!(json["data"]["action"], "unset-upstream");
-    assert_eq!(json["data"]["branch"], "main");
-    assert_eq!(json["data"]["had_upstream"], true);
-
-    // Second invocation is a no-op: had_upstream=false, still exit 0.
-    let noop = run_libra_command(&["--json", "branch", "--unset-upstream"], repo.path());
-    assert_cli_success(&noop, "--json unset-upstream noop");
-    let json = parse_json_stdout(&noop);
-    assert_eq!(json["data"]["action"], "unset-upstream");
-    assert_eq!(json["data"]["had_upstream"], false);
-}
-
-/// Listing a branch that tracks a now-deleted remote must not crash: the
-/// configured tracking name is still shown (config read is independent of
-/// remote existence).
-#[test]
-#[serial]
-fn test_branch_list_survives_dangling_remote() {
-    let repo = create_committed_repo_via_cli();
-    // Write tracking config directly, pointing at a remote that does not exist.
-    assert_cli_success(
-        &run_libra_command(&["config", "branch.main.remote", "ghost"], repo.path()),
-        "set branch.main.remote",
-    );
-    assert_cli_success(
-        &run_libra_command(
-            &["config", "branch.main.merge", "refs/heads/main"],
-            repo.path(),
-        ),
-        "set branch.main.merge",
-    );
-
-    let listed = run_libra_command(&["branch", "-l"], repo.path());
-    assert_cli_success(&listed, "branch -l with dangling remote");
-    let stdout = String::from_utf8_lossy(&listed.stdout);
-    assert!(
-        stdout.contains("[ghost/main]"),
-        "list should show tracking name even for a missing remote: {stdout}"
-    );
-}
-
-// =====================================================================
-//  Wave 3 — copy (-c/-C), txn-hardened rename/copy, reflog migration,
-//           -f/--force, --create-reflog (accepted-noop)
-// =====================================================================
-
-/// A fully-defaulted `BranchArgs` (list mode, every action off) for tests that
-/// override one field via struct-update syntax.
-fn branch_args_default() -> BranchArgs {
-    BranchArgs {
-        new_branch: None,
-        commit_hash: None,
-        list: false,
-        delete: None,
-        delete_safe: None,
-        set_upstream_to: None,
-        unset_upstream: None,
-        show_current: false,
-        rename: vec![],
-        copy: vec![],
-        force_copy: vec![],
-        edit_description: None,
-        remotes: false,
-        all: false,
-        contains: vec![],
-        no_contains: vec![],
-        merged: None,
-        no_merged: None,
-        points_at: None,
-        ignore_case: false,
-        sort: None,
-        format: None,
-        force: false,
-        create_reflog: false,
-        track: None,
-        no_track: false,
-    }
-}
-
-/// Read the `commit` field of a named branch from `--json branch -l`.
-fn branch_commit_json(repo: &std::path::Path, name: &str) -> Option<String> {
-    let out = run_libra_command(&["--json", "branch", "-l"], repo);
-    let json = parse_json_stdout(&out);
-    json["data"]["branches"]
-        .as_array()?
-        .iter()
-        .find(|e| e["name"] == name)?
-        .get("commit")?
-        .as_str()
-        .map(str::to_string)
-}
-
-/// `branch -c old new` creates a destination pointing at the source tip.
-#[test]
-#[serial]
-fn test_branch_copy_creates_pointer_to_same_commit() {
-    let repo = create_committed_repo_via_cli();
-    assert_cli_success(
-        &run_libra_command(&["branch", "old"], repo.path()),
-        "create old",
-    );
-    assert_cli_success(
-        &run_libra_command(&["branch", "-c", "old", "newcopy"], repo.path()),
-        "copy old -> newcopy",
-    );
-    let old_commit = branch_commit_json(repo.path(), "old").expect("old commit");
-    let new_commit = branch_commit_json(repo.path(), "newcopy").expect("newcopy commit");
-    assert_eq!(old_commit, new_commit, "copy must point at the same commit");
-}
-
-/// `branch -C old existing` overwrites an existing destination; plain `-c`
-/// without force is refused and leaves the destination untouched.
-#[test]
-#[serial]
-fn test_branch_copy_force_overwrites_existing() {
-    let repo = create_committed_repo_via_cli();
-    // old @ base, then advance main so `another` (created now) differs from old.
-    assert_cli_success(
-        &run_libra_command(&["branch", "old"], repo.path()),
-        "create old",
-    );
-    assert_cli_success(
-        &run_libra_command(
-            &["commit", "--allow-empty", "-m", "m1", "--no-verify"],
-            repo.path(),
-        ),
-        "advance main",
-    );
-    assert_cli_success(
-        &run_libra_command(&["branch", "existing"], repo.path()),
-        "create existing at m1",
-    );
-    let old_commit = branch_commit_json(repo.path(), "old").expect("old commit");
-
-    // Without force: refused, `existing` unchanged.
-    let plain = run_libra_command(&["branch", "-c", "old", "existing"], repo.path());
-    assert!(
-        !plain.status.success(),
-        "plain -c must refuse existing dest"
-    );
-    let still = branch_commit_json(repo.path(), "existing").expect("existing commit");
-    assert_ne!(still, old_commit, "rejected copy must not mutate existing");
-
-    // With -C: overwrite to old's commit.
-    assert_cli_success(
-        &run_libra_command(&["branch", "-C", "old", "existing"], repo.path()),
-        "force-copy old -> existing",
-    );
-    let now = branch_commit_json(repo.path(), "existing").expect("existing commit");
-    assert_eq!(
-        now, old_commit,
-        "force-copy must reset existing to old's tip"
-    );
-}
-
-/// Copy mirrors the source's tracking + description config onto the
-/// destination.
-#[tokio::test]
-#[serial]
-async fn test_branch_copy_migrates_config_tracking() {
-    let temp = tempdir().unwrap();
-    test::setup_with_new_libra_in(temp.path()).await;
-    let _guard = ChangeDirGuard::new(temp.path());
-
-    // Give an empty commit so a branch tip exists, then create `src`.
-    commit::execute(CommitArgs {
-        message: Some("base".to_string()),
-        file: None,
-        allow_empty: true,
-        conventional: false,
-        no_edit: false,
-        amend: false,
-        signoff: false,
-        disable_pre: true,
-        all: false,
-        no_verify: true,
-        author: None,
-        ..Default::default()
-    })
-    .await;
-    execute(BranchArgs {
-        new_branch: Some("src".to_string()),
-        ..branch_args_default()
-    })
-    .await;
-    ConfigKv::set("branch.src.remote", "origin", false)
-        .await
-        .expect("set remote");
-    ConfigKv::set("branch.src.merge", "refs/heads/main", false)
-        .await
-        .expect("set merge");
-    ConfigKv::set("branch.src.description", "the source branch", false)
-        .await
-        .expect("set description");
-
-    execute(BranchArgs {
-        copy: vec!["src".to_string(), "dst".to_string()],
-        ..branch_args_default()
-    })
-    .await;
-
-    assert_eq!(
-        ConfigKv::get("branch.dst.remote")
-            .await
-            .unwrap()
-            .map(|e| e.value),
-        Some("origin".to_string())
-    );
-    assert_eq!(
-        ConfigKv::get("branch.dst.merge")
-            .await
-            .unwrap()
-            .map(|e| e.value),
-        Some("refs/heads/main".to_string())
-    );
-    assert_eq!(
-        ConfigKv::get("branch.dst.description")
-            .await
-            .unwrap()
-            .map(|e| e.value),
-        Some("the source branch".to_string())
-    );
-    // Source config is preserved (copy, not move).
-    assert!(
-        ConfigKv::get("branch.src.remote").await.unwrap().is_some(),
-        "copy must not remove source config"
-    );
-}
-
-/// Copy migrates the source ref's reflog faithfully (field-for-field) when it
-/// has entries; with no source reflog the copy is a clean no-op.
-#[tokio::test]
-#[serial]
-async fn test_branch_copy_migrates_reflog_when_present() {
-    use libra::internal::reflog::{Reflog, ReflogAction, ReflogContext};
-
-    let temp = tempdir().unwrap();
-    test::setup_with_new_libra_in(temp.path()).await;
-    let _guard = ChangeDirGuard::new(temp.path());
-
-    commit::execute(CommitArgs {
-        message: Some("base".to_string()),
-        file: None,
-        allow_empty: true,
-        conventional: false,
-        no_edit: false,
-        amend: false,
-        signoff: false,
-        disable_pre: true,
-        all: false,
-        no_verify: true,
-        author: None,
-        ..Default::default()
-    })
-    .await;
-    execute(BranchArgs {
-        new_branch: Some("src".to_string()),
-        ..branch_args_default()
-    })
-    .await;
-
-    let db = libra::internal::db::get_db_conn_instance().await;
-    // Seed two reflog rows on the source ref.
-    for i in 0..2 {
-        Reflog::insert_single_entry(
-            &db,
-            &ReflogContext {
-                old_oid: format!("{i}{}", "0".repeat(63)),
-                new_oid: format!("{}{}", i + 1, "0".repeat(63)),
-                action: ReflogAction::Commit {
-                    message: format!("entry {i}"),
-                },
-                message: None,
-            },
-            "refs/heads/src",
-        )
-        .await
-        .expect("seed reflog");
-    }
-    let src_entries = Reflog::find_all(&db, "refs/heads/src")
-        .await
-        .expect("src reflog");
-    assert_eq!(src_entries.len(), 2);
-
-    execute(BranchArgs {
-        copy: vec!["src".to_string(), "dst".to_string()],
-        ..branch_args_default()
-    })
-    .await;
-
-    let dst_entries = Reflog::find_all(&db, "refs/heads/dst")
-        .await
-        .expect("dst reflog");
-    assert_eq!(dst_entries.len(), 2, "all reflog rows must migrate");
-    // Faithful field-for-field copy. The two seeded rows can share a timestamp,
-    // so compare as order-independent tuple sets rather than zipping by index.
-    let fingerprint = |e: &libra::internal::model::reflog::Model| {
-        (
-            e.old_oid.clone(),
-            e.new_oid.clone(),
-            e.action.clone(),
-            e.committer_name.clone(),
-            e.committer_email.clone(),
-            e.timestamp,
-            e.message.clone(),
-        )
-    };
-    let mut src_fp: Vec<_> = src_entries.iter().map(fingerprint).collect();
-    let mut dst_fp: Vec<_> = dst_entries.iter().map(fingerprint).collect();
-    src_fp.sort();
-    dst_fp.sort();
-    assert_eq!(src_fp, dst_fp, "reflog rows must be copied field-for-field");
-    for d in &dst_entries {
-        assert_eq!(d.ref_name, "refs/heads/dst", "ref_name must be rewritten");
-    }
-}
-
-/// Copy with no source reflog leaves the destination reflog empty (no error,
-/// no assumption that the source has a reflog).
-#[tokio::test]
-#[serial]
-async fn test_branch_copy_no_reflog_is_noop() {
-    use libra::internal::reflog::Reflog;
-
-    let temp = tempdir().unwrap();
-    test::setup_with_new_libra_in(temp.path()).await;
-    let _guard = ChangeDirGuard::new(temp.path());
-
-    commit::execute(CommitArgs {
-        message: Some("base".to_string()),
-        file: None,
-        allow_empty: true,
-        conventional: false,
-        no_edit: false,
-        amend: false,
-        signoff: false,
-        disable_pre: true,
-        all: false,
-        no_verify: true,
-        author: None,
-        ..Default::default()
-    })
-    .await;
-    execute(BranchArgs {
-        new_branch: Some("src".to_string()),
-        ..branch_args_default()
-    })
-    .await;
-    execute(BranchArgs {
-        copy: vec!["src".to_string(), "dst".to_string()],
-        ..branch_args_default()
-    })
-    .await;
-
-    let db = libra::internal::db::get_db_conn_instance().await;
-    assert!(
-        Reflog::find_all(&db, "refs/heads/dst")
-            .await
-            .expect("dst reflog")
-            .is_empty(),
-        "no source reflog => empty destination reflog"
-    );
-}
-
-/// Locked branches: rejected as rename source and as copy/force-copy target,
-/// but allowed as a read-only copy source.
-#[test]
-#[serial]
-fn test_branch_locked_protection_copy_rename() {
-    let repo = create_committed_repo_via_cli();
-    assert_cli_success(
-        &run_libra_command(&["branch", "topic"], repo.path()),
-        "create topic",
-    );
-
-    // (a) rename a locked source -> Locked (128).
-    let rename_locked = run_libra_command(&["branch", "-m", "main", "renamed"], repo.path());
-    let (_s, report) = parse_cli_error_stderr(&rename_locked.stderr);
-    assert_eq!(rename_locked.status.code(), Some(128));
-    assert_eq!(report.error_code, "LBR-CONFLICT-002");
-
-    // (b) copy onto a locked target -> Locked (128).
-    let copy_to_locked = run_libra_command(&["branch", "-c", "topic", "main"], repo.path());
-    assert_eq!(copy_to_locked.status.code(), Some(128));
-    let (_s, report) = parse_cli_error_stderr(&copy_to_locked.stderr);
-    assert_eq!(report.error_code, "LBR-CONFLICT-002");
-
-    // (b') force-copy onto a locked target is STILL refused.
-    let force_to_locked = run_libra_command(&["branch", "-C", "topic", "main"], repo.path());
-    assert_eq!(force_to_locked.status.code(), Some(128));
-
-    // (c) copy FROM a locked source to a normal target -> success.
-    let copy_from_locked = run_libra_command(&["branch", "-c", "main", "from-main"], repo.path());
-    assert_cli_success(&copy_from_locked, "copy from locked source");
-    let main_commit = branch_commit_json(repo.path(), "main").expect("main commit");
-    let copy_commit = branch_commit_json(repo.path(), "from-main").expect("from-main commit");
-    assert_eq!(
-        main_commit, copy_commit,
-        "copy-from-locked must duplicate tip"
-    );
-}
-
-/// `branch -m` (rename) refuses a locked source.
-#[test]
-#[serial]
-fn test_branch_rename_locked_source_rejected() {
-    let repo = create_committed_repo_via_cli();
-    let output = run_libra_command(&["branch", "-m", "main", "trunk"], repo.path());
-    assert_eq!(output.status.code(), Some(128));
-    let (_s, report) = parse_cli_error_stderr(&output.stderr);
-    assert_eq!(report.error_code, "LBR-CONFLICT-002");
-}
-
-/// Renaming the current branch migrates all config keys, updates HEAD in the
-/// same transaction, and leaves no `branch.<old>.*` residue.
-#[tokio::test]
-#[serial]
-async fn test_branch_rename_migrates_config_and_updates_head() {
-    let temp = tempdir().unwrap();
-    test::setup_with_new_libra_in(temp.path()).await;
-    let _guard = ChangeDirGuard::new(temp.path());
-
-    commit::execute(CommitArgs {
-        message: Some("base".to_string()),
-        file: None,
-        allow_empty: true,
-        conventional: false,
-        no_edit: false,
-        amend: false,
-        signoff: false,
-        disable_pre: true,
-        all: false,
-        no_verify: true,
-        author: None,
-        ..Default::default()
-    })
-    .await;
-    // Create + switch to a renamable (non-locked) current branch.
-    execute(BranchArgs {
-        new_branch: Some("feature".to_string()),
-        ..branch_args_default()
-    })
-    .await;
-    switch::execute(SwitchArgs {
-        branch: Some("feature".to_string()),
-        create: None,
-        force_create: None,
-        detach: false,
-        track: false,
-        ..Default::default()
-    })
-    .await;
-    ConfigKv::set("branch.feature.remote", "origin", false)
-        .await
-        .expect("set remote");
-    ConfigKv::set("branch.feature.description", "desc", false)
-        .await
-        .expect("set description");
-
-    execute(BranchArgs {
-        rename: vec!["feature".to_string(), "feature2".to_string()],
-        ..branch_args_default()
-    })
-    .await;
-
-    // HEAD followed the rename.
-    match Head::current().await {
-        Head::Branch(name) => assert_eq!(name, "feature2", "HEAD must follow rename"),
-        _ => panic!("expected to be on a branch"),
-    }
-    // Config migrated, no residue.
-    assert_eq!(
-        ConfigKv::get("branch.feature2.remote")
-            .await
-            .unwrap()
-            .map(|e| e.value),
-        Some("origin".to_string())
-    );
-    assert_eq!(
-        ConfigKv::get("branch.feature2.description")
-            .await
-            .unwrap()
-            .map(|e| e.value),
-        Some("desc".to_string())
-    );
-    assert!(
-        ConfigKv::get("branch.feature.remote")
-            .await
-            .unwrap()
-            .is_none(),
-        "old branch config must be removed"
-    );
-    assert!(
-        ConfigKv::get("branch.feature.description")
-            .await
-            .unwrap()
-            .is_none(),
-        "old branch description must be removed"
-    );
-}
-
-/// `branch -f <existing>` resets an existing branch's tip instead of erroring.
-#[test]
-#[serial]
-fn test_branch_create_force_resets_existing() {
-    let repo = create_committed_repo_via_cli();
-    let base = branch_commit_json(repo.path(), "main").expect("main commit");
-    assert_cli_success(
-        &run_libra_command(&["branch", "topic"], repo.path()),
-        "create topic at base",
-    );
-    // Advance main so HEAD differs from topic.
-    assert_cli_success(
-        &run_libra_command(
-            &["commit", "--allow-empty", "-m", "m1", "--no-verify"],
-            repo.path(),
-        ),
-        "advance main",
-    );
-
-    // Plain create on existing -> AlreadyExists.
-    let plain = run_libra_command(&["branch", "topic"], repo.path());
-    assert!(
-        !plain.status.success(),
-        "plain create on existing must fail"
-    );
-
-    // -f resets topic to current HEAD (m1).
-    assert_cli_success(
-        &run_libra_command(&["branch", "-f", "topic"], repo.path()),
-        "force-create resets topic",
-    );
-    let head = branch_commit_json(repo.path(), "main").expect("main commit");
-    let topic = branch_commit_json(repo.path(), "topic").expect("topic commit");
-    assert_eq!(topic, head, "force-create must reset topic to HEAD");
-    assert_ne!(
-        topic, base,
-        "topic should no longer point at the base commit"
-    );
-}
-
-/// `--create-reflog` is accepted and is a strict no-op (branch still created,
-/// exit 0).
-#[test]
-#[serial]
-fn test_branch_create_reflog_flag_accepted_noop() {
-    let repo = create_committed_repo_via_cli();
-    let output = run_libra_command(&["branch", "feature", "--create-reflog"], repo.path());
-    assert_cli_success(&output, "branch --create-reflog");
-    // Branch was created normally.
-    assert!(
-        branch_commit_json(repo.path(), "feature").is_some(),
-        "branch should be created with --create-reflog"
-    );
-}
-
-/// `-c old new --json` emits the copy envelope with the exact `data` key set
-/// {action, src, dst, commit, force}.
-#[test]
-#[serial]
-fn test_branch_copy_json_schema() {
-    let repo = create_committed_repo_via_cli();
-    assert_cli_success(
-        &run_libra_command(&["branch", "old"], repo.path()),
-        "create old",
-    );
-    let output = run_libra_command(&["--json", "branch", "-c", "old", "newcopy"], repo.path());
-    assert_cli_success(&output, "--json copy");
-    let json = parse_json_stdout(&output);
-    assert_eq!(json["command"], "branch");
-    assert_eq!(json["data"]["action"], "copy");
-    assert_eq!(json["data"]["src"], "old");
-    assert_eq!(json["data"]["dst"], "newcopy");
-    assert!(json["data"]["commit"].as_str().is_some());
-    assert_eq!(json["data"]["force"], false);
-
-    // Force-copy reports force=true.
-    let forced = run_libra_command(&["--json", "branch", "-C", "old", "newcopy"], repo.path());
-    assert_cli_success(&forced, "--json force copy");
-    let json = parse_json_stdout(&forced);
-    assert_eq!(json["data"]["force"], true);
-}
-
-// =====================================================================
-//  Wave 4 — `--edit-description` + list description metadata
-// =====================================================================
-
-/// Write an executable stub editor script and return its path. The stub
-/// receives the temp file path as `$1`. Unix-only (the editor is invoked via
-/// `sh -c`).
-#[cfg(unix)]
-fn write_stub_editor(dir: &std::path::Path, name: &str, body: &str) -> String {
-    let path = dir.join(name);
-    fs::write(&path, body).expect("write stub editor");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod stub editor");
-    path.to_str().expect("utf8 path").to_string()
-}
-
-/// `--edit-description` with no configured editor (`EDITOR=""`, no
-/// `core.editor`) is a usage error: `LBR-CLI-002`, exit 129, and it must not
-/// hang.
-#[test]
-#[serial]
-fn test_branch_edit_description_no_editor_errors() {
-    let repo = create_committed_repo_via_cli();
-    // Target a non-locked branch so the editor check (not the locked guard) is
-    // what's exercised.
-    assert_cli_success(
-        &run_libra_command(&["branch", "feature"], repo.path()),
-        "create feature",
-    );
-    let output = run_libra_command_with_stdin_and_env(
-        &["branch", "--edit-description", "feature"],
-        repo.path(),
-        "",
-        &[("EDITOR", "")],
-    );
-    assert_eq!(output.status.code(), Some(129));
-    let (_s, report) = parse_cli_error_stderr(&output.stderr);
-    assert_eq!(report.error_code, "LBR-CLI-002");
-}
-
-/// `--edit-description` refuses a locked branch (before touching the editor):
-/// `LBR-CONFLICT-002`, exit 128.
-#[test]
-#[serial]
-fn test_branch_edit_description_locked_rejected() {
-    let repo = create_committed_repo_via_cli();
-    let output = run_libra_command_with_stdin_and_env(
-        &["branch", "--edit-description", "main"],
-        repo.path(),
-        "",
-        &[("EDITOR", "")],
-    );
-    assert_eq!(output.status.code(), Some(128));
-    let (_s, report) = parse_cli_error_stderr(&output.stderr);
-    assert_eq!(report.error_code, "LBR-CONFLICT-002");
-}
-
-/// `--edit-description` from detached HEAD without a branch name reports
-/// `LBR-REPO-003` (exit 128).
-#[test]
-#[serial]
-fn test_branch_edit_description_detached_errors() {
-    let repo = create_committed_repo_via_cli();
-    let detach = run_libra_command(&["switch", "--detach", "HEAD"], repo.path());
-    assert!(detach.status.success(), "detach failed");
-    let output = run_libra_command_with_stdin_and_env(
-        &["branch", "--edit-description"],
-        repo.path(),
-        "",
-        &[("EDITOR", "")],
-    );
-    assert_eq!(output.status.code(), Some(128));
-    let (_s, report) = parse_cli_error_stderr(&output.stderr);
-    assert_eq!(report.error_code, "LBR-REPO-003");
-}
-
-/// `--edit-description` on a non-locked branch captures the editor's content,
-/// persists it to `branch.<name>.description`, and the `--json` envelope
-/// reports `{action, branch, description}`.
-#[cfg(unix)]
-#[test]
-#[serial]
-fn test_branch_edit_description_writes_and_persists() {
-    let repo = create_committed_repo_via_cli();
-    assert_cli_success(
-        &run_libra_command(&["branch", "feature"], repo.path()),
-        "create feature",
-    );
-    let editor = write_stub_editor(
-        repo.path(),
-        "ed.sh",
-        "#!/bin/sh\nprintf 'the feature branch\\n' > \"$1\"\n",
-    );
-
-    let output = run_libra_command_with_stdin_and_env(
-        &["--json", "branch", "--edit-description", "feature"],
-        repo.path(),
-        "",
-        &[("EDITOR", editor.as_str())],
-    );
-    assert_cli_success(&output, "edit-description feature");
-    let json = parse_json_stdout(&output);
-    assert_eq!(json["command"], "branch");
-    assert_eq!(json["data"]["action"], "edit-description");
-    assert_eq!(json["data"]["branch"], "feature");
-    assert_eq!(json["data"]["description"], "the feature branch");
-
-    // Persisted: list JSON exposes the description on the feature entry.
-    let listed = run_libra_command(&["--json", "branch", "-l"], repo.path());
-    let json = parse_json_stdout(&listed);
-    let feature = json["data"]["branches"]
-        .as_array()
-        .expect("branches")
-        .iter()
-        .find(|e| e["name"] == "feature")
-        .expect("feature entry");
-    assert_eq!(feature["description"], "the feature branch");
-}
-
-/// A stub editor that exits non-zero is treated as a cancel: the description is
-/// left unchanged and the command exits 0.
-#[cfg(unix)]
-#[test]
-#[serial]
-fn test_branch_edit_description_nonzero_exit_is_cancel() {
-    let repo = create_committed_repo_via_cli();
-    assert_cli_success(
-        &run_libra_command(&["branch", "feature"], repo.path()),
-        "create feature",
-    );
-    // Pre-set a description via config.
-    assert_cli_success(
-        &run_libra_command(
-            &["config", "branch.feature.description", "original"],
-            repo.path(),
-        ),
-        "set description",
-    );
-    let editor = write_stub_editor(repo.path(), "cancel.sh", "#!/bin/sh\nexit 1\n");
-
-    let output = run_libra_command_with_stdin_and_env(
-        &["branch", "--edit-description", "feature"],
-        repo.path(),
-        "",
-        &[("EDITOR", editor.as_str())],
-    );
-    assert_cli_success(&output, "edit-description cancel exits 0");
-
-    // Description unchanged.
-    let listed = run_libra_command(&["--json", "branch", "-l"], repo.path());
-    let json = parse_json_stdout(&listed);
-    let feature = json["data"]["branches"]
-        .as_array()
-        .expect("branches")
-        .iter()
-        .find(|e| e["name"] == "feature")
-        .expect("feature entry");
-    assert_eq!(
-        feature["description"], "original",
-        "cancel must not change description"
-    );
-}
-
-/// Editing to an empty description clears `branch.<name>.description`; the list
-/// entry then omits the field (backward compatible).
-#[cfg(unix)]
-#[test]
-#[serial]
-fn test_branch_edit_description_empty_clears() {
-    let repo = create_committed_repo_via_cli();
-    assert_cli_success(
-        &run_libra_command(&["branch", "feature"], repo.path()),
-        "create feature",
-    );
-    assert_cli_success(
-        &run_libra_command(
-            &["config", "branch.feature.description", "to be cleared"],
-            repo.path(),
-        ),
-        "set description",
-    );
-    let editor = write_stub_editor(repo.path(), "empty.sh", "#!/bin/sh\n: > \"$1\"\n");
-
-    let output = run_libra_command_with_stdin_and_env(
-        &["--json", "branch", "--edit-description", "feature"],
-        repo.path(),
-        "",
-        &[("EDITOR", editor.as_str())],
-    );
-    assert_cli_success(&output, "edit-description empty clears");
-    let json = parse_json_stdout(&output);
-    // Cleared description is omitted from the JSON (skip_serializing_if).
-    assert!(
-        json["data"].get("description").is_none(),
-        "cleared description must be omitted from JSON"
-    );
-
-    let listed = run_libra_command(&["--json", "branch", "-l"], repo.path());
-    let json = parse_json_stdout(&listed);
-    let feature = json["data"]["branches"]
-        .as_array()
-        .expect("branches")
-        .iter()
-        .find(|e| e["name"] == "feature")
-        .expect("feature entry");
-    assert!(
-        feature.get("description").is_none(),
-        "list entry must omit cleared description"
-    );
-}
-
-/// UTF-8 (multi-byte) descriptions round-trip losslessly through the editor.
-#[cfg(unix)]
-#[test]
-#[serial]
-fn test_branch_edit_description_utf8_roundtrip() {
-    let repo = create_committed_repo_via_cli();
-    assert_cli_success(
-        &run_libra_command(&["branch", "feature"], repo.path()),
-        "create feature",
-    );
-    let editor = write_stub_editor(
-        repo.path(),
-        "utf8.sh",
-        "#!/bin/sh\nprintf '%s\\n' '\u{63cf}\u{8ff0} \u{1f33f}' > \"$1\"\n",
-    );
-
-    let output = run_libra_command_with_stdin_and_env(
-        &["--json", "branch", "--edit-description", "feature"],
-        repo.path(),
-        "",
-        &[("EDITOR", editor.as_str())],
-    );
-    assert_cli_success(&output, "edit-description utf8");
-    let json = parse_json_stdout(&output);
-    assert_eq!(json["data"]["description"], "\u{63cf}\u{8ff0} \u{1f33f}");
-}
-
-/// Setting a description via config surfaces it in `branch -l --json`; branches
-/// without a description omit the field (backward compatible).
-#[test]
-#[serial]
-fn test_branch_list_json_exposes_description() {
-    let repo = create_committed_repo_via_cli();
-    assert_cli_success(
-        &run_libra_command(&["branch", "feature"], repo.path()),
-        "create feature",
-    );
-    assert_cli_success(
-        &run_libra_command(
-            &["config", "branch.feature.description", "documented branch"],
-            repo.path(),
-        ),
-        "set description",
-    );
-
-    let listed = run_libra_command(&["--json", "branch", "-l"], repo.path());
-    assert_cli_success(&listed, "branch -l --json");
-    let json = parse_json_stdout(&listed);
-    let branches = json["data"]["branches"].as_array().expect("branches");
-    let feature = branches
-        .iter()
-        .find(|e| e["name"] == "feature")
-        .expect("feature entry");
-    assert_eq!(feature["description"], "documented branch");
-    // main has no description -> field omitted.
-    let main = branches
-        .iter()
-        .find(|e| e["name"] == "main")
-        .expect("main entry");
-    assert!(
-        main.get("description").is_none(),
-        "branch without a description must omit the field"
-    );
-}
-
-// =====================================================================
-//  Wave 5 — decline --track/--no-track, --sort/--format stub,
-//           name-length boundary
-// =====================================================================
-
-/// `--track[=mode]` is declined as a usage error (`LBR-CLI-002`, exit 129)
-/// with a hint pointing at the supported alternatives — both the `=mode` form
-/// and the bare flag.
-#[test]
-#[serial]
-fn test_branch_track_declined_exit_129() {
-    let repo = create_committed_repo_via_cli();
-    for args in [
-        vec!["branch", "--track=direct", "newbranch"],
-        vec!["branch", "--track"],
-    ] {
-        let output = run_libra_command(&args, repo.path());
-        assert_eq!(output.status.code(), Some(129), "args: {args:?}");
-        let (stderr, report) = parse_cli_error_stderr(&output.stderr);
-        assert_eq!(report.error_code, "LBR-CLI-002", "args: {args:?}");
-        assert!(
-            stderr.contains("switch --track") || stderr.contains("branch -u"),
-            "decline hint should point at the alternatives: {stderr}"
-        );
-    }
-    // The declined create must not have produced a branch.
-    let listed = run_libra_command(&["branch", "-l"], repo.path());
-    let names = list_names_in_order(&String::from_utf8_lossy(&listed.stdout));
-    assert!(
-        !names.iter().any(|n| n == "newbranch"),
-        "declined --track must not create the branch: {names:?}"
-    );
-}
-
-/// `--no-track` is declined the same way (exit 129, `LBR-CLI-002`).
-#[test]
-#[serial]
-fn test_branch_no_track_declined_exit_129() {
-    let repo = create_committed_repo_via_cli();
-    let output = run_libra_command(&["branch", "--no-track", "newbranch"], repo.path());
-    assert_eq!(output.status.code(), Some(129));
-    let (_s, report) = parse_cli_error_stderr(&output.stderr);
-    assert_eq!(report.error_code, "LBR-CLI-002");
-    let listed = run_libra_command(&["branch", "-l"], repo.path());
-    let names = list_names_in_order(&String::from_utf8_lossy(&listed.stdout));
-    assert!(!names.iter().any(|n| n == "newbranch"));
-}
-
-/// `--track` declined error is JSON-renderable with its stable code under
-/// `--json` (still exit 129).
-#[test]
-#[serial]
-fn test_branch_track_declined_json_stable_code() {
-    let repo = create_committed_repo_via_cli();
-    let output = run_libra_command(&["--json", "branch", "--track=inherit"], repo.path());
-    assert_eq!(output.status.code(), Some(129));
-    let (_s, report) = parse_cli_error_stderr(&output.stderr);
-    assert_eq!(report.error_code, "LBR-CLI-002");
-}
-
-/// `--sort` is accepted but ignored on the list path: the list still prints in
-/// the default order, a `note:` is emitted to stderr, and the exit code is 0.
-#[test]
-#[serial]
-fn test_branch_sort_flag_stub_exit0_with_note() {
-    let repo = create_committed_repo_via_cli();
-    assert_cli_success(
-        &run_libra_command(&["branch", "topic"], repo.path()),
-        "create topic",
-    );
-    let output = run_libra_command(&["branch", "--sort=committerdate"], repo.path());
-    assert!(output.status.success(), "stub --sort must exit 0");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let names = list_names_in_order(&stdout);
-    assert!(
-        names.iter().any(|n| n == "main"),
-        "list still printed: {names:?}"
-    );
-    assert!(
-        names.iter().any(|n| n == "topic"),
-        "list still printed: {names:?}"
-    );
-    assert!(
-        stderr.contains("note:") && stderr.contains("--json"),
-        "stderr should carry the informational note: {stderr}"
-    );
-}
-
-/// `--format` behaves like `--sort`: ignored, default list, stderr note, exit 0.
-#[test]
-#[serial]
-fn test_branch_format_flag_stub_exit0_with_note() {
-    let repo = create_committed_repo_via_cli();
-    let output = run_libra_command(&["branch", "--format=%(refname)"], repo.path());
-    assert!(output.status.success(), "stub --format must exit 0");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("note:") && stderr.contains("--json"),
-        "stderr should carry the informational note: {stderr}"
-    );
-    let names = list_names_in_order(&String::from_utf8_lossy(&output.stdout));
-    assert!(names.iter().any(|n| n == "main"));
-}
-
-/// `--sort` is in the `query` group, so combining it with a create positional
-/// trips the action↔query mutual exclusion. Libra surfaces that clap conflict
-/// as a usage error (exit 129, like other branch parse conflicts) and the
-/// branch is NOT created.
-#[test]
-#[serial]
-fn test_branch_sort_with_create_is_group_conflict() {
-    let repo = create_committed_repo_via_cli();
-    let output = run_libra_command(
-        &["branch", "newbranch", "--sort=committerdate"],
-        repo.path(),
-    );
-    assert_eq!(
-        output.status.code(),
-        Some(129),
-        "create + query-group flag must be rejected as a usage conflict"
-    );
-    let listed = run_libra_command(&["branch", "-l"], repo.path());
-    let names = list_names_in_order(&String::from_utf8_lossy(&listed.stdout));
-    assert!(
-        !names.iter().any(|n| n == "newbranch"),
-        "conflicting invocation must not create the branch: {names:?}"
-    );
-}
-
-/// Branch-name validation stays lenient: camelCase and multi-segment dotted
-/// names are valid; only the existing illegal forms plus the 255-byte cap are
-/// rejected.
-#[test]
-fn test_branch_valid_name_allows_camelcase_and_dotted() {
-    use libra::command::branch::is_valid_git_branch_name;
-    assert!(is_valid_git_branch_name("featureBranch"));
-    assert!(is_valid_git_branch_name("feature/sub_topic.v2"));
-    assert!(is_valid_git_branch_name("release/2.0-rc1"));
-    // A bare '@' (not '@{') and interior '/' remain legal.
-    assert!(is_valid_git_branch_name("user@host-work"));
-    // Still rejects the existing illegal forms.
-    assert!(!is_valid_git_branch_name("bad..name"));
-    assert!(!is_valid_git_branch_name("has space"));
-    assert!(!is_valid_git_branch_name("ends/"));
-}
-
-/// camelCase / dotted names are creatable end-to-end through the CLI.
-#[test]
-#[serial]
-fn test_branch_create_camelcase_and_dotted_via_cli() {
-    let repo = create_committed_repo_via_cli();
-    for name in ["featureBranch", "feature/sub_topic.v2"] {
-        assert_cli_success(
-            &run_libra_command(&["branch", name], repo.path()),
-            "create lenient name",
-        );
-    }
-    let listed = run_libra_command(&["branch", "-l"], repo.path());
-    let names = list_names_in_order(&String::from_utf8_lossy(&listed.stdout));
-    assert!(names.iter().any(|n| n == "featureBranch"));
-    assert!(names.iter().any(|n| n == "feature/sub_topic.v2"));
-}
-
-/// Reflog migration is optional: copying a branch in a repo whose `reflog`
-/// table is absent (older/partially-migrated repos) still succeeds — the
-/// migration is a no-op and the ref + config transaction is not aborted.
-/// Regression guard for the Codex-flagged missing-`reflog`-table case.
-#[tokio::test]
-#[serial]
-async fn test_branch_copy_succeeds_without_reflog_table() {
-    use sea_orm::{ConnectionTrait, DbBackend, Statement};
-
-    let temp = tempdir().unwrap();
-    test::setup_with_new_libra_in(temp.path()).await;
-    let _guard = ChangeDirGuard::new(temp.path());
-
-    commit::execute(CommitArgs {
-        message: Some("base".to_string()),
-        file: None,
-        allow_empty: true,
-        conventional: false,
-        no_edit: false,
-        amend: false,
-        signoff: false,
-        disable_pre: true,
-        all: false,
-        no_verify: true,
-        author: None,
-        ..Default::default()
-    })
-    .await;
-    execute(BranchArgs {
-        new_branch: Some("src".to_string()),
-        ..branch_args_default()
-    })
-    .await;
-
-    // Simulate an older/variant repo with no reflog storage.
-    let db = libra::internal::db::get_db_conn_instance().await;
-    db.execute(Statement::from_string(
-        DbBackend::Sqlite,
-        "DROP TABLE IF EXISTS reflog",
-    ))
-    .await
-    .expect("drop reflog table");
-
-    // Copy must still succeed (reflog migration becomes a no-op).
-    execute(BranchArgs {
-        copy: vec!["src".to_string(), "dst".to_string()],
-        ..branch_args_default()
-    })
-    .await;
-
-    assert!(
-        Branch::find_branch_result("dst", None)
-            .await
-            .expect("query dst")
-            .is_some(),
-        "copy must succeed even when the reflog table is absent"
-    );
-}
-
-// =====================================================================
-//  Codex review round 2 — self-copy/self-rename guards, shlex editor
-// =====================================================================
-
-/// Copying a branch onto itself is rejected (even with `-C`) as a usage error,
-/// before any mutation — so the branch's reflog/config is never erased.
-#[test]
-#[serial]
-fn test_branch_copy_onto_itself_rejected() {
-    let repo = create_committed_repo_via_cli();
-    assert_cli_success(
-        &run_libra_command(&["branch", "feature"], repo.path()),
-        "create feature",
-    );
-    for flag in ["-c", "-C"] {
-        let output = run_libra_command(&["branch", flag, "feature", "feature"], repo.path());
-        assert_eq!(output.status.code(), Some(129), "flag {flag}");
-        let (stderr, report) = parse_cli_error_stderr(&output.stderr);
-        assert_eq!(report.error_code, "LBR-CLI-002", "flag {flag}");
-        assert!(
-            stderr.contains("onto itself"),
-            "self-copy message: {stderr}"
-        );
-    }
-    // feature still exists and is unchanged.
-    assert!(
-        branch_commit_json(repo.path(), "feature").is_some(),
-        "feature must survive a rejected self-copy"
-    );
-}
-
-/// Renaming a branch onto itself is rejected before any mutation — guarding
-/// against the move/migrate steps deleting the (only) source row.
-#[test]
-#[serial]
-fn test_branch_rename_onto_itself_rejected() {
-    let repo = create_committed_repo_via_cli();
-    assert_cli_success(
-        &run_libra_command(&["branch", "feature"], repo.path()),
-        "create feature",
-    );
-    let output = run_libra_command(&["branch", "-m", "feature", "feature"], repo.path());
-    assert_eq!(output.status.code(), Some(129));
-    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
-    assert_eq!(report.error_code, "LBR-CLI-002");
-    assert!(
-        stderr.contains("onto itself"),
-        "self-rename message: {stderr}"
-    );
-    // The branch must still exist (not deleted by a botched self-rename).
-    assert!(
-        branch_commit_json(repo.path(), "feature").is_some(),
-        "feature must survive a rejected self-rename"
-    );
-}
-
-/// The editor is launched via shell-style argv splitting (not `sh -c`), so an
-/// editor command with flags (e.g. `code --wait`) still works: the temp-file
-/// path is appended as the final argument.
-#[cfg(unix)]
-#[test]
-#[serial]
-fn test_branch_edit_description_editor_with_args() {
-    let repo = create_committed_repo_via_cli();
-    assert_cli_success(
-        &run_libra_command(&["branch", "feature"], repo.path()),
-        "create feature",
-    );
-    // Stub writes fixed content to its LAST argument (the temp-file path),
-    // proving the leading `--flag` token was parsed as a separate arg.
-    let stub = write_stub_editor(
-        repo.path(),
-        "args.sh",
-        "#!/bin/sh\nfor a in \"$@\"; do f=\"$a\"; done\nprintf 'edited with args\\n' > \"$f\"\n",
-    );
-    let editor = format!("{stub} --wait");
-
-    let output = run_libra_command_with_stdin_and_env(
-        &["--json", "branch", "--edit-description", "feature"],
-        repo.path(),
-        "",
-        &[("EDITOR", editor.as_str())],
-    );
-    assert_cli_success(&output, "edit-description editor-with-args");
-    let json = parse_json_stdout(&output);
-    assert_eq!(json["data"]["description"], "edited with args");
 }

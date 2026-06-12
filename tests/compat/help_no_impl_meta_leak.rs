@@ -65,7 +65,6 @@ const VISIBLE_COMMANDS: &[&str] = &[
     "show",
     "show-ref",
     "ls-remote",
-    "ls-tree",
     "symbolic-ref",
     "rev-parse",
     "rev-list",

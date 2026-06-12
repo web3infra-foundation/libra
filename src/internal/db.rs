@@ -568,17 +568,8 @@ pub async fn create_database(db_path: &str) -> io::Result<DatabaseConnection> {
         ));
     }
 
-    let file = std::fs::File::create(db_path)
+    std::fs::File::create(db_path)
         .map_err(|err| IOError::other(format!("Failed to create database file: {err:?}")))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        std::fs::set_permissions(db_path, std::fs::Permissions::from_mode(0o600)).map_err(
-            |err| IOError::other(format!("Failed to set database permissions: {err:?}")),
-        )?;
-    }
-    drop(file);
 
     // Connect to the new database and set up the schema.
     match connect_database(db_path).await {

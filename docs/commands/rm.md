@@ -116,13 +116,6 @@ In `--dry-run` mode, the same output is produced but no files are modified.
 Global `--quiet` suppresses this primary human output while keeping warnings
 and errors on stderr.
 
-The path is highlighted only when color is enabled. Output respects `--color` /
-`--no-color`: when stdout is not a terminal (e.g. piped) or `--no-color` is
-given, each line is plain `rm '<path>'` with no ANSI escapes, so scripts can
-parse the filename safely. When a removal is refused for uncommitted changes,
-the conflicting file list is indented with four spaces (matching `git rm`),
-not a tab.
-
 ## JSON Output
 
 `--json` and `--machine` use the `rm` command envelope. `paths` contains every
@@ -169,12 +162,6 @@ When removing many files programmatically (e.g., a CI cleanup step or a migratio
 
 Removing a file that has local modifications silently destroys work. Git requires `--force` in the same scenario. Libra follows this convention exactly: if the working tree differs from the index or the index differs from HEAD, the command errors with a message explaining which flag to use (`--cached` to keep the file, `-f` to force deletion). This two-flag escape hatch lets users express intent clearly.
 
-### Why save the index before deleting files?
-
-For a real removal, Libra first removes entries from the in-memory index, saves the index to `.libra/index`, and only then deletes files from the working tree. If the index save fails, the command stops before touching disk files, so the repository does not end up tracking files that were already physically deleted.
-
-`--dry-run` skips both index save and filesystem deletion.
-
 ### Why no per-command `--quiet` flag?
 
 Unlike `libra clean`, the `rm` command does not have a command-specific quiet
@@ -202,12 +189,10 @@ Note: jj's `file untrack` is conceptually similar to `libra rm --cached` -- it s
 
 | Scenario | Behavior | Exit |
 |----------|----------|------|
-| No pathspecs provided | Error: nothing specified for removal | 128 |
-| Path not found in index | Error (or zero with `--ignore-unmatch`) | 129 / 0 |
-| Directory without `-r` | Error: not removing directory recursively without `-r` | 128 |
-| Uncommitted local modifications | Warning-class error: file has local modifications, use `--cached` or `-f` | 9 |
-| Staged changes differ from HEAD | Warning-class error: file has staged changes, use `--cached` or `-f` | 9 |
-| Both staged and local changes | Warning-class error: file has staged content different from both the file and HEAD, use `-f` | 9 |
-| Index save failure | Fatal IO error before any working-tree file is deleted | 128 |
-| Filesystem removal failure after index save | Warning-class error; JSON stderr includes `details.failed_paths` | 9 |
-| Not inside a repository | Error: repository not found | 128 |
+| No pathspecs provided | Error: nothing specified for removal | non-zero |
+| Path not found in index | Error (or zero with `--ignore-unmatch`) | non-zero / 0 |
+| Directory without `-r` | Error: not removing directory recursively without `-r` | non-zero |
+| Uncommitted local modifications | Error: file has local modifications, use `--cached` or `-f` | non-zero |
+| Staged changes differ from HEAD | Error: file has staged changes, use `--cached` or `-f` | non-zero |
+| Both staged and local changes | Error: file has staged content different from both the file and HEAD, use `-f` | non-zero |
+| Not inside a repository | Error: repository not found | non-zero |

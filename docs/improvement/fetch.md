@@ -30,11 +30,10 @@
 **后续维护目标：**
 - 继续维护 local/SSH/invalid-remote/progress 回归测试
 - 若未来需要暴露 bytes received、sideband message 等更细粒度指标，应以向后兼容字段扩展现有 schema
-- 继续维护 `--prune`、`--porcelain`、`--dry-run`、`FETCH_HEAD`/`--append`、`--tags`、`--refmap`、`--atomic` 和 shallow lifecycle 回归测试
 
-**已由后续 fetch 兼容计划补齐的原非目标：**
+**本批非目标：**
 - 不改动底层 pack 协议、索引写入和 refs 更新算法
-- `fetch --prune` 已落地，并复用 `remote prune` 的远程追踪分支比对/删除逻辑
+- 不在本批引入 `fetch --prune`，该职责继续由 `remote prune` 承担
 - 不让 `pull` / `clone` 直接继承顶层 fetch 的 human/JSON 渲染
 
 ## 验证方式
@@ -51,9 +50,7 @@ fetch 基线上叠加一个用户决策：把 `fetch_repository(..., depth)` 已
 能力公开为稳定 CLI flag。本节只承担兼容契约，不重新设计 fetch 主流程。
 
 - `FetchArgs` 新增 `--depth <N>`，`run_fetch()` 把 depth 透传给现有
-  `fetch_repository_with_result()` 调用点；后续兼容计划又补齐了
-  `--deepen`（相对 `deepen-relative`）、`--unshallow`、`--shallow-since`、
-  `--shallow-exclude` 和 `--update-shallow`。
+  `fetch_repository_with_result()` 调用点；不新增 `FetchError` 变体。
 - `--depth` 在 `--help` 中**不带 experimental 标记**（用户决策：稳定公开）。
 - 与 `--all` 组合时，depth 同时作用于全部被 fetch 的 remote。
 - `clone --depth` 已存在；`COMPATIBILITY.md` 与 `docs/commands/clone.md` 同步
@@ -61,5 +58,4 @@ fetch 基线上叠加一个用户决策：把 `fetch_repository(..., depth)` 已
   `unsupported`，链接 [`compatibility/declined.md`](compatibility/declined.md)。
 - 测试覆盖在 `tests/command/fetch_test.rs` 增量补齐浅克隆用例（单分支
   depth 1、`--all --depth N`、full→shallow 幂等、shallow→shallow 幂等和
-  `.libra/shallow` boundary 持久化），并在本地 integration 场景中覆盖
-  shallow clone 后的 `fetch --deepen` 相对加深。
+  `.libra/shallow` boundary 持久化）。

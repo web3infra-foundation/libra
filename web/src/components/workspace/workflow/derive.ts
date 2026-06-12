@@ -73,6 +73,8 @@ function deriveCanonicalPlans(plans: CodeUiPlanSnapshot[]): [Plan, Plan] {
 function planFromSnapshot(snapshot: CodeUiPlanSnapshot): Plan {
   return {
     id: snapshot.id,
+    title: snapshot.title,
+    summary: snapshot.summary,
     steps: snapshot.steps.map(stepFromSnapshot),
   };
 }

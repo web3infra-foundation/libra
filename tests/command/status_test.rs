@@ -2,13 +2,11 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use std::{collections::VecDeque, fs, io::Write};
+use std::{fs, io::Write};
 
 use libra::{
     cli::Stash,
     command::{
-        bisect::BisectState,
-        rebase::{RebaseRuntimeOptions, RebaseState},
         stash,
         status::{
             PorcelainVersion, StatusArgs, UntrackedFiles, execute_to as status_execute_inner,
@@ -225,7 +223,6 @@ async fn test_changes_to_be_staged() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -359,7 +356,6 @@ async fn test_status_porcelain() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -373,7 +369,6 @@ async fn test_status_porcelain() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     file2.write_all(b"modified content").unwrap();
@@ -509,7 +504,6 @@ async fn test_status_short_format() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -523,7 +517,6 @@ async fn test_status_short_format() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -618,7 +611,6 @@ async fn test_status_porcelain_v2_basic() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     file1.write_all(b" more").unwrap(); // unstaged modification
@@ -696,7 +688,6 @@ async fn test_status_porcelain_v2_branch_metadata_includes_upstream_counts() {
             ignore_errors: false,
             refresh: false,
             force: false,
-            ..Default::default()
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -767,7 +758,6 @@ async fn test_status_porcelain_v2_untracked_files_no() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -781,7 +771,7 @@ async fn test_status_porcelain_v2_untracked_files_no() {
         StatusArgs {
             porcelain: Some(PorcelainVersion::V2),
             ignored: true,
-            untracked_files: Some(UntrackedFiles::No),
+            untracked_files: UntrackedFiles::No,
             ..Default::default()
         },
         &mut output,
@@ -825,7 +815,6 @@ async fn test_status_porcelain_v2_untracked_files_all() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -836,7 +825,7 @@ async fn test_status_porcelain_v2_untracked_files_all() {
     status_execute(
         StatusArgs {
             porcelain: Some(PorcelainVersion::V2),
-            untracked_files: Some(UntrackedFiles::All),
+            untracked_files: UntrackedFiles::All,
             ..Default::default()
         },
         &mut output,
@@ -875,7 +864,6 @@ async fn test_status_untracked_files_no() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -889,7 +877,7 @@ async fn test_status_untracked_files_no() {
         StatusArgs {
             porcelain: Some(PorcelainVersion::V1),
             ignored: true,
-            untracked_files: Some(UntrackedFiles::No),
+            untracked_files: UntrackedFiles::No,
             ..Default::default()
         },
         &mut output,
@@ -933,7 +921,6 @@ async fn test_status_untracked_files_all() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -944,7 +931,7 @@ async fn test_status_untracked_files_all() {
     status_execute(
         StatusArgs {
             porcelain: Some(PorcelainVersion::V1),
-            untracked_files: Some(UntrackedFiles::All),
+            untracked_files: UntrackedFiles::All,
             ..Default::default()
         },
         &mut output,
@@ -1017,7 +1004,6 @@ async fn test_status_mixed_changes() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -1081,7 +1067,6 @@ async fn test_status_deleted_files() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -1150,7 +1135,6 @@ async fn test_status_with_subdirectories() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -1158,7 +1142,7 @@ async fn test_status_with_subdirectories() {
     let mut output = Vec::new();
     status_execute(
         StatusArgs {
-            untracked_files: Some(UntrackedFiles::All),
+            untracked_files: UntrackedFiles::All,
             ..Default::default()
         },
         &mut output,
@@ -1181,7 +1165,7 @@ async fn test_status_with_subdirectories() {
     let mut output = Vec::new();
     status_execute(
         StatusArgs {
-            untracked_files: Some(UntrackedFiles::Normal),
+            untracked_files: UntrackedFiles::Normal,
             ..Default::default()
         },
         &mut output,
@@ -1236,7 +1220,6 @@ async fn test_status_verbose_output() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -1290,7 +1273,6 @@ async fn test_status_short_format_with_branch() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -1313,10 +1295,8 @@ async fn test_status_short_format_with_branch() {
             branch: true,
             show_stash: false,
             ignored: false,
-            untracked_files: Some(UntrackedFiles::Normal),
+            untracked_files: UntrackedFiles::Normal,
             exit_code: false,
-            z: false,
-            pathspec: vec![],
         },
         &mut output,
     )
@@ -1355,7 +1335,6 @@ async fn test_status_porcelain_format_with_branch() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -1378,10 +1357,8 @@ async fn test_status_porcelain_format_with_branch() {
             branch: true,
             show_stash: false,
             ignored: false,
-            untracked_files: Some(UntrackedFiles::Normal),
+            untracked_files: UntrackedFiles::Normal,
             exit_code: false,
-            z: false,
-            pathspec: vec![],
         },
         &mut output,
     )
@@ -1420,7 +1397,6 @@ async fn test_status_show_stash_with_existing_stash() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -1443,16 +1419,11 @@ async fn test_status_show_stash_with_existing_stash() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
-        ..Default::default()
     })
     .await;
 
     stash::execute(Stash::Push {
         message: Some("test stash".to_string()),
-        include_untracked: false,
-        all: false,
-        keep_index: false,
-        patch: false,
     })
     .await;
 
@@ -1465,10 +1436,8 @@ async fn test_status_show_stash_with_existing_stash() {
             branch: false,
             show_stash: true,
             ignored: false,
-            untracked_files: Some(UntrackedFiles::Normal),
+            untracked_files: UntrackedFiles::Normal,
             exit_code: false,
-            z: false,
-            pathspec: vec![],
         },
         &mut output,
     )
@@ -1494,10 +1463,8 @@ async fn test_status_show_stash_with_existing_stash() {
             branch: false,
             show_stash: true,
             ignored: false,
-            untracked_files: Some(UntrackedFiles::Normal),
+            untracked_files: UntrackedFiles::Normal,
             exit_code: false,
-            z: false,
-            pathspec: vec![],
         },
         &mut output,
     )
@@ -1523,10 +1490,8 @@ async fn test_status_show_stash_with_existing_stash() {
             branch: false,
             show_stash: true,
             ignored: false,
-            untracked_files: Some(UntrackedFiles::Normal),
+            untracked_files: UntrackedFiles::Normal,
             exit_code: false,
-            z: false,
-            pathspec: vec![],
         },
         &mut output,
     )
@@ -1565,7 +1530,6 @@ async fn test_status_show_stash_without_stash() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -1580,10 +1544,8 @@ async fn test_status_show_stash_without_stash() {
             branch: false,
             show_stash: true,
             ignored: false,
-            untracked_files: Some(UntrackedFiles::Normal),
+            untracked_files: UntrackedFiles::Normal,
             exit_code: false,
-            z: false,
-            pathspec: vec![],
         },
         &mut output,
     )
@@ -1621,7 +1583,6 @@ async fn test_status_branch_detached_head() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -1643,7 +1604,6 @@ async fn test_status_branch_detached_head() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -1653,10 +1613,8 @@ async fn test_status_branch_detached_head() {
     switch::execute(SwitchArgs {
         branch: Some(current_commit.to_string()),
         create: None,
-        force_create: None,
         detach: true,
         track: false,
-        ..Default::default()
     })
     .await;
 
@@ -1669,10 +1627,8 @@ async fn test_status_branch_detached_head() {
             branch: true,
             show_stash: false,
             ignored: false,
-            untracked_files: Some(UntrackedFiles::Normal),
+            untracked_files: UntrackedFiles::Normal,
             exit_code: false,
-            z: false,
-            pathspec: vec![],
         },
         &mut output,
     )
@@ -1710,7 +1666,6 @@ async fn test_status_porcelain_v2_file_modes_and_hashes() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(create_commit_args("Initial commit")).await;
@@ -1726,7 +1681,6 @@ async fn test_status_porcelain_v2_file_modes_and_hashes() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -1741,7 +1695,6 @@ async fn test_status_porcelain_v2_file_modes_and_hashes() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -1864,7 +1817,6 @@ async fn test_status_porcelain_v2_executable_file() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
 
@@ -1928,7 +1880,6 @@ async fn test_status_porcelain_v2_deleted_file() {
         ignore_errors: false,
         refresh: false,
         force: false,
-        ..Default::default()
     })
     .await;
     commit::execute(create_commit_args("Initial commit")).await;
@@ -2014,7 +1965,6 @@ async fn test_status_after_add() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
-        ..Default::default()
     })
     .await;
 
@@ -2182,402 +2132,4 @@ fn test_add_dry_run_output() {
         !status_stdout.contains("A  file.txt"),
         "dry run should not stage: {status_stdout}"
     );
-}
-
-#[test]
-#[serial]
-fn test_status_z_nul_terminates_porcelain() {
-    let repo = create_committed_repo_via_cli();
-    std::fs::write(repo.path().join("untracked.txt"), "u\n").unwrap();
-    std::fs::write(repo.path().join("tracked.txt"), "tracked\nmod\n").unwrap();
-
-    // `-z` with no explicit format implies porcelain v1 with NUL terminators.
-    let out = run_libra_command(&["status", "-z"], repo.path());
-    assert_cli_success(&out, "status -z");
-    assert!(
-        out.stdout.contains(&0u8),
-        "status -z must NUL-terminate entries; stdout={:?}",
-        String::from_utf8_lossy(&out.stdout)
-    );
-    assert!(
-        !out.stdout.contains(&b'\n'),
-        "status -z must not emit newlines; stdout={:?}",
-        String::from_utf8_lossy(&out.stdout)
-    );
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        text.contains("tracked.txt"),
-        "should list the modified file: {text}"
-    );
-    assert!(
-        text.contains("untracked.txt"),
-        "should list the untracked file: {text}"
-    );
-}
-
-fn stage_tracked_rename() -> tempfile::TempDir {
-    let repo = create_committed_repo_via_cli();
-    std::fs::rename(
-        repo.path().join("tracked.txt"),
-        repo.path().join("renamed.txt"),
-    )
-    .expect("rename tracked file");
-
-    let output = run_libra_command(&["add", "-A"], repo.path());
-    assert_cli_success(&output, "stage rename with add -A");
-    repo
-}
-
-#[test]
-#[serial]
-fn porcelain_v2_rename_line_emits_r100() {
-    let repo = stage_tracked_rename();
-
-    let output = run_libra_command(&["status", "--porcelain=v2"], repo.path());
-    assert_cli_success(&output, "status --porcelain=v2 after rename");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    let rename_line = stdout
-        .lines()
-        .find(|line| line.starts_with("2 R "))
-        .unwrap_or_else(|| panic!("expected porcelain v2 rename line, got: {stdout}"));
-    assert!(
-        rename_line.contains(" R100 renamed.txt\ttracked.txt"),
-        "rename line must carry R100 and TAB-separated new/original paths, got: {rename_line}"
-    );
-    assert!(
-        !stdout
-            .lines()
-            .any(|line| line.ends_with(" renamed.txt") && line.starts_with("1 A")),
-        "renamed destination must not also render as a plain add: {stdout}"
-    );
-    assert!(
-        !stdout
-            .lines()
-            .any(|line| line.ends_with(" tracked.txt") && line.starts_with("1 D")),
-        "rename source must not also render as a plain delete: {stdout}"
-    );
-}
-
-#[test]
-#[serial]
-fn short_rename_arrow_format() {
-    let repo = stage_tracked_rename();
-
-    let output = run_libra_command(&["status", "--short"], repo.path());
-    assert_cli_success(&output, "status --short after rename");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    assert!(
-        stdout
-            .lines()
-            .any(|line| line == "R  tracked.txt -> renamed.txt"),
-        "short status should render staged rename as old -> new arrow, got: {stdout}"
-    );
-    assert!(
-        !stdout
-            .lines()
-            .any(|line| line == "A  renamed.txt" || line == "D  tracked.txt"),
-        "short status should collapse rename instead of add/delete pair, got: {stdout}"
-    );
-}
-
-#[test]
-#[serial]
-fn z_flag_porcelain_v2_rename_nul() {
-    let repo = stage_tracked_rename();
-
-    let output = run_libra_command(&["status", "--porcelain=v2", "-z"], repo.path());
-    assert_cli_success(&output, "status --porcelain=v2 -z after rename");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    assert!(
-        output
-            .stdout
-            .windows(b"renamed.txt\0tracked.txt\0".len())
-            .any(|window| window == b"renamed.txt\0tracked.txt\0"),
-        "porcelain v2 -z rename must use NUL between new and original path: {stdout:?}"
-    );
-    assert!(
-        !output
-            .stdout
-            .windows(b"renamed.txt\ttracked.txt".len())
-            .any(|window| window == b"renamed.txt\ttracked.txt"),
-        "porcelain v2 -z rename must not retain TAB path separator: {stdout:?}"
-    );
-    assert!(
-        !stdout.contains(" -> "),
-        "porcelain v2 -z rename must not use arrow syntax: {stdout:?}"
-    );
-}
-
-#[test]
-#[serial]
-fn z_flag_short_rename_order_new_then_orig() {
-    let repo = stage_tracked_rename();
-
-    let output = run_libra_command(&["status", "-z", "-s"], repo.path());
-    assert_cli_success(&output, "status -z -s after rename");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    assert!(
-        output.stdout == b"R  renamed.txt\0tracked.txt\0",
-        "short -z rename must be `R  <new>\\0<orig>\\0`, got: {stdout:?}"
-    );
-}
-
-#[test]
-#[serial]
-fn z_alone_equals_porcelain_v1_z() {
-    let repo = create_committed_repo_via_cli();
-    std::fs::write(repo.path().join("untracked.txt"), "u\n").unwrap();
-
-    let z_only = run_libra_command(&["status", "-z"], repo.path());
-    assert_cli_success(&z_only, "status -z");
-    let porcelain_z = run_libra_command(&["status", "--porcelain=v1", "-z"], repo.path());
-    assert_cli_success(&porcelain_z, "status --porcelain=v1 -z");
-
-    assert_eq!(
-        z_only.stdout, porcelain_z.stdout,
-        "status -z must equal porcelain v1 -z"
-    );
-}
-
-#[test]
-#[serial]
-fn config_show_untracked_no_hides_untracked() {
-    let repo = create_committed_repo_via_cli();
-    std::fs::write(repo.path().join("untracked.txt"), "u\n").unwrap();
-    let output = run_libra_command(&["config", "status.showUntrackedFiles", "no"], repo.path());
-    assert_cli_success(&output, "configure status.showUntrackedFiles");
-
-    let output = run_libra_command(&["status", "--short"], repo.path());
-    assert_cli_success(&output, "status --short with status.showUntrackedFiles=no");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    assert!(
-        !stdout.contains("untracked.txt"),
-        "config should hide untracked files by default: {stdout}"
-    );
-}
-
-#[test]
-#[serial]
-fn cli_overrides_config_untracked() {
-    let repo = create_committed_repo_via_cli();
-    std::fs::create_dir_all(repo.path().join("dir")).unwrap();
-    std::fs::write(repo.path().join("dir").join("child.txt"), "u\n").unwrap();
-    let output = run_libra_command(&["config", "status.showUntrackedFiles", "no"], repo.path());
-    assert_cli_success(&output, "configure status.showUntrackedFiles");
-
-    let output = run_libra_command(&["status", "--short", "--untracked-files=all"], repo.path());
-    assert_cli_success(&output, "status --untracked-files=all overrides config");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    assert!(
-        stdout.contains("?? dir/child.txt"),
-        "explicit CLI untracked mode should override config: {stdout}"
-    );
-}
-
-#[test]
-#[serial]
-fn config_branch_true_enables_branch_header() {
-    let repo = create_committed_repo_via_cli();
-    let output = run_libra_command(&["config", "status.branch", "true"], repo.path());
-    assert_cli_success(&output, "configure status.branch");
-
-    let output = run_libra_command(&["status", "--short"], repo.path());
-    assert_cli_success(&output, "status --short with status.branch=true");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    assert!(
-        stdout
-            .lines()
-            .next()
-            .is_some_and(|line| line.starts_with("## ")),
-        "status.branch=true should enable short branch header: {stdout}"
-    );
-}
-
-#[test]
-#[serial]
-fn config_short_true_enables_short_output() {
-    let repo = create_committed_repo_via_cli();
-    std::fs::write(repo.path().join("tracked.txt"), "tracked\nmodified\n").unwrap();
-    let output = run_libra_command(&["config", "status.short", "true"], repo.path());
-    assert_cli_success(&output, "configure status.short");
-
-    let output = run_libra_command(&["status"], repo.path());
-    assert_cli_success(&output, "status with status.short=true");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    assert!(
-        stdout.lines().any(|line| line == " M tracked.txt"),
-        "status.short=true should default to short output: {stdout}"
-    );
-    assert!(
-        !stdout.contains("Changes not staged for commit"),
-        "status.short=true should not render long human sections: {stdout}"
-    );
-}
-
-#[test]
-#[serial]
-fn invalid_config_value_warns_and_falls_back() {
-    let repo = create_committed_repo_via_cli();
-    std::fs::write(repo.path().join("untracked.txt"), "u\n").unwrap();
-    let output = run_libra_command(
-        &["config", "status.showUntrackedFiles", "banana"],
-        repo.path(),
-    );
-    assert_cli_success(&output, "configure invalid status.showUntrackedFiles");
-
-    let output = run_libra_command(&["status", "--short"], repo.path());
-    assert_cli_success(&output, "status with invalid status.showUntrackedFiles");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stdout.contains("?? untracked.txt"),
-        "invalid config should fall back to normal untracked output: {stdout}"
-    );
-    assert!(
-        stderr.contains("warning: invalid status.showUntrackedFiles 'banana'"),
-        "invalid config should warn on stderr: {stderr}"
-    );
-
-    let warning_exit = run_libra_command(
-        &["--exit-code-on-warning", "status", "--short"],
-        repo.path(),
-    );
-    assert_eq!(warning_exit.status.code(), Some(9));
-    let stderr = String::from_utf8_lossy(&warning_exit.stderr);
-    assert!(
-        stderr.contains("warning: invalid status.showUntrackedFiles 'banana'"),
-        "--exit-code-on-warning should preserve the config warning: {stderr}"
-    );
-}
-
-async fn save_rebase_state_for_status() -> String {
-    let head = Head::current_commit()
-        .await
-        .expect("committed repo should have HEAD");
-    let state = RebaseState {
-        head_name: "main".to_string(),
-        onto: head,
-        orig_head: head,
-        todo: VecDeque::new(),
-        done: Vec::new(),
-        stopped_sha: None,
-        current_head: head,
-        autostash_ref: None,
-        options: RebaseRuntimeOptions::default(),
-    };
-    state.save().await.expect("save rebase state");
-    head.to_string()
-}
-
-async fn save_bisect_state_for_status() {
-    let head = Head::current_commit()
-        .await
-        .expect("committed repo should have HEAD");
-    let state = BisectState {
-        orig_head: head,
-        orig_head_name: Some("main".to_string()),
-        bad: Some(head),
-        good: Vec::new(),
-        current: Some(head),
-        skipped: Vec::new(),
-        steps: Some(0),
-        completed: false,
-    };
-    state.save().await.expect("save bisect state");
-}
-
-#[tokio::test]
-#[serial]
-async fn detect_rebase_state_human_hint() {
-    let repo = create_committed_repo_via_cli();
-    let _guard = ChangeDirGuard::new(repo.path());
-    let onto = save_rebase_state_for_status().await;
-
-    let output = run_libra_command(&["status"], repo.path());
-    assert_cli_success(&output, "status with rebase state");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    assert!(
-        stdout.contains("rebase in progress"),
-        "human status should report rebase state: {stdout}"
-    );
-    assert!(
-        stdout.contains(&format!("onto {}", &onto[..8])),
-        "human status should include the rebase target: {stdout}"
-    );
-    assert!(
-        stdout.contains("libra rebase --continue") && stdout.contains("libra rebase --abort"),
-        "human status should include rebase recovery commands: {stdout}"
-    );
-}
-
-#[tokio::test]
-#[serial]
-async fn detect_bisect_state_human_hint() {
-    let repo = create_committed_repo_via_cli();
-    let _guard = ChangeDirGuard::new(repo.path());
-    save_bisect_state_for_status().await;
-
-    let output = run_libra_command(&["status"], repo.path());
-    assert_cli_success(&output, "status with bisect state");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    assert!(
-        stdout.contains("bisect in progress"),
-        "human status should report bisect state: {stdout}"
-    );
-    assert!(
-        !stdout.contains("bisect --abort"),
-        "status must not mention unsupported bisect --abort: {stdout}"
-    );
-}
-
-#[tokio::test]
-#[serial]
-async fn json_includes_repo_state() {
-    let repo = create_committed_repo_via_cli();
-
-    let clean_output = run_libra_command(&["status", "--json"], repo.path());
-    assert_cli_success(&clean_output, "json status without repo state");
-    let clean_json = parse_json_stdout(&clean_output);
-    assert_eq!(clean_json["data"]["repo_state"], serde_json::Value::Null);
-
-    let _guard = ChangeDirGuard::new(repo.path());
-    save_rebase_state_for_status().await;
-    drop(_guard);
-
-    let rebase_output = run_libra_command(&["status", "--json"], repo.path());
-    assert_cli_success(&rebase_output, "json status with rebase state");
-    let rebase_json = parse_json_stdout(&rebase_output);
-    assert_eq!(rebase_json["data"]["repo_state"], "rebase");
-}
-
-#[tokio::test]
-#[serial]
-async fn porcelain_modes_omit_repo_state_hints() {
-    let repo = create_committed_repo_via_cli();
-    let _guard = ChangeDirGuard::new(repo.path());
-    save_rebase_state_for_status().await;
-
-    for args in [
-        &["status", "--short"][..],
-        &["status", "--porcelain=v1"][..],
-        &["status", "--porcelain=v2"][..],
-    ] {
-        let output = run_libra_command(args, repo.path());
-        assert_cli_success(&output, "machine status with rebase state");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            !stdout.contains("rebase in progress") && !stdout.contains("libra rebase --continue"),
-            "machine/short output must not include human repo-state hints: {stdout}"
-        );
-    }
 }

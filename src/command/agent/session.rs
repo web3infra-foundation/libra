@@ -4,16 +4,7 @@
 //! a captured external-agent session into Libra's own `refs/libra/intent`
 //! AI history (entire.md §14.4 item 2).
 
-use std::{path::Path, str::FromStr};
-
 use clap::{Args, Subcommand};
-use git_internal::{
-    hash::ObjectHash,
-    internal::object::{
-        ObjectTrait,
-        tree::{Tree, TreeItemMode},
-    },
-};
 use sea_orm::{ConnectionTrait, Statement};
 use serde::Serialize;
 
@@ -21,9 +12,7 @@ use crate::{
     internal::{ai::observed_agents::AgentKind, db::get_db_conn_instance},
     utils::{
         error::{CliError, CliResult},
-        object::read_git_object,
         output::{OutputConfig, emit_json_data},
-        util,
     },
 };
 
@@ -232,48 +221,25 @@ impl SessionMutationKind {
     }
 }
 
-async fn extract_transcript_from_latest_checkpoint(
-    conn: &(impl ConnectionTrait + ?Sized),
-    repo_path: &Path,
-    session_id: &str,
-    agent_kind: &str,
+fn extract_transcript_from_metadata(
+    metadata_json: &str,
     output_path: &str,
 ) -> CliResult<TranscriptExtraction> {
-    let backend = conn.get_database_backend();
-    let row = conn
-        .query_one(Statement::from_sql_and_values(
-            backend,
-            "SELECT checkpoint_id, traces_commit \
-             FROM agent_checkpoint \
-             WHERE session_id = ? \
-             ORDER BY created_at DESC, checkpoint_id DESC \
-             LIMIT 1",
-            [session_id.into()],
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json).map_err(|e| {
+        CliError::fatal(format!(
+            "captured session metadata_json is not valid JSON; cannot extract transcript: {e}"
         ))
-        .await
-        .map_err(|e| {
-            CliError::fatal(format!(
-                "failed to query latest checkpoint for session '{session_id}': {e}"
-            ))
-        })?
+    })?;
+    let source = metadata
+        .get("transcript_path")
+        .and_then(|value| value.as_str())
+        .filter(|path| !path.trim().is_empty())
         .ok_or_else(|| {
-            CliError::fatal(format!(
-                "captured session '{session_id}' has no checkpoint transcript snapshot; cannot extract transcript"
-            ))
+            CliError::fatal(
+                "captured session metadata_json does not contain transcript_path; cannot extract transcript",
+            )
         })?;
-    let checkpoint_id: String = row.try_get_by("checkpoint_id").map_err(|e| {
-        CliError::fatal(format!(
-            "agent_checkpoint.checkpoint_id for session '{session_id}' could not be decoded as TEXT: {e}"
-        ))
-    })?;
-    let traces_commit: String = row.try_get_by("traces_commit").map_err(|e| {
-        CliError::fatal(format!(
-            "agent_checkpoint.traces_commit for checkpoint '{checkpoint_id}' could not be decoded as TEXT: {e}"
-        ))
-    })?;
-    let transcript =
-        read_checkpoint_transcript(repo_path, &checkpoint_id, &traces_commit, agent_kind)?;
-
+    let source_path = std::path::PathBuf::from(source);
     let output = std::path::PathBuf::from(output_path);
     if let Some(parent) = output.parent()
         && !parent.as_os_str().is_empty()
@@ -285,106 +251,18 @@ async fn extract_transcript_from_latest_checkpoint(
             ))
         })?;
     }
-    std::fs::write(&output, &transcript).map_err(|e| {
+    let bytes = std::fs::copy(&source_path, &output).map_err(|e| {
         CliError::fatal(format!(
-            "failed to write checkpoint transcript for session '{session_id}' to '{}': {e}",
+            "failed to copy transcript from '{}' to '{}': {e}",
+            source_path.display(),
             output.display()
         ))
     })?;
     Ok(TranscriptExtraction {
-        source_path: format!("checkpoint:{checkpoint_id}:transcript/{agent_kind}"),
+        source_path: source_path.display().to_string(),
         output_path: output.display().to_string(),
-        bytes: transcript.len() as u64,
+        bytes,
     })
-}
-
-fn read_checkpoint_transcript(
-    repo_path: &Path,
-    checkpoint_id: &str,
-    traces_commit: &str,
-    agent_kind: &str,
-) -> CliResult<Vec<u8>> {
-    let commit_hash = ObjectHash::from_str(traces_commit).map_err(|e| {
-        CliError::fatal(format!(
-            "checkpoint '{checkpoint_id}' has invalid traces_commit '{traces_commit}': {e}"
-        ))
-    })?;
-    let commit_data = read_git_object(repo_path, &commit_hash).map_err(|e| {
-        CliError::fatal(format!(
-            "failed to read checkpoint commit {traces_commit} for '{checkpoint_id}': {e}"
-        ))
-    })?;
-    let commit = git_internal::internal::object::commit::Commit::from_bytes(
-        &commit_data,
-        commit_hash,
-    )
-    .map_err(|e| {
-        CliError::fatal(format!(
-            "failed to decode checkpoint commit {traces_commit} for '{checkpoint_id}': {e:?}"
-        ))
-    })?;
-
-    let prefix = checkpoint_id.get(..2).ok_or_else(|| {
-        CliError::fatal(format!(
-            "checkpoint_id '{checkpoint_id}' is too short to locate transcript snapshot"
-        ))
-    })?;
-    let rest = &checkpoint_id[2..];
-    let path = ["checkpoint", prefix, rest, "transcript", agent_kind];
-    let blob_oid = lookup_tree_path(repo_path, &commit.tree_id, &path)?;
-    read_git_object(repo_path, &blob_oid).map_err(|e| {
-        CliError::fatal(format!(
-            "failed to read transcript blob {} for checkpoint '{}': {e}",
-            blob_oid, checkpoint_id
-        ))
-    })
-}
-
-fn lookup_tree_path(
-    repo_path: &Path,
-    root_tree: &ObjectHash,
-    path: &[&str],
-) -> CliResult<ObjectHash> {
-    let mut tree_oid = *root_tree;
-    for (idx, segment) in path.iter().enumerate() {
-        let tree_data = read_git_object(repo_path, &tree_oid).map_err(|e| {
-            CliError::fatal(format!("failed to read checkpoint tree {tree_oid}: {e}"))
-        })?;
-        let tree = Tree::from_bytes(&tree_data, tree_oid).map_err(|e| {
-            CliError::fatal(format!(
-                "failed to decode checkpoint tree {tree_oid}: {e:?}"
-            ))
-        })?;
-        let item = tree
-            .tree_items
-            .iter()
-            .find(|item| item.name == *segment)
-            .ok_or_else(|| {
-                CliError::fatal(format!(
-                    "checkpoint transcript tree is missing path component '{}'",
-                    segment
-                ))
-            })?;
-        if idx == path.len() - 1 {
-            if item.mode == TreeItemMode::Tree {
-                return Err(CliError::fatal(format!(
-                    "checkpoint transcript path '{}' resolved to a tree, expected blob",
-                    path.join("/")
-                )));
-            }
-            return Ok(item.id);
-        }
-        if item.mode != TreeItemMode::Tree {
-            return Err(CliError::fatal(format!(
-                "checkpoint transcript path component '{}' resolved to a blob, expected tree",
-                segment
-            )));
-        }
-        tree_oid = item.id;
-    }
-    Err(CliError::fatal(
-        "checkpoint transcript path cannot be empty".to_string(),
-    ))
 }
 
 async fn list(args: SessionListArgs, output: &OutputConfig) -> CliResult<()> {
@@ -487,26 +365,13 @@ async fn show(args: SessionShowArgs, output: &OutputConfig) -> CliResult<()> {
                     .unwrap_or_default(),
             };
             let transcript = if let Some(path) = args.extract_transcript.as_deref() {
-                if !table_exists(&conn, "agent_checkpoint").await? {
-                    return Err(CliError::fatal(
-                        "agent_checkpoint table not yet present; cannot extract checkpoint transcript snapshot",
-                    ));
-                }
-                let repo_path = util::try_get_storage_path(None).map_err(|e| {
+                let metadata_json = row.try_get_by::<String, _>("metadata_json").map_err(|e| {
                     CliError::fatal(format!(
-                        "not in a Libra repository; cannot read checkpoint transcript snapshot: {e}"
+                        "agent_session.metadata_json for '{}' could not be decoded as TEXT: {e}",
+                        args.session_id
                     ))
                 })?;
-                Some(
-                    extract_transcript_from_latest_checkpoint(
-                        &conn,
-                        &repo_path,
-                        &args.session_id,
-                        &payload.agent_kind,
-                        path,
-                    )
-                    .await?,
-                )
+                Some(extract_transcript_from_metadata(&metadata_json, path)?)
             } else {
                 None
             };
@@ -1214,83 +1079,27 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn agent_session_extract_transcript_reads_latest_checkpoint_blob() {
-        let (_dir, conn, repo_path) = fresh_repo().await;
-        insert_agent_session_fixture_with_metadata(
-            &conn,
-            "claude__extract-checkpoint",
-            "stopped",
-            Some(1_700_000_100),
-            r#"{"transcript_path":"/tmp/mutable-local-transcript.jsonl"}"#,
-        )
-        .await;
+    #[test]
+    fn agent_session_extract_transcript_copies_metadata_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("captured.jsonl");
+        let output = dir.path().join("nested").join("copy.jsonl");
+        std::fs::write(&source, "{\"type\":\"message\"}\n").unwrap();
+        let metadata = serde_json::json!({
+            "transcript_path": source,
+        })
+        .to_string();
 
-        let objects_dir = repo_path.join("objects");
-        std::fs::create_dir_all(&objects_dir).unwrap();
-        let storage = std::sync::Arc::new(crate::utils::client_storage::ClientStorage::init(
-            objects_dir,
-        ));
-        let manager = crate::internal::ai::history::HistoryManager::new_with_ref(
-            storage,
-            repo_path.clone(),
-            std::sync::Arc::new(conn.clone()),
-            crate::internal::branch::AGENT_TRACES_BRANCH,
-        );
-        let redacted = crate::internal::ai::observed_agents::RedactedBytes::new_unchecked(
-            b"{\"type\":\"message\",\"token\":\"<REDACTED:test>\"}\n".to_vec(),
-        );
-        let checkpoint_id = "abcdef12-3456-7890-abcd-ef1234567890";
-        let written = manager
-            .append_checkpoint_commit(crate::internal::ai::history::CheckpointCommitParams {
-                checkpoint_id,
-                session_id: "claude__extract-checkpoint",
-                agent_kind: "claude_code",
-                parent_commit: None,
-                scope: crate::internal::ai::history::CheckpointScope::Committed,
-                tool_use_id: None,
-                metadata_json: br#"{"checkpoint_id":"abcdef12-3456-7890-abcd-ef1234567890"}"#,
-                transcript_redacted: &redacted,
-                provider_name: "claude_code",
-                events_jsonl: None,
-            })
-            .await
-            .unwrap();
+        let result =
+            extract_transcript_from_metadata(&metadata, output.to_string_lossy().as_ref()).unwrap();
 
-        let backend = conn.get_database_backend();
-        conn.execute(Statement::from_sql_and_values(
-            backend,
-            "INSERT INTO agent_checkpoint (
-                checkpoint_id, session_id, scope, parent_commit, tree_oid,
-                metadata_blob_oid, traces_commit, created_at
-             ) VALUES (?, 'claude__extract-checkpoint', 'committed', NULL, ?, ?, ?, 1700000200)",
-            vec![
-                checkpoint_id.into(),
-                written.tree_oid.to_string().into(),
-                written.metadata_blob_oid.to_string().into(),
-                written.commit_hash.to_string().into(),
-            ],
-        ))
-        .await
-        .unwrap();
-
-        let output = repo_path.join("nested").join("copy.jsonl");
-        let result = extract_transcript_from_latest_checkpoint(
-            &conn,
-            &repo_path,
-            "claude__extract-checkpoint",
-            "claude_code",
-            output.to_string_lossy().as_ref(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result.bytes, redacted.len() as u64);
+        assert_eq!(result.bytes, 19);
+        assert_eq!(result.source_path, source.display().to_string());
+        assert_eq!(result.output_path, output.display().to_string());
         assert_eq!(
-            result.source_path,
-            format!("checkpoint:{checkpoint_id}:transcript/claude_code")
+            std::fs::read_to_string(output).unwrap(),
+            "{\"type\":\"message\"}\n"
         );
-        assert_eq!(std::fs::read(&output).unwrap(), redacted.bytes());
     }
 
     /// Phase 4.2 acceptance: promoting a captured session writes an

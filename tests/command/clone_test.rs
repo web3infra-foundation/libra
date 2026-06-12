@@ -187,7 +187,6 @@ async fn test_clone_branch() {
         single_branch: false,
         bare: false,
         depth: None,
-        ..Default::default()
     })
     .await;
 
@@ -219,7 +218,6 @@ async fn test_clone_bare_repository() {
         single_branch: false,
         bare: true,
         depth: None,
-        ..Default::default()
     })
     .await;
 
@@ -266,7 +264,6 @@ async fn test_clone_branch_single_branch() {
         single_branch: true,
         bare: false,
         depth: None,
-        ..Default::default()
     })
     .await;
 
@@ -297,7 +294,6 @@ async fn test_clone_default_branch() {
         single_branch: false,
         bare: false,
         depth: None,
-        ..Default::default()
     })
     .await;
 
@@ -328,7 +324,6 @@ async fn test_clone_default_branch_single_branch() {
         single_branch: true,
         bare: false,
         depth: None,
-        ..Default::default()
     })
     .await;
 
@@ -361,7 +356,6 @@ async fn test_clone_to_existing_empty_dir() {
         single_branch: false,
         bare: false,
         depth: None,
-        ..Default::default()
     })
     .await;
 
@@ -397,7 +391,6 @@ async fn test_clone_to_existing_dir() {
         single_branch: false,
         bare: false,
         depth: None,
-        ..Default::default()
     })
     .await;
 
@@ -429,7 +422,6 @@ async fn test_clone_to_dir_with_existing_file_name() {
         single_branch: false,
         bare: false,
         depth: None,
-        ..Default::default()
     })
     .await;
 
@@ -460,7 +452,6 @@ async fn test_clone_with_depth() {
         single_branch: false,
         bare: false,
         depth: Some(1),
-        ..Default::default()
     })
     .await;
 
@@ -491,7 +482,6 @@ async fn test_clone_with_depth_and_branch() {
         single_branch: true,
         bare: false,
         depth: Some(5),
-        ..Default::default()
     })
     .await;
 

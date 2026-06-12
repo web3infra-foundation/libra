@@ -1,7 +1,5 @@
 ## Switch 命令改进详细计划
 
-> **实施状态：✅ 已落地（2026-06-08 复核）** — typed `SwitchError`、结构化 `SwitchOutput`、`-C` / `--force-create`、`-f` / `--force` / `--discard-changes`、`--orphan`、`--guess` / `--no-guess`、`checkout.guess` / `checkout.defaultRemote`、事务内 upstream 设置与 `Head::update_result_with_conn` 均已完成；`--merge` / `--conflict`、`--ignore-other-worktrees`、`--overwrite-ignore`、`--track=direct|inherit` / `--no-track` 继续延后。
-
 > 最后编写时间：2026-03-31
 
 同时落地 [Cross-Cutting Improvements A/B/F/G](README.md#全局层面改进贯穿所有命令)。
@@ -29,7 +27,7 @@
 
 - `checkout::execute_safe()` 会根据目标是否可解析到本地 commit，调用 `switch::ensure_clean_status()` 或 `switch::ensure_clean_status_for_commit()`，并直接匹配 `SwitchError` 变体保持 `checkout` 现有对外文案
 - `run_switch()` 调用 `branch::create_branch_safe()` → 返回 `CliResult<()>`
-- `switch_to_tracked_remote_branch()` 在同一 reflog/HEAD 事务中调用 `branch::set_upstream_with_conn()`，使本地分支 ref、upstream config、HEAD 与 reflog 原子提交
+- `switch_to_tracked_remote_branch()` 调用 `branch::set_upstream_safe_with_output()` → 返回 `CliResult<()>`
 - `restore_to_commit()` 调用 `restore::execute_safe()` → 返回 `CliResult<()>`
 
 `checkout` 侧的详细兼容要求单列于 [checkout.md](checkout.md)；本文件只记录 `switch` 需要暴露给 `checkout` 的共享接口变化，避免两份计划互相覆盖。
@@ -69,7 +67,7 @@
 - **不改变 `SwitchOutput` 结构体和 JSON 输出 schema**。已有的结构化输出保持向后兼容
 - **不改变 `render_switch_output()` 渲染逻辑**。human/JSON/quiet 三模式渲染已正确
 - **不改变 `checkout` 的对外行为，也不强行抽象 `switch`/`checkout` 共用执行层**。两者的成功/失败文案与兼容目标暂时独立维护；`checkout` 仅同步适配 `ensure_clean_status()` 新返回类型
-- **`--force` / `--discard-changes` 已在 switch-improvement-plan 落地**。`--merge` / `--conflict` 仍留后续
+- **不引入 `--merge` / `--force` 选项**。强制切换或合并切换留后续
 - **不引入 stash 集成**（如 `switch --stash`）
 
 ### 设计原则

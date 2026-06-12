@@ -1,7 +1,5 @@
 //! Review helpers for turning an [`IntentSpec`] into actionable quality checks.
 //!
-//! 将 [`IntentSpec`] 转换为可操作质量检查的审查助手。
-//!
 //! Boundary: this module only derives review guidance from already-normalized intent
 //! data; parsing, repair, and persistence stay in sibling modules. Regression coverage
 //! lives in the intent-spec and orchestrator tests that assert risk gates and checks

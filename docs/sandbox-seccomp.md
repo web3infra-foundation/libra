@@ -22,38 +22,18 @@ Libra ships a recommended baseline policy at
 Compile it once for your architecture and export
 `LIBRA_SECCOMP_POLICY`:
 
-1. Install a seccomp compiler:
+1. Install one of:
    * [`seccompiler`](https://crates.io/crates/seccompiler) (Rust;
      used by Firecracker) — `cargo install seccompiler-bin`
    * `libseccomp-tools` (`apt install libseccomp-tools` or
      `dnf install libseccomp-devel`)
 
-   If you externally precompile the bundled JSON on `aarch64` or
-   `riscv64`, also install `jq` for the preprocessing step below.
-
 2. Compile the bundled JSON to a BPF binary:
    ```sh
-   policy_json="$(libra repo-root)/template/seccomp-default.json"
-   tmp_policy_json=
-
-   # The bundled template keeps x86-only raw I/O denies for x86_64.
-   # When precompiling externally on aarch64/riscv64, remove those names
-   # before seccompiler validates the JSON.
-   case "$(uname -m)" in
-     aarch64|riscv64)
-       tmp_policy_json="$(mktemp)"
-       jq '(.default.filter) |= map(select(.syscall != "iopl" and .syscall != "ioperm"))' \
-           "$policy_json" > "$tmp_policy_json"
-       policy_json="$tmp_policy_json"
-       ;;
-   esac
-
    # seccompiler — recommended for portability
    seccompiler-bin --target-arch "$(uname -m)" \
-       --input-file "$policy_json" \
+       --input-file "$(libra repo-root)/template/seccomp-default.json" \
        --output-file ~/.libra/seccomp.bpf
-
-   [ -z "$tmp_policy_json" ] || rm -f "$tmp_policy_json"
 
    # Or hand-pasted from this doc into ~/.libra/seccomp.json
    # if you cloned without the bundled template/ directory.
@@ -73,8 +53,9 @@ Compile it once for your architecture and export
 
 5. If you compile to the fallback location, no env var is required:
    ```sh
-   # Reuse the architecture-specific compile command from step 2 with:
-   # --output-file "$HOME/.libra/seccomp.bpf"
+   seccompiler-bin --target-arch "$(uname -m)" \
+       --input-file "$(libra repo-root)/template/seccomp-default.json" \
+       --output-file "$HOME/.libra/seccomp.bpf"
 
    LIBRA_LOG=info libra code --goal 'noop' --network deny
    # → fallback path is used automatically.
@@ -84,22 +65,19 @@ Compile it once for your architecture and export
 
 The bundled
 [`template/seccomp-default.json`](../template/seccomp-default.json)
-uses the `seccompiler` JSON schema with one `default` filter. Its
-denylist rules group syscalls into six intent-labelled buckets:
+groups syscalls into six intent-labelled buckets:
 
 - **Mount manipulation** (`mount` / `umount2` / `pivot_root` /
-  `move_mount` / etc.) — could remount `/proc` or escape the
-  bwrap mount namespace.
+  `open_tree` / `move_mount` / `fsopen` / `fsmount` / `fsconfig` /
+  `fspick`) — could remount `/proc` or escape the bwrap mount
+  namespace.
 - **Kernel module + kexec** (`init_module`, `finit_module`,
   `delete_module`, `kexec_load`, `kexec_file_load`) — direct
   kernel-mode escalation.
 - **Process tampering** (`ptrace`, `process_vm_writev`,
   `process_vm_readv`) — cross-process memory access bypass.
 - **Host control** (`reboot`, `setdomainname`, `sethostname`,
-  `syslog`, plus x86_64-only `iopl` / `ioperm`) — system-wide
-  identity / power / kernel log / raw I/O-port access. Libra's
-  runtime compiler filters x86_64-only names out when materialising
-  the default policy for aarch64/riscv64.
+  `syslog`) — system-wide identity / power state.
 - **Sandbox-bypass primitives** (`setns`, `unshare`) — re-enter
   namespaces or create new ones for escape.
 - **Kernel-introspection surfaces** (`perf_event_open`, `bpf`,
@@ -110,29 +88,29 @@ Default action is `allow`, so tools like `cargo`, `pytest`,
 Tighten by adding more denies (mind that some legitimate tools
 need `clone3` / `io_uring_setup` on newer kernels).
 
+The bundled baseline uses only syscalls that resolve on every
+architecture Libra's runtime compiler targets (it must compile
+cleanly via `compile_bundled_seccomp_policy()`, whose
+`host_target_arch()` currently maps `x86_64` and `aarch64`).
+Architecture-specific denials — e.g. the x86-only
+`iopl` / `ioperm` I/O-port syscalls — are intentionally left out
+of the portable baseline; add them to a host-specific copy if you
+run exclusively on `x86_64` and want to block direct I/O-port
+access. Note `umount` (the legacy syscall) is absent on `x86_64`
+and `aarch64`; the baseline blocks `umount2`, which is what those
+architectures actually expose.
+
 ### Architecture caveat
 
 `seccompiler-bin --target-arch` must match the runner's `uname
 -m`. A policy compiled for `x86_64` will be rejected at load time
-on `aarch64` or `riscv64` because the syscall numbers differ. The
-bundled JSON keeps `iopl` / `ioperm` so x86_64 root/container runs deny
-raw I/O-port access; Libra's built-in compiler removes those
-x86_64-only rules before compiling the fallback policy for
-aarch64/riscv64.
-
-That normalization only happens in Libra's built-in fallback compiler.
-If you use `seccompiler-bin` yourself on aarch64 or riscv64, do not
-pass the raw bundled JSON directly. First generate an
-architecture-specific JSON file that removes the `iopl` / `ioperm`
-filter entries, as shown in the quick start. If you need precompiled
-policies for multiple architectures, compile one per target and pick at
-startup:
+on `aarch64` because the syscall numbers differ. If you need both
+architectures, compile two policies and pick at startup:
 
 ```sh
 case "$(uname -m)" in
   x86_64)  export LIBRA_SECCOMP_POLICY="$HOME/.libra/seccomp-x86_64.bpf" ;;
   aarch64) export LIBRA_SECCOMP_POLICY="$HOME/.libra/seccomp-aarch64.bpf" ;;
-  riscv64) export LIBRA_SECCOMP_POLICY="$HOME/.libra/seccomp-riscv64.bpf" ;;
 esac
 ```
 

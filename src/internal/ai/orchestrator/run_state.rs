@@ -1,7 +1,5 @@
 //! Mutable in-memory run state used while an orchestrated AI workflow is active.
 //!
-//! 编排 AI 工作流处于活动状态时使用的可变内存运行状态。
-//!
 //! Boundary: this state coordinates phase progress before persistence snapshots are
 //! written; it should not own durable serialization formats. Scheduler and runtime
 //! tests cover transition ordering and incomplete-run recovery boundaries.

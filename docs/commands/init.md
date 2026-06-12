@@ -24,25 +24,6 @@ repository and `origin` is configured to point at the source branch layout. Any 
 files found in the source worktree or checked-out import are copied to matching
 `.libraignore` files.
 
-### Re-initialization
-
-Running `libra init` again inside an existing repository is safe and idempotent. It tops up
-any missing template files (`info/exclude`, `hooks/*`) without overwriting user-modified
-hooks, refreshes `core.sharedRepository` and the on-disk permissions when a new `--shared`
-mode is given, and otherwise leaves the repository untouched. The repository identity
-(`libra.repoid`), the vault (`vault.db`), and existing refs/`HEAD` are always preserved — a
-re-init never re-seeds them, and `--initial-branch` is ignored (with a warning) so `HEAD` is
-never clobbered. Success prints:
-
-```text
-Reinitialized existing Libra repository in /path/to/repo/.libra
-```
-
-A re-init is rejected only when it would be destructive: passing an explicit
-`--object-format`/`--ref-format` that disagrees with the stored value fails with
-`LBR-CLI-002` (exit 129) and changes nothing on disk. Omitting those flags inherits the
-existing format. The `--json`/`--machine` schema is identical for first init and re-init.
-
 ## Options
 
 ### `[DIRECTORY]`
@@ -115,43 +96,10 @@ Path to a template directory whose contents are copied into the new `.libra` dir
 libra init --template /path/to/template
 ```
 
-### `--shared[=<MODE>]`
+### `--shared <MODE>`
 
-Mark the repository as shared amongst several users, mirroring `git init --shared`.
-The bare flag defaults to `group`; to pass an explicit mode use the `=` form
-(`--shared=<mode>`), so a trailing directory is always parsed as the positional
-`DIRECTORY` rather than swallowed as the value:
-
-```bash
-libra init --shared            # equivalent to --shared=group
-libra init --shared=group repo # 'repo' is the directory, not the mode
-libra init --shared=0660 repo
-```
-
-Accepted modes and their effect:
-
-| `--shared` value | `.libra/` content permissions (Unix) | `core.sharedRepository` |
-|------------------|--------------------------------------|--------------------------|
-| `umask` / `false` | unchanged (process umask) | `umask` |
-| `group` / `true` | group-readable/writable (`0o2775` dirs) | `group` |
-| `all` / `world` / `everybody` | world-readable/writable (`0o2777` dirs) | `all` |
-| 4-digit octal `0NNN` | the given mode (directories keep search bits) | `0NNN` (verbatim) |
-
-The canonical mode is persisted to `core.sharedRepository` (read it back with
-`libra config get core.sharedRepository`).
-
-**Vault protection.** On Unix, the shared permissions are applied only to the
-object/ref content tree. Two carve-outs keep signing keys private even in a
-group-shared repository:
-
-- the vault files (`vault.db`, `vault.db-wal`, `vault.db-shm`) are forced to
-  owner-only `0o600`;
-- the `.libra/` top-level directory entry stays owner-only writable (group/world
-  get `r-x` only), so other users cannot unlink or replace the vault from the
-  repository root.
-
-Symlinks inside the layout are skipped (no permission change) to avoid TOCTOU
-escapes. On Windows `--shared` is a no-op (permissions follow NTFS ACLs).
+Specify that the repository is to be shared amongst several users (mirrors the Git
+`--shared` flag for group permissions).
 
 ### `--ref-format <FORMAT>`
 
@@ -175,7 +123,6 @@ libra init -b develop
 libra init --object-format sha256
 libra init --from-git-repository ../old-project
 libra init --vault false
-libra init --shared=group
 ```
 
 ## Human Output
@@ -298,7 +245,7 @@ rather than ongoing cohabitation.
 | Initial branch name | `git init -b <name>` / `--initial-branch` | No direct flag (uses `trunk()` revset config) | `libra init -b <name>` / `--initial-branch` |
 | Object hash format | `git init --object-format=sha256` | Inherits from Git backend | `libra init --object-format sha256` |
 | Template directory | `git init --template=<dir>` | N/A | `libra init --template <dir>` |
-| Shared permissions | `git init --shared[=<mode>]` | N/A | `libra init --shared[=<mode>]` (persists `core.sharedRepository`; vault stays owner-only) |
+| Shared permissions | `git init --shared[=<mode>]` | N/A | `libra init --shared <mode>` |
 | Separate storage dir | `git init --separate-git-dir=<dir>` | `jj git init --colocate` | Removed |
 | Import from Git repo | N/A (use `git clone --local`) | `jj git init --git-repo <path>` | `libra init --from-git-repository <path>` |
 | Vault / signing bootstrap | N/A (manual GPG/SSH setup) | N/A | `libra init --vault <bool>` (default: true) |
@@ -313,8 +260,8 @@ Every `InitError` variant maps to an explicit `StableErrorCode`.
 
 | Scenario | Error Code | Exit | Hint |
 |----------|-----------|------|------|
-| Invalid argument (bad branch name, bad format, invalid `--shared` mode) | `LBR-CLI-002` | 129 | varies by argument |
-| Destructive re-init conflict (explicit `--object-format`/`--ref-format` mismatch) | `LBR-CLI-002` | 129 | "omit the flag to reuse the existing format" |
+| Invalid argument (bad branch name, bad format) | `LBR-CLI-001` | 129 | varies by argument |
+| Repository already initialized | `LBR-REPO-003` | 128 | "remove .libra/ to reinitialize" |
 | Source Git repository not found | `LBR-IO-001` | 128 | -- |
 | Source is not a valid Git repository | `LBR-CLI-003` | 129 | "a valid Git repository must contain HEAD, config, and objects" |
 | Template directory not found | `LBR-IO-001` | 128 | -- |

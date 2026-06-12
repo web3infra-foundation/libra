@@ -1,6 +1,4 @@
 //! Static skill scanner for risky workflow definitions.
-//!
-//! 危险工作流定义的静态技能扫描器。
 
 use serde::{Deserialize, Serialize};
 

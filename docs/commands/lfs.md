@@ -11,12 +11,6 @@ libra lfs locks [--id <ID>] [--path <PATH>] [--limit <N>]
 libra lfs lock <path>
 libra lfs unlock <path> [--force] [--id <ID>]
 libra lfs ls-files [--long] [--size] [--name-only]
-libra lfs install
-libra lfs uninstall
-libra lfs push [<remote>] [<ref>...]
-libra lfs fetch [<remote>] [<ref>...]
-libra lfs prune [--dry-run]
-libra lfs checkout [<path>...]
 ```
 
 ## Description
@@ -25,7 +19,7 @@ libra lfs checkout [<path>...]
 
 LFS tracking is configured through Libra Attributes (`.libra_attributes`), which maps glob patterns to the LFS filter. The `track` and `untrack` subcommands manage these patterns. File locking prevents concurrent edits to binary files that cannot be merged, with server-side enforcement via the LFS lock API.
 
-**Unlike Git, Libra never installs `git-lfs` smudge/clean filters or pre-push hooks, and never writes `.gitattributes`.** LFS is integrated natively: the LFS client, pointer-file parsing, attribute management, and the `push`/`fetch`/`prune`/`checkout` object-sync flows are all built into the `libra` binary, driven by `.libra_attributes`. This intentional difference is decision **D5** ([`docs/improvement/compatibility/declined.md#d5-git-lfs-gitattributes-filter--hooks-bridge`](../improvement/compatibility/declined.md)); `install`/`uninstall` exist only as no-op compatibility shims so automation that calls `git lfs install` does not break.
+Unlike Git, which requires a separate `git-lfs` extension installed as a smudge/clean filter, Libra integrates LFS natively. The LFS client, pointer file parsing, and attribute management are built into the `libra` binary. No additional installation or filter configuration is needed.
 
 ## Options
 
@@ -174,86 +168,9 @@ a1b2c3d4e5 * assets/logo.png
 f6g7h8i9j0 - docs/spec.pdf
 ```
 
-### `install` / `uninstall`
-
-```bash
-libra lfs install
-libra lfs uninstall
-```
-
-**No-ops.** Git LFS uses `git lfs install` to register global smudge/clean filters and pre-push hooks. Libra has built-in LFS and needs none of that (**D5**), so these subcommands change nothing, print a short notice, and exit 0 — keeping CI scripts that call `git lfs install` working. They must run inside a Libra repository (they go through the standard repository preflight).
-
-### `push`
-
-Upload the LFS objects referenced by the current branch to a remote.
-
-```bash
-libra lfs push                 # push current branch's LFS objects to the upstream
-libra lfs push origin          # ...to the named remote
-libra lfs push origin main     # the remote is always the FIRST positional
-```
-
-| Argument | Description |
-|----------|-------------|
-| `[<remote>]` | Remote name (first positional). Defaults to the current branch upstream. |
-| `[<ref>...]` | Additional positionals. Push currently operates on the **current branch only**; an explicit ref that is not the current branch is rejected (`LBR-CLI-003`, exit 129). |
-
-Push scans the current branch's reachable commits, collects the LFS pointers, verifies every referenced object exists locally (a missing object is a hard error, never a silent skip), then uploads via the LFS batch protocol with server-side lock verification. Repositories with no LFS pointers exit 0 without contacting the server.
-
-> Scope note: push is limited to the current branch because lock verification uses the current refspec and index. Push other branches by checking them out first.
-
-### `fetch`
-
-Download LFS objects referenced by remote-tracking refs that are missing from the local cache.
-
-```bash
-libra lfs fetch                # fetch missing objects for the current branch
-libra lfs fetch origin         # ...from the named remote
-libra lfs fetch origin main    # the remote is always the FIRST positional
-```
-
-| Argument | Description |
-|----------|-------------|
-| `[<remote>]` | Remote name (first positional). Defaults to the current branch upstream. |
-| `[<ref>...]` | Refs to scan. Each prefers the remote-tracking ref (`<remote>/<ref>`), falling back to a local ref of the same name. |
-
-Each downloaded object lands in a temporary file and is **independently hash-verified** (its SHA-256 must equal the pointer OID) before being atomically renamed into `.libra/lfs/objects/<a>/<b>/<oid>`. A remote 404 (which writes a pointer placeholder) or checksum mismatch never corrupts the object store, and no `.tmp` file is left behind. If no objects are missing, fetch is a no-op and contacts no server.
-
-### `prune`
-
-Delete local LFS objects not referenced by any reachable ref or the index.
-
-```bash
-libra lfs prune              # delete unreferenced cached objects
-libra lfs prune --dry-run    # report what would be deleted, delete nothing
-```
-
-| Flag | Short | Long | Description |
-|------|-------|------|-------------|
-| Dry run | `-n` | `--dry-run` | List the objects that would be pruned without deleting anything. |
-
-The keep set is every OID referenced by a reachable commit (branches, tags, `HEAD`, and reflog OIDs — ancestry is followed) **plus** the OIDs staged in the current index and the OIDs referenced by current working-tree LFS pointer files, so objects you have created but not yet committed are never deleted. Malformed cache entries (non-64-hex filenames) are skipped, individual removal failures degrade to a warning, and emptied sharding directories are cleaned up. Reports `Pruned <n> files (<size>)`.
-
-> Reachability boundary: the keep set does **not** include remote-tracking branches or git-lfs's `--recent` time window. Make sure unpushed objects are pushed before pruning.
-
-### `checkout`
-
-Restore working-tree pointer files to their full LFS object content from the local cache.
-
-```bash
-libra lfs checkout                  # restore all LFS pointer files
-libra lfs checkout assets/logo.png  # restore only the given path(s)
-```
-
-| Argument | Description |
-|----------|-------------|
-| `[<path>...]` | Optional paths to restore. Defaults to all LFS-tracked pointer files. |
-
-For each LFS-tracked file that is currently a pointer in the working tree, checkout looks up the cached object, **verifies its hash before overwriting**, and replaces the pointer with the full content. Files already materialized (non-pointers) are skipped, and a missing cache object leaves the pointer untouched with a notice (not a fatal error) — run `libra lfs fetch` first.
-
 ## JSON / Machine Output
 
-`--json` and `--machine` are supported for every subcommand. `--json` writes one command envelope to stdout, and `--machine` emits the same envelope as a compact single JSON line. Download/upload progress is suppressed under structured output so stdout carries only the envelope. The `data.action` field identifies the subcommand (`track`, `untrack`, `locks`, `lock`, `unlock`, `ls-files`, `install`, `uninstall`, `push`, `fetch`, `prune`, `checkout`). Subcommand-specific additive fields — all omitted when empty/zero — are: `pushed_oids` (push), `fetched_oids` (fetch), `pruned_files` + `size_freed` + `dry_run` (prune), and `restored_paths` (checkout).
+`--json` and `--machine` are supported for successful `track`, `untrack`, `locks`, `lock`, `unlock`, and `ls-files` operations. `--json` writes one command envelope to stdout, and `--machine` emits the same envelope as a compact single JSON line.
 
 Tracking patterns:
 
@@ -315,17 +232,6 @@ libra lfs unlock assets/hero-image.psd
 
 # Stop tracking a pattern
 libra lfs untrack "*.gif"
-
-# Sync LFS objects with a remote
-libra lfs push origin
-libra lfs fetch origin
-
-# Reclaim disk by pruning unreferenced objects (preview first)
-libra lfs prune --dry-run
-libra lfs prune
-
-# Materialize pointer files back to full content
-libra lfs checkout
 ```
 
 ## Design Rationale
@@ -364,11 +270,6 @@ Unlocking a file while the working tree is dirty could indicate that the develop
 | Long OID | `--long` | `--long` | Not available |
 | File size | `--size` | `--size` | Not available |
 | Name only | `--name-only` | `--name-only` | Not available |
-| Install / uninstall | `libra lfs install` / `uninstall` (no-op shims) | `git lfs install` / `uninstall` (registers filters/hooks) | Not available |
-| Push objects | `libra lfs push [<remote>]` (current branch) | `git lfs push <remote> <ref>` | Not available |
-| Fetch objects | `libra lfs fetch [<remote>] [<ref>...]` | `git lfs fetch <remote> <ref>` | Not available |
-| Prune cache | `libra lfs prune [--dry-run]` (refs+tags+HEAD+reflog+index+worktree pointers) | `git lfs prune` (+`--recent` window) | Not available |
-| Checkout pointers | `libra lfs checkout [<path>...]` | `git lfs checkout` | Not available |
 | Installation required | Built-in | Separate `git-lfs` install + `git lfs install` | Not available |
 | Attributes file | `.libra_attributes` | `.gitattributes` | Not available |
 | Filter configuration | Automatic | Manual (smudge/clean filters) | Not available |
@@ -388,8 +289,4 @@ Note: jj does not currently have LFS support. Large file management in jj reposi
 | `unlock` without push access | `AuthPermissionDenied` | The user lacks push permissions. |
 | Failed to read/write `.libra_attributes` | IO error | The attributes file could not be read or written. |
 | Failed to load index | IO error | The repository index is corrupted or missing. |
-| LFS server communication failure | `NetworkUnavailable` | The LFS server was unreachable or a download/upload failed. |
-| `push` of a non-current branch | `CliInvalidTarget` | Push operates on the current branch only; check out the target branch first. |
-| `push` with an object missing from the local cache | `RepoStateInvalid` | A referenced LFS object is absent locally; run `libra lfs fetch` or restore it. |
-| `push`/`fetch` with an unknown remote | `NetworkUnavailable` | No URL is configured for the requested remote. |
-| `checkout` against a corrupt cached object | `RepoCorrupt` | The cached object failed hash verification and was not used to overwrite the pointer. |
+| LFS server communication failure | Network error | The LFS server returned an unexpected status code. |

@@ -1,45 +1,40 @@
-# Revert 命令改进状态
+# Revert 命令改进详细计划
 
 ## 所属批次
 
 第四批：暂存与撤销命令（P1 一致性修复）
 
-## 当前代码状态
+## 已完成前置条件与当前代码状态
 
-### 已落地能力
+### 已确认落地的基线
+- `RevertError` typed enum 已落地，detached HEAD / invalid commit / conflict / object / index / HEAD 更新失败均有显式 `StableErrorCode`
+- `run_revert()` + `render_revert_output()` 已完成执行层/渲染层拆分
+- `RevertOutput` 已覆盖 `reverted_commit`、`short_reverted`、`new_commit`、`short_new`、`no_commit`、`files_changed`（`short_reverted` / `short_new` 是对应 commit hash 的 7 字符短形式，便于 human / agent 直接消费）
+- `docs/commands/revert.md` 已记录 JSON schema、错误码和常用示例
+- `tests/command/revert_test.rs` 已覆盖基础 revert、`--no-commit`、root commit、JSON 输出和错误码
 
-- 支持单提交、多提交和 `A..B` 范围回滚，范围按 newest-first 执行。
-- 支持 detached `HEAD` 下创建 revert 提交，并直接前推 detached `HEAD`。
-- 支持 merge commit revert 的 `-m` / `--mainline <parent-number>`。
-- 支持单提交 `-n` / `--no-commit`；多提交或范围与 `-n` 组合会失败闭合。
-- 支持 `-s` / `--signoff` trailer。
-- 支持冲突 sequencer 控制：`--continue`、`--skip`、`--abort`、`--quit`。
-- 进行中状态存储在 `.libra/libra.db` 的 `revert_sequence` 表，不使用 `.git/sequencer` 或文件式 `REVERT_HEAD`。
-- root commit revert 使用 Git empty-tree 对象创建空树，避免空 `Tree::from_tree_items` 失败。
-- 英文/中文命令文档、兼容矩阵、迁移 registry 文档已同步。
+### 基于当前代码的 Review 结论
+- revert 的用户契约已经稳定：human 成功确认、JSON 结果模型、错误码和测试已一致
+- 当前实现与命令文档对齐，没有发现与第四批其他命令的语义冲突
+- 本轮 Review 的主要修订是清理计划文档陈旧描述，避免把已交付能力误写成“仍缺失”
 
-### 仍保留的 partial 差距
+## 目标与非目标
 
-- `-e` / `--edit` 与 `--no-edit` 已接受，但还没有启动编辑器。
-- 尚未支持 `--strategy`、`-X`、`-S` / `--gpg-sign`、`--cleanup`、`--commit`、`--rerere-autoupdate`、`--reference` 和 Git 的完整 `--no-*` 别名集合。
-- 冲突检测仍是 path-level；不是 Git 的行级 hunk merge。
+**已完成目标：**
+- typed error、显式错误码、JSON / machine、run/render 分层、`--help` EXAMPLES 和回归测试已全部落地
 
-## 验证记录
+**后续维护目标：**
+- 继续维护 conflict、`--no-commit`、root commit 和 detached HEAD 回归
+- 若未来支持 revert merge commit，应以新增参数/新 schema 字段的方式向后兼容扩展
 
-已完成：
+**本批非目标：**
+- 不支持 merge commit revert
+- 不改变三方合并与反向补丁算法
+- 不引入交互式冲突解决工作流
 
-```bash
-cargo +nightly fmt --all
-source .env.test && LIBRA_SKIP_WEB_BUILD=1 cargo check
-source .env.test && LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test -- revert --test-threads=1 --nocapture
-```
+## 验证方式
 
-`command_test -- revert` 当前结果：18 passed。
-
-后续随总目标一起执行最终 gate：
-
-```bash
-cargo +nightly fmt --all --check
-cargo clippy --all-targets --all-features -- -D warnings
-source .env.test && cargo test --all
-```
+1. `cargo +nightly fmt --all --check`
+2. `cargo clippy --all-targets --all-features -- -D warnings`
+3. `cargo test revert_test`
+4. `docs/commands/revert.md` 与命令实际输出保持一致

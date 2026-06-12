@@ -14,32 +14,25 @@
 //! 1. Takes the bundled JSON text (embedded at compile time via
 //!    `include_str!`) and the host's target arch (resolved at
 //!    runtime so cross-arch builds remain correct).
-//! 2. Normalises that JSON for the selected architecture, pruning
-//!    denylist entries for syscall names that do not exist there.
-//!    The bundled template keeps x86_64-only raw I/O denies
-//!    (`iopl` / `ioperm`) so root/container x86_64 runs still
-//!    block direct I/O-port access; aarch64 drops those entries
-//!    before handing the policy to seccompiler.
-//! 3. Calls `seccompiler::compile_from_json` to produce a
+//! 2. Calls `seccompiler::compile_from_json` to produce a
 //!    `BpfThreadMap` — a map from thread name (we only use the
 //!    `default` filter slot) to the assembled `BpfProgram`.
-//! 4. Serialises the program to the raw `Vec<u8>` shape `bwrap
+//! 3. Serialises the program to the raw `Vec<u8>` shape `bwrap
 //!    --seccomp <fd>` reads from the file descriptor we hand it
 //!    (each instruction is a 64-bit little-endian word — the
 //!    in-kernel `sock_filter` struct ABI).
 //!
-//! For x86_64, the output is intentionally byte-compatible with
-//! `seccompiler-bin --target-arch x86_64 --input-file
-//! template/seccomp-default.json`. For aarch64, Libra first removes
-//! x86_64-only syscall names from the bundled policy so the runtime
-//! can still materialise the default BPF without weakening x86_64.
+//! The output is intentionally byte-compatible with
+//! `seccompiler-bin --target-arch <arch> --input-file
+//! template/seccomp-default.json` so an operator who pre-compiled
+//! the policy with the standalone tool sees the same bytes the
+//! runtime would compile on its own.
 
 #![cfg(target_os = "linux")]
 
-use std::{io::Write, path::Path};
+use std::path::Path;
 
 use seccompiler::{BpfProgram, TargetArch, compile_from_json};
-use serde_json::Value;
 use thiserror::Error;
 
 /// Embedded JSON policy. Lives at `template/seccomp-default.json`
@@ -101,18 +94,13 @@ pub fn host_target_arch() -> Result<TargetArch, SeccompCompileError> {
 }
 
 /// Compile the bundled JSON policy into the raw BPF bytes
-/// `bwrap --seccomp <fd>` expects. The policy is normalised for
-/// the target architecture before seccompiler sees it.
+/// `bwrap --seccomp <fd>` expects. The byte layout matches
+/// `seccompiler-bin --output bpf-bin --input-file
+/// template/seccomp-default.json` so a pre-compiled file and an
+/// on-the-fly compiled blob are interchangeable.
 pub fn compile_bundled_seccomp_policy() -> Result<Vec<u8>, SeccompCompileError> {
     let arch = host_target_arch()?;
-    compile_bundled_seccomp_policy_for_arch(arch)
-}
-
-fn compile_bundled_seccomp_policy_for_arch(
-    arch: TargetArch,
-) -> Result<Vec<u8>, SeccompCompileError> {
-    let policy_json = policy_json_for_arch(arch)?;
-    let mut filters = compile_from_json(policy_json.as_bytes(), arch).map_err(|err| {
+    let mut filters = compile_from_json(BUNDLED_POLICY_JSON.as_bytes(), arch).map_err(|err| {
         SeccompCompileError::JsonInvalid {
             reason: err.to_string(),
         }
@@ -123,53 +111,11 @@ fn compile_bundled_seccomp_policy_for_arch(
     Ok(bpf_program_to_bytes(&program))
 }
 
-fn policy_json_for_arch(arch: TargetArch) -> Result<String, SeccompCompileError> {
-    let mut policy: Value = serde_json::from_str(BUNDLED_POLICY_JSON).map_err(|err| {
-        SeccompCompileError::JsonInvalid {
-            reason: err.to_string(),
-        }
-    })?;
-    prune_policy_for_arch(&mut policy, arch);
-    serde_json::to_string(&policy).map_err(|err| SeccompCompileError::JsonInvalid {
-        reason: err.to_string(),
-    })
-}
-
-fn prune_policy_for_arch(policy: &mut Value, arch: TargetArch) {
-    let Some(rules) = policy
-        .get_mut("default")
-        .and_then(|default| default.get_mut("filter"))
-        .and_then(Value::as_array_mut)
-    else {
-        return;
-    };
-
-    rules.retain(|rule| {
-        let syscall = rule.get("syscall").and_then(Value::as_str);
-        match syscall {
-            Some(name) => bundled_policy_syscall_supported_on_arch(name, arch),
-            None => true,
-        }
-    });
-}
-
-fn bundled_policy_syscall_supported_on_arch(syscall: &str, arch: TargetArch) -> bool {
-    match arch {
-        TargetArch::x86_64 => true,
-        TargetArch::aarch64 | TargetArch::riscv64 => !matches!(syscall, "iopl" | "ioperm"),
-    }
-}
-
 /// Write the compiled policy to `path`, creating the parent
 /// directory if necessary. Used by the runtime's first-launch
 /// fallback path to materialise `~/.libra/seccomp.bpf` so the
 /// `--seccomp <fd>` wiring (v0.17.725) can pick it up on
 /// subsequent invocations.
-///
-/// The write is atomic from readers' perspective: a fresh process
-/// either sees no policy and compiles its own, or sees a complete
-/// policy after the temp-file rename. It must never observe the
-/// target path while BPF bytes are still being written.
 pub fn ensure_compiled_seccomp_policy_at(path: &Path) -> Result<(), std::io::Error> {
     if path.is_file() {
         return Ok(());
@@ -183,22 +129,7 @@ pub fn ensure_compiled_seccomp_policy_at(path: &Path) -> Result<(), std::io::Err
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    write_policy_file_atomically(path, &bytes)
-}
-
-fn write_policy_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("seccomp.bpf");
-    let mut temp = tempfile::Builder::new()
-        .prefix(&format!(".{file_name}."))
-        .suffix(".tmp")
-        .tempfile_in(parent)?;
-    temp.write_all(bytes)?;
-    temp.as_file_mut().sync_all()?;
-    temp.persist(path).map(|_| ()).map_err(|err| err.error)
+    std::fs::write(path, bytes)
 }
 
 /// Serialise a `BpfProgram` (a `Vec<sock_filter>`) into the raw
@@ -251,51 +182,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bundled_policy_compiles_for_supported_arches() {
-        for arch in [TargetArch::x86_64, TargetArch::aarch64] {
-            let bytes = compile_bundled_seccomp_policy_for_arch(arch).unwrap_or_else(|err| {
-                panic!("bundled seccomp JSON must compile for {arch:?}: {err}")
-            });
-            assert!(
-                bytes.len() >= 8,
-                "compiled BPF for {arch:?} must contain at least one sock_filter; got {} bytes",
-                bytes.len(),
-            );
-            assert_eq!(
-                bytes.len() % 8,
-                0,
-                "compiled BPF byte length for {arch:?} must be a multiple of 8; got {} bytes",
-                bytes.len(),
-            );
-        }
-    }
-
-    #[test]
-    fn policy_normalization_keeps_x86_raw_io_denies_and_filters_aarch64() {
-        let x86_policy =
-            policy_json_for_arch(TargetArch::x86_64).expect("x86 policy JSON normalizes");
-        assert!(
-            x86_policy.contains("\"syscall\":\"iopl\""),
-            "x86 policy must retain iopl raw I/O deny"
-        );
-        assert!(
-            x86_policy.contains("\"syscall\":\"ioperm\""),
-            "x86 policy must retain ioperm raw I/O deny"
-        );
-
-        let aarch64_policy =
-            policy_json_for_arch(TargetArch::aarch64).expect("aarch64 policy JSON normalizes");
-        assert!(
-            !aarch64_policy.contains("\"syscall\":\"iopl\""),
-            "aarch64 policy must drop x86-only iopl before seccompiler validation"
-        );
-        assert!(
-            !aarch64_policy.contains("\"syscall\":\"ioperm\""),
-            "aarch64 policy must drop x86-only ioperm before seccompiler validation"
-        );
-    }
-
     /// Scenario: `ensure_compiled_seccomp_policy_at` produces a
     /// file at the target path when none exists, and is a no-op
     /// when a file is already there (no re-compile, no overwrite).
@@ -317,29 +203,6 @@ mod tests {
         assert_ne!(
             bytes_before, bytes_after,
             "sentinel should differ from compiled BPF; sanity check failed",
-        );
-    }
-
-    #[test]
-    fn write_policy_file_atomically_writes_complete_file() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("nested").join("seccomp.bpf");
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
-
-        write_policy_file_atomically(&path, b"complete policy").expect("atomic write succeeds");
-
-        assert_eq!(
-            std::fs::read(&path).expect("read final policy"),
-            b"complete policy"
-        );
-        let leftovers: Vec<_> = std::fs::read_dir(path.parent().expect("parent"))
-            .expect("read parent")
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name() != "seccomp.bpf")
-            .collect();
-        assert!(
-            leftovers.is_empty(),
-            "atomic write should not leave temp files behind: {leftovers:?}"
         );
     }
 }

@@ -6,10 +6,7 @@
 use std::{
     fs,
     path::PathBuf,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 
 use async_trait::async_trait;
@@ -64,49 +61,6 @@ impl Source for FakeSource {
             .lock()
             .expect("context lock")
             .push(context.clone());
-        Ok(ToolOutput::success(format!(
-            "{}:{}",
-            context.source_slug, context.tool_name
-        )))
-    }
-}
-
-/// A source whose `call_tool` records how many calls are in flight at once, so
-/// a test can observe the effect of the CEX-S2-14 per-slug throttle on the real
-/// handler dispatch path. Each call increments the in-flight gauge, holds it
-/// briefly (so concurrent calls overlap), then decrements.
-#[derive(Clone)]
-struct ConcurrencyProbeSource {
-    manifest: CapabilityManifest,
-    current: Arc<AtomicUsize>,
-    max_seen: Arc<AtomicUsize>,
-}
-
-impl ConcurrencyProbeSource {
-    fn new(manifest: CapabilityManifest) -> Self {
-        Self {
-            manifest,
-            current: Arc::new(AtomicUsize::new(0)),
-            max_seen: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-}
-
-#[async_trait]
-impl Source for ConcurrencyProbeSource {
-    fn manifest(&self) -> &CapabilityManifest {
-        &self.manifest
-    }
-
-    async fn call_tool(
-        &self,
-        context: SourceCallContext,
-        _invocation: ToolInvocation,
-    ) -> ToolResult<ToolOutput> {
-        let now = self.current.fetch_add(1, Ordering::SeqCst) + 1;
-        self.max_seen.fetch_max(now, Ordering::SeqCst);
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        self.current.fetch_sub(1, Ordering::SeqCst);
         Ok(ToolOutput::success(format!(
             "{}:{}",
             context.source_slug, context.tool_name
@@ -470,70 +424,5 @@ fn openapi_fixture_generates_rest_tool_specs() {
     assert_eq!(
         params["properties"]["body"]["required"],
         serde_json::json!(["title"])
-    );
-}
-
-/// Drive `n_tasks` concurrent `handle()` calls at one source slug through a pool
-/// built with the given per-slug `limit`, returning the peak observed in-flight
-/// count. `limit == 0` disables throttling.
-async fn observe_peak_concurrency(limit: usize, n_tasks: usize) -> usize {
-    let manifest =
-        CapabilityManifest::new("project_docs", SourceKind::LocalDocs, TrustTier::Project)
-            .with_tool(read_tool("lookup"));
-    let probe = Arc::new(ConcurrencyProbeSource::new(manifest));
-    let pool = SourcePool::new().with_source_concurrency_limit(limit);
-    pool.register_source(probe.clone())
-        .expect("register probe source");
-
-    let tool_name = source_prefixed_tool_name("project_docs", "lookup");
-    let handler = pool
-        .tool_handlers_for_session("session-a", SourceToolNaming::Prefixed)
-        .expect("build handlers")
-        .into_iter()
-        .find(|(name, _)| name == &tool_name)
-        .map(|(_, handler)| handler)
-        .expect("probe handler must be built");
-
-    let mut tasks = Vec::new();
-    for _ in 0..n_tasks {
-        let handler = handler.clone();
-        let tool_name = tool_name.clone();
-        tasks.push(tokio::spawn(async move {
-            handler
-                .handle(invocation(&tool_name))
-                .await
-                .expect("source call must succeed");
-        }));
-    }
-    for task in tasks {
-        task.await.expect("task must not panic");
-    }
-
-    assert_eq!(
-        probe.current.load(Ordering::SeqCst),
-        0,
-        "every in-flight permit must be released after the calls complete",
-    );
-    probe.max_seen.load(Ordering::SeqCst)
-}
-
-/// CEX-S2-14 end-to-end: the per-slug limit configured on the pool is threaded
-/// all the way into the handlers it builds and enforced on the real
-/// `SourceToolHandler::handle` dispatch path — not just on the standalone
-/// `SourceThrottle`. A disabled pool (`limit == 0`) is the control: it must
-/// exceed the cap, proving the bound is the throttle and not test scheduling.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn source_pool_throttle_caps_concurrent_handler_dispatch_per_slug() {
-    let throttled = observe_peak_concurrency(2, 12).await;
-    assert!(
-        throttled <= 2,
-        "a pool built with limit 2 must cap per-slug handler concurrency at 2, saw {throttled}",
-    );
-
-    let unthrottled = observe_peak_concurrency(0, 12).await;
-    assert!(
-        unthrottled > 2,
-        "a disabled throttle (limit 0) must allow more than 2 concurrent calls \
-         (saw {unthrottled}); this confirms the cap above is the throttle, not scheduling",
     );
 }

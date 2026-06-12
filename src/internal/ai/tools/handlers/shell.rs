@@ -634,7 +634,6 @@ mod tests {
                 }),
                 file_history: None,
                 max_output_bytes: Some(DEFAULT_MAX_OUTPUT_BYTES),
-                agent_run_id: None,
             },
             rx,
         )
@@ -1061,7 +1060,6 @@ mod tests {
             approval: None,
             file_history: None,
             max_output_bytes: Some(DEFAULT_MAX_OUTPUT_BYTES),
-            agent_run_id: None,
         });
 
         let result = ShellHandler.handle(inv).await.unwrap();

@@ -5,7 +5,7 @@
 ## 概要
 
 ```bash
-libra verify-pack [OPTIONS] <IDX_FILE>...
+libra verify-pack [OPTIONS] <IDX_FILE>
 ```
 
 ## 说明
@@ -21,16 +21,15 @@ libra verify-pack [OPTIONS] <IDX_FILE>...
 
 默认情况下，pack 路径通过将索引文件扩展名替换为 `.pack` 得出。当 pack 归档位于其他位置时，使用 `--pack <PACK_FILE>`。该命令不需要 Libra 仓库。在仓库内运行时，它使用该仓库的对象格式。在仓库外运行时，version 2 索引文件会从索引布局推断 SHA-1 或 SHA-256；version 1 索引仅支持 SHA-1。
 
-兼容性说明：`--pack <PACK_FILE>` 是 Libra 扩展，只能在验证单个 `<IDX_FILE>` 时使用。
+兼容性说明：此命令目前每次调用接受一个 `<IDX_FILE>`，并且不暴露 Git 的 `-s` / `--stat-only` 形式。
 
 ## 选项
 
 | 标志 | 短选项 | 说明 | 默认值 |
 |------|-------|-------------|---------|
-| `<IDX_FILE>...` | | 要验证的 pack 索引文件 | 必需 |
+| `<IDX_FILE>` | | 要验证的 pack 索引文件 | 必需 |
 | `--pack <PATH>` | | 要对照验证的 pack 归档 | 扩展名替换为 `.pack` 的 `<IDX_FILE>` |
 | `--verbose` | `-v` | 使用 Git 兼容的 verbose 字段打印每个索引对象 | 关闭 |
-| `--stat-only` | `-s` | 仅打印 pack 统计信息 | 关闭 |
 | `--json` | | 输出结构化 JSON 信封 | 关闭 |
 | `--machine` | | 以一行紧凑 JSON 输出同一信封 | 关闭 |
 
@@ -38,10 +37,8 @@ libra verify-pack [OPTIONS] <IDX_FILE>...
 
 ```bash
 libra verify-pack objects/pack/pack-abc123.idx
-libra verify-pack pack-a.idx pack-b.idx
 libra verify-pack --pack /tmp/pack-abc123.pack /tmp/pack-abc123.idx
 libra verify-pack -v pack-abc123.idx
-libra verify-pack -s pack-abc123.idx
 libra verify-pack pack-abc123.idx --json
 ```
 
@@ -62,15 +59,6 @@ objects/pack/pack-abc123.idx: ok
 
 字段为 `<oid> <type> <size> <size-in-pack> <offset>`。version 2 索引的 CRC32 值会被验证，并且仍可在结构化输出中使用，但不会在人类可读 verbose 模式下打印。
 
-> **与 Git 的有意差异。** 对于 deltified 对象，`git verify-pack -v` 会在每行末尾追加两列 —— `<chain-depth> <base-oid>`。Libra 不打印它们：`git-internal` 解码器吐出重构后的对象流和每个对象的 `chain_len`，但不保留原始 delta 的 base 引用，因此在回调处无法获得 base OID。链深仍可通过 `--stat-only` 的直方图观察。
-
-Stat-only 模式输出 Git 兼容的聚合统计：
-
-```text
-non delta: 19 objects
-chain length = 1: 4 objects
-```
-
 ## 结构化输出
 
 ```json
@@ -89,15 +77,15 @@ chain length = 1: 4 objects
 }
 ```
 
-当多个索引文件与 `--json` 一起验证时，`data.packs[]` 包含每个输入索引的结果对象。当 `--verbose` 与 `--json` 组合使用时，每个结果的 `objects[]` 包含 `oid`、`object_type`、`size`、`size_in_pack`、`offset` 和可选的 `crc32`。
+当 `--verbose` 与 `--json` 组合使用时，`data.objects[]` 包含 `oid`、`object_type`、`size`、`size_in_pack`、`offset` 和可选的 `crc32`。
 
 ## 兼容性
 
 | 功能 | Libra | Git | jj |
 |---------|-------|-----|----|
-| 验证 pack 索引 | `libra verify-pack <idx>...` | `git verify-pack <idx>...` | N/A |
+| 验证 pack 索引 | `libra verify-pack <idx>` | `git verify-pack <idx>...` | N/A |
 | Verbose 对象 | `-v` / `--verbose` | `-v` | N/A |
-| Stat-only 模式 | `-s` / `--stat-only` | `-s` / `--stat-only` | N/A |
+| Stat-only 模式 | 不支持 | `-s` / `--stat-only` | N/A |
 | 显式 pack 路径 | `--pack <path>` | N/A | N/A |
 | JSON 输出 | `--json` / `--machine` | N/A | N/A |
 | Version 1 索引 | SHA-1 仓库支持 | 支持 | N/A |
@@ -112,15 +100,3 @@ chain length = 1: 4 objects
 | 索引格式错误 | `LBR-REPO-002` | 128 |
 | Pack 格式错误 | `LBR-REPO-002` | 128 |
 | 索引和 pack 不一致 | `LBR-REPO-002` | 128 |
-
-详细的损坏诊断会保留在人类可读错误文本中。常见示例包括
-`pack index v2 checksum mismatch`、`pack checksum mismatch: index has <hash>,
-pack has <hash>`、`offset mismatch for <oid>: index has <n>, pack has <n>`，
-以及 `crc32 mismatch for <oid>: index has <hex>, pack has <hex>`。
-
-当一次传入多个索引文件时，Libra 当前会在第一个失败索引处停止，并在
-stderr 输出共享 CLI 错误。`--json` 和 `--machine` 只会在所有请求的索引都校验通过时输出成功 payload。
-
-## 被 `fsck` 复用
-
-`verify-pack` 的核心校验逻辑被 [`libra fsck`](../fsck.md) 在进程内复用，用于体检 `objects/pack/` 下的每个 packfile。fsck 不 fork 子进程，而是直接调用同一校验逻辑：报告任何受损或不可读的 pack，并以退出码 `1`（与 `git fsck` 一致）结束，且不会因单个坏 pack 而中断对其余 pack 的检查。

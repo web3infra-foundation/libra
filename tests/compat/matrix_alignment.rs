@@ -2,147 +2,36 @@
 //! compatibility/documentation matrices.
 //!
 //! The compatibility matrix promises to cover every top-level
-//! `src/cli.rs::Commands` variant. These checks used to be delegated to shell
-//! scripts under `scripts/`; they are now **self-contained Rust** so
-//! `cargo test --all` enforces them directly with no external script
-//! dependency. CI runs the same assertions via `cargo test --all`.
+//! `src/cli.rs::Commands` variant. This test runs the same script used by
+//! CI so `cargo test --all` catches command additions or removals that forget
+//! to update the public matrix.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, process::Command};
 
-/// Convert a PascalCase clap variant identifier to the kebab-case command name
-/// clap derives by default (e.g. `ShowRef` -> `show-ref`, `CatFile` ->
-/// `cat-file`). Every `Commands` variant here relies on that default rename, so
-/// this mirrors what the binary actually exposes.
-fn to_kebab(ident: &str) -> String {
-    let mut out = String::with_capacity(ident.len() + 4);
-    for (i, ch) in ident.chars().enumerate() {
-        if ch.is_ascii_uppercase() {
-            if i != 0 {
-                out.push('-');
-            }
-            out.push(ch.to_ascii_lowercase());
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
-/// Extract the top-level command names from the `enum Commands { … }` block in
-/// `src/cli.rs`.
-///
-/// Variant lines are 4-space-indented tuple variants (`    Init(InitArgs),`);
-/// attribute lines (`#[command(...)]`), their continuations, comments, and the
-/// `Stash`/`Bisect` sub-enums that follow the block are skipped.
-fn cli_command_names(cli_rs: &str) -> Vec<String> {
-    let start = cli_rs
-        .find("enum Commands {")
-        .expect("src/cli.rs must define `enum Commands`");
-    let body = &cli_rs[start..];
-    // The enum closes at the first line that is exactly `}` (column 0); the
-    // sub-enums (`pub enum Stash`) only appear after that brace.
-    let end = body.find("\n}").expect("enum Commands must close with `}`");
-    let body = &body[..end];
-
-    let mut names = Vec::new();
-    for line in body.lines() {
-        let trimmed = line.trim_start();
-        // Variants are indented exactly four spaces inside the enum body.
-        if line.len() - trimmed.len() != 4 {
-            continue;
-        }
-        if !trimmed.starts_with(|c: char| c.is_ascii_uppercase()) {
-            continue;
-        }
-        let ident_end = trimmed
-            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-            .unwrap_or(trimmed.len());
-        // Only tuple variants (`Ident(Args)`) name a command.
-        if trimmed[ident_end..].starts_with('(') {
-            names.push(to_kebab(&trimmed[..ident_end]));
-        }
-    }
-    names.sort();
-    names.dedup();
-    names
-}
-
-/// Extract command names from the `## Top-level commands` table in
-/// `COMPATIBILITY.md` (the first cell of each data row).
-fn compat_matrix_names(compat_md: &str) -> Vec<String> {
-    let section = compat_md
-        .split("## Top-level commands")
-        .nth(1)
-        .expect("COMPATIBILITY.md must have a `## Top-level commands` section");
-    // Stop at the next level-2 heading so the "intentionally absent" table is
-    // not pulled in.
-    let section = section.split("\n## ").next().unwrap_or(section);
-
-    let mut names = Vec::new();
-    for line in section.lines() {
-        let line = line.trim();
-        if !line.starts_with('|') {
-            continue;
-        }
-        let first = line
-            .trim_matches('|')
-            .split('|')
-            .next()
-            .unwrap_or("")
-            .trim();
-        // Skip the header row and the `|---|` separator.
-        if first.is_empty() || first == "Command" || first.starts_with("---") {
-            continue;
-        }
-        names.push(first.to_string());
-    }
-    names.sort();
-    names.dedup();
-    names
-}
-
-/// The compatibility matrix promises to cover every top-level
-/// `src/cli.rs::Commands` variant (including hidden ones like `index-pack` and
-/// `hooks`). This catches command additions/removals that forget to update the
-/// public matrix. Previously delegated to `scripts/check_compat_matrix.sh`.
 #[test]
 fn compatibility_matrix_matches_cli_commands() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let cli_rs = std::fs::read_to_string(repo.join("src/cli.rs")).expect("read src/cli.rs");
-    let compat_md =
-        std::fs::read_to_string(repo.join("COMPATIBILITY.md")).expect("read COMPATIBILITY.md");
-
-    let cli = cli_command_names(&cli_rs);
-    let matrix = compat_matrix_names(&compat_md);
-
-    assert!(
-        !cli.is_empty(),
-        "failed to extract any command names from src/cli.rs::Commands"
-    );
-
-    let missing: Vec<&String> = cli.iter().filter(|c| !matrix.contains(c)).collect();
-    let extra: Vec<&String> = matrix.iter().filter(|c| !cli.contains(c)).collect();
+    let output = Command::new("bash")
+        .arg("scripts/check_compat_matrix.sh")
+        .current_dir(&repo)
+        .output()
+        .expect("run scripts/check_compat_matrix.sh");
 
     assert!(
-        missing.is_empty() && extra.is_empty(),
-        "COMPATIBILITY.md `## Top-level commands` table drifted from \
-         src/cli.rs::Commands.\n  \
-         Missing from COMPATIBILITY.md (add a row): {missing:?}\n  \
-         Extra in COMPATIBILITY.md (remove or rename): {extra:?}"
+        output.status.success(),
+        "compatibility matrix drift check failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
-/// Every `/api/code/*` route in `code_router()` must be documented in
-/// `docs/commands/code-control.md`. Previously the check confirmed
-/// `scripts/check_docs_consistency.sh` listed each route; it now verifies the
-/// canonical control doc itself covers them.
 #[test]
-fn docs_consistency_covers_code_ui_router_matrix() {
+fn docs_consistency_script_covers_code_ui_router_matrix() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let web_mod = std::fs::read_to_string(repo.join("src/internal/ai/web/mod.rs"))
         .expect("read src/internal/ai/web/mod.rs");
-    let doc = std::fs::read_to_string(repo.join("docs/commands/code-control.md"))
-        .expect("read docs/commands/code-control.md");
+    let script = std::fs::read_to_string(repo.join("scripts/check_docs_consistency.sh"))
+        .expect("read scripts/check_docs_consistency.sh");
 
     let router_region = web_mod
         .split("fn code_router()")
@@ -171,25 +60,27 @@ fn docs_consistency_covers_code_ui_router_matrix() {
 
     for route in routes {
         assert!(
-            doc.contains(&route),
-            "docs/commands/code-control.md must document the Code UI endpoint {route}"
+            script.contains(&route),
+            "scripts/check_docs_consistency.sh must require docs for {route}"
         );
     }
 }
 
-/// The `compat-web-check` CI job must fail when the committed `web/out/` static
-/// export drifts from a fresh `pnpm build`. The drift check is now inlined into
-/// `.github/workflows/base.yml` (previously `scripts/check_web_out_clean.sh`),
-/// so assert the workflow still runs the porcelain check after the build.
 #[test]
-fn web_build_job_inlines_static_export_drift_check() {
+fn web_build_job_checks_static_export_drift() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workflow = std::fs::read_to_string(repo.join(".github/workflows/base.yml"))
         .expect("read .github/workflows/base.yml");
     assert!(
-        workflow.contains("git status --porcelain -- web/out"),
-        "compat-web-check job must inline `git status --porcelain -- web/out` to detect \
-         modified and untracked static export files after `pnpm build`"
+        workflow.contains("bash scripts/check_web_out_clean.sh"),
+        "web build CI job must run scripts/check_web_out_clean.sh after pnpm build"
+    );
+
+    let script = std::fs::read_to_string(repo.join("scripts/check_web_out_clean.sh"))
+        .expect("read scripts/check_web_out_clean.sh");
+    assert!(
+        script.contains("git status --porcelain -- web/out"),
+        "web/out drift script must detect modified and untracked static export files"
     );
 }
 

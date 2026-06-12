@@ -550,18 +550,14 @@ fn pump_stdout_lines(
 ///
 /// Returns an empty vec when `$PATH` is unset or no binaries match.
 pub fn discover_rpc_agents() -> Vec<RpcAgentBinary> {
+    use std::collections::HashSet;
+
     let Some(path_var) = std::env::var_os("PATH") else {
         return Vec::new();
     };
-    discover_rpc_agents_in_path(path_var)
-}
-
-fn discover_rpc_agents_in_path(path_var: impl AsRef<std::ffi::OsStr>) -> Vec<RpcAgentBinary> {
-    use std::collections::HashSet;
-
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<RpcAgentBinary> = Vec::new();
-    for dir in std::env::split_paths(path_var.as_ref()) {
+    for dir in std::env::split_paths(&path_var) {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -609,13 +605,29 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial(rpc_path_env)]
     fn discover_returns_empty_when_no_binaries_match() {
+        // Point PATH at an empty tempdir — we expect no matches.
         let dir = tempfile::tempdir().unwrap();
-        let agents = discover_rpc_agents_in_path(dir.path());
+        let original = std::env::var_os("PATH");
+        // SAFETY: tests serialize this env mutation via the
+        // `#[serial(rpc_path_env)]` lock so no other test under this
+        // key races us; we restore PATH before returning.
+        unsafe {
+            std::env::set_var("PATH", dir.path());
+        }
+        let agents = discover_rpc_agents();
+        unsafe {
+            match original {
+                Some(prev) => std::env::set_var("PATH", prev),
+                None => std::env::remove_var("PATH"),
+            }
+        }
         assert!(agents.is_empty());
     }
 
     #[test]
+    #[serial(rpc_path_env)]
     fn discover_picks_up_libra_agent_prefix() {
         let dir = tempfile::tempdir().unwrap();
         // Plant a file named `libra-agent-test-fixture` and chmod it
@@ -628,7 +640,17 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let agents = discover_rpc_agents_in_path(dir.path());
+        let original = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", dir.path());
+        }
+        let agents = discover_rpc_agents();
+        unsafe {
+            match original {
+                Some(prev) => std::env::set_var("PATH", prev),
+                None => std::env::remove_var("PATH"),
+            }
+        }
 
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].slug, "test-fixture");
@@ -636,6 +658,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(rpc_path_env)]
     fn discover_skips_files_without_executable_bit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("libra-agent-no-exec");
@@ -646,7 +669,17 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         }
 
-        let agents = discover_rpc_agents_in_path(dir.path());
+        let original = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", dir.path());
+        }
+        let agents = discover_rpc_agents();
+        unsafe {
+            match original {
+                Some(prev) => std::env::set_var("PATH", prev),
+                None => std::env::remove_var("PATH"),
+            }
+        }
 
         assert!(
             agents.is_empty(),
@@ -655,6 +688,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(rpc_path_env)]
     fn discover_skips_files_with_empty_slug() {
         // `libra-agent-` (no slug) must NOT match.
         let dir = tempfile::tempdir().unwrap();
@@ -666,7 +700,17 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let agents = discover_rpc_agents_in_path(dir.path());
+        let original = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", dir.path());
+        }
+        let agents = discover_rpc_agents();
+        unsafe {
+            match original {
+                Some(prev) => std::env::set_var("PATH", prev),
+                None => std::env::remove_var("PATH"),
+            }
+        }
 
         assert!(
             agents.is_empty(),
@@ -675,6 +719,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(rpc_path_env)]
     fn discover_dedups_across_path_entries() {
         let dir_a = tempfile::tempdir().unwrap();
         let dir_b = tempfile::tempdir().unwrap();
@@ -688,8 +733,18 @@ mod tests {
             }
         }
 
+        let original = std::env::var_os("PATH");
         let combined = std::env::join_paths([dir_a.path(), dir_b.path()]).unwrap();
-        let agents = discover_rpc_agents_in_path(&combined);
+        unsafe {
+            std::env::set_var("PATH", &combined);
+        }
+        let agents = discover_rpc_agents();
+        unsafe {
+            match original {
+                Some(prev) => std::env::set_var("PATH", prev),
+                None => std::env::remove_var("PATH"),
+            }
+        }
 
         assert_eq!(agents.len(), 1, "first match wins: {agents:?}");
         assert_eq!(agents[0].slug, "dup");
@@ -701,10 +756,8 @@ mod tests {
     //
     // Each test plants a small `#!/bin/sh` script as the
     // `libra-agent-<slug>` binary and exercises one transport edge
-    // case. Only the timeout-path test uses a short deadline; every
-    // other test expects a non-timeout error and therefore uses
-    // RPC_DEFAULT_TIMEOUT as a pure backstop — a tight deadline there
-    // races child-spawn latency and flakes under parallel-suite load.
+    // case. Tests use `invoke_with_timeout` with a short deadline so
+    // the suite stays fast even on the timeout path.
 
     #[cfg(unix)]
     fn plant_script(dir: &std::path::Path, slug: &str, body: &str) -> RpcAgentBinary {
@@ -751,7 +804,7 @@ mod tests {
         let bin = plant_script(dir.path(), "early-exit", "#!/bin/sh\nexit 0\n");
         let mut agent = RpcAgent::spawn(bin).unwrap();
         let err = agent
-            .invoke_with_timeout("capabilities", None, RPC_DEFAULT_TIMEOUT)
+            .invoke_with_timeout("capabilities", None, Duration::from_secs(2))
             .expect_err("must fail");
         let msg = format!("{err:#}");
         // Either "closed stdout before answering" (reader saw EOF
@@ -774,7 +827,7 @@ mod tests {
         );
         let mut agent = RpcAgent::spawn(bin).unwrap();
         let err = agent
-            .invoke_with_timeout("capabilities", None, RPC_DEFAULT_TIMEOUT)
+            .invoke_with_timeout("capabilities", None, Duration::from_secs(2))
             .expect_err("must fail");
         assert!(
             format!("{err:#}").contains("parse RPC response line"),
@@ -795,7 +848,7 @@ mod tests {
         );
         let mut agent = RpcAgent::spawn(bin).unwrap();
         let err = agent
-            .invoke_with_timeout("capabilities", None, RPC_DEFAULT_TIMEOUT)
+            .invoke_with_timeout("capabilities", None, Duration::from_secs(2))
             .expect_err("must fail");
         let msg = format!("{err:#}");
         assert!(
@@ -816,7 +869,7 @@ mod tests {
         );
         let mut agent = RpcAgent::spawn(bin).unwrap();
         let err = agent
-            .invoke_with_timeout("capabilities", None, RPC_DEFAULT_TIMEOUT)
+            .invoke_with_timeout("capabilities", None, Duration::from_secs(2))
             .expect_err("must fail");
         assert!(
             format!("{err:#}").contains("unsupported jsonrpc version"),
@@ -836,7 +889,7 @@ mod tests {
         );
         let mut agent = RpcAgent::spawn(bin).unwrap();
         let value = agent
-            .invoke_with_timeout("capabilities", None, RPC_DEFAULT_TIMEOUT)
+            .invoke_with_timeout("capabilities", None, Duration::from_secs(2))
             .expect("must succeed");
         assert_eq!(
             value
@@ -864,7 +917,7 @@ mod tests {
             "blob": "a".repeat(2 * 1024 * 1024),
         });
         let err = agent
-            .invoke_with_timeout("capabilities", Some(huge_params), RPC_DEFAULT_TIMEOUT)
+            .invoke_with_timeout("capabilities", Some(huge_params), Duration::from_secs(2))
             .expect_err("must reject");
         let msg = format!("{err:#}");
         assert!(
@@ -895,7 +948,7 @@ mod tests {
         let bin = plant_script(dir.path(), "huge", &body);
         let mut agent = RpcAgent::spawn(bin).unwrap();
         let err = agent
-            .invoke_with_timeout("capabilities", None, RPC_DEFAULT_TIMEOUT)
+            .invoke_with_timeout("capabilities", None, Duration::from_secs(15))
             .expect_err("must fail");
         let msg = format!("{err:#}");
         assert!(
@@ -942,7 +995,7 @@ mod tests {
         // Second call to a non-advertised method must be rejected by
         // the gate without hitting the binary.
         let err = agent
-            .invoke_with_timeout("read_transcript", None, RPC_DEFAULT_TIMEOUT)
+            .invoke_with_timeout("read_transcript", None, Duration::from_secs(2))
             .expect_err("must reject non-advertised");
         assert!(
             format!("{err:#}").contains("does not advertise method 'read_transcript'"),

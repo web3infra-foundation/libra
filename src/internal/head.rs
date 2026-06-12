@@ -376,24 +376,16 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::utils::test;
-
-    async fn db_for_repo(repo: &std::path::Path) -> sea_orm::DbConn {
-        let db_path = repo
-            .join(crate::utils::util::ROOT_DIR)
-            .join(crate::utils::util::DATABASE);
-        crate::internal::db::get_db_conn_instance_for_path(&db_path)
-            .await
-            .expect("test repository database should open")
-    }
+    use crate::utils::test::{self, ChangeDirGuard};
 
     #[tokio::test]
     #[serial]
     async fn current_commit_result_with_conn_returns_corrupt_when_head_row_missing() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
 
-        let db = db_for_repo(repo.path()).await;
+        let db = get_db_conn_instance().await;
         reference::Entity::delete_many()
             .filter(reference::Column::Kind.eq(reference::ConfigKind::Head))
             .filter(reference::Column::Remote.is_null())
@@ -416,8 +408,9 @@ mod tests {
     async fn current_commit_result_with_conn_returns_corrupt_for_invalid_detached_hash() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
 
-        let db = db_for_repo(repo.path()).await;
+        let db = get_db_conn_instance().await;
         let head = reference::Entity::find()
             .filter(reference::Column::Kind.eq(reference::ConfigKind::Head))
             .filter(reference::Column::Remote.is_null())
@@ -453,8 +446,9 @@ mod tests {
     async fn remote_current_result_with_conn_returns_none_for_unknown_remote() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
 
-        let db = db_for_repo(repo.path()).await;
+        let db = get_db_conn_instance().await;
         let result = Head::remote_current_result_with_conn(&db, "no-such-remote")
             .await
             .expect("unknown remote should not surface as error");
@@ -475,8 +469,9 @@ mod tests {
     async fn remote_current_result_with_conn_returns_corrupt_for_invalid_detached_hash() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
 
-        let db = db_for_repo(repo.path()).await;
+        let db = get_db_conn_instance().await;
         let remote = "origin";
         let row = reference::ActiveModel {
             kind: Set(reference::ConfigKind::Head),
@@ -514,8 +509,9 @@ mod tests {
     async fn current_with_conn_panics_with_invariant_message_when_head_corrupt() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
 
-        let db = db_for_repo(repo.path()).await;
+        let db = get_db_conn_instance().await;
         reference::Entity::delete_many()
             .filter(reference::Column::Kind.eq(reference::ConfigKind::Head))
             .filter(reference::Column::Remote.is_null())
@@ -539,8 +535,9 @@ mod tests {
     async fn remote_current_with_conn_panics_with_invariant_message_when_remote_head_corrupt() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
 
-        let db = db_for_repo(repo.path()).await;
+        let db = get_db_conn_instance().await;
         let remote = "origin";
         let row = reference::ActiveModel {
             kind: Set(reference::ConfigKind::Head),

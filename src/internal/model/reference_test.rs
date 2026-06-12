@@ -1,7 +1,5 @@
 //! Unit tests for SeaORM reference models and serialization assumptions.
 //!
-//! SeaORM 参考模型和序列化假设的单元测试。
-//!
 //! Scenario focus: stable model field names, JSON compatibility, and edge cases that
 //! generated database entities do not express on their own.
 
