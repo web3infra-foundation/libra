@@ -1,6 +1,6 @@
 //! Integration tests for the `2026050303_agent_capture` migration.
 //!
-//! See `docs/improvement/entire.md` (section 4.4) for the acceptance criteria
+//! See `docs/development/commands/_general.md` (section 4.4) for the acceptance criteria
 //! these tests pin: fresh-DB up, legacy-DB compatibility, and `up → down → up`
 //! idempotency.
 
@@ -134,7 +134,8 @@ async fn agent_capture_rollback_drops_tables_and_indexes_only() {
     assert_eq!(
         rolled_back,
         vec![
-            2026053101, 2026052301, 2026050801, 2026050601, 2026050501, 2026050303
+            2026060801, 2026060401, 2026060201, 2026053101, 2026052301, 2026050801, 2026050601,
+            2026050501, 2026050303
         ]
     );
 

@@ -3336,7 +3336,7 @@ mod tests {
         }
     }
 
-    /// Regression for [`docs/improvement/clone.md`] §"第一批 Cloudflare clone
+    /// Regression for [`docs/development/commands/clone.md`] §"第一批 Cloudflare clone
     /// 只保证完整 non-bare clone" — every Cloudflare-incompatible flag must
     /// surface `CloneError::UnsupportedCloudCloneOption` whose `option` field
     /// names the rejected flag, never silently fall back to a vanilla clone.
@@ -4251,7 +4251,7 @@ mod tests {
     }
 
     /// Pins the `--json` `CloneOutput` wire contract (documented in
-    /// docs/improvement/clone.md). The ordinary-Git case must carry every
+    /// docs/development/commands/clone.md). The ordinary-Git case must carry every
     /// always-present field — including `gitignore_converted` (the
     /// `.gitignore` → `.libraignore` conversion report) — and must OMIT
     /// the optional `source_kind` / `cloud_site` (their

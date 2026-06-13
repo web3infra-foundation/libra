@@ -200,7 +200,7 @@ fn sandbox_status_prefers_bwrap_when_configured_helper_is_not_executable() {
 /// `libra sandbox --help` surfaces the EXAMPLES banner so users see the
 /// three supported invocations (human / JSON / machine forms of
 /// `status`) without having to read the design doc. Cross-cutting
-/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
+/// `--help` EXAMPLES rollout per `docs/development/commands/_general.md` item B.
 #[test]
 fn test_sandbox_help_lists_examples_banner() {
     let temp = tempfile::tempdir().expect("failed to create tempdir");

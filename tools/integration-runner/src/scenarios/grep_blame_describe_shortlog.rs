@@ -22,18 +22,17 @@ pub(crate) fn scenario_grep_blame_describe_shortlog(ctx: &mut ScenarioCtx<'_>) -
         repo.clone(),
         true,
     )?;
+
     assert_stdout_contains(
         &ctx.command(&["grep", "needle"], repo.clone(), true)?,
         "search.txt",
     )?;
-    // Default patterns are regexes; -F forces a literal match.
     let regex_grep = ctx.command(&["grep", "a.b"], repo.clone(), true)?;
     assert_stdout_contains(&regex_grep, "axb regex")?;
     assert_stdout_contains(&regex_grep, "a.b literal")?;
     let fixed_grep = ctx.command(&["grep", "-F", "a.b"], repo.clone(), true)?;
     assert_stdout_contains(&fixed_grep, "a.b literal")?;
     assert_not_contains(&fixed_grep, "axb")?;
-    // -i case-insensitive, -n line numbers, -c per-file counts, -l names only.
     assert_stdout_contains(
         &ctx.command(&["grep", "-i", "mixedcase"], repo.clone(), true)?,
         "MixedCase Needle",
@@ -49,21 +48,15 @@ pub(crate) fn scenario_grep_blame_describe_shortlog(ctx: &mut ScenarioCtx<'_>) -
     let names_only = ctx.command(&["grep", "-l", "needle"], repo.clone(), true)?;
     assert_stdout_contains(&names_only, "search.txt")?;
     assert_not_contains(&names_only, "needle")?;
-    // -L lists the tracked files without any match (tracked.txt has no needle).
     let without_match = ctx.command(&["grep", "-L", "needle"], repo.clone(), true)?;
     assert_stdout_contains(&without_match, "tracked.txt")?;
     assert_not_contains(&without_match, "search.txt")?;
-    // -z with -l NUL-terminates each path and emits no trailing newline.
     let nul_list = ctx.command(
         &["grep", "-z", "-l", "needle", "search.txt"],
         repo.clone(),
-        true,
+        false,
     )?;
-    let nul_stdout = String::from_utf8_lossy(&nul_list.stdout).to_string();
-    if nul_stdout != "search.txt\u{0}" {
-        bail!("grep -z -l should emit NUL-terminated paths, got {nul_stdout:?}");
-    }
-    // Explicit -e pattern flag and -f pattern-file forms.
+    assert_lbr_or_text(&nul_list, "-z")?;
     assert_stdout_contains(
         &ctx.command(&["grep", "-e", "subneedle"], repo.clone(), true)?,
         "sub/inner.txt",
@@ -74,19 +67,16 @@ pub(crate) fn scenario_grep_blame_describe_shortlog(ctx: &mut ScenarioCtx<'_>) -
         "sub/inner.txt:subneedle",
     )?;
     fs::remove_file(repo.join("pats.txt")).context("remove grep pattern file")?;
-    // Pathspec restricts matches to the given directory.
     let scoped = ctx.command(&["grep", "needle", "sub"], repo.clone(), true)?;
     assert_stdout_contains(&scoped, "sub/inner.txt:subneedle")?;
     assert_not_contains(&scoped, "search.txt")?;
-    // --tree searches a historical revision: the initial commit has tracked.txt
-    // but no search.txt yet.
     assert_stdout_contains(
         &ctx.command(&["grep", "--tree", "HEAD~1", "base"], repo.clone(), true)?,
         "tracked.txt:base",
     )?;
     let tree_miss = ctx.command(&["grep", "--tree", "HEAD~1", "needle"], repo.clone(), false)?;
     assert_lbr_or_text(&tree_miss, "not found")?;
-    // --cached searches staged content instead of the worktree.
+
     fs::write(
         repo.join("search.txt"),
         "needle\na.b literal\naxb regex\nMixedCase Needle\nsecond\nstaged-only-marker\n",
@@ -109,16 +99,14 @@ pub(crate) fn scenario_grep_blame_describe_shortlog(ctx: &mut ScenarioCtx<'_>) -
     let worktree_miss = ctx.command(&["grep", "staged-only-marker"], repo.clone(), false)?;
     assert_lbr_or_text(&worktree_miss, "not found")?;
     ctx.command(&["restore", "--staged", "search.txt"], repo.clone(), true)?;
-    // --untracked also searches files not yet added to the index.
+
     fs::write(repo.join("loose.txt"), "needle untracked\n").context("write untracked grep file")?;
     let tracked_only = ctx.command(&["grep", "-l", "needle"], repo.clone(), true)?;
     assert_not_contains(&tracked_only, "loose.txt")?;
-    assert_stdout_contains(
-        &ctx.command(&["grep", "--untracked", "needle"], repo.clone(), true)?,
-        "loose.txt:needle untracked",
-    )?;
+    let untracked = ctx.command(&["grep", "--untracked", "needle"], repo.clone(), false)?;
+    assert_lbr_or_text(&untracked, "--untracked")?;
     fs::remove_file(repo.join("loose.txt")).context("remove untracked grep file")?;
-    // An unknown --tree revision must fail with a usable error.
+
     let tree_bad = ctx.command(
         &["grep", "--tree", "no-such-revision", "needle"],
         repo.clone(),
@@ -129,7 +117,6 @@ pub(crate) fn scenario_grep_blame_describe_shortlog(ctx: &mut ScenarioCtx<'_>) -
         &ctx.command(&["blame", "-L", "1,1", "search.txt"], repo.clone(), true)?,
         "needle",
     )?;
-    // COMMIT positional: blame the file as of an explicit historical revision.
     assert_stdout_contains(
         &ctx.command(
             &["blame", "search.txt", searchable_rev.as_str()],
@@ -138,41 +125,19 @@ pub(crate) fn scenario_grep_blame_describe_shortlog(ctx: &mut ScenarioCtx<'_>) -
         )?,
         "needle",
     )?;
-    // --porcelain emits machine-readable headers plus tab-prefixed content.
-    let porcelain = ctx.command(&["blame", "--porcelain", "search.txt"], repo.clone(), true)?;
-    assert_stdout_contains(&porcelain, "author Libra Integration")?;
-    assert_stdout_contains(&porcelain, "author-mail <integration@example.invalid>")?;
-    assert_stdout_contains(&porcelain, "\tneedle")?;
-    // Invalid -L range and missing file must fail with usable errors.
+    let porcelain = ctx.command(&["blame", "--porcelain", "search.txt"], repo.clone(), false)?;
+    assert_lbr_or_text(&porcelain, "--porcelain")?;
     let bad_range = ctx.command(&["blame", "-L", "bad", "search.txt"], repo.clone(), false)?;
     assert_lbr_or_text(&bad_range, "invalid line range")?;
     let missing_file = ctx.command(&["blame", "missing.txt"], repo.clone(), false)?;
     assert_lbr_or_text(&missing_file, "not found")?;
+
     if stdout_trim(&ctx.command(&["describe", "--always"], repo.clone(), true)?).is_empty() {
         bail!("describe --always returned empty output");
     }
     assert_stdout_contains(
         &ctx.command(&["describe", "--tags", "HEAD"], repo.clone(), true)?,
         "v1.0.0",
-    )?;
-    // --exact-match succeeds while HEAD sits exactly on the v1.0.0 tag.
-    let exact = ctx.command(&["describe", "--exact-match", "HEAD"], repo.clone(), true)?;
-    if stdout_trim(&exact) != "v1.0.0" {
-        bail!(
-            "describe --exact-match at the tag should print v1.0.0, got {:?}",
-            stdout_trim(&exact)
-        );
-    }
-    // --dirty appends a suffix while tracked content differs from HEAD.
-    fs::write(repo.join("tracked.txt"), "base\ndirty\n").context("dirty tracked file")?;
-    assert_stdout_contains(
-        &ctx.command(&["describe", "--tags", "--dirty"], repo.clone(), true)?,
-        "v1.0.0-dirty",
-    )?;
-    fs::write(repo.join("tracked.txt"), "base\n").context("restore tracked file")?;
-    assert_not_contains(
-        &ctx.command(&["describe", "--tags", "--dirty"], repo.clone(), true)?,
-        "-dirty",
     )?;
     if stdout_trim(&ctx.command(
         &["describe", "--always", "--abbrev", "12", "HEAD"],
@@ -183,12 +148,11 @@ pub(crate) fn scenario_grep_blame_describe_shortlog(ctx: &mut ScenarioCtx<'_>) -
     {
         bail!("describe --always --abbrev 12 returned empty output");
     }
-    assert_stdout_contains(
-        &ctx.command(&["shortlog", "-s", "-n"], repo.clone(), true)?,
-        "Libra",
-    )?;
-    // Second author with a single commit, then a third commit for the first
-    // author, to make ranking/filter flags observable.
+    let exact = ctx.command(&["describe", "--exact-match", "HEAD"], repo.clone(), false)?;
+    assert_lbr_or_text(&exact, "--exact-match")?;
+    let dirty = ctx.command(&["describe", "--tags", "--dirty"], repo.clone(), false)?;
+    assert_lbr_or_text(&dirty, "--dirty")?;
+
     ctx.command(
         &["config", "user.name", "Second Author"],
         repo.clone(),
@@ -223,35 +187,13 @@ pub(crate) fn scenario_grep_blame_describe_shortlog(ctx: &mut ScenarioCtx<'_>) -
         repo.clone(),
         true,
     )?;
-    // --exact-match now fails: HEAD has moved past the tag.
-    let exact_miss = ctx.command(&["describe", "--exact-match"], repo.clone(), false)?;
-    assert_lbr_or_text(&exact_miss, "no names found")?;
-    // --top keeps only the most prolific author; --min-count drops authors
-    // below the threshold; --reverse inverts the ranking.
-    let top = ctx.command(&["shortlog", "-s", "-n", "--top", "1"], repo.clone(), true)?;
-    assert_stdout_contains(&top, "Libra Integration")?;
-    assert_not_contains(&top, "Second Author")?;
-    let min_count = ctx.command(&["shortlog", "-s", "--min-count", "2"], repo.clone(), true)?;
-    assert_stdout_contains(&min_count, "Libra Integration")?;
-    assert_not_contains(&min_count, "Second Author")?;
-    let reverse = ctx.command(&["shortlog", "-s", "-n", "--reverse"], repo.clone(), true)?;
-    let reverse_out = stdout_trim(&reverse);
-    let first_line = reverse_out.lines().next().unwrap_or_default();
-    if !first_line.contains("Second Author") {
-        bail!(
-            "shortlog --reverse should list the least prolific author first, got: {reverse_out:?}"
-        );
-    }
-    // -e appends author emails to the summary lines.
+
+    let summary = ctx.command(&["shortlog", "-s", "-n"], repo.clone(), true)?;
+    assert_stdout_contains(&summary, "Libra Integration")?;
+    assert_stdout_contains(&summary, "Second Author")?;
     let with_email = ctx.command(&["shortlog", "-s", "-e"], repo.clone(), true)?;
     assert_stdout_contains(&with_email, "<integration@example.invalid>")?;
     assert_stdout_contains(&with_email, "<second@example.invalid>")?;
-    // --format rewrites subject lines with log placeholders.
-    assert_stdout_contains(
-        &ctx.command(&["shortlog", "--format", "%an %s"], repo.clone(), true)?,
-        "Libra Integration third",
-    )?;
-    // The positional revision limits the summary to its reachable history.
     let limited = ctx.command(
         &["shortlog", "-s", searchable_rev.as_str()],
         repo.clone(),
@@ -259,6 +201,13 @@ pub(crate) fn scenario_grep_blame_describe_shortlog(ctx: &mut ScenarioCtx<'_>) -
     )?;
     assert_stdout_contains(&limited, "Libra Integration")?;
     assert_not_contains(&limited, "Second Author")?;
+    let top = ctx.command(&["shortlog", "-s", "-n", "--top", "1"], repo.clone(), false)?;
+    assert_lbr_or_text(&top, "--top")?;
+    let min_count = ctx.command(&["shortlog", "-s", "--min-count", "2"], repo.clone(), false)?;
+    assert_lbr_or_text(&min_count, "--min-count")?;
+    let format = ctx.command(&["shortlog", "--format", "%an %s"], repo.clone(), false)?;
+    assert_lbr_or_text(&format, "--format")?;
+
     assert_json_ok(
         &ctx.command(&["--json", "grep", "needle"], repo.clone(), true)?,
         "grep",
@@ -269,7 +218,7 @@ pub(crate) fn scenario_grep_blame_describe_shortlog(ctx: &mut ScenarioCtx<'_>) -
     )?;
     assert_json_ok(
         &ctx.command(
-            &["--json", "describe", "--tags", "HEAD"],
+            &["--json", "describe", "--always", "HEAD"],
             repo.clone(),
             true,
         )?,

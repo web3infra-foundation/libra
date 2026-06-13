@@ -1,7 +1,7 @@
 //! `libra hooks <provider> <subcommand>` — compatibility entry point invoked
 //! by hook configurations the existing `HookProvider`s install (Claude Code's
 //! `.claude/settings.json`, Gemini's hooks). Adds the `Commands::Hooks(...)`
-//! variant promised in `docs/improvement/entire.md` (sections 1.2 and 6.1).
+//! variant promised in `docs/development/commands/_general.md` (sections 1.2 and 6.1).
 //!
 //! Phase 1.1: this entry point currently delegates to the canonical
 //! `process_hook_event_from_stdin`, which writes to `refs/libra/intent`
@@ -34,7 +34,7 @@ use crate::{
 /// `tool-use`, `stop`, `session-end`) for both providers so operators
 /// see what to put in their hook config without reading the design
 /// doc. Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
+/// `docs/development/commands/_general.md` item B.
 pub const HOOKS_EXAMPLES: &str = "\
 EXAMPLES:
     libra hooks claude session-start         Claude SessionStart hook entry (reads JSON on stdin)

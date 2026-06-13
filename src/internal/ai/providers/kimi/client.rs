@@ -118,7 +118,7 @@ impl Client {
     /// Creates a Kimi client from environment variables or Vault.
     ///
     /// Priority chain for `MOONSHOT_API_KEY` (12-Factor, see
-    /// `docs/improvement/config.md`):
+    /// `docs/development/commands/config.md`):
     /// 1. Process env `MOONSHOT_API_KEY`
     /// 2. Local repo config (`vault.env.MOONSHOT_API_KEY`)
     /// 3. Global config (`vault.env.MOONSHOT_API_KEY`)

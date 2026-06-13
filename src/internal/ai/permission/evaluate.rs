@@ -123,7 +123,7 @@ pub fn evaluate<'a>(
 /// Compute the set of tool names that must be **removed from the model's
 /// schema** because a `pattern == "*"` Deny rule covers them.
 ///
-/// Algorithm (matches `docs/improvement/opencode.md` `Tool Registry 预过滤
+/// Algorithm (matches `docs/development/commands/_general.md` `Tool Registry 预过滤
 /// 合同` verbatim):
 ///
 /// 1. For each tool name in `all_tools`, decide whether it groups under the

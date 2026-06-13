@@ -52,7 +52,7 @@ use crate::{
 /// the most common invocation per sub-command plus a force-sync and a
 /// JSON variant so users can map intent to invocation without reading
 /// the design doc. Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
+/// `docs/development/commands/_general.md` item B.
 pub const CLOUD_EXAMPLES: &str = "\
 EXAMPLES:
     libra cloud status                            Show cloud sync coverage for current repo

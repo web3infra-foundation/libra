@@ -81,7 +81,7 @@ pub struct SandboxRuntimeConfig {
     /// the sandbox falls back to [`evidence::TracingSandboxEvidenceSink`]
     /// so existing log scrapers see no change. See
     /// [`evidence`](self::evidence) for the full event vocabulary and
-    /// `docs/improvement/sandbox.md` lines 142-144 / 162 / 373 for
+    /// `docs/development/commands/sandbox.md` lines 142-144 / 162 / 373 for
     /// the doc contract this hook satisfies.
     pub evidence_sink: Option<std::sync::Arc<dyn evidence::SandboxEvidenceSink>>,
     /// Optional seccomp BPF policy file path. When set on Linux
@@ -92,7 +92,7 @@ pub struct SandboxRuntimeConfig {
     /// file in the child to populate that FD. Default `None`
     /// keeps Linux as opt-in unless `~/.libra/seccomp.bpf` exists and
     /// no explicit `LIBRA_SECCOMP_POLICY` override is set. See
-    /// `docs/improvement/sandbox.md` line 19 ("seccomp 注入") for
+    /// `docs/development/commands/sandbox.md` line 19 ("seccomp 注入") for
     /// the doc contract.
     pub seccomp_policy_path: Option<PathBuf>,
 }
@@ -1386,7 +1386,7 @@ async fn cleanup_command_tmpdir(
         Ok(()) => {}
         Err(err) if err.kind() == ErrorKind::NotFound => {}
         Err(err) => {
-            // Doc contract: `docs/improvement/sandbox.md:142` —
+            // Doc contract: `docs/development/commands/sandbox.md:142` —
             // surface tmp cleanup failure as a structured Evidence
             // event in addition to the legacy tracing line. The
             // default `TracingSandboxEvidenceSink` keeps the
@@ -1461,7 +1461,7 @@ fn build_command_from_spec(
             seccomp_policy_path,
         })
         .map_err(|err| {
-            // Doc contract: `docs/improvement/sandbox.md:143`, L162,
+            // Doc contract: `docs/development/commands/sandbox.md:143`, L162,
             // L373 — writable_root rejections AND enforcement
             // failures must surface as structured Evidence in
             // addition to the propagated error string. The default
@@ -1557,7 +1557,7 @@ struct SandboxConfigFile {
     #[serde(default)]
     deny_read: Vec<PathBuf>,
     /// Optional `[sandbox]` table. Network access lives under
-    /// `[sandbox.network]` per `docs/improvement/sandbox.md` §7.3,
+    /// `[sandbox.network]` per `docs/development/commands/sandbox.md` §7.3,
     /// while `deny_read` stays at the file root for backward
     /// compatibility with existing configs.
     #[serde(default)]
@@ -1603,7 +1603,7 @@ enum SandboxNetworkMode {
 impl SandboxConfigFile {
     /// Translate the `[sandbox.network]` section into a
     /// [`NetworkAccess`], validating allowlist services per
-    /// `docs/improvement/sandbox.md` §7.3 (no bare `*` / empty host,
+    /// `docs/development/commands/sandbox.md` §7.3 (no bare `*` / empty host,
     /// no implicit high-sensitivity-port grants). Returns `Ok(None)`
     /// when no `[sandbox.network]` section is present so callers leave
     /// the policy-derived access untouched.
@@ -2940,7 +2940,7 @@ mod tests {
     /// regular file (not a directory) — `remove_dir_all` returns
     /// `NotADirectory`/`Other` and the sink should capture exactly
     /// one event with the file path. See
-    /// `docs/improvement/sandbox.md:142`.
+    /// `docs/development/commands/sandbox.md:142`.
     #[cfg(unix)]
     #[tokio::test]
     async fn cleanup_command_tmpdir_records_evidence_on_failure() {
@@ -2998,7 +2998,7 @@ mod tests {
     /// sandbox emits when `SandboxEnforcement::Required` cannot
     /// produce an effective backend (Linux without
     /// `LIBRA_LINUX_SANDBOX_EXE`). See
-    /// `docs/improvement/sandbox.md:143`, L162, L373. Linux-only
+    /// `docs/development/commands/sandbox.md:143`, L162, L373. Linux-only
     /// because the EnforcementFailed branch fires on the missing-
     /// helper path; on macOS the seatbelt helper is always
     /// available so the same inputs select `MacosSeatbelt` instead.
@@ -3086,7 +3086,7 @@ mod tests {
     /// Pin the structured `WritableRootRejected` Evidence event
     /// the sandbox emits when a configured writable_root matches a
     /// dangerous mount pattern (e.g. `/var/run/docker.sock`). See
-    /// `docs/improvement/sandbox.md:143`. The sandbox's
+    /// `docs/development/commands/sandbox.md:143`. The sandbox's
     /// `validate_writable_roots_with_cwd` returns
     /// `SandboxPolicyError::DangerousWritableRoot`, which
     /// `build_command_from_spec` propagates as a `String` error

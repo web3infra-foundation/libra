@@ -80,7 +80,7 @@ impl Client {
     /// Creates an Anthropic client from environment variables or Vault.
     ///
     /// Functional scope: priority chain (12-Factor, see
-    /// `docs/improvement/config.md`):
+    /// `docs/development/commands/config.md`):
     /// 1. Process env `ANTHROPIC_API_KEY` (required)
     /// 2. Local repo config (`vault.env.ANTHROPIC_API_KEY`)
     /// 3. Global config (`vault.env.ANTHROPIC_API_KEY`)

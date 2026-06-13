@@ -1419,7 +1419,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         rebased_head, orig_head,
         "rebase should rewrite the feature tip"
     );
-    // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md —
+    // Migrated from lossy `Branch::find_branch` per docs/development/commands/branch.md —
     // storage errors no longer collapse into "feature branch should exist".
     let branch_after_rebase = Branch::find_branch_result("feature", None)
         .await
@@ -1456,7 +1456,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
     })
     .await;
 
-    // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+    // Migrated from lossy `Branch::find_branch` per docs/development/commands/branch.md.
     let branch_after_abort = Branch::find_branch_result("feature", None)
         .await
         .expect("failed to query feature branch after abort")
@@ -3694,7 +3694,7 @@ async fn test_rebase_continue_requires_resolution() {
 /// four mode invocations (start / `--continue` / `--skip` / `--abort`)
 /// plus the JSON variant before they have to deal with conflict state.
 /// Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
+/// `docs/development/commands/_general.md` item B.
 #[test]
 fn test_rebase_help_lists_examples_banner() {
     let repo = tempdir().expect("tempdir for rebase --help");

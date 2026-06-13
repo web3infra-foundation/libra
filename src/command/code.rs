@@ -432,7 +432,7 @@ impl From<CodeApprovalPolicy> for AskForApproval {
 /// resume by thread id, plan mode, and `--env-file` for vault-less
 /// provider bootstrap) so users see the right entry point without
 /// reading the design doc. Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
+/// `docs/development/commands/_general.md` item B.
 pub const CODE_EXAMPLES: &str = "\
 EXAMPLES:
     libra code                                       Launch the default TUI session

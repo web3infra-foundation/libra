@@ -68,7 +68,7 @@ const PUSH_TIMEOUT: Duration = Duration::from_secs(60);
 /// remote/branch push, `-u` upstream setup, forced overwrite, dry-run,
 /// JSON for agents) so a user does not need to read the design doc to
 /// remember the canonical flags. Cross-cutting `--help` EXAMPLES rollout
-/// per `docs/improvement/README.md` item B.
+/// per `docs/development/commands/_general.md` item B.
 pub const PUSH_EXAMPLES: &str = "\
 EXAMPLES:
     libra push                          Push current branch to tracking remote

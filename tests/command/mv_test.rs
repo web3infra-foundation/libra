@@ -750,7 +750,7 @@ async fn test_mv_rejects_moving_directory_into_subdirectory() {
 /// `libra mv --help` surfaces the EXAMPLES banner so users see the
 /// rename / move-into-dir / multi-source / dry-run / force / JSON forms
 /// without having to read the design doc. Cross-cutting `--help` EXAMPLES
-/// rollout per `docs/improvement/README.md` item B.
+/// rollout per `docs/development/commands/_general.md` item B.
 #[test]
 fn test_mv_help_lists_examples_banner() {
     let repo = tempdir().expect("tempdir for mv --help");

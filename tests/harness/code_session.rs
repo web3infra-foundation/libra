@@ -491,7 +491,7 @@ impl CodeSession {
     /// The returned [`super::EventStream`] reads events on a worker
     /// thread; per-event timeouts are configured by the caller.
     ///
-    /// Wave 1 of `docs/improvement/test.md` makes this the central
+    /// Wave 1 of `docs/development/commands/_general.md` makes this the central
     /// entry point for the SSE matrix and downstream Waves
     /// (state / generation / approval) that need to observe runtime
     /// notifications without polling `/session`.

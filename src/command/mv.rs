@@ -24,7 +24,7 @@ use crate::{
 /// multi-source, dry-run, force-overwrite, and JSON-for-agents forms so
 /// users can map intent to invocation without reading the design doc.
 /// Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
+/// `docs/development/commands/_general.md` item B.
 pub const MV_EXAMPLES: &str = "\
 EXAMPLES:
     libra mv old.txt new.txt              Rename a single tracked file

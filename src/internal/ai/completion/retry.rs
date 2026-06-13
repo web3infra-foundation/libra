@@ -124,7 +124,7 @@ fn is_retryable_error(err: &CompletionError) -> bool {
 fn is_retryable_provider_message(message: &str) -> bool {
     let msg = message.to_ascii_lowercase();
     [
-        // HTTP status branches (`docs/improvement/opencode.md` line 1109).
+        // HTTP status branches (`docs/development/commands/_general.md` line 1109).
         "status 429",
         "status 500",
         "status 502",
@@ -133,7 +133,7 @@ fn is_retryable_provider_message(message: &str) -> bool {
         // 429 rate-limit (line 1110).
         "rate limit",
         // Stream-error codes from the doc taxonomy table
-        // (`docs/improvement/opencode.md` lines 1101-1102): both must
+        // (`docs/development/commands/_general.md` lines 1101-1102): both must
         // classify as retryable transients per `StreamErrorKind::Transient`.
         "server_is_overloaded",
         "server_error",
@@ -258,7 +258,7 @@ mod tests {
     }
 
     /// `is_retryable_error` must accept the HTTP-status-and-rate-limit
-    /// taxonomy from `docs/improvement/opencode.md` line 1109. Pin the
+    /// taxonomy from `docs/development/commands/_general.md` line 1109. Pin the
     /// matrix so a future "tighten the retry set" refactor doesn't
     /// silently drop one of the documented retryable conditions.
     #[test]

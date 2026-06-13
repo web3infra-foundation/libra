@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.1173"
+version = "0.17.1174"
 edition = "2024"
 license = "MIT"
 description = "AI agent-native version control system with Git on-disk compatibility, SQLite-backed metadata, and tiered cloud storage"
@@ -18,7 +18,7 @@ test-network   = []   # L2: tests requiring outbound network but no secrets
 test-live-ai   = []   # L3: tests calling real LLM APIs
 test-live-cloud = []  # L3: tests hitting real D1/R2 endpoints
 test-provider  = []   # deterministic hidden provider for local TUI automation tests
-subagent-scaffold = []  # CEX-S2-10 schema-only scaffold (Step 2 sub-agent contracts; gated on CP-4 in production — see docs/improvement/agent.md "Step 2 audit closure")
+subagent-scaffold = []  # CEX-S2-10 schema-only scaffold (Step 2 sub-agent contracts; gated on CP-4 in production — see docs/development/commands/agent.md "Step 2 audit closure")
 
 [dependencies]
 uuid = { version = "1.23.1", features = ["v4", "v5", "v7"] }

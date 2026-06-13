@@ -672,7 +672,7 @@ impl D1Client {
     ///
     /// - **No FK to `ai_thread(thread_id)`**. D1 does not host the
     ///   `ai_thread` table; `thread_id` is always NULL in v1
-    ///   (`docs/improvement/entire.md` §11.3). **Owner**: cloud-sync
+    ///   (`docs/development/commands/_general.md` §11.3). **Owner**: cloud-sync
     ///   path (this module). **Revisit**: Phase 4 migration that
     ///   replicates `ai_thread` to D1; until then, treat any non-NULL
     ///   `thread_id` rows as a local-only join key.
@@ -1982,7 +1982,7 @@ mod tests {
     }
 
     /// Scenario: D1 credentials follow the same priority chain as the rest of
-    /// the secret surface (docs/improvement/config.md 12-Factor rule):
+    /// the secret surface (docs/development/commands/config.md 12-Factor rule):
     /// process env > local vault > global vault. Local vault is the fallback
     /// when env is unset. Mirrors v0.17.906's resolve_env_for_target_process_
     /// env_overrides_local_vault fix.

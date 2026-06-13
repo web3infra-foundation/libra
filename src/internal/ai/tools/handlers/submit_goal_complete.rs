@@ -1,6 +1,6 @@
 //! Handler for the `submit_goal_complete` tool.
 //!
-//! Used inside Goal mode (`docs/improvement/opencode.md` lines 657-661,
+//! Used inside Goal mode (`docs/development/commands/_general.md` lines 657-661,
 //! 1808). The model invokes this when it believes the active Goal is
 //! satisfied. The supervisor (P6.3) reads the parsed claim from the
 //! just-finished `ToolLoopTurn` and turns it into a

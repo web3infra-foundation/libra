@@ -1,6 +1,6 @@
 //! CEX-S2-12 / S2-INV-08 sub-agent flag-off regression tests.
 //!
-//! Spec: `docs/improvement/agent.md` Step 2.3 (CEX-S2-12) and the Step 2 exit
+//! Spec: `docs/development/commands/agent.md` Step 2.3 (CEX-S2-12) and the Step 2 exit
 //! standard "兼容性" row (CP-S2-3 flag-off equivalence): with
 //! `code.sub_agents.enabled = false` — the default — the sub-agent runtime must
 //! stay completely inert, so a fresh single-agent install behaves identically to

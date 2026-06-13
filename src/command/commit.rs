@@ -57,7 +57,7 @@ const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
 
 /// `--help` examples shown in `libra commit --help` output.
 ///
-/// Per `docs/improvement/commit.md`, the commit command exposes nine
+/// Per `docs/development/commands/commit.md`, the commit command exposes nine
 /// representative scenarios so users see the most common invocations
 /// without having to read the doc. Keep this list and the rustdoc
 /// snippet in `commit.md` in sync.

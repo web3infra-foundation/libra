@@ -1,5 +1,5 @@
 //! Per-source-slug concurrency limiting for the Source Pool (CEX-S2-14,
-//! `docs/improvement/agent.md:1959`).
+//! `docs/development/commands/agent.md:1959`).
 //!
 //! Multiple sub-agents can each hold tool handlers for the same source. Without
 //! a bound they could fire concurrent calls at one MCP / REST backend and

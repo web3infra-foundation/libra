@@ -106,7 +106,7 @@ pub type Client = GenericClient<DeepSeekProvider>;
 impl Client {
     /// Creates a DeepSeek client from environment variables or Vault.
     ///
-    /// Priority chain (12-Factor, see `docs/improvement/config.md`):
+    /// Priority chain (12-Factor, see `docs/development/commands/config.md`):
     /// 1. Process env `DEEPSEEK_API_KEY`
     /// 2. Local repo config (`vault.env.DEEPSEEK_API_KEY`)
     /// 3. Global config (`vault.env.DEEPSEEK_API_KEY`)
@@ -235,7 +235,7 @@ mod tests {
         drop(global_guard);
     }
 
-    /// Per docs/improvement/config.md (12-Factor priority), process env wins
+    /// Per docs/development/commands/config.md (12-Factor priority), process env wins
     /// over the global vault — `DEEPSEEK_API_KEY=B libra ...` is the sacred
     /// per-invocation override. Global vault is the fallback when env is
     /// unset. Mirrors v0.17.906's config_test::resolve_env_for_target_process_

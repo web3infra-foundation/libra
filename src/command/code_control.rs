@@ -27,7 +27,7 @@ use crate::utils::error::{CliError, CliResult};
 /// shows how to wire it to the discovery file emitted by
 /// `libra code --control write`, and demonstrates Unix-style piping
 /// to feed a single JSON-RPC request through the shim. Cross-cutting
-/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
+/// `--help` EXAMPLES rollout per `docs/development/commands/_general.md` item B.
 pub const CODE_CONTROL_EXAMPLES: &str = "\
 EXAMPLES:
     libra code-control --stdio --url http://127.0.0.1:3000 --token-file ./control.token

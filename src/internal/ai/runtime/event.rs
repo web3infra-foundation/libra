@@ -8,7 +8,7 @@
 //!
 //! # Envelope-with-typed-payload requirement (R-A3)
 //!
-//! Per `docs/improvement/agent.md` "Step 2 audit closure" R-A3, every concrete
+//! Per `docs/development/commands/agent.md` "Step 2 audit closure" R-A3, every concrete
 //! `Event` implementation **MUST** serialize as an envelope-with-typed-payload
 //! shape so that an old reader can skip-and-warn instead of failing on a
 //! variant it has never seen before:

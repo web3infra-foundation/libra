@@ -183,7 +183,7 @@ fn test_reset_hard_with_pathspec_returns_usage_error() {
 
 #[test]
 fn test_reset_soft_with_pathspec_returns_usage_error() {
-    // PathspecWithSoft is documented in docs/improvement/reset.md and mapped
+    // PathspecWithSoft is documented in docs/development/commands/reset.md and mapped
     // to CliInvalidArguments (LBR-CLI-002, exit 129). The --hard variant
     // already has coverage above; this pins the --soft side too.
     let repo = create_committed_repo_via_cli();
@@ -359,7 +359,7 @@ async fn test_reset_corrupt_head_reference_returns_repo_corrupt() {
     let repo = create_committed_repo_via_cli();
     let target_commit = {
         let _guard = ChangeDirGuard::new(repo.path());
-        // Migrated from lossy `InternalBranch::find_branch` per docs/improvement/branch.md —
+        // Migrated from lossy `InternalBranch::find_branch` per docs/development/commands/branch.md —
         // storage errors no longer collapse into "main branch should exist".
         InternalBranch::find_branch_result("main", None)
             .await
@@ -450,7 +450,7 @@ async fn test_reset_pathspec_surfaces_subtree_corruption_as_repo_corrupt() {
 
     {
         let _guard = ChangeDirGuard::new(repo.path());
-        // Migrated from lossy `InternalBranch::find_branch` per docs/improvement/branch.md.
+        // Migrated from lossy `InternalBranch::find_branch` per docs/development/commands/branch.md.
         let head = InternalBranch::find_branch_result("main", None)
             .await
             .expect("failed to query main branch")

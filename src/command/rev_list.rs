@@ -21,7 +21,7 @@ use crate::{
 /// banner pins the default `HEAD` walk, an explicit branch walk, a
 /// quiet form, and a JSON variant for agents so users see all
 /// supported forms without reading the design doc. Cross-cutting
-/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
+/// `--help` EXAMPLES rollout per `docs/development/commands/_general.md` item B.
 pub const REV_LIST_EXAMPLES: &str = "\
 EXAMPLES:
     libra rev-list                  Walk ancestry from HEAD (one hash per line)

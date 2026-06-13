@@ -1,6 +1,6 @@
 //! OC-Phase 4 retry-policy integration test.
 //!
-//! Spec: `docs/improvement/opencode.md` → "Retry Policy 实现要求" — the
+//! Spec: `docs/development/commands/_general.md` → "Retry Policy 实现要求" — the
 //! tool-loop side wraps every `model.completion(request)` with a retry
 //! that:
 //!   * keeps retrying on transient (`server_is_overloaded` /
@@ -132,7 +132,7 @@ fn fast_policy(max_retries: u32) -> CompletionRetryPolicy {
 /// a regression that infinitely retries would hang the test.
 ///
 /// The fixture intentionally **omits** the `status 503:` prefix so
-/// the doc's `server_is_overloaded` mapping (`docs/improvement/opencode.md`
+/// the doc's `server_is_overloaded` mapping (`docs/development/commands/_general.md`
 /// line 1101) is exercised in isolation from the doc's HTTP-5xx rule
 /// (line 1109). A combined `"status 503: server_is_overloaded"` string
 /// would let either branch satisfy the test, hiding a regression in
@@ -186,7 +186,7 @@ async fn retry_exhausts_budget_then_surfaces_final_error() {
 
 /// Scenario: a bare HTTP `503` (status only, neutral message) also
 /// retries — exercising the doc's HTTP-5xx rule from
-/// `docs/improvement/opencode.md` line 1109 in isolation from the
+/// `docs/development/commands/_general.md` line 1109 in isolation from the
 /// `server_is_overloaded` code branch from line 1101. Splitting the
 /// two ensures a regression in either branch fails with the offending
 /// signature instead of being shadowed by the other.
@@ -303,7 +303,7 @@ async fn non_retryable_errors_surface_immediately() {
 /// signature in isolation. One fake call per signature so a
 /// regression in any single match arm fails with the offending
 /// signature in the assertion message rather than being shadowed by
-/// a sibling rule. The signatures cover both `docs/improvement/opencode.md`
+/// a sibling rule. The signatures cover both `docs/development/commands/_general.md`
 /// stream-error codes (`server_is_overloaded`, `server_error`) and
 /// the HTTP-status branches (`429` + 5xx) called out at lines
 /// 1101-1110.

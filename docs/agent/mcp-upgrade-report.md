@@ -90,8 +90,7 @@ All required checks were run on current workspace state:
 1. `cargo +nightly fmt --all` passed.
 2. `cargo clippy --all-targets --all-features` passed.
 3. `cargo test --all` passed.
-4. Cloud script run against current project code:
-   - Script used: `/Users/jackie/rustprogram/libra/scripts/run_cloud_tests.sh`
+4. Cloud live checks ran against current project code:
    - Final result: passed (`14 passed; 0 failed`).
 
 ## 6. Commit phases

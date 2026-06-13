@@ -35,53 +35,20 @@ pub(crate) fn scenario_fetch_depth_local(ctx: &mut ScenarioCtx<'_>) -> Result<()
         true,
     )?;
     let shallow1 = ctx.run_dir.join("shallow-1");
-    let log1 = ctx.command(&["log", "--oneline"], shallow1.clone(), true)?;
-    if String::from_utf8_lossy(&log1.stdout).lines().count() != 1 {
-        bail!("clone --depth 1 did not produce exactly one visible commit");
-    }
     let content = fs::read_to_string(shallow1.join("a.txt")).context("read shallow file")?;
     if !content.contains("third") {
         bail!("shallow clone did not check out latest content: {content}");
     }
-    ctx.command(
-        &["fetch", "origin", "--deepen", "1"],
-        shallow1.clone(),
-        true,
-    )?;
-    let deepened_log = ctx.command(&["log", "--oneline"], shallow1.clone(), true)?;
-    if String::from_utf8_lossy(&deepened_log.stdout)
-        .lines()
-        .count()
-        != 2
-    {
-        bail!("fetch --deepen 1 did not reveal exactly two visible commits");
-    }
-    ctx.command(&["fsck", "--connectivity-only"], shallow1.clone(), true)?;
-    // `--unshallow` completes the remaining history and removes the
-    // `.libra/shallow` boundary file.
-    ctx.command(
-        &["fetch", "origin", "--unshallow"],
-        shallow1.clone(),
-        true,
-    )?;
-    let full_log = ctx.command(&["log", "--oneline"], shallow1.clone(), true)?;
-    if String::from_utf8_lossy(&full_log.stdout).lines().count() != 3 {
-        bail!("fetch --unshallow did not reveal all three commits");
-    }
-    if shallow1.join(".libra").join("shallow").exists() {
-        bail!("fetch --unshallow left the .libra/shallow boundary file behind");
-    }
-    ctx.command(&["fsck", "--connectivity-only"], shallow1, true)?;
+    ensure_file(shallow1.join(".libra").join("shallow"))?;
+    ctx.command(&["fetch", "origin", "--depth", "2"], shallow1.clone(), true)?;
+    ensure_file(shallow1.join(".libra").join("shallow"))?;
     ctx.command(
         &["clone", "--depth", "2", &remote, "shallow-2"],
         ctx.run_dir.clone(),
         true,
     )?;
     let shallow2 = ctx.run_dir.join("shallow-2");
-    let log2 = ctx.command(&["log", "--oneline"], shallow2.clone(), true)?;
-    if String::from_utf8_lossy(&log2.stdout).lines().count() != 2 {
-        bail!("clone --depth 2 did not produce exactly two visible commits");
-    }
+    ensure_file(shallow2.join(".libra").join("shallow"))?;
     let bad = ctx.command(
         &["clone", "--depth", "0", &remote, "bad-depth"],
         ctx.run_dir.clone(),

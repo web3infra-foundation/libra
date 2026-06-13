@@ -1,6 +1,6 @@
 //! Static model-capability matrix.
 //!
-//! This module is part of OC-Phase 1 P1.2 from `docs/improvement/opencode.md`.
+//! This module is part of OC-Phase 1 P1.2 from `docs/development/commands/_general.md`.
 //! It records what each `(provider_id, model_id)` pair is known to support so
 //! the factory can give actionable error messages and the runtime can refuse
 //! a feature the model cannot handle (e.g. structured tool calls on a

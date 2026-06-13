@@ -149,13 +149,13 @@ Git 添加 `fetch.prune = true` 作为推荐默认值，因为陈旧的远程跟
 
 ### Shallow fetch（`--depth`）作为稳定标志暴露
 
-`libra fetch --depth N` 是公共稳定标志（已在 [`docs/improvement/compatibility/shallow.md`](../improvement/compatibility/shallow.md) 中审计为 C3）。内部 `fetch_repository(..., depth)` plumbing 已支持 shallow fetch 一段时间；C3 将其暴露到 CLI，并绑定契约：
+`libra fetch --depth N` 是公共稳定标志（已在 [`docs/development/commands/clone.md`](../../development/commands/clone.md) 中审计为 C3）。内部 `fetch_repository(..., depth)` plumbing 已支持 shallow fetch 一段时间；C3 将其暴露到 CLI，并绑定契约：
 
 - `--depth N` 将获取限制为每个远程分支的最新 `N` 个提交。
 - 它可与 `--all` 组合：跨所有已配置远程的 shallow fetch 是 `libra fetch --all --depth N`。
 - 完整历史 fetch 后再执行 `fetch --depth N` 是幂等的。
 - 对已经 shallow 的仓库以相同深度再次 fetch 也是幂等的：Libra 将服务器通告的 shallow 边界持久化在 `.libra/shallow` 中，并在后续 upload-pack 协商期间发送它们。
-- Sparse checkout（`clone --sparse`）**不**属于此契约；见 [`docs/improvement/compatibility/declined.md`](../improvement/compatibility/declined.md)，了解为什么有意延后 sparse-checkout。
+- Sparse checkout（`clone --sparse`）**不**属于此契约；见 [`docs/development/commands/_compatibility.md`](../../development/commands/_compatibility.md)，了解为什么有意延后 sparse-checkout。
 
 Shallow fetch 会引入通常的 Git “shallow boundary” 注意事项（blame、log、merge-base 计算可能看不到边界之外的提交）。这个取舍是用户可见旋钮，而不是默认值；完整历史 fetch 仍是默认行为，也是 monorepo 和 AI 代理工作流的推荐姿态。对于确实需要完整历史的场景，分层云存储（S3/R2 + LRU caching）仍是带宽解决方案。
 

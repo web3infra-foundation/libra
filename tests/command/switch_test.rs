@@ -240,7 +240,7 @@ async fn test_switch_function() {
             _ => panic!("head not in branch,unreachable"),
             // Head::Detached(name) => name.to_string(),
         };
-        // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+        // Migrated from lossy `Branch::find_branch` per docs/development/commands/branch.md.
         let branch = Branch::find_branch_result(&ref_name, None)
             .await
             .expect("failed to query current branch")
@@ -544,7 +544,7 @@ async fn test_detach_head_basic() {
         let commit_message = switch_to_detach("main^~^~^~^~^~^".to_string()).await;
         assert_eq!(&commit_message, "commit_0");
     }
-    // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+    // Migrated from lossy `Branch::find_branch` per docs/development/commands/branch.md.
     let master_commit_id = Branch::find_branch_result("main", None)
         .await
         .expect("failed to query main branch")
@@ -670,7 +670,7 @@ async fn test_detach_head_extra() {
         assert_eq!(commit_message, "commit_0".to_string());
         switch_to_branch("main".to_string()).await;
     }
-    // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+    // Migrated from lossy `Branch::find_branch` per docs/development/commands/branch.md.
     let master_commit_id = Branch::find_branch_result("main", None)
         .await
         .expect("failed to query main branch")

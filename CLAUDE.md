@@ -109,7 +109,6 @@ tests/                           # ~98 top-level integration test files + ~21 te
 ├── publish_*.rs                 # Publish snapshot/upload/preflight/refs/redaction/ai_export tests
 └── command_test.rs, e2e_mcp_flow.rs, mcp_integration_test.rs, network_remotes_test.rs, storage_r2_test.rs, …
 
-examples/                        # `hello_world.rs`, `multi_agent.toml`
 build.rs                         # Builds the Next.js web frontend into web/out/ unless LIBRA_SKIP_WEB_BUILD=1
 docs/                            # Community docs, contributing guide, agent specs, improvement walkthroughs, error-codes
 sql/
@@ -117,7 +116,6 @@ sql/
 ├── sqlite_20260415_ai_runtime_contract.sql  # AI runtime contract extension
 ├── migrations/                              # Versioned forward + matching `_down.sql` migrations (YYYYMMDDNN naming)
 └── publish/                                 # Publish Worker D1 schema (0001_publish.sql, …)
-scripts/                         # check_compat_matrix.sh, check_docs_consistency.sh, check_integration_plan_consistency.sh
 template/                        # Git hook templates (pre-commit.sh, pre-commit.ps1, exclude, description) + sandbox seccomp filter (seccomp-default.json)
 web/                             # Next.js 16 frontend (pnpm); built into web/out/ and embedded via rust-embed
 worker/                          # Cloudflare Worker for read-only publishing (OpenNext + wrangler + playwright)
@@ -170,7 +168,7 @@ All PRs must pass these jobs on the `[self-hosted]` runner pool:
 2. **compat-clippy** — `cargo clippy --all-targets --all-features -- -D warnings` (with `LIBRA_SKIP_WEB_BUILD=1`)
 3. **compat-web-check** — `pnpm --dir web lint` + `pnpm --dir web build` so `web/out/` cannot drift from `WebAssets`
 4. **compat-redundancy** — directory-shape check on `third-party/rust/crates`
-5. **compat-offline-core** — `scripts/check_compat_matrix.sh` + `cargo test --all` + a second pass with `--features test-provider` for the TUI automation matrices (`code_ui_scenarios`, `harness_self_test`, `code_codex_default_tui_test`, `code_ui_remote_lease_matrix`, `code_ui_remote_sse_matrix`) under `--test-threads=1`
+5. **compat-offline-core** — `cargo test --test compat_matrix_alignment compatibility_matrix_matches_cli_commands -- --exact` + `cargo test --all` + a second pass with `--features test-provider` for the TUI automation matrices (`code_ui_scenarios`, `harness_self_test`, `code_codex_default_tui_test`, `code_ui_remote_lease_matrix`, `code_ui_remote_sse_matrix`) under `--test-threads=1`
 6. **compat-network-remotes** — `cargo test --features test-network --test network_remotes_test`
 
 Additional workflows: `codeql.yml` (security analysis), `model-generation-nightly.yml` (nightly model-generation matrix), `release.yml` (release pipeline).
@@ -329,7 +327,7 @@ The publish Worker uses its own D1 schema in `sql/publish/` (`0001_publish.sql`,
 - `LIBRA_COMMITTER_NAME` / `LIBRA_COMMITTER_EMAIL` — committer identity overrides
 - `LIBRA_SSH_COMMAND`, `LIBRA_SSH_STRICT_HOST_KEY_CHECKING` — SSH protocol tuning
 - `LIBRA_CODE_LEASE_DURATION_MS` — `libra code` automation lease length
-- `LIBRA_SANDBOX_ENFORCEMENT`, `LIBRA_SANDBOX_NETWORK_DISABLED`, `LIBRA_LINUX_SANDBOX_EXE`, `LIBRA_USE_LINUX_SANDBOX_BWRAP` — sandbox toggles (`docs/improvement/sandbox.md`)
+- `LIBRA_SANDBOX_ENFORCEMENT`, `LIBRA_SANDBOX_NETWORK_DISABLED`, `LIBRA_LINUX_SANDBOX_EXE`, `LIBRA_USE_LINUX_SANDBOX_BWRAP` — sandbox toggles (`docs/development/commands/sandbox.md`)
 - `LIBRA_ERROR_JSON`, `LIBRA_FINE_EXIT_CODES` — stable-error-code surface toggles
 
 The following are baked-in constants (no env-var override) — listed

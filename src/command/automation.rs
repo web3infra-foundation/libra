@@ -31,7 +31,7 @@ use crate::{
 /// spawning shell actions, and JSON variants for agents so users can
 /// map intent to invocation without reading the design doc.
 /// Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
+/// `docs/development/commands/_general.md` item B.
 pub const AUTOMATION_EXAMPLES: &str = "\
 EXAMPLES:
     libra automation list                                List configured automation rules

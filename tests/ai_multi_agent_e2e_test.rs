@@ -1,9 +1,9 @@
 //! S7 acceptance scenario: multi-agent declarative config E2E
 //! (OC-Phase 5 P5.5).
 //!
-//! Per docs/improvement/opencode.md:1724-1732 the scenario covers:
+//! Per docs/development/commands/_general.md:1724-1732 the scenario covers:
 //!
-//! 1. Load `examples/multi_agent.toml` and validate the documented
+//! 1. Load `tests/fixtures/ai/multi_agent.toml` and validate the canonical
 //!    `planner → coder → reviewer` pipeline parses cleanly under the
 //!    OC-Phase 5 P5.1 schema + validator.
 //! 2. Each of the three agents records usage with a distinct
@@ -40,7 +40,7 @@ use libra::internal::{
 };
 use sea_orm::Database;
 
-const SAMPLE_TOML_PATH: &str = "examples/multi_agent.toml";
+const SAMPLE_TOML_PATH: &str = "tests/fixtures/ai/multi_agent.toml";
 
 fn fake_usage(input: u64, output: u64, cost_usd: f64) -> CompletionUsageSummary {
     CompletionUsageSummary {
@@ -68,19 +68,19 @@ fn agent_context(agent: &str, provider: &str, model: &str) -> UsageContext {
 }
 
 /// S7 phase 1: the canonical declarative config in
-/// `examples/multi_agent.toml` parses + validates cleanly under the
+/// `tests/fixtures/ai/multi_agent.toml` parses + validates cleanly under the
 /// P5.1 schema. Pins the documented `planner → coder → reviewer`
 /// pipeline shape so a future schema change either updates the
-/// example or breaks this test (whichever the operator notices
+/// fixture or breaks this test (whichever the operator notices
 /// first).
 #[test]
 fn s7_canonical_example_toml_parses_and_validates() {
     let toml_str = std::fs::read_to_string(SAMPLE_TOML_PATH)
-        .expect("examples/multi_agent.toml must be readable from the repo root");
+        .expect("tests/fixtures/ai/multi_agent.toml must be readable from the repo root");
     let cfg = AgentsConfig::from_toml_str(&toml_str)
-        .expect("examples/multi_agent.toml must parse under the P5.1 schema");
+        .expect("tests/fixtures/ai/multi_agent.toml must parse under the P5.1 schema");
     cfg.validate()
-        .expect("examples/multi_agent.toml must pass P5.1 validation");
+        .expect("tests/fixtures/ai/multi_agent.toml must pass P5.1 validation");
 
     // Documented pipeline shape.
     assert!(cfg.multi_agent.enabled, "feature flag must be on");

@@ -3,7 +3,7 @@
 //! Exercises [`HeadlessCodeRuntime`] end-to-end against the deterministic
 //! `test-provider` fixture: submitting a prompt should drive a tool-loop turn
 //! whose final assistant text lands in the live `CodeUiSession`. Used as the
-//! L1 verification anchor for Phase 3 of `docs/improvement/web.md` (the
+//! L1 verification anchor for Phase 3 of `docs/development/commands/_general.md` (the
 //! `--web-only --provider <non-codex>` path that previously fell back to a
 //! read-only placeholder).
 

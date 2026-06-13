@@ -1845,7 +1845,7 @@ async fn test_push_ssh_host_key_failure_is_reported() {
 /// six canonical invocations (default upstream push, named origin/branch
 /// push, `-u`, `--force`, `--dry-run`, `--json`) without having to read
 /// the design doc. Companion to the cross-cutting `--help` EXAMPLES
-/// rollout from `docs/improvement/README.md` item B.
+/// rollout from `docs/development/commands/_general.md` item B.
 #[test]
 fn test_push_help_lists_examples_banner() {
     let repo = tempfile::tempdir().expect("tempdir for push --help");

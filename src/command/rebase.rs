@@ -502,8 +502,8 @@ impl ReplayResult {
 /// Rebase exposes a small four-mode state machine: start (positional
 /// upstream), `--continue`, `--abort`, `--skip`. The banner pins one
 /// example per mode plus a JSON variant so users see all transitions
-/// without reading `docs/improvement/rebase.md`. Cross-cutting `--help`
-/// EXAMPLES rollout per `docs/improvement/README.md` item B.
+/// without reading `docs/development/commands/rebase.md`. Cross-cutting `--help`
+/// EXAMPLES rollout per `docs/development/commands/_general.md` item B.
 pub const REBASE_EXAMPLES: &str = "\
 EXAMPLES:
     libra rebase main             Replay current branch on top of main

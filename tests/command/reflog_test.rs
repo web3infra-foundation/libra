@@ -499,7 +499,7 @@ async fn test_reflog_show_with_stat() {
 /// `libra reflog --help` surfaces the EXAMPLES banner so users see the
 /// three sub-commands (`show`, `delete`, `exists`) plus a filtered show,
 /// a HEAD@{N} delete selector, and the JSON variant for agents. Cross-cutting
-/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
+/// `--help` EXAMPLES rollout per `docs/development/commands/_general.md` item B.
 #[test]
 fn test_reflog_help_lists_examples_banner() {
     let repo = tempdir().expect("tempdir for reflog --help");

@@ -590,7 +590,7 @@ async fn test_grep_all_match_is_based_on_positive_pattern_presence_even_with_inv
 /// canonical invocations (regex vs literal, multi-pattern, --cached,
 /// --tree REV, count, filename listing, --json) without reading the
 /// design doc. Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
+/// `docs/development/commands/_general.md` item B.
 #[test]
 fn test_grep_help_lists_examples_banner() {
     let repo = tempdir().expect("tempdir for grep --help");

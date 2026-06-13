@@ -27,7 +27,7 @@ use crate::{
 /// combinations (`--since 7d`, `--session`, `--include-failed`, csv
 /// format) so users can map intent to invocation without reading the
 /// design doc. Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
+/// `docs/development/commands/_general.md` item B.
 pub const USAGE_EXAMPLES: &str = "\
 EXAMPLES:
     libra usage report                                  Per-model totals across all recorded rows

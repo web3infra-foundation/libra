@@ -1,6 +1,6 @@
 //! OC-Phase 6 P6.1 — Goal mode schema integration tests.
 //!
-//! Spec: `docs/improvement/opencode.md` lines 532-700. P6.1 ships the
+//! Spec: `docs/development/commands/_general.md` lines 532-700. P6.1 ships the
 //! schema only; the supervisor (P6.3), verifier (P6.2), tools (P6.4),
 //! CLI/TUI (P6.5), Code Control (P6.6), and the full S6 E2E (P6.7) all
 //! plug into the types defined here in later PRs. The integration
@@ -544,7 +544,7 @@ fn resume_replay_handles_claim_rejection_then_completion() {
 }
 
 /// Scenario: `CriteriaRevised` (the `/goal criteria add <text>`
-/// entry from `docs/improvement/opencode.md` line 690) replaces the
+/// entry from `docs/development/commands/_general.md` line 690) replaces the
 /// spec's acceptance criteria, and any `completed_criteria` no
 /// longer in scope are dropped from the state. This guards the
 /// verifier (P6.2) from accepting completion based on a stale
@@ -986,7 +986,7 @@ fn session_event_goal_with_unknown_nested_variant_deserialises() {
 /// `Created` envelope followed directly by a `Completed` envelope
 /// whose report omits a required spec criterion. The supervisor's
 /// resume seam reads the stream verbatim and (per
-/// `docs/improvement/opencode.md` lines 1463-1467) returns idle the
+/// `docs/development/commands/_general.md` lines 1463-1467) returns idle the
 /// moment it sees `Completed` — the verifier (P6.2) is not invoked
 /// on replay. Without the schema-layer floor enforced by
 /// `validate_completion_report_shape`, the forged Goal would
@@ -1190,7 +1190,7 @@ fn replay_surfaces_cross_goal_envelopes_as_rejection_diagnostics() {
 }
 
 /// Scenario (Codex pass-6 P2#4): the doc-required budget summary
-/// (`docs/improvement/opencode.md` line 1519) is now part of the
+/// (`docs/development/commands/_general.md` line 1519) is now part of the
 /// completion-report wire shape. A round-trip through serde keeps
 /// every field — pinning regressions that drop one of the three
 /// budget-summary fields.

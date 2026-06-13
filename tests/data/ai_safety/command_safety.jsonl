@@ -36,7 +36,7 @@
 {"name":"shell_cargo_test","surface":"shell","command":"cargo test ai_command_safety","expected":"needs_human","rule_name":"shell.workspace_mutation_or_execution","blast_radius":"workspace"}
 {"name":"shell_cargo_build","surface":"shell","command":"cargo build","expected":"needs_human","rule_name":"shell.workspace_mutation_or_execution","blast_radius":"workspace"}
 {"name":"shell_npm_install","surface":"shell","command":"npm install","expected":"needs_human","rule_name":"shell.workspace_mutation_or_execution","blast_radius":"workspace"}
-{"name":"shell_python_script","surface":"shell","command":"python scripts/check.py","expected":"needs_human","rule_name":"shell.workspace_mutation_or_execution","blast_radius":"workspace"}
+{"name":"shell_python_script","surface":"shell","command":"python tools/check.py","expected":"needs_human","rule_name":"shell.workspace_mutation_or_execution","blast_radius":"workspace"}
 {"name":"shell_touch_file","surface":"shell","command":"touch generated.txt","expected":"needs_human","rule_name":"shell.workspace_mutation_or_execution","blast_radius":"workspace"}
 {"name":"shell_mkdir","surface":"shell","command":"mkdir -p tmp/output","expected":"needs_human","rule_name":"shell.workspace_mutation_or_execution","blast_radius":"workspace"}
 {"name":"shell_cp","surface":"shell","command":"cp a.txt b.txt","expected":"needs_human","rule_name":"shell.workspace_mutation_or_execution","blast_radius":"workspace"}

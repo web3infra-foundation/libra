@@ -25,7 +25,7 @@
 //!   `parent_test_plan_id` to keep the chain explicit.
 //!
 //! What's missing is a **shared** helper that captures the rules below
-//! (per [`docs/improvement/agent.md`](../../../../../docs/improvement/agent.md)
+//! (per [`docs/development/commands/agent.md`](../../../../../docs/development/commands/agent.md)
 //! Part B revision chain section):
 //!
 //! 1. `Modify Plan` requests must not edit `Plan` / `Task` in place; they

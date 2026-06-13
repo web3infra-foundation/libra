@@ -24,7 +24,7 @@ const HEADS_PREFIX: &str = "refs/heads/";
 /// only symbolic ref Libra currently supports). The banner pins the
 /// read, short-read, set, quiet, and JSON forms so users see all
 /// supported forms without reading the design doc. Cross-cutting
-/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
+/// `--help` EXAMPLES rollout per `docs/development/commands/_general.md` item B.
 pub const SYMBOLIC_REF_EXAMPLES: &str = "\
 EXAMPLES:
     libra symbolic-ref HEAD                       Print HEAD's symbolic target (refs/heads/<branch>)

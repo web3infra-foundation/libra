@@ -873,7 +873,7 @@ impl HistoryManager {
     /// events/<provider>.jsonl}` and merges it into the parent commit's tree
     /// so successive checkpoints accumulate (rather than overwrite). The
     /// resulting commit message carries `Libra-*` trailers per the design
-    /// spec (see `docs/improvement/entire.md` §3.3).
+    /// spec (see `docs/development/commands/_general.md` §3.3).
     ///
     /// Returns the freshly-written commit hash plus the OIDs callers need to
     /// stamp onto `agent_checkpoint` (root tree OID and metadata blob OID).

@@ -178,42 +178,25 @@ fn clean_help_distinguishes_libra_behavior() {
     );
 }
 
-/// Verify that COMPATIBILITY.md documents the clean -i row with status=done
-/// and intentional-difference contract (as per Task 3 requirement).
 #[test]
-fn clean_interactive_marked_done_in_matrix() {
+fn clean_governance_documents_interactive_and_pathspec_decisions() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let matrix_path = repo.join("docs/development/compatibility-matrix.yaml");
+    let governance_path = repo.join("docs/development/commands/_compatibility.md");
+    let governance =
+        std::fs::read_to_string(&governance_path).expect("read compatibility governance doc");
 
-    // Check if the matrix file exists and can be parsed
-    if let Ok(matrix_content) = std::fs::read_to_string(&matrix_path) {
-        // Look for clean -i entry with status: done
-        let clean_i_entries: Vec<String> = matrix_content
-            .lines()
-            .collect::<Vec<_>>()
-            .windows(20)
-            .filter_map(|window| {
-                let window_str = window.join("\n");
-                if window_str.contains("command: clean")
-                    && window_str.contains("flag:")
-                    && (window_str.contains("-i") || window_str.contains("interactive"))
-                {
-                    Some(window_str)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if !clean_i_entries.is_empty() {
-            // At least one clean -i entry should exist
-            let matrix_has_entry = !clean_i_entries.is_empty();
-            assert!(
-                matrix_has_entry,
-                "docs/development/compatibility-matrix.yaml should have a clean -i entry"
-            );
-        }
-    }
+    assert!(
+        governance.contains("clean -i") || governance.contains("`clean -i`"),
+        "compatibility governance must mention clean -i"
+    );
+    assert!(
+        governance.contains("有意差异") || governance.contains("intentional"),
+        "compatibility governance must preserve the clean -i intentional-difference contract"
+    );
+    assert!(
+        governance.contains("D-clean-pathspec"),
+        "compatibility governance must preserve the clean pathspec deferred decision"
+    );
 }
 
 /// Guard contract: `clean -i` is documented as intentional-difference, never as

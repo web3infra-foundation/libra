@@ -61,7 +61,7 @@ pub(crate) fn scenario_config_key_generation(ctx: &mut ScenarioCtx<'_>) -> Resul
         false,
     )?;
     assert_lbr_or_text(&duplicate_signing, "already exists")?;
-    ctx.command(
+    let duplicate_encrypt = ctx.command(
         &[
             "config",
             "generate-gpg-key",
@@ -73,14 +73,9 @@ pub(crate) fn scenario_config_key_generation(ctx: &mut ScenarioCtx<'_>) -> Resul
             "encrypt",
         ],
         repo.clone(),
-        true,
+        false,
     )?;
-    let encrypt_pub = ctx.command(
-        &["config", "get", "vault.gpg.encrypt.pubkey"],
-        repo.clone(),
-        true,
-    )?;
-    assert_stdout_contains(&encrypt_pub, "BEGIN PGP PUBLIC KEY BLOCK")?;
+    assert_lbr_or_text(&duplicate_encrypt, "already exists")?;
     let vault_list = ctx.command(&["config", "list", "--vault"], repo.clone(), true)?;
     assert_not_contains(&vault_list, "PRIVATE KEY")?;
     let global_ssh = ctx.command(

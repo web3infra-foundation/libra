@@ -135,7 +135,7 @@ fn api_router() -> Router<WebAppState> {
 }
 
 fn code_router() -> Router<WebAppState> {
-    // Auth layer matrix (matches docs/automation/local-tui-control.md):
+    // Auth layer matrix (matches docs/commands/code.md):
     //   /session          -> loopback only (observe)
     //   /events           -> loopback only (observe)
     //   /diagnostics      -> loopback only (observe)
@@ -1265,7 +1265,7 @@ mod tests {
     }
 
     /// Wave 2 / PR 2 — route-level loopback gate ordering for read
-    /// routes. `docs/improvement/test.md` §5.3 / §6.3 inline test:
+    /// routes. `docs/development/commands/_general.md` §5.3 / §6.3 inline test:
     /// `GET /api/code/session` from a non-loopback `ConnectInfo`
     /// MUST short-circuit with `403 LOOPBACK_REQUIRED` BEFORE the
     /// runtime is touched. This guards the documented loopback ↦

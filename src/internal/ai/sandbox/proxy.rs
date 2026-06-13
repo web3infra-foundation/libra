@@ -1,5 +1,5 @@
 //! Network allowlist decision layer for sandbox Phase 7
-//! (`docs/improvement/sandbox.md` §7.4).
+//! (`docs/development/commands/sandbox.md` §7.4).
 //!
 //! AI shell tools that need allowlisted outbound network access route through
 //! a short-lived local HTTP/CONNECT proxy in [`super::proxy_runtime`]. This
@@ -262,7 +262,7 @@ pub fn allowlist_proxy_from_policy(
 ///
 /// Encodes the three-way outcome of the `(NetworkAccess-style mode,
 /// proxy-startup result, SandboxEnforcement)` decision tree from
-/// `docs/improvement/sandbox.md` §7.4 lines 340-343 without forcing
+/// `docs/development/commands/sandbox.md` §7.4 lines 340-343 without forcing
 /// callers to import `SandboxTransformError` (the transform layer
 /// converts `Reject` into `NetworkEnforcementFailed` at the boundary).
 ///
@@ -294,7 +294,7 @@ pub enum NetworkProxySelection<'a> {
 
 /// What kind of network policy the caller is asking for.
 ///
-/// Pre-positions the Phase 7 (`docs/improvement/sandbox.md` §7.1)
+/// Pre-positions the Phase 7 (`docs/development/commands/sandbox.md` §7.1)
 /// `NetworkAccess::{Denied, Allowlist, Full}` migration without
 /// touching the existing 2-state `NetworkAccess` enum. Once Phase 7
 /// lands, this type collapses into the three-state `NetworkAccess`
@@ -335,7 +335,7 @@ pub enum ProxyEnforcement {
 
 /// Resolve which [`NetworkProxy`] the sandbox runtime should use for
 /// an outbound request based on the three inputs from
-/// `docs/improvement/sandbox.md` §7.4 lines 340-343:
+/// `docs/development/commands/sandbox.md` §7.4 lines 340-343:
 ///
 /// 1. The requested mode (`Denied` / `Allowlist` / `Full`).
 /// 2. Whether the per-allowlist proxy has started

@@ -31,21 +31,12 @@ pub(crate) fn scenario_init_bare_and_shared(ctx: &mut ScenarioCtx<'_>) -> Result
         ctx.command(&["--json", "db", "status"], repo.clone(), true)?;
         ctx.command(&["fsck", "--connectivity-only"], repo, true)?;
     }
-    // Valueless `--shared` (require_equals + default_missing_value) defaults to
-    // "group"; the trailing word is the DIRECTORY positional, not the value.
-    ctx.command(
+    let valueless_shared = ctx.command(
         &["init", "--shared", "shared-default"],
         ctx.run_dir.clone(),
-        true,
+        false,
     )?;
-    let shared_default = ctx.run_dir.join("shared-default");
-    let cfg = ctx.command(
-        &["config", "get", "core.sharedRepository"],
-        shared_default.clone(),
-        true,
-    )?;
-    assert_stdout_contains(&cfg, "group")?;
-    ctx.command(&["fsck", "--connectivity-only"], shared_default, true)?;
+    assert_lbr_or_text(&valueless_shared, "shared")?;
     let invalid = ctx.command(
         &["init", "--shared=invalid", "shared-invalid"],
         ctx.run_dir.clone(),

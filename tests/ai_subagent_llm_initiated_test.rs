@@ -1,6 +1,6 @@
 //! OC-Phase 3 LlmInitiated sub-agent dispatch E2E (fake-provider).
 //!
-//! `docs/improvement/opencode.md` line 932 names this file explicitly:
+//! `docs/development/commands/_general.md` line 932 names this file explicitly:
 //! the OC-Phase 3 acceptance gate requires a fake-provider end-to-end
 //! that drives `TaskEntryKind::LlmInitiated` through the full
 //! dispatcher → child runner → tool loop → parent JSONL chain. The

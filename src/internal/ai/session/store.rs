@@ -92,7 +92,7 @@ impl SessionStore {
     }
 
     /// Create a store rooted at `{storage_path}/sessions/{subdir}/`. Used
-    /// by CEX-EntireIO Phase 3 (`docs/improvement/entire.md` §11.5) to
+    /// by CEX-EntireIO Phase 3 (`docs/development/commands/_general.md` §11.5) to
     /// keep `libra code` and `libra agent` session locks in disjoint
     /// subtrees so their `.lock` files cannot collide. Pre-existing
     /// callers stay on [`Self::from_storage_path`] which preserves the

@@ -1,6 +1,6 @@
 //! CEX-S2-16 / S2-INV-13 PreToolUse hook fail-closed dispatch fixtures.
 //!
-//! Spec: `docs/improvement/agent.md` Step 2.2 hook exit-code 权威映射表. The
+//! Spec: `docs/development/commands/agent.md` Step 2.2 hook exit-code 权威映射表. The
 //! security-critical property is **fail-closed**: only an exit-0 hook allows the
 //! tool call; every other terminal condition (explicit block, unknown exit code,
 //! timeout, OS-signal kill, spawn failure) must NOT allow it.

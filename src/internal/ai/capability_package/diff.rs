@@ -3,7 +3,7 @@
 //! Before a capability package is installed or upgraded the user must be shown
 //! exactly which **new** capabilities it would grant — new tools (skills /
 //! commands), new sources / MCP servers, new sub-agent definitions and new
-//! requested permissions (`docs/improvement/agent.md` Step 2.7: "安装或启用
+//! requested permissions (`docs/development/commands/agent.md` Step 2.7: "安装或启用
 //! package 时展示 capability diff"; "package 更新时重新计算 checksum 和
 //! permission diff"). When an update adds a *mutating* capability — a new
 //! source / MCP server or a new sub-agent definition — re-confirmation is

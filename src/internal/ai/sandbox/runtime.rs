@@ -224,7 +224,7 @@ pub struct ExecEnv {
     /// (just before exec) and dups it to [`SECCOMP_POLICY_FD`].
     /// The bwrap arg vector includes `--seccomp <fd>` pointing at
     /// the same FD number so bwrap finds the policy after exec.
-    /// See `docs/improvement/sandbox.md` line 19 ("seccomp 注入")
+    /// See `docs/development/commands/sandbox.md` line 19 ("seccomp 注入")
     /// for the doc contract this satisfies.
     pub seccomp_policy_path: Option<PathBuf>,
 }
@@ -385,7 +385,7 @@ pub enum SandboxTransformError {
     /// [`SandboxEnforcement::Required`] forbids degrading to
     /// `Denied`. Surfaced ahead of Phase 7's full proxy wire-up so
     /// the runtime has a stable error shape to fail closed with — see
-    /// `docs/improvement/sandbox.md` §7.4 line 341.
+    /// `docs/development/commands/sandbox.md` §7.4 line 341.
     ///
     /// `reason` carries an actionable hint (which proxy backend was
     /// expected, why it didn't start, etc.) so users can recover
@@ -629,7 +629,7 @@ impl SandboxManager {
                         // matching `pre_exec` hook in
                         // `ExecEnv::into_command` opens the file in
                         // the child to populate the FD. See
-                        // `docs/improvement/sandbox.md` line 19 for
+                        // `docs/development/commands/sandbox.md` line 19 for
                         // the doc contract.
                         let seccomp_fd = if seccomp_policy_path_for_transform.is_some() {
                             Some(SECCOMP_POLICY_FD)

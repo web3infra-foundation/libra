@@ -67,7 +67,7 @@ impl std::fmt::Display for SetUrlMode {
 /// the most common invocation per sub-command (where it carries enough
 /// signal beyond the sub-command name) plus a JSON variant so users can
 /// map intent to invocation without reading the design doc. Cross-cutting
-/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
+/// `--help` EXAMPLES rollout per `docs/development/commands/_general.md` item B.
 pub const REMOTE_EXAMPLES: &str = "\
 EXAMPLES:
     libra remote -v                                List remotes with fetch/push URLs

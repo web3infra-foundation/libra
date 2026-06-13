@@ -1432,7 +1432,7 @@ async fn test_remote_remove_works_after_deleting_last_url() {
 /// most common invocation per sub-command (`add`, `remove`, `rename`,
 /// `-v`, `get-url --all`, `set-url --push`, `prune --dry-run`, `--json`)
 /// without reading the design doc. Cross-cutting `--help` EXAMPLES
-/// rollout per `docs/improvement/README.md` item B.
+/// rollout per `docs/development/commands/_general.md` item B.
 #[test]
 fn test_remote_help_lists_examples_banner() {
     let repo = tempdir().expect("tempdir for remote --help");

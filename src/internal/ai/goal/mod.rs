@@ -1,6 +1,6 @@
 //! Codex-like Goal mode runtime contract (OC-Phase 6).
 //!
-//! Per `docs/improvement/opencode.md` line 532, Goal mode is a runtime layer
+//! Per `docs/development/commands/_general.md` line 532, Goal mode is a runtime layer
 //! that **prevents the assistant's normal final answer from putting the
 //! session into idle while a Goal is still active**. The schema here is the
 //! foundation for that contract: the immutable [`spec::GoalSpec`] (what the
@@ -26,7 +26,7 @@
 //!
 //! # Why a fresh module instead of extending `agent_run`
 //!
-//! Per `docs/improvement/opencode.md` lines 1551-1556, Goal mode lives in
+//! Per `docs/development/commands/_general.md` lines 1551-1556, Goal mode lives in
 //! the `libra code` namespace and **must not** touch `agent_session`,
 //! `agent_checkpoint`, or `refs/libra/agent-traces` (entire.md ownership
 //! boundary). A fresh module makes the boundary visible and stops a

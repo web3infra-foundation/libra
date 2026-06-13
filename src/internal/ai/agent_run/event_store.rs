@@ -7,7 +7,7 @@
 //! session JSONL. Keeping run events in their own file is what lets the
 //! main session stay byte-equivalent to the CEX-00 / CP-S2-2 baseline
 //! while sub-agent runs accumulate their own append-only history
-//! (`docs/improvement/agent.md` CEX-S2-11 (3), and the `AgentRun`
+//! (`docs/development/commands/agent.md` CEX-S2-11 (3), and the `AgentRun`
 //! `transcript_path` contract at [`super::run::AgentRun`]).
 //!
 //! This module owns only the path resolution and the append / read I/O.

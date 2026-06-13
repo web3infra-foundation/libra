@@ -1,6 +1,6 @@
 //! Sandbox structured-event sink — OC-Phase 7 P2 Evidence wiring.
 //!
-//! Per `docs/improvement/sandbox.md` lines 142-144, 162, 348, and 373:
+//! Per `docs/development/commands/sandbox.md` lines 142-144, 162, 348, and 373:
 //! sandbox rejection events, cleanup failures, dangerous writable
 //! roots, and (future) enforcement / network denials must surface as
 //! structured records the agent runtime can route to
@@ -47,7 +47,7 @@ use super::NetworkProtocol;
 pub enum SandboxEvidenceEvent {
     /// `cleanup_command_tmpdir(path)` failed to remove the
     /// per-command private tmp directory. Doc reference:
-    /// `docs/improvement/sandbox.md:142`.
+    /// `docs/development/commands/sandbox.md:142`.
     TmpdirCleanupFailed {
         /// Tmp directory the sandbox was attempting to remove.
         path: PathBuf,
@@ -60,7 +60,7 @@ pub enum SandboxEvidenceEvent {
     },
     /// `SandboxPolicy::validate_writable_roots_with_cwd` refused a
     /// configured `writable_root` (e.g. `/`, `/proc`, a docker
-    /// socket path). Doc reference: `docs/improvement/sandbox.md:143`.
+    /// socket path). Doc reference: `docs/development/commands/sandbox.md:143`.
     WritableRootRejected {
         /// The rejected writable root, resolved against the
         /// command's working directory.
@@ -75,7 +75,7 @@ pub enum SandboxEvidenceEvent {
     /// host could not provide — typically a missing
     /// `LIBRA_LINUX_SANDBOX_EXE` helper on Linux, or an unsupported
     /// platform / policy combination elsewhere. Doc reference:
-    /// `docs/improvement/sandbox.md:143`, L162, L373 ("enforcement
+    /// `docs/development/commands/sandbox.md:143`, L162, L373 ("enforcement
     /// 失败 必须落到 ... `Evidence[E]`，不能藏在 tracing 日志里").
     EnforcementFailed {
         /// Verbatim `reason` string from
@@ -90,7 +90,7 @@ pub enum SandboxEvidenceEvent {
     /// configured policy — typically `NetworkAccess::Allowlist`
     /// requested under `SandboxEnforcement::Required` while the
     /// per-allowlist proxy backend is unavailable. Doc reference:
-    /// `docs/improvement/sandbox.md:348` ("网络拒绝事件（连接被
+    /// `docs/development/commands/sandbox.md:348` ("网络拒绝事件（连接被
     /// OS 或代理阻断）写入 ToolInvocation[E] + Evidence[E]") and
     /// L373.
     ///
@@ -107,7 +107,7 @@ pub enum SandboxEvidenceEvent {
     },
     /// The runtime allowlist proxy denied an individual outbound
     /// connection request after inspecting the CONNECT target or HTTP
-    /// Host header. Doc reference: `docs/improvement/sandbox.md:348`
+    /// Host header. Doc reference: `docs/development/commands/sandbox.md:348`
     /// ("网络拒绝事件（连接被 OS 或代理阻断）写入
     /// ToolInvocation[E] + Evidence[E]").
     NetworkRequestDenied {

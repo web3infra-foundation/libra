@@ -531,7 +531,7 @@ impl FinalDecision {
     ///   human-gated routes resolve through the CEX-S2-13 human-gated merge
     ///   flow; or
     /// - the proposal is `stale`. The Phase-4 projection-freshness contract
-    ///   (`docs/improvement/agent.md`, `ProjectionFreshness` table) forbids
+    ///   (`docs/development/commands/agent.md`, `ProjectionFreshness` table) forbids
     ///   writing a final `Decision` from a stale `ValidationReport` /
     ///   `RiskScoreBreakdown` / `DecisionProposal`; such a proposal must be
     ///   replayed / recomputed (or escalated to human review) first, never

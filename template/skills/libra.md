@@ -74,7 +74,7 @@ Update in order:
 - `AGENTS.md` — primary agent guidance
 - `Claude.md` — contributor setup, env vars, test layers
 - `COMPATIBILITY.md`
-- `docs/improvement/agent.md`
+- `docs/development/commands/agent.md`
 
 Activate with `/skill libra` inside `libra code`.
 

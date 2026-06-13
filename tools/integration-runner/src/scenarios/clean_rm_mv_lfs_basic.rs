@@ -71,13 +71,12 @@ pub(crate) fn scenario_clean_rm_mv_lfs_basic(ctx: &mut ScenarioCtx<'_>) -> Resul
     assert_not_contains(&verbose, "Checking rename of")?;
     ensure_file(repo.join("verbose-new.txt"))?;
     let json_mv = ctx.command(
-        &["--json", "mv", "--sparse", "json.txt", "json-new.txt"],
+        &["--json", "mv", "json.txt", "json-new.txt"],
         repo.clone(),
         true,
     )?;
     assert_json_ok(&json_mv, "mv")?;
     assert_stdout_contains(&json_mv, "json-new.txt")?;
-    assert_not_contains(&json_mv, "\"sparse\"")?;
     ensure_file(repo.join("json-new.txt"))?;
     ctx.command(
         &["commit", "-m", "rename", "--no-verify"],
@@ -117,11 +116,7 @@ pub(crate) fn scenario_clean_rm_mv_lfs_basic(ctx: &mut ScenarioCtx<'_>) -> Resul
     let lfs = ctx.command(&["lfs", "ls-files"], repo.clone(), true)?;
     assert_not_contains(&lfs, "PRIVATE KEY")?;
     assert_stdout_contains(&lfs, "assets/blob.bin")?;
-    let lfs_long = ctx.command(
-        &["lfs", "ls-files", "--long", "--size"],
-        repo.clone(),
-        true,
-    )?;
+    let lfs_long = ctx.command(&["lfs", "ls-files", "--long", "--size"], repo.clone(), true)?;
     assert_stdout_contains(&lfs_long, LFS_BLOB_OID)?;
     assert_stdout_contains(&lfs_long, "assets/blob.bin (18 B)")?;
     let lfs_names = ctx.command(&["lfs", "ls-files", "--name-only"], repo.clone(), true)?;

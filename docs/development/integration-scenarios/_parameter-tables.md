@@ -69,27 +69,17 @@
 | `diff --old --new` | `cli.restore-reset-diff` | 两个 revision 间差异可见 |
 | `diff --name-only` / `--name-status` | `cli.restore-reset-diff` | 文件名和状态摘要可用于脚本断言 |
 | `diff --stat` / `--numstat` | `cli.restore-reset-diff` | 文件级统计输出可见 |
-| `diff --raw` | `cli.restore-reset-diff` | raw 机器格式含 mode、abbrev object id、状态和路径 |
-| mode-only `diff --raw` / `--name-status` | `cli.restore-reset-diff` | `T` typechange 输出由命令测试覆盖 |
-| `diff -b` / `-w` / `--ignore-blank-lines` | `cli.restore-reset-diff` | 空白忽略路径由命令测试覆盖，runner 覆盖 `-w` |
-| `diff -U<n>` / `--unified <n>` / `diff.context` | `cli.restore-reset-diff` | 可配置上下文由命令测试覆盖，runner 覆盖 `-U0` |
-| `diff --exit-code` / `--quiet` | `cli.restore-reset-diff` | 有差异时语义退码为 1 |
-| `diff -M<n>` / `--find-renames[=<n>]` | `cli.restore-reset-diff` | Git 风格短阈值和 name-status 重命名输出可见 |
-| `diff -C<n>` / `--find-copies[=<n>]` / `--no-renames` | `cli.restore-reset-diff` | copy/禁用 rename 细节由命令测试覆盖 |
-| `diff --relative[=<path>]` / `diff.noPrefix` | `cli.restore-reset-diff` | 子目录过滤和路径裁切由命令测试覆盖 |
-| `diff --word-diff[=<mode>]` / `--word-diff-regex` / `diff.wordRegex` | `cli.restore-reset-diff` | word-diff 标记、regex 上限和配置由命令测试覆盖 |
-| `diff -W` / `--function-context` | `cli.restore-reset-diff` | 函数上下文扩展由命令测试覆盖 |
+| `diff --output <file>` | `cli.restore-reset-diff` | patch 写入文件，stdout 不输出 hunk |
+| `diff --algorithm=histogram` | `cli.restore-reset-diff` | 当前唯一实现算法可用，其他算法负向断言 |
 | `restore --staged <path>` | `cli.restore-reset-diff` | index 恢复到 HEAD，工作区保持修改 |
 | `restore --worktree <path>` | `cli.restore-reset-diff` | 工作区文件恢复到 index 或 source 内容 |
-| `restore --source <rev>` | `cli.restore-reset-diff` | source revision 不存在时失败且不改写文件 |
-| `restore --ours` / `--theirs` | `cli.restore-reset-diff` | 冲突阶段 stage 2/3 写入工作区，index 保持 unmerged |
-| `restore --ignore-unmerged` | `cli.restore-reset-diff` | unmerged path 被跳过，plain restore over unmerged path 退出 128 |
+| `restore --source <rev>` | `cli.restore-reset-diff` | source revision 可恢复文件；不存在时失败且不改写文件 |
+| `restore --pathspec-from-file` / `--overlay` / `--no-overlay` | `cli.restore-reset-diff` | 当前未实现，runner 负向断言稳定错误 |
 | `reset HEAD -- <path>` | `cli.restore-reset-diff` | 路径级 reset 只取消暂存 |
-| `reset --pathspec-from-file=<file>` / `--pathspec-file-nul` | `cli.restore-reset-diff` | file/NUL pathspec 输入只取消暂存指定路径 |
-| `reset --no-refresh` | `cli.restore-reset-diff` | 兼容 no-op flag 可传入且保持 mixed reset 语义 |
 | `reset --soft` | `cli.restore-reset-diff` | 只移动 HEAD，保留 index/工作区 |
 | `reset --mixed` | `cli.restore-reset-diff` | 移动 HEAD 并重置 index |
 | `reset --hard` | `cli.restore-reset-diff` | HEAD、index、工作区全部回到目标 revision |
+| `reset --pathspec-from-file` / `--keep` / `--merge` | `cli.restore-reset-diff` | 当前未实现，runner 负向断言稳定错误 |
 
 
 
@@ -98,9 +88,7 @@
 | 参数或子命令 | 场景 ID | 关键断言 |
 |---|---|---|
 | `stash push -m` | `cli.stash-bisect-worktree` | tracked 修改被保存，消息可在列表中观察 |
-| `stash push -u` / `--include-untracked` | `cli.stash-bisect-worktree` | 可见 untracked 文件被保存、移除，并可由 `pop` 恢复 |
-| `stash push -a` / `--all` | `cli.stash-bisect-worktree` | ignored 文件与可见 untracked 文件一起被保存、移除，并可恢复 |
-| `stash push --keep-index` | `cli.stash-bisect-worktree` | 已暂存内容保持在 index/worktree，未暂存 delta 被 stash |
+| `stash push -u` / `--all` / `--keep-index` | `cli.stash-bisect-worktree` | 当前未实现，runner 负向断言稳定错误 |
 | `stash list` / `stash show` | `cli.stash-bisect-worktree` | stash 条目和文件级摘要可观察 |
 | `stash apply` | `cli.stash-bisect-worktree` | 修改恢复但 stash 条目保留 |
 | `stash pop` | `cli.stash-bisect-worktree` | 修改恢复且 stash 条目删除 |
@@ -109,16 +97,15 @@
 | `bisect bad` / `bisect good <rev>` | `cli.stash-bisect-worktree` | 会话状态推进并可由 log/view 观察 |
 | `bisect log` / `bisect view` | `cli.stash-bisect-worktree` | 当前会话和候选状态可输出 |
 | `bisect reset` | `cli.stash-bisect-worktree` | 结束会话并恢复原 HEAD |
-| `worktree add -b <branch> <path>` | `cli.stash-bisect-worktree` | shared branch 被创建，linked worktree 被创建并登记 |
-| `worktree add --no-checkout --lock --reason <text> <path>` | `cli.stash-bisect-worktree` | linked worktree 仅创建目录与 `.libra` 链接，不恢复 tracked 文件，并立即登记为 locked |
-| `worktree list --verbose` | `cli.stash-bisect-worktree` | 主 worktree 和 linked worktree 均可列出，并显示 shared HEAD 短 hash |
-| `worktree list --porcelain` | `cli.stash-bisect-worktree` | 输出稳定 `worktree` / `HEAD` / `locked` 记录，不输出 Git per-worktree `branch` / `detached` |
+| `bisect start <bad> <good1> <good2>` | `cli.stash-bisect-worktree` | 当前未支持 positional multi-good，runner 负向断言 |
+| `worktree add <path>` | `cli.stash-bisect-worktree` | linked worktree 被创建、登记，并从当前 HEAD 填充工作区 |
+| `worktree add --no-checkout` | `cli.stash-bisect-worktree` | 当前未实现，runner 负向断言稳定错误 |
+| `worktree list` / `--json worktree list` | `cli.stash-bisect-worktree` | 主 worktree 和 linked worktree 均可列出，JSON envelope 可解析 |
 | `worktree lock --reason` / `unlock` | `cli.stash-bisect-worktree` | 锁状态和 reason 可观察并可解除 |
 | `worktree move <src> <dest>` | `cli.stash-bisect-worktree` | 登记路径和目录路径同步移动 |
 | `worktree remove <path>` | `cli.stash-bisect-worktree` | 默认注销登记但保留目录 |
-| `worktree remove -f -f <path>` | `cli.stash-bisect-worktree` | locked worktree 需要双 force 才能注销；未带 `--delete-dir` 时仍保留目录 |
-| `worktree remove --delete-dir --force <path>` | `cli.stash-bisect-worktree` | dirty linked worktree 需显式 force 才能删盘 |
-| `worktree prune --dry-run` / `--verbose --expire now` | `cli.stash-bisect-worktree` | dry-run 仅报告 stale 登记，expire 只清理目录缺失条目 |
+| `worktree remove --delete-dir <path>` | `cli.stash-bisect-worktree` | dirty linked worktree 被拒绝；清理后可删除目录 |
+| `worktree prune` | `cli.stash-bisect-worktree` | 清理目录缺失的 stale 登记并输出被清理路径 |
 
 
 
@@ -126,21 +113,23 @@
 
 | 参数或子命令 | 场景 ID | 关键断言 |
 |---|---|---|
-| `tag <name>` / `tag -m <msg>` / `tag -F <file>` | `cli.tag-basic` | 轻量、inline-message annotated 和 file-message annotated tag 均可创建、列出、解析 |
-| `tag -l` / `tag -l -n` / `tag --points-at` / `tag --contains` / `tag --merged` / `tag --sort` | `cli.tag-basic` | 列表、注释摘要、target/history/merged 过滤和 refname 排序覆盖 |
-| `tag -f` / `tag -d <name>...` / JSON batch delete partial failure | `cli.tag-basic` | 强制更新、批量删除、部分失败 JSON `deleted`/`failed` 契约覆盖 |
+| `tag <name>` / `tag -m <msg>` | `cli.tag-basic` | 轻量和 inline-message annotated tag 可创建、列出、解析 |
+| `tag -F <file>` | `cli.tag-basic` | 当前未实现，runner 负向断言稳定错误 |
+| `tag -l` / `tag -l -n` | `cli.tag-basic` | 列表和注释摘要覆盖 |
+| `tag -f` / `tag -d <name>` / JSON delete | `cli.tag-basic` | 强制更新、删除、JSON 删除和缺失 tag 错误覆盖 |
 | `merge <branch>` | `cli.merge-rebase-cherry-revert-smoke` | fast-forward 与三方无冲突 merge 均可观察 |
-| `merge --find-renames[=<n>]` | `cli.merge-rebase-cherry-revert-smoke` | 相似度阈值控制 rename+edit 是否自动合并 |
-| `merge --squash --continue` | `cli.merge-rebase-cherry-revert-smoke` | 与 lifecycle action 组合必须被拒绝 |
+| `merge --find-renames[=<n>]` | `cli.merge-rebase-cherry-revert-smoke` | 当前未实现，runner 负向断言稳定错误 |
+| `merge --squash --continue` | `cli.merge-rebase-cherry-revert-smoke` | 与 lifecycle action 组合被拒绝 |
 | `merge --continue` / `--abort` | `cli.merge-rebase-cherry-revert-smoke` | 无会话时明确失败；冲突续跑场景另行补充 |
 | `rebase <upstream>` | `cli.merge-rebase-cherry-revert-smoke` | topic 提交重放到新 base |
 | `rebase --continue` | `cli.merge-rebase-cherry-revert-smoke` | 无会话时明确失败；冲突续跑场景另行补充 |
 | `cherry-pick <commit>` | `cli.merge-rebase-cherry-revert-smoke` | 指定提交修改被重放到当前分支 |
-| `revert <commit>` / `A..B`, `revert --continue` / `--abort` | `cli.merge-rebase-cherry-revert-smoke` | 创建反向提交、范围回滚并验证空会话控制失败 |
-| `grep` / `grep -F/-i/-n/-c/-l/-e/-f/--tree` | `cli.grep-blame-describe-shortlog` | 工作区、pathspec、pattern file 和历史 tree 搜索可观察 |
-| `blame` / `blame -L` | `cli.grep-blame-describe-shortlog` | 行级作者、提交和范围限制可观察 |
-| `describe --tags/--always/--abbrev` | `cli.grep-blame-describe-shortlog` | tag 描述和 hash fallback 可观察 |
-| `shortlog` / `shortlog -s` / `shortlog -n` | `cli.grep-blame-describe-shortlog` | 作者汇总和排序可观察 |
+| `revert <commit>` / `A..B`, `revert --continue` / `--abort` | `cli.merge-rebase-cherry-revert-smoke` | 单提交反向提交覆盖；范围回滚和空会话控制为负向断言 |
+| `grep` / `grep -F/-i/-n/-c/-l/-L/-e/-f/--tree/--cached` | `cli.grep-blame-describe-shortlog` | 工作区、index、pathspec、pattern file 和历史 tree 搜索可观察 |
+| `grep -z` / `grep --untracked` | `cli.grep-blame-describe-shortlog` | 当前未实现，runner 负向断言 |
+| `blame` / `blame -L` / `blame <file> <commit>` | `cli.grep-blame-describe-shortlog` | 行级作者、提交和范围限制可观察；`--porcelain` 为负向断言 |
+| `describe --tags/--always/--abbrev` | `cli.grep-blame-describe-shortlog` | tag 描述和 hash fallback 可观察；`--exact-match` / `--dirty` 为负向断言 |
+| `shortlog` / `shortlog -s` / `shortlog -n` / `shortlog -e` | `cli.grep-blame-describe-shortlog` | 作者汇总、排序、邮箱和 revision 限制可观察；扩展 flags 为负向断言 |
 | `rev-parse HEAD` / `--short` / `--show-toplevel` | `cli.object-readback` | 完整哈希、短哈希和工作树根路径可传递给后续 plumbing 命令 |
 | `rev-parse --verify` / `--verify --short` / `--default` | `cli.object-readback` | 单对象断言、短哈希断言、默认 revision 回退和 quiet 失败退出 1 可观察 |
 | `show --no-patch` / `--stat` / `<rev>:<path>` / `<blob>` | `cli.object-readback` | commit 元数据、统计、历史文件内容、文本 blob 与 binary blob 元数据可观察 |
@@ -151,7 +140,8 @@
 | `rm <path>` | `cli.clean-rm-mv-lfs-basic` | tracked 文件从工作区和 index 移除 |
 | `mv <src> <dst>` | `cli.clean-rm-mv-lfs-basic` | tracked 文件移动并更新 index |
 | `lfs track/untrack/ls-files` | `cli.clean-rm-mv-lfs-basic` | `.libra_attributes` pattern 和 LFS tracked 文件列表可观察 |
-| `reflog show` / `reflog show --stat` / `reflog exists` / `reflog expire --dry-run` | `cli.reflog-symbolic-ref` | HEAD/ref 更新记录可读，exists 可脚本探测，expire 可预览清理并对无 ref 入参返回稳定错误 |
+| `reflog show` / `reflog show --stat` / `-p` / filters / `reflog exists` | `cli.reflog-symbolic-ref` | HEAD/ref 更新记录可读，exists 可脚本探测 |
+| `reflog expire` | `cli.reflog-symbolic-ref` | 当前未实现，runner 负向断言稳定错误且 reflog 保持 intact |
 | `symbolic-ref` / `symbolic-ref --short` / `symbolic-ref HEAD <target>` | `cli.reflog-symbolic-ref` | HEAD 符号引用读写可观察 |
 | `--json open` | `cli.open-smoke` | 只输出 URL 和 `launched=false`，不启动外部程序 |
 
@@ -181,37 +171,15 @@
 | 参数或子命令 | 场景 ID | 关键断言 |
 |---|---|---|
 | `clone <repo> [path]` | `cli.clone-fetch-pull-local` | 本地 Git fixture 克隆后文件、refs、remote config 可观察 |
-| `clone -b/--branch` / `--single-branch` / `--no-single-branch` | `cli.clone-fetch-pull-local` | 指定分支 checkout 与分支范围配置可观察 |
-| `clone --depth` | `cli.fetch-depth-local` | shallow 边界写入，`fetch --deepen` 后历史扩展 |
-| `clone --shallow-since` / `--shallow-exclude` / `--reject-shallow` | `cli.fetch-depth-local` | shallow 参数解析和非法/不满足条件路径失败 |
-| `clone --origin` | `cli.clone-fetch-pull-local` | 自定义 remote 名称写入配置并供 fetch/pull 使用 |
-| `clone --bare` / `--mirror` | `cli.clone-fetch-pull-local` | bare/mirror 布局与 mirror refspec/config 可观察 |
-| `clone --no-checkout` | `cli.clone-fetch-pull-local` | metadata/refs 写入但工作区不 checkout |
-| `clone --reference` / `--reference-if-able` / `--dissociate` | `cli.clone-fetch-pull-local` | reference object copy、missing reference 降级和 dissociate 输出可观察 |
-| `clone --local` / `--no-hardlinks` / `--shared` / `--jobs` | `cli.clone-fetch-pull-local` | local clone 安全路径、copy/hardlink 兼容 no-op 参数可传入 |
-| `clone --filter` | `cli.clone-fetch-pull-local` | partial clone promisor/filter 配置和缺 blob checkout 风险可观察 |
-| `remote add/remove/rename/-v` | `cli.clone-fetch-pull-local` | remote 增删改列闭环可观察 |
-| `remote show [-n/--no-query] [-v]` | `cli.clone-fetch-pull-local` | cached/query 输出和 verbose 详情可观察 |
-| `remote get-url --push --all` | `cli.clone-fetch-pull-local` | fetch URL / push URL / all URL 输出可观察 |
-| `remote set-url --add --delete --push --all` | `cli.clone-fetch-pull-local` | URL 列表追加、替换、删除和 pushurl 分离可观察 |
-| `remote prune --dry-run` | `cli.clone-fetch-pull-local` | stale tracking refs 预览和删除语义可观察 |
-| `remote set-branches --add` | `cli.clone-fetch-pull-local` | fetch refspec 被改写/追加 |
-| `remote set-head -a/-d <branch>` | `cli.clone-fetch-pull-local` | remote HEAD 自动、手动、删除路径可观察 |
-| `remote update [remote...]` | `cli.clone-fetch-pull-local` | 指定/全部 remote fetch 调用可观察 |
-| `ls-remote --heads --tags --refs --symref` | `cli.clone-fetch-pull-local` | refs 过滤、HEAD symref 和 peeled tag 抑制可观察 |
-| `ls-remote --exit-code --get-url --sort -o/--server-option <pattern>` | `cli.clone-fetch-pull-local` | URL 解析、不匹配退出码、排序和兼容 server-option 可观察 |
-| `fetch [remote] [refspec]` / `fetch --all` | `cli.clone-fetch-pull-local` | 默认 remote、显式 refspec 和 all-remotes 更新 refs |
-| `fetch --depth` / `--deepen` / `--unshallow` | `cli.fetch-depth-local` | shallow 边界创建、扩展、移除语义可观察 |
-| `fetch --shallow-since` / `--shallow-exclude` / `--update-shallow` | `cli.fetch-depth-local` | shallow shape 参数解析和边界更新可观察 |
-| `fetch --recurse-submodules[=<mode>]` | `cli.clone-fetch-pull-local` | 明确拒绝或友好 usage 错误，不退化为未知参数 |
-| `fetch --porcelain` / `--dry-run` / `--append` / `-v` | `cli.clone-fetch-pull-local` | 机器输出、无写入预览、FETCH_HEAD append 和 stderr 诊断可观察 |
-| `fetch --prune` / `--tags` / `--no-tags` / `--force` | `cli.clone-fetch-pull-local` | tracking ref 清理、tag auto-follow/强制覆盖语义可观察 |
-| `fetch --atomic` / `--refmap` | `cli.clone-fetch-pull-local` | ref 更新事务和自定义 tracking 目标可观察 |
-| `pull [remote] [refspec]` | `cli.clone-fetch-pull-local` | fetch + integrate 闭环，tracking 缺失负向可观察 |
-| `pull --ff-only` / `--ff` / `--no-ff` | `cli.clone-fetch-pull-local` | fast-forward 策略选择和冲突 flag 拒绝可观察 |
-| `pull --squash` / `--no-squash` / `--no-commit` / `--commit` | `cli.clone-fetch-pull-local` | merge path 的 index/commit 副作用可观察 |
-| `pull --rebase[=<when>]` / `-r` | `cli.clone-fetch-pull-local` | linear rebase 成功，unsupported `merges/interactive` 失败 |
-| `pull --autostash` / `--no-autostash` / `--depth` | `cli.clone-fetch-pull-local`、`cli.fetch-depth-local` | dirty worktree integration 与 shallow fetch 参数可观察 |
+| `clone --depth` / `fetch --depth` | `cli.fetch-depth-local` | shallow marker 与 checkout 内容可观察，非法 depth 失败 |
+| `remote add/remove/rename/-v/show/get-url/set-url/prune` | `cli.clone-fetch-pull-local` | 当前 remote 增删改查和 prune 基础路径可观察 |
+| unsupported remote flags (`set-branches` / `set-head` / `update`) | `cli.clone-fetch-pull-local` | 当前未实现，runner 负向断言稳定错误 |
+| `ls-remote --heads --tags --refs` | `cli.clone-fetch-pull-local` | refs 过滤输出可观察 |
+| unsupported ls-remote flags (`--sort` / `--exit-code` / `--get-url` / `--symref`) | `cli.clone-fetch-pull-local` | 当前未实现，runner 负向断言 |
+| `fetch [remote]` / `fetch --all` / `fetch --depth` | `cli.clone-fetch-pull-local`、`cli.fetch-depth-local` | 默认 remote、全部 remote 和 depth fetch 可观察 |
+| unsupported fetch flags (`--deepen` / `--unshallow` / `--prune` / `--porcelain` / tags modes) | `cli.clone-fetch-pull-local`、`cli.fetch-depth-local` | 当前未实现，runner 负向断言 |
+| `pull` / `pull --ff-only` / `pull --rebase` | `cli.clone-fetch-pull-local` | 本地 fast-forward/rebase 基础路径可观察 |
+| unsupported pull flags (`--squash` / `--no-squash` / `--commit` / `--ff`) | `cli.clone-fetch-pull-local` | 当前未实现，runner 负向断言 |
 | `push <remote> [refspec...]` | `live.github-create-push-clone-fetch` | 真实 GitHub remote ref 更新和 clone/fetch readback 可观察 |
 | `push --dry-run` / `--porcelain` | `live.github-create-push-clone-fetch`、`cli.push-local-file-remote-rejected` | 预览/机器输出语义；本地 file remote fail-closed |
 | `push -u/--set-upstream` | `live.github-create-push-clone-fetch` | upstream tracking config 写入 |
@@ -226,19 +194,19 @@
 
 | 参数或子命令 | 场景 ID | 关键断言 |
 |---|---|---|
-| `notes add -m/-F/-f --ref` | `cli.notes-smoke` | 默认和自定义 notes ref 写入、强制覆盖和消息来源可观察 |
-| `notes list/show/remove --ref` | `cli.notes-smoke` | note ref 列表、读取、删除和删除后负向可观察 |
-| `ls-tree -r -t -d -l -z --name-only --name-status --object-only --abbrev[=N] <tree> [path...]` | `cli.ls-tree-smoke` | tree/path 过滤、递归、大小、NUL、仅路径/对象输出和缺失路径错误可观察 |
+| `notes` | `cli.notes-smoke` | 当前未注册，runner 断言 JSON unknown-command 错误并运行 fsck |
+| `ls-tree` | `cli.ls-tree-smoke` | 当前未注册，runner 创建 tree fixture 后断言 JSON unknown-command 错误并运行 fsck |
 | `cat-file -t/-s/-p/-e <object>` | `cli.object-readback` | object 类型、大小、内容和存在性退出码可观察 |
-| `cat-file --batch[=<fmt>]` / `--batch-check[=<fmt>]` / `-Z` / `--buffer` / `--batch-all-objects` / `--unordered` / `--follow-symlinks` | `cli.object-readback` | stdin/batch、all-objects、NUL 和格式化输出契约可观察 |
-| `cat-file --textconv` / `--filters` | `cli.object-readback` | unsupported flag 返回稳定错误 |
 | `cat-file --ai*` | 无（显式排除） | AI object inspection 属 Libra AI 扩展，不纳入 Git 兼容黑盒计划 |
-| `hash-object -w --stdin --stdin-paths -t/--type --literally --path --no-filters <path...>` | `cli.object-readback`、`cli.sha256-object-readback` | blob 写入、stdin/path 输入、类型校验、literal 和 sha256 object id 可观察 |
-| `fsck [object] --no-reflogs -v/--verbose --unreachable --dangling[=BOOL] --no-dangling --name-objects --lost-found --root --tags --connectivity-only --full --no-full --strict` | `cli.object-readback`、`cli.gc-smoke` | 默认/严格/连通性检查、dangling/unreachable 输出和 lost-found 副作用可观察 |
-| `gc --dry-run --prune=<when>` | `cli.gc-smoke` | unreachable loose object 预览和真实清理后 fsck 通过 |
-| `prune --dry-run --expire <when> -v/--verbose` | `cli.gc-smoke` | prune 预览、保留、verbose 删除输出可观察 |
-| `archive [treeish] --format/-f --output/-o --prefix` | `cli.archive-smoke` | tar/tar.gz/tar.bz2/zip 输出、路径 prefix 和 unsafe prefix/format 失败可观察 |
-| `verify-pack [-v/--verbose] [-s/--stat-only] --pack <pack> <idx...>` | `cli.verify-pack-smoke` | idx/pack 对应校验、verbose/stat-only 和缺失/错误 pack 失败可观察 |
+| `hash-object -w` / `--stdin` / `-t` | `cli.object-readback`、`cli.sha256-object-readback` | blob 写入、stdin 输入、类型校验和 sha256 object id 可观察 |
+| `show --no-patch` / `<rev>:<path>` / `<blob>` | `cli.object-readback` | commit 元数据、历史文件内容和 blob 内容可观察 |
+| `show-ref --head` / `--heads` / `--hash` | `cli.object-readback` | HEAD/分支引用和 hash-only 输出可观察 |
+| `rev-list HEAD` | `cli.object-readback` | 可达提交输出和 JSON envelope 可观察 |
+| `fsck` / `fsck --connectivity-only` / `fsck <object>` | `cli.object-readback`、`cli.gc-smoke` | 默认、连通性和指定对象检查可观察 |
+| `gc` / `prune` | `cli.gc-smoke` | 当前顶层命令未注册，runner 断言 JSON unknown-command 错误 |
+| `maintenance run --dry-run --task gc` | `cli.gc-smoke` | 当前可用 maintenance 路径返回 JSON envelope |
+| `archive` | `cli.archive-smoke` | 当前未注册，runner 断言 JSON unknown-command 错误 |
+| `verify-pack [-v] --pack <pack> <idx...>` | `cli.verify-pack-smoke` | idx/pack 对应校验和 verbose 路径可观察；`-s` 当前未覆盖为正向 |
 | `db status` / `db upgrade` / `db --json status` | `cli.schema-upgrade-observable` | fresh/current schema 状态、升级 no-op 和非 repo 失败可观察 |
 | hidden `index-pack` | `cli.verify-pack-smoke` | 仅作为 pack fixture 辅助生成，不作为独立用户命令场景 |
 

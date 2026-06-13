@@ -16,7 +16,7 @@
 //! risk to a human reviewer).
 //!
 //! Like its constituents this performs no I/O and is a pure function of its
-//! inputs. See `docs/improvement/agent.md` Step 2.5 (CEX-S2-15).
+//! inputs. See `docs/development/commands/agent.md` Step 2.5 (CEX-S2-15).
 
 use super::{
     EvidenceId,

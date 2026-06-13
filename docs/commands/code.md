@@ -101,10 +101,12 @@ Automation clients attach with `POST /api/code/controller/attach`, body `{ "clie
 
 Selecting `loopback` is rejected when `--host` is not a loopback address, and the flag conflicts with `--stdio`. The browser server-side endpoints are tagged in the `code_router()` audit matrix (`src/internal/ai/web/mod.rs`):
 
-- `/session`, `/events`, `/diagnostics`, `/threads`, `/repo`, `/repo/status` — loopback-only observe.
-- `/controller/attach` — loopback. `kind: "automation"` requests additionally require `X-Libra-Control-Token`. The handler **issues** the lease's `controllerToken` (it does not expect the caller to send one).
-- `/controller/detach`, `/messages`, `/interactions/{id}` — loopback + `X-Code-Controller-Token`; `Automation` leases additionally require `X-Libra-Control-Token`.
-- `/control/cancel` — loopback + `X-Code-Controller-Token`. `Automation` leases also require `X-Libra-Control-Token`; this is the only difference from the TUI `Esc` cancel path.
+- `GET /api/code/session`, `GET /api/code/events`, `GET /api/code/diagnostics`, `GET /api/code/threads`, `GET /api/code/goal/status` — loopback-only observe.
+- `POST /api/code/controller/attach` — loopback. `kind: "automation"` requests additionally require `X-Libra-Control-Token`. The handler **issues** the lease's `controllerToken` (it does not expect the caller to send one).
+- `POST /api/code/controller/detach`, `POST /api/code/messages`, `POST /api/code/interactions/{id}` — loopback + `X-Code-Controller-Token`; `Automation` leases additionally require `X-Libra-Control-Token`.
+- `POST /api/code/control/cancel` — loopback + `X-Code-Controller-Token`. `Automation` leases also require `X-Libra-Control-Token`; this is the only difference from the TUI `Esc` cancel path.
+- `POST /api/code/task/dispatch` — loopback + `X-Code-Controller-Token`; user-initiated sub-agent dispatch requires an automation lease.
+- `POST /api/code/goal/start`, `POST /api/code/goal/cancel` — loopback + `X-Code-Controller-Token`; goal mutation requires the active controller lease.
 
 Browser write requests share the same 256 KiB body limit and audit-sink wiring as automation control. The browser persists the lease only in memory; reloading the page drops the lease and the next write reattaches.
 
@@ -145,15 +147,21 @@ Code UI API errors use `{ error: { code, message } }`:
 | `LOOPBACK_REQUIRED` | 403 | Non-loopback client attempted an API route. |
 | `PAYLOAD_TOO_LARGE` | 413 | Write request body exceeded 256 KiB. |
 | `CONTROL_DISABLED` | 403 | Automation control is not enabled for this process. |
-| `MISSING_CONTROL_TOKEN` / `INVALID_CONTROL_TOKEN` | 403 | Automation control token is absent or invalid. |
-| `MISSING_CONTROLLER_TOKEN` / `INVALID_CONTROLLER_TOKEN` | 403 | Lease token is absent or invalid for a write route. |
+| `MISSING_CONTROL_TOKEN` | 403 | Automation control token is absent. |
+| `INVALID_CONTROL_TOKEN` | 403 | Automation control token is invalid. |
+| `MISSING_CONTROLLER_TOKEN` | 403 | Lease token is absent for a write route. |
+| `INVALID_CONTROLLER_TOKEN` | 403 | Lease token is invalid or stale for a write route. |
 | `INVALID_CONTROLLER_KIND` | 400 | Controller attach requested an unsupported kind. |
 | `CONTROLLER_CONFLICT` | 409 | Another live controller owns the lease, or the session is busy. |
 | `BROWSER_CONTROL_DISABLED` | 403 | Browser write control is disabled. |
 | `AUTOMATION_CONTROLLER_REQUIRED` | 403 | An automation-only path was called with a non-automation lease. |
 | `CODE_UI_UNAVAILABLE` | 404 | No active `libra code` session is attached to the web server. |
 | `INVALID_QUERY_PARAM` | 400 | Query parsing failed, currently for `/threads` pagination. |
-| `STORAGE_PATH_INVALID` / `STATUS_UNAVAILABLE` / `THREAD_LIST_FAILED` / `DB_UNAVAILABLE` / `INTERNAL_ERROR` | 500 | Server-side storage, status, projection, database, or fallback internal failure. |
+| `STORAGE_PATH_INVALID` | 500 | Storage-root resolution failed. |
+| `STATUS_UNAVAILABLE` | 500 | Runtime status snapshot is unavailable. |
+| `THREAD_LIST_FAILED` | 500 | Thread projection enumeration failed. |
+| `DB_UNAVAILABLE` | 500 | Session database is offline. |
+| `INTERNAL_ERROR` | 500 | Fallback internal failure. |
 | `UNSUPPORTED_OPERATION` | 422 | Runtime rejected a requested operation that is not yet supported. |
 
 ### Web Search

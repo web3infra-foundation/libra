@@ -179,7 +179,7 @@ async fn test_execute_commit() {
             Head::Branch(name) => name,
             _ => panic!("head not in branch"),
         };
-        // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+        // Migrated from lossy `Branch::find_branch` per docs/development/commands/branch.md.
         let branch = Branch::find_branch_result(&branch_name, None)
             .await
             .expect("failed to query branch")
@@ -187,7 +187,7 @@ async fn test_execute_commit() {
         let commit: Commit = load_object(&branch.commit).unwrap();
 
         assert_eq!(commit.message.trim(), "init");
-        // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+        // Migrated from lossy `Branch::find_branch` per docs/development/commands/branch.md.
         let branch = Branch::find_branch_result(&branch_name, None)
             .await
             .expect("failed to query branch")
@@ -218,7 +218,7 @@ async fn test_execute_commit() {
             Head::Branch(name) => name,
             _ => panic!("head not in branch"),
         };
-        // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+        // Migrated from lossy `Branch::find_branch` per docs/development/commands/branch.md.
         let branch = Branch::find_branch_result(&branch_name, None)
             .await
             .expect("failed to query branch")
@@ -226,7 +226,7 @@ async fn test_execute_commit() {
         let commit: Commit = load_object(&branch.commit).unwrap();
 
         assert_eq!(commit.message.trim(), "init commit");
-        // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+        // Migrated from lossy `Branch::find_branch` per docs/development/commands/branch.md.
         let branch = Branch::find_branch_result(&branch_name, None)
             .await
             .expect("failed to query branch")
@@ -1033,7 +1033,7 @@ async fn test_commit_without_identity_fails_by_default() {
 /// --no-edit`, `-F file`, `-s -m`, `--allow-empty`, `--conventional`,
 /// `--json -m`) without having to read the design doc. Companion to the
 /// global `--help` EXAMPLES rollout tracked in
-/// `docs/improvement/README.md` (cross-cutting item B).
+/// `docs/development/commands/_general.md` (cross-cutting item B).
 #[test]
 fn test_commit_help_lists_examples_banner() {
     let repo = tempdir().expect("tempdir for commit --help");

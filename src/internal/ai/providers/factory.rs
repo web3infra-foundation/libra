@@ -2,7 +2,7 @@
 //! [`ModelBinding`] and per-call build options.
 //!
 //! This module is the second half of OC-Phase 1 P1.2 from
-//! `docs/improvement/opencode.md`. The command layer is responsible for
+//! `docs/development/commands/_general.md`. The command layer is responsible for
 //! turning CLI flags / dotenv into a [`ProviderBuildOptions`]; the factory is
 //! responsible for one thing only: dispatching to the right provider client
 //! constructor and wrapping the resulting `Model` into [`AnyCompletionModel`].

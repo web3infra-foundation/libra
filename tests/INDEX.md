@@ -22,7 +22,7 @@
 | `compat_bisect_subcommand_surface` | 1 | Guards `libra bisect` subcommand surface | `src/command/bisect.rs` |
 | `compat_worktree_delete_dir` | 1 | Guards worktree delete semantics on dir removal | `src/command/worktree.rs` |
 | `compat_checkout_alias_help` | 1 | Guards `--help` text for checkout aliases | `src/command/checkout.rs` |
-| `compat_matrix_alignment` | 1 | Guards public docs/release matrices vs. real CLI/API surfaces | `COMPATIBILITY.md`, `docs/automation/local-tui-control.md`, `.github/workflows/base.yml`, `src/cli.rs`, `src/internal/ai/web/mod.rs` |
+| `compat_matrix_alignment` | 1 | Guards public docs/release matrices vs. real CLI/API surfaces | `COMPATIBILITY.md`, `docs/commands/code.md`, `.github/workflows/base.yml`, `src/cli.rs`, `src/internal/ai/web/mod.rs` |
 | `compat_live_compat_workflow` | 1 | Guards optional live AI/cloud workflow remains manual/scheduled and secret-gated | `.github/workflows/live-compat.yml` |
 | `compat_branch_lossy_wrapper_guard` | 1 | Guards branch-name lossy conversion wrapper | `src/internal/branch.rs` |
 | `compat_lfs_client_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in `internal/protocol/lfs_client.rs` | `src/internal/protocol/lfs_client.rs` |
@@ -33,7 +33,7 @@
 | `compat_extra_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in miscellaneous modules | `src/**` |
 | `compat_all_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in general production codebase | `src/**` |
 | `compat_agent_run_non_exhaustive_guard` | 1 | Enforces `#[non_exhaustive]` on every `pub enum` under `agent_run/` for additive evolution | `src/internal/ai/agent_run/` |
-| `compat_agent_docs_contract` | 1 | Guards active Agent plan claims against stale removed-provider status | `docs/improvement/agent.md`, `src/command/code.rs` |
+| `compat_agent_docs_contract` | 1 | Guards active Agent plan claims against stale removed-provider status | `docs/development/commands/agent.md`, `src/command/code.rs` |
 | `compat_help_examples_banner` | 1 | Every visible command in `src/cli.rs::Commands` renders an `EXAMPLES:` / `Examples:` section in `<cmd> --help` (cross-cutting item B) | `src/cli.rs`, `src/command/**` |
 | `compat_error_codes_doc_sync` | 1 | Every `LBR-*-NNN` literal in `src/utils/error.rs` is documented in `docs/error-codes.md` | `src/utils/error.rs`, `docs/error-codes.md` |
 | `compat_command_docs_examples_section` | 1 | Every `docs/commands/<name>.md` page carries an `## Examples` / `## Common Commands` heading | `docs/commands/**` |
@@ -175,6 +175,6 @@ relevant source entry above.
 
 - Every new `tests/<name>.rs` must add a row here in the same PR (enforced by
   §10 of `docs/development/integration-test-plan.md`).
-- Renames must update both this index and the plan; `scripts/check_integration_plan_consistency.sh`
+- Renames must update both this index and the plan; `compat_matrix_alignment`
   will fail CI on dangling references.
 - TODO rows are tracked as `BASELINE_GAP-INTEG-007` — the index pass.

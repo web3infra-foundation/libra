@@ -1,6 +1,6 @@
 //! Pure PreToolUse hook exit-code classifier (CEX-S2-16 / S2-INV-13, Step 2.2).
 //!
-//! `docs/improvement/agent.md` Step 2.2 defines the authoritative hook exit-code
+//! `docs/development/commands/agent.md` Step 2.2 defines the authoritative hook exit-code
 //! mapping table. The security-critical property is **fail-closed**: only the
 //! three documented outcomes (`0` → allow, `2` → deny, `3` → needs-human) are
 //! recognised; *every other* terminal condition — an unknown exit code, a

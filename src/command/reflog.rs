@@ -37,7 +37,7 @@ use crate::{
 /// banner pins one example per sub-command plus a filtered `show` and a
 /// JSON variant so users can map their intent to the right invocation
 /// without reading the design doc. Cross-cutting `--help` EXAMPLES
-/// rollout per `docs/improvement/README.md` item B.
+/// rollout per `docs/development/commands/_general.md` item B.
 pub const REFLOG_EXAMPLES: &str = "\
 EXAMPLES:
     libra reflog show                          Show HEAD reflog entries

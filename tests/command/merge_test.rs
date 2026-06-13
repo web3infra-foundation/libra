@@ -803,7 +803,7 @@ fn test_merge_untracked_overwrite_refuses_before_head_update() {
 /// `libra merge --help` surfaces the EXAMPLES banner so users see the
 /// supported fast-forward / remote-ref / JSON forms before hitting the
 /// `MergeNonFastForward` runtime error. Cross-cutting `--help` EXAMPLES
-/// rollout per `docs/improvement/README.md` item B.
+/// rollout per `docs/development/commands/_general.md` item B.
 #[test]
 fn test_merge_help_lists_examples_banner() {
     let repo = tempfile::tempdir().expect("tempdir for merge --help");

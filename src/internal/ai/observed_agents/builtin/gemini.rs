@@ -8,7 +8,7 @@
 //! [`ObservedAgent::protected_dirs`] manifest that `rewind` / `clean`
 //! consume to leave Gemini's session storage alone.
 //!
-//! `docs/improvement/entire.md` §16.1 lists `builtin/gemini.rs` as a
+//! `docs/development/commands/_general.md` §16.1 lists `builtin/gemini.rs` as a
 //! required v1 file, and `builtin/stable_promoted.rs::promoted_specs_cover_every_v1_preview_kind`
 //! asserts that `AgentKind::Gemini` is a "dedicated stable" type rather
 //! than a row in `STABLE_PROMOTED_SPECS`. Until v0.17.672 the codebase
@@ -16,7 +16,7 @@
 //! dedicated type the assertion implies — this module closes that gap.
 //!
 //! `TranscriptTruncator` is intentionally not implemented here: per
-//! `docs/improvement/entire.md` §7.3, v1 leaves the agent's transcript
+//! `docs/development/commands/_general.md` §7.3, v1 leaves the agent's transcript
 //! file untouched on `rewind --apply` and prints a warning. Adding the
 //! truncator is gated on understanding Gemini's session JSONL schema
 //! and is tracked alongside the Claude Code truncator's evolution.

@@ -40,7 +40,7 @@ enum GrepReadError {
 /// `--tree REV` historical search, count, filename listing, line
 /// numbers, JSON for agents) so users can map intent to invocation
 /// without reading the design doc. Cross-cutting `--help` EXAMPLES
-/// rollout per `docs/improvement/README.md` item B.
+/// rollout per `docs/development/commands/_general.md` item B.
 pub const GREP_EXAMPLES: &str = "\
 EXAMPLES:
     libra grep 'TODO'                     Search the working tree for the regex 'TODO'

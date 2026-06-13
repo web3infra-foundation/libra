@@ -1,6 +1,6 @@
 //! OC-Phase 6 P6.7 — S6 supervisor non-completion E2E.
 //!
-//! Spec: `docs/improvement/opencode.md` lines 1706-1722.
+//! Spec: `docs/development/commands/_general.md` lines 1706-1722.
 //!
 //! S6 walks the supervisor through three turns:
 //!

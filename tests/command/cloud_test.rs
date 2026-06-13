@@ -183,7 +183,7 @@ fn test_cloud_sync_human_progress_json_emits_event_without_stdout_progress() {
 /// canonical invocation per sub-command (`status`, `sync`, `restore`)
 /// plus force-sync and JSON variants without reading the design doc.
 /// Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
+/// `docs/development/commands/_general.md` item B.
 #[test]
 fn test_cloud_help_lists_examples_banner() {
     let repo = tempdir().expect("tempdir for cloud --help");

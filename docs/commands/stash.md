@@ -340,7 +340,7 @@ Git's `--include-untracked` (`-u`) and `--all` (`-a`) stash untracked and ignore
 
 ### Why a curated subcommand model?
 
-Git's stash has grown organically and supports `git stash` as a shorthand for `git stash push`, plus `git stash save` (deprecated) and the plumbing pair `git stash create` / `git stash store`. Libra exposes the eight subcommands users actually reach for in practice: `push`, `pop`, `list`, `apply`, `drop`, `show`, `branch`, and `clear`. The plumbing pair (`create` / `store`) and the `save` shorthand are deferred — see [`docs/improvement/compatibility/declined.md`](../improvement/compatibility/declined.md) sections D8 and D9. This keeps the surface aligned with stock Git for everyday workflows while leaving rarely-used plumbing out of the maintained surface.
+Git's stash has grown organically and supports `git stash` as a shorthand for `git stash push`, plus `git stash save` (deprecated) and the plumbing pair `git stash create` / `git stash store`. Libra exposes the eight subcommands users actually reach for in practice: `push`, `pop`, `list`, `apply`, `drop`, `show`, `branch`, and `clear`. The plumbing pair (`create` / `store`) and the `save` shorthand are deferred — see [`docs/development/commands/_compatibility.md`](../development/commands/_compatibility.md) sections D8 and D9. This keeps the surface aligned with stock Git for everyday workflows while leaving rarely-used plumbing out of the maintained surface.
 
 ### Why `stash@{N}` syntax instead of plain indices?
 

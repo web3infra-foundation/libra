@@ -75,7 +75,7 @@ libra --json ls-remote --tags origin
 
 The same banner is rendered by `libra ls-remote --help` so the doc and
 the CLI surface stay in sync (cross-cutting `--help` EXAMPLES rollout,
-see `docs/improvement/README.md` item B).
+see `docs/development/commands/_general.md` item B).
 
 ## Notes
 

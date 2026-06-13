@@ -36,11 +36,8 @@ pub(crate) fn scenario_config_list_variants(ctx: &mut ScenarioCtx<'_>) -> Result
     assert_not_contains(&gpg, "PRIVATE KEY")?;
     let json_list = ctx.command(&["--json", "config", "list"], repo.clone(), true)?;
     assert_json_ok(&json_list, "config")?;
-    let json_name_only_rejected = ctx.command(
-        &["--json", "config", "list", "--name-only"],
-        repo.clone(),
-        false,
-    )?;
-    assert_json_error_code(&json_name_only_rejected, "LBR-CLI-002")?;
+    let json_name_only = ctx.command(&["--json", "config", "list", "--name-only"], repo, true)?;
+    assert_json_ok(&json_name_only, "config")?;
+    assert_stdout_contains(&json_name_only, "user.name")?;
     Ok(())
 }

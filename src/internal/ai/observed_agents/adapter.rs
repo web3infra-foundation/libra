@@ -5,7 +5,7 @@
 //! `read_transcript`, and `protected_dirs`. Hooks, transcript truncation, and
 //! chunking are all opt-in.
 //!
-//! See `docs/improvement/entire.md` (section 5) for the rationale and the v1
+//! See `docs/development/commands/_general.md` (section 5) for the rationale and the v1
 //! adapter matrix (Claude Code + Gemini stable; 5 preview stubs).
 
 use std::path::PathBuf;
@@ -238,7 +238,7 @@ pub trait ObservedAgentHooks: ObservedAgent {
 /// Required by `libra agent checkpoint rewind --apply` once Phase 2 lands.
 /// V1 adapters do NOT implement this — `rewind --apply` therefore leaves the
 /// agent's transcript file untouched and prints a warning, per
-/// `docs/improvement/entire.md` section 7.3.
+/// `docs/development/commands/_general.md` section 7.3.
 pub trait TranscriptTruncator: ObservedAgent {
     fn truncate_transcript(&self, transcript_data: &[u8], checkpoint_id: &str) -> Result<Vec<u8>>;
 }

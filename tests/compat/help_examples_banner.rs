@@ -1,5 +1,5 @@
 //! `tests/compat/help_examples_banner.rs` — surface contract for the
-//! cross-cutting `--help` EXAMPLES rollout (docs/improvement/README.md
+//! cross-cutting `--help` EXAMPLES rollout (docs/development/commands/_general.md
 //! item B, marked ✅ at v0.17.837).
 //!
 //! Per-command tests live in `tests/command/<name>_test.rs` (each
@@ -138,7 +138,7 @@ fn every_visible_command_help_renders_examples_section() {
         missing.is_empty(),
         "Every visible command in src/cli.rs::Commands must render an \
          EXAMPLES section in `<cmd> --help` (cross-cutting item B in \
-         docs/improvement/README.md, sealed at v0.17.836). Missing the \
+         docs/development/commands/_general.md, sealed at v0.17.836). Missing the \
          section: {missing:?}. Fix by adding `pub const <CMD>_EXAMPLES` \
          and `#[command(after_help = <CMD>_EXAMPLES)]` on the Args struct \
          (or wiring after_help on the subcommand binding in src/cli.rs \

@@ -891,7 +891,7 @@ mod tests {
     use super::*;
 
     /// Canonical sample TOML mirroring the doc snippet at
-    /// docs/improvement/opencode.md:1363-1407. Used as the
+    /// docs/development/commands/_general.md:1363-1407. Used as the
     /// happy-path round-trip fixture.
     const CANONICAL_SAMPLE_TOML: &str = r#"
 [code.multi_agent]

@@ -689,7 +689,7 @@ fn build_agent_session_metadata_json(
 /// Detect whether a `TurnStart` is starting alongside another active agent
 /// session in the same `working_dir`.
 ///
-/// Per the agent-traces state machine (`docs/improvement/entire.md` §6.3),
+/// Per the agent-traces state machine (`docs/development/commands/_general.md` §6.3),
 /// a `TurnStart` (UserPromptSubmit) checks for other `active` sessions in
 /// the same `working_dir`; finding any records `concurrent_active=true`
 /// without blocking. Only `TurnStart` events newly raise the flag; the

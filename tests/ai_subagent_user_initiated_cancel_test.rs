@@ -1,6 +1,6 @@
 //! OC-Phase 3 UserInitiated cancel-propagation E2E (fake-provider).
 //!
-//! `docs/improvement/opencode.md` line 979 names this file
+//! `docs/development/commands/_general.md` line 979 names this file
 //! explicitly: opencode PR #25798 lifted cancel semantics to
 //! `Effect.Effect<void>` so a parent abort must await child cleanup
 //! before releasing. Libra's equivalent contract is the

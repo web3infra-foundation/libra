@@ -88,7 +88,7 @@ pub struct SandboxEnforcementParseError {
 
 /// Wire-protocol selector for a [`NetworkService`] allowlist entry.
 ///
-/// Pre-positioned for Phase 7 (`docs/improvement/sandbox.md` §7.1) of the
+/// Pre-positioned for Phase 7 (`docs/development/commands/sandbox.md` §7.1) of the
 /// sandbox network-three-state work. Until the full
 /// `NetworkAccess::Allowlist { services }` migration lands this type is
 /// used by the [`NetworkService`] schema, validators, and allowlist
@@ -111,7 +111,7 @@ pub enum NetworkProtocol {
 
 /// One entry in a sandbox network allowlist.
 ///
-/// Pre-positioned for Phase 7 (`docs/improvement/sandbox.md` §7.1).
+/// Pre-positioned for Phase 7 (`docs/development/commands/sandbox.md` §7.1).
 /// The shape matches the `.libra/sandbox.toml` `[[sandbox.network.services]]`
 /// section:
 ///
@@ -182,7 +182,7 @@ const HIGH_SENSITIVITY_PORTS: &[u16] = &[22, 3389];
 
 impl NetworkService {
     /// Validate this service entry against the rules in
-    /// `docs/improvement/sandbox.md` §7.1:
+    /// `docs/development/commands/sandbox.md` §7.1:
     ///
     /// - `host` must not be empty.
     /// - `host` must not be the bare wildcard `"*"`.
@@ -231,7 +231,7 @@ impl NetworkService {
     }
 }
 
-/// Sandbox network access mode. Per `docs/improvement/sandbox.md`
+/// Sandbox network access mode. Per `docs/development/commands/sandbox.md`
 /// §7.1 the runtime supports a three-state contract:
 ///
 /// - [`NetworkAccess::Denied`] (the default): no outbound network
@@ -278,7 +278,7 @@ pub enum NetworkAccess {
 /// (`true` → [`NetworkAccess::Full`], `false` → [`NetworkAccess::Denied`])
 /// that older `.libra/sandbox.toml` files and persisted
 /// `SandboxPolicy::WorkspaceWrite` JSON envelopes used before the Phase 7
-/// three-state migration (see `docs/improvement/sandbox.md` §7.1).
+/// three-state migration (see `docs/development/commands/sandbox.md` §7.1).
 ///
 /// The legacy form keeps configs and Codex-style JSON envelopes written
 /// against the previous 2-state [`NetworkAccess`] readable after the
@@ -421,7 +421,7 @@ impl NetworkAccess {
     /// either input, so a config file can lock a workspace down but
     /// never silently widen a policy.
     ///
-    /// Per `docs/improvement/sandbox.md` §7.5, *upgrading* network
+    /// Per `docs/development/commands/sandbox.md` §7.5, *upgrading* network
     /// access (e.g. opening an allowlist from a `Denied` baseline)
     /// requires the `ExecApprovalRequest` channel; this combiner
     /// deliberately does not perform that upgrade. A config `Full`
@@ -530,7 +530,7 @@ pub enum SandboxPolicy {
     WorkspaceWrite {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         writable_roots: Vec<PathBuf>,
-        /// Three-state network policy per `docs/improvement/sandbox.md`
+        /// Three-state network policy per `docs/development/commands/sandbox.md`
         /// §7.1: `Denied` / `Allowlist { services }` / `Full`. The
         /// legacy `bool` (which mapped `true → Full`, `false →
         /// Denied`) was migrated in v0.17.723; callers needing the
@@ -1338,7 +1338,7 @@ mod tests {
     /// straight into the three-state enum so older
     /// `.libra/sandbox.toml` configs and persisted `SandboxPolicy`
     /// envelopes from before the Phase 7 migration keep loading.
-    /// Pins `docs/improvement/sandbox.md` §7.1 line 305 and the §
+    /// Pins `docs/development/commands/sandbox.md` §7.1 line 305 and the §
     /// "验证方式" integration test item 9 contract.
     #[test]
     fn network_access_deserialize_accepts_legacy_bool_form() {

@@ -76,7 +76,7 @@ Use these **exact** invocations (they are enforced by CI and the project’s AGE
   `pnpm --dir web install --frozen-lockfile && pnpm --dir web lint && pnpm --dir web build`, then `git status --porcelain -- web/out` (must be empty; compat-web-check inlines this drift check)
 - Worker checks (inside `worker/`):
   `pnpm lint && pnpm test && pnpm test:miniflare && pnpm build`
-- Required consistency check before PRs that touch surfaces (de-scripted — there is no `scripts/` dir):
+- Required consistency check before PRs that touch surfaces (de-scripted — there is no helper script directory):
   `cargo test --test compat_matrix_alignment` (covers `COMPATIBILITY.md` ↔ `src/cli.rs::Commands` drift and `docs/commands/code-control.md` ↔ Code UI router coverage; also runs inside `cargo test --all`)
 
 ## Language, style & hard rules
@@ -119,7 +119,7 @@ Use `tempfile::tempdir()` + `utils::test::ChangeDirGuard` (or the helpers in `te
 
 - Read the root files first: `AGENTS.md` (authoritative for agents), `Claude.md`, `COMPATIBILITY.md`.
 - The single best “how do I even run this” file for contributors is `Claude.md` (build commands, test layers, Cargo features, environment variables).
-- For the AI runtime contract and future phases, see `docs/improvement/agent.md`.
+- For the AI runtime contract and future phases, see `docs/development/commands/agent.md`.
 
 Activate this skill (`/skill libra`) at the start of any session that will read or modify a libra repository or the libra source tree itself. It gives you the correct mental model and the exact incantations the project expects.
 

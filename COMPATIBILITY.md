@@ -16,7 +16,7 @@ what level. The four tiers have the following user-facing semantics:
 The tier here describes **Git surface** compatibility only. It does not
 describe whether a command has been modernized for CLIG (`--json` / `--machine`
 / stable error codes / `run_<cmd>()` split); that work is tracked in
-[`docs/improvement/README.md`](docs/improvement/README.md) and in each command
+[`docs/development/commands/_general.md`](docs/development/commands/_general.md) and in each command
 batch document.
 
 ## Top-level commands (from `src/cli.rs`)
@@ -24,7 +24,7 @@ batch document.
 | Command | Tier | Notes |
 |---------|------|-------|
 | init | supported | |
-| clone | partial | `--depth` and `--single-branch` supported; `--sparse` unsupported (see [docs/improvement/compatibility/declined.md#d10-clone---sparse-与顶层-sparse-checkout-命令](docs/improvement/compatibility/declined.md#d10-clone---sparse-与顶层-sparse-checkout-命令)); `--recurse-submodules` unsupported (see [docs/improvement/compatibility/declined.md#d4-clone---recurse-submodules](docs/improvement/compatibility/declined.md#d4-clone---recurse-submodules)) |
+| clone | partial | `--depth` and `--single-branch` supported; `--sparse` unsupported (see [docs/development/commands/_compatibility.md#d10-clone---sparse-与顶层-sparse-checkout-命令](docs/development/commands/_compatibility.md#d10-clone---sparse-与顶层-sparse-checkout-命令)); `--recurse-submodules` unsupported (see [docs/development/commands/_compatibility.md#d4-clone---recurse-submodules](docs/development/commands/_compatibility.md#d4-clone---recurse-submodules)) |
 | code | intentionally-different | Libra AI extension, not a Git command |
 | code-control | intentionally-different | Libra AI automation extension, not a Git command |
 | automation | intentionally-different | Libra AI automation rules/history extension, not a Git command |
@@ -37,8 +37,8 @@ batch document.
 | restore | supported | |
 | status | supported | |
 | clean | supported | |
-| stash | partial | `push` / `pop` / `list` / `apply` / `drop` / `show` / `branch` / `clear` supported; `create` / `store` deferred (see [docs/improvement/compatibility/declined.md#d8-stash-create](docs/improvement/compatibility/declined.md#d8-stash-create) and [#d9-stash-store](docs/improvement/compatibility/declined.md#d9-stash-store)) |
-| lfs | partial | built-in Libra LFS command; uses `.libra_attributes`, not Git LFS filters/hooks (see [docs/improvement/compatibility/declined.md#d5-git-lfs-gitattributes-filter--hooks-bridge](docs/improvement/compatibility/declined.md#d5-git-lfs-gitattributes-filter--hooks-bridge)) |
+| stash | partial | `push` / `pop` / `list` / `apply` / `drop` / `show` / `branch` / `clear` supported; `create` / `store` deferred (see [docs/development/commands/_compatibility.md#d8-stash-create](docs/development/commands/_compatibility.md#d8-stash-create) and [#d9-stash-store](docs/development/commands/_compatibility.md#d9-stash-store)) |
+| lfs | partial | built-in Libra LFS command; uses `.libra_attributes`, not Git LFS filters/hooks (see [docs/development/commands/_compatibility.md#d5-git-lfs-gitattributes-filter--hooks-bridge](docs/development/commands/_compatibility.md#d5-git-lfs-gitattributes-filter--hooks-bridge)) |
 | log | supported | |
 | shortlog | supported | |
 | show | supported | |
@@ -56,7 +56,7 @@ batch document.
 | rev-list | supported | |
 | describe | supported | |
 | cherry-pick | supported | |
-| push | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected — intentional (see [docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push](docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push)) |
+| push | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected — intentional (see [docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push](docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push)) |
 | fetch | supported | `--depth` public flag |
 | pull | partial | fetch + fast-forward/three-way merge supported; no `--ff-only` / `--rebase` / `--squash` strategy flags exposed |
 | diff | supported | |
@@ -73,25 +73,26 @@ batch document.
 | cloud | intentionally-different | Libra cloud backup/restore extension, not a Git command |
 | publish | intentionally-different | Libra Cloudflare publish extension, not a Git command |
 | agent | intentionally-different | Libra external-agent capture extension, not a Git command |
+| maintenance | partial | `run` / `register` / `unregister` / `status` exposed; lower-level maintenance tasks such as `commit-graph` and `prefetch` are skipped when unsupported |
 | hooks | intentionally-different | Hidden compatibility entry for hook configs installed by `libra agent enable` |
 | cat-file | supported | `-e` does not support JSON |
 | fsck | supported | |
 | verify-pack | partial | validates one `.idx` file against a matching `.pack`; Git's multi-index form and `-s` / `--stat-only` are not exposed |
 | index-pack | supported | hidden plumbing command |
 | checkout | partial | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore`; detached HEAD and patch modes still partial |
-| bisect | partial | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` supported; `replay` (see [docs/improvement/compatibility/declined.md#d6-bisect-replay](docs/improvement/compatibility/declined.md#d6-bisect-replay)) / `terms` (see [docs/improvement/compatibility/declined.md#d7-bisect-terms](docs/improvement/compatibility/declined.md#d7-bisect-terms)) deferred |
+| bisect | partial | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` supported; `replay` (see [docs/development/commands/_compatibility.md#d6-bisect-replay](docs/development/commands/_compatibility.md#d6-bisect-replay)) / `terms` (see [docs/development/commands/_compatibility.md#d7-bisect-terms](docs/development/commands/_compatibility.md#d7-bisect-terms)) deferred |
 
 ## Git commands intentionally absent from `src/cli.rs`
 
 | Command | Tier | Notes |
 |---------|------|-------|
-| submodule | unsupported | intentional product boundary (see [docs/improvement/compatibility/declined.md#d1-submodule-子命令族](docs/improvement/compatibility/declined.md#d1-submodule-子命令族)) |
-| sparse-checkout | unsupported | no public sparse checkout command (see [docs/improvement/compatibility/declined.md#d10-clone---sparse-与顶层-sparse-checkout-命令](docs/improvement/compatibility/declined.md#d10-clone---sparse-与顶层-sparse-checkout-命令)) |
+| submodule | unsupported | intentional product boundary (see [docs/development/commands/_compatibility.md#d1-submodule-子命令族](docs/development/commands/_compatibility.md#d1-submodule-子命令族)) |
+| sparse-checkout | unsupported | no public sparse checkout command (see [docs/development/commands/_compatibility.md#d10-clone---sparse-与顶层-sparse-checkout-命令](docs/development/commands/_compatibility.md#d10-clone---sparse-与顶层-sparse-checkout-命令)) |
 
 ## Hooks
 
-- Stock Git hooks at `.git/hooks` / `core.hooksPath`: `unsupported` (see [docs/improvement/compatibility/declined.md#d3-git-hooks-bridge-作为核心特性](docs/improvement/compatibility/declined.md#d3-git-hooks-bridge-作为核心特性))
-- AI provider hooks: `intentionally-different` (see [docs/improvement/agent.md](docs/improvement/agent.md))
+- Stock Git hooks at `.git/hooks` / `core.hooksPath`: `unsupported` (see [docs/development/commands/_compatibility.md#d3-git-hooks-bridge-作为核心特性](docs/development/commands/_compatibility.md#d3-git-hooks-bridge-作为核心特性))
+- AI provider hooks: `intentionally-different` (see [docs/development/commands/agent.md](docs/development/commands/agent.md))
 
 ## LFS compatibility notes
 
@@ -99,7 +100,7 @@ batch document.
   lock management and `.libra_attributes`.
 - Git LFS filter bridge (`.gitattributes` smudge/clean filters + `git-lfs` hook
   install): `intentionally-different` (see
-  [docs/improvement/compatibility/declined.md#d5-git-lfs-gitattributes-filter--hooks-bridge](docs/improvement/compatibility/declined.md#d5-git-lfs-gitattributes-filter--hooks-bridge)).
+  [docs/development/commands/_compatibility.md#d5-git-lfs-gitattributes-filter--hooks-bridge](docs/development/commands/_compatibility.md#d5-git-lfs-gitattributes-filter--hooks-bridge)).
 - Repository asset storage policy: current committed binaries remain inline.
   Optional future Git LFS rules in `.gitattributes` are tracked as a repository
   governance decision, **not** as the `libra lfs` command status.

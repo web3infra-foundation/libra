@@ -7,7 +7,7 @@
 //!
 //! # Design note
 //!
-//! Per [`docs/improvement/agent.md`](../../../../../docs/improvement/agent.md)
+//! Per [`docs/development/commands/agent.md`](../../../../../docs/development/commands/agent.md)
 //! Part B Phase 0 plan, the long-term goal is for the Runtime to own the only
 //! formal-write entry point for each phase. As a Wave 1B incremental step,
 //! the helpers below are thin shims over the existing scattered persistence

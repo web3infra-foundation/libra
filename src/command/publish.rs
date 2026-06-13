@@ -1,6 +1,6 @@
 //! `libra publish` — read-only Cloudflare publishing.
 //!
-//! Per `docs/improvement/publish.md`, the publish CLI surface is
+//! Per `docs/development/commands/publish.md`, the publish CLI surface is
 //! `init` / `sync` / `status` / `deploy` / `unpublish`. `init` now
 //! materialises the embedded Worker template, `sync` plans and writes
 //! local refs to publish D1/R2 storage, `status` reports local template
@@ -93,7 +93,7 @@ use crate::{
 /// site-scoped status, a deploy that skips Cloudflare mutation, and a
 /// JSON variant for agents so users can map intent to invocation
 /// without reading the design doc. Cross-cutting `--help` EXAMPLES
-/// rollout per `docs/improvement/README.md` item B.
+/// rollout per `docs/development/commands/_general.md` item B.
 pub const PUBLISH_EXAMPLES: &str = "\
 EXAMPLES:
     libra publish init --slug <slug> --clone-domain <domain>

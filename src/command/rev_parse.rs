@@ -27,7 +27,7 @@ use crate::{
 /// repository top-level. The banner pins the four mutually-exclusive
 /// modes plus a JSON variant for agents so users see all supported
 /// forms without reading the design doc. Cross-cutting `--help`
-/// EXAMPLES rollout per `docs/improvement/README.md` item B.
+/// EXAMPLES rollout per `docs/development/commands/_general.md` item B.
 pub const REV_PARSE_EXAMPLES: &str = "\
 EXAMPLES:
     libra rev-parse HEAD                Print the full 40-char hash for HEAD

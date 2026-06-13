@@ -206,7 +206,7 @@ fn test_rev_list_quiet_suppresses_stdout() {
 /// the default HEAD walk, an explicit branch walk, a relative ref walk,
 /// the JSON variant, and the quiet form without reading the design doc.
 /// Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
+/// `docs/development/commands/_general.md` item B.
 #[test]
 fn test_rev_list_help_lists_examples_banner() {
     let repo = tempdir().expect("tempdir for rev-list --help");

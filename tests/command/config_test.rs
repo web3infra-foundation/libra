@@ -1302,8 +1302,9 @@ async fn resolve_user_identity_sources_tolerates_corrupt_global_db() {
 }
 
 /// `resolve_env_for_target` is the shared secret resolver used by provider,
-/// D1, R2, and tool credential paths. Per the 12-Factor / docs/improvement/
-/// config.md spec, the priority is **process env > local vault > global vault**
+/// D1, R2, and tool credential paths. Per the 12-Factor /
+/// docs/development/commands/config.md spec, the priority is
+/// **process env > local vault > global vault**
 /// so a per-process override like `GEMINI_API_KEY=B libra push` always wins.
 /// Local vault is the fallback when env is unset.
 #[tokio::test]

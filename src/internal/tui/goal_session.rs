@@ -1,6 +1,6 @@
 //! In-memory Goal session state owned by the TUI App.
 //!
-//! Per `docs/improvement/opencode.md` lines 540-700, an active Goal
+//! Per `docs/development/commands/_general.md` lines 540-700, an active Goal
 //! is a session-level construct: there is at most one Goal in flight
 //! per `libra code` session, and its events flow into the same
 //! JSONL stream as the rest of the session (P6.7 wires the
@@ -246,7 +246,7 @@ impl GoalSession {
     /// Append a `CriteriaRevised` envelope that adds a single
     /// user-authored criterion to the active Goal. Implements the
     /// `/goal criteria add <text>` flow from
-    /// `docs/improvement/opencode.md` line 690 — the criterion id is
+    /// `docs/development/commands/_general.md` line 690 — the criterion id is
     /// minted server-side as `user-<n>` where `n` is the count of
     /// existing `user-` prefixed criteria + 1, so two consecutive
     /// `/goal criteria add` calls produce distinct ids without
@@ -326,7 +326,7 @@ impl GoalSession {
 }
 
 /// Render `state` as a compact one-line indicator for the TUI
-/// bottom pane. Per `docs/improvement/opencode.md` line 723 the
+/// bottom pane. Per `docs/development/commands/_general.md` line 723 the
 /// active Goal must surface its id short code + status + progress
 /// without requiring the user to invoke `/goal status` every turn.
 ///
@@ -878,7 +878,7 @@ mod tests {
 
     /// Once the supervisor has projected a live plan, the bottom
     /// indicator includes the current step required by
-    /// `docs/improvement/opencode.md`'s Goal contract. The renderer
+    /// `docs/development/commands/_general.md`'s Goal contract. The renderer
     /// prefers an in-progress step over later pending work.
     #[test]
     fn render_goal_status_line_includes_current_plan_step() {

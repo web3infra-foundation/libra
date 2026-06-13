@@ -1444,13 +1444,13 @@ impl CodeUiApiError {
 
 /// Wave 2 / PR 2 — single source-of-truth catalogue of every
 /// Code UI error code the API exposes, paired with the HTTP status
-/// it MUST resolve to. Per `docs/improvement/test.md` §5.20, this
+/// it MUST resolve to. Per `docs/development/commands/_general.md` §5.20, this
 /// list is enforced by `code_ui_error_code_contract*` in `tests`
 /// below: any new error code added by a constructor OR emitted by
 /// a route handler as an inline `WebApiError {…}` literal must be
 /// appended here, otherwise the test fails. The list is also the
-/// reference for `docs/automation/local-tui-control.md` and the
-/// Worker frontend error rendering.
+/// reference for `docs/commands/code.md` and the Worker frontend
+/// error rendering.
 ///
 /// Codex pass-1 P3: the list is grouped by gate-rejection layer
 /// (loopback first, then body limit, then control-token, then
@@ -1681,19 +1681,11 @@ mod tests {
         ))
     }
 
-    /// Wave 12 / PR 12 — Codex pass-1 fix: pin the
-    /// `docs/automation/local-tui-control.md` "Error code reference"
-    /// table against `code_ui_error_codes()` so a code-only
-    /// addition can't silently desync the publicly-documented
-    /// contract. Parses every Markdown row whose first cell is
-    /// a backtick-wrapped identifier and compares the
-    /// `(code, status)` set against the source-of-truth table.
     #[test]
     fn code_ui_error_code_listing_matches_authoritative_doc() {
         let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("docs/automation/local-tui-control.md");
-        let doc =
-            std::fs::read_to_string(&doc_path).expect("read docs/automation/local-tui-control.md");
+            .join("docs/commands/code.md");
+        let doc = std::fs::read_to_string(&doc_path).expect("read docs/commands/code.md");
         let mut doc_pairs: Vec<(String, u16)> = Vec::new();
         for line in doc.lines() {
             // Markdown table rows look like `| \`CODE\` | 403 | gate description |`.
@@ -1729,11 +1721,11 @@ mod tests {
             .collect();
         assert!(
             !doc_pairs.is_empty(),
-            "error code reference table not found in docs/automation/local-tui-control.md",
+            "Code UI API error table not found in docs/commands/code.md",
         );
         assert_eq!(
             doc_pairs, source_pairs,
-            "docs/automation/local-tui-control.md error code table is out of sync with code_ui_error_codes(); regenerate the table to match (order matters — the table mirrors the runtime gate ordering).",
+            "docs/commands/code.md Code UI API error table is out of sync with code_ui_error_codes(); regenerate the table to match (order matters — the table mirrors the runtime gate ordering).",
         );
     }
 
@@ -1782,7 +1774,7 @@ mod tests {
     /// Wave 2 / PR 2 — error code source-of-truth contract.
     ///
     /// `code_ui_error_codes()` lists every Code UI error code the
-    /// API may return. Per `docs/improvement/test.md` §5.20 we
+    /// API may return. Per `docs/development/commands/_general.md` §5.20 we
     /// pin both:
     ///
     /// 1. the (code, status) tuples themselves are stable — any

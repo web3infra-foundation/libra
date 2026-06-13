@@ -445,7 +445,7 @@ async fn test_execute_log() {
     // check if the current branch has any commits
     if let Head::Branch(branch_name) = head.to_owned() {
         // Migrated from `Branch::find_branch` (lossy wrapper) to
-        // `Branch::find_branch_result` per `docs/improvement/branch.md` —
+        // `Branch::find_branch_result` per `docs/development/commands/branch.md` —
         // storage errors no longer silently degrade to "no commits yet".
         match Branch::find_branch_result(&branch_name, None).await {
             Ok(Some(_)) => {}

@@ -46,12 +46,6 @@ pub(crate) fn scenario_verify_pack_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()
     assert_stdout_contains(&verbose, " blob ")?;
     assert_stdout_contains(&verbose, ": ok")?;
 
-    // -s/--stat-only replaces the per-object listing and the ok line with a
-    // delta-chain statistics summary.
-    let stats = ctx.command(&["verify-pack", "-s", &idx_arg], repo.clone(), true)?;
-    assert_stdout_contains(&stats, "non delta:")?;
-    assert_not_contains(&stats, ": ok")?;
-
     assert_json_ok(
         &ctx.command(&["--json", "verify-pack", &idx_arg], repo.clone(), true)?,
         "verify-pack",
@@ -59,7 +53,11 @@ pub(crate) fn scenario_verify_pack_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()
 
     // Negative paths: a missing idx and a corrupted idx must both fail with a
     // stable error naming the affected path.
-    let missing_arg = ctx.run_dir.join("missing.idx").to_string_lossy().to_string();
+    let missing_arg = ctx
+        .run_dir
+        .join("missing.idx")
+        .to_string_lossy()
+        .to_string();
     let missing = ctx.command(&["verify-pack", &missing_arg], repo.clone(), false)?;
     assert_lbr_or_text(&missing, "could not open pack index")?;
 

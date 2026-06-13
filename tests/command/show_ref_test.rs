@@ -435,7 +435,7 @@ async fn test_show_ref_head_exempt_from_pattern_filter() {
 /// the all-refs default, --heads / --tags scope filters, --head opt-in,
 /// -s hash-only form, pattern filter, and the JSON variant without
 /// reading the design doc. Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
+/// `docs/development/commands/_general.md` item B.
 #[test]
 fn test_show_ref_help_lists_examples_banner() {
     let repo = tempdir().expect("tempdir for show-ref --help");

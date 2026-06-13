@@ -9,7 +9,7 @@
 //!
 //! # CP-4 gate violation
 //!
-//! Per `docs/improvement/agent.md` "Step 2 audit closure (CEX-S2-00 / 01 / 02)",
+//! Per `docs/development/commands/agent.md` "Step 2 audit closure (CEX-S2-00 / 01 / 02)",
 //! all CEX-S2-10..18 Runtime task cards are gated on **CP-4** (Step 1 single-
 //! agent gate). Step 1 is currently incomplete (multiple `未开始` cards in the
 //! milestone index). This file ships the schema scaffold ahead of CP-4 by

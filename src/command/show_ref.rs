@@ -26,7 +26,7 @@ use crate::{
 /// output, a pattern filter for substring search, and a JSON variant
 /// for agents so users see all supported forms without reading the
 /// design doc. Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
+/// `docs/development/commands/_general.md` item B.
 pub const SHOW_REF_EXAMPLES: &str = "\
 EXAMPLES:
     libra show-ref                   List all local refs with their object hashes

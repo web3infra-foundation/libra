@@ -1,6 +1,6 @@
 //! OC-Phase 3 sub-agent worktree isolation contract.
 //!
-//! `docs/improvement/opencode.md` originally named this file as the
+//! `docs/development/commands/_general.md` originally named this file as the
 //! temporary readonly regression target. CEX-S2-11 / CEX-S2-12 now
 //! materialize an isolated workspace before a mutating child runner is
 //! invoked, so this target pins both the historical schema filter and

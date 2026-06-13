@@ -918,7 +918,7 @@ async fn test_remove_pathspec_from_file_ignore_unmatch() {
 /// single-file, recursive, `--cached`, force, dry-run, pathspec-from-file,
 /// and JSON forms before they hit one of `rm`'s strict
 /// conflicting-state safety errors. Cross-cutting `--help` EXAMPLES
-/// rollout per `docs/improvement/README.md` item B.
+/// rollout per `docs/development/commands/_general.md` item B.
 #[test]
 fn test_rm_help_lists_examples_banner() {
     let repo = tempdir().expect("tempdir for rm --help");

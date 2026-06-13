@@ -107,7 +107,7 @@ pub enum HookFailureReason {
 
 /// Reason payload for `AgentRunEvent::PostToolReviewRequired`.
 ///
-/// Per the audit-closure schema in `docs/improvement/agent.md` Step 2.2 hook
+/// Per the audit-closure schema in `docs/development/commands/agent.md` Step 2.2 hook
 /// table: same variant set as `HookFailureReason` PLUS the two PostToolUse-
 /// only literals `hook_deny` / `hook_needs_human`. The variants are listed
 /// flat (not wrapped in a `Failure(HookFailureReason)` newtype) so the wire

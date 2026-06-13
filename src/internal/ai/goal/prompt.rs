@@ -1,6 +1,6 @@
 //! Goal continuation-prompt builder — extracted from
 //! [`super::supervisor`] for OC-Phase 6 P6.3 file-organisation parity
-//! with `docs/improvement/opencode.md:1469` (which lists
+//! with `docs/development/commands/_general.md:1469` (which lists
 //! `goal/prompt.rs` as the canonical home for the builder).
 //!
 //! The builder is a `GoalSupervisor::step()` collaborator that turns a

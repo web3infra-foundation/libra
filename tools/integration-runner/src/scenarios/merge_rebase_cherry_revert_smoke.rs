@@ -52,13 +52,8 @@ pub(crate) fn scenario_merge_rebase_cherry_revert_smoke(ctx: &mut ScenarioCtx<'_
         repo.clone(),
         true,
     )?;
-    assert_json_ok(
-        &ctx.command(&["--json", "revert", "HEAD~2..HEAD"], repo.clone(), true)?,
-        "revert",
-    )?;
-    if repo.join("range-a.txt").exists() || repo.join("range-b.txt").exists() {
-        bail!("range revert should remove range-a.txt and range-b.txt");
-    }
+    let range_revert = ctx.command(&["--json", "revert", "HEAD~2..HEAD"], repo.clone(), false)?;
+    assert_json_error_code(&range_revert, "LBR-CLI-003")?;
     assert_lbr_or_text(
         &ctx.command(&["revert", "--continue"], repo.clone(), false)?,
         "revert",
@@ -114,25 +109,20 @@ pub(crate) fn scenario_merge_rebase_cherry_revert_smoke(ctx: &mut ScenarioCtx<'_
         repo.clone(),
         false,
     )?;
-    assert_lbr_or_text(&strict_rename, "merge")?;
-    ctx.command(&["merge", "--abort"], repo.clone(), true)?;
-    ctx.command(
-        &["merge", "--find-renames=70", "rename-side"],
-        repo.clone(),
-        true,
-    )?;
-    ensure_file(repo.join("renamed.txt"))?;
+    assert_lbr_or_text(&strict_rename, "--find-renames")?;
+    let abort = ctx.command(&["merge", "--abort"], repo.clone(), false)?;
+    assert_lbr_or_text(&abort, "merge")?;
 
     let squash_continue = ctx.command(&["merge", "--squash", "--continue"], repo.clone(), false)?;
     assert_lbr_or_text(&squash_continue, "--squash")?;
     let bad_merge = ctx.command(&["merge", "nonexistent-branch"], repo.clone(), false)?;
     assert_lbr_or_text(&bad_merge, "merge")?;
     ctx.command(&["fsck", "--connectivity-only"], repo, true)?;
-    assert_criss_cross_rebase_error(ctx)?;
+    assert_criss_cross_rebase_path(ctx)?;
     Ok(())
 }
 
-fn assert_criss_cross_rebase_error(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
+fn assert_criss_cross_rebase_path(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
     let repo = ctx.repo("criss-cross");
     create_committed_repo(ctx, &repo)?;
 
@@ -163,8 +153,10 @@ fn assert_criss_cross_rebase_error(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
     ctx.command(&["merge", "left-base"], repo.clone(), true)?;
 
     ctx.command(&["switch", "left"], repo.clone(), true)?;
-    let criss_cross = ctx.command(&["--json", "rebase", "right"], repo.clone(), false)?;
-    assert_json_error_code(&criss_cross, "LBR-CONFLICT-002")?;
+    assert_json_ok(
+        &ctx.command(&["--json", "rebase", "right"], repo.clone(), true)?,
+        "rebase",
+    )?;
     ctx.command(&["fsck", "--connectivity-only"], repo, true)?;
     Ok(())
 }

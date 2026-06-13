@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 //! Server-Sent Events client for the L2 SSE matrix.
 //!
-//! Wave 1 (`docs/improvement/test.md`) calls this out as the only hard
+//! Wave 1 (`docs/development/commands/_general.md`) calls this out as the only hard
 //! blocking item: the `tests/harness/code_session.rs` PTY harness has
 //! always driven `/api/code/messages` and `/session`, but the matrix
 //! roadmap needs a blocking SSE reader before any of the SSE / state /

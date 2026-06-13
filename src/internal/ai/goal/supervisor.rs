@@ -1,6 +1,6 @@
 //! Goal supervisor — Goal-bound tool-loop orchestrator.
 //!
-//! Per `docs/improvement/opencode.md` lines 632-668, the supervisor is
+//! Per `docs/development/commands/_general.md` lines 632-668, the supervisor is
 //! the entity that turns a freshly returned `ToolLoopTurn` into the
 //! next loop decision. It does **not** drive `run_tool_loop` itself
 //! (that integration lives in P6.5 / P6.6 — `libra code` CLI/TUI and

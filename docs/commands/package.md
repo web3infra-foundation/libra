@@ -75,5 +75,5 @@ capabilities (overlap-safe) disappear at the next session start.
 
 - [`COMPATIBILITY.md`](../../COMPATIBILITY.md) — `package` is a Libra-only
   extension (no Git equivalent).
-- `docs/improvement/agent.md` Step 2.7 (CEX-S2-17) — the capability-package /
+- `docs/development/commands/agent.md` Step 2.7 (CEX-S2-17) — the capability-package /
   plugin-trust design.

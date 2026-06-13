@@ -163,7 +163,7 @@ fast and predictable while giving users a deliberate pruning path.
 ### Shallow fetch (`--depth`) is exposed as a stable flag
 
 `libra fetch --depth N` is a public stable flag (audited C3 in
-[`docs/improvement/compatibility/shallow.md`](../improvement/compatibility/shallow.md)).
+[`docs/development/commands/clone.md`](../development/commands/clone.md)).
 The internal `fetch_repository(..., depth)` plumbing has supported shallow fetch
 for some time; C3 surfaces it on the CLI and binds the contract:
 
@@ -175,7 +175,7 @@ for some time; C3 surfaces it on the CLI and binds the contract:
   idempotent: Libra persists server-advertised shallow boundaries in
   `.libra/shallow` and sends them during later upload-pack negotiation.
 - Sparse checkout (`clone --sparse`) is **not** part of this contract — see
-  [`docs/improvement/compatibility/declined.md`](../improvement/compatibility/declined.md)
+  [`docs/development/commands/_compatibility.md`](../development/commands/_compatibility.md)
   for why sparse-checkout is intentionally deferred.
 
 Shallow fetch does introduce the usual Git "shallow boundary" caveats (blame,

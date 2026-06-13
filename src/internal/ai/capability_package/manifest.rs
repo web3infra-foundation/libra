@@ -18,7 +18,7 @@
 //! [`agent_run`](crate::internal::ai::agent_run) newtypes rather than forking
 //! parallel types.
 //!
-//! See `docs/improvement/agent.md` Step 2.7 (CEX-S2-17).
+//! See `docs/development/commands/agent.md` Step 2.7 (CEX-S2-17).
 
 use serde::{Deserialize, Serialize};
 

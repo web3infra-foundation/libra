@@ -423,7 +423,7 @@ fn test_rev_parse_machine_returns_single_json_line() {
 /// `libra rev-parse --help` surfaces the EXAMPLES banner so users see
 /// the four mutually-exclusive modes (resolve / --short / --abbrev-ref
 /// / --show-toplevel) plus the JSON variant for agents. Cross-cutting
-/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
+/// `--help` EXAMPLES rollout per `docs/development/commands/_general.md` item B.
 #[test]
 fn test_rev_parse_help_lists_examples_banner() {
     let repo = tempdir().expect("tempdir for rev-parse --help");
