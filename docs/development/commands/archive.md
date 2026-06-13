@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra archive` 的目标是按 commit、branch、tag 或缩写提交解析出树对象，并把该树中的已跟踪文件写成归档流。该设计不修改工作区和索引；省略 `TREEISH` 时使用 `HEAD`，默认输出未压缩 tar 到 stdout，也支持通过 `--output <FILE>` 写入文件。
+`libra archive` 的目标是按 commit、branch、tag 或缩写提交解析出树对象，并把该树中的已跟踪文件写成归档流。该设计不修改工作区和索引；省略 `TREEISH` 时使用 `HEAD`，默认输出未压缩 tar 到 stdout，也支持通过 `--output <FILE>`（短选项 `-o`）写入文件。归档格式由 `--format`/`-f`（默认 `tar`）控制，支持四种格式：`tar`、`tar.gz`/`tgz`、`tar.bz2`/`tbz2`/`tbz`、`zip`（bzip2 经 `BzEncoder`、zip 经 `zip::ZipWriter` 实现）。`--prefix <PREFIX>` 可为每个归档路径前置一个相对目录前缀，前缀经 `validate_prefix` 校验并拒绝绝对路径与 `..` 穿越。
 
 ## 对比 Git 与兼容性
 
@@ -29,8 +29,8 @@ flowchart TD
     E --> G["副作用边界<br/>只写归档输出流/文件"]
 ```
 
-- 底层操作对象：`Blob`（文件内容或 LFS pointer 写入对象库后的 blob 对象）；`Commit`（提交对象、父提交关系和提交消息载荷）；`TreeItem` / `TreeItemMode`（tree 中的路径项和 mode）；`Tree`（由索引或对象遍历生成的目录树对象）；`ObjectHash`（SHA-1/SHA-256 对象 ID 和 revision 解析结果）
-- 输出与错误契约：人类输出、`--json` / `--machine` 输出和 quiet/verbose 分支必须继续走现有 `OutputConfig` / `emit_json_data` / `CliError` 路径；新增失败模式要补稳定错误码、用户提示和回归测试。
+- 底层操作对象：`Blob`（`load_blob_content` 读取 `blob.data` 并原样写入归档，不识别或解引用 LFS pointer，LFS pointer blob 按原始字节写入）；`Commit`（提交对象，仅读取 `commit.tree_id`，不读取父提交关系或提交消息载荷）；`TreeItem` / `TreeItemMode`（tree 中的路径项和 mode）；`Tree`（`resolve_entries` 仅通过 `load_object::<Tree>(&commit.tree_id)` 从对象库加载，不访问索引）；`ObjectHash`（SHA-1/SHA-256 对象 ID 和 revision 解析结果）
+- 输出与错误契约：`execute_safe` 只产生二进制归档输出，签名中接收 `_output: &OutputConfig`（前导下划线表示有意未使用），全程不读取该参数，也没有 `--json` / `--machine` / quiet/verbose 分支或 `emit_json_data` 调用；失败通过 `CliError` / `CliResult` 传播，并已经携带多种稳定错误码：`CliInvalidArguments`（`LBR-CLI-002`，格式或前缀非法）、`CliInvalidTarget`（`LBR-CLI-003`，treeish 无法解析或空树）、`RepoCorrupt`（`LBR-REPO-002`，commit/tree 对象或不安全条目名不可读）、`IoReadFailed`（`LBR-IO-001`，blob 读取失败）、`IoWriteFailed`（`LBR-IO-002`，归档写出/落盘失败）；新增失败模式要补稳定错误码、用户提示和回归测试。
 - 副作用边界：该命令不应修改索引、对象库、refs/HEAD 或 reflog；唯一写入面是归档输出流/文件，发布前需要继续验证二进制输出不会误写终端或覆盖非预期路径。
 
 ## 实现历史

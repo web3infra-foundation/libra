@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra cherry-pick` 的目标是把已有提交引入当前分支，并在冲突时用 SQLite sequencer 记录可恢复状态。实现需要支持多提交、`-x`、`-s`、`--ff`、`--mainline`、空提交策略和继续/跳过/中止流程，同时对不支持的合并策略给出清晰错误。
+`libra cherry-pick` 的目标是把一个或多个已有提交引入当前分支。当前实现支持按顺序重放多个提交、`-n, --no-commit`（单提交时暂存而不自动提交），并对合并提交直接拒绝（`--mainline` 等合并策略不支持），同时对无法解析的提交、detached HEAD 和冲突给出清晰错误。`-x`/`-s`/`-e`、`--ff`、`--mainline`、空提交策略以及 `--continue`/`--skip`/`--abort` sequencer 流程目前未实现（见“还未实现的功能”）。
 
 ## 对比 Git 与兼容性
 
@@ -36,19 +36,19 @@ flowchart TD
 ## 实现历史
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
-- 2026-06-04 `c0268ec9`（`feat(cherry-pick): add -x/-s/-e and allow-empty flags, lift multi-commit no-commit restriction (v0.17.1309)`）：基础实现节点：add -x/-s/-e and allow-empty flags, lift multi-commit no-commit restriction (v0.17.1309)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-04 `f3d4a180`（`feat(cherry-pick): support -m mainline for merge commits, --ff fast-forward, reject unsupported strategies (v0.17.1312)`）：功能演进：support -m mainline for merge commits, --ff fast-forward, reject unsupported strategies (v0.17.1312)；该节点扩展了当前命令可用的参数或行为。
-- 2026-06-04 `bd5f8c4d`（`feat(cherry-pick): persist conflict sequencer in SQLite for continue/skip/abort/quit (v0.17.1311)`）：功能演进：persist conflict sequencer in SQLite for continue/skip/abort/quit (v0.17.1311)；该节点扩展了当前命令可用的参数或行为。
+- 2026-06-04 `c0268ec9`（`feat(cherry-pick): add -x/-s/-e and allow-empty flags, lift multi-commit no-commit restriction (v0.17.1309)`）：历史节点：add -x/-s/-e and allow-empty flags, lift multi-commit no-commit restriction (v0.17.1309)；该提交对应的 `-x`/`-s`/`-e`/allow-empty 已在后续被回退，当前 HEAD 不再提供这些参数（见“还未实现的功能”）。
+- 2026-06-04 `f3d4a180`（`feat(cherry-pick): support -m mainline for merge commits, --ff fast-forward, reject unsupported strategies (v0.17.1312)`）：功能演进：support -m mainline for merge commits, --ff fast-forward, reject unsupported strategies (v0.17.1312)；该提交对应的 `-m mainline`/`--ff` 已在后续被回退，当前 HEAD 不再提供这些参数（见“还未实现的功能”）。
+- 2026-06-04 `bd5f8c4d`（`feat(cherry-pick): persist conflict sequencer in SQLite for continue/skip/abort/quit (v0.17.1311)`）：功能演进：persist conflict sequencer in SQLite for continue/skip/abort/quit (v0.17.1311)；该提交对应的 SQLite sequencer（continue/skip/abort/quit）已在后续被回退，当前 HEAD 不再提供这些参数（见“还未实现的功能”）。
 - 2026-06-04 `b9c7d575`（`fix(cherry-pick): keep sequencer state accurate when a resumed pick hard-errors mid-sequence (v0.17.1316)`）：实现修正：keep sequencer state accurate when a resumed pick hard-errors mid-sequence (v0.17.1316)；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 2026-06-07 `ee9570df`（`test(cherry-pick): construct wrong-branch state directly`）：测试契约：construct wrong-branch state directly；相关行为已有回归守卫，后续变更需要继续满足。
-- 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
+- 历史结论：上述 `-x`/`-s`/`-e`、`-m mainline`、`--ff` 与 SQLite sequencer（continue/skip/abort/quit）相关提交对应的实现已在后续被回退，当前 `src/command/cherry_pick.rs` 的公开面只剩 `<commit>...` 与 `-n, --no-commit`，合并提交被直接拒绝。文档应以这些提交之后的现行代码、测试和兼容矩阵为准，历史提交仅作背景，不再作为事实来源。
 
 ## 当前状态
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/cherry-pick.md`。
 - Synopsis：`libra cherry-pick [-n | --no-commit] [--json] [--quiet] <commit>...`。
-- 公开参数/子命令包括：`-n`, `--no-commit`、`<commit>...` (positional, required)`、`--json`、`--quiet`。
+- 公开参数/子命令包括：`<commit>...`（位置参数，必填）、`-n, --no-commit`、`--json`、`--quiet`。
 
 
 ## 还未实现的功能
@@ -57,10 +57,15 @@ flowchart TD
 |---|---|---|
 | 兼容差异项 | 编辑消息 | 原始对照：--edit / -e；相关参数/替代：不适用；当前说明：不支持 (use -n then commit -m)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 主线父提交 | 原始对照：--mainline <n> / -m <n>；相关参数/替代：不适用；当前说明：不支持 (merge commits rejected)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | 记录来源 | 原始对照：-x；相关参数/替代：不适用；当前说明：不支持 (无 -x，CherryPickArgs 未声明该字段)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | 追加 Signed-off-by | 原始对照：--signoff / -s；相关参数/替代：不适用；当前说明：不支持 (无 -s/--signoff，CherryPickArgs 未声明该字段)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | 快进 | 原始对照：--ff；相关参数/替代：不适用；当前说明：不支持 (无 --ff，CherryPickArgs 未声明该字段)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 冲突后继续 | 原始对照：--continue；相关参数/替代：不适用；当前说明：不支持 (resolve then commit)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 中止进行中操作 | 原始对照：--abort；相关参数/替代：不适用；当前说明：不支持 (no sequencer state)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | Skip 当前 commit | 原始对照：--skip；相关参数/替代：不适用；当前说明：不支持。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | 退出 sequencer | 原始对照：--quit；相关参数/替代：不适用；当前说明：不支持 (no sequencer state)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 策略 | 原始对照：--strategy <s>；相关参数/替代：不适用；当前说明：不支持 (single merge strategy)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | 空提交策略 | 原始对照：--allow-empty / --keep-redundant-commits / --empty=<how>；相关参数/替代：不适用；当前说明：不支持 (无 --allow-empty，CherryPickArgs 未声明该字段)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求
 

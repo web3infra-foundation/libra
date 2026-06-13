@@ -14,7 +14,7 @@
 ## 设计方案
 
 - 入口与分发：已公开接入 `src/cli.rs::Commands`；已由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
-- 源码分层：主要实现文件为 `src/command/remove.rs`。参数/子命令类型包括：`RemoveArgs`；输出、错误或状态类型包括：源码未暴露独立输出/错误类型，错误通过 `CliResult` 或上层命令错误统一传播；主要执行函数包括：`execute`、`execute_safe`。
+- 源码分层：主要实现文件为 `src/command/remove.rs`。参数/子命令类型包括：`RemoveArgs`；输出、错误或状态类型包括：私有输出结构 `RemoveOutput` / `RemovePathOutput` / `RemoveDirectoryOutput`（均 `#[derive(Serialize)]`，构成 `--json` 结构化负载，经 `emit_json_data` 序列化，未导出为 `pub`），未暴露独立错误类型，错误通过 `CliResult` 或上层命令错误统一传播；主要执行函数包括：`execute`、`execute_safe`。
 - 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；索引路径会加载、比较、刷新或保存 `.libra/index`。
 
 - 流程图：以下流程图按当前源码分层展示主路径和底层对象边界，便于维护者把代码入口、执行函数和副作用范围对应起来。
@@ -45,8 +45,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/rm.md`。
-- Synopsis：`libra rm [--json|--machine] <pathspec>...`。
-- 公开参数/子命令包括：`Option Details`。
+- Synopsis：`libra rm [-r] [-f] [--cached] [--dry-run] [--ignore-unmatch] [--pathspec-from-file <file> [--pathspec-file-nul]] <pathspec>...`。
+- 公开参数/子命令包括：`<pathspec>...`、`--cached`、`-r, --recursive`、`-f, --force`、`--dry-run`、`--ignore-unmatch`、`--pathspec-from-file <PATHSPEC_FROM_FILE>`、`--pathspec-file-nul`。
 
 
 ## 还未实现的功能

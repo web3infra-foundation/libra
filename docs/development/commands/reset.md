@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra reset` 的目标是移动 HEAD、索引和工作区到指定状态，覆盖 hard/mixed/soft 与 pathspec reset。实现需要支持 `--pathspec-from-file`、NUL pathspec、refresh 控制和结构化输出，并把 merge/keep reset 作为未完成兼容差异。
+`libra reset` 的目标是移动 HEAD、索引和工作区到指定状态，覆盖 hard/mixed/soft 与 pathspec reset，并提供结构化输出，同时把 merge/keep reset 作为未完成兼容差异。
 
 ## 对比 Git 与兼容性
 
@@ -36,7 +36,7 @@ flowchart TD
 ## 实现历史
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
-- 2026-06-06 `0e7b5a8f`（`feat(reset): support --pathspec-from-file, --pathspec-file-nul, --no-refresh`）：基础实现节点：support --pathspec-from-file, --pathspec-file-nul, --no-refresh；当前实现的主要轮廓可追溯到该提交。
+- 2026-06-06 `0e7b5a8f`（`feat(reset): support --pathspec-from-file, --pathspec-file-nul, --no-refresh`）：该提交描述的 `--pathspec-from-file` / `--pathspec-file-nul` / `--no-refresh` 标志当前 HEAD 的 `ResetArgs` 并未公开，仅保留 hard/mixed/soft 与位置 pathspec；本节作为背景，不再视为当前事实来源。
 - 2026-05-24 `2827b6e3`（`fix(reset): skip traversing ignored directories in reset --hard and bump version to 0.17.946`）：实现修正：skip traversing ignored directories in reset --hard and bump version to 0.17.946；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 2026-05-21 `1fa9973e`（`test(reset): pin ResetError stable_code 19-variant mapping (v0.17.706)`）：测试契约：pin ResetError stable_code 19-variant mapping (v0.17.706)；相关行为已有回归守卫，后续变更需要继续满足。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
@@ -45,8 +45,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/reset.md`。
-- Synopsis：`libra reset [<target>] [--soft | --mixed | --hard]`。
-- 公开参数/子命令包括：`Flag examples`。
+- Synopsis：`libra reset [--soft | --mixed | --hard] [<target>] [-- <pathspec>...]`。
+- 公开参数/子命令包括：`[<target>]`、`--soft`、`--mixed`、`--hard`、`[<pathspec>...]`。
 
 
 ## 还未实现的功能

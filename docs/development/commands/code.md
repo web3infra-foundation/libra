@@ -47,8 +47,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/code.md`。
-- Synopsis：`libra code`。
-- 公开参数/子命令包括：`Provider Backends`、`Local Automation Control`、`Web Browser Control`、`/session`、`/controller/attach`、`/controller/detach`、`/control/cancel`、`Code UI Wire Contract`、`Web Search`、`Approval Policies` 等。
+- Synopsis：`libra code [--web-only] [--stdio] [--provider <PROVIDER>] [--resume <THREAD_UUID>]`。注意：`--provider`（任何非 Gemini 值）与 `--resume` 是 TUI 专用参数；`validate_mode_args` 对 `--web` 和 `--stdio` 两种非 TUI 模式都会调用 `reject_non_tui_flags`，在那两种模式下设置它们会被拒绝（`src/command/code.rs:4131`、`src/command/code.rs:4151`），因此实际上不能与 `--web-only`/`--stdio` 组合。
+- 公开参数/子命令包括：`--web-only`（别名 `--web`）、`-p, --port <PORT>`、`--host <HOST>`、`--cwd <PATH>`、`--repo <PATH>`、`--env-file <PATH>`、`--control <MODE>`、`--browser-control <MODE>`、`--control-token-file <PATH>`、`--control-info-file <PATH>`、`--provider <PROVIDER>`、`--model <MODEL>`、`--temperature <FLOAT>`、`--ollama-thinking <MODE>`（别名 `--thinking`）、`--ollama-compact-tools`、`--deepseek-thinking <MODE>`、`--deepseek-reasoning-effort <EFFORT>`、`--deepseek-stream <BOOL>`（别名 `--stream`）、`--kimi-thinking <MODE>`、`--kimi-stream <BOOL>`、`--agent <NAME>`、`--context <MODE>`、`--resume <THREAD_UUID>`、`--approval-policy <POLICY>`、`--approval-ttl <SECS>`、`--network-access <MODE>`、`--mcp-port <PORT>`、`--stdio`（别名 `--mcp-stdio`）、`--api-base <URL>`、`--codex-bin <PATH>`、`--codex-port <PORT>`、`--plan-mode[=<BOOL>]`、`--goal <OBJECTIVE>` 等。其中部分参数有 provider 互斥约束：`--codex-bin`、`--codex-port`（`src/command/code.rs:4021-4025`）和 `--plan-mode=true`（`src/command/code.rs:4027`）只有在 `--provider=codex` 时才允许，否则报错 “… is only supported with --provider=codex”；反之 `--api-base` 在 `--provider=codex` 时被拒绝（`src/command/code.rs:4032`，报错 “--api-base is not supported with --provider=codex”）。
 
 
 ## 还未实现的功能

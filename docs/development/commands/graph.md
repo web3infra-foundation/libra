@@ -30,7 +30,7 @@ flowchart TD
 ```
 
 - 底层操作对象：AI thread graph（线程版本图和运行关系）；SeaORM / `.libra/libra.db`（配置、refs、reflog、AI/发布元数据等 SQLite 表）；`Index` / `.libra/index`（暂存区状态、路径条目和刷新/保存边界）；`Blob`（文件内容或 LFS pointer 写入对象库后的 blob 对象）；`Tree`（由索引或对象遍历生成的目录树对象）；`LocalStorage`（本地对象或发布存储根目录）；`Storage` / `StorageExt`（对象存储抽象，覆盖本地、remote 和 publish 存储）；`DatabaseConnection`（SeaORM 数据库连接）
-- 输出与错误契约：人类输出、`--json` / `--machine` 输出和 quiet/verbose 分支必须继续走现有 `OutputConfig` / `emit_json_data` / `CliError` 路径；新增失败模式要补稳定错误码、用户提示和回归测试。
+- 输出与错误契约：当前实现没有结构化输出路径——`execute_safe(args, _output)` 把 `OutputConfig` 标记为未使用（下划线前缀），成功路径始终调用 `run_graph_tui` 启动 ratatui TUI，不走 `emit_json_data` 或 `--json` / `--machine` 分支；失败路径仍通过 `CliError`（`command_usage` / `repo_not_found` / `fatal` + `RepoCorrupt` / `io`）返回稳定错误码、用户提示和回归测试。若未来要补 `--json` / `--machine`，需先在 `GraphArgs` 增加对应 flag 并接入 `OutputConfig`。
 - 副作用边界：凡是写入索引、对象库、refs/HEAD、reflog、SQLite/D1、工作树或远端的路径，都必须先完成参数校验和 dry-run/预检分支，再执行持久化，避免部分写入后静默成功。
 
 ## 实现历史
@@ -44,8 +44,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/graph.md`。
-- Synopsis：`libra graph <THREAD_ID> [--repo <PATH>]`。
-- 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。
+- Synopsis：`libra graph <THREAD_UUID> [--repo <PATH>]`。
+- 公开参数/子命令包括：`<THREAD_UUID>`、`--repo <PATH>`。
 
 
 ## 还未实现的功能
@@ -53,6 +53,7 @@ flowchart TD
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | 兼容矩阵说明 | Libra AI graph inspection extension, 不是 Git 命令 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
+| 结构化输出 | `--json` 结构化输出（`GRAPH_EXAMPLES` 第三行 `libra graph --json <thread-uuid>` 宣传的“Structured JSON output for agents”）在 `GraphArgs` 中并不存在，`execute_safe` 也没有 JSON/machine 输出分支 | 当前 EXAMPLES 横幅与实现不符；该 flag 未落地，需要在 `GraphArgs` 增加 `--json` 并接入 `OutputConfig` / `emit_json_data` 后才能兑现，否则应从 `GRAPH_EXAMPLES` 移除该行。 |
 
 ## 维护要求
 

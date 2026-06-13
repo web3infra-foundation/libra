@@ -37,8 +37,8 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2025-11-29 `4a66aa45`（`feat(blame, diff): add blame support, bump the git-internal version (#70)`）：基础实现节点：add blame support, bump the git-internal version (#70)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-05 `a9e6093e`（`feat(diff): add -W/--function-context hunk expansion`）：功能演进：add -W/--function-context hunk expansion；该节点扩展了当前命令可用的参数或行为。
-- 2026-06-05 `45de394f`（`feat(diff): add --word-diff with plain/color and configurable regex`）：功能演进：add --word-diff with plain/color and configurable regex；该节点扩展了当前命令可用的参数或行为。
+- 2026-06-05 `a9e6093e`（`feat(diff): add -W/--function-context hunk expansion`）：历史节点；`-W`/`--function-context` 当前并未在 `DiffArgs` 中公开，该行为已不在当前实现内。
+- 2026-06-05 `45de394f`（`feat(diff): add --word-diff with plain/color and configurable regex`）：历史节点；`--word-diff`/`--color-words` 当前并未在 `DiffArgs` 中公开，仍属于「还未实现的功能」表中的差异项。
 - 2026-06-07 `6ef353a3`（`fix(diff): close compatibility plan gaps`）：实现修正：close compatibility plan gaps；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -46,8 +46,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/diff.md`。
-- Synopsis：`libra diff [<pathspec>...]`。
-- 公开参数/子命令包括：`Option Details`。
+- Synopsis：`libra diff [--staged] [--old <COMMIT> --new <COMMIT>] [--stat | --numstat | --name-only | --name-status] [<pathspec>...]`。
+- 公开参数/子命令包括：`--old <COMMIT>`、`--new <COMMIT>`、`--staged`、`[<pathspec>...]`、`--algorithm <NAME>`、`--output <FILENAME>`、`--name-only`、`--name-status`、`--numstat`、`--stat`。
 
 
 ## 还未实现的功能

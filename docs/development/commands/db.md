@@ -15,7 +15,7 @@
 
 - 入口与分发：已公开接入 `src/cli.rs::Commands`；已由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
 - 源码分层：主要实现文件为 `src/command/db.rs`。参数/子命令类型包括：`DbArgs`、`DbSubcommand`；输出、错误或状态类型包括：源码未暴露独立输出/错误类型，错误通过 `CliResult` 或上层命令错误统一传播；主要执行函数包括：`execute_safe`。
-- 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；数据库路径会通过 SeaORM/SQLite 或 D1 客户端持久化元数据。
+- 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；schema 检查与升级仅通过 `internal::db` 的 `inspect_database_schema` / `upgrade_database_schema`（SeaORM + SQLite）持久化元数据，不涉及 D1 客户端。
 
 - 流程图：以下流程图按当前源码分层展示主路径和底层对象边界，便于维护者把代码入口、执行函数和副作用范围对应起来。
 
@@ -29,7 +29,7 @@ flowchart TD
     E --> G["副作用边界<br/>写入分支需先预检"]
 ```
 
-- 底层操作对象：SeaORM / `.libra/libra.db`（配置、refs、reflog、AI/发布元数据等 SQLite 表）；Vault/libvault（身份、密钥或 vault-backed 签名边界）；配置层（local/global/system、remote、identity 和运行时设置）
+- 底层操作对象：SeaORM / `.libra/libra.db`（仓库 schema 版本表，经 `upgrade_database_schema` / `inspect_database_schema` 访问）；升级时附带 `~/.libra/config.db`（全局配置 SQLite 库）的 soft-failure schema 升级。命令不导入或调用 libvault，也不读写配置键、remote、身份或运行时设置。
 - 输出与错误契约：人类输出、`--json` / `--machine` 输出和 quiet/verbose 分支必须继续走现有 `OutputConfig` / `emit_json_data` / `CliError` 路径；新增失败模式要补稳定错误码、用户提示和回归测试。
 - 副作用边界：凡是写入索引、对象库、refs/HEAD、reflog、SQLite/D1、工作树或远端的路径，都必须先完成参数校验和 dry-run/预检分支，再执行持久化，避免部分写入后静默成功。
 
@@ -46,8 +46,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/db.md`。
-- Synopsis：`libra db status`。
-- 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。
+- Synopsis：`libra db <status|upgrade>`。
+- 公开参数/子命令包括：`status`、`upgrade`（均无独立 flag，仅复用全局 `--json` / `--machine` 输出开关）。
 
 
 ## 还未实现的功能

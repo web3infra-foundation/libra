@@ -14,7 +14,7 @@
 ## 设计方案
 
 - 入口与分发：已公开接入 `src/cli.rs::Commands`；已由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
-- 源码分层：主要实现文件为 `src/command/branch.rs`。参数/子命令类型包括：`BranchArgs`；输出、错误或状态类型包括：`BranchOutput`、`BranchListEntry`；主要执行函数包括：`execute`、`execute_safe`、`set_upstream_safe`、`create_branch_safe`。
+- 源码分层：主要实现文件为 `src/command/branch.rs`。参数/子命令类型包括：`BranchArgs`；输出、错误或状态类型包括：`BranchOutput`、`BranchListEntry`；主要执行函数包括：`execute`、`execute_safe`、`set_upstream`、`set_upstream_safe`、`set_upstream_safe_with_output`、`create_branch`、`create_branch_safe`、`list_branches`、`filter_branches`、`is_valid_git_branch_name`（其中 `set_upstream_safe_with_output` 被 `switch`/`push`/`checkout` 等其他命令复用；命令级 `list_branches` 仅为向后兼容的便捷封装，生产代码中除 `branch.rs` 自身外没有调用方，只被测试代码 `tests/command/checkout_test.rs` 调用——switch/push/checkout 等命令使用的是 store 层的 `Branch::list_branches_result`，而非该命令级函数）。
 - 源码意图：源码模块注释说明该命令由 `run_branch` 分发到创建、删除、列表、重命名和上游跟踪 helper，并把 branch store 错误映射为命令级错误。
 - 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；核心领域逻辑集中在 `set_upstream_safe`、`create_branch_safe`；对象路径会解析 revision 并读写 blob/tree/commit/tag 等对象；引用路径会读取或更新 SQLite refs、HEAD 与 reflog；数据库路径会通过 SeaORM/SQLite 或 D1 客户端持久化元数据。
 
@@ -39,7 +39,7 @@ flowchart TD
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2025-11-19 `256bfe62`（`feat: add -all  subcommands for branch command (#58)`）：基础实现节点：add -all  subcommands for branch command (#58)；当前实现的主要轮廓可追溯到该提交。
 - 2026-06-06 `7e94b815`（`feat(switch): add -C/--force-create (create or reset branch then switch)`）：功能演进：add -C/--force-create (create or reset branch then switch)；该节点扩展了当前命令可用的参数或行为。
-- 2026-06-04 `f54123ea`（`feat(branch): decline --track/--no-track, stub --sort/--format, mark compatibility partial [decision-reversal supported->partial] (v0.17.1296)`）：功能演进：decline --track/--no-track, stub --sort/--format, mark compatibility partial [decision-reversal supported->partial] (v0.17.1296)；该节点扩展了当前命令可用的参数或行为。
+- 2026-06-04 `f54123ea`（`feat(branch): decline --track/--no-track, stub --sort/--format, mark compatibility partial [decision-reversal supported->partial] (v0.17.1296)`）：功能演进：decline --track/--no-track, stub --sort/--format, mark compatibility partial [decision-reversal supported->partial] (v0.17.1296)；该节点明确拒绝了 `--track/--no-track` 并仅对 `--sort/--format` 作 stub 标注，并未为当前命令新增可用参数（这些参数在当前 HEAD 仍不存在，见“还未实现的功能”表）。注意：本文顶部兼容级别以 `COMPATIBILITY.md` 现行矩阵为准（当前为 `supported`），该提交标题中的 `partial` 字样仅为历史提交原文引用，不代表当前矩阵结论。
 - 2026-06-04 `07fbf023`（`fix(branch): launch editor via shlex (no shell), reject self-copy/self-rename, harden reflog timestamp (codex review r2) (v0.17.1298)`）：实现修正：launch editor via shlex (no shell), reject self-copy/self-rename, harden reflog timestamp (codex review r2) (v0.17.1298)；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -47,15 +47,21 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/branch.md`。
-- Synopsis：`libra branch [<new_branch>] [<commit_hash>]`。
-- 公开参数/子命令包括：`Flag examples`。
+- Synopsis：`libra branch [-l] [-r] [-a] [--contains [<commit>]] [--no-contains [<commit>]]` / `libra branch [<new_branch>] [<commit_hash>]` / `libra branch (-d | -D) <branch>` / `libra branch -m [<old_branch>] <new_branch>` / `libra branch -u <upstream>` / `libra branch --show-current`。
+- 公开参数/子命令包括：`[<new_branch>] [<commit_hash>]`、`-l, --list`、`-d, --delete <DELETE_SAFE>`、`-D, --delete-force <DELETE>`、`-u, --set-upstream-to <UPSTREAM>`、`--show-current`、`-m, --move <OLD_BRANCH> <NEW_BRANCH>`、`-r, --remotes`、`-a, --all`、`--contains [<commit>]`、`--no-contains [<commit>]`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 当前无已确认的参数级缺口 | rename 能力已由当前源码实现，不能再列为未实现项。 | 新增 Git 兼容参数或兼容差异时再补表项，并同步兼容矩阵和测试证据。 |
+| 复制分支 | `-c` / `-C` / `--copy` 在当前 `BranchArgs` 中无对应定义。 | 暂未实现复制分支；新增时补兼容矩阵和测试证据。 |
+| 上游管理 | `--unset-upstream` 在当前 `BranchArgs` 中无对应定义。 | 暂未实现；当前仅支持 `-u` / `--set-upstream-to`。 |
+| 描述编辑 | `--edit-description` 在当前 `BranchArgs` 中无对应定义。 | 暂未实现。 |
+| 过滤查询 | `--merged <commit>` / `--no-merged <commit>` / `--points-at <object>` 在当前 `BranchArgs` 中无对应定义。 | 暂未实现；当前仅支持 `--contains` / `--no-contains`。 |
+| 排序与格式 | `--sort <key>` / `--format <format>` 在当前 `BranchArgs` 中无对应定义（`f54123ea` 仅作 stub 标注，未提供实际参数）。 | 暂未实现。 |
+| 大小写忽略 | `--ignore-case` 在当前 `BranchArgs` 中无对应定义。 | 暂未实现。 |
+| 跟踪设置 | `--track` / `--no-track` 已在 `f54123ea` 明确 decline，当前 `BranchArgs` 无对应定义。 | 已声明拒绝；不提供该参数。 |
 
 ## 维护要求
 

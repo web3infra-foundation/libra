@@ -47,8 +47,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/rebase.md`。
-- Synopsis：`libra rebase <upstream>`。
-- 公开参数/子命令包括：`Option Details`。
+- Synopsis：`libra rebase <upstream> | --continue | --abort | --skip`。
+- 公开参数/子命令包括：`<upstream>`、`--continue`、`--abort`、`--skip`。
 
 
 ## 还未实现的功能

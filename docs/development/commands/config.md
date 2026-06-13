@@ -14,7 +14,7 @@
 ## 设计方案
 
 - 入口与分发：已公开接入 `src/cli.rs::Commands`；已由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
-- 源码分层：主要实现文件为 `src/command/config.rs`。参数/子命令类型包括：`ConfigArgs`、`ConfigCommand`；输出、错误或状态类型包括：源码未暴露独立输出/错误类型，错误通过 `CliResult` 或上层命令错误统一传播；主要执行函数包括：`execute`、`execute_safe`。
+- 源码分层：主要实现文件为 `src/command/config.rs`。参数/子命令类型包括：`ConfigArgs`、`ConfigCommand`；输出、错误或状态类型包括：`ConfigListEntry`、`ConfigImportSummary`、`ConfigSshKeyEntry`、`ConfigGpgKeyEntry`（`--json` 序列化），错误通过 `CliError` / `CliResult` 统一传播；主要执行函数包括：`execute`、`execute_safe`、`execute_inner`、`resolve_command`。
 - 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；数据库路径会通过 SeaORM/SQLite 或 D1 客户端持久化元数据。
 
 - 流程图：以下流程图按当前源码分层展示主路径和底层对象边界，便于维护者把代码入口、执行函数和副作用范围对应起来。
@@ -47,8 +47,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/config.md`。
-- Synopsis：`libra config <subcommand> [options]`。
-- 公开参数/子命令包括：`Subcommands`、`Scope Flags`、`Hidden Git-Compatible Flags`、`Other Flags`。
+- Synopsis：`libra config [OPTIONS] [key] [value] [COMMAND]`。
+- 公开参数/子命令包括：`set`、`get`、`list`、`unset`、`import`、`path`、`edit`、`generate-ssh-key`、`generate-gpg-key`、`--local`、`--global`、`-d, --default <DEFAULT>` 等（另含隐藏 Git 兼容标志 `--get`、`--get-all`、`--unset`、`--unset-all`、`-l, --list`、`--add`、`--import`、`--get-regexp`、`--show-origin`）。`--system` 虽在 clap 中声明，但运行时在 `execute_inner` 中无条件以 `CliError::command_usage` 拒绝（提示改用 `--local` / `--global`），并非可用作用域；详见下方缺口表。
 
 
 ## 还未实现的功能
@@ -56,6 +56,7 @@ flowchart TD
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | 功能缺口 | 不支持编辑器编辑：Libra 使用 SQLite 存储，不能安全地通过文本编辑器往返修改；详见设计方案。 | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| 兼容差异项 | `--system` 作用域 | 原始对照：git config --system；相关参数/替代：否；当前说明：clap 中声明但运行时无条件拒绝（`execute_inner` 返回 `CliError::command_usage`，提示改用 `--local` / `--global`），并非可用作用域。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 编辑器编辑 | 原始对照：git config -e；相关参数/替代：jj config edit；当前说明：不支持 (SQLite 存储)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 类型转换 | 原始对照：--type=bool\|int\|path；相关参数/替代：否 (TOML 类型)；当前说明：不支持 (本批次)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | NUL 分隔输出 | 原始对照：-z；相关参数/替代：否；当前说明：不支持 (本批次)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |

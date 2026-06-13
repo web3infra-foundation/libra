@@ -24,12 +24,12 @@ flowchart TD
     A["入口与分发<br/>src/cli.rs::Commands"] --> B["源码分层<br/>src/command/reflog.rs"]
     B --> C["参数模型<br/>ReflogArgs"]
     C --> D["执行路径<br/>execute / execute_safe"]
-    D --> E["底层对象<br/>Blob / Commit / Tree / ReflogContext"]
+    D --> E["底层对象<br/>Blob / Commit / Tree / Reflog"]
     D --> F["输出与错误<br/>CliResult"]
     E --> G["副作用边界<br/>写入分支需先预检"]
 ```
 
-- 底层操作对象：`Blob`（文件内容或 LFS pointer 写入对象库后的 blob 对象）；`Commit`（提交对象、父提交关系和提交消息载荷）；`Tree`（由索引或对象遍历生成的目录树对象）；`ReflogContext` / `with_reflog`（SQLite reflog 写入和动作记录）；SeaORM / `.libra/libra.db`（配置、refs、reflog、AI/发布元数据等 SQLite 表）；`ObjectHash`（SHA-1/SHA-256 对象 ID 和 revision 解析结果）；`ConfigKv`（配置键值持久化行）
+- 底层操作对象：`Blob`（文件内容或 LFS pointer 写入对象库后的 blob 对象）；`Commit`（提交对象、父提交关系和提交消息载荷）；`Tree`（由索引或对象遍历生成的目录树对象）；`Reflog`（通过 `Reflog::find_all` / `Reflog::find_one` 读取 reflog 记录，删除走原始 `DELETE FROM reflog` SQL，不经 `ReflogContext` / `with_reflog` 写入路径）；SeaORM / `.libra/libra.db`（配置、refs、reflog、AI/发布元数据等 SQLite 表）；`ObjectHash`（SHA-1/SHA-256 对象 ID 和 revision 解析结果）；`ConfigKv`（配置键值持久化行）
 - 输出与错误契约：人类输出、`--json` / `--machine` 输出和 quiet/verbose 分支必须继续走现有 `OutputConfig` / `emit_json_data` / `CliError` 路径；新增失败模式要补稳定错误码、用户提示和回归测试。
 - 副作用边界：凡是写入索引、对象库、refs/HEAD、reflog、SQLite/D1、工作树或远端的路径，都必须先完成参数校验和 dry-run/预检分支，再执行持久化，避免部分写入后静默成功。
 
@@ -37,17 +37,17 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-01-10 `7d256d09`（`feat(reflog): support --grep, --since, --until, --stat, --patch/-p, --author, -n/--number params in reflog show (#112)`）：基础实现节点：support --grep, --since, --until, --stat, --patch/-p, --author, -n/--number params in reflog show (#112)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-06 `aac5351a`（`feat(reflog): implement reflog expire (time/reachability/stale-fix) (#1391)`）：功能演进：implement reflog expire (time/reachability/stale-fix) (#1391)；该节点扩展了当前命令可用的参数或行为。
 - 2026-05-15 `75734b60`（`feat(reflog): structure command output`）：功能演进：structure command output；该节点扩展了当前命令可用的参数或行为。
 - 2026-05-17 `492feff7`（`test(command/reflog): pin Display for 4 FormatterKind variants (v0.17.366)`）：测试契约：pin Display for 4 FormatterKind variants (v0.17.366)；相关行为已有回归守卫，后续变更需要继续满足。
+- 2026-06-06 `aac5351a`（`feat(reflog): implement reflog expire (time/reachability/stale-fix) (#1391)`）：历史上的 expire 探索节点；当前 main 的 `src/command/reflog.rs` 子命令枚举仅有 `show`/`delete`/`exists`，并不存在 `expire`，故该提交未反映在当前命令的公开参数中。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
 ## 当前状态
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/reflog.md`。
-- Synopsis：`libra reflog show [<ref_name>] [--pretty <format>] [--since <date>] [--until <date>] [--grep <pattern>] [--author <pattern>] [-n <N>] [-p/--patch] [--stat]`。
-- 公开参数/子命令包括：`Subcommand: `show`、`Subcommand: `delete`、`Subcommand: `exists`。
+- Synopsis：`libra reflog show [<ref_name>] [--pretty <format>] [--since <date>] [--until <date>] [--grep <pattern>] [--author <pattern>] [-n <N>] [-p/--patch] [--stat]` ｜ `libra reflog delete <selectors>...` ｜ `libra reflog exists <ref_name>`。
+- 公开参数/子命令包括：`show [<ref_name>]`（`--pretty <format>`、`--since <date>`、`--until <date>`、`--grep <pattern>`、`--author <pattern>`、`-n, --number <N>`、`-p, --patch`、`--stat`）、`delete <selectors>...`、`exists <ref_name>`。
 
 
 ## 还未实现的功能

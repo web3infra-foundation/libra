@@ -47,8 +47,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/usage.md`。
-- Synopsis：`libra usage report [OPTIONS]`。
-- 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。
+- Synopsis：`libra usage <report|prune> [OPTIONS]`。
+- 公开参数/子命令包括：`report`（`--by <model|agent|agent-provider-model>`、`--since <DATE>`、`--until <DATE>`、`--session <SESSION_ID>`、`--thread <THREAD_UUID>`、`--include-failed`、`--format <human|json|csv>`）、`prune`（`--retention-days <RETENTION_DAYS>`）。
 
 
 ## 还未实现的功能

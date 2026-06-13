@@ -26,7 +26,7 @@ flowchart TD
     C --> D["执行路径<br/>execute / execute_safe"]
     D --> E["底层对象<br/>Index / .libra/index / Blob / Commit"]
     D --> F["输出与错误<br/>GrepOutput"]
-    E --> G["副作用边界<br/>写入分支需先预检"]
+    E --> G["副作用边界<br/>只读命令：仅读取索引/对象，不写入"]
 ```
 
 - 底层操作对象：`Index` / `.libra/index`（暂存区状态、路径条目和刷新/保存边界）；`Blob`（文件内容或 LFS pointer 写入对象库后的 blob 对象）；`Commit`（提交对象、父提交关系和提交消息载荷）；`Tree`（由索引或对象遍历生成的目录树对象）；SeaORM / `.libra/libra.db`（配置、refs、reflog、AI/发布元数据等 SQLite 表）；`ObjectHash`（SHA-1/SHA-256 对象 ID 和 revision 解析结果）
@@ -37,8 +37,12 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-04-05 `45291721`（`feat(grep): add git-like grep support (#336)`）：基础实现节点：add git-like grep support (#336)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-05 `01997f50`（`feat(grep): add --untracked to also search untracked, non-ignored files`）：功能演进：add --untracked to also search untracked, non-ignored files；该节点扩展了当前命令可用的参数或行为。
-- 2026-06-05 `0e22f00d`（`feat(grep): add --no-index to search the filesystem without a repository`）：功能演进：add --no-index to search the filesystem without a repository；该节点扩展了当前命令可用的参数或行为。
+- 2026-06-05 `01997f50`（`feat(grep): add --untracked to also search untracked, non-ignored files`）：功能演进：add --untracked to also search untracked, non-ignored files；但该 `--untracked` 标志随后被 `900c062`（`Update integration`）回退，当前 HEAD 的 `GrepArgs` 已无此参数。
+- 2026-06-05 `0e22f00d`（`feat(grep): add --no-index to search the filesystem without a repository`）：功能演进：add --no-index to search the filesystem without a repository；但该 `--no-index` 标志随后被 `900c062`（`Update integration`）回退，当前 HEAD 的 `GrepArgs` 已无此参数。
+- 2026-06-05 `e3bfe11`（`feat(grep): add -A/-B/-C context lines with group separators`）：曾添加 `-A`/`-B`/`-C` 上下文行与分组分隔符；但该批改动同样被 `900c062`（`Update integration`）回退，当前 HEAD 的 `GrepArgs` 已无这些参数（参见缺口表「上下文行」一行）。
+- 2026-06-05 `2d471be`（`feat(grep): add --heading/--no-heading, --break, and -z/--null output formats`）：曾添加 `--heading`/`--no-heading`、`--break` 与 `-z`/`--null` 输出格式；但该批改动同样被 `900c062`（`Update integration`）回退，当前 HEAD 的 `GrepArgs` 已无这些参数（参见缺口表「文件名分组标题」「NUL 分隔输出」两行）。
+- 2026-06-05 `e8151a5`（`feat(grep): add -a/--text and -I binary-file handling`）：曾添加 `-a`/`--text` 与 `-I` 二进制文件处理；但该批改动同样被 `900c062`（`Update integration`）回退，当前 HEAD 的 `GrepArgs` 已无这些参数（参见缺口表「强制文本搜索」「忽略二进制文件」两行）。
+- 2026-06-05 `3e17784`（`feat(grep): accept -E/-G as regex aliases and decline -P/--perl-regexp (129)`）：曾添加 `-E`/`-G` 正则别名并以 129 退出拒绝 `-P`/`--perl-regexp`；但该批改动同样被 `900c062`（`Update integration`）回退，当前 HEAD 的 `GrepArgs` 已无这些参数（参见缺口表「扩展正则」「Perl 正则」两行）。
 - 2026-06-07 `6d60ee03`（`fix(grep): close compatibility plan gaps`）：实现修正：close compatibility plan gaps；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -46,19 +50,25 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/grep.md`。
-- Synopsis：`libra grep [<options>] <pattern> [-- <pathspec>...]`。
-- 公开参数/子命令包括：`Option Details`。
+- Synopsis：`libra grep [<options>] [<pattern>] [<pathspec>...]`。
+- 公开参数/子命令包括：位置参数 `<PATTERN>`（可选，`pattern`）、位置参数 `<PATHS>...`（`pathspec`）、`-e, --regexp <PATTERN>`、`-f, --file <FILE>`、`--all-match`、`-F, --fixed-string`、`-i, --ignore-case`、`-c, --count`、`-l, --files-with-matches`、`-L, --files-without-matches`、`-n, --line-number`、`-w, --word-regexp`、`-v, --invert-match`、`-b, --byte-offset`、`--tree <REVISION>`、`--cached` 等。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容差异项 | 上下文行 | 原始对照：不支持；相关参数/替代：-C / -A / -B；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 扩展正则 | 原始对照：不支持；相关参数/替代：-E / --extended-regexp；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | Perl 正则 | 原始对照：不支持；相关参数/替代：-P / --perl-regexp；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | 上下文行 | 原始对照：不支持；相关参数/替代：-C / -A / -B；当前说明：`e3bfe11` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | 扩展正则 | 原始对照：不支持；相关参数/替代：-E / --extended-regexp；当前说明：`3e17784` 曾添加 -E/-G 别名，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | Perl 正则 | 原始对照：不支持；相关参数/替代：-P / --perl-regexp；当前说明：`3e17784` 曾以 129 退出拒绝该标志，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 显示函数 | 原始对照：不支持；相关参数/替代：-p / --show-function；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 最大深度 | 原始对照：不支持；相关参数/替代：--max-depth；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | 搜索未跟踪文件 | 原始对照：不支持；相关参数/替代：--untracked；当前说明：`01997f50` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | 无仓库文件系统搜索 | 原始对照：不支持；相关参数/替代：--no-index；当前说明：`0e22f00d` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | 文件名分组标题 | 原始对照：不支持；相关参数/替代：--heading / --no-heading；当前说明：`2d471be` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | NUL 分隔输出 | 原始对照：不支持；相关参数/替代：-z / --null；当前说明：`2d471be` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | 强制文本搜索 | 原始对照：不支持；相关参数/替代：-a / --text；当前说明：`e8151a5` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | 忽略二进制文件 | 原始对照：不支持；相关参数/替代：-I；当前说明：`e8151a5` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求
 

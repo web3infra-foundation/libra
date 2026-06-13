@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra show` 的目标是展示提交、tag、tree 或 blob 对象内容，并按对象类型选择合适的人类可读输出。实现需要处理 annotated tag、pager、diff name-status、大文件/二进制摘要和结构化错误。
+`libra show` 的目标是展示提交、tag、tree 或 blob 对象内容，并按对象类型选择合适的人类可读输出。实现需要处理 annotated tag、pager、diff 文件名展示（`--name-only`）、大文件/二进制摘要和结构化错误。
 
 ## 对比 Git 与兼容性
 
@@ -14,19 +14,19 @@
 ## 设计方案
 
 - 入口与分发：已公开接入 `src/cli.rs::Commands`；已由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
-- 源码分层：主要实现文件为 `src/command/show.rs`、`src/command/show/pretty.rs`。参数/子命令类型包括：`ShowArgs`；输出、错误或状态类型包括：`ShowOutput`、`ShowTreeEntry`；主要执行函数包括：`execute`、`execute_safe`。
+- 源码分层：主要实现文件为 `src/command/show.rs`。参数/子命令类型包括：`ShowArgs`；输出、错误或状态类型包括：`ShowOutput`、`ShowCommitData`、`ShowFileChange`、`ShowTagData`、`ShowTreeData`、`ShowTreeEntry`、`ShowBlobData`；主要执行函数包括：`execute`、`execute_safe`。
 - 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；对象路径会解析 revision 并读写 blob/tree/commit/tag 等对象；引用路径会读取或更新 SQLite refs、HEAD 与 reflog。
 
 - 流程图：以下流程图按当前源码分层展示主路径和底层对象边界，便于维护者把代码入口、执行函数和副作用范围对应起来。
 
 ```mermaid
 flowchart TD
-    A["入口与分发<br/>src/cli.rs::Commands"] --> B["源码分层<br/>src/command/show.rs / src/command/show/pretty.rs"]
+    A["入口与分发<br/>src/cli.rs::Commands"] --> B["源码分层<br/>src/command/show.rs"]
     B --> C["参数模型<br/>ShowArgs"]
     C --> D["执行路径<br/>execute / execute_safe"]
     D --> E["底层对象<br/>Blob / Commit / TreeItem / TreeItemMode"]
-    D --> F["输出与错误<br/>ShowOutput / ShowTreeEntry"]
-    E --> G["副作用边界<br/>写入分支需先预检"]
+    D --> F["输出与错误<br/>ShowOutput / ShowCommitData / ShowFileChange / ShowTagData / ShowTreeData / ShowTreeEntry / ShowBlobData"]
+    E --> G["副作用边界<br/>只读命令，无持久化写入"]
 ```
 
 - 底层操作对象：`Blob`（文件内容或 LFS pointer 写入对象库后的 blob 对象）；`Commit`（提交对象、父提交关系和提交消息载荷）；`TreeItem` / `TreeItemMode`（tree 中的路径项和 mode）；`Tree`（由索引或对象遍历生成的目录树对象）；`Branch` / branch store（SQLite refs 上的分支读写、过滤和上游关系）；`Head`（SQLite 中的 HEAD 指向、当前分支和 detached 状态）；`ClientStorage`（本地/分层对象存储读写入口）；`ObjectHash`（SHA-1/SHA-256 对象 ID 和 revision 解析结果）；`ObjectType`（blob/tree/commit/tag 类型分派）
@@ -36,7 +36,7 @@ flowchart TD
 ## 实现历史
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
-- 2026-06-06 `1593a844`（`feat(show): add --name-status diff display mode`）：基础实现节点：add --name-status diff display mode；当前实现的主要轮廓可追溯到该提交。
+- 2026-06-06 `1593a844`（`feat(show): add --name-status diff display mode`）：基础实现节点；尽管提交标题写作 `--name-status`，当前 HEAD 实际公开的 diff 文件名标志是 `--name-only`（字段 `name_only`），并不存在 `--name-status` 标志；当前实现的主要轮廓可追溯到该提交。
 - 2026-05-15 `aaf16f28`（`feat(show): route human output through pager`）：功能演进：route human output through pager；该节点扩展了当前命令可用的参数或行为。
 - 2026-06-07 `5a5e5fcb`（`fix(show): summarize large and binary blobs`）：实现修正：summarize large and binary blobs；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
@@ -45,8 +45,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/show.md`。
-- Synopsis：`libra show [OPTIONS] [OBJECT] [-- <PATHS>...]`。
-- 公开参数/子命令包括：`Examples`。
+- Synopsis：`libra show [OPTIONS] [OBJECT] [PATHS]...`。
+- 公开参数/子命令包括：`[OBJECT]`、`-s, --no-patch`、`--oneline`、`--name-only`、`--stat`、`[PATHS]...`。
 
 
 ## 还未实现的功能

@@ -26,12 +26,12 @@ flowchart TD
     C --> D["执行路径<br/>execute_safe"]
     D --> E["底层对象<br/>Agent profile / runtime 对象（外部代理 / hook"]
     D --> F["输出与错误<br/>CliResult"]
-    E --> G["副作用边界<br/>只读输出/外部调用为主"]
+    E --> G["副作用边界<br/>写 session JSONL、写 Git blob、追加 AI history ref，并 UPSERT agent_session 行"]
 ```
 
 - 底层操作对象：Agent profile / runtime 对象（外部代理、hook、权限和运行状态）；session/thread store（AI 会话、线程、事件和恢复状态）
 - 输出与错误契约：人类输出、`--json` / `--machine` 输出和 quiet/verbose 分支必须继续走现有 `OutputConfig` / `emit_json_data` / `CliError` 路径；新增失败模式要补稳定错误码、用户提示和回归测试。
-- 副作用边界：当前实现以读操作、格式化输出或外部服务调用为主；若后续增加写入能力，需要先在设计中补齐持久化对象、回滚语义和测试证据。
+- 副作用边界：当前实现是写密集型路径（`process_hook_event_from_stdin`，`src/internal/ai/hooks/runtime.rs:157`）：通过 `SessionStore::save` 写 session JSONL 文件（runtime.rs:402-404），通过 `write_git_object` 写内容寻址的 Git blob（runtime.rs:1225），通过 `HistoryManager::append` 追加到 AI history ref（runtime.rs:1226-1228）；AgentTraces 路径还会 UPSERT `agent_session` 表中的行（runtime.rs:586-623）。任何持久化对象、回滚语义和测试证据的变更都要同步设计。
 
 ## 实现历史
 
@@ -43,8 +43,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/hooks.md`。
-- Synopsis：`libra hooks claude   {session-start|prompt|tool-use|model-update|compaction|stop|session-end}`。
-- 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。
+- Synopsis：`libra hooks {claude|gemini} {session-start|prompt|tool-use|model-update|compaction|stop|session-end}`。
+- 公开参数/子命令包括：`claude`、`gemini` 两个 provider 子命令，二者均接受 `session-start`、`prompt`、`tool-use`、`model-update`、`compaction`、`stop`、`session-end` 七个生命周期事件子命令。
 
 
 ## 还未实现的功能

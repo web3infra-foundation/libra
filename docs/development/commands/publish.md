@@ -14,7 +14,7 @@
 ## 设计方案
 
 - 入口与分发：已公开接入 `src/cli.rs::Commands`；已由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
-- 源码分层：主要实现文件为 `src/command/publish.rs`。参数/子命令类型包括：`PublishArgs`、`PublishCommand`、`InitArgs`、`SyncArgs`、`StatusArgs`、`DeployArgs`、`UnpublishArgs`；输出、错误或状态类型包括：源码未暴露独立输出/错误类型，错误通过 `CliResult` 或上层命令错误统一传播；主要执行函数包括：`execute`、`execute_safe`。
+- 源码分层：主要实现文件为 `src/command/publish.rs`。参数/子命令类型包括：`PublishArgs`、`PublishCommand`、`InitArgs`、`SyncArgs`、`StatusArgs`、`DeployArgs`、`UnpublishArgs`；输出、错误或状态类型包括：crate 私有输出类型 `PublishInitOutput`、`PublishSyncOutput`、`PublishStatusOutput`、`PublishDeployOutput`、`PublishUnpublishOutput`（均实现 `CommandOutput`），错误通过 `CliResult` 或上层命令错误统一传播；主要执行函数包括：`execute`、`execute_safe`。
 - 源码意图：源码模块注释说明 `publish` 的 CLI surface 包括 init/sync/status/deploy/unpublish，并围绕 Worker 模板、D1/R2 同步、Wrangler 部署和下线编排展开。
 - 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；对象路径会解析 revision 并读写 blob/tree/commit/tag 等对象；引用路径会读取或更新 SQLite refs、HEAD 与 reflog；数据库路径会通过 SeaORM/SQLite 或 D1 客户端持久化元数据。
 
@@ -30,8 +30,8 @@ flowchart TD
     E --> G["副作用边界<br/>写入分支需先预检"]
 ```
 
-- 底层操作对象：`D1Client`（Cloudflare D1 元数据读写）；`Storage` / `StorageExt`（对象存储抽象，覆盖本地、remote 和 publish 存储）；`Branch` / branch store（SQLite refs 上的分支读写、过滤和上游关系）；`Head`（SQLite 中的 HEAD 指向、当前分支和 detached 状态）；`Commit`（提交对象、父提交关系和提交消息载荷）；`Tree`（由索引或对象遍历生成的目录树对象）；`Blob`（文件内容或 LFS pointer 写入对象库后的 blob 对象）；`ObjectHash`（SHA-1/SHA-256 对象 ID 和 revision 解析结果）；`TreeItem` / `TreeItemMode`（tree 中的路径项和 mode）；`LocalStorage`（本地对象或发布存储根目录）；`ObjectType`（blob/tree/commit/tag 类型分派）；Vault/libvault（身份、密钥或 vault-backed 签名边界）
-- 输出与错误契约：人类输出、`--json` / `--machine` 输出和 quiet/verbose 分支必须继续走现有 `OutputConfig` / `emit_json_data` / `CliError` 路径；新增失败模式要补稳定错误码、用户提示和回归测试。
+- 底层操作对象：`D1Client`（Cloudflare D1 元数据读写）；`Storage` / `StorageExt`（对象存储抽象，覆盖本地、remote 和 publish 存储）；`Branch` / branch store（SQLite refs 上的分支读写、过滤和上游关系）；`Head`（SQLite 中的 HEAD 指向、当前分支和 detached 状态）；`Commit`（提交对象、父提交关系和提交消息载荷）；`Tree`（由索引或对象遍历生成的目录树对象）；`Blob`（文件内容或 LFS pointer 写入对象库后的 blob 对象）；`ObjectHash`（SHA-1/SHA-256 对象 ID 和 revision 解析结果）；`LocalStorage`（本地对象或发布存储根目录）；`ObjectType`（blob/tree/commit/tag 类型分派）
+- 输出与错误契约：人类输出、`--json` / `--machine` 输出和 quiet/verbose 分支必须继续走现有 `OutputConfig` / `output::emit` / `CliError` 路径；新增失败模式要补稳定错误码、用户提示和回归测试。
 - 副作用边界：凡是写入索引、对象库、refs/HEAD、reflog、SQLite/D1、工作树或远端的路径，都必须先完成参数校验和 dry-run/预检分支，再执行持久化，避免部分写入后静默成功。
 
 ## 实现历史
@@ -48,8 +48,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/publish.md`。
-- Synopsis：`libra publish init      [OPTIONS]`。
-- 公开参数/子命令包括：`libra publish init`、`--max-preview-bytes <bytes>`、`libra publish sync`、`--dry-run`、`--ref <branch|tag|full-ref>`、`--ref`、`--json`、`libra publish status`、`missing`、`current` 等。
+- Synopsis：`libra publish <init|sync|status|deploy|unpublish> [OPTIONS]`。
+- 公开参数/子命令包括：`init`、`sync`、`status`、`deploy`、`unpublish` 五个子命令；`init` 支持 `--slug <SLUG>`、`--clone-domain <DOMAIN>`、`--display-origin <URL>`、`--name <NAME>`、`--visibility <MODE>`、`--worker-name <NAME>`、`--max-preview-bytes <BYTES>`；`sync` 支持 `--ref <REF>`、`--dry-run`、`--fail-on-dirty`、`--ai-redaction <POLICY>`、`--allow-sensitive-path <PATH>`、`--force`；`status` 支持 `--site-id <UUID>`；`deploy` 支持 `--skip-deploy`；`unpublish` 支持 `--yes`、`--site-id <UUID>` 等。
 
 
 ## 还未实现的功能
@@ -57,7 +57,7 @@ flowchart TD
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | 兼容矩阵说明 | Libra Cloudflare 发布扩展, 不是 Git 命令 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
-| 功能缺口 | libra publish init 当前ly does not write publish keys into | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| 功能缺口 | `libra publish init` 仅生成 Worker 模板脚手架与清单，尚未把 `--slug` / `--clone-domain` 等参数写入站点配置或密钥（`run_publish_init_at_root` 仍以 `_args` 忽略 `InitArgs`） | 后续实现时需要同步源码、测试和兼容矩阵。 |
 
 ## 维护要求
 

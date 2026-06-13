@@ -14,23 +14,23 @@
 ## 设计方案
 
 - 入口与分发：已公开接入 `src/cli.rs::Commands`；已由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
-- 源码分层：主要实现文件为 `src/command/code_control.rs`、`src/command/code_control_files.rs`。参数/子命令类型包括：`CodeControlArgs`；输出、错误或状态类型包括：`ControlInfo`、`LiveInstanceInfo`、`ControlLockError`；主要执行函数包括：`execute`。
+- 源码分层：主要实现文件为 `src/command/code_control.rs`。参数/子命令类型包括：`CodeControlArgs`；输出、错误或状态类型包括：`JsonRpcResponse`、`JsonRpcErrorObject`；主要执行函数包括：`execute`。
 - 执行路径：`execute` 是主要执行入口。
 
 - 流程图：以下流程图按当前源码分层展示主路径和底层对象边界，便于维护者把代码入口、执行函数和副作用范围对应起来。
 
 ```mermaid
 flowchart TD
-    A["入口与分发<br/>src/cli.rs::Commands"] --> B["源码分层<br/>src/command/code_control.rs / src/command/code_control_files.rs"]
+    A["入口与分发<br/>src/cli.rs::Commands"] --> B["源码分层<br/>src/command/code_control.rs"]
     B --> C["参数模型<br/>CodeControlArgs"]
     C --> D["执行路径<br/>execute"]
     D --> E["底层对象<br/>未直接触达 Git 对象 / 索引 / refs 或外部存储"]
-    D --> F["输出与错误<br/>ControlInfo / LiveInstanceInfo / ControlLockError"]
+    D --> F["输出与错误<br/>JsonRpcResponse / JsonRpcErrorObject"]
     E --> G["副作用边界<br/>只读输出/外部调用为主"]
 ```
 
 - 底层操作对象：未直接触达 Git 对象、索引、refs 或外部存储；主要副作用集中在 CLI 输出、配置读取或外部进程/浏览器边界。
-- 输出与错误契约：人类输出、`--json` / `--machine` 输出和 quiet/verbose 分支必须继续走现有 `OutputConfig` / `emit_json_data` / `CliError` 路径；新增失败模式要补稳定错误码、用户提示和回归测试。
+- 输出与错误契约：该命令没有 `--json` / `--machine` 标志，也不走 `OutputConfig` / `emit_json_data` 路径；`execute` 通过内部 `write_json_value` 辅助函数直接逐行写出 NDJSON 形式的 JSON-RPC 2.0（`JsonRpcResponse` / `JsonRpcErrorObject`），失败路径仍以 `CliError` / `CliResult` 上抛；新增失败模式要补稳定错误码、用户提示和回归测试。
 - 副作用边界：当前实现以读操作、格式化输出或外部服务调用为主；若后续增加写入能力，需要先在设计中补齐持久化对象、回滚语义和测试证据。
 
 ## 实现历史
@@ -45,7 +45,7 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/code-control.md`。
-- 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。
+- 公开参数/子命令包括：`--stdio`、`--url <URL>`、`--token-file <PATH>`。无 clap 子命令；具体动作以 stdin 上的 NDJSON JSON-RPC 2.0 方法（`session.get`、`diagnostics.get`、`controller.attach`、`controller.detach`、`message.submit`、`interaction.respond`、`turn.cancel`、`events.subscribe`、`task.dispatch`、`goal.start`、`goal.status`、`goal.cancel`）下发；目前仅支持 `--stdio`，其余调用方式会被拒绝。
 
 
 ## 还未实现的功能

@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra clone` 的目标是从本地、SSH、HTTPS 或 Libra cloud 来源创建新仓库，并初始化对象、refs、配置和工作区。实现需要覆盖浅克隆、镜像、origin 命名、引用仓库、局部克隆过滤、URL 脱敏和安全边界检查，同时明确子模块与 sparse checkout 的延后决策。
+`libra clone` 的目标是从本地、SSH、HTTPS 或 Libra cloud 来源创建新仓库，并初始化对象、refs、配置和工作区。当前实现覆盖浅克隆（`--depth`）、单分支克隆（`--single-branch`）、裸仓库（`--bare`）、分支检出（`-b/--branch`）、URL 脱敏和安全边界检查，同时明确子模块与 sparse checkout 的延后决策；镜像、origin 命名、引用仓库、局部克隆过滤等标准 Git clone 参数当前不在 `CloneArgs` 中，统一列于“还未实现的功能”缺口表。
 
 ## 对比 Git 与兼容性
 
@@ -39,7 +39,7 @@ flowchart TD
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-01-25 `3703bfab`（`feat(clone): add --depth parameter for shallow clone (#165)`）：基础实现节点：add --depth parameter for shallow clone (#165)；当前实现的主要轮廓可追溯到该提交。
 - 2026-06-04 `98e5f47b`（`feat(clone): atomic remote/branch config write and credential redaction`）：功能演进：atomic remote/branch config write and credential redaction；该节点扩展了当前命令可用的参数或行为。
-- 2026-06-04 `d03e2902`（`feat(clone): add --filter partial clone with promisor config`）：功能演进：add --filter partial clone with promisor config；该节点扩展了当前命令可用的参数或行为。
+- 2026-06-04 `d03e2902`（`feat(clone): add --filter partial clone with promisor config`）：该提交曾引入 `--filter` 与 promisor 配置，但**当前 HEAD 的 `CloneArgs`（`src/command/clone.rs`）中不存在 `filter` 字段，clone.rs 也无 promisor 逻辑**——该功能已被回退/未永久落地，与“还未实现的功能”缺口表保持一致。
 - 2026-06-07 `38e31be2`（`fix(clone): close compatibility plan gaps`）：实现修正：close compatibility plan gaps；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -48,7 +48,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/clone.md`。
 - Synopsis：`libra clone [OPTIONS] <REMOTE_REPO> [LOCAL_PATH]`。
-- 公开参数/子命令包括：`<REMOTE_REPO>` (required)`、`[LOCAL_PATH]`、`-b, --branch <NAME>`、`--single-branch`、`--bare`、`--depth <N>`。
+- 公开参数/子命令包括：`<REMOTE_REPO>` (required)、`[LOCAL_PATH]`、`-b, --branch <BRANCH>`、`--single-branch`、`--bare`、`--depth <N>`。
 
 
 ## 还未实现的功能
@@ -58,9 +58,10 @@ flowchart TD
 | 兼容矩阵说明 | `--depth` and `--single-branch` 支持; `--sparse` 不支持 (see [docs/development/commands/_compatibility.md#d10-clone---sparse-与顶层-sparse-checkout-命令](docs/development/commands/_compatibility.md#d10-clone---sparse-与顶层-sparse-checkout-命令)); `--recurse-submodules` 不支持 (see [docs/development/commands/_compatibility.md#d4-clone---recurse-submodules](docs/development/commands/_compatibility.md#d4-clone---recurse-submodules)) | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 | 功能缺口 | objectsfetched / bytesreceived are 未公开暴露 until the fetch improvement lands | 后续实现时需要同步源码、测试和兼容矩阵。 |
 | 功能缺口 | sparse is intentionally 不支持 | 后续实现时需要同步源码、测试和兼容矩阵。 |
-| 功能缺口 | the audit-driven decision is to keep --sparse 延后 until there is a concrete | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| 功能缺口 | `--sparse` 未实现（不在 `CloneArgs` 中）；audit-driven decision is to keep --sparse 延后 | 后续实现时需要同步源码、测试和兼容矩阵。 |
 | 功能缺口 | recurse-submodules is intentionally 不支持 | 后续实现时需要同步源码、测试和兼容矩阵。 |
-| 功能缺口 | clone --recurse-submodules is also 不支持. See | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| 功能缺口 | `--recurse-submodules` 未实现（不在 `CloneArgs` 中）；不支持，详见 [docs/development/commands/_compatibility.md#d4-clone---recurse-submodules](docs/development/commands/_compatibility.md#d4-clone---recurse-submodules) | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| 功能缺口 | 标准 Git clone 参数 `--no-checkout`、`-o, --origin <NAME>`、`--filter <spec>`、`--reference <repo>`、`--dissociate`、`--local`、`--shared`、`--mirror`、`--shallow-since <date>`、`--shallow-exclude <rev>`、`--reject-shallow` 均不在 `CloneArgs`（`src/command/clone.rs`）中，当前未实现 | 后续实现时需要同步源码、测试和兼容矩阵。 |
 | 兼容差异项 | Malformed URL or 不支持 scheme | 原始对照：LBR-CLI-003；相关参数/替代：129；当前说明："check the clone URL or scheme"。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求

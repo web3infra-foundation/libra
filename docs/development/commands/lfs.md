@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra lfs` 的目标是提供 Libra 内置大文件管理能力，使用 `.libra_attributes` 记录跟踪规则并生成指针文件。实现需要覆盖 track/untrack/status/push/prune/checkout 等子命令，同时明确它不是 Git LFS filter/hook 桥接实现。
+`libra lfs` 的目标是提供 Libra 内置大文件管理能力，使用 `.libra_attributes` 记录跟踪规则并生成指针文件。当前实现覆盖 track/untrack/ls-files 以及三条锁服务流程 locks/lock/unlock 子命令，同时明确它不是 Git LFS filter/hook 桥接实现。
 
 ## 对比 Git 与兼容性
 
@@ -25,12 +25,12 @@ flowchart TD
     A["入口与分发<br/>src/cli.rs::Commands"] --> B["源码分层<br/>src/command/lfs.rs / src/command/lfs_schema.rs"]
     B --> C["参数模型<br/>LfsCmds"]
     C --> D["执行路径<br/>execute / execute_safe"]
-    D --> E["底层对象<br/>.libra_attributes / Index / .libra/index / Branch"]
+    D --> E["底层对象<br/>.libra_attributes / Index / .libra/index / Head"]
     D --> F["输出与错误<br/>LfsOutput / LfsFileOutput"]
     E --> G["副作用边界<br/>写入分支需先预检"]
 ```
 
-- 底层操作对象：LFS pointer / lock / batch 对象（`.libra_attributes` 驱动的大文件路径）；`Index` / `.libra/index`（暂存区状态、路径条目和刷新/保存边界）；`Branch` / branch store（SQLite refs 上的分支读写、过滤和上游关系）；`Head`（SQLite 中的 HEAD 指向、当前分支和 detached 状态）
+- 底层操作对象：LFS pointer / lock / batch 对象（`.libra_attributes` 驱动的大文件路径）；`Index` / `.libra/index`（暂存区状态、路径条目和刷新/保存边界）；`Head`（SQLite 中的 HEAD 指向、当前分支和 detached 状态，经 `current_refspec()` 中的 `Head::current()` 派生 refspec）
 - 输出与错误契约：人类输出、`--json` / `--machine` 输出和 quiet/verbose 分支必须继续走现有 `OutputConfig` / `emit_json_data` / `CliError` 路径；新增失败模式要补稳定错误码、用户提示和回归测试。
 - 副作用边界：凡是写入索引、对象库、refs/HEAD、reflog、SQLite/D1、工作树或远端的路径，都必须先完成参数校验和 dry-run/预检分支，再执行持久化，避免部分写入后静默成功。
 
@@ -38,8 +38,8 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-05-23 `2c0157f6`（`feat(lfs): wire LFS_EXAMPLES into clap after_help (v0.17.821)`）：基础实现节点：wire LFS_EXAMPLES into clap after_help (v0.17.821)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-05 `4edd8965`（`feat(lfs): prune empty shard dirs and align docs/compatibility for new subcommands`）：功能演进：prune empty shard dirs and align docs/compatibility for new subcommands；该节点扩展了当前命令可用的参数或行为。
-- 2026-06-05 `edf7db40`（`feat(lfs): implement prune and checkout commands`）：功能演进：implement prune and checkout commands；该节点扩展了当前命令可用的参数或行为。
+- 2026-06-05 `4edd8965`（`feat(lfs): prune empty shard dirs and align docs/compatibility for new subcommands`）：功能演进：prune empty shard dirs and align docs/compatibility for new subcommands；该提交曾引入 prune/checkout 等子命令，但其后已从当前 `LfsCmds` 中移除，现仅保留 track/untrack/locks/lock/unlock/ls-files。
+- 2026-06-05 `edf7db40`（`feat(lfs): implement prune and checkout commands`）：功能演进：implement prune and checkout commands；该提交实现的 prune/checkout 子命令在当前代码中已不再公开，仅作历史背景保留。
 - 2026-06-07 `9968c61d`（`fix(lfs): close compatibility plan gaps`）：实现修正：close compatibility plan gaps；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -47,8 +47,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/lfs.md`。
-- Synopsis：`libra lfs track [<pattern>...]`。
-- 公开参数/子命令包括：`track`、`untrack`、`locks`、`lock`、`unlock`、`ls-files`。
+- Synopsis：`libra lfs (track [<pattern>...] | untrack <path>... | ls-files [--long] [--size] [--name-only] | locks [--id <ID>] [--path <PATH>] [--limit <N>] | lock <path> | unlock <path> [--force] [--id <ID>])`。
+- 公开参数/子命令包括：`track [<pattern>...]`、`untrack <path>...`、`locks`（`--id`/`-i <ID>`、`--path`/`-p <PATH>`、`--limit`/`-l <N>`）、`lock <path>`、`unlock <path>`（`--force`/`-f`、`--id`/`-i <ID>`）、`ls-files`（`--long`/`-l`、`--size`/`-s`、`--name-only`/`-n`）。
 
 
 ## 还未实现的功能

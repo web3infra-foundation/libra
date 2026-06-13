@@ -44,7 +44,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/maintenance.md`。
 - Synopsis：`libra maintenance <subcommand> [options]`。
-- 公开参数/子命令包括：`run`、`--task <task>`、`--dry-run`、`--quiet`、`register`、`--schedule <schedule>`、`unregister`、`status`。
+- 公开参数/子命令包括：`run`、`--task <task>`、`--dry-run`、`-q, --quiet`、`register`、`--schedule <schedule>`、`unregister`、`status`。
 
 
 ## 还未实现的功能
@@ -53,6 +53,7 @@ flowchart TD
 |---|---|---|
 | 兼容矩阵说明 | `run` / `register` / `unregister` / `status` exposed; lower-level maintenance tasks such as `commit-graph` and `prefetch` are skipped when 不支持 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 | 兼容差异项 | commit-graph | 当前状态：Update commit-graph (not yet 支持; skipped)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | prefetch | 当前状态：Prefetch (requires remote configuration; skipped)，与 commit-graph 同为始终立即跳过的占位实现。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求
 

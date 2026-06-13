@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra blame` 的目标是按行展示文件内容的最近修改提交、作者和时间信息。实现需要支持常用显示字段、行号范围、porcelain 输出和空白忽略等兼容面，同时把移动/复制检测、反向 blame 等高阶能力列为后续工作。
+`libra blame` 的目标是按行展示文件内容的最近修改提交、作者和时间信息。实现需要支持常用显示字段和行号范围等兼容面，同时把 porcelain 输出、空白忽略（-w）、移动/复制检测、反向 blame 等高阶能力列为后续工作（当前 HEAD 均未实现）。
 
 ## 对比 Git 与兼容性
 
@@ -37,8 +37,8 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2025-11-29 `4a66aa45`（`feat(blame, diff): add blame support, bump the git-internal version (#70)`）：基础实现节点：add blame support, bump the git-internal version (#70)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-03 `1d055f9e`（`feat(blame): add ignore-whitespace (-w) attribution and BFS early-exit (v0.17.1290)`）：功能演进：add ignore-whitespace (-w) attribution and BFS early-exit (v0.17.1290)；该节点扩展了当前命令可用的参数或行为。
-- 2026-06-03 `e377e0a6`（`feat(blame): implement porcelain/-p output and clamp overlong -L end with checked arithmetic (v0.17.1289)`）：功能演进：implement porcelain/-p output and clamp overlong -L end with checked arithmetic (v0.17.1289)；该节点扩展了当前命令可用的参数或行为。
+- 2026-06-03 `1d055f9e`（`feat(blame): add ignore-whitespace (-w) attribution and BFS early-exit (v0.17.1290)`）：功能演进：add ignore-whitespace (-w) attribution and BFS early-exit (v0.17.1290)；该提交引入的 `-w` / ignore-whitespace 参数在当前 HEAD 的 `BlameArgs` 中已不存在（已回退），与缺口表保持一致。
+- 2026-06-03 `e377e0a6`（`feat(blame): implement porcelain/-p output and clamp overlong -L end with checked arithmetic (v0.17.1289)`）：功能演进：implement porcelain/-p output and clamp overlong -L end with checked arithmetic (v0.17.1289)；该提交引入的 porcelain / `-p` 输出在当前 HEAD 的 `BlameArgs` 与 `execute_safe` 中已不存在（已回退），与缺口表保持一致。
 - 2026-06-04 `a0e349a9`（`fix: align blame and bisect compatibility`）：实现修正：align blame and bisect compatibility；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -47,7 +47,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/blame.md`。
 - Synopsis：`libra blame <file> [<commit>] [-L <range>]`。
-- 公开参数/子命令包括：`Line Range Formats (`-L`)`。
+- 公开参数/子命令包括：`<FILE>`、`[<COMMIT>]`、`-L <RANGE>`。
 
 
 ## 还未实现的功能
@@ -58,6 +58,7 @@ flowchart TD
 | 兼容差异项 | 反向 blame | 原始对照：不支持；相关参数/替代：--reverse；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 显示邮箱 | 原始对照：不支持；相关参数/替代：-e / --show-email；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | porcelain 格式 | 原始对照：不支持；相关参数/替代：--porcelain / --line-porcelain；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | 忽略空白 | 原始对照：不支持；相关参数/替代：-w / --ignore-whitespace；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 增量输出 | 原始对照：不支持；相关参数/替代：--incremental；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 相似度阈值 | 原始对照：不支持；相关参数/替代：-M / -C (move/copy detection)；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 

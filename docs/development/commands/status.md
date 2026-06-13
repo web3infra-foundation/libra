@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra status` 的目标是展示工作区和索引状态，并支持 porcelain v1/v2、NUL 输出、untracked/ignored 模式和结构化输出。实现需要稳定呈现 add/modify/delete/rename 相关状态，同时把 rename detection 与 column display 等能力列为缺口。
+`libra status` 的目标是展示工作区和索引状态，并支持 porcelain v1/v2、untracked/ignored 模式和结构化输出。实现需要稳定呈现 add/modify/delete/rename 相关状态，同时把 rename detection、column display 与 `-z` NUL 输出等能力列为缺口。
 
 ## 对比 Git 与兼容性
 
@@ -14,9 +14,9 @@
 ## 设计方案
 
 - 入口与分发：已公开接入 `src/cli.rs::Commands`；已由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
-- 源码分层：主要实现文件为 `src/command/status.rs`。参数/子命令类型包括：`StatusArgs`；输出、错误或状态类型包括：`StatusError`、`UpstreamInfo`、`MergeStatusInfo`；主要执行函数包括：`execute`、`execute_safe`、`execute_to`、`changes_to_be_committed_safe`、`changes_to_be_staged_split_safe`。
+- 源码分层：主要实现文件为 `src/command/status.rs`。参数/子命令类型包括：`StatusArgs`、`PorcelainVersion`、`UntrackedFiles`；输出、错误或状态类型包括：`StatusData`（`src/command/status.rs:238`，所有渲染器共享的中心数据结构，承载 staged/unstaged/ignored/stash/upstream/merge_state/porcelain_v2 字段，模块内可见）、`Changes`、`StatusError`、`UpstreamInfo`、`MergeStatusInfo`；核心数据函数为 `collect_status_data`，辅助执行函数包括：`execute`、`execute_safe`、`execute_to`、`changes_to_be_committed_safe`、`changes_to_be_staged_split_safe`。
 - 源码意图：源码模块注释说明该命令结合 ignore 策略计算 staged/unstaged/untracked 集合，并输出简洁摘要或结构化状态。
-- 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；核心领域逻辑集中在 `execute_to`、`changes_to_be_committed_safe`、`changes_to_be_staged_split_safe`；索引路径会加载、比较、刷新或保存 `.libra/index`；对象路径会解析 revision 并读写 blob/tree/commit/tag 等对象；引用路径会读取或更新 SQLite refs、HEAD 与 reflog；数据库路径会通过 SeaORM/SQLite 或 D1 客户端持久化元数据。
+- 执行路径：`execute_safe`、`execute_to`、`collect_status_json_envelope_for_api` 三个入口都立即委托给共享数据核心 `collect_status_data(args) -> CliResult<StatusData>`（`src/command/status.rs:259`）；`execute_to` 是薄封装，先调用 `collect_status_data` 再调用 `render_status_to_writer`。索引路径会加载、比较并刷新 `.libra/index`（只读，不回写）；对象路径会解析 revision 并读取 blob/tree/commit 等对象；引用路径只读取 SQLite refs 与 HEAD（不更新 refs/HEAD，也不写 reflog）；本命令为只读，不通过 SeaORM/SQLite 或 D1 客户端持久化元数据。
 
 - 流程图：以下流程图按当前源码分层展示主路径和底层对象边界，便于维护者把代码入口、执行函数和副作用范围对应起来。
 
@@ -24,9 +24,9 @@
 flowchart TD
     A["入口与分发<br/>src/cli.rs::Commands"] --> B["源码分层<br/>src/command/status.rs"]
     B --> C["参数模型<br/>StatusArgs"]
-    C --> D["执行路径<br/>execute / execute_safe / execute_to"]
+    C --> D["执行路径<br/>execute_safe / execute_to → collect_status_data"]
     D --> E["底层对象<br/>Index / .libra/index / Blob / Commit"]
-    D --> F["输出与错误<br/>StatusError / UpstreamInfo / MergeStatusInfo"]
+    D --> F["输出与状态<br/>StatusData / Changes / StatusError / UpstreamInfo / MergeStatusInfo"]
     E --> G["副作用边界<br/>写入分支需先预检"]
 ```
 
@@ -38,7 +38,7 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2025-11-11 `926b2c38`（`Add --ignored arg for libra status (#35)`）：基础实现节点：Add --ignored arg for libra status (#35)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-06 `7d985dec`（`feat(status): add -z NUL-terminated porcelain output (implies v1)`）：功能演进：add -z NUL-terminated porcelain output (implies v1)；该节点扩展了当前命令可用的参数或行为。
+- 2026-06-06 `7d985dec`（`feat(status): add -z NUL-terminated porcelain output (implies v1)`）：历史节点曾引入 `-z` NUL-terminated porcelain 输出，但该改动已在后续 HEAD 提交中回退；当前 `StatusArgs` 不再包含 `-z` 参数，相关能力归入缺口列表。
 - 2025-12-10 `22ecce78`（`feat(status): support --porcelain=v2 and --untracked-files modes (#78) (#82)`）：功能演进：support --porcelain=v2 and --untracked-files modes (#78) (#82)；该节点扩展了当前命令可用的参数或行为。
 - 2026-05-17 `f5351224`（`docs(status): correct porcelain-v2 rationale + document stash_entries opt-in`）：文档与兼容口径：correct porcelain-v2 rationale + document stash_entries opt-in；当前文档按该节点之后的实现状态校准。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
@@ -57,6 +57,8 @@ flowchart TD
 |---|---|---|
 | 功能缺口 | Git's --find-renames / -M is not 支持; rename detection is not yet implemented in Libra's status | 后续实现时需要同步源码、测试和兼容矩阵。 |
 | 功能缺口 | column display is not 支持 | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| 功能缺口 | `-z` NUL-terminated porcelain 输出曾实现后回退，当前 `StatusArgs` 不含 `-z` | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| 功能缺口 | Git 的 `--ahead-behind` / `--no-ahead-behind` 显式开关未支持；ahead/behind 始终内部计算（`compute_ahead_behind`），无 CLI 开关控制 | 后续实现时需要同步源码、测试和兼容矩阵。 |
 
 ## 维护要求
 

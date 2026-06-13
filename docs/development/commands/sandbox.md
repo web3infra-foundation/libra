@@ -48,7 +48,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/sandbox.md`。
 - Synopsis：`libra sandbox status`。
-- 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。
+- 公开参数/子命令包括：`status`（唯一子命令，输出 AI 工具执行的有效 sandbox 诊断）。无独立局部参数，仅复用全局 `--json` / `--machine` 输出开关。
 
 
 ## 还未实现的功能

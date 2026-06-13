@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra revert` 的目标是生成抵消已有提交的反向变更，并保留冲突处理和提交控制的清晰边界。实现需要支持 merge commit mainline revert、no-commit 流程和稳定错误输出，同时把 sequencer continue/abort/skip 与自定义策略列为未完成。
+`libra revert` 的目标是生成抵消已有提交的反向变更，并保留冲突处理和提交控制的清晰边界。当前实现支持单父提交的反向变更、no-commit 流程和稳定错误输出，同时把 merge commit mainline revert（`-m/--mainline`，当前直接拒绝）、sequencer continue/abort/skip 与自定义策略列为未完成。
 
 ## 对比 Git 与兼容性
 
@@ -36,7 +36,7 @@ flowchart TD
 ## 实现历史
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
-- 2026-06-06 `b5af38ad`（`feat(revert): support merge-commit revert via -m/--mainline`）：基础实现节点：support merge-commit revert via -m/--mainline；当前实现的主要轮廓可追溯到该提交。
+- 基础实现节点：当前 HEAD 仅支持单父提交的反向变更（`<commit>` + `-n/--no-commit`），merge commit 仍在 `revert_single_commit` 中被 `RevertError::MergeCommitUnsupported` 拒绝，尚未引入 `-m/--mainline`。
 - 2026-05-21 `752c516f`（`test(revert): pin RevertError Display + stable_code surfaces (v0.17.703)`）：测试契约：pin RevertError Display + stable_code surfaces (v0.17.703)；相关行为已有回归守卫，后续变更需要继续满足。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -45,7 +45,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/revert.md`。
 - Synopsis：`libra revert [-n | --no-commit] [--json] [--quiet] <commit>`。
-- 公开参数/子命令包括：`-n`, `--no-commit`、`<commit>` (positional, required)`、`--json`、`--quiet`。
+- 公开参数/子命令包括：`<commit>`（位置参数，必填）、`-n, --no-commit`、`--json`、`--quiet`。
 
 
 ## 还未实现的功能

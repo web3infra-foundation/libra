@@ -48,7 +48,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/cat-file.md`。
 - Synopsis：`libra cat-file [OPTIONS] [OBJECT]`。
-- 公开参数/子命令包括：`Examples`。
+- 公开参数/子命令包括：`-t`、`-s`、`-p`、`-e`、`--ai <ID>`、`--ai-type <ID>`、`--ai-list <TYPE>`、`--ai-list-types`、`[OBJECT]`。
 
 
 ## 还未实现的功能

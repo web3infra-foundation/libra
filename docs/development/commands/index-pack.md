@@ -48,7 +48,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/index-pack.md`。
 - Synopsis：`libra index-pack [OPTIONS] <PACK_FILE>`。
-- 公开参数/子命令包括：`Examples`。
+- 公开参数/子命令包括：`<PACK_FILE>`、`-o <INDEX_FILE>`、`--index-version <INDEX_VERSION>`。
 
 
 ## 还未实现的功能
@@ -59,7 +59,6 @@ flowchart TD
 | 兼容差异项 | --fix-thin (add bases for thin packs) | 原始对照：未实现；相关参数/替代：是；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | --keep (create .keep file) | 原始对照：未实现；相关参数/替代：是；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 进度输出 | 原始对照：未实现；相关参数/替代：--progress / --no-progress；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 不支持 index version | 当前状态：LBR-CLI-002；Git/相关参数：129。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求
 

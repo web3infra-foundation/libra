@@ -24,12 +24,12 @@ flowchart TD
     A["入口与分发<br/>未公开 CLI / 设计资料"] --> B["源码分层<br/>src/command/ls_tree.rs"]
     B --> C["参数模型<br/>LsTreeArgs"]
     C --> D["执行路径<br/>execute / execute_safe"]
-    D --> E["底层对象<br/>Blob / Commit / TreeItem / TreeItemMode"]
+    D --> E["底层对象<br/>Commit / Tree / TreeItemMode"]
     D --> F["输出与错误<br/>CliResult"]
     E --> G["副作用边界<br/>写入分支需先预检"]
 ```
 
-- 底层操作对象：`Blob`（文件内容或 LFS pointer 写入对象库后的 blob 对象）；`Commit`（提交对象、父提交关系和提交消息载荷）；`TreeItem` / `TreeItemMode`（tree 中的路径项和 mode）；`Tree`（由索引或对象遍历生成的目录树对象）；`ClientStorage`（本地/分层对象存储读写入口）；`ObjectHash`（SHA-1/SHA-256 对象 ID 和 revision 解析结果）；`ObjectType`（blob/tree/commit/tag 类型分派）
+- 底层操作对象：`Commit`（提交对象、父提交关系和提交消息载荷）；`TreeItemMode`（tree 中路径项的 mode；路径项本身通过 `Tree::tree_items` 字段遍历，无独立 `TreeItem` 类型）；`Tree`（由索引或对象遍历生成的目录树对象）；`ClientStorage`（本地/分层对象存储读写入口；blob 大小通过 `ClientStorage::get()` 读取字节长度，而非独立 `Blob` 对象）；`ObjectHash`（SHA-1/SHA-256 对象 ID 和 revision 解析结果）；`ObjectType`（blob/tree/commit/tag 类型分派）
 - 输出与错误契约：人类输出、`--json` / `--machine` 输出和 quiet/verbose 分支必须继续走现有 `OutputConfig` / `emit_json_data` / `CliError` 路径；新增失败模式要补稳定错误码、用户提示和回归测试。
 - 副作用边界：凡是写入索引、对象库、refs/HEAD、reflog、SQLite/D1、工作树或远端的路径，都必须先完成参数校验和 dry-run/预检分支，再执行持久化，避免部分写入后静默成功。
 

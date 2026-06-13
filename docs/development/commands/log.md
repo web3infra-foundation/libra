@@ -38,7 +38,7 @@ flowchart TD
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2025-12-19 `d45bec8c`（`feat(log): add --abbrev-commit/--abbrev/--no-abbrev-commit for commit… (#93)`）：基础实现节点：add --abbrev-commit/--abbrev/--no-abbrev-commit for commit… (#93)；当前实现的主要轮廓可追溯到该提交。
 - 2026-06-06 `f95b80df`（`feat(log): colorize graph columns and align compatibility matrix`）：功能演进：colorize graph columns and align compatibility matrix；该节点扩展了当前命令可用的参数或行为。
-- 2026-06-06 `89045f35`（`feat(log): support revision ranges (A..B, A...B, ^A B)`）：功能演进：support revision ranges (A..B, A...B, ^A B)；该节点扩展了当前命令可用的参数或行为。
+- 2026-06-06 `89045f35`（`feat(log): support revision ranges (A..B, A...B, ^A B)`）：该提交曾尝试支持 revision range，但相关改动未保留在当前 HEAD 的 `src/command/log.rs` 中（`LogArgs` 不含 revision/range 位置参数，仍以 HEAD 为起点遍历），因此 revision range 仍属未实现项，见“还未实现的功能”。
 - 2026-06-07 `155a430a`（`fix(log): close compatibility plan gaps`）：实现修正：close compatibility plan gaps；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -46,15 +46,19 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/log.md`。
-- Synopsis：`libra log [OPTIONS] [-- PATHS...]`。
-- 公开参数/子命令包括：`-n, --number <N>`、`--oneline`、`--abbrev-commit`、`--abbrev <LENGTH>`、`--no-abbrev-commit`、`-p, --patch`、`--name-only`、`--name-status`、`--stat`、`--author <PATTERN>` 等。
+- Synopsis：`libra log [OPTIONS] [PATHS]...`。
+- 公开参数/子命令包括：`-n, --number <NUMBER>`、`--oneline`、`--abbrev-commit`、`--abbrev <N>`、`--no-abbrev-commit`、`-p, --patch`、`--name-only`、`--name-status`、`--author <PATTERN>`、`--since <DATE>`、`--until <DATE>`、`--pretty <FORMAT>`、`--decorate[=<MODE>]`、`--no-decorate`、`--graph`、`--stat`、`--grep <PATTERN>`、位置参数 `[PATHS]...`（限定 diff 输出范围，无需 `--` 分隔符）等。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 功能缺口 | Revision range syntax (A..B, A...B) is not yet 支持; use -n and --since/--until for scoping | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| 功能缺口 | Revision range syntax (A..B, A...B, ^A B) is not yet 支持; use -n and --since/--until for scoping | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| 功能缺口 | `--follow`（跨重命名跟踪单文件历史）未实现 | `LogArgs` 不含该参数；后续实现需同步源码、测试和兼容矩阵。 |
+| 功能缺口 | `--all` / `--branches`（遍历全部引用而非仅 HEAD）未实现 | `LogArgs` 不含该参数，仍以 HEAD 为起点遍历；后续实现需同步源码、测试和兼容矩阵。 |
+| 功能缺口 | `--reverse`（按逆序输出提交）未实现 | `LogArgs` 不含该参数；后续实现需同步源码、测试和兼容矩阵。 |
+| 功能缺口 | `-L`（按行范围跟踪历史）未实现 | `LogArgs` 不含该参数；后续实现需同步源码、测试和兼容矩阵。 |
 
 ## 维护要求
 

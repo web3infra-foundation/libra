@@ -13,9 +13,9 @@
 
 ## 设计方案
 
-- 入口与分发：源码资料存在但尚未公开接入 `src/cli.rs::Commands`；当前未由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
+- 入口与分发：源码文件存在但尚未公开接入 `src/cli.rs::Commands`；`src/command/ls_files.rs` 在 `src/command/mod.rs`（及 `src/` 任何位置）都没有 `mod ls_files` 声明，因此该文件未被编译进二进制。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
 - 源码分层：主要实现文件为 `src/command/ls_files.rs`。参数/子命令类型包括：`LsFilesArgs`；输出、错误或状态类型包括：`FileEntry`；主要执行函数包括：`execute`、`execute_safe`。
-- 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；索引路径会加载、比较、刷新或保存 `.libra/index`；对象路径会解析 revision 并读写 blob/tree/commit/tag 等对象。
+- 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；索引路径只读地加载 `.libra/index`（`Index::load`）并按筛选项收集条目；判断 modified 时对工作树文件内容计算 `Blob` id 与索引哈希比较，全程不解析 revision，也不读写 blob/tree/commit/tag 对象库或刷新/保存索引。
 
 - 流程图：以下流程图按当前源码分层展示主路径和底层对象边界，便于维护者把代码入口、执行函数和副作用范围对应起来。
 
@@ -41,7 +41,7 @@ flowchart TD
 
 ## 当前状态
 
-- 公开状态：未公开；模块状态：未从 `src/command/mod.rs` 导出。
+- 公开状态：未公开；模块状态：`src/command/ls_files.rs` 源码文件存在，但 `src/` 中没有任何 `mod ls_files` 声明，因此未被编译进二进制。
 - 用户文档：`docs/commands/ls-files.md`。
 - 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。
 

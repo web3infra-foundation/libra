@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra remote` 的目标是管理远端配置，包括 add/remove/rename/set-url/prune/show/set-branches/set-head 等子命令。实现需要保护 SSH key namespace、复用 fetch prune 逻辑，并把远端状态以用户可读和结构化方式呈现。
+`libra remote` 的目标是管理远端配置，包括 add/remove/rename/get-url/set-url/prune/show/-v 等子命令。实现需要保护 SSH key namespace、复用 fetch prune 逻辑，并把远端状态以用户可读和结构化方式呈现。
 
 ## 对比 Git 与兼容性
 
@@ -37,8 +37,8 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2025-10-25 `5703987b`（`feat: add option rename for remote command (#27)`）：基础实现节点：add option rename for remote command (#27)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-09 `b8e6b4f4`（`feat(remote): add detailed `remote show <name>` subcommand (#379)`）：功能演进：add detailed `remote show <name>` subcommand (#379)；该节点扩展了当前命令可用的参数或行为。
-- 2026-06-06 `586231c0`（`feat(remote): add set-branches and set-head subcommands (#1392)`）：功能演进：add set-branches and set-head subcommands (#1392)；该节点扩展了当前命令可用的参数或行为。
+- 2026-06-09 `b8e6b4f4`（`feat(remote): add detailed `remote show <name>` subcommand (#379)`）：历史节点曾引入带 `<name>` 参数的详细 `remote show <name>` 子命令（fetch/push URL、HEAD 分支、远端及本地跟踪分支），但该带参数的 Show 形态及对应的 `RemoteOutput::Show` 输出变体已不在当前 HEAD；当前 `RemoteCmds::Show` 是无参数的单元变体，分发到 `run_list_remotes(false)`，仅列出远端名称。
+- 2026-06-06 `586231c0`（`feat(remote): add set-branches and set-head subcommands (#1392)`）：历史节点曾引入 set-branches / set-head 子命令，但这两个子命令已不在当前 `RemoteCmds` 表面（HEAD 仅保留 add/remove/rename/-v/show/get-url/set-url/prune）。
 - 2026-05-29 `a22d3b4b`（`fix(remote): guard ssh key namespace rename`）：实现修正：guard ssh key namespace rename；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -47,14 +47,15 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/remote.md`。
 - Synopsis：`libra remote <subcommand> [OPTIONS] [ARGS]`。
-- 公开参数/子命令包括：`Subcommand: `show`、`Subcommand: `-v` (list verbose)`、`Subcommand: `add`、`Subcommand: `remove`、`Subcommand: `rename`、`Subcommand: `get-url`、`Subcommand: `set-url`、`Subcommand: `prune`。
+- 公开参数/子命令包括：`add <name> <url>`、`remove <name>`、`rename <old> <new>`、`-v`（verbose 列表）、`show`、`get-url [--push] [--all] <name>`、`set-url [--add] [--delete] [--push] [--all] <name> <value>`、`prune [--dry-run] <name>`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 后续跟踪 | 当前未发现公开未完成项。 | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
+| 子命令 | `remote show <name>` 详细视图（fetch/push URL、HEAD 分支、远端及本地跟踪分支）。曾在 `b8e6b4f4` 引入，但不在当前 HEAD：`RemoteCmds::Show` 为无参数单元变体，`RemoteOutput` 无 `Show` 变体。 | 当前 `libra remote show` 等价于列出远端名称（`run_list_remotes(false)`）；如需恢复带参数详情，需重新引入 Show 变体与对应输出，并同步兼容矩阵、用户文档与测试。 |
+| 子命令 | `remote update`（按 remote group 批量 fetch）。`RemoteCmds` 与 `RemoteOutput` 均无 `Update` 变体。 | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
 
 ## 维护要求
 

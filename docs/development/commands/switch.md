@@ -37,7 +37,7 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-01-21 `27f2ae2f`（`feat(switch): add --track flag to switch command (#157)`）：基础实现节点：add --track flag to switch command (#157)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-06 `7e94b815`（`feat(switch): add -C/--force-create (create or reset branch then switch)`）：功能演进：add -C/--force-create (create or reset branch then switch)；该节点扩展了当前命令可用的参数或行为。
+- 2026-06-06 `7e94b815`（`feat(switch): add -C/--force-create (create or reset branch then switch)`）：该提交标题声称新增 `-C` / `--force-create`，但该功能并未保留在当前 HEAD：`SwitchArgs` 中没有 `force_create` 字段，代码库中也不存在 `create_branch_force` 函数，强制创建仍属未实现项（见“还未实现的功能”表）。
 - 2026-05-23 `28bb0785`（`test(reset+switch): pin agent-traces locked-branch coverage (v0.17.746)`）：测试契约：pin agent-traces locked-branch coverage (v0.17.746)；相关行为已有回归守卫，后续变更需要继续满足。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -45,8 +45,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/switch.md`。
-- Synopsis：`libra switch <branch>`。
-- 公开参数/子命令包括：`Flag details`。
+- Synopsis：`libra switch [-c|--create <CREATE>] [-d|--detach] [--track] [<BRANCH>]`。
+- 公开参数/子命令包括：`<branch>`、`-c, --create <CREATE>`、`-d, --detach`、`--track`。
 
 
 ## 还未实现的功能

@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra automation` 的目标是管理 Libra 的自动化规则和历史记录，让用户可以查看、运行、修剪或审计 AI 自动化流程。它属于 Libra AI 工作流扩展，重点是可追踪、可清理和可审计，而不是复刻 Git 命令。
+`libra automation` 的目标是管理 Libra 的自动化规则和历史记录，让用户可以查看（`list`）、运行（`run`）或审计历史（`history`）AI 自动化流程。它属于 Libra AI 工作流扩展，重点是可追踪、可清理和可审计，而不是复刻 Git 命令。
 
 ## 对比 Git 与兼容性
 
@@ -37,7 +37,7 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-05-05 `ee8bb5b1`（`feat(tui): complete Local TUI Automation Control implementation (#356)`）：基础实现节点：complete Local TUI Automation Control implementation (#356)；当前实现的主要轮廓可追溯到该提交。
-- 2026-05-17 `bd718ce7`（`feat(automation): add `libra automation prune` for log retention`）：功能演进：add `libra automation prune` for log retention；该节点扩展了当前命令可用的参数或行为。
+- 2026-05-17 `bd718ce7`（`feat(automation): add `libra automation prune` for log retention`）：历史功能演进；但当前源码仅保留 `list` / `run` / `history` 三个子命令，`prune` 子命令在当前实现中已不存在，文档以当前代码为准。
 - 2026-05-23 `f2865dad`（`docs(automation): add Examples section to match --help banner (v0.17.844)`）：文档与兼容口径：add Examples section to match --help banner (v0.17.844)；当前文档按该节点之后的实现状态校准。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -45,8 +45,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/automation.md`。
-- Synopsis：`libra automation list`。
-- 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。
+- Synopsis：`libra automation <list|run|history> [options]`。
+- 公开参数/子命令包括：`list`、`run [--rule <NAME>] [--now <DATE>] [--live]`、`history [--limit <N>]`（`--json` / `--machine` 为全局输出开关）。
 
 
 ## 还未实现的功能

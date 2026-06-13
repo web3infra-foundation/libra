@@ -39,7 +39,7 @@ flowchart TD
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2025-10-02 `e45fc0f7`（`feat: add option -F/--file for commit command (#10)`）：基础实现节点：add option -F/--file for commit command (#10)；当前实现的主要轮廓可追溯到该提交。
 - 2026-06-07 `d399c043`（`feat: support show-ref dereference and commit trailers`）：功能演进：support show-ref dereference and commit trailers；该节点扩展了当前命令可用的参数或行为。
-- 2026-06-05 `d68e5d66`（`feat(commit): support autosquash and dry-run porcelain modes`）：功能演进：support autosquash and dry-run porcelain modes；该节点扩展了当前命令可用的参数或行为。
+- 2026-06-05 `d68e5d66`（`feat(commit): support autosquash and dry-run porcelain modes`）：功能演进：support autosquash and dry-run porcelain modes；注意当前 `CommitArgs` 已不含 autosquash / dry-run / porcelain 相关参数，这些模式未在当前实现中保留。
 - 2026-06-07 `f2c67a80`（`fix(commit): close compatibility plan gaps`）：实现修正：close compatibility plan gaps；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -47,8 +47,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/commit.md`。
-- Synopsis：`libra commit [OPTIONS] -m <MESSAGE>`。
-- 公开参数/子命令包括：`-m, --message <MESSAGE>`、`-F, --file <FILE>`、`--amend`、`--no-edit`、`--conventional`、`-a, --all`、`-s, --signoff`、`--allow-empty`、`--disable-pre`、`--no-verify` 等。
+- Synopsis：`libra commit [OPTIONS] (-m <MESSAGE> | -F <FILE> | --amend --no-edit)`（`message` 声明为 `required_unless_present_any(["file", "no_edit"])`，故 `-F <FILE>` 或 `--amend --no-edit` 均可替代 `-m` 满足必填约束）。
+- 公开参数/子命令包括：`-m, --message <MESSAGE>`、`-F, --file <FILE>`、`--amend`、`--no-edit`、`--conventional`、`-a, --all`、`-s, --signoff`、`--author <AUTHOR>`、`--allow-empty`、`--disable-pre`、`--no-verify` 等。
 
 
 ## 还未实现的功能
@@ -57,6 +57,7 @@ flowchart TD
 |---|---|---|
 | 功能缺口 | fixup and --squash are not 支持; use libra rebase -i for commit restructuring | 后续实现时需要同步源码、测试和兼容矩阵。 |
 | 功能缺口 | cleanup mode for comment stripping is not 支持; messages are used as-is | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| 功能缺口 | `CommitArgs` 未实现 `--dry-run`、`--porcelain`、`-e/--edit`、`-v/--verbose`、`--trailer`、`-C/-c`（复用提交消息）、`--reset-author`、`--status/--no-status` 等 Git 标准标志 | 后续实现时需要同步源码、测试和兼容矩阵。 |
 
 ## 维护要求
 

@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra fsck` 的目标是检查对象、refs、索引和 pack 的完整性。实现需要支持严格格式检查、full/no-full pack 验证、lost-found 文档口径、非零退出和与 `verify-pack` 共享校验路径，确保损坏状态不会被静默吞掉。
+`libra fsck` 的目标是检查对象、refs、索引和 reflog 的完整性。实现需要支持对象格式校验、dangling/unreachable 报告、lost-found 文档口径和发现严重损坏时的非零退出，确保损坏状态不会被静默吞掉。
 
 ## 对比 Git 与兼容性
 
@@ -37,8 +37,8 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-05-18 `7f0e37b6`（`feat(fsck): implement fsck command (#371)`）：基础实现节点：implement fsck command (#371)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-07 `7d3d9d31`（`feat(fsck): verify pack integrity by reusing verify-pack in-process (v0.17.1407)`）：功能演进：verify pack integrity by reusing verify-pack in-process (v0.17.1407)；该节点扩展了当前命令可用的参数或行为。
-- 2026-06-05 `1a48d4e7`（`feat(fsck): add --strict commit/tree format and graph checks`）：功能演进：add --strict commit/tree format and graph checks；该节点扩展了当前命令可用的参数或行为。
+- 2026-06-07 `7d3d9d31`（`feat(fsck): verify pack integrity by reusing verify-pack in-process (v0.17.1407)`）：历史节点曾引入复用 verify-pack 的 pack 完整性检查，但该 pack 校验路径在后续提交中已从 `src/command/fsck.rs` 移除，当前实现不再校验 pack。
+- 2026-06-05 `1a48d4e7`（`feat(fsck): add --strict commit/tree format and graph checks`）：历史节点曾新增 `--strict` 严格格式与图检查，但 `--strict` 参数在后续提交中已从当前实现移除，`FsckArgs` 不再公开该参数。
 - 2026-06-07 `7e9ffa6d`（`fix(fsck): close compatibility plan gaps`）：实现修正：close compatibility plan gaps；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -47,7 +47,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/fsck.md`。
 - Synopsis：`libra fsck [OPTIONS] [OBJECT]`。
-- 公开参数/子命令包括：`[OBJECT]`、`-v, --verbose`、`--no-reflogs`、`--unreachable`、`--dangling`, `--no-dangling`、`--dangling`、`--no-dangling`、`--name-objects`、`--lost-found`、`lost-found/commit/<hash>` 等。
+- 公开参数/子命令包括：`[OBJECT]`、`-v, --verbose`、`--no-reflogs`、`--unreachable`、`--dangling [<BOOL>]`、`--no-dangling`、`--name-objects`、`--lost-found`、`--root`、`--tags`、`--connectivity-only`。
 
 
 ## 还未实现的功能

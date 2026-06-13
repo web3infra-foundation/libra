@@ -27,7 +27,7 @@ flowchart TD
     C --> D["执行路径<br/>execute / execute_safe / run_add"]
     D --> E["底层对象<br/>IndexEntry / Index / .libra/index / Blob"]
     D --> F["输出与错误<br/>AddError / AddFailure / AddOutput"]
-    E --> G["副作用边界<br/>写入分支需先预检"]
+    E --> G["副作用边界<br/>写入索引/对象库需先预检"]
 ```
 
 - 底层操作对象：`IndexEntry`（索引条目，承载路径、mode、object id 和 stat 元数据）；`Index` / `.libra/index`（暂存区状态、路径条目和刷新/保存边界）；`Blob`（文件内容或 LFS pointer 写入对象库后的 blob 对象）；LFS pointer / lock / batch 对象（`.libra_attributes` 驱动的大文件路径）
@@ -38,8 +38,8 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2025-11-12 `dceab279`（`feat: 为 add 命令提供 --force 并统一 ignore 策略 (#38)`）：基础实现节点：为 add 命令提供 --force 并统一 ignore 策略 (#38)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-12 `57dc1cf8`（`feat(p0-rejection): add -p/--patch flag rejection across add, commit, checkout, restore, reset, rebase, stash`）：功能演进：add -p/--patch flag rejection across add, commit, checkout, restore, reset, rebase, stash；该节点扩展了当前命令可用的参数或行为。
-- 2026-06-03 `d22736ef`（`feat(add): implement --renormalize (tracked-only), --pathspec-from-file/--pathspec-file-nul, --ignore-missing (dry-run) (v0.17.1281)`）：功能演进：implement --renormalize (tracked-only), --pathspec-from-file/--pathspec-file-nul, --ignore-missing (dry-run) (v0.17.1281)；该节点扩展了当前命令可用的参数或行为。
+- 2026-06-12 `57dc1cf8`（`feat(p0-rejection): add -p/--patch flag rejection across add, commit, checkout, restore, reset, rebase, stash`）：功能演进：add -p/--patch flag rejection across add, commit, checkout, restore, reset, rebase, stash；注意：当前 `src/command/add.rs` 已不含 `-p`/`--patch` 拒绝逻辑，该改动后续被回退。
+- 2026-06-03 `d22736ef`（`feat(add): implement --renormalize (tracked-only), --pathspec-from-file/--pathspec-file-nul, --ignore-missing (dry-run) (v0.17.1281)`）：功能演进：implement --renormalize (tracked-only), --pathspec-from-file/--pathspec-file-nul, --ignore-missing (dry-run) (v0.17.1281)；注意：当前 `AddArgs` 已不含 `--renormalize`、`--pathspec-from-file`/`--pathspec-file-nul`、`--ignore-missing`，这些参数后续被回退。
 - 2026-06-07 `5c2961e7`（`fix(add): close compatibility plan gaps`）：实现修正：close compatibility plan gaps；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -48,7 +48,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/add.md`。
 - Synopsis：`libra add [OPTIONS] [PATHSPEC...]`。
-- 公开参数/子命令包括：`[PATHSPEC...]`、`-A, --all`、`-u, --update`、`--refresh`、`-f, --force`、`-n, --dry-run`、`-v, --verbose`、`--ignore-errors`。
+- 公开参数/子命令包括：`[PATHSPEC...]`、`-A, --all`、`-u, --update`、`--refresh`、`-f, --force`、`-d, --dry-run`、`-v, --verbose`、`--ignore-errors`。
 
 
 ## 还未实现的功能
@@ -57,6 +57,11 @@ flowchart TD
 |---|---|---|
 | 兼容矩阵说明 | sparse-checkout 标志不支持 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 | 兼容差异项 | Intent to add | 原始对照：git add -N / --intent-to-add；相关参数/替代：不适用；当前说明：不适用 (未实现)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | Interactive patch (`-p`/`--patch`) | 原始对照：git add -p / --patch；当前 `AddArgs` 不含该参数（曾在 `57dc1cf8` 加入拒绝逻辑后被回退）。后续实现时需补回归测试并同步兼容矩阵。 |
+| 兼容差异项 | Chmod (`--chmod=±x`) | 原始对照：git add --chmod=+x；当前 `AddArgs` 不含该参数。后续实现时需补回归测试并同步兼容矩阵。 |
+| 兼容差异项 | Renormalize (`--renormalize`) | 原始对照：git add --renormalize；当前 `AddArgs` 不含该参数（曾在 `d22736ef` 加入后被回退）。后续实现时需补回归测试并同步兼容矩阵。 |
+| 兼容差异项 | Pathspec from file (`--pathspec-from-file`/`--pathspec-file-nul`) | 原始对照：git add --pathspec-from-file / --pathspec-file-nul；当前 `AddArgs` 不含该参数（曾在 `d22736ef` 加入后被回退）。后续实现时需补回归测试并同步兼容矩阵。 |
+| 兼容差异项 | Ignore missing (`--ignore-missing`) | 原始对照：git add --ignore-missing；当前 `AddArgs` 不含该参数（曾在 `d22736ef` 加入后被回退）。后续实现时需补回归测试并同步兼容矩阵。 |
 
 ## 维护要求
 

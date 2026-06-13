@@ -13,7 +13,7 @@
 
 ## 设计方案
 
-- 入口与分发：源码资料存在但尚未公开接入 `src/cli.rs::Commands`；当前未由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
+- 入口与分发：源码资料存在但尚未公开接入 `src/cli.rs::Commands`；`src/command/notes.rs` 与 `src/internal/notes.rs` 文件虽在磁盘上存在，但 `src/command/mod.rs` 与 `src/internal/mod.rs` 均无 `mod notes` 声明，故两者均未编译进二进制。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
 - 源码分层：主要实现文件为 `src/command/notes.rs`。参数/子命令类型包括：`NotesArgs`、`NotesSubcommand`；输出、错误或状态类型包括：`NotesOutput`、`NotesListEntry`、`NotesRemovedEntry`；主要执行函数包括：`execute`、`execute_safe`。
 - 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置。
 
@@ -24,14 +24,14 @@ flowchart TD
     A["入口与分发<br/>未公开 CLI / 设计资料"] --> B["源码分层<br/>src/command/notes.rs"]
     B --> C["参数模型<br/>NotesArgs / NotesSubcommand"]
     C --> D["执行路径<br/>execute / execute_safe"]
-    D --> E["底层对象<br/>未直接触达 Git 对象 / 索引 / refs 或外部存储"]
+    D --> E["底层对象<br/>blob 写入对象库 + SQLite notes 表"]
     D --> F["输出与错误<br/>NotesOutput / NotesListEntry / NotesRemovedEntry"]
-    E --> G["副作用边界<br/>只读输出/外部调用为主"]
+    E --> G["副作用边界<br/>写 blob 对象 + SQLite notes 行"]
 ```
 
-- 底层操作对象：未直接触达 Git 对象、索引、refs 或外部存储；主要副作用集中在 CLI 输出、配置读取或外部进程/浏览器边界。
+- 底层操作对象：`src/internal/notes.rs` 的 `add()` 把消息内容写成 blob 并经对象库 `put` 持久化，同时向 SQLite `notes` 表写入 (`notes_ref`、`object`、`blob`) 映射行；因此实现直接触达 Git 对象库与 SQLite 存储（但不写 refs/索引）。
 - 输出与错误契约：人类输出、`--json` / `--machine` 输出和 quiet/verbose 分支必须继续走现有 `OutputConfig` / `emit_json_data` / `CliError` 路径；新增失败模式要补稳定错误码、用户提示和回归测试。
-- 副作用边界：当前实现以读操作、格式化输出或外部服务调用为主；若后续增加写入能力，需要先在设计中补齐持久化对象、回滚语义和测试证据。
+- 副作用边界：当前实现的 `add()` 写入 blob 对象与 SQLite `notes` 行（show/list/remove 含读取与删除行）；后续扩展持久化能力时，需要补齐回滚语义和测试证据。
 
 ## 实现历史
 
@@ -41,9 +41,9 @@ flowchart TD
 
 ## 当前状态
 
-- 公开状态：未公开；模块状态：未从 `src/command/mod.rs` 导出。
+- 公开状态：未公开；模块状态：源码文件 `src/command/notes.rs` 与 `src/internal/notes.rs` 存在，但无 `mod notes` 声明，未编译进二进制。
 - 用户文档：`docs/commands/notes.md`。
-- Synopsis：`libra notes add [-m <message> | -F <file>] [-f] [<object>]`。
+- Synopsis：`libra notes [--ref <ref>] add [-m <message>]... [-F <file>]... [-f] [<object>]`（`-m`/`-F` 可重复并按命令行顺序任意混用）。
 - 公开参数/子命令包括：`Subcommands`、`Flag examples`。
 
 

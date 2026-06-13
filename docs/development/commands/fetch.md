@@ -38,8 +38,8 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-04-06 `30bed711`（`feat(remote): land batch-5 remote and fetch UX (#341)`）：基础实现节点：land batch-5 remote and fetch UX (#341)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-05 `7d75d886`（`feat(fetch): add --refmap to override fetched-ref destinations`）：功能演进：add --refmap to override fetched-ref destinations；该节点扩展了当前命令可用的参数或行为。
-- 2026-06-05 `b005e9ee`（`feat(fetch): add --atomic with rollback pack cleanup`）：功能演进：add --atomic with rollback pack cleanup；该节点扩展了当前命令可用的参数或行为。
+- 2026-06-05 `7d75d886`（`feat(fetch): add --refmap to override fetched-ref destinations`）：历史节点：曾尝试新增 `--refmap`，但当前 `FetchArgs` 已不再公开该参数（仅保留 `--all` / `--depth`）。
+- 2026-06-05 `b005e9ee`（`feat(fetch): add --atomic with rollback pack cleanup`）：历史节点：曾尝试新增 `--atomic`，但当前 `FetchArgs` 已不再公开该参数（仅保留 `--all` / `--depth`）。
 - 2026-06-07 `b21dc6fd`（`fix(fetch): close compatibility plan gaps`）：实现修正：close compatibility plan gaps；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -48,16 +48,14 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/fetch.md`。
 - Synopsis：`libra fetch [OPTIONS] [<repository> [<refspec>]]`。
-- 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。
+- 公开参数/子命令包括：`[<repository>]`、`[<refspec>]`、`-a, --all`、`--depth <N>`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 功能缺口 | for why sparse-checkout is intentionally 延后. | 后续实现时需要同步源码、测试和兼容矩阵。 |
 | 兼容差异项 | Git shallow 扩展参数 | 原始对照：`--deepen` / `--shallow-since` / `--unshallow` 等；当前说明：不支持。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 无效远端规格 (missing repo, malformed URL, 不支持 scheme) | 原始对照：LBR-CLI-003 or LBR-REPO-001；相关参数/替代：129 / 128；当前说明：Varies by cause。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求
 
