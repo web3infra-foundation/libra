@@ -455,6 +455,10 @@ impl SourceCallLog {
                     ),
                     success: sea_orm::ActiveValue::Set(if in_memory_copy.success { 1 } else { 0 }),
                     created_at: sea_orm::ActiveValue::Set(chrono::Utc::now().to_rfc3339()),
+                    // Main-session source calls carry no sub-agent run; the
+                    // sub-agent tool loop populates this from its run context
+                    // (migration `2026060201`). NULL == main-session call.
+                    agent_run_id: sea_orm::ActiveValue::Set(None),
                 };
                 use sea_orm::ActiveModelTrait;
                 if let Err(err) = active.insert(db.as_ref()).await {

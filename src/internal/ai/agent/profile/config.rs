@@ -122,6 +122,15 @@ pub struct MultiAgentConfig {
     /// operator opts in to duplicating the whole worktree per run.
     #[serde(default)]
     pub allow_full_copy: bool,
+
+    /// CEX-S2-14: per-slug Source Pool call throttle for sub-agent runs.
+    /// `0` (the default) disables the throttle, leaving flag-off
+    /// source-call behaviour unbounded exactly as the Step 1 baseline —
+    /// so a fresh install observes byte-equivalent behaviour. A positive
+    /// value caps the number of concurrent in-flight calls the scheduler
+    /// will issue against any single source slug.
+    #[serde(default)]
+    pub source_concurrency_limit: u32,
 }
 
 impl Default for MultiAgentConfig {
@@ -132,6 +141,7 @@ impl Default for MultiAgentConfig {
             max_concurrent_subagents: default_max_concurrent_subagents(),
             subagent_timeout_ms: default_subagent_timeout_ms(),
             allow_full_copy: false,
+            source_concurrency_limit: 0,
         }
     }
 }
