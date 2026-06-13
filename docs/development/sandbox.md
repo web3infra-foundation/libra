@@ -139,7 +139,7 @@ shell 工具 → run_shell_command_with_approval (mod.rs:909)
 - TUI：`execute_tui`（`code.rs:1401`）建 `ToolRegistry`（注册 `shell`=`ShellHandler`、`apply_patch`=`ApplyPatchHandler`），再 `run_tui_with_model`。
 - 每会话 `runtime_context` 在 `run_tui_with_model_inner`（`code.rs:2753`）里由 `default_tui_runtime_context`（`code.rs:3406`）构造；该函数据 `CodeContext` 选策略：`Review|Research` → `ReadOnly`；`Dev|None` → `WorkspaceWrite { writable_roots: vec![working_dir], network_access, … }`（`code.rs:3414-3433`）。
 - **关键现状**：`sandbox_runtime: None` 在 `code.rs:3433` 硬编码——TUI 今天完全靠 env / `.libra/sandbox.toml` 调后端。**VM 后端最干净的接入点就是在这里把 `sandbox_runtime` 填上一个带 VM 句柄的 `SandboxRuntimeConfig`。**
-- 终端恢复用了 `scopeguard::guard`（`code.rs:2810`）——**VM 销毁应当照搬这个 RAII guard 模式**，保证早退/panic 也能 `container stop && rm`。
+- 终端恢复用了 `scopeguard::guard`（`code.rs:2810`）；它是 VM 销毁的**位置参考**，但该闭包是同步的、无法 `await` 外部 `container stop && rm`——VM 销毁需用 §7 Phase 2 的**三层保障**（正常路径 await + Drop 内阻塞兜底 + 启动期 PID 感知回收），不能直接照搬。
 - headless/web 走 `build_headless_web_code_ui_runtime`（`code.rs:1968`），需同等处理。
 
 每个工具调用过 `ToolRegistry::dispatch`（`registry.rs:271`），它把 `invocation.working_dir = self.working_dir` 重新盖章（`registry.rs:286`，“sandbox 单一事实源”）。只有 `ShellHandler`（`shell.rs:73`）会进 `run_shell_command_with_approval`；`ApplyPatchHandler`（`apply_patch.rs:44`）在**宿主进程内直接写文件**，不经 OS 沙箱（这是 §9 要专门处理的一致性点）。
@@ -156,7 +156,7 @@ shell 工具 → run_shell_command_with_approval (mod.rs:909)
 
 ## 3. apple/container 调研结论
 
-> 一手来源：`github.com/apple/container`（README、`docs/technical-overview.md`、`docs/command-reference.md`、Releases `1.0.0`、issue #636）、`github.com/apple/containerization`（README、vminitd）、WWDC 2025 session 346。详见 §17。带 *UNVERIFIED* 的条目为公开文档未明确、需在 Phase 0 spike 实测确认。
+> 一手来源：`github.com/apple/container`（README、`docs/technical-overview.md`、`docs/command-reference.md`、Releases `1.0.0`、issue #66）、`github.com/apple/containerization`（README、vminitd）、WWDC 2025 session 346。详见 §17。带 *UNVERIFIED* 的条目为公开文档未明确、需在 Phase 0 spike 实测确认。
 
 ### 3.1 是什么
 
@@ -198,7 +198,7 @@ shell 工具 → run_shell_command_with_approval (mod.rs:909)
 
 **对一个 Rust 宿主进程，今天唯一稳定、受支持的集成方式是 shell out 到 `container` CLI。** 依据：
 
-- apiserver 只暴露 **XPC**，本质 Swift-only；社区已开 issue #636 / discussion #855 请求 socket/HTTP API，**未承诺**；`1.0.0` 还移除了 v0 XPC（跨大版本不稳定）。→ **不要从 Rust 直连 XPC。**
+- apiserver 只暴露 **XPC**，本质 Swift-only；社区请求 socket/HTTP API 的诉求汇总在 issue #66（仍在跟踪，Apple **未承诺**；曾另开的 #636 已于 2025-11-03 作为 #66 的重复关闭，用户被指向外部 `socktainer` 项目）；`1.0.0` 还移除了 v0 XPC（跨大版本不稳定）。→ **不要从 Rust 直连 XPC。**
 - 直接链接 `apple/containerization` Swift 包需要：写 Swift shim、对着 macOS 26/Xcode 26 编译、自管 `com.apple.security.virtualization` 授权与签名、跟一套 pre-1.0 不稳定 API。→ **高成本、低稳定，排除。**
 - guest 内 `vminitd` 的 vsock gRPC 是干净 RPC 边界，但那是 host↔guest 内部契约；要用它你得自己用 `Virtualization.framework` 建 VM、连 vsock——等于重写 containerization 包。→ **排除。**
 - `cctl` 是 demo 工具，非稳定 CLI。→ **不要在它上面建产品。**
@@ -213,7 +213,7 @@ shell 工具 → run_shell_command_with_approval (mod.rs:909)
 
 ### 3.7 网络
 
-- **macOS 26**：每容器一个**专属 IP**（`vmnet`），基本免端口转发；可建多网络、容器间通信（`network create --subnet[/--subnet-v6]`，不同网络互相隔离）；`--internal` 网络无出口。
+- **macOS 26**：每容器一个**专属 IP**（`vmnet`），基本免端口转发；可建多网络、容器间通信（`network create --subnet[/--subnet-v6]`，不同网络互相隔离）；`--internal` 在 Apple 文档中的定义是 *host-only network*（“Restrict to host-only network”），即不连外网——“无对外出口”是其推论，但**精确出网/可达宿主语义需 Phase 0 实测**（§8 不应过度依赖未经证实的“no NAT”保证）。
 - **macOS 15**：vmnet 只能给互相隔离的网络，容器间通信几乎不可用——这是 `1.0.0` 要 macOS 26 的主因。
 - 端口发布 `-p host:hostport:ctrport`（IPv6 亦可）；多网络下 publish 只走第一块网卡。
 - DNS：`container system dns create <domain> --localhost <IP>`，会**关闭 macOS Private Relay** 且**重启不保留**。
@@ -410,6 +410,17 @@ pub struct SandboxRuntimeConfig {
 
 **验收**：spike-findings 文档回答上述每条，给出推荐常量（默认镜像、guest 挂载点、host-gateway 取法、是否支持 headless），并对“macOS 15 是否值得兜底”给结论（默认结论：不兜底，<26 一律降级 seatbelt）。
 
+**Phase 0 决定后续可行性的硬分支（kill / fallback criteria）**：
+
+| spike 结论 | 对后续阶段的影响 |
+|---|---|
+| host-only 网络下 **无 guest 可达的宿主地址** | §8 Allowlist **首版不交付**；Allowlist 在 `Required` 下降级 Denied（§8.5）；功能仅出 Denied/Full |
+| **headless/launchd 不可用**（需登录会话） | CI/远程 `libra code` 该后端不可用；这些环境 `Auto`/`BestEffort` 降级 seatbelt、`Required` 报错（决策表 §10） |
+| 绑挂 **fsync/mmap 语义破坏 `cargo build`** 或慢到不可用 | 重新评估“worktree 共享挂载”模型；可能改为 guest 内独立 checkout + `container cp` 回写（牺牲 §9 的 apply_patch 即时一致性），或暂缓该后端用于 Rust 构建 |
+| uid/gid 映射导致写回宿主文件属主异常 | 文档明示并在镜像/挂载参数里修正；必要时加 `--user` 或 idmap |
+
+上述任一“不可用”结论都不阻断 Phase 1（骨架/配置/argv 纯逻辑可照常做），但会裁剪 Phase 4 的交付范围——**Phase 0 findings 必须显式写明本表每行的实测结论**。
+
 ### Phase 1 — 后端骨架与配置面（可单元测试，不依赖真 VM）
 
 改动点：
@@ -430,14 +441,16 @@ pub struct SandboxRuntimeConfig {
 改动点：
 
 1. 新文件 `src/internal/ai/sandbox/container_vm.rs`：`AppleContainerRuntime` 的 `ensure_system_started` / `ensure_image` / `create_session_vm` / `destroy_session_vm`，全部 `tokio::process::Command` 驱动 `container`，超时 + 结构化错误 `VmError`。
-   - `create_session_vm`：`container run -d --name libra-code-<session> -v <host_worktree>:/workspace:rw -w /workspace <network-flags> --cpus <n> --memory <m> <image> sleep infinity`，解析返回的 container id。
-   - `destroy_session_vm`：`container stop <id>`（带超时）+ `container rm -f <id>`，幂等、吞错、记 evidence。
-   - `ContainerVmGuard`（RAII，仿 `RunningAllowlistProxy` 的 `Drop`，`proxy_runtime.rs:30-60`）：`Drop` 里 `block_on`/`spawn` 销毁，确保早退也清理；并在进程级注册一个兜底回收（见孤儿回收）。
-2. `command/code.rs` 接入：
-   - 在 `run_tui_with_model_inner`（`code.rs:2753`）解析出 `backend`，若 `apple-container` 且探针过：`ensure_system_started` → `ensure_image` → `create_session_vm(working_dir)` → 得 `ContainerVmHandle`；填进 `default_tui_runtime_context` 产出的 `SandboxRuntimeConfig.sandbox_runtime`（把 `code.rs:3433` 的 `None` 换成 `Some(cfg_with_vm)`）。
-   - 用 `scopeguard::guard`（仿 `code.rs:2810`）在会话退出/早退/panic 时 `destroy_session_vm`。
+   - `create_session_vm`：`container run -d --name libra-code-<host_pid>-<session> --label libra.owner_pid=<host_pid> -v <host_worktree>:/workspace:rw -w /workspace <network-flags> --cpus <n> --memory <m> <image> sleep infinity`，解析返回的 container id。**名字/标签编入宿主 PID**，供并发安全的孤儿回收（见下）。
+   - `destroy_session_vm(&handle)`：**async**，`container stop <id>`（带超时）+ `container rm -f <id>`，幂等、吞错、记 evidence。
+2. **销毁的三层保障（不要照搬 proxy 的 `Drop`）**。⚠️ `RunningAllowlistProxy::Drop`（`proxy_runtime.rs:51-59`）只做**进程内同步** `task.abort()`，它**从不 spawn/await 外部进程**；`scopeguard::guard`（`code.rs:2810`）的闭包是**同步 `FnOnce`，不能 await**。而 `destroy_session_vm` 必须 spawn 并**等待** `container stop && rm` 这个**外部子进程**跑完；在多线程 tokio 运行时（`cli.rs:551`）里：worker 线程的 `Drop` 中 `Handle::current().block_on()` 会 **panic**，`Drop` 里 detach 的 `tokio::spawn` 常常**进程退出前跑不完 → 泄漏 VM**。正确做法分三层：
+   - **(a) 正常路径（首选）**：在 `run_tui_with_model_inner` 返回前，于现有 web/mcp/managed 关停序列（`code.rs:3225-3233`）旁边**显式 `destroy_session_vm(&handle).await`**。为覆盖 `code.rs:2820-3025` 间众多早退分支，把会话主体抽到一个内层 `async fn`，外层 `let result = inner().await; if let Some(h)=&vm { destroy_session_vm(h).await; } result`，保证任何 `?` 早退都先 await 清理。
+   - **(b) panic / 硬退兜底**：再挂一个 `Drop` guard，但里面用**阻塞 `std::process::Command::new("container").args(["rm","-f",&id])`**（同步、不碰 tokio、`Drop` 任意线程安全），best-effort 吞错。它只是兜底，不替代 (a)。
+   - **(c) 启动期 PID 感知孤儿回收（真正的 backstop）**：见下。
+3. `command/code.rs` 接入：
+   - 在 `run_tui_with_model_inner`（`code.rs:2753`）解析出 `backend`，若 `apple-container` 且探针过：`ensure_system_started` → `ensure_image` → `create_session_vm(working_dir)` → 得 `ContainerVmHandle`；填进 `default_tui_runtime_context` 产出的 `SandboxRuntimeConfig.sandbox_runtime`（把 `code.rs:3433` 的 `None` 换成 `Some(cfg_with_vm)`）；按 2(a)/(b) 装清理。
    - headless：`build_headless_web_code_ui_runtime`（`code.rs:1968-2027`）同等处理。
-3. **孤儿回收**：进程启动时 `container ls --format json` 找 `libra-code-*` 名、且无活动会话的容器，`rm -f` 之（防上次崩溃残留）。可作 `libra sandbox` 的一个维护子命令或启动期清理（§11 注意 CLI 面变更需 compat guard）。
+4. **孤儿回收（PID 感知，并发安全）**：进程启动时 `container ls --format json` 列出 `libra-code-*`，**只回收 `libra.owner_pid` 标签对应进程已死的容器**（用 `kill(pid, 0)` / `/proc` 或 `libc::kill` 探活）。⚠️ 同主机**并发多个 `libra code` 会话是正常场景**——仅靠 `libra-code-*` 名匹配会误杀别的存活会话；必须按 owner PID 存活性判定。做成**启动期静默清理**，不新增 CLI 子命令（避免一串 compat guard 改动，见 §11）。
 4. **CLI flag**：`libra code --sandbox-backend <auto|seatbelt|apple-container|none>`（`CodeArgs`），并入 `--help` EXAMPLES（满足三条 help 契约，见 §11）。
 
 验收：L2/L3（gated，需真 macOS 26 + Apple Silicon，见 §10 的 `env_var_is_set` + feature gate）端到端：起会话→VM 出现在 `container ls`→跑一条 `echo`→会话结束→`container ls` 不再有该 VM。L1：用一个**可注入的 fake runner**（trait 化 `container` 调用，类似 test-provider 思路）断言生命周期调用序列（start→image→run→exec→stop→rm）与早退清理。
@@ -446,7 +459,7 @@ pub struct SandboxRuntimeConfig {
 
 改动点：
 
-1. **writable roots → 挂载**：把 `policy.get_writable_roots_with_cwd(cwd)`（`policy.rs:727-735`，`WorkspaceWrite.writable_roots`）翻译成 `-v host:guest:rw`。**模板就是 `create_bwrap_command_args`（`runtime.rs:799-858`）**——它已经把 writable roots / deny_read 翻成 bwrap 的 bind/tmpfs，照搬其映射逻辑到 `container run` 的 `-v`/`--mount`。
+1. **writable roots → 挂载**：把 `policy.get_writable_roots_with_cwd(cwd)`（`policy.rs:727-735`，`WorkspaceWrite.writable_roots`）翻译成 `-v host:guest:rw`。**模板就是 `create_bwrap_command_args_with_seccomp`（`runtime.rs:799-858`；同名瘦包装 `create_bwrap_command_args` 在 `runtime.rs:776-791`，writable-roots→`--bind`/deny_read→`--tmpfs` 的实际映射在 `:838-853`）**——照搬其映射逻辑到 `container run` 的 `-v`/`--mount`。
    - 主 worktree → `/workspace:rw`；额外 writable roots → 各自 guest 挂载点；`deny_read_paths`（`mod.rs:1425-1426`）→ 不挂载（VM 内本就不可见，天然满足）或挂 `--mount …,readonly` 排除。
    - `rebased_to_workspace`（`policy.rs:611-636`，sub-agent 把 writable roots 收窄到单一 workspace 根）→ 对应单一挂载根，利于多 VM。
 2. **apply_patch 一致性（D6 核心）**：因为 worktree 是**共享读写挂载**，`ApplyPatchHandler`（`apply_patch.rs:44`，宿主内写 `working_dir`）写的文件 guest 立即可见，guest 内 shell 写的也宿主可见——**无需把 patch 逻辑搬进 VM**。需验证：跨 virtio-fs 的写入对随后 guest 内进程可见、无缓存一致性坑（Phase 0 已实测）。文档明确：**worktree 内一致；worktree 外（guest 装的依赖、`$HOME`）宿主不可见，按设计如此。**
@@ -460,7 +473,7 @@ pub struct SandboxRuntimeConfig {
 
 1. **Denied** → `container run --network none`（或 `--internal` 无路由）；不起代理；`disable_network` 逻辑（`runtime.rs:558-563`）对 VM 改为“确实无网”而非仅 env 提示。
 2. **Full** → 默认 NAT 网络（每容器 IP 出网）。
-3. **Allowlist** → `--internal` 网络（无 NAT 出口）+ 宿主 `AllowlistProxy` 绑在 **guest 可达的 host-gateway 地址**（Phase 0 取得）+ 把注入的 `*_PROXY` 重写成该 host-gateway:port（覆盖 `inject_allowlist_proxy_env` `mod.rs:1533-1553` 的硬编码 loopback）+ guest 侧**默认拒绝直连**（镜像内 baked nftables default-deny，仅放行到代理；或依赖 `--internal` 无 NAT 使唯一可达出口就是代理）。代理生命周期从“每命令”提到“每会话”（与 VM 同寿）。
+3. **Allowlist** → `--internal`（host-only network）+ 宿主 `AllowlistProxy` 绑在 **guest 可达的 host-gateway 地址**（Phase 0 取得）+ 把注入的 `*_PROXY` 重写成该 host-gateway:port（覆盖 `inject_allowlist_proxy_env` `mod.rs:1533-1553` 的硬编码 loopback）+ guest 侧**默认拒绝直连**（镜像内 baked nftables default-deny，仅放行到代理；host-only 限制使唯一可达外部出口就是代理）。代理生命周期从“每命令”提到“每会话”（与 VM 同寿）。**前提**：host-only 网络下 guest 必须能访问到宿主代理地址——若 Phase 0 实测发现不可达，本模式按 §8.5 的兜底降级。
 4. **强制力**：Allowlist 在 `Required` 下，若 guest 侧默认拒绝尚未就绪（即无法保证直连被挡），必须 fail-closed（不能退化成“env 提示但实际能直连”）。
 
 验收：L3 网络矩阵：Denied 下 guest `curl` 任意外网失败；Full 下成功；Allowlist 下仅允许列表内 host 成功、列表外失败、且绕过 `*_PROXY` 的直连也失败。
@@ -477,7 +490,7 @@ pub struct SandboxRuntimeConfig {
      - `Required` → `SandboxTransformError::EnforcementFailed { reason }`（带可操作提示：装 `container`、升级 macOS 26、用 Apple Silicon、或显式 `--sandbox-backend seatbelt`）。
      - `PreferStrict` → 触发审批回退（沿用现有 fallback 文案路径）。
      - `BestEffort` → `tracing::warn!` 并**降级回 `MacosSeatbelt`**（不是 `None`，因为 seatbelt 在 macOS 总可用）。
-3. **新错误码**（`StableErrorCode`）：`SANDBOX_VM_UNAVAILABLE`、`SANDBOX_VM_START_FAILED`、`SANDBOX_VM_EXEC_FAILED`、`SANDBOX_VM_UNSUPPORTED_PLATFORM`；同步 `docs/error-codes.md`（否则 `compat_error_codes_doc_sync` guard 失败）。
+3. **新错误码**：遵循仓库 `StableErrorCode` 方案——**PascalCase 枚举变体映射到 `LBR-<DOMAIN>-NNN` 字符串**（如 `AgentBudgetExceeded => "LBR-AGENT-001"`，见 `src/utils/error.rs:185+`）。当前 `error.rs` / `docs/error-codes.md` **尚无任何 sandbox 码**，需新开一个 `LBR-SANDBOX-NNN` 段，例如：`SandboxVmUnavailable => "LBR-SANDBOX-001"`、`SandboxVmStartFailed => "LBR-SANDBOX-002"`、`SandboxVmExecFailed => "LBR-SANDBOX-003"`、`SandboxVmUnsupportedPlatform => "LBR-SANDBOX-004"`。每个变体同步进 `docs/error-codes.md`（否则 `compat_error_codes_doc_sync` guard 失败）。
 4. **evidence 事件**（`evidence.rs`）：VM 创建/销毁/exec 失败/网络拒绝（复用 `SandboxEvidenceEvent`，新增 VM 相关变体）。
 
 验收：L1：各 enforcement 档 × 探针不过的组合，断言错误/降级路径正确；`libra sandbox status --json` 含新字段且在非 macOS / 无 container 时给出合理值（`available=false`、`reason` 可读）。
@@ -505,7 +518,7 @@ pub struct SandboxRuntimeConfig {
 |---|---|---|---|
 | `Denied` | `--network none` | 无 | VM 无任何网络接口 = 物理无网 |
 | `Full` | 默认 NAT 网络（容器专属 IP） | 无 | 等同普通容器出网；隔离仍由 VM 边界提供 |
-| `Allowlist` | `--internal` 网络（无 NAT 出口） + 宿主代理经 host-gateway 暴露 | 会话级 `AllowlistProxy` 绑 host-gateway | `--internal` 使唯一可达外部出口是代理；guest 默认拒绝直连兜底 |
+| `Allowlist` | `--internal`（host-only network，不连外网） + 宿主代理经 host-gateway 暴露 | 会话级 `AllowlistProxy` 绑 host-gateway | host-only 使唯一可达外部出口是代理；guest 默认拒绝直连兜底 |
 
 ### 8.2 Allowlist 的可达性与重写
 
@@ -521,7 +534,25 @@ Allowlist/Full 下 guest 需 DNS。优先用默认网络自带 DNS；若用 `--i
 
 ### 8.4 与 enforcement 的耦合
 
-沿用 `proxy_enforcement_from_sandbox`（`runtime.rs:747-753`）：`Required`→代理不可用即 `Reject`（`NetworkEnforcementFailed`）；`PreferStrict`/`BestEffort`→`DegradeToDenied`（对 VM = 改成 `--network none` 重建网络或拒绝该会话出网）。注意：VM 网络是**会话级**决定的（创建 VM 时定网络模式），命令级若策略变更需要重配/重建，v1 简化为**会话级固定网络模式**（取会话策略；命令级收紧只影响代理 allowlist，不重建 VM）。
+沿用 `proxy_enforcement_from_sandbox`（`runtime.rs:747-753`）：`Required`→代理不可用即 `Reject`（`NetworkEnforcementFailed`）；`PreferStrict`/`BestEffort`→`DegradeToDenied`。
+
+**⚠️ 关键修正：VM 网络模式不能从“会话策略”推出。** `default_tui_runtime_context`（`code.rs:3413-3421`）构造的会话 `SandboxPolicy` 只会是 `ReadOnly` 或 `WorkspaceWrite{Full|Denied}`——`network_access` 经 `from_legacy_bool` 只能得 `Full`/`Denied`，**永远不是 `Allowlist`**。`Allowlist` 仅由 `build_command_from_spec`（`mod.rs:1436-1449`）在**命令级**读 `.libra/sandbox.toml [sandbox.network]` 经 `with_network_restriction`（收紧式）注入。因此**会话创建 VM 时，代码并不知道后续命令会不会是 Allowlist**。
+
+v1 的确定性做法：
+
+1. **会话起新增一次显式读取** `.libra/sandbox.toml [sandbox.network]`（独立于命令级那次加载，复用 `load_sandbox_config_network_access` `mod.rs:2112-2116`），与会话 `WorkspaceWrite.network_access` 合并，**取两者中更严的**作为**会话固定 VM 网络模式**：
+   - 会话 `Denied`（`--network-access deny`）→ `--network none`，无视 toml（最严）。
+   - 会话 `Full`（`--network-access allow`）+ toml `mode="allowlist"` → host-only + 代理（Allowlist）。
+   - 会话 `Full` + 无 toml 限制 → 默认 NAT（Full）。
+2. **承认 session 与 effective(命令级) 策略在网络上会发散**：命令级若把网络**收紧**（如某次调用降到 Denied）而 VM 创建时是 Full/Allowlist——v1 **不重建 VM**，该收紧仅作用于代理 allowlist（Allowlist→更小的放行集）。
+3. **明确的执行空洞 + 闸门**：上一条意味着“命令级收紧到 `Denied`、但 VM 是 Full/Allowlist”时，`LIBRA_SANDBOX_NETWORK_DISABLED=1`（`runtime.rs:558-563`）只是 guest 内**提示**，VM 仍有网——**v1 不强制此情形**。因此：在 `SandboxEnforcement::Required` 下，若检测到“命令级 Denied 收紧 vs VM 已联网”，**必须 fail-closed**（拒绝该命令并提示需要 Denied 会话），而不是放行；`BestEffort` 下 warn 并放行。彻底修复需会话内重建 VM 网络（§15 留口）。
+
+### 8.5 Allowlist 不可达时的兜底（Phase 0 决定）
+
+§8.2 的整套 Allowlist 设计**以“host-only 网络下 guest 能访问到宿主代理地址”为前提**。Phase 0 spike 必须给出 host-gateway 可达性的明确结论，并据此走以下分支：
+
+- **可达** → 按 §8.1/§8.2 实现 Allowlist。
+- **不可达 / 不确定** → Allowlist 在 `Required` 下**降级为 `Denied`（fail-closed，不静默放行直连）**，`PreferStrict`/`BestEffort` 降级 Denied 并 warn；**首版功能仅承诺 `Denied` 与 `Full` 两种 VM 网络模式**，Allowlist 留待 host-gateway 方案落实后再开。这把“Allowlist 是最难的一块”修正为“Allowlist 可能首版不交付”，避免基于未证实假设过度承诺。
 
 ---
 
@@ -532,7 +563,7 @@ Allowlist/Full 下 guest 需 DNS。优先用默认网络自带 DNS；若用 `--i
 | guest 路径 | 来源 | 模式 | 说明 |
 |---|---|---|---|
 | `/workspace` | 宿主 worktree 根（`resolve_code_working_dir` `code.rs:2465`） | rw | 主工作区；apply_patch + shell 共享 |
-| `/workspace/<extra>` 或专属点 | 额外 writable roots（`WorkspaceWrite.writable_roots`） | rw | 仿 `create_bwrap_command_args` 翻译 |
+| `/workspace/<extra>` 或专属点 | 额外 writable roots（`WorkspaceWrite.writable_roots`） | rw | 仿 `create_bwrap_command_args_with_seccomp`（`runtime.rs:799-858`）翻译 |
 | （不挂载） | `deny_read_paths`（`mod.rs:1425`） | — | VM 内本不可见，天然满足 |
 | ephemeral | 系统/`$HOME`/`/tmp`/依赖 | rw（VM 内） | 随 VM 焚毁 |
 
@@ -542,6 +573,7 @@ Allowlist/Full 下 guest 需 DNS。优先用默认网络自带 DNS；若用 `--i
 - **不要**把 `apply_task_worktree_env_overrides`（`runtime.rs:101-119`）注入的宿主路径 `HOME/XDG_CONFIG_HOME/XDG_CACHE_HOME/CARGO_HOME/LIBRA_LOG_FILE` 原样带进 guest——这些指向宿主 worktree 子目录，在 guest 里无意义或会误指。两种处理：
   1. **推荐**：VM 后端跳过这些 host-path 覆盖，让 guest 用镜像里的默认 `$HOME` 等；只透传与路径无关的 env（`PATH` 用 guest 的、`LANG` 等）。
   2. 或：把这些路径同样前缀重映射到 guest（仅当对应目录也在挂载内）。
+- **精确实现点（务必只对 VM 生效）**：`apply_task_worktree_env_overrides`（`runtime.rs:101-119`）是在 `CommandSpec::shell` 构造时**上游**写进 `spec.env` 的，等到 `transform` 时这些键已在 env map 里。因此过滤要发生在 **VM 后端臂内**（`exec_argv` 拼 `-e` 之前，或 transform 的 `MacosAppleContainer` 臂里）对**已填充的 `spec.env`** 做一次按 `SandboxType` 区分的剔除——**deny-list**：`HOME`、`XDG_CONFIG_HOME`、`XDG_CACHE_HOME`、`CARGO_HOME`、`LIBRA_LOG_FILE`、`TMPDIR`（这些指向宿主路径，带进 guest 会导致 `CARGO_HOME` 指向不存在目录而构建失败）；其余键 allow。**绝不能**在通用路径上剔除，否则会破坏 seatbelt 臂（它需要这些宿主路径覆盖）。建议写成 `fn guest_env(spec_env) -> HashMap` 只在 VM 臂调用，并配单测断言 seatbelt 臂 env 不变、VM 臂剔除了上述 6 个键。
 - `TMPDIR`：现有逻辑注入宿主私有 0700 tmpdir（`mod.rs:1212-1213,1373-1379`）；VM 内应让 guest 用自己的 `/tmp`（ephemeral），故 VM 后端不透传宿主 `TMPDIR`。
 - `LIBRA_SANDBOX_NETWORK_DISABLED`（`runtime.rs:558-563`）：对 VM 仍可作为 guest 内进程的提示信号透传，但真正强制靠 `--network none`（§8.1）。
 
@@ -615,12 +647,29 @@ Allowlist/Full 下 guest 需 DNS。优先用默认网络自带 DNS；若用 `--i
 container system start
 container build -t libra-sandbox:dev -f template/sandbox/Dockerfile.libra-dev .
 
+# 若要 Allowlist 出网：在项目根写 .libra/sandbox.toml（这是当前唯一能得到
+# NetworkAccess::Allowlist 的入口——见下方“关于 --network-access”）
+cat > .libra/sandbox.toml <<'TOML'
+[sandbox.network]
+mode = "allowlist"
+[[sandbox.network.services]]
+host = "*.crates.io"
+ports = [443]
+protocol = "tcp"
+[[sandbox.network.services]]
+host = "static.crates.io"
+ports = [443]
+protocol = "tcp"
+TOML
+
 # 每次开发会话（worktree 读写绑挂进 VM，命令全在 VM 跑）
 export LIBRA_SANDBOX_BACKEND=apple-container
 export LIBRA_SANDBOX_ENFORCEMENT=required      # 平台不满足直接报错，不静默降级
 export LIBRA_SANDBOX_VM_IMAGE=libra-sandbox:dev
-libra code --sandbox-backend apple-container --network-access allowlist
+libra code --sandbox-backend apple-container   # 出网模式由上面的 sandbox.toml 决定
 ```
+
+> **关于 `--network-access`**：现有 `CodeNetworkAccess`（`code.rs:388`）只有 `allow` / `deny` 两个取值——`--network-access allowlist` 会**clap 解析失败**。会话级 `WorkspaceWrite.network_access` 因此只可能是 `Full`（allow）或 `Denied`（deny），`Allowlist` **只能**经 `.libra/sandbox.toml [sandbox.network] mode="allowlist"` 在命令级注入（`with_network_restriction`，收紧式）。若希望提供 `--network-access allowlist` 直选，需作为 Phase 4 的**前置任务**给 `CodeNetworkAccess` 增一个 `Allowlist` 变体并贯穿到会话策略——本计划默认走 toml，不改该枚举。
 
 此时：LLM 循环/TUI 在宿主；agent 的每条 `run_shell`（`cargo build`、`cargo test`、装依赖、跑脚本）经 `container exec` 在一次性 VM 内执行；`apply_patch` 写到共享 `/workspace`，VM 内构建立即看到；会话结束 VM 焚毁。`libra sandbox status` 应显示 `sandbox_type: apple-container`、`apple_container_available: true`。
 
@@ -668,11 +717,11 @@ container stop dev-box && container rm dev-box
 | `Virtualization.framework`/virtio 0-day | 与所有 VM 方案同；保持 macOS 更新；高危任务用 `--network none` |
 | Allowlist 被 `*_PROXY` 绕过直连 | guest baked nftables default-deny（§8.2）；规则未就绪时 `Required` fail-closed |
 | 凭据泄漏进 guest | 默认不透传宿主 `HOME`/`*_PROXY` 之外 env；密钥按需经 env 显式注入 |
-| 孤儿 VM 资源泄漏 | RAII guard + 启动期孤儿回收（§7 Phase 2） |
+| 孤儿 VM 资源泄漏 | 三层销毁：正常路径 await + Drop 内阻塞兜底 + 启动期 **PID 感知**孤儿回收（§7 Phase 2，并发会话安全） |
 | headless 无登录会话不可用 | Phase 0 实测；不可用则该环境降级 seatbelt（`BestEffort`）或报错（`Required`） |
 | 密集并行耗尽 RAM | sub-agent 复用父 VM（§12）；`vm_memory`/`vm_cpus` 可配 |
 
-**默认姿态**：单一 worktree 读写挂载 + `Denied` 网络（除非会话显式 `--network-access full|allowlist`）。
+**默认姿态**：单一 worktree 读写挂载 + `Denied` 网络（除非显式放开：`--network-access allow`=Full，或 `.libra/sandbox.toml [sandbox.network] mode="allowlist"`=Allowlist）。
 
 ---
 
@@ -681,7 +730,7 @@ container stop dev-box && container rm dev-box
 - **trait `SandboxBackend` 重构**（§6.4 路线 B）：稳定后抽象，便于第三方后端。
 - **warm pool**：预热空闲 VM 降启动延迟。
 - **一 sub-agent 一 VM**：强隔离的并行（成本换隔离）。
-- **直连稳定 API**：若 Apple 落地 socket/REST（issue #636），从 CLI 子进程迁到 API，降延迟、得结构化事件。
+- **直连稳定 API**：若 Apple 落地 socket/REST（issue #66），从 CLI 子进程迁到 API，降延迟、得结构化事件。
 - **其它 VM 栈**：Lima/Colima/krunkit 作为非 Apple-官方备选后端（同一 `SandboxBackendChoice` 扩展）。
 - **macOS 15 兜底**：若有强需求，针对 0.x 预览的受限网络做降级模式（默认不做）。
 - **快照/检查点**：利用 VM 快照做会话级 undo（远期）。
@@ -721,7 +770,7 @@ container stop dev-box && container rm dev-box
 ## 17. 参考资料（调研来源）
 
 - apple/container README、`docs/technical-overview.md`、`docs/command-reference.md`、`docs/how-to.md`
-- apple/container Releases `1.0.0`、issue #636（socket/API 请求）、discussion #855
+- apple/container Releases `1.0.0`、issue #66（socket/API 请求的汇总跟踪；#636 已作为其重复关闭）、discussion #855
 - apple/containerization README、`vminitd/`、DeepWiki（VM management）
 - WWDC 2025 session 346（Meet Containerization）
 - 第三方技术解读（the New Stack、4sysops、addozhang、anil.recoil.org、kubeace）——延迟/网络/限制的非官方实测，仅作旁证
@@ -738,7 +787,7 @@ container stop dev-box && container rm dev-box
 | `select_initial` 后端分支 | `runtime.rs:409-445` |
 | `transform` 新增 match 臂 | `runtime.rs:579-687`（仿 macOS 臂 `581-601`） |
 | `new_session` 集合（VM 不入） | `runtime.rs:698-701` |
-| writable roots→挂载 模板 | `create_bwrap_command_args` `runtime.rs:799-858` |
+| writable roots→挂载 模板 | `create_bwrap_command_args_with_seccomp` `runtime.rs:799-858`（瘦包装 `create_bwrap_command_args` `:776-791`） |
 | `ExecEnv::into_command`（复用） | `runtime.rs:239-258` |
 | spawn/drain/timeout（复用） | `mod.rs:1232-1334` |
 | `build_command_from_spec` 填 backend/vm | `mod.rs:1408-1462` |
