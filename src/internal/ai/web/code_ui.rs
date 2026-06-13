@@ -1683,8 +1683,8 @@ mod tests {
 
     #[test]
     fn code_ui_error_code_listing_matches_authoritative_doc() {
-        let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("docs/commands/code.md");
+        let doc_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/commands/code.md");
         let doc = std::fs::read_to_string(&doc_path).expect("read docs/commands/code.md");
         let mut doc_pairs: Vec<(String, u16)> = Vec::new();
         for line in doc.lines() {

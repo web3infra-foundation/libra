@@ -298,24 +298,25 @@ async fn run_gc(
     let mut removed = 0;
     for (hash_str, obj_path) in &all_loose {
         if let Some(hash) = parse_object_hash(hash_str)
-            && !reachable.contains(&hash) {
-                if dry_run {
-                    if !quiet {
-                        info_println(
-                            output,
-                            &format!("  would remove unreachable object {hash_str}"),
-                        );
-                    }
-                } else {
-                    if let Err(e) = fs::remove_file(obj_path) {
-                        return Err(CliError::fatal(format!(
-                            "failed to remove unreachable object {}: {e}",
-                            hash_str
-                        )));
-                    }
-                    removed += 1;
+            && !reachable.contains(&hash)
+        {
+            if dry_run {
+                if !quiet {
+                    info_println(
+                        output,
+                        &format!("  would remove unreachable object {hash_str}"),
+                    );
                 }
+            } else {
+                if let Err(e) = fs::remove_file(obj_path) {
+                    return Err(CliError::fatal(format!(
+                        "failed to remove unreachable object {}: {e}",
+                        hash_str
+                    )));
+                }
+                removed += 1;
             }
+        }
     }
 
     // Clean up empty object directories
@@ -833,10 +834,11 @@ async fn collect_reachable_objects(storage: &ClientStorage) -> CliResult<HashSet
 
     for ref_entry in refs {
         if let Some(commit_hash_str) = &ref_entry.commit
-            && let Some(hash) = parse_object_hash(commit_hash_str) {
-                reachable.insert(hash);
-                walk_reachable(&hash, storage, &mut reachable)?;
-            }
+            && let Some(hash) = parse_object_hash(commit_hash_str)
+        {
+            reachable.insert(hash);
+            walk_reachable(&hash, storage, &mut reachable)?;
+        }
     }
 
     // Collect from reflogs
@@ -848,20 +850,22 @@ async fn collect_reachable_objects(storage: &ClientStorage) -> CliResult<HashSet
     let is_null_oid = |oid: &str| oid.chars().all(|c| c == '0');
     for entry in reflogs {
         if !is_null_oid(&entry.new_oid)
-            && let Some(hash) = parse_object_hash(&entry.new_oid) {
-                reachable.insert(hash);
-                walk_reachable(&hash, storage, &mut reachable)?;
-            }
+            && let Some(hash) = parse_object_hash(&entry.new_oid)
+        {
+            reachable.insert(hash);
+            walk_reachable(&hash, storage, &mut reachable)?;
+        }
     }
 
     // Collect from index
     let index_path = path::index();
     if index_path.exists()
-        && let Ok(index) = git_internal::internal::index::Index::load(&index_path) {
-            for entry in index.tracked_entries(0) {
-                reachable.insert(entry.hash);
-            }
+        && let Ok(index) = git_internal::internal::index::Index::load(&index_path)
+    {
+        for entry in index.tracked_entries(0) {
+            reachable.insert(entry.hash);
         }
+    }
 
     Ok(reachable)
 }
@@ -990,9 +994,10 @@ fn cleanup_empty_dirs(dir: &Path) -> io::Result<()> {
             && path.file_name() != Some("pack".as_ref())
             && path.file_name() != Some("info".as_ref())
             && let Ok(mut iter) = fs::read_dir(&path)
-                && iter.next().is_none() {
-                    let _ = fs::remove_dir(&path);
-                }
+            && iter.next().is_none()
+        {
+            let _ = fs::remove_dir(&path);
+        }
     }
     Ok(())
 }
@@ -1026,9 +1031,10 @@ fn remove_packed_refs(base: &Path, current: &Path, count: &mut usize) -> io::Res
             remove_packed_refs(base, &path, count)?;
             // Remove empty directory
             if let Ok(mut iter) = fs::read_dir(&path)
-                && iter.next().is_none() {
-                    let _ = fs::remove_dir(&path);
-                }
+                && iter.next().is_none()
+            {
+                let _ = fs::remove_dir(&path);
+            }
         } else if path.is_file() {
             fs::remove_file(&path)?;
             *count += 1;
