@@ -1,9 +1,14 @@
 # `libra package`
 
-Install, list, and diff **capability packages** — auditable, checksum-verified
-bundles of skills, slash-commands, Source Pool sources, and sub-agent
-definitions (CEX-S2-17, Step 2.7). This is a Libra-only AI-ecosystem extension,
-not a Git command.
+Historical design for installing, listing, and diffing **capability packages** —
+auditable, checksum-verified bundles of skills, slash-commands, Source Pool
+sources, and sub-agent definitions (CEX-S2-17, Step 2.7). This is a Libra-only
+AI-ecosystem extension, not a Git command.
+
+> Status: unpublished. `libra package` is not registered in the public CLI in
+> the current release. Running it returns the standard unknown-command error
+> (`LBR-CLI-001`). The interface below describes preserved design material, not
+> a user-visible command contract.
 
 ## Synopsis
 
@@ -22,7 +27,7 @@ a SHA-256 `checksum` over the bundled content, the `bundled` capabilities
 (skills / commands / sources / sub-agents), `requested_permissions`, and
 `install_warnings`.
 
-`libra package` is the trust gate for those bundles:
+The unpublished design uses `libra package` as the trust gate for those bundles:
 
 - **`list`** prints every installed package with its version and enabled state,
   read from the per-repo store at `.libra/capability_packages.json`.

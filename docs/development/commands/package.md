@@ -44,7 +44,7 @@ flowchart TD
 ## 当前状态
 
 - 公开状态：未公开；模块状态：未从 `src/command/mod.rs` 导出，且 `capability_package` 子模块也未在 `src/internal/ai/mod.rs` 声明，故两处源码均在 Rust 模块树之外（孤立死文件，不参与编译）。
-- 用户文档：`docs/commands/package.md`。
+- 用户文档：`docs/commands/package.md`，当前仅作为 unpublished historical design 页面保留，不声明可执行 CLI 合约。
 - Synopsis：`libra package list` | `libra package diff <path>` | `libra package install <path> [--yes] [--enable]` | `libra package uninstall <package-id>`。
 - 公开参数/子命令包括：`list`（无参数）、`diff <path>`、`install <path> [--yes] [--enable]`、`uninstall <package-id>`（`PackageCmds` 枚举见 `src/command/package.rs:41`–`65`，对应示例见 `PACKAGE_EXAMPLES` 常量 `src/command/package.rs:31`–`38`）。
 
