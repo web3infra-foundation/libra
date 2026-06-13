@@ -1,8 +1,13 @@
 # libra stats
 
-Show file statistics for the current working directory.
+Historical design for showing file statistics for the current working directory.
 
-`libra stats` is a Libra-only extension (it has no `git` equivalent). It is a
+> Status: unpublished. `libra stats` is not registered in the public CLI in the
+> current release. Running it returns the standard unknown-command error
+> (`LBR-CLI-001`). The interface below describes preserved design material, not
+> a user-visible command contract.
+
+The unpublished design is a Libra-only extension (it has no `git` equivalent). It is a
 read-only command that recursively scans the current working directory, counts
 regular files, and groups them by file extension. The `.libra/` metadata
 directory and the `target/` build directory are skipped.
@@ -27,7 +32,7 @@ working tree exactly as it is.
 
 ## Options
 
-`libra stats` takes no command-specific options. It honors the global output
+If this command is published in a future release, it should take no command-specific options and honor the global output
 flags:
 
 | Flag | Description |

@@ -42,7 +42,7 @@ flowchart TD
 ## 当前状态
 
 - 公开状态：未公开；模块状态：未从 `src/command/mod.rs` 导出，且源码树中无任何 `pub mod stats` / `mod stats` 声明，`src/command/stats.rs` 为对 Rust 模块系统不可见的孤立文件。
-- 用户文档：`docs/commands/stats.md`。
+- 用户文档：`docs/commands/stats.md`，当前仅作为 unpublished historical design 页面保留，不声明可执行 CLI 合约。
 - Synopsis：`libra stats`。
 - 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。
 
