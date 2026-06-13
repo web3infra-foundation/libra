@@ -109,7 +109,6 @@ tests/                           # ~98 top-level integration test files + ~21 te
 ├── publish_*.rs                 # Publish snapshot/upload/preflight/refs/redaction/ai_export tests
 └── command_test.rs, e2e_mcp_flow.rs, mcp_integration_test.rs, network_remotes_test.rs, storage_r2_test.rs, …
 
-benches/ai_runtime_baseline.rs   # Criterion-style runtime baseline benchmark
 examples/                        # `hello_world.rs`, `multi_agent.toml`
 build.rs                         # Builds the Next.js web frontend into web/out/ unless LIBRA_SKIP_WEB_BUILD=1
 docs/                            # Community docs, contributing guide, agent specs, improvement walkthroughs, error-codes

@@ -170,14 +170,14 @@ This report analyzes Libra's `COMPATIBILITY.md` against the evaluation criteria 
   - No startup time baseline (Grit explicitly optimizes `grit --help` to < 100ms; Libra not tracked)
   - No memory profiling per scenario (does `git log --oneline` on 1M-commit history use < 500MB?)
   - No performance regression tests in CI (a change could silently slow down `status` by 10x)
-  - No benchmarks exposed in documentation
+  - No performance baseline exposed in documentation
 
-**Comparison with Grit**: Grit has `benches/ai_runtime_baseline.rs` using Criterion. Performance is tracked in AGENTS.md as a consideration for agent-driven development.
+**Comparison with Grit**: Grit tracks performance as an agent-development consideration; Libra currently does not ship an in-repository `cargo bench` target.
 
 **Recommendation**:
 - Add "Perf baseline" column to matrix (target latency + pass/fail criteria)
 - Create `tools/perf-baseline.sh` running 5-10 representative scenarios; track per release
-- Add performance regressions guard in CI (e.g., `cargo bench -- --baseline <prev_version>`)
+- Add performance regression guard in CI through the scripted perf baseline when it exists
 
 ---
 
@@ -392,4 +392,3 @@ The improved `COMPATIBILITY_IMPROVED.md` addresses these gaps by:
 5. Adopting lessons from Grit (TOML tracking, dashboards, automated regression detection)
 
 The recommended path forward combines Libra's pragmatic 4-tier system with Grit's automated validation infrastructure to achieve both user clarity and engineering confidence.
-

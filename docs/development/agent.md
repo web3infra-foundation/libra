@@ -864,7 +864,7 @@ rg -n "SubAgentDispatcher|run_tool_loop_with_history_and_observer|ToolLoopConfig
 | `App` plan-workflow 字段/方法：`pending_intent_review` / `pending_plan_revision` / `handle_intent_review_choice` / `handle_post_plan_choice` / `start_plan_workflow` / `begin_plan_workflow` | `internal/tui/app.rs:527` / `:529` / `:6015` / `:6508` / `:7126` / `:7179` | 存在（AG-03 迁出源） |
 | `AgentRuntimeHandle` / `AgentRuntimeWorker` / `CodeAgentServices` / `AgentEvent` / `AgentSnapshot` / `TurnRequest` / `AgentInteraction` | — | **待建**（AG-01/AG-02） |
 | `WorkflowPattern` / `WorkflowContext` / `WorkflowEvent` / `workflow.rs` | — | **待建**（AG-13） |
-| `benches/ai_runtime_baseline.rs` | — | **不存在**（无 `benches/` 目录、Cargo.toml 无 `[[bench]]`）；AG-01 必须新建（见该卡） |
+| Cargo performance baseline | — | 不再作为本计划交付项；仓库不保留 `benches/` 目录或 `[[bench]]` target |
 
 **Phase 1「复用现有」基石锚点（AG-01/AG-02 直接 import，勿重新抽象；注意非直觉落点）：**
 
@@ -1990,7 +1990,7 @@ rg -n "struct BudgetTracker|enum BudgetScope|enum BudgetAxis" src/internal/ai/ag
 | Graph 数据层耦合 ratatui | 删除 graph TUI 时丢 projection loader | AG-09 先抽 UI-neutral graph service |
 | 文档和 source-of-truth 分裂 | 用户仍按旧 TUI/`--web-only` 文档操作 | AG-12 统一 docs/compat/error-code/release notes |
 | 模块边界提案与现状脱节 | AG-01 产出难以维护的并行结构，增加认知负载 | AG-01 强制「收敛现有 ai/agent/runtime + runtime + intentspec + goal」，新目录仅作为可选 facade；本计划 review 已固化此纪律 |
-| AgentRuntime 抽象层引入性能退化 | TUI 直接状态机转为 trait 调用 / async channel / snapshot 序列化，增加延迟 | AG-01 **新建** `benches/ai_runtime_baseline.rs`（**已核对：当前无 `benches/` 目录、Cargo.toml 无 `[[bench]]`**——本卡须建目录 + 在 Cargo.toml 加 `[[bench]] name = "ai_runtime_baseline" harness = false` 或 criterion harness），在 runtime 层（不经 Web/TUI、用 fake provider）测单 turn submit→terminal 延迟，记录为基线；后续卡的门槛 = 不回归超过该基线 +20%。AG-02 的 shared `CodeAgentServices` 避免重复初始化；snapshot delta 在 AG-05 后逐步替代全量序列化 |
+| AgentRuntime 抽象层引入性能退化 | TUI 直接状态机转为 trait 调用 / async channel / snapshot 序列化，增加延迟 | 本计划不再维护 `benches/` / `cargo bench` 基线；Phase E 的 P95 budget 只能作为目标，不能作为 release gate。AG-02 的 shared `CodeAgentServices` 避免重复初始化；snapshot delta 在 AG-05 后逐步替代全量序列化 |
 | `--control` / `code-control` 语义未同步迁移 | TUI 删除后用户仍尝试用 `--control write` 驱动不存在的 TUI，或 `code-control` 指向失效 endpoint | Phase 6 / AG-06 同步定义 `--control` 在 Web-only 时代的语义；AG-12 明确 `code-control` 删除或重定向方案 |
 | 只照搬 `pie` 分层而忽略 Libra formal runtime | 可能丢失 IntentSpec/Plan/Projection、SQLite audit、approval TTL 和 graph 语义 | 只吸收 `pie` 的 provider-stream/runtime-harness/thin-adapter/append-only 思路；所有 Libra formal writes、projection、sandbox、SourcePool 仍是硬约束 |
 | Web SSE 直接绑定 provider stream | 断线重连、resume、TUI/Web projection 会产生漂移 | AG-05 要求 SSE 来自 runtime event cursor；provider stream 先归一成 runtime events，再由 projection/SSE 消费 |
@@ -2068,7 +2068,7 @@ rg -n "struct BudgetTracker|enum BudgetScope|enum BudgetAxis" src/internal/ai/ag
 - **表现**：所有测试都走 `std::process::Command` 启动 Web server + HTTP attach，测一次需要 5-10 秒，且时序脆弱。
 - **后果**：CI 慢；flaky tests；问题定位困难。
 - **自检问题**：是否存在不启动 Web server、不启动 TUI App、直接用 `AgentRuntimeHandle` + fake provider 的测试？单测运行时间是否 < 1 秒？
-- **纠偏**：AG-01 必须建立 runtime-level fake-stream bench / contract test；AG-10 的 Web harness 是补充覆盖，不是唯一覆盖。
+- **纠偏**：AG-01 必须建立 runtime-level fake-stream contract tests；AG-10 的 Web harness 是补充覆盖，不是唯一覆盖。
 
 ### 陷阱 10：把 workflow pattern 写进交互状态机的 match 分支
 
