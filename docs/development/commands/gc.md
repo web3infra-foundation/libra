@@ -42,7 +42,7 @@ flowchart TD
 ## 当前状态
 
 - 公开状态：未公开；模块状态：`src/command/gc.rs` 源文件存在，但 `src/` 树中没有任何 `mod gc` 声明（`src/command/mod.rs` 未声明该模块），因此该文件尚未被编译进二进制。
-- 用户文档：`docs/commands/gc.md`。
+- 用户文档：`docs/commands/gc.md`，当前仅作为 unpublished historical design 页面保留，不声明可执行 CLI 合约；已发布维护入口是 `libra maintenance run --dry-run --task gc`。
 - Synopsis：`libra gc [--dry-run] [--prune=<date> | --no-prune] [--aggressive] [--auto] [--force]`。
 - 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。
 

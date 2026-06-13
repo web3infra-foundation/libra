@@ -1,6 +1,12 @@
 # `libra gc`
 
-Prune unreachable loose objects and clean stale pack sidecar files.
+Historical design for pruning unreachable loose objects and cleaning stale pack sidecar files.
+
+> Status: unpublished. `libra gc` is not registered in the public CLI in the
+> current release. Running it returns the standard unknown-command error
+> (`LBR-CLI-001`). Use `libra maintenance run --dry-run --task gc` for the
+> currently published maintenance entry point. The notes below describe preserved
+> design material, not a user-visible `gc` command contract.
 
 ## Synopsis
 
@@ -10,7 +16,7 @@ libra gc [--dry-run] [--prune=<date> | --no-prune] [--aggressive] [--auto] [--fo
 
 ## Description
 
-`libra gc` first expires reflogs using the default `gc.reflogExpire` and
+The unpublished design first expires reflogs using the default `gc.reflogExpire` and
 `gc.reflogExpireUnreachable` policy, then traces objects reachable from
 repository references, remaining reflogs, the index, in-progress operation
 state, and local AI catalogs. It prunes unreachable loose objects that match the
@@ -69,7 +75,7 @@ Cleaned 0 stale pack file(s).
 
 ## Structured Output
 
-With `--json`, `libra gc` returns a `gc` envelope containing:
+If this command is published in a future release, `--json` should return a `gc` envelope containing:
 
 - `loose_objects.scanned`, `reachable`, `unreachable`, `pruned`, and `retained`
 - `reflogs.refs_scanned`, `entries_scanned`, `pruned`, and `rewritten`
@@ -120,7 +126,7 @@ With `--json`, `libra gc` returns a `gc` envelope containing:
 
 ## Compatibility
 
-The command aligns with Git's core safety rule: reachable objects are retained,
+The unpublished design aligns with Git's core safety rule: reachable objects are retained,
 and unreachable loose objects are pruned only when the prune policy allows it.
 Before pruning objects, Libra runs the same default policy as
 `libra reflog expire --all` without `--rewrite`, `--updateref`, or
