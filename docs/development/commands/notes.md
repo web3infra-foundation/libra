@@ -42,7 +42,7 @@ flowchart TD
 ## 当前状态
 
 - 公开状态：未公开；模块状态：源码文件 `src/command/notes.rs` 与 `src/internal/notes.rs` 存在，但无 `mod notes` 声明，未编译进二进制。
-- 用户文档：`docs/commands/notes.md`。
+- 用户文档：`docs/commands/notes.md`，当前仅作为 unpublished historical design 页面保留，不声明可执行 CLI 合约。
 - Synopsis：`libra notes [--ref <ref>] add [-m <message>]... [-F <file>]... [-f] [<object>]`（`-m`/`-F` 可重复并按命令行顺序任意混用）。
 - 公开参数/子命令包括：`Subcommands`、`Flag examples`。
 

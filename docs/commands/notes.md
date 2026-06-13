@@ -1,7 +1,12 @@
 # `libra notes`
 
-Add, show, list, or remove notes attached to commits without modifying the
-commits themselves.
+Historical design for adding, showing, listing, or removing notes attached to
+commits without modifying the commits themselves.
+
+> Status: unpublished. `libra notes` is not registered in the public CLI in the
+> current release. Running it returns the standard unknown-command error
+> (`LBR-CLI-001`). The interface below describes preserved design material, not
+> a user-visible command contract.
 
 ## Synopsis
 
@@ -14,7 +19,7 @@ libra notes remove [<object>...]
 
 ## Description
 
-`libra notes` manages annotations attached to commit objects. Unlike commit
+The unpublished design manages annotations attached to commit objects. Unlike commit
 messages, notes can be added or removed after the commit is created — the
 original commit hash stays unchanged. This makes them useful for post-hoc
 metadata such as code-review results, CI status, or deploy tracking.
@@ -23,7 +28,7 @@ Notes are stored as blob objects under a notes ref (default
 `refs/notes/commits`). Use `--ref <ref>` to operate on a different namespace
 (e.g., `refs/notes/review`).
 
-Without a subcommand, `list` is the default (equivalent to `libra notes list`).
+If this command is published in a future release, omitting a subcommand should default to `list`.
 
 ## Options
 
@@ -101,7 +106,7 @@ libra notes --json show                         # Structured JSON output
 
 ## Structured Output (JSON examples)
 
-`--json` / `--machine` uses `action` to distinguish operations:
+If this command is published in a future release, `--json` / `--machine` should use `action` to distinguish operations:
 
 ### `add`
 
