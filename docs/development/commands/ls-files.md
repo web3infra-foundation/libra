@@ -42,7 +42,7 @@ flowchart TD
 ## 当前状态
 
 - 公开状态：未公开；模块状态：`src/command/ls_files.rs` 源码文件存在，但 `src/` 中没有任何 `mod ls_files` 声明，因此未被编译进二进制。
-- 用户文档：`docs/commands/ls-files.md`。
+- 用户文档：`docs/commands/ls-files.md`，当前仅作为 unpublished historical design 页面保留，不声明可执行 CLI 合约；已发布的 LFS 列表入口是 `libra lfs ls-files`。
 - 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。
 
 
