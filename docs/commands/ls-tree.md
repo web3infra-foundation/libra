@@ -1,6 +1,11 @@
 # `libra ls-tree`
 
-List the contents of a tree object.
+Historical design for listing the contents of a tree object.
+
+> Status: unpublished. `libra ls-tree` is not registered in the public CLI in
+> the current release. Running it returns the standard unknown-command error
+> (`LBR-CLI-001`). The implementation notes below describe preserved design
+> material, not a user-visible command contract.
 
 ## Synopsis
 
@@ -10,7 +15,7 @@ libra ls-tree [OPTIONS] <TREE-ISH> [PATH...]
 
 ## Description
 
-`libra ls-tree` resolves `<TREE-ISH>` to a commit root tree or to a tree object
+The unpublished design resolves `<TREE-ISH>` to a commit root tree or to a tree object
 hash, then prints entries from that tree. It is read-only: it does not update
 refs, the index, the worktree, or object storage.
 
@@ -64,7 +69,7 @@ With `-l`, blob entries include their decoded object size:
 
 ## Structured Output
 
-With `--json`, output uses the standard command envelope. With `-l`, blob
+If this command is published in a future release, `--json` should use the standard command envelope. With `-l`, blob
 entries include the `size` field:
 
 ```json

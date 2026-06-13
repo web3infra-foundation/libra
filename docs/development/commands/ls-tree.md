@@ -42,7 +42,7 @@ flowchart TD
 ## 当前状态
 
 - 公开状态：未公开；模块状态：未从 `src/command/mod.rs` 导出。
-- 用户文档：`docs/commands/ls-tree.md`。
+- 用户文档：`docs/commands/ls-tree.md`，当前仅作为 unpublished historical design 页面保留，不声明可执行 CLI 合约。
 - Synopsis：`libra ls-tree [OPTIONS] <TREE-ISH> [PATH...]`。
 - 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。
 
