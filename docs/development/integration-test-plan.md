@@ -98,7 +98,7 @@ cargo test --test ai_agent_test -- --test-threads=1
 | 其他 CLI 外壳能力 | `open`、root `--json/-J`、`--machine`、`--quiet`、颜色/progress/exit-code-on-warning | 1 | 已实现 | `cli.open-smoke`, `cli.cross-cutting-flags` |
 | Schema 与本地协议 | `db status/upgrade`、local clone/remote/ls-remote/fetch/pull、shallow fetch、拒绝 file remote push | 2 | 已实现 | `cli.schema-upgrade-observable`, `cli.clone-fetch-pull-local`, `cli.fetch-depth-local`, `cli.push-local-file-remote-rejected` |
 | 对象读取与树遍历 | `rev-parse`、`show-ref`、`cat-file`、`hash-object`、`show`、`rev-list`、`fsck`、sha256 object format；`ls-tree` 当前为缺口负向场景 | 2 | 已实现 | `cli.object-readback`, `cli.ls-tree-smoke`, `cli.sha256-object-readback` |
-| 维护命令 | `gc`、`prune`、`archive`、`verify-pack`、内部 `index-pack` fixture | 2 | 已实现 | `cli.gc-smoke`, `cli.archive-smoke`, `cli.verify-pack-smoke` |
+| 维护命令 | `gc`、`prune`、`archive` 当前未公开状态的负向覆盖、`verify-pack`、内部 `index-pack` fixture | 2 | 已实现 | `cli.gc-smoke`, `cli.archive-smoke`, `cli.verify-pack-smoke` |
 | GitHub live remote | `gh` 创建/清理私有临时 repo、`push` refspec/tag/delete/force/mirror、真实 clone/fetch/pull | 3 | 已实现，需显式 live gate | `live.github-create-push-clone-fetch` |
 
 **剩余覆盖缺口**：默认本地 wave 已覆盖当前 runner 注册的 `cli.*` 场景；需要真实 GitHub 远端的 `live.*` 场景不进入默认阻断门，只能在具备 `gh` 登录态和仓库创建/删除权限时运行。新增或修改 Git 兼容命令时，必须把对应场景加入本表、YAML、场景文档和 runner registry；如果当前 runner 尚未实现，必须在 YAML 和文档中保留明确的未实现状态，而不能只在本表声明覆盖。
