@@ -1,6 +1,11 @@
 # `libra prune`
 
-Prune all unreachable objects from the repository.
+Historical design for pruning unreachable objects from the repository.
+
+> Status: unpublished. `libra prune` is not registered in the public CLI in the
+> current release. Running it returns the standard unknown-command error
+> (`LBR-CLI-001`). The interface below describes preserved design material, not
+> a user-visible command contract.
 
 ## Synopsis
 
@@ -10,7 +15,7 @@ libra prune [OPTIONS] [HEAD]...
 
 ## Description
 
-`libra prune` effectively runs `libra fsck --unreachable` using all the refs available in `refs/`, optionally with an additional set of heads specified on the command line, and prunes all unpacked objects unreachable from any of these head objects from the repository. In addition, it prunes the unpacked objects that are also found in packs.
+The unpublished design effectively runs `libra fsck --unreachable` using all the refs available in `refs/`, optionally with an additional set of heads specified on the command line, and prunes all unpacked objects unreachable from any of these head objects from the repository. In addition, it prunes the unpacked objects that are also found in packs.
 
 Specifically, unreachable objects found in pack will be kept. For more details about unreachable objects, refer to the `libra fsck --unreachable` documentation.
 
@@ -97,7 +102,7 @@ warnings and errors on stderr.
 
 ## Structured Output
 
-`libra prune` supports the global `--json` and `--machine` flags on successful prunes.
+If this command is published in a future release, `libra prune` should support the global `--json` and `--machine` flags on successful prunes.
 
 - `--json` writes one success envelope to `stdout`
 - `--machine` writes the same schema as compact single-line JSON

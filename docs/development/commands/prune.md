@@ -42,7 +42,7 @@ flowchart TD
 ## 当前状态
 
 - 公开状态：未公开；模块状态：未从 `src/command/mod.rs` 导出。
-- 用户文档：`docs/commands/prune.md`。
+- 用户文档：`docs/commands/prune.md`，当前仅作为 unpublished historical design 页面保留，不声明可执行 CLI 合约。
 - Synopsis：`libra prune [OPTIONS] [HEAD]...`。
 - 公开参数/子命令包括：`-n, --dry-run`、`-v, --verbose`、`--expire <TIME>`、`[HEAD]...`。
 
