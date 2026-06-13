@@ -89,6 +89,41 @@ pub(crate) fn compatibility_commands() -> BTreeSet<String> {
     commands
 }
 
+fn command_links_in_readme_section(start_heading: &str, end_heading: &str) -> BTreeSet<String> {
+    let readme = read_repo_file("docs/development/commands/README.md");
+    let mut in_section = false;
+    let mut commands = BTreeSet::new();
+    for line in readme.lines() {
+        if line == start_heading {
+            in_section = true;
+            continue;
+        }
+        if in_section && line == end_heading {
+            break;
+        }
+        if !in_section || !line.starts_with("| [`") {
+            continue;
+        }
+        let Some(command) = line
+            .split("[`")
+            .nth(1)
+            .and_then(|rest| rest.split('`').next())
+        else {
+            continue;
+        };
+        commands.insert(command.to_string());
+    }
+    commands
+}
+
+pub(crate) fn command_development_public_commands() -> BTreeSet<String> {
+    command_links_in_readme_section("## 公开命令", "## 未公开或未纳入用户承诺的命令资料")
+}
+
+pub(crate) fn command_development_unpublished_docs() -> BTreeSet<String> {
+    command_links_in_readme_section("## 未公开或未纳入用户承诺的命令资料", "## 汇总文档")
+}
+
 pub(crate) fn code_router_routes(web_mod: &str) -> BTreeSet<String> {
     let router_region = web_mod
         .split("fn code_router()")
@@ -122,7 +157,6 @@ fn flag_values(body: &str, flag: &str) -> BTreeSet<String> {
     while let Some(index) = rest.find(flag) {
         rest = &rest[index + flag.len()..];
         let value = rest
-            .trim_start()
             .split_whitespace()
             .next()
             .unwrap_or("")
@@ -195,10 +229,9 @@ pub(crate) fn declared_features() -> BTreeSet<String> {
                 .chars()
                 .next()
                 .is_some_and(|ch| ch.is_ascii_alphabetic())
+            && let Some(name) = trimmed.split('=').next()
         {
-            if let Some(name) = trimmed.split('=').next() {
-                features.insert(name.trim().to_string());
-            }
+            features.insert(name.trim().to_string());
         }
     }
     features

@@ -3,9 +3,10 @@ mod matrix_alignment_support;
 use std::fs;
 
 use matrix_alignment_support::{
-    assert_contains, cli_commands, code_router_routes, compatibility_commands,
-    declared_cargo_targets, declared_features, plan_features, plan_test_targets, quarantine_tests,
-    read_repo_file, repo_root,
+    assert_contains, cli_commands, code_router_routes, command_development_public_commands,
+    command_development_unpublished_docs, compatibility_commands, declared_cargo_targets,
+    declared_features, plan_features, plan_test_targets, quarantine_tests, read_repo_file,
+    repo_root,
 };
 
 #[test]
@@ -19,6 +20,42 @@ fn compatibility_matrix_matches_cli_commands() {
         missing.is_empty() && extra.is_empty(),
         "COMPATIBILITY.md top-level command matrix is out of sync with src/cli.rs::Commands.\nmissing from COMPATIBILITY.md: {missing:?}\nlisted in COMPATIBILITY.md but absent from src/cli.rs::Commands: {extra:?}"
     );
+}
+
+#[test]
+fn command_development_readme_matches_public_cli_surface() {
+    let cli = cli_commands();
+    let compat = compatibility_commands();
+    let public_docs = command_development_public_commands();
+    let unpublished_docs = command_development_unpublished_docs();
+
+    let missing_from_docs = cli.difference(&public_docs).cloned().collect::<Vec<_>>();
+    let extra_in_docs = public_docs.difference(&cli).cloned().collect::<Vec<_>>();
+    let unpublished_but_public = unpublished_docs
+        .intersection(&cli)
+        .cloned()
+        .collect::<Vec<_>>();
+    let unpublished_but_compatible = unpublished_docs
+        .intersection(&compat)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    assert!(
+        missing_from_docs.is_empty()
+            && extra_in_docs.is_empty()
+            && unpublished_but_public.is_empty()
+            && unpublished_but_compatible.is_empty(),
+        "docs/development/commands/README.md command tables are out of sync with src/cli.rs::Commands and COMPATIBILITY.md.\nmissing public docs: {missing_from_docs:?}\nextra public docs: {extra_in_docs:?}\nunpublished docs exposed in CLI: {unpublished_but_public:?}\nunpublished docs exposed in COMPATIBILITY.md: {unpublished_but_compatible:?}"
+    );
+
+    for command in public_docs.union(&unpublished_docs) {
+        let path = repo_root().join(format!("docs/development/commands/{command}.md"));
+        assert!(
+            path.is_file(),
+            "command development README links to missing document: {}",
+            path.display()
+        );
+    }
 }
 
 #[test]
