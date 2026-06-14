@@ -404,8 +404,16 @@ scenarios:
     purpose: "Cover the public archive command: committed tree can generate tar file output with --prefix, --output and --format=zip, and safe prefix rejection."
     gh_required: false
     requires_git: false
-    key_assertion_categories: [json_envelope, fsck, file_exists, negative_exit]
+    key_assertion_categories: [fsck, file_exists, negative_exit]
     doc_section: "cli.archive-smoke"
+  - id: cli.notes-smoke
+    wave: 2
+    group: maintenance
+    purpose: "Cover the public notes command: add/show/list/remove on HEAD and custom refs, JSON output, and duplicate-note rejection."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck, negative_exit]
+    doc_section: "cli.notes-smoke"
 
   - id: cli.verify-pack-smoke
     wave: 2

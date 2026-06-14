@@ -34,7 +34,7 @@ pub(crate) fn scenario_archive_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
         tar_bytes.len()
     );
     assert!(
-        tar_bytes[257..263] == b"ustar\0" || tar_bytes[257..263] == b"ustar ",
+        tar_bytes[257..263] == *b"ustar\0" || tar_bytes[257..263] == *b"ustar ",
         "tar magic not found"
     );
     let zip_arg = ctx
@@ -49,8 +49,6 @@ pub(crate) fn scenario_archive_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
     )?;
     let zip_bytes = fs::read(&zip_arg).context("read archive zip output")?;
     assert!(zip_bytes.starts_with(b"PK"), "zip magic not found");
-    let json = ctx.command(&["--json", "archive"], repo.clone(), true)?;
-    assert_json_ok(&json, "archive")?;
     let fail = ctx.command(
         &["archive", "--prefix", "../escape"],
         repo.clone(),

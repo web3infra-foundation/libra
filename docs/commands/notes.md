@@ -3,10 +3,10 @@
 Historical design for adding, showing, listing, or removing notes attached to
 commits without modifying the commits themselves.
 
-> Status: unpublished. `libra notes` is not registered in the public CLI in the
-> current release. Running it returns the standard unknown-command error
-> (`LBR-CLI-001`). The interface below describes preserved design material, not
-> a user-visible command contract.
+> Status: `partial`. `libra notes` is now registered in the public CLI. The core
+> operations (`add`, `list`, `show`, `remove`) are supported. Advanced Git notes
+> subcommands (`append`, `edit`, `copy`, `merge`, `prune`, `get-ref`) and interactive
+> editor support are not implemented.
 
 ## Synopsis
 

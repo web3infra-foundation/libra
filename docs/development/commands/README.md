@@ -56,6 +56,7 @@
 | [`maintenance`](maintenance.md) | `partial` | `run` / `register` / `unregister` / `status` exposed; lower-level maintenance tasks such as `commit-graph` and `prefe... |
 | [`merge`](merge.md) | `partial` | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |
 | [`mv`](mv.md) | `partial` | sparse-checkout flag unsupported; `--skip-errors` not exposed |
+| [`notes`](notes.md) | `partial` | `add` / `show` / `list` / `remove` supported; `--ref` supported; append/edit/copy/merge/prune and editor support not implemented |
 | [`open`](open.md) | `supported` | 见命令文档。 |
 | [`publish`](publish.md) | `intentionally-different` | Libra Cloudflare publish extension, not a Git command |
 | [`pull`](pull.md) | `partial` | fetch + fast-forward/three-way merge supported; `--ff-only` / `--rebase` exposed; `--squash` / `--no-ff` not exposed |
@@ -90,7 +91,6 @@
 | [`for-each-ref`](for-each-ref.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |
 | [`gc`](gc.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |
 | [`ls-files`](ls-files.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |
-| [`notes`](notes.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |
 | [`package`](package.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |
 | [`prune`](prune.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |
 | [`stats`](stats.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |

@@ -32,7 +32,7 @@ const ROOT_AFTER_HELP: &str = "\
 Command Groups:
   Repository Setup        init, clone, config
   Working Tree            status, add, rm, mv, restore, clean, stash, lfs, worktree
-  History Inspection      log, shortlog, show, show-ref, ls-remote, diff, grep, blame, describe
+  History Inspection      log, shortlog, show, show-ref, ls-remote, diff, grep, blame, describe, notes
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
@@ -349,6 +349,11 @@ enum Commands {
         alias = "desc"
     )]
     Describe(command::describe::DescribeArgs),
+    #[command(
+        about = "Add, show, list, or remove notes attached to commits",
+        after_help = command::notes::NOTES_EXAMPLES
+    )]
+    Notes(command::notes::NotesArgs),
     #[command(about = "Provide content, type or size info for repository objects")]
     CatFile(command::cat_file::CatFileArgs),
     #[command(
@@ -1183,6 +1188,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::RevList(cmd_args) => command::rev_list::execute_safe(cmd_args, &output).await?,
         Commands::Mv(cmd_args) => command::mv::execute_safe(cmd_args, &output).await?,
         Commands::Describe(cmd_args) => command::describe::execute_safe(cmd_args, &output).await?,
+        Commands::Notes(cmd_args) => command::notes::execute_safe(cmd_args, &output, &argv).await?,
         Commands::CherryPick(cmd_args) => {
             command::cherry_pick::execute_safe(cmd_args, &output).await?
         }

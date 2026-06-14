@@ -45,6 +45,7 @@ pub mod ls_tree;
 pub mod maintenance;
 pub mod merge;
 pub mod mv;
+pub mod notes;
 pub mod open;
 pub mod package;
 pub mod publish;

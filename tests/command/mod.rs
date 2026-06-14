@@ -306,6 +306,7 @@ mod ls_tree_test;
 mod maintenance_test;
 mod merge_test;
 mod mv_test;
+mod notes_test;
 mod open_test;
 mod output_flags_test;
 mod publish_test;

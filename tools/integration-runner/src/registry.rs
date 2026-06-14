@@ -106,6 +106,7 @@ pub(crate) fn scenario_registry() -> &'static [(&'static str, ScenarioFn)] {
         ),
         ("cli.gc-smoke", scenario_gc_smoke),
         ("cli.archive-smoke", scenario_archive_smoke),
+        ("cli.notes-smoke", scenario_notes_smoke),
         ("cli.verify-pack-smoke", scenario_verify_pack_smoke),
         // Wave 3 live (dispatched only via `run-live`; normal `run --waves 3` skips gh_required early)
         (

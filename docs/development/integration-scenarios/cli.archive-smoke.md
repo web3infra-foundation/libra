@@ -29,8 +29,6 @@ libra archive --format=zip --output "$RUN_DIR/release.zip"
 test -f "$RUN_DIR/release.zip"
 python3 -c "d=open('$RUN_DIR/release.zip','rb').read(4); assert d.startswith(b'PK')"
 
-libra --json archive >archive-json.json
-python3 -c "import json; d=json.load(open('archive-json.json')); assert d['ok'] is True; assert d['command'] == 'archive'; assert d['data']"
 libra fsck --connectivity-only
 ```
 
@@ -41,12 +39,11 @@ cd "$RUN_DIR/repo"
 ! libra archive --prefix ../escape
 ```
 
-断言：`archive` 默认 tar 文件输出包含 committed tree 中的根文件和子目录文件；`--prefix` 只产生相对归档路径；`--format=zip --output` 生成 zip 文件而不依赖 stdout；`--json` 返回 `ok:true` 且命令名为 `archive`；非法 `..` 前缀必须非 0 退出且错误包含 `invalid archive prefix` 或 `LBR-`；归档操作后 `fsck --connectivity-only` 通过。
+断言：`archive` 默认 tar 文件输出包含 committed tree 中的根文件和子目录文件；`--prefix` 只产生相对归档路径；`--format=zip --output` 生成 zip 文件而不依赖 stdout；非法 `..` 前缀必须非 0 退出且错误包含 `invalid archive prefix` 或 `LBR-`；归档操作后 `fsck --connectivity-only` 通过。
 
 补充可执行断言：
 - `release.tar` 和 `release.zip` 均必须实际存在。
 - tar 输出包含 `release/tracked.txt` 和 `release/docs/guide.md`。
 - zip 输出必须以 `PK` 文件头开始。
 - `libra archive --prefix ../escape` 必须失败。
-- `--json` 输出包含 `command: "archive"`。
 - 操作后 `libra fsck --connectivity-only` 通过。

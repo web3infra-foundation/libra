@@ -12,7 +12,7 @@ use crate::{
     },
 };
 
-const NOTES_EXAMPLES: &str = "\
+pub const NOTES_EXAMPLES: &str = "\
 EXAMPLES:
     libra notes add -m \"Reviewed-by: Alice\"         Add a note to HEAD
     libra notes show                                  Show the note on HEAD

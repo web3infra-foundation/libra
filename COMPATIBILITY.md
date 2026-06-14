@@ -56,6 +56,7 @@ batch document.
 | rev-parse | supported | |
 | rev-list | supported | |
 | describe | supported | |
+| notes | partial | `add` / `show` / `list` / `remove` supported; `--ref` supported; append/edit/copy/merge/prune and editor support not implemented |
 | cherry-pick | supported | |
 | push | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected — intentional (see [docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push](docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push)) |
 | fetch | supported | `--depth` public flag |

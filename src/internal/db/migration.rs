@@ -635,6 +635,13 @@ pub fn builtin_migrations() -> Vec<Migration> {
             include_str!("../../../sql/migrations/2026060801_revert_sequence.sql"),
             include_str!("../../../sql/migrations/2026060801_revert_sequence_down.sql"),
         ),
+        // Phase 1.12: persistent `notes` table for `libra notes` add/show/list/remove.
+        sql_migration(
+            2026061401,
+            "notes",
+            include_str!("../../../sql/migrations/2026061401_notes.sql"),
+            include_str!("../../../sql/migrations/2026061401_notes_down.sql"),
+        ),
     ]
 }
 
