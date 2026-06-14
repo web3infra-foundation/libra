@@ -178,6 +178,12 @@ async fn json_switch_track_has_tracking_fields() {
     let _guard = ChangeDirGuard::new(repo.path());
 
     let head = Head::current_commit().await.unwrap();
+    let output = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "add origin remote for track test");
+
     Branch::update_branch(
         "refs/remotes/origin/feature",
         &head.to_string(),

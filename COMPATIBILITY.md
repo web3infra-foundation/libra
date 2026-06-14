@@ -50,7 +50,7 @@ batch document.
 | branch | supported | |
 | tag | supported | |
 | commit | supported | |
-| switch | supported | |
+| switch | supported | `-C/--force-create` and `--orphan` supported; detached HEAD via `switch --detach` supported |
 | rebase | partial | `--autosquash` / `--reapply-cherry-picks` not supported |
 | merge | partial | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |
 | reset | supported | |

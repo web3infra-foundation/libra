@@ -747,6 +747,8 @@ async fn test_basic_rebase() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -811,6 +813,8 @@ async fn test_basic_rebase() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -847,6 +851,8 @@ async fn test_basic_rebase() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -940,6 +946,8 @@ async fn test_rebase_preserves_untracked_files() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -976,6 +984,8 @@ async fn test_rebase_preserves_untracked_files() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -1012,6 +1022,8 @@ async fn test_rebase_preserves_untracked_files() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -1107,6 +1119,8 @@ async fn test_rebase_already_up_to_date() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -1165,6 +1179,8 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -1201,6 +1217,8 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -1237,6 +1255,8 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -1330,6 +1350,8 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -1366,6 +1388,8 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -1402,6 +1426,8 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -1612,6 +1638,8 @@ async fn test_rebase_with_conflict_and_abort() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -1652,6 +1680,8 @@ async fn test_rebase_with_conflict_and_abort() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -1688,6 +1718,8 @@ async fn test_rebase_with_conflict_and_abort() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -1800,6 +1832,8 @@ async fn test_rebase_binary_conflict_writes_markers() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -1835,6 +1869,8 @@ async fn test_rebase_binary_conflict_writes_markers() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -1870,6 +1906,8 @@ async fn test_rebase_binary_conflict_writes_markers() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -1958,6 +1996,8 @@ async fn test_rebase_with_conflict_and_skip() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2031,6 +2071,8 @@ async fn test_rebase_with_conflict_and_skip() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2067,6 +2109,8 @@ async fn test_rebase_with_conflict_and_skip() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2150,6 +2194,8 @@ async fn test_rebase_with_conflict_and_continue() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2190,6 +2236,8 @@ async fn test_rebase_with_conflict_and_continue() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2226,6 +2274,8 @@ async fn test_rebase_with_conflict_and_continue() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2345,6 +2395,8 @@ async fn test_rebase_multiple_commits_partial_conflict() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2442,6 +2494,8 @@ async fn test_rebase_multiple_commits_partial_conflict() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2478,6 +2532,8 @@ async fn test_rebase_multiple_commits_partial_conflict() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2578,6 +2634,8 @@ async fn test_rebase_state_persistence() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2614,6 +2672,8 @@ async fn test_rebase_state_persistence() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2650,6 +2710,8 @@ async fn test_rebase_state_persistence() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2751,6 +2813,8 @@ async fn test_rebase_fast_forward_branch_behind() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2760,6 +2824,8 @@ async fn test_rebase_fast_forward_branch_behind() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2798,6 +2864,8 @@ async fn test_rebase_fast_forward_branch_behind() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2867,6 +2935,8 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2876,6 +2946,8 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2912,6 +2984,8 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2984,6 +3058,8 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -2993,6 +3069,8 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -3029,6 +3107,8 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -3101,6 +3181,8 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -3137,6 +3219,8 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -3173,6 +3257,8 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -3252,6 +3338,8 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -3289,6 +3377,8 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -3325,6 +3415,8 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -3402,6 +3494,8 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -3456,6 +3550,8 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -3492,6 +3588,8 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -3568,6 +3666,8 @@ async fn test_rebase_continue_requires_resolution() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -3604,6 +3704,8 @@ async fn test_rebase_continue_requires_resolution() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -3640,6 +3742,8 @@ async fn test_rebase_continue_requires_resolution() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })

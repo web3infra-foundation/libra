@@ -1613,6 +1613,8 @@ async fn test_status_branch_detached_head() {
     switch::execute(SwitchArgs {
         branch: Some(current_commit.to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: true,
         track: false,
     })

@@ -45,16 +45,15 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/switch.md`。
-- Synopsis：`libra switch [-c|--create <CREATE>] [-d|--detach] [--track] [<BRANCH>]`。
-- 公开参数/子命令包括：`<branch>`、`-c, --create <CREATE>`、`-d, --detach`、`--track`。
+- Synopsis：`libra switch [-c|--create <CREATE>] [-C|--force-create <FORCE_CREATE>] [--orphan <ORPHAN>] [-d|--detach] [--track] [<BRANCH>]`。
+- 公开参数/子命令包括：`<branch>`、`-c, --create <CREATE>`、`-C, --force-create <FORCE_CREATE>`、`--orphan <ORPHAN>`、`-d, --detach`、`--track`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容差异项 | 强制创建 | 原始对照：git switch -C feature；相关参数/替代：不支持 (delete first)；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 孤儿分支 | 原始对照：git switch --orphan <name>；相关参数/替代：不支持；当前说明：jj new root()。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 后续跟踪 | 当前未发现公开未完成项。 | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
 
 ## 维护要求
 

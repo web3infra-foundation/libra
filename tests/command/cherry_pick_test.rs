@@ -75,6 +75,8 @@ async fn test_basic_cherry_pick() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -149,6 +151,8 @@ async fn test_basic_cherry_pick() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -285,6 +289,8 @@ async fn test_cherry_pick_with_commit() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -325,6 +331,8 @@ async fn test_cherry_pick_with_commit() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -404,6 +412,8 @@ async fn test_cherry_pick_multiple_commits() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".to_string()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -471,6 +481,8 @@ async fn test_cherry_pick_multiple_commits() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -674,6 +686,8 @@ async fn test_cherry_pick_sha256_hash_handling() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some("feature".into()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
@@ -711,6 +725,8 @@ async fn test_cherry_pick_sha256_hash_handling() {
     switch::execute(SwitchArgs {
         branch: Some("main".into()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
     })
