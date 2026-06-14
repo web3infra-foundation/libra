@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`supported`。`--depth` public flag
+- 兼容级别：`partial`。repository/refspec、`--all` 和 `--depth` 已公开；prune/dry-run/tags/force/append/refmap 与 shallow 扩展参数尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 

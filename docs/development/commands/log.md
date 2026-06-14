@@ -6,9 +6,9 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`supported`。
+- 兼容级别：`partial`。
 
-- 当前矩阵承诺常用 Git 行为已支持；`--range`（revision ranges）、`--all`、`--reverse`、`--follow`、`-L` 已补齐。新增语义必须同步矩阵、用户文档和测试。
+- 当前矩阵承诺常用 Git log 子集已支持；`--range`（revision ranges）、`--all`、`--reverse`、`--follow`、`-L` 已补齐，但 Git 位置性 revision range、复杂 rename follow 和精确行级归属仍为 partial。新增语义必须同步矩阵、用户文档和测试。
 
 
 ## 设计方案
@@ -38,7 +38,7 @@ flowchart TD
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2025-12-19 `d45bec8c`（`feat(log): add --abbrev-commit/--abbrev/--no-abbrev-commit for commit… (#93)`）：基础实现节点：add --abbrev-commit/--abbrev/--no-abbrev-commit for commit… (#93)；当前实现的主要轮廓可追溯到该提交。
 - 2026-06-06 `f95b80df`（`feat(log): colorize graph columns and align compatibility matrix`）：功能演进：colorize graph columns and align compatibility matrix；该节点扩展了当前命令可用的参数或行为。
-- 2026-06-06 `89045f35`（`feat(log): support revision ranges (A..B, A...B, ^A B)`）：该提交曾尝试支持 revision range，但相关改动未保留在当前 HEAD 的 `src/command/log.rs` 中（`LogArgs` 不含 revision/range 位置参数，仍以 HEAD 为起点遍历），因此 revision range 仍属未实现项，见“还未实现的功能”。
+- 2026-06-06 `89045f35`（`feat(log): support revision ranges (A..B, A...B, ^A B)`）：当前 HEAD 通过 `--range <SPEC>` 保留 revision range 入口，但未复刻 Git 的位置性 `git log A..B` 语法；该差异继续列在“还未实现的功能”。
 - 2026-06-07 `155a430a`（`fix(log): close compatibility plan gaps`）：实现修正：close compatibility plan gaps；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 

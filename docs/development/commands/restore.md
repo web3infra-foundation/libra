@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`supported`。
+- 兼容级别：`partial`。`--source` / `--staged` / `--worktree` 和路径 restore 已支持；overlay、冲突解析、patch/progress 变体尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 

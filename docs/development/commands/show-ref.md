@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`supported`。
+- 兼容级别：`partial`。branch/tag/HEAD listing 和 hash-only 输出已支持；verify/exists/dereference/abbrev/exclude-existing 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 

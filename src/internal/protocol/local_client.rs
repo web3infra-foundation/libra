@@ -70,16 +70,22 @@ struct RepoCurrentDirGuard {
     original_dir: PathBuf,
     restored: bool,
     restore_failure_logged: bool,
+    #[cfg(test)]
+    _cwd_lock: crate::utils::test::CwdLockGuard,
 }
 
 impl RepoCurrentDirGuard {
     fn change_to(new_dir: &Path) -> Result<Self, IoError> {
+        #[cfg(test)]
+        let cwd_lock = crate::utils::test::cwd_lock_guard();
         let original_dir = env::current_dir()?;
         env::set_current_dir(new_dir)?;
         Ok(Self {
             original_dir,
             restored: false,
             restore_failure_logged: false,
+            #[cfg(test)]
+            _cwd_lock: cwd_lock,
         })
     }
 

@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`supported`。
+- 兼容级别：`partial`。staged/old-new/pathspec/name/stat/numstat/output/algorithm 已支持；位置性 revspec、summary、word/binary diff、whitespace 和 external diff 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 

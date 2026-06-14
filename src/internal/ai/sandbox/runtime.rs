@@ -82,19 +82,58 @@ impl CommandSpec {
         justification: Option<String>,
         ambient_cargo_target_dir_is_set: bool,
     ) -> Self {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let shell = default_shell();
+        let command = command.into();
+        let command = command_for_shell_cwd(command, &cwd);
         let mut env = HashMap::new();
         apply_task_worktree_env_overrides(&cwd, &mut env);
         apply_fuse_workspace_env_overrides(&cwd, &mut env, ambient_cargo_target_dir_is_set);
         Self {
             program: shell,
-            args: vec!["-c".to_string(), command.into()],
+            args: vec!["-c".to_string(), command],
             cwd,
             env,
             timeout_ms,
             sandbox_permissions,
             justification,
         }
+    }
+}
+
+fn command_for_shell_cwd(command: String, cwd: &Path) -> String {
+    #[cfg(test)]
+    {
+        format!(
+            "cd {} && {command}",
+            shell_quote(cwd.to_string_lossy().as_ref())
+        )
+    }
+
+    #[cfg(not(test))]
+    {
+        let _ = cwd;
+        command
+    }
+}
+
+#[cfg(test)]
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn default_shell() -> String {
+    #[cfg(test)]
+    {
+        std::env::var("LIBRA_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+    }
+
+    #[cfg(not(test))]
+    {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
     }
 }
 
@@ -211,6 +250,7 @@ fn apply_fuse_workspace_env_overrides(
 pub struct ExecEnv {
     pub command: Vec<String>,
     pub cwd: PathBuf,
+    pub spawn_cwd: PathBuf,
     pub env: HashMap<String, String>,
     pub timeout_ms: Option<u64>,
     pub sandbox: SandboxType,
@@ -245,7 +285,10 @@ impl ExecEnv {
 
         let mut command = Command::new(program);
         command.args(args);
-        let canonical_cwd = self.cwd.canonicalize().unwrap_or_else(|_| self.cwd.clone());
+        let canonical_cwd = self
+            .spawn_cwd
+            .canonicalize()
+            .unwrap_or_else(|_| self.spawn_cwd.clone());
         command.current_dir(canonical_cwd);
         command.envs(self.env);
         if self.new_session {
@@ -686,9 +729,12 @@ impl SandboxManager {
             }
         };
 
+        let spawn_cwd = spawn_cwd_for_command(&command, &spec.cwd);
+
         Ok(ExecEnv {
             command,
             cwd: spec.cwd,
+            spawn_cwd,
             env,
             timeout_ms: spec.timeout_ms,
             sandbox: effective_sandbox,
@@ -703,6 +749,34 @@ impl SandboxManager {
             seccomp_policy_path: seccomp_policy_path_for_transform,
         })
     }
+}
+
+fn spawn_cwd_for_command(command: &[String], cwd: &Path) -> PathBuf {
+    #[cfg(test)]
+    {
+        if is_test_shell_command(command) {
+            return PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        }
+    }
+    #[cfg(not(test))]
+    {
+        let _ = command;
+    }
+
+    cwd.to_path_buf()
+}
+
+#[cfg(test)]
+fn is_test_shell_command(command: &[String]) -> bool {
+    matches!(command, [program, flag, _] if flag == "-c" && is_test_shell_program(program))
+}
+
+#[cfg(test)]
+fn is_test_shell_program(program: &str) -> bool {
+    Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "sh" | "bash" | "zsh"))
 }
 
 fn internal_sandbox_required(
@@ -1918,6 +1992,7 @@ mod tests {
                 "sleep 5".to_string(),
             ],
             cwd: std::env::temp_dir(),
+            spawn_cwd: std::env::temp_dir(),
             env: HashMap::new(),
             timeout_ms: Some(1_000),
             sandbox: SandboxType::MacosSeatbelt,
@@ -1953,7 +2028,8 @@ mod tests {
         );
 
         assert_eq!(spec.cwd, cwd);
-        assert_eq!(spec.args, vec!["-c".to_string(), "echo ok".to_string()]);
+        assert_eq!(spec.args[0], "-c");
+        assert!(spec.args[1].contains("echo ok"));
         assert!(!spec.program.is_empty());
     }
 

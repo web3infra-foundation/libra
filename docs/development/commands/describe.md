@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`supported`。
+- 兼容级别：`partial`。基础 describe、`--tags`、`--always` 和 `--abbrev` 已支持；long/match/exclude/first-parent/dirty/exact/contains/candidates/all 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 

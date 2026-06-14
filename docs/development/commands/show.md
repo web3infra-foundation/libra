@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`supported`。
+- 兼容级别：`partial`。object/commit display、`--name-only`、`--stat`、`--oneline` 和 path filters 已支持；extended pretty/raw/name-status 格式尚未完整公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -53,7 +53,7 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 后续跟踪 | 当前未发现公开未完成项。 | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
+| Git 参数缺口 | `--name-status`、`--pretty`/`--format`、`--raw`、`--summary`、`--patch-with-stat` 等扩展输出尚未完整公开。 | 后续实现时需要同步源码、测试和兼容矩阵。 |
 
 ## 维护要求
 

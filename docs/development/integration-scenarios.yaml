@@ -203,7 +203,7 @@ scenarios:
   - id: cli.commit-status-log
     wave: 1
     group: core
-    purpose: "Core status/add/commit/log closed loop with message sources, dry-run/amend/conventional commits, status --exit-code, porcelain v2 rename/typechange visibility, explicit --untracked-files/--branch behavior, JSON status/log envelopes, and negative checks for unsupported status -z and log --follow."
+    purpose: "Core status/add/commit/log closed loop with message sources, dry-run/amend/conventional commits, status --exit-code, porcelain v2 rename/typechange visibility, explicit --untracked-files/--branch behavior, status -z NUL output, JSON status/log envelopes, and log --follow coverage."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck, global_db_isolation, lbr_error, negative_exit]
@@ -212,7 +212,7 @@ scenarios:
   - id: cli.branch-switch-checkout
     wave: 1
     group: branching
-    purpose: "Cover branch/switch/checkout creation, switching, switch -c, checkout -b, --detach, path checkout, rename, safe/forced delete, remote branch visibility, and negative checks for unsupported switch -C/-f/--orphan/guess flags."
+    purpose: "Cover branch/switch/checkout creation, switching, switch -c, switch -C, switch --orphan, checkout -b, --detach, path checkout, rename, safe/forced delete, remote branch visibility, and negative checks for unsupported switch -f/guess flags."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck, negative_exit]

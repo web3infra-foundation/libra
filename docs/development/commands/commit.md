@@ -6,9 +6,9 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`supported`。
+- 兼容级别：`partial`。
 
-- 当前矩阵承诺常用 Git 行为已支持；`--cleanup`、`--dry-run`、`--fixup`、`--squash`、`-C/-c`、`--trailer`、`--reset-author` 已补齐。新增语义必须同步矩阵、用户文档和测试。
+- 当前矩阵承诺常用 Git commit 子集已支持；`--cleanup`、`--dry-run`、`--fixup`、`--squash`、`-C/-c`、`--trailer`、`--reset-author` 已补齐，编辑器/verbose/porcelain/status-template surface 仍为缺口。新增语义必须同步矩阵、用户文档和测试。
 
 
 ## 设计方案

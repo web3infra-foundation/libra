@@ -2,13 +2,13 @@
 
 ## 命令实现目标
 
-`libra switch` 的目标是在分支之间切换，或创建/重置分支后切换。实现需要支持 track、force-create、锁定分支保护、结构化输出和错误码，并把 orphan 或部分 Git checkout 兼容行为留在差异记录中。
+`libra switch` 的目标是在分支之间切换，或创建/重置分支后切换。实现需要支持 track、force-create、orphan、锁定分支保护、结构化输出和错误码，并把 Git `switch` 的强制丢弃、guess 和 merge/submodule 相关兼容行为留在差异记录中。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`supported`。
+- 兼容级别：`partial`。
 
-- 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
+- 当前矩阵承诺常用 Git 行为已支持；但 Git `switch` 的 `-f/--discard-changes`、`--guess` / `--no-guess`、`--merge` / conflict style / submodule 等参数尚未公开。新增语义必须同步矩阵、用户文档和测试。
 
 
 ## 设计方案
@@ -37,7 +37,7 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-01-21 `27f2ae2f`（`feat(switch): add --track flag to switch command (#157)`）：基础实现节点：add --track flag to switch command (#157)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-06 `7e94b815`（`feat(switch): add -C/--force-create (create or reset branch then switch)`）：该提交标题声称新增 `-C` / `--force-create`，但该功能并未保留在当前 HEAD：`SwitchArgs` 中没有 `force_create` 字段，代码库中也不存在 `create_branch_force` 函数，强制创建仍属未实现项（见“还未实现的功能”表）。
+- 2026-06-06 `7e94b815`（`feat(switch): add -C/--force-create (create or reset branch then switch)`）：当前 HEAD 已保留 `SwitchArgs::force_create`，`libra switch -C <name> [<start-point>]` 会删除并重建非当前目标分支后切换；对应行为已有 `tests/command/switch_test.rs` 覆盖。
 - 2026-05-23 `28bb0785`（`test(reset+switch): pin agent-traces locked-branch coverage (v0.17.746)`）：测试契约：pin agent-traces locked-branch coverage (v0.17.746)；相关行为已有回归守卫，后续变更需要继续满足。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -53,7 +53,9 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 后续跟踪 | 当前未发现公开未完成项。 | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
+| Git 兼容参数 | `-f` / `--discard-changes`。 | 当前未公开；集成场景保留负向检查，后续实现时需明确 dirty worktree 覆盖、JSON 输出与错误码。 |
+| Git 兼容参数 | `--guess` / `--no-guess`。 | 当前仅通过 `--track` 显式跟踪远端分支；默认/显式 guess 行为未公开。 |
+| Git 兼容参数 | `--merge`、`--conflict=<style>`、`--recurse-submodules`、`--ignore-other-worktrees` 等切换策略参数。 | 当前未公开；后续需要先补工作树冲突模型和多工作树隔离契约。 |
 
 ## 维护要求
 

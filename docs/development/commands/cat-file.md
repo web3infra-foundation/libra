@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`supported`。`-e` does not support JSON
+- 兼容级别：`partial`。`-t` / `-s` / `-p` / `-e` 已支持；batch mode、参数组合扩展和 `-e` 的 JSON/machine 输出尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 

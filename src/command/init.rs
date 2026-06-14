@@ -314,13 +314,21 @@ impl InitProgress {
 
 struct CurrentDirGuard {
     original_dir: PathBuf,
+    #[cfg(test)]
+    _cwd_lock: crate::utils::test::CwdLockGuard,
 }
 
 impl CurrentDirGuard {
     fn change_to(target: &Path) -> io::Result<Self> {
+        #[cfg(test)]
+        let cwd_lock = crate::utils::test::cwd_lock_guard();
         let original_dir = env::current_dir()?;
         env::set_current_dir(target)?;
-        Ok(Self { original_dir })
+        Ok(Self {
+            original_dir,
+            #[cfg(test)]
+            _cwd_lock: cwd_lock,
+        })
     }
 }
 

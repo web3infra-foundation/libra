@@ -35,7 +35,7 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-06-10 `8ca435a7`（`feat(ls-tree): implement tree inspection command (#398)`）：基础实现节点：implement tree inspection command (#398)；当前实现的主要轮廓可追溯到该提交。
-- 历史结论：`src/command/ls_tree.rs` 或配套测试/文档已有历史节点，但当前 `src/cli.rs::Commands` 未公开 `ls-tree` 入口；实现历史不改变当前状态章节中的未接入结论。
+- 历史结论：`src/command/ls_tree.rs` 已通过 `src/cli.rs::Commands::LsTree` 公开；早期“未公开 CLI”的记录已经过期，当前状态以源码和本页“当前状态”为准。
 
 ## 当前状态
 

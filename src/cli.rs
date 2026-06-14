@@ -32,11 +32,11 @@ const ROOT_AFTER_HELP: &str = "\
 Command Groups:
   Repository Setup        init, clone, config
   Working Tree            status, add, rm, mv, restore, clean, stash, lfs, worktree
-  History Inspection      log, shortlog, show, show-ref, ls-remote, diff, grep, blame, describe, notes
+  History Inspection      log, shortlog, show, show-ref, ls-remote, ls-tree, diff, grep, blame, describe, notes, archive
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing db, fsck, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
+  Maintenance And Plumbing db, fsck, maintenance, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -1149,6 +1149,8 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
 
             command::init::execute_safe(cmd_args, &output).await?;
             set_local_hash_kind_for_storage(&storage).await?;
+            #[cfg(test)]
+            let _cwd_lock = crate::utils::test::cwd_lock_guard();
             env::set_current_dir(&original_dir).map_err(|e| {
                 CliError::fatal(format!(
                     "failed to restore working directory '{}': {}",

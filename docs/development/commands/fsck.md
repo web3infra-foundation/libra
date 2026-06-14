@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`supported`。
+- 兼容级别：`partial`。对象、refs、索引、reflog 和 connectivity 检查已支持；JSON/machine 输出、strict mode 和 pack 校验 surface 尚未完整公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -54,7 +54,8 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 后续跟踪 | 当前未发现公开未完成项。 | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
+| 输出契约 | `execute_safe` 当前未使用 `OutputConfig` 渲染 JSON/machine 输出。 | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| Git 参数缺口 | `--strict` 和 pack 校验入口当前未公开。 | 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求
 

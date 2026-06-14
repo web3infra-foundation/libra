@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`supported`。vault-backed
+- 兼容级别：`partial`。vault-backed local/global config 已支持；system scope、editor round-trip、类型转换、NUL 输出、section 操作和 includeIf 尚未完整支持。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 

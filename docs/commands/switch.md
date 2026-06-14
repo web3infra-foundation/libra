@@ -27,7 +27,7 @@ Fuzzy branch name suggestions are provided via Levenshtein distance when a branc
 
 | Flag | Long | Value | Description |
 |------|------|-------|-------------|
-| | `<branch>` | positional (optional) | Target branch, commit, or remote reference to switch to |
+| | `<branch>` | positional (optional) | Target local branch to switch to, or a commit/tag/branch when used with `--detach` |
 | `-c` | `--create` | `<name>` | Create a new branch and switch to it |
 | `-C` | `--force-create` | `<name>` | Create a new branch or reset an existing one and switch to it |
 | | `--orphan` | `<name>` | Create a new orphan branch with no parents and switch to it |
@@ -236,8 +236,8 @@ When a branch name is not found, Libra computes Levenshtein distance against all
 | Create from commit | `git switch -c fix abc1234` | `libra switch -c fix abc1234` | `jj new abc1234` + `jj branch create fix` |
 | Detach HEAD | `git switch --detach v1.0` | `libra switch --detach v1.0` | `jj edit <rev>` (always detached-like) |
 | Track remote | `git switch --track origin/main` | `libra switch --track origin/main` | N/A (jj tracks all remotes) |
-| Force create | `git switch -C feature` | Not supported (delete first) | N/A |
-| Orphan branch | `git switch --orphan <name>` | Not supported | `jj new root()` |
+| Force create | `git switch -C feature` | `libra switch -C feature` | N/A |
+| Orphan branch | `git switch --orphan <name>` | `libra switch --orphan <name>` | `jj new root()` |
 | Structured output | No | `--json` / `--machine` | `--template` |
 | Fuzzy suggestions | No | Levenshtein-based "did you mean" hints | No |
 | Clean-state validation | Warns but proceeds (sometimes) | Blocks switch with actionable error | No dirty state concept |

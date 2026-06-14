@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`supported`。
+- 兼容级别：`partial`。tracked/index/tree search 与常用匹配/count/list/line flags 已支持；context、extended/Perl regex、untracked/no-index 和 binary controls 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 

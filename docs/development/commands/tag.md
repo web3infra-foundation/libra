@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`supported`。
+- 兼容级别：`partial`。轻量标签、message-based annotated tags、force/delete/list/`-n` 已支持；显式 annotate、过滤、排序、多列、签名和验证尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 

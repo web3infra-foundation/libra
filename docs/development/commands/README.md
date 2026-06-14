@@ -26,33 +26,33 @@
 | [`agent`](agent.md) | `intentionally-different` | Libra external-agent capture extension, not a Git command |
 | [`automation`](automation.md) | `intentionally-different` | Libra AI automation rules/history extension, not a Git command |
 | [`bisect`](bisect.md) | `partial` | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` supported; `replay` (see [docs/development/comma... |
-| [`blame`](blame.md) | `supported` | 见命令文档。 |
-| [`branch`](branch.md) | `supported` | 见命令文档。 |
-| [`cat-file`](cat-file.md) | `supported` | `-e` does not support JSON |
+| [`blame`](blame.md) | `partial` | numeric `-L` ranges supported; porcelain/reverse/email/whitespace/copy-move detection not exposed |
+| [`branch`](branch.md) | `partial` | create/list/delete/rename/upstream set/current/contains supported; copy/unset-upstream/merged/points-at/sort/format not exposed |
+| [`cat-file`](cat-file.md) | `partial` | `-t` / `-s` / `-p` / `-e` supported; batch modes and `-e` JSON/machine output not exposed |
 | [`checkout`](checkout.md) | `partial` | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore... |
-| [`cherry-pick`](cherry-pick.md) | `supported` | 见命令文档。 |
-| [`clean`](clean.md) | `supported` | 见命令文档。 |
+| [`cherry-pick`](cherry-pick.md) | `partial` | commit replay and `-n` supported; source recording, edit/mainline/signoff/sequencer/strategy flags incomplete |
+| [`clean`](clean.md) | `partial` | `-n` / `-f` / `-d` / `-x` / `-X` / `--exclude` supported; `-i` and pathspec filtering not exposed |
 | [`clone`](clone.md) | `partial` | `--depth` and `--single-branch` supported; `--sparse` unsupported (see [docs/development/commands/_compatibility.md#d... |
 | [`cloud`](cloud.md) | `intentionally-different` | Libra cloud backup/restore extension, not a Git command |
 | [`code`](code.md) | `intentionally-different` | Libra AI extension, not a Git command |
 | [`code-control`](code-control.md) | `intentionally-different` | Libra AI automation extension, not a Git command |
-| [`commit`](commit.md) | `supported` | 见命令文档。 |
-| [`config`](config.md) | `supported` | vault-backed |
+| [`commit`](commit.md) | `partial` | common commit flags plus cleanup/fixup/squash/trailer supported; editor/verbose/porcelain/status-template flags not exposed |
+| [`config`](config.md) | `partial` | vault-backed local/global config; system scope, editor round-trip, typed conversion, NUL output and section operations incomplete |
 | [`db`](db.md) | `intentionally-different` | Libra repository database schema inspection/upgrade extension, not a Git command |
-| [`describe`](describe.md) | `supported` | 见命令文档。 |
-| [`diff`](diff.md) | `supported` | 见命令文档。 |
-| [`fetch`](fetch.md) | `supported` | `--depth` public flag |
+| [`describe`](describe.md) | `partial` | basic describe, `--tags`, `--always`, `--abbrev` supported; long/match/exclude/dirty and related filters not exposed |
+| [`diff`](diff.md) | `partial` | staged/old-new/pathspec/name/stat output supported; positional revspec, summary/word/binary/whitespace/ext-diff incomplete |
+| [`fetch`](fetch.md) | `partial` | repository/refspec, `--all`, and `--depth` supported; prune/dry-run/tags/force/refmap and shallow expansion flags not exposed |
 | [`for-each-ref`](for-each-ref.md) | `partial` | `--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort` / `--count` / `<pattern>` supported; full Git atom language, `--contains` / `--merged` / `--points-at` and shell quoting modes are not exposed |
-| [`fsck`](fsck.md) | `supported` | 见命令文档。 |
+| [`fsck`](fsck.md) | `partial` | object/ref/index/reflog/connectivity checks supported; JSON/machine output, strict mode and pack verification surface incomplete |
 | [`graph`](graph.md) | `intentionally-different` | Libra AI graph inspection extension, not a Git command |
-| [`grep`](grep.md) | `supported` | 见命令文档。 |
+| [`grep`](grep.md) | `partial` | tracked/index/tree search with common match flags supported; context, extended/Perl regex, untracked/no-index and binary controls not exposed |
 | [`hash-object`](hash-object.md) | `partial` | Blob hashing for files and `--stdin`; `-w` writes blob objects. Other object types and advanced Git hash-object flags... |
 | [`hooks`](hooks.md) | `intentionally-different` | Hidden compatibility entry for hook configs installed by `libra agent enable` |
-| [`index-pack`](index-pack.md) | `supported` | hidden plumbing command |
-| [`init`](init.md) | `supported` | 见命令文档。 |
+| [`index-pack`](index-pack.md) | `partial` | hidden plumbing command; stdin/fix-thin/keep/progress flags not exposed |
+| [`init`](init.md) | `partial` | fresh repository initialization supported; safe re-initialization/top-up of existing repos not implemented |
 | [`lfs`](lfs.md) | `partial` | built-in Libra LFS command; uses `.libra_attributes`, not Git LFS filters/hooks (see [docs/development/commands/_comp... |
-| [`log`](log.md) | `supported` | 见命令文档。 |
-| [`ls-remote`](ls-remote.md) | `supported` | 见命令文档。 |
+| [`log`](log.md) | `partial` | common log surface plus `--range`/`--all`/`--reverse`/`--follow`/`-L`; positional ranges and exact line history remain partial |
+| [`ls-remote`](ls-remote.md) | `partial` | heads/tags/refs filtering and patterns supported; symref/get-url/sort/exit-code not exposed |
 | [`ls-tree`](ls-tree.md) | `partial` | Commit/tree listing, recursive listing, path prefix filters, JSON, and common output flags supported; `--full-name` / `--full-tree` / `--format` and `REV:path` syntax are not exposed |
 | [`maintenance`](maintenance.md) | `partial` | `run` / `register` / `unregister` / `status` exposed; lower-level maintenance tasks such as `commit-graph` and `prefe... |
 | [`merge`](merge.md) | `partial` | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |
@@ -63,23 +63,23 @@
 | [`pull`](pull.md) | `partial` | fetch + fast-forward/three-way merge supported; `--ff-only` / `--rebase` exposed; `--squash` / `--no-ff` not exposed |
 | [`push`](push.md) | `partial` | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected — intentiona... |
 | [`rebase`](rebase.md) | `partial` | `--autosquash` / `--reapply-cherry-picks` not supported |
-| [`reflog`](reflog.md) | `supported` | 见命令文档。 |
-| [`remote`](remote.md) | `supported` | 见命令文档。 |
-| [`reset`](reset.md) | `supported` | 见命令文档。 |
-| [`restore`](restore.md) | `supported` | 见命令文档。 |
-| [`rev-list`](rev-list.md) | `supported` | 见命令文档。 |
-| [`rev-parse`](rev-parse.md) | `supported` | 见命令文档。 |
-| [`revert`](revert.md) | `supported` | 见命令文档。 |
+| [`reflog`](reflog.md) | `partial` | show/delete/exists and rich show filters supported; expire not exposed |
+| [`remote`](remote.md) | `partial` | add/remove/rename/list/get-url/set-url/prune supported; detailed show and update not exposed |
+| [`reset`](reset.md) | `partial` | soft/mixed/hard/path reset supported; merge/keep/pathspec-from-file/no-refresh not exposed |
+| [`restore`](restore.md) | `partial` | source/staged/worktree path restore supported; overlay/conflict/progress variants not exposed |
+| [`rev-list`](rev-list.md) | `partial` | single revision reachability listing supported; ranges/exclusions/count/parent filters not exposed |
+| [`rev-parse`](rev-parse.md) | `partial` | basic revision parsing and toplevel/short/abbrev-ref supported; verify/default/repository-query/filter modes not exposed |
+| [`revert`](revert.md) | `partial` | single-commit revert and `-n` supported; edit/mainline/sequencer/strategy flags incomplete |
 | [`rm`](rm.md) | `partial` | `--force` / `--dry-run` / `--cached` / `--recursive` / `--ignore-unmatch` / `--pathspec-from-file` / `--pathspec-file... |
 | [`sandbox`](sandbox.md) | `intentionally-different` | Libra AI sandbox diagnostics extension, not a Git command |
-| [`shortlog`](shortlog.md) | `supported` | 见命令文档。 |
-| [`show`](show.md) | `supported` | 见命令文档。 |
-| [`show-ref`](show-ref.md) | `supported` | 见命令文档。 |
+| [`shortlog`](shortlog.md) | `partial` | basic author summary supported; group/format/stdin/no-merges/author filters not exposed |
+| [`show`](show.md) | `partial` | object/commit display and common name/stat flags supported; extended pretty/raw/name-status formats not exposed |
+| [`show-ref`](show-ref.md) | `partial` | branch/tag/HEAD listing supported; verify/exists/dereference/abbrev/exclude-existing not exposed |
 | [`stash`](stash.md) | `partial` | `push` / `pop` / `list` / `apply` / `drop` / `show` / `branch` / `clear` supported; `create` / `store` deferred (see ... |
 | [`status`](status.md) | `supported` | 见命令文档。 |
-| [`switch`](switch.md) | `supported` | 见命令文档。 |
+| [`switch`](switch.md) | `partial` | `-C/--force-create`、`--orphan`、`--detach`、`--track` 已公开；`-f/--discard-changes`、`--guess` / `--no-guess`、merge/conflict/submodule 相关参数未公开。 |
 | [`symbolic-ref`](symbolic-ref.md) | `partial` | Supports local `HEAD` only; other symbolic refs are rejected because Libra stores refs in SQLite |
-| [`tag`](tag.md) | `supported` | 见命令文档。 |
+| [`tag`](tag.md) | `partial` | lightweight/message tags, force/delete/list/`-n` supported; explicit annotate, filters, sort/column, signing and verification not exposed |
 | [`usage`](usage.md) | `intentionally-different` | Libra AI provider/model usage reporting extension, not a Git command |
 | [`verify-pack`](verify-pack.md) | `partial` | validates one `.idx` file against a matching `.pack`; Git's multi-index form and `-s` / `--stat-only` are not exposed |
 | [`worktree`](worktree.md) | `intentionally-different` | `remove` keeps disk dir by default (no implicit data loss). Use `--delete-dir` for Git-style behavior; the flag refus... |

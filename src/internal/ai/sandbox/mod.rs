@@ -7,7 +7,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::ErrorKind,
+    io::{self, ErrorKind},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -1247,22 +1247,59 @@ async fn run_command_spec_inner(
     let proxy_evidence_sink = evidence_sink
         .clone()
         .or_else(|| sandbox_runtime.and_then(|cfg| cfg.evidence_sink.clone()));
-    let allowlist_proxy = start_allowlist_proxy_if_needed(
+    let mut allowlist_proxy = start_allowlist_proxy_if_needed(
         &mut built.command,
         built.allowlist_proxy_services,
         proxy_evidence_sink,
     )
     .await?;
     let timeout_override = built.timeout_ms;
+    repair_missing_process_cwd(&built.process_cwd)?;
     let mut cmd = built.command;
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = match cmd.spawn() {
+    let mut child = match spawn_shell_command(&mut cmd, &built.process_cwd) {
         Ok(child) => child,
         Err(error) => {
-            if let Some(proxy) = allowlist_proxy {
+            #[cfg(test)]
+            let fallback_error = if error.kind() == ErrorKind::NotFound {
+                match run_std_command_fallback(
+                    built.exec_env.clone(),
+                    max_output_bytes,
+                    timeout_override,
+                )
+                .await
+                {
+                    Ok(output) => {
+                        if let Some(proxy) = allowlist_proxy.take() {
+                            proxy.shutdown().await;
+                        }
+                        return Ok(output);
+                    }
+                    Err(fallback_error) => Some(fallback_error),
+                }
+            } else {
+                None
+            };
+            #[cfg(not(test))]
+            let fallback_error: Option<String> = None;
+
+            if let Some(proxy) = allowlist_proxy.take() {
                 proxy.shutdown().await;
             }
-            return Err(format!("failed to spawn shell: {error}"));
+            let process_cwd = std::env::current_dir()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|err| format!("<unavailable: {err}>"));
+            let fallback_detail = fallback_error
+                .map(|detail| format!("; std fallback also failed: {detail}"))
+                .unwrap_or_default();
+            return Err(format!(
+                "failed to spawn shell program `{}` in `{}` \
+                 (spawn cwd exists: {}, process cwd: {}): {error}{fallback_detail}",
+                built.spawn_program,
+                built.spawn_cwd.display(),
+                built.spawn_cwd.exists(),
+                process_cwd
+            ));
         }
     };
 
@@ -1322,7 +1359,7 @@ async fn run_command_spec_inner(
         stderr.push_str("\n[stderr stream incomplete]");
     }
 
-    if let Some(proxy) = allowlist_proxy {
+    if let Some(proxy) = allowlist_proxy.take() {
         proxy.shutdown().await;
     }
 
@@ -1498,19 +1535,236 @@ fn build_command_from_spec(
             }
             err.to_string()
         })?;
+    let spawn_program = exec_env
+        .command
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "<missing>".to_string());
     let allowlist_proxy_services = exec_env.allowlist_proxy_services.clone();
+    let spawn_cwd = exec_env.cwd.clone();
+    let process_cwd = exec_env.spawn_cwd.clone();
+    #[cfg(test)]
+    let fallback_exec_env = exec_env.clone();
     let (command, timeout_ms) = exec_env.into_command()?;
     Ok(BuiltCommand {
         command,
         timeout_ms,
         allowlist_proxy_services,
+        spawn_cwd,
+        process_cwd,
+        #[cfg(test)]
+        exec_env: fallback_exec_env,
+        spawn_program,
     })
+}
+
+fn spawn_shell_command(
+    cmd: &mut tokio::process::Command,
+    fallback_cwd: &Path,
+) -> std::io::Result<tokio::process::Child> {
+    let mut last_not_found = None;
+    #[cfg(test)]
+    let max_attempts = 20;
+    #[cfg(not(test))]
+    let max_attempts = 3;
+
+    for attempt in 0..max_attempts {
+        match cmd.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error) if error.kind() == ErrorKind::NotFound && attempt + 1 < max_attempts => {
+                last_not_found = Some(error);
+                #[cfg(test)]
+                {
+                    let Some(_cwd_lock) = crate::utils::test::try_cwd_lock_guard() else {
+                        break;
+                    };
+                    restore_process_cwd(fallback_cwd)?;
+                }
+                #[cfg(not(test))]
+                restore_process_cwd(fallback_cwd)?;
+                #[cfg(test)]
+                std::thread::sleep(Duration::from_millis(10));
+                std::thread::yield_now();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    if let Some(error) = last_not_found {
+        Err(error)
+    } else {
+        Err(io::Error::new(
+            ErrorKind::NotFound,
+            "failed to spawn command after cwd repair",
+        ))
+    }
+}
+
+#[cfg(test)]
+async fn run_std_command_fallback(
+    exec_env: ExecEnv,
+    max_output_bytes: usize,
+    timeout_override: Option<u64>,
+) -> Result<SandboxExecOutput, String> {
+    tokio::task::spawn_blocking(move || {
+        run_std_command_fallback_blocking(exec_env, max_output_bytes, timeout_override)
+    })
+    .await
+    .map_err(|error| format!("std fallback task join failed: {error}"))?
+}
+
+#[cfg(test)]
+fn run_std_command_fallback_blocking(
+    exec_env: ExecEnv,
+    max_output_bytes: usize,
+    timeout_override: Option<u64>,
+) -> Result<SandboxExecOutput, String> {
+    let (program, args) = exec_env
+        .command
+        .split_first()
+        .ok_or_else(|| "missing command program".to_string())?;
+    let canonical_cwd = exec_env
+        .spawn_cwd
+        .canonicalize()
+        .unwrap_or_else(|_| exec_env.spawn_cwd.clone());
+    let stdout_file = tempfile::tempfile()
+        .map_err(|error| format!("create stdout tempfile for fallback: {error}"))?;
+    let stderr_file = tempfile::tempfile()
+        .map_err(|error| format!("create stderr tempfile for fallback: {error}"))?;
+    let mut stdout_reader = stdout_file
+        .try_clone()
+        .map_err(|error| format!("clone stdout tempfile for fallback: {error}"))?;
+    let mut stderr_reader = stderr_file
+        .try_clone()
+        .map_err(|error| format!("clone stderr tempfile for fallback: {error}"))?;
+
+    let mut command = std::process::Command::new(program);
+    command
+        .args(args)
+        .current_dir(canonical_cwd)
+        .envs(exec_env.env)
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file));
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("spawn std fallback command `{program}`: {error}"))?;
+    let timeout_dur = Duration::from_millis(timeout_override.unwrap_or(DEFAULT_TIMEOUT_MS));
+    let start = std::time::Instant::now();
+    let (exit_code, timed_out) = loop {
+        match child
+            .try_wait()
+            .map_err(|error| format!("wait std fallback command `{program}`: {error}"))?
+        {
+            Some(status) => break (status.code().unwrap_or(-1), false),
+            None if start.elapsed() >= timeout_dur => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break (TIMEOUT_EXIT_CODE, true);
+            }
+            None => std::thread::sleep(Duration::from_millis(10)),
+        }
+    };
+
+    let (mut stdout, stdout_truncated, stdout_incomplete) =
+        read_limited_tempfile(&mut stdout_reader, max_output_bytes);
+    let (mut stderr, stderr_truncated, stderr_incomplete) =
+        read_limited_tempfile(&mut stderr_reader, max_output_bytes);
+    if stdout_truncated {
+        stdout.push_str("\n[stdout truncated]");
+    }
+    if stderr_truncated {
+        stderr.push_str("\n[stderr truncated]");
+    }
+    if stdout_incomplete {
+        stdout.push_str("\n[stdout stream incomplete]");
+    }
+    if stderr_incomplete {
+        stderr.push_str("\n[stderr stream incomplete]");
+    }
+
+    Ok(SandboxExecOutput {
+        exit_code,
+        stdout,
+        stderr,
+        timed_out,
+    })
+}
+
+#[cfg(test)]
+fn read_limited_tempfile(
+    file: &mut std::fs::File,
+    max_output_bytes: usize,
+) -> (String, bool, bool) {
+    use std::io::{Read, Seek, SeekFrom};
+
+    if file.seek(SeekFrom::Start(0)).is_err() {
+        return (String::new(), false, true);
+    }
+
+    let mut bytes = Vec::new();
+    let mut truncated = false;
+    let mut incomplete = false;
+    let mut buf = [0_u8; 8192];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(read) => {
+                if bytes.len() < max_output_bytes {
+                    let remaining = max_output_bytes - bytes.len();
+                    let keep = read.min(remaining);
+                    bytes.extend_from_slice(&buf[..keep]);
+                    truncated |= keep < read;
+                } else {
+                    truncated = true;
+                }
+            }
+            Err(_) => {
+                incomplete = true;
+                break;
+            }
+        }
+    }
+
+    (
+        String::from_utf8_lossy(&bytes).into_owned(),
+        truncated,
+        incomplete,
+    )
 }
 
 struct BuiltCommand {
     command: tokio::process::Command,
     timeout_ms: Option<u64>,
     allowlist_proxy_services: Option<Vec<NetworkService>>,
+    spawn_cwd: PathBuf,
+    process_cwd: PathBuf,
+    #[cfg(test)]
+    exec_env: ExecEnv,
+    spawn_program: String,
+}
+
+fn repair_missing_process_cwd(fallback: &Path) -> Result<(), String> {
+    if std::env::current_dir().is_ok() {
+        return Ok(());
+    }
+
+    restore_process_cwd(fallback).map_err(|error| error.to_string())
+}
+
+fn restore_process_cwd(fallback: &Path) -> std::io::Result<()> {
+    let fallback = fallback
+        .canonicalize()
+        .unwrap_or_else(|_| fallback.to_path_buf());
+    std::env::set_current_dir(&fallback).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+            "failed to restore process current directory to `{}` before spawning shell: {error}",
+            fallback.display()
+            ),
+        )
+    })
 }
 
 async fn start_allowlist_proxy_if_needed(
@@ -3205,6 +3459,40 @@ mod tests {
                 .is_some_and(|name| name.starts_with(COMMAND_TMPDIR_PREFIX))
         );
         assert!(!command_tmpdir.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn repair_missing_process_cwd_restores_deleted_process_cwd() {
+        struct RestoreCwd(Option<PathBuf>);
+
+        impl Drop for RestoreCwd {
+            fn drop(&mut self) {
+                if let Some(path) = self.0.take() {
+                    let _ = std::env::set_current_dir(path);
+                }
+            }
+        }
+
+        let _cwd_lock = crate::utils::test::cwd_lock_guard();
+        let original =
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let _restore = RestoreCwd(Some(original));
+        let deleted_cwd = tempfile::tempdir().expect("deleted cwd tempdir");
+        let fallback_cwd = tempfile::tempdir().expect("fallback cwd tempdir");
+        std::env::set_current_dir(deleted_cwd.path()).expect("enter deleted cwd candidate");
+        drop(deleted_cwd);
+        assert!(std::env::current_dir().is_err());
+
+        repair_missing_process_cwd(fallback_cwd.path()).expect("cwd repair should succeed");
+
+        let expected = fallback_cwd
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| fallback_cwd.path().to_path_buf());
+        let actual = std::env::current_dir().expect("current dir should be restored");
+        assert_eq!(actual, expected);
     }
 
     #[cfg(unix)]

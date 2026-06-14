@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`supported`。
+- 兼容级别：`partial`。基础提交 replay 和 `-n/--no-commit` 已支持；`-x`、edit、mainline、signoff、ff、sequencer、strategy 和 empty policy 仍不完整。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 

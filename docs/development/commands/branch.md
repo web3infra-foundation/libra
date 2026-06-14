@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`supported`。
+- 兼容级别：`partial`。创建、列出、删除、重命名、上游设置和 contains/no-contains 已支持；复制、unset-upstream、描述编辑、merged/points-at、sort/format 和 ignore-case 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 

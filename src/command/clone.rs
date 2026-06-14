@@ -990,6 +990,8 @@ pub async fn execute_safe(args: CloneArgs, output: &OutputConfig) -> CliResult<(
 
     // Always restore the working directory.
     if env::current_dir().ok().as_ref() != Some(&original_dir) {
+        #[cfg(test)]
+        let _cwd_lock = crate::utils::test::cwd_lock_guard();
         env::set_current_dir(&original_dir).map_err(|source| {
             CliError::from(CloneError::RestoreDirectory {
                 path: original_dir.clone(),
@@ -1221,6 +1223,8 @@ async fn execute_clone_inner(
     .await
     .map_err(|error| {
         if env::current_dir().ok().as_deref() != Some(original_dir) {
+            #[cfg(test)]
+            let _cwd_lock = crate::utils::test::cwd_lock_guard();
             let _ = env::set_current_dir(original_dir);
         }
         let cleanup_warning = cleanup_failed_clone(&local_path, created_by_clone);
@@ -1284,6 +1288,8 @@ async fn execute_cloud_publish_clone(
     .await
     .map_err(|error| {
         if env::current_dir().ok().as_deref() != Some(original_dir) {
+            #[cfg(test)]
+            let _cwd_lock = crate::utils::test::cwd_lock_guard();
             let _ = env::set_current_dir(original_dir);
         }
         let cleanup_warning = cleanup_failed_clone(&local_path, created_by_clone);
@@ -1317,6 +1323,8 @@ async fn clone_cloud_publish_into_destination(
     original_dir: &Path,
     output: &OutputConfig,
 ) -> Result<CloneOutput, CloneError> {
+    #[cfg(test)]
+    let _cwd_lock = crate::utils::test::cwd_lock_guard();
     env::set_current_dir(local_path).map_err(|source| CloneError::ChangeDirectory {
         path: local_path.to_path_buf(),
         source,
@@ -2752,6 +2760,8 @@ async fn clone_into_destination(
     original_dir: &Path,
     output: &OutputConfig,
 ) -> Result<CloneOutput, CloneError> {
+    #[cfg(test)]
+    let _cwd_lock = crate::utils::test::cwd_lock_guard();
     env::set_current_dir(local_path).map_err(|source| CloneError::ChangeDirectory {
         path: local_path.to_path_buf(),
         source,

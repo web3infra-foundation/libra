@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`supported`。
+- 兼容级别：`partial`。`--soft` / `--mixed` / `--hard` 和路径 reset 已支持；`--merge`、`--keep`、pathspec-from-file 和 no-refresh 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -55,6 +55,8 @@ flowchart TD
 |---|---|---|
 | 兼容差异项 | merge reset | 原始对照：git reset --merge <target>；相关参数/替代：不支持；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | keep reset | 原始对照：git reset --keep <target>；相关参数/替代：不支持；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | pathspec 文件输入 | 原始对照：`--pathspec-from-file` / `--pathspec-file-nul`；当前 `ResetArgs` 未公开。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | 跳过刷新 | 原始对照：`--no-refresh`；当前 `ResetArgs` 未公开。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求
 

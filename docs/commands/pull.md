@@ -34,6 +34,15 @@ Pull supports already-up-to-date, fast-forward, and single-head three-way merge 
 | `--machine` | Compact single-line JSON; suppresses progress (global flag). | `libra pull --machine` |
 | `--quiet` | Suppress all progress and merge summary output. | `libra pull --quiet` |
 
+## Examples
+
+```bash
+libra pull
+libra pull origin main
+libra pull --ff-only
+libra pull --rebase origin main
+```
+
 ## Human Output
 
 Default human mode writes fetch progress to `stderr` and the pull summary to `stdout`.

@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra for-each-ref` 的目标是按格式列出本地引用，作为 Git ref listing 的 plumbing 兼容入口。当前实现文件和文档资料已经存在，但顶层 CLI 尚未公开接入，因此该文档同时记录实现目标与接入缺口。
+`libra for-each-ref` 的目标是按格式列出本地引用，作为 Git ref listing 的 plumbing 兼容入口。当前实现文件、用户文档和顶层 CLI 入口均已公开；剩余工作集中在完整 atom 语言、高级过滤和 quoting mode。
 
 ## 对比 Git 与兼容性
 
@@ -21,7 +21,7 @@
 
 ```mermaid
 flowchart TD
-    A["入口与分发<br/>未公开 CLI / 设计资料"] --> B["源码分层<br/>src/command/for_each_ref.rs"]
+    A["入口与分发<br/>Commands::ForEachRef"] --> B["源码分层<br/>src/command/for_each_ref.rs"]
     B --> C["参数模型<br/>ForEachRefArgs"]
     C --> D["执行路径<br/>execute / execute_safe"]
     D --> E["底层对象<br/>Blob / Commit / Tree / Branch"]
@@ -37,7 +37,7 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-06-13 `8d4fb969`（`Implement ref and index listing commands`）：基础实现节点：Implement ref and index listing commands；当前实现的主要轮廓可追溯到该提交。
-- 历史结论：`src/command/for_each_ref.rs` 或配套测试/文档已有历史节点，但当前 `src/cli.rs::Commands` 未公开 `for-each-ref` 入口；实现历史不改变当前状态章节中的未接入结论。
+- 历史结论：`src/command/for_each_ref.rs` 已通过 `src/cli.rs::Commands::ForEachRef` 公开；早期“未公开 CLI”的记录已经过期，当前状态以源码和本页“当前状态”为准。
 
 ## 当前状态
 

@@ -9,6 +9,8 @@
 ```
 libra switch <branch>
 libra switch -c <name> [<start-point>]
+libra switch -C <name> [<start-point>]
+libra switch --orphan <name>
 libra switch -d <commit|tag|branch>
 libra switch --track <remote/branch>
 ```
@@ -17,7 +19,7 @@ libra switch --track <remote/branch>
 
 `libra switch` 是更改分支的主要命令。它会在切换前验证工作树干净，更新 HEAD 和索引，并恢复工作树以匹配目标提交。与作为 Git 兼容表面存在的 `libra checkout` 不同，`switch` 是分支操作的推荐命令。
 
-该命令支持四种模式：切换到已有本地分支（默认）、用 `-c` 创建新分支、用 `-d` detach HEAD，以及用 `--track` 跟踪远程分支。当目标分支已经是当前分支时，该命令是 no-op，并完全跳过干净性检查。
+该命令支持多种模式：切换到已有本地分支（默认）、用 `-c` 创建新分支、用 `-C` 强制创建或重置分支、用 `--orphan` 创建无父提交分支、用 `-d` detach HEAD，以及用 `--track` 跟踪远程分支。当目标分支已经是当前分支时，该命令是 no-op，并完全跳过干净性检查。
 
 当找不到分支时，会通过 Levenshtein 距离提供模糊分支名建议，帮助捕获拼写错误，而无需精确匹配。
 
@@ -25,8 +27,10 @@ libra switch --track <remote/branch>
 
 | 标志 | 长选项 | 值 | 说明 |
 |------|------|-------|-------------|
-| | `<branch>` | 位置参数（可选） | 要切换到的目标分支、提交或远程引用 |
+| | `<branch>` | 位置参数（可选） | 要切换到的本地分支；与 `--detach` 搭配时也可为提交、标签或分支 |
 | `-c` | `--create` | `<name>` | 创建新分支并切换到它 |
+| `-C` | `--force-create` | `<name>` | 创建新分支或重置已有分支并切换到它 |
+| | `--orphan` | `<name>` | 创建无父提交的新分支并切换到它 |
 | `-d` | `--detach` | | 在给定提交、标签或分支上 detach HEAD |
 | | `--track` | | 创建跟踪给定远程分支的本地分支，并切换到它 |
 
@@ -38,6 +42,19 @@ libra switch --track <remote/branch>
 libra switch -c feature-x              # 从 HEAD 创建新分支
 libra switch -c fix-123 abc1234        # 从特定提交创建新分支
 libra switch -c release-2.0 main       # 从另一个分支创建新分支
+```
+
+**`-C / --force-create <name> [start-point]`**：类似 `--create`，但如果 `<name>` 已存在，会从 `<start-point>`（省略时为 HEAD）删除并重建该分支。当前分支不能被删除重建。
+
+```bash
+libra switch -C feature-x              # 将 feature-x 重置到 HEAD 并切换
+libra switch -C fix-123 abc1234        # 从特定提交重置分支
+```
+
+**`--orphan <name>`**：创建没有父提交历史的新分支，并把工作树恢复到空树状态。如果分支已存在，会先删除重建（当前分支除外）。
+
+```bash
+libra switch --orphan fresh-start      # 创建无历史的新分支
 ```
 
 **`-d / --detach`**：让 HEAD 直接指向某个提交，而不是分支。适合检查历史状态或从标签构建。
@@ -60,6 +77,8 @@ libra switch --track feature            # 假设 origin/feature
 libra switch main                      # 切换到已有分支
 libra switch -c feature-x              # 创建并切换到新分支
 libra switch -c fix-123 abc1234        # 从特定提交创建分支
+libra switch -C feature-x              # 重置分支到 HEAD 并切换
+libra switch --orphan fresh-start      # 创建无历史的新分支
 libra switch --detach v1.0             # 在标签上 detach HEAD
 libra switch --track origin/main       # 跟踪并切换到远程分支
 libra switch --json main               # 面向代理的结构化 JSON 输出
@@ -217,8 +236,8 @@ Git 的 `checkout` 被过度重载：它切换分支、恢复文件、detach HEA
 | 从提交创建 | `git switch -c fix abc1234` | `libra switch -c fix abc1234` | `jj new abc1234` + `jj branch create fix` |
 | Detach HEAD | `git switch --detach v1.0` | `libra switch --detach v1.0` | `jj edit <rev>`（始终类似 detached） |
 | 跟踪远程 | `git switch --track origin/main` | `libra switch --track origin/main` | N/A（jj 跟踪所有远程） |
-| 强制创建 | `git switch -C feature` | 不支持（先删除） | N/A |
-| Orphan 分支 | `git switch --orphan <name>` | 不支持 | `jj new root()` |
+| 强制创建 | `git switch -C feature` | `libra switch -C feature` | N/A |
+| Orphan 分支 | `git switch --orphan <name>` | `libra switch --orphan <name>` | `jj new root()` |
 | 结构化输出 | 无 | `--json` / `--machine` | `--template` |
 | 模糊建议 | 无 | 基于 Levenshtein 的 "did you mean" 提示 | 无 |
 | 干净状态验证 | 警告但有时继续 | 以可操作错误阻止切换 | 无 dirty state 概念 |
