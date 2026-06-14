@@ -86,14 +86,15 @@
 
 ## 未公开或未纳入用户承诺的命令资料
 
-| 文档 | 当前状态 | 下一步 |
-|---|---|---|
+以下命令曾有开发设计资料，但已明确决定不接入公开 CLI；它们降级为内部历史资料，不承诺用户可见兼容面：
 
-| [`gc`](gc.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |
-| [`ls-files`](ls-files.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |
-| [`package`](package.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |
-| [`prune`](prune.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |
-| [`stats`](stats.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |
+- `gc`：功能由 `libra maintenance run --task gc` 覆盖（见 `docs/development/internal/gc.md`）
+- `ls-files`：内部设计资料保留（见 `docs/development/internal/ls-files.md`）
+- `package`：内部设计资料保留（见 `docs/development/internal/package.md`）
+- `prune`：内部设计资料保留（见 `docs/development/internal/prune.md`）
+- `stats`：内部设计资料保留（见 `docs/development/internal/stats.md`）
+
+若未来需要发布其中任一命令，必须重新走完整的 CLI 接入、`COMPATIBILITY.md` 登记、用户文档和回归测试流程。
 
 ## 汇总文档
 

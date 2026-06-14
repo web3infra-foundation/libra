@@ -1,4 +1,8 @@
-# `libra ls-files` 开发设计
+# `libra ls-files` 内部设计资料
+
+> Status: **declined / historical**. This command was not published to the public CLI.
+
+This document preserves the original design notes for the unpublished `ls-files` implementation. It is not a user-visible command contract and is not tracked in `COMPATIBILITY.md`.
 
 ## 命令实现目标
 

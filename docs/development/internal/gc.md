@@ -1,4 +1,9 @@
-# `libra gc` 开发设计
+# `libra gc` 内部设计资料
+
+> Status: **declined / historical**. This command was not published to the public CLI.
+> The maintenance entry point `libra maintenance run --task gc` provides the same safe garbage-collection pass.
+
+This document preserves the original design notes for the unpublished `gc` implementation. It is not a user-visible command contract and is not tracked in `COMPATIBILITY.md`.
 
 ## 命令实现目标
 

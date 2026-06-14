@@ -1,4 +1,8 @@
-# `libra package` 开发设计
+# `libra package` 内部设计资料
+
+> Status: **declined / historical**. This command was not published to the public CLI.
+
+This document preserves the original design notes for the unpublished `package` implementation. It is not a user-visible command contract and is not tracked in `COMPATIBILITY.md`.
 
 ## 命令实现目标
 
