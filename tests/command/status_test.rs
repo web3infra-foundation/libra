@@ -28,7 +28,7 @@ fn output_porcelain(
     unstaged: &libra::command::status::Changes,
     writer: &mut impl Write,
 ) {
-    output_porcelain_inner(staged, unstaged, writer)
+    output_porcelain_inner(staged, unstaged, false, writer)
         .expect("porcelain output should succeed in test");
 }
 
@@ -302,12 +302,14 @@ fn test_output_porcelain_format() {
         new: vec![PathBuf::from("new_file.txt")],
         modified: vec![PathBuf::from("modified_file.txt")],
         deleted: vec![PathBuf::from("deleted_file.txt")],
+        renamed: vec![],
     };
 
     let unstaged = Changes {
         new: vec![PathBuf::from("untracked_file.txt")],
         modified: vec![PathBuf::from("unstaged_modified.txt")],
         deleted: vec![PathBuf::from("unstaged_deleted.txt")],
+        renamed: vec![],
     };
 
     // Create a buffer to capture the output
@@ -433,12 +435,14 @@ fn test_output_short_format() {
         new: vec![PathBuf::from("new_file.txt")],
         modified: vec![PathBuf::from("modified_file.txt")],
         deleted: vec![PathBuf::from("deleted_file.txt")],
+        renamed: vec![],
     };
 
     let unstaged = Changes {
         new: vec![PathBuf::from("untracked_file.txt")],
         modified: vec![PathBuf::from("unstaged_modified.txt")],
         deleted: vec![PathBuf::from("unstaged_deleted.txt")],
+        renamed: vec![],
     };
 
     // Create a buffer to capture the output
@@ -1297,6 +1301,7 @@ async fn test_status_short_format_with_branch() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            ..Default::default()
         },
         &mut output,
     )
@@ -1359,6 +1364,7 @@ async fn test_status_porcelain_format_with_branch() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            ..Default::default()
         },
         &mut output,
     )
@@ -1438,6 +1444,7 @@ async fn test_status_show_stash_with_existing_stash() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            ..Default::default()
         },
         &mut output,
     )
@@ -1465,6 +1472,7 @@ async fn test_status_show_stash_with_existing_stash() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            ..Default::default()
         },
         &mut output,
     )
@@ -1492,6 +1500,7 @@ async fn test_status_show_stash_with_existing_stash() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            ..Default::default()
         },
         &mut output,
     )
@@ -1546,6 +1555,7 @@ async fn test_status_show_stash_without_stash() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            ..Default::default()
         },
         &mut output,
     )
@@ -1631,6 +1641,7 @@ async fn test_status_branch_detached_head() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            ..Default::default()
         },
         &mut output,
     )
@@ -2133,5 +2144,203 @@ fn test_add_dry_run_output() {
     assert!(
         !status_stdout.contains("A  file.txt"),
         "dry run should not stage: {status_stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_status_porcelain_z_uses_null_terminator() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let output = run_libra_command(&["init"], &repo);
+    assert!(output.status.success());
+
+    std::fs::write(repo.join("file.txt"), "content").unwrap();
+
+    let output = run_libra_command(&["status", "--porcelain", "-z"], &repo);
+    assert!(output.status.success());
+
+    // NUL terminator means no newline byte in stdout.
+    assert!(
+        !output.stdout.contains(&b'\n'),
+        "-z should not emit newlines, got: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        output.stdout.contains(&b'\0'),
+        "-z should emit NUL terminators"
+    );
+}
+
+#[test]
+#[serial]
+fn test_status_short_z_uses_null_terminator() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let output = run_libra_command(&["init"], &repo);
+    assert!(output.status.success());
+
+    std::fs::write(repo.join("file.txt"), "content").unwrap();
+
+    let output = run_libra_command(&["status", "-s", "-z"], &repo);
+    assert!(output.status.success());
+
+    assert!(
+        !output.stdout.contains(&b'\n'),
+        "-s -z should not emit newlines, got: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+#[serial]
+fn test_status_branch_no_ahead_behind_suppresses_counts() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let output = run_libra_command(&["init"], &repo);
+    assert!(output.status.success());
+
+    let output = run_libra_command(&["config", "set", "user.name", "Test"], &repo);
+    assert!(output.status.success());
+    let output = run_libra_command(&["config", "set", "user.email", "test@example.com"], &repo);
+    assert!(output.status.success());
+
+    std::fs::write(repo.join("file.txt"), "content").unwrap();
+    let output = run_libra_command(&["add", "file.txt"], &repo);
+    assert!(output.status.success());
+    let output = run_libra_command(&["commit", "-m", "first", "--no-verify"], &repo);
+    assert!(output.status.success());
+
+    let output = run_libra_command(
+        &["status", "--short", "--branch", "--no-ahead-behind"],
+        &repo,
+    );
+    assert!(
+        output.status.success(),
+        "--no-ahead-behind should be accepted"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("## main"),
+        "branch info should be shown: {stdout}"
+    );
+
+    let output = run_libra_command(&["status", "--short", "--branch", "--ahead-behind"], &repo);
+    assert!(output.status.success(), "--ahead-behind should be accepted");
+}
+
+#[test]
+#[serial]
+fn test_status_column_aligns_labels() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let output = run_libra_command(&["init"], &repo);
+    assert!(output.status.success());
+
+    let output = run_libra_command(&["config", "set", "user.name", "Test"], &repo);
+    assert!(output.status.success());
+    let output = run_libra_command(&["config", "set", "user.email", "test@example.com"], &repo);
+    assert!(output.status.success());
+
+    std::fs::write(repo.join("mod.txt"), "mod").unwrap();
+    std::fs::write(repo.join("keep.txt"), "keep").unwrap();
+    let output = run_libra_command(&["add", "mod.txt", "keep.txt"], &repo);
+    assert!(output.status.success());
+    let output = run_libra_command(&["commit", "-m", "base", "--no-verify"], &repo);
+    assert!(output.status.success());
+
+    std::fs::remove_file(repo.join("mod.txt")).unwrap();
+    let output = run_libra_command(&["add", "mod.txt"], &repo);
+    assert!(output.status.success());
+    std::fs::write(repo.join("new.txt"), "new").unwrap();
+    let output = run_libra_command(&["add", "new.txt"], &repo);
+    assert!(output.status.success());
+
+    let output = run_libra_command(&["status", "--column"], &repo);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("deleted:  mod.txt"),
+        "--column should align labels: {stdout}"
+    );
+    assert!(
+        stdout.contains("new file: new.txt"),
+        "--column should align labels: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_status_find_renames_detects_content_rename() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let output = run_libra_command(&["init"], &repo);
+    assert!(output.status.success());
+
+    let output = run_libra_command(&["config", "set", "user.name", "Test"], &repo);
+    assert!(output.status.success());
+    let output = run_libra_command(&["config", "set", "user.email", "test@example.com"], &repo);
+    assert!(output.status.success());
+
+    std::fs::write(repo.join("old.txt"), "content").unwrap();
+    let output = run_libra_command(&["add", "old.txt"], &repo);
+    assert!(output.status.success());
+    let output = run_libra_command(&["commit", "-m", "base", "--no-verify"], &repo);
+    assert!(output.status.success());
+
+    std::fs::remove_file(repo.join("old.txt")).unwrap();
+    std::fs::write(repo.join("new.txt"), "content").unwrap();
+
+    let output = run_libra_command(&["status", "--find-renames", "--short"], &repo);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains('R'),
+        "--find-renames should report rename status, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("D  old.txt"),
+        "old path should not remain as delete: {stdout}"
+    );
+    assert!(
+        !stdout.contains("?? new.txt"),
+        "new path should not remain as untracked: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_status_find_renames_honors_threshold() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let output = run_libra_command(&["init"], &repo);
+    assert!(output.status.success());
+
+    let output = run_libra_command(&["config", "set", "user.name", "Test"], &repo);
+    assert!(output.status.success());
+    let output = run_libra_command(&["config", "set", "user.email", "test@example.com"], &repo);
+    assert!(output.status.success());
+
+    std::fs::write(repo.join("aaaa.txt"), "content-a").unwrap();
+    let output = run_libra_command(&["add", "aaaa.txt"], &repo);
+    assert!(output.status.success());
+    let output = run_libra_command(&["commit", "-m", "base", "--no-verify"], &repo);
+    assert!(output.status.success());
+
+    std::fs::remove_file(repo.join("aaaa.txt")).unwrap();
+    std::fs::write(repo.join("zzzz.txt"), "content-b").unwrap();
+
+    let output = run_libra_command(&["status", "--find-renames=100", "--short"], &repo);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains('R'),
+        "100% threshold should not match different names/content: {stdout}"
     );
 }

@@ -2,13 +2,13 @@
 
 ## 命令实现目标
 
-`libra status` 的目标是展示工作区和索引状态，并支持 porcelain v1/v2、untracked/ignored 模式和结构化输出。实现需要稳定呈现 add/modify/delete/rename 相关状态，同时把 rename detection、column display 与 `-z` NUL 输出等能力列为缺口。
+`libra status` 的目标是展示工作区和索引状态，并支持 porcelain v1/v2、untracked/ignored 模式、结构化输出、`-z` NUL 终止输出、`--find-renames` 重命名检测、`--column` 列对齐，以及 `--ahead-behind` 上游计数控制。
 
 ## 对比 Git 与兼容性
 
 - 兼容级别：`supported`。
 
-- 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
+- 当前矩阵承诺常用 Git 行为已支持；`-z`、`--find-renames`、`--column`、`--ahead-behind`/`--no-ahead-behind` 已补齐。新增语义必须同步矩阵、用户文档和测试。
 
 
 ## 设计方案
@@ -48,17 +48,14 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/status.md`。
 - Synopsis：`libra status [OPTIONS]`。
-- 公开参数/子命令包括：`-s, --short`、`--porcelain [VERSION]`、`--branch`、`--show-stash`、`--ignored`、`--untracked-files <MODE>`、`--exit-code`。
+- 公开参数/子命令包括：`-s, --short`、`--porcelain [VERSION]`、`--branch`、`--ahead-behind`、`--no-ahead-behind`、`--show-stash`、`--ignored`、`--untracked-files <MODE>`、`--column`、`-z`、`--find-renames [PERCENT]`、`--exit-code`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 功能缺口 | Git's --find-renames / -M is not 支持; rename detection is not yet implemented in Libra's status | 后续实现时需要同步源码、测试和兼容矩阵。 |
-| 功能缺口 | column display is not 支持 | 后续实现时需要同步源码、测试和兼容矩阵。 |
-| 功能缺口 | `-z` NUL-terminated porcelain 输出曾实现后回退，当前 `StatusArgs` 不含 `-z` | 后续实现时需要同步源码、测试和兼容矩阵。 |
-| 功能缺口 | Git 的 `--ahead-behind` / `--no-ahead-behind` 显式开关未支持；ahead/behind 始终内部计算（`compute_ahead_behind`），无 CLI 开关控制 | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| 兼容矩阵说明 | common Git status surface plus `-z` NUL-terminated output, `--find-renames`, `--column`, and `--ahead-behind`/`--no-ahead-behind` supported | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 
 ## 维护要求
 

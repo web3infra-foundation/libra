@@ -35,7 +35,7 @@ batch document.
 | rm | partial | `--force` / `--dry-run` / `--cached` / `--recursive` / `--ignore-unmatch` / `--pathspec-from-file` / `--pathspec-file-nul` supported; sparse-checkout flag unsupported; per-command `--quiet` not exposed (use global `--quiet`) |
 | mv | partial | sparse-checkout flag unsupported; `--skip-errors` not exposed |
 | restore | supported | |
-| status | supported | |
+| status | supported | common Git status surface plus `--porcelain` v1/v2, `--short`, `--branch`, `-z` NUL-terminated output, `--find-renames`, `--column`, and `--ahead-behind`/`--no-ahead-behind` supported |
 | clean | supported | |
 | stash | partial | `push` / `pop` / `list` / `apply` / `drop` / `show` / `branch` / `clear` supported; `create` / `store` deferred (see [docs/development/commands/_compatibility.md#d8-stash-create](docs/development/commands/_compatibility.md#d8-stash-create) and [#d9-stash-store](docs/development/commands/_compatibility.md#d9-stash-store)) |
 | lfs | partial | built-in Libra LFS command; uses `.libra_attributes`, not Git LFS filters/hooks (see [docs/development/commands/_compatibility.md#d5-git-lfs-gitattributes-filter--hooks-bridge](docs/development/commands/_compatibility.md#d5-git-lfs-gitattributes-filter--hooks-bridge)) |
