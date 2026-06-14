@@ -46,6 +46,7 @@ flowchart TD
 - 参数证据：`-r` / `--recursive` 已公开并由 `command_test::command::ls_tree_test::ls_tree_recursive_lists_nested_entries_without_parent_trees` 与 `ls_tree_directory_filter_recurses_when_requested` 覆盖；集成场景 `cli.ls-tree-smoke` 也执行 `libra ls-tree -r HEAD src`。
 - 参数证据：`-t`（递归时展示 tree 条目）已公开并由 `ls_tree_recursive_t_includes_tree_entries` 覆盖。
 - 参数证据：`-l` / `--long`（展示 blob 大小）已公开并由 `ls_tree_long_includes_blob_size_and_tree_dash` 覆盖。
+- 参数证据：`--name-only`（只输出路径）已公开并由 `ls_tree_name_only_prints_paths` 覆盖；集成场景 `cli.ls-tree-smoke` 也执行 `libra ls-tree --name-only HEAD`。
 
 
 ## 还未实现的功能
