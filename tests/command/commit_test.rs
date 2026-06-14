@@ -2,7 +2,10 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use libra::utils::{object_ext::TreeExt, output::OutputConfig};
+use libra::{
+    command::commit::CleanupMode,
+    utils::{object_ext::TreeExt, output::OutputConfig},
+};
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -29,6 +32,7 @@ async fn test_execute_commit_with_empty_index_fail() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     let result = execute_safe(args, &OutputConfig::default()).await;
     assert!(result.is_err());
@@ -86,6 +90,7 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         },
         &OutputConfig::default(),
     )
@@ -170,6 +175,7 @@ async fn test_execute_commit() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
 
@@ -209,6 +215,7 @@ async fn test_execute_commit() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
 
@@ -266,6 +273,7 @@ async fn test_execute_commit() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
 
@@ -300,6 +308,7 @@ async fn test_execute_commit() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
 
@@ -354,6 +363,7 @@ async fn test_commit_with_all_flag_stages_tracked_changes() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -372,6 +382,7 @@ async fn test_commit_with_all_flag_stages_tracked_changes() {
         all: true,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -426,6 +437,7 @@ async fn test_commit_with_all_flag_records_deletions() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -444,6 +456,7 @@ async fn test_commit_with_all_flag_records_deletions() {
         all: true,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -524,6 +537,7 @@ async fn test_commit_sha256() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -548,6 +562,7 @@ async fn test_commit_sha256() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -610,6 +625,7 @@ async fn test_commit_with_custom_author() {
         all: false,
         no_verify: false,
         author: Some("Custom Author <custom@example.com>".to_string()),
+        ..Default::default()
     })
     .await;
 
@@ -659,6 +675,7 @@ async fn test_commit_amend_with_custom_author() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -680,6 +697,7 @@ async fn test_commit_amend_with_custom_author() {
         all: false,
         no_verify: false,
         author: Some("Amend Author <amend@example.com>".to_string()),
+        ..Default::default()
     })
     .await;
 
@@ -714,6 +732,7 @@ async fn test_commit_empty_working_tree() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
 
     let result = execute_safe(args, &OutputConfig::default()).await;
@@ -740,6 +759,7 @@ async fn test_commit_with_actual_changes() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(init_args).await;
 
@@ -770,6 +790,7 @@ async fn test_commit_with_actual_changes() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
 
     commit::execute(args).await;
@@ -795,6 +816,7 @@ async fn test_commit_amend_without_changes() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(init_args).await;
 
@@ -811,6 +833,7 @@ async fn test_commit_amend_without_changes() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
 
     // This should succeed even without staged changes
@@ -849,6 +872,7 @@ async fn test_commit_signoff_persists_trailer() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -883,6 +907,7 @@ async fn test_commit_amend_signoff_persists_trailer() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -898,6 +923,7 @@ async fn test_commit_amend_signoff_persists_trailer() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -938,6 +964,7 @@ async fn test_commit_amend_without_existing_commit_returns_repo_state_error() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         },
         &OutputConfig::default(),
     )
@@ -1010,6 +1037,7 @@ async fn test_commit_without_identity_fails_by_default() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         },
         &OutputConfig::default(),
     )
@@ -1062,4 +1090,218 @@ fn test_commit_help_lists_examples_banner() {
             "commit --help should include `{invocation}`, stdout: {stdout}"
         );
     }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_cleanup_strips_comments() {
+    let temp_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_dir.path());
+
+    test::ensure_file("a.txt", Some("a\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    commit::execute(CommitArgs {
+        message: Some("subject\n\n# this is a comment\nbody".into()),
+        cleanup: Some(CleanupMode::Strip),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    let commit = Head::current_commit().await.unwrap();
+    let commit_obj = load_object::<Commit>(&commit).unwrap();
+    assert!(
+        !commit_obj.message.contains("# this is a comment"),
+        "cleanup=strip should remove comment lines: {}",
+        commit_obj.message
+    );
+    assert!(commit_obj.message.contains("body"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_trailer_appended() {
+    let temp_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_dir.path());
+
+    test::ensure_file("a.txt", Some("a\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    commit::execute(CommitArgs {
+        message: Some("subject".into()),
+        trailers: vec!["Reviewed-by: Jane".to_string()],
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    let commit = Head::current_commit().await.unwrap();
+    let commit_obj = load_object::<Commit>(&commit).unwrap();
+    assert!(commit_obj.message.contains("Reviewed-by: Jane"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_dry_run_does_not_create_commit() {
+    let temp_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_dir.path());
+
+    test::ensure_file("a.txt", Some("a\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    let before = Head::current_commit().await;
+
+    commit::execute(CommitArgs {
+        message: Some("dry run subject".into()),
+        dry_run: true,
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    let after = Head::current_commit().await;
+    assert_eq!(before, after, "--dry-run should not advance HEAD");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_reuse_message() {
+    let temp_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_dir.path());
+
+    test::ensure_file("a.txt", Some("a\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("original subject".into()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    let first = Head::current_commit().await.unwrap();
+
+    test::ensure_file("b.txt", Some("b\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["b.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        reuse_message: Some("HEAD".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    let second = Head::current_commit().await.unwrap();
+    let second_obj = load_object::<Commit>(&second).unwrap();
+    assert_eq!(
+        second_obj.message.trim_start_matches('\n'),
+        "original subject"
+    );
+    assert_ne!(first, second);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_fixup_sets_subject() {
+    let temp_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_dir.path());
+
+    test::ensure_file("a.txt", Some("a\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("original subject".into()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    test::ensure_file("b.txt", Some("b\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["b.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        fixup: Some("HEAD".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    let commit = Head::current_commit().await.unwrap();
+    let commit_obj = load_object::<Commit>(&commit).unwrap();
+    assert_eq!(
+        commit_obj.message.trim_start_matches('\n'),
+        "fixup! original subject"
+    );
 }

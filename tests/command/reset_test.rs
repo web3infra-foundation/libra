@@ -517,6 +517,7 @@ async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -544,6 +545,7 @@ async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -615,6 +617,7 @@ async fn setup_standard_repo(
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
     let commit1 = Head::current_commit().await.unwrap();
@@ -658,6 +661,7 @@ async fn setup_standard_repo(
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
     let commit2 = Head::current_commit().await.unwrap();
@@ -701,6 +705,7 @@ async fn setup_standard_repo(
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
     let commit3 = Head::current_commit().await.unwrap();
@@ -744,6 +749,7 @@ async fn setup_standard_repo(
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
     let commit4 = Head::current_commit().await.unwrap();
@@ -976,6 +982,7 @@ async fn test_reset_mixed_same_target_resets_index_without_moving_head() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
     let head_before = Head::current_commit().await.unwrap();
@@ -1053,6 +1060,7 @@ async fn test_reset_hard_same_target_restores_worktree_and_removes_staged_additi
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1135,6 +1143,7 @@ async fn test_reset_hard_removes_paths_tracked_only_by_head_tree() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1162,6 +1171,7 @@ async fn test_reset_hard_removes_paths_tracked_only_by_head_tree() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1323,6 +1333,7 @@ async fn test_reset_hard_skips_ignored_directories() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 

@@ -188,6 +188,7 @@ async fn test_reflog_show_with_filters() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(commit_args).await;
     }
@@ -256,6 +257,7 @@ async fn test_reflog_show_invalid_date() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(commit_args).await;
 
@@ -289,6 +291,7 @@ async fn test_reflog_show_with_author_filter() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(commit_args).await;
     }
@@ -338,6 +341,7 @@ async fn test_reflog_show_with_number_limit() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(commit_args).await;
     }
@@ -387,6 +391,7 @@ async fn test_reflog_show_with_combined_filters() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(commit_args).await;
     }
@@ -445,6 +450,7 @@ async fn test_reflog_show_with_patch() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(commit_args).await;
     }
@@ -483,6 +489,7 @@ async fn test_reflog_show_with_stat() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(commit_args).await;
     }

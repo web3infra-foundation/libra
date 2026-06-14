@@ -118,6 +118,53 @@ pub struct CommitArgs {
     /// Override the commit author. Specify an explicit author using the standard A U Thor <author@example.com> format.
     #[arg(long)]
     pub author: Option<String>,
+
+    /// Create a fixup commit targeting the specified commit. The message becomes "fixup! <subject>".
+    #[arg(long, value_name = "COMMIT", conflicts_with_all = ["message", "file", "squash", "reuse_message", "reedit_message"])]
+    pub fixup: Option<String>,
+
+    /// Create a squash commit targeting the specified commit. The message becomes "squash! <subject>".
+    #[arg(long, value_name = "COMMIT", conflicts_with_all = ["message", "file", "fixup", "reuse_message", "reedit_message"])]
+    pub squash: Option<String>,
+
+    /// Clean up the commit message according to the given mode: strip (default), whitespace, verbatim, scissors, or default.
+    #[arg(long, value_name = "MODE")]
+    pub cleanup: Option<CleanupMode>,
+
+    /// Do not actually create the commit; show what would be committed.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Add a trailer line to the commit message. Can be given multiple times.
+    #[arg(long = "trailer", value_name = "TRAILER")]
+    pub trailers: Vec<String>,
+
+    /// Reuse the message from the specified commit.
+    #[arg(short = 'C', long = "reuse-message", value_name = "COMMIT", conflicts_with_all = ["message", "file", "fixup", "squash"])]
+    pub reuse_message: Option<String>,
+
+    /// Reuse and edit the message from the specified commit.
+    #[arg(short = 'c', long = "reedit-message", value_name = "COMMIT", conflicts_with_all = ["message", "file", "fixup", "squash"])]
+    pub reedit_message: Option<String>,
+
+    /// Reset the author of the commit to the current user identity.
+    #[arg(long)]
+    pub reset_author: bool,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum CleanupMode {
+    /// Strip leading/trailing empty lines and trailing whitespace from every line, then strip commentary lines.
+    #[default]
+    Strip,
+    /// Same as strip but leave consecutive empty lines.
+    Whitespace,
+    /// Do not change the message at all.
+    Verbatim,
+    /// Same as strip but truncate the message at the scissors line.
+    Scissors,
+    /// Same as strip if the message is to be edited, otherwise whitespace.
+    Default,
 }
 
 // ---------------------------------------------------------------------------
@@ -455,22 +502,7 @@ pub async fn run_commit(
     }
 
     // Resolve commit message
-    let message = match (args.message, args.file) {
-        (Some(msg), _) => msg,
-        (None, Some(file_path)) => tokio::fs::read_to_string(&file_path).await.map_err(|e| {
-            CommitError::MessageFileRead {
-                path: file_path,
-                detail: e.to_string(),
-            }
-        })?,
-        (None, None) => {
-            if !args.no_edit {
-                return Err(CommitError::EmptyMessage);
-            }
-            // --no-edit with --amend: message comes from parent commit below
-            String::new()
-        }
-    };
+    let message = resolve_commit_message(&args).await?;
 
     // Create tree
     let tree = create_tree(&index, &storage, "".into()).await?;
@@ -529,6 +561,30 @@ pub async fn run_commit(
             ));
         }
 
+        if args.dry_run {
+            let commit = Commit::new(
+                author,
+                committer,
+                tree.id,
+                grandpa_commit_id,
+                &format_commit_msg(&commit_message, None),
+            );
+            return Ok(build_commit_output(
+                &commit,
+                &commit_message,
+                &staged_changes,
+                true,
+                is_signoff,
+                if is_conventional && !skip_conventional_check {
+                    Some(true)
+                } else {
+                    None
+                },
+                false,
+            )
+            .await);
+        }
+
         let gpg_sig = vault_sign_commit(
             &tree.id,
             &grandpa_commit_id,
@@ -584,6 +640,30 @@ pub async fn run_commit(
         ));
     }
 
+    if args.dry_run {
+        let commit = Commit::new(
+            author,
+            committer,
+            tree.id,
+            parents_commit_ids,
+            &format_commit_msg(&commit_message, None),
+        );
+        return Ok(build_commit_output(
+            &commit,
+            &commit_message,
+            &staged_changes,
+            false,
+            is_signoff,
+            if is_conventional && !skip_conventional_check {
+                Some(true)
+            } else {
+                None
+            },
+            false,
+        )
+        .await);
+    }
+
     let gpg_sig = vault_sign_commit(
         &tree.id,
         &parents_commit_ids,
@@ -621,6 +701,131 @@ pub async fn run_commit(
         gpg_sig.is_some(),
     )
     .await)
+}
+
+/// Resolve the final commit message from CLI arguments.
+async fn resolve_commit_message(args: &CommitArgs) -> Result<String, CommitError> {
+    let raw = if let Some(spec) = &args.fixup {
+        let target_message = load_commit_message(spec).await?;
+        format!("fixup! {}", commit_subject(&target_message))
+    } else if let Some(spec) = &args.squash {
+        let target_message = load_commit_message(spec).await?;
+        format!("squash! {}", commit_subject(&target_message))
+    } else if let Some(spec) = args.reuse_message.as_ref().or(args.reedit_message.as_ref()) {
+        load_commit_message(spec).await?
+    } else if let Some(msg) = &args.message {
+        msg.clone()
+    } else if let Some(file_path) = &args.file {
+        tokio::fs::read_to_string(file_path)
+            .await
+            .map_err(|e| CommitError::MessageFileRead {
+                path: file_path.clone(),
+                detail: e.to_string(),
+            })?
+    } else if args.no_edit {
+        String::new()
+    } else {
+        return Err(CommitError::EmptyMessage);
+    };
+
+    let mode = args.cleanup.unwrap_or(CleanupMode::Strip);
+
+    let cleaned = cleanup_commit_message(&raw, mode);
+
+    if cleaned.trim().is_empty() && !args.no_edit {
+        return Err(CommitError::EmptyMessage);
+    }
+
+    if args.trailers.is_empty() {
+        Ok(cleaned)
+    } else {
+        Ok(append_trailers(&cleaned, &args.trailers))
+    }
+}
+
+/// Load the commit message of the given commit-ish.
+async fn load_commit_message(spec: &str) -> Result<String, CommitError> {
+    let hash =
+        util::get_commit_base_typed(spec)
+            .await
+            .map_err(|e| CommitError::ParentCommitLoad {
+                commit_id: spec.to_string(),
+                detail: e.to_string(),
+            })?;
+    let commit = load_object::<Commit>(&hash).map_err(|e| CommitError::ParentCommitLoad {
+        commit_id: spec.to_string(),
+        detail: e.to_string(),
+    })?;
+    Ok(commit.message.trim_start_matches('\n').to_string())
+}
+
+/// Extract the subject (first line) of a commit message.
+fn commit_subject(message: &str) -> &str {
+    message.lines().next().unwrap_or(message).trim()
+}
+
+/// Apply Git-style cleanup to a commit message.
+fn cleanup_commit_message(message: &str, mode: CleanupMode) -> String {
+    match mode {
+        CleanupMode::Verbatim => message.to_string(),
+        CleanupMode::Scissors => {
+            let trimmed = message
+                .lines()
+                .take_while(|line| !line.trim().starts_with("------------------------ >8 "))
+                .collect::<Vec<_>>()
+                .join("\n");
+            cleanup_commit_message(&trimmed, CleanupMode::Strip)
+        }
+        CleanupMode::Whitespace => {
+            let lines: Vec<String> = message
+                .lines()
+                .map(|line| line.trim_end().to_string())
+                .collect();
+            let trimmed = trim_empty_lines(&lines);
+            trimmed.join("\n")
+        }
+        CleanupMode::Strip | CleanupMode::Default => {
+            let lines: Vec<String> = message
+                .lines()
+                .map(|line| {
+                    let trimmed = line.trim_end();
+                    if trimmed.starts_with('#') {
+                        String::new()
+                    } else {
+                        trimmed.to_string()
+                    }
+                })
+                .collect();
+            let mut result = trim_empty_lines(&lines);
+            result.retain(|line| !line.is_empty());
+            result.join("\n")
+        }
+    }
+}
+
+fn trim_empty_lines(lines: &[String]) -> Vec<String> {
+    let start = lines
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(lines.len());
+    let end = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map(|i| i + 1)
+        .unwrap_or(lines.len());
+    lines[start..end].to_vec()
+}
+
+/// Append trailer lines to a commit message, inserting a blank line if needed.
+fn append_trailers(message: &str, trailers: &[String]) -> String {
+    let trailers_block = trailers.join("\n");
+    if message.is_empty() {
+        trailers_block
+    } else if message.ends_with('\n') {
+        format!("{}\n{}", message.trim_end(), trailers_block)
+    } else {
+        format!("{}\n\n{}", message, trailers_block)
+    }
 }
 
 /// Run the pre-commit hook, respecting OutputConfig for I/O isolation.
@@ -1442,6 +1647,7 @@ mod test {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         fn message_and_file_are_none(args: &CommitArgs) -> Option<String> {
             match (&args.message, &args.file) {
@@ -1597,6 +1803,7 @@ mod test {
             disable_pre: false,
             all: false,
             author: None,
+            ..Default::default()
         };
 
         let commit_message_with_verify = if args_with_verify.signoff {

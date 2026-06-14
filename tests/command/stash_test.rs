@@ -62,6 +62,7 @@ async fn test_stash_push_no_changes() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -106,6 +107,7 @@ async fn test_stash_push_no_changes_json_output() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -151,6 +153,7 @@ async fn test_stash_push_and_pop() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -227,6 +230,7 @@ async fn test_stash_push_and_pop_preserves_dotfiles() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -300,6 +304,7 @@ async fn test_stash_list() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -420,6 +425,7 @@ async fn test_stash_drop() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -480,6 +486,7 @@ async fn test_stash_drop_missing_reflog_returns_no_stash_found() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -536,6 +543,7 @@ async fn test_stash_json_output() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 

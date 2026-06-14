@@ -482,6 +482,7 @@ async fn setup_repo_with_commit_with(
         all: false,
         no_verify: true,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -668,6 +669,7 @@ async fn test_force_tag() {
         all: false,
         no_verify: true,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -827,6 +829,7 @@ async fn test_annotation_lines_tag() {
         all: false,
         no_verify: true,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -865,6 +868,7 @@ async fn test_annotation_lines_tag() {
         all: false,
         no_verify: true,
         author: None,
+        ..Default::default()
     })
     .await;
 

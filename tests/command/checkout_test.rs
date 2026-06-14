@@ -110,6 +110,7 @@ async fn test_checkout_module_functions() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute_safe(commit_args, &OutputConfig::default())
         .await
@@ -162,6 +163,7 @@ async fn test_checkout_module_functions_sha256() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute_safe(commit_args, &OutputConfig::default())
         .await
@@ -233,6 +235,7 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
             all: true,
             no_verify: false,
             author: None,
+            ..Default::default()
         },
         &OutputConfig::default(),
     )
@@ -315,6 +318,7 @@ async fn test_checkout_new_branch_with_dirty_worktree_returns_error() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         },
         &OutputConfig::default(),
     )
@@ -412,6 +416,7 @@ async fn test_checkout_current_branch_with_dirty_worktree_succeeds() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         },
         &OutputConfig::default(),
     )
@@ -495,6 +500,7 @@ async fn test_checkout_existing_branch_with_unstaged_dirty_worktree_returns_erro
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         },
         &OutputConfig::default(),
     )

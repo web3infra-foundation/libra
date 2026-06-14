@@ -9,6 +9,10 @@ Create a new commit from staged changes.
 ```
 libra commit [OPTIONS] -m <MESSAGE>
 libra commit [OPTIONS] -F <FILE>
+libra commit [OPTIONS] -C <COMMIT>
+libra commit [OPTIONS] -c <COMMIT>
+libra commit [OPTIONS] --fixup <COMMIT>
+libra commit [OPTIONS] --squash <COMMIT>
 libra commit --amend [--no-edit]
 ```
 
@@ -126,6 +130,74 @@ Override the commit author. Must use the standard `A U Thor <author@example.com>
 libra commit --author "Jane Doe <jane@example.com>" -m "Patch"
 ```
 
+### `--cleanup <MODE>`
+
+Clean up the commit message before committing. Accepted values: `strip` (default, removes
+commentary lines and trims whitespace), `whitespace` (only trims whitespace), `verbatim` (no
+cleanup), `scissors` (stops at scissors line), `default`.
+
+```bash
+libra commit --cleanup=strip -m "feat: add login"
+```
+
+### `--dry-run`
+
+Do not actually create the commit. Show the commit summary that would be produced.
+
+```bash
+libra commit --dry-run -m "Draft commit"
+```
+
+### `--fixup <COMMIT>`
+
+Create a fixup commit whose message is `fixup! <target subject>`.
+
+```bash
+libra commit --fixup HEAD~1
+```
+
+### `--squash <COMMIT>`
+
+Create a squash commit whose message is `squash! <target subject>`.
+
+```bash
+libra commit --squash abc1234
+```
+
+### `-C <COMMIT>`, `--reuse-message <COMMIT>`
+
+Reuse the commit message from the specified commit.
+
+```bash
+libra commit -C HEAD~1
+```
+
+### `-c <COMMIT>`, `--reedit-message <COMMIT>`
+
+Reuse the commit message from the specified commit. In Git this opens an editor; Libra
+reuses the message directly when no editor is available.
+
+```bash
+libra commit -c HEAD~1
+```
+
+### `--trailer <TRAILER>`
+
+Add a trailer line to the commit message. Can be specified multiple times.
+
+```bash
+libra commit -m "Add feature" --trailer "Reviewed-by: Jane Doe"
+```
+
+### `--reset-author`
+
+Reset the author of the commit to the current user identity. This is the default for new
+commits; the flag is accepted for Git compatibility.
+
+```bash
+libra commit --amend --reset-author --no-edit
+```
+
 ## Common Commands
 
 ```bash
@@ -137,6 +209,10 @@ libra commit -a -m "Fix typo"
 libra commit -F message.txt
 libra commit -s -m "Add feature"
 libra commit --allow-empty -m "Trigger CI"
+libra commit --dry-run -m "Draft commit"
+libra commit --fixup HEAD~1
+libra commit -C HEAD~1
+libra commit -m "Add feature" --trailer "Reviewed-by: Jane Doe"
 libra commit --json -m "Add feature"
 ```
 

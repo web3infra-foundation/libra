@@ -2,13 +2,13 @@
 
 ## 命令实现目标
 
-`libra commit` 的目标是把索引快照记录为新的提交，并处理消息来源、作者、签名、hooks、结构化输出和兼容拒绝。实现需要支持 `--all`、`--author`、交互式编辑器、autosquash、dry-run porcelain、commit trailers 和稳定错误码，同时对 patch/fixup/squash 等未完成行为明确说明。
+`libra commit` 的目标是把索引快照记录为新的提交，并处理消息来源、作者、签名、hooks、结构化输出和兼容拒绝。实现已支持 `--all`、`--author`、`--cleanup`、`--dry-run`、`--fixup`、`--squash`、`-C/-c`（复用提交消息）、`--trailer`、`--reset-author`、交互式编辑器、autosquash、dry-run porcelain、commit trailers 和稳定错误码，同时对 `-e/--edit`、`-v/--verbose`、`--porcelain`、`--status` 等未完成行为明确说明。
 
 ## 对比 Git 与兼容性
 
 - 兼容级别：`supported`。
 
-- 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
+- 当前矩阵承诺常用 Git 行为已支持；`--cleanup`、`--dry-run`、`--fixup`、`--squash`、`-C/-c`、`--trailer`、`--reset-author` 已补齐。新增语义必须同步矩阵、用户文档和测试。
 
 
 ## 设计方案
@@ -47,17 +47,16 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/commit.md`。
-- Synopsis：`libra commit [OPTIONS] (-m <MESSAGE> | -F <FILE> | --amend --no-edit)`（`message` 声明为 `required_unless_present_any(["file", "no_edit"])`，故 `-F <FILE>` 或 `--amend --no-edit` 均可替代 `-m` 满足必填约束）。
-- 公开参数/子命令包括：`-m, --message <MESSAGE>`、`-F, --file <FILE>`、`--amend`、`--no-edit`、`--conventional`、`-a, --all`、`-s, --signoff`、`--author <AUTHOR>`、`--allow-empty`、`--disable-pre`、`--no-verify` 等。
+- Synopsis：`libra commit [OPTIONS] (-m <MESSAGE> | -F <FILE> | -C <COMMIT> | -c <COMMIT> | --fixup <COMMIT> | --squash <COMMIT> | --amend --no-edit)`。
+- 公开参数/子命令包括：`-m, --message <MESSAGE>`、`-F, --file <FILE>`、`--amend`、`--no-edit`、`--conventional`、`-a, --all`、`-s, --signoff`、`--author <AUTHOR>`、`--allow-empty`、`--disable-pre`、`--no-verify`、`--cleanup <MODE>`、`--dry-run`、`--fixup <COMMIT>`、`--squash <COMMIT>`、`-C/--reuse-message <COMMIT>`、`-c/--reedit-message <COMMIT>`、`--trailer <TRAILER>`、`--reset-author` 等。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 功能缺口 | fixup and --squash are not 支持; use libra rebase -i for commit restructuring | 后续实现时需要同步源码、测试和兼容矩阵。 |
-| 功能缺口 | cleanup mode for comment stripping is not 支持; messages are used as-is | 后续实现时需要同步源码、测试和兼容矩阵。 |
-| 功能缺口 | `CommitArgs` 未实现 `--dry-run`、`--porcelain`、`-e/--edit`、`-v/--verbose`、`--trailer`、`-C/-c`（复用提交消息）、`--reset-author`、`--status/--no-status` 等 Git 标准标志 | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| 兼容矩阵说明 | common Git commit surface plus `--cleanup`, `--dry-run`, `--fixup`, `--squash`, `-C/-c`, `--trailer`, and `--reset-author` supported | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
+| 功能缺口 | `-e/--edit` 打开编辑器、`-v/--verbose` 在编辑器中显示 diff、`--porcelain` 机器输出、`--status`/`--no-status` 在模板中包含状态 | 后续实现时需要同步源码、测试和兼容矩阵。 |
 
 ## 维护要求
 

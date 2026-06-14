@@ -628,6 +628,7 @@ async fn test_log_patch_no_pathspec() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -656,6 +657,7 @@ async fn test_log_patch_no_pathspec() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -746,6 +748,7 @@ async fn test_log_patch_with_pathspec() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -873,6 +876,7 @@ async fn test_log_stat() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -900,6 +904,7 @@ async fn test_log_stat() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -955,6 +960,7 @@ async fn test_log_stat_with_modifications() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -982,6 +988,7 @@ async fn test_log_stat_with_modifications() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1188,6 +1195,7 @@ async fn test_log_graph_simple_chain() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1215,6 +1223,7 @@ async fn test_log_graph_simple_chain() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1260,6 +1269,7 @@ async fn test_log_stat_and_graph_combined() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1390,6 +1400,7 @@ async fn test_log_double_dash_disables_short_number_rewrite() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1418,6 +1429,7 @@ async fn test_log_double_dash_disables_short_number_rewrite() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1662,6 +1674,7 @@ async fn test_log_grep_filtering() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1690,6 +1703,7 @@ async fn test_log_grep_filtering() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1718,6 +1732,7 @@ async fn test_log_grep_filtering() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 

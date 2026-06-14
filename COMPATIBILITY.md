@@ -49,7 +49,7 @@ batch document.
 | symbolic-ref | partial | Supports local `HEAD` only; other symbolic refs are rejected because Libra stores refs in SQLite |
 | branch | supported | |
 | tag | supported | |
-| commit | supported | |
+| commit | supported | common Git commit surface plus `--cleanup`, `--dry-run`, `--fixup`, `--squash`, `-C/-c`, `--trailer`, and `--reset-author` supported; `-e/--edit`, `-v/--verbose`, `--porcelain`, and `--status`/`--no-status` not yet exposed |
 | switch | supported | `-C/--force-create` and `--orphan` supported; detached HEAD via `switch --detach` supported |
 | rebase | partial | `--autosquash` / `--reapply-cherry-picks` not supported |
 | merge | partial | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |

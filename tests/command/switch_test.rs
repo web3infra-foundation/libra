@@ -283,6 +283,7 @@ async fn test_switch_function() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
     }
@@ -338,6 +339,7 @@ async fn test_switch_function() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
 
@@ -472,6 +474,7 @@ async fn test_switch_track_sets_upstream() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(args).await;
 
@@ -541,6 +544,7 @@ async fn test_detach_head_basic() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
     }
@@ -586,6 +590,7 @@ async fn test_detach_head_basic() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
     }
