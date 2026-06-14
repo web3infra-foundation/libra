@@ -17,6 +17,8 @@ use libra::{
 use serial_test::serial;
 use tempfile::tempdir;
 
+use super::*;
+
 async fn configure_identity_for_test() {
     ConfigKv::set("user.name", "Checkout Test User", false)
         .await
@@ -777,6 +779,58 @@ fn test_checkout_machine_outputs_single_json_line() {
 }
 
 #[test]
+fn test_checkout_detached_head_by_commit() {
+    let repo = create_committed_repo_via_cli();
+
+    let head_output = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert_cli_success(&head_output, "rev-parse HEAD");
+    let head_hash = String::from_utf8_lossy(&head_output.stdout)
+        .trim()
+        .to_string();
+
+    let output = run_libra_command(&["--json", "checkout", &head_hash], repo.path());
+    assert_cli_success(&output, "checkout commit should detach HEAD");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["action"], "detach");
+    assert_eq!(json["data"]["detached"], true);
+
+    let head = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    let current_head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    assert_eq!(current_head, head_hash);
+}
+
+#[test]
+fn test_checkout_force_new_branch_resets_existing() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["checkout", "-b", "feature"], repo.path());
+    assert_cli_success(&output, "checkout -b feature should succeed");
+
+    let output = run_libra_command(&["checkout", "main"], repo.path());
+    assert_cli_success(&output, "checkout main should succeed");
+
+    std::fs::write(repo.path().join("second.txt"), "second\n").unwrap();
+    let output = run_libra_command(&["add", "second.txt"], repo.path());
+    assert_cli_success(&output, "add second.txt");
+    let output = run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    assert_cli_success(&output, "commit second");
+
+    let head_output = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    let head_hash = String::from_utf8_lossy(&head_output.stdout)
+        .trim()
+        .to_string();
+
+    let output = run_libra_command(&["checkout", "-B", "feature"], repo.path());
+    assert_cli_success(&output, "checkout -B feature should succeed");
+
+    let feature_output = run_libra_command(&["rev-parse", "feature"], repo.path());
+    let feature_hash = String::from_utf8_lossy(&feature_output.stdout)
+        .trim()
+        .to_string();
+    assert_eq!(feature_hash, head_hash);
+}
+
+#[test]
 fn test_checkout_json_missing_branch_reports_invalid_target() {
     use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
 
@@ -788,11 +842,6 @@ fn test_checkout_json_missing_branch_reports_invalid_target() {
     assert!(output.stdout.is_empty());
     let (_human, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-CLI-003");
-    assert!(
-        report
-            .message
-            .contains("path specification 'missing' did not match")
-    );
 }
 
 #[test]

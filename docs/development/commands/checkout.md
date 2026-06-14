@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra checkout` 的目标是保留 Git 兼容入口，同时把分支切换和文件恢复分别引导到 `switch` 与 `restore` 的清晰模型。当前实现覆盖可见的分支兼容面（`[<branch>]` 切换、`-b <new_branch>` 创建并切换）与 `checkout -- <path>` 恢复别名；detached HEAD 仅作只读展示，`-B`/`--detach`/`--orphan`/`--ours`/`--theirs`/`--force` 等扩展模式当前未公开。
+`libra checkout` 的目标是保留 Git 兼容入口，同时把分支切换和文件恢复分别引导到 `switch` 与 `restore` 的清晰模型。当前实现覆盖分支切换、`-b` 创建并切换、`-B` 强制创建/重置并切换、`checkout <commit>` detached HEAD，以及 `checkout -- <path>` 恢复别名。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore`; detached HEAD and patch modes still partial
+- 兼容级别：`partial`。visible branch compatibility surface plus `checkout <commit>` detached HEAD, `-b`/`-B` branch creation, and explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` for new code; patch modes still partial
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -41,22 +41,22 @@ flowchart TD
 - 2026-06-04 `c7e090d7`（`feat(checkout): support -B, --detach, and --orphan branch checkout modes (v0.17.1303)`）：功能演进：support -B, --detach, and --orphan branch checkout modes (v0.17.1303)；该节点扩展了当前命令可用的参数或行为。
 - 2026-06-04 `092371f0`（`fix(checkout): use exists_result for --orphan name collision (catch unborn refs) (v0.17.1308)`）：实现修正：use exists_result for --orphan name collision (catch unborn refs) (v0.17.1308)；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 2026-06-04 `5bac3d88`（`docs(checkout): document -B/--detach/--orphan/--ours/--theirs and pass compat guards (v0.17.1306)`）：文档与兼容口径：document -B/--detach/--orphan/--ours/--theirs and pass compat guards (v0.17.1306)；当前文档按该节点之后的实现状态校准。
-- 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。注意：上述 `-B`/`--detach`/`--orphan`/`--ours`/`--theirs`/`--force` 模式已从当前 `CheckoutArgs` 中回退，现源码仅公开 `[<branch>]`、`-b <new_branch>` 与 `-- <pathspec>`。
+- 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。当前源码已公开 `[<branch>]`、`-b <new_branch>`、`-B <new_branch>`、`checkout <commit>` detached HEAD 与 `-- <pathspec>`。
 
 ## 当前状态
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/checkout.md`。
-- Synopsis：`libra checkout [-b <new_branch>] [<branch>] [-- <pathspec>...]`。
-- 公开参数/子命令包括：`[<branch>]`、`-b <new_branch>`、`-- <pathspec>...`。
+- Synopsis：`libra checkout [-b <new_branch>] [-B <new_branch>] [<branch>] [-- <pathspec>...]`。
+- 公开参数/子命令包括：`[<branch>]`、`-b <new_branch>`、`-B <new_branch>`、`-- <pathspec>...`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵说明 | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore`; detached HEAD and patch modes still 部分支持 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
-| 兼容差异项 | Detach HEAD | 原始对照：git checkout <commit>；相关参数/替代：不支持 (use libra switch --detach)；当前说明：jj edit <rev>。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容矩阵说明 | visible branch compatibility surface plus `checkout <commit>` detached HEAD, `-b`/`-B` branch creation, and explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` for new code; patch modes still partial | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
+| 兼容差异项 | Patch mode | 原始对照：`checkout -p`；相关参数/替代：不支持 (use libra restore)；当前说明：按全局 D15 延后/拒绝。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求
 

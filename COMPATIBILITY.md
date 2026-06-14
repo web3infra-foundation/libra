@@ -83,7 +83,7 @@ batch document.
 | fsck | supported | |
 | verify-pack | partial | validates one `.idx` file against a matching `.pack`; Git's multi-index form and `-s` / `--stat-only` are not exposed |
 | index-pack | supported | hidden plumbing command |
-| checkout | partial | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore`; detached HEAD and patch modes still partial |
+| checkout | partial | visible branch compatibility surface plus `checkout <commit>` detached HEAD, `-b`/`-B` branch creation, and explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` for new code; patch modes still partial |
 | bisect | partial | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` supported; `replay` (see [docs/development/commands/_compatibility.md#d6-bisect-replay](docs/development/commands/_compatibility.md#d6-bisect-replay)) / `terms` (see [docs/development/commands/_compatibility.md#d7-bisect-terms](docs/development/commands/_compatibility.md#d7-bisect-terms)) deferred |
 
 ## Git commands intentionally absent from `src/cli.rs`
