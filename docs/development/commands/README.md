@@ -42,6 +42,7 @@
 | [`describe`](describe.md) | `supported` | 见命令文档。 |
 | [`diff`](diff.md) | `supported` | 见命令文档。 |
 | [`fetch`](fetch.md) | `supported` | `--depth` public flag |
+| [`for-each-ref`](for-each-ref.md) | `partial` | `--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort` / `--count` / `<pattern>` supported; full Git atom language, `--contains` / `--merged` / `--points-at` and shell quoting modes are not exposed |
 | [`fsck`](fsck.md) | `supported` | 见命令文档。 |
 | [`graph`](graph.md) | `intentionally-different` | Libra AI graph inspection extension, not a Git command |
 | [`grep`](grep.md) | `supported` | 见命令文档。 |
@@ -88,7 +89,6 @@
 | 文档 | 当前状态 | 下一步 |
 |---|---|---|
 
-| [`for-each-ref`](for-each-ref.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |
 | [`gc`](gc.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |
 | [`ls-files`](ls-files.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |
 | [`package`](package.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |

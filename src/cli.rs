@@ -36,7 +36,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing db, fsck, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
+  Maintenance And Plumbing db, fsck, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -325,6 +325,11 @@ enum Commands {
     Show(command::show::ShowArgs),
     #[command(about = "List references in a local repository")]
     ShowRef(command::show_ref::ShowRefArgs),
+    #[command(
+        about = "Iterate over refs in a local repository with formatting and filtering",
+        after_help = command::for_each_ref::FOR_EACH_REF_EXAMPLES
+    )]
+    ForEachRef(command::for_each_ref::ForEachRefArgs),
     #[command(about = "List references in a remote repository")]
     LsRemote(command::ls_remote::LsRemoteArgs),
     #[command(
@@ -1172,6 +1177,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Shortlog(cmd_args) => command::shortlog::execute_safe(cmd_args, &output).await?,
         Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
         Commands::ShowRef(cmd_args) => command::show_ref::execute_safe(cmd_args, &output).await?,
+        Commands::ForEachRef(cmd_args) => {
+            command::for_each_ref::execute_safe(cmd_args, &output).await?
+        }
         Commands::LsRemote(cmd_args) => command::ls_remote::execute_safe(cmd_args, &output).await?,
         Commands::LsTree(cmd_args) => command::ls_tree::execute_safe(cmd_args, &output).await?,
         Commands::SymbolicRef(cmd_args) => {

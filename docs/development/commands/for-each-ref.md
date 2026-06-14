@@ -6,14 +6,14 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`unpublished`。未进入 COMPATIBILITY.md；以代码接入状态为准。
+- 兼容级别：`partial`。`--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort` / `--count` / `<pattern>` supported; full Git atom language, `--contains` / `--merged` / `--points-at` and shell quoting modes are not exposed
 
-- 该资料未对应公开 CLI 命令；用户可见状态按未发布处理。
+- 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
 
 ## 设计方案
 
-- 入口与分发：源码资料存在但尚未公开接入 `src/cli.rs::Commands`；当前未由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
+- 入口与分发：源码资料存在并已公开接入 `src/cli.rs::Commands`；`src/command/mod.rs` 已导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
 - 源码分层：主要实现文件为 `src/command/for_each_ref.rs`。参数/子命令类型包括：`ForEachRefArgs`；输出、错误或状态类型包括：`RefEntry`；主要执行函数包括：`execute`、`execute_safe`。
 - 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；对象路径会解析 revision 并读写 blob/tree/commit/tag 等对象；引用路径会读取或更新 SQLite refs、HEAD 与 reflog。
 
@@ -41,17 +41,19 @@ flowchart TD
 
 ## 当前状态
 
-- 公开状态：未公开；模块状态：未从 `src/command/mod.rs` 导出。
-- 用户文档：`docs/commands/for-each-ref.md`，当前仅作为 unpublished historical design 页面保留，不声明可执行 CLI 合约。
-- 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。
+- 公开状态：已公开；模块状态：已从 `src/command/mod.rs` 导出。
+- 用户文档：`docs/commands/for-each-ref.md`，记录公开 CLI 合约。
+- 公开参数/子命令包括：`--heads`、`--tags`、`--remotes`、`--all`、`--format`、`--sort`、`--count`、`<pattern>...`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵 | `COMPATIBILITY.md` 尚未登记该命令行。 | 需要决定是否纳入用户可见兼容矩阵和矩阵守卫。 |
-| CLI 接入 | `src/cli.rs::Commands` 尚未公开该顶层命令。 | 需要决定接入 CLI、降级为内部设计资料，或移出用户命令文档。 |
+| 兼容矩阵 | `COMPATIBILITY.md` 已登记该命令为 `partial`。 | 保持与矩阵对齐；新增参数时同步矩阵和守卫测试。 |
+| 功能缺口 | Git atom 语言子集 | 原始对照：完整 `%(atom)` 集合；相关参数/替代：`--format`；当前说明：仅支持 `%(refname)` / `%(objectname)` / `%(objecttype)`。 后续扩展时需补回归测试并同步兼容矩阵。 |
+| 功能缺口 | 高级过滤 | 原始对照：`--contains` / `--no-contains` / `--merged` / `--no-merged` / `--points-at`；当前说明：未实现。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 功能缺口 | 引用命名空间 | 原始对照：`--format` 的 shell/perl/python/tcl 引用模式；当前说明：未实现。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求
 

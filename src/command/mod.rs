@@ -30,6 +30,7 @@ pub mod db;
 pub mod describe;
 pub mod diff;
 pub mod fetch;
+pub mod for_each_ref;
 pub mod fsck;
 pub mod graph;
 pub mod grep;
