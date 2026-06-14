@@ -43,6 +43,7 @@ flowchart TD
 - 用户文档：`docs/commands/ls-tree.md`。
 - Synopsis：`libra ls-tree [OPTIONS] <TREE-ISH> [PATH...]`。
 - 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。
+- 参数证据：`-r` / `--recursive` 已公开并由 `command_test::command::ls_tree_test::ls_tree_recursive_lists_nested_entries_without_parent_trees` 与 `ls_tree_directory_filter_recurses_when_requested` 覆盖；集成场景 `cli.ls-tree-smoke` 也执行 `libra ls-tree -r HEAD src`。
 
 
 ## 还未实现的功能
