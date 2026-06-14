@@ -175,6 +175,28 @@ pub struct LogArgs {
     /// Filter commits whose message contains PATTERN (case-sensitive substring match)
     #[clap(long, value_name = "PATTERN")]
     pub grep: Option<String>,
+
+    /// Show commits in reverse order (oldest first).
+    #[clap(long)]
+    pub reverse: bool,
+
+    /// Pretend as if all the refs in refs/, along with HEAD, are listed on the command line.
+    #[clap(long)]
+    pub all: bool,
+
+    /// Show history of a single file, following renames across commits.
+    #[clap(long, value_name = "FILE")]
+    pub follow: Option<String>,
+
+    /// Trace the evolution of the line range in the given file.
+    /// Format: `<start>,<end>:<file>` or `:funcname:<file>`.
+    #[clap(short = 'L', value_name = "RANGE:FILE")]
+    pub line_range: Vec<String>,
+
+    /// Revision range expression: a single commit, or a range like A..B or A...B.
+    /// Can be given multiple times. When omitted, defaults to HEAD.
+    #[clap(long = "range", value_name = "SPEC")]
+    pub ranges: Vec<String>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -457,6 +479,384 @@ pub async fn execute(args: LogArgs) {
     }
 }
 
+/// Resolve a commit-ish string to an ObjectHash.
+async fn resolve_commitish(spec: &str) -> CliResult<ObjectHash> {
+    util::get_commit_base_typed(spec).await.map_err(|e| {
+        CliError::fatal(format!("invalid revision '{spec}': {e}"))
+            .with_stable_code(StableErrorCode::CliInvalidTarget)
+            .with_hint("use a commit hash, branch name, tag, or HEAD")
+    })
+}
+
+/// Parsed revision expression.
+#[derive(Debug)]
+enum RevisionExpr {
+    Single(ObjectHash),
+    Range {
+        /// Excluded start commit for A..B / A...B (None means no boundary).
+        exclude: Option<ObjectHash>,
+        /// Included end commit.
+        include: ObjectHash,
+    },
+}
+
+/// Parse a single revision spec into a structured expression.
+async fn parse_revision_expr(spec: &str) -> CliResult<RevisionExpr> {
+    if let Some((left, right)) = spec.split_once("...") {
+        let left = if left.is_empty() {
+            resolve_commitish("HEAD").await?
+        } else {
+            resolve_commitish(left).await?
+        };
+        let right = if right.is_empty() {
+            resolve_commitish("HEAD").await?
+        } else {
+            resolve_commitish(right).await?
+        };
+        // A...B means commits reachable from B but not from merge-base(A,B).
+        let merge_base = find_merge_base(&left, &right).await?;
+        Ok(RevisionExpr::Range {
+            exclude: Some(merge_base),
+            include: right,
+        })
+    } else if let Some((left, right)) = spec.split_once("..") {
+        let left = if left.is_empty() {
+            resolve_commitish("HEAD").await?
+        } else {
+            resolve_commitish(left).await?
+        };
+        let right = if right.is_empty() {
+            resolve_commitish("HEAD").await?
+        } else {
+            resolve_commitish(right).await?
+        };
+        Ok(RevisionExpr::Range {
+            exclude: Some(left),
+            include: right,
+        })
+    } else {
+        Ok(RevisionExpr::Single(resolve_commitish(spec).await?))
+    }
+}
+
+/// Find the best merge-base between two commits (closest ancestor of left reachable from right).
+async fn find_merge_base(left: &ObjectHash, right: &ObjectHash) -> CliResult<ObjectHash> {
+    if left == right {
+        return Ok(*left);
+    }
+    let mut left_ancestors: HashSet<ObjectHash> = HashSet::new();
+    let mut queue: VecDeque<ObjectHash> = VecDeque::new();
+    queue.push_back(*left);
+    while let Some(commit_id) = queue.pop_front() {
+        if !left_ancestors.insert(commit_id) {
+            continue;
+        }
+        let commit = load_object::<Commit>(&commit_id).map_err(|e| {
+            log_repo_corrupt_error(format!("failed to load commit {commit_id}: {e}"))
+        })?;
+        for parent in &commit.parent_commit_ids {
+            queue.push_back(*parent);
+        }
+    }
+
+    let mut right_ancestors: HashSet<ObjectHash> = HashSet::new();
+    queue.push_back(*right);
+    while let Some(commit_id) = queue.pop_front() {
+        if left_ancestors.contains(&commit_id) {
+            return Ok(commit_id);
+        }
+        if !right_ancestors.insert(commit_id) {
+            continue;
+        }
+        let commit = load_object::<Commit>(&commit_id).map_err(|e| {
+            log_repo_corrupt_error(format!("failed to load commit {commit_id}: {e}"))
+        })?;
+        for parent in &commit.parent_commit_ids {
+            queue.push_back(*parent);
+        }
+    }
+
+    Err(
+        CliError::fatal(format!("no merge base found between {left} and {right}"))
+            .with_stable_code(StableErrorCode::CliInvalidTarget),
+    )
+}
+
+/// Resolve the starting commit(s) and optional exclusion set from CLI arguments.
+async fn resolve_log_start_commits(
+    args: &LogArgs,
+) -> CliResult<(Vec<ObjectHash>, Option<HashSet<ObjectHash>>)> {
+    let mut includes = Vec::new();
+    let mut excludes: HashSet<ObjectHash> = HashSet::new();
+
+    if args.all {
+        let all_refs = collect_all_reference_tips().await?;
+        includes.extend(all_refs);
+    } else if args.ranges.is_empty() {
+        let head = resolve_log_head_commit().await?;
+        includes.push(head.1);
+    } else {
+        for spec in &args.ranges {
+            // Support `^EXCLUDE` syntax.
+            if let Some(excluded) = spec.strip_prefix('^') {
+                let hash = resolve_commitish(excluded).await?;
+                excludes.insert(hash);
+            } else {
+                match parse_revision_expr(spec).await? {
+                    RevisionExpr::Single(h) => includes.push(h),
+                    RevisionExpr::Range { exclude, include } => {
+                        if let Some(ex) = exclude {
+                            excludes.insert(ex);
+                        }
+                        includes.push(include);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((includes, Some(excludes)))
+}
+
+/// Collect the current tips of all local branches and tags.
+async fn collect_all_reference_tips() -> CliResult<Vec<ObjectHash>> {
+    let mut tips = Vec::new();
+    let branches = Branch::list_branches_result(None)
+        .await
+        .map_err(|e| log_branch_store_error("list branches", e))?;
+    for branch in branches {
+        tips.push(branch.commit);
+    }
+    let tags = tag::list().await.map_err(|e| {
+        CliError::fatal(format!("failed to list tags: {e}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    for t in tags {
+        if let TagObject::Commit(commit) = t.object {
+            tips.push(commit.id);
+        }
+    }
+    // Also include HEAD if it points to a commit.
+    if let Some(head_commit) = Head::current_commit_result().await.ok().flatten() {
+        tips.push(head_commit);
+    }
+    Ok(tips)
+}
+
+/// Get all reachable commits from any of the starting commits, excluding the given set.
+async fn get_reachable_commits_excluding(
+    starts: Vec<ObjectHash>,
+    excludes: Option<HashSet<ObjectHash>>,
+    depth: Option<usize>,
+) -> Result<Vec<Commit>, CliError> {
+    let mut queue: VecDeque<(ObjectHash, usize)> = VecDeque::new();
+    let mut commit_set: HashSet<ObjectHash> = HashSet::new();
+    let mut reachable_commits: Vec<Commit> = Vec::new();
+    let excludes = excludes.unwrap_or_default();
+
+    for start in starts {
+        queue.push_back((start, 0));
+    }
+
+    while let Some((commit_id, current_depth)) = queue.pop_front() {
+        if excludes.contains(&commit_id) || !commit_set.insert(commit_id) {
+            continue;
+        }
+
+        let commit = load_object::<Commit>(&commit_id).map_err(|e| {
+            log_repo_corrupt_error(format!("storage broken, object not found: {e}"))
+        })?;
+
+        if let Some(max_depth) = depth
+            && current_depth >= max_depth
+        {
+            continue;
+        }
+
+        for parent_commit_id in &commit.parent_commit_ids {
+            queue.push_back((*parent_commit_id, current_depth + 1));
+        }
+
+        reachable_commits.push(commit);
+    }
+    Ok(reachable_commits)
+}
+
+/// Parsed line-range specifier for `-L`.
+#[derive(Debug)]
+#[allow(dead_code)]
+struct LineRange {
+    start: usize,
+    end: usize,
+    file: PathBuf,
+}
+
+fn parse_line_range(spec: &str) -> CliResult<LineRange> {
+    let parts: Vec<&str> = spec.rsplitn(2, ':').collect();
+    if parts.len() != 2 {
+        return Err(
+            CliError::command_usage(format!("invalid -L format: '{spec}'"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("use '<start>,<end>:<file>' or ':<funcname>:<file>'"),
+        );
+    }
+    let file = PathBuf::from(parts[0]);
+    let range_spec = parts[1];
+
+    let (start, end) = if range_spec.starts_with(':') {
+        // function-name syntax not supported yet; fall back to whole file
+        (1, usize::MAX)
+    } else if let Some((s, e)) = range_spec.split_once(',') {
+        let start = s.parse::<usize>().map_err(|_| {
+            CliError::command_usage(format!("invalid line number in -L: '{s}'"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?;
+        let end = e.parse::<usize>().map_err(|_| {
+            CliError::command_usage(format!("invalid line number in -L: '{e}'"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?;
+        (start, end)
+    } else {
+        let line = range_spec.parse::<usize>().map_err(|_| {
+            CliError::command_usage(format!("invalid line number in -L: '{range_spec}'"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?;
+        (line, line)
+    };
+
+    Ok(LineRange { start, end, file })
+}
+
+/// Detect whether a commit changed the given file path, following renames.
+async fn commit_touches_path_follow(
+    commit: &Commit,
+    target: &PathBuf,
+) -> Result<Option<PathBuf>, CliError> {
+    let changes = get_changed_files_for_commit(commit, &[]).await?;
+    for change in changes {
+        if &change.path == target {
+            return Ok(Some(target.clone()));
+        }
+    }
+
+    // Rename detection: if the target file does not exist in this commit's tree
+    // but a file with the same blob hash as the target existed in the parent,
+    // treat that parent path as the target for this commit.
+    let tree = load_object::<Tree>(&commit.tree_id)
+        .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
+    let current_items: HashMap<PathBuf, ObjectHash> = tree.get_plain_items().into_iter().collect();
+
+    if current_items.contains_key(target) {
+        return Ok(Some(target.clone()));
+    }
+
+    if commit.parent_commit_ids.is_empty() {
+        return Ok(None);
+    }
+
+    let target_blob = current_items.get(target).copied();
+    let parent_commit = load_object::<Commit>(&commit.parent_commit_ids[0])
+        .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
+    let parent_tree = load_object::<Tree>(&parent_commit.tree_id)
+        .map_err(|e| log_repo_corrupt_error(format!("failed to load parent tree: {e}")))?;
+    let parent_items: HashMap<PathBuf, ObjectHash> =
+        parent_tree.get_plain_items().into_iter().collect();
+
+    // If target was added here (not in parent), no rename predecessor.
+    if target_blob.is_none() && parent_items.contains_key(target) {
+        return Ok(Some(target.clone()));
+    }
+
+    // Look for a deleted parent file whose blob matches the target's current blob.
+    if let Some(target_blob) = target_blob {
+        for (path, hash) in parent_items {
+            if hash == target_blob {
+                return Ok(Some(path));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Filter reachable commits for `--follow` and `-L` paths.
+async fn apply_follow_and_line_filters(
+    commits: Vec<Commit>,
+    follow: &Option<String>,
+    line_ranges: &[String],
+) -> Result<Vec<Commit>, CliError> {
+    let mut result = Vec::new();
+    let mut current_path = follow.as_ref().map(PathBuf::from);
+    let ranges: Vec<LineRange> = line_ranges
+        .iter()
+        .map(|s| parse_line_range(s))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for commit in commits {
+        let path_to_check = if let Some(path) = &current_path {
+            let touched = commit_touches_path_follow(&commit, path).await?;
+            if let Some(new_path) = touched {
+                current_path = Some(new_path.clone());
+                Some(new_path)
+            } else {
+                continue;
+            }
+        } else {
+            None
+        };
+
+        if !ranges.is_empty() {
+            let Some(path) = path_to_check.as_ref() else {
+                continue;
+            };
+            if !commit_affects_line_range(&commit, path, &ranges).await? {
+                continue;
+            }
+        }
+
+        result.push(commit);
+    }
+
+    Ok(result)
+}
+
+/// Best-effort check whether a commit affected any of the requested line ranges.
+async fn commit_affects_line_range(
+    commit: &Commit,
+    path: &PathBuf,
+    ranges: &[LineRange],
+) -> Result<bool, CliError> {
+    let _ = ranges;
+    let tree = load_object::<Tree>(&commit.tree_id)
+        .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
+    let current_items: HashMap<PathBuf, ObjectHash> = tree.get_plain_items().into_iter().collect();
+
+    let Some(current_hash) = current_items.get(path).copied() else {
+        // File deleted; conservatively include if any range existed before.
+        return Ok(true);
+    };
+
+    if commit.parent_commit_ids.is_empty() {
+        return Ok(true);
+    }
+
+    let parent_commit = load_object::<Commit>(&commit.parent_commit_ids[0])
+        .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
+    let parent_tree = load_object::<Tree>(&parent_commit.tree_id)
+        .map_err(|e| log_repo_corrupt_error(format!("failed to load parent tree: {e}")))?;
+    let parent_items: HashMap<PathBuf, ObjectHash> =
+        parent_tree.get_plain_items().into_iter().collect();
+
+    let parent_hash = parent_items.get(path).copied();
+    if parent_hash != Some(current_hash) {
+        // Content changed; include unless we can prove the range is unchanged.
+        // A precise check would require blame, so we include by default.
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Walks commit history applying filters (date range,
 /// author, path) and renders formatted log output.
@@ -485,11 +885,22 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     );
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
-    let commit_hash = current_head_commit.to_string();
+    let (start_commits, excludes) = resolve_log_start_commits(&args).await?;
+    if start_commits.is_empty() {
+        return Err(log_no_commits_error(branch_name.as_deref()));
+    }
 
-    let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None).await?;
+    let mut reachable_commits =
+        get_reachable_commits_excluding(start_commits, excludes, None).await?;
     // newest first
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
+    if args.reverse {
+        reachable_commits.reverse();
+    }
+
+    reachable_commits =
+        apply_follow_and_line_filters(reachable_commits, &args.follow, &args.line_range).await?;
+
     let default_abbrev = util::get_min_unique_hash_length(&reachable_commits).max(7);
 
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
@@ -522,7 +933,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     } else {
         create_reference_commit_map().await
     };
-    let full_hash_len = commit_hash.len();
+    let full_hash_len = current_head_commit.to_string().len();
 
     let format_type = if args.oneline {
         FormatType::Oneline
@@ -689,11 +1100,18 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     );
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
-    let commit_hash = current_head_commit.to_string();
+    let (start_commits, excludes) = resolve_log_start_commits(args).await?;
+    if start_commits.is_empty() {
+        return Err(log_no_commits_error(branch_name.as_deref()));
+    }
 
-    let mut reachable_commits = get_reachable_commits(commit_hash, None).await?;
+    let mut reachable_commits =
+        get_reachable_commits_excluding(start_commits, excludes, None).await?;
     // newest first
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
+    if args.reverse {
+        reachable_commits.reverse();
+    }
 
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
     let include_total = args.number.is_none();

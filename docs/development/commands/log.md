@@ -2,13 +2,13 @@
 
 ## 命令实现目标
 
-`libra log` 的目标是展示提交历史，并支持数量、时间、作者、graph、format 和颜色等常用查看能力。实现需要在 Git 兼容历史查看和 Libra 结构化输出之间保持一致，并把尚未覆盖的复杂 revision range 或格式能力列为后续工作。
+`libra log` 的目标是展示提交历史，并支持数量、时间、作者、graph、format、颜色、revision range（通过 `--range`）、`--all`、`--reverse`、`--follow` 和 `-L` 等常用查看能力。实现需要在 Git 兼容历史查看和 Libra 结构化输出之间保持一致，并把尚未覆盖的复杂格式能力列为后续工作。
 
 ## 对比 Git 与兼容性
 
 - 兼容级别：`supported`。
 
-- 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
+- 当前矩阵承诺常用 Git 行为已支持；`--range`（revision ranges）、`--all`、`--reverse`、`--follow`、`-L` 已补齐。新增语义必须同步矩阵、用户文档和测试。
 
 
 ## 设计方案
@@ -47,18 +47,17 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/log.md`。
 - Synopsis：`libra log [OPTIONS] [PATHS]...`。
-- 公开参数/子命令包括：`-n, --number <NUMBER>`、`--oneline`、`--abbrev-commit`、`--abbrev <N>`、`--no-abbrev-commit`、`-p, --patch`、`--name-only`、`--name-status`、`--author <PATTERN>`、`--since <DATE>`、`--until <DATE>`、`--pretty <FORMAT>`、`--decorate[=<MODE>]`、`--no-decorate`、`--graph`、`--stat`、`--grep <PATTERN>`、位置参数 `[PATHS]...`（限定 diff 输出范围，无需 `--` 分隔符）等。
+- 公开参数/子命令包括：`-n, --number <NUMBER>`、`--oneline`、`--abbrev-commit`、`--abbrev <N>`、`--no-abbrev-commit`、`-p, --patch`、`--name-only`、`--name-status`、`--author <PATTERN>`、`--since <DATE>`、`--until <DATE>`、`--pretty <FORMAT>`、`--decorate[=<MODE>]`、`--no-decorate`、`--graph`、`--stat`、`--grep <PATTERN>`、`--reverse`、`--all`、`--follow <FILE>`、`-L <RANGE:FILE>`、`--range <SPEC>`、位置参数 `[PATHS]...`（限定 diff 输出范围，无需 `--` 分隔符）等。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 功能缺口 | Revision range syntax (A..B, A...B, ^A B) is not yet 支持; use -n and --since/--until for scoping | 后续实现时需要同步源码、测试和兼容矩阵。 |
-| 功能缺口 | `--follow`（跨重命名跟踪单文件历史）未实现 | `LogArgs` 不含该参数；后续实现需同步源码、测试和兼容矩阵。 |
-| 功能缺口 | `--all` / `--branches`（遍历全部引用而非仅 HEAD）未实现 | `LogArgs` 不含该参数，仍以 HEAD 为起点遍历；后续实现需同步源码、测试和兼容矩阵。 |
-| 功能缺口 | `--reverse`（按逆序输出提交）未实现 | `LogArgs` 不含该参数；后续实现需同步源码、测试和兼容矩阵。 |
-| 功能缺口 | `-L`（按行范围跟踪历史）未实现 | `LogArgs` 不含该参数；后续实现需同步源码、测试和兼容矩阵。 |
+| 兼容矩阵说明 | common Git log surface plus `--range` revision expressions, `--all`, `--reverse`, `--follow`, and `-L` supported | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
+| 功能缺口 | Git 原生位置性 revision range 语法（`A..B`、`A...B`、位置参数）未完全复刻；当前通过 `--range` 标志提供 | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| 功能缺口 | `--follow` 重命名跟踪基于 best-effort blob 匹配，不保证复杂重命名场景 | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| 功能缺口 | `-L` 行级历史跟踪为 best-effort，尚未实现精确 blame 级行归属 | 后续实现时需要同步源码、测试和兼容矩阵。 |
 
 ## 维护要求
 

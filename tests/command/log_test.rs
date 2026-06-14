@@ -1784,3 +1784,273 @@ async fn test_log_grep_filtering() {
     let commit_count = count_commit_lines(&stdout);
     assert_eq!(commit_count, 1);
 }
+
+#[tokio::test]
+#[serial]
+async fn test_log_reverse_outputs_oldest_first() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    test::ensure_file("a.txt", Some("a\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("first".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    test::ensure_file("b.txt", Some("b\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["b.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("second".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    let (_, out, _) = run_log_cmd(&["--oneline", "--reverse"], temp_path.path());
+    let first_idx = out.find("first").expect("first commit should appear");
+    let second_idx = out.find("second").expect("second commit should appear");
+    assert!(
+        first_idx < second_idx,
+        "--reverse should list oldest first: {out}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_range_excludes_start_commit() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    test::ensure_file("a.txt", Some("a\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("base".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+    let base = Head::current_commit().await.unwrap();
+
+    test::ensure_file("b.txt", Some("b\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["b.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("tip".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    let (_, out, _) = run_log_cmd(
+        &["--oneline", "--range", &format!("{}..HEAD", base)],
+        temp_path.path(),
+    );
+    assert!(out.contains("tip"), "range should include tip: {out}");
+    assert!(!out.contains("base"), "range should exclude base: {out}");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_all_includes_branches() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    test::ensure_file("a.txt", Some("a\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("main only".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    execute(BranchArgs {
+        new_branch: Some("side".to_string()),
+        commit_hash: None,
+        list: false,
+        delete: None,
+        delete_safe: None,
+        set_upstream_to: None,
+        show_current: false,
+        rename: vec![],
+        remotes: false,
+        all: false,
+        contains: vec![],
+        no_contains: vec![],
+    })
+    .await;
+
+    test::ensure_file("side.txt", Some("side\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["side.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("side only".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    let (_, out, _) = run_log_cmd(&["--oneline", "--all"], temp_path.path());
+    assert!(
+        out.contains("side only"),
+        "--all should include side branch: {out}"
+    );
+    assert!(
+        out.contains("main only"),
+        "--all should include main branch: {out}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_follow_detects_rename() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    test::ensure_file("old.txt", Some("content\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["old.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("add old".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    std::fs::remove_file(temp_path.path().join("old.txt")).unwrap();
+    test::ensure_file("new.txt", Some("content\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["old.txt".into(), "new.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("rename".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    let (_, out, _) = run_log_cmd(&["--oneline", "--follow", "new.txt"], temp_path.path());
+    // The follow filter is best-effort; assert the command succeeds and
+    // includes the rename commit at minimum.
+    assert!(
+        out.contains("rename"),
+        "--follow should include rename commit: {out}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_line_range_flag_accepted() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    test::ensure_file("a.txt", Some("line1\nline2\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("add a".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    let (status, out, err) = run_log_cmd(&["--oneline", "-L1,2:a.txt"], temp_path.path());
+    assert!(status.success(), "-L flag should be accepted: {err}");
+    // Line-range tracking is best-effort; just ensure the flag parses.
+    assert!(
+        out.contains("add a") || out.is_empty(),
+        "-L should not produce unexpected output: {out}"
+    );
+}

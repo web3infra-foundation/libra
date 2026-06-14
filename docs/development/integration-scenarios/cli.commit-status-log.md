@@ -1,6 +1,6 @@
 ### `cli.commit-status-log`
 
-目的：覆盖 `status`、`add`、`commit`、`log` 的本地闭环，并记录当前未支持的 `status -z`、`log --follow` 差异。
+目的：覆盖 `status`、`add`、`commit`、`log` 的本地闭环，并记录当前 `-z` 差异。
 
 最小步骤：
 
@@ -33,7 +33,7 @@ libra status --porcelain v2
 libra --json status
 libra commit -m "rename tracked" --no-verify
 libra log --oneline renamed.txt
-! libra log --follow --oneline renamed.txt
+libra log --follow --oneline renamed.txt
 libra log --name-status renamed.txt
 libra --json log renamed.txt
 
@@ -47,6 +47,6 @@ libra status --short --branch
 关键断言：
 
 - JSON `status` / `log` envelope 可解析。
-- 空提交、unsupported `-z`、unsupported `--follow` 都必须失败且不移动 HEAD。
+- 空提交、unsupported `-z` 都必须失败且不移动 HEAD。--follow 现在应成功。
 - rename 当前通过 `A renamed.txt` + `D tracked.txt` 观察，不断言 rename-follow 历史。
 - Unix 下 symlink typechange 通过 porcelain v2 mode `120000` 和路径观察。

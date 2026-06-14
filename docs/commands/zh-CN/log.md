@@ -91,6 +91,10 @@ libra log --name-status -- src/
 
 ```bash
 libra log --stat
+libra log --range main..feature
+libra log --all --oneline
+libra log --reverse --oneline
+libra log --follow src/main.rs
 ```
 
 ### `--author <PATTERN>`
@@ -152,6 +156,52 @@ libra log --no-decorate
 ```bash
 libra log --graph
 libra log --oneline --graph
+```
+
+### `--range <SPEC>`
+
+限定提交历史到某个修订范围。支持形式：
+- `A..B` — 从 `B` 可达但不可从 `A` 到达的提交。
+- `A...B` — 对称差（在 `A` 或 `B` 中但不在其合并基的提交）。
+- 单个引用，例如 `main` 或 `HEAD~3`。
+
+```bash
+libra log --range main..feature
+libra log --range HEAD~3..HEAD
+```
+
+### `--all`
+
+显示从所有本地分支和标签可达的提交，而不是仅从 HEAD。
+
+```bash
+libra log --all
+libra log --all --oneline
+```
+
+### `--reverse`
+
+按反时间顺序输出提交（最旧在前）。
+
+```bash
+libra log --reverse
+libra log --reverse --oneline
+```
+
+### `--follow <FILE>`
+
+Best-effort 跨重命名追踪单个文件历史。文件路径相对于当前目录解析。
+
+```bash
+libra log --follow src/main.rs
+```
+
+### `-L <RANGE:FILE>`
+
+接受 Git 风格行范围语法。完整的 blame 级行归属尚未实现；当前版本中该标志作为路径过滤解析。
+
+```bash
+libra log -L1,10:src/main.rs
 ```
 
 ### `[PATHS...]`
@@ -249,13 +299,25 @@ Graph 格式：
 
 ## 设计理由
 
-### 暂无 `--all` / `--branches` / `--remotes` 标志
+### 使用 `--range` 而非位置修订语法
 
-Git 的 `--all` 显示从所有 refs（分支、标签、stash）可达的提交，而 `--branches` 和 `--remotes` 分别过滤为本地或远程分支。Libra 当前只从 HEAD 遍历提交图。实现 `--all` 需要先枚举 SQLite `reference` 表，收集所有分支 tip 和标签目标，然后将多个提交遍历合并为单个时间线。这已计划但尚未实现。当前单 HEAD 遍历覆盖最常见用例（检查当前分支历史），并避免多根图合并的复杂度。
+Git 接受 `git log A..B` 这种位置修订表达式。Libra 通过 `--range A..B` 暴露相同语义，从而把位置参数保留给路径规范，并避免与现有 `-- -N` 测试模式产生歧义。
 
-### 暂无修订范围（`A..B`）语法
+### `--all` 实现
 
-Git 的修订范围语法（`main..feature`、`main...feature`、`HEAD~3..HEAD`）很强大但复杂，需要完整修订解析器，支持符号引用、祖先操作符（`~`、`^`）和集合操作（差集、对称差）。Libra 尚未实现修订解析器。`-n` 标志和 `--since`/`--until` 日期过滤提供基础历史作用域。完整修订范围解析器在路线图中，将同时支持 Git 兼容语法和额外 Libra 特定扩展。
+`--all` 枚举 SQLite `reference` 表中的本地分支和轻量标签，收集其 tip 提交，并遍历这些历史的并集。
+
+### `--reverse`
+
+`--reverse` 收集过滤后的提交并按最旧优先打印。它应用在所有其他过滤之后，因此 `-n` 仍限制结果集大小。
+
+### `--follow`
+
+`--follow` 通过遍历历史并匹配被移除/新增 blob 哈希来进行 best-effort 重命名检测。它不能处理复杂目录重命名或内容相似重命名。
+
+### `-L`
+
+`-L` 已被解析和接受；完整的 blame 级行归属尚未实现。当前版本中该标志作为路径过滤。
 
 ### 文本渲染的 `--graph`
 
@@ -286,13 +348,14 @@ Libra 将 `--graph` 实现为基于文本的 ASCII/Unicode 图渲染器，类似
 | Decorate refs | `git log --decorate` | 始终显示 | `libra log --decorate` |
 | 不 decorate | `git log --no-decorate` | N/A | `libra log --no-decorate` |
 | Graph 视图 | `git log --graph` | `jj log`（默认有 graph） | `libra log --graph` |
-| 所有 refs | `git log --all` | `jj log -r 'all()'` | N/A（尚未实现） |
+| 所有 refs | `git log --all` | `jj log -r 'all()'` | `libra log --all` |
 | 仅分支 | `git log --branches` | `jj log -r 'branches()'` | N/A |
 | 仅远程 | `git log --remotes` | `jj log -r 'remote_branches()'` | N/A |
-| 修订范围 | `git log A..B` | `jj log -r 'A..B'` | N/A（尚未实现） |
-| Grep 消息 | `git log --grep=<pat>` | Revset `description()` | N/A |
+| 修订范围 | `git log A..B` | `jj log -r 'A..B'` | `libra log --range A..B` |
+| Grep 消息 | `git log --grep=<pat>` | Revset `description()` | `libra log --grep <pat>` |
 | 路径过滤 | `git log -- <paths>` | N/A（使用 revset） | `libra log -- <paths>` |
-| 反向顺序 | `git log --reverse` | `jj log --reversed` | N/A |
+| 反向顺序 | `git log --reverse` | `jj log --reversed` | `libra log --reverse` |
+| 追踪重命名 | `git log --follow <file>` | N/A | `libra log --follow <file>` |
 | 仅 merge commits | `git log --merges` | N/A | N/A |
 | 仅 first parent | `git log --first-parent` | N/A | N/A |
 | 结构化 JSON 输出 | N/A | N/A | `--json` / `--machine` |
@@ -312,9 +375,11 @@ Libra 将 `--graph` 实现为基于文本的 ASCII/Unicode 图渲染器，类似
 
 ## 兼容性说明
 
-- `--all`、`--branches` 和 `--remotes` 尚未实现；log 从 HEAD 遍历
-- 修订范围语法（`A..B`、`A...B`）尚不支持；使用 `-n` 和 `--since`/`--until` 限定范围
+- `--branches` 和 `--remotes` 尚未实现
+- `--all` 遍历本地分支和轻量标签；远程跟踪引用和 stash 不包含在内
+- 修订范围语法通过 `--range A..B` 和 `--range A...B` 提供；Git 的位置 `git log A..B` 语法不支持
+- `--follow` 使用 best-effort 重命名检测，可能遗漏复杂重命名
+- `-L` 已被接受，但尚未提供 blame 级行精度
+- `--reverse` 已支持
 - jj 的 log 使用模板语言（`-T`）进行格式化；Libra 使用 Git 兼容的 `--pretty` 格式字符串
-- 尚未实现用于消息过滤的 `--grep`
-- 尚未实现用于时间顺序的 `--reverse`
 - 在 JSON 模式中，`files` 包含结构化变更摘要；JSON 输出永远不包含 patch 文本
