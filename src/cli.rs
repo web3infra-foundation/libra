@@ -327,6 +327,11 @@ enum Commands {
     ShowRef(command::show_ref::ShowRefArgs),
     #[command(about = "List references in a remote repository")]
     LsRemote(command::ls_remote::LsRemoteArgs),
+    #[command(
+        about = "List the contents of a tree object",
+        after_help = command::ls_tree::LS_TREE_EXAMPLES
+    )]
+    LsTree(command::ls_tree::LsTreeArgs),
     #[command(about = "Read or update the symbolic HEAD ref")]
     SymbolicRef(command::symbolic_ref::SymbolicRefArgs),
     #[command(about = "Parse and normalize revision names and repository paths")]
@@ -1158,6 +1163,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
         Commands::ShowRef(cmd_args) => command::show_ref::execute_safe(cmd_args, &output).await?,
         Commands::LsRemote(cmd_args) => command::ls_remote::execute_safe(cmd_args, &output).await?,
+        Commands::LsTree(cmd_args) => command::ls_tree::execute_safe(cmd_args, &output).await?,
         Commands::SymbolicRef(cmd_args) => {
             command::symbolic_ref::execute_safe(cmd_args, &output).await?
         }

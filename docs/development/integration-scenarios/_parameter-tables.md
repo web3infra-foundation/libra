@@ -195,7 +195,7 @@
 | 参数或子命令 | 场景 ID | 关键断言 |
 |---|---|---|
 | `notes` | `cli.notes-smoke` | 当前未注册，runner 断言 JSON unknown-command 错误并运行 fsck |
-| `ls-tree` | `cli.ls-tree-smoke` | 当前未注册，runner 创建 tree fixture 后断言 JSON unknown-command 错误并运行 fsck |
+| `ls-tree` | `cli.ls-tree-smoke` | 已公开基础 tree inspection：默认输出、递归路径过滤、`--name-only`、JSON envelope、缺失路径负向和 fsck |
 | `cat-file -t/-s/-p/-e <object>` | `cli.object-readback` | object 类型、大小、内容和存在性退出码可观察 |
 | `cat-file --ai*` | 无（显式排除） | AI object inspection 属 Libra AI 扩展，不纳入 Git 兼容黑盒计划 |
 | `hash-object -w` / `--stdin` / `-t` | `cli.object-readback`、`cli.sha256-object-readback` | blob 写入、stdin 输入、类型校验和 sha256 object id 可观察 |

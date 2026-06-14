@@ -44,6 +44,7 @@ batch document.
 | show | supported | |
 | show-ref | supported | |
 | ls-remote | supported | |
+| ls-tree | partial | Commit/tree listing, recursive listing, path prefix filters, JSON, and common output flags supported; `--full-name` / `--full-tree` / `--format` and `REV:path` syntax are not exposed |
 | symbolic-ref | partial | Supports local `HEAD` only; other symbolic refs are rejected because Libra stores refs in SQLite |
 | branch | supported | |
 | tag | supported | |

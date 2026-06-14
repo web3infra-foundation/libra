@@ -375,7 +375,7 @@ scenarios:
   - id: cli.ls-tree-smoke
     wave: 2
     group: objects
-    purpose: "Document current ls-tree command gap: `libra ls-tree` is not registered, so the scenario asserts stable JSON unknown-command error after creating a tree fixture, then runs fsck."
+    purpose: "Cover the public ls-tree plumbing command: basic tree listing, recursive path filtering, JSON envelope, negative missing path, and fsck."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck, file_exists, negative_exit, lbr_error]

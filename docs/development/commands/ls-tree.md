@@ -2,18 +2,16 @@
 
 ## 命令实现目标
 
-`libra ls-tree` 的目标是检查指定 tree-ish 下的树对象内容，提供 Git tree inspection 的 plumbing 兼容入口。当前实现文件和测试存在但顶层 CLI 尚未公开接入，因此文档需要同时记录可用设计和公开接入缺口。
+`libra ls-tree` 的目标是检查指定 tree-ish 下的树对象内容，提供 Git tree inspection 的 plumbing 兼容入口。当前已公开基础 CLI surface，用于列出 commit/tree 下的条目、递归遍历、路径前缀过滤、常见输出模式和 JSON envelope。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`unpublished`。未进入 COMPATIBILITY.md；以代码接入状态为准。
-
-- 该资料未对应公开 CLI 命令；用户可见状态按未发布处理。
+- 兼容级别：`partial`。基础 tree inspection 已公开；`--full-name` / `--full-tree` / `--format` 与 Git 的 `REV:path` tree-ish 语法仍未公开。
 
 
 ## 设计方案
 
-- 入口与分发：源码资料存在但尚未公开接入 `src/cli.rs::Commands`；当前未由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
+- 入口与分发：`src/cli.rs::Commands::LsTree` 公开顶层 CLI，`src/command/mod.rs` 导出 `ls_tree` 模块；CLI 层在 `src/cli.rs` 把解析后的参数交给 `command::ls_tree::execute_safe`，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
 - 源码分层：主要实现文件为 `src/command/ls_tree.rs`。参数/子命令类型包括：`LsTreeArgs`；输出、错误或状态类型包括：源码未暴露独立输出/错误类型，错误通过 `CliResult` 或上层命令错误统一传播；主要执行函数包括：`execute`、`execute_safe`。
 - 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；对象路径会解析 revision 并读写 blob/tree/commit/tag 等对象。
 
@@ -21,7 +19,7 @@
 
 ```mermaid
 flowchart TD
-    A["入口与分发<br/>未公开 CLI / 设计资料"] --> B["源码分层<br/>src/command/ls_tree.rs"]
+    A["入口与分发<br/>Commands::LsTree"] --> B["源码分层<br/>src/command/ls_tree.rs"]
     B --> C["参数模型<br/>LsTreeArgs"]
     C --> D["执行路径<br/>execute / execute_safe"]
     D --> E["底层对象<br/>Commit / Tree / TreeItemMode"]
@@ -41,8 +39,8 @@ flowchart TD
 
 ## 当前状态
 
-- 公开状态：未公开；模块状态：未从 `src/command/mod.rs` 导出。
-- 用户文档：`docs/commands/ls-tree.md`，当前仅作为 unpublished historical design 页面保留，不声明可执行 CLI 合约。
+- 公开状态：已公开；模块状态：`src/command/mod.rs` 导出 `ls_tree`，`src/cli.rs::Commands::LsTree` 负责 CLI 接入。
+- 用户文档：`docs/commands/ls-tree.md`。
 - Synopsis：`libra ls-tree [OPTIONS] <TREE-ISH> [PATH...]`。
 - 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。
 
@@ -51,8 +49,6 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵 | `COMPATIBILITY.md` 尚未登记该命令行。 | 需要决定是否纳入用户可见兼容矩阵和矩阵守卫。 |
-| CLI 接入 | `src/cli.rs::Commands` 尚未公开该顶层命令。 | 需要决定接入 CLI、降级为内部设计资料，或移出用户命令文档。 |
 | 功能缺口 | full-name, and --full-tree are 延后. | 后续实现时需要同步源码、测试和兼容矩阵。 |
 | 兼容差异项 | 自定义格式 | 原始对照：Deferred；相关参数/替代：--format；当前说明：Different model。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 不支持 REV:path syntax | 当前状态：LBR-UNSUPPORTED-001；Git/相关参数：128。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
