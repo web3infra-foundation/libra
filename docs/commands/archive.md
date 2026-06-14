@@ -1,11 +1,6 @@
 # `libra archive`
 
-Historical design for creating an archive from a committed tree snapshot.
-
-> Status: unpublished. `libra archive` is not registered in the public CLI in
-> the current release. Running it returns the standard unknown-command error
-> (`LBR-CLI-001`). The implementation notes below describe the preserved design
-> in `src/command/archive.rs`, not a user-visible command contract.
+Create an archive from a committed tree snapshot.
 
 ## Synopsis
 
@@ -15,7 +10,7 @@ libra archive [OPTIONS] [TREEISH]
 
 ## Description
 
-The unpublished design is analogous to `git archive`: it resolves a commit, branch,
+`libra archive` is analogous to `git archive`: it resolves a commit, branch,
 tag, or abbreviated commit hash, walks that commit tree, and writes the tracked
 files as an archive. The command does not modify the working tree or index.
 
@@ -54,7 +49,7 @@ libra archive --format=zip -o feature.zip feature-branch
 
 ## Output
 
-If this command is published in a future release, success will write archive bytes to stdout or to the path passed
+On success, `libra archive` writes archive bytes to stdout or to the path passed
 with `--output <FILE>`. It does not print a separate success message.
 
 Tar archives preserve regular files, executable file modes, symlinks, nested

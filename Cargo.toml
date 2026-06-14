@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.1471"
+version = "0.17.1472"
 edition = "2024"
 license = "MIT"
 description = "AI agent-native version control system with Git on-disk compatibility, SQLite-backed metadata, and tiered cloud storage"
@@ -33,6 +33,9 @@ chrono = { version = "0.4.44", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive"] }
 colored = "3.1.1"
 flate2 = "1.1.9"  # add features = ["zlib"] if slow
+tar = "0.4"
+zip = "0.6"
+bzip2 = "0.6"
 futures = "0.3.32"
 futures-util = "0.3.32"
 hex = "0.4.3"

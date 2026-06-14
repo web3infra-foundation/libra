@@ -1560,12 +1560,11 @@ impl Config {
     /// [`ConfigKv::get_current_remote_with_conn`].
     pub async fn get_current_remote_with_conn<C: ConnectionTrait>(
         db: &C,
-    ) -> Result<Option<String>, ()> {
+    ) -> Result<Option<String>> {
         match Head::current_with_conn(db).await {
             Head::Branch(name) => Ok(Config::get_remote_with_conn(db, &name).await),
             Head::Detached(_) => {
-                eprintln!("fatal: HEAD is detached, cannot get remote");
-                Err(())
+                anyhow::bail!("HEAD is detached, cannot get remote")
             }
         }
     }
@@ -1891,7 +1890,7 @@ impl Config {
 
     /// Get remote repo name of current branch (legacy).
     /// Returns `Err(())` when HEAD is detached.
-    pub async fn get_current_remote() -> Result<Option<String>, ()> {
+    pub async fn get_current_remote() -> Result<Option<String>> {
         let db = get_db_conn_instance().await;
         Self::get_current_remote_with_conn(&db).await
     }

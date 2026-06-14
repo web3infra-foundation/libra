@@ -27,7 +27,7 @@ use crate::{
     },
 };
 
-const ARCHIVE_EXAMPLES: &str = "\
+pub const ARCHIVE_EXAMPLES: &str = "\
 EXAMPLES:
     libra archive -o project.tar HEAD
     libra archive --format=tar.gz --prefix=project-v1/ -o project-v1.tar.gz v1.0

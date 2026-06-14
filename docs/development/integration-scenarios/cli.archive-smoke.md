@@ -1,6 +1,6 @@
 ### `cli.archive-smoke`
 
-目的：覆盖 `archive` 当前未公开的 Git 兼容命令状态，确保它不会被误当作已发布 CLI；runner 断言 `libra archive` 返回标准 unknown-command JSON 错误，并在场景末尾验证仓库健康。
+目的：覆盖 `archive` 作为已公开 Git 兼容命令的最小黑盒行为，确保 committed tree 可以生成 tar/zip 文件输出，安全前缀生效，非法前缀被拒绝。
 
 最小步骤：
 
@@ -16,16 +16,37 @@ cd repo
 libra config user.name "Libra Integration"
 libra config user.email "integration@example.invalid"
 printf 'base\n' > tracked.txt
-libra add tracked.txt
+mkdir -p docs
+printf 'archive docs\n' > docs/guide.md
+libra add tracked.txt docs/guide.md
 libra commit -m "test: archive fixtures" --no-verify
 
-! libra --json archive --output "$RUN_DIR/release.tar" --prefix release/
+libra archive --output "$RUN_DIR/release.tar" --prefix release/
+test -f "$RUN_DIR/release.tar"
+python3 -c "p='$RUN_DIR/release.tar'; d=open(p,'rb').read(); assert len(d) >= 263 and d[257:263] in (b'ustar\0', b'ustar '); assert b'release/tracked.txt' in d; assert b'release/docs/guide.md' in d"
+
+libra archive --format=zip --output "$RUN_DIR/release.zip"
+test -f "$RUN_DIR/release.zip"
+python3 -c "d=open('$RUN_DIR/release.zip','rb').read(4); assert d.startswith(b'PK')"
+
+libra --json archive >archive-json.json
+python3 -c "import json; d=json.load(open('archive-json.json')); assert d['ok'] is True; assert d['command'] == 'archive'; assert d['data']"
 libra fsck --connectivity-only
 ```
 
-断言：`archive` 当前未注册为顶层命令；`libra --json archive ...` 必须非 0 退出，JSON 错误码为 `LBR-CLI-001`；操作后 `libra fsck --connectivity-only` 通过。
+负向步骤：
+
+```bash
+cd "$RUN_DIR/repo"
+! libra archive --prefix ../escape
+```
+
+断言：`archive` 默认 tar 文件输出包含 committed tree 中的根文件和子目录文件；`--prefix` 只产生相对归档路径；`--format=zip --output` 生成 zip 文件而不依赖 stdout；`--json` 返回 `ok:true` 且命令名为 `archive`；非法 `..` 前缀必须非 0 退出且错误包含 `invalid archive prefix` 或 `LBR-`；归档操作后 `fsck --connectivity-only` 通过。
 
 补充可执行断言：
-- `libra --json archive --output ...` 必须失败。
-- JSON 错误码必须是 `LBR-CLI-001`。
+- `release.tar` 和 `release.zip` 均必须实际存在。
+- tar 输出包含 `release/tracked.txt` 和 `release/docs/guide.md`。
+- zip 输出必须以 `PK` 文件头开始。
+- `libra archive --prefix ../escape` 必须失败。
+- `--json` 输出包含 `command: "archive"`。
 - 操作后 `libra fsck --connectivity-only` 通过。

@@ -1091,6 +1091,7 @@ async fn execute_clone(
 
 /// Inner implementation that returns an error tuple containing the clone error
 /// and an optional cleanup warning.
+#[allow(clippy::result_large_err)]
 async fn execute_clone_inner(
     args: &CloneArgs,
     original_dir: &Path,
@@ -1227,6 +1228,7 @@ async fn execute_clone_inner(
     })
 }
 
+#[allow(clippy::result_large_err)]
 async fn execute_cloud_publish_clone(
     args: &CloneArgs,
     source: &CloudPublishSource,

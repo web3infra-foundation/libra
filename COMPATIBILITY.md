@@ -76,6 +76,7 @@ batch document.
 | agent | intentionally-different | Libra external-agent capture extension, not a Git command |
 | maintenance | partial | `run` / `register` / `unregister` / `status` exposed; lower-level maintenance tasks such as `commit-graph` and `prefetch` are skipped when unsupported |
 | hooks | intentionally-different | Hidden compatibility entry for hook configs installed by `libra agent enable` |
+| archive | partial | Creates tar/tar.gz/tar.bz2/zip archives from a committed tree; `--format`, `--output`, `--prefix` supported |
 | cat-file | supported | `-e` does not support JSON |
 | fsck | supported | |
 | verify-pack | partial | validates one `.idx` file against a matching `.pack`; Git's multi-index form and `-s` / `--stat-only` are not exposed |

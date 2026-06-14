@@ -22,6 +22,7 @@
 | 命令 | 兼容级别 | 当前说明 |
 |---|---|---|
 | [`add`](add.md) | `partial` | sparse-checkout flag unsupported |
+| [`archive`](archive.md) | `partial` | Creates tar/tar.gz/tar.bz2/zip archives from a committed tree; `--format`, `--output`, `--prefix` supported |
 | [`agent`](agent.md) | `intentionally-different` | Libra external-agent capture extension, not a Git command |
 | [`automation`](automation.md) | `intentionally-different` | Libra AI automation rules/history extension, not a Git command |
 | [`bisect`](bisect.md) | `partial` | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` supported; `replay` (see [docs/development/comma... |
@@ -85,7 +86,7 @@
 
 | 文档 | 当前状态 | 下一步 |
 |---|---|---|
-| [`archive`](archive.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |
+
 | [`for-each-ref`](for-each-ref.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |
 | [`gc`](gc.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |
 | [`ls-files`](ls-files.md) | 未在 `src/cli.rs::Commands` 公开 | 若要发布，补 CLI/dispatch/`COMPATIBILITY.md`/测试；否则保持为历史设计资料。 |

@@ -351,6 +351,11 @@ enum Commands {
     Describe(command::describe::DescribeArgs),
     #[command(about = "Provide content, type or size info for repository objects")]
     CatFile(command::cat_file::CatFileArgs),
+    #[command(
+        about = "Create an archive of files from a named tree",
+        after_help = command::archive::ARCHIVE_EXAMPLES
+    )]
+    Archive(command::archive::ArchiveArgs),
     #[command(about = "Compute Git-compatible object IDs")]
     HashObject(command::hash_object::HashObjectArgs),
     #[command(about = "Validate pack index files against pack archives")]
@@ -1183,6 +1188,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::Push(cmd_args) => command::push::execute_safe(cmd_args, &output).await?,
         Commands::CatFile(cmd_args) => command::cat_file::execute_safe(cmd_args, &output).await?,
+        Commands::Archive(cmd_args) => command::archive::execute_safe(cmd_args, &output).await?,
         Commands::HashObject(cmd_args) => {
             command::hash_object::execute_safe(cmd_args, &output).await?
         }

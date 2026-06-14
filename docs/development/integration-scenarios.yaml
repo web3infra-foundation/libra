@@ -401,10 +401,10 @@ scenarios:
   - id: cli.archive-smoke
     wave: 2
     group: maintenance
-    purpose: "Document current archive command gap: `libra archive` is not registered, so the scenario asserts stable JSON unknown-command error after verifying committed content exists."
+    purpose: "Cover the public archive command: committed tree can generate tar file output with --prefix, --output and --format=zip, and safe prefix rejection."
     gh_required: false
     requires_git: false
-    key_assertion_categories: [file_exists, fsck, negative_exit]
+    key_assertion_categories: [json_envelope, fsck, file_exists, negative_exit]
     doc_section: "cli.archive-smoke"
 
   - id: cli.verify-pack-smoke
