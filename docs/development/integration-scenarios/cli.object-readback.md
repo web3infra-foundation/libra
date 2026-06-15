@@ -32,7 +32,9 @@ libra --json show HEAD
 libra show-ref --head
 libra show-ref --heads
 libra show-ref --hash --heads
-libra --json show-ref --heads
+libra show-ref --abbrev=12 --heads
+libra show-ref --hash=12 --heads
+libra --json show-ref --abbrev=12 --heads
 libra show-ref --verify refs/heads/main
 libra show-ref --verify HEAD
 libra show-ref --exists refs/heads/main
@@ -68,6 +70,6 @@ libra show-ref --dereference --tags v1.0
 关键断言：
 
 - `rev-parse`、`show`、`show-ref`、`cat-file`、`hash-object`、`rev-list`、`fsck` 当前正向路径可用。
-- `show-ref --dereference` 对 annotated tag 输出 `refs/tags/<name>^{}` peeled 行；`show-ref --verify` 只接受完整 refname / `HEAD`；`show-ref --exists` 成功静默，缺失 ref 失败。
+- `show-ref --abbrev=12` / `--hash=12` 输出 HEAD 的 12 位前缀；`show-ref --dereference` 对 annotated tag 输出 `refs/tags/<name>^{}` peeled 行；`show-ref --verify` 只接受完整 refname / `HEAD`；`show-ref --exists` 成功静默，缺失 ref 失败。
 - 缺失 revision/object 和非法 hash-object 类型必须失败。
 - `for-each-ref`、`ls-files`、高级 `rev-parse`/`rev-list` 过滤不属于当前场景正向覆盖。

@@ -68,8 +68,27 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     if stdout_trim(&hash_only) != head_id {
         bail!("show-ref --hash --heads returned unexpected hash");
     }
+    let Some(head_short_12) = head_id.get(..12) else {
+        bail!("rev-parse HEAD returned an id shorter than 12 characters: {head_id}");
+    };
+    let abbreviated = ctx.command(&["show-ref", "--abbrev=12", "--heads"], repo.clone(), true)?;
+    let abbreviated_output = stdout_trim(&abbreviated);
+    let Some(abbreviated_hash) = abbreviated_output.split_whitespace().next() else {
+        bail!("show-ref --abbrev=12 --heads returned empty output");
+    };
+    if abbreviated_hash != head_short_12 {
+        bail!("show-ref --abbrev=12 --heads returned unexpected hash");
+    }
+    let hash_width = ctx.command(&["show-ref", "--hash=12", "--heads"], repo.clone(), true)?;
+    if stdout_trim(&hash_width) != head_short_12 {
+        bail!("show-ref --hash=12 --heads returned unexpected hash");
+    }
     assert_json_ok(
-        &ctx.command(&["--json", "show-ref", "--heads"], repo.clone(), true)?,
+        &ctx.command(
+            &["--json", "show-ref", "--abbrev=12", "--heads"],
+            repo.clone(),
+            true,
+        )?,
         "show-ref",
     )?;
     let object_type = ctx.command(&["cat-file", "-t", &head_id], repo.clone(), true)?;

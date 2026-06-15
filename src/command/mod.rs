@@ -66,6 +66,7 @@ pub mod shortlog;
 pub mod show;
 pub mod show_ref;
 mod show_ref_deref;
+mod show_ref_render;
 pub mod symbolic_ref;
 pub mod tag;
 pub mod usage;

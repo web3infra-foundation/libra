@@ -25,6 +25,11 @@ Use `-d` / `--dereference` to peel annotated tags. Annotated tags are printed
 twice: once for the tag object itself and once as `refs/tags/<name>^{}` pointing
 at the peeled target. Lightweight tags remain single-line entries.
 
+Use `--abbrev[=<n>]` to shorten displayed object IDs, defaulting to 7 hex
+digits when the value is omitted. `--abbrev=0` keeps full hashes. `--hash=<n>`
+combines hash-only output with the same width control; `--hash` without a value
+keeps the full hash unless `--abbrev` is also supplied.
+
 Use `--verify <ref>` when a script needs an exact refname such as `HEAD` or
 `refs/heads/main`; short names like `main` are rejected. Use `--exists <ref>` to
 check whether exactly one ref exists without printing a success line.
@@ -40,7 +45,8 @@ no filesystem scanning.
 | `--heads` | | Show only branches (`refs/heads/`). |
 | `--tags` | | Show only tags (`refs/tags/`). |
 | `--head` | | Include `HEAD` in the output. |
-| `--hash` | `-s` | Only show the object hash, not the reference name. |
+| `--hash[=<n>]` | `-s[<n>]` | Only show the object hash, optionally shortened to `n` hex digits. |
+| `--abbrev[=<n>]` | | Abbreviate object IDs to `n` hex digits, or 7 when `n` is omitted. |
 | `--dereference` | `-d` | Dereference annotated tags and include peeled `^{}` entries. |
 | `--verify` | | Verify exact refnames instead of pattern filtering. |
 | `--exists` | | Check whether exactly one ref exists without printing it. |
@@ -64,6 +70,12 @@ libra show-ref --dereference --tags v1.0
 # Include HEAD and show hashes only
 libra show-ref --head --hash
 
+# Abbreviate refs to 12 hex digits
+libra show-ref --abbrev=12 --heads
+
+# Print only 12 hex digits per matching hash
+libra show-ref --hash=12 --heads
+
 # Verify an exact ref
 libra show-ref --verify refs/heads/main
 
@@ -85,6 +97,8 @@ libra show-ref --heads
 libra show-ref --tags
 libra show-ref --dereference --tags v1.0
 libra show-ref --head --hash
+libra show-ref --abbrev=12 --heads
+libra show-ref --hash=12 --heads
 libra show-ref --verify refs/heads/main
 libra show-ref --exists refs/heads/main
 libra show-ref --json --head --heads
@@ -114,6 +128,18 @@ def5678901234567890abcdef12345678abc1234 refs/tags/v1.0.0
 abc1234def5678901234567890abcdef12345678 refs/tags/v1.0.0^{}
 ```
 
+With `--abbrev=12`, hashes are shortened while refnames remain visible:
+
+```text
+abc1234def56 refs/heads/main
+```
+
+With `--hash=12`, only the shortened hash is printed:
+
+```text
+abc1234def56
+```
+
 ## Structured Output (JSON examples)
 
 ```json
@@ -122,6 +148,7 @@ abc1234def5678901234567890abcdef12345678 refs/tags/v1.0.0^{}
   "command": "show-ref",
   "data": {
     "hash_only": false,
+    "abbrev": null,
     "entries": [
       {
         "hash": "abc1234def5678901234567890abcdef12345678",
@@ -140,8 +167,10 @@ abc1234def5678901234567890abcdef12345678 refs/tags/v1.0.0^{}
 }
 ```
 
-When `--hash` is active, `hash_only` is `true`. The `entries` array is always
-present regardless of the flag so that JSON consumers have a uniform schema.
+When `--hash` is active, `hash_only` is `true`. When `--abbrev` or a hash width
+is active, `abbrev` records the width and `entries[].hash` contains the displayed
+abbreviated value. The `entries` array is always present regardless of the flag
+so that JSON consumers have a uniform schema.
 
 With `--exists`, human output is silent on success. JSON output reports the
 checked ref:
@@ -193,7 +222,8 @@ and which commit it resolves to.
 | Filter to branches | `--heads` | `--heads` | `jj bookmark list` |
 | Filter to tags | `--tags` | `--tags` | `jj tag list` |
 | Include HEAD | `--head` | `--head` | N/A (no HEAD concept) |
-| Hash-only output | `-s` / `--hash` | `-s` / `--hash` | N/A |
+| Hash-only output | `-s[<n>]` / `--hash[=<n>]` | `-s[<n>]` / `--hash[=<n>]` | N/A |
+| Abbreviate object IDs | `--abbrev[=<n>]` | `--abbrev[=<n>]` | N/A |
 | Dereference annotated tags | `-d` / `--dereference` | `-d` / `--dereference` | N/A |
 | Pattern matching | Path-segment suffix match | Path-segment suffix match | Regex via revset |
 | `--verify` (check exact ref) | `--verify <ref>` | Yes | N/A |

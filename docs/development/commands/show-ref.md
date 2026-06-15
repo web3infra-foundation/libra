@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra show-ref` 的目标是列出本地 refs（分支、标签）及其对象哈希。当前实现支持 `--heads` / `--tags` 范围过滤、`--head` 纳入 HEAD、`-s, --hash` 仅输出哈希、`-d, --dereference` 展开 annotated tag 的 peeled `^{}` 行、`[PATTERN]...` 按 Git 风格完整路径段后缀过滤、远端跟踪分支、`--verify <ref>` 精确 ref 验证以及 `--exists <ref>` 存在性检查。
+`libra show-ref` 的目标是列出本地 refs（分支、标签）及其对象哈希。当前实现支持 `--heads` / `--tags` 范围过滤、`--head` 纳入 HEAD、`-s, --hash[=<n>]` 仅输出哈希且可选缩短、`--abbrev[=<n>]` 缩短显示哈希、`-d, --dereference` 展开 annotated tag 的 peeled `^{}` 行、`[PATTERN]...` 按 Git 风格完整路径段后缀过滤、远端跟踪分支、`--verify <ref>` 精确 ref 验证以及 `--exists <ref>` 存在性检查。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。branch/tag/HEAD listing、hash-only 输出、`--dereference`、`--verify` 和 `--exists` 已支持；abbrev 和 exclude-existing 尚未公开。
+- 兼容级别：`partial`。branch/tag/HEAD listing、`--hash[=<n>]`、`--abbrev[=<n>]`、`--dereference`、`--verify` 和 `--exists` 已支持；`--exclude-existing` 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -14,8 +14,8 @@
 ## 设计方案
 
 - 入口与分发：已公开接入 `src/cli.rs::Commands`；已由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
-- 源码分层：主要实现文件为 `src/command/show_ref.rs`（由 `src/command/mod.rs` 的 `pub mod show_ref;` 直接声明），annotated tag 展开逻辑位于 `src/command/show_ref_deref.rs` 私有 helper 模块。参数/子命令类型包括：`ShowRefArgs`；输出、错误或状态类型包括：内部 `ShowRefEntry`，错误通过 `CliResult` / `CliError` 统一传播；主要执行函数包括：`execute`、`execute_safe`、`collect_show_ref_entries`。
-- 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；普通列举路径调用 `collect_show_ref_entries`，`--verify` / `--exists` 走精确 refname 检查路径；命令为纯只读，通过 `Branch::list_branches_result`、`tag::list()`、`ConfigKv::all_remote_configs()` 和 `Head::current_commit_result()` 读取 SQLite refs/HEAD 与远端配置；`--dereference` 仅额外读取 annotated tag 指向的对象链以计算 peeled hash，不更新 refs、HEAD 或 reflog。
+- 源码分层：主要实现文件为 `src/command/show_ref.rs`（由 `src/command/mod.rs` 的 `pub mod show_ref;` 直接声明），annotated tag 展开逻辑位于 `src/command/show_ref_deref.rs` 私有 helper 模块，输出渲染和 hash 缩短逻辑位于 `src/command/show_ref_render.rs` 私有 helper 模块。参数/子命令类型包括：`ShowRefArgs`；输出、错误或状态类型包括：内部 `ShowRefEntry` 和 `ShowRefRenderOptions`，错误通过 `CliResult` / `CliError` 统一传播；主要执行函数包括：`execute`、`execute_safe`、`collect_show_ref_entries`。
+- 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；普通列举路径调用 `collect_show_ref_entries`，`--verify` / `--exists` 走精确 refname 检查路径；命令为纯只读，通过 `Branch::list_branches_result`、`tag::list()`、`ConfigKv::all_remote_configs()` 和 `Head::current_commit_result()` 读取 SQLite refs/HEAD 与远端配置；`--dereference` 仅额外读取 annotated tag 指向的对象链以计算 peeled hash；`--abbrev[=<n>]` / `--hash[=<n>]` 只影响渲染出的 hash 字段，不更新 refs、HEAD 或 reflog。
 
 - 流程图：以下流程图按当前源码分层展示主路径和底层对象边界，便于维护者把代码入口、执行函数和副作用范围对应起来。
 
@@ -47,14 +47,14 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/show-ref.md`。
 - Synopsis：`libra show-ref [OPTIONS] [PATTERN]...`。
-- 公开参数/子命令包括：`--heads`、`--tags`、`--head`、`-s, --hash`、`-d, --dereference`、`--verify`、`--exists`、`[PATTERN]...`。
+- 公开参数/子命令包括：`--heads`、`--tags`、`--head`、`-s, --hash[=<n>]`、`--abbrev[=<n>]`、`-d, --dereference`、`--verify`、`--exists`、`[PATTERN]...`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| Git 参数 | `--abbrev`、`--exclude-existing` 尚未公开；`--exists` 已按 Git 用法对缺失 ref 返回退出码 2，但其他错误仍遵循 Libra 稳定错误码契约。 | 后续若落地需新增实现、补稳定错误码与回归测试。 |
+| Git 参数 | `--exclude-existing` 尚未公开；`--exists` 已按 Git 用法对缺失 ref 返回退出码 2，但其他错误仍遵循 Libra 稳定错误码契约。 | 后续若落地需新增实现、补稳定错误码与回归测试。 |
 
 ## 维护要求
 

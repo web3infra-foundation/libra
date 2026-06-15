@@ -1,12 +1,13 @@
 //! Implements `show-ref` to list all refs (branches, tags) with their object IDs.
 
-use std::io::Write;
-
 use clap::Parser;
 use serde::Serialize;
 
 use crate::{
-    command::show_ref_deref,
+    command::{
+        show_ref_deref,
+        show_ref_render::{ShowRefRenderOptions, render_show_ref_entries},
+    },
     internal::{
         branch::{Branch, BranchStoreError},
         config::ConfigKv,
@@ -35,6 +36,7 @@ EXAMPLES:
     libra show-ref --tags            List only tags (refs/tags/)
     libra show-ref --head            Include HEAD in the output
     libra show-ref -s --heads        Print branch hashes only (one per line, scripting-friendly)
+    libra show-ref --abbrev=12       Abbreviate object IDs to 12 hex digits
     libra show-ref -d --tags         Peel annotated tags and show refs/tags/<name>^{} lines
     libra show-ref --verify refs/heads/main
                                      Verify an exact refname and print it
@@ -58,9 +60,26 @@ pub struct ShowRefArgs {
     #[clap(long = "head")]
     pub head: bool,
 
-    /// Only show the object hash, not the reference name
-    #[clap(short = 's', long = "hash")]
-    pub hash: bool,
+    /// Only show the object hash, optionally shortened to N hex digits
+    #[clap(
+        short = 's',
+        long = "hash",
+        value_name = "N",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "0"
+    )]
+    pub hash: Option<usize>,
+
+    /// Abbreviate object IDs to N hex digits, or 7 when no value is supplied
+    #[clap(
+        long = "abbrev",
+        value_name = "N",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "7"
+    )]
+    pub abbrev: Option<usize>,
 
     /// Dereference annotated tags and include peeled refs/tags/<name>^{} entries
     #[clap(short = 'd', long = "dereference")]
@@ -101,39 +120,11 @@ pub async fn execute_safe(args: ShowRefArgs, output: &OutputConfig) -> CliResult
     }
 
     let entries = collect_show_ref_entries(&args).await?;
-    render_show_ref_entries(&entries, args.hash, output)
-}
-
-fn render_show_ref_entries(
-    entries: &[ShowRefEntry],
-    hash_only: bool,
-    output: &OutputConfig,
-) -> CliResult<()> {
-    if output.is_json() {
-        emit_json_data(
-            "show-ref",
-            &serde_json::json!({
-                "hash_only": hash_only,
-                "entries": entries,
-            }),
-            output,
-        )
-    } else if output.quiet {
-        Ok(())
-    } else {
-        let stdout = std::io::stdout();
-        let mut writer = stdout.lock();
-        for entry in entries {
-            if hash_only {
-                writeln!(writer, "{}", entry.hash)
-                    .map_err(|e| CliError::io(format!("failed to write show-ref output: {e}")))?;
-            } else {
-                writeln!(writer, "{} {}", entry.hash, entry.refname)
-                    .map_err(|e| CliError::io(format!("failed to write show-ref output: {e}")))?;
-            }
-        }
-        Ok(())
-    }
+    render_show_ref_entries(
+        &entries,
+        ShowRefRenderOptions::from_args(args.hash, args.abbrev),
+        output,
+    )
 }
 
 fn show_ref_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
@@ -269,7 +260,11 @@ async fn execute_verify(args: &ShowRefArgs, output: &OutputConfig) -> CliResult<
         verified.push(entry.clone());
     }
 
-    render_show_ref_entries(&verified, args.hash, output)
+    render_show_ref_entries(
+        &verified,
+        ShowRefRenderOptions::from_args(args.hash, args.abbrev),
+        output,
+    )
 }
 
 async fn execute_exists(args: &ShowRefArgs, output: &OutputConfig) -> CliResult<()> {
