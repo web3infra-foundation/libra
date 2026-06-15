@@ -67,7 +67,7 @@ batch document.
 | blame | partial | file blame with numeric `-L` ranges and ignore-rev inputs supported; porcelain, reverse, email, whitespace, incremental, and copy/move detection are not exposed |
 | revert | partial | single-commit revert and `-n/--no-commit` supported; edit/mainline/sequencer/strategy surface remains incomplete |
 | remote | partial | add/remove/rename/list/get-url/set-url/prune supported; detailed `remote show <name>` and `remote update` are not exposed |
-| hash-object | partial | Blob hashing for files and `--stdin`; `-w` writes blob objects. Other object types and advanced Git hash-object flags are unsupported |
+| hash-object | partial | Blob hashing for files and `--stdin`; `-w` writes blob objects; `--path` and `--no-filters` are accepted for raw-byte hashing. Other object types and advanced Git hash-object flags are unsupported |
 | open | supported | |
 | config | partial | vault-backed local/global config is supported; system scope, editor round-trip, typed conversion, NUL output, section rename/remove, and includeIf are incomplete |
 | db | intentionally-different | Libra repository database schema inspection/upgrade extension, not a Git command |

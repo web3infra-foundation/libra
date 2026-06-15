@@ -199,7 +199,7 @@
 | `ls-tree` | `cli.ls-tree-smoke` | 已公开基础 tree inspection：默认输出、递归路径过滤、`--name-only`、JSON envelope、缺失路径负向和 fsck |
 | `cat-file -t/-s/-p/-e <object>` | `cli.object-readback` | object 类型、大小、内容和存在性退出码可观察 |
 | `cat-file --ai*` | 无（显式排除） | AI object inspection 属 Libra AI 扩展，不纳入 Git 兼容黑盒计划 |
-| `hash-object -w` / `--stdin` / `-t` | `cli.object-readback`、`cli.sha256-object-readback` | blob 写入、stdin 输入、类型校验和 sha256 object id 可观察 |
+| `hash-object -w` / `--stdin` / `--path` / `--no-filters` / `-t` | `cli.object-readback`、`cli.sha256-object-readback` | blob 写入、stdin 输入、路径上下文/no-filters 兼容入口、类型校验和 sha256 object id 可观察 |
 | `show --no-patch` / `<rev>:<path>` / `<blob>` | `cli.object-readback` | commit 元数据、历史文件内容和 blob 内容可观察 |
 | `show-ref --head` / `--heads` / `--hash[=<n>]` / `--abbrev[=<n>]` / `--dereference` / `--verify` / `--exists` | `cli.object-readback` | HEAD/分支引用、hash-only/abbrev 输出、annotated tag peel、精确 ref 验证和存在性检查可观察 |
 | `for-each-ref --points-at <object>` | `cli.object-readback` | 指向指定对象的 branch、lightweight tag、annotated tag 可观察 |

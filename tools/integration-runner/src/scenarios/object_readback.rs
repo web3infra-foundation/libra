@@ -119,6 +119,14 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
         &ctx.command(&["--json", "hash-object", "loose.txt"], repo.clone(), true)?,
         "hash-object",
     )?;
+    let no_filters_blob = ctx.command(
+        &["hash-object", "--no-filters", "loose.txt"],
+        repo.clone(),
+        true,
+    )?;
+    if stdout_trim(&no_filters_blob) != blob_id {
+        bail!("hash-object --no-filters id did not match default blob id");
+    }
     let stdin_blob = ctx.command_with_stdin(
         &["hash-object", "--stdin"],
         repo.clone(),
@@ -128,6 +136,27 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     if stdout_trim(&stdin_blob) != blob_id {
         bail!("hash-object --stdin id did not match file blob id");
     }
+    let stdin_path_json = ctx.command_with_stdin(
+        &["--json", "hash-object", "--stdin", "--path", "loose.txt"],
+        repo.clone(),
+        "loose blob\n",
+        true,
+    )?;
+    assert_json_ok(&stdin_path_json, "hash-object")?;
+    assert_stdout_contains(&stdin_path_json, "\"source\": \"loose.txt\"")?;
+    let path_no_filters = ctx.command_with_stdin(
+        &[
+            "hash-object",
+            "--stdin",
+            "--path",
+            "loose.txt",
+            "--no-filters",
+        ],
+        repo.clone(),
+        "loose blob\n",
+        false,
+    )?;
+    assert_lbr_or_text(&path_no_filters, "cannot be used with")?;
     let bad_type = ctx.command(
         &["hash-object", "-t", "bogus", "loose.txt"],
         repo.clone(),

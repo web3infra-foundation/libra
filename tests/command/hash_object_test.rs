@@ -92,6 +92,71 @@ async fn hash_object_stdin_works_outside_repository() {
 }
 
 #[tokio::test]
+async fn hash_object_no_filters_matches_default_hash() {
+    let repo = tempfile::tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+    fs::write(repo.path().join("hello.txt"), b"hello").expect("write fixture");
+
+    let output = run_libra_command(&["hash-object", "--no-filters", "hello.txt"], repo.path());
+    assert_cli_success(&output, "hash-object --no-filters should succeed");
+
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0"
+    );
+}
+
+#[tokio::test]
+async fn hash_object_stdin_path_matches_raw_hash_and_reports_source_label() {
+    let repo = tempfile::tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command_with_stdin(
+        &[
+            "hash-object",
+            "--stdin",
+            "--path=virtual/input.txt",
+            "--json",
+        ],
+        repo.path(),
+        "hello",
+    );
+    assert_cli_success(&output, "hash-object --stdin --path should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["objects"][0]["source"], "virtual/input.txt");
+    assert_eq!(
+        json["data"]["objects"][0]["oid"],
+        "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0"
+    );
+}
+
+#[tokio::test]
+async fn hash_object_path_conflicts_with_no_filters() {
+    let repo = tempfile::tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command_with_stdin(
+        &[
+            "hash-object",
+            "--stdin",
+            "--path=virtual/input.txt",
+            "--no-filters",
+        ],
+        repo.path(),
+        "hello",
+    );
+
+    assert_eq!(output.status.code(), Some(129));
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        human.contains("cannot be used with"),
+        "expected clap conflict message, got: {human}"
+    );
+}
+
+#[tokio::test]
 async fn hash_object_write_still_requires_repository() {
     let dir = tempfile::tempdir().expect("create temp dir");
     fs::write(dir.path().join("persist.txt"), b"persist me").expect("write fixture");

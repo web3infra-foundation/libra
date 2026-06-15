@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra hash-object` 的目标是计算 Git 兼容对象 ID，并可选地把 blob 写入对象库。实现需要支持文件、stdin、对象类型参数、`--literally`、`--path` 和 filters/no-filters 的兼容边界，同时把不支持的对象类型和属性过滤行为清晰暴露。
+`libra hash-object` 的目标是计算 Git 兼容对象 ID，并可选地把 blob 写入对象库。实现需要支持文件、stdin、对象类型参数、`--path` 和 `--no-filters` 的兼容边界，同时把 `--literally`、不支持的对象类型和属性过滤行为清晰暴露。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。Blob hashing for files and `--stdin`; `-w` writes blob objects. Other object types and advanced Git hash-object flags are unsupported
+- 兼容级别：`partial`。Blob hashing for files and `--stdin`; `-w` writes blob objects; `--path` and `--no-filters` are accepted for raw-byte hashing. Other object types and advanced Git hash-object flags are unsupported
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -15,7 +15,7 @@
 
 - 入口与分发：已公开接入 `src/cli.rs::Commands`；已由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
 - 源码分层：主要实现文件为 `src/command/hash_object.rs`。参数/子命令类型包括：`HashObjectArgs`；输出、错误或状态类型包括：源码未暴露独立输出/错误类型，错误通过 `CliResult` 或上层命令错误统一传播；主要执行函数包括：`execute`、`execute_safe`。
-- 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；仅读取文件或 stdin 内容并计算 blob 对象，`-w` 时通过 `save_object` 写入对象库（不解析 revision，亦不处理 tree/commit/tag）。
+- 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；仅读取文件或 stdin 内容并计算 blob 对象，`--path` 只作为 stdin JSON source label / Git 兼容路径上下文，`--no-filters` 显式选择当前 raw-byte hashing 行为，`-w` 时通过 `save_object` 写入对象库（不解析 revision，亦不处理 tree/commit/tag）。
 
 - 流程图：以下流程图按当前源码分层展示主路径和底层对象边界，便于维护者把代码入口、执行函数和副作用范围对应起来。
 
@@ -37,7 +37,7 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-05-18 `dc17dc9b`（`feat(hash-object): add blob hashing command (#373)`）：基础实现节点：add blob hashing command (#373)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-05 `0b4c12a0`（`feat(hash-object): accept --path source label and --no-filters no-op`）：注意：当前 `src/command/hash_object.rs` 并未保留 `--path` / `--no-filters` 参数，该提交描述与现状不符，相关能力仍属“还未实现”。
+- 2026-06-15 本批实现：当前 `src/command/hash_object.rs` 已重新公开 `--path` / `--no-filters`。`--path` 不应用 attributes/clean filters，只作为 Git 兼容路径上下文和 stdin JSON source label；`--no-filters` 为 raw-byte hashing 的显式 no-op。
 - 2026-06-05 `2f3306e7`（`feat(hash-object): support -t commit/tree/tag with --literally and write`）：注意：当前代码仅接受 `-t blob`，其余对象类型在 `execute_safe` 显式拒绝，亦无 `--literally`；该提交描述与现状不符。
 - 2026-06-07 `da3f2f99`（`fix(hash-object): close compatibility plan gaps`）：实现修正：close compatibility plan gaps；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
@@ -46,15 +46,15 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/hash-object.md`。
-- 公开参数/子命令包括：`-w, --write`、`--stdin`、`-t, --type <TYPE>`（仅接受 `blob`，其余类型显式拒绝）、`<PATH>...`。
+- 公开参数/子命令包括：`-w, --write`、`--stdin`、`--path <PATH>`、`--no-filters`、`-t, --type <TYPE>`（仅接受 `blob`，其余类型显式拒绝）、`<PATH>...`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵说明 | Blob hashing for files and `--stdin`; `-w` writes blob objects. Other object types and advanced Git hash-object flags are 不支持 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
-| 兼容差异项 | Path filters / attributes | 原始对照：不支持；相关参数/替代：--path, filters；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容矩阵说明 | Blob hashing for files and `--stdin`; `-w` writes blob objects; `--path` / `--no-filters` accepted for raw-byte hashing. Other object types and advanced Git hash-object flags are 不支持 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
+| 兼容差异项 | Path filters / attributes | 原始对照：Git 可用 `--path` 触发 attribute/filter 处理；相关参数/替代：`--path` 已接受但不应用 filters，`--no-filters` 为 raw-byte hashing no-op；当前说明：属性过滤仍不支持。 后续实现真正 filter/attribute 支持时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | Hash literally invalid objects | 原始对照：不支持；相关参数/替代：--literally；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求
