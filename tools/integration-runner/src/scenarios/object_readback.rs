@@ -145,6 +145,23 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     )?;
     let rev_list = ctx.command(&["rev-list", "HEAD"], repo.clone(), true)?;
     assert_stdout_contains(&rev_list, &head_id)?;
+    let rev_count = ctx.command(&["rev-list", "--count", "HEAD"], repo.clone(), true)?;
+    if stdout_trim(&rev_count) != "2" {
+        bail!("rev-list --count HEAD returned unexpected count");
+    }
+    let rev_limit = ctx.command(&["rev-list", "-n", "1", "HEAD"], repo.clone(), true)?;
+    let rev_limit_stdout = String::from_utf8_lossy(&rev_limit.stdout);
+    if rev_limit_stdout.lines().count() != 1 {
+        bail!("rev-list -n 1 HEAD returned more than one commit");
+    }
+    let rev_skip = ctx.command(
+        &["rev-list", "--skip", "1", "--max-count", "1", "HEAD"],
+        repo.clone(),
+        true,
+    )?;
+    if stdout_trim(&rev_skip) != head_id {
+        bail!("rev-list --skip 1 --max-count 1 HEAD did not return the parent commit");
+    }
     assert_json_ok(
         &ctx.command(&["--json", "rev-list", "HEAD"], repo.clone(), true)?,
         "rev-list",

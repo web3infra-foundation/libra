@@ -25,6 +25,8 @@ use crate::{
 pub const REV_LIST_EXAMPLES: &str = "\
 EXAMPLES:
     libra rev-list                  Walk ancestry from HEAD (one hash per line)
+    libra rev-list --count HEAD     Count reachable commits after filters
+    libra rev-list -n 5 HEAD        Limit output to the first five commits
     libra rev-list main             Walk ancestry from refs/heads/main
     libra rev-list HEAD~5           Walk ancestry from a relative ref
     libra rev-list --json HEAD      Structured JSON output (input + commits[] + total)
@@ -33,6 +35,18 @@ EXAMPLES:
 #[derive(Parser, Debug)]
 #[command(after_help = REV_LIST_EXAMPLES)]
 pub struct RevListArgs {
+    /// Limit output to at most N commits
+    #[clap(short = 'n', long = "max-count", value_name = "N")]
+    pub max_count: Option<usize>,
+
+    /// Skip the first N commits before output or counting
+    #[clap(long, value_name = "N", default_value_t = 0)]
+    pub skip: usize,
+
+    /// Print only the number of commits after filters
+    #[clap(long)]
+    pub count: bool,
+
     /// Revision to list from. Defaults to HEAD when omitted.
     #[clap(value_name = "SPEC")]
     pub spec: Option<String>,
@@ -43,6 +57,9 @@ struct RevListOutput {
     input: String,
     commits: Vec<String>,
     total: usize,
+    count_only: bool,
+    max_count: Option<usize>,
+    skip: usize,
 }
 
 pub async fn execute(args: RevListArgs) -> Result<(), String> {
@@ -59,10 +76,25 @@ pub async fn execute_safe(args: RevListArgs, output: &OutputConfig) -> CliResult
         emit_json_data("rev-list", &result, output)
     } else if output.quiet {
         Ok(())
+    } else if result.count_only {
+        let stdout = std::io::stdout();
+        let mut writer = stdout.lock();
+        write_rev_list_count(&mut writer, result.total)
     } else {
         let stdout = std::io::stdout();
         let mut writer = stdout.lock();
         write_rev_list_output(&mut writer, &result.commits)
+    }
+}
+
+fn write_rev_list_count<W: Write>(writer: &mut W, total: usize) -> CliResult<()> {
+    match writeln!(writer, "{total}") {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(
+            CliError::fatal(format!("failed to write rev-list output: {error}"))
+                .with_stable_code(StableErrorCode::IoWriteFailed),
+        ),
     }
 }
 
@@ -92,6 +124,8 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
 
     let commits = commits
         .into_iter()
+        .skip(args.skip)
+        .take(args.max_count.unwrap_or(usize::MAX))
         .map(|commit| commit.id.to_string())
         .collect::<Vec<_>>();
     let total = commits.len();
@@ -100,6 +134,9 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         input: spec.to_string(),
         commits,
         total,
+        count_only: args.count,
+        max_count: args.max_count,
+        skip: args.skip,
     })
 }
 
@@ -144,7 +181,7 @@ mod tests {
         },
     };
 
-    use super::{RevListArgs, sort_rev_list_commits, write_rev_list_output};
+    use super::{RevListArgs, sort_rev_list_commits, write_rev_list_count, write_rev_list_output};
     use crate::utils::error::StableErrorCode;
 
     struct FailingWriter {
@@ -200,6 +237,17 @@ mod tests {
     }
 
     #[test]
+    fn test_rev_list_args_parse_count_controls() {
+        let args =
+            RevListArgs::try_parse_from(["rev-list", "-n", "2", "--skip", "1", "--count", "HEAD"])
+                .unwrap();
+        assert_eq!(args.max_count, Some(2));
+        assert_eq!(args.skip, 1);
+        assert!(args.count);
+        assert_eq!(args.spec.as_deref(), Some("HEAD"));
+    }
+
+    #[test]
     fn test_sort_rev_list_commits_preserves_equal_timestamp_order() {
         let high = test_hash(0xff);
         let low = test_hash(0x01);
@@ -243,5 +291,16 @@ mod tests {
 
         write_rev_list_output(&mut writer, &["abc123".to_string()])
             .expect("broken pipe should be ignored");
+    }
+
+    #[test]
+    fn test_write_rev_list_count_maps_write_failure_to_write_code() {
+        let mut writer = FailingWriter {
+            kind: io::ErrorKind::PermissionDenied,
+        };
+
+        let error = write_rev_list_count(&mut writer, 1).expect_err("write should fail");
+
+        assert_eq!(error.stable_code(), StableErrorCode::IoWriteFailed);
     }
 }

@@ -96,6 +96,64 @@ fn test_rev_list_supports_revision_navigation() {
 }
 
 #[test]
+fn test_rev_list_max_count_and_skip_limit_visible_output() {
+    let repo = create_two_commit_repo_with_direct_tip_update(1);
+
+    let full = run_libra_command(&["rev-list", "HEAD"], repo.path());
+    assert_cli_success(&full, "rev-list HEAD");
+    let full_stdout = String::from_utf8_lossy(&full.stdout);
+    let full_lines = full_stdout.lines().collect::<Vec<_>>();
+    assert_eq!(full_lines.len(), 2, "expected two commits: {full_stdout}");
+
+    let limited = run_libra_command(&["rev-list", "--max-count", "1", "HEAD"], repo.path());
+    assert_cli_success(&limited, "rev-list --max-count 1 HEAD");
+    let limited_stdout = String::from_utf8_lossy(&limited.stdout);
+    assert_eq!(
+        limited_stdout.lines().collect::<Vec<_>>(),
+        vec![full_lines[0]]
+    );
+
+    let short_limited = run_libra_command(&["rev-list", "-n", "1", "HEAD"], repo.path());
+    assert_cli_success(&short_limited, "rev-list -n 1 HEAD");
+    assert_eq!(short_limited.stdout, limited.stdout);
+
+    let skipped = run_libra_command(
+        &["rev-list", "--skip", "1", "--max-count", "1", "HEAD"],
+        repo.path(),
+    );
+    assert_cli_success(&skipped, "rev-list --skip 1 --max-count 1 HEAD");
+    let skipped_stdout = String::from_utf8_lossy(&skipped.stdout);
+    assert_eq!(
+        skipped_stdout.lines().collect::<Vec<_>>(),
+        vec![full_lines[1]]
+    );
+}
+
+#[test]
+fn test_rev_list_count_reports_filtered_commit_count() {
+    let repo = create_two_commit_repo_with_direct_tip_update(1);
+
+    let all = run_libra_command(&["rev-list", "--count", "HEAD"], repo.path());
+    assert_cli_success(&all, "rev-list --count HEAD");
+    assert_eq!(String::from_utf8_lossy(&all.stdout).trim(), "2");
+
+    let limited = run_libra_command(
+        &[
+            "rev-list",
+            "--count",
+            "--skip",
+            "1",
+            "--max-count",
+            "1",
+            "HEAD",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&limited, "rev-list --count --skip 1 --max-count 1 HEAD");
+    assert_eq!(String::from_utf8_lossy(&limited.stdout).trim(), "1");
+}
+
+#[test]
 fn test_rev_list_invalid_target_returns_cli_error_code() {
     let repo = create_committed_repo_via_cli();
 
@@ -223,6 +281,8 @@ fn test_rev_list_help_lists_examples_banner() {
     );
     for invocation in [
         "libra rev-list",
+        "libra rev-list --count HEAD",
+        "libra rev-list -n 5 HEAD",
         "libra rev-list main",
         "libra rev-list HEAD~5",
         "libra rev-list --json HEAD",

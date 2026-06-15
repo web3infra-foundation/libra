@@ -55,7 +55,7 @@ batch document.
 | merge | partial | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |
 | reset | partial | `--soft`, `--mixed`, `--hard`, and pathspec reset supported; `--merge`, `--keep`, pathspec-from-file, and no-refresh are not exposed |
 | rev-parse | partial | basic revision parsing, `--short`, `--abbrev-ref`, and `--show-toplevel` supported; verify/default/repository-query/output-filter/parseopt modes are not exposed |
-| rev-list | partial | single revision reachability listing supported; ranges, exclusions, count/limit, parent filters, and extended output are not exposed |
+| rev-list | partial | single revision reachability listing plus `--count`, `-n`/`--max-count`, and `--skip` supported; ranges, exclusions, parent filters, and extended output are not exposed |
 | describe | partial | basic describe, `--tags`, `--always`, `--abbrev`, `--exact-match`, and `--dirty[=<mark>]` supported; long/match/exclude/first-parent/contains/candidates/all are not exposed |
 | notes | partial | `add` / `show` / `list` / `remove` supported; `--ref` supported; append/edit/copy/merge/prune and editor support not implemented |
 | cherry-pick | partial | basic one-or-more commit replay, `-n/--no-commit`, and `-x` supported; edit/mainline/signoff/ff/sequencer/strategy/empty-policy surface remains incomplete |

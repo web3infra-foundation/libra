@@ -67,7 +67,7 @@
 | [`remote`](remote.md) | `partial` | add/remove/rename/list/get-url/set-url/prune supported; detailed show and update not exposed |
 | [`reset`](reset.md) | `partial` | soft/mixed/hard/path reset supported; merge/keep/pathspec-from-file/no-refresh not exposed |
 | [`restore`](restore.md) | `partial` | source/staged/worktree path restore supported; overlay/conflict/progress variants not exposed |
-| [`rev-list`](rev-list.md) | `partial` | single revision reachability listing supported; ranges/exclusions/count/parent filters not exposed |
+| [`rev-list`](rev-list.md) | `partial` | single revision reachability plus count/limit controls supported; ranges, exclusions, parent filters, and extended output not exposed |
 | [`rev-parse`](rev-parse.md) | `partial` | basic revision parsing and toplevel/short/abbrev-ref supported; verify/default/repository-query/filter modes not exposed |
 | [`revert`](revert.md) | `partial` | single-commit revert and `-n` supported; edit/mainline/sequencer/strategy flags incomplete |
 | [`rm`](rm.md) | `partial` | `--force` / `--dry-run` / `--cached` / `--recursive` / `--ignore-unmatch` / `--pathspec-from-file` / `--pathspec-file... |
