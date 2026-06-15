@@ -175,6 +175,7 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
         repo.clone(),
         true,
     )?;
+    ctx.command(&["tag", "v1-light"], repo.clone(), true)?;
     let dereferenced_tag = ctx.command(
         &["show-ref", "--dereference", "--tags", "v1.0"],
         repo.clone(),
@@ -182,6 +183,27 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     )?;
     assert_stdout_contains(&dereferenced_tag, "refs/tags/v1.0^{}")?;
     assert_stdout_contains(&dereferenced_tag, &latest_head)?;
+    let refs_at_head = ctx.command(
+        &[
+            "for-each-ref",
+            "--points-at",
+            &latest_head,
+            "--format=%(refname) %(objecttype)",
+        ],
+        repo.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&refs_at_head, "refs/heads/main commit")?;
+    assert_stdout_contains(&refs_at_head, "refs/tags/v1.0 tag")?;
+    assert_stdout_contains(&refs_at_head, "refs/tags/v1-light commit")?;
+    assert_json_ok(
+        &ctx.command(
+            &["--json", "for-each-ref", "--points-at", &latest_head],
+            repo.clone(),
+            true,
+        )?,
+        "for-each-ref",
+    )?;
     let missing = ctx.command(&["cat-file", "-t", "deadbeef"], repo, false)?;
     assert_lbr_or_text(&missing, "object not found")?;
     Ok(())

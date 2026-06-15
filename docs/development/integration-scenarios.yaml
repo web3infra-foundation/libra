@@ -366,7 +366,7 @@ scenarios:
   - id: cli.object-readback
     wave: 2
     group: objects
-    purpose: "End-to-end object roundtrip over current plumbing: rev-parse HEAD/--short/--show-toplevel, show commit/path/blob, show-ref --head/--heads/--hash[=<n>]/--abbrev[=<n>]/--dereference/--verify/--exists, cat-file type/size/pretty/exists, hash-object file/stdin, rev-list HEAD/--count/-n/--skip, fsck, and negative object/revision paths."
+    purpose: "End-to-end object roundtrip over current plumbing: rev-parse HEAD/--short/--show-toplevel, show commit/path/blob, show-ref --head/--heads/--hash[=<n>]/--abbrev[=<n>]/--dereference/--verify/--exists, for-each-ref --points-at, cat-file type/size/pretty/exists, hash-object file/stdin, rev-list HEAD/--count/-n/--skip, fsck, and negative object/revision paths."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck, negative_exit]

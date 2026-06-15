@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra for-each-ref` 的目标是按格式列出本地引用，作为 Git ref listing 的 plumbing 兼容入口。当前实现文件、用户文档和顶层 CLI 入口均已公开；剩余工作集中在完整 atom 语言、高级过滤和 quoting mode。
+`libra for-each-ref` 的目标是按格式列出本地引用，作为 Git ref listing 的 plumbing 兼容入口。当前实现文件、用户文档和顶层 CLI 入口均已公开；剩余工作集中在完整 atom 语言、contains/merged 类高级过滤和 quoting mode。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort` / `--count` / `<pattern>` supported; full Git atom language, `--contains` / `--merged` / `--points-at` and shell quoting modes are not exposed
+- 兼容级别：`partial`。`--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort` / `--count` / `--points-at` / `<pattern>` supported; full Git atom language, `--contains` / `--merged` filters and shell quoting modes are not exposed
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -43,7 +43,7 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已从 `src/command/mod.rs` 导出。
 - 用户文档：`docs/commands/for-each-ref.md`，记录公开 CLI 合约。
-- 公开参数/子命令包括：`--heads`、`--tags`、`--remotes`、`--all`、`--format`、`--sort`、`--count`、`<pattern>...`。
+- 公开参数/子命令包括：`--heads`、`--tags`、`--remotes`、`--all`、`--format`、`--sort`、`--count`、`--points-at <object>`、`<pattern>...`。
 
 
 ## 还未实现的功能
@@ -52,7 +52,7 @@ flowchart TD
 |---|---|---|
 | 兼容矩阵 | `COMPATIBILITY.md` 已登记该命令为 `partial`。 | 保持与矩阵对齐；新增参数时同步矩阵和守卫测试。 |
 | 功能缺口 | Git atom 语言子集 | 原始对照：完整 `%(atom)` 集合；相关参数/替代：`--format`；当前说明：仅支持 `%(refname)` / `%(objectname)` / `%(objecttype)`。 后续扩展时需补回归测试并同步兼容矩阵。 |
-| 功能缺口 | 高级过滤 | 原始对照：`--contains` / `--no-contains` / `--merged` / `--no-merged` / `--points-at`；当前说明：未实现。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 功能缺口 | 高级过滤 | 原始对照：`--contains` / `--no-contains` / `--merged` / `--no-merged`；当前说明：尚未实现；`--points-at` 已支持 direct refs、lightweight tags 和 annotated tag peeled target。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 功能缺口 | 引用命名空间 | 原始对照：`--format` 的 shell/perl/python/tcl 引用模式；当前说明：未实现。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求

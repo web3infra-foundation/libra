@@ -1,6 +1,9 @@
 //! Implements `for-each-ref` to enumerate refs with filtering and formatting.
 
+use std::str::FromStr;
+
 use clap::Parser;
+use git_internal::hash::ObjectHash;
 use serde::Serialize;
 
 use crate::{
@@ -22,6 +25,7 @@ EXAMPLES:
     libra for-each-ref --all            List all refs (default)
     libra for-each-ref --format='%(refname) %(objectname)'  Custom format
     libra for-each-ref --sort=refname   Sort by ref name
+    libra for-each-ref --points-at HEAD List refs that point at HEAD
     libra for-each-ref --count=10       Limit output to 10 refs";
 
 #[derive(Parser, Debug)]
@@ -55,6 +59,10 @@ pub struct ForEachRefArgs {
     #[clap(long, value_name = "COUNT")]
     pub count: Option<usize>,
 
+    /// Show only refs that point at OBJECT
+    #[clap(long, value_name = "OBJECT")]
+    pub points_at: Option<String>,
+
     /// Refname patterns to match
     #[clap(value_name = "PATTERN")]
     pub patterns: Vec<String>,
@@ -65,6 +73,8 @@ pub struct RefEntry {
     refname: String,
     objectname: String,
     objecttype: String,
+    #[serde(skip_serializing)]
+    points_at: Vec<String>,
 }
 
 pub async fn execute(args: ForEachRefArgs) -> CliResult<()> {
@@ -91,11 +101,11 @@ async fn run_for_each_ref(_args: &ForEachRefArgs) -> CliResult<Vec<RefEntry>> {
             .await
             .map_err(branch_error)?;
         for branch in branches {
-            entries.push(RefEntry {
-                refname: format!("refs/heads/{}", branch.name),
-                objectname: branch.commit.to_string(),
-                objecttype: "commit".to_string(),
-            });
+            entries.push(direct_ref_entry(
+                format!("refs/heads/{}", branch.name),
+                branch.commit.to_string(),
+                "commit",
+            ));
         }
     }
 
@@ -114,11 +124,11 @@ async fn run_for_each_ref(_args: &ForEachRefArgs) -> CliResult<Vec<RefEntry>> {
                 } else {
                     format!("refs/remotes/{}/{}", remote.name, branch.name)
                 };
-                entries.push(RefEntry {
+                entries.push(direct_ref_entry(
                     refname,
-                    objectname: branch.commit.to_string(),
-                    objecttype: "commit".to_string(),
-                });
+                    branch.commit.to_string(),
+                    "commit",
+                ));
             }
         }
     }
@@ -129,13 +139,13 @@ async fn run_for_each_ref(_args: &ForEachRefArgs) -> CliResult<Vec<RefEntry>> {
                 .with_stable_code(StableErrorCode::IoReadFailed)
         })?;
         for t in tags {
-            let (objectname, objecttype) = tag_object_info(&t.object);
-            entries.push(RefEntry {
-                refname: format!("refs/tags/{}", t.name),
-                objectname,
-                objecttype,
-            });
+            entries.push(tag_ref_entry(&t));
         }
+    }
+
+    if let Some(object_ref) = _args.points_at.as_deref() {
+        let target = resolve_points_at_target(object_ref).await?;
+        entries.retain(|entry| entry.points_at.iter().any(|hash| hash == &target));
     }
 
     if !_args.patterns.is_empty() {
@@ -154,13 +164,77 @@ async fn run_for_each_ref(_args: &ForEachRefArgs) -> CliResult<Vec<RefEntry>> {
     Ok(entries)
 }
 
-fn tag_object_info(object: &tag::TagObject) -> (String, String) {
-    match object {
-        tag::TagObject::Commit(commit) => (commit.id.to_string(), "commit".to_string()),
-        tag::TagObject::Tag(tag) => (tag.id.to_string(), "tag".to_string()),
-        tag::TagObject::Tree(tree) => (tree.id.to_string(), "tree".to_string()),
-        tag::TagObject::Blob(blob) => (blob.id.to_string(), "blob".to_string()),
+fn direct_ref_entry(refname: String, objectname: String, objecttype: &str) -> RefEntry {
+    RefEntry {
+        refname,
+        points_at: vec![objectname.clone()],
+        objectname,
+        objecttype: objecttype.to_string(),
     }
+}
+
+fn tag_ref_entry(tag: &tag::Tag) -> RefEntry {
+    let (objectname, objecttype, points_at) = tag_object_info(&tag.object);
+    RefEntry {
+        refname: format!("refs/tags/{}", tag.name),
+        objectname,
+        objecttype,
+        points_at,
+    }
+}
+
+fn tag_object_info(object: &tag::TagObject) -> (String, String, Vec<String>) {
+    match object {
+        tag::TagObject::Commit(commit) => {
+            let id = commit.id.to_string();
+            (id.clone(), "commit".to_string(), vec![id])
+        }
+        tag::TagObject::Tag(tag) => (
+            tag.id.to_string(),
+            "tag".to_string(),
+            vec![tag.id.to_string(), tag.object_hash.to_string()],
+        ),
+        tag::TagObject::Tree(tree) => {
+            let id = tree.id.to_string();
+            (id.clone(), "tree".to_string(), vec![id])
+        }
+        tag::TagObject::Blob(blob) => {
+            let id = blob.id.to_string();
+            (id.clone(), "blob".to_string(), vec![id])
+        }
+    }
+}
+
+async fn resolve_points_at_target(object_ref: &str) -> CliResult<String> {
+    let tag_name = object_ref.strip_prefix("refs/tags/").unwrap_or(object_ref);
+    if let Some(tag_ref) = tag::find_tag_ref(tag_name).await.map_err(|source| {
+        CliError::fatal(format!("failed to resolve tag '{object_ref}': {source}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })? {
+        let target = tag_ref.target.ok_or_else(|| {
+            CliError::fatal(format!("tag '{object_ref}' is missing target object"))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+        })?;
+        ObjectHash::from_str(&target).map_err(|source| {
+            CliError::fatal(format!(
+                "tag '{object_ref}' has invalid target object '{target}': {source}"
+            ))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+        })?;
+        return Ok(target);
+    }
+
+    if let Ok(hash) = util::get_commit_base(object_ref).await {
+        return Ok(hash.to_string());
+    }
+    if let Ok(hash) = ObjectHash::from_str(object_ref) {
+        return Ok(hash.to_string());
+    }
+
+    Err(
+        CliError::fatal(format!("Not a valid object name {object_ref}"))
+            .with_stable_code(StableErrorCode::CliInvalidTarget),
+    )
 }
 
 fn branch_error(source: crate::internal::branch::BranchStoreError) -> CliError {

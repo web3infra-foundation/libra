@@ -94,6 +94,57 @@ async fn test_for_each_ref_sort_and_count() {
 
 #[tokio::test]
 #[serial]
+async fn test_for_each_ref_points_at_matches_direct_and_peeled_tag_targets() {
+    let temp = tempdir().unwrap();
+    setup_repo_with_commit(&temp).await;
+
+    let lightweight = run_libra_command(&["tag", "lw"], temp.path());
+    assert_cli_success(&lightweight, "tag lw should succeed");
+    let annotated = run_libra_command(&["tag", "-m", "annotated", "ann"], temp.path());
+    assert_cli_success(&annotated, "tag -m ann should succeed");
+
+    let head_output = run_libra_command(
+        &[
+            "for-each-ref",
+            "--points-at",
+            "HEAD",
+            "--format=%(refname) %(objecttype)",
+        ],
+        temp.path(),
+    );
+    assert_cli_success(&head_output, "for-each-ref --points-at HEAD should succeed");
+    let head_stdout = String::from_utf8_lossy(&head_output.stdout);
+    assert!(
+        head_stdout.contains("refs/heads/main commit"),
+        "expected main branch in --points-at HEAD output, got: {head_stdout}"
+    );
+    assert!(
+        head_stdout.contains("refs/tags/lw commit"),
+        "expected lightweight tag in --points-at HEAD output, got: {head_stdout}"
+    );
+    assert!(
+        head_stdout.contains("refs/tags/ann tag"),
+        "expected annotated tag in --points-at HEAD output, got: {head_stdout}"
+    );
+
+    let tag_object_output = run_libra_command(
+        &["for-each-ref", "--points-at", "ann", "--format=%(refname)"],
+        temp.path(),
+    );
+    assert_cli_success(
+        &tag_object_output,
+        "for-each-ref --points-at ann should succeed",
+    );
+    let tag_stdout = String::from_utf8_lossy(&tag_object_output.stdout);
+    assert_eq!(
+        tag_stdout.trim(),
+        "refs/tags/ann",
+        "expected only annotated tag object ref, got: {tag_stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_for_each_ref_unknown_sort_rejects() {
     let temp = tempdir().unwrap();
     setup_repo_with_commit(&temp).await;

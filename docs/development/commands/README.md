@@ -42,7 +42,7 @@
 | [`describe`](describe.md) | `partial` | basic describe, `--tags`, `--always`, `--abbrev`, `--exact-match`, and `--dirty[=<mark>]` supported; long/match/exclude/first-parent and related filters not exposed |
 | [`diff`](diff.md) | `partial` | staged/old-new/pathspec/name/stat output supported; positional revspec, summary/word/binary/whitespace/ext-diff incomplete |
 | [`fetch`](fetch.md) | `partial` | repository/refspec, `--all`, and `--depth` supported; prune/dry-run/tags/force/refmap and shallow expansion flags not exposed |
-| [`for-each-ref`](for-each-ref.md) | `partial` | `--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort` / `--count` / `<pattern>` supported; full Git atom language, `--contains` / `--merged` / `--points-at` and shell quoting modes are not exposed |
+| [`for-each-ref`](for-each-ref.md) | `partial` | `--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort` / `--count` / `--points-at` / `<pattern>` supported; full Git atom language, `--contains` / `--merged` filters and shell quoting modes are not exposed |
 | [`fsck`](fsck.md) | `partial` | object/ref/index/reflog/connectivity checks supported; JSON/machine output, strict mode and pack verification surface incomplete |
 | [`graph`](graph.md) | `intentionally-different` | Libra AI graph inspection extension, not a Git command |
 | [`grep`](grep.md) | `partial` | tracked/index/tree search with common match flags supported; context, extended/Perl regex, untracked/no-index and binary controls not exposed |

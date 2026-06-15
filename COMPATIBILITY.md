@@ -43,7 +43,7 @@ batch document.
 | shortlog | partial | basic author summary, email, count sorting, time filters, and single revision supported; grouping/format/stdin/no-merges/author filters are not exposed |
 | show | partial | object/commit display, `--name-only`, `--stat`, `--oneline`, and path filters supported; extended pretty/raw/name-status formats are not exposed |
 | show-ref | partial | branch/tag/HEAD listing, `--hash[=<n>]`, `--abbrev[=<n>]`, `--dereference`, `--verify`, and `--exists` supported; `--exclude-existing` is not exposed |
-| for-each-ref | partial | `--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort` / `--count` / `<pattern>` supported; full Git atom language, `--contains` / `--merged` / `--points-at` and shell quoting modes are not exposed |
+| for-each-ref | partial | `--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort` / `--count` / `--points-at` / `<pattern>` supported; full Git atom language, `--contains` / `--merged` filters and shell quoting modes are not exposed |
 | ls-remote | partial | heads/tags/refs filtering and patterns supported; `--symref`, `--get-url`, `--sort`, and `--exit-code` are not exposed |
 | ls-tree | partial | Commit/tree listing, recursive listing, path prefix filters, JSON, and common output flags supported; `--full-name` / `--full-tree` / `--format` and `REV:path` syntax are not exposed |
 | symbolic-ref | partial | Supports local `HEAD` only; other symbolic refs are rejected because Libra stores refs in SQLite |

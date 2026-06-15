@@ -134,6 +134,7 @@
 | `rev-parse --verify` / `--verify --short` / `--default` | `cli.object-readback` | 单对象断言、短哈希断言、默认 revision 回退和 quiet 失败退出 1 可观察 |
 | `show --no-patch` / `--stat` / `<rev>:<path>` / `<blob>` | `cli.object-readback` | commit 元数据、统计、历史文件内容、文本 blob 与 binary blob 元数据可观察 |
 | `show-ref --head` / `--heads` / `--hash[=<n>]` / `--abbrev[=<n>]` / `--dereference` / `--exists` / `--verify` / pattern | `cli.object-readback` | HEAD/分支引用可列出，annotated tag peel、完整 refname 存在性、精确验证、hash-only/abbrev 输出、pattern 过滤和缺失 ref 退出码可观察 |
+| `for-each-ref --points-at <object>` | `cli.object-readback` | branch、lightweight tag 和 annotated tag peeled target 过滤可观察，JSON envelope 可用 |
 | `rev-list HEAD` / `-n` / `--max-count` / `--skip` / `--count` | `cli.object-readback` | 可达提交、限制、跳过和计数输出符合 fixture |
 | `rev-list A..B` / `^A` / `--parents` / `--timestamp` | 待补场景 | 范围、排除引用、父提交和时间戳输出仍未公开 |
 | `clean -n/-f/-fd/-fX` | `cli.clean-rm-mv-lfs-basic` | dry-run、文件删除、目录删除、ignored-only 删除覆盖 |
@@ -201,6 +202,7 @@
 | `hash-object -w` / `--stdin` / `-t` | `cli.object-readback`、`cli.sha256-object-readback` | blob 写入、stdin 输入、类型校验和 sha256 object id 可观察 |
 | `show --no-patch` / `<rev>:<path>` / `<blob>` | `cli.object-readback` | commit 元数据、历史文件内容和 blob 内容可观察 |
 | `show-ref --head` / `--heads` / `--hash[=<n>]` / `--abbrev[=<n>]` / `--dereference` / `--verify` / `--exists` | `cli.object-readback` | HEAD/分支引用、hash-only/abbrev 输出、annotated tag peel、精确 ref 验证和存在性检查可观察 |
+| `for-each-ref --points-at <object>` | `cli.object-readback` | 指向指定对象的 branch、lightweight tag、annotated tag 可观察 |
 | `rev-list HEAD` / `--count` / `-n` / `--skip` | `cli.object-readback` | 可达提交输出、计数/限制和 JSON envelope 可观察 |
 | `fsck` / `fsck --connectivity-only` / `fsck <object>` | `cli.object-readback`、`cli.gc-smoke` | 默认、连通性和指定对象检查可观察 |
 | `gc` / `prune` | `cli.gc-smoke` | 当前顶层命令未注册，runner 断言 JSON unknown-command 错误 |

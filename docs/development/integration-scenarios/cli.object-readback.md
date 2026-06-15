@@ -62,18 +62,23 @@ libra rev-list --count HEAD
 libra rev-list -n 1 HEAD
 libra rev-list --skip 1 --max-count 1 HEAD
 libra --json rev-list HEAD
+LATEST_HEAD="$(libra rev-parse HEAD)"
 libra fsck
 libra fsck --connectivity-only
 libra fsck "$HEAD_ID"
 libra tag -m "release fixture" v1.0
+libra tag v1-light
 libra show-ref --dereference --tags v1.0
+libra for-each-ref --points-at "$LATEST_HEAD" --format='%(refname) %(objecttype)'
+libra --json for-each-ref --points-at "$LATEST_HEAD"
 ! libra cat-file -t deadbeef
 ```
 
 关键断言：
 
-- `rev-parse`、`show`、`show-ref`、`cat-file`、`hash-object`、`rev-list`、`fsck` 当前正向路径可用。
+- `rev-parse`、`show`、`show-ref`、`for-each-ref`、`cat-file`、`hash-object`、`rev-list`、`fsck` 当前正向路径可用。
 - `rev-list --count` 输出过滤后的提交数量；`rev-list -n` 限制输出行数；`rev-list --skip --max-count` 可跳过当前 HEAD 后定位父提交。
 - `show-ref --abbrev=12` / `--hash=12` 输出 HEAD 的 12 位前缀；`show-ref --dereference` 对 annotated tag 输出 `refs/tags/<name>^{}` peeled 行；`show-ref --verify` 只接受完整 refname / `HEAD`；`show-ref --exists` 成功静默，缺失 ref 失败。
+- `for-each-ref --points-at` 对 branch、lightweight tag 和 annotated tag peeled target 的过滤可观察；`--json` 返回标准 envelope。
 - 缺失 revision/object 和非法 hash-object 类型必须失败。
-- `for-each-ref`、`ls-files`、高级 `rev-parse`/`rev-list` 过滤不属于当前场景正向覆盖。
+- `ls-files`、高级 `for-each-ref --contains/--merged`、高级 `rev-parse`/`rev-list` 过滤不属于当前场景正向覆盖。
