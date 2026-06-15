@@ -34,6 +34,13 @@ Use `--verify <ref>` when a script needs an exact refname such as `HEAD` or
 `refs/heads/main`; short names like `main` are rejected. Use `--exists <ref>` to
 check whether exactly one ref exists without printing a success line.
 
+Use `--exclude-existing[=<pattern>]` as a Git-compatible stdin filter. Each
+input line is parsed for the final whitespace-separated refname, a trailing
+`^{}` peel suffix is ignored for the existence check, refs already present in
+the local repository are dropped, and missing refs are printed back exactly as
+they appeared on stdin. When `<pattern>` is supplied, only refnames with that
+prefix are considered.
+
 Libra stores refs in SQLite rather than loose files or packed-refs, so
 `show-ref` queries the database directly. This makes enumeration O(rows) with
 no filesystem scanning.
@@ -50,6 +57,7 @@ no filesystem scanning.
 | `--dereference` | `-d` | Dereference annotated tags and include peeled `^{}` entries. |
 | `--verify` | | Verify exact refnames instead of pattern filtering. |
 | `--exists` | | Check whether exactly one ref exists without printing it. |
+| `--exclude-existing[=<pattern>]` | | Filter stdin to refs that do not already exist locally. |
 | `<PATTERN>...` | | Filter refs by path-segment suffix match on the ref name. Multiple patterns are OR-ed. |
 
 ### Examples
@@ -82,6 +90,9 @@ libra show-ref --verify refs/heads/main
 # Check existence without success output
 libra show-ref --exists refs/heads/main
 
+# Keep only refs from stdin that are missing locally
+printf '%s\n' 'abc123 refs/heads/new' | libra show-ref --exclude-existing
+
 # Filter to refs ending in the path segment "release"
 libra show-ref release
 
@@ -101,6 +112,7 @@ libra show-ref --abbrev=12 --heads
 libra show-ref --hash=12 --heads
 libra show-ref --verify refs/heads/main
 libra show-ref --exists refs/heads/main
+libra show-ref --exclude-existing
 libra show-ref --json --head --heads
 libra show-ref main
 ```
@@ -186,6 +198,26 @@ checked ref:
 }
 ```
 
+With `--exclude-existing`, human output preserves each missing input line. JSON
+output reports the parsed refname alongside the preserved line:
+
+```json
+{
+  "ok": true,
+  "command": "show-ref",
+  "data": {
+    "exclude_existing": true,
+    "pattern": "refs/heads",
+    "entries": [
+      {
+        "line": "abc123 refs/heads/new",
+        "refname": "refs/heads/new"
+      }
+    ]
+  }
+}
+```
+
 ## Design Rationale
 
 ### Why path-segment suffix matching?
@@ -228,6 +260,7 @@ and which commit it resolves to.
 | Pattern matching | Path-segment suffix match | Path-segment suffix match | Regex via revset |
 | `--verify` (check exact ref) | `--verify <ref>` | Yes | N/A |
 | `--exists` (existence check) | `--exists <ref>` | Yes | N/A |
+| `--exclude-existing` stdin filter | `--exclude-existing[=<pattern>]` | Yes | N/A |
 | JSON output | `--json` | No | No |
 | Ref storage | SQLite `reference` table | Loose files + packed-refs | Operation log |
 | Remote-tracking refs | Yes (`refs/remotes/`) | Yes (`refs/remotes/`) | Via `jj git fetch` |
@@ -239,5 +272,6 @@ and which commit it resolves to.
 | No matching refs | `LBR-CLI-003` | 129 |
 | `--verify` target is not an exact existing ref | `LBR-CLI-003` | 128, or 1 with global `--quiet` |
 | `--exists` target is missing | `LBR-CLI-003` | 2 |
+| `--exclude-existing` combined with `--verify` / `--exists` | `LBR-CLI-002` | 129 |
 | Failed to read refs | `LBR-IO-001` | 128 |
 | Corrupt stored branch/tag data | `LBR-REPO-002` | 128 |

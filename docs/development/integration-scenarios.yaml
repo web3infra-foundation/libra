@@ -372,6 +372,15 @@ scenarios:
     key_assertion_categories: [json_envelope, fsck, negative_exit]
     doc_section: "cli.object-readback"
 
+  - id: cli.show-ref-exclude-existing
+    wave: 2
+    group: objects
+    purpose: "Git-compatible show-ref stdin filter coverage: --exclude-existing, --exclude-existing=<pattern>, JSON output, verify conflict, and post-filter fsck."
+    gh_required: false
+    requires_git: false
+    key_assertion_categories: [json_envelope, fsck, negative_exit]
+    doc_section: "cli.show-ref-exclude-existing"
+
   - id: cli.ls-tree-smoke
     wave: 2
     group: objects

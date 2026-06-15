@@ -133,7 +133,7 @@
 | `rev-parse HEAD` / `--short` / `--show-toplevel` | `cli.object-readback` | 完整哈希、短哈希和工作树根路径可传递给后续 plumbing 命令 |
 | `rev-parse --verify` / `--verify --short` / `--default` | `cli.object-readback` | 单对象断言、短哈希断言、默认 revision 回退和 quiet 失败退出 1 可观察 |
 | `show --no-patch` / `--stat` / `<rev>:<path>` / `<blob>` | `cli.object-readback` | commit 元数据、统计、历史文件内容、文本 blob 与 binary blob 元数据可观察 |
-| `show-ref --head` / `--heads` / `--hash[=<n>]` / `--abbrev[=<n>]` / `--dereference` / `--exists` / `--verify` / pattern | `cli.object-readback` | HEAD/分支引用可列出，annotated tag peel、完整 refname 存在性、精确验证、hash-only/abbrev 输出、pattern 过滤和缺失 ref 退出码可观察 |
+| `show-ref --head` / `--heads` / `--hash[=<n>]` / `--abbrev[=<n>]` / `--dereference` / `--exists` / `--verify` / `--exclude-existing[=<pattern>]` / pattern | `cli.object-readback`, `cli.show-ref-exclude-existing` | HEAD/分支引用可列出，annotated tag peel、完整 refname 存在性、精确验证、hash-only/abbrev 输出、stdin filter、pattern 过滤和缺失 ref 退出码可观察 |
 | `for-each-ref --points-at <object>` | `cli.object-readback` | branch、lightweight tag 和 annotated tag peeled target 过滤可观察，JSON envelope 可用 |
 | `rev-list HEAD` / `-n` / `--max-count` / `--skip` / `--count` | `cli.object-readback` | 可达提交、限制、跳过和计数输出符合 fixture |
 | `rev-list A..B` / `^A` / `--parents` / `--timestamp` | 待补场景 | 范围、排除引用、父提交和时间戳输出仍未公开 |
@@ -201,7 +201,7 @@
 | `cat-file --ai*` | 无（显式排除） | AI object inspection 属 Libra AI 扩展，不纳入 Git 兼容黑盒计划 |
 | `hash-object -w` / `--stdin` / `--path` / `--no-filters` / `-t` | `cli.object-readback`、`cli.sha256-object-readback` | blob 写入、stdin 输入、路径上下文/no-filters 兼容入口、类型校验和 sha256 object id 可观察 |
 | `show --no-patch` / `<rev>:<path>` / `<blob>` | `cli.object-readback` | commit 元数据、历史文件内容和 blob 内容可观察 |
-| `show-ref --head` / `--heads` / `--hash[=<n>]` / `--abbrev[=<n>]` / `--dereference` / `--verify` / `--exists` | `cli.object-readback` | HEAD/分支引用、hash-only/abbrev 输出、annotated tag peel、精确 ref 验证和存在性检查可观察 |
+| `show-ref --head` / `--heads` / `--hash[=<n>]` / `--abbrev[=<n>]` / `--dereference` / `--verify` / `--exists` / `--exclude-existing[=<pattern>]` | `cli.object-readback`, `cli.show-ref-exclude-existing` | HEAD/分支引用、hash-only/abbrev 输出、annotated tag peel、精确 ref 验证、存在性检查和 stdin filter 可观察 |
 | `for-each-ref --points-at <object>` | `cli.object-readback` | 指向指定对象的 branch、lightweight tag、annotated tag 可观察 |
 | `rev-list HEAD` / `--count` / `-n` / `--skip` | `cli.object-readback` | 可达提交输出、计数/限制和 JSON envelope 可观察 |
 | `fsck` / `fsck --connectivity-only` / `fsck <object>` | `cli.object-readback`、`cli.gc-smoke` | 默认、连通性和指定对象检查可观察 |

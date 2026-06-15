@@ -28,7 +28,7 @@
 | History | `log` | `cli.commit-status-log` |
 | History | `shortlog` | `cli.grep-blame-describe-shortlog` |
 | History | `show` | `cli.object-readback` |
-| History | `show-ref` | `cli.object-readback`、`cli.clone-fetch-pull-local` |
+| History | `show-ref` | `cli.object-readback`、`cli.show-ref-exclude-existing`、`cli.clone-fetch-pull-local` |
 | History | `for-each-ref` | 当前未注册，未纳入正向 runner 场景 |
 | History | `ls-files` | 当前未注册，未纳入正向 runner 场景 |
 | History | `ls-remote` | `cli.clone-fetch-pull-local` |
@@ -109,6 +109,7 @@
 - [`cli.fetch-depth-local`](cli.fetch-depth-local.md)
 - [`cli.push-local-file-remote-rejected`](cli.push-local-file-remote-rejected.md)
 - [`cli.object-readback`](cli.object-readback.md)
+- [`cli.show-ref-exclude-existing`](cli.show-ref-exclude-existing.md)
 - [`cli.ls-tree-smoke`](cli.ls-tree-smoke.md)
 - [`cli.sha256-object-readback`](cli.sha256-object-readback.md)
 - [`cli.gc-smoke`](cli.gc-smoke.md)

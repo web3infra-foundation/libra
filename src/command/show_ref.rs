@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::{
     command::{
-        show_ref_deref,
+        show_ref_check, show_ref_deref, show_ref_exclude_existing,
         show_ref_render::{ShowRefRenderOptions, render_show_ref_entries},
     },
     internal::{
@@ -16,7 +16,7 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
-        output::{OutputConfig, emit_json_data},
+        output::OutputConfig,
     },
 };
 
@@ -42,6 +42,8 @@ EXAMPLES:
                                      Verify an exact refname and print it
     libra show-ref --exists refs/heads/main
                                      Check whether an exact refname exists
+    libra show-ref --exclude-existing
+                                     Filter stdin to refs that do not exist locally
     libra show-ref main              Filter refs ending in the path segment 'main'
     libra show-ref --json --heads    Structured JSON output for agents";
 
@@ -93,6 +95,17 @@ pub struct ShowRefArgs {
     #[clap(long, conflicts_with = "verify")]
     pub exists: bool,
 
+    /// Filter stdin to refs that do not already exist locally
+    #[clap(
+        long = "exclude-existing",
+        value_name = "PATTERN",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "",
+        conflicts_with_all = ["verify", "exists"]
+    )]
+    pub exclude_existing: Option<String>,
+
     /// Filter refs by path-segment suffix pattern
     pub pattern: Vec<String>,
 }
@@ -112,11 +125,22 @@ pub async fn execute(args: ShowRefArgs) -> Result<(), String> {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Lists all refs (branches, tags) with their object IDs.
 pub async fn execute_safe(args: ShowRefArgs, output: &OutputConfig) -> CliResult<()> {
+    if let Some(pattern) = args.exclude_existing.as_deref() {
+        return show_ref_exclude_existing::execute(
+            if pattern.is_empty() {
+                None
+            } else {
+                Some(pattern)
+            },
+            output,
+        )
+        .await;
+    }
     if args.exists {
-        return execute_exists(&args, output).await;
+        return show_ref_check::execute_exists(&args, output).await;
     }
     if args.verify {
-        return execute_verify(&args, output).await;
+        return show_ref_check::execute_verify(&args, output).await;
     }
 
     let entries = collect_show_ref_entries(&args).await?;
@@ -173,7 +197,7 @@ async fn collect_show_ref_entries(args: &ShowRefArgs) -> CliResult<Vec<ShowRefEn
     Ok(entries)
 }
 
-async fn collect_raw_show_ref_entries(
+pub(crate) async fn collect_raw_show_ref_entries(
     include_head: bool,
     show_heads: bool,
     show_tags: bool,
@@ -241,60 +265,6 @@ fn show_ref_pattern_matches(refname: &str, pattern: &str) -> bool {
         || base_refname
             .strip_suffix(pattern)
             .is_some_and(|prefix| prefix.ends_with('/'))
-}
-
-async fn execute_verify(args: &ShowRefArgs, output: &OutputConfig) -> CliResult<()> {
-    if args.pattern.is_empty() {
-        return Err(CliError::command_usage("--verify requires a reference").with_exit_code(128));
-    }
-
-    let entries = collect_raw_show_ref_entries(true, true, true, args.dereference).await?;
-    let mut verified = Vec::new();
-    for refname in &args.pattern {
-        let Some(entry) = entries.iter().find(|entry| entry.refname == *refname) else {
-            let exit_code = if output.quiet { 1 } else { 128 };
-            return Err(CliError::failure(format!("'{refname}' - not a valid ref"))
-                .with_stable_code(StableErrorCode::CliInvalidTarget)
-                .with_exit_code(exit_code));
-        };
-        verified.push(entry.clone());
-    }
-
-    render_show_ref_entries(
-        &verified,
-        ShowRefRenderOptions::from_args(args.hash, args.abbrev),
-        output,
-    )
-}
-
-async fn execute_exists(args: &ShowRefArgs, output: &OutputConfig) -> CliResult<()> {
-    if args.pattern.len() != 1 {
-        let message = if args.pattern.is_empty() {
-            "--exists requires a reference"
-        } else {
-            "--exists requires exactly one reference"
-        };
-        return Err(CliError::command_usage(message).with_exit_code(128));
-    }
-
-    let refname = &args.pattern[0];
-    let entries = collect_raw_show_ref_entries(true, true, true, false).await?;
-    if !entries.iter().any(|entry| entry.refname == *refname) {
-        return Err(
-            CliError::failure(format!("reference does not exist: {refname}"))
-                .with_stable_code(StableErrorCode::CliInvalidTarget)
-                .with_exit_code(2),
-        );
-    }
-
-    if !output.is_json() {
-        return Ok(());
-    }
-    emit_json_data(
-        "show-ref",
-        &serde_json::json!({ "exists": true, "refname": refname }),
-        output,
-    )
 }
 
 fn remote_refname(remote: &str, branch_name: &str) -> String {
