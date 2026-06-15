@@ -33,7 +33,7 @@ batch document.
 | sandbox | intentionally-different | Libra AI sandbox diagnostics extension, not a Git command |
 | add | partial | sparse-checkout flag unsupported |
 | rm | partial | `--force` / `--dry-run` / `--cached` / `--recursive` / `--ignore-unmatch` / `--pathspec-from-file` / `--pathspec-file-nul` supported; sparse-checkout flag unsupported; per-command `--quiet` not exposed (use global `--quiet`) |
-| mv | partial | sparse-checkout flag unsupported; `--skip-errors` not exposed |
+| mv | partial | `-k` / `--skip-errors` supported; `--sparse` accepted as a no-op because Libra does not maintain sparse-checkout state |
 | restore | partial | `--source`, `--staged`, `--worktree`, and path restore are supported; overlay/conflict/progress variants are not exposed |
 | status | supported | common Git status surface plus `--porcelain` v1/v2, `--short`, `--branch`, `-z` NUL-terminated output, `--find-renames`, `--column`, and `--ahead-behind`/`--no-ahead-behind` supported |
 | clean | partial | `-n`, `-f`, `-d`, `-x`, `-X`, and `--exclude` are supported; `-i` is intentionally different/not exposed and pathspec filtering remains deferred |

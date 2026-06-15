@@ -56,7 +56,7 @@
 | [`ls-tree`](ls-tree.md) | `partial` | Commit/tree listing, recursive listing, path prefix filters, JSON, and common output flags supported; `--full-name` / `--full-tree` / `--format` and `REV:path` syntax are not exposed |
 | [`maintenance`](maintenance.md) | `partial` | `run` / `register` / `unregister` / `status` exposed; lower-level maintenance tasks such as `commit-graph` and `prefe... |
 | [`merge`](merge.md) | `partial` | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |
-| [`mv`](mv.md) | `partial` | sparse-checkout flag unsupported; `--skip-errors` not exposed |
+| [`mv`](mv.md) | `partial` | `-k` / `--skip-errors` supported; `--sparse` accepted as a no-op because Libra does not maintain sparse-checkout state |
 | [`notes`](notes.md) | `partial` | `add` / `show` / `list` / `remove` supported; `--ref` supported; append/edit/copy/merge/prune and editor support not implemented |
 | [`open`](open.md) | `supported` | 见命令文档。 |
 | [`publish`](publish.md) | `intentionally-different` | Libra Cloudflare publish extension, not a Git command |

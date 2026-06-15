@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。sparse-checkout flag unsupported; `--skip-errors` not exposed
+- 兼容级别：`partial`。`-k` / `--skip-errors` supported; `--sparse` accepted as a no-op because Libra does not maintain sparse-checkout state
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -14,7 +14,7 @@
 ## 设计方案
 
 - 入口与分发：已公开接入 `src/cli.rs::Commands`；已由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
-- 源码分层：主要实现文件为 `src/command/mv.rs`。参数/子命令类型包括：`MvArgs`；输出、错误或状态类型包括：`MvOutput`（模块私有，无可见性修饰符，仅限 `mv` 模块内可见，字段 `moves` / `index_updates` / `dry_run` / `forced` / `verbose`，经 `emit_json_data` 序列化驱动 `--json` 契约），错误通过 `CliResult` 或上层命令错误统一传播；主要执行函数包括：`execute`、`execute_safe`。
+- 源码分层：主要实现文件为 `src/command/mv.rs`。参数/子命令类型包括：`MvArgs`；输出、错误或状态类型包括：`MvOutput`（模块私有，无可见性修饰符，仅限 `mv` 模块内可见，字段 `moves` / `index_updates` / `dry_run` / `forced` / `verbose`，经 `emit_json_data` 序列化驱动 `--json` 契约；`-k` 只影响哪些候选进入 `moves` / `index_updates`，`--sparse` 不进入 JSON schema），错误通过 `CliResult` 或上层命令错误统一传播；主要执行函数包括：`execute`、`execute_safe`。
 - 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；索引路径会加载、比较、刷新或保存 `.libra/index`。
 
 - 流程图：以下流程图按当前源码分层展示主路径和底层对象边界，便于维护者把代码入口、执行函数和副作用范围对应起来。
@@ -37,8 +37,8 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-02-22 `17c0c53f`（`feat(mv): implement mv behavior and tests (#207) (#224)`）：基础实现节点：implement mv behavior and tests (#207) (#224)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-06 `5753861b`（`feat(mv): add --sparse no-op flag and harden move pre-validation (#1386)`）：功能演进：add --sparse no-op flag and harden move pre-validation (#1386)；注意：`--sparse` 标志在当前 HEAD 的 `MvArgs` 中已不存在（已回退），与“还未实现的功能”缺口表一致，本提交仅保留 move 预检加固部分。
-- 2026-06-01 `ebd2023d`（`feat(mv): support skip errors`）：功能演进：support skip errors；注意：`-k`/`--skip-errors` 标志在当前 HEAD 的 `MvArgs` 中已不存在（已回退），与“还未实现的功能”缺口表一致。
+- 2026-06-06 `5753861b`（`feat(mv): add --sparse no-op flag and harden move pre-validation (#1386)`）：功能演进：add --sparse no-op flag and harden move pre-validation (#1386)；该能力曾在后续版本回退，本批重新以 no-op 形式公开 `--sparse`。
+- 2026-06-01 `ebd2023d`（`feat(mv): support skip errors`）：功能演进：support skip errors；该能力曾在后续版本回退，本批重新公开 `-k` / `--skip-errors` 并补回回归测试。
 - 2026-06-07 `d065ea36`（`fix(mv): close compatibility plan gaps`）：实现修正：close compatibility plan gaps；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -47,16 +47,15 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/mv.md`。
 - Synopsis：`libra mv [<options>] <source>... <destination>`。
-- 公开参数/子命令包括：`<source>... <destination>`、`-v, --verbose`、`-n, --dry-run`、`-f, --force`。
+- 公开参数/子命令包括：`<source>... <destination>`、`-v, --verbose`、`-n, --dry-run`、`-f, --force`、`-k, --skip-errors`、`--sparse`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵说明 | sparse-checkout 标志不支持; `--skip-errors` 未公开暴露 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
-| 兼容差异项 | Skip errors | 原始对照：不支持；相关参数/替代：-k；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | Sparse checkout | 原始对照：不支持；相关参数/替代：--sparse；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容限制 | Sparse checkout cone 语义 | `--sparse` 已作为 no-op 接受；由于 Libra 尚未维护 sparse-checkout 状态，无法复现 Git 在 cone 外路径上的放宽语义。 |
+| 后续增强 | `-k` skip 诊断输出 | 当前按 Git 行为静默跳过无效来源，并在 JSON 中只返回实际 move plan；如果未来需要 agent 级 skipped 明细，需要新增输出字段并同步 JSON schema 测试。 |
 
 ## 维护要求
 
