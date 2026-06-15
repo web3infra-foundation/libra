@@ -42,7 +42,7 @@ batch document.
 | log | partial | common Git log surface plus `--range` revision expressions, `--all`, `--reverse`, `--follow`, and `-L` supported; positional revision range syntax and exact function-range tracking remain partial |
 | shortlog | partial | basic author summary, email, count sorting, time filters, and single revision supported; grouping/format/stdin/no-merges/author filters are not exposed |
 | show | partial | object/commit display, `--name-only`, `--stat`, `--oneline`, and path filters supported; extended pretty/raw/name-status formats are not exposed |
-| show-ref | partial | branch/tag/HEAD listing, hash-only output, `--verify`, and `--exists` supported; dereference, abbrev, and exclude-existing are not exposed |
+| show-ref | partial | branch/tag/HEAD listing, hash-only output, `--dereference`, `--verify`, and `--exists` supported; abbrev and exclude-existing are not exposed |
 | for-each-ref | partial | `--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort` / `--count` / `<pattern>` supported; full Git atom language, `--contains` / `--merged` / `--points-at` and shell quoting modes are not exposed |
 | ls-remote | partial | heads/tags/refs filtering and patterns supported; `--symref`, `--get-url`, `--sort`, and `--exit-code` are not exposed |
 | ls-tree | partial | Commit/tree listing, recursive listing, path prefix filters, JSON, and common output flags supported; `--full-name` / `--full-tree` / `--format` and `REV:path` syntax are not exposed |

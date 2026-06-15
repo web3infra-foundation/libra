@@ -531,11 +531,6 @@ async fn test_show_ref_head_exempt_from_pattern_filter() {
     );
 }
 
-/// `libra show-ref --help` surfaces the EXAMPLES banner so users see
-/// the all-refs default, --heads / --tags scope filters, --head opt-in,
-/// -s hash-only form, pattern filter, and the JSON variant without
-/// reading the design doc. Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/development/commands/_general.md` item B.
 #[test]
 fn test_show_ref_help_lists_examples_banner() {
     let repo = tempdir().expect("tempdir for show-ref --help");
@@ -556,6 +551,7 @@ fn test_show_ref_help_lists_examples_banner() {
         "libra show-ref --tags",
         "libra show-ref --head",
         "libra show-ref -s",
+        "libra show-ref -d",
         "libra show-ref main",
         "libra show-ref --json",
     ] {

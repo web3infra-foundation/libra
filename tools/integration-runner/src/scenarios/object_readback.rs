@@ -72,7 +72,6 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
         &ctx.command(&["--json", "show-ref", "--heads"], repo.clone(), true)?,
         "show-ref",
     )?;
-
     let object_type = ctx.command(&["cat-file", "-t", &head_id], repo.clone(), true)?;
     assert_stdout_contains(&object_type, "commit")?;
     ctx.command(&["cat-file", "-s", &head_id], repo.clone(), true)?;
@@ -134,6 +133,19 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
     ctx.command(&["fsck"], repo.clone(), true)?;
     ctx.command(&["fsck", "--connectivity-only"], repo.clone(), true)?;
     ctx.command(&["fsck", &head_id], repo.clone(), true)?;
+    let latest_head = stdout_trim(&ctx.command(&["rev-parse", "HEAD"], repo.clone(), true)?);
+    ctx.command(
+        &["tag", "-m", "release fixture", "v1.0"],
+        repo.clone(),
+        true,
+    )?;
+    let dereferenced_tag = ctx.command(
+        &["show-ref", "--dereference", "--tags", "v1.0"],
+        repo.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&dereferenced_tag, "refs/tags/v1.0^{}")?;
+    assert_stdout_contains(&dereferenced_tag, &latest_head)?;
     let missing = ctx.command(&["cat-file", "-t", "deadbeef"], repo, false)?;
     assert_lbr_or_text(&missing, "object not found")?;
     Ok(())

@@ -15,10 +15,15 @@ and optionally `HEAD`) along with the object hash each ref points to. By default
 both branches and tags are shown. Use `--heads` or `--tags` to restrict output
 to one category.
 
-Positional `<PATTERN>` arguments act as substring filters on the fully-qualified
-ref name (e.g., `refs/heads/main`). Only refs whose name contains at least one
-of the given patterns are included. `HEAD` is never filtered out by patterns
-when `--head` is specified.
+Positional `<PATTERN>` arguments match complete path segments from the end of
+the fully-qualified ref name, following Git's `show-ref` behavior. For example,
+`main` matches `refs/heads/main` and `refs/remotes/origin/main`, but does not
+match `refs/heads/main-2`. `HEAD` is never filtered out by patterns when
+`--head` is specified.
+
+Use `-d` / `--dereference` to peel annotated tags. Annotated tags are printed
+twice: once for the tag object itself and once as `refs/tags/<name>^{}` pointing
+at the peeled target. Lightweight tags remain single-line entries.
 
 Use `--verify <ref>` when a script needs an exact refname such as `HEAD` or
 `refs/heads/main`; short names like `main` are rejected. Use `--exists <ref>` to
@@ -36,9 +41,10 @@ no filesystem scanning.
 | `--tags` | | Show only tags (`refs/tags/`). |
 | `--head` | | Include `HEAD` in the output. |
 | `--hash` | `-s` | Only show the object hash, not the reference name. |
-| `--verify` | | Verify exact refnames instead of substring filtering. |
+| `--dereference` | `-d` | Dereference annotated tags and include peeled `^{}` entries. |
+| `--verify` | | Verify exact refnames instead of pattern filtering. |
 | `--exists` | | Check whether exactly one ref exists without printing it. |
-| `<PATTERN>...` | | Filter refs by substring match on the ref name. Multiple patterns are OR-ed. |
+| `<PATTERN>...` | | Filter refs by path-segment suffix match on the ref name. Multiple patterns are OR-ed. |
 
 ### Examples
 
@@ -52,6 +58,9 @@ libra show-ref --heads
 # Show only tags
 libra show-ref --tags
 
+# Peel annotated tags
+libra show-ref --dereference --tags v1.0
+
 # Include HEAD and show hashes only
 libra show-ref --head --hash
 
@@ -61,7 +70,7 @@ libra show-ref --verify refs/heads/main
 # Check existence without success output
 libra show-ref --exists refs/heads/main
 
-# Filter to refs containing "release"
+# Filter to refs ending in the path segment "release"
 libra show-ref release
 
 # Combine filters: only branches matching "feat"
@@ -74,6 +83,7 @@ libra show-ref --heads feat
 libra show-ref
 libra show-ref --heads
 libra show-ref --tags
+libra show-ref --dereference --tags v1.0
 libra show-ref --head --hash
 libra show-ref --verify refs/heads/main
 libra show-ref --exists refs/heads/main
@@ -95,6 +105,13 @@ With `--hash`, only the object IDs are printed:
 ```text
 abc1234def5678901234567890abcdef12345678
 def5678901234567890abcdef12345678abc1234
+```
+
+With `--dereference`, annotated tags include an additional peeled entry:
+
+```text
+def5678901234567890abcdef12345678abc1234 refs/tags/v1.0.0
+abc1234def5678901234567890abcdef12345678 refs/tags/v1.0.0^{}
 ```
 
 ## Structured Output (JSON examples)
@@ -142,16 +159,13 @@ checked ref:
 
 ## Design Rationale
 
-### Why substring match instead of glob?
+### Why path-segment suffix matching?
 
-Git's `show-ref` uses prefix matching against fully-qualified ref names, but
-in practice users most often want to ask "show me anything related to
-`release`" or "anything with `main` in its name." Substring matching is
-simpler to implement, simpler to explain, and covers the common case. It
-avoids the cognitive overhead of remembering whether you need `refs/heads/main*`
-or `main*`. For the rare case where you need precise control, the JSON output
-gives you the full ref name array and you can filter client-side. Glob support
-may be added later as a superset.
+Git's `show-ref` pattern matching treats patterns as complete refname path
+segments matched from the end of the fully-qualified ref name. Libra follows
+that behavior so scripts can pass `main` without accidentally matching
+`main-2`, while still matching both `refs/heads/main` and
+`refs/remotes/origin/main`.
 
 ### Why SQLite-backed refs?
 
@@ -180,10 +194,10 @@ and which commit it resolves to.
 | Filter to tags | `--tags` | `--tags` | `jj tag list` |
 | Include HEAD | `--head` | `--head` | N/A (no HEAD concept) |
 | Hash-only output | `-s` / `--hash` | `-s` / `--hash` | N/A |
-| Pattern matching | Substring match | Prefix/glob match | Regex via revset |
+| Dereference annotated tags | `-d` / `--dereference` | `-d` / `--dereference` | N/A |
+| Pattern matching | Path-segment suffix match | Path-segment suffix match | Regex via revset |
 | `--verify` (check exact ref) | `--verify <ref>` | Yes | N/A |
 | `--exists` (existence check) | `--exists <ref>` | Yes | N/A |
-| `-d` / `--dereference` | Not yet implemented | Yes | N/A |
 | JSON output | `--json` | No | No |
 | Ref storage | SQLite `reference` table | Loose files + packed-refs | Operation log |
 | Remote-tracking refs | Yes (`refs/remotes/`) | Yes (`refs/remotes/`) | Via `jj git fetch` |
