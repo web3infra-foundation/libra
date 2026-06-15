@@ -295,6 +295,7 @@ mod graph_test;
 mod grep_test;
 mod hash_object_test;
 mod hooks_help_test;
+mod index_pack_keep_test;
 mod index_pack_test;
 mod init_from_git_test;
 mod init_json_test;

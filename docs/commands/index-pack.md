@@ -19,6 +19,10 @@ with `.idx`. The default index format is version 1 (SHA-1 fan-out table plus
 offset/hash pairs). Version 2 (with CRC32 checksums and support for large
 offsets) can be requested with `--index-version 2`.
 
+With `--keep`, Libra also writes a `.keep` file beside the pack. Bare
+`--keep` creates an empty keep file; `--keep=<MSG>` writes the message followed
+by a newline, matching Git's keep-file convention.
+
 This is a low-level plumbing command. It is used internally by `libra fetch` and
 `libra clone` after receiving pack data over the wire, and can be invoked
 manually to rebuild missing or corrupt index files.
@@ -29,6 +33,7 @@ manually to rebuild missing or corrupt index files.
 |------|-------|-------------|---------|
 | `<PACK_FILE>` | | Path to the `.pack` file to index (required). Must end with `.pack` unless `-o` is given. | |
 | `-o <PATH>` | `-o` | Output path for the generated index file. | `<PACK_FILE>` with `.pack` replaced by `.idx` |
+| `--keep[=<MSG>]` | | Create `<PACK_FILE>` with `.keep` extension. If `MSG` is provided, write it followed by a newline. | Not created |
 | `--index-version <N>` | | Force the index format version (1 or 2). | `1` |
 
 ### Examples
@@ -43,6 +48,9 @@ libra index-pack pack-abc123.pack -o /tmp/pack-abc123.idx
 # Force version 2 index format
 libra index-pack pack-abc123.pack --index-version 2
 
+# Keep the pack from pruning after rebuilding its index
+libra index-pack --keep="manual recovery" pack-abc123.pack
+
 # JSON output for scripting
 libra index-pack pack-abc123.pack --json
 ```
@@ -52,6 +60,7 @@ libra index-pack pack-abc123.pack --json
 ```bash
 libra index-pack pack-123.pack
 libra index-pack pack-123.pack -o pack-123.idx
+libra index-pack --keep pack-123.pack
 libra index-pack pack-123.pack --index-version 2
 libra index-pack pack-123.pack --json
 ```
@@ -75,7 +84,8 @@ On success, human mode prints the generated index path:
   "data": {
     "pack_file": "/tmp/pack-123.pack",
     "index_file": "/tmp/pack-123.idx",
-    "index_version": 1
+    "index_version": 1,
+    "keep_file": null
   }
 }
 ```
@@ -89,7 +99,23 @@ Version 2 example:
   "data": {
     "pack_file": "/tmp/pack-123.pack",
     "index_file": "/tmp/pack-123.idx",
-    "index_version": 2
+    "index_version": 2,
+    "keep_file": null
+  }
+}
+```
+
+Keep-file example:
+
+```json
+{
+  "ok": true,
+  "command": "index-pack",
+  "data": {
+    "pack_file": "/tmp/pack-123.pack",
+    "index_file": "/tmp/pack-123.idx",
+    "index_version": 1,
+    "keep_file": "/tmp/pack-123.keep"
   }
 }
 ```
@@ -146,7 +172,7 @@ algorithms.
 | Verify existing index | `libra verify-pack <idx>` | `verify-pack` / `index-pack --verify` | N/A |
 | `--stdin` (read pack from stdin) | Not implemented | Yes | N/A |
 | `--fix-thin` (add bases for thin packs) | Not implemented | Yes | N/A |
-| `--keep` (create .keep file) | Not implemented | Yes | N/A |
+| `--keep` (create .keep file) | `--keep[=<MSG>]` | Yes | N/A |
 | `--threads` (parallel decompression) | Internal (8 threads) | `--threads=<N>` | N/A |
 | Progress output | Not implemented | `--progress` / `--no-progress` | N/A |
 | JSON output | `--json` | No | N/A |
@@ -160,7 +186,9 @@ algorithms.
 |----------|-----------------|------|
 | Pack path does not end with `.pack` (and no `-o`) | `LBR-CLI-002` | 129 |
 | Pack path and index path are identical | `LBR-CLI-002` | 129 |
+| Keep path and index path are identical | `LBR-CLI-002` | 129 |
 | Pack file cannot be opened | `LBR-IO-001` | 128 |
 | Unsupported index version | `LBR-CLI-002` | 129 |
 | Pack contents are invalid or corrupt | `LBR-REPO-002` | 128 |
 | Index write failed | `LBR-IO-002` | 128 |
+| Keep-file write failed | `LBR-IO-002` | 128 |

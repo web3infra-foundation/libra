@@ -17,11 +17,21 @@ pub(crate) fn scenario_verify_pack_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()
     fs::copy(&pack_src, &pack_dst).with_context(|| format!("copy pack {}", pack_src.display()))?;
     let pack = pack_dst.to_string_lossy().to_string();
     ctx.command(
-        &["index-pack", &pack, "--index-version", "1"],
+        &[
+            "index-pack",
+            "--keep=integration keep",
+            &pack,
+            "--index-version",
+            "1",
+        ],
         repo.clone(),
         true,
     )?;
     let idx = pack_dst.with_extension("idx");
+    let keep = pack_dst.with_extension("keep");
+    let keep_message =
+        fs::read_to_string(&keep).with_context(|| format!("read keep {}", keep.display()))?;
+    anyhow::ensure!(keep_message == "integration keep\n");
     let idx_arg = idx.to_string_lossy().to_string();
     assert_stdout_contains(
         &ctx.command(&["verify-pack", &idx_arg], repo.clone(), true)?,

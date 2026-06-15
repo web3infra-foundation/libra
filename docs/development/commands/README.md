@@ -48,7 +48,7 @@
 | [`grep`](grep.md) | `partial` | tracked/index/tree search with common match flags supported; context, extended/Perl regex, untracked/no-index and binary controls not exposed |
 | [`hash-object`](hash-object.md) | `partial` | Blob hashing for files and `--stdin`; `-w` writes blob objects; `--path` / `--no-filters` accepted for raw-byte... |
 | [`hooks`](hooks.md) | `intentionally-different` | Hidden compatibility entry for hook configs installed by `libra agent enable` |
-| [`index-pack`](index-pack.md) | `partial` | hidden plumbing command; stdin/fix-thin/keep/progress flags not exposed |
+| [`index-pack`](index-pack.md) | `partial` | hidden plumbing command; `--keep[=<MSG>]` supported; stdin/fix-thin/progress flags not exposed |
 | [`init`](init.md) | `partial` | fresh repository initialization supported; safe re-initialization/top-up of existing repos not implemented |
 | [`lfs`](lfs.md) | `partial` | built-in Libra LFS command; uses `.libra_attributes`, not Git LFS filters/hooks (see [docs/development/commands/_comp... |
 | [`log`](log.md) | `partial` | common log surface plus `--range`/`--all`/`--reverse`/`--follow`/`-L`; positional ranges and exact line history remain partial |

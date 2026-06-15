@@ -427,7 +427,7 @@ scenarios:
   - id: cli.verify-pack-smoke
     wave: 2
     group: maintenance
-    purpose: "Smoke verify-pack default, --pack, -v, -s, and JSON paths; uses index-pack as an internal fixture helper."
+    purpose: "Smoke verify-pack default, --pack, -v, -s, and JSON paths; uses index-pack --keep as an internal fixture helper."
     gh_required: false
     requires_git: false
     key_assertion_categories: [fsck]
