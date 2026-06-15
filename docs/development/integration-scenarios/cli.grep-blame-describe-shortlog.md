@@ -1,6 +1,6 @@
 ### `cli.grep-blame-describe-shortlog`
 
-目的：覆盖 history inspection 剩余命令：`grep`、`blame`、`describe`、`shortlog` 的常用参数和失败路径。
+目的：覆盖 history inspection 剩余命令：`grep`、`blame`、`describe`、`shortlog` 的常用参数和失败路径；其中 `describe` 覆盖 `--tags`、`--always`、`--abbrev`、`--exact-match` 和 `--dirty`。
 
 最小步骤：
 
@@ -100,4 +100,3 @@ cd "$RUN_DIR/inspect-repo"
 - `libra --json describe --tags` 成功且包含 tag 信息。
 - `libra --json shortlog` 返回按作者汇总的结构。
 - 负向 `libra grep` 无匹配 或 `libra blame` 非法范围必须非 0，stderr 包含可识别错误（可选 LBR-）。
-

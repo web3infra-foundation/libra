@@ -198,3 +198,98 @@ fn test_describe_invalid_reference_returns_cli_invalid_target() {
     assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-003");
 }
+
+#[test]
+fn test_describe_exact_match_fails_after_head_moves_past_tag() {
+    let repo = create_committed_repo_via_cli();
+
+    let tag_output = run_libra_command(&["tag", "-m", "Release v1.0", "v1.0"], repo.path());
+    assert_cli_success(&tag_output, "failed to create tag for describe test");
+
+    std::fs::write(repo.path().join("tracked.txt"), "tracked\nnext\n")
+        .expect("failed to update tracked file");
+    let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert_cli_success(&add_output, "failed to stage updated tracked file");
+    let commit_output = run_libra_command(&["commit", "-m", "next", "--no-verify"], repo.path());
+    assert_cli_success(&commit_output, "failed to create second commit");
+
+    let output = run_libra_command(&["describe", "--exact-match"], repo.path());
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert!(
+        human.contains("no tag exactly matches"),
+        "exact-match failure should explain why describe failed: {human}"
+    );
+}
+
+#[test]
+fn test_describe_exact_match_succeeds_on_tagged_head() {
+    let repo = create_committed_repo_via_cli();
+
+    let tag_output = run_libra_command(&["tag", "-m", "Release v1.0", "v1.0"], repo.path());
+    assert_cli_success(&tag_output, "failed to create tag for describe test");
+
+    let output = run_libra_command(&["describe", "--exact-match", "--json"], repo.path());
+    assert_cli_success(&output, "describe --exact-match --json should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["result"], "v1.0");
+    assert_eq!(json["data"]["exact_match"], true);
+    assert_eq!(json["data"]["dirty"], false);
+}
+
+#[test]
+fn test_describe_dirty_appends_default_suffix_for_tracked_changes() {
+    let repo = create_committed_repo_via_cli();
+
+    let tag_output = run_libra_command(&["tag", "-m", "Release v1.0", "v1.0"], repo.path());
+    assert_cli_success(&tag_output, "failed to create tag for describe test");
+    std::fs::write(repo.path().join("tracked.txt"), "tracked\nchanged\n")
+        .expect("failed to dirty tracked file");
+
+    let output = run_libra_command(&["describe", "--dirty", "--json"], repo.path());
+    assert_cli_success(&output, "describe --dirty --json should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["result"], "v1.0-dirty");
+    assert_eq!(json["data"]["dirty"], true);
+    assert_eq!(json["data"]["dirty_mark"], "-dirty");
+}
+
+#[test]
+fn test_describe_dirty_ignores_untracked_files_like_git() {
+    let repo = create_committed_repo_via_cli();
+
+    let tag_output = run_libra_command(&["tag", "-m", "Release v1.0", "v1.0"], repo.path());
+    assert_cli_success(&tag_output, "failed to create tag for describe test");
+    std::fs::write(repo.path().join("untracked.txt"), "untracked\n")
+        .expect("failed to write untracked file");
+
+    let output = run_libra_command(&["describe", "--dirty", "--json"], repo.path());
+    assert_cli_success(&output, "describe --dirty --json should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["result"], "v1.0");
+    assert_eq!(json["data"]["dirty"], false);
+    assert!(json["data"]["dirty_mark"].is_null());
+}
+
+#[test]
+fn test_describe_dirty_accepts_custom_suffix() {
+    let repo = create_committed_repo_via_cli();
+
+    let tag_output = run_libra_command(&["tag", "-m", "Release v1.0", "v1.0"], repo.path());
+    assert_cli_success(&tag_output, "failed to create tag for describe test");
+    std::fs::write(repo.path().join("tracked.txt"), "tracked\nchanged\n")
+        .expect("failed to dirty tracked file");
+
+    let output = run_libra_command(&["describe", "--dirty=-worktree", "--json"], repo.path());
+    assert_cli_success(&output, "describe --dirty=-worktree --json should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["result"], "v1.0-worktree");
+    assert_eq!(json["data"]["dirty"], true);
+    assert_eq!(json["data"]["dirty_mark"], "-worktree");
+}

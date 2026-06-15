@@ -6,23 +6,28 @@ use git_internal::{
     hash::ObjectHash,
     internal::object::{commit::Commit, types::ObjectType},
 };
-use serde::Serialize;
 
 use crate::{
-    command::load_object,
+    command::{load_object, status},
     internal::tag::{self, TagObject},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
-        util::{self, CommitBaseError},
+        util,
     },
 };
+
+#[path = "describe_types.rs"]
+mod describe_types;
+use describe_types::{DescribeError, DescribeOutput};
 
 const DESCRIBE_EXAMPLES: &str = "\
 EXAMPLES:
     libra describe                  Describe HEAD using the nearest annotated tag
     libra describe --tags           Include lightweight tags (not just annotated ones) in the search
     libra describe --always         Fall back to abbreviated commit hash when no tag matches
+    libra describe --exact-match    Only succeed when HEAD exactly matches a tag
+    libra describe --dirty          Append -dirty when tracked content differs from HEAD
     libra describe HEAD~1           Describe a specific commit-ish (hash, ref, or HEAD~N)
     libra describe --abbrev 12      Use 12 hex digits instead of the default 7 in the hash portion
     libra describe --json           Structured JSON output for agents";
@@ -44,51 +49,20 @@ pub struct DescribeArgs {
     /// Show an abbreviated commit hash when no tag can describe the target.
     #[clap(long)]
     pub always: bool,
+
+    /// Only output exact tag matches.
+    #[clap(long)]
+    pub exact_match: bool,
+
+    /// Append MARK when tracked content differs from HEAD.
+    #[clap(long, value_name = "MARK", num_args = 0..=1, require_equals = true, default_missing_value = "-dirty")]
+    pub dirty: Option<String>,
 }
 
 // Entry in tag lookup map
 struct TagInfo {
     name: String,
     is_annotated: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct DescribeOutput {
-    input: String,
-    resolved_commit: String,
-    result: String,
-    tag: Option<String>,
-    distance: Option<usize>,
-    abbreviated_commit: Option<String>,
-    exact_match: bool,
-    used_always: bool,
-}
-
-#[derive(Debug, thiserror::Error)]
-enum DescribeError {
-    #[error("HEAD does not point to a commit")]
-    HeadUnborn,
-    #[error("{0}")]
-    InvalidReference(String),
-    #[error("{0}")]
-    ReadFailure(String),
-    #[error("{0}")]
-    CorruptReference(String),
-    #[error("failed to load commit '{commit_id}': {detail}")]
-    LoadCommit { commit_id: String, detail: String },
-    #[error("no names found, cannot describe anything")]
-    NoNamesFound,
-}
-
-impl From<CommitBaseError> for DescribeError {
-    fn from(error: CommitBaseError) -> Self {
-        match error {
-            CommitBaseError::HeadUnborn => Self::HeadUnborn,
-            CommitBaseError::InvalidReference(message) => Self::InvalidReference(message),
-            CommitBaseError::ReadFailure(message) => Self::ReadFailure(message),
-            CommitBaseError::CorruptReference(message) => Self::CorruptReference(message),
-        }
-    }
 }
 
 pub async fn execute(args: DescribeArgs) {
@@ -119,6 +93,10 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
         .map_err(DescribeError::from)?;
     let resolved_commit = start_hash.to_string();
     let abbrev = args.abbrev.unwrap_or(7);
+    let include_lightweight = args.tags;
+    let exact_match = args.exact_match;
+    let always = args.always;
+    let dirty_mark = args.dirty;
 
     // 2. Load all tags and build a mapping table: commit hash -> tag info (name, is_annotated)
     let all_tags = tag::list()
@@ -130,7 +108,7 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
         let is_annotated = t.object.get_type() == ObjectType::Tag;
 
         // Only include light-weight tags if --tags is specified
-        if is_annotated || args.tags {
+        if is_annotated || include_lightweight {
             let tag_name = t.name;
             let target_commit_hash = match t.object {
                 TagObject::Commit(c) => c.id,
@@ -164,13 +142,18 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
     while let Some((curr_hash, dist)) = queue.pop_front() {
         // Check if current commit has a matching tag
         if let Some(tag_info) = tag_map.get(&curr_hash) {
-            return Ok(describe_output(
+            let output = describe_output(
                 input.clone(),
                 resolved_commit.clone(),
                 &tag_info.name,
                 dist,
                 abbrev,
-            ));
+            );
+            return apply_dirty_mark(output, dirty_mark).await;
+        }
+
+        if exact_match {
+            break;
         }
 
         // Load commit to find parents
@@ -188,9 +171,15 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
         }
     }
 
-    if args.always {
+    if exact_match {
+        return Err(DescribeError::NoExactMatch {
+            commit_id: resolved_commit,
+        });
+    }
+
+    if always {
         let abbreviated = abbreviate_hash(&resolved_commit, abbrev);
-        return Ok(DescribeOutput {
+        let output = DescribeOutput {
             input,
             resolved_commit,
             result: abbreviated.clone(),
@@ -199,10 +188,43 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
             abbreviated_commit: Some(abbreviated),
             exact_match: false,
             used_always: true,
-        });
+            dirty: false,
+            dirty_mark: None,
+        };
+        return apply_dirty_mark(output, dirty_mark).await;
     }
 
     Err(DescribeError::NoNamesFound)
+}
+
+async fn apply_dirty_mark(
+    mut output: DescribeOutput,
+    dirty_mark: Option<String>,
+) -> Result<DescribeOutput, DescribeError> {
+    if let Some(mark) = dirty_mark
+        && has_tracked_dirty_changes().await?
+    {
+        output.result.push_str(&mark);
+        output.dirty = true;
+        output.dirty_mark = Some(mark);
+    }
+
+    Ok(output)
+}
+
+async fn has_tracked_dirty_changes() -> Result<bool, DescribeError> {
+    let staged = status::changes_to_be_committed_safe()
+        .await
+        .map_err(|error| DescribeError::ReadFailure(format!("{error}")))?;
+    if !staged.is_empty() {
+        return Ok(true);
+    }
+
+    let unstaged = status::changes_to_be_staged()
+        .map_err(|error| DescribeError::ReadFailure(format!("{error}")))?;
+    Ok(!unstaged.modified.is_empty()
+        || !unstaged.deleted.is_empty()
+        || !unstaged.renamed.is_empty())
 }
 
 // Formats the output string based on Git's describe rules.
@@ -236,6 +258,8 @@ fn describe_output(
         abbreviated_commit,
         exact_match: distance == 0,
         used_always: false,
+        dirty: false,
+        dirty_mark: None,
     }
 }
 
@@ -274,6 +298,11 @@ fn describe_cli_error(error: DescribeError) -> CliError {
             .with_hint(
                 "create a tag, pass '--tags' to include lightweight tags, or use '--always'.",
             ),
+        DescribeError::NoExactMatch { commit_id } => {
+            CliError::fatal(format!("no tag exactly matches '{commit_id}'"))
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("move to a tagged commit or omit '--exact-match'.")
+        }
         DescribeError::LoadCommit { commit_id, detail } => {
             CliError::fatal(format!("failed to load commit '{commit_id}': {detail}"))
                 .with_stable_code(StableErrorCode::RepoCorrupt)
@@ -282,43 +311,5 @@ fn describe_cli_error(error: DescribeError) -> CliError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Pin the `Display` format for every variant of [`DescribeError`].
-    /// These strings are used directly as the CliError message via
-    /// `describe_cli_error` (lines above) and surface in both human
-    /// and `--json` envelopes.
-    #[test]
-    fn describe_error_display_pins_each_variant() {
-        assert_eq!(
-            DescribeError::HeadUnborn.to_string(),
-            "HEAD does not point to a commit",
-        );
-        // `{0}`-only variants echo the inner string verbatim.
-        assert_eq!(
-            DescribeError::InvalidReference("bad-ref".to_string()).to_string(),
-            "bad-ref",
-        );
-        assert_eq!(
-            DescribeError::ReadFailure("db locked".to_string()).to_string(),
-            "db locked",
-        );
-        assert_eq!(
-            DescribeError::CorruptReference("bad commit hash".to_string()).to_string(),
-            "bad commit hash",
-        );
-        assert_eq!(
-            DescribeError::LoadCommit {
-                commit_id: "deadbeef".to_string(),
-                detail: "object not found".to_string(),
-            }
-            .to_string(),
-            "failed to load commit 'deadbeef': object not found",
-        );
-        assert_eq!(
-            DescribeError::NoNamesFound.to_string(),
-            "no names found, cannot describe anything",
-        );
-    }
-}
+#[path = "describe_tests.rs"]
+mod tests;

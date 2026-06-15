@@ -128,7 +128,7 @@
 | `grep` / `grep -F/-i/-n/-c/-l/-L/-e/-f/--tree/--cached` | `cli.grep-blame-describe-shortlog` | 工作区、index、pathspec、pattern file 和历史 tree 搜索可观察 |
 | `grep -z` / `grep --untracked` | `cli.grep-blame-describe-shortlog` | 当前未实现，runner 负向断言 |
 | `blame` / `blame -L` / `blame <file> <commit>` | `cli.grep-blame-describe-shortlog` | 行级作者、提交和范围限制可观察；`--porcelain` 为负向断言 |
-| `describe --tags/--always/--abbrev` | `cli.grep-blame-describe-shortlog` | tag 描述和 hash fallback 可观察；`--exact-match` / `--dirty` 为负向断言 |
+| `describe --tags/--always/--abbrev/--exact-match/--dirty[=<mark>]` | `cli.grep-blame-describe-shortlog` | tag 描述、hash fallback、exact match 和 tracked dirty 后缀可观察；HEAD 越过 tag 后的 `--exact-match` 为负向断言 |
 | `shortlog` / `shortlog -s` / `shortlog -n` / `shortlog -e` | `cli.grep-blame-describe-shortlog` | 作者汇总、排序、邮箱和 revision 限制可观察；扩展 flags 为负向断言 |
 | `rev-parse HEAD` / `--short` / `--show-toplevel` | `cli.object-readback` | 完整哈希、短哈希和工作树根路径可传递给后续 plumbing 命令 |
 | `rev-parse --verify` / `--verify --short` / `--default` | `cli.object-readback` | 单对象断言、短哈希断言、默认 revision 回退和 quiet 失败退出 1 可观察 |
