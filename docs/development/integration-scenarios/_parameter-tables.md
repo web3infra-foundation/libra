@@ -123,7 +123,7 @@
 | `merge --continue` / `--abort` | `cli.merge-rebase-cherry-revert-smoke` | 无会话时明确失败；冲突续跑场景另行补充 |
 | `rebase <upstream>` | `cli.merge-rebase-cherry-revert-smoke` | topic 提交重放到新 base |
 | `rebase --continue` | `cli.merge-rebase-cherry-revert-smoke` | 无会话时明确失败；冲突续跑场景另行补充 |
-| `cherry-pick <commit>` | `cli.merge-rebase-cherry-revert-smoke` | 指定提交修改被重放到当前分支 |
+| `cherry-pick <commit>` / `cherry-pick -x <commit>` | `cli.merge-rebase-cherry-revert-smoke` | 指定提交修改被重放到当前分支；默认消息不追加来源行，`-x` 追加来源提交行 |
 | `revert <commit>` / `A..B`, `revert --continue` / `--abort` | `cli.merge-rebase-cherry-revert-smoke` | 单提交反向提交覆盖；范围回滚和空会话控制为负向断言 |
 | `grep` / `grep -F/-i/-n/-c/-l/-L/-e/-f/--tree/--cached` | `cli.grep-blame-describe-shortlog` | 工作区、index、pathspec、pattern file 和历史 tree 搜索可观察 |
 | `grep -z` / `grep --untracked` | `cli.grep-blame-describe-shortlog` | 当前未实现，runner 负向断言 |

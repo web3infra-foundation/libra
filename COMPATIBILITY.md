@@ -58,7 +58,7 @@ batch document.
 | rev-list | partial | single revision reachability listing supported; ranges, exclusions, count/limit, parent filters, and extended output are not exposed |
 | describe | partial | basic describe, `--tags`, `--always`, and `--abbrev` supported; long/match/exclude/first-parent/dirty/exact/contains/candidates/all are not exposed |
 | notes | partial | `add` / `show` / `list` / `remove` supported; `--ref` supported; append/edit/copy/merge/prune and editor support not implemented |
-| cherry-pick | partial | basic one-or-more commit replay and `-n/--no-commit` supported; `-x`, edit/mainline/signoff/ff/sequencer/strategy/empty-policy surface remains incomplete |
+| cherry-pick | partial | basic one-or-more commit replay, `-n/--no-commit`, and `-x` supported; edit/mainline/signoff/ff/sequencer/strategy/empty-policy surface remains incomplete |
 | push | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected — intentional (see [docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push](docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push)) |
 | fetch | partial | repository/refspec, `--all`, and `--depth` supported; prune/dry-run/tags/force/append/refmap and shallow expansion flags are not exposed |
 | pull | partial | fetch + fast-forward/three-way merge supported; `--ff-only` and `--rebase` exposed; `--squash` / `--no-ff` strategy flags not exposed |

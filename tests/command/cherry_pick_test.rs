@@ -199,6 +199,7 @@ async fn test_basic_cherry_pick() {
     cherry_pick::execute(cherry_pick::CherryPickArgs {
         commits: vec![c2_commit.to_string()],
         no_commit: true,
+        record_origin: false,
     })
     .await;
 
@@ -351,6 +352,7 @@ async fn test_cherry_pick_with_commit() {
     cherry_pick::execute(cherry_pick::CherryPickArgs {
         commits: vec![feature_commit.to_string()],
         no_commit: false,
+        record_origin: false,
     })
     .await;
 
@@ -361,6 +363,15 @@ async fn test_cherry_pick_with_commit() {
     assert_ne!(
         head_before, head_after,
         "A new commit should have been created"
+    );
+    let cherry_pick_commit: Commit =
+        load_object(&head_after).expect("Should load cherry-pick commit");
+    assert_eq!(cherry_pick_commit.message.trim(), "Feature commit");
+    assert!(
+        !cherry_pick_commit
+            .message
+            .contains("(cherry picked from commit "),
+        "default cherry-pick should not append source line"
     );
 
     // Verify file was cherry-picked
@@ -500,6 +511,7 @@ async fn test_cherry_pick_multiple_commits() {
     cherry_pick::execute(cherry_pick::CherryPickArgs {
         commits: vec![commit1.to_string(), commit2.to_string()],
         no_commit: false,
+        record_origin: false,
     })
     .await;
 
@@ -539,10 +551,58 @@ async fn test_cherry_pick_errors() {
     cherry_pick::execute(cherry_pick::CherryPickArgs {
         commits: vec!["nonexistent".to_string()],
         no_commit: false,
+        record_origin: false,
     })
     .await;
 
     println!("Error handling test completed");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_cherry_pick_x_appends_source_line_to_commit_message() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    let output = run_libra_command(&["switch", "-c", "feature"], repo.path());
+    assert_cli_success(&output, "switch -c feature should succeed");
+
+    fs::write("feature.txt", "feature content\n").unwrap();
+    let output = run_libra_command(&["add", "feature.txt"], repo.path());
+    assert_cli_success(&output, "add feature.txt should succeed");
+
+    let output = run_libra_command(
+        &["commit", "-m", "Feature commit", "--no-verify"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "feature commit should succeed");
+
+    let feature_commit = Head::current_commit()
+        .await
+        .expect("expected feature commit");
+
+    let output = run_libra_command(&["switch", "main"], repo.path());
+    assert_cli_success(&output, "switch main should succeed");
+
+    let output = run_libra_command(
+        &["cherry-pick", "-x", &feature_commit.to_string()],
+        repo.path(),
+    );
+    assert_cli_success(&output, "cherry-pick -x should succeed");
+
+    let head_after = Head::current_commit()
+        .await
+        .expect("expected cherry-pick commit");
+    let picked_commit: Commit = load_object(&head_after).expect("expected cherry-pick commit");
+    let expected_source_line = format!("(cherry picked from commit {feature_commit})");
+    assert!(
+        picked_commit.message.contains("Feature commit"),
+        "cherry-pick -x should preserve source commit message"
+    );
+    assert!(
+        picked_commit.message.contains(&expected_source_line),
+        "cherry-pick -x should append source line"
+    );
 }
 
 #[test]
@@ -747,6 +807,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
     cherry_pick::execute(CherryPickArgs {
         commits: vec!["4b825dc642cb6eb9a060e54bf8d69288fbee4904".into()],
         no_commit: false,
+        record_origin: false,
     })
     .await;
     let head_after_invalid = Head::current_commit().await.unwrap();
@@ -763,6 +824,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
     cherry_pick::execute(CherryPickArgs {
         commits: vec![feature_commit.to_string()],
         no_commit: false,
+        record_origin: false,
     })
     .await;
     let head_after_valid = Head::current_commit().await.unwrap();

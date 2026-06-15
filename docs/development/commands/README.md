@@ -30,7 +30,7 @@
 | [`branch`](branch.md) | `partial` | create/list/delete/rename/upstream set/current/contains supported; copy/unset-upstream/merged/points-at/sort/format not exposed |
 | [`cat-file`](cat-file.md) | `partial` | `-t` / `-s` / `-p` / `-e` supported; batch modes and `-e` JSON/machine output not exposed |
 | [`checkout`](checkout.md) | `partial` | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore... |
-| [`cherry-pick`](cherry-pick.md) | `partial` | commit replay and `-n` supported; source recording, edit/mainline/signoff/sequencer/strategy flags incomplete |
+| [`cherry-pick`](cherry-pick.md) | `partial` | commit replay, `-n`, and `-x` supported; edit/mainline/signoff/sequencer/strategy flags incomplete |
 | [`clean`](clean.md) | `partial` | `-n` / `-f` / `-d` / `-x` / `-X` / `--exclude` supported; `-i` and pathspec filtering not exposed |
 | [`clone`](clone.md) | `partial` | `--depth` and `--single-branch` supported; `--sparse` unsupported (see [docs/development/commands/_compatibility.md#d... |
 | [`cloud`](cloud.md) | `intentionally-different` | Libra cloud backup/restore extension, not a Git command |

@@ -248,7 +248,7 @@ scenarios:
   - id: cli.merge-rebase-cherry-revert-smoke
     wave: 1
     group: history_edit
-    purpose: "Smoke for merge, rebase, cherry-pick, and single-commit revert; negative checks cover revert range, empty lifecycle actions, unsupported merge --find-renames/--squash, and missing merge targets. Criss-cross fixture currently asserts rebase JSON success."
+    purpose: "Smoke for merge, rebase, cherry-pick default messages, cherry-pick -x source recording, and single-commit revert; negative checks cover revert range, empty lifecycle actions, unsupported merge --find-renames/--squash, and missing merge targets. Criss-cross fixture currently asserts rebase JSON success."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck, negative_exit, lbr_error]

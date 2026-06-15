@@ -43,6 +43,7 @@ use crate::{
 const CHERRY_PICK_EXAMPLES: &str = "\
 EXAMPLES:
     libra cherry-pick abc1234              Apply a single commit
+    libra cherry-pick -x abc1234           Record the original commit hash in the new message
     libra cherry-pick abc1234 def5678      Apply multiple commits in order
     libra cherry-pick -n abc1234           Apply without auto-committing
     libra cherry-pick --json abc1234       Structured JSON output for agents";
@@ -160,6 +161,10 @@ pub struct CherryPickArgs {
     /// Don't automatically commit the cherry-pick
     #[clap(short = 'n', long)]
     pub no_commit: bool,
+
+    /// Append "(cherry picked from commit ...)" to the new commit message
+    #[clap(short = 'x')]
+    pub record_origin: bool,
 }
 
 pub async fn execute(args: CherryPickArgs) {
@@ -330,7 +335,7 @@ async fn cherry_pick_single_commit(
             CherryPickSingleError::LoadObject("failed to resolve current HEAD".to_string())
         })?;
         let cherry_pick_commit_id =
-            create_cherry_pick_commit(&commit_to_pick, &current_head).await?;
+            create_cherry_pick_commit(&commit_to_pick, &current_head, args.record_origin).await?;
         Ok(Some(cherry_pick_commit_id))
     }
 }
@@ -338,16 +343,21 @@ async fn cherry_pick_single_commit(
 async fn create_cherry_pick_commit(
     original_commit: &Commit,
     parent_id: &ObjectHash,
+    record_origin: bool,
 ) -> Result<ObjectHash, CherryPickSingleError> {
     let index = Index::load(path::index())
         .map_err(|e| CherryPickSingleError::LoadObject(format!("failed to load index: {e}")))?;
     let tree_id = create_tree_from_index(&index)?;
 
-    let cherry_pick_message = format!(
-        "{}\n\n(cherry picked from commit {})",
-        original_commit.message.trim(),
-        original_commit.id
-    );
+    let cherry_pick_message = if record_origin {
+        format!(
+            "{}\n\n(cherry picked from commit {})",
+            original_commit.message.trim(),
+            original_commit.id
+        )
+    } else {
+        original_commit.message.trim().to_string()
+    };
 
     let commit = Commit::from_tree_id(
         tree_id,

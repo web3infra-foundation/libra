@@ -35,6 +35,10 @@ libra commit -m "topic" --no-verify
 TOPIC="$(libra rev-parse HEAD)"
 libra switch main
 libra cherry-pick "$TOPIC"
+libra show --no-patch HEAD
+libra revert HEAD
+libra cherry-pick -x "$TOPIC"
+libra show --no-patch HEAD
 libra revert HEAD
 libra --json log --oneline
 
@@ -50,6 +54,7 @@ libra fsck --connectivity-only
 
 关键断言：
 
-- `merge`、`cherry-pick`、单提交 `revert` 和 JSON `log` 当前可用。
+- `merge`、默认 `cherry-pick`、`cherry-pick -x`、单提交 `revert` 和 JSON `log` 当前可用。
+- 默认 `cherry-pick` 的提交消息不应追加来源行；`cherry-pick -x` 的提交消息应追加 `(cherry picked from commit <TOPIC>)`。
 - revert range、空会话 lifecycle、`merge --find-renames`、`merge --squash` 和缺失分支必须失败。
 - criss-cross fixture 当前断言 `--json rebase right` 成功，并在完成后运行 `fsck --connectivity-only`。

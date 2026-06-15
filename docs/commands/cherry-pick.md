@@ -7,12 +7,12 @@ Apply the changes introduced by some existing commits.
 ## Synopsis
 
 ```
-libra cherry-pick [-n | --no-commit] [--json] [--quiet] <commit>...
+libra cherry-pick [-n | --no-commit] [-x] [--json] [--quiet] <commit>...
 ```
 
 ## Description
 
-`libra cherry-pick` applies the changes introduced by the specified commits onto the current branch. For each named commit, Libra computes the diff between that commit and its parent, applies the resulting changeset to the current index and working tree, and (unless `--no-commit` is given) records a new commit whose message references the original.
+`libra cherry-pick` applies the changes introduced by the specified commits onto the current branch. For each named commit, Libra computes the diff between that commit and its parent, applies the resulting changeset to the current index and working tree, and (unless `--no-commit` is given) records a new commit. Use `-x` when the new commit message should include the original commit hash.
 
 This is useful for selectively applying commits from one branch to another without merging. When multiple commits are supplied they are applied in the order given, each one becoming a new commit on the current branch before the next is processed.
 
@@ -33,6 +33,15 @@ libra cherry-pick -n abc1234
 # Inspect staged changes, then commit manually
 libra status
 libra commit -m "cherry-picked and adjusted abc1234"
+```
+
+### `-x`
+
+Append `(cherry picked from commit <hash>)` to the new commit message. Without `-x`, Libra keeps the source commit message without adding the provenance line, matching Git's default behavior.
+
+```bash
+# Record the original commit hash in the new commit message
+libra cherry-pick -x abc1234
 ```
 
 ### `<commit>...` (positional, required)
@@ -66,6 +75,9 @@ libra cherry-pick abc1234 def5678
 
 # Cherry-pick without committing, to edit or combine changes
 libra cherry-pick -n abc1234
+
+# Cherry-pick and record the original commit hash in the new message
+libra cherry-pick -x abc1234
 
 # Cherry-pick with JSON output for AI agents or scripts
 libra cherry-pick --json abc1234
@@ -129,7 +141,7 @@ When `--no-commit` is used, `new_commit` and `short_new` are `null`:
 
 Git's `--edit` opens an editor so the user can modify the commit message before recording. Libra omits this for two reasons:
 
-1. **Agent-first workflow.** Libra is designed for AI-agent-driven development where interactive editor prompts block automation pipelines. The default message format (`<original message>\n\n(cherry picked from commit <hash>)`) is deterministic and machine-parseable, which is exactly what agents need.
+1. **Agent-first workflow.** Libra is designed for AI-agent-driven development where interactive editor prompts block automation pipelines. The default message comes from the source commit, and `-x` adds a deterministic source line when provenance must be machine-parseable.
 2. **Compose with `--no-commit`.** Users who want to customize the message can use `-n` to stage changes without committing, then run `libra commit -m "custom message"`. This two-step approach is explicit, scriptable, and avoids the complexity of spawning an editor subprocess.
 
 ### Why no `--mainline` for merge commits?
@@ -143,7 +155,7 @@ Git's `--mainline <parent-number>` allows cherry-picking merge commits by specif
 
 When multiple commits are cherry-picked, each one builds on the result of the previous. Without intermediate commits, the index represents only the cumulative effect of all changes, losing the per-commit attribution. Allowing this would:
 
-1. **Destroy provenance.** The `(cherry picked from commit ...)` trailer would be meaningless since the staged state is a blend of multiple source commits.
+1. **Destroy provenance.** If `-x` were combined with multiple uncommitted picks, the `(cherry picked from commit ...)` trailer would be meaningless since the staged state is a blend of multiple source commits.
 2. **Complicate recovery.** If a conflict arises on the third of five commits, there are no intermediate commits to roll back to. Git handles this with `--continue`/`--abort` state files, which Libra intentionally avoids (see below).
 
 ### Why no `--continue`, `--abort`, or `--skip`?
@@ -160,6 +172,7 @@ Git maintains `.git/CHERRY_PICK_HEAD` and sequencer state files to support multi
 |-----------|-----|-----|-------|
 | Positional commits | `git cherry-pick <commit>...` | N/A (uses `jj rebase`) | `libra cherry-pick <commit>...` |
 | No-commit mode | `--no-commit` / `-n` | N/A | `--no-commit` / `-n` |
+| Record source | `-x` | N/A | `-x` |
 | Edit message | `--edit` / `-e` | N/A | Not supported (use `-n` then `commit -m`) |
 | Mainline parent | `--mainline <n>` / `-m <n>` | N/A | Not supported (merge commits rejected) |
 | Continue after conflict | `--continue` | N/A | Not supported (resolve then `commit`) |
