@@ -74,7 +74,7 @@
 | [`sandbox`](sandbox.md) | `intentionally-different` | Libra AI sandbox diagnostics extension, not a Git command |
 | [`shortlog`](shortlog.md) | `partial` | basic author summary supported; group/format/stdin/no-merges/author filters not exposed |
 | [`show`](show.md) | `partial` | object/commit display and common name/stat flags supported; extended pretty/raw/name-status formats not exposed |
-| [`show-ref`](show-ref.md) | `partial` | branch/tag/HEAD listing supported; verify/exists/dereference/abbrev/exclude-existing not exposed |
+| [`show-ref`](show-ref.md) | `partial` | branch/tag/HEAD listing, hash-only output, `--verify`, and `--exists` supported; dereference/abbrev/exclude-existing not exposed |
 | [`stash`](stash.md) | `partial` | `push` / `pop` / `list` / `apply` / `drop` / `show` / `branch` / `clear` supported; `create` / `store` deferred (see ... |
 | [`status`](status.md) | `supported` | 见命令文档。 |
 | [`switch`](switch.md) | `partial` | `-C/--force-create`、`--orphan`、`--detach`、`--track` 已公开；`-f/--discard-changes`、`--guess` / `--no-guess`、merge/conflict/submodule 相关参数未公开。 |

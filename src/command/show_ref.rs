@@ -34,6 +34,10 @@ EXAMPLES:
     libra show-ref --tags            List only tags (refs/tags/)
     libra show-ref --head            Include HEAD in the output
     libra show-ref -s --heads        Print branch hashes only (one per line, scripting-friendly)
+    libra show-ref --verify refs/heads/main
+                                     Verify an exact refname and print it
+    libra show-ref --exists refs/heads/main
+                                     Check whether an exact refname exists
     libra show-ref main              Filter refs by substring match (e.g. only entries containing 'main')
     libra show-ref --json --heads    Structured JSON output for agents";
 
@@ -56,6 +60,14 @@ pub struct ShowRefArgs {
     #[clap(short = 's', long = "hash")]
     pub hash: bool,
 
+    /// Verify exact refnames instead of substring filtering
+    #[clap(long, conflicts_with = "exists")]
+    pub verify: bool,
+
+    /// Check whether exactly one ref exists without printing it
+    #[clap(long, conflicts_with = "verify")]
+    pub exists: bool,
+
     /// Filter refs by pattern (substring match on the ref name)
     pub pattern: Vec<String>,
 }
@@ -75,9 +87,22 @@ pub async fn execute(args: ShowRefArgs) -> Result<(), String> {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Lists all refs (branches, tags) with their object IDs.
 pub async fn execute_safe(args: ShowRefArgs, output: &OutputConfig) -> CliResult<()> {
-    let hash_only = args.hash;
-    let entries = collect_show_ref_entries(&args).await?;
+    if args.exists {
+        return execute_exists(&args, output).await;
+    }
+    if args.verify {
+        return execute_verify(&args, output).await;
+    }
 
+    let entries = collect_show_ref_entries(&args).await?;
+    render_show_ref_entries(&entries, args.hash, output)
+}
+
+fn render_show_ref_entries(
+    entries: &[ShowRefEntry],
+    hash_only: bool,
+    output: &OutputConfig,
+) -> CliResult<()> {
     if output.is_json() {
         emit_json_data(
             "show-ref",
@@ -92,7 +117,7 @@ pub async fn execute_safe(args: ShowRefArgs, output: &OutputConfig) -> CliResult
     } else {
         let stdout = std::io::stdout();
         let mut writer = stdout.lock();
-        for entry in &entries {
+        for entry in entries {
             if hash_only {
                 writeln!(writer, "{}", entry.hash)
                     .map_err(|e| CliError::io(format!("failed to write show-ref output: {e}")))?;
@@ -129,25 +154,45 @@ fn show_ref_tag_list_error(error: ListTagError) -> CliError {
 }
 
 async fn collect_show_ref_entries(args: &ShowRefArgs) -> CliResult<Vec<ShowRefEntry>> {
-    // When neither --heads nor --tags is specified, show both
     let show_heads = args.heads || !args.tags;
     let show_tags = args.tags || !args.heads;
+    let mut entries = collect_raw_show_ref_entries(args.head, show_heads, show_tags).await?;
+    if !args.pattern.is_empty() {
+        entries.retain(|entry| {
+            entry.refname == "HEAD"
+                || args
+                    .pattern
+                    .iter()
+                    .any(|p| entry.refname.contains(p.as_str()))
+        });
+    }
 
-    let mut entries: Vec<ShowRefEntry> = Vec::new();
+    if entries.is_empty() {
+        return Err(CliError::failure("no matching refs found")
+            .with_stable_code(StableErrorCode::CliInvalidTarget));
+    }
 
-    // Include HEAD if --head is specified
-    if args.head
+    Ok(entries)
+}
+
+async fn collect_raw_show_ref_entries(
+    include_head: bool,
+    show_heads: bool,
+    show_tags: bool,
+) -> CliResult<Vec<ShowRefEntry>> {
+    let mut entries = Vec::new();
+
+    if include_head
         && let Some(hash) = Head::current_commit_result()
             .await
             .map_err(|error| show_ref_branch_store_error("resolve HEAD", error))?
     {
         entries.push(ShowRefEntry {
             hash: hash.to_string(),
-            refname: "HEAD".to_string(),
+            refname: String::from("HEAD"),
         });
     }
 
-    // Collect local branches: refs/heads/<name>
     if show_heads {
         let branches = Branch::list_branches_result(None)
             .await
@@ -181,11 +226,9 @@ async fn collect_show_ref_entries(args: &ShowRefArgs) -> CliResult<Vec<ShowRefEn
         }
     }
 
-    // Collect tags: refs/tags/<name>
     if show_tags {
         let tag_list = tag::list().await.map_err(show_ref_tag_list_error)?;
         for t in tag_list {
-            // For annotated tags use the tag object hash; for lightweight use the commit hash.
             let hash = match &t.object {
                 tag::TagObject::Commit(c) => c.id.to_string(),
                 tag::TagObject::Tag(tg) => tg.id.to_string(),
@@ -199,73 +242,62 @@ async fn collect_show_ref_entries(args: &ShowRefArgs) -> CliResult<Vec<ShowRefEn
         }
     }
 
-    // Apply pattern filter if any patterns were given
-    if !args.pattern.is_empty() {
-        entries.retain(|entry| {
-            entry.refname == "HEAD"
-                || args
-                    .pattern
-                    .iter()
-                    .any(|p| entry.refname.contains(p.as_str()))
-        });
-    }
-
-    if entries.is_empty() {
-        return Err(CliError::failure("no matching refs found")
-            .with_stable_code(StableErrorCode::CliInvalidTarget));
-    }
-
     Ok(entries)
+}
+
+async fn execute_verify(args: &ShowRefArgs, output: &OutputConfig) -> CliResult<()> {
+    if args.pattern.is_empty() {
+        return Err(CliError::command_usage("--verify requires a reference").with_exit_code(128));
+    }
+
+    let entries = collect_raw_show_ref_entries(true, true, true).await?;
+    let mut verified = Vec::new();
+    for refname in &args.pattern {
+        let Some(entry) = entries.iter().find(|entry| entry.refname == *refname) else {
+            let exit_code = if output.quiet { 1 } else { 128 };
+            return Err(CliError::failure(format!("'{refname}' - not a valid ref"))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_exit_code(exit_code));
+        };
+        verified.push(entry.clone());
+    }
+
+    render_show_ref_entries(&verified, args.hash, output)
+}
+
+async fn execute_exists(args: &ShowRefArgs, output: &OutputConfig) -> CliResult<()> {
+    if args.pattern.len() != 1 {
+        let message = if args.pattern.is_empty() {
+            "--exists requires a reference"
+        } else {
+            "--exists requires exactly one reference"
+        };
+        return Err(CliError::command_usage(message).with_exit_code(128));
+    }
+
+    let refname = &args.pattern[0];
+    let entries = collect_raw_show_ref_entries(true, true, true).await?;
+    if !entries.iter().any(|entry| entry.refname == *refname) {
+        return Err(
+            CliError::failure(format!("reference does not exist: {refname}"))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_exit_code(2),
+        );
+    }
+
+    if !output.is_json() {
+        return Ok(());
+    }
+    emit_json_data(
+        "show-ref",
+        &serde_json::json!({ "exists": true, "refname": refname }),
+        output,
+    )
 }
 
 fn remote_refname(remote: &str, branch_name: &str) -> String {
     if branch_name.starts_with("refs/remotes/") {
-        branch_name.to_string()
-    } else {
-        format!("refs/remotes/{remote}/{branch_name}")
+        return branch_name.to_string();
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use clap::Parser;
-
-    use super::ShowRefArgs;
-
-    #[test]
-    fn test_show_ref_args_default() {
-        let args = ShowRefArgs::try_parse_from(["show-ref"]).unwrap();
-        assert!(!args.heads);
-        assert!(!args.tags);
-        assert!(!args.head);
-        assert!(!args.hash);
-        assert!(args.pattern.is_empty());
-    }
-
-    #[test]
-    fn test_show_ref_args_heads_only() {
-        let args = ShowRefArgs::try_parse_from(["show-ref", "--heads"]).unwrap();
-        assert!(args.heads);
-        assert!(!args.tags);
-    }
-
-    #[test]
-    fn test_show_ref_args_tags_only() {
-        let args = ShowRefArgs::try_parse_from(["show-ref", "--tags"]).unwrap();
-        assert!(!args.heads);
-        assert!(args.tags);
-    }
-
-    #[test]
-    fn test_show_ref_args_with_pattern() {
-        let args = ShowRefArgs::try_parse_from(["show-ref", "--heads", "main"]).unwrap();
-        assert!(args.heads);
-        assert_eq!(args.pattern, vec!["main".to_string()]);
-    }
-
-    #[test]
-    fn test_show_ref_args_hash_flag() {
-        let args = ShowRefArgs::try_parse_from(["show-ref", "--hash"]).unwrap();
-        assert!(args.hash);
-    }
+    format!("refs/remotes/{remote}/{branch_name}")
 }

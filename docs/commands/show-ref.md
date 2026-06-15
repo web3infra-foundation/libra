@@ -20,6 +20,10 @@ ref name (e.g., `refs/heads/main`). Only refs whose name contains at least one
 of the given patterns are included. `HEAD` is never filtered out by patterns
 when `--head` is specified.
 
+Use `--verify <ref>` when a script needs an exact refname such as `HEAD` or
+`refs/heads/main`; short names like `main` are rejected. Use `--exists <ref>` to
+check whether exactly one ref exists without printing a success line.
+
 Libra stores refs in SQLite rather than loose files or packed-refs, so
 `show-ref` queries the database directly. This makes enumeration O(rows) with
 no filesystem scanning.
@@ -32,6 +36,8 @@ no filesystem scanning.
 | `--tags` | | Show only tags (`refs/tags/`). |
 | `--head` | | Include `HEAD` in the output. |
 | `--hash` | `-s` | Only show the object hash, not the reference name. |
+| `--verify` | | Verify exact refnames instead of substring filtering. |
+| `--exists` | | Check whether exactly one ref exists without printing it. |
 | `<PATTERN>...` | | Filter refs by substring match on the ref name. Multiple patterns are OR-ed. |
 
 ### Examples
@@ -49,6 +55,12 @@ libra show-ref --tags
 # Include HEAD and show hashes only
 libra show-ref --head --hash
 
+# Verify an exact ref
+libra show-ref --verify refs/heads/main
+
+# Check existence without success output
+libra show-ref --exists refs/heads/main
+
 # Filter to refs containing "release"
 libra show-ref release
 
@@ -63,6 +75,8 @@ libra show-ref
 libra show-ref --heads
 libra show-ref --tags
 libra show-ref --head --hash
+libra show-ref --verify refs/heads/main
+libra show-ref --exists refs/heads/main
 libra show-ref --json --head --heads
 libra show-ref main
 ```
@@ -112,6 +126,20 @@ def5678901234567890abcdef12345678abc1234
 When `--hash` is active, `hash_only` is `true`. The `entries` array is always
 present regardless of the flag so that JSON consumers have a uniform schema.
 
+With `--exists`, human output is silent on success. JSON output reports the
+checked ref:
+
+```json
+{
+  "ok": true,
+  "command": "show-ref",
+  "data": {
+    "exists": true,
+    "refname": "refs/heads/main"
+  }
+}
+```
+
 ## Design Rationale
 
 ### Why substring match instead of glob?
@@ -153,7 +181,8 @@ and which commit it resolves to.
 | Include HEAD | `--head` | `--head` | N/A (no HEAD concept) |
 | Hash-only output | `-s` / `--hash` | `-s` / `--hash` | N/A |
 | Pattern matching | Substring match | Prefix/glob match | Regex via revset |
-| `--verify` (check single ref) | Not yet implemented | Yes | N/A |
+| `--verify` (check exact ref) | `--verify <ref>` | Yes | N/A |
+| `--exists` (existence check) | `--exists <ref>` | Yes | N/A |
 | `-d` / `--dereference` | Not yet implemented | Yes | N/A |
 | JSON output | `--json` | No | No |
 | Ref storage | SQLite `reference` table | Loose files + packed-refs | Operation log |
@@ -164,5 +193,7 @@ and which commit it resolves to.
 | Scenario | StableErrorCode | Exit |
 |----------|-----------------|------|
 | No matching refs | `LBR-CLI-003` | 129 |
+| `--verify` target is not an exact existing ref | `LBR-CLI-003` | 128, or 1 with global `--quiet` |
+| `--exists` target is missing | `LBR-CLI-003` | 2 |
 | Failed to read refs | `LBR-IO-001` | 128 |
 | Corrupt stored branch/tag data | `LBR-REPO-002` | 128 |
