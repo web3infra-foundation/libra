@@ -208,7 +208,7 @@
 | `gc` / `prune` | `cli.gc-smoke` | 当前顶层命令未注册，runner 断言 JSON unknown-command 错误 |
 | `maintenance run --dry-run --task gc` | `cli.gc-smoke` | 当前可用 maintenance 路径返回 JSON envelope |
 | `archive` | `cli.archive-smoke` | 当前未注册，runner 断言 JSON unknown-command 错误 |
-| `verify-pack [-v] --pack <pack> <idx...>` | `cli.verify-pack-smoke` | idx/pack 对应校验和 verbose 路径可观察；`-s` 当前未覆盖为正向 |
+| `verify-pack [-v|-s] --pack <pack> <idx>` | `cli.verify-pack-smoke` | idx/pack 对应校验、verbose 对象行和 stat-only 摘要路径可观察；multi-index 仍未公开 |
 | `db status` / `db upgrade` / `db --json status` | `cli.schema-upgrade-observable` | fresh/current schema 状态、升级 no-op 和非 repo 失败可观察 |
 | hidden `index-pack` | `cli.verify-pack-smoke` | 仅作为 pack fixture 辅助生成，不作为独立用户命令场景 |
 

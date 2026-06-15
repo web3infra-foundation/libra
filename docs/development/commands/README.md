@@ -81,7 +81,7 @@
 | [`symbolic-ref`](symbolic-ref.md) | `partial` | Supports local `HEAD` only; other symbolic refs are rejected because Libra stores refs in SQLite |
 | [`tag`](tag.md) | `partial` | lightweight/message tags, force/delete/list/`-n` supported; explicit annotate, filters, sort/column, signing and verification not exposed |
 | [`usage`](usage.md) | `intentionally-different` | Libra AI provider/model usage reporting extension, not a Git command |
-| [`verify-pack`](verify-pack.md) | `partial` | validates one `.idx` file against a matching `.pack`; Git's multi-index form and `-s` / `--stat-only` are not exposed |
+| [`verify-pack`](verify-pack.md) | `partial` | validates one `.idx` file against a matching `.pack`; `-s` / `--stat-only` supported; Git's multi-index form is not exposed |
 | [`worktree`](worktree.md) | `intentionally-different` | `remove` keeps disk dir by default (no implicit data loss). Use `--delete-dir` for Git-style behavior; the flag refus... |
 
 ## 未公开或未纳入用户承诺的命令资料

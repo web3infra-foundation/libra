@@ -73,6 +73,13 @@ pub mod symbolic_ref;
 pub mod tag;
 pub mod usage;
 pub mod verify_pack;
+mod verify_pack_decode;
+mod verify_pack_index;
+mod verify_pack_index_common;
+mod verify_pack_index_v2;
+mod verify_pack_render;
+mod verify_pack_support;
+mod verify_pack_types;
 #[cfg(all(unix, feature = "worktree-fuse"))]
 #[path = "worktree-fuse.rs"]
 pub mod worktree;

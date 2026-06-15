@@ -81,7 +81,7 @@ batch document.
 | archive | partial | Creates tar/tar.gz/tar.bz2/zip archives from a committed tree; `--format`, `--output`, `--prefix` supported |
 | cat-file | partial | `-t`, `-s`, `-p`, `-e`, and AI object modes supported; batch modes and JSON/machine output for `-e` are not exposed |
 | fsck | partial | object/ref/index/reflog/connectivity checks supported; JSON/machine output, strict mode, and pack verification surface remain incomplete |
-| verify-pack | partial | validates one `.idx` file against a matching `.pack`; Git's multi-index form and `-s` / `--stat-only` are not exposed |
+| verify-pack | partial | validates one `.idx` file against a matching `.pack`; `-s` / `--stat-only` supported; Git's multi-index form is not exposed |
 | index-pack | partial | hidden plumbing command for pack file indexing; stdin/fix-thin/keep/progress flags are not exposed |
 | checkout | partial | visible branch compatibility surface plus `checkout <commit>` detached HEAD, `-b`/`-B` branch creation, and explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` for new code; patch modes still partial |
 | bisect | partial | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` supported; `replay` (see [docs/development/commands/_compatibility.md#d6-bisect-replay](docs/development/commands/_compatibility.md#d6-bisect-replay)) / `terms` (see [docs/development/commands/_compatibility.md#d7-bisect-terms](docs/development/commands/_compatibility.md#d7-bisect-terms)) deferred |

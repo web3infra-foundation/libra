@@ -46,6 +46,10 @@ pub(crate) fn scenario_verify_pack_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()
     assert_stdout_contains(&verbose, " blob ")?;
     assert_stdout_contains(&verbose, ": ok")?;
 
+    let stats = ctx.command(&["verify-pack", "-s", &idx_arg], repo.clone(), true)?;
+    assert_stdout_contains(&stats, "non delta:")?;
+    assert_not_contains(&stats, ": ok")?;
+
     assert_json_ok(
         &ctx.command(&["--json", "verify-pack", &idx_arg], repo.clone(), true)?,
         "verify-pack",

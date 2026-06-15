@@ -34,7 +34,7 @@ libra verify-pack --pack "$PACK_FILE" "$PACK_IDX"
 libra verify-pack -v "$PACK_IDX"
 libra verify-pack -s "$PACK_IDX"
 libra --json verify-pack "$PACK_IDX" >verifypack.json
-python3 -c "import json; d=json.load(open('verifypack.json')); assert d['ok'] is True; assert d['data']['verified'] is True; assert 'objects' in d['data']"
+python3 -c "import json; d=json.load(open('verifypack.json')); assert d['ok'] is True; assert d['data']['verified'] is True; assert d['data']['object_count'] > 0"
 ```
 
 负向步骤：
@@ -50,12 +50,11 @@ printf 'corrupt' >> "$RUN_ROOT/fixtures/$SCENARIO/corrupt.idx"
 断言：`index-pack` 仅作为隐藏内部 fixture 生成器使用；`verify-pack` 默认从 idx sibling 推导 `.pack` 路径；`--pack` 显式路径可验证同一 pack；`-v` 输出对象 hash/offset；`-s` 输出统计摘要；`--json` 输出 `verified=true`、object count、pack/index hash 等结构化字段；缺失或损坏 idx 必须失败且错误包含受影响路径。fixture 来源固定为仓库内 `tests/data/packs/small-sha1.pack` 复制到 `$RUN_ROOT/fixtures/$SCENARIO/`，不得读取开发者真实 `.git/objects/pack` 或 `.libra/objects/pack`。
 
 补充可执行断言：
-- `libra --json verify-pack "$PACK_IDX"` 必须 `ok:true`；单 idx 时 `data.verified == true`，多 idx 时 `data.packs[].verified` 全为 true。
+- `libra --json verify-pack "$PACK_IDX"` 必须 `ok:true`；单 idx 时 `data.verified == true` 且 `data.object_count > 0`。
 - `verify-pack --pack "$PACK_FILE" "$PACK_IDX"` 输出与 sibling 推导一致的 `<idx>: ok`。
 - `verify-pack -v` 输出 `<oid> <type> <size> <size-in-pack> <offset>` 对象行（含 `commit` 和 `blob`）并以 `: ok` 结尾。
 - `verify-pack -s` 输出 `non delta:` 统计摘要且不打印 `: ok` 行。
 - 缺失 idx 场景 `libra verify-pack missing.idx` 必须非 0，错误包含 `could not open pack index` 与路径。
 - 损坏 idx 场景 `libra verify-pack corrupt.idx` 必须非 0，stderr 包含 `invalid pack index` 路径或 corrupt 信息。
 - 操作后在生成 pack 的仓库执行 `libra fsck` 通过。
-- 验证 `--json` 输出包含 "objects" 数组。
-
+- 非 verbose `--json` 不要求 `objects` 数组；`-v` 的对象行由 human 输出断言覆盖。

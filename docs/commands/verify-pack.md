@@ -28,7 +28,7 @@ files infer SHA-1 vs SHA-256 from the index layout; version 1 indexes are SHA-1
 only.
 
 Compatibility note: this command currently accepts one `<IDX_FILE>` per
-invocation and does not expose Git's `-s` / `--stat-only` form.
+invocation; Git's multi-index form is not exposed.
 
 ## Options
 
@@ -37,6 +37,7 @@ invocation and does not expose Git's `-s` / `--stat-only` form.
 | `<IDX_FILE>` | | Pack index file to verify | Required |
 | `--pack <PATH>` | | Pack archive to verify against | `<IDX_FILE>` with `.pack` extension |
 | `--verbose` | `-v` | Print each indexed object using Git-compatible verbose fields | Off |
+| `--stat-only` | `-s` | Print only Git-style non-delta and delta-chain statistics | Off |
 | `--json` | | Emit a structured JSON envelope | Off |
 | `--machine` | | Emit the same envelope as one compact JSON line | Off |
 
@@ -46,6 +47,7 @@ invocation and does not expose Git's `-s` / `--stat-only` form.
 libra verify-pack objects/pack/pack-abc123.idx
 libra verify-pack --pack /tmp/pack-abc123.pack /tmp/pack-abc123.idx
 libra verify-pack -v pack-abc123.idx
+libra verify-pack -s pack-abc123.idx
 libra verify-pack pack-abc123.idx --json
 ```
 
@@ -69,6 +71,14 @@ The fields are `<oid> <type> <size> <size-in-pack> <offset>`. CRC32 values for
 version 2 indexes are validated and remain available in structured output, but
 are not printed in human verbose mode.
 
+Stat-only mode prints Git-style aggregate statistics and omits the trailing
+`: ok` line:
+
+```text
+non delta: 42 objects
+chain length = 1: 3 objects
+```
+
 ## Structured Output
 
 ```json
@@ -89,6 +99,8 @@ are not printed in human verbose mode.
 
 When `--verbose` is combined with `--json`, `data.objects[]` contains `oid`,
 `object_type`, `size`, `size_in_pack`, `offset`, and optional `crc32`.
+When `--stat-only` is combined with `--json`, `data.stats` contains
+`non_delta` and any `chain_lengths`.
 
 ## Compatibility
 
@@ -96,7 +108,7 @@ When `--verbose` is combined with `--json`, `data.objects[]` contains `oid`,
 |---------|-------|-----|----|
 | Verify pack index | `libra verify-pack <idx>` | `git verify-pack <idx>...` | N/A |
 | Verbose objects | `-v` / `--verbose` | `-v` | N/A |
-| Stat-only mode | Unsupported | `-s` / `--stat-only` | N/A |
+| Stat-only mode | `-s` / `--stat-only` | `-s` / `--stat-only` | N/A |
 | Explicit pack path | `--pack <path>` | N/A | N/A |
 | JSON output | `--json` / `--machine` | N/A | N/A |
 | Version 1 index | Supported for SHA-1 repositories | Supported | N/A |
