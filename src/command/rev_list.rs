@@ -27,6 +27,8 @@ EXAMPLES:
     libra rev-list                  Walk ancestry from HEAD (one hash per line)
     libra rev-list --count HEAD     Count reachable commits after filters
     libra rev-list -n 5 HEAD        Limit output to the first five commits
+    libra rev-list --parents HEAD   Include parent commit IDs on each line
+    libra rev-list --timestamp HEAD Prefix each line with the committer timestamp
     libra rev-list main             Walk ancestry from refs/heads/main
     libra rev-list HEAD~5           Walk ancestry from a relative ref
     libra rev-list --json HEAD      Structured JSON output (input + commits[] + total)
@@ -47,19 +49,53 @@ pub struct RevListArgs {
     #[clap(long)]
     pub count: bool,
 
+    /// Print parent commit IDs after each commit
+    #[clap(long)]
+    pub parents: bool,
+
+    /// Prefix each output line with the commit timestamp
+    #[clap(long)]
+    pub timestamp: bool,
+
     /// Revision to list from. Defaults to HEAD when omitted.
     #[clap(value_name = "SPEC")]
     pub spec: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct RevListEntry {
+    commit: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    parents: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct RevListOutput {
     input: String,
     commits: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entries: Option<Vec<RevListEntry>>,
     total: usize,
     count_only: bool,
+    parents: bool,
+    timestamp: bool,
     max_count: Option<usize>,
     skip: usize,
+}
+
+impl RevListOutput {
+    fn human_lines(&self) -> Vec<String> {
+        if let Some(entries) = &self.entries {
+            return entries
+                .iter()
+                .map(|entry| format_rev_list_entry(entry, self.parents, self.timestamp))
+                .collect();
+        }
+
+        self.commits.clone()
+    }
 }
 
 pub async fn execute(args: RevListArgs) -> Result<(), String> {
@@ -83,7 +119,7 @@ pub async fn execute_safe(args: RevListArgs, output: &OutputConfig) -> CliResult
     } else {
         let stdout = std::io::stdout();
         let mut writer = stdout.lock();
-        write_rev_list_output(&mut writer, &result.commits)
+        write_rev_list_output(&mut writer, &result.human_lines())
     }
 }
 
@@ -126,6 +162,31 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         .into_iter()
         .skip(args.skip)
         .take(args.max_count.unwrap_or(usize::MAX))
+        .collect::<Vec<_>>();
+    let entries = if args.count || (!args.parents && !args.timestamp) {
+        None
+    } else {
+        Some(
+            commits
+                .iter()
+                .map(|commit| RevListEntry {
+                    commit: commit.id.to_string(),
+                    parents: if args.parents {
+                        commit
+                            .parent_commit_ids
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
+                    timestamp: args.timestamp.then_some(commit.committer.timestamp),
+                })
+                .collect(),
+        )
+    };
+    let commits = commits
+        .iter()
         .map(|commit| commit.id.to_string())
         .collect::<Vec<_>>();
     let total = commits.len();
@@ -133,11 +194,26 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
     Ok(RevListOutput {
         input: spec.to_string(),
         commits,
+        entries,
         total,
         count_only: args.count,
+        parents: args.parents,
+        timestamp: args.timestamp,
         max_count: args.max_count,
         skip: args.skip,
     })
+}
+
+fn format_rev_list_entry(entry: &RevListEntry, show_parents: bool, show_timestamp: bool) -> String {
+    let mut fields = Vec::new();
+    if show_timestamp && let Some(timestamp) = entry.timestamp {
+        fields.push(timestamp.to_string());
+    }
+    fields.push(entry.commit.clone());
+    if show_parents {
+        fields.extend(entry.parents.iter().cloned());
+    }
+    fields.join(" ")
 }
 
 fn sort_rev_list_commits(commits: &mut [git_internal::internal::object::commit::Commit]) {
@@ -169,138 +245,5 @@ fn rev_list_target_error(spec: &str, error: CommitBaseError) -> CliError {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::io::{self, Write};
-
-    use clap::Parser;
-    use git_internal::{
-        hash::{ObjectHash, get_hash_kind},
-        internal::object::{
-            commit::Commit,
-            signature::{Signature, SignatureType},
-        },
-    };
-
-    use super::{RevListArgs, sort_rev_list_commits, write_rev_list_count, write_rev_list_output};
-    use crate::utils::error::StableErrorCode;
-
-    struct FailingWriter {
-        kind: io::ErrorKind,
-    }
-
-    impl Write for FailingWriter {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::new(self.kind, "test write failure"))
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    fn test_signature(timestamp: usize) -> Signature {
-        Signature {
-            signature_type: SignatureType::Committer,
-            name: "tester".to_string(),
-            email: "tester@example.com".to_string(),
-            timestamp,
-            timezone: "+0000".to_string(),
-        }
-    }
-
-    fn test_hash(byte: u8) -> ObjectHash {
-        ObjectHash::from_bytes(&vec![byte; get_hash_kind().size()])
-            .expect("test hash bytes should match active hash kind")
-    }
-
-    fn test_commit(id: ObjectHash, timestamp: usize) -> Commit {
-        Commit {
-            id,
-            tree_id: id,
-            parent_commit_ids: Vec::new(),
-            author: test_signature(timestamp),
-            committer: test_signature(timestamp),
-            message: "test".to_string(),
-        }
-    }
-
-    #[test]
-    fn test_rev_list_args_default() {
-        let args = RevListArgs::try_parse_from(["rev-list"]).unwrap();
-        assert!(args.spec.is_none());
-    }
-
-    #[test]
-    fn test_rev_list_args_with_spec() {
-        let args = RevListArgs::try_parse_from(["rev-list", "HEAD~1"]).unwrap();
-        assert_eq!(args.spec.as_deref(), Some("HEAD~1"));
-    }
-
-    #[test]
-    fn test_rev_list_args_parse_count_controls() {
-        let args =
-            RevListArgs::try_parse_from(["rev-list", "-n", "2", "--skip", "1", "--count", "HEAD"])
-                .unwrap();
-        assert_eq!(args.max_count, Some(2));
-        assert_eq!(args.skip, 1);
-        assert!(args.count);
-        assert_eq!(args.spec.as_deref(), Some("HEAD"));
-    }
-
-    #[test]
-    fn test_sort_rev_list_commits_preserves_equal_timestamp_order() {
-        let high = test_hash(0xff);
-        let low = test_hash(0x01);
-        let mut commits = vec![test_commit(high, 1), test_commit(low, 1)];
-
-        sort_rev_list_commits(&mut commits);
-
-        assert_eq!(commits[0].id, high);
-        assert_eq!(commits[1].id, low);
-    }
-
-    #[test]
-    fn test_sort_rev_list_commits_orders_newest_first() {
-        let old = test_hash(0x01);
-        let new = test_hash(0xff);
-        let mut commits = vec![test_commit(old, 1), test_commit(new, 2)];
-
-        sort_rev_list_commits(&mut commits);
-
-        assert_eq!(commits[0].id, new);
-        assert_eq!(commits[1].id, old);
-    }
-
-    #[test]
-    fn test_write_rev_list_output_maps_write_failure_to_write_code() {
-        let mut writer = FailingWriter {
-            kind: io::ErrorKind::PermissionDenied,
-        };
-
-        let error = write_rev_list_output(&mut writer, &["abc123".to_string()])
-            .expect_err("write should fail");
-
-        assert_eq!(error.stable_code(), StableErrorCode::IoWriteFailed);
-    }
-
-    #[test]
-    fn test_write_rev_list_output_ignores_broken_pipe() {
-        let mut writer = FailingWriter {
-            kind: io::ErrorKind::BrokenPipe,
-        };
-
-        write_rev_list_output(&mut writer, &["abc123".to_string()])
-            .expect("broken pipe should be ignored");
-    }
-
-    #[test]
-    fn test_write_rev_list_count_maps_write_failure_to_write_code() {
-        let mut writer = FailingWriter {
-            kind: io::ErrorKind::PermissionDenied,
-        };
-
-        let error = write_rev_list_count(&mut writer, 1).expect_err("write should fail");
-
-        assert_eq!(error.stable_code(), StableErrorCode::IoWriteFailed);
-    }
-}
+#[path = "rev_list_tests.rs"]
+mod tests;
