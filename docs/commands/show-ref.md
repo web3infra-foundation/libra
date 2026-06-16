@@ -15,6 +15,12 @@ and optionally `HEAD`) along with the object hash each ref points to. By default
 both branches and tags are shown. Use `--heads` / `--branches` or `--tags` to
 restrict output to one category.
 
+Git-compatible reset aliases are accepted for scripts that compose flags:
+`--no-branches`, `--no-tags`, `--no-head`, `--no-dereference`,
+`--no-abbrev`, `--no-verify`, and `--no-exists` reset their corresponding
+positive flag when they appear later on the command line. Git also accepts
+`--no-hash` as a hash-only spelling; Libra follows that behavior.
+
 Positional `<PATTERN>` arguments match complete path segments from the end of
 the fully-qualified ref name, following Git's `show-ref` behavior. For example,
 `main` matches `refs/heads/main` and `refs/remotes/origin/main`, but does not
@@ -51,13 +57,21 @@ no filesystem scanning.
 |------|-------|-------------|
 | `--heads` | | Show only branches (`refs/heads/`). |
 | `--branches` | | Git-compatible alias for `--heads`. |
+| `--no-branches` | | Reset `--heads` / `--branches` scope filtering. |
 | `--tags` | | Show only tags (`refs/tags/`). |
+| `--no-tags` | | Reset `--tags` scope filtering. |
 | `--head` | | Include `HEAD` in the output. |
+| `--no-head` | | Reset `--head` so `HEAD` is omitted. |
 | `--hash[=<n>]` | `-s[<n>]` | Only show the object hash, optionally shortened to `n` hex digits. |
+| `--no-hash` | | Git-compatible hash-only alias. |
 | `--abbrev[=<n>]` | | Abbreviate object IDs to `n` hex digits, or 7 when `n` is omitted. |
+| `--no-abbrev` | | Reset `--abbrev` and display full object IDs. |
 | `--dereference` | `-d` | Dereference annotated tags and include peeled `^{}` entries. |
+| `--no-dereference` | | Reset `--dereference` and suppress peeled tag entries. |
 | `--verify` | | Verify exact refnames instead of pattern filtering. |
+| `--no-verify` | | Reset `--verify` and return to pattern filtering. |
 | `--exists` | | Check whether exactly one ref exists without printing it. |
+| `--no-exists` | | Reset `--exists` and return to normal ref listing. |
 | `--exclude-existing[=<pattern>]` | | Filter stdin to refs that do not already exist locally. |
 | `<PATTERN>...` | | Filter refs by path-segment suffix match on the ref name. Multiple patterns are OR-ed. |
 
@@ -73,8 +87,14 @@ libra show-ref --heads
 # Same branch filter using Git's alias
 libra show-ref --branches
 
+# Reset a composed branch-only filter back to default branch+tag listing
+libra show-ref --branches --no-branches
+
 # Show only tags
 libra show-ref --tags
+
+# Reset an abbreviated display back to full object IDs
+libra show-ref --abbrev=12 --no-abbrev --heads
 
 # Peel annotated tags
 libra show-ref --dereference --tags v1.0
@@ -110,13 +130,19 @@ libra show-ref --heads feat
 libra show-ref
 libra show-ref --heads
 libra show-ref --branches
+libra show-ref --branches --no-branches
 libra show-ref --tags
 libra show-ref --dereference --tags v1.0
+libra show-ref --dereference --no-dereference --tags v1.0
 libra show-ref --head --hash
 libra show-ref --abbrev=12 --heads
+libra show-ref --abbrev=12 --no-abbrev --heads
 libra show-ref --hash=12 --heads
+libra show-ref --no-hash --heads
 libra show-ref --verify refs/heads/main
+libra show-ref --verify --no-verify main
 libra show-ref --exists refs/heads/main
+libra show-ref --exists --no-exists refs/heads/main
 libra show-ref --exclude-existing
 libra show-ref --json --head --heads
 libra show-ref main
@@ -258,8 +284,9 @@ and which commit it resolves to.
 | List all refs | `libra show-ref` | `git show-ref` | `jj bookmark list` + `jj tag list` |
 | Filter to branches | `--heads` / `--branches` | `--heads` / `--branches` | `jj bookmark list` |
 | Filter to tags | `--tags` | `--tags` | `jj tag list` |
+| Reset composed filters | `--no-branches`, `--no-tags`, `--no-head`, `--no-dereference`, `--no-abbrev`, `--no-verify`, `--no-exists` | Same | N/A |
 | Include HEAD | `--head` | `--head` | N/A (no HEAD concept) |
-| Hash-only output | `-s[<n>]` / `--hash[=<n>]` | `-s[<n>]` / `--hash[=<n>]` | N/A |
+| Hash-only output | `-s[<n>]` / `--hash[=<n>]` / `--no-hash` | `-s[<n>]` / `--hash[=<n>]` / `--no-hash` | N/A |
 | Abbreviate object IDs | `--abbrev[=<n>]` | `--abbrev[=<n>]` | N/A |
 | Dereference annotated tags | `-d` / `--dereference` | `-d` / `--dereference` | N/A |
 | Pattern matching | Path-segment suffix match | Path-segment suffix match | Regex via revset |

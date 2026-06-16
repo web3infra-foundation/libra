@@ -30,15 +30,20 @@ libra show --no-patch HEAD
 libra show HEAD:docs/guide.md
 libra --json show HEAD
 libra show-ref --head
+libra show-ref --head --no-head
 libra show-ref --heads
 libra show-ref --branches
 libra show-ref --hash --heads
 libra show-ref --abbrev=12 --heads
 libra show-ref --hash=12 --heads
+libra show-ref --no-hash --heads
+libra show-ref --abbrev=12 --no-abbrev --heads
 libra --json show-ref --abbrev=12 --heads
 libra show-ref --verify refs/heads/main
 libra show-ref --verify HEAD
 libra show-ref --exists refs/heads/main
+libra show-ref --verify --no-verify main
+libra show-ref --exists --no-exists refs/heads/main
 ! libra show-ref --verify main
 ! libra show-ref --exists refs/heads/missing
 
@@ -78,7 +83,10 @@ libra fsck --connectivity-only
 libra fsck "$HEAD_ID"
 libra tag -m "release fixture" v1.0
 libra tag v1-light
+libra show-ref --branches --no-branches
+libra show-ref --tags --no-tags
 libra show-ref --dereference --tags v1.0
+libra show-ref --dereference --no-dereference --tags v1.0
 libra for-each-ref --points-at "$LATEST_HEAD" --format='%(refname) %(objecttype)'
 libra --json for-each-ref --points-at "$LATEST_HEAD"
 ! libra cat-file -t deadbeef
@@ -88,7 +96,7 @@ libra --json for-each-ref --points-at "$LATEST_HEAD"
 
 - `rev-parse`、`show`、`show-ref`、`for-each-ref`、`cat-file`、`hash-object`（含 `--path` / `--no-filters` 兼容入口）、`rev-list`、`fsck` 当前正向路径可用。
 - `rev-list --count` 输出过滤后的提交数量；`rev-list -n` 限制输出行数；`rev-list --skip --max-count` 可跳过当前 HEAD 后定位父提交；multi revision、`A..B`、`^A`、`A...B` 和 parent bound reset aliases 均有正向断言。
-- `show-ref --branches` 与 `--heads` 输出一致；`show-ref --abbrev=12` / `--hash=12` 输出 HEAD 的 12 位前缀；`show-ref --dereference` 对 annotated tag 输出 `refs/tags/<name>^{}` peeled 行；`show-ref --verify` 只接受完整 refname / `HEAD`；`show-ref --exists` 成功静默，缺失 ref 失败。
+- `show-ref --branches` 与 `--heads` 输出一致；`--no-branches` / `--no-tags` reset aliases 恢复默认 branch+tag 范围；`show-ref --abbrev=12` / `--hash=12` 输出 HEAD 的 12 位前缀；`--no-abbrev` 恢复完整哈希，`--no-hash` 按 Git 行为作为 hash-only alias；`show-ref --dereference` 对 annotated tag 输出 `refs/tags/<name>^{}` peeled 行，`--no-dereference` 取消 peeled 行；`--no-head`、`--no-verify`、`--no-exists` 可恢复对应默认行为；`show-ref --verify` 只接受完整 refname / `HEAD`；`show-ref --exists` 成功静默，缺失 ref 失败。
 - `for-each-ref --points-at` 对 branch、lightweight tag 和 annotated tag peeled target 的过滤可观察；`--json` 返回标准 envelope。
 - 缺失 revision/object 和非法 hash-object 类型必须失败。
 - `ls-files`、高级 `for-each-ref --contains/--merged`、高级 `rev-parse`/`rev-list` traversal filters 不属于当前场景正向覆盖。

@@ -2,13 +2,13 @@
 
 ## 命令实现目标
 
-`libra show-ref` 的目标是列出本地 refs（分支、标签）及其对象哈希。当前实现支持 `--heads` / `--branches` / `--tags` 范围过滤、`--head` 纳入 HEAD、`-s, --hash[=<n>]` 仅输出哈希且可选缩短、`--abbrev[=<n>]` 缩短显示哈希、`-d, --dereference` 展开 annotated tag 的 peeled `^{}` 行、`[PATTERN]...` 按 Git 风格完整路径段后缀过滤、远端跟踪分支、`--verify <ref>` 精确 ref 验证、`--exists <ref>` 存在性检查以及 `--exclude-existing[=<pattern>]` stdin filter。
+`libra show-ref` 的目标是列出本地 refs（分支、标签）及其对象哈希。当前实现支持 `--heads` / `--branches` / `--tags` 范围过滤、`--head` 纳入 HEAD、`-s, --hash[=<n>]` / `--no-hash` 仅输出哈希且可选缩短、`--abbrev[=<n>]` / `--no-abbrev` 缩短显示哈希或重置为完整哈希、`-d, --dereference` / `--no-dereference` 展开或重置 annotated tag 的 peeled `^{}` 行、`[PATTERN]...` 按 Git 风格完整路径段后缀过滤、远端跟踪分支、`--verify <ref>` / `--no-verify` 精确 ref 验证切换、`--exists <ref>` / `--no-exists` 存在性检查切换、`--head` / `--no-head` HEAD 输出切换以及 `--exclude-existing[=<pattern>]` stdin filter。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。branch/tag/HEAD listing、`--branches` alias、`--hash[=<n>]`、`--abbrev[=<n>]`、`--dereference`、`--verify`、`--exists` 和 `--exclude-existing[=<pattern>]` 已支持；Git 的 `--no-*` alias 尚未公开。
+- 兼容级别：`supported`。branch/tag/HEAD listing、`--heads` / `--branches`、hash/abbrev/dereference/verify/exists/head 的 Git `--no-*` reset aliases，以及 `--exclude-existing[=<pattern>]` 均已支持。
 
-- 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
+- 当前矩阵承诺 Git show-ref 主要参数面已支持；新增语义必须同步矩阵、用户文档和测试。
 
 
 ## 设计方案
@@ -42,6 +42,7 @@ flowchart TD
 - 2026-06-07 `2de5c022`（`fix(show-ref): query exists refs without decoding objects`）：实现修正：query exists refs without decoding objects；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 2026-06-15 本批实现：新增 `--exclude-existing[=<pattern>]` stdin filter，按 Git 语义剥离输入 refname 的 `^{}` 后缀、跳过已存在 refs、保留缺失 refs 的原始输入行，并为 `--json` 提供结构化 `entries`。
 - 2026-06-16 本批实现：新增 Git 兼容 `--branches` alias，复用 `--heads` 分支范围过滤语义，并补充 CLI、JSON 与 owner scenario 回归测试。
+- 2026-06-17 本批实现：新增 `--no-branches`、`--no-tags`、`--no-head`、`--no-dereference`、`--no-abbrev`、`--no-verify`、`--no-exists` reset aliases，并按 Git 行为把 `--no-hash` 作为 hash-only alias 处理；补充 focused CLI 测试和 `cli.object-readback` 黑盒覆盖。
 - 历史结论：以 HEAD 实际编译进二进制的 `src/command/show_ref.rs` / `src/command/show_ref_deref.rs` 为准；当前公开 `--verify` / `--exists` 的精确 ref 检查，并重新接入 `--dereference` annotated tag peel 输出。更早的迁移式文档只保留为背景。
 
 ## 当前状态
@@ -49,14 +50,14 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/show-ref.md`。
 - Synopsis：`libra show-ref [OPTIONS] [PATTERN]...`。
-- 公开参数/子命令包括：`--heads`、`--branches`、`--tags`、`--head`、`-s, --hash[=<n>]`、`--abbrev[=<n>]`、`-d, --dereference`、`--verify`、`--exists`、`--exclude-existing[=<pattern>]`、`[PATTERN]...`。
+- 公开参数/子命令包括：`--heads`、`--branches`、`--no-branches`、`--tags`、`--no-tags`、`--head`、`--no-head`、`-s, --hash[=<n>]`、`--no-hash`、`--abbrev[=<n>]`、`--no-abbrev`、`-d, --dereference`、`--no-dereference`、`--verify`、`--no-verify`、`--exists`、`--no-exists`、`--exclude-existing[=<pattern>]`、`[PATTERN]...`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| Git 参数 | Git 的 `--no-*` alias 尚未公开；当前保留 `--heads` / `--branches` / `--tags` 正向形式。 | 后续若落地需新增实现、补稳定错误码与回归测试。 |
+| 当前无已确认缺口 | Git show-ref help 中的公开参数面已接入；全局 `--quiet` 覆盖 Git `-q/--quiet` 脚本场景。 | 后续发现新的 Git 行为差异时，必须补源码、测试、用户文档、兼容矩阵和集成场景。 |
 
 ## 维护要求
 

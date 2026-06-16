@@ -34,10 +34,14 @@ EXAMPLES:
     libra show-ref                   List all local refs with their object hashes
     libra show-ref --heads           List only branches (refs/heads/)
     libra show-ref --branches        Alias for --heads
+    libra show-ref --branches --no-branches
+                                     Reset branch-only filtering back to the default branch+tag listing
     libra show-ref --tags            List only tags (refs/tags/)
     libra show-ref --head            Include HEAD in the output
     libra show-ref -s --heads        Print branch hashes only (one per line, scripting-friendly)
     libra show-ref --abbrev=12       Abbreviate object IDs to 12 hex digits
+    libra show-ref --abbrev=12 --no-abbrev --heads
+                                     Reset abbreviated display back to full object IDs
     libra show-ref -d --tags         Peel annotated tags and show refs/tags/<name>^{} lines
     libra show-ref --verify refs/heads/main
                                      Verify an exact refname and print it
@@ -52,21 +56,34 @@ EXAMPLES:
 #[command(after_help = SHOW_REF_EXAMPLES)]
 pub struct ShowRefArgs {
     /// Show only branches (refs/heads/); --branches is a Git-compatible alias
-    #[clap(long, visible_alias = "branches")]
+    #[clap(long, visible_alias = "branches", overrides_with = "no_heads")]
     pub heads: bool,
 
+    /// Reset --heads / --branches scope filtering
+    #[clap(long = "no-branches", overrides_with = "heads")]
+    pub no_heads: bool,
+
     /// Show only tags (refs/tags/)
-    #[clap(long)]
+    #[clap(long, overrides_with = "no_tags")]
     pub tags: bool,
 
+    /// Reset --tags scope filtering
+    #[clap(long = "no-tags", overrides_with = "tags")]
+    pub no_tags: bool,
+
     /// Include HEAD in the output
-    #[clap(long = "head")]
+    #[clap(long = "head", overrides_with = "no_head")]
     pub head: bool,
+
+    /// Reset --head so HEAD is omitted unless another mode includes it
+    #[clap(long = "no-head", overrides_with = "head")]
+    pub no_head: bool,
 
     /// Only show the object hash, optionally shortened to N hex digits
     #[clap(
         short = 's',
         long = "hash",
+        visible_alias = "no-hash",
         value_name = "N",
         num_args = 0..=1,
         require_equals = true,
@@ -80,21 +97,38 @@ pub struct ShowRefArgs {
         value_name = "N",
         num_args = 0..=1,
         require_equals = true,
-        default_missing_value = "7"
+        default_missing_value = "7",
+        overrides_with = "no_abbrev"
     )]
     pub abbrev: Option<usize>,
 
+    /// Reset --abbrev so object IDs are displayed at full width
+    #[clap(long = "no-abbrev", overrides_with = "abbrev")]
+    pub no_abbrev: bool,
+
     /// Dereference annotated tags and include peeled refs/tags/<name>^{} entries
-    #[clap(short = 'd', long = "dereference")]
+    #[clap(short = 'd', long = "dereference", overrides_with = "no_dereference")]
     pub dereference: bool,
 
+    /// Reset --dereference so annotated tags are not peeled
+    #[clap(long = "no-dereference", overrides_with = "dereference")]
+    pub no_dereference: bool,
+
     /// Verify exact refnames instead of pattern filtering
-    #[clap(long, conflicts_with = "exists")]
+    #[clap(long, conflicts_with = "exists", overrides_with = "no_verify")]
     pub verify: bool,
 
+    /// Reset --verify and return to normal pattern filtering
+    #[clap(long = "no-verify", overrides_with = "verify")]
+    pub no_verify: bool,
+
     /// Check whether exactly one ref exists without printing it
-    #[clap(long, conflicts_with = "verify")]
+    #[clap(long, conflicts_with = "verify", overrides_with = "no_exists")]
     pub exists: bool,
+
+    /// Reset --exists and return to normal ref listing
+    #[clap(long = "no-exists", overrides_with = "exists")]
+    pub no_exists: bool,
 
     /// Filter stdin to refs that do not already exist locally
     #[clap(

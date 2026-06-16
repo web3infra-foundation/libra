@@ -30,6 +30,7 @@ mod merge_rebase_cherry_revert_smoke;
 mod notes_smoke;
 mod object_readback;
 mod object_readback_rev_list;
+mod object_readback_show_ref;
 mod open_smoke;
 mod push_local_file_remote_rejected;
 mod rebase_conflict_continue;

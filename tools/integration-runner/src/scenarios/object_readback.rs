@@ -56,43 +56,7 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
         "show",
     )?;
 
-    assert_stdout_contains(
-        &ctx.command(&["show-ref", "--head"], repo.clone(), true)?,
-        "HEAD",
-    )?;
-    let heads_ref = ctx.command(&["show-ref", "--heads"], repo.clone(), true)?;
-    assert_stdout_contains(&heads_ref, "refs/heads/main")?;
-    let branches_ref = ctx.command(&["show-ref", "--branches"], repo.clone(), true)?;
-    if branches_ref.stdout != heads_ref.stdout {
-        bail!("show-ref --branches did not match --heads output");
-    }
-    let hash_only = ctx.command(&["show-ref", "--hash", "--heads"], repo.clone(), true)?;
-    if stdout_trim(&hash_only) != head_id {
-        bail!("show-ref --hash --heads returned unexpected hash");
-    }
-    let Some(head_short_12) = head_id.get(..12) else {
-        bail!("rev-parse HEAD returned an id shorter than 12 characters: {head_id}");
-    };
-    let abbreviated = ctx.command(&["show-ref", "--abbrev=12", "--heads"], repo.clone(), true)?;
-    let abbreviated_output = stdout_trim(&abbreviated);
-    let Some(abbreviated_hash) = abbreviated_output.split_whitespace().next() else {
-        bail!("show-ref --abbrev=12 --heads returned empty output");
-    };
-    if abbreviated_hash != head_short_12 {
-        bail!("show-ref --abbrev=12 --heads returned unexpected hash");
-    }
-    let hash_width = ctx.command(&["show-ref", "--hash=12", "--heads"], repo.clone(), true)?;
-    if stdout_trim(&hash_width) != head_short_12 {
-        bail!("show-ref --hash=12 --heads returned unexpected hash");
-    }
-    assert_json_ok(
-        &ctx.command(
-            &["--json", "show-ref", "--abbrev=12", "--heads"],
-            repo.clone(),
-            true,
-        )?,
-        "show-ref",
-    )?;
+    super::object_readback_show_ref::assert_initial_show_ref_readback(ctx, &repo, &head_id)?;
     let object_type = ctx.command(&["cat-file", "-t", &head_id], repo.clone(), true)?;
     assert_stdout_contains(&object_type, "commit")?;
     ctx.command(&["cat-file", "-s", &head_id], repo.clone(), true)?;
@@ -177,13 +141,7 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
         true,
     )?;
     ctx.command(&["tag", "v1-light"], repo.clone(), true)?;
-    let dereferenced_tag = ctx.command(
-        &["show-ref", "--dereference", "--tags", "v1.0"],
-        repo.clone(),
-        true,
-    )?;
-    assert_stdout_contains(&dereferenced_tag, "refs/tags/v1.0^{}")?;
-    assert_stdout_contains(&dereferenced_tag, &latest_head)?;
+    super::object_readback_show_ref::assert_tagged_show_ref_readback(ctx, &repo, &latest_head)?;
     let refs_at_head = ctx.command(
         &[
             "for-each-ref",
