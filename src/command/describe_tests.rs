@@ -40,4 +40,8 @@ fn describe_error_display_pins_each_variant() {
         .to_string(),
         "no tag exactly matches 'deadbeef'",
     );
+    assert_eq!(
+        DescribeError::LongWithAbbrevZero.to_string(),
+        "options '--long' and '--abbrev=0' cannot be used together",
+    );
 }

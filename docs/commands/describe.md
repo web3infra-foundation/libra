@@ -31,6 +31,10 @@ actionable hint suggesting `--tags` or `--always`.
 `--exact-match` restricts the command to tags that point directly at the target
 commit. If no exact tag exists, it fails even when `--always` is also present.
 
+`--long` forces Git's long format when a tag describes the target. Exact matches
+therefore print `v1.2.3-0-gabc1234` instead of `v1.2.3`. Like Git,
+`--long --abbrev=0` is rejected because the long form requires a hash suffix.
+
 `--dirty[=<mark>]` appends a suffix when tracked content differs from `HEAD`.
 The default suffix is `-dirty`; custom marks are accepted with
 `--dirty=<mark>`. Untracked files are ignored, matching Git's dirty check for
@@ -45,6 +49,7 @@ this command.
 | `--abbrev <N>` | Number of hex digits for the abbreviated commit hash in the output. | `7` |
 | `--always` | When no tag can describe the target, fall back to the abbreviated commit hash instead of failing. | Off |
 | `--exact-match` | Only succeed when the target commit exactly matches a tag. | Off |
+| `--long` | Force `tag-N-gHASH` output when a tag describes the target, including `tag-0-gHASH` for exact matches. | Off |
 | `--dirty[=<mark>]` | Append a dirty mark when tracked content differs from `HEAD`. | Off, default mark `-dirty` when enabled |
 
 ### Examples
@@ -61,6 +66,9 @@ libra describe --always
 
 # Only succeed on an exact tag match
 libra describe --exact-match
+
+# Force tag-0-gHASH output on an exact tag match
+libra describe --long
 
 # Describe a specific commit
 libra describe HEAD~5
@@ -85,6 +93,7 @@ libra describe
 libra describe --tags
 libra describe --always
 libra describe --exact-match
+libra describe --long
 libra describe --dirty
 libra describe HEAD~1
 libra describe --json
@@ -94,6 +103,7 @@ libra describe --tags --abbrev 10
 ## Human Output
 
 - Exact tag match: `v1.2.3`
+- Exact tag match with `--long`: `v1.2.3-0-gabc1234`
 - Reachable tag: `v1.2.3-4-gabc1234`
 - `--always` fallback: `abc1234`
 - `--dirty` on tracked changes: `v1.2.3-dirty`
@@ -120,6 +130,7 @@ libra describe --tags --abbrev 10
     "abbreviated_commit": null,
     "exact_match": true,
     "used_always": false,
+    "long_format": false,
     "dirty": false,
     "dirty_mark": null
   }
@@ -141,6 +152,7 @@ libra describe --tags --abbrev 10
     "abbreviated_commit": "abc1234",
     "exact_match": false,
     "used_always": false,
+    "long_format": false,
     "dirty": false,
     "dirty_mark": null
   }
@@ -162,6 +174,7 @@ libra describe --tags --abbrev 10
     "abbreviated_commit": "abc1234",
     "exact_match": false,
     "used_always": true,
+    "long_format": false,
     "dirty": false,
     "dirty_mark": null
   }
@@ -186,6 +199,7 @@ When `--always` is used and no tag matches, `tag` and `distance` are `null` and
     "abbreviated_commit": null,
     "exact_match": true,
     "used_always": false,
+    "long_format": false,
     "dirty": true,
     "dirty_mark": "-dirty"
   }
@@ -194,11 +208,10 @@ When `--always` is used and no tag matches, `tag` and `distance` are `null` and
 
 ## Design Rationale
 
-### Why no `--long`, `--match`, `--exclude`, or `--first-parent`?
+### Why no `--match`, `--exclude`, or `--first-parent`?
 
-Git's `describe` has accumulated many options over the years: `--long` forces
-the long format even on exact matches, `--match` and `--exclude` filter tag
-names by glob, `--candidates` controls how many tags to consider, and
+Git's `describe` has accumulated many options over the years: `--match` and
+`--exclude` filter tag names by glob, `--candidates` controls how many tags to consider, and
 `--first-parent` restricts the traversal. Libra deliberately ships the common
 read path first: identifying a build version, requiring an exact tag when a
 release script needs one, and marking tracked dirty state. The BFS-based
@@ -208,15 +221,12 @@ combinatorial complexity that makes Git's `describe` behavior hard to reason
 about (e.g., the interaction between `--match`, `--exclude`, and
 `--candidates`).
 
-### Why simplified output format?
+### Why include both string and structured fields?
 
-Libra always produces the standard `tag-N-gHASH` format (or just the tag name
-for exact matches). There is no `--long` flag to force the long format on
-exact matches. The JSON output already includes separate `tag`, `distance`,
-`abbreviated_commit`, and `exact_match` fields, so any consumer that needs to
-distinguish exact-match from non-exact can check `exact_match` directly. This
-is strictly more informative than Git's `--long` flag, which merely changes
-the string format.
+Human output follows Git's string format, including `--long` for exact matches.
+The JSON output also includes separate `tag`, `distance`, `abbreviated_commit`,
+`exact_match`, and `long_format` fields, so automation can avoid parsing the
+human string when it needs to distinguish exact matches from reachable tags.
 
 ### Why BFS instead of Git's candidate algorithm?
 
@@ -239,7 +249,7 @@ search, but this has not been a problem in practice.
 | Abbreviated hash length | `--abbrev <N>` (default 7) | `--abbrev=<N>` (default dynamically chosen) | N/A |
 | Fallback to hash | `--always` | `--always` | N/A |
 | Exact match only | `--exact-match` | `--exact-match` | N/A |
-| Force long format | Not implemented (use JSON `exact_match`) | `--long` | N/A |
+| Force long format | `--long` | `--long` | N/A |
 | Match tag pattern | Not implemented | `--match <glob>` | N/A |
 | Exclude tag pattern | Not implemented | `--exclude <glob>` | N/A |
 | Candidate count | All tags (BFS) | `--candidates=<N>` (default 10) | N/A |
@@ -256,4 +266,5 @@ search, but this has not been a problem in practice.
 | `HEAD` has no commit | `LBR-REPO-003` | 128 |
 | No tags can describe the target and `--always` is absent | `LBR-REPO-003` | 128 |
 | `--exact-match` target has no exact tag | `LBR-REPO-003` | 128 |
+| `--long --abbrev=0` | `LBR-CLI-002` | 129 |
 | Failed to read refs or objects | `LBR-IO-001` / `LBR-REPO-002` | 128 |

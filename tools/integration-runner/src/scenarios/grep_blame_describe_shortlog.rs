@@ -139,6 +139,14 @@ pub(crate) fn scenario_grep_blame_describe_shortlog(ctx: &mut ScenarioCtx<'_>) -
         &ctx.command(&["describe", "--tags", "HEAD"], repo.clone(), true)?,
         "v1.0.0",
     )?;
+    let long_describe = stdout_trim(&ctx.command(
+        &["describe", "--long", "--tags", "HEAD"],
+        repo.clone(),
+        true,
+    )?);
+    if !long_describe.starts_with("v1.0.0-0-g") {
+        bail!("describe --long --tags HEAD returned {long_describe}");
+    }
     if stdout_trim(&ctx.command(
         &["describe", "--always", "--abbrev", "12", "HEAD"],
         repo.clone(),
@@ -148,10 +156,23 @@ pub(crate) fn scenario_grep_blame_describe_shortlog(ctx: &mut ScenarioCtx<'_>) -
     {
         bail!("describe --always --abbrev 12 returned empty output");
     }
-    let exact = ctx.command(&["describe", "--exact-match", "HEAD"], repo.clone(), false)?;
-    assert_lbr_or_text(&exact, "--exact-match")?;
-    let dirty = ctx.command(&["describe", "--tags", "--dirty"], repo.clone(), false)?;
-    assert_lbr_or_text(&dirty, "--dirty")?;
+    assert_stdout_contains(
+        &ctx.command(&["describe", "--exact-match", "HEAD"], repo.clone(), true)?,
+        "v1.0.0",
+    )?;
+    let long_abbrev_zero =
+        ctx.command(&["describe", "--long", "--abbrev=0"], repo.clone(), false)?;
+    assert_lbr_or_text(&long_abbrev_zero, "--abbrev=0")?;
+    fs::write(
+        repo.join("search.txt"),
+        "needle\na.b literal\naxb regex\nMixedCase Needle\nsecond\ndirty\n",
+    )
+    .context("dirty describe tracked file")?;
+    assert_stdout_contains(
+        &ctx.command(&["describe", "--tags", "--dirty"], repo.clone(), true)?,
+        "-dirty",
+    )?;
+    ctx.command(&["restore", "search.txt"], repo.clone(), true)?;
 
     ctx.command(
         &["config", "user.name", "Second Author"],
@@ -170,6 +191,8 @@ pub(crate) fn scenario_grep_blame_describe_shortlog(ctx: &mut ScenarioCtx<'_>) -
         repo.clone(),
         true,
     )?;
+    let exact_after_move = ctx.command(&["describe", "--exact-match", "HEAD"], repo.clone(), false)?;
+    assert_lbr_or_text(&exact_after_move, "--exact-match")?;
     ctx.command(
         &["config", "user.name", "Libra Integration"],
         repo.clone(),

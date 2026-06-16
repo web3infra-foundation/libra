@@ -17,8 +17,11 @@ use crate::{
     },
 };
 
+#[path = "describe_format.rs"]
+mod describe_format;
 #[path = "describe_types.rs"]
 mod describe_types;
+use describe_format::{abbreviate_hash, describe_output};
 use describe_types::{DescribeError, DescribeOutput};
 
 const DESCRIBE_EXAMPLES: &str = "\
@@ -27,6 +30,7 @@ EXAMPLES:
     libra describe --tags           Include lightweight tags (not just annotated ones) in the search
     libra describe --always         Fall back to abbreviated commit hash when no tag matches
     libra describe --exact-match    Only succeed when HEAD exactly matches a tag
+    libra describe --long           Force tag-0-gHASH form for exact tag matches
     libra describe --dirty          Append -dirty when tracked content differs from HEAD
     libra describe HEAD~1           Describe a specific commit-ish (hash, ref, or HEAD~N)
     libra describe --abbrev 12      Use 12 hex digits instead of the default 7 in the hash portion
@@ -53,6 +57,10 @@ pub struct DescribeArgs {
     /// Only output exact tag matches.
     #[clap(long)]
     pub exact_match: bool,
+
+    /// Always output the long format when a tag describes the target.
+    #[clap(long)]
+    pub long: bool,
 
     /// Append MARK when tracked content differs from HEAD.
     #[clap(long, value_name = "MARK", num_args = 0..=1, require_equals = true, default_missing_value = "-dirty")]
@@ -93,6 +101,10 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
         .map_err(DescribeError::from)?;
     let resolved_commit = start_hash.to_string();
     let abbrev = args.abbrev.unwrap_or(7);
+    let long_format = args.long;
+    if long_format && abbrev == 0 {
+        return Err(DescribeError::LongWithAbbrevZero);
+    }
     let include_lightweight = args.tags;
     let exact_match = args.exact_match;
     let always = args.always;
@@ -148,6 +160,7 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
                 &tag_info.name,
                 dist,
                 abbrev,
+                long_format,
             );
             return apply_dirty_mark(output, dirty_mark).await;
         }
@@ -188,6 +201,7 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
             abbreviated_commit: Some(abbreviated),
             exact_match: false,
             used_always: true,
+            long_format,
             dirty: false,
             dirty_mark: None,
         };
@@ -227,50 +241,6 @@ async fn has_tracked_dirty_changes() -> Result<bool, DescribeError> {
         || !unstaged.renamed.is_empty())
 }
 
-// Formats the output string based on Git's describe rules.
-fn format_describe_result(tag_name: &str, dist: usize, full_sha: &str, abbrev: usize) -> String {
-    if dist == 0 || abbrev == 0 {
-        // If the current commit is exactly at the tag, just return the tag name
-        tag_name.to_string()
-    } else {
-        // Extract the abbreviated hash based on the specified length (default 7)
-        let short_sha = abbreviate_hash(full_sha, abbrev);
-        // format: <tag_name>-<distance>-g<abbreviated_sha>
-        format!("{}-{}-g{}", tag_name, dist, short_sha)
-    }
-}
-
-fn describe_output(
-    input: String,
-    resolved_commit: String,
-    tag_name: &str,
-    distance: usize,
-    abbrev: usize,
-) -> DescribeOutput {
-    let abbreviated_commit =
-        (distance > 0 && abbrev > 0).then(|| abbreviate_hash(&resolved_commit, abbrev));
-    DescribeOutput {
-        input,
-        resolved_commit: resolved_commit.clone(),
-        result: format_describe_result(tag_name, distance, &resolved_commit, abbrev),
-        tag: Some(tag_name.to_string()),
-        distance: Some(distance),
-        abbreviated_commit,
-        exact_match: distance == 0,
-        used_always: false,
-        dirty: false,
-        dirty_mark: None,
-    }
-}
-
-fn abbreviate_hash(full_sha: &str, abbrev: usize) -> String {
-    if abbrev == 0 || abbrev >= full_sha.len() {
-        full_sha.to_string()
-    } else {
-        full_sha[..abbrev].to_string()
-    }
-}
-
 fn prefer_tag(existing: &TagInfo, candidate_name: &str, candidate_is_annotated: bool) -> bool {
     match (existing.is_annotated, candidate_is_annotated) {
         (false, true) => true,
@@ -303,6 +273,9 @@ fn describe_cli_error(error: DescribeError) -> CliError {
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("move to a tagged commit or omit '--exact-match'.")
         }
+        DescribeError::LongWithAbbrevZero => CliError::command_usage(error.to_string())
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint("omit '--long' or choose a positive '--abbrev <N>'."),
         DescribeError::LoadCommit { commit_id, detail } => {
             CliError::fatal(format!("failed to load commit '{commit_id}': {detail}"))
                 .with_stable_code(StableErrorCode::RepoCorrupt)

@@ -39,7 +39,7 @@
 | [`commit`](commit.md) | `partial` | common commit flags plus cleanup/fixup/squash/trailer supported; editor/verbose/porcelain/status-template flags not exposed |
 | [`config`](config.md) | `partial` | vault-backed local/global config; system scope, editor round-trip, typed conversion, NUL output and section operations incomplete |
 | [`db`](db.md) | `intentionally-different` | Libra repository database schema inspection/upgrade extension, not a Git command |
-| [`describe`](describe.md) | `partial` | basic describe, `--tags`, `--always`, `--abbrev`, `--exact-match`, and `--dirty[=<mark>]` supported; long/match/exclude/first-parent and related filters not exposed |
+| [`describe`](describe.md) | `partial` | basic describe, `--tags`, `--always`, `--abbrev`, `--exact-match`, `--long`, and `--dirty[=<mark>]` supported; match/exclude/first-parent and related filters not exposed |
 | [`diff`](diff.md) | `partial` | staged/old-new/pathspec/name/stat output supported; positional revspec, summary/word/binary/whitespace/ext-diff incomplete |
 | [`fetch`](fetch.md) | `partial` | repository/refspec, `--all`, and `--depth` supported; prune/dry-run/tags/force/refmap and shallow expansion flags not exposed |
 | [`for-each-ref`](for-each-ref.md) | `partial` | `--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort` / `--count` / `--points-at` / `<pattern>` supported; full Git atom language, `--contains` / `--merged` filters and shell quoting modes are not exposed |

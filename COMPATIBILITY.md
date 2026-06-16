@@ -56,7 +56,7 @@ batch document.
 | reset | partial | `--soft`, `--mixed`, `--hard`, and pathspec reset supported; `--merge`, `--keep`, pathspec-from-file, and no-refresh are not exposed |
 | rev-parse | partial | basic revision parsing, `--short`, `--abbrev-ref`, and `--show-toplevel` supported; verify/default/repository-query/output-filter/parseopt modes are not exposed |
 | rev-list | partial | single revision reachability listing plus `--count`, `-n`/`--max-count`, `--skip`, parent-count filters (`--merges`, `--no-merges`, `--min-parents`, `--max-parents`), `--parents`, and `--timestamp` supported; ranges, exclusions, reset parent-filter aliases, and advanced traversal filters are not exposed |
-| describe | partial | basic describe, `--tags`, `--always`, `--abbrev`, `--exact-match`, and `--dirty[=<mark>]` supported; long/match/exclude/first-parent/contains/candidates/all are not exposed |
+| describe | partial | basic describe, `--tags`, `--always`, `--abbrev`, `--exact-match`, `--long`, and `--dirty[=<mark>]` supported; match/exclude/first-parent/contains/candidates/all are not exposed |
 | notes | partial | `add` / `show` / `list` / `remove` supported; `--ref` supported; append/edit/copy/merge/prune and editor support not implemented |
 | cherry-pick | partial | basic one-or-more commit replay, `-n/--no-commit`, and `-x` supported; edit/mainline/signoff/ff/sequencer/strategy/empty-policy surface remains incomplete |
 | push | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected — intentional (see [docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push](docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push)) |

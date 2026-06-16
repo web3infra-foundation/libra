@@ -12,6 +12,7 @@ pub(super) struct DescribeOutput {
     pub(super) abbreviated_commit: Option<String>,
     pub(super) exact_match: bool,
     pub(super) used_always: bool,
+    pub(super) long_format: bool,
     pub(super) dirty: bool,
     pub(super) dirty_mark: Option<String>,
 }
@@ -32,6 +33,8 @@ pub(super) enum DescribeError {
     NoNamesFound,
     #[error("no tag exactly matches '{commit_id}'")]
     NoExactMatch { commit_id: String },
+    #[error("options '--long' and '--abbrev=0' cannot be used together")]
+    LongWithAbbrevZero,
 }
 
 impl From<CommitBaseError> for DescribeError {
