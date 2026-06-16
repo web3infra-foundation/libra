@@ -3,6 +3,7 @@
 use std::{
     collections::BTreeSet,
     io::{self, Write},
+    path::{Component, Path},
 };
 
 use clap::Parser;
@@ -33,6 +34,8 @@ EXAMPLES:
     libra ls-tree -r HEAD src                  Recursively list entries under src
     libra ls-tree -l HEAD README.md            Include blob sizes
     libra ls-tree --name-only HEAD src         Print paths only
+    libra ls-tree --full-name HEAD             Print repository-relative paths
+    libra ls-tree --full-tree HEAD             List from the repository root
     libra ls-tree --object-only --abbrev HEAD  Print abbreviated object IDs only
     libra ls-tree -z HEAD                      Use NUL-terminated records for scripts
     libra ls-tree --json HEAD                  Structured JSON output for agents";
@@ -72,6 +75,14 @@ pub struct LsTreeArgs {
     #[arg(long = "object-only", conflicts_with_all = ["name_only", "name_status"])]
     pub object_only: bool,
 
+    /// Print paths relative to the repository root when invoked from a subdirectory.
+    #[arg(long = "full-name")]
+    pub full_name: bool,
+
+    /// List from the repository root and interpret paths relative to the repository root.
+    #[arg(long = "full-tree")]
+    pub full_tree: bool,
+
     /// Abbreviate object IDs to N hex characters, or 7 when no value is supplied.
     #[arg(
         long = "abbrev",
@@ -86,7 +97,7 @@ pub struct LsTreeArgs {
     #[arg(value_name = "TREE-ISH")]
     pub treeish: String,
 
-    /// Optional repository-relative path prefixes to list.
+    /// Optional path prefixes to list; relative to the current directory unless --full-tree is set.
     #[arg(value_name = "PATH")]
     pub paths: Vec<String>,
 }
@@ -114,6 +125,13 @@ struct RawLsTreeEntry {
     mode: TreeItemMode,
     object_id: ObjectHash,
     path: String,
+}
+
+#[derive(Debug, Clone)]
+struct LsTreePathContext {
+    current_dir_prefix: String,
+    display_repository_paths: bool,
+    root_relative_filters: bool,
 }
 
 pub async fn execute(args: LsTreeArgs) -> Result<(), String> {
@@ -152,11 +170,12 @@ async fn resolve_ls_tree(args: &LsTreeArgs) -> CliResult<LsTreeOutput> {
     validate_args(args)?;
     let storage = util::objects_storage();
     let root_tree = resolve_treeish_to_tree(&args.treeish, &storage).await?;
-    let filters = normalize_path_filters(&args.paths)?;
-    let raw_entries = collect_matching_entries(root_tree, &filters, args)?;
+    let path_context = LsTreePathContext::from_args(args)?;
+    let filters = normalize_path_filters(&args.paths, &path_context)?;
+    let raw_entries = collect_matching_entries(root_tree, &filters, args, &path_context)?;
     let entries = raw_entries
         .into_iter()
-        .map(|entry| format_entry(entry, args.abbrev, args.long, &storage))
+        .map(|entry| format_entry(entry, args.abbrev, args.long, &storage, &path_context))
         .collect::<CliResult<Vec<_>>>()?;
 
     Ok(LsTreeOutput {
@@ -272,20 +291,110 @@ fn treeish_resolution_error(treeish: &str, error: CommitBaseError) -> CliError {
     }
 }
 
-fn normalize_path_filters(paths: &[String]) -> CliResult<Vec<String>> {
+impl LsTreePathContext {
+    fn from_args(args: &LsTreeArgs) -> CliResult<Self> {
+        let current_dir_prefix = if args.full_tree {
+            String::new()
+        } else {
+            current_directory_prefix()?
+        };
+
+        Ok(Self {
+            current_dir_prefix,
+            display_repository_paths: args.full_name || args.full_tree,
+            root_relative_filters: args.full_tree,
+        })
+    }
+}
+
+fn current_directory_prefix() -> CliResult<String> {
+    let workdir = util::try_working_dir().map_err(|error| {
+        CliError::fatal(format!("failed to locate repository root: {error}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    let cwd = util::cur_dir();
+    let relative = pathdiff::diff_paths(&cwd, &workdir).ok_or_else(|| {
+        CliError::fatal(format!(
+            "failed to resolve current directory '{}' relative to repository root '{}'",
+            cwd.display(),
+            workdir.display()
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    normalize_workdir_prefix(&relative)
+}
+
+fn normalize_workdir_prefix(path: &Path) -> CliResult<String> {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => {
+                let Some(part) = part.to_str() else {
+                    return Err(CliError::command_usage(
+                        "current directory contains non-UTF-8 path components",
+                    )
+                    .with_stable_code(StableErrorCode::CliInvalidArguments));
+                };
+                components.push(part.to_string());
+            }
+            Component::ParentDir => {
+                return Err(CliError::command_usage(
+                    "current directory is outside the repository worktree",
+                )
+                .with_stable_code(StableErrorCode::CliInvalidArguments));
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(CliError::fatal(format!(
+                    "failed to normalize current directory path '{}'",
+                    path.display()
+                ))
+                .with_stable_code(StableErrorCode::IoReadFailed));
+            }
+        }
+    }
+    Ok(components.join("/"))
+}
+
+fn normalize_path_filters(
+    paths: &[String],
+    path_context: &LsTreePathContext,
+) -> CliResult<Vec<String>> {
     let mut filters = Vec::new();
     for path in paths {
-        filters.push(normalize_one_path_filter(path)?);
+        filters.push(normalize_one_path_filter_with_context(path, path_context)?);
     }
     Ok(filters)
 }
 
+#[cfg(test)]
 fn normalize_one_path_filter(path: &str) -> CliResult<String> {
+    normalize_relative_path_filter(path)
+}
+
+fn normalize_one_path_filter_with_context(
+    path: &str,
+    path_context: &LsTreePathContext,
+) -> CliResult<String> {
+    let normalized = normalize_relative_path_filter(path)?;
+    if path_context.root_relative_filters || path_context.current_dir_prefix.is_empty() {
+        return Ok(normalized);
+    }
+    if normalized.is_empty() {
+        return Ok(path_context.current_dir_prefix.clone());
+    }
+    Ok(join_tree_path(
+        &path_context.current_dir_prefix,
+        &normalized,
+    ))
+}
+
+fn normalize_relative_path_filter(path: &str) -> CliResult<String> {
     if path.starts_with('/') {
-        return Err(CliError::command_usage(format!(
-            "path filter '{path}' must be relative to the repository root"
-        ))
-        .with_stable_code(StableErrorCode::CliInvalidArguments));
+        return Err(
+            CliError::command_usage(format!("path filter '{path}' must be relative"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+        );
     }
 
     let mut components = Vec::new();
@@ -308,16 +417,40 @@ fn collect_matching_entries(
     root_tree: ObjectHash,
     filters: &[String],
     args: &LsTreeArgs,
+    path_context: &LsTreePathContext,
 ) -> CliResult<Vec<RawLsTreeEntry>> {
     let mut entries = Vec::new();
     if filters.is_empty() {
-        collect_tree_contents(root_tree, "", args, &mut entries)?;
+        collect_current_scope_contents(
+            root_tree,
+            &path_context.current_dir_prefix,
+            args,
+            &mut entries,
+        )?;
     } else {
         for filter in filters {
             collect_one_filter(root_tree, filter, args, &mut entries)?;
         }
     }
     Ok(dedupe_entries(entries))
+}
+
+fn collect_current_scope_contents(
+    root_tree: ObjectHash,
+    current_dir_prefix: &str,
+    args: &LsTreeArgs,
+    entries: &mut Vec<RawLsTreeEntry>,
+) -> CliResult<()> {
+    if current_dir_prefix.is_empty() {
+        collect_tree_contents(root_tree, "", args, entries)?;
+        return Ok(());
+    }
+
+    let (entry, subtree) = find_tree_entry(root_tree, current_dir_prefix)?;
+    if entry.mode != TreeItemMode::Tree {
+        return Err(path_not_found_error(current_dir_prefix));
+    }
+    collect_tree_contents(subtree, current_dir_prefix, args, entries)
 }
 
 fn collect_one_filter(
@@ -463,6 +596,7 @@ fn format_entry(
     abbrev: Option<usize>,
     include_size: bool,
     storage: &ClientStorage,
+    path_context: &LsTreePathContext,
 ) -> CliResult<LsTreeEntry> {
     let object_type = object_type_for_mode(entry.mode);
     let size = if include_size && object_type == "blob" {
@@ -486,9 +620,22 @@ fn format_entry(
         mode: mode_string(entry.mode).to_string(),
         object_type: object_type.to_string(),
         object: abbreviate_hash(&entry.object_id.to_string(), abbrev),
-        path: entry.path,
+        path: display_path(&entry.path, path_context),
         size,
     })
+}
+
+fn display_path(path: &str, path_context: &LsTreePathContext) -> String {
+    if path_context.display_repository_paths || path_context.current_dir_prefix.is_empty() {
+        return path.to_string();
+    }
+
+    if path == path_context.current_dir_prefix {
+        return ".".to_string();
+    }
+    path.strip_prefix(&format!("{}/", path_context.current_dir_prefix))
+        .unwrap_or(path)
+        .to_string()
 }
 
 fn object_type_for_mode(mode: TreeItemMode) -> &'static str {

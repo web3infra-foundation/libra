@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra ls-tree` 的目标是检查指定 tree-ish 下的树对象内容，提供 Git tree inspection 的 plumbing 兼容入口。当前已公开基础 CLI surface，用于列出 commit/tree 下的条目、递归遍历、路径前缀过滤、常见输出模式和 JSON envelope。
+`libra ls-tree` 的目标是检查指定 tree-ish 下的树对象内容，提供 Git tree inspection 的 plumbing 兼容入口。当前已公开基础 CLI surface，用于列出 commit/tree 下的条目、递归遍历、路径前缀过滤、子目录路径语义、常见输出模式和 JSON envelope。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 tree inspection 已公开；`--full-name` / `--full-tree` / `--format` 与 Git 的 `REV:path` tree-ish 语法仍未公开。
+- 兼容级别：`partial`。基础 tree inspection、子目录相对输出、`--full-name` 和 `--full-tree` 已公开；`--format` 与 Git 的 `REV:path` tree-ish 语法仍未公开。
 
 
 ## 设计方案
@@ -48,13 +48,15 @@ flowchart TD
 - 参数证据：`-l` / `--long`（展示 blob 大小）已公开并由 `ls_tree_long_includes_blob_size_and_tree_dash` 覆盖。
 - 参数证据：`--name-only`（只输出路径）已公开并由 `ls_tree_name_only_prints_paths` 覆盖；集成场景 `cli.ls-tree-smoke` 也执行 `libra ls-tree --name-only HEAD`。
 - 参数证据：`--object-only`（只输出对象 ID）已公开并由 `ls_tree_object_only_honors_abbrev_width` 覆盖。
+- 参数证据：子目录默认路径语义已由 `ls_tree_from_subdirectory_defaults_to_current_directory` 覆盖；集成场景 `cli.ls-tree-smoke` 也从 `src/` 执行 `libra ls-tree HEAD`。
+- 参数证据：`--full-name` 已公开并由 `ls_tree_full_name_from_subdirectory_keeps_repository_paths` 与 `ls_tree_subdirectory_path_filter_is_current_directory_relative` 覆盖；集成场景 `cli.ls-tree-smoke` 也从 `src/` 执行 `libra ls-tree --full-name HEAD`。
+- 参数证据：`--full-tree` 已公开并由 `ls_tree_full_tree_from_subdirectory_lists_repository_root` 覆盖；集成场景 `cli.ls-tree-smoke` 也从 `src/` 执行 `libra ls-tree --full-tree HEAD`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 功能缺口 | full-name, and --full-tree are 延后. | 后续实现时需要同步源码、测试和兼容矩阵。 |
 | 兼容差异项 | 自定义格式 | 原始对照：Deferred；相关参数/替代：--format；当前说明：Different model。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 不支持 REV:path syntax | 当前状态：LBR-UNSUPPORTED-001；Git/相关参数：128。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 

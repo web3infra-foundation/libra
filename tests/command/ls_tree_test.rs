@@ -104,6 +104,70 @@ fn ls_tree_default_lists_root_entries() {
 
 #[test]
 #[serial]
+fn ls_tree_from_subdirectory_defaults_to_current_directory() {
+    let repo = setup_ls_tree_repo();
+    let src_dir = repo.path().join("src");
+
+    let output = run_libra_command(&["ls-tree", "HEAD"], &src_dir);
+    assert_cli_success(&output, "ls-tree HEAD from src should succeed");
+    let stdout = stdout_string(&output);
+
+    assert!(stdout.contains("\tlib.rs\n"));
+    assert!(stdout.contains("\tnested\n"));
+    assert!(!stdout.contains("\tREADME.md\n"));
+    assert!(!stdout.contains("\tsrc/lib.rs\n"));
+}
+
+#[test]
+#[serial]
+fn ls_tree_full_name_from_subdirectory_keeps_repository_paths() {
+    let repo = setup_ls_tree_repo();
+    let src_dir = repo.path().join("src");
+
+    let output = run_libra_command(&["ls-tree", "--full-name", "HEAD"], &src_dir);
+    assert_cli_success(&output, "ls-tree --full-name from src should succeed");
+    let stdout = stdout_string(&output);
+
+    assert!(stdout.contains("\tsrc/lib.rs\n"));
+    assert!(stdout.contains("\tsrc/nested\n"));
+    assert!(!stdout.contains("\tlib.rs\n"));
+}
+
+#[test]
+#[serial]
+fn ls_tree_full_tree_from_subdirectory_lists_repository_root() {
+    let repo = setup_ls_tree_repo();
+    let src_dir = repo.path().join("src");
+
+    let output = run_libra_command(&["ls-tree", "--full-tree", "HEAD"], &src_dir);
+    assert_cli_success(&output, "ls-tree --full-tree from src should succeed");
+    let stdout = stdout_string(&output);
+
+    assert!(stdout.contains("\tREADME.md\n"));
+    assert!(stdout.contains("\tsrc\n"));
+    assert!(!stdout.contains("\tlib.rs\n"));
+}
+
+#[test]
+#[serial]
+fn ls_tree_subdirectory_path_filter_is_current_directory_relative() {
+    let repo = setup_ls_tree_repo();
+    let src_dir = repo.path().join("src");
+
+    let output = run_libra_command(&["ls-tree", "HEAD", "lib.rs"], &src_dir);
+    assert_cli_success(&output, "ls-tree HEAD lib.rs from src should succeed");
+    assert!(stdout_string(&output).contains("\tlib.rs\n"));
+
+    let full_name = run_libra_command(&["ls-tree", "--full-name", "HEAD", "lib.rs"], &src_dir);
+    assert_cli_success(
+        &full_name,
+        "ls-tree --full-name HEAD lib.rs from src should succeed",
+    );
+    assert!(stdout_string(&full_name).contains("\tsrc/lib.rs\n"));
+}
+
+#[test]
+#[serial]
 fn ls_tree_accepts_branch_treeish() {
     let repo = setup_ls_tree_repo();
     let branch = run_libra_command(&["branch", "topic"], repo.path());

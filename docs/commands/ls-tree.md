@@ -11,12 +11,13 @@ libra ls-tree [OPTIONS] <TREE-ISH> [PATH...]
 ## Description
 
 `libra ls-tree` resolves `<TREE-ISH>` to a commit root tree or to a tree object
-hash, then prints entries from that tree. It is read-only: it does not update
-refs, the index, the worktree, or object storage.
+hash, then prints entries from that tree. When invoked from a subdirectory,
+paths and output are relative to that subdirectory by default. It is read-only:
+it does not update refs, the index, the worktree, or object storage.
 
-The first compatibility slice supports ordinary repository-relative path prefix
-filters. Full Git pathspec matching, `REV:path` tree-ish syntax, `--format`,
-`--full-name`, and `--full-tree` are deferred.
+The current compatibility slice supports ordinary path prefix filters,
+`--full-name`, and `--full-tree`. Full Git pathspec matching, `REV:path`
+tree-ish syntax, and `--format` are deferred.
 
 ## Options
 
@@ -30,9 +31,11 @@ filters. Full Git pathspec matching, `REV:path` tree-ish syntax, `--format`,
 | `--name-only` | Print only entry paths |
 | `--name-status` | Git-compatible alias that prints only entry paths |
 | `--object-only` | Print only object IDs |
+| `--full-name` | Print paths relative to the repository root when invoked from a subdirectory |
+| `--full-tree` | List from the repository root and interpret path filters relative to the repository root |
 | `--abbrev[=<N>]` | Abbreviate object IDs to `N` characters, or 7 when `N` is omitted |
 | `<TREE-ISH>` | Commit, branch, tag, `HEAD`, or tree object hash |
-| `[PATH...]` | Optional repository-relative path prefix filters |
+| `[PATH...]` | Optional path prefix filters; relative to the current directory unless `--full-tree` is set |
 
 ## Examples
 
@@ -41,6 +44,8 @@ libra ls-tree HEAD
 libra ls-tree -r HEAD src
 libra ls-tree -l HEAD README.md
 libra ls-tree --name-only HEAD src
+libra ls-tree --full-name HEAD
+libra ls-tree --full-tree HEAD
 libra ls-tree --object-only --abbrev HEAD
 libra ls-tree -z HEAD
 libra --json ls-tree HEAD
@@ -95,7 +100,9 @@ entries include the `size` field:
 | Commit/tree listing | Supported | Supported | Use file/revset commands |
 | Recursive listing | `-r` / `--recursive` | `-r` | Different model |
 | Tree entries while recursive | `-t` | `-t` | Different model |
-| Path filters | Prefix filters only | Full pathspec | Revset/file patterns |
+| Subdirectory output | Current-directory relative; `--full-name` keeps repository paths | Supported | Different model |
+| Root-scoped listing | `--full-tree` | `--full-tree` | Different model |
+| Path filters | Prefix filters only; current-directory relative unless `--full-tree` is set | Full pathspec | Revset/file patterns |
 | Custom formatting | Deferred | `--format` | Different model |
 | JSON output | `--json` | No | No |
 

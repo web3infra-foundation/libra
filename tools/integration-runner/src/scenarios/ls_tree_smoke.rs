@@ -28,6 +28,17 @@ pub(crate) fn scenario_ls_tree_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()> {
     assert_stdout_contains(&recursive, "src/nested/deep.txt")?;
     let names = ctx.command(&["ls-tree", "--name-only", "HEAD"], repo.clone(), true)?;
     assert_stdout_contains(&names, "README.md")?;
+    let src_dir = repo.join("src");
+    let scoped = ctx.command(&["ls-tree", "HEAD"], src_dir.clone(), true)?;
+    assert_stdout_contains(&scoped, "lib.rs")?;
+    assert_stdout_contains(&scoped, "nested")?;
+    assert_not_contains(&scoped, "README.md")?;
+    assert_not_contains(&scoped, "src/lib.rs")?;
+    let full_name = ctx.command(&["ls-tree", "--full-name", "HEAD"], src_dir.clone(), true)?;
+    assert_stdout_contains(&full_name, "src/lib.rs")?;
+    let full_tree = ctx.command(&["ls-tree", "--full-tree", "HEAD"], src_dir, true)?;
+    assert_stdout_contains(&full_tree, "README.md")?;
+    assert_stdout_contains(&full_tree, "src")?;
     let json = ctx.command(&["--json", "ls-tree", "-r", "HEAD", "src"], repo.clone(), true)?;
     assert_json_ok(&json, "ls-tree")?;
     let missing = ctx.command(&["ls-tree", "HEAD", "missing"], repo.clone(), false)?;

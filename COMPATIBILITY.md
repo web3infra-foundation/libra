@@ -45,7 +45,7 @@ batch document.
 | show-ref | partial | branch/tag/HEAD listing, `--hash[=<n>]`, `--abbrev[=<n>]`, `--dereference`, `--verify`, `--exists`, and `--exclude-existing[=<pattern>]` supported; `--branches` / `--no-*` aliases are not exposed |
 | for-each-ref | partial | `--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort` / `--count` / `--points-at` / `<pattern>` supported; full Git atom language, `--contains` / `--merged` filters and shell quoting modes are not exposed |
 | ls-remote | partial | heads/tags/refs filtering and patterns supported; `--symref`, `--get-url`, `--sort`, and `--exit-code` are not exposed |
-| ls-tree | partial | Commit/tree listing, recursive listing, path prefix filters, JSON, and common output flags supported; `--full-name` / `--full-tree` / `--format` and `REV:path` syntax are not exposed |
+| ls-tree | partial | Commit/tree listing, recursive listing, current-directory-relative path prefix filters, `--full-name`, `--full-tree`, JSON, and common output flags supported; `--format` and `REV:path` syntax are not exposed |
 | symbolic-ref | partial | Supports local `HEAD` only; other symbolic refs are rejected because Libra stores refs in SQLite |
 | branch | partial | create/list/delete/rename/upstream set/current/contains filters supported; copy, unset-upstream, description, merged/points-at, sort/format, and ignore-case are not exposed |
 | tag | partial | lightweight tags, message-based annotated tags, force, delete, list, and `-n` supported; explicit `-a`, filters, sorting, columns, signing, and verification are not exposed |
