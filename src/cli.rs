@@ -641,6 +641,48 @@ fn rewrite_log_short_number_args(args: Vec<String>) -> Vec<String> {
     out
 }
 
+fn rewrite_index_pack_progress_args(args: Vec<String>) -> Vec<String> {
+    let subcommand = find_subcommand_index(&args);
+    let Some((index_pack_index, from_double_dash)) = subcommand else {
+        return args;
+    };
+    if !matches!(args.get(index_pack_index), Some(name) if name == "index-pack") {
+        return args;
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    if from_double_dash {
+        for (idx, arg) in args.iter().enumerate().take(index_pack_index + 1) {
+            if idx + 1 == index_pack_index && arg == "--" {
+                continue;
+            }
+            out.push(arg.clone());
+        }
+    } else {
+        out.extend(args.iter().take(index_pack_index + 1).cloned());
+    }
+
+    let mut after_double_dash = false;
+    for arg in args.into_iter().skip(index_pack_index + 1) {
+        if after_double_dash {
+            out.push(arg);
+            continue;
+        }
+        if arg == "--" {
+            after_double_dash = true;
+            out.push(arg);
+            continue;
+        }
+        match arg.as_str() {
+            "--progress" => out.push("--progress=text".to_string()),
+            "--no-progress" => out.push("--progress=none".to_string()),
+            _ => out.push(arg),
+        }
+    }
+
+    out
+}
+
 /// Locate the first non-flag token in `args` and return its index plus whether it was
 /// produced by an explicit `--` separator.
 ///
@@ -662,6 +704,17 @@ fn find_subcommand_index(args: &[String]) -> Option<(usize, bool)> {
             } else {
                 None
             };
+        }
+        if matches!(arg.as_str(), "--color" | "--progress") {
+            i = (i + 2).min(args.len());
+            continue;
+        }
+        if arg.starts_with("--color=")
+            || arg.starts_with("--progress=")
+            || arg.starts_with("--json=")
+        {
+            i += 1;
+            continue;
         }
         if !arg.starts_with('-') {
             return Some((i, false));
@@ -1079,6 +1132,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         None => env::args().collect::<Vec<_>>(),
     };
     let argv = rewrite_log_short_number_args(argv);
+    let argv = rewrite_index_pack_progress_args(argv);
     utils::output::reset_warning_tracker();
     if is_error_codes_help_topic(&argv) {
         return print_error_codes_help();
@@ -1320,6 +1374,45 @@ mod tests {
         assert!(
             matches!(cli.command, Commands::Config(_)),
             "`cfg` should parse as the config subcommand"
+        );
+    }
+
+    #[test]
+    fn index_pack_progress_rewrite_keeps_pack_positional() {
+        let rewritten = rewrite_index_pack_progress_args(vec![
+            "libra".to_string(),
+            "index-pack".to_string(),
+            "--progress".to_string(),
+            "fixture.pack".to_string(),
+        ]);
+
+        assert_eq!(
+            rewritten,
+            vec!["libra", "index-pack", "--progress=text", "fixture.pack"]
+        );
+    }
+
+    #[test]
+    fn index_pack_no_progress_rewrite_uses_global_none_mode() {
+        let rewritten = rewrite_index_pack_progress_args(vec![
+            "libra".to_string(),
+            "--progress".to_string(),
+            "none".to_string(),
+            "index-pack".to_string(),
+            "--no-progress".to_string(),
+            "fixture.pack".to_string(),
+        ]);
+
+        assert_eq!(
+            rewritten,
+            vec![
+                "libra",
+                "--progress",
+                "none",
+                "index-pack",
+                "--progress=none",
+                "fixture.pack"
+            ]
         );
     }
 

@@ -19,6 +19,8 @@ EXAMPLES:
     libra index-pack pack-123.pack                  Build pack-123.idx alongside the .pack
     libra index-pack --keep pack-123.pack           Build an idx and empty pack-123.keep
     libra index-pack --keep=message pack-123.pack   Build an idx and write message to .keep
+    libra index-pack --progress pack-123.pack       Accept Git-style progress request
+    libra index-pack --no-progress pack-123.pack    Accept Git-style progress suppression
     libra index-pack pack-123.pack -o pack-123.idx  Write the index to a specific path
     libra index-pack pack-123.pack --json           Structured JSON output for agents";
 

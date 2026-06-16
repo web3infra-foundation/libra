@@ -23,6 +23,10 @@ With `--keep`, Libra also writes a `.keep` file beside the pack. Bare
 `--keep` creates an empty keep file; `--keep=<MSG>` writes the message followed
 by a newline, matching Git's keep-file convention.
 
+Git-style `--progress` and `--no-progress` are accepted for script
+compatibility. They use Libra's existing global progress mode and do not add a
+separate `index-pack` progress stream.
+
 This is a low-level plumbing command. It is used internally by `libra fetch` and
 `libra clone` after receiving pack data over the wire, and can be invoked
 manually to rebuild missing or corrupt index files.
@@ -35,6 +39,8 @@ manually to rebuild missing or corrupt index files.
 | `-o <PATH>` | `-o` | Output path for the generated index file. | `<PACK_FILE>` with `.pack` replaced by `.idx` |
 | `--keep[=<MSG>]` | | Create `<PACK_FILE>` with `.keep` extension. If `MSG` is provided, write it followed by a newline. | Not created |
 | `--index-version <N>` | | Force the index format version (1 or 2). | `1` |
+| `--progress` | | Accept Git-style progress request; maps to Libra's global text progress mode. | Global progress mode |
+| `--no-progress` | | Accept Git-style progress suppression; maps to Libra's global no-progress mode. | Global progress mode |
 
 ### Examples
 
@@ -51,6 +57,10 @@ libra index-pack pack-abc123.pack --index-version 2
 # Keep the pack from pruning after rebuilding its index
 libra index-pack --keep="manual recovery" pack-abc123.pack
 
+# Accept Git-style progress flags used by scripts
+libra index-pack --progress pack-abc123.pack
+libra index-pack --no-progress pack-abc123.pack
+
 # JSON output for scripting
 libra index-pack pack-abc123.pack --json
 ```
@@ -61,6 +71,8 @@ libra index-pack pack-abc123.pack --json
 libra index-pack pack-123.pack
 libra index-pack pack-123.pack -o pack-123.idx
 libra index-pack --keep pack-123.pack
+libra index-pack --progress pack-123.pack
+libra index-pack --no-progress pack-123.pack
 libra index-pack pack-123.pack --index-version 2
 libra index-pack pack-123.pack --json
 ```
@@ -174,7 +186,7 @@ algorithms.
 | `--fix-thin` (add bases for thin packs) | Not implemented | Yes | N/A |
 | `--keep` (create .keep file) | `--keep[=<MSG>]` | Yes | N/A |
 | `--threads` (parallel decompression) | Internal (8 threads) | `--threads=<N>` | N/A |
-| Progress output | Not implemented | `--progress` / `--no-progress` | N/A |
+| Progress flags | `--progress` / `--no-progress` accepted; no dedicated progress stream | `--progress` / `--no-progress` | N/A |
 | JSON output | `--json` | No | N/A |
 | Max pack size (v1) | ~2 GB (32-bit offsets) | ~2 GB (32-bit offsets) | N/A |
 | CRC32 checksums | Version 2 only | Version 2+ | N/A |

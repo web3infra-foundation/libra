@@ -19,6 +19,7 @@ pub(crate) fn scenario_verify_pack_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()
     ctx.command(
         &[
             "index-pack",
+            "--progress",
             "--keep=integration keep",
             &pack,
             "--index-version",
@@ -38,7 +39,7 @@ pub(crate) fn scenario_verify_pack_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()
         .with_context(|| format!("copy second pack {}", pack_src.display()))?;
     let second_pack = second_pack_dst.to_string_lossy().to_string();
     ctx.command(
-        &["index-pack", &second_pack, "--index-version", "1"],
+        &["index-pack", "--no-progress", &second_pack, "--index-version", "1"],
         repo.clone(),
         true,
     )?;
