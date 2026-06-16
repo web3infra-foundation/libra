@@ -34,17 +34,26 @@ pub(crate) fn scenario_verify_pack_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()
         fs::read_to_string(&keep).with_context(|| format!("read keep {}", keep.display()))?;
     anyhow::ensure!(keep_message == "integration keep\n");
     let idx_arg = idx.to_string_lossy().to_string();
-    let second_pack_dst = ctx.run_dir.join("fixture-second.pack");
-    fs::copy(&pack_src, &second_pack_dst)
-        .with_context(|| format!("copy second pack {}", pack_src.display()))?;
-    let second_pack = second_pack_dst.to_string_lossy().to_string();
-    ctx.command(
-        &["index-pack", "--no-progress", &second_pack, "--index-version", "1"],
+    let second_idx = ctx.run_dir.join("fixture-stdin.idx");
+    let second_idx_arg = second_idx.to_string_lossy().to_string();
+    let second_pack_dst = second_idx.with_extension("pack");
+    let pack_bytes = fs::read(&pack_src)
+        .with_context(|| format!("read stdin pack fixture {}", pack_src.display()))?;
+    ctx.command_with_stdin_bytes(
+        &[
+            "index-pack",
+            "--no-progress",
+            "--stdin",
+            "-o",
+            &second_idx_arg,
+            "--index-version",
+            "1",
+        ],
         repo.clone(),
+        &pack_bytes,
         true,
     )?;
-    let second_idx = second_pack_dst.with_extension("idx");
-    let second_idx_arg = second_idx.to_string_lossy().to_string();
+    anyhow::ensure!(second_pack_dst.exists());
     assert_stdout_contains(
         &ctx.command(&["verify-pack", &idx_arg], repo.clone(), true)?,
         ": ok",

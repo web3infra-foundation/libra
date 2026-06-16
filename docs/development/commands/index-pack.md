@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra index-pack` 的目标是为已有 pack 归档构建或校验 pack index，是对象传输与 pack 处理的隐藏 plumbing 能力。实现需要继承 SHA-256、pack index handling 和错误码治理，同时把 stdin 与 thin pack 列为未完成差异；Git-style `--progress` / `--no-progress` 已作为兼容入口接收。
+`libra index-pack` 的目标是为已有 pack 归档或 stdin pack stream 构建或校验 pack index，是对象传输与 pack 处理的隐藏 plumbing 能力。实现需要继承 SHA-256、pack index handling 和错误码治理，同时把 thin pack 列为未完成差异；Git-style `--progress` / `--no-progress` 已作为兼容入口接收。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。hidden plumbing command；pack file 到 idx 的基础路径已支持，`--keep[=<MSG>]` 已支持；`--progress` / `--no-progress` 已接收并映射到现有全局进度模式；stdin/fix-thin flags 尚未公开。
+- 兼容级别：`partial`。hidden plumbing command；pack file 到 idx 的基础路径已支持，`--stdin` 已支持并要求 `-o <INDEX_FILE>`；`--keep[=<MSG>]` 已支持；`--progress` / `--no-progress` 已接收并映射到现有全局进度模式；`--fix-thin` 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -14,9 +14,9 @@
 ## 设计方案
 
 - 入口与分发：已公开接入 `src/cli.rs::Commands`；已由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
-- 源码分层：主入口为 `src/command/index_pack.rs`，v1/v2 索引构建分别位于 `src/command/index_pack_v1.rs` 和 `src/command/index_pack_v2.rs`，错误映射、`.keep` 路径和 keep-file 写入位于 `src/command/index_pack_support.rs`。参数/子命令类型包括：`IndexPackArgs`；输出、错误或状态类型包括：`IndexPackOutput` 和 `CliError` / `CliResult`；主要执行函数包括：`execute`、`execute_safe`、`build_index_v1`、`build_index_v2`。
+- 源码分层：主入口为 `src/command/index_pack.rs`，v1/v2 索引构建分别位于 `src/command/index_pack_v1.rs` 和 `src/command/index_pack_v2.rs`，错误映射、`.keep` 路径和 keep-file 写入位于 `src/command/index_pack_support.rs`。参数/子命令类型包括：`IndexPackArgs`；输出、错误或状态类型包括：`IndexPackOutput` 和 `CliError` / `CliResult`；主要执行函数包括：`execute`、`execute_safe`、`derive_stdin_pack_file`、`read_stdin_to_pack_file`、`build_index_v1`、`build_index_v2`。
 - 源码意图：主模块只负责参数校验、输出配置和副作用编排；索引构建模块读取 pack 数据、计算对象偏移和哈希，并写出对应 `.idx` 输出。
-- 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；核心实现读取 pack 文件、解析对象 metadata、计算 fanout/offset/checksum，并按 pack index v1/v2 规则写出 `.idx`；启用 `--keep[=<MSG>]` 时，在 `.idx` 构建成功后写出同名 `.keep` 文件；`src/cli.rs` 在 clap 解析前把 `index-pack --progress` / `--no-progress` 归一化到现有全局 `--progress` 模式，避免与全局 `--progress <MODE>` 参数冲突。
+- 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；普通路径读取 `<PACK_FILE>`，stdin 路径要求 `-o <INDEX_FILE>` 并先把 stdin pack bytes 写入同 stem 的 `.pack` 文件，再复用相同索引构建器；核心实现读取 pack 文件、解析对象 metadata、计算 fanout/offset/checksum，并按 pack index v1/v2 规则写出 `.idx`；启用 `--keep[=<MSG>]` 时，在 `.idx` 构建成功后写出同名 `.keep` 文件；`src/cli.rs` 在 clap 解析前把 `index-pack --progress` / `--no-progress` 归一化到现有全局 `--progress` 模式，避免与全局 `--progress <MODE>` 参数冲突。
 
 - 流程图：以下流程图按当前源码分层展示主路径和底层对象边界，便于维护者把代码入口、执行函数和副作用范围对应起来。
 
@@ -44,21 +44,21 @@ flowchart TD
 - 2026-05-24 `7b3b2d80`（`fix(help): inline descriptions for index-pack + ls-remote EXAMPLES (v0.17.919)`）：文档与帮助口径：补齐 `index-pack` 示例的内联描述，要求当前文档继续与 `--help` 可见面一致。
 - 2026-06-16 当前批次：补齐 `--keep[=<MSG>]`，写出 Git-compatible `.keep` 文件，并把 `index_pack` 拆分为入口、v1、v2 和 support 模块。
 - 2026-06-16 当前批次：补齐 `--progress` / `--no-progress` 兼容接收，维持当前无专属 progress stream 的行为，并用命令测试和 `cli.verify-pack-smoke` 固定。
+- 2026-06-16 当前批次：补齐 `--stdin` 输入来源，要求 `-o <INDEX_FILE>`，把 stdin pack 持久化为同 stem `.pack`，再生成目标 `.idx`，并用 `command_test::index_pack_stdin_*` 固定。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
 ## 当前状态
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/index-pack.md`。
-- Synopsis：`libra index-pack [OPTIONS] <PACK_FILE>`。
-- 公开参数/子命令包括：`<PACK_FILE>`、`-o <INDEX_FILE>`、`--keep[=<MSG>]`、`--index-version <INDEX_VERSION>`、`--progress`、`--no-progress`。
+- Synopsis：`libra index-pack [OPTIONS] [<PACK_FILE>]`。
+- 公开参数/子命令包括：`<PACK_FILE>`、`--stdin`、`-o <INDEX_FILE>`、`--keep[=<MSG>]`、`--index-version <INDEX_VERSION>`、`--progress`、`--no-progress`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容差异项 | --stdin (read pack from stdin) | 原始对照：未实现；相关参数/替代：是；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | --fix-thin (add bases for thin packs) | 原始对照：未实现；相关参数/替代：是；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求

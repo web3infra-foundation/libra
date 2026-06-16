@@ -105,6 +105,16 @@ impl<'a> ScenarioCtx<'a> {
         stdin_body: &str,
         expect_success: bool,
     ) -> Result<Output> {
+        self.command_with_stdin_bytes(args, cwd, stdin_body.as_bytes(), expect_success)
+    }
+
+    pub(crate) fn command_with_stdin_bytes(
+        &mut self,
+        args: &[&str],
+        cwd: PathBuf,
+        stdin_body: &[u8],
+        expect_success: bool,
+    ) -> Result<Output> {
         fs::create_dir_all(&cwd).with_context(|| format!("create cwd {}", cwd.display()))?;
         self.seq += 1;
         let seq = self.seq;
@@ -141,7 +151,7 @@ impl<'a> ScenarioCtx<'a> {
             .with_context(|| format!("spawn libra {}", args.join(" ")))?;
         if let Some(mut stdin) = child.stdin.take() {
             stdin
-                .write_all(stdin_body.as_bytes())
+                .write_all(stdin_body)
                 .context("write libra stdin")?;
         }
         let output = child

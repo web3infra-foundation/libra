@@ -82,7 +82,7 @@ batch document.
 | cat-file | partial | `-t`, `-s`, `-p`, `-e`, and AI object modes supported; batch modes and JSON/machine output for `-e` are not exposed |
 | fsck | partial | object/ref/index/reflog/connectivity checks supported; JSON/machine output, strict mode, and pack verification surface remain incomplete |
 | verify-pack | partial | validates one or more `.idx` files against matching `.pack` siblings; `-s` / `--stat-only` supported; `--pack` is available for a single explicit pack path |
-| index-pack | partial | hidden plumbing command for pack file indexing; `--keep[=<msg>]` and Git-style `--progress` / `--no-progress` compatibility flags are accepted; stdin/fix-thin flags are not exposed |
+| index-pack | partial | hidden plumbing command for pack file indexing; `--stdin`, `--keep[=<msg>]`, and Git-style `--progress` / `--no-progress` compatibility flags are accepted; `--fix-thin` is not exposed |
 | checkout | partial | visible branch compatibility surface plus `checkout <commit>` detached HEAD, `-b`/`-B` branch creation, and explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` for new code; patch modes still partial |
 | bisect | partial | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` supported; `replay` (see [docs/development/commands/_compatibility.md#d6-bisect-replay](docs/development/commands/_compatibility.md#d6-bisect-replay)) / `terms` (see [docs/development/commands/_compatibility.md#d7-bisect-terms](docs/development/commands/_compatibility.md#d7-bisect-terms)) deferred |
 

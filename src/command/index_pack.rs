@@ -1,3 +1,9 @@
+use std::{
+    fs::OpenOptions,
+    io::{self, Write},
+    path::PathBuf,
+};
+
 use clap::Parser;
 pub use index_pack_v1::build_index_v1;
 pub use index_pack_v2::build_index_v2;
@@ -19,6 +25,7 @@ EXAMPLES:
     libra index-pack pack-123.pack                  Build pack-123.idx alongside the .pack
     libra index-pack --keep pack-123.pack           Build an idx and empty pack-123.keep
     libra index-pack --keep=message pack-123.pack   Build an idx and write message to .keep
+    libra index-pack --stdin -o pack-123.idx        Read pack bytes from stdin
     libra index-pack --progress pack-123.pack       Accept Git-style progress request
     libra index-pack --no-progress pack-123.pack    Accept Git-style progress suppression
     libra index-pack pack-123.pack -o pack-123.idx  Write the index to a specific path
@@ -27,8 +34,8 @@ EXAMPLES:
 #[derive(Parser, Debug)]
 #[command(after_help = INDEX_PACK_EXAMPLES)]
 pub struct IndexPackArgs {
-    #[arg(help = "Pack file path")]
-    pub pack_file: String,
+    #[arg(help = "Pack file path", required_unless_present = "stdin")]
+    pub pack_file: Option<String>,
 
     #[arg(
         short = 'o',
@@ -48,6 +55,9 @@ pub struct IndexPackArgs {
 
     #[arg(long, help = "Force pack index version 1 or 2")]
     pub index_version: Option<u8>,
+
+    #[arg(long, help = "Read pack data from standard input; requires -o")]
+    pub stdin: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,11 +80,24 @@ pub fn execute_safe(args: IndexPackArgs, output: &OutputConfig) -> CliResult<()>
         index_file,
         keep,
         index_version,
+        stdin,
     } = args;
 
     let index_file = match index_file {
         Some(index_file) => index_file,
+        None if stdin => {
+            return Err(
+                CliError::fatal("index-pack --stdin requires -o <INDEX_FILE>")
+                    .with_stable_code(StableErrorCode::CliInvalidArguments),
+            );
+        }
         None => {
+            let Some(pack_file) = pack_file.as_deref() else {
+                return Err(
+                    CliError::fatal("pack-file is required unless --stdin is used")
+                        .with_stable_code(StableErrorCode::CliInvalidArguments),
+                );
+            };
             if !pack_file.ends_with(".pack") {
                 return Err(CliError::fatal("pack-file does not end with '.pack'")
                     .with_stable_code(StableErrorCode::CliInvalidArguments));
@@ -82,6 +105,22 @@ pub fn execute_safe(args: IndexPackArgs, output: &OutputConfig) -> CliResult<()>
             pack_file.replace(".pack", ".idx")
         }
     };
+
+    let pack_file = if stdin {
+        if pack_file.is_some() {
+            return Err(
+                CliError::fatal("index-pack --stdin cannot be combined with <PACK_FILE>")
+                    .with_stable_code(StableErrorCode::CliInvalidArguments),
+            );
+        }
+        derive_stdin_pack_file(&index_file)
+    } else {
+        pack_file.ok_or_else(|| {
+            CliError::fatal("pack-file is required unless --stdin is used")
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })
+    }?;
+
     if index_file == pack_file {
         return Err(
             CliError::fatal("pack-file and index-file are the same file")
@@ -99,6 +138,10 @@ pub fn execute_safe(args: IndexPackArgs, output: &OutputConfig) -> CliResult<()>
     let keep_file = keep_path
         .as_ref()
         .map(|path| path.to_string_lossy().into_owned());
+
+    if stdin {
+        read_stdin_to_pack_file(&pack_file)?;
+    }
 
     std::fs::File::open(&pack_file).map_err(|e| {
         CliError::fatal(format!(
@@ -146,4 +189,47 @@ pub fn execute_safe(args: IndexPackArgs, output: &OutputConfig) -> CliResult<()>
     }
 
     Ok(())
+}
+
+fn derive_stdin_pack_file(index_file: &str) -> CliResult<String> {
+    let pack_file = PathBuf::from(index_file).with_extension("pack");
+    if pack_file.as_os_str().is_empty() {
+        return Err(
+            CliError::fatal("index-pack --stdin requires a valid -o <INDEX_FILE> path")
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+        );
+    }
+    Ok(pack_file.to_string_lossy().into_owned())
+}
+
+fn read_stdin_to_pack_file(pack_file: &str) -> CliResult<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(pack_file)
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "could not create derived pack file '{}' for writing: {}",
+                pack_file,
+                format_io_error(&e)
+            ))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+        })?;
+
+    io::copy(&mut io::stdin().lock(), &mut file).map_err(|e| {
+        CliError::fatal(format!(
+            "could not read pack data from stdin into '{}': {}",
+            pack_file,
+            format_io_error(&e)
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    file.flush().map_err(|e| {
+        CliError::fatal(format!(
+            "could not flush derived pack file '{}': {}",
+            pack_file,
+            format_io_error(&e)
+        ))
+        .with_stable_code(StableErrorCode::IoWriteFailed)
+    })
 }

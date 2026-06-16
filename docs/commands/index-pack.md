@@ -5,7 +5,7 @@ Build a `.idx` index file for an existing `.pack` archive.
 ## Synopsis
 
 ```
-libra index-pack [OPTIONS] <PACK_FILE>
+libra index-pack [OPTIONS] [<PACK_FILE>]
 ```
 
 ## Description
@@ -18,6 +18,11 @@ Without `-o`, the output file name is derived by replacing the `.pack` extension
 with `.idx`. The default index format is version 1 (SHA-1 fan-out table plus
 offset/hash pairs). Version 2 (with CRC32 checksums and support for large
 offsets) can be requested with `--index-version 2`.
+
+With `--stdin`, Libra reads pack bytes from standard input. This mode requires
+`-o <PATH>` because there is no input file name to derive the index path from.
+Libra persists the stdin pack beside the index by replacing the output path's
+extension with `.pack`, then builds the requested `.idx` from that saved pack.
 
 With `--keep`, Libra also writes a `.keep` file beside the pack. Bare
 `--keep` creates an empty keep file; `--keep=<MSG>` writes the message followed
@@ -35,7 +40,8 @@ manually to rebuild missing or corrupt index files.
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `<PACK_FILE>` | | Path to the `.pack` file to index (required). Must end with `.pack` unless `-o` is given. | |
+| `<PACK_FILE>` | | Path to the `.pack` file to index. Required unless `--stdin` is used. Must end with `.pack` unless `-o` is given. | |
+| `--stdin` | | Read pack bytes from standard input. Requires `-o`; writes the pack beside the index with a `.pack` extension. | Off |
 | `-o <PATH>` | `-o` | Output path for the generated index file. | `<PACK_FILE>` with `.pack` replaced by `.idx` |
 | `--keep[=<MSG>]` | | Create `<PACK_FILE>` with `.keep` extension. If `MSG` is provided, write it followed by a newline. | Not created |
 | `--index-version <N>` | | Force the index format version (1 or 2). | `1` |
@@ -50,6 +56,9 @@ libra index-pack objects/pack/pack-abc123.pack
 
 # Specify a custom output path
 libra index-pack pack-abc123.pack -o /tmp/pack-abc123.idx
+
+# Read a pack stream from stdin and generate /tmp/incoming.idx
+cat incoming.pack | libra index-pack --stdin -o /tmp/incoming.idx
 
 # Force version 2 index format
 libra index-pack pack-abc123.pack --index-version 2
@@ -70,6 +79,7 @@ libra index-pack pack-abc123.pack --json
 ```bash
 libra index-pack pack-123.pack
 libra index-pack pack-123.pack -o pack-123.idx
+libra index-pack --stdin -o pack-123.idx
 libra index-pack --keep pack-123.pack
 libra index-pack --progress pack-123.pack
 libra index-pack --no-progress pack-123.pack
@@ -132,6 +142,21 @@ Keep-file example:
 }
 ```
 
+Stdin example:
+
+```json
+{
+  "ok": true,
+  "command": "index-pack",
+  "data": {
+    "pack_file": "/tmp/stdin-pack.pack",
+    "index_file": "/tmp/stdin-pack.idx",
+    "index_version": 1,
+    "keep_file": null
+  }
+}
+```
+
 ## Design Rationale
 
 ### Why expose this low-level command?
@@ -182,7 +207,7 @@ algorithms.
 | Custom output path | `-o <path>` | `-o <path>` | N/A |
 | Index version | `--index-version 1\|2` (default 1) | `--index-version <N>[,<offset>]` (default 2) | N/A |
 | Verify existing index | `libra verify-pack <idx>` | `verify-pack` / `index-pack --verify` | N/A |
-| `--stdin` (read pack from stdin) | Not implemented | Yes | N/A |
+| `--stdin` (read pack from stdin) | `--stdin -o <idx>`; stores a same-stem `.pack` beside the idx | Yes | N/A |
 | `--fix-thin` (add bases for thin packs) | Not implemented | Yes | N/A |
 | `--keep` (create .keep file) | `--keep[=<MSG>]` | Yes | N/A |
 | `--threads` (parallel decompression) | Internal (8 threads) | `--threads=<N>` | N/A |
@@ -197,8 +222,11 @@ algorithms.
 | Scenario | StableErrorCode | Exit |
 |----------|-----------------|------|
 | Pack path does not end with `.pack` (and no `-o`) | `LBR-CLI-002` | 129 |
+| `--stdin` without `-o <PATH>` | `LBR-CLI-002` | 129 |
+| `--stdin` combined with `<PACK_FILE>` | `LBR-CLI-002` | 129 |
 | Pack path and index path are identical | `LBR-CLI-002` | 129 |
 | Keep path and index path are identical | `LBR-CLI-002` | 129 |
+| Derived stdin pack file cannot be created | `LBR-IO-002` | 128 |
 | Pack file cannot be opened | `LBR-IO-001` | 128 |
 | Unsupported index version | `LBR-CLI-002` | 129 |
 | Pack contents are invalid or corrupt | `LBR-REPO-002` | 128 |
