@@ -135,8 +135,8 @@
 | `show --no-patch` / `--stat` / `<rev>:<path>` / `<blob>` | `cli.object-readback` | commit 元数据、统计、历史文件内容、文本 blob 与 binary blob 元数据可观察 |
 | `show-ref --head` / `--heads` / `--branches` / `--hash[=<n>]` / `--abbrev[=<n>]` / `--dereference` / `--exists` / `--verify` / `--exclude-existing[=<pattern>]` / pattern | `cli.object-readback`, `cli.show-ref-exclude-existing` | HEAD/分支引用可列出且 `--branches` alias 与 `--heads` 等价，annotated tag peel、完整 refname 存在性、精确验证、hash-only/abbrev 输出、stdin filter、pattern 过滤和缺失 ref 退出码可观察 |
 | `for-each-ref --points-at <object>` | `cli.object-readback` | branch、lightweight tag 和 annotated tag peeled target 过滤可观察，JSON envelope 可用 |
-| `rev-list HEAD` / `-n` / `--max-count` / `--skip` / `--count` | `cli.object-readback` | 可达提交、限制、跳过和计数输出符合 fixture |
-| `rev-list A..B` / `^A` / `--parents` / `--timestamp` | 待补场景 | 范围、排除引用、父提交和时间戳输出仍未公开 |
+| `rev-list HEAD` / multi revision / `A..B` / `^A` / `A...B` / `-n` / `--max-count` / `--skip` / `--count` / `--no-min-parents` / `--no-max-parents` | `cli.object-readback` | 可达提交、范围/排除、限制、跳过、计数和 parent bound reset 输出符合 fixture |
+| `rev-list --parents` / `--timestamp` | `cli.object-readback` | 父提交和 timestamp 输出字段顺序符合 Git |
 | `clean -n/-f/-fd/-fX` | `cli.clean-rm-mv-lfs-basic` | dry-run、文件删除、目录删除、ignored-only 删除覆盖 |
 | `rm <path>` | `cli.clean-rm-mv-lfs-basic` | tracked 文件从工作区和 index 移除 |
 | `mv <src> <dst>` | `cli.clean-rm-mv-lfs-basic` | tracked 文件移动并更新 index |
@@ -203,7 +203,7 @@
 | `show --no-patch` / `<rev>:<path>` / `<blob>` | `cli.object-readback` | commit 元数据、历史文件内容和 blob 内容可观察 |
 | `show-ref --head` / `--heads` / `--branches` / `--hash[=<n>]` / `--abbrev[=<n>]` / `--dereference` / `--verify` / `--exists` / `--exclude-existing[=<pattern>]` | `cli.object-readback`, `cli.show-ref-exclude-existing` | HEAD/分支引用、`--branches` alias、hash-only/abbrev 输出、annotated tag peel、精确 ref 验证、存在性检查和 stdin filter 可观察 |
 | `for-each-ref --points-at <object>` | `cli.object-readback` | 指向指定对象的 branch、lightweight tag、annotated tag 可观察 |
-| `rev-list HEAD` / `--count` / `-n` / `--skip` | `cli.object-readback` | 可达提交输出、计数/限制和 JSON envelope 可观察 |
+| `rev-list HEAD` / multi revision / `A..B` / `^A` / `A...B` / `--count` / `-n` / `--skip` | `cli.object-readback` | 可达提交输出、范围/排除、计数/限制和 JSON envelope 可观察 |
 | `fsck` / `fsck --connectivity-only` / `fsck <object>` | `cli.object-readback`、`cli.gc-smoke` | 默认、连通性和指定对象检查可观察 |
 | `gc` / `prune` | `cli.gc-smoke` | 当前顶层命令未注册，runner 断言 JSON unknown-command 错误 |
 | `maintenance run --dry-run --task gc` | `cli.gc-smoke` | 当前可用 maintenance 路径返回 JSON envelope |

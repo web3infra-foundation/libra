@@ -67,11 +67,13 @@ fn test_commit_with_parent_count(id: ObjectHash, timestamp: usize, parent_count:
 #[test]
 fn test_rev_list_args_default() {
     let args = RevListArgs::try_parse_from(["rev-list"]).unwrap();
-    assert!(args.spec.is_none());
+    assert!(args.specs.is_empty());
     assert!(!args.parents);
     assert!(!args.timestamp);
     assert!(!args.merges);
     assert!(!args.no_merges);
+    assert!(!args.no_min_parents);
+    assert!(!args.no_max_parents);
     assert_eq!(args.min_parents, None);
     assert_eq!(args.max_parents, None);
 }
@@ -79,7 +81,14 @@ fn test_rev_list_args_default() {
 #[test]
 fn test_rev_list_args_with_spec() {
     let args = RevListArgs::try_parse_from(["rev-list", "HEAD~1"]).unwrap();
-    assert_eq!(args.spec.as_deref(), Some("HEAD~1"));
+    assert_eq!(args.specs, vec!["HEAD~1"]);
+}
+
+#[test]
+fn test_rev_list_args_with_multiple_specs() {
+    let args =
+        RevListArgs::try_parse_from(["rev-list", "main", "^feature", "main..topic"]).unwrap();
+    assert_eq!(args.specs, vec!["main", "^feature", "main..topic"]);
 }
 
 #[test]
@@ -90,7 +99,7 @@ fn test_rev_list_args_parse_count_controls() {
     assert_eq!(args.max_count, Some(2));
     assert_eq!(args.skip, 1);
     assert!(args.count);
-    assert_eq!(args.spec.as_deref(), Some("HEAD"));
+    assert_eq!(args.specs, vec!["HEAD"]);
 }
 
 #[test]
@@ -99,7 +108,7 @@ fn test_rev_list_args_parse_parent_and_timestamp_output() {
         RevListArgs::try_parse_from(["rev-list", "--parents", "--timestamp", "HEAD"]).unwrap();
     assert!(args.parents);
     assert!(args.timestamp);
-    assert_eq!(args.spec.as_deref(), Some("HEAD"));
+    assert_eq!(args.specs, vec!["HEAD"]);
 }
 
 #[test]
@@ -119,7 +128,25 @@ fn test_rev_list_args_parse_parent_count_filters() {
     assert!(args.no_merges);
     assert_eq!(args.min_parents, Some(1));
     assert_eq!(args.max_parents, Some(2));
-    assert_eq!(args.spec.as_deref(), Some("HEAD"));
+    assert_eq!(args.specs, vec!["HEAD"]);
+}
+
+#[test]
+fn test_rev_list_args_parse_parent_count_reset_filters() {
+    let args = RevListArgs::try_parse_from([
+        "rev-list",
+        "--min-parents",
+        "1",
+        "--max-parents",
+        "1",
+        "--no-min-parents",
+        "--no-max-parents",
+        "HEAD",
+    ])
+    .unwrap();
+    assert!(args.no_min_parents);
+    assert!(args.no_max_parents);
+    assert_eq!(args.specs, vec!["HEAD"]);
 }
 
 #[test]
@@ -147,6 +174,20 @@ fn test_parent_count_filter_combines_aliases_and_explicit_bounds() {
             min: 2,
             max: Some(1)
         }
+    );
+
+    let reset_min =
+        RevListArgs::try_parse_from(["rev-list", "--merges", "--no-min-parents"]).unwrap();
+    assert_eq!(
+        parent_count_filter(&reset_min),
+        ParentCountFilter { min: 0, max: None }
+    );
+
+    let reset_max =
+        RevListArgs::try_parse_from(["rev-list", "--no-merges", "--no-max-parents"]).unwrap();
+    assert_eq!(
+        parent_count_filter(&reset_max),
+        ParentCountFilter { min: 0, max: None }
     );
 }
 

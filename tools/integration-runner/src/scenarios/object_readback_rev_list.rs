@@ -37,6 +37,43 @@ pub(crate) fn assert_rev_list_readback(
         bail!("rev-list --skip 1 --max-count 1 HEAD did not return the parent commit");
     }
 
+    let rev_multi = ctx.command(
+        &["rev-list", "HEAD", "HEAD~1"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    let rev_multi_output = String::from_utf8_lossy(&rev_multi.stdout);
+    if rev_multi_output.lines().collect::<Vec<_>>() != vec![latest_id.as_str(), head_id] {
+        bail!("rev-list HEAD HEAD~1 did not de-duplicate multi revision output");
+    }
+
+    let rev_range = ctx.command(
+        &["rev-list", "HEAD~1..HEAD"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    if stdout_trim(&rev_range) != latest_id {
+        bail!("rev-list HEAD~1..HEAD did not return only the tip commit");
+    }
+
+    let rev_exclude = ctx.command(
+        &["rev-list", "^HEAD~1", "HEAD"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    if stdout_trim(&rev_exclude) != latest_id {
+        bail!("rev-list ^HEAD~1 HEAD did not exclude the parent history");
+    }
+
+    let rev_symmetric = ctx.command(
+        &["rev-list", "HEAD~1...HEAD"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    if stdout_trim(&rev_symmetric) != latest_id {
+        bail!("rev-list HEAD~1...HEAD did not return the symmetric difference");
+    }
+
     let rev_min_parents = ctx.command(
         &["rev-list", "--min-parents", "1", "HEAD"],
         repo.to_path_buf(),
@@ -53,6 +90,38 @@ pub(crate) fn assert_rev_list_readback(
     )?;
     if stdout_trim(&rev_max_parents) != head_id {
         bail!("rev-list --max-parents 0 HEAD did not return the root commit");
+    }
+
+    let rev_no_min = ctx.command(
+        &[
+            "rev-list",
+            "--count",
+            "--min-parents",
+            "1",
+            "--no-min-parents",
+            "HEAD",
+        ],
+        repo.to_path_buf(),
+        true,
+    )?;
+    if stdout_trim(&rev_no_min) != "2" {
+        bail!("rev-list --no-min-parents did not clear the lower parent bound");
+    }
+
+    let rev_no_max = ctx.command(
+        &[
+            "rev-list",
+            "--count",
+            "--max-parents",
+            "0",
+            "--no-max-parents",
+            "HEAD",
+        ],
+        repo.to_path_buf(),
+        true,
+    )?;
+    if stdout_trim(&rev_no_max) != "2" {
+        bail!("rev-list --no-max-parents did not clear the upper parent bound");
     }
 
     let rev_no_merges = ctx.command(

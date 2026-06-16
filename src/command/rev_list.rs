@@ -1,42 +1,27 @@
-//! Implements `rev-list` to enumerate commits reachable from a revision.
-
-use std::io::Write;
+//! Implements `rev-list` to enumerate commits reachable from revisions.
 
 use clap::Parser;
-use git_internal::internal::object::commit::Commit;
-use serde::Serialize;
 
-use crate::{
-    command::log,
-    utils::{
-        error::{CliError, CliResult, StableErrorCode},
-        output::{OutputConfig, emit_json_data},
-        util::{self, CommitBaseError},
-    },
+use crate::utils::{
+    error::{CliError, CliResult},
+    output::{OutputConfig, emit_json_data},
+    util,
 };
 
-/// `--help` examples shown in `libra rev-list --help` output.
-///
-/// `rev-list` walks the commit graph from the given spec (default
-/// `HEAD`) and prints each reachable commit hash on its own line. The
-/// banner pins the default `HEAD` walk, an explicit branch walk, a
-/// quiet form, and a JSON variant for agents so users see all
-/// supported forms without reading the design doc. Cross-cutting
-/// `--help` EXAMPLES rollout per `docs/development/commands/_general.md` item B.
-pub const REV_LIST_EXAMPLES: &str = "\
-EXAMPLES:
-    libra rev-list                  Walk ancestry from HEAD (one hash per line)
-    libra rev-list --count HEAD     Count reachable commits after filters
-    libra rev-list -n 5 HEAD        Limit output to the first five commits
-    libra rev-list --merges HEAD    Print only merge commits
-    libra rev-list --max-parents 0 HEAD
-                                    Print only root commits
-    libra rev-list --parents HEAD   Include parent commit IDs on each line
-    libra rev-list --timestamp HEAD Prefix each line with the committer timestamp
-    libra rev-list main             Walk ancestry from refs/heads/main
-    libra rev-list HEAD~5           Walk ancestry from a relative ref
-    libra rev-list --json HEAD      Structured JSON output (input + commits[] + total)
-    libra rev-list --quiet HEAD     Suppress stdout (use exit code as truthy probe)";
+#[path = "rev_list_filter.rs"]
+mod rev_list_filter;
+#[path = "rev_list_output.rs"]
+mod rev_list_output;
+#[path = "rev_list_spec.rs"]
+mod rev_list_spec;
+
+#[cfg(test)]
+use rev_list_filter::ParentCountFilter;
+use rev_list_filter::{commit_matches_parent_count, parent_count_filter, sort_rev_list_commits};
+use rev_list_output::{REV_LIST_EXAMPLES, RevListEntry, RevListOutput, emit_human_rev_list};
+#[cfg(test)]
+use rev_list_output::{format_rev_list_entry, write_rev_list_count, write_rev_list_output};
+use rev_list_spec::resolve_revision_selection;
 
 #[derive(Parser, Debug)]
 #[command(after_help = REV_LIST_EXAMPLES)]
@@ -77,49 +62,17 @@ pub struct RevListArgs {
     #[clap(long = "max-parents", value_name = "N")]
     pub max_parents: Option<usize>,
 
-    /// Revision to list from. Defaults to HEAD when omitted.
+    /// Clear the lower parent-count bound
+    #[clap(long = "no-min-parents")]
+    pub no_min_parents: bool,
+
+    /// Clear the upper parent-count bound
+    #[clap(long = "no-max-parents")]
+    pub no_max_parents: bool,
+
+    /// Revisions to include or exclude. Defaults to HEAD when omitted.
     #[clap(value_name = "SPEC")]
-    pub spec: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct RevListEntry {
-    commit: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    parents: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    timestamp: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct RevListOutput {
-    input: String,
-    commits: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    entries: Option<Vec<RevListEntry>>,
-    total: usize,
-    count_only: bool,
-    parents: bool,
-    timestamp: bool,
-    merges: bool,
-    no_merges: bool,
-    min_parents: Option<usize>,
-    max_parents: Option<usize>,
-    max_count: Option<usize>,
-    skip: usize,
-}
-
-impl RevListOutput {
-    fn human_lines(&self) -> Vec<String> {
-        if let Some(entries) = &self.entries {
-            return entries
-                .iter()
-                .map(|entry| format_rev_list_entry(entry, self.parents, self.timestamp))
-                .collect();
-        }
-
-        self.commits.clone()
-    }
+    pub specs: Vec<String>,
 }
 
 pub async fn execute(args: RevListArgs) -> Result<(), String> {
@@ -134,52 +87,14 @@ pub async fn execute_safe(args: RevListArgs, output: &OutputConfig) -> CliResult
 
     if output.is_json() {
         emit_json_data("rev-list", &result, output)
-    } else if output.quiet {
-        Ok(())
-    } else if result.count_only {
-        let stdout = std::io::stdout();
-        let mut writer = stdout.lock();
-        write_rev_list_count(&mut writer, result.total)
     } else {
-        let stdout = std::io::stdout();
-        let mut writer = stdout.lock();
-        write_rev_list_output(&mut writer, &result.human_lines())
+        emit_human_rev_list(output, &result)
     }
-}
-
-fn write_rev_list_count<W: Write>(writer: &mut W, total: usize) -> CliResult<()> {
-    match writeln!(writer, "{total}") {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        Err(error) => Err(
-            CliError::fatal(format!("failed to write rev-list output: {error}"))
-                .with_stable_code(StableErrorCode::IoWriteFailed),
-        ),
-    }
-}
-
-fn write_rev_list_output<W: Write>(writer: &mut W, commits: &[String]) -> CliResult<()> {
-    for commit in commits {
-        match writeln!(writer, "{commit}") {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
-            Err(error) => {
-                return Err(
-                    CliError::fatal(format!("failed to write rev-list output: {error}"))
-                        .with_stable_code(StableErrorCode::IoWriteFailed),
-                );
-            }
-        }
-    }
-    Ok(())
 }
 
 async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
-    let spec = args.spec.as_deref().unwrap_or("HEAD");
-    let commit = util::get_commit_base_typed(spec)
-        .await
-        .map_err(|err| rev_list_target_error(spec, err))?;
-    let mut commits = log::get_reachable_commits(commit.to_string(), None).await?;
+    let selection = resolve_revision_selection(&args.specs).await?;
+    let mut commits = selection.commits;
     sort_rev_list_commits(&mut commits);
     let parent_filter = parent_count_filter(args);
 
@@ -218,7 +133,8 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
     let total = commits.len();
 
     Ok(RevListOutput {
-        input: spec.to_string(),
+        input: selection.input,
+        inputs: selection.inputs,
         commits,
         entries,
         total,
@@ -229,75 +145,11 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         no_merges: args.no_merges,
         min_parents: args.min_parents,
         max_parents: args.max_parents,
+        no_min_parents: args.no_min_parents,
+        no_max_parents: args.no_max_parents,
         max_count: args.max_count,
         skip: args.skip,
     })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ParentCountFilter {
-    min: usize,
-    max: Option<usize>,
-}
-
-fn parent_count_filter(args: &RevListArgs) -> ParentCountFilter {
-    let min = args
-        .min_parents
-        .unwrap_or(0)
-        .max(usize::from(args.merges) * 2);
-    let max = match (args.max_parents, args.no_merges) {
-        (Some(explicit), true) => Some(explicit.min(1)),
-        (Some(explicit), false) => Some(explicit),
-        (None, true) => Some(1),
-        (None, false) => None,
-    };
-
-    ParentCountFilter { min, max }
-}
-
-fn commit_matches_parent_count(commit: &Commit, filter: ParentCountFilter) -> bool {
-    let parent_count = commit.parent_commit_ids.len();
-    parent_count >= filter.min && filter.max.is_none_or(|max| parent_count <= max)
-}
-
-fn format_rev_list_entry(entry: &RevListEntry, show_parents: bool, show_timestamp: bool) -> String {
-    let mut fields = Vec::new();
-    if show_timestamp && let Some(timestamp) = entry.timestamp {
-        fields.push(timestamp.to_string());
-    }
-    fields.push(entry.commit.clone());
-    if show_parents {
-        fields.extend(entry.parents.iter().cloned());
-    }
-    fields.join(" ")
-}
-
-fn sort_rev_list_commits(commits: &mut [Commit]) {
-    // `sort_by_key` is stable, so equal timestamps keep the traversal order
-    // returned by `get_reachable_commits` (HEAD before parent in linear history).
-    commits.sort_by_key(|commit| std::cmp::Reverse(commit.committer.timestamp));
-}
-
-fn rev_list_target_error(spec: &str, error: CommitBaseError) -> CliError {
-    match error {
-        CommitBaseError::HeadUnborn => CliError::failure(format!(
-            "not a valid object name: '{spec}' (HEAD does not point to a commit)"
-        ))
-        .with_stable_code(StableErrorCode::CliInvalidTarget)
-        .with_hint("create a commit before resolving HEAD."),
-        CommitBaseError::InvalidReference(detail) => {
-            CliError::failure(format!("not a valid object name: '{spec}' ({detail})"))
-                .with_stable_code(StableErrorCode::CliInvalidTarget)
-        }
-        CommitBaseError::ReadFailure(detail) => {
-            CliError::fatal(format!("failed to resolve '{spec}': {detail}"))
-                .with_stable_code(StableErrorCode::IoReadFailed)
-        }
-        CommitBaseError::CorruptReference(detail) => {
-            CliError::fatal(format!("failed to resolve '{spec}': {detail}"))
-                .with_stable_code(StableErrorCode::RepoCorrupt)
-        }
-    }
 }
 
 #[cfg(test)]
