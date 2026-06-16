@@ -60,10 +60,12 @@ pub(crate) fn scenario_object_readback(ctx: &mut ScenarioCtx<'_>) -> Result<()> 
         &ctx.command(&["show-ref", "--head"], repo.clone(), true)?,
         "HEAD",
     )?;
-    assert_stdout_contains(
-        &ctx.command(&["show-ref", "--heads"], repo.clone(), true)?,
-        "refs/heads/main",
-    )?;
+    let heads_ref = ctx.command(&["show-ref", "--heads"], repo.clone(), true)?;
+    assert_stdout_contains(&heads_ref, "refs/heads/main")?;
+    let branches_ref = ctx.command(&["show-ref", "--branches"], repo.clone(), true)?;
+    if branches_ref.stdout != heads_ref.stdout {
+        bail!("show-ref --branches did not match --heads output");
+    }
     let hash_only = ctx.command(&["show-ref", "--hash", "--heads"], repo.clone(), true)?;
     if stdout_trim(&hash_only) != head_id {
         bail!("show-ref --hash --heads returned unexpected hash");

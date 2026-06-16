@@ -12,8 +12,8 @@ libra show-ref [OPTIONS] [PATTERN]...
 
 `libra show-ref` enumerates references stored in the repository (branches, tags,
 and optionally `HEAD`) along with the object hash each ref points to. By default
-both branches and tags are shown. Use `--heads` or `--tags` to restrict output
-to one category.
+both branches and tags are shown. Use `--heads` / `--branches` or `--tags` to
+restrict output to one category.
 
 Positional `<PATTERN>` arguments match complete path segments from the end of
 the fully-qualified ref name, following Git's `show-ref` behavior. For example,
@@ -50,6 +50,7 @@ no filesystem scanning.
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--heads` | | Show only branches (`refs/heads/`). |
+| `--branches` | | Git-compatible alias for `--heads`. |
 | `--tags` | | Show only tags (`refs/tags/`). |
 | `--head` | | Include `HEAD` in the output. |
 | `--hash[=<n>]` | `-s[<n>]` | Only show the object hash, optionally shortened to `n` hex digits. |
@@ -68,6 +69,9 @@ libra show-ref
 
 # Show only branches
 libra show-ref --heads
+
+# Same branch filter using Git's alias
+libra show-ref --branches
 
 # Show only tags
 libra show-ref --tags
@@ -105,6 +109,7 @@ libra show-ref --heads feat
 ```bash
 libra show-ref
 libra show-ref --heads
+libra show-ref --branches
 libra show-ref --tags
 libra show-ref --dereference --tags v1.0
 libra show-ref --head --hash
@@ -251,7 +256,7 @@ and which commit it resolves to.
 | Feature | Libra | Git | jj |
 |---------|-------|-----|----|
 | List all refs | `libra show-ref` | `git show-ref` | `jj bookmark list` + `jj tag list` |
-| Filter to branches | `--heads` | `--heads` | `jj bookmark list` |
+| Filter to branches | `--heads` / `--branches` | `--heads` / `--branches` | `jj bookmark list` |
 | Filter to tags | `--tags` | `--tags` | `jj tag list` |
 | Include HEAD | `--head` | `--head` | N/A (no HEAD concept) |
 | Hash-only output | `-s[<n>]` / `--hash[=<n>]` | `-s[<n>]` / `--hash[=<n>]` | N/A |

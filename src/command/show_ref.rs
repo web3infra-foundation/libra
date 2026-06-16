@@ -33,6 +33,7 @@ pub const SHOW_REF_EXAMPLES: &str = "\
 EXAMPLES:
     libra show-ref                   List all local refs with their object hashes
     libra show-ref --heads           List only branches (refs/heads/)
+    libra show-ref --branches        Alias for --heads
     libra show-ref --tags            List only tags (refs/tags/)
     libra show-ref --head            Include HEAD in the output
     libra show-ref -s --heads        Print branch hashes only (one per line, scripting-friendly)
@@ -50,8 +51,8 @@ EXAMPLES:
 #[derive(Parser, Debug)]
 #[command(after_help = SHOW_REF_EXAMPLES)]
 pub struct ShowRefArgs {
-    /// Show only branches (refs/heads/)
-    #[clap(long)]
+    /// Show only branches (refs/heads/); --branches is a Git-compatible alias
+    #[clap(long, visible_alias = "branches")]
     pub heads: bool,
 
     /// Show only tags (refs/tags/)

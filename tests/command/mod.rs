@@ -332,6 +332,7 @@ mod sandbox_status_test;
 mod schema_upgrade_test;
 mod shortlog_test;
 mod show_ref_abbrev_test;
+mod show_ref_alias_test;
 mod show_ref_deref_pattern_test;
 mod show_ref_exclude_existing_test;
 mod show_ref_test;
