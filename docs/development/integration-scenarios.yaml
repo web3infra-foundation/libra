@@ -339,7 +339,7 @@ scenarios:
   - id: cli.clone-fetch-pull-local
     wave: 2
     group: protocol_local
-    purpose: "Local-path Git remote interop for current clone/remote/ls-remote/fetch/pull surfaces, including local clone content, remote get/set/show/prune basics, ls-remote heads/tags/refs, fetch --all/--depth, pull --ff-only/--rebase basics, and negative checks for unsupported remote/ls-remote/fetch/pull flags. Uses gitfix() for fixtures."
+    purpose: "Local-path Git remote interop for current clone/remote/ls-remote/fetch/pull surfaces, including local clone content, remote get/set/show/prune basics, ls-remote heads/tags/refs/get-url/sort/exit-code, fetch --all/--depth, pull --ff-only/--rebase basics, and negative checks for unsupported remote/fetch/pull flags. Uses gitfix() for fixtures."
     gh_required: false
     requires_git: true
     key_assertion_categories: [json_envelope, fsck, gitfix_isolation]

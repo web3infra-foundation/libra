@@ -44,7 +44,7 @@ batch document.
 | show | partial | object/commit display, `--name-only`, `--stat`, `--oneline`, and path filters supported; extended pretty/raw/name-status formats are not exposed |
 | show-ref | partial | branch/tag/HEAD listing, `--branches` alias, `--hash[=<n>]`, `--abbrev[=<n>]`, `--dereference`, `--verify`, `--exists`, and `--exclude-existing[=<pattern>]` supported; `--no-*` aliases are not exposed |
 | for-each-ref | partial | `--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort` / `--count` / `--points-at` / `<pattern>` supported; full Git atom language, `--contains` / `--merged` filters and shell quoting modes are not exposed |
-| ls-remote | partial | heads/tags/refs filtering and patterns supported; `--symref`, `--get-url`, `--sort`, and `--exit-code` are not exposed |
+| ls-remote | partial | heads/tags/refs filtering, patterns, `--get-url`, `--sort=refname`/`version:refname`, and `--exit-code` supported; `--symref` is not exposed |
 | ls-tree | partial | Commit/tree listing, recursive listing, current-directory-relative path prefix filters, `--full-name`, `--full-tree`, JSON, and common output flags supported; `--format` and `REV:path` syntax are not exposed |
 | symbolic-ref | partial | Supports local `HEAD` only; other symbolic refs are rejected because Libra stores refs in SQLite |
 | branch | partial | create/list/delete/rename/upstream set/current/contains filters supported; copy, unset-upstream, description, merged/points-at, sort/format, and ignore-case are not exposed |

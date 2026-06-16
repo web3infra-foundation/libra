@@ -1,6 +1,6 @@
 ### `cli.clone-fetch-pull-local`
 
-目的：验证当前本地路径 Git remote 的 clone、remote、ls-remote、fetch、pull 基础互操作，并用负向断言记录未实现的 Git 参数。
+目的：验证当前本地路径 Git remote 的 clone、remote、ls-remote、fetch、pull 基础互操作，并用负向断言记录仍未实现的 Git 参数。
 
 最小步骤：
 
@@ -26,8 +26,10 @@ libra remote prune origin
 libra ls-remote --heads origin
 libra ls-remote --tags origin
 libra ls-remote --refs origin
-! libra ls-remote --sort=version:refname origin
-! libra ls-remote --exit-code origin no-match
+libra ls-remote --get-url origin
+libra ls-remote --sort=version:refname --tags origin
+libra ls-remote --exit-code origin main
+! libra ls-remote --exit-code origin no-match  # exit 2, silent
 ! libra remote set-branches origin main
 ! libra remote set-head origin main
 ! libra remote update origin
@@ -50,6 +52,6 @@ libra fsck --connectivity-only
 关键断言：
 
 - 本地 Git fixture 可被 Libra clone，工作区内容、remote config 和 refs 可观察。
-- 当前 `remote`、`ls-remote`、`fetch`、`pull` 支持面覆盖基础正向路径。
-- `remote set-branches/set-head/update`、`ls-remote --sort/--exit-code`、`fetch --deepen/--unshallow/--prune`、`pull --squash/--commit` 当前作为负向路径验证。
+- 当前 `remote`、`ls-remote`、`fetch`、`pull` 支持面覆盖基础正向路径，其中 `ls-remote --get-url` 不做 discovery，`--sort=version:refname` 按 refname 版本顺序排序，`--exit-code` 在无匹配时返回 2。
+- `remote set-branches/set-head/update`、`fetch --deepen/--unshallow/--prune`、`pull --squash/--commit` 当前作为负向路径验证。
 - 失败路径不得破坏 clone 仓库，结尾 `fsck --connectivity-only` 必须通过。

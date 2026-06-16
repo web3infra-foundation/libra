@@ -36,9 +36,48 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
     let ls_remote = ctx.command(&["ls-remote", &remote], ctx.run_dir.clone(), true)?;
     assert_stdout_contains(&ls_remote, "refs/heads/main")?;
     assert_stdout_contains(
+        &ctx.command(
+            &["ls-remote", "--get-url", &remote],
+            ctx.run_dir.clone(),
+            true,
+        )?,
+        &remote,
+    )?;
+    assert_stdout_contains(
         &ctx.command(&["ls-remote", "--tags", &remote], ctx.run_dir.clone(), true)?,
         "refs/tags/v1.1.0",
     )?;
+    let sorted_tags = ctx.command(
+        &["ls-remote", "--tags", "--sort=version:refname", &remote],
+        ctx.run_dir.clone(),
+        true,
+    )?;
+    let sorted_tags_stdout = String::from_utf8_lossy(&sorted_tags.stdout);
+    let v1_1 = sorted_tags_stdout
+        .find("refs/tags/v1.1.0")
+        .context("sorted ls-remote tags omitted v1.1.0")?;
+    let v1_2 = sorted_tags_stdout
+        .find("refs/tags/v1.2.0")
+        .context("sorted ls-remote tags omitted v1.2.0")?;
+    if v1_1 >= v1_2 {
+        bail!("ls-remote --sort=version:refname returned unexpected tag order: {sorted_tags_stdout}");
+    }
+    ctx.command(
+        &["ls-remote", "--exit-code", &remote, "main"],
+        ctx.run_dir.clone(),
+        true,
+    )?;
+    let missing_ref = ctx.command(
+        &["ls-remote", "--exit-code", &remote, "no-match"],
+        ctx.run_dir.clone(),
+        false,
+    )?;
+    if missing_ref.status.code() != Some(2) {
+        bail!(
+            "ls-remote --exit-code no-match returned {:?}, expected 2",
+            missing_ref.status.code()
+        );
+    }
     let json_ls_remote = ctx.command(
         &["--json", "ls-remote", "--heads", &remote, "main"],
         ctx.run_dir.clone(),
@@ -54,6 +93,10 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
     )?;
     assert_stdout_contains(
         &ctx.command(&["remote", "get-url", "origin"], clone_dir.clone(), true)?,
+        &remote,
+    )?;
+    assert_stdout_contains(
+        &ctx.command(&["ls-remote", "--get-url", "origin"], clone_dir.clone(), true)?,
         &remote,
     )?;
     assert_stdout_contains(

@@ -175,8 +175,8 @@
 | `clone --depth` / `fetch --depth` | `cli.fetch-depth-local` | shallow marker 与 checkout 内容可观察，非法 depth 失败 |
 | `remote add/remove/rename/-v/show/get-url/set-url/prune` | `cli.clone-fetch-pull-local` | 当前 remote 增删改查和 prune 基础路径可观察 |
 | unsupported remote flags (`set-branches` / `set-head` / `update`) | `cli.clone-fetch-pull-local` | 当前未实现，runner 负向断言稳定错误 |
-| `ls-remote --heads --tags --refs` | `cli.clone-fetch-pull-local` | refs 过滤输出可观察 |
-| unsupported ls-remote flags (`--sort` / `--exit-code` / `--get-url` / `--symref`) | `cli.clone-fetch-pull-local` | 当前未实现，runner 负向断言 |
+| `ls-remote --heads --tags --refs --get-url --sort --exit-code` | `cli.clone-fetch-pull-local` | refs 过滤、URL 解析、排序和 no-match exit 2 可观察 |
+| unsupported ls-remote flags (`--symref`) | `cli.clone-fetch-pull-local` | 当前未实现，命令文档保留缺口 |
 | `fetch [remote]` / `fetch --all` / `fetch --depth` | `cli.clone-fetch-pull-local`、`cli.fetch-depth-local` | 默认 remote、全部 remote 和 depth fetch 可观察 |
 | unsupported fetch flags (`--deepen` / `--unshallow` / `--prune` / `--porcelain` / tags modes) | `cli.clone-fetch-pull-local`、`cli.fetch-depth-local` | 当前未实现，runner 负向断言 |
 | `pull` / `pull --ff-only` / `pull --rebase` | `cli.clone-fetch-pull-local` | 本地 fast-forward/rebase 基础路径可观察 |
