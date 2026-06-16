@@ -1346,6 +1346,15 @@ src/internal/ai/<module>/
 | Integration test | 跨模块真实调用（可用 fake provider） | ≥ 1 | headless Web adapter 提交 turn 并观察 SSE |
 | Negative test | 错误路径、取消、预算耗尽、越权 | ≥ 1 | budget hard-cap 时 `AwaitUser` 而非静默截断 |
 
+### 测试闭环规则
+
+每张 AG 卡在交付前必须把测试闭环写清楚，不能只写“补测试”或“跑相关测试”。闭环必须同时满足：
+
+1. 卡正文或 AG-24 Test Closure Matrix 写出具体 `<target>::<test_fn>`。
+2. 新增 top-level integration target 必须在 `Cargo.toml` 注册（`tests/compat/*` 必须显式 `[[test]]`）并同步 `tests/INDEX.md` 的 wave / purpose / relevant src。
+3. `## 验收命令` 中必须出现实际可运行的 target；如果某个场景并入既有 target（例如 `command_test`），矩阵里必须写明实际 target、filter 和被覆盖的 test function。
+4. 文档-only 或 CLI-only 卡可以不满足六类测试的数量要求，但必须在矩阵中写“豁免原因 + 替代验证”（例如 docs drift `rg`、snapshot/schema pin、compat alignment）。没有豁免说明时，默认按六类最低要求执行。
+
 ### 测试环境标注
 
 ```rust
@@ -2134,7 +2143,15 @@ pub async fn run_tournament<'a>(
 ##### 4. 验收标准
 - 不新起第二套并行调度（复用 `dagrs 0.8.1` 与 `dispatch_batch`）；不把任何 pattern 塞进交互 gate。
 - 六 pattern 各有 fake-provider / replay 合约测试，派生/收敛/终止稳定且写 `SessionEvent`。
-- generate-and-filter / tournament 提供 dispatcher 现缺 of score/rank/select；loop-until-done 提供面向任意 sub-agent 任务的 loop-until-dry 入口。
+- 具体测试必须落在 Cargo target `ai_workflow_pattern_test`，至少包含：
+  - `ai_workflow_pattern_test::classify_and_act_routes_to_pattern_persona_and_model`
+  - `ai_workflow_pattern_test::fan_out_and_synthesize_writes_deterministic_session_events`
+  - `ai_workflow_pattern_test::adversarial_verification_uses_independent_verifier`
+  - `ai_workflow_pattern_test::generate_and_filter_deduplicates_and_selects_verified_result`
+  - `ai_workflow_pattern_test::tournament_pairwise_bracket_is_deterministic`
+  - `ai_workflow_pattern_test::loop_until_done_stops_on_no_new_findings_budget_or_await_user`
+  - `ai_workflow_pattern_test::cap_one_flag_off_is_byte_identical_to_sequential_dispatch`
+- generate-and-filter / tournament 补齐 dispatcher 当前缺失的 score/rank/select；loop-until-done 提供面向任意 sub-agent 任务的 loop-until-dry 入口。
 - CP-S2-4 cap=1 时 byte-identical（顺序退化）。
 - 每个 sub-agent 走既有 `AgentExecutionSpec`（[`src/internal/ai/agent/profile/spec.rs`](../../src/internal/ai/agent/profile/spec.rs)）+ workspace 隔离（`materialize_isolated_workspace`，[`src/internal/ai/agent/runtime/sub_agent_dispatcher.rs`](../../src/internal/ai/agent/runtime/sub_agent_dispatcher.rs)）+ approval/sandbox/tool gate，不旁路。
 
@@ -2143,7 +2160,7 @@ pub async fn run_tournament<'a>(
 把三条单 context 失效模式缓解固化为命名守卫测试，并要求 AG-13 的每个 pattern 继承。
 
 ##### 1. 涉及文件
-* 目标测试目录: `tests/ai_workflow_guard_test.rs` (新建)
+* 目标测试目录: `tests/ai_workflow_guard_test.rs` (新建，Cargo target `ai_workflow_guard_test`)
 * 监督循环驱动处: [`src/internal/ai/goal/driver.rs`](../../src/internal/ai/goal/driver.rs)
 * 判定与证据收集处: [`src/internal/ai/goal/verifier.rs`](../../src/internal/ai/goal/verifier.rs)
 
@@ -2156,10 +2173,10 @@ pub async fn run_tournament<'a>(
   * **机制**：每次 compaction / replan 均不修改不可变的 `GoalSpec`，并在每次构建新 continuation prompt 或分发子任务时，将原始 objective 拼装到提示词头部。
 
 ##### 3. 验收标准
-- `agentic-laziness` 守卫：final-text-without-claim 不允许终止（[`src/internal/ai/goal/driver.rs`](../../src/internal/ai/goal/driver.rs) 路径 + `build_system_report` 证据要求）。
-- `self-preferential-bias` 守卫：completion/verify 最终裁决来自确定性 verifier（[`src/internal/ai/goal/verifier.rs`](../../src/internal/ai/goal/verifier.rs)）/ 客观 gate（[`src/internal/ai/orchestrator/gate.rs`](../../src/internal/ai/orchestrator/gate.rs)）/ 独立 verifier sub-agent，绝非产出方自评；adversarial-verification 的 LLM verifier 仅 advisory，移除后确定性 gate 仍是最终裁决。
-- `goal-drift` 守卫：每次续跑 / 每个 sub-agent 从不可变 `GoalSpec` / 任务 contract 重新对齐；goal spec 不进 compaction 有损路径。
-- 三守卫是 source-of-truth 测试：任何 pattern 原语未继承对应守卫则失败。
+- `ai_workflow_guard_test::agentic_laziness_final_text_without_claim_continues`：final-text-without-claim 不允许终止（[`src/internal/ai/goal/driver.rs`](../../src/internal/ai/goal/driver.rs) 路径 + `build_system_report` 证据要求）。
+- `ai_workflow_guard_test::self_preferential_bias_requires_independent_verifier_or_deterministic_gate`：completion/verify 最终裁决来自确定性 verifier（[`src/internal/ai/goal/verifier.rs`](../../src/internal/ai/goal/verifier.rs)）/ 客观 gate（[`src/internal/ai/orchestrator/gate.rs`](../../src/internal/ai/orchestrator/gate.rs)）/ 独立 verifier sub-agent，绝非产出方自评；adversarial-verification 的 LLM verifier 仅 advisory，移除后确定性 gate 仍是最终裁决。
+- `ai_workflow_guard_test::goal_drift_preserves_original_goal_spec_after_compaction`：每次续跑 / 每个 sub-agent 从不可变 `GoalSpec` / 任务 contract 重新对齐；goal spec 不进 compaction 有损路径。
+- `ai_workflow_guard_test::workflow_patterns_inherit_failure_guards`：三守卫是 source-of-truth 测试；任何 pattern 原语未继承对应守卫则失败。
 
 ### AG-15: Workflow templates & per-workflow budget
 
@@ -2198,6 +2215,11 @@ impl BudgetTracker {
 - automation 侧有「可保存多步 workflow 模板」schema；可重复 workflow 经 `AutomationScheduler`（[`src/internal/ai/automation/scheduler.rs`](../../src/internal/ai/automation/scheduler.rs)）按间隔触发（对应 /loop）、goal 提供硬完成判据（对应 /goal），遵循 dedup key + fire-once + audit + session-scoped。
 - `BudgetTracker`（[`src/internal/ai/agent/budget.rs`](../../src/internal/ai/agent/budget.rs)）新增 per-workflow/per-run token 预算维度；每次 pattern 运行声明并强制预算，耗尽 `AwaitUser` 不静默截断。
 - 所有模板触发进入同一 serialized turn queue，受同一 approval/sandbox/tool gate 约束。
+- 具体测试必须落在 Cargo target `ai_workflow_template_budget_test`，至少包含：
+  - `ai_workflow_template_budget_test::skill_workflow_frontmatter_dispatches_pattern_without_widening_tools`
+  - `ai_workflow_template_budget_test::automation_workflow_template_enters_serialized_queue_with_audit`
+  - `ai_workflow_template_budget_test::workflow_budget_hard_cap_yields_await_user`
+  - `ai_workflow_template_budget_test::workflow_template_is_parameterized_not_literal_script`
 
 ### AG-16: Observed Agent capability contract
 
@@ -2389,15 +2411,22 @@ Libra 对应（AG-16 + AG-24 必须落地）：
 此测试失败即 Gate 8 失败，防止 agent 包与框架层循环依赖或遗漏注册。
 
 #### 测试目标与 INDEX 同步（AG-24 强制）
-新增或扩展（在 PR 中同时更新 `tests/INDEX.md` 和 `Cargo.toml` [[test]]）：
-- `compat_agent_capability_matrix_pin`（Wave 1）：冻结 E1 8-key + current 7 agent matrix。
-- `compat_agent_architecture_guard`（Wave 1）：import 约束 + self-register 强制。
-- `agent_external_protocol_v2_matrix`（或并入 command_test）：fake binary 覆盖 info/timeout/oversize/undeclared-cap。
-- `agent_checkpoint_export_e4_fixtures`（Wave 2）：使用 cli-checkpoints 形态的 1-session / 61-session / 46MiB / missing-optional / .zst fixture；验证 lazy + content_hash。
-- `agent_lifecycle_owner_and_trust_gap`：owner claim、SubagentStart/End、Codex trust-gap banner。
-- `agent_skill_event_extraction`：claude-code / codex 至少的 SkillEvent 抽取 + 投影。
-- `agent_review_investigate_workflow`（Wave 3+，features test-provider）：multi reviewer fan-in + investigate round-robin + fix 桥回 AgentRuntime 的端到端（不直接 mutating）。
-所有新测试必须引用具体 `<target>::<test_fn>` 形式。
+新增或扩展时，必须在同一 PR 更新 `Cargo.toml` `[[test]]`、`tests/INDEX.md` 和本节矩阵。若实现选择把某行并入既有 target，必须把“实际 target/filter”改到矩阵里并同步 `## 验收命令`，不得保留场景名与命令名漂移。
+
+| AG / 契约 | 实际 target | 必须包含的 `<target>::<test_fn>` | 注册 / INDEX / 命令要求 |
+|---|---|---|---|
+| AG-16 / E1 / E9 | `compat_agent_capability_matrix_pin` | `compat_agent_capability_matrix_pin::declared_agent_caps_wire_keys_are_exactly_e1`; `compat_agent_capability_matrix_pin::known_agent_capability_matrix_matches_current_roster`; `compat_agent_capability_matrix_pin::unsupported_external_agent_kind_is_quarantined` | Wave 1；`Cargo.toml` `[[test]]` + `tests/INDEX.md`；最终命令必须跑该 target |
+| AG-16 + AG-24 | `compat_agent_architecture_guard` | `compat_agent_architecture_guard::observed_agent_modules_do_not_import_runtime_or_checkpoint_layers`; `compat_agent_architecture_guard::all_known_agent_kinds_resolve_non_null_adapter`; `compat_agent_architecture_guard::external_agent_info_is_required_for_registration` | Wave 1；`Cargo.toml` `[[test]]` + `tests/INDEX.md`；失败即 Gate 8 失败 |
+| AG-17 | `command_test` filter `agent_` | `command_test::agent_list_add_remove_aliases_parse`; `command_test::agent_list_json_contains_capability_fields`; `command_test::agent_add_non_hook_installable_returns_actionable_unsupported` | 已有 target 可复用；`tests/INDEX.md` 对 command coverage 加 AG-17 说明 |
+| AG-18 / E2 | `agent_rpc_external_test` | `agent_rpc_external_test::info_success_registers_binary`; `agent_rpc_external_test::version_mismatch_is_skipped_with_reason`; `agent_rpc_external_test::timeout_and_oversize_are_fail_closed`; `agent_rpc_external_test::undeclared_capability_method_is_rejected` | Wave 1/2；原场景名 `agent_external_protocol_v2_matrix` 只作为目的说明，不再作为命令名 |
+| AG-19 / E3 | `agent_lifecycle_event_test` | `agent_lifecycle_event_test::invalid_hook_envelopes_are_rejected_before_checkpoint`; `agent_lifecycle_event_test::owner_claim_prevents_duplicate_checkpoint`; `agent_lifecycle_event_test::subagent_start_end_write_subagent_checkpoint`; `agent_lifecycle_event_test::codex_trust_gap_banner_only_for_unapproved_hooks` | Wave 2；覆盖 owner claim、SubagentStart/End、trust-gap |
+| AG-19 redaction | `agent_checkpoint_redaction_test` | `agent_checkpoint_redaction_test::raw_hook_input_is_redacted_before_persist`; `agent_checkpoint_redaction_test::extractor_warning_does_not_include_secret_owner_or_prompt` | Wave 2；与 lifecycle/checkpoint writer 同 PR 更新 |
+| AG-20 / E4 / E5 | `agent_checkpoint_export_test` | `agent_checkpoint_export_test::exports_single_and_multi_session_layouts`; `agent_checkpoint_export_test::checkpoint_show_list_are_metadata_first`; `agent_checkpoint_export_test::content_hash_reader_accepts_legacy_bare_hex_and_writes_prefixed`; `agent_checkpoint_export_test::large_or_zstd_transcript_requires_explicit_detail` | Wave 2；原场景名 `agent_checkpoint_export_e4_fixtures` 落到该 target |
+| AG-21 / E5 / E6 / E7 | `agent_transcript_intelligence_test` | `agent_transcript_intelligence_test::claude_codex_opencode_fixtures_extract_metadata_or_partial`; `agent_transcript_intelligence_test::token_usage_mapping_uses_e6_wire_keys`; `agent_transcript_intelligence_test::missing_optional_files_return_partial_not_panic`; `agent_transcript_intelligence_test::skill_events_project_for_claude_and_codex` | Wave 2；`tests/INDEX.md` 新增；若拆 target，矩阵必须同步 |
+| AG-22 / E8 | `agent_review_workflow_test` | `agent_review_workflow_test::fake_reviewers_cover_success_error_cancel_and_slow_output`; `agent_review_workflow_test::review_sink_is_not_blocked_by_high_frequency_reviewer`; `agent_review_workflow_test::review_fix_bridge_enters_agent_runtime_mutating_path` | Wave 3+；需 `--features test-provider` 时在命令中标注 |
+| AG-23 / E8 | `agent_investigate_workflow_test` | `agent_investigate_workflow_test::round_robin_reaches_quorum_and_max_turns`; `agent_investigate_workflow_test::stalled_cancelled_paused_and_continue_resume_are_pinned`; `agent_investigate_workflow_test::concurrent_same_run_id_fails_closed`; `agent_investigate_workflow_test::investigate_fix_bridge_enters_agent_runtime_mutating_path` | Wave 3+；需 `--features test-provider` 时在命令中标注 |
+
+AG-24 交付时必须把上表逐行核对：没有 target、没有具体 test function、没有 `Cargo.toml` / `tests/INDEX.md` 注册、或 `## 验收命令` 未覆盖，均视为测试方案未闭环。
 
 #### 两个开发文档的强制同步规则
 - `docs/development/agent.md`（本文件，内部 runtime + Gate 8 执行卡 + wire E1-E9）是 AG 卡的唯一事实来源。
@@ -2478,6 +2507,9 @@ Dynamic Workflow 编排层检查：
 
 ```bash
 # 失效模式守卫 + workflow pattern 合约（确定性 / fake provider）
+cargo test --test ai_workflow_pattern_test
+cargo test --test ai_workflow_guard_test
+cargo test --test ai_workflow_template_budget_test
 cargo test --test ai_goal_supervisor_test --test ai_goal_verifier_test --test ai_goal_completion_gate_test
 cargo test --test ai_subagent_parallel_test
 cargo test --lib goal::supervisor goal::verifier orchestrator::verifier agent::budget
@@ -2497,6 +2529,8 @@ Entireio/cli 对齐轨道检查：
 
 ```bash
 # capability / CLI / RPC contract
+cargo test --test compat_agent_capability_matrix_pin
+cargo test --test compat_agent_architecture_guard
 cargo test --lib observed_agents
 cargo test --test command_test agent
 cargo test --test agent_rpc_external_test
@@ -2507,6 +2541,7 @@ rg -n "AgentSubcommand|List|Add|Remove|Rpc" src/command/agent
 cargo test --test agent_lifecycle_event_test
 cargo test --test agent_checkpoint_export_test
 cargo test --test agent_checkpoint_redaction_test
+cargo test --test agent_transcript_intelligence_test
 rg -n "LifecycleEvent|LifecycleEventKind|refs/libra/agent-traces|content_hash|full.jsonl|full.jsonl.zst" src/internal/ai src/command/agent docs/development/commands/agent.md
 
 # review / investigate workflow parity
