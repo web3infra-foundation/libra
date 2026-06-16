@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use super::{
     verify_pack_decode::pack_entry_sizes,
     verify_pack_types::{
-        DecodedPack, ParsedIndex, VerifyPackObjectOutput, VerifyPackOutput, VerifyPackStats,
+        DecodedPack, ParsedIndex, VerifyPackBatchOutput, VerifyPackObjectOutput, VerifyPackOutput,
+        VerifyPackStats,
     },
 };
 use crate::utils::{
@@ -102,6 +103,29 @@ pub(crate) fn render_verify_pack_output(
             };
             print_stats(stats);
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn render_verify_pack_batch_output(
+    results: &[VerifyPackOutput],
+    mode: VerifyPackRenderMode,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    if output.is_json() {
+        let result = VerifyPackBatchOutput {
+            verified: results.iter().all(|result| result.verified),
+            count: results.len(),
+            results: results.to_vec(),
+        };
+        return emit_json_data("verify-pack", &result, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+
+    for result in results {
+        render_verify_pack_output(result, mode, output)?;
     }
     Ok(())
 }

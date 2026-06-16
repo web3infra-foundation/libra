@@ -33,6 +33,17 @@ pub(crate) fn scenario_verify_pack_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()
         fs::read_to_string(&keep).with_context(|| format!("read keep {}", keep.display()))?;
     anyhow::ensure!(keep_message == "integration keep\n");
     let idx_arg = idx.to_string_lossy().to_string();
+    let second_pack_dst = ctx.run_dir.join("fixture-second.pack");
+    fs::copy(&pack_src, &second_pack_dst)
+        .with_context(|| format!("copy second pack {}", pack_src.display()))?;
+    let second_pack = second_pack_dst.to_string_lossy().to_string();
+    ctx.command(
+        &["index-pack", &second_pack, "--index-version", "1"],
+        repo.clone(),
+        true,
+    )?;
+    let second_idx = second_pack_dst.with_extension("idx");
+    let second_idx_arg = second_idx.to_string_lossy().to_string();
     assert_stdout_contains(
         &ctx.command(&["verify-pack", &idx_arg], repo.clone(), true)?,
         ": ok",
@@ -60,10 +71,41 @@ pub(crate) fn scenario_verify_pack_smoke(ctx: &mut ScenarioCtx<'_>) -> Result<()
     assert_stdout_contains(&stats, "non delta:")?;
     assert_not_contains(&stats, ": ok")?;
 
+    let multi = ctx.command(
+        &["verify-pack", &idx_arg, &second_idx_arg],
+        repo.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&multi, &idx_arg)?;
+    assert_stdout_contains(&multi, &second_idx_arg)?;
+
+    let multi_stats = ctx.command(
+        &["verify-pack", "-s", &idx_arg, &second_idx_arg],
+        repo.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&multi_stats, "non delta:")?;
+    assert_not_contains(&multi_stats, ": ok")?;
+
     assert_json_ok(
         &ctx.command(&["--json", "verify-pack", &idx_arg], repo.clone(), true)?,
         "verify-pack",
     )?;
+    let multi_json = ctx.command(
+        &["--json", "verify-pack", &idx_arg, &second_idx_arg],
+        repo.clone(),
+        true,
+    )?;
+    assert_json_ok(&multi_json, "verify-pack")?;
+    assert_stdout_contains(&multi_json, "\"results\"")?;
+    assert_stdout_contains(&multi_json, "\"count\": 2")?;
+
+    let bad_pack_multi = ctx.command(
+        &["verify-pack", "--pack", &pack, &idx_arg, &second_idx_arg],
+        repo.clone(),
+        false,
+    )?;
+    assert_lbr_or_text(&bad_pack_multi, "cannot use --pack with multiple index files")?;
 
     // Negative paths: a missing idx and a corrupted idx must both fail with a
     // stable error naming the affected path.

@@ -5,7 +5,7 @@ Validate a Git pack index (`.idx`) against its matching pack archive (`.pack`).
 ## Synopsis
 
 ```bash
-libra verify-pack [OPTIONS] <IDX_FILE>
+libra verify-pack [OPTIONS] <IDX_FILE>...
 ```
 
 ## Description
@@ -20,22 +20,24 @@ decodes the corresponding pack file, and verifies that both files agree on:
 - object count, object IDs, and offsets
 - CRC32 values for version 2 indexes
 
-By default the pack path is derived by replacing the index file extension with
-`.pack`. Use `--pack <PACK_FILE>` when the pack archive lives elsewhere.
+By default the pack path is derived by replacing each index file extension with
+`.pack`. Use `--pack <PACK_FILE>` with a single `<IDX_FILE>` when the pack
+archive lives elsewhere.
 The command does not require a Libra repository. When run inside a repository,
 it uses that repository's object format. Outside a repository, version 2 index
 files infer SHA-1 vs SHA-256 from the index layout; version 1 indexes are SHA-1
 only.
 
-Compatibility note: this command currently accepts one `<IDX_FILE>` per
-invocation; Git's multi-index form is not exposed.
+Compatibility note: multiple `<IDX_FILE>` values are verified in order. `--pack`
+cannot be combined with multiple indexes because Git's pack/index naming model
+does not provide an unambiguous explicit pack for each index.
 
 ## Options
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `<IDX_FILE>` | | Pack index file to verify | Required |
-| `--pack <PATH>` | | Pack archive to verify against | `<IDX_FILE>` with `.pack` extension |
+| `<IDX_FILE>...` | | Pack index file(s) to verify | Required |
+| `--pack <PATH>` | | Pack archive to verify against one index | `<IDX_FILE>` with `.pack` extension |
 | `--verbose` | `-v` | Print each indexed object using Git-compatible verbose fields | Off |
 | `--stat-only` | `-s` | Print only Git-style non-delta and delta-chain statistics | Off |
 | `--json` | | Emit a structured JSON envelope | Off |
@@ -45,6 +47,7 @@ invocation; Git's multi-index form is not exposed.
 
 ```bash
 libra verify-pack objects/pack/pack-abc123.idx
+libra verify-pack pack-a.idx pack-b.idx
 libra verify-pack --pack /tmp/pack-abc123.pack /tmp/pack-abc123.idx
 libra verify-pack -v pack-abc123.idx
 libra verify-pack -s pack-abc123.idx
@@ -53,10 +56,11 @@ libra verify-pack pack-abc123.idx --json
 
 ## Human Output
 
-Successful non-verbose verification prints one summary line:
+Successful non-verbose verification prints one summary line per index:
 
 ```text
 objects/pack/pack-abc123.idx: ok
+objects/pack/pack-def456.idx: ok
 ```
 
 Verbose mode prints indexed objects before the summary line using Git's base
@@ -102,11 +106,44 @@ When `--verbose` is combined with `--json`, `data.objects[]` contains `oid`,
 When `--stat-only` is combined with `--json`, `data.stats` contains
 `non_delta` and any `chain_lengths`.
 
+For multiple indexes, structured output wraps per-index results:
+
+```json
+{
+  "ok": true,
+  "command": "verify-pack",
+  "data": {
+    "verified": true,
+    "count": 2,
+    "results": [
+      {
+        "idx_file": "pack-a.idx",
+        "pack_file": "pack-a.pack",
+        "index_version": 1,
+        "object_count": 42,
+        "pack_hash": "0123456789abcdef0123456789abcdef01234567",
+        "index_hash": "89abcdef0123456789abcdef0123456789abcdef",
+        "verified": true
+      },
+      {
+        "idx_file": "pack-b.idx",
+        "pack_file": "pack-b.pack",
+        "index_version": 1,
+        "object_count": 42,
+        "pack_hash": "fedcba9876543210fedcba9876543210fedcba98",
+        "index_hash": "76543210fedcba9876543210fedcba9876543210",
+        "verified": true
+      }
+    ]
+  }
+}
+```
+
 ## Compatibility
 
 | Feature | Libra | Git | jj |
 |---------|-------|-----|----|
-| Verify pack index | `libra verify-pack <idx>` | `git verify-pack <idx>...` | N/A |
+| Verify pack index | `libra verify-pack <idx>...` | `git verify-pack <idx>...` | N/A |
 | Verbose objects | `-v` / `--verbose` | `-v` | N/A |
 | Stat-only mode | `-s` / `--stat-only` | `-s` / `--stat-only` | N/A |
 | Explicit pack path | `--pack <path>` | N/A | N/A |
@@ -123,3 +160,4 @@ When `--stat-only` is combined with `--json`, `data.stats` contains
 | Index is malformed | `LBR-REPO-002` | 128 |
 | Pack is malformed | `LBR-REPO-002` | 128 |
 | Index and pack disagree | `LBR-REPO-002` | 128 |
+| `--pack` used with multiple indexes | `LBR-CLI-002` | 129 |

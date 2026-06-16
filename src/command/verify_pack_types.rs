@@ -22,6 +22,13 @@ pub(crate) struct VerifyPackOutput {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub(crate) struct VerifyPackBatchOutput {
+    pub(crate) verified: bool,
+    pub(crate) count: usize,
+    pub(crate) results: Vec<VerifyPackOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct VerifyPackObjectOutput {
     pub(crate) oid: String,
     pub(crate) object_type: String,
