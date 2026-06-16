@@ -17,6 +17,7 @@
 7. 2026-06-05 entire-alignment: 与 [`docs/development/commands/_general.md`](commands/_general.md)（外部 Agent 会话捕获子系统）对齐，消除共享耦合处的隐患——Companion docs 增列 entire.md 并标注正交；新增跨文档「外部 Agent / session / checkpoint」术语消歧；在「事件日志、游标与投影」节固化 `SessionEvent` schema 主权归 AG-01 + 向后兼容/unknown-event-safe 承诺（entire.md 复用同一 `SessionStore` JSONL，仅以 `.libra/sessions/{code,agent}/` 子目录隔离）。本计划删除 Code TUI 后，entire.md 的会话展示面统一改走 Web Code UI。
 8. 2026-06-05 claude-execution-hardening: 清理会误导 Claude 直接复制的伪代码（`TaskInvocation.instruction`、`TaskFailure::from`、不存在的 budget 构造器），把绝对 `file://` 链接改为仓库相对路径，并把执行协议中的非 Libra-native VCS 命令替换为 Libra-native 工作流。
 9. 2026-06-16 entireio-cli-parity: 基于 `/Volumes/Data/entireio/cli`、`/Volumes/Data/entireio/cli-checkpoints` 与已被覆盖的 [d0a714887c9f2fbe0e0df51057c0952a7867f174](https://github.com/web3infra-foundation/libra/commit/d0a714887c9f2fbe0e0df51057c0952a7867f174) 分析版，补齐 entireio/cli 对齐差距、Gate 8、Phase 14-17 与 AG-16~AG-24，使外部 Agent 捕获、能力声明、checkpoint/export、review/investigate 与 skill 事件可作为落地任务执行；同时明确旧分析中的 `claudecode` provider 不得复活。
+10. 2026-06-17 persistence-grounding: 新增独立「持久化与数据库结构」章节，按当前 SQL 迁移和写入代码确认内部 `libra code` runtime、外部 `libra agent` 捕获、SQLite 表、Libra 对象与 `refs/libra/agent-traces` 的数据流边界。
 
 
 ## 执行结论
@@ -992,6 +993,73 @@ libra graph
 ```
 
 旧 flags 必须 fail fast，不能作为隐藏兼容路径继续运行。
+
+## 持久化与数据库结构（收到数据后的落点）
+
+本章是 AG-01、AG-19、AG-20、AG-24 开工前必须复核的持久化契约。结论按当前代码、SQL 迁移与本文已锁定的迁移目标确认：`libra code` 内部 AgentRuntime 的 replay 真源是 `SessionEvent` JSONL；`libra agent` 外部捕获的 catalog 真源是 raw SQL `agent_*` 表 + `refs/libra/agent-traces` 上的 Libra 对象。两条平面可以共享 `SessionStore` 原语与 Web 展示能力，但不能共享 session 实例、checkpoint 类型或 DB 表语义。
+
+### 两条持久化平面
+
+| 平面 | 输入来源 | 事实源 | SQLite 角色 | Libra 对象角色 |
+|---|---|---|---|---|
+| 内部 `libra code` AgentRuntime | WebSocket/Web API 的 submit/respond/cancel/observe、provider stream、tool/sub-agent/goal 事件 | 当前 `SessionStore::from_storage_path` 写 `.libra/sessions/<session_id>/events.jsonl`；本文的隔离目标是 `.libra/sessions/code/<session_id>/events.jsonl`。两者都是 append-only `SessionEvent`（单 session `u64` cursor，snapshot = fold(events)） | `ai_*` 表保存 thread、scheduler、索引、latest artifact、usage 等可查询 projection；这些表不得成为第二份 transcript truth | 结构化 Task/Run/Artifact 可经 `StorageExt::{put_json,put_tracked,put_artifact}` 写入底层 blob/history；事件行或 projection 只保存可重放引用 |
+| 外部 `libra agent` 捕获 | provider hook / RPC 解析出的 `LifecycleEvent`（Claude Code/Gemini/Cursor/Codex/OpenCode/Copilot/FactoryAI） | `agent_session` / `agent_checkpoint` catalog + `refs/libra/agent-traces` checkpoint commit；辅助 session log 在 `.libra/sessions/agent/<session_id>/events.jsonl` | `agent_session` 记录会话摘要；`agent_checkpoint` 记录 checkpoint OID 指针；`agent_usage_stats` 记录 token/cost/latency；三表 raw SQL，无 SeaORM entity | 完整 redacted transcript、metadata、可选 events JSONL 写成 Git-compatible blob/tree/commit；DB 只存 `tree_oid`、`metadata_blob_oid`、`traces_commit` |
+| 共享 repo 元数据 | refs、对象同步、cloud restore | `.libra/objects` + SQLite ref/index | `reference` 存 HEAD/branch/tag（本地 locked `agent-traces` 对应远端/逻辑 `refs/libra/agent-traces`）；`object_index` 存对象同步索引 | 所有大 payload 和 checkpoint 历史必须可由对象 OID 恢复；cloud sync 只上传 `object_index` 可见对象 |
+
+### SQLite 表与当前有效结构
+
+内部 runtime 使用的 SeaORM-backed projection 表来自 `sql/sqlite_20260309_init.sql` 与 `sql/sqlite_20260415_ai_runtime_contract.sql`：
+
+| 表族 | 表 | 当前职责 |
+|---|---|---|
+| Thread catalog | `ai_thread`、`ai_thread_participant`、`ai_thread_intent` | thread 根记录、参与者、thread↔intent 顺序关系；`ai_thread` 带 `current_intent_id`、`latest_intent_id`、`metadata_json`、`archived`、`version`、时间戳 |
+| Scheduler/read model | `ai_scheduler_state`、`ai_scheduler_plan_head`、`ai_scheduler_selected_plan`、`ai_live_context_window` | 当前 selected plan、active task/run、候选/已选 plan 顺序、live context window；`ai_scheduler_state.version` 用于并发更新保护 |
+| Rebuildable indexes | `ai_index_intent_plan`、`ai_index_intent_task`、`ai_index_plan_step_task`、`ai_index_task_run`、`ai_index_run_event`、`ai_index_run_patchset`、`ai_index_intent_context_frame` | 从 runtime objects/events 重建的查询索引；用于快速解析 intent→plan→task→run→event/patchset/context 关系 |
+| Latest artifacts | `ai_validation_report`、`ai_risk_score_breakdown`、`ai_decision_proposal`、`ai_final_decision` | Validation→Risk→DecisionProposal→FinalDecision 链；每表都有 `thread_id`、`policy_version`、`summary_json`、`stale`、`is_latest`、时间戳，并用 partial unique index 保证每 thread 只有一个 latest |
+| Provider/session metadata | `ai_thread_provider_metadata` | legacy session id、provider thread id、provider kind 与 metadata 的 bridge，供迁移/兼容读取 |
+| Usage | `agent_usage_stats` | provider/model/agent profile 粒度的 token、tool call、latency、cost、success/error 记录；当前有效结构包含初始列 `session_id`、`thread_id`、`agent_run_id`、`run_id`、`provider`、`model`、`request_kind`、`intent`、token/cost/latency 字段，以及 `2026050801` 新增的 nullable `agent_name` 和 `(agent_name, provider, model)` 索引 |
+| Adjacent audit/ops | `approved_permission`、`source_call_log`、`automation_log` | 不承载 transcript/checkpoint，但属于 Agent 工作流审计面：`approved_permission(project_id, permission, pattern, created_at)` 持久化 Always approval；`source_call_log` 记录 source/tool 调用并经 `2026060201` 增加 nullable `agent_run_id`；`automation_log` 记录 rule trigger/action/status/details |
+
+外部 `libra agent` 捕获表来自 `2026050303_agent_capture.sql`，并受后续迁移修正：
+
+| 表 | 当前有效字段 | 写入/读取规则 |
+|---|---|---|
+| `agent_session` | `session_id` PK；`agent_kind` CHECK = `claude_code`/`cursor`/`codex`/`gemini`/`opencode`/`copilot`/`factory_ai`；`provider_session_id`；可空 `thread_id` FK；`state` CHECK = `pending`/`active`/`condensed`/`stopped`/`quarantined`；`working_dir`、`worktree_id`、`parent_commit`、`parent_session_id`、`metadata_json`、`redaction_report`、`started_at`、`last_event_at`、`stopped_at`、`schema_version`；unique `(agent_kind, provider_session_id)` | hook ingest 先验证 envelope 和 expected event kind，再 UPSERT 此表；unknown agent kind 必须 quarantine/unsupported，不能强行写入 CHECK enum；`metadata_json` 只放轻量可查询 metadata，不放完整 transcript |
+| `agent_checkpoint` | `checkpoint_id` PK；`session_id` FK；`parent_checkpoint_id`；`scope` CHECK = `temporary`/`committed`/`subagent`；`parent_commit` 当前可空（`2026050501` 放宽，用 NULL 表示 unborn/no HEAD）；`tree_oid`、`metadata_blob_oid`、`traces_commit`；`tool_use_id`、`subagent_session_id`、`description`、`created_at` | `TurnEnd`/`SessionEnd` 等 checkpoint 事件先写对象 commit，再把返回的 `tree_oid`、`metadata_blob_oid`、`commit_hash` 插入本表；本表是 catalog/index，不承载 transcript body |
+| `agent_usage_stats` | 同上 Usage 表 | `UsageRecorder` 直接 raw SQL insert；成功、缺失 usage、失败都可记录；聚合查询按 provider/model/thread/session/agent profile 走索引 |
+| `reference` | `name`、`kind`、`commit`、`remote` 及唯一索引 | 保存 HEAD/branch/tag/ref 状态。不要手写 ref 文件；`agent-traces` 是 Libra-managed locked branch，远端合同保留 `refs/libra/agent-traces` |
+| `object_index` | `o_id`、`o_type`、`o_size`、`repo_id`、`created_at`、`is_synced`，unique `(repo_id, o_id)` | cloud sync/restore 的对象目录。`append_checkpoint_commit` 直接写对象时必须显式 enqueue object_index 更新；transcript blob 使用 `o_type='agent_transcript'`，metadata/events blob 用 `blob`，tree/commit 用对应类型 |
+
+### 内部 AgentRuntime 数据流
+
+1. Web/API、automation、trigger、sub-agent promotion 等输入先进入 `AgentRuntimeWorker` 的 serialized turn queue；adapter 只提交命令，不维护长期状态。
+2. worker 把 Completion/Codex/provider stream、tool result、approval、goal、compaction、artifact 等事件归一成 `SessionEvent`；核心 session 状态推进以 append-only JSONL 为 replay 真源。
+3. `SessionJsonlStore::append` 在 `<session_root>/events.jsonl` 追加一行 JSON；当前 `libra code` 的 `<session_root>` 仍来自 `.libra/sessions/<session_id>`，迁移到 code 子目录时必须保持文件名、锁语义和 replay 兼容。子 agent 的完整 run transcript 写入 `.libra/sessions/<thread_id>/agents/<run_id>.jsonl`，主 session 只接收 `AgentRun`/summary/tool-call/tool-result 等可投影事件。
+4. SQLite `ai_*` 表保存可查询 projection：thread/scheduler/index 表可由 events/objects 重建；Validation/Risk/Decision artifact stores 在事务中更新 latest row，再追加 `SessionEvent::AiArtifact` mirror，使 operator tail JSONL 时也能看到 artifact 生命周期。
+5. `agent_usage_stats` 记录模型调用后的 usage/cost/latency；缺失 usage 不写零值假账，而是走 `usage_estimated` 或 failure row，避免把 provider 未返回 usage 误判成免费调用。
+
+内部 runtime 的硬约束：任何影响恢复的事实必须先落到 `SessionEvent` 或对应 SQLite artifact/projection 写路径，再更新 in-memory snapshot；`AgentSnapshot`、`CodeUiSessionSnapshot`、graph read model 必须通过同一 projection/fold 生成。新增字段时优先做 additive schema/JSON payload，旧 reader 必须能跳过 unknown event。
+
+### 外部 `libra agent` 捕获数据流
+
+1. hook/RPC 输入先经 stdin size、UTF-8、JSON、`SessionHookEnvelope`、expected `LifecycleEventKind` 校验；provider parser 只产 `LifecycleEvent`，不得直接写 checkpoint。
+2. `HookTarget::AgentTraces` 使用 `SessionStore::from_storage_path_with_subdir(storage_path, "agent")`，因此外部捕获日志在 `.libra/sessions/agent/`，与内部 `libra code` 的历史 sessions root 或目标 `.libra/sessions/code/` 互不抢同一个 lock。
+3. runtime 对 prompt/tool input 做 redaction，确认 `agent_session` 表存在后按 `(agent_kind, provider_session_id)` UPSERT `agent_session`，更新 `state`、`last_event_at`、`redaction_report`、`metadata_json`、`stopped_at`。
+4. 对 `TurnEnd` / `SessionEnd` 这类 committed checkpoint，`write_committed_checkpoint` 只在 transcript path 位于 provider 允许的 home-relative 根下时读取完整 transcript；读取后必须转成 `RedactedBytes`，否则 fallback 到已 redacted prompt。
+5. `HistoryManager::append_checkpoint_commit` 写 Libra 底层对象：`metadata.json` blob、redacted transcript blob、可选 events JSONL blob；为这些 blob、后续 tree 和 commit enqueue `object_index`；构建 `transcript/<provider>`、可选 `events/<provider>.jsonl`、checkpoint inner tree，并把它 splice 到 `checkpoint/<checkpoint_id[:2]>/<checkpoint_id[2:]>`。
+6. 同一函数用 CAS loop 写新的 agent-traces commit 并更新 locked ref；成功后返回 `commit_hash`、`tree_oid`、`metadata_blob_oid`。
+7. hook runtime 再向 `agent_checkpoint` 插入 catalog 行：`tree_oid = returned tree`、`metadata_blob_oid = returned metadata blob`、`traces_commit = returned commit`。因此读取/list/show 默认查 SQLite metadata 和 OID；detail/lazy show 才按 OID 读取大 transcript 对象。
+
+这条流的失败语义必须保持：校验和 redaction 在任何持久化之前完成；checkpoint 对象写入、`object_index`、ref CAS、`agent_checkpoint` 行是一组不可随意拆散的协议。实现者不得手写“先 insert DB 再补对象”的新路径，否则会产生 DB 指向不存在对象、cloud restore 缺 blob、或 prune 误删未挂 ref 对象的窗口。
+
+### 保存成 Libra 底层对象时的规则
+
+- 小型结构化对象（Task、Run、Artifact metadata）优先使用 `StorageExt::put_json` 写 blob；需要防 GC / 有时间序列历史时使用 `put_tracked`，让 `HistoryManager::append` 把对象挂到 AI history。
+- 外部 Agent checkpoint 必须走 `HistoryManager::append_checkpoint_commit`，不要直接调用 `write_git_object` 后手动拼 `agent_checkpoint`。该函数已经封装 redacted transcript、tree layout、object_index、CAS ref update 与返回 OID。
+- SQLite 行只保存可查询摘要和 OID 指针。完整 transcript、prompt/context、大 JSONL、压缩内容、multi-session export payload 都放 Libra 对象或 artifact；新增 searchable 字段才考虑 raw SQL migration。
+- `agent_session` / `agent_checkpoint` / `agent_usage_stats` 目前无 SeaORM entity；AG-19/AG-20 扩展这些表时必须写 raw SQL migration，并同步 D1 mirror、测试和本文结构表。
+- 对 `object_index` 的写入是 cloud sync 可见性的边界。任何绕过 `ClientStorage::put` 或 `append_checkpoint_commit` 的底层对象写入，都必须证明对象被加入 `object_index`，否则本地可读但 R2/D1 restore 会缺对象。
+- 遇到 SQLite `locked` / `busy`、ref head conflict、对象索引后台队列拥塞时，优先使用现有事务、busy timeout、retry/CAS helper；不得吞错后继续返回成功，也不得让用户看到“checkpoint 已保存”但 DB/ref/object 任一环缺失。
 
 ## 当前基线
 
