@@ -10,7 +10,8 @@ use git_internal::{
 };
 
 use super::{
-    RevListArgs, RevListEntry, format_rev_list_entry, sort_rev_list_commits, write_rev_list_count,
+    ParentCountFilter, RevListArgs, RevListEntry, commit_matches_parent_count,
+    format_rev_list_entry, parent_count_filter, sort_rev_list_commits, write_rev_list_count,
     write_rev_list_output,
 };
 use crate::utils::error::StableErrorCode;
@@ -55,12 +56,24 @@ fn test_commit(id: ObjectHash, timestamp: usize) -> Commit {
     }
 }
 
+fn test_commit_with_parent_count(id: ObjectHash, timestamp: usize, parent_count: u8) -> Commit {
+    let mut commit = test_commit(id, timestamp);
+    commit.parent_commit_ids = (0..parent_count)
+        .map(|offset| test_hash(offset + 1))
+        .collect();
+    commit
+}
+
 #[test]
 fn test_rev_list_args_default() {
     let args = RevListArgs::try_parse_from(["rev-list"]).unwrap();
     assert!(args.spec.is_none());
     assert!(!args.parents);
     assert!(!args.timestamp);
+    assert!(!args.merges);
+    assert!(!args.no_merges);
+    assert_eq!(args.min_parents, None);
+    assert_eq!(args.max_parents, None);
 }
 
 #[test]
@@ -87,6 +100,69 @@ fn test_rev_list_args_parse_parent_and_timestamp_output() {
     assert!(args.parents);
     assert!(args.timestamp);
     assert_eq!(args.spec.as_deref(), Some("HEAD"));
+}
+
+#[test]
+fn test_rev_list_args_parse_parent_count_filters() {
+    let args = RevListArgs::try_parse_from([
+        "rev-list",
+        "--merges",
+        "--no-merges",
+        "--min-parents",
+        "1",
+        "--max-parents",
+        "2",
+        "HEAD",
+    ])
+    .unwrap();
+    assert!(args.merges);
+    assert!(args.no_merges);
+    assert_eq!(args.min_parents, Some(1));
+    assert_eq!(args.max_parents, Some(2));
+    assert_eq!(args.spec.as_deref(), Some("HEAD"));
+}
+
+#[test]
+fn test_parent_count_filter_combines_aliases_and_explicit_bounds() {
+    let merges = RevListArgs::try_parse_from(["rev-list", "--merges"]).unwrap();
+    assert_eq!(
+        parent_count_filter(&merges),
+        ParentCountFilter { min: 2, max: None }
+    );
+
+    let no_merges = RevListArgs::try_parse_from(["rev-list", "--no-merges"]).unwrap();
+    assert_eq!(
+        parent_count_filter(&no_merges),
+        ParentCountFilter {
+            min: 0,
+            max: Some(1)
+        }
+    );
+
+    let empty_intersection =
+        RevListArgs::try_parse_from(["rev-list", "--merges", "--no-merges"]).unwrap();
+    assert_eq!(
+        parent_count_filter(&empty_intersection),
+        ParentCountFilter {
+            min: 2,
+            max: Some(1)
+        }
+    );
+}
+
+#[test]
+fn test_commit_matches_parent_count_filter() {
+    let root = test_commit_with_parent_count(test_hash(0x10), 1, 0);
+    let single = test_commit_with_parent_count(test_hash(0x20), 2, 1);
+    let merge = test_commit_with_parent_count(test_hash(0x30), 3, 2);
+    let single_parent = ParentCountFilter {
+        min: 1,
+        max: Some(1),
+    };
+
+    assert!(!commit_matches_parent_count(&root, single_parent));
+    assert!(commit_matches_parent_count(&single, single_parent));
+    assert!(!commit_matches_parent_count(&merge, single_parent));
 }
 
 #[test]

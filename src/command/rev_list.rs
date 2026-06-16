@@ -3,6 +3,7 @@
 use std::io::Write;
 
 use clap::Parser;
+use git_internal::internal::object::commit::Commit;
 use serde::Serialize;
 
 use crate::{
@@ -27,6 +28,9 @@ EXAMPLES:
     libra rev-list                  Walk ancestry from HEAD (one hash per line)
     libra rev-list --count HEAD     Count reachable commits after filters
     libra rev-list -n 5 HEAD        Limit output to the first five commits
+    libra rev-list --merges HEAD    Print only merge commits
+    libra rev-list --max-parents 0 HEAD
+                                    Print only root commits
     libra rev-list --parents HEAD   Include parent commit IDs on each line
     libra rev-list --timestamp HEAD Prefix each line with the committer timestamp
     libra rev-list main             Walk ancestry from refs/heads/main
@@ -57,6 +61,22 @@ pub struct RevListArgs {
     #[clap(long)]
     pub timestamp: bool,
 
+    /// Print only commits with at least two parents
+    #[clap(long)]
+    pub merges: bool,
+
+    /// Omit commits with at least two parents
+    #[clap(long = "no-merges")]
+    pub no_merges: bool,
+
+    /// Print only commits with at least N parents
+    #[clap(long = "min-parents", value_name = "N")]
+    pub min_parents: Option<usize>,
+
+    /// Print only commits with at most N parents
+    #[clap(long = "max-parents", value_name = "N")]
+    pub max_parents: Option<usize>,
+
     /// Revision to list from. Defaults to HEAD when omitted.
     #[clap(value_name = "SPEC")]
     pub spec: Option<String>,
@@ -81,6 +101,10 @@ struct RevListOutput {
     count_only: bool,
     parents: bool,
     timestamp: bool,
+    merges: bool,
+    no_merges: bool,
+    min_parents: Option<usize>,
+    max_parents: Option<usize>,
     max_count: Option<usize>,
     skip: usize,
 }
@@ -157,9 +181,11 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         .map_err(|err| rev_list_target_error(spec, err))?;
     let mut commits = log::get_reachable_commits(commit.to_string(), None).await?;
     sort_rev_list_commits(&mut commits);
+    let parent_filter = parent_count_filter(args);
 
     let commits = commits
         .into_iter()
+        .filter(|commit| commit_matches_parent_count(commit, parent_filter))
         .skip(args.skip)
         .take(args.max_count.unwrap_or(usize::MAX))
         .collect::<Vec<_>>();
@@ -199,9 +225,39 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         count_only: args.count,
         parents: args.parents,
         timestamp: args.timestamp,
+        merges: args.merges,
+        no_merges: args.no_merges,
+        min_parents: args.min_parents,
+        max_parents: args.max_parents,
         max_count: args.max_count,
         skip: args.skip,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ParentCountFilter {
+    min: usize,
+    max: Option<usize>,
+}
+
+fn parent_count_filter(args: &RevListArgs) -> ParentCountFilter {
+    let min = args
+        .min_parents
+        .unwrap_or(0)
+        .max(usize::from(args.merges) * 2);
+    let max = match (args.max_parents, args.no_merges) {
+        (Some(explicit), true) => Some(explicit.min(1)),
+        (Some(explicit), false) => Some(explicit),
+        (None, true) => Some(1),
+        (None, false) => None,
+    };
+
+    ParentCountFilter { min, max }
+}
+
+fn commit_matches_parent_count(commit: &Commit, filter: ParentCountFilter) -> bool {
+    let parent_count = commit.parent_commit_ids.len();
+    parent_count >= filter.min && filter.max.is_none_or(|max| parent_count <= max)
 }
 
 fn format_rev_list_entry(entry: &RevListEntry, show_parents: bool, show_timestamp: bool) -> String {
@@ -216,7 +272,7 @@ fn format_rev_list_entry(entry: &RevListEntry, show_parents: bool, show_timestam
     fields.join(" ")
 }
 
-fn sort_rev_list_commits(commits: &mut [git_internal::internal::object::commit::Commit]) {
+fn sort_rev_list_commits(commits: &mut [Commit]) {
     // `sort_by_key` is stable, so equal timestamps keep the traversal order
     // returned by `get_reachable_commits` (HEAD before parent in linear history).
     commits.sort_by_key(|commit| std::cmp::Reverse(commit.committer.timestamp));
