@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra reset` 的目标是移动 HEAD、索引和工作区到指定状态，覆盖 hard/mixed/soft 与 pathspec reset，并提供结构化输出，同时把 merge/keep reset 作为未完成兼容差异。
+`libra reset` 的目标是移动 HEAD、索引和工作区到指定状态，覆盖 hard/mixed/soft 与 pathspec reset（含 `--pathspec-from-file` / `--pathspec-file-nul` / `--no-refresh`），并提供结构化输出，同时把 merge/keep reset 作为未完成兼容差异。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`--soft` / `--mixed` / `--hard` 和路径 reset 已支持；`--merge`、`--keep`、pathspec-from-file 和 no-refresh 尚未公开。
+- 兼容级别：`partial`。`--soft` / `--mixed` / `--hard` 和路径 reset 已支持；`--pathspec-from-file` / `--pathspec-file-nul`（批量/标准输入路径，按字面取值，不做 Git 默认的 C 风格引号解码）和 `--no-refresh`（accepted as a no-op，Libra 的 reset 从不刷新索引）也已支持；`--merge`、`--keep` 仍未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -36,7 +36,7 @@ flowchart TD
 ## 实现历史
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
-- 2026-06-06 `0e7b5a8f`（`feat(reset): support --pathspec-from-file, --pathspec-file-nul, --no-refresh`）：该提交描述的 `--pathspec-from-file` / `--pathspec-file-nul` / `--no-refresh` 标志当前 HEAD 的 `ResetArgs` 并未公开，仅保留 hard/mixed/soft 与位置 pathspec；本节作为背景，不再视为当前事实来源。
+- 2026-06-06 `0e7b5a8f`（`feat(reset): support --pathspec-from-file, --pathspec-file-nul, --no-refresh`）：引入 `--pathspec-from-file`（`-` 读 stdin）/ `--pathspec-file-nul` / `--no-refresh` 三个标志。注：该提交的代码内容曾被一次纠缠的 reconcile 从工作树中丢弃（提交信息保留、实现消失），已于 2026-06-18 按原 diff 重新落地到当前 `ResetArgs`，故这些标志现已公开并有回归测试覆盖。
 - 2026-05-24 `2827b6e3`（`fix(reset): skip traversing ignored directories in reset --hard and bump version to 0.17.946`）：实现修正：skip traversing ignored directories in reset --hard and bump version to 0.17.946；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 2026-05-21 `1fa9973e`（`test(reset): pin ResetError stable_code 19-variant mapping (v0.17.706)`）：测试契约：pin ResetError stable_code 19-variant mapping (v0.17.706)；相关行为已有回归守卫，后续变更需要继续满足。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
@@ -45,8 +45,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/reset.md`。
-- Synopsis：`libra reset [--soft | --mixed | --hard] [<target>] [-- <pathspec>...]`。
-- 公开参数/子命令包括：`[<target>]`、`--soft`、`--mixed`、`--hard`、`[<pathspec>...]`。
+- Synopsis：`libra reset [--soft | --mixed | --hard] [<target>] [-- <pathspec>...]`；`libra reset [<target>] --pathspec-from-file=<file> [--pathspec-file-nul]`。
+- 公开参数/子命令包括：`[<target>]`、`--soft`、`--mixed`、`--hard`、`[<pathspec>...]`、`--pathspec-from-file=<file>`、`--pathspec-file-nul`、`--no-refresh`。
 
 
 ## 还未实现的功能
@@ -55,8 +55,6 @@ flowchart TD
 |---|---|---|
 | 兼容差异项 | merge reset | 原始对照：git reset --merge <target>；相关参数/替代：不支持；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | keep reset | 原始对照：git reset --keep <target>；相关参数/替代：不支持；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | pathspec 文件输入 | 原始对照：`--pathspec-from-file` / `--pathspec-file-nul`；当前 `ResetArgs` 未公开。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 跳过刷新 | 原始对照：`--no-refresh`；当前 `ResetArgs` 未公开。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求
 
