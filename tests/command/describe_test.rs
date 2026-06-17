@@ -293,3 +293,137 @@ fn test_describe_dirty_accepts_custom_suffix() {
     assert_eq!(json["data"]["dirty"], true);
     assert_eq!(json["data"]["dirty_mark"], "-worktree");
 }
+
+/// `--match` keeps only tags whose name matches the glob; a non-matching tag that
+/// would otherwise win the lexicographic tie-break is filtered out.
+#[test]
+fn test_describe_match_single_glob() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "rel", "a-other"], repo.path()),
+        "tag a-other",
+    );
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "rel", "v1.0"], repo.path()),
+        "tag v1.0",
+    );
+
+    // Without --match the lexicographic tie-break picks "a-other"; --match forces v1.0.
+    let output = run_libra_command(&["describe", "--match", "v1.*", "--json"], repo.path());
+    assert_cli_success(&output, "describe --match v1.* should succeed");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["tag"], "v1.0");
+    assert_eq!(json["data"]["result"], "v1.0");
+}
+
+/// Multiple `--match` globs are OR-combined: matching any one is enough.
+#[test]
+fn test_describe_match_multiple_globs_or() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "rel", "a-other"], repo.path()),
+        "tag a-other",
+    );
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "rel", "v1.0"], repo.path()),
+        "tag v1.0",
+    );
+
+    let output = run_libra_command(
+        &["describe", "--match", "x*", "--match", "v1.*", "--json"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "describe with two --match globs should succeed");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["tag"], "v1.0");
+}
+
+/// `--exclude` removes a matched tag even when it would otherwise win.
+#[test]
+fn test_describe_exclude_filters_matched_tag() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "rel", "a-rc"], repo.path()),
+        "tag a-rc",
+    );
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "rel", "v1.0"], repo.path()),
+        "tag v1.0",
+    );
+
+    // Without exclude the tie-break would pick "a-rc"; --exclude removes it.
+    let output = run_libra_command(&["describe", "--exclude", "*rc*", "--json"], repo.path());
+    assert_cli_success(&output, "describe --exclude *rc* should succeed");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["tag"], "v1.0");
+}
+
+/// `--match` and `--exclude` combine: exclude takes precedence over match.
+#[test]
+fn test_describe_match_and_exclude_combined() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "rel", "v1.0-rc"], repo.path()),
+        "tag v1.0-rc",
+    );
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "rel", "v1.0"], repo.path()),
+        "tag v1.0",
+    );
+
+    let output = run_libra_command(
+        &["describe", "--match", "v1.*", "--exclude", "*rc*", "--json"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "describe --match + --exclude should succeed");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["tag"], "v1.0");
+}
+
+/// A glob longer than 256 chars is rejected at the parsing stage (129).
+#[test]
+fn test_describe_glob_over_256_chars_rejected() {
+    let repo = create_committed_repo_via_cli();
+    let pattern = "a".repeat(257);
+    let output = run_libra_command(&["describe", "--match", &pattern], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "overlong glob should be rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// A malformed glob pattern is rejected with a usage error rather than panicking.
+#[test]
+fn test_describe_invalid_glob_rejected() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["describe", "--match", "v{1"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "invalid glob should be rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+/// `--first-parent` is accepted and produces a normal description on a linear
+/// history (where it has no effect beyond the default walk).
+#[test]
+fn test_describe_first_parent_linear_history() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "rel", "v1.0"], repo.path()),
+        "tag v1.0",
+    );
+
+    let output = run_libra_command(&["describe", "--first-parent", "--json"], repo.path());
+    assert_cli_success(&output, "describe --first-parent should succeed");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["tag"], "v1.0");
+    assert_eq!(json["data"]["result"], "v1.0");
+}

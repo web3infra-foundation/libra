@@ -32,9 +32,17 @@ EXAMPLES:
     libra describe --exact-match    Only succeed when HEAD exactly matches a tag
     libra describe --long           Force tag-0-gHASH form for exact tag matches
     libra describe --dirty          Append -dirty when tracked content differs from HEAD
+    libra describe --first-parent   Follow only the first parent of merge commits when walking history
+    libra describe --match 'v1.*'   Only consider tags whose name matches the glob
+    libra describe --exclude '*rc*' Skip tags whose name matches the glob
     libra describe HEAD~1           Describe a specific commit-ish (hash, ref, or HEAD~N)
     libra describe --abbrev 12      Use 12 hex digits instead of the default 7 in the hash portion
     libra describe --json           Structured JSON output for agents";
+
+/// Maximum byte length accepted for a `--match`/`--exclude` glob pattern, guarding
+/// against pathological inputs. Longer patterns are rejected up front with
+/// [`DescribeError::InvalidArgument`] (`CliInvalidArguments`, exit 129).
+const MAX_GLOB_LEN: usize = 256;
 
 #[derive(Parser, Debug)]
 #[command(after_help = DESCRIBE_EXAMPLES)]
@@ -65,6 +73,18 @@ pub struct DescribeArgs {
     /// Append MARK when tracked content differs from HEAD.
     #[clap(long, value_name = "MARK", num_args = 0..=1, require_equals = true, default_missing_value = "-dirty")]
     pub dirty: Option<String>,
+
+    /// Follow only the first parent of merge commits when walking history.
+    #[clap(long = "first-parent")]
+    pub first_parent: bool,
+
+    /// Only consider tags whose name matches the glob (repeatable; OR semantics).
+    #[clap(long = "match", value_name = "PATTERN")]
+    pub match_patterns: Vec<String>,
+
+    /// Exclude tags whose name matches the glob (repeatable; takes precedence over --match).
+    #[clap(long, value_name = "PATTERN")]
+    pub exclude: Vec<String>,
 }
 
 // Entry in tag lookup map
@@ -109,6 +129,12 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
     let exact_match = args.exact_match;
     let always = args.always;
     let dirty_mark = args.dirty;
+    let first_parent = args.first_parent;
+
+    // Compile the --match / --exclude name filters once. Overly long or malformed
+    // patterns are rejected up front as usage errors (CliInvalidArguments, 129).
+    let matchers = compile_globs(&args.match_patterns)?;
+    let excluders = compile_globs(&args.exclude)?;
 
     // 2. Load all tags and build a mapping table: commit hash -> tag info (name, is_annotated)
     let all_tags = tag::list()
@@ -122,6 +148,10 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
         // Only include light-weight tags if --tags is specified
         if is_annotated || include_lightweight {
             let tag_name = t.name;
+            // Apply --match / --exclude name filters (exclude wins over match).
+            if !tag_passes_filters(&tag_name, &matchers, &excluders) {
+                continue;
+            }
             let target_commit_hash = match t.object {
                 TagObject::Commit(c) => c.id,
                 TagObject::Tag(tg) => tg.object_hash,
@@ -176,10 +206,18 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
                 detail: error.to_string(),
             })?;
 
-        for parent_id_str in commit.parent_commit_ids {
-            if !visited.contains(&parent_id_str) {
-                visited.insert(parent_id_str);
-                queue.push_back((parent_id_str, dist + 1));
+        // With --first-parent only the first parent is followed, so merge commits
+        // do not pull in their merged-in side history.
+        let parents = commit.parent_commit_ids;
+        let parents: &[ObjectHash] = if first_parent {
+            &parents[..parents.len().min(1)]
+        } else {
+            &parents
+        };
+        for parent_id_str in parents {
+            if !visited.contains(parent_id_str) {
+                visited.insert(*parent_id_str);
+                queue.push_back((*parent_id_str, dist + 1));
             }
         }
     }
@@ -241,6 +279,44 @@ async fn has_tracked_dirty_changes() -> Result<bool, DescribeError> {
         || !unstaged.renamed.is_empty())
 }
 
+/// Compile `--match`/`--exclude` glob patterns, rejecting overly long or malformed
+/// patterns with [`DescribeError::InvalidArgument`] (`CliInvalidArguments`, exit 129).
+/// Returned globs borrow `patterns`, so the slice must outlive the filter loop.
+fn compile_globs(patterns: &[String]) -> Result<Vec<wax::Glob<'_>>, DescribeError> {
+    let mut globs = Vec::with_capacity(patterns.len());
+    for pattern in patterns {
+        if pattern.len() > MAX_GLOB_LEN {
+            return Err(DescribeError::InvalidArgument(format!(
+                "glob pattern too long ({} chars); the limit is {MAX_GLOB_LEN}",
+                pattern.len()
+            )));
+        }
+        let glob = wax::Glob::new(pattern.as_str()).map_err(|error| {
+            DescribeError::InvalidArgument(format!("invalid glob pattern '{pattern}': {error}"))
+        })?;
+        globs.push(glob);
+    }
+    Ok(globs)
+}
+
+/// Whether a tag name survives the `--match`/`--exclude` filters. An exclude match
+/// always rejects; with no `--match` patterns every non-excluded name passes,
+/// otherwise the name must match at least one `--match` glob.
+fn tag_passes_filters(name: &str, matchers: &[wax::Glob<'_>], excluders: &[wax::Glob<'_>]) -> bool {
+    if excluders
+        .iter()
+        .any(|glob| wax::Program::is_match(glob, name))
+    {
+        return false;
+    }
+    if matchers.is_empty() {
+        return true;
+    }
+    matchers
+        .iter()
+        .any(|glob| wax::Program::is_match(glob, name))
+}
+
 fn prefer_tag(existing: &TagInfo, candidate_name: &str, candidate_is_annotated: bool) -> bool {
     match (existing.is_annotated, candidate_is_annotated) {
         (false, true) => true,
@@ -276,6 +352,9 @@ fn describe_cli_error(error: DescribeError) -> CliError {
         DescribeError::LongWithAbbrevZero => CliError::command_usage(error.to_string())
             .with_stable_code(StableErrorCode::CliInvalidArguments)
             .with_hint("omit '--long' or choose a positive '--abbrev <N>'."),
+        DescribeError::InvalidArgument(message) => CliError::command_usage(message)
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint("check the --match/--exclude glob syntax."),
         DescribeError::LoadCommit { commit_id, detail } => {
             CliError::fatal(format!("failed to load commit '{commit_id}': {detail}"))
                 .with_stable_code(StableErrorCode::RepoCorrupt)

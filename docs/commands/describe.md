@@ -51,6 +51,9 @@ this command.
 | `--exact-match` | Only succeed when the target commit exactly matches a tag. | Off |
 | `--long` | Force `tag-N-gHASH` output when a tag describes the target, including `tag-0-gHASH` for exact matches. | Off |
 | `--dirty[=<mark>]` | Append a dirty mark when tracked content differs from `HEAD`. | Off, default mark `-dirty` when enabled |
+| `--first-parent` | Follow only the first parent of merge commits when walking history. | Off |
+| `--match <pattern>` | Only consider tags whose name matches the glob (repeatable; OR semantics, wax globs ≤256 chars). | None |
+| `--exclude <pattern>` | Exclude tags whose name matches the glob (repeatable; takes precedence over `--match`). | None |
 
 ### Examples
 
@@ -81,6 +84,15 @@ libra describe --dirty
 
 # Use a custom dirty mark
 libra describe --dirty=-worktree
+
+# Follow only the first parent of merge commits
+libra describe --first-parent
+
+# Only consider tags matching a glob
+libra describe --match 'v1.*'
+
+# Skip release-candidate tags
+libra describe --exclude '*rc*'
 
 # JSON output for automation
 libra describe --json
@@ -208,18 +220,15 @@ When `--always` is used and no tag matches, `tag` and `distance` are `null` and
 
 ## Design Rationale
 
-### Why no `--match`, `--exclude`, or `--first-parent`?
+### `--match`, `--exclude`, `--first-parent`, and what is still missing
 
-Git's `describe` has accumulated many options over the years: `--match` and
-`--exclude` filter tag names by glob, `--candidates` controls how many tags to consider, and
-`--first-parent` restricts the traversal. Libra deliberately ships the common
-read path first: identifying a build version, requiring an exact tag when a
-release script needs one, and marking tracked dirty state. The BFS-based
-algorithm is straightforward and predictable. Additional flags can be added
-incrementally if real users or agents need them, but starting small avoids the
-combinatorial complexity that makes Git's `describe` behavior hard to reason
-about (e.g., the interaction between `--match`, `--exclude`, and
-`--candidates`).
+Libra exposes `--match` and `--exclude` (wax globs, capped at 256 chars, with
+exclude taking precedence over match) and `--first-parent` (follow only the
+first parent of merge commits during the BFS walk). `--candidates`,
+`--contains`, and `--all` remain unimplemented: they depend on Git's
+multi-candidate / reverse-walk containment algorithm, which Libra's predictable
+BFS does not provide. They can be added incrementally if real users or agents
+need them.
 
 ### Why include both string and structured fields?
 
@@ -250,10 +259,10 @@ search, but this has not been a problem in practice.
 | Fallback to hash | `--always` | `--always` | N/A |
 | Exact match only | `--exact-match` | `--exact-match` | N/A |
 | Force long format | `--long` | `--long` | N/A |
-| Match tag pattern | Not implemented | `--match <glob>` | N/A |
-| Exclude tag pattern | Not implemented | `--exclude <glob>` | N/A |
+| Match tag pattern | `--match <glob>` (wax, ≤256 chars, repeatable) | `--match <glob>` | N/A |
+| Exclude tag pattern | `--exclude <glob>` (exclude wins over match) | `--exclude <glob>` | N/A |
 | Candidate count | All tags (BFS) | `--candidates=<N>` (default 10) | N/A |
-| First-parent only | Not implemented | `--first-parent` | N/A |
+| First-parent only | `--first-parent` | `--first-parent` | N/A |
 | Dirty suffix | `--dirty[=<mark>]` | `--dirty[=<mark>]` | N/A |
 | JSON output | `--json` with typed fields | No | No |
 | Algorithm | BFS (shortest path) | Heuristic multi-candidate | N/A |

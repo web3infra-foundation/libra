@@ -44,4 +44,42 @@ fn describe_error_display_pins_each_variant() {
         DescribeError::LongWithAbbrevZero.to_string(),
         "options '--long' and '--abbrev=0' cannot be used together",
     );
+    assert_eq!(
+        DescribeError::InvalidArgument("glob too long".to_string()).to_string(),
+        "glob too long",
+    );
+}
+
+/// `--match`/`--exclude` filter semantics: exclude wins over match, and an empty
+/// match set lets every non-excluded name through.
+#[test]
+fn tag_passes_filters_match_exclude_semantics() {
+    let no_globs: [wax::Glob<'_>; 0] = [];
+    // No filters: every name passes.
+    assert!(tag_passes_filters("v1.0", &no_globs, &no_globs));
+    // --match only: name must match at least one glob.
+    let match_pats = ["v1.*".to_string()];
+    let m = compile_globs(&match_pats).expect("valid glob");
+    assert!(tag_passes_filters("v1.2", &m, &no_globs));
+    assert!(!tag_passes_filters("v2.0", &m, &no_globs));
+    // --exclude wins over --match.
+    let exclude_pats = ["*rc*".to_string()];
+    let e = compile_globs(&exclude_pats).expect("valid glob");
+    assert!(!tag_passes_filters("v1.0rc1", &m, &e));
+    assert!(tag_passes_filters("v1.0", &m, &e));
+}
+
+/// Overlong and malformed globs are rejected as usage errors rather than panicking.
+#[test]
+fn compile_globs_rejects_overlong_and_invalid() {
+    let long = "a".repeat(MAX_GLOB_LEN + 1);
+    assert!(matches!(
+        compile_globs(&[long]),
+        Err(DescribeError::InvalidArgument(_))
+    ));
+    // An unterminated alternation `{` is not a valid glob.
+    assert!(matches!(
+        compile_globs(&["v{1".to_string()]),
+        Err(DescribeError::InvalidArgument(_))
+    ));
 }

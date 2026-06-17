@@ -35,6 +35,8 @@ pub(super) enum DescribeError {
     NoExactMatch { commit_id: String },
     #[error("options '--long' and '--abbrev=0' cannot be used together")]
     LongWithAbbrevZero,
+    #[error("{0}")]
+    InvalidArgument(String),
 }
 
 impl From<CommitBaseError> for DescribeError {
