@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。对象、refs、索引、reflog 和 connectivity 检查已支持；JSON/machine 输出、strict mode 和 pack 校验 surface 尚未完整公开。
+- 兼容级别：`partial`。对象、refs、索引、reflog 和 connectivity 检查已支持；`--strict` 已支持（commit email/timezone、commit tree/parent 存在性与类型、tree 条目存在性/类型/排序检查，刻意窄于 Git：未实现 `.gitmodules`/pathname-charset 检查与 `fsck.<msg-id>` 严重级别配置）；JSON/machine 输出和 pack 校验 surface（`--full`/`--no-full`）尚未完整公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -38,7 +38,7 @@ flowchart TD
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-05-18 `7f0e37b6`（`feat(fsck): implement fsck command (#371)`）：基础实现节点：implement fsck command (#371)；当前实现的主要轮廓可追溯到该提交。
 - 2026-06-07 `7d3d9d31`（`feat(fsck): verify pack integrity by reusing verify-pack in-process (v0.17.1407)`）：历史节点曾引入复用 verify-pack 的 pack 完整性检查，但该 pack 校验路径在后续提交中已从 `src/command/fsck.rs` 移除，当前实现不再校验 pack。
-- 2026-06-05 `1a48d4e7`（`feat(fsck): add --strict commit/tree format and graph checks`）：历史节点曾新增 `--strict` 严格格式与图检查，但 `--strict` 参数在后续提交中已从当前实现移除，`FsckArgs` 不再公开该参数。
+- 2026-06-05 `1a48d4e7`（`feat(fsck): add --strict commit/tree format and graph checks`）：新增 `--strict` 严格格式与图检查。该改动曾被一次 reconcile 丢弃，2026-06-18 重新应用到当前 `src/command/fsck.rs`：`--strict` 检查 commit author/committer email 含 `@`、timezone 为 `±HHMM` 且在 ±1400 内、commit 的 tree/parent 存在且类型正确、tree 条目存在且类型与 mode 匹配并按 Git 规范排序。`--full`/`--no-full` pack 校验入口仍未恢复。
 - 2026-06-07 `7e9ffa6d`（`fix(fsck): close compatibility plan gaps`）：实现修正：close compatibility plan gaps；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -47,7 +47,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/fsck.md`。
 - Synopsis：`libra fsck [OPTIONS] [OBJECT]`。
-- 公开参数/子命令包括：`[OBJECT]`、`-v, --verbose`、`--no-reflogs`、`--unreachable`、`--dangling [<BOOL>]`、`--no-dangling`、`--name-objects`、`--lost-found`、`--root`、`--tags`、`--connectivity-only`。
+- 公开参数/子命令包括：`[OBJECT]`、`-v, --verbose`、`--no-reflogs`、`--unreachable`、`--dangling [<BOOL>]`、`--no-dangling`、`--name-objects`、`--lost-found`、`--root`、`--tags`、`--connectivity-only`、`--strict`。
 
 
 ## 还未实现的功能
@@ -55,7 +55,7 @@ flowchart TD
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | 输出契约 | `execute_safe` 当前未使用 `OutputConfig` 渲染 JSON/machine 输出。 | 后续实现时需要同步源码、测试和兼容矩阵。 |
-| Git 参数缺口 | `--strict` 和 pack 校验入口当前未公开。 | 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| Git 参数缺口 | pack 校验入口（`--full`/`--no-full`）当前未公开。 | 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求
 

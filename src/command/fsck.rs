@@ -14,7 +14,11 @@ use git_internal::{
     internal::{
         index::Index,
         object::{
-            ObjectTrait, blob::Blob, commit::Commit, tag::Tag as GitTag, tree::Tree,
+            ObjectTrait,
+            blob::Blob,
+            commit::Commit,
+            tag::Tag as GitTag,
+            tree::{Tree, TreeItemMode},
             types::ObjectType,
         },
     },
@@ -224,6 +228,7 @@ const FSCK_AFTER_HELP: &str = "EXAMPLES:
     libra fsck --root                   Print root commit ids in the report
     libra fsck --tags                   Print tag ids in the report
     libra fsck --connectivity-only      Skip blob content checks; verify graph only
+    libra fsck --strict                 Apply stricter commit/tree format checks
     libra fsck <object-id>              Verify a single object by id";
 
 /// Verify repository integrity by checking objects, refs, and index
@@ -277,6 +282,13 @@ pub struct FsckArgs {
     /// Only check connectivity, not object contents
     #[arg(long)]
     pub connectivity_only: bool,
+
+    /// Enable stricter format checks: commit author/committer emails must
+    /// contain `@` and carry a well-formed timezone within ±1400; a commit's
+    /// tree/parents and a tree's entries must exist with matching object types;
+    /// and tree entries must be in Git's canonical sort order.
+    #[arg(long)]
+    pub strict: bool,
 }
 
 impl FsckArgs {
@@ -360,7 +372,7 @@ async fn run_fsck(args: &FsckArgs) -> CliResult<FsckResult> {
     let storage = ClientStorage::init(path::objects());
 
     if let Some(ref object_id) = args.object {
-        check_single_object(object_id, &storage).await
+        check_single_object(object_id, &storage, args.strict).await
     } else {
         check_all_objects(args, &storage).await
     }
@@ -428,11 +440,15 @@ fn list_all_objects_in_storage(storage: &ClientStorage) -> io::Result<Vec<Object
     Ok(hashes)
 }
 
-async fn check_single_object(object_id: &str, storage: &ClientStorage) -> CliResult<FsckResult> {
+async fn check_single_object(
+    object_id: &str,
+    storage: &ClientStorage,
+    strict: bool,
+) -> CliResult<FsckResult> {
     let hash = parse_object_hash(object_id)
         .ok_or_else(|| CliError::command_usage(format!("invalid object ID: {}", object_id)))?;
 
-    let (check_result, has_errors) = verify_object(&hash, storage, false, true).await?;
+    let (check_result, has_errors) = verify_object(&hash, storage, false, true, strict).await?;
 
     let overall_status = match check_result.status {
         CheckStatus::Ok => {
@@ -500,6 +516,7 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         &mut result,
         args.verbose,
         args.connectivity_only,
+        args.strict,
     )
     .await?;
 
@@ -637,6 +654,7 @@ async fn check_objects(
     result: &mut FsckResult,
     verbose: bool,
     connectivity_only: bool,
+    strict: bool,
 ) -> CliResult<()> {
     for hash_str in sorted_hashes {
         let hash = match parse_object_hash(hash_str) {
@@ -661,7 +679,7 @@ async fn check_objects(
         }
 
         let (check_result, reported_errors) =
-            verify_object(&hash, storage, connectivity_only, true).await?;
+            verify_object(&hash, storage, connectivity_only, true, strict).await?;
         result.objects_checked += 1;
         result.has_errors |= reported_errors;
 
@@ -889,7 +907,7 @@ async fn check_connectivity(
             }
         }
         let (check_result, reported_errors) =
-            verify_object(hash, storage, connectivity_only, false).await?;
+            verify_object(hash, storage, connectivity_only, false, false).await?;
         result.has_errors |= reported_errors;
         if check_result.status != CheckStatus::Ok && result.overall_status == CheckStatus::Ok {
             result.overall_status = check_result.status.clone();
@@ -1301,15 +1319,58 @@ async fn check_and_fix_refs(
     Ok(())
 }
 
+/// Whether a signature timezone is a well-formed `±HHMM` offset within ±1400
+/// (the widest real-world UTC offset). Used by `--strict`.
+fn is_valid_timezone(tz: &str) -> bool {
+    let bytes = tz.as_bytes();
+    if bytes.len() != 5 || (bytes[0] != b'+' && bytes[0] != b'-') {
+        return false;
+    }
+    let digits = &tz[1..];
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let hours: i32 = digits[0..2].parse().unwrap_or(99);
+    let minutes: i32 = digits[2..4].parse().unwrap_or(99);
+    minutes < 60 && hours * 100 + minutes <= 1400
+}
+
+/// The object type a tree entry of the given mode must resolve to (used by
+/// `--strict` to flag mode/type mismatches).
+fn expected_type_for_mode(mode: TreeItemMode) -> ObjectType {
+    match mode {
+        TreeItemMode::Tree => ObjectType::Tree,
+        TreeItemMode::Commit => ObjectType::Commit, // gitlink / submodule
+        TreeItemMode::Blob | TreeItemMode::BlobExecutable | TreeItemMode::Link => ObjectType::Blob,
+    }
+}
+
+/// Whether tree entries are in Git's canonical sort order: by name, treating a
+/// tree entry's name as if it had a trailing `/`.
+fn tree_entries_sorted(items: &[git_internal::internal::object::tree::TreeItem]) -> bool {
+    fn sort_key(item: &git_internal::internal::object::tree::TreeItem) -> Vec<u8> {
+        let mut key = item.name.as_bytes().to_vec();
+        if item.mode == TreeItemMode::Tree {
+            key.push(b'/');
+        }
+        key
+    }
+    items
+        .windows(2)
+        .all(|pair| sort_key(&pair[0]) <= sort_key(&pair[1]))
+}
+
 /// Verify a single object's integrity
 /// If connectivity_only is true, only checks that objects exist (not their content)
 /// If report_errors is true, reports errors immediately; otherwise just returns status
+/// If strict is true, applies the additional `--strict` format/graph checks
 /// Returns (ObjectCheckResult, has_error)
 async fn verify_object(
     hash: &ObjectHash,
     storage: &ClientStorage,
     connectivity_only: bool,
     report_errors: bool,
+    strict: bool,
 ) -> CliResult<(ObjectCheckResult, bool)> {
     let mut has_error = false;
 
@@ -1474,6 +1535,26 @@ async fn verify_object(
                             has_error |= report(FsckMsgId::NullSha1, "tree", &hash.to_string());
                         }
                     }
+
+                    if strict && report_errors {
+                        for item in &tree.tree_items {
+                            // Each entry's target must exist with a matching type.
+                            if !storage.exist(&item.id) {
+                                has_error |=
+                                    report(FsckMsgId::Missing, "tree", &item.id.to_string());
+                            } else if let Ok(actual) = storage.get_object_type(&item.id)
+                                && actual != expected_type_for_mode(item.mode)
+                            {
+                                has_error |=
+                                    report(FsckMsgId::BadObjectSha1, "tree", &hash.to_string());
+                            }
+                        }
+                        // Entries must be in Git's canonical sort order.
+                        if !tree_entries_sorted(&tree.tree_items) {
+                            has_error |=
+                                report(FsckMsgId::TreeNotSorted, "tree", &hash.to_string());
+                        }
+                    }
                 }
                 Err(_) => {
                     if report_errors {
@@ -1509,6 +1590,47 @@ async fn verify_object(
                     }
                     if commit.committer.email.is_empty() && report_errors {
                         has_error |= report(FsckMsgId::MissingEmail, "commit", &hash.to_string());
+                    }
+
+                    if strict && report_errors {
+                        // Emails must contain '@'.
+                        if !commit.author.email.is_empty() && !commit.author.email.contains('@') {
+                            has_error |= report(FsckMsgId::BadEmail, "commit", &hash.to_string());
+                        }
+                        if !commit.committer.email.is_empty()
+                            && !commit.committer.email.contains('@')
+                        {
+                            has_error |= report(FsckMsgId::BadEmail, "commit", &hash.to_string());
+                        }
+                        // Timezones must be well-formed and within range.
+                        if !is_valid_timezone(&commit.author.timezone)
+                            || !is_valid_timezone(&commit.committer.timezone)
+                        {
+                            has_error |=
+                                report(FsckMsgId::BadTimezone, "commit", &hash.to_string());
+                        }
+                        // The tree must exist and be a tree.
+                        if !storage.exist(&commit.tree_id) {
+                            has_error |=
+                                report(FsckMsgId::MissingTree, "commit", &hash.to_string());
+                        } else if let Ok(tree_type) = storage.get_object_type(&commit.tree_id)
+                            && tree_type != ObjectType::Tree
+                        {
+                            has_error |=
+                                report(FsckMsgId::BadObjectSha1, "commit", &hash.to_string());
+                        }
+                        // Parents must exist and be commits.
+                        for parent in &commit.parent_commit_ids {
+                            if !storage.exist(parent) {
+                                has_error |=
+                                    report(FsckMsgId::Missing, "commit", &parent.to_string());
+                            } else if let Ok(parent_type) = storage.get_object_type(parent)
+                                && parent_type != ObjectType::Commit
+                            {
+                                has_error |=
+                                    report(FsckMsgId::BadObjectSha1, "commit", &hash.to_string());
+                            }
+                        }
                     }
                 }
                 Err(_) => {
@@ -1675,7 +1797,7 @@ async fn check_refs(storage: &ClientStorage, connectivity_only: bool) -> CliResu
             if let Some(hash) = parse_object_hash(commit_hash_str) {
                 if storage.exist(&hash) {
                     // Verify the object is actually valid
-                    match verify_object(&hash, storage, connectivity_only, false).await {
+                    match verify_object(&hash, storage, connectivity_only, false, false).await {
                         Ok((check, _reported)) if check.status == CheckStatus::Ok => {
                             result.ok += 1;
                         }
@@ -1815,6 +1937,18 @@ fn validate_index_entry(
 #[cfg(test)]
 mod tests {
     use super::{FsckMsgId, tag_parse_error_msg_id};
+
+    #[test]
+    fn is_valid_timezone_accepts_in_range_and_rejects_invalid() {
+        assert!(super::is_valid_timezone("+0000"));
+        assert!(super::is_valid_timezone("-0800"));
+        assert!(super::is_valid_timezone("+1400"));
+        assert!(!super::is_valid_timezone("+9900"), "hours out of range");
+        assert!(!super::is_valid_timezone("+0060"), "minutes must be < 60");
+        assert!(!super::is_valid_timezone("0000"), "missing sign");
+        assert!(!super::is_valid_timezone("+00:0"), "non-digit");
+        assert!(!super::is_valid_timezone("+000"), "wrong length");
+    }
 
     #[test]
     fn tag_parse_error_msg_id_keeps_object_type_errors_specific() {

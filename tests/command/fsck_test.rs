@@ -4,6 +4,17 @@
 
 use std::fs;
 
+use git_internal::{
+    hash::{HashKind, ObjectHash, set_hash_kind_for_test},
+    internal::object::{
+        ObjectTrait,
+        commit::Commit,
+        signature::{Signature, SignatureType},
+        tree::{Tree, TreeItem, TreeItemMode},
+        types::ObjectType,
+    },
+};
+use libra::utils::client_storage::ClientStorage;
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -744,4 +755,136 @@ fn test_fsck_broken_tag_reference() {
         "should handle broken tag reference, got: {}",
         combined
     );
+}
+
+/// Build a signature with a fixed name/timestamp but caller-chosen email and
+/// timezone (so `--strict` checks can be exercised).
+fn strict_signature(email: &str, tz: &str, ty: SignatureType) -> Signature {
+    Signature {
+        signature_type: ty,
+        name: "Test".to_string(),
+        email: email.to_string(),
+        timestamp: 1_700_000_000,
+        timezone: tz.to_string(),
+    }
+}
+
+/// Store an in-process commit with the given author/committer email and
+/// timezone into the repo's object store, returning its object id (hex).
+fn store_strict_commit(repo: &std::path::Path, email: &str, tz: &str) -> String {
+    let _kind = set_hash_kind_for_test(HashKind::Sha1);
+    let storage = ClientStorage::init(repo.join(".libra/objects"));
+    let commit = Commit::new(
+        strict_signature(email, tz, SignatureType::Author),
+        strict_signature(email, tz, SignatureType::Committer),
+        ObjectHash::default(),
+        vec![],
+        "strict fixture",
+    );
+    storage
+        .put(
+            &commit.id,
+            &commit.to_data().expect("serialize commit"),
+            ObjectType::Commit,
+        )
+        .expect("store commit");
+    commit.id.to_string()
+}
+
+/// `--strict` flags a commit whose author/committer email lacks `@`; the default
+/// (non-strict) check does not.
+#[test]
+#[serial]
+fn test_strict_commit_bad_email() {
+    let repo = tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+    let id = store_strict_commit(repo.path(), "noatsign", "+0000");
+
+    let plain = run_libra_command(&["fsck", &id], repo.path());
+    assert!(
+        !String::from_utf8_lossy(&plain.stderr).contains("bad email"),
+        "non-strict fsck must not flag email format"
+    );
+
+    let strict = run_libra_command(&["fsck", "--strict", &id], repo.path());
+    let stderr = String::from_utf8_lossy(&strict.stderr);
+    assert!(
+        stderr.contains("bad email"),
+        "strict must flag a missing @: {stderr}"
+    );
+    assert_eq!(strict.status.code(), Some(1));
+}
+
+/// `--strict` flags a commit whose timezone is out of range; the default check
+/// does not.
+#[test]
+#[serial]
+fn test_strict_commit_bad_timezone() {
+    let repo = tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+    let id = store_strict_commit(repo.path(), "test@example.com", "+9900");
+
+    let plain = run_libra_command(&["fsck", &id], repo.path());
+    assert!(
+        !String::from_utf8_lossy(&plain.stderr).contains("bad timezone"),
+        "non-strict fsck must not flag the timezone"
+    );
+
+    let strict = run_libra_command(&["fsck", "--strict", &id], repo.path());
+    let stderr = String::from_utf8_lossy(&strict.stderr);
+    assert!(
+        stderr.contains("bad timezone"),
+        "strict must flag a bad timezone: {stderr}"
+    );
+    assert_eq!(strict.status.code(), Some(1));
+}
+
+/// `--strict` flags a tree whose entries are not in Git's canonical sort order;
+/// the default check does not.
+#[test]
+#[serial]
+fn test_strict_tree_unsorted() {
+    let repo = tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+
+    let id = {
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let storage = ClientStorage::init(repo.path().join(".libra/objects"));
+        // Deliberately out of order: "b" precedes "a".
+        let items = vec![
+            TreeItem {
+                mode: TreeItemMode::Blob,
+                id: ObjectHash::from_bytes(&[0x22; 20]).unwrap(),
+                name: "b".to_string(),
+            },
+            TreeItem {
+                mode: TreeItemMode::Blob,
+                id: ObjectHash::from_bytes(&[0x11; 20]).unwrap(),
+                name: "a".to_string(),
+            },
+        ];
+        let tree = Tree::from_tree_items(items).expect("build tree");
+        storage
+            .put(
+                &tree.id,
+                &tree.to_data().expect("serialize tree"),
+                ObjectType::Tree,
+            )
+            .expect("store tree");
+        tree.id.to_string()
+    };
+
+    let plain = run_libra_command(&["fsck", &id], repo.path());
+    assert!(
+        !String::from_utf8_lossy(&plain.stderr).contains("tree not sorted"),
+        "non-strict fsck must not flag tree ordering"
+    );
+
+    let strict = run_libra_command(&["fsck", "--strict", &id], repo.path());
+    let stderr = String::from_utf8_lossy(&strict.stderr);
+    assert!(
+        stderr.contains("tree not sorted"),
+        "strict must flag an unsorted tree: {stderr}"
+    );
+    assert_eq!(strict.status.code(), Some(1));
 }

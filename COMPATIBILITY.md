@@ -80,7 +80,7 @@ batch document.
 | hooks | intentionally-different | Hidden compatibility entry for hook configs installed by `libra agent enable` |
 | archive | partial | Creates tar/tar.gz/tar.bz2/zip archives from a committed tree; `--format`, `--output`, `--prefix` supported |
 | cat-file | partial | `-t`, `-s`, `-p`, `-e`, and AI object modes supported; batch modes and JSON/machine output for `-e` are not exposed |
-| fsck | partial | object/ref/index/reflog/connectivity checks supported; JSON/machine output, strict mode, and pack verification surface remain incomplete |
+| fsck | partial | object/ref/index/reflog/connectivity checks supported; `--strict` adds commit email/timezone, commit tree/parent existence+type, and tree entry existence/type/sort-order checks (intentionally narrower than Git: `.gitmodules`/pathname-charset checks and `fsck.<msg-id>` severity config are not implemented); JSON/machine output and pack verification surface (`--full`/`--no-full`) remain incomplete |
 | verify-pack | partial | validates one or more `.idx` files against matching `.pack` siblings; `-s` / `--stat-only` supported; `--pack` is available for a single explicit pack path |
 | index-pack | partial | hidden plumbing command for pack file indexing; `--stdin`, `--keep[=<msg>]`, and Git-style `--progress` / `--no-progress` compatibility flags are accepted; `--fix-thin` is not exposed |
 | checkout | partial | visible branch compatibility surface plus `checkout <commit>` detached HEAD, `-b`/`-B` branch creation, and explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` for new code; patch modes still partial |
