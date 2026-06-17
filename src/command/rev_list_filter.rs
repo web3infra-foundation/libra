@@ -51,19 +51,35 @@ pub(super) fn rev_list_author_filter(args: &RevListArgs) -> Option<String> {
     args.author.as_ref().map(|pattern| pattern.to_lowercase())
 }
 
+pub(super) fn rev_list_committer_filter(args: &RevListArgs) -> Option<String> {
+    args.committer
+        .as_ref()
+        .map(|pattern| pattern.to_lowercase())
+}
+
 pub(super) fn commit_matches_author(commit: &Commit, author_filter: Option<&str>) -> bool {
-    let Some(author_filter) = author_filter else {
+    signature_matches_filter(&commit.author.name, &commit.author.email, author_filter)
+}
+
+pub(super) fn commit_matches_committer(commit: &Commit, committer_filter: Option<&str>) -> bool {
+    signature_matches_filter(
+        &commit.committer.name,
+        &commit.committer.email,
+        committer_filter,
+    )
+}
+
+fn signature_matches_filter(name: &str, email: &str, filter: Option<&str>) -> bool {
+    let Some(filter) = filter else {
         return true;
     };
-    if author_filter.is_empty() {
+    if filter.is_empty() {
         return true;
     }
 
-    let author_name = commit.author.name.to_lowercase();
-    let author_email = commit.author.email.to_lowercase();
-    author_name.contains(author_filter)
-        || author_email.contains(author_filter)
-        || format!("{author_name} <{author_email}>").contains(author_filter)
+    let name = name.to_lowercase();
+    let email = email.to_lowercase();
+    name.contains(filter) || email.contains(filter) || format!("{name} <{email}>").contains(filter)
 }
 
 pub(super) fn commit_matches_parent_count(commit: &Commit, filter: ParentCountFilter) -> bool {

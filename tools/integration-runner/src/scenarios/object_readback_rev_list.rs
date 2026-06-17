@@ -9,6 +9,20 @@ pub(crate) fn assert_rev_list_readback(
         .context("write rev-list second fixture")?;
     ctx.command(&["add", "docs/rev-list.md"], repo.to_path_buf(), true)?;
     ctx.command(
+        &["config", "user.name", "Rev List Committer"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    ctx.command(
+        &[
+            "config",
+            "user.email",
+            "rev-list-committer@example.com",
+        ],
+        repo.to_path_buf(),
+        true,
+    )?;
+    ctx.command(
         &[
             "commit",
             "-m",
@@ -42,42 +56,6 @@ pub(crate) fn assert_rev_list_readback(
     )?;
     if stdout_trim(&rev_skip) != head_id {
         bail!("rev-list --skip 1 --max-count 1 HEAD did not return the parent commit");
-    }
-
-    let rev_since = ctx.command(
-        &["rev-list", "--count", "--since", "0", "HEAD"],
-        repo.to_path_buf(),
-        true,
-    )?;
-    if stdout_trim(&rev_since) != "2" {
-        bail!("rev-list --count --since 0 HEAD returned unexpected count");
-    }
-
-    let rev_after = ctx.command(
-        &["rev-list", "--count", "--after", "0", "HEAD"],
-        repo.to_path_buf(),
-        true,
-    )?;
-    if stdout_trim(&rev_after) != "2" {
-        bail!("rev-list --after alias returned unexpected count");
-    }
-
-    let rev_until = ctx.command(
-        &["rev-list", "--count", "--until", "0", "HEAD"],
-        repo.to_path_buf(),
-        true,
-    )?;
-    if stdout_trim(&rev_until) != "0" {
-        bail!("rev-list --count --until 0 HEAD returned unexpected count");
-    }
-
-    let rev_before = ctx.command(
-        &["rev-list", "--count", "--before", "0", "HEAD"],
-        repo.to_path_buf(),
-        true,
-    )?;
-    if stdout_trim(&rev_before) != "0" {
-        bail!("rev-list --before alias returned unexpected count");
     }
 
     let rev_multi = ctx.command(
@@ -117,158 +95,11 @@ pub(crate) fn assert_rev_list_readback(
         bail!("rev-list HEAD~1...HEAD did not return the symmetric difference");
     }
 
-    let rev_min_parents = ctx.command(
-        &["rev-list", "--min-parents", "1", "HEAD"],
-        repo.to_path_buf(),
-        true,
+    super::object_readback_rev_list_filters::assert_rev_list_filters(
+        ctx, repo, head_id, &latest_id,
     )?;
-    if stdout_trim(&rev_min_parents) != latest_id {
-        bail!("rev-list --min-parents 1 HEAD did not return the non-root commit");
-    }
-
-    let rev_max_parents = ctx.command(
-        &["rev-list", "--max-parents", "0", "HEAD"],
-        repo.to_path_buf(),
-        true,
-    )?;
-    if stdout_trim(&rev_max_parents) != head_id {
-        bail!("rev-list --max-parents 0 HEAD did not return the root commit");
-    }
-
-    let rev_no_min = ctx.command(
-        &[
-            "rev-list",
-            "--count",
-            "--min-parents",
-            "1",
-            "--no-min-parents",
-            "HEAD",
-        ],
-        repo.to_path_buf(),
-        true,
-    )?;
-    if stdout_trim(&rev_no_min) != "2" {
-        bail!("rev-list --no-min-parents did not clear the lower parent bound");
-    }
-
-    let rev_no_max = ctx.command(
-        &[
-            "rev-list",
-            "--count",
-            "--max-parents",
-            "0",
-            "--no-max-parents",
-            "HEAD",
-        ],
-        repo.to_path_buf(),
-        true,
-    )?;
-    if stdout_trim(&rev_no_max) != "2" {
-        bail!("rev-list --no-max-parents did not clear the upper parent bound");
-    }
-
-    let rev_first_parent = ctx.command(
-        &["rev-list", "--count", "--first-parent", "HEAD"],
-        repo.to_path_buf(),
-        true,
-    )?;
-    if stdout_trim(&rev_first_parent) != "2" {
-        bail!("rev-list --first-parent HEAD returned unexpected count in linear history");
-    }
-
-    let rev_author = ctx.command(
-        &["rev-list", "--author", "rev-list@example.com", "HEAD"],
-        repo.to_path_buf(),
-        true,
-    )?;
-    if stdout_trim(&rev_author) != latest_id {
-        bail!("rev-list --author did not return only the matching author commit");
-    }
-
-    let rev_author_missing = ctx.command(
-        &["rev-list", "--count", "--author", "missing-author", "HEAD"],
-        repo.to_path_buf(),
-        true,
-    )?;
-    if stdout_trim(&rev_author_missing) != "0" {
-        bail!("rev-list --count --author missing-author returned unexpected count");
-    }
-
-    let rev_no_merges = ctx.command(
-        &["rev-list", "--no-merges", "HEAD"],
-        repo.to_path_buf(),
-        true,
-    )?;
-    let rev_no_merges_output = String::from_utf8_lossy(&rev_no_merges.stdout);
-    if rev_no_merges_output.lines().collect::<Vec<_>>() != vec![latest_id.as_str(), head_id] {
-        bail!("rev-list --no-merges HEAD did not keep linear commits in traversal order");
-    }
-
-    let rev_merges = ctx.command(&["rev-list", "--merges", "HEAD"], repo.to_path_buf(), true)?;
-    if !stdout_trim(&rev_merges).is_empty() {
-        bail!("rev-list --merges HEAD returned commits for a linear history");
-    }
-
-    let rev_merge_count = ctx.command(
-        &["rev-list", "--count", "--merges", "HEAD"],
-        repo.to_path_buf(),
-        true,
-    )?;
-    if stdout_trim(&rev_merge_count) != "0" {
-        bail!("rev-list --count --merges HEAD returned unexpected count");
-    }
-
-    let rev_parents = ctx.command(&["rev-list", "--parents", "HEAD"], repo.to_path_buf(), true)?;
-    let rev_parents_output = String::from_utf8_lossy(&rev_parents.stdout);
-    let Some(first_parent_line) = rev_parents_output.lines().next() else {
-        bail!("rev-list --parents HEAD returned empty output");
-    };
-    if !first_parent_line.starts_with(&latest_id) || !first_parent_line.ends_with(head_id) {
-        bail!("rev-list --parents HEAD did not include the current HEAD followed by its parent");
-    }
-
-    let rev_timestamp = ctx.command(
-        &["rev-list", "--timestamp", "HEAD"],
-        repo.to_path_buf(),
-        true,
-    )?;
-    let rev_timestamp_output = String::from_utf8_lossy(&rev_timestamp.stdout);
-    let Some(first_timestamp_line) = rev_timestamp_output.lines().next() else {
-        bail!("rev-list --timestamp HEAD returned empty output");
-    };
-    let timestamp_fields = first_timestamp_line.split_whitespace().collect::<Vec<_>>();
-    if timestamp_fields.len() != 2
-        || timestamp_fields[0].parse::<u64>().is_err()
-        || timestamp_fields[1] != latest_id
-    {
-        bail!("rev-list --timestamp HEAD did not use Git-compatible `timestamp commit` output");
-    }
-
-    let rev_timestamp_parents = ctx.command(
-        &["rev-list", "--timestamp", "--parents", "HEAD"],
-        repo.to_path_buf(),
-        true,
-    )?;
-    let rev_timestamp_parents_output = String::from_utf8_lossy(&rev_timestamp_parents.stdout);
-    let Some(first_timestamp_parent_line) = rev_timestamp_parents_output.lines().next() else {
-        bail!("rev-list --timestamp --parents HEAD returned empty output");
-    };
-    let timestamp_parent_fields = first_timestamp_parent_line
-        .split_whitespace()
-        .collect::<Vec<_>>();
-    if timestamp_parent_fields.len() != 3
-        || timestamp_parent_fields[0].parse::<u64>().is_err()
-        || timestamp_parent_fields[1] != latest_id
-        || timestamp_parent_fields[2] != head_id
-    {
-        bail!(
-            "rev-list --timestamp --parents HEAD did not use Git-compatible `timestamp commit parent` output"
-        );
-    }
-
-    assert_json_ok(
-        &ctx.command(&["--json", "rev-list", "HEAD"], repo.to_path_buf(), true)?,
-        "rev-list",
+    super::object_readback_rev_list_output::assert_rev_list_output(
+        ctx, repo, head_id, &latest_id,
     )?;
 
     Ok(())

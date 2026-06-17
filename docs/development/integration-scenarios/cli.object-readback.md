@@ -65,6 +65,8 @@ printf 'loose blob\n' | libra --json hash-object --stdin --path loose.txt
 
 printf 'rev-list second\n' > docs/rev-list.md
 libra add docs/rev-list.md
+libra config user.name "Rev List Committer"
+libra config user.email rev-list-committer@example.com
 libra commit -m "test: rev-list second" --author "Rev List Author <rev-list@example.com>" --no-verify
 libra rev-list HEAD
 libra rev-list HEAD HEAD~1
@@ -83,6 +85,8 @@ libra rev-list --count --max-parents 0 --no-max-parents HEAD
 libra rev-list --count --first-parent HEAD
 libra rev-list --author rev-list@example.com HEAD
 libra rev-list --count --author missing-author HEAD
+libra rev-list --committer rev-list-committer@example.com HEAD
+libra rev-list --count --committer missing-committer HEAD
 libra --json rev-list HEAD
 LATEST_HEAD="$(libra rev-parse HEAD)"
 libra fsck
@@ -102,8 +106,8 @@ libra --json for-each-ref --points-at "$LATEST_HEAD"
 关键断言：
 
 - `rev-parse`、`show`、`show-ref`、`for-each-ref`、`cat-file`、`hash-object`（含 `--path` / `--no-filters` 兼容入口）、`rev-list`、`fsck` 当前正向路径可用。
-- `rev-list --count` 输出过滤后的提交数量；`rev-list -n` 限制输出行数；`rev-list --skip --max-count` 可跳过当前 HEAD 后定位父提交；`--since` / `--after` 与 `--until` / `--before` 时间过滤可观察；multi revision、`A..B`、`^A`、`A...B`、`--first-parent`、`--author` 和 parent bound reset aliases 均有正向断言。
+- `rev-list --count` 输出过滤后的提交数量；`rev-list -n` 限制输出行数；`rev-list --skip --max-count` 可跳过当前 HEAD 后定位父提交；`--since` / `--after` 与 `--until` / `--before` 时间过滤可观察；multi revision、`A..B`、`^A`、`A...B`、`--first-parent`、`--author`、`--committer` 和 parent bound reset aliases 均有正向断言。
 - `show-ref --branches` 与 `--heads` 输出一致；`--no-branches` / `--no-tags` reset aliases 恢复默认 branch+tag 范围；`show-ref --abbrev=12` / `--hash=12` 输出 HEAD 的 12 位前缀；`--no-abbrev` 恢复完整哈希，`--no-hash` 按 Git 行为作为 hash-only alias；`show-ref --dereference` 对 annotated tag 输出 `refs/tags/<name>^{}` peeled 行，`--no-dereference` 取消 peeled 行；`--no-head`、`--no-verify`、`--no-exists` 可恢复对应默认行为；`show-ref --verify` 只接受完整 refname / `HEAD`；`show-ref --exists` 成功静默，缺失 ref 失败。
 - `for-each-ref --points-at` 对 branch、lightweight tag 和 annotated tag peeled target 的过滤可观察；`--json` 返回标准 envelope。
 - 缺失 revision/object 和非法 hash-object 类型必须失败。
-- `ls-files`、高级 `for-each-ref --contains/--merged`、高级 `rev-parse` 和 `rev-list` committer/path/cherry-pick traversal filters 不属于当前场景正向覆盖。
+- `ls-files`、高级 `for-each-ref --contains/--merged`、高级 `rev-parse` 和 `rev-list` message grep/path/cherry-pick traversal filters 不属于当前场景正向覆盖。

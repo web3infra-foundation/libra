@@ -786,7 +786,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn with_repo_current_dir_restores_current_dir_when_task_is_cancelled() {
         let caller_dir = tempdir().unwrap();
@@ -829,7 +829,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn with_repo_current_dir_serializes_concurrent_operations() {
         let caller_dir = tempdir().unwrap();
