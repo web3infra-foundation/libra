@@ -49,6 +49,8 @@ mod rev_list_author_filter_test;
 mod rev_list_committer_filter_test;
 #[path = "rev_list_grep_filter_test.rs"]
 mod rev_list_grep_filter_test;
+#[path = "rev_list_path_filter_test.rs"]
+mod rev_list_path_filter_test;
 
 #[test]
 fn test_rev_list_defaults_to_head() {

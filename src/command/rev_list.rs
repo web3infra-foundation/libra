@@ -19,9 +19,9 @@ mod rev_list_spec;
 use rev_list_filter::ParentCountFilter;
 use rev_list_filter::{
     commit_matches_author, commit_matches_committer, commit_matches_message,
-    commit_matches_parent_count, commit_matches_time_window, parent_count_filter,
-    rev_list_author_filter, rev_list_committer_filter, rev_list_message_filter,
-    rev_list_time_window, sort_rev_list_commits,
+    commit_matches_parent_count, commit_matches_time_window, filter_commits_by_pathspecs,
+    parent_count_filter, rev_list_author_filter, rev_list_committer_filter,
+    rev_list_message_filter, rev_list_time_window, sort_rev_list_commits,
 };
 use rev_list_output::{REV_LIST_EXAMPLES, RevListEntry, RevListOutput, emit_human_rev_list};
 #[cfg(test)]
@@ -102,6 +102,10 @@ pub struct RevListArgs {
     /// Revisions to include or exclude. Defaults to HEAD when omitted.
     #[clap(value_name = "SPEC")]
     pub specs: Vec<String>,
+
+    /// Paths to limit the commit list after an explicit `--` separator
+    #[clap(last = true, value_name = "PATH")]
+    pub pathspecs: Vec<String>,
 }
 
 pub async fn execute(args: RevListArgs) -> Result<(), String> {
@@ -125,6 +129,7 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
     let selection = resolve_revision_selection(&args.specs, args.first_parent).await?;
     let mut commits = selection.commits;
     sort_rev_list_commits(&mut commits);
+    let commits = filter_commits_by_pathspecs(commits, &args.pathspecs).await?;
     let time_window = rev_list_time_window(args)?;
     let author_filter = rev_list_author_filter(args);
     let committer_filter = rev_list_committer_filter(args);
@@ -182,6 +187,7 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         author: args.author.clone(),
         committer: args.committer.clone(),
         grep: args.grep.clone(),
+        pathspecs: args.pathspecs.clone(),
         since: args.since.clone(),
         until: args.until.clone(),
         merges: args.merges,

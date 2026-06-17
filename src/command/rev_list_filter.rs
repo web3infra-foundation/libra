@@ -3,8 +3,12 @@ use regex::Regex;
 
 use super::RevListArgs;
 use crate::{
+    command::log,
     internal::log::date_parser::parse_date,
-    utils::error::{CliError, CliResult, StableErrorCode},
+    utils::{
+        error::{CliError, CliResult, StableErrorCode},
+        util,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +126,30 @@ pub(super) fn commit_matches_message(
         .patterns
         .iter()
         .any(|pattern| pattern.is_match(&commit.message))
+}
+
+pub(super) async fn filter_commits_by_pathspecs(
+    commits: Vec<Commit>,
+    pathspecs: &[String],
+) -> CliResult<Vec<Commit>> {
+    if pathspecs.is_empty() {
+        return Ok(commits);
+    }
+
+    let filters = pathspecs
+        .iter()
+        .map(util::to_workdir_path)
+        .collect::<Vec<_>>();
+    let mut filtered = Vec::new();
+
+    for commit in commits {
+        let changes = log::get_changed_files_for_commit(&commit, &filters).await?;
+        if !changes.is_empty() {
+            filtered.push(commit);
+        }
+    }
+
+    Ok(filtered)
 }
 
 pub(super) fn commit_matches_parent_count(commit: &Commit, filter: ParentCountFilter) -> bool {

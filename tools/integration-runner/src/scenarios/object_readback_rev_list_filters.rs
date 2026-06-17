@@ -183,6 +183,38 @@ pub(crate) fn assert_rev_list_filters(
         bail!("rev-list --grep should be case-sensitive by default");
     }
 
+    let rev_path = ctx.command(
+        &["rev-list", "HEAD", "--", "docs/rev-list.md"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    if stdout_trim(&rev_path) != latest_id {
+        bail!("rev-list HEAD -- docs/rev-list.md did not return only the matching path commit");
+    }
+
+    let rev_root_path = ctx.command(
+        &["rev-list", "HEAD", "--", "README.md"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    if stdout_trim(&rev_root_path) != head_id {
+        bail!("rev-list HEAD -- README.md did not return only the root path commit");
+    }
+
+    let rev_path_json = ctx.command(
+        &["--json", "rev-list", "HEAD", "--", "docs/rev-list.md"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    let rev_path_json: serde_json::Value = serde_json::from_slice(&rev_path_json.stdout)
+        .context("parse rev-list pathspec JSON output")?;
+    if rev_path_json["data"]["pathspecs"] != serde_json::json!(["docs/rev-list.md"]) {
+        bail!("rev-list pathspec JSON did not echo pathspecs: {rev_path_json}");
+    }
+    if rev_path_json["data"]["commits"] != serde_json::json!([latest_id]) {
+        bail!("rev-list pathspec JSON did not limit commits: {rev_path_json}");
+    }
+
     let rev_no_merges = ctx.command(
         &["rev-list", "--no-merges", "HEAD"],
         repo.to_path_buf(),

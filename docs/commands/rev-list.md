@@ -5,12 +5,12 @@ List commit objects reachable from a revision.
 ## Synopsis
 
 ```bash
-libra rev-list [OPTIONS] [SPEC]...
+libra rev-list [OPTIONS] [SPEC]... [-- <PATH>...]
 ```
 
 ## Description
 
-`libra rev-list` resolves one or more revision inputs to commits, walks the reachable history, applies optional exclusion/range, first-parent, author, committer, message grep, time-window, parent-count, and count/limit filters, and prints commit IDs newest first. When `<SPEC>` is omitted, the command defaults to `HEAD`. Output formatting can include parent commit IDs (`--parents`) and committer timestamps (`--timestamp`).
+`libra rev-list` resolves one or more revision inputs to commits, walks the reachable history, applies optional exclusion/range, first-parent, author, committer, message grep, path, time-window, parent-count, and count/limit filters, and prints commit IDs newest first. When `<SPEC>` is omitted, the command defaults to `HEAD`. Output formatting can include parent commit IDs (`--parents`) and committer timestamps (`--timestamp`).
 
 ## Options
 
@@ -34,6 +34,7 @@ libra rev-list [OPTIONS] [SPEC]...
 | `--parents` | Print parent commit IDs after each listed commit. |
 | `--timestamp` | Prefix each listed commit with its committer timestamp, matching Git's `timestamp commit [parents...]` field order. |
 | `<SPEC>...` | Revisions to enumerate from. Defaults to `HEAD`; accepts multiple positive revisions, `^<rev>` exclusions, `A..B`, and `A...B`. |
+| `-- <PATH>...` | Limit commits to changes that touched one of the listed paths. |
 
 ## Common Commands
 
@@ -59,6 +60,7 @@ libra rev-list --first-parent HEAD
 libra rev-list --author alice HEAD
 libra rev-list --committer alice HEAD
 libra rev-list --grep 'fix|feat' HEAD
+libra rev-list HEAD -- src/
 libra rev-list --parents HEAD
 libra rev-list --timestamp --parents HEAD
 libra rev-list HEAD~1
@@ -68,7 +70,7 @@ libra --json rev-list HEAD
 
 ## Human Output
 
-Output is one commit ID per line by default. Multiple positive revisions are unioned and de-duplicated. `^<rev>` excludes commits reachable from that revision. `A..B` is equivalent to `^A B`; `A...B` prints the symmetric difference between both sides. `--first-parent` limits traversal through merge commits to the first parent chain. Author, committer, message grep, time-window, and parent-count filters are applied before `--skip`, `--max-count`, and `--count`. `--author` and `--committer` match the respective `name <email>` string case-insensitively. `--grep` matches the full commit message with a case-sensitive regular expression; repeated `--grep` patterns use OR semantics. `--since`/`--after` and `--until`/`--before` accept `YYYY-MM-DD`, RFC3339/full timestamps with timezone, Unix timestamps, and relative forms such as `2 weeks ago`. With `--parents`, each line becomes `commit parent...`. With `--timestamp`, each line becomes `timestamp commit`; combining both produces `timestamp commit parent...`. With `--count`, output remains a single decimal count and ignores output-format flags.
+Output is one commit ID per line by default. Multiple positive revisions are unioned and de-duplicated. `^<rev>` excludes commits reachable from that revision. `A..B` is equivalent to `^A B`; `A...B` prints the symmetric difference between both sides. `--first-parent` limits traversal through merge commits to the first parent chain. Author, committer, message grep, path, time-window, and parent-count filters are applied before `--skip`, `--max-count`, and `--count`. `--author` and `--committer` match the respective `name <email>` string case-insensitively. `--grep` matches the full commit message with a case-sensitive regular expression; repeated `--grep` patterns use OR semantics. Path filters must follow an explicit `--` separator and match files or directories relative to the worktree root. `--since`/`--after` and `--until`/`--before` accept `YYYY-MM-DD`, RFC3339/full timestamps with timezone, Unix timestamps, and relative forms such as `2 weeks ago`. With `--parents`, each line becomes `commit parent...`. With `--timestamp`, each line becomes `timestamp commit`; combining both produces `timestamp commit parent...`. With `--count`, output remains a single decimal count and ignores output-format flags.
 
 ```text
 abc1234def5678901234567890abcdef12345678
@@ -101,6 +103,7 @@ def5678901234567890abcdef12345678abc1234
     "author": null,
     "committer": null,
     "grep": [],
+    "pathspecs": [],
     "since": null,
     "until": null,
     "merges": false,
@@ -144,6 +147,7 @@ When `--parents` or `--timestamp` is present, `commits[]` remains the plain comm
     "author": null,
     "committer": null,
     "grep": [],
+    "pathspecs": [],
     "since": null,
     "until": null,
     "merges": false,
@@ -173,6 +177,7 @@ When `--parents` or `--timestamp` is present, `commits[]` remains the plain comm
 | Author filter | `--author <PATTERN>` | Same | revset predicates |
 | Committer filter | `--committer <PATTERN>` | Same | revset predicates |
 | Message grep | `--grep <PATTERN>` | Same | revset predicates |
+| Path limitation | `-- <PATH>...` | Same | revset/file predicates |
 | Parent output | `--parents` | Same | revset/template output |
 | Timestamp output | `--timestamp` | Same | template output |
 | JSON output | `--json` | No | No |
