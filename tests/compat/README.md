@@ -28,6 +28,7 @@ top-level `[[test]]` entries in `Cargo.toml`.
 | File | Owning batch | Coverage |
 |------|--------------|----------|
 | `stash_subcommand_surface.rs` | C4 | `stash --help` lists `show` / `branch` / `clear`; cross-subcommand JSON schema agreement |
+| `pull_strategy_flags_surface.rs` | pull recovery (2026-06-18) | `pull --help` exposes `--ff-only` / `--rebase` / `--ff` / `--no-ff` / `--depth`; deferred `--squash` / `--no-commit` / `--autostash` / `--unshallow` must NOT appear; `COMPATIBILITY.md` pull row stays aligned |
 | `bisect_subcommand_surface.rs` | C4 | `bisect --help` lists `run` / `view`; EXAMPLES banner is wired |
 | `worktree_delete_dir.rs` | C5 | `worktree remove` with and without `--delete-dir`; dirty-worktree refusal |
 | `checkout_alias_help.rs` | C5 | top-level `--help` includes `checkout`; the help banner mentions `switch` / `restore` |

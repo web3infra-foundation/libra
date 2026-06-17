@@ -166,6 +166,10 @@ name = "compat_stash_subcommand_surface"
 path = "tests/compat/stash_subcommand_surface.rs"
 
 [[test]]
+name = "compat_pull_strategy_flags_surface"
+path = "tests/compat/pull_strategy_flags_surface.rs"
+
+[[test]]
 name = "compat_bisect_subcommand_surface"
 path = "tests/compat/bisect_subcommand_surface.rs"
 

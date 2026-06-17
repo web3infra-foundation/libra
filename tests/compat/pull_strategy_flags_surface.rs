@@ -7,10 +7,17 @@
 //!
 //! - `--ff-only` and `--rebase` (`-r`) are implemented and MUST appear in
 //!   `pull --help` (they were misreported as "not exposed" before v0.17.1215).
-//! - The merge-engine forwarding flags `--squash` / `--no-squash` /
-//!   `--commit` / `--no-commit` / `--ff` / `--no-ff` / `--autostash` /
-//!   `--no-autostash` and the fetch `--depth` flag are implemented and MUST
-//!   appear (the `--squash`-deferred era ended in v0.17.1388).
+//! - The fast-forward control flags `--ff` / `--no-ff` and the fetch `--depth`
+//!   flag are implemented and MUST appear. They were delivered in
+//!   v0.17.1388 (`0c7604f`), dropped by a later reconcile, and the applicable
+//!   subset was recovered on 2026-06-18.
+//! - The squash/no-commit/autostash forwarding flags (`--squash`,
+//!   `--commit`/`--no-commit`, `--autostash`) are genuinely deferred: they
+//!   depend on merge-engine capabilities (squash staging, no-commit stop, the
+//!   autostash state machine) that are not present in the current build, so
+//!   they MUST NOT appear. If a future change recovers the merge engine and
+//!   adds them, this guard flips red and forces a `COMPATIBILITY.md` update in
+//!   the same PR.
 //! - `--unshallow` is genuinely deferred (fetch has no unshallow path), so it
 //!   MUST NOT appear — if a future change adds it, this guard flips red and
 //!   forces a `COMPATIBILITY.md` update in the same PR.
@@ -57,7 +64,7 @@ fn pull_help_exposes_ff_only_and_rebase() {
 }
 
 #[test]
-fn pull_help_exposes_forwarded_strategy_flags() {
+fn pull_help_exposes_recovered_ff_and_depth_flags() {
     let output = run(&["pull", "--help"]);
     assert!(
         output.status.success(),
@@ -65,26 +72,16 @@ fn pull_help_exposes_forwarded_strategy_flags() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for flag in [
-        "--squash",
-        "--no-squash",
-        "--commit",
-        "--no-commit",
-        "--ff",
-        "--no-ff",
-        "--autostash",
-        "--no-autostash",
-        "--depth",
-    ] {
+    for flag in ["--ff", "--no-ff", "--depth"] {
         assert!(
             stdout.contains(flag),
-            "pull --help must expose the forwarded `{flag}` flag; stdout: {stdout}"
+            "pull --help must expose the recovered `{flag}` flag; stdout: {stdout}"
         );
     }
 }
 
 #[test]
-fn pull_help_omits_unimplemented_unshallow() {
+fn pull_help_omits_deferred_squash_commit_autostash_and_unshallow() {
     let output = run(&["pull", "--help"]);
     assert!(
         output.status.success(),
@@ -92,11 +89,24 @@ fn pull_help_omits_unimplemented_unshallow() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        !stdout.contains("--unshallow"),
-        "pull --help must NOT advertise the deferred `--unshallow` flag; if it \
-         was implemented, update COMPATIBILITY.md and this guard. stdout: {stdout}"
-    );
+    // These depend on merge-engine machinery that the current build lacks, so
+    // they are deferred (not faked). `--commit`/`--no-commit` are gated on the
+    // same no-commit stop path, so they must not appear either.
+    for flag in [
+        "--squash",
+        "--no-squash",
+        "--no-commit",
+        "--autostash",
+        "--no-autostash",
+        "--unshallow",
+    ] {
+        assert!(
+            !stdout.contains(flag),
+            "pull --help must NOT advertise the deferred `{flag}` flag; if the \
+             merge engine was recovered and it was implemented, update \
+             COMPATIBILITY.md and this guard. stdout: {stdout}"
+        );
+    }
 }
 
 #[test]

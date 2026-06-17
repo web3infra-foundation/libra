@@ -101,6 +101,10 @@ fn is_false(value: &bool) -> bool {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct PullMergeOptions {
     pub ff_only: bool,
+    /// Force a real merge commit even when the integration could fast-forward
+    /// (`libra pull --no-ff`). When set, the fast-forward short-circuit is
+    /// skipped and a two-parent merge commit is recorded instead.
+    pub no_ff: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -414,7 +418,7 @@ pub(crate) async fn run_merge_for_pull_with_options(
         });
     }
 
-    if lca.id == current_commit.id {
+    if lca.id == current_commit.id && !options.no_ff {
         let files_changed = count_changed_files(Some(&current_commit), &target_commit)?;
         apply_fast_forward_merge(target_commit.clone(), upstream, output).await?;
         return Ok(PullMergeSummary {
@@ -430,6 +434,9 @@ pub(crate) async fn run_merge_for_pull_with_options(
         });
     }
 
+    // `--no-ff` cannot be combined with `--ff-only` (clap rejects the pair on
+    // the pull surface), so reaching `ff_only` here means a genuine
+    // non-fast-forward history.
     if options.ff_only {
         return Err(PullMergeError::NonFastForward {
             current: current_commit.id.to_string(),

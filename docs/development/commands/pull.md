@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。fetch + fast-forward/three-way merge supported; `--ff-only` and `--rebase` exposed; `--squash` and `--no-ff` strategy flags not exposed
+- 兼容级别：`partial`。fetch + fast-forward/three-way merge supported; `--ff-only`、`--rebase`、`--no-ff`、`--ff` 与 fetch `--depth` exposed; `--squash` / `--commit` / `--no-commit` / `--autostash` strategy flags 仍未公开（依赖尚未恢复的 merge 引擎能力）
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -37,7 +37,7 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-05-28 `c8c47040`（`feat(pull): add --rebase flag for diverged history`）：基础实现节点：add --rebase flag for diverged history；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-06 `0c7604f9`（`feat(pull): forward merge flags + depth, gate unsupported rebase strategies (#1388)`）：功能演进：forward merge flags + depth, gate unsupported rebase strategies (#1388)；注意该提交引入的 merge flags 与 depth 参数在当前 HEAD 的 `PullArgs` 中并未保留，现有公开参数仅为 `-r, --rebase` 与 `--ff-only`。
+- 2026-06-06 `0c7604f9`（`feat(pull): forward merge flags + depth, gate unsupported rebase strategies (#1388)`）：功能演进：forward merge flags + depth, gate unsupported rebase strategies (#1388)。该提交曾被一次 reconcile 误丢内容。2026-06-18 已恢复其中在当前（已分叉）merge 引擎上仍然适用的子集：`--no-ff`、`--ff` 与 fetch `--depth`；`--squash` / `--commit` / `--no-commit` / `--autostash` 因依赖当前 HEAD 已回退的 merge 引擎能力（squash 暂存、no-commit 暂停、autostash 状态机）而继续 deferred。
 - 2026-05-30 `8e987801`（`feat(pull): support ff-only`）：功能演进：support ff-only；该节点扩展了当前命令可用的参数或行为。
 - 2026-06-09 `17d26c76`（`fix(pull): avoid fast-forward hang from whole-worktree restore`）：实现修正：avoid fast-forward hang from whole-worktree restore；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 2026-06-01 `17be24e0`（`test(compat): pin pull --ff-only/--rebase surface and fix matrix row (v0.17.1215)`）：测试契约：pin pull --ff-only/--rebase surface and fix matrix row (v0.17.1215)；相关行为已有回归守卫，后续变更需要继续满足。
@@ -47,17 +47,17 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/pull.md`。
-- Synopsis：`libra pull [--ff-only] [--rebase] [<repository> [<refspec>]]`。
-- 公开参数/子命令包括：`[<repository>]`、`[<refspec>]`、`-r, --rebase`、`--ff-only`。
+- Synopsis：`libra pull [--ff-only] [--ff] [--no-ff] [--rebase] [--depth <n>] [<repository> [<refspec>]]`。
+- 公开参数/子命令包括：`[<repository>]`、`[<refspec>]`、`-r, --rebase`、`--ff-only`、`--ff`、`--no-ff`、`--depth <n>`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵说明 | fetch + fast-forward/three-way merge 支持，`--ff-only` 与 `-r/--rebase` 已公开；`--squash` / `--no-squash` / `--commit` / `--no-commit` / `--ff` / `--no-ff` / `--autostash` / `--no-autostash` 与 fetch `--depth` 均未出现在当前 HEAD 的 `PullArgs`（`src/command/pull.rs:42`-`57`）中 | 这些 forward/strategy/depth 标志在当前 HEAD 未公开；实现状态变化时同步 `COMPATIBILITY.md` 和测试证据。 |
-| 兼容差异项 | Force merge commit | 原始对照：不支持；相关参数/替代：git pull --no-ff；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | Squash | 原始对照：不支持；相关参数/替代：git pull --squash；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容矩阵说明 | `--ff-only` / `-r,--rebase` / `--ff` / `--no-ff` 与 fetch `--depth` 已公开并生效（`--no-ff` 强制生成 merge commit，`--depth` 透传到 fetch 浅历史）；`--squash` / `--commit` / `--no-commit` / `--autostash` 仍未公开 | 这几个 strategy 标志依赖当前 HEAD 已回退的 merge 引擎（squash 暂存、no-commit 暂停、autostash 状态机），属于 merge 引擎恢复范畴，暂不在 `PullArgs` 中暴露；恢复 merge 引擎后再同步 `COMPATIBILITY.md` 与测试。 |
+| 兼容差异项 | Squash | 原始对照：不支持；相关参数/替代：git pull --squash；当前说明：依赖 merge 引擎 squash 暂存能力，待 merge 引擎恢复后补齐。 |
+| 兼容差异项 | No-commit / Autostash | 原始对照：不支持；相关参数/替代：git pull --no-commit / --autostash；当前说明：依赖 merge 引擎的 no-commit 暂停与 autostash 状态机，待其恢复后补齐。 |
 
 ## 维护要求
 

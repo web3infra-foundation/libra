@@ -5,7 +5,7 @@ Fetch objects from a remote and integrate the fetched branch into the current br
 ## Synopsis
 
 ```text
-libra pull [--ff-only] [--rebase] [<repository> [<refspec>]]
+libra pull [--ff-only] [--ff] [--no-ff] [--rebase] [--depth <n>] [<repository> [<refspec>]]
 ```
 
 ## Description
@@ -14,13 +14,17 @@ libra pull [--ff-only] [--rebase] [<repository> [<refspec>]]
 
 With `--rebase` (`-r`), the integration step instead replays local-only commits on top of the fetched upstream tip. This is equivalent to `libra fetch` followed by `libra rebase <upstream>`.
 
-With `--ff-only`, pull fetches the upstream but refuses to create a merge commit when local and remote histories have diverged. Fast-forward and already-up-to-date pulls still succeed. `--ff-only` conflicts with `--rebase`.
+With `--ff-only`, pull fetches the upstream but refuses to create a merge commit when local and remote histories have diverged. Fast-forward and already-up-to-date pulls still succeed. `--ff-only` conflicts with `--rebase`, `--ff`, and `--no-ff`.
+
+With `--no-ff`, pull always records a real merge commit even when the upstream could be fast-forwarded, mirroring `git pull --no-ff`. `--ff` explicitly allows the default fast-forward behaviour. `--ff`, `--no-ff`, and `--ff-only` are mutually exclusive and conflict with `--rebase`.
+
+With `--depth <n>`, the fetch phase is limited to a shallow history of `n` commits per tip before integration, mirroring `git pull --depth`. `--depth` is fetch-only and conflicts with `--rebase`.
 
 When invoked with no arguments, the command reads the current branch tracking configuration (`branch.<name>.remote` and `branch.<name>.merge`). When `<repository>` is given alone, the current branch name is used as the remote branch. When both `<repository>` and `<refspec>` are given, the specified remote branch is fetched and merged.
 
 Pull supports already-up-to-date, fast-forward, and single-head three-way merge results. If the local and remote branches conflict, pull returns the merge-owned `LBR-CONFLICT-002` error with `phase: "merge"` and leaves the same merge state that `libra merge` uses. Resolve conflicts with `libra add <path>` and `libra merge --continue`, or run `libra merge --abort`.
 
-`pull` does not implement `--squash`, `--no-ff`, custom merge strategies, or pull-specific strategy flags beyond `--ff-only` and `--rebase`.
+`pull` does not yet implement `--squash`, `--commit` / `--no-commit`, or `--autostash`. These depend on merge-engine capabilities (squash staging, no-commit stop, and the autostash state machine) that are not present in the current build; they are documented as deferred rather than silently degraded.
 
 ## Options
 
@@ -28,7 +32,10 @@ Pull supports already-up-to-date, fast-forward, and single-head three-way merge 
 |-----------------|-------------|---------|
 | `<repository>` | Remote name to pull from. When omitted, uses the current branch's configured upstream. | `libra pull origin` |
 | `<refspec>` | Branch name on the remote. Requires `<repository>`. When omitted, uses the current branch name. | `libra pull origin main` |
-| `--ff-only` | Refuse to create a merge commit; succeeds only for fast-forward or already-up-to-date pulls. Conflicts with `--rebase`. | `libra pull --ff-only` |
+| `--ff-only` | Refuse to create a merge commit; succeeds only for fast-forward or already-up-to-date pulls. Conflicts with `--rebase`, `--ff`, `--no-ff`. | `libra pull --ff-only` |
+| `--ff` | Explicitly allow a fast-forward merge (the default). Conflicts with `--no-ff`, `--ff-only`, `--rebase`. | `libra pull --ff` |
+| `--no-ff` | Always create a merge commit even when a fast-forward is possible. Conflicts with `--ff`, `--ff-only`, `--rebase`. | `libra pull --no-ff` |
+| `--depth <n>` | Limit the fetch phase to a shallow history of `n` commits per tip. Conflicts with `--rebase`. | `libra pull --depth 1` |
 | `-r`, `--rebase` | After fetching, rebase the current branch onto the upstream tip instead of merging. | `libra pull --rebase` |
 | `--json` | Emit structured JSON envelope to stdout (global flag). | `libra pull --json` |
 | `--machine` | Compact single-line JSON; suppresses progress (global flag). | `libra pull --machine` |
@@ -40,6 +47,8 @@ Pull supports already-up-to-date, fast-forward, and single-head three-way merge 
 libra pull
 libra pull origin main
 libra pull --ff-only
+libra pull --no-ff
+libra pull --depth 1
 libra pull --rebase origin main
 ```
 
@@ -170,8 +179,10 @@ Rebase output omits `merge` and includes `rebase`:
 | Fast-forward-only pull | `libra pull --ff-only` | `git pull --ff-only` | N/A |
 | Three-way integration | Supported through merge engine | Supported | N/A |
 | Rebase on pull | `libra pull --rebase` | `git pull --rebase` | N/A |
-| Force merge commit | Not supported | `git pull --no-ff` | N/A |
-| Squash | Not supported | `git pull --squash` | N/A |
+| Force merge commit | `libra pull --no-ff` | `git pull --no-ff` | N/A |
+| Shallow pull | `libra pull --depth 1` | `git pull --depth 1` | N/A |
+| Squash | Not supported (deferred — needs merge-engine squash staging) | `git pull --squash` | N/A |
+| No-commit / autostash | Not supported (deferred — needs merge-engine support) | `git pull --no-commit` / `--autostash` | N/A |
 | Structured output | `--json` / `--machine` | No | No |
 | Phase diagnostics | `phase` detail in error JSON | No | No |
 

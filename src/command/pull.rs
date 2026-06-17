@@ -23,15 +23,19 @@ EXAMPLES:
     libra pull                             Pull from tracking remote
     libra pull origin main                 Pull specific branch from origin
     libra pull --ff-only                   Refuse to create a merge commit
+    libra pull --no-ff                     Always create a merge commit
     libra pull --rebase                    Rebase the current branch onto the upstream
+    libra pull --depth 1                   Shallow-fetch then integrate
     libra pull --json                      Structured JSON output for agents
     libra pull --quiet                     Suppress progress output
 
 NOTES:
     By default pull uses the same merge engine as `libra merge`, including
     clean three-way merges and merge-state conflicts. Use --ff-only to reject
-    divergent histories instead of creating a merge commit. Use --rebase to
-    replay local-only commits onto the upstream tip instead.";
+    divergent histories instead of creating a merge commit, or --no-ff to force
+    a merge commit even when a fast-forward is possible. Use --rebase to replay
+    local-only commits onto the upstream tip instead, and --depth to limit the
+    fetch to a shallow history before integrating.";
 
 /// Fetch from a remote and integrate changes into the current branch.
 // EXAMPLES are wired via `#[command(after_help = PULL_EXAMPLES)]` and render
@@ -52,8 +56,20 @@ pub struct PullArgs {
     rebase: bool,
 
     /// Refuse to merge unless the upstream can be fast-forwarded
-    #[clap(long = "ff-only", conflicts_with = "rebase")]
+    #[clap(long = "ff-only", conflicts_with_all = ["rebase", "ff", "no_ff"])]
     ff_only: bool,
+
+    /// Allow a fast-forward merge (the default; clears --no-ff)
+    #[clap(long, conflicts_with_all = ["no_ff", "ff_only", "rebase"])]
+    ff: bool,
+
+    /// Always create a merge commit even when fast-forward is possible
+    #[clap(long = "no-ff", conflicts_with_all = ["ff", "ff_only", "rebase"])]
+    no_ff: bool,
+
+    /// Limit the fetch to the given number of commits from each tip (shallow fetch)
+    #[clap(long, conflicts_with = "rebase")]
+    depth: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -173,6 +189,9 @@ impl PullArgs {
             refspec,
             rebase: false,
             ff_only: false,
+            ff: false,
+            no_ff: false,
+            depth: None,
         }
     }
 }
@@ -220,7 +239,8 @@ pub(crate) async fn run_pull(
         target.remote_config.clone(),
         Some(target.remote_branch.clone()),
         false,
-        None,
+        args.depth,
+        false,
         &child_output,
     )
     .await
@@ -272,6 +292,7 @@ pub(crate) async fn run_pull(
         &child_output,
         merge::PullMergeOptions {
             ff_only: args.ff_only,
+            no_ff: args.no_ff,
         },
     )
     .await
@@ -654,6 +675,32 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn depth_and_no_ff_flags_parse() {
+        let args = PullArgs::try_parse_from(["pull", "origin", "main", "--depth", "1", "--no-ff"])
+            .expect("--depth 1 --no-ff should parse");
+        assert_eq!(args.depth, Some(1));
+        assert!(args.no_ff);
+        assert!(!args.ff);
+
+        // Absent flags keep their defaults (merge path, full-depth fetch).
+        let bare = PullArgs::try_parse_from(["pull"]).expect("bare pull should parse");
+        assert_eq!(bare.depth, None);
+        assert!(!bare.no_ff);
+        assert!(!bare.ff);
+    }
+
+    #[test]
+    fn ff_conflicts_with_no_ff() {
+        // `--ff` and `--no-ff` are mutually exclusive at the clap layer.
+        assert!(PullArgs::try_parse_from(["pull", "--ff", "--no-ff"]).is_err());
+        // `--no-ff` cannot be combined with `--rebase` (different integration paths).
+        assert!(PullArgs::try_parse_from(["pull", "--no-ff", "--rebase"]).is_err());
+        // `--depth` is fetch-only and rejected on the rebase path's flag set only
+        // when combined with rebase; a plain `--depth` still parses.
+        assert!(PullArgs::try_parse_from(["pull", "--depth", "2"]).is_ok());
+    }
 
     #[test]
     fn test_map_fetch_discovery_error_unauthorized_matches_clone() {
