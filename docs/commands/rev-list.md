@@ -10,7 +10,7 @@ libra rev-list [OPTIONS] [SPEC]...
 
 ## Description
 
-`libra rev-list` resolves one or more revision inputs to commits, walks the reachable history, applies optional exclusion/range, first-parent, author, committer, time-window, parent-count, and count/limit filters, and prints commit IDs newest first. When `<SPEC>` is omitted, the command defaults to `HEAD`. Output formatting can include parent commit IDs (`--parents`) and committer timestamps (`--timestamp`).
+`libra rev-list` resolves one or more revision inputs to commits, walks the reachable history, applies optional exclusion/range, first-parent, author, committer, message grep, time-window, parent-count, and count/limit filters, and prints commit IDs newest first. When `<SPEC>` is omitted, the command defaults to `HEAD`. Output formatting can include parent commit IDs (`--parents`) and committer timestamps (`--timestamp`).
 
 ## Options
 
@@ -30,6 +30,7 @@ libra rev-list [OPTIONS] [SPEC]...
 | `--first-parent` | Follow only the first parent when walking through merge commits. |
 | `--author <PATTERN>` | Print only commits whose author name or email contains `PATTERN` case-insensitively. |
 | `--committer <PATTERN>` | Print only commits whose committer name or email contains `PATTERN` case-insensitively. |
+| `--grep <PATTERN>` | Print only commits whose message matches `PATTERN` as a case-sensitive regular expression. May be repeated; any matching pattern includes the commit. |
 | `--parents` | Print parent commit IDs after each listed commit. |
 | `--timestamp` | Prefix each listed commit with its committer timestamp, matching Git's `timestamp commit [parents...]` field order. |
 | `<SPEC>...` | Revisions to enumerate from. Defaults to `HEAD`; accepts multiple positive revisions, `^<rev>` exclusions, `A..B`, and `A...B`. |
@@ -57,6 +58,7 @@ libra rev-list --max-parents 0 --no-max-parents HEAD
 libra rev-list --first-parent HEAD
 libra rev-list --author alice HEAD
 libra rev-list --committer alice HEAD
+libra rev-list --grep 'fix|feat' HEAD
 libra rev-list --parents HEAD
 libra rev-list --timestamp --parents HEAD
 libra rev-list HEAD~1
@@ -66,7 +68,7 @@ libra --json rev-list HEAD
 
 ## Human Output
 
-Output is one commit ID per line by default. Multiple positive revisions are unioned and de-duplicated. `^<rev>` excludes commits reachable from that revision. `A..B` is equivalent to `^A B`; `A...B` prints the symmetric difference between both sides. `--first-parent` limits traversal through merge commits to the first parent chain. Author, committer, time-window, and parent-count filters are applied before `--skip`, `--max-count`, and `--count`. `--author` and `--committer` match the respective `name <email>` string case-insensitively. `--since`/`--after` and `--until`/`--before` accept `YYYY-MM-DD`, RFC3339/full timestamps with timezone, Unix timestamps, and relative forms such as `2 weeks ago`. With `--parents`, each line becomes `commit parent...`. With `--timestamp`, each line becomes `timestamp commit`; combining both produces `timestamp commit parent...`. With `--count`, output remains a single decimal count and ignores output-format flags.
+Output is one commit ID per line by default. Multiple positive revisions are unioned and de-duplicated. `^<rev>` excludes commits reachable from that revision. `A..B` is equivalent to `^A B`; `A...B` prints the symmetric difference between both sides. `--first-parent` limits traversal through merge commits to the first parent chain. Author, committer, message grep, time-window, and parent-count filters are applied before `--skip`, `--max-count`, and `--count`. `--author` and `--committer` match the respective `name <email>` string case-insensitively. `--grep` matches the full commit message with a case-sensitive regular expression; repeated `--grep` patterns use OR semantics. `--since`/`--after` and `--until`/`--before` accept `YYYY-MM-DD`, RFC3339/full timestamps with timezone, Unix timestamps, and relative forms such as `2 weeks ago`. With `--parents`, each line becomes `commit parent...`. With `--timestamp`, each line becomes `timestamp commit`; combining both produces `timestamp commit parent...`. With `--count`, output remains a single decimal count and ignores output-format flags.
 
 ```text
 abc1234def5678901234567890abcdef12345678
@@ -98,6 +100,7 @@ def5678901234567890abcdef12345678abc1234
     "first_parent": false,
     "author": null,
     "committer": null,
+    "grep": [],
     "since": null,
     "until": null,
     "merges": false,
@@ -140,6 +143,7 @@ When `--parents` or `--timestamp` is present, `commits[]` remains the plain comm
     "first_parent": false,
     "author": null,
     "committer": null,
+    "grep": [],
     "since": null,
     "until": null,
     "merges": false,
@@ -168,6 +172,7 @@ When `--parents` or `--timestamp` is present, `commits[]` remains the plain comm
 | First-parent traversal | `--first-parent` | Same | revset/graph predicates |
 | Author filter | `--author <PATTERN>` | Same | revset predicates |
 | Committer filter | `--committer <PATTERN>` | Same | revset predicates |
+| Message grep | `--grep <PATTERN>` | Same | revset predicates |
 | Parent output | `--parents` | Same | revset/template output |
 | Timestamp output | `--timestamp` | Same | template output |
 | JSON output | `--json` | No | No |
@@ -179,5 +184,6 @@ When `--parents` or `--timestamp` is present, `commits[]` remains the plain comm
 |----------|-----------------|------|
 | Invalid target ref | `LBR-CLI-003` | 129 |
 | Invalid date filter | `LBR-CLI-002` | 129 |
+| Invalid grep regex | `LBR-CLI-002` | 129 |
 | Failed to read repository metadata | `LBR-IO-001` | 128 |
 | Corrupt stored refs/objects | `LBR-REPO-002` | 128 |

@@ -767,7 +767,8 @@ mod tests {
         assert!(buf.windows(4).any(|w| w == b"PACK"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
     async fn fetch_objects_propagates_reachable_commit_walk_errors() {
         let repo_dir = tempdir().unwrap();
         setup_with_new_libra_in(repo_dir.path()).await;

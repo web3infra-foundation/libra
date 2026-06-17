@@ -35,6 +35,8 @@ EXAMPLES:
                                     Filter commits by author name or email
     libra rev-list --committer alice HEAD
                                     Filter commits by committer name or email
+    libra rev-list --grep 'fix' HEAD
+                                    Filter commits by message regex
     libra rev-list --parents HEAD   Include parent commit IDs on each line
     libra rev-list --timestamp HEAD Prefix each line with the committer timestamp
     libra rev-list main             Walk ancestry from refs/heads/main
@@ -65,6 +67,7 @@ pub(super) struct RevListOutput {
     pub(super) first_parent: bool,
     pub(super) author: Option<String>,
     pub(super) committer: Option<String>,
+    pub(super) grep: Vec<String>,
     pub(super) since: Option<String>,
     pub(super) until: Option<String>,
     pub(super) merges: bool,

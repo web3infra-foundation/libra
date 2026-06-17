@@ -10,9 +10,9 @@ use git_internal::{
 };
 
 use super::{
-    ParentCountFilter, RevListArgs, RevListEntry, commit_matches_parent_count,
-    format_rev_list_entry, parent_count_filter, sort_rev_list_commits, write_rev_list_count,
-    write_rev_list_output,
+    ParentCountFilter, RevListArgs, RevListEntry, commit_matches_message,
+    commit_matches_parent_count, format_rev_list_entry, parent_count_filter,
+    rev_list_message_filter, sort_rev_list_commits, write_rev_list_count, write_rev_list_output,
 };
 use crate::utils::error::StableErrorCode;
 
@@ -112,6 +112,16 @@ fn test_rev_list_args_parse_parent_and_timestamp_output() {
 }
 
 #[test]
+fn test_rev_list_args_parse_message_grep_filters() {
+    let args =
+        RevListArgs::try_parse_from(["rev-list", "--grep", "Alpha", "--grep", "Beta", "HEAD"])
+            .unwrap();
+
+    assert_eq!(args.grep, vec!["Alpha", "Beta"]);
+    assert_eq!(args.specs, vec!["HEAD"]);
+}
+
+#[test]
 fn test_rev_list_args_parse_parent_count_filters() {
     let args = RevListArgs::try_parse_from([
         "rev-list",
@@ -204,6 +214,27 @@ fn test_commit_matches_parent_count_filter() {
     assert!(!commit_matches_parent_count(&root, single_parent));
     assert!(commit_matches_parent_count(&single, single_parent));
     assert!(!commit_matches_parent_count(&merge, single_parent));
+}
+
+#[test]
+fn test_commit_matches_message_uses_regex_or_semantics() {
+    let mut commit = test_commit(test_hash(0x40), 1);
+    commit.message = "Alpha topic".to_string();
+    let args =
+        RevListArgs::try_parse_from(["rev-list", "--grep", "Beta", "--grep", "Alpha.*topic"])
+            .unwrap();
+    let filter = rev_list_message_filter(&args)
+        .expect("valid grep regex")
+        .expect("grep filter should be present");
+
+    assert!(commit_matches_message(&commit, Some(&filter)));
+
+    let args = RevListArgs::try_parse_from(["rev-list", "--grep", "alpha"]).unwrap();
+    let filter = rev_list_message_filter(&args)
+        .expect("valid grep regex")
+        .expect("grep filter should be present");
+
+    assert!(!commit_matches_message(&commit, Some(&filter)));
 }
 
 #[test]

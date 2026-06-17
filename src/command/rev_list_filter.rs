@@ -1,4 +1,5 @@
 use git_internal::internal::object::commit::Commit;
+use regex::Regex;
 
 use super::RevListArgs;
 use crate::{
@@ -16,6 +17,11 @@ pub(super) struct ParentCountFilter {
 pub(super) struct RevListTimeWindow {
     since: Option<i64>,
     until: Option<i64>,
+}
+
+#[derive(Debug)]
+pub(super) struct RevListMessageFilter {
+    patterns: Vec<Regex>,
 }
 
 pub(super) fn parent_count_filter(args: &RevListArgs) -> ParentCountFilter {
@@ -57,6 +63,28 @@ pub(super) fn rev_list_committer_filter(args: &RevListArgs) -> Option<String> {
         .map(|pattern| pattern.to_lowercase())
 }
 
+pub(super) fn rev_list_message_filter(
+    args: &RevListArgs,
+) -> CliResult<Option<RevListMessageFilter>> {
+    if args.grep.is_empty() {
+        return Ok(None);
+    }
+
+    let patterns = args
+        .grep
+        .iter()
+        .map(|pattern| {
+            Regex::new(pattern).map_err(|error| {
+                CliError::fatal(format!("invalid --grep pattern '{pattern}': {error}"))
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+                    .with_hint("use a valid regular expression or escape metacharacters")
+            })
+        })
+        .collect::<CliResult<Vec<_>>>()?;
+
+    Ok(Some(RevListMessageFilter { patterns }))
+}
+
 pub(super) fn commit_matches_author(commit: &Commit, author_filter: Option<&str>) -> bool {
     signature_matches_filter(&commit.author.name, &commit.author.email, author_filter)
 }
@@ -80,6 +108,20 @@ fn signature_matches_filter(name: &str, email: &str, filter: Option<&str>) -> bo
     let name = name.to_lowercase();
     let email = email.to_lowercase();
     name.contains(filter) || email.contains(filter) || format!("{name} <{email}>").contains(filter)
+}
+
+pub(super) fn commit_matches_message(
+    commit: &Commit,
+    filter: Option<&RevListMessageFilter>,
+) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+
+    filter
+        .patterns
+        .iter()
+        .any(|pattern| pattern.is_match(&commit.message))
 }
 
 pub(super) fn commit_matches_parent_count(commit: &Commit, filter: ParentCountFilter) -> bool {

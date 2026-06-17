@@ -148,6 +148,41 @@ pub(crate) fn assert_rev_list_filters(
         bail!("rev-list --count --committer missing-committer returned unexpected count");
     }
 
+    let rev_grep = ctx.command(
+        &["rev-list", "--grep", "rev-list second", "HEAD"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    if stdout_trim(&rev_grep) != latest_id {
+        bail!("rev-list --grep did not return only the matching message commit");
+    }
+
+    let rev_multi_grep = ctx.command(
+        &[
+            "rev-list",
+            "--grep",
+            "object readback",
+            "--grep",
+            "rev-list second",
+            "HEAD",
+        ],
+        repo.to_path_buf(),
+        true,
+    )?;
+    let rev_multi_grep_output = String::from_utf8_lossy(&rev_multi_grep.stdout);
+    if rev_multi_grep_output.lines().collect::<Vec<_>>() != vec![latest_id, head_id] {
+        bail!("rev-list multiple --grep patterns did not use OR message matching");
+    }
+
+    let rev_grep_case_miss = ctx.command(
+        &["rev-list", "--count", "--grep", "REV-LIST SECOND", "HEAD"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    if stdout_trim(&rev_grep_case_miss) != "0" {
+        bail!("rev-list --grep should be case-sensitive by default");
+    }
+
     let rev_no_merges = ctx.command(
         &["rev-list", "--no-merges", "HEAD"],
         repo.to_path_buf(),

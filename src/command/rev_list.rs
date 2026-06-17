@@ -18,9 +18,10 @@ mod rev_list_spec;
 #[cfg(test)]
 use rev_list_filter::ParentCountFilter;
 use rev_list_filter::{
-    commit_matches_author, commit_matches_committer, commit_matches_parent_count,
-    commit_matches_time_window, parent_count_filter, rev_list_author_filter,
-    rev_list_committer_filter, rev_list_time_window, sort_rev_list_commits,
+    commit_matches_author, commit_matches_committer, commit_matches_message,
+    commit_matches_parent_count, commit_matches_time_window, parent_count_filter,
+    rev_list_author_filter, rev_list_committer_filter, rev_list_message_filter,
+    rev_list_time_window, sort_rev_list_commits,
 };
 use rev_list_output::{REV_LIST_EXAMPLES, RevListEntry, RevListOutput, emit_human_rev_list};
 #[cfg(test)]
@@ -61,6 +62,10 @@ pub struct RevListArgs {
     /// Filter commits by committer name or email
     #[clap(long, value_name = "PATTERN")]
     pub committer: Option<String>,
+
+    /// Filter commits by message using a regular expression
+    #[clap(long, value_name = "PATTERN")]
+    pub grep: Vec<String>,
 
     /// Show commits more recent than DATE
     #[clap(long, visible_alias = "after", value_name = "DATE")]
@@ -123,12 +128,14 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
     let time_window = rev_list_time_window(args)?;
     let author_filter = rev_list_author_filter(args);
     let committer_filter = rev_list_committer_filter(args);
+    let message_filter = rev_list_message_filter(args)?;
     let parent_filter = parent_count_filter(args);
 
     let commits = commits
         .into_iter()
         .filter(|commit| commit_matches_author(commit, author_filter.as_deref()))
         .filter(|commit| commit_matches_committer(commit, committer_filter.as_deref()))
+        .filter(|commit| commit_matches_message(commit, message_filter.as_ref()))
         .filter(|commit| commit_matches_time_window(commit, time_window))
         .filter(|commit| commit_matches_parent_count(commit, parent_filter))
         .skip(args.skip)
@@ -174,6 +181,7 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         first_parent: args.first_parent,
         author: args.author.clone(),
         committer: args.committer.clone(),
+        grep: args.grep.clone(),
         since: args.since.clone(),
         until: args.until.clone(),
         merges: args.merges,
