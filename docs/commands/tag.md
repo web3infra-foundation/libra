@@ -6,7 +6,7 @@ Create, list, or delete tags.
 
 ```
 libra tag [<name>] [-m <message>] [-f]
-libra tag -l [-n <lines>]
+libra tag -l [-n <lines>] [--points-at <object>]
 libra tag -d <name>
 ```
 
@@ -28,6 +28,7 @@ Tag references are stored in the SQLite database alongside branch references, pr
 | `-m` | `--message` | `<msg>` | Create an annotated tag with the given message |
 | `-f` | `--force` | | Overwrite an existing tag |
 | `-n` | `--n-lines` | `<lines>` | Number of annotation lines to display when listing (0 = names only) |
+| | `--points-at` | `<object>` | List only tags pointing at the given object (peeled to its commit); implies list mode |
 
 ### Flag examples
 
@@ -47,6 +48,9 @@ libra tag -l
 # List tags with annotation preview (2 lines)
 libra tag -l -n 2
 
+# List only tags pointing at HEAD's commit
+libra tag --points-at HEAD
+
 # Delete a tag
 libra tag -d v1.0
 
@@ -60,6 +64,7 @@ libra tag --json v1.0
 libra tag v1.0                        # Create a lightweight tag at HEAD
 libra tag -m "Release v1.1" v1.1      # Create an annotated tag
 libra tag -l -n 2                     # List tags with up to 2 annotation lines
+libra tag --points-at HEAD            # List tags pointing at HEAD's commit
 libra tag -d v1.0                     # Delete a tag
 libra tag --json v1.0                 # Structured JSON output for agents
 ```
@@ -167,6 +172,7 @@ Libra preserves Git's two-tier tag model for on-disk format compatibility. Light
 | Create annotated | `git tag -a -m "msg" <name>` | `libra tag -m "msg" <name>` | Not supported (lightweight only) |
 | List tags | `git tag -l` | `libra tag -l` | `jj tag list` |
 | List with message | `git tag -l -n3` | `libra tag -l -n 3` | N/A |
+| List by target | `git tag --points-at <obj>` | `libra tag --points-at <obj>` | N/A |
 | Delete | `git tag -d <name>` | `libra tag -d <name>` | `jj tag delete <name>` |
 | Force overwrite | `git tag -f <name>` | `libra tag -f <name>` | `jj tag create <name>` (always overwrites) |
 | Sign tag | `git tag -s <name>` | Not supported (vault-based planned) | N/A |
@@ -180,6 +186,7 @@ Libra preserves Git's two-tier tag model for on-disk format compatibility. Light
 | Tag already exists | `LBR-CONFLICT-002` | "delete it first with 'libra tag -d <name>'." |
 | HEAD has no commit to tag | `LBR-REPO-003` | "create a commit first before tagging HEAD." |
 | Tag not found (delete/show) | `LBR-CLI-003` | "use 'libra tag -l' to list available tags." |
+| Unresolvable `--points-at` object | `LBR-CLI-003` | "use 'libra log --oneline' to see available commits." |
 | Missing tag name for --delete/--message/--force | `LBR-CLI-002` | "use 'libra tag <name>' to create or update a tag" |
 | Failed to resolve HEAD | `LBR-IO-001` or `LBR-REPO-002` | -- |
 | Failed to serialize annotated tag | `LBR-REPO-005` | -- |

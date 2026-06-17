@@ -3,7 +3,7 @@
 use std::io;
 
 use clap::Parser;
-use git_internal::errors::GitError;
+use git_internal::{errors::GitError, hash::ObjectHash};
 use sea_orm::DbErr;
 use serde::Serialize;
 
@@ -28,6 +28,7 @@ EXAMPLES:
     libra tag -m \"Release v1.1\" v1.1    Create an annotated tag
     libra tag -l -n 2                     List tags with up to 2 annotation lines
     libra tag -d v1.0                     Delete a tag
+    libra tag --points-at HEAD            List tags pointing at HEAD's commit
     libra tag --json v1.0                 Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -57,6 +58,10 @@ pub struct TagArgs {
     /// Number of annotation lines to display when listing tags (0 for tag names only)
     #[clap(short, long)]
     pub n_lines: Option<usize>,
+
+    /// Only list tags pointing at the given object (peeled to its commit). Implies list mode.
+    #[clap(long = "points-at", value_name = "object")]
+    pub points_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -159,6 +164,9 @@ enum TagError {
 
     #[error("failed to list tags: {0}")]
     ListFailed(#[source] tag::ListTagError),
+
+    #[error("malformed object name '{0}'")]
+    InvalidPointsAtObject(String),
 }
 
 fn classify_tag_load_error(error: &anyhow::Error) -> StableErrorCode {
@@ -231,6 +239,11 @@ impl From<TagError> for CliError {
             TagError::ListFailed(source) => {
                 CliError::fatal(message).with_stable_code(classify_list_tag_error(&source))
             }
+            TagError::InvalidPointsAtObject(object) => {
+                CliError::fatal(format!("not a valid object name: '{object}'"))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+                    .with_hint("use 'libra log --oneline' to see available commits.")
+            }
         }
     }
 }
@@ -297,9 +310,16 @@ async fn run_tag(args: &TagArgs) -> Result<TagOutput, TagError> {
     validate_named_tag_action(args)?;
     util::require_repo().map_err(|_| TagError::NotInRepo)?;
 
-    if args.list || args.n_lines.is_some() || args.name.is_none() {
+    if args.list || args.n_lines.is_some() || args.points_at.is_some() || args.name.is_none() {
+        // `--points-at` peels each tag to its commit and keeps only those that
+        // resolve to the requested object, mirroring `git tag --points-at`.
+        // Like `-n`, it forces list mode even when a name is also supplied.
+        let points_at = match args.points_at.as_deref() {
+            Some(object) => Some(resolve_points_at_object(object).await?),
+            None => None,
+        };
         return Ok(TagOutput::List {
-            tags: collect_tags(args.n_lines.unwrap_or(0)).await?,
+            tags: collect_tags(args.n_lines.unwrap_or(0), points_at.as_ref()).await?,
         });
     }
 
@@ -348,7 +368,7 @@ fn render_tag_output(result: &TagOutput, output: &OutputConfig) -> CliResult<()>
 }
 
 pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {
-    let tags = collect_tags(show_lines)
+    let tags = collect_tags(show_lines, None)
         .await
         .map_err(anyhow::Error::from)?;
     Ok(format_tag_entries(&tags))
@@ -402,13 +422,44 @@ async fn run_delete_tag(tag_name: &str) -> Result<TagOutput, TagError> {
     })
 }
 
-async fn collect_tags(show_lines: usize) -> Result<Vec<TagListEntry>, TagError> {
+async fn collect_tags(
+    show_lines: usize,
+    points_at: Option<&ObjectHash>,
+) -> Result<Vec<TagListEntry>, TagError> {
     let tags = tag::list().await.map_err(TagError::ListFailed)?;
     let mut entries = Vec::with_capacity(tags.len());
     for tag in tags {
+        if let Some(target) = points_at
+            && &tag_peeled_commit(&tag.object) != target
+        {
+            continue;
+        }
         entries.push(tag_to_list_entry(tag, show_lines));
     }
     Ok(entries)
+}
+
+/// Resolve the `--points-at` argument to an object hash, mapping an
+/// unresolvable revision to [`TagError::InvalidPointsAtObject`] so the CLI
+/// reports `not a valid object name` (LBR-CLI-003, exit 129) rather than a
+/// raw resolver error.
+async fn resolve_points_at_object(object: &str) -> Result<ObjectHash, TagError> {
+    crate::command::get_target_commit(object)
+        .await
+        .map_err(|_| TagError::InvalidPointsAtObject(object.to_string()))
+}
+
+/// Peel a tag's target object down to the commit it ultimately references:
+/// lightweight tags point straight at a commit, annotated tags carry the
+/// commit in their `object_hash`, and tree/blob tags peel to themselves.
+/// Used by `--points-at` to compare against the requested object.
+fn tag_peeled_commit(object: &TagObject) -> ObjectHash {
+    match object {
+        TagObject::Commit(commit) => commit.id,
+        TagObject::Tag(tag_object) => tag_object.object_hash,
+        TagObject::Tree(tree) => tree.id,
+        TagObject::Blob(blob) => blob.id,
+    }
 }
 
 fn tag_to_list_entry(tag: tag::Tag, show_lines: usize) -> TagListEntry {
@@ -680,6 +731,29 @@ mod tests {
             }));
 
         assert_eq!(cli_error.stable_code(), StableErrorCode::RepoCorrupt);
+    }
+
+    #[test]
+    fn parses_points_at_flag() {
+        let args = TagArgs::try_parse_from(["tag", "--points-at", "HEAD"]).unwrap();
+        assert_eq!(args.points_at.as_deref(), Some("HEAD"));
+        assert!(!args.list);
+        assert!(args.name.is_none());
+    }
+
+    /// An unresolvable `--points-at` revision maps to `CliInvalidTarget`
+    /// (LBR-CLI-003, exit 129) with the same human-facing message as
+    /// `branch --points-at`, so scripts see a stable "not a valid object
+    /// name" failure rather than a raw resolver error.
+    #[test]
+    fn tag_error_invalid_points_at_object_maps_as_cli_invalid_target() {
+        let err = CliError::from(TagError::InvalidPointsAtObject("nope".to_string()));
+        assert_eq!(err.stable_code(), StableErrorCode::CliInvalidTarget);
+        assert!(
+            err.message().contains("not a valid object name"),
+            "unexpected message: {}",
+            err.message(),
+        );
     }
 
     /// Pin the `Display` format for the static-message and direct-

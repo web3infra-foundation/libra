@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra tag` 的目标是创建、列出、过滤和删除标签。实现需要支持 force、`-n` 展示、annotated tag message 和轻量标签路径，同时把 Git-style `-a` / `--annotate`、`--points-at`、签名与验证等后续能力列为缺口。
+`libra tag` 的目标是创建、列出、过滤和删除标签。实现需要支持 force、`-n` 展示、annotated tag message、`-a`/`--annotate`、`--points-at` 过滤和轻量标签路径，同时把签名与验证等后续能力列为缺口。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。轻量标签、message-based annotated tags、force/delete/list/`-n` 已支持；显式 annotate、过滤、排序、多列、签名和验证尚未公开。
+- 兼容级别：`partial`。轻量标签、message-based annotated tags、`-a`/`--annotate`、force/delete/list/`-n`、`--points-at <object>` 已支持；其余过滤（`--contains`/`--merged`/`--sort`/`--column`）、签名和验证尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -38,7 +38,7 @@ flowchart TD
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2025-10-02 `3879a44a`（`feat: add argument -f/--force for tag command`）：基础实现节点：add argument -f/--force for tag command；当前实现的主要轮廓可追溯到该提交。
 - 2026-06-07 `8fecc10d`（`feat(tag): add -a/--annotate flag requiring a message (v0.17.1409)`）：历史资料中曾记录 `-a/--annotate`，但当前 `TagArgs` 未公开该 flag；当前事实以源码为准。
-- 2026-06-06 `58b0cc16`（`feat(tag): add --points-at list filter (v0.17.1406)`）：历史资料中曾记录 `--points-at`，但当前 `TagArgs` 未公开该 flag；当前事实以源码为准。
+- 2026-06-06 `58b0cc16`（`feat(tag): add --points-at list filter (v0.17.1406)`）：新增 `--points-at <object>`（字段 `points_at`），列表模式下按 peel-to-commit 过滤标签；不可解析对象映射为 `LBR-CLI-003`（exit 129）。该提交曾在一次 reconcile 中从工作树丢失，已于 2026-06-18 依据原提交 diff 恢复（含单元测试、端到端测试与文档）。
 - 2026-05-18 `b534c401`（`fix(commit,stash,index-pack,tag): restore Issues URL on internal-invariant paths`）：实现修正：restore Issues URL on internal-invariant paths；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 2026-05-16 `fff9cbb0`（`test(tag): pin Display for 5 static-message TagError variants (v0.17.292)`）：测试契约：pin Display for 5 static-message TagError variants (v0.17.292)；相关行为已有回归守卫，后续变更需要继续满足。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
@@ -48,15 +48,13 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/tag.md`。
 - Synopsis：`libra tag [OPTIONS] [-l | -d | -f] [-m <MESSAGE>] [-n <N_LINES>] [NAME]`。
-- 公开参数/子命令包括：`-l, --list`、`-d, --delete`、`-m, --message <MESSAGE>`、`-f, --force`、`-n, --n-lines <N_LINES>`、`[NAME]`。
+- 公开参数/子命令包括：`-l, --list`、`-d, --delete`、`-m, --message <MESSAGE>`、`-a, --annotate`、`-f, --force`、`-n, --n-lines <N_LINES>`、`--points-at <object>`、`[NAME]`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容差异项 | Git-style 显式附注标签 flag | 原始对照：Git 的 annotate flag 加消息创建路径；相关参数/替代：当前 message-based 创建路径已创建 annotated tag，但 `-a` / `--annotate` 未公开。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 按对象过滤标签 | 原始对照：git tag --points-at <object>；相关参数/替代：不支持；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 签名标签 | 原始对照：git tag -s <name>；相关参数/替代：不支持 (vault-based planned)；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 验证标签 | 原始对照：git tag -v <name>；相关参数/替代：不支持 (vault-based planned)；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 按包含提交过滤 | 原始对照：git tag --contains <commit>；相关参数/替代：当前 `TagArgs` 未公开 `--contains`；当前说明：不支持。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
