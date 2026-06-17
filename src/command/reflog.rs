@@ -22,7 +22,10 @@ use crate::{
         db::get_db_conn_instance,
         log::date_parser::parse_date,
         model::reflog::Model,
-        reflog::{HEAD, Reflog},
+        reflog::{
+            ExpireCutoff, ExpireOptions, ExpireResult, HEAD, Reflog, ReflogError,
+            expire_defaults_with_conn, expire_reflog, parse_expire_cutoff,
+        },
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -45,6 +48,8 @@ EXAMPLES:
     libra reflog show --grep 'commit (amend)'  Filter HEAD reflog by message pattern
     libra reflog exists refs/heads/feature-x   Probe whether a ref has reflog entries
     libra reflog delete HEAD@{2}               Remove a single reflog selector
+    libra reflog expire --all --dry-run        Preview which entries would be pruned
+    libra reflog expire --expire=now --all     Prune all time-expired entries now
     libra reflog --json show HEAD              Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -95,6 +100,35 @@ enum Subcommands {
         #[clap(required = true)]
         ref_name: String,
     },
+    /// Prune old or unreachable reflog entries (see `git reflog expire`).
+    Expire {
+        /// Process the reflog of every ref instead of explicit `<refs>`
+        #[arg(long)]
+        all: bool,
+        /// Prune entries older than this time (`never`, `now`, `all`, a number of days, or a date)
+        #[arg(long)]
+        expire: Option<String>,
+        /// Prune unreachable entries older than this time
+        #[arg(long = "expire-unreachable")]
+        expire_unreachable: Option<String>,
+        /// Rewrite the `old`/`new` chain so it stays continuous across pruned entries
+        #[arg(long)]
+        rewrite: bool,
+        /// Move a pruned local branch ref to its newest surviving entry
+        #[arg(long)]
+        updateref: bool,
+        /// Prune entries whose new value no longer loads as a commit object
+        #[arg(long = "stale-fix")]
+        stale_fix: bool,
+        /// Compute and print the plan without changing the database
+        #[arg(long = "dry-run", short = 'n')]
+        dry_run: bool,
+        /// Print each pruned entry
+        #[arg(long, short = 'v')]
+        verbose: bool,
+        /// Reflog refs to expire (mutually informative with `--all`)
+        refs: Vec<String>,
+    },
 }
 
 pub async fn execute(args: ReflogArgs) {
@@ -133,7 +167,43 @@ pub async fn execute_safe(args: ReflogArgs, output: &OutputConfig) -> CliResult<
         }
         Subcommands::Delete { selectors } => handle_delete(&selectors, output).await,
         Subcommands::Exists { ref_name } => handle_exists(&ref_name, output).await,
+        Subcommands::Expire {
+            all,
+            expire,
+            expire_unreachable,
+            rewrite,
+            updateref,
+            stale_fix,
+            dry_run,
+            verbose,
+            refs,
+        } => {
+            let options = ExpireCliOptions {
+                all,
+                expire,
+                expire_unreachable,
+                rewrite,
+                updateref,
+                stale_fix,
+                dry_run,
+                verbose,
+                refs,
+            };
+            handle_expire(options, output).await
+        }
     }
+}
+
+struct ExpireCliOptions {
+    all: bool,
+    expire: Option<String>,
+    expire_unreachable: Option<String>,
+    rewrite: bool,
+    updateref: bool,
+    stale_fix: bool,
+    dry_run: bool,
+    verbose: bool,
+    refs: Vec<String>,
 }
 
 /// Options for reflog show command
@@ -420,6 +490,197 @@ async fn handle_exists(ref_name: &str, output: &OutputConfig) -> CliResult<()> {
             exists: true,
         };
         return emit_json_data("reflog.exists", &result, output);
+    }
+    Ok(())
+}
+
+/// Production reachability loader: a commit OID → its parent OIDs (or `None`
+/// when the OID does not load as a commit). A plain `fn` (captures nothing) so
+/// it satisfies the `Send + 'static` bound of [`expire_reflog`].
+fn load_commit_parents(oid: &str) -> Option<Vec<String>> {
+    let hash = ObjectHash::from_str(oid).ok()?;
+    let commit = load_object::<Commit>(&hash).ok()?;
+    Some(
+        commit
+            .parent_commit_ids
+            .iter()
+            .map(|parent| parent.to_string())
+            .collect(),
+    )
+}
+
+/// Production `--stale-fix` predicate: whether `oid` loads as a commit object.
+fn oid_is_commit(oid: &str) -> bool {
+    ObjectHash::from_str(oid)
+        .ok()
+        .is_some_and(|hash| load_object::<Commit>(&hash).is_ok())
+}
+
+/// Reject obviously-malformed ref names before touching the database.
+fn validate_expire_ref(name: &str) -> CliResult<()> {
+    let invalid = name.is_empty()
+        || name.len() > 4096
+        || name.contains("..")
+        || name.chars().any(|c| c.is_control() || c == ' ');
+    if invalid {
+        return Err(CliError::failure(format!("invalid ref name '{name}'"))
+            .with_stable_code(StableErrorCode::CliInvalidTarget));
+    }
+    Ok(())
+}
+
+/// Parse a CLI `--expire` / `--expire-unreachable` value into an absolute
+/// cutoff, surfacing a friendly hint on failure.
+fn parse_cli_expire_cutoff(raw: &str) -> CliResult<ExpireCutoff> {
+    parse_expire_cutoff(raw).ok_or_else(|| {
+        CliError::fatal(format!("invalid expire time '{raw}'"))
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint(
+                "use 'never', 'now', 'all', a number of days, or a date like '10 days ago' \
+                 (the dotted form '10.days.ago' is not supported)",
+            )
+    })
+}
+
+fn map_reflog_error(error: ReflogError) -> CliError {
+    match error {
+        ReflogError::Config(detail) => CliError::fatal(format!("reflog expire: {detail}"))
+            .with_stable_code(StableErrorCode::CliInvalidArguments),
+        other => CliError::fatal(format!("reflog expire failed: {other}"))
+            .with_stable_code(StableErrorCode::IoWriteFailed),
+    }
+}
+
+/// Phase A of `reflog expire`: resolve and validate the ref list with **no**
+/// writes, so an invalid/unknown ref aborts before any other ref is touched.
+async fn resolve_expire_refs<C: ConnectionTrait>(
+    conn: &C,
+    options: &ExpireCliOptions,
+) -> CliResult<Vec<String>> {
+    if options.all {
+        let rows = conn
+            .query_all(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT DISTINCT ref_name FROM reflog;".to_string(),
+            ))
+            .await
+            .map_err(|e| {
+                CliError::fatal(format!("failed to enumerate reflog refs: {e}"))
+                    .with_stable_code(StableErrorCode::IoReadFailed)
+            })?;
+        let mut refs: Vec<String> = rows
+            .iter()
+            .filter_map(|row| row.try_get::<String>("", "ref_name").ok())
+            .collect();
+        refs.sort();
+        refs.dedup();
+        return Ok(refs);
+    }
+
+    if options.refs.is_empty() {
+        return Err(
+            CliError::fatal("reflog expire: no reflog specified to delete")
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_exit_code(128)
+                .with_hint("specify one or more refs, or use --all"),
+        );
+    }
+
+    let mut refs = Vec::new();
+    for raw in &options.refs {
+        validate_expire_ref(raw)?;
+        let normalized = parse_ref_name(raw).await;
+        let exists = Reflog::find_one(conn, &normalized)
+            .await
+            .map_err(|e| {
+                CliError::fatal(format!("failed to read reflog for '{normalized}': {e}"))
+                    .with_stable_code(StableErrorCode::IoReadFailed)
+            })?
+            .is_some();
+        if !exists {
+            return Err(
+                CliError::failure(format!("reflog for '{normalized}' not found"))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget),
+            );
+        }
+        refs.push(normalized);
+    }
+    refs.sort();
+    refs.dedup();
+    Ok(refs)
+}
+
+async fn handle_expire(options: ExpireCliOptions, output: &OutputConfig) -> CliResult<()> {
+    let db = get_db_conn_instance().await;
+
+    let (default_expire, default_unreachable) = expire_defaults_with_conn(&db)
+        .await
+        .map_err(map_reflog_error)?;
+    let expire = match &options.expire {
+        Some(raw) => parse_cli_expire_cutoff(raw)?,
+        None => default_expire,
+    };
+    let expire_unreachable = match &options.expire_unreachable {
+        Some(raw) => parse_cli_expire_cutoff(raw)?,
+        None => default_unreachable,
+    };
+
+    let expire_options = ExpireOptions {
+        expire,
+        expire_unreachable,
+        rewrite: options.rewrite,
+        updateref: options.updateref,
+        stale_fix: options.stale_fix,
+        dry_run: options.dry_run,
+    };
+
+    // Phase A: resolve + validate (no writes).
+    let refs = resolve_expire_refs(&db, &options).await?;
+
+    // Phase B: expire each ref in its own transaction.
+    let mut results = Vec::new();
+    for ref_name in &refs {
+        let result = expire_reflog(
+            &db,
+            ref_name,
+            &expire_options,
+            load_commit_parents,
+            oid_is_commit,
+        )
+        .await
+        .map_err(map_reflog_error)?;
+        results.push(result);
+    }
+
+    render_expire(&results, options.verbose, output)
+}
+
+fn render_expire(results: &[ExpireResult], verbose: bool, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("reflog.expire", &results.to_vec(), output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+    for result in results {
+        if verbose {
+            for entry in &result.pruned_entries {
+                let reason = format!("{:?}", entry.reason).to_lowercase();
+                println!(
+                    "{reason} {}@{{{}}} {}..{}",
+                    result.ref_name,
+                    entry.index,
+                    short_oid(&entry.old_oid),
+                    short_oid(&entry.new_oid),
+                );
+            }
+        }
+        if result.pruned > 0 {
+            println!(
+                "{}: pruned {} of {} reflog entries",
+                result.ref_name, result.pruned, result.scanned
+            );
+        }
     }
     Ok(())
 }

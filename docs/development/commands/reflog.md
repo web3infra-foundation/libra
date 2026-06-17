@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`show` / `delete` / `exists` 与 rich show filters 已支持；`reflog expire` 尚未公开。
+- 兼容级别：`supported`。`show` / `delete` / `exists` / `expire` 子命令均已支持；`expire` 按时间 + 可达性 + `--stale-fix` 清理（`--all`/`--expire`/`--expire-unreachable`/`--rewrite`/`--updateref`/`-n`/`-v`），读取 `gc.reflogExpire`/`gc.reflogExpireUnreachable`（90/30 天默认，只读不写）。刻意差异：无 ref 的 expire 直接报错（退出码 128）而非 Git 的静默 no-op；`--stale-fix` 仅检查 new 值是否能加载为 commit（无传递性对象遍历）；`--updateref` 跳过符号 `HEAD` 与 remote-tracking ref。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -39,7 +39,7 @@ flowchart TD
 - 2026-01-10 `7d256d09`（`feat(reflog): support --grep, --since, --until, --stat, --patch/-p, --author, -n/--number params in reflog show (#112)`）：基础实现节点：support --grep, --since, --until, --stat, --patch/-p, --author, -n/--number params in reflog show (#112)；当前实现的主要轮廓可追溯到该提交。
 - 2026-05-15 `75734b60`（`feat(reflog): structure command output`）：功能演进：structure command output；该节点扩展了当前命令可用的参数或行为。
 - 2026-05-17 `492feff7`（`test(command/reflog): pin Display for 4 FormatterKind variants (v0.17.366)`）：测试契约：pin Display for 4 FormatterKind variants (v0.17.366)；相关行为已有回归守卫，后续变更需要继续满足。
-- 2026-06-06 `aac5351a`（`feat(reflog): implement reflog expire (time/reachability/stale-fix) (#1391)`）：历史上的 expire 探索节点；当前 main 的 `src/command/reflog.rs` 子命令枚举仅有 `show`/`delete`/`exists`，并不存在 `expire`，故该提交未反映在当前命令的公开参数中。
+- 2026-06-06 `aac5351a`（`feat(reflog): implement reflog expire (time/reachability/stale-fix) (#1391)`）：新增 `reflog expire` 子命令。该改动曾被一次 reconcile 丢弃，2026-06-18 重新应用：`src/internal/reflog.rs` 提供 `ExpireCutoff`/`ExpireOptions`/`ExpireResult` 与 `expire_reflog`/`expire_reflog_with_conn`/`collect_reachable`/`parse_expire_cutoff`/`expire_defaults_with_conn`（注入式 `load_parents`/`is_commit` loader，便于单测合成图），`src/command/reflog.rs` 提供两阶段（先校验全部 ref 再逐 ref 事务清理）的 `Expire` 子命令。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
 ## 当前状态
@@ -47,14 +47,14 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/reflog.md`。
 - Synopsis：`libra reflog show [<ref_name>] [--pretty <format>] [--since <date>] [--until <date>] [--grep <pattern>] [--author <pattern>] [-n <N>] [-p/--patch] [--stat]` ｜ `libra reflog delete <selectors>...` ｜ `libra reflog exists <ref_name>`。
-- 公开参数/子命令包括：`show [<ref_name>]`（`--pretty <format>`、`--since <date>`、`--until <date>`、`--grep <pattern>`、`--author <pattern>`、`-n, --number <N>`、`-p, --patch`、`--stat`）、`delete <selectors>...`、`exists <ref_name>`。
+- 公开参数/子命令包括：`show [<ref_name>]`（`--pretty <format>`、`--since <date>`、`--until <date>`、`--grep <pattern>`、`--author <pattern>`、`-n, --number <N>`、`-p, --patch`、`--stat`）、`delete <selectors>...`、`exists <ref_name>`、`expire`（`--all`、`--expire <time>`、`--expire-unreachable <time>`、`--rewrite`、`--updateref`、`--stale-fix`、`-n/--dry-run`、`-v/--verbose`、`<refs>...`）。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容差异项 | Expire old entries | 原始对照：不支持；相关参数/替代：reflog expire；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | `--stale-fix` 传递性对象遍历 | 仅检查 new 值是否能加载为 commit；Git 的 `commit → tree → blob` 完整性遍历交给 `fsck` / 未来的 `gc`。 |
 
 ## 维护要求
 

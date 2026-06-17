@@ -94,6 +94,51 @@ libra reflog exists HEAD
 libra reflog exists main
 ```
 
+### Subcommand: `expire`
+
+Prune old or unreachable reflog entries from the SQLite `reflog` table (the
+analogue of `git reflog expire`). Cleanup for each ref runs in a single
+transaction and rolls back on any error.
+
+| Flag / Argument | Description |
+|-----------------|-------------|
+| `--all` | Process every ref that has reflog entries instead of explicit `<refs>`. |
+| `--expire=<time>` | Prune entries older than `<time>`. Accepts `never`, `now`, `all`, a bare number of days, or a date/relative form like `"10 days ago"`. Defaults to `gc.reflogExpire` (90 days). |
+| `--expire-unreachable=<time>` | Prune *unreachable* entries older than `<time>`. Defaults to `gc.reflogExpireUnreachable` (30 days). |
+| `--rewrite` | Keep the `old`/`new` chain continuous across pruned entries. |
+| `--updateref` | Move a pruned local branch ref to its newest surviving entry. `refs/heads/*` only — symbolic `HEAD` and remote-tracking refs are skipped (Git ignores `--updateref` for symbolic references). |
+| `--stale-fix` | Prune entries whose new value no longer loads as a commit object. Simplified relative to Git: only the entry's `new` OID is checked, with no transitive `commit → tree → blob` walk. |
+| `-n`, `--dry-run` | Compute and print the plan without changing the database. |
+| `-v`, `--verbose` | Print each pruned entry (`<reason> <ref>@{i} <old>..<new>`). |
+| `<refs>...` | Reflog refs to expire when `--all` is not given. |
+
+Time values are normalised to an absolute cutoff: `never` disables that
+dimension, `all` matches every entry regardless of timestamp, and any other
+value matches entries strictly older than the cutoff.
+
+> **Intentional differences from Git:**
+> - Running `expire` with neither `<refs>` nor `--all` is a hard error (exit `128`,
+>   "no reflog specified to delete") rather than Git's silent no-op, so automation
+>   never mistakes "nothing specified" for "cleaned up".
+> - `--stale-fix` only verifies that each entry's new value loads as a commit; it
+>   does not perform Git's full transitive object-integrity walk (that belongs to
+>   `fsck` / a future `gc`).
+> - `--updateref` never moves symbolic `HEAD` or remote-tracking refs.
+>
+> Libra has no `gc` command; the `gc.reflogExpire` / `gc.reflogExpireUnreachable`
+> config keys are **read** (never written) to supply the 90/30-day defaults.
+
+```bash
+# Preview which entries would be pruned across all refs
+libra reflog expire --all --dry-run
+
+# Prune every time-expired entry now
+libra reflog expire --expire=now --all
+
+# Expire a single branch's reflog with the configured defaults
+libra reflog expire refs/heads/main
+```
+
 ## Common Commands
 
 ```bash
@@ -262,7 +307,7 @@ When `--patch` or `--stat` is set, the corresponding entry fields contain the re
 
 ### Why subcommand-based instead of Git's implicit `show`?
 
-Git treats `git reflog` as a shorthand for `git reflog show`, and its subcommands (`expire`, `delete`, `exists`) are somewhat hidden. Libra makes all operations explicit subcommands: `show`, `delete`, and `exists`. This eliminates ambiguity for both human users and AI agents, making the command surface fully discoverable through `--help`. It also aligns with Libra's general principle that every operation should be a named subcommand rather than an implicit default.
+Git treats `git reflog` as a shorthand for `git reflog show`, and its subcommands (`expire`, `delete`, `exists`) are somewhat hidden. Libra makes all operations explicit subcommands: `show`, `delete`, `exists`, and `expire`. This eliminates ambiguity for both human users and AI agents, making the command surface fully discoverable through `--help`. It also aligns with Libra's general principle that every operation should be a named subcommand rather than an implicit default.
 
 ### Why `--grep` and `--author` filtering?
 
@@ -296,7 +341,10 @@ Git stores reflogs as append-only text files under `.git/logs/`. This is simple 
 | Show stat | `--stat` | `--stat` (via log options) | `--stat` on `op show` |
 | Delete entries | `reflog delete <selector>...` | `reflog delete <ref@{N}>` | N/A (operation log is append-only) |
 | Check existence | `reflog exists <ref>` | `reflog exists <ref>` | N/A |
-| Expire old entries | Not supported | `reflog expire` | N/A (GC handles cleanup) |
+| Expire old entries | `reflog expire` (time / reachability / `--stale-fix`) | `reflog expire` | N/A (GC handles cleanup) |
+| No-ref expire | Explicit error (exit 128) — intentional difference | Silent no-op | N/A |
+| `--updateref` on `HEAD` / remotes | Skipped (symbolic refs) | Skipped (symbolic refs) | N/A |
+| `gc.reflog*` config | Read-only (no `gc` command) | Read + written by `gc` | N/A |
 | Storage | SQLite table | Flat files (`.git/logs/`) | Operation log (custom format) |
 
 Note: jj does not have a reflog. Instead, it maintains an operation log (`jj op log`) that records every repository mutation. This provides similar forensic capabilities but at the operation level rather than the reference level.
