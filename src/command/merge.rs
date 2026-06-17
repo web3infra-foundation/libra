@@ -296,6 +296,8 @@ pub async fn execute(args: MergeArgs) {
 /// Returns [`CliError`] when the target is invalid, histories are unrelated,
 /// conflicts need resolution, objects cannot be read, or HEAD/worktree updates fail.
 pub async fn execute_safe(args: MergeArgs, output: &OutputConfig) -> CliResult<()> {
+    // Refuse to start a merge while a cherry-pick sequence is in progress.
+    crate::command::cherry_pick::ensure_no_cherry_pick_in_progress().await?;
     let result = run_merge(args, output).await.map_err(merge_error_to_cli)?;
     render_merge_output(&result, output)
 }
