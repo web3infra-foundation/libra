@@ -9,7 +9,14 @@ pub(crate) fn assert_rev_list_readback(
         .context("write rev-list second fixture")?;
     ctx.command(&["add", "docs/rev-list.md"], repo.to_path_buf(), true)?;
     ctx.command(
-        &["commit", "-m", "test: rev-list second", "--no-verify"],
+        &[
+            "commit",
+            "-m",
+            "test: rev-list second",
+            "--author",
+            "Rev List Author <rev-list@example.com>",
+            "--no-verify",
+        ],
         repo.to_path_buf(),
         true,
     )?;
@@ -167,6 +174,24 @@ pub(crate) fn assert_rev_list_readback(
     )?;
     if stdout_trim(&rev_first_parent) != "2" {
         bail!("rev-list --first-parent HEAD returned unexpected count in linear history");
+    }
+
+    let rev_author = ctx.command(
+        &["rev-list", "--author", "rev-list@example.com", "HEAD"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    if stdout_trim(&rev_author) != latest_id {
+        bail!("rev-list --author did not return only the matching author commit");
+    }
+
+    let rev_author_missing = ctx.command(
+        &["rev-list", "--count", "--author", "missing-author", "HEAD"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    if stdout_trim(&rev_author_missing) != "0" {
+        bail!("rev-list --count --author missing-author returned unexpected count");
     }
 
     let rev_no_merges = ctx.command(

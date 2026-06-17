@@ -165,6 +165,7 @@ fn test_rev_list_help_lists_examples_banner() {
         "libra rev-list --merges HEAD",
         "libra rev-list --max-parents 0 HEAD",
         "libra rev-list --first-parent HEAD",
+        "libra rev-list --author alice HEAD",
         "libra rev-list --parents HEAD",
         "libra rev-list --timestamp HEAD",
         "libra rev-list main",

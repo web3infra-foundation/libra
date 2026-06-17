@@ -43,6 +43,9 @@ mod rev_list_date_filter_test;
 #[path = "rev_list_first_parent_test.rs"]
 mod rev_list_first_parent_test;
 
+#[path = "rev_list_author_filter_test.rs"]
+mod rev_list_author_filter_test;
+
 #[test]
 fn test_rev_list_defaults_to_head() {
     let repo = create_committed_repo_via_cli();

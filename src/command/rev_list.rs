@@ -18,8 +18,8 @@ mod rev_list_spec;
 #[cfg(test)]
 use rev_list_filter::ParentCountFilter;
 use rev_list_filter::{
-    commit_matches_parent_count, commit_matches_time_window, parent_count_filter,
-    rev_list_time_window, sort_rev_list_commits,
+    commit_matches_author, commit_matches_parent_count, commit_matches_time_window,
+    parent_count_filter, rev_list_author_filter, rev_list_time_window, sort_rev_list_commits,
 };
 use rev_list_output::{REV_LIST_EXAMPLES, RevListEntry, RevListOutput, emit_human_rev_list};
 #[cfg(test)]
@@ -52,6 +52,10 @@ pub struct RevListArgs {
     /// Follow only the first parent of merge commits
     #[clap(long = "first-parent")]
     pub first_parent: bool,
+
+    /// Filter commits by author name or email
+    #[clap(long, value_name = "PATTERN")]
+    pub author: Option<String>,
 
     /// Show commits more recent than DATE
     #[clap(long, visible_alias = "after", value_name = "DATE")]
@@ -112,10 +116,12 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
     let mut commits = selection.commits;
     sort_rev_list_commits(&mut commits);
     let time_window = rev_list_time_window(args)?;
+    let author_filter = rev_list_author_filter(args);
     let parent_filter = parent_count_filter(args);
 
     let commits = commits
         .into_iter()
+        .filter(|commit| commit_matches_author(commit, author_filter.as_deref()))
         .filter(|commit| commit_matches_time_window(commit, time_window))
         .filter(|commit| commit_matches_parent_count(commit, parent_filter))
         .skip(args.skip)
@@ -159,6 +165,7 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         parents: args.parents,
         timestamp: args.timestamp,
         first_parent: args.first_parent,
+        author: args.author.clone(),
         since: args.since.clone(),
         until: args.until.clone(),
         merges: args.merges,

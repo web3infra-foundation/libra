@@ -47,6 +47,25 @@ pub(super) fn rev_list_time_window(args: &RevListArgs) -> CliResult<RevListTimeW
     })
 }
 
+pub(super) fn rev_list_author_filter(args: &RevListArgs) -> Option<String> {
+    args.author.as_ref().map(|pattern| pattern.to_lowercase())
+}
+
+pub(super) fn commit_matches_author(commit: &Commit, author_filter: Option<&str>) -> bool {
+    let Some(author_filter) = author_filter else {
+        return true;
+    };
+    if author_filter.is_empty() {
+        return true;
+    }
+
+    let author_name = commit.author.name.to_lowercase();
+    let author_email = commit.author.email.to_lowercase();
+    author_name.contains(author_filter)
+        || author_email.contains(author_filter)
+        || format!("{author_name} <{author_email}>").contains(author_filter)
+}
+
 pub(super) fn commit_matches_parent_count(commit: &Commit, filter: ParentCountFilter) -> bool {
     let parent_count = commit.parent_commit_ids.len();
     parent_count >= filter.min && filter.max.is_none_or(|max| parent_count <= max)
