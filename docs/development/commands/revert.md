@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra revert` 的目标是生成抵消已有提交的反向变更，并保留冲突处理和提交控制的清晰边界。当前实现支持单父提交的反向变更、no-commit 流程和稳定错误输出，同时把 merge commit mainline revert（`-m/--mainline`，当前直接拒绝）、sequencer continue/abort/skip 与自定义策略列为未完成。
+`libra revert` 的目标是生成抵消已有提交的反向变更，并保留冲突处理和提交控制的清晰边界。当前实现支持单父提交的反向变更、merge commit mainline revert（`-m/--mainline`）、no-commit 流程和稳定错误输出，同时把 sequencer continue/abort/skip 与自定义策略列为未完成。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。单提交 revert 与 `-n/--no-commit` 已支持；edit/mainline/sequencer/strategy surface 尚未公开。
+- 兼容级别：`partial`。单提交 revert、`-n/--no-commit` 与 `-m/--mainline`（merge commit revert）已支持；edit/sequencer/strategy surface 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -36,16 +36,17 @@ flowchart TD
 ## 实现历史
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
-- 基础实现节点：当前 HEAD 仅支持单父提交的反向变更（`<commit>` + `-n/--no-commit`），merge commit 仍在 `revert_single_commit` 中被 `RevertError::MergeCommitUnsupported` 拒绝，尚未引入 `-m/--mainline`。
+- 基础实现节点：当前 HEAD 支持单父提交的反向变更（`<commit>` + `-n/--no-commit`），并通过 `revert_single_commit` 中的 mainline 选择逻辑支持 merge commit revert（`-m/--mainline`）。
 - 2026-05-21 `752c516f`（`test(revert): pin RevertError Display + stable_code surfaces (v0.17.703)`）：测试契约：pin RevertError Display + stable_code surfaces (v0.17.703)；相关行为已有回归守卫，后续变更需要继续满足。
+- 2026-06-18：恢复 `-m/--mainline` merge commit revert（原始内容由一次 reconcile 丢弃，仅遗留提交消息），重新应用 `b5af38a` 的源码、错误变体（`MainlineRequired` / `MainlineForNonMerge` / `InvalidMainline`，全部 exit 128）、测试与文档。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
 ## 当前状态
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/revert.md`。
-- Synopsis：`libra revert [-n | --no-commit] [--json] [--quiet] <commit>`。
-- 公开参数/子命令包括：`<commit>`（位置参数，必填）、`-n, --no-commit`、`--json`、`--quiet`。
+- Synopsis：`libra revert [-n | --no-commit] [-m | --mainline <parent-number>] [--json] [--quiet] <commit>`。
+- 公开参数/子命令包括：`<commit>`（位置参数，必填）、`-n, --no-commit`、`-m, --mainline <parent-number>`、`--json`、`--quiet`。
 
 
 ## 还未实现的功能
@@ -53,7 +54,6 @@ flowchart TD
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | 兼容差异项 | 编辑消息 | 原始对照：--edit / --no-edit；相关参数/替代：不适用；当前说明：不支持 (use -n then commit -m)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 主线父提交 | 原始对照：--mainline <n> / -m <n>；相关参数/替代：不适用；当前说明：不支持 (merge commits rejected)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 冲突后继续 | 原始对照：--continue；相关参数/替代：不适用；当前说明：不支持 (resolve then commit)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 中止进行中操作 | 原始对照：--abort；相关参数/替代：不适用；当前说明：不支持 (no sequencer state)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | Skip 当前 commit | 原始对照：--skip；相关参数/替代：不适用；当前说明：不支持。 后续实现时需要补对应回归测试并同步兼容矩阵。 |

@@ -153,6 +153,7 @@ async fn test_basic_revert() {
     revert::execute(revert::RevertArgs {
         commit: "HEAD".to_string(),
         no_commit: false,
+        mainline: None,
     })
     .await;
 
@@ -266,6 +267,7 @@ async fn test_revert_no_commit() {
     revert::execute(revert::RevertArgs {
         commit: "HEAD".to_string(),
         no_commit: true,
+        mainline: None,
     })
     .await;
 
@@ -345,6 +347,7 @@ async fn test_revert_root_commit() {
     revert::execute(revert::RevertArgs {
         commit: root_hash,
         no_commit: false,
+        mainline: None,
     })
     .await;
 
@@ -467,8 +470,104 @@ async fn test_revert_errors() {
     revert::execute(revert::RevertArgs {
         commit: "nonexistent".to_string(),
         no_commit: false,
+        mainline: None,
     })
     .await;
 
     println!("Error handling test completed");
+}
+
+// ---------------------------------------------------------------------------
+// Merge-commit revert via -m/--mainline.
+// ---------------------------------------------------------------------------
+
+fn commit_file_revert(repo: &std::path::Path, file: &str, content: &str, msg: &str) {
+    fs::write(repo.join(file), content).expect("write file");
+    assert_cli_success(&run_libra_command(&["add", file], repo), "add file");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", msg, "--no-verify"], repo),
+        "commit file",
+    );
+}
+
+/// HEAD on main is a 2-parent merge of `feature` (added feature.txt) into main
+/// (added mainfile.txt): parent 1 = main pre-merge, parent 2 = feature.
+fn build_revert_merge_repo() -> tempfile::TempDir {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], p),
+        "branch feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], p),
+        "checkout feature",
+    );
+    commit_file_revert(p, "feature.txt", "feature\n", "feature");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], p),
+        "checkout main",
+    );
+    commit_file_revert(p, "mainfile.txt", "main\n", "main change");
+    assert_cli_success(
+        &run_libra_command(&["merge", "feature"], p),
+        "merge feature",
+    );
+    repo
+}
+
+#[test]
+#[serial]
+fn test_revert_merge_without_mainline_errors_128() {
+    let repo = build_revert_merge_repo();
+    let out = run_libra_command(&["revert", "HEAD"], repo.path());
+    assert_eq!(out.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("is a merge but no -m option was given"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_revert_merge_with_mainline_removes_feature_side() {
+    let repo = build_revert_merge_repo();
+    let p = repo.path();
+    assert!(p.join("feature.txt").exists());
+    assert!(p.join("mainfile.txt").exists());
+    let out = run_libra_command(&["revert", "-m", "1", "HEAD"], p);
+    assert_cli_success(&out, "revert -m 1 HEAD");
+    // Reverting relative to parent 1 (main pre-merge) undoes feature's addition.
+    assert!(
+        !p.join("feature.txt").exists(),
+        "feature.txt should be reverted away"
+    );
+    assert!(p.join("mainfile.txt").exists(), "mainfile.txt stays");
+}
+
+#[test]
+#[serial]
+fn test_revert_mainline_on_non_merge_errors_128() {
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["revert", "-m", "1", "HEAD"], repo.path());
+    assert_eq!(out.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("is not a merge"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_revert_mainline_out_of_range_errors_128() {
+    let repo = build_revert_merge_repo();
+    let out = run_libra_command(&["revert", "-m", "5", "HEAD"], repo.path());
+    assert_eq!(out.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does not have a parent number 5"),
+        "unexpected stderr: {stderr}"
+    );
 }

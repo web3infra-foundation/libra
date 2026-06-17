@@ -65,7 +65,7 @@ batch document.
 | diff | partial | staged/old-new/pathspec/name/stat/numstat/output/algorithm supported; positional revspec, summary, word/binary diff, whitespace, and external diff are not exposed |
 | grep | partial | tracked/index/tree search with common match/count/list/line flags supported; context, extended/Perl regex, untracked/no-index, and binary controls are not exposed |
 | blame | partial | file blame with numeric `-L` ranges and ignore-rev inputs supported; porcelain, reverse, email, whitespace, incremental, and copy/move detection are not exposed |
-| revert | partial | single-commit revert and `-n/--no-commit` supported; edit/mainline/sequencer/strategy surface remains incomplete |
+| revert | partial | single-commit revert, `-n/--no-commit`, and `-m/--mainline` merge-commit revert supported; edit/sequencer/strategy surface remains incomplete |
 | remote | partial | add/remove/rename/list/get-url/set-url/prune supported; detailed `remote show <name>` and `remote update` are not exposed |
 | hash-object | partial | Blob hashing for files and `--stdin`; `-w` writes blob objects; `--path` and `--no-filters` are accepted for raw-byte hashing. Other object types and advanced Git hash-object flags are unsupported |
 | open | supported | |
