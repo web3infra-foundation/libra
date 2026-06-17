@@ -1,6 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
+use serde::Serialize;
 
 use crate::{
     command::{load_object, log},
@@ -14,6 +15,14 @@ pub(super) struct RevListSelection {
     pub(super) input: String,
     pub(super) inputs: Vec<String>,
     pub(super) commits: Vec<Commit>,
+    pub(super) sides: HashMap<String, RevListSide>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum RevListSide {
+    Left,
+    Right,
 }
 
 enum RevisionTerm<'a> {
@@ -31,6 +40,7 @@ pub(super) async fn resolve_revision_selection(
     let mut included = Vec::<Commit>::new();
     let mut included_ids = HashSet::<String>::new();
     let mut excluded = HashSet::<String>::new();
+    let mut sides = HashMap::<String, RevListSide>::new();
 
     for input in &input_terms {
         match parse_revision_term(input) {
@@ -49,9 +59,27 @@ pub(super) async fn resolve_revision_selection(
                 let right_commits = reachable_commits(right, first_parent).await?;
                 let left_ids = commit_id_set(&left_commits);
                 let right_ids = commit_id_set(&right_commits);
-                excluded.extend(left_ids.intersection(&right_ids).cloned());
-                insert_commits(left_commits, &mut included, &mut included_ids);
-                insert_commits(right_commits, &mut included, &mut included_ids);
+                let common_ids = left_ids
+                    .intersection(&right_ids)
+                    .cloned()
+                    .collect::<HashSet<_>>();
+                excluded.extend(common_ids.iter().cloned());
+                insert_commits_with_side(
+                    left_commits,
+                    RevListSide::Left,
+                    &common_ids,
+                    &mut included,
+                    &mut included_ids,
+                    &mut sides,
+                );
+                insert_commits_with_side(
+                    right_commits,
+                    RevListSide::Right,
+                    &common_ids,
+                    &mut included,
+                    &mut included_ids,
+                    &mut sides,
+                );
             }
         }
     }
@@ -66,6 +94,7 @@ pub(super) async fn resolve_revision_selection(
         input,
         inputs: input_terms,
         commits,
+        sides,
     })
 }
 
@@ -175,6 +204,25 @@ fn insert_commits(
 ) {
     for commit in commits {
         if included_ids.insert(commit.id.to_string()) {
+            included.push(commit);
+        }
+    }
+}
+
+fn insert_commits_with_side(
+    commits: Vec<Commit>,
+    side: RevListSide,
+    common_ids: &HashSet<String>,
+    included: &mut Vec<Commit>,
+    included_ids: &mut HashSet<String>,
+    sides: &mut HashMap<String, RevListSide>,
+) {
+    for commit in commits {
+        let id = commit.id.to_string();
+        if !common_ids.contains(&id) {
+            sides.entry(id.clone()).or_insert(side);
+        }
+        if included_ids.insert(id) {
             included.push(commit);
         }
     }

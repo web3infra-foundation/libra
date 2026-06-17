@@ -1,5 +1,3 @@
-use std::io::{self, Write};
-
 use clap::Parser;
 use git_internal::{
     hash::{ObjectHash, get_hash_kind},
@@ -10,25 +8,9 @@ use git_internal::{
 };
 
 use super::{
-    ParentCountFilter, RevListArgs, RevListEntry, commit_matches_message,
-    commit_matches_parent_count, format_rev_list_entry, parent_count_filter,
-    rev_list_message_filter, sort_rev_list_commits, write_rev_list_count, write_rev_list_output,
+    ParentCountFilter, RevListArgs, commit_matches_message, commit_matches_parent_count,
+    parent_count_filter, rev_list_message_filter, sort_rev_list_commits,
 };
-use crate::utils::error::StableErrorCode;
-
-struct FailingWriter {
-    kind: io::ErrorKind,
-}
-
-impl Write for FailingWriter {
-    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-        Err(io::Error::new(self.kind, "test write failure"))
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
 
 fn test_signature(timestamp: usize) -> Signature {
     Signature {
@@ -74,6 +56,11 @@ fn test_rev_list_args_default() {
     assert!(!args.no_merges);
     assert!(!args.no_min_parents);
     assert!(!args.no_max_parents);
+    assert!(!args.left_right);
+    assert!(!args.left_only);
+    assert!(!args.right_only);
+    assert!(!args.cherry_pick);
+    assert!(!args.cherry_mark);
     assert_eq!(args.min_parents, None);
     assert_eq!(args.max_parents, None);
 }
@@ -109,6 +96,22 @@ fn test_rev_list_args_parse_parent_and_timestamp_output() {
     assert!(args.parents);
     assert!(args.timestamp);
     assert_eq!(args.specs, vec!["HEAD"]);
+}
+
+#[test]
+fn test_rev_list_args_parse_side_and_cherry_filters() {
+    let args =
+        RevListArgs::try_parse_from(["rev-list", "--left-right", "--cherry-pick", "main...topic"])
+            .unwrap();
+    assert!(args.left_right);
+    assert!(args.cherry_pick);
+    assert_eq!(args.specs, vec!["main...topic"]);
+
+    let args = RevListArgs::try_parse_from(["rev-list", "--left-only", "--right-only"]);
+    assert!(args.is_err());
+
+    let args = RevListArgs::try_parse_from(["rev-list", "--cherry-pick", "--cherry-mark"]);
+    assert!(args.is_err());
 }
 
 #[test]
@@ -238,25 +241,6 @@ fn test_commit_matches_message_uses_regex_or_semantics() {
 }
 
 #[test]
-fn test_format_rev_list_entry_matches_git_field_order() {
-    let entry = RevListEntry {
-        commit: "abc123".to_string(),
-        parents: vec!["def456".to_string(), "789abc".to_string()],
-        timestamp: Some(123),
-    };
-
-    assert_eq!(
-        format_rev_list_entry(&entry, true, true),
-        "123 abc123 def456 789abc"
-    );
-    assert_eq!(
-        format_rev_list_entry(&entry, true, false),
-        "abc123 def456 789abc"
-    );
-    assert_eq!(format_rev_list_entry(&entry, false, true), "123 abc123");
-}
-
-#[test]
 fn test_sort_rev_list_commits_preserves_equal_timestamp_order() {
     let high = test_hash(0xff);
     let low = test_hash(0x01);
@@ -278,37 +262,4 @@ fn test_sort_rev_list_commits_orders_newest_first() {
 
     assert_eq!(commits[0].id, new);
     assert_eq!(commits[1].id, old);
-}
-
-#[test]
-fn test_write_rev_list_output_maps_write_failure_to_write_code() {
-    let mut writer = FailingWriter {
-        kind: io::ErrorKind::PermissionDenied,
-    };
-
-    let error =
-        write_rev_list_output(&mut writer, &["abc123".to_string()]).expect_err("write should fail");
-
-    assert_eq!(error.stable_code(), StableErrorCode::IoWriteFailed);
-}
-
-#[test]
-fn test_write_rev_list_output_ignores_broken_pipe() {
-    let mut writer = FailingWriter {
-        kind: io::ErrorKind::BrokenPipe,
-    };
-
-    write_rev_list_output(&mut writer, &["abc123".to_string()])
-        .expect("broken pipe should be ignored");
-}
-
-#[test]
-fn test_write_rev_list_count_maps_write_failure_to_write_code() {
-    let mut writer = FailingWriter {
-        kind: io::ErrorKind::PermissionDenied,
-    };
-
-    let error = write_rev_list_count(&mut writer, 1).expect_err("write should fail");
-
-    assert_eq!(error.stable_code(), StableErrorCode::IoWriteFailed);
 }

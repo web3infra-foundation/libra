@@ -1,4 +1,4 @@
-use super::prelude::*;
+use super::{object_readback_rev_list_cherry::assert_rev_list_cherry_filters, prelude::*};
 
 pub(crate) fn assert_rev_list_filters(
     ctx: &mut ScenarioCtx<'_>,
@@ -238,6 +238,8 @@ pub(crate) fn assert_rev_list_filters(
     if stdout_trim(&rev_merge_count) != "0" {
         bail!("rev-list --count --merges HEAD returned unexpected count");
     }
+
+    assert_rev_list_cherry_filters(ctx, repo, latest_id)?;
 
     Ok(())
 }

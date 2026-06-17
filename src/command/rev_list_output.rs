@@ -2,6 +2,7 @@ use std::io::Write;
 
 use serde::Serialize;
 
+use super::rev_list_spec::RevListSide;
 use crate::utils::{
     error::{CliError, CliResult, StableErrorCode},
     output::OutputConfig,
@@ -38,6 +39,10 @@ EXAMPLES:
     libra rev-list --grep 'fix' HEAD
                                     Filter commits by message regex
     libra rev-list HEAD -- src/     Limit commits to changes under src/
+    libra rev-list --left-right main...feature
+                                    Mark symmetric-difference sides
+    libra rev-list --cherry-pick main...feature
+                                    Omit patch-equivalent commits across sides
     libra rev-list --parents HEAD   Include parent commit IDs on each line
     libra rev-list --timestamp HEAD Prefix each line with the committer timestamp
     libra rev-list main             Walk ancestry from refs/heads/main
@@ -48,6 +53,10 @@ EXAMPLES:
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct RevListEntry {
     pub(super) commit: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) side: Option<RevListSide>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) cherry_equivalent: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) parents: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -62,6 +71,8 @@ pub(super) struct RevListOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) entries: Option<Vec<RevListEntry>>,
     pub(super) total: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) count_fields: Vec<usize>,
     pub(super) count_only: bool,
     pub(super) parents: bool,
     pub(super) timestamp: bool,
@@ -70,6 +81,11 @@ pub(super) struct RevListOutput {
     pub(super) committer: Option<String>,
     pub(super) grep: Vec<String>,
     pub(super) pathspecs: Vec<String>,
+    pub(super) left_right: bool,
+    pub(super) left_only: bool,
+    pub(super) right_only: bool,
+    pub(super) cherry_pick: bool,
+    pub(super) cherry_mark: bool,
     pub(super) since: Option<String>,
     pub(super) until: Option<String>,
     pub(super) merges: bool,
@@ -87,7 +103,15 @@ impl RevListOutput {
         if let Some(entries) = &self.entries {
             return entries
                 .iter()
-                .map(|entry| format_rev_list_entry(entry, self.parents, self.timestamp))
+                .map(|entry| {
+                    format_rev_list_entry(
+                        entry,
+                        self.parents,
+                        self.timestamp,
+                        self.left_right,
+                        self.cherry_mark,
+                    )
+                })
                 .collect();
         }
 
@@ -101,7 +125,7 @@ pub(super) fn emit_human_rev_list(output: &OutputConfig, result: &RevListOutput)
     } else if result.count_only {
         let stdout = std::io::stdout();
         let mut writer = stdout.lock();
-        write_rev_list_count(&mut writer, result.total)
+        write_rev_list_count_fields(&mut writer, &result.count_fields)
     } else {
         let stdout = std::io::stdout();
         let mut writer = stdout.lock();
@@ -109,8 +133,21 @@ pub(super) fn emit_human_rev_list(output: &OutputConfig, result: &RevListOutput)
     }
 }
 
+#[cfg(test)]
 pub(super) fn write_rev_list_count<W: Write>(writer: &mut W, total: usize) -> CliResult<()> {
-    match writeln!(writer, "{total}") {
+    write_rev_list_count_fields(writer, &[total])
+}
+
+pub(super) fn write_rev_list_count_fields<W: Write>(
+    writer: &mut W,
+    fields: &[usize],
+) -> CliResult<()> {
+    let count = fields
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\t");
+    match writeln!(writer, "{count}") {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         Err(error) => Err(
@@ -140,14 +177,43 @@ pub(super) fn format_rev_list_entry(
     entry: &RevListEntry,
     show_parents: bool,
     show_timestamp: bool,
+    show_left_right: bool,
+    show_cherry_mark: bool,
 ) -> String {
     let mut fields = Vec::new();
     if show_timestamp && let Some(timestamp) = entry.timestamp {
         fields.push(timestamp.to_string());
     }
-    fields.push(entry.commit.clone());
+    fields.push(format_entry_commit(
+        entry,
+        show_left_right,
+        show_cherry_mark,
+    ));
     if show_parents {
         fields.extend(entry.parents.iter().cloned());
     }
     fields.join(" ")
+}
+
+fn format_entry_commit(
+    entry: &RevListEntry,
+    show_left_right: bool,
+    show_cherry_mark: bool,
+) -> String {
+    let marker = if show_cherry_mark {
+        if entry.cherry_equivalent.unwrap_or(false) {
+            "="
+        } else {
+            "+"
+        }
+    } else if show_left_right {
+        match entry.side {
+            Some(RevListSide::Left) => "<",
+            Some(RevListSide::Right) => ">",
+            None => "",
+        }
+    } else {
+        ""
+    };
+    format!("{marker}{}", entry.commit)
 }

@@ -8,6 +8,8 @@ use crate::utils::{
     util,
 };
 
+#[path = "rev_list_cherry.rs"]
+mod rev_list_cherry;
 #[path = "rev_list_filter.rs"]
 mod rev_list_filter;
 #[path = "rev_list_output.rs"]
@@ -15,6 +17,7 @@ mod rev_list_output;
 #[path = "rev_list_spec.rs"]
 mod rev_list_spec;
 
+use rev_list_cherry::{RevListSelectedCommit, apply_cherry_filters, attach_cherry_metadata};
 #[cfg(test)]
 use rev_list_filter::ParentCountFilter;
 use rev_list_filter::{
@@ -24,8 +27,6 @@ use rev_list_filter::{
     rev_list_message_filter, rev_list_time_window, sort_rev_list_commits,
 };
 use rev_list_output::{REV_LIST_EXAMPLES, RevListEntry, RevListOutput, emit_human_rev_list};
-#[cfg(test)]
-use rev_list_output::{format_rev_list_entry, write_rev_list_count, write_rev_list_output};
 use rev_list_spec::resolve_revision_selection;
 
 #[derive(Parser, Debug)]
@@ -66,6 +67,26 @@ pub struct RevListArgs {
     /// Filter commits by message using a regular expression
     #[clap(long, value_name = "PATTERN")]
     pub grep: Vec<String>,
+
+    /// Prefix symmetric-difference commits with '<' or '>'
+    #[clap(long = "left-right")]
+    pub left_right: bool,
+
+    /// Show only the left side of a symmetric difference
+    #[clap(long = "left-only", conflicts_with = "right_only")]
+    pub left_only: bool,
+
+    /// Show only the right side of a symmetric difference
+    #[clap(long = "right-only", conflicts_with = "left_only")]
+    pub right_only: bool,
+
+    /// Omit patch-equivalent commits across symmetric-difference sides
+    #[clap(long = "cherry-pick", conflicts_with = "cherry_mark")]
+    pub cherry_pick: bool,
+
+    /// Mark patch-equivalent commits with '=' and others with '+'
+    #[clap(long = "cherry-mark", conflicts_with = "cherry_pick")]
+    pub cherry_mark: bool,
 
     /// Show commits more recent than DATE
     #[clap(long, visible_alias = "after", value_name = "DATE")]
@@ -130,6 +151,8 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
     let mut commits = selection.commits;
     sort_rev_list_commits(&mut commits);
     let commits = filter_commits_by_pathspecs(commits, &args.pathspecs).await?;
+    let commits = attach_cherry_metadata(commits, &selection.sides);
+    let commits = apply_cherry_filters(commits, args)?;
     let time_window = rev_list_time_window(args)?;
     let author_filter = rev_list_author_filter(args);
     let committer_filter = rev_list_committer_filter(args);
@@ -138,24 +161,34 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
 
     let commits = commits
         .into_iter()
-        .filter(|commit| commit_matches_author(commit, author_filter.as_deref()))
-        .filter(|commit| commit_matches_committer(commit, committer_filter.as_deref()))
-        .filter(|commit| commit_matches_message(commit, message_filter.as_ref()))
-        .filter(|commit| commit_matches_time_window(commit, time_window))
-        .filter(|commit| commit_matches_parent_count(commit, parent_filter))
+        .filter(|selected| commit_matches_author(&selected.commit, author_filter.as_deref()))
+        .filter(|selected| commit_matches_committer(&selected.commit, committer_filter.as_deref()))
+        .filter(|selected| commit_matches_message(&selected.commit, message_filter.as_ref()))
+        .filter(|selected| commit_matches_time_window(&selected.commit, time_window))
+        .filter(|selected| commit_matches_parent_count(&selected.commit, parent_filter))
         .skip(args.skip)
         .take(args.max_count.unwrap_or(usize::MAX))
         .collect::<Vec<_>>();
-    let entries = if args.count || (!args.parents && !args.timestamp) {
+    let count_fields = if args.count {
+        rev_list_count_fields(&commits, args)
+    } else {
+        Vec::new()
+    };
+    let entries = if args.count
+        || (!args.parents && !args.timestamp && !args.left_right && !args.cherry_mark)
+    {
         None
     } else {
         Some(
             commits
                 .iter()
-                .map(|commit| RevListEntry {
-                    commit: commit.id.to_string(),
+                .map(|selected| RevListEntry {
+                    commit: selected.commit.id.to_string(),
+                    side: selected.side,
+                    cherry_equivalent: args.cherry_mark.then_some(selected.cherry_equivalent),
                     parents: if args.parents {
-                        commit
+                        selected
+                            .commit
                             .parent_commit_ids
                             .iter()
                             .map(ToString::to_string)
@@ -163,14 +196,16 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
                     } else {
                         Vec::new()
                     },
-                    timestamp: args.timestamp.then_some(commit.committer.timestamp),
+                    timestamp: args
+                        .timestamp
+                        .then_some(selected.commit.committer.timestamp),
                 })
                 .collect(),
         )
     };
     let commits = commits
         .iter()
-        .map(|commit| commit.id.to_string())
+        .map(|selected| selected.commit.id.to_string())
         .collect::<Vec<_>>();
     let total = commits.len();
 
@@ -180,6 +215,7 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         commits,
         entries,
         total,
+        count_fields,
         count_only: args.count,
         parents: args.parents,
         timestamp: args.timestamp,
@@ -188,6 +224,11 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         committer: args.committer.clone(),
         grep: args.grep.clone(),
         pathspecs: args.pathspecs.clone(),
+        left_right: args.left_right,
+        left_only: args.left_only,
+        right_only: args.right_only,
+        cherry_pick: args.cherry_pick,
+        cherry_mark: args.cherry_mark,
         since: args.since.clone(),
         until: args.until.clone(),
         merges: args.merges,
@@ -201,6 +242,67 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
     })
 }
 
+fn rev_list_count_fields(commits: &[RevListSelectedCommit], args: &RevListArgs) -> Vec<usize> {
+    if args.left_right && args.cherry_mark {
+        return vec![
+            side_count(commits, rev_list_spec::RevListSide::Left, false),
+            side_count(commits, rev_list_spec::RevListSide::Right, false),
+            commits
+                .iter()
+                .filter(|selected| selected.cherry_equivalent)
+                .count(),
+        ];
+    }
+
+    if args.left_right {
+        return vec![
+            side_total(commits, rev_list_spec::RevListSide::Left),
+            side_total(commits, rev_list_spec::RevListSide::Right),
+        ];
+    }
+
+    if args.cherry_mark {
+        return vec![
+            commits
+                .iter()
+                .filter(|selected| !selected.cherry_equivalent)
+                .count(),
+            commits
+                .iter()
+                .filter(|selected| selected.cherry_equivalent)
+                .count(),
+        ];
+    }
+
+    vec![commits.len()]
+}
+
+fn side_total(commits: &[RevListSelectedCommit], side: rev_list_spec::RevListSide) -> usize {
+    commits
+        .iter()
+        .filter(|selected| selected.side == Some(side))
+        .count()
+}
+
+fn side_count(
+    commits: &[RevListSelectedCommit],
+    side: rev_list_spec::RevListSide,
+    cherry_equivalent: bool,
+) -> usize {
+    commits
+        .iter()
+        .filter(|selected| {
+            selected.side == Some(side) && selected.cherry_equivalent == cherry_equivalent
+        })
+        .count()
+}
+
+#[cfg(test)]
+#[path = "rev_list_output_tests.rs"]
+mod output_tests;
 #[cfg(test)]
 #[path = "rev_list_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "rev_list_write_tests.rs"]
+mod write_tests;

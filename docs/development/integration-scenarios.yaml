@@ -366,7 +366,7 @@ scenarios:
   - id: cli.object-readback
     wave: 2
     group: objects
-    purpose: "End-to-end object roundtrip over current plumbing: rev-parse HEAD/--short/--show-toplevel, show commit/path/blob, show-ref --head/--no-head/--heads/--branches/--no-branches/--tags/--no-tags/--hash[=<n>]/--no-hash/--abbrev[=<n>]/--no-abbrev/--dereference/--no-dereference/--verify/--no-verify/--exists/--no-exists, for-each-ref --points-at, cat-file type/size/pretty/exists, hash-object file/stdin/--path/--no-filters, rev-list HEAD/multi-revision/A..B/^A/A...B/--count/-n/--skip/--since/--after/--until/--before/--merges/--no-merges/--min-parents/--max-parents/--no-min-parents/--no-max-parents/--first-parent/--author/--committer/--grep/pathspec/--parents/--timestamp, fsck, and negative object/revision paths."
+    purpose: "End-to-end object roundtrip over current plumbing: rev-parse HEAD/--short/--show-toplevel, show commit/path/blob, show-ref --head/--no-head/--heads/--branches/--no-branches/--tags/--no-tags/--hash[=<n>]/--no-hash/--abbrev[=<n>]/--no-abbrev/--dereference/--no-dereference/--verify/--no-verify/--exists/--no-exists, for-each-ref --points-at, cat-file type/size/pretty/exists, hash-object file/stdin/--path/--no-filters, rev-list HEAD/multi-revision/A..B/^A/A...B/--count/-n/--skip/--since/--after/--until/--before/--merges/--no-merges/--min-parents/--max-parents/--no-min-parents/--no-max-parents/--first-parent/--author/--committer/--grep/pathspec/--left-right/--left-only/--right-only/--cherry-pick/--cherry-mark/--parents/--timestamp, fsck, and negative object/revision paths."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck, negative_exit]
