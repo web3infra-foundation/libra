@@ -32,11 +32,22 @@ by agents and tooling.
 
 ### Subcommand: `show`
 
-List configured remote names, one per line.
+With no name, lists configured remote names, one per line. With a `<name>`,
+prints detailed information about that remote: configured fetch/push URLs, the
+cached remote HEAD branch (`refs/remotes/<name>/HEAD`), cached remote-tracking
+branches, and the local branches/refs configured for pull/push.
 
-| Argument | Description |
-|----------|-------------|
-| (none) | Prints all remote names |
+| Flag / Argument | Description | Example |
+|-----------------|-------------|---------|
+| (none) | Prints all remote names | `libra remote show` |
+| `<name>` | Remote to inspect in detail | `libra remote show origin` |
+| `-n`, `--no-query` | Skip network discovery (accepted; Libra's `show` is always offline, so this is the default behaviour) | `libra remote show --no-query origin` |
+| `-v`, `--verbose` | Include additional detail where available | `libra remote show -v origin` |
+
+> Detailed `remote show <name>` is **offline**: it reads only Libra's local
+> config and cached remote-tracking refs (`queried` is always `false`). Live
+> remote HEAD discovery and `remote update` are not yet implemented (see
+> `COMPATIBILITY.md`).
 
 ### Subcommand: `-v` (list verbose)
 
@@ -104,10 +115,39 @@ Delete local remote-tracking branches that no longer exist on the remote.
 | `<name>` | Remote name | `origin` |
 | `--dry-run` | Show what would be pruned without deleting | `libra remote prune --dry-run origin` |
 
+### Subcommand: `set-branches`
+
+Set the branches tracked by a remote by rewriting its `remote.<name>.fetch`
+refspecs. Each branch becomes `+refs/heads/<branch>:refs/remotes/<name>/<branch>`.
+
+| Flag / Argument | Description | Example |
+|-----------------|-------------|---------|
+| `<name>` | Remote name | `origin` |
+| `<branch>...` | One or more branch names to track (required) | `libra remote set-branches origin main dev` |
+| `--add` | Append to the tracked branches instead of replacing them | `libra remote set-branches --add origin dev` |
+
+### Subcommand: `set-head`
+
+Set or delete a remote's default branch pointer (`refs/remotes/<name>/HEAD`).
+
+| Flag / Argument | Description | Example |
+|-----------------|-------------|---------|
+| `<name>` | Remote name | `origin` |
+| `<branch>` | Branch to set as the remote HEAD (must already exist as a tracking branch) | `libra remote set-head origin main` |
+| `-d`, `--delete` | Delete the remote HEAD ref (idempotent) | `libra remote set-head origin -d` |
+| `-a`, `--auto` | Detect the remote HEAD automatically — **deferred / not yet implemented** (returns a usage error directing you to specify a branch) | `libra remote set-head origin -a` |
+
+> The three modes (`<branch>`, `--delete`, `--auto`) are mutually exclusive.
+> `set-head <branch>` requires the tracking branch `refs/remotes/<name>/<branch>`
+> to already exist (fetch it first). `--auto` is deferred pending remote HEAD
+> discovery; live `remote show <name>` discovery and `remote update` are likewise
+> not yet implemented (see `COMPATIBILITY.md`).
+
 ## Common Commands
 
 ```bash
 libra remote show
+libra remote show origin
 libra remote -v
 libra remote add origin https://example.com/repo.git
 libra remote get-url origin
@@ -115,11 +155,30 @@ libra remote get-url --all origin
 libra remote set-url --add origin https://mirror.example.com/repo.git
 libra remote set-url --add --push origin ssh://git@example.com/repo.git
 libra remote prune --dry-run origin
+libra remote set-branches origin main dev
+libra remote set-head origin main
+libra remote set-head origin -d
 ```
 
 ## Human Output
 
-- `remote show` prints configured remote names, one per line.
+- `remote show` (no name) prints configured remote names, one per line.
+- `remote show <name>` prints a detailed, offline report:
+
+```text
+* remote origin
+  Fetch URL: https://example.com/repo.git
+  Push URL: https://example.com/repo.git
+  HEAD branch: (unknown)
+  Remote branch data: cached
+  Remote branches:
+    (none)
+  Local branches configured for 'git pull':
+    (none)
+  Local refs configured for 'git push':
+    (none)
+```
+
 - `remote -v` prints every fetch URL and effective push URL:
 
 ```text
@@ -156,6 +215,9 @@ Would prune 2 stale remote-tracking branch(es).
 - `urls`: `name`, `push`, `all`, `urls[]`
 - `set-url`: `name`, `role`, `mode`, `urls[]`, `removed`
 - `prune`: `name`, `dry_run`, `stale_branches[]`
+- `show`: `name`, `fetch_urls[]`, `push_urls[]`, `head_branch`, `remote_branches[]`, `pull_config[]`, `push_config[]`, `queried` (always `false` — offline)
+- `set-branches`: `name`, `added`, `fetch_refspecs[]`
+- `set-head`: `name`, `mode` (`set`/`delete`), `target`
 
 Example (verbose list):
 
