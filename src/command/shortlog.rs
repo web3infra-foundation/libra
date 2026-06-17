@@ -73,6 +73,9 @@ EXAMPLES:
     libra shortlog                  Summarize commits reachable from HEAD by author
     libra shortlog HEAD~5           Summarize a subset of history starting from a revision
     libra shortlog -n -s            Sort by commit count, suppress subjects (count only)
+    libra shortlog -c -s            Summarize by committer instead of author
+    libra shortlog --no-merges      Exclude merge commits from the summary
+    libra shortlog --top 5          Show only the top 5 authors
     libra shortlog --since 24h      Restrict to commits in the last 24 hours
     libra shortlog --json           Structured JSON output for agents";
 
@@ -98,6 +101,26 @@ pub struct ShortlogArgs {
     /// Show commits older than DATE (RFC3339, `YYYY-MM-DD`, or relative like `1h`)
     #[clap(long = "until", value_name = "DATE")]
     pub until: Option<String>,
+
+    /// Group commits by committer identity instead of author.
+    #[clap(short = 'c', long = "committer")]
+    pub committer: bool,
+
+    /// Do not include merge commits (commits with more than one parent).
+    #[clap(long = "no-merges")]
+    pub no_merges: bool,
+
+    /// Show only the top N authors.
+    #[clap(long = "top", value_name = "N")]
+    pub top: Option<usize>,
+
+    /// Show only authors with at least N commits.
+    #[clap(long = "min-count", value_name = "N")]
+    pub min_count: Option<usize>,
+
+    /// Reverse the output order.
+    #[clap(long = "reverse")]
+    pub reverse: bool,
 
     /// Revision to summarize. Defaults to HEAD.
     pub revision: Option<String>,
@@ -203,7 +226,14 @@ async fn run_shortlog(args: &ShortlogArgs) -> CliResult<ShortlogOutput> {
     let since_ts = parse_shortlog_date_arg(args.since.as_deref(), "--since")?;
     let until_ts = parse_shortlog_date_arg(args.until.as_deref(), "--until")?;
     let revision = args.revision.clone().unwrap_or_else(|| "HEAD".to_string());
-    let commits = get_commits_for_shortlog(args.revision.as_deref(), since_ts, until_ts).await?;
+    let mut commits =
+        get_commits_for_shortlog(args.revision.as_deref(), since_ts, until_ts).await?;
+
+    // `--no-merges` drops merge commits (more than one parent) before
+    // aggregation so the counts and totals reflect only non-merge commits.
+    if args.no_merges {
+        commits.retain(|commit| commit.parent_commit_ids.len() <= 1);
+    }
 
     Ok(aggregate_shortlog(args, &revision, commits))
 }
@@ -213,8 +243,15 @@ fn aggregate_shortlog(args: &ShortlogArgs, revision: &str, commits: Vec<Commit>)
     let mut author_map: HashMap<String, AuthorStats> = HashMap::new();
 
     for commit in commits {
-        let author_name = commit.author.name.clone();
-        let author_email = commit.author.email.clone();
+        // `-c`/`--committer` groups by the committer identity; otherwise by the
+        // author (Git's default).
+        let signature = if args.committer {
+            &commit.committer
+        } else {
+            &commit.author
+        };
+        let author_name = signature.name.clone();
+        let author_email = signature.email.clone();
         let key = if args.email {
             format!("{} <{}>", author_name, author_email)
         } else {
@@ -247,6 +284,19 @@ fn aggregate_shortlog(args: &ShortlogArgs, revision: &str, commits: Vec<Commit>)
         authors.sort_by_key(|stats| (std::cmp::Reverse(stats.count), stats.name.to_lowercase()));
     } else {
         authors.sort_by_key(|stats| stats.name.to_lowercase());
+    }
+
+    // `--min-count` drops low-frequency identities, `--reverse` flips the
+    // sorted order, and `--top` keeps only the leading N — applied in that
+    // order so `--top` counts post-filter, post-reverse entries.
+    if let Some(min_count) = args.min_count {
+        authors.retain(|stats| stats.count >= min_count);
+    }
+    if args.reverse {
+        authors.reverse();
+    }
+    if let Some(top) = args.top {
+        authors.truncate(top);
     }
 
     ShortlogOutput {

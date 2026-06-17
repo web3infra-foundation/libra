@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 author summary、email、count sorting、时间过滤和单 revision 已支持；group/format/stdin/no-merges/author 等扩展过滤尚未公开。
+- 兼容级别：`partial`。基础 author summary、email、count sorting、时间过滤、单 revision、`-c`/`--committer` 分组、`--no-merges`、`--top`/`--min-count`/`--reverse` 已支持；`--group=trailer:<key>`、`--format`、stdin 输入、`--author` 过滤和 `-w` 换行宽度尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -36,8 +36,8 @@ flowchart TD
 ## 实现历史
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
-- 2026-06-06 `cec72108`（`feat(shortlog): add -c/--committer grouping and --no-merges filter`）：尽管提交标题宣称新增 `-c/--committer` 与 `--no-merges`，这两个标志在 HEAD 上的 `ShortlogArgs` 及整个 `src/command/shortlog.rs` 中均不存在（编译实现仍只暴露 `-n/-s/-e/--since/--until` 与位置参数 `revision`）——该功能未在当前 HEAD 落地（已回退或从未接入），与下文「还未实现的功能」缺口表一致。
-- 2026-06-10 `3b170290`（`feat(shortlog): add --top option (#382)`）：该提交描述的 `--top` 选项当前同样未出现在 `ShortlogArgs` 中，不在当前事实实现范围内。
+- 2026-06-06 `cec72108`（`feat(shortlog): add -c/--committer grouping and --no-merges filter`）：新增 `-c`/`--committer`（按 committer 身份分组）与 `--no-merges`（聚合前剔除多父提交）。该内容曾在一次 reconcile 中从工作树丢失，已于 2026-06-18 依据原提交 diff 恢复（含端到端测试与文档）。
+- 2026-06-10 `3b170290`（`feat(shortlog): add --top option (#382)`）：新增 `--top`/`--min-count`/`--reverse`（排序后限制/过滤/翻转输出）。同样曾被 reconcile 丢失，已于 2026-06-18 恢复。
 - 2026-06-01 `1a7501da`（`test(shortlog): pin json revision summary`）：测试契约：pin json revision summary；相关行为已有回归守卫，后续变更需要继续满足。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -46,7 +46,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/shortlog.md`。
 - Synopsis：`libra shortlog [<revision>] [-n] [-s] [-e] [--since <date>] [--until <date>]`。
-- 公开参数/子命令包括：`-n, --numbered`、`-s, --summary`、`-e, --email`、`--since <DATE>`、`--until <DATE>`、`[<revision>]`。
+- 公开参数/子命令包括：`-n, --numbered`、`-s, --summary`、`-e, --email`、`-c, --committer`、`--no-merges`、`--top <N>`、`--min-count <N>`、`--reverse`、`--since <DATE>`、`--until <DATE>`、`[<revision>]`。
 
 
 ## 还未实现的功能
@@ -55,14 +55,9 @@ flowchart TD
 |---|---|---|
 | 兼容差异项 | 分组方式 | 原始对照：不支持；相关参数/替代：--group=author\|committer\|trailer:<key>；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 格式化输出 | 原始对照：不支持；相关参数/替代：--format=<format>；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 提交者分组 | 原始对照：不支持；相关参数/替代：--committer (已弃用，改用 --group=committer)；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 管道输入 | 原始对照：不支持；相关参数/替代：从 stdin 读取管道输入；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 排除 merge 提交 | 原始对照：不支持；相关参数/替代：--no-merges；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 作者过滤 | 原始对照：不支持；相关参数/替代：--author=<pattern>；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 换行宽度 | 原始对照：不支持；相关参数/替代：-w[<width>[,<indent1>[,<indent2>]]]；当前说明：`ShortlogArgs` 当前无 `width` 字段。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | top 限制 | 原始对照：不支持；相关参数/替代：--top；当前说明：`ShortlogArgs` 当前无 `top` 字段。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 最小计数过滤 | 原始对照：不支持；相关参数/替代：--min-count；当前说明：`ShortlogArgs` 当前无 `min_count` 字段。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 逆序输出 | 原始对照：不支持；相关参数/替代：--reverse；当前说明：`ShortlogArgs` 当前无 `reverse` 字段。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求
 
