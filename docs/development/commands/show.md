@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。object/commit display、`--name-only`、`--stat`、`--oneline` 和 path filters 已支持；extended pretty/raw/name-status 格式尚未完整公开。
+- 兼容级别：`partial`。object/commit display、`--name-only`、`--name-status`、`--stat`、`--oneline` 和 path filters 已支持；extended pretty/raw 格式尚未完整公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -36,7 +36,7 @@ flowchart TD
 ## 实现历史
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
-- 2026-06-06 `1593a844`（`feat(show): add --name-status diff display mode`）：基础实现节点；尽管提交标题写作 `--name-status`，当前 HEAD 实际公开的 diff 文件名标志是 `--name-only`（字段 `name_only`），并不存在 `--name-status` 标志；当前实现的主要轮廓可追溯到该提交。
+- 2026-06-06 `1593a844`（`feat(show): add --name-status diff display mode`）：新增 `--name-status`（字段 `name_status`），按 `A`/`M`/`D` 状态字母 + tab + 文件名输出。该提交曾在一次 reconcile 中从工作树丢失，已于 2026-06-18 依据原提交 diff 恢复（含两条端到端测试与文档）。
 - 2026-05-15 `aaf16f28`（`feat(show): route human output through pager`）：功能演进：route human output through pager；该节点扩展了当前命令可用的参数或行为。
 - 2026-06-07 `5a5e5fcb`（`fix(show): summarize large and binary blobs`）：实现修正：summarize large and binary blobs；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
@@ -46,14 +46,14 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/show.md`。
 - Synopsis：`libra show [OPTIONS] [OBJECT] [PATHS]...`。
-- 公开参数/子命令包括：`[OBJECT]`、`-s, --no-patch`、`--oneline`、`--name-only`、`--stat`、`[PATHS]...`。
+- 公开参数/子命令包括：`[OBJECT]`、`-s, --no-patch`、`--oneline`、`--name-only`、`--name-status`、`--stat`、`[PATHS]...`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| Git 参数缺口 | `--name-status`、`--pretty`/`--format`、`--raw`、`--summary`、`--patch-with-stat` 等扩展输出尚未完整公开。 | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| Git 参数缺口 | `--pretty`/`--format`、`--raw`、`--summary`、`--patch-with-stat` 等扩展输出尚未完整公开。 | 后续实现时需要同步源码、测试和兼容矩阵。 |
 
 ## 维护要求
 
