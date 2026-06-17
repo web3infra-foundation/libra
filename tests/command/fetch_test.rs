@@ -1048,3 +1048,145 @@ async fn test_fetch_shallow_then_shallow_is_idempotent() {
     let second = run_libra_command(&["fetch", "origin", "--depth", "1"], &repo_dir);
     assert_cli_success(&second, "second fetch --depth 1 after shallow");
 }
+
+/// `libra fetch --dry-run` previews the remote-tracking ref updates without
+/// downloading any pack or writing refs / FETCH_HEAD.
+#[tokio::test]
+#[serial]
+async fn test_fetch_dry_run_previews_without_writing() {
+    let (_temp_root, repo_dir, current_branch, pushed_commit) =
+        setup_local_fetch_cli_fixture().await;
+
+    let output = run_libra_command(&["--json", "fetch", "origin", "--dry-run"], &repo_dir);
+    assert_cli_success(&output, "fetch --dry-run origin");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["remotes"][0]["refs_updated"][0]["remote_ref"],
+        format!("refs/remotes/origin/{current_branch}")
+    );
+    assert_eq!(
+        json["data"]["remotes"][0]["refs_updated"][0]["new_oid"],
+        pushed_commit
+    );
+    // Dry-run downloads nothing.
+    assert_eq!(json["data"]["remotes"][0]["objects_fetched"], 0);
+
+    // No remote-tracking ref was written, and no FETCH_HEAD was created.
+    assert!(
+        !repo_dir.join(".libra/FETCH_HEAD").exists(),
+        "--dry-run must not write FETCH_HEAD"
+    );
+    let _guard = ChangeDirGuard::new(&repo_dir);
+    let tracking = Branch::find_branch_result(
+        &format!("refs/remotes/origin/{current_branch}"),
+        Some("origin"),
+    )
+    .await
+    .expect("branch lookup should succeed");
+    assert!(
+        tracking.is_none(),
+        "--dry-run must not persist a remote-tracking ref"
+    );
+}
+
+/// `libra fetch --porcelain` prints one machine-readable line per ref update.
+#[tokio::test]
+#[serial]
+async fn test_fetch_porcelain_prints_per_ref_lines() {
+    let (_temp_root, repo_dir, current_branch, pushed_commit) =
+        setup_local_fetch_cli_fixture().await;
+
+    let output = run_libra_command(&["fetch", "origin", "--porcelain"], &repo_dir);
+    assert_cli_success(&output, "fetch --porcelain origin");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| line.contains(&format!("refs/remotes/origin/{current_branch}")))
+        .unwrap_or_else(|| panic!("expected a porcelain line for the fetched ref, got: {stdout}"));
+    let cols: Vec<&str> = line.split(' ').collect();
+    // `<flag> <old-oid> <new-oid> <local-ref>` — new ref uses the `*` flag.
+    assert_eq!(cols[0], "*", "a new ref must use the `*` flag");
+    assert_eq!(cols[2], pushed_commit, "third column must be the new oid");
+    assert_eq!(
+        cols[3],
+        format!("refs/remotes/origin/{current_branch}"),
+        "fourth column must be the local tracking ref"
+    );
+}
+
+/// `--porcelain` and the global `--json` are both machine formats and must not
+/// be combined (usage error, exit 129).
+#[tokio::test]
+#[serial]
+async fn test_fetch_porcelain_rejects_combination_with_json() {
+    let (_temp_root, repo_dir, _current_branch, _pushed_commit) =
+        setup_local_fetch_cli_fixture().await;
+
+    let output = run_libra_command(&["--json", "fetch", "origin", "--porcelain"], &repo_dir);
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "combining --porcelain with --json must be a usage error"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--porcelain") && stderr.contains("--json"),
+        "error must mention the conflicting flags, got: {stderr}"
+    );
+}
+
+/// `-v/--verbose` announces the remote being contacted on stderr without
+/// changing the stdout result contract.
+#[tokio::test]
+#[serial]
+async fn test_fetch_verbose_announces_remote_on_stderr() {
+    let (_temp_root, repo_dir, _current_branch, _pushed_commit) =
+        setup_local_fetch_cli_fixture().await;
+
+    let output = run_libra_command(&["fetch", "origin", "-v"], &repo_dir);
+    assert_cli_success(&output, "fetch -v origin");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Fetching origin from"),
+        "verbose mode must announce the remote on stderr, got: {stderr}"
+    );
+}
+
+/// A plain `libra fetch` writes `.libra/FETCH_HEAD`; `--append` accumulates
+/// rather than overwriting.
+#[tokio::test]
+#[serial]
+async fn test_fetch_writes_and_appends_fetch_head() {
+    let (_temp_root, repo_dir, current_branch, pushed_commit) =
+        setup_local_fetch_cli_fixture().await;
+
+    let first = run_libra_command(&["fetch", "origin"], &repo_dir);
+    assert_cli_success(&first, "fetch origin (writes FETCH_HEAD)");
+
+    let fetch_head_path = repo_dir.join(".libra/FETCH_HEAD");
+    assert!(
+        fetch_head_path.exists(),
+        "fetch must write .libra/FETCH_HEAD"
+    );
+    let body = fs::read_to_string(&fetch_head_path).expect("read FETCH_HEAD");
+    assert!(
+        body.contains(&pushed_commit) && body.contains("not-for-merge"),
+        "FETCH_HEAD must record the fetched oid as not-for-merge, got: {body}"
+    );
+    assert!(
+        body.contains(&format!("branch '{current_branch}'")),
+        "FETCH_HEAD must describe the fetched branch, got: {body}"
+    );
+
+    // `--append` accumulates: re-fetching with --append keeps prior lines.
+    let append = run_libra_command(&["fetch", "origin", "--append"], &repo_dir);
+    assert_cli_success(&append, "fetch --append origin");
+    let appended = fs::read_to_string(&fetch_head_path).expect("read FETCH_HEAD after append");
+    assert!(
+        appended.matches("not-for-merge").count() >= body.matches("not-for-merge").count(),
+        "--append must not shrink FETCH_HEAD, before: {body}\nafter: {appended}"
+    );
+}

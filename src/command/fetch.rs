@@ -58,6 +58,9 @@ EXAMPLES:
     libra fetch --all                      Fetch every configured remote
     libra fetch origin --depth 1           Shallow fetch (latest commit only)
     libra fetch --all --depth 3            Shallow fetch across all remotes
+    libra fetch origin --dry-run           Preview ref updates without downloading
+    libra fetch origin --porcelain         Machine-readable per-ref update lines
+    libra fetch origin -v                  Announce the remote on stderr
     libra --json fetch origin              Structured JSON output for agents";
 
 pub(crate) enum RemoteClient {
@@ -487,6 +490,26 @@ pub struct FetchArgs {
     /// Limit fetching to the specified number of commits from the tip of each remote branch
     #[clap(long, value_name = "N")]
     pub depth: Option<usize>,
+
+    /// Show what would be fetched without downloading objects or writing any
+    /// refs, reflog, FETCH_HEAD, or shallow metadata.
+    #[clap(long = "dry-run")]
+    pub dry_run: bool,
+
+    /// Append fetched ref records to `.libra/FETCH_HEAD` instead of overwriting
+    /// it. Long-only: `-a` is reserved for `--all` (Git's `-a` is `--append`).
+    #[clap(long)]
+    pub append: bool,
+
+    /// Print extra diagnostics (the remote being contacted) to stderr, leaving
+    /// the stdout result contract unchanged.
+    #[clap(long, short = 'v')]
+    pub verbose: bool,
+
+    /// Print a machine-readable, single-space-separated line per ref update:
+    /// `<flag> <old-oid> <new-oid> <local-ref>`. Mutually exclusive with `--json`.
+    #[clap(long)]
+    pub porcelain: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -753,8 +776,63 @@ pub async fn execute(args: FetchArgs) {
 /// authentication/network/pack negotiation fails, object writes fail, or
 /// remote-tracking refs cannot be updated.
 pub async fn execute_safe(args: FetchArgs, output: &OutputConfig) -> CliResult<()> {
+    // `--porcelain` and `--json` are both machine formats; `--json` is a global
+    // flag so this exclusion is enforced here (usage error 129), not by clap.
+    if args.porcelain && output.is_json() {
+        return Err(
+            CliError::command_usage("--porcelain and --json are mutually exclusive")
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+        );
+    }
+    let porcelain = args.porcelain;
+    let dry_run = args.dry_run;
+    let append = args.append;
     let result = run_fetch(args, output).await?;
-    render_fetch_output(&result, output)
+    // FETCH_HEAD records the fetched refs; `--dry-run` writes nothing.
+    if !dry_run {
+        write_fetch_head(&result, append).map_err(CliError::from)?;
+    }
+    if porcelain {
+        render_fetch_porcelain(&result, output)
+    } else {
+        render_fetch_output(&result, output)
+    }
+}
+
+/// Render Git's `--porcelain` format: one `<flag> <old-oid> <new-oid>
+/// <local-ref>` line per ref update, single-space separated, with no human
+/// summary columns.
+fn render_fetch_porcelain(result: &FetchOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.quiet {
+        return Ok(());
+    }
+    let rendered = format_fetch_porcelain(result);
+    if rendered.is_empty() {
+        return Ok(());
+    }
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+    writeln!(writer, "{rendered}")
+        .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))
+}
+
+fn format_fetch_porcelain(result: &FetchOutput) -> String {
+    let mut lines = Vec::new();
+    for remote in &result.remotes {
+        for update in &remote.refs_updated {
+            let (flag, old_oid) = match &update.old_oid {
+                // New ref: space-flag is reserved for fast-forward; new refs use
+                // `*` with an all-zero old object id sized to the hash kind.
+                None => ('*', "0".repeat(update.new_oid.len())),
+                Some(old) => (' ', old.clone()),
+            };
+            lines.push(format!(
+                "{flag} {old_oid} {} {}",
+                update.new_oid, update.remote_ref
+            ));
+        }
+    }
+    lines.join("\n")
 }
 
 async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOutput> {
@@ -765,6 +843,10 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         refspec,
         all,
         depth,
+        dry_run,
+        append: _,
+        verbose,
+        porcelain: _,
     } = args;
 
     if all {
@@ -775,8 +857,15 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
 
         let mut results = Vec::with_capacity(remotes.len());
         for remote in remotes {
+            if verbose {
+                eprintln!(
+                    "Fetching {} from {}",
+                    remote.name,
+                    redact_url_credentials(&remote.url)
+                );
+            }
             results.push(
-                fetch_repository_with_result(remote, None, false, depth, output)
+                fetch_repository_with_result(remote, None, false, depth, dry_run, output)
                     .await
                     .map_err(CliError::from)?,
             );
@@ -821,9 +910,24 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
                 .with_hint("use 'libra remote -v' to inspect configured remotes")
         })?;
 
-    let result = fetch_repository_with_result(remote_config, refspec.clone(), false, depth, output)
-        .await
-        .map_err(CliError::from)?;
+    if verbose {
+        eprintln!(
+            "Fetching {} from {}",
+            remote_config.name,
+            redact_url_credentials(&remote_config.url)
+        );
+    }
+
+    let result = fetch_repository_with_result(
+        remote_config,
+        refspec.clone(),
+        false,
+        depth,
+        dry_run,
+        output,
+    )
+    .await
+    .map_err(CliError::from)?;
 
     Ok(FetchOutput {
         all: false,
@@ -1010,7 +1114,7 @@ pub async fn fetch_repository_safe(
     depth: Option<usize>,
     output: &OutputConfig,
 ) -> Result<(), FetchError> {
-    fetch_repository_with_result(remote_config, branch, single_branch, depth, output)
+    fetch_repository_with_result(remote_config, branch, single_branch, depth, false, output)
         .await
         .map(|_| ())
 }
@@ -1020,6 +1124,7 @@ pub(crate) async fn fetch_repository_with_result(
     branch: Option<String>,
     single_branch: bool,
     depth: Option<usize>,
+    dry_run: bool,
     output: &OutputConfig,
 ) -> Result<FetchRepositoryResult, FetchError> {
     let (remote_client, discovery) =
@@ -1081,6 +1186,20 @@ pub(crate) async fn fetch_repository_with_result(
     {
         let normalized = normalize_branch_ref(branch_name);
         refs.retain(|reference| reference._ref == normalized);
+    }
+
+    // `--dry-run`: compute the would-be remote-tracking ref updates from the
+    // discovered refs and return before downloading any pack or writing
+    // anything (no `.pack`/`.idx`, no shallow update, no ref/reflog writes, no
+    // FETCH_HEAD).
+    if dry_run {
+        let refs_updated = compute_fetch_ref_preview(&remote_config, &refs).await?;
+        return Ok(FetchRepositoryResult {
+            remote: remote_config.name,
+            url: normalized_url,
+            refs_updated,
+            objects_fetched: 0,
+        });
     }
 
     let mut want = refs
@@ -1717,6 +1836,115 @@ fn apply_shallow_updates(shallow: &[String], unshallow: &[String]) -> Result<(),
     write_shallow_boundaries(&boundaries)
 }
 
+/// Read-only counterpart of [`update_references`] for `--dry-run`: report the
+/// remote-tracking ref updates the discovered refs would produce, without any
+/// database writes.
+async fn compute_fetch_ref_preview(
+    remote_config: &RemoteConfig,
+    refs: &[DiscRef],
+) -> Result<Vec<FetchRefUpdate>, FetchError> {
+    let mut updates = Vec::new();
+    for reference in refs {
+        let full_ref_name = if let Some(branch_name) = reference._ref.strip_prefix("refs/heads/") {
+            format!("refs/remotes/{}/{}", remote_config.name, branch_name)
+        } else if let Some(mr_name) = reference._ref.strip_prefix("refs/mr/") {
+            format!("refs/remotes/{}/mr/{}", remote_config.name, mr_name)
+        } else {
+            continue;
+        };
+
+        let old_oid = Branch::find_branch_result(&full_ref_name, Some(&remote_config.name))
+            .await
+            .map_err(|error| FetchError::UpdateRefs {
+                message: format!(
+                    "failed to inspect existing remote-tracking ref '{full_ref_name}': {error}"
+                ),
+            })?
+            .map(|branch| branch.commit.to_string());
+
+        if old_oid.as_deref() == Some(reference._hash.as_str()) {
+            continue;
+        }
+        updates.push(FetchRefUpdate {
+            remote_ref: full_ref_name,
+            old_oid,
+            new_oid: reference._hash.clone(),
+        });
+    }
+    Ok(updates)
+}
+
+fn fetch_head_path() -> Result<PathBuf, FetchError> {
+    util::try_get_storage_path(None)
+        .map(|storage| storage.join("FETCH_HEAD"))
+        .map_err(|source| FetchError::LocalState {
+            message: format!("failed to locate repository storage for FETCH_HEAD: {source}"),
+        })
+}
+
+/// Render the `FETCH_HEAD` body: one `<oid>\t<not-for-merge>\t<desc>` line per
+/// fetched ref. Libra fetch never designates a merge target (merge with
+/// `libra pull`), so every line is marked `not-for-merge`.
+fn format_fetch_head(result: &FetchOutput) -> String {
+    let mut lines = Vec::new();
+    for remote in &result.remotes {
+        let tracking_prefix = format!("refs/remotes/{}/", remote.remote);
+        for update in &remote.refs_updated {
+            let branch = update
+                .remote_ref
+                .strip_prefix(&tracking_prefix)
+                .unwrap_or(&update.remote_ref);
+            lines.push(format!(
+                "{}\tnot-for-merge\tbranch '{}' of {}",
+                update.new_oid, branch, remote.url
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Write (or, with `append`, accumulate into) `.libra/FETCH_HEAD` via an atomic
+/// temp-file + rename, owner-only on Unix.
+fn write_fetch_head(result: &FetchOutput, append: bool) -> Result<(), FetchError> {
+    let path = fetch_head_path()?;
+    let body = format_fetch_head(result);
+
+    let mut content = String::new();
+    if append && let Ok(existing) = fs::read_to_string(&path) {
+        content.push_str(&existing);
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+    }
+    if !body.is_empty() {
+        content.push_str(&body);
+        content.push('\n');
+    }
+
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, &content).map_err(|source| FetchError::LocalState {
+        message: format!(
+            "failed to write FETCH_HEAD temp '{}': {source}",
+            tmp.display()
+        ),
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)).map_err(|source| {
+            FetchError::LocalState {
+                message: format!("failed to set permissions on FETCH_HEAD: {source}"),
+            }
+        })?;
+    }
+    fs::rename(&tmp, &path).map_err(|source| FetchError::LocalState {
+        message: format!(
+            "failed to finalize FETCH_HEAD '{}': {source}",
+            path.display()
+        ),
+    })
+}
+
 async fn update_references(
     remote_config: &RemoteConfig,
     refs: &[DiscRef],
@@ -2001,6 +2229,78 @@ mod tests {
         internal::protocol::FetchStream,
         utils::{output::OutputConfig, test::ScopedEnvVar},
     };
+
+    #[test]
+    fn format_fetch_porcelain_layout_is_space_separated() {
+        use super::{FetchOutput, FetchRefUpdate, FetchRepositoryResult, format_fetch_porcelain};
+
+        let output = FetchOutput {
+            all: false,
+            requested_remote: Some("origin".to_string()),
+            refspec: None,
+            remotes: vec![FetchRepositoryResult {
+                remote: "origin".to_string(),
+                url: "https://example.com/x.git".to_string(),
+                objects_fetched: 2,
+                refs_updated: vec![
+                    FetchRefUpdate {
+                        remote_ref: "refs/remotes/origin/main".to_string(),
+                        old_oid: Some("a".repeat(40)),
+                        new_oid: "b".repeat(40),
+                    },
+                    FetchRefUpdate {
+                        remote_ref: "refs/remotes/origin/dev".to_string(),
+                        old_oid: None,
+                        new_oid: "c".repeat(40),
+                    },
+                ],
+            }],
+        };
+
+        let rendered = format_fetch_porcelain(&output);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(lines.len(), 2);
+        // Updated ref: the single-char flag is a space, so the line begins with
+        // two spaces (`<flag> <old> <new> <ref>`). Dropping empty fields yields
+        // the three data columns.
+        let cols: Vec<&str> = lines[0].split(' ').filter(|c| !c.is_empty()).collect();
+        assert_eq!(cols.len(), 3);
+        assert_eq!(cols[0], "a".repeat(40));
+        assert_eq!(cols[1], "b".repeat(40));
+        assert_eq!(cols[2], "refs/remotes/origin/main");
+        assert!(lines[0].starts_with("  "), "fast-forward flag is a space");
+        // New ref: `*` flag with an all-zero old oid sized to the hash kind.
+        assert!(lines[1].starts_with("* "));
+        assert!(lines[1].contains(&"0".repeat(40)));
+        assert!(lines[1].ends_with("refs/remotes/origin/dev"));
+    }
+
+    #[test]
+    fn format_fetch_head_marks_every_ref_not_for_merge() {
+        use super::{FetchOutput, FetchRefUpdate, FetchRepositoryResult, format_fetch_head};
+
+        let output = FetchOutput {
+            all: false,
+            requested_remote: Some("origin".to_string()),
+            refspec: None,
+            remotes: vec![FetchRepositoryResult {
+                remote: "origin".to_string(),
+                url: "https://example.com/x.git".to_string(),
+                objects_fetched: 1,
+                refs_updated: vec![FetchRefUpdate {
+                    remote_ref: "refs/remotes/origin/main".to_string(),
+                    old_oid: None,
+                    new_oid: "d".repeat(40),
+                }],
+            }],
+        };
+
+        let body = format_fetch_head(&output);
+        assert!(body.contains(&"d".repeat(40)));
+        assert!(body.contains("\tnot-for-merge\t"));
+        // The tracking prefix is stripped to the bare branch name in the desc.
+        assert!(body.contains("branch 'main' of https://example.com/x.git"));
+    }
 
     /// Pin the `Display` format for the static-message and direct-message
     /// variants of [`FetchError`]. These strings are used as the
