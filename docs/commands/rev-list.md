@@ -10,7 +10,7 @@ libra rev-list [OPTIONS] [SPEC]...
 
 ## Description
 
-`libra rev-list` resolves one or more revision inputs to commits, walks the reachable history, applies optional exclusion/range, parent-count, and count/limit filters, and prints commit IDs newest first. When `<SPEC>` is omitted, the command defaults to `HEAD`. Output formatting can include parent commit IDs (`--parents`) and committer timestamps (`--timestamp`).
+`libra rev-list` resolves one or more revision inputs to commits, walks the reachable history, applies optional exclusion/range, time-window, parent-count, and count/limit filters, and prints commit IDs newest first. When `<SPEC>` is omitted, the command defaults to `HEAD`. Output formatting can include parent commit IDs (`--parents`) and committer timestamps (`--timestamp`).
 
 ## Options
 
@@ -19,6 +19,8 @@ libra rev-list [OPTIONS] [SPEC]...
 | `-n <N>`, `--max-count <N>` | Limit output to at most `N` commits after sorting. |
 | `--skip <N>` | Skip the first `N` commits before output or counting. |
 | `--count` | Print only the number of commits after filters. |
+| `--since <DATE>`, `--after <DATE>` | Print commits whose committer timestamp is at or after `DATE`. |
+| `--until <DATE>`, `--before <DATE>` | Print commits whose committer timestamp is at or before `DATE`. |
 | `--merges` | Print only commits with at least two parents. |
 | `--no-merges` | Omit commits with at least two parents. |
 | `--min-parents <N>` | Print only commits with at least `N` parents. |
@@ -37,6 +39,8 @@ libra rev-list HEAD
 libra rev-list --count HEAD
 libra rev-list -n 5 HEAD
 libra rev-list --skip 5 --max-count 10 HEAD
+libra rev-list --since 2026-01-01 HEAD
+libra rev-list --after "2 weeks ago" --before 2026-06-01 HEAD
 libra rev-list main feature
 libra rev-list ^main feature
 libra rev-list main..feature
@@ -56,7 +60,7 @@ libra --json rev-list HEAD
 
 ## Human Output
 
-Output is one commit ID per line by default. Multiple positive revisions are unioned and de-duplicated. `^<rev>` excludes commits reachable from that revision. `A..B` is equivalent to `^A B`; `A...B` prints the symmetric difference between both sides. Parent-count filters are applied before `--skip`, `--max-count`, and `--count`. With `--parents`, each line becomes `commit parent...`. With `--timestamp`, each line becomes `timestamp commit`; combining both produces `timestamp commit parent...`. With `--count`, output remains a single decimal count and ignores output-format flags.
+Output is one commit ID per line by default. Multiple positive revisions are unioned and de-duplicated. `^<rev>` excludes commits reachable from that revision. `A..B` is equivalent to `^A B`; `A...B` prints the symmetric difference between both sides. Time-window and parent-count filters are applied before `--skip`, `--max-count`, and `--count`. `--since`/`--after` and `--until`/`--before` accept `YYYY-MM-DD`, RFC3339/full timestamps with timezone, Unix timestamps, and relative forms such as `2 weeks ago`. With `--parents`, each line becomes `commit parent...`. With `--timestamp`, each line becomes `timestamp commit`; combining both produces `timestamp commit parent...`. With `--count`, output remains a single decimal count and ignores output-format flags.
 
 ```text
 abc1234def5678901234567890abcdef12345678
@@ -85,6 +89,8 @@ def5678901234567890abcdef12345678abc1234
     "count_only": false,
     "parents": false,
     "timestamp": false,
+    "since": null,
+    "until": null,
     "merges": false,
     "no_merges": false,
     "min_parents": null,
@@ -122,6 +128,8 @@ When `--parents` or `--timestamp` is present, `commits[]` remains the plain comm
     "count_only": false,
     "parents": true,
     "timestamp": true,
+    "since": null,
+    "until": null,
     "merges": false,
     "no_merges": false,
     "min_parents": null,
@@ -143,6 +151,7 @@ When `--parents` or `--timestamp` is present, `commits[]` remains the plain comm
 | Multiple revisions | Supported, de-duplicated | Same | revsets |
 | Exclusion/range syntax | `^A`, `A..B`, `A...B` | Same | revsets |
 | Count and limit | `--count`, `-n` / `--max-count`, `--skip` | Same | revset functions |
+| Time filters | `--since` / `--after`, `--until` / `--before` | Same | revset predicates |
 | Parent-count filters | `--merges`, `--no-merges`, `--min-parents`, `--max-parents`, `--no-min-parents`, `--no-max-parents` | Same | revset predicates |
 | Parent output | `--parents` | Same | revset/template output |
 | Timestamp output | `--timestamp` | Same | template output |
@@ -154,5 +163,6 @@ When `--parents` or `--timestamp` is present, `commits[]` remains the plain comm
 | Scenario | StableErrorCode | Exit |
 |----------|-----------------|------|
 | Invalid target ref | `LBR-CLI-003` | 129 |
+| Invalid date filter | `LBR-CLI-002` | 129 |
 | Failed to read repository metadata | `LBR-IO-001` | 128 |
 | Corrupt stored refs/objects | `LBR-REPO-002` | 128 |

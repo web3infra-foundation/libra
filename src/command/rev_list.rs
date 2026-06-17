@@ -17,7 +17,10 @@ mod rev_list_spec;
 
 #[cfg(test)]
 use rev_list_filter::ParentCountFilter;
-use rev_list_filter::{commit_matches_parent_count, parent_count_filter, sort_rev_list_commits};
+use rev_list_filter::{
+    commit_matches_parent_count, commit_matches_time_window, parent_count_filter,
+    rev_list_time_window, sort_rev_list_commits,
+};
 use rev_list_output::{REV_LIST_EXAMPLES, RevListEntry, RevListOutput, emit_human_rev_list};
 #[cfg(test)]
 use rev_list_output::{format_rev_list_entry, write_rev_list_count, write_rev_list_output};
@@ -45,6 +48,14 @@ pub struct RevListArgs {
     /// Prefix each output line with the commit timestamp
     #[clap(long)]
     pub timestamp: bool,
+
+    /// Show commits more recent than DATE
+    #[clap(long, visible_alias = "after", value_name = "DATE")]
+    pub since: Option<String>,
+
+    /// Show commits older than DATE
+    #[clap(long, visible_alias = "before", value_name = "DATE")]
+    pub until: Option<String>,
 
     /// Print only commits with at least two parents
     #[clap(long)]
@@ -96,10 +107,12 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
     let selection = resolve_revision_selection(&args.specs).await?;
     let mut commits = selection.commits;
     sort_rev_list_commits(&mut commits);
+    let time_window = rev_list_time_window(args)?;
     let parent_filter = parent_count_filter(args);
 
     let commits = commits
         .into_iter()
+        .filter(|commit| commit_matches_time_window(commit, time_window))
         .filter(|commit| commit_matches_parent_count(commit, parent_filter))
         .skip(args.skip)
         .take(args.max_count.unwrap_or(usize::MAX))
@@ -141,6 +154,8 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         count_only: args.count,
         parents: args.parents,
         timestamp: args.timestamp,
+        since: args.since.clone(),
+        until: args.until.clone(),
         merges: args.merges,
         no_merges: args.no_merges,
         min_parents: args.min_parents,

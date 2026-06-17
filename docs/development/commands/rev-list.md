@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra rev-list` 的目标是列出从一个或多个 revision 可达的提交对象。当前实现接受零个或多个 `[SPEC]`（缺省 `HEAD`），支持多 revision union、`^` 排除、`A..B` / `A...B` 范围，并按提交时间倒序打印可达提交哈希；`--count`、`-n`/`--max-count`、`--skip`、`--merges`、`--no-merges`、`--min-parents`、`--max-parents`、`--no-min-parents`、`--no-max-parents`、`--parents`、`--timestamp` 已支持。高级遍历过滤等 Git plumbing 行为尚未实现（见“还未实现的功能”）。
+`libra rev-list` 的目标是列出从一个或多个 revision 可达的提交对象。当前实现接受零个或多个 `[SPEC]`（缺省 `HEAD`），支持多 revision union、`^` 排除、`A..B` / `A...B` 范围，并按提交时间倒序打印可达提交哈希；`--count`、`-n`/`--max-count`、`--skip`、`--since`/`--after`、`--until`/`--before`、`--merges`、`--no-merges`、`--min-parents`、`--max-parents`、`--no-min-parents`、`--no-max-parents`、`--parents`、`--timestamp` 已支持。高级遍历过滤等 Git plumbing 行为尚未实现（见“还未实现的功能”）。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。多 revision 可达提交列表、`^` 排除、`A..B` / `A...B` 范围、`--count`、`-n`/`--max-count`、`--skip`、父提交数量过滤（`--merges`、`--no-merges`、`--min-parents`、`--max-parents`、`--no-min-parents`、`--no-max-parents`）、`--parents` 和 `--timestamp` 已支持；高级遍历过滤尚未公开。
+- 兼容级别：`partial`。多 revision 可达提交列表、`^` 排除、`A..B` / `A...B` 范围、`--count`、`-n`/`--max-count`、`--skip`、committer 时间过滤（`--since`/`--after`、`--until`/`--before`）、父提交数量过滤（`--merges`、`--no-merges`、`--min-parents`、`--max-parents`、`--no-min-parents`、`--no-max-parents`）、`--parents` 和 `--timestamp` 已支持；高级遍历过滤尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -42,6 +42,7 @@ flowchart TD
 - 2026-06-16：补齐 Git 兼容输出参数 `--parents` 与 `--timestamp`，人类输出采用 Git 字段顺序，JSON 保持 `commits[]` 为纯提交 ID 并在需要时增加 `entries[]` 元数据。
 - 2026-06-16：补齐 Git 兼容父提交数量过滤 `--merges`、`--no-merges`、`--min-parents`、`--max-parents`；过滤在 `--skip`、`--max-count` 和 `--count` 前应用，`--merges --no-merges` 按交集语义返回空结果。
 - 2026-06-17：补齐多 revision、`^` exclusion、`A..B`、`A...B` 和 `--no-min-parents` / `--no-max-parents`；`RevListArgs` 改为接收 `specs: Vec<String>`，JSON 新增 `inputs[]` 与 reset alias 布尔字段。
+- 2026-06-17：补齐 committer 时间过滤 `--since`/`--after` 与 `--until`/`--before`；沿用 `internal::log::date_parser::parse_date`，支持 `YYYY-MM-DD`、RFC3339、Unix timestamp 和相对时间表达式。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
 ## 当前状态
@@ -49,14 +50,14 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/rev-list.md`。
 - Synopsis：`libra rev-list [OPTIONS] [SPEC]...`。
-- 公开参数/子命令包括：`-n, --max-count <N>`、`--skip <N>`、`--count`、`--merges`、`--no-merges`、`--min-parents <N>`、`--max-parents <N>`、`--no-min-parents`、`--no-max-parents`、`--parents`、`--timestamp`、`[SPEC]...`（可选定位参数，缺省为 `HEAD`；支持多 revision、`^` 排除、`A..B` 和 `A...B`）；`--json` / `--quiet` 为全局参数，不在 `RevListArgs` 内本地声明。
+- 公开参数/子命令包括：`-n, --max-count <N>`、`--skip <N>`、`--count`、`--since <DATE>` / `--after <DATE>`、`--until <DATE>` / `--before <DATE>`、`--merges`、`--no-merges`、`--min-parents <N>`、`--max-parents <N>`、`--no-min-parents`、`--no-max-parents`、`--parents`、`--timestamp`、`[SPEC]...`（可选定位参数，缺省为 `HEAD`；支持多 revision、`^` 排除、`A..B` 和 `A...B`）；`--json` / `--quiet` 为全局参数，不在 `RevListArgs` 内本地声明。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 高级遍历过滤 | `--since` / `--until`、author/committer grep、path limitation、first-parent、cherry-pick 等高级 traversal/filter 组合。 | 暂未公开；后续实现时需要补源码、测试、兼容矩阵和 integration scenario 证据。 |
+| 高级遍历过滤 | author/committer grep、path limitation、first-parent、cherry-pick 等高级 traversal/filter 组合。 | 暂未公开；后续实现时需要补源码、测试、兼容矩阵和 integration scenario 证据。 |
 
 ## 维护要求
 

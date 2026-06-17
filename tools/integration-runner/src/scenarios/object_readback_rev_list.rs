@@ -37,6 +37,42 @@ pub(crate) fn assert_rev_list_readback(
         bail!("rev-list --skip 1 --max-count 1 HEAD did not return the parent commit");
     }
 
+    let rev_since = ctx.command(
+        &["rev-list", "--count", "--since", "0", "HEAD"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    if stdout_trim(&rev_since) != "2" {
+        bail!("rev-list --count --since 0 HEAD returned unexpected count");
+    }
+
+    let rev_after = ctx.command(
+        &["rev-list", "--count", "--after", "0", "HEAD"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    if stdout_trim(&rev_after) != "2" {
+        bail!("rev-list --after alias returned unexpected count");
+    }
+
+    let rev_until = ctx.command(
+        &["rev-list", "--count", "--until", "0", "HEAD"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    if stdout_trim(&rev_until) != "0" {
+        bail!("rev-list --count --until 0 HEAD returned unexpected count");
+    }
+
+    let rev_before = ctx.command(
+        &["rev-list", "--count", "--before", "0", "HEAD"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    if stdout_trim(&rev_before) != "0" {
+        bail!("rev-list --before alias returned unexpected count");
+    }
+
     let rev_multi = ctx.command(
         &["rev-list", "HEAD", "HEAD~1"],
         repo.to_path_buf(),

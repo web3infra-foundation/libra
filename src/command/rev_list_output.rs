@@ -56,6 +56,8 @@ pub(super) struct RevListOutput {
     pub(super) count_only: bool,
     pub(super) parents: bool,
     pub(super) timestamp: bool,
+    pub(super) since: Option<String>,
+    pub(super) until: Option<String>,
     pub(super) merges: bool,
     pub(super) no_merges: bool,
     pub(super) min_parents: Option<usize>,
