@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected — intentional (see [docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push](docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push))
+- 兼容级别：`partial`。branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; `--force-with-lease[=<ref>[:<expect>]]`（发送前校验远端仍匹配 tracking-ref/expected OID，与 `--force` 互斥）和 `--porcelain`（机器可读的每 ref 行，与 `--json`/`--machine` 互斥）supported；`--force-if-includes` 与 `--thin`/`--no-thin` 作为 **no-op** 接受。**unsupported（尚未打通协议层）：** `--atomic`、`--signed`、`--push-option`/`-o`、`--follow-tags`。local file remote rejected — intentional (see [docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push](docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push))
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -39,7 +39,7 @@ flowchart TD
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2025-11-27 `a4e9881b`（`feat: add force push support to push command (#69)`）：基础实现节点：add force push support to push command (#69)；当前实现的主要轮廓可追溯到该提交。
 - 2026-06-07 `6b11a315`（`feat(push): add atomic push safety`）：功能演进：add atomic push safety；该节点新增的 `--atomic` 等 flag 已在后续提交回退，当前 `PushArgs` 不再公开。
-- 2026-06-06 `e507dc57`（`feat(push): add --force-with-lease, --porcelain, and no-op compat flags (#1389)`）：功能演进：add --force-with-lease, --porcelain, and no-op compat flags (#1389)；该节点新增的 `--force-with-lease` / `--porcelain` 等 flag 已在后续提交回退，当前 `PushArgs` 不再公开。
+- 2026-06-06 `e507dc57`（`feat(push): add --force-with-lease, --porcelain, and no-op compat flags (#1389)`）：功能演进：add --force-with-lease, --porcelain, and no-op compat flags (#1389)；该节点新增的 `--force-with-lease` / `--porcelain` / `--force-if-includes` / `--thin`/`--no-thin` 等 flag 曾被一次 reconcile 丢失内容，已于 2026-06-18 恢复到当前代码（lease 校验 + porcelain 输出 + no-op 兼容 flag），`PushArgs` 重新公开这些参数。
 - 2026-05-29 `3a4990e8`（`fix(push): set upstream for up-to-date refspec`）：实现修正：set upstream for up-to-date refspec；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -48,16 +48,15 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/push.md`。
 - Synopsis：`libra push [OPTIONS] [<repository> [<refspec>...]]`。
-- 公开参数/子命令包括：`[<repository>]`、`[<REFSPEC>...]`、`-u, --set-upstream`、`-f, --force`、`-n, --dry-run`、`--tags`、`--mirror`。
+- 公开参数/子命令包括：`[<repository>]`、`[<REFSPEC>...]`、`-u, --set-upstream`、`-f, --force`、`--force-with-lease[=<ref>[:<expect>]]`、`--force-if-includes`、`--thin`、`--no-thin`、`--porcelain`、`-n, --dry-run`、`--tags`、`--mirror`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| Git flag | `--force-with-lease` | 当前 `PushArgs` 未公开（曾在 `e507dc57` 引入后回退）；如需恢复需补 lease 校验、错误码、JSON/机器输出契约和回归测试。 |
-| Git flag | `--atomic` | 当前 `PushArgs` 未公开（曾在 `6b11a315` 引入后回退）；恢复时需保证多 ref 更新的原子提交语义。 |
-| Git flag | `--porcelain` / `--signed` / `--follow-tags` | 当前 `PushArgs` 未公开；恢复时需补对应输出格式、签名协议或 tag 跟随逻辑和测试证据。 |
+| Git flag | `--atomic` | 当前 `PushArgs` 未公开（曾在 `6b11a315` 引入后回退）；恢复时需保证多 ref 更新的原子提交语义（需打通 `src/internal/protocol` receive-pack）。 |
+| Git flag | `--signed` / `--push-option` (`-o`) / `--follow-tags` | 当前 `PushArgs` 未公开；恢复时需补 push-cert 签名协议、push-option 转发或 tag 跟随逻辑和测试证据（均需协议层改造）。 |
 
 ## 维护要求
 
