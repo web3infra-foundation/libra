@@ -2,9 +2,15 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::{
+    fs,
+    time::{Duration, SystemTime},
+};
 
 use tempfile::tempdir;
+use walkdir::WalkDir;
 
 use super::*;
 
@@ -138,6 +144,240 @@ fn test_maintenance_run_loose_objects_few() {
     assert!(
         stdout.contains("skipping") || stdout.contains("threshold"),
         "few loose objects should skip packing, got: {stdout}"
+    );
+}
+
+#[test]
+
+/// Regression test: `maintenance run --task loose-objects` writes a standard
+/// `.pack`/`.idx` pair and leaves objects readable.
+///
+/// Previously the task wrote `pack-maintenance-{timestamp}` without a `.pack`
+/// extension, which `LocalStorage::list_all_packs` never discovers. After the
+/// task deleted the original loose objects, those objects became unreadable.
+fn test_maintenance_run_loose_objects_pack_is_readable() {
+    let repo = create_committed_repo_via_cli();
+
+    // Create enough files in a single commit to exceed the loose-object
+    // threshold (100 objects). Each file becomes a blob; together with the
+    // commit and tree this gives us >100 loose objects.
+    for i in 0..105 {
+        fs::write(
+            repo.path().join(format!("file_{i:03}.txt")),
+            format!("content {i}\n"),
+        )
+        .unwrap();
+    }
+    run_libra_command(&["add", "."], repo.path());
+    run_libra_command(&["commit", "-m", "many files", "--no-verify"], repo.path());
+
+    // Age all loose object files so the loose-objects task considers them old.
+    let objects_dir = repo.path().join(".libra").join("objects");
+    let old_time = SystemTime::now() - Duration::from_secs(30 * 24 * 60 * 60);
+    for entry in WalkDir::new(&objects_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
+        let file = fs::File::open(entry.path()).unwrap();
+        file.set_modified(old_time).unwrap();
+    }
+
+    // Run the loose-objects task and verify it packed objects.
+    let output = run_libra_command(
+        &["--json", "maintenance", "run", "--task", "loose-objects"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "loose-objects should pass, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    let tasks = json
+        .get("data")
+        .and_then(|d| d.get("tasks"))
+        .expect("tasks array");
+    let loose_task = tasks
+        .as_array()
+        .expect("tasks is array")
+        .iter()
+        .find(|t| t.get("task").and_then(|v| v.as_str()) == Some("loose-objects"))
+        .expect("loose-objects task in results");
+    let packed = loose_task
+        .get("objects_packed")
+        .and_then(|v| v.as_u64())
+        .expect("objects_packed field");
+    assert!(
+        packed >= 100,
+        "loose-objects should pack at least 100 objects, got task: {loose_task}"
+    );
+
+    // Verify the pack is discoverable: a .pack file should exist under
+    // .libra/objects/pack.
+    let pack_dir = objects_dir.join("pack");
+    let pack_files: Vec<_> = fs::read_dir(&pack_dir)
+        .expect("pack directory should exist")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "pack"))
+        .collect();
+    assert!(
+        !pack_files.is_empty(),
+        "a .pack file should be created under {pack_dir:?}"
+    );
+
+    // Verify history remains readable after the loose objects were removed.
+    let log_output = run_libra_command(&["log", "--pretty=%s"], repo.path());
+    assert!(
+        log_output.status.success(),
+        "log should succeed after packing, stderr: {}",
+        String::from_utf8_lossy(&log_output.stderr)
+    );
+    let log_stdout = String::from_utf8_lossy(&log_output.stdout);
+    assert!(
+        log_stdout.contains("many files") && log_stdout.contains("base"),
+        "history must remain intact after packing, got: {log_stdout}"
+    );
+}
+
+#[test]
+
+/// Regression test: `maintenance run --task incremental-repack` creates a valid
+/// `.pack`/`.idx` pair and only deletes source packs after verification.
+///
+/// Previously the consolidated file was named without a `.pack` extension, so
+/// `LocalStorage::list_all_packs` ignored it. After the task deleted the source
+/// `.pack` files, objects that only lived in those packs became unreadable.
+fn test_maintenance_run_incremental_repack_verifies_new_pack() {
+    let repo = create_committed_repo_via_cli();
+
+    // Create 5 separate packs by repeatedly adding old loose objects and
+    // running the loose-objects task.
+    for pack_idx in 0..5 {
+        for file_idx in 0..105 {
+            fs::write(
+                repo.path()
+                    .join(format!("pack{pack_idx}_file{file_idx:03}.txt")),
+                format!("content {pack_idx} {file_idx}\n"),
+            )
+            .unwrap();
+        }
+        run_libra_command(&["add", "."], repo.path());
+        run_libra_command(
+            &[
+                "commit",
+                "-m",
+                &format!("pack commit {pack_idx}"),
+                "--no-verify",
+            ],
+            repo.path(),
+        );
+
+        // Age all loose objects so the next loose-objects run packs them.
+        let objects_dir = repo.path().join(".libra").join("objects");
+        let old_time = SystemTime::now() - Duration::from_secs(30 * 24 * 60 * 60);
+        for entry in WalkDir::new(&objects_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            let file = fs::File::open(entry.path()).unwrap();
+            file.set_modified(old_time).unwrap();
+        }
+
+        let output = run_libra_command(
+            &["maintenance", "run", "--task", "loose-objects"],
+            repo.path(),
+        );
+        assert!(
+            output.status.success(),
+            "loose-objects run {pack_idx} should pass, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // Verify we have at least 5 .pack files before incremental repack.
+    let pack_dir = repo.path().join(".libra").join("objects").join("pack");
+    let initial_packs: Vec<_> = fs::read_dir(&pack_dir)
+        .expect("pack directory should exist")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "pack"))
+        .collect();
+    assert!(
+        initial_packs.len() >= 5,
+        "should have at least 5 packs before incremental repack, got {}",
+        initial_packs.len()
+    );
+
+    // Run incremental repack and verify it succeeds.
+    let output = run_libra_command(
+        &[
+            "--json",
+            "maintenance",
+            "run",
+            "--task",
+            "incremental-repack",
+        ],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "incremental-repack should pass, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    let tasks = json
+        .get("data")
+        .and_then(|d| d.get("tasks"))
+        .expect("tasks array");
+    let repack_task = tasks
+        .as_array()
+        .expect("tasks is array")
+        .iter()
+        .find(|t| t.get("task").and_then(|v| v.as_str()) == Some("incremental-repack"))
+        .expect("incremental-repack task in results");
+    let packs_repacked = repack_task
+        .get("packs_repacked")
+        .and_then(|v| v.as_u64())
+        .expect("packs_repacked field");
+    assert!(
+        packs_repacked >= 5,
+        "incremental-repack should repack at least 5 packs, got task: {repack_task}"
+    );
+
+    // Verify a single consolidated .pack remains.
+    let final_packs: Vec<_> = fs::read_dir(&pack_dir)
+        .expect("pack directory should exist")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "pack"))
+        .collect();
+    assert_eq!(
+        final_packs.len(),
+        1,
+        "should be left with exactly one consolidated .pack, got {}",
+        final_packs.len()
+    );
+
+    // Verify history remains readable after source packs were removed.
+    let log_output = run_libra_command(&["log", "--pretty=%s"], repo.path());
+    assert!(
+        log_output.status.success(),
+        "log should succeed after repack, stderr: {}",
+        String::from_utf8_lossy(&log_output.stderr)
+    );
+    let log_stdout = String::from_utf8_lossy(&log_output.stdout);
+    for pack_idx in 0..5 {
+        let msg = format!("pack commit {pack_idx}");
+        assert!(
+            log_stdout.contains(&msg),
+            "history must contain '{msg}' after repack, got: {log_stdout}"
+        );
+    }
+    assert!(
+        log_stdout.contains("base"),
+        "history must contain 'base' after repack, got: {log_stdout}"
     );
 }
 
@@ -376,6 +616,74 @@ fn test_maintenance_run_dry_run_gc_with_dangling() {
     );
 }
 
+#[test]
+
+/// Regression test: `maintenance run --task gc` must preserve reachable objects.
+///
+/// Previously `collect_reachable_objects` pre-inserted ref/reflog commit hashes
+/// into the reachable set before calling `walk_reachable`, so the walker
+/// returned immediately and never protected the commit's tree, parents, or
+/// historical blobs. This could cause GC to delete reachable loose objects and
+/// corrupt history.
+fn test_maintenance_gc_preserves_reachable_objects() {
+    let repo = create_committed_repo_via_cli();
+
+    // Create additional commits so the history contains multiple trees/blobs.
+    fs::write(repo.path().join("file_a.txt"), "content a\n").unwrap();
+    run_libra_command(&["add", "file_a.txt"], repo.path());
+    run_libra_command(&["commit", "-m", "commit a", "--no-verify"], repo.path());
+
+    fs::write(repo.path().join("file_b.txt"), "content b\n").unwrap();
+    run_libra_command(&["add", "file_b.txt"], repo.path());
+    run_libra_command(&["commit", "-m", "commit b", "--no-verify"], repo.path());
+
+    // Run GC and verify it does not remove any reachable object.
+    let output = run_libra_command(
+        &["--json", "maintenance", "run", "--task", "gc"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "gc should pass, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    let tasks = json
+        .get("data")
+        .and_then(|d| d.get("tasks"))
+        .expect("tasks array");
+    let gc_task = tasks
+        .as_array()
+        .expect("tasks is array")
+        .iter()
+        .find(|t| t.get("task").and_then(|v| v.as_str()) == Some("gc"))
+        .expect("gc task in results");
+    let removed = gc_task
+        .get("objects_removed")
+        .and_then(|v| v.as_u64())
+        .expect("objects_removed field");
+    assert_eq!(
+        removed, 0,
+        "gc must not remove reachable objects, got task: {gc_task}"
+    );
+
+    // Verify history is still readable after GC.
+    let log_output = run_libra_command(&["log", "--pretty=%s"], repo.path());
+    assert!(
+        log_output.status.success(),
+        "log should succeed after gc, stderr: {}",
+        String::from_utf8_lossy(&log_output.stderr)
+    );
+    let log_stdout = String::from_utf8_lossy(&log_output.stdout);
+    assert!(
+        log_stdout.contains("commit b")
+            && log_stdout.contains("commit a")
+            && log_stdout.contains("base"),
+        "history must remain intact after gc, got: {log_stdout}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Error Handling Tests (≥ 8 required)
 // ---------------------------------------------------------------------------
@@ -508,6 +816,74 @@ fn test_maintenance_run_json_output() {
     assert!(
         data.get("tasks").is_some(),
         "json data should contain tasks field"
+    );
+}
+
+/// Regression test: `maintenance run --json` must exit non-zero when a task fails.
+///
+/// Previously the JSON path returned `Ok(())` immediately after emitting the
+/// `overall_success: false` payload, so automation received exit code 0 even
+/// when tasks failed. The JSON should still be emitted, but the process must
+/// return a non-zero exit code.
+#[cfg(unix)]
+#[test]
+fn test_maintenance_run_json_exits_nonzero_on_task_failure() {
+    if skip_permission_denied_test_if_root(
+        "test_maintenance_run_json_exits_nonzero_on_task_failure",
+    ) {
+        return;
+    }
+
+    let repo = create_committed_repo_via_cli();
+
+    // Make the objects directory unreadable so `run_gc` fails while listing
+    // loose objects.
+    let objects_dir = repo.path().join(".libra").join("objects");
+    let mut permissions = fs::metadata(&objects_dir).unwrap().permissions();
+    permissions.set_mode(0o000);
+    fs::set_permissions(&objects_dir, permissions).unwrap();
+
+    let output = run_libra_command(
+        &["--json", "maintenance", "run", "--task", "gc"],
+        repo.path(),
+    );
+
+    // Restore permissions so the temp directory can be cleaned up.
+    let mut permissions = fs::metadata(&objects_dir).unwrap().permissions();
+    permissions.set_mode(0o755);
+    let _ = fs::set_permissions(&objects_dir, permissions);
+
+    assert!(
+        !output.status.success(),
+        "json maintenance run should fail when task fails, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "json maintenance run should exit with code 1"
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    let data = json.get("data").expect("json should have data field");
+    assert_eq!(
+        data.get("overall_success"),
+        Some(&serde_json::Value::Bool(false)),
+        "json should report overall_success: false"
+    );
+    let tasks = data
+        .get("tasks")
+        .expect("tasks array")
+        .as_array()
+        .expect("tasks is array");
+    let gc_task = tasks
+        .iter()
+        .find(|t| t.get("task").and_then(|v| v.as_str()) == Some("gc"))
+        .expect("gc task in results");
+    assert_eq!(
+        gc_task.get("success"),
+        Some(&serde_json::Value::Bool(false)),
+        "gc task should report success: false, got: {gc_task}"
     );
 }
 
