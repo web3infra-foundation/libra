@@ -160,6 +160,15 @@ pub(crate) fn assert_rev_list_readback(
         bail!("rev-list --no-max-parents did not clear the upper parent bound");
     }
 
+    let rev_first_parent = ctx.command(
+        &["rev-list", "--count", "--first-parent", "HEAD"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    if stdout_trim(&rev_first_parent) != "2" {
+        bail!("rev-list --first-parent HEAD returned unexpected count in linear history");
+    }
+
     let rev_no_merges = ctx.command(
         &["rev-list", "--no-merges", "HEAD"],
         repo.to_path_buf(),

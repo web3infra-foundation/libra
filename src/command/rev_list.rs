@@ -49,6 +49,10 @@ pub struct RevListArgs {
     #[clap(long)]
     pub timestamp: bool,
 
+    /// Follow only the first parent of merge commits
+    #[clap(long = "first-parent")]
+    pub first_parent: bool,
+
     /// Show commits more recent than DATE
     #[clap(long, visible_alias = "after", value_name = "DATE")]
     pub since: Option<String>,
@@ -104,7 +108,7 @@ pub async fn execute_safe(args: RevListArgs, output: &OutputConfig) -> CliResult
 }
 
 async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
-    let selection = resolve_revision_selection(&args.specs).await?;
+    let selection = resolve_revision_selection(&args.specs, args.first_parent).await?;
     let mut commits = selection.commits;
     sort_rev_list_commits(&mut commits);
     let time_window = rev_list_time_window(args)?;
@@ -154,6 +158,7 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         count_only: args.count,
         parents: args.parents,
         timestamp: args.timestamp,
+        first_parent: args.first_parent,
         since: args.since.clone(),
         until: args.until.clone(),
         merges: args.merges,

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
 
 use crate::{
-    command::log,
+    command::{load_object, log},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         util::{self, CommitBaseError},
@@ -23,7 +23,10 @@ enum RevisionTerm<'a> {
     Symmetric { left: &'a str, right: &'a str },
 }
 
-pub(super) async fn resolve_revision_selection(specs: &[String]) -> CliResult<RevListSelection> {
+pub(super) async fn resolve_revision_selection(
+    specs: &[String],
+    first_parent: bool,
+) -> CliResult<RevListSelection> {
     let input_terms = normalized_inputs(specs);
     let mut included = Vec::<Commit>::new();
     let mut included_ids = HashSet::<String>::new();
@@ -32,16 +35,18 @@ pub(super) async fn resolve_revision_selection(specs: &[String]) -> CliResult<Re
     for input in &input_terms {
         match parse_revision_term(input) {
             RevisionTerm::Include(spec) => {
-                include_reachable(spec, &mut included, &mut included_ids).await?
+                include_reachable(spec, first_parent, &mut included, &mut included_ids).await?
             }
-            RevisionTerm::Exclude(spec) => exclude_reachable(spec, &mut excluded).await?,
+            RevisionTerm::Exclude(spec) => {
+                exclude_reachable(spec, first_parent, &mut excluded).await?
+            }
             RevisionTerm::Range { start, end } => {
-                include_reachable(end, &mut included, &mut included_ids).await?;
-                exclude_reachable(start, &mut excluded).await?;
+                include_reachable(end, first_parent, &mut included, &mut included_ids).await?;
+                exclude_reachable(start, first_parent, &mut excluded).await?;
             }
             RevisionTerm::Symmetric { left, right } => {
-                let left_commits = reachable_commits(left).await?;
-                let right_commits = reachable_commits(right).await?;
+                let left_commits = reachable_commits(left, first_parent).await?;
+                let right_commits = reachable_commits(right, first_parent).await?;
                 let left_ids = commit_id_set(&left_commits);
                 let right_ids = commit_id_set(&right_commits);
                 excluded.extend(left_ids.intersection(&right_ids).cloned());
@@ -106,16 +111,25 @@ fn default_head(input: &str) -> &str {
 
 async fn include_reachable(
     spec: &str,
+    first_parent: bool,
     included: &mut Vec<Commit>,
     included_ids: &mut HashSet<String>,
 ) -> CliResult<()> {
-    insert_commits(reachable_commits(spec).await?, included, included_ids);
+    insert_commits(
+        reachable_commits(spec, first_parent).await?,
+        included,
+        included_ids,
+    );
     Ok(())
 }
 
-async fn exclude_reachable(spec: &str, excluded: &mut HashSet<String>) -> CliResult<()> {
+async fn exclude_reachable(
+    spec: &str,
+    first_parent: bool,
+    excluded: &mut HashSet<String>,
+) -> CliResult<()> {
     excluded.extend(
-        reachable_commits(spec)
+        reachable_commits(spec, first_parent)
             .await?
             .into_iter()
             .map(|commit| commit.id.to_string()),
@@ -123,9 +137,29 @@ async fn exclude_reachable(spec: &str, excluded: &mut HashSet<String>) -> CliRes
     Ok(())
 }
 
-async fn reachable_commits(spec: &str) -> CliResult<Vec<Commit>> {
+async fn reachable_commits(spec: &str, first_parent: bool) -> CliResult<Vec<Commit>> {
     let commit = resolve_commit(spec).await?;
-    log::get_reachable_commits(commit.to_string(), None).await
+    if first_parent {
+        first_parent_reachable_commits(commit)
+    } else {
+        log::get_reachable_commits(commit.to_string(), None).await
+    }
+}
+
+fn first_parent_reachable_commits(start: ObjectHash) -> CliResult<Vec<Commit>> {
+    let mut commits = Vec::new();
+    let mut current = Some(start);
+
+    while let Some(commit_id) = current {
+        let commit = load_object::<Commit>(&commit_id).map_err(|error| {
+            CliError::fatal(format!("storage broken, object not found: {error}"))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+        })?;
+        current = commit.parent_commit_ids.first().copied();
+        commits.push(commit);
+    }
+
+    Ok(commits)
 }
 
 async fn resolve_commit(spec: &str) -> CliResult<ObjectHash> {
