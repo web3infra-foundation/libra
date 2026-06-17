@@ -1,14 +1,14 @@
 use super::*;
 
-struct CherryFilterRepo {
-    repo: tempfile::TempDir,
-    left_same_id: String,
-    left_unique_id: String,
-    right_same_id: String,
-    right_unique_id: String,
+pub(super) struct CherryFilterRepo {
+    pub(super) repo: tempfile::TempDir,
+    pub(super) left_same_id: String,
+    pub(super) left_unique_id: String,
+    pub(super) right_same_id: String,
+    pub(super) right_unique_id: String,
 }
 
-fn create_cherry_filter_repo() -> CherryFilterRepo {
+pub(super) fn create_cherry_filter_repo() -> CherryFilterRepo {
     let repo = tempdir().expect("failed to create repository root");
     init_repo_via_cli(repo.path());
     configure_identity_via_cli(repo.path());
@@ -71,14 +71,14 @@ fn head_commit_id(repo: &Path) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn stdout_lines(output: &std::process::Output) -> Vec<String> {
+pub(super) fn stdout_lines(output: &std::process::Output) -> Vec<String> {
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(str::to_owned)
         .collect()
 }
 
-fn assert_same_lines(mut actual: Vec<String>, mut expected: Vec<String>) {
+pub(super) fn assert_same_lines(mut actual: Vec<String>, mut expected: Vec<String>) {
     actual.sort();
     expected.sort();
     assert_eq!(actual, expected);
@@ -220,5 +220,6 @@ fn test_rev_list_json_includes_cherry_filter_flags_and_entries() {
     assert_eq!(json["data"]["left_only"], false);
     assert_eq!(json["data"]["right_only"], false);
     assert_eq!(json["data"]["cherry_pick"], false);
+    assert_eq!(json["data"]["cherry"], false);
     assert_eq!(json["data"]["entries"].as_array().map(Vec::len), Some(4));
 }

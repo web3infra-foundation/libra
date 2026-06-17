@@ -43,6 +43,8 @@ EXAMPLES:
                                     Mark symmetric-difference sides
     libra rev-list --cherry-pick main...feature
                                     Omit patch-equivalent commits across sides
+    libra rev-list --cherry main...feature
+                                    Show right side and mark equivalent commits
     libra rev-list --parents HEAD   Include parent commit IDs on each line
     libra rev-list --timestamp HEAD Prefix each line with the committer timestamp
     libra rev-list main             Walk ancestry from refs/heads/main
@@ -86,6 +88,7 @@ pub(super) struct RevListOutput {
     pub(super) right_only: bool,
     pub(super) cherry_pick: bool,
     pub(super) cherry_mark: bool,
+    pub(super) cherry: bool,
     pub(super) since: Option<String>,
     pub(super) until: Option<String>,
     pub(super) merges: bool,
@@ -110,6 +113,7 @@ impl RevListOutput {
                         self.timestamp,
                         self.left_right,
                         self.cherry_mark,
+                        self.cherry,
                     )
                 })
                 .collect();
@@ -179,6 +183,7 @@ pub(super) fn format_rev_list_entry(
     show_timestamp: bool,
     show_left_right: bool,
     show_cherry_mark: bool,
+    show_cherry: bool,
 ) -> String {
     let mut fields = Vec::new();
     if show_timestamp && let Some(timestamp) = entry.timestamp {
@@ -188,6 +193,7 @@ pub(super) fn format_rev_list_entry(
         entry,
         show_left_right,
         show_cherry_mark,
+        show_cherry,
     ));
     if show_parents {
         fields.extend(entry.parents.iter().cloned());
@@ -199,10 +205,23 @@ fn format_entry_commit(
     entry: &RevListEntry,
     show_left_right: bool,
     show_cherry_mark: bool,
+    show_cherry: bool,
 ) -> String {
     let marker = if show_cherry_mark {
         if entry.cherry_equivalent.unwrap_or(false) {
             "="
+        } else {
+            "+"
+        }
+    } else if show_cherry {
+        if entry.cherry_equivalent.unwrap_or(false) {
+            "="
+        } else if show_left_right {
+            match entry.side {
+                Some(RevListSide::Left) => "<",
+                Some(RevListSide::Right) => ">",
+                None => "",
+            }
         } else {
             "+"
         }

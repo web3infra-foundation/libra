@@ -43,15 +43,17 @@ pub(super) fn apply_cherry_filters(
     mut commits: Vec<RevListSelectedCommit>,
     args: &RevListArgs,
 ) -> CliResult<Vec<RevListSelectedCommit>> {
-    if args.cherry_pick || args.cherry_mark {
+    if args.cherry_pick || args.cherry_mark || args.cherry {
         mark_cherry_equivalents(&mut commits)?;
     }
 
-    if args.cherry_pick {
+    if args.cherry_pick && !args.cherry {
         commits.retain(|commit| !commit.cherry_equivalent);
     }
 
-    if args.left_only {
+    if args.cherry {
+        commits.retain(|commit| commit.side == Some(RevListSide::Right));
+    } else if args.left_only {
         commits.retain(|commit| commit.side == Some(RevListSide::Left));
     } else if args.right_only {
         commits.retain(|commit| commit.side == Some(RevListSide::Right));

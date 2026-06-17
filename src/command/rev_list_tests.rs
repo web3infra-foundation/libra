@@ -61,6 +61,7 @@ fn test_rev_list_args_default() {
     assert!(!args.right_only);
     assert!(!args.cherry_pick);
     assert!(!args.cherry_mark);
+    assert!(!args.cherry);
     assert_eq!(args.min_parents, None);
     assert_eq!(args.max_parents, None);
 }
@@ -112,6 +113,10 @@ fn test_rev_list_args_parse_side_and_cherry_filters() {
 
     let args = RevListArgs::try_parse_from(["rev-list", "--cherry-pick", "--cherry-mark"]);
     assert!(args.is_err());
+
+    let args = RevListArgs::try_parse_from(["rev-list", "--cherry", "main...topic"]).unwrap();
+    assert!(args.cherry);
+    assert_eq!(args.specs, vec!["main...topic"]);
 }
 
 #[test]

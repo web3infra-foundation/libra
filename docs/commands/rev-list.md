@@ -10,7 +10,7 @@ libra rev-list [OPTIONS] [SPEC]... [-- <PATH>...]
 
 ## Description
 
-`libra rev-list` resolves one or more revision inputs to commits, walks the reachable history, applies optional exclusion/range, symmetric-difference side, cherry-equivalence, first-parent, author, committer, message grep, path, time-window, parent-count, and count/limit filters, and prints commit IDs newest first. When `<SPEC>` is omitted, the command defaults to `HEAD`. Output formatting can include parent commit IDs (`--parents`), committer timestamps (`--timestamp`), side markers (`--left-right`), and cherry-equivalence markers (`--cherry-mark`).
+`libra rev-list` resolves one or more revision inputs to commits, walks the reachable history, applies optional exclusion/range, symmetric-difference side, cherry-equivalence, first-parent, author, committer, message grep, path, time-window, parent-count, and count/limit filters, and prints commit IDs newest first. When `<SPEC>` is omitted, the command defaults to `HEAD`. Output formatting can include parent commit IDs (`--parents`), committer timestamps (`--timestamp`), side markers (`--left-right`), and cherry-equivalence markers (`--cherry-mark` / `--cherry`).
 
 ## Options
 
@@ -36,6 +36,7 @@ libra rev-list [OPTIONS] [SPEC]... [-- <PATH>...]
 | `--right-only` | With symmetric-difference input, keep only commits unique to the right side. Conflicts with `--left-only`. |
 | `--cherry-pick` | Omit patch-equivalent commits that appear on both sides of a symmetric difference. Conflicts with `--cherry-mark`. |
 | `--cherry-mark` | Mark patch-equivalent commits with `=` and non-equivalent commits with `+`. Conflicts with `--cherry-pick`. |
+| `--cherry` | Shorthand for right-side, cherry-marked, no-merge symmetric-difference output. Equivalent commits are prefixed with `=`, unique right-side commits with `+`, or `>` when combined with `--left-right`. |
 | `--parents` | Print parent commit IDs after each listed commit. |
 | `--timestamp` | Prefix each listed commit with its committer timestamp, matching Git's `timestamp commit [parents...]` field order. |
 | `<SPEC>...` | Revisions to enumerate from. Defaults to `HEAD`; accepts multiple positive revisions, `^<rev>` exclusions, `A..B`, and `A...B`. |
@@ -70,7 +71,10 @@ libra rev-list --left-right main...feature
 libra rev-list --right-only main...feature
 libra rev-list --cherry-pick main...feature
 libra rev-list --cherry-mark main...feature
+libra rev-list --cherry main...feature
+libra rev-list --left-right --cherry main...feature
 libra rev-list --count --left-right --cherry-mark main...feature
+libra rev-list --count --cherry main...feature
 libra rev-list --parents HEAD
 libra rev-list --timestamp --parents HEAD
 libra rev-list HEAD~1
@@ -80,7 +84,7 @@ libra --json rev-list HEAD
 
 ## Human Output
 
-Output is one commit ID per line by default. Multiple positive revisions are unioned and de-duplicated. `^<rev>` excludes commits reachable from that revision. `A..B` is equivalent to `^A B`; `A...B` prints the symmetric difference between both sides. `--left-right` prefixes symmetric-difference commits with `<` or `>`, `--left-only` and `--right-only` keep one side, `--cherry-pick` removes patch-equivalent pairs across sides, and `--cherry-mark` prefixes equivalent commits with `=` and unique commits with `+`. `--first-parent` limits traversal through merge commits to the first parent chain. Author, committer, message grep, path, time-window, side/cherry, and parent-count filters are applied before `--skip`, `--max-count`, and `--count`. `--author` and `--committer` match the respective `name <email>` string case-insensitively. `--grep` matches the full commit message with a case-sensitive regular expression; repeated `--grep` patterns use OR semantics. Path filters must follow an explicit `--` separator and match files or directories relative to the worktree root. `--since`/`--after` and `--until`/`--before` accept `YYYY-MM-DD`, RFC3339/full timestamps with timezone, Unix timestamps, and relative forms such as `2 weeks ago`. With `--parents`, each line becomes `commit parent...`. With `--timestamp`, each line becomes `timestamp commit`; combining both produces `timestamp commit parent...`. With `--count`, default output is a single decimal count; `--left-right` produces `<left>\t<right>`, `--cherry-mark` produces `<unique>\t<equivalent>`, and combining `--left-right --cherry-mark` produces `<left-unique>\t<right-unique>\t<equivalent>`.
+Output is one commit ID per line by default. Multiple positive revisions are unioned and de-duplicated. `^<rev>` excludes commits reachable from that revision. `A..B` is equivalent to `^A B`; `A...B` prints the symmetric difference between both sides. `--left-right` prefixes symmetric-difference commits with `<` or `>`, `--left-only` and `--right-only` keep one side, `--cherry-pick` removes patch-equivalent pairs across sides, `--cherry-mark` prefixes equivalent commits with `=` and unique commits with `+`, and `--cherry` keeps the right side, marks equivalent commits with `=`, marks unique right-side commits with `+`, and implies no-merge output. With `--left-right --cherry`, unique right-side commits use `>` while equivalent commits keep `=`. `--first-parent` limits traversal through merge commits to the first parent chain. Author, committer, message grep, path, time-window, side/cherry, and parent-count filters are applied before `--skip`, `--max-count`, and `--count`. `--author` and `--committer` match the respective `name <email>` string case-insensitively. `--grep` matches the full commit message with a case-sensitive regular expression; repeated `--grep` patterns use OR semantics. Path filters must follow an explicit `--` separator and match files or directories relative to the worktree root. `--since`/`--after` and `--until`/`--before` accept `YYYY-MM-DD`, RFC3339/full timestamps with timezone, Unix timestamps, and relative forms such as `2 weeks ago`. With `--parents`, each line becomes `commit parent...`. With `--timestamp`, each line becomes `timestamp commit`; combining both produces `timestamp commit parent...`. With `--count`, default output is a single decimal count; `--left-right` produces `<left>\t<right>`, `--cherry-mark` or `--cherry` produces `<unique>\t<equivalent>`, and combining `--left-right --cherry-mark` or `--left-right --cherry` produces `<left-unique>\t<right-unique>\t<equivalent>`.
 
 ```text
 abc1234def5678901234567890abcdef12345678
@@ -129,6 +133,7 @@ def5678901234567890abcdef12345678abc1234
     "right_only": false,
     "cherry_pick": false,
     "cherry_mark": false,
+    "cherry": false,
     "since": null,
     "until": null,
     "merges": false,
@@ -143,7 +148,7 @@ def5678901234567890abcdef12345678abc1234
 }
 ```
 
-When `--parents`, `--timestamp`, `--left-right`, or `--cherry-mark` is present, `commits[]` remains the plain commit-ID list for compatibility and `entries[]` carries the optional metadata used for human output.
+When `--parents`, `--timestamp`, `--left-right`, `--cherry-mark`, or `--cherry` is present, `commits[]` remains the plain commit-ID list for compatibility and `entries[]` carries the optional metadata used for human output.
 
 ```json
 {
@@ -180,6 +185,7 @@ When `--parents`, `--timestamp`, `--left-right`, or `--cherry-mark` is present, 
     "right_only": false,
     "cherry_pick": false,
     "cherry_mark": true,
+    "cherry": false,
     "since": null,
     "until": null,
     "merges": false,
@@ -211,7 +217,7 @@ When `--parents`, `--timestamp`, `--left-right`, or `--cherry-mark` is present, 
 | Message grep | `--grep <PATTERN>` | Same | revset predicates |
 | Path limitation | `-- <PATH>...` | Same | revset/file predicates |
 | Symmetric side output/filtering | `--left-right`, `--left-only`, `--right-only` | Same | revset predicates/templates |
-| Cherry-equivalence filtering | `--cherry-pick`, `--cherry-mark`; `--cherry` shorthand not implemented | `--cherry`, `--cherry-pick`, `--cherry-mark` | revset predicates/templates |
+| Cherry-equivalence filtering | `--cherry`, `--cherry-pick`, `--cherry-mark` | Same | revset predicates/templates |
 | Parent output | `--parents` | Same | revset/template output |
 | Timestamp output | `--timestamp` | Same | template output |
 | JSON output | `--json` | No | No |

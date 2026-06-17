@@ -93,6 +93,32 @@ pub(crate) fn assert_rev_list_cherry_filters(
         ],
     )?;
 
+    let rev_cherry = ctx.command(
+        &["rev-list", "--cherry", "main...rev-right"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    assert_same_lines(
+        &rev_cherry,
+        vec![
+            format!("={right_same_id}"),
+            format!("+{right_unique_id}"),
+        ],
+    )?;
+
+    let rev_left_right_cherry = ctx.command(
+        &["rev-list", "--left-right", "--cherry", "main...rev-right"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    assert_same_lines(
+        &rev_left_right_cherry,
+        vec![
+            format!("={right_same_id}"),
+            format!(">{right_unique_id}"),
+        ],
+    )?;
+
     let rev_cherry_count = ctx.command(
         &[
             "rev-list",
@@ -108,6 +134,30 @@ pub(crate) fn assert_rev_list_cherry_filters(
         bail!("rev-list cherry count fields did not match Git-compatible side counts");
     }
 
+    let rev_cherry_shorthand_count = ctx.command(
+        &["rev-list", "--count", "--cherry", "main...rev-right"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    if stdout_trim(&rev_cherry_shorthand_count) != "1\t1" {
+        bail!("rev-list --count --cherry did not match Git-compatible fields");
+    }
+
+    let rev_left_right_cherry_count = ctx.command(
+        &[
+            "rev-list",
+            "--count",
+            "--left-right",
+            "--cherry",
+            "main...rev-right",
+        ],
+        repo.to_path_buf(),
+        true,
+    )?;
+    if stdout_trim(&rev_left_right_cherry_count) != "0\t1\t1" {
+        bail!("rev-list --count --left-right --cherry did not match Git-compatible fields");
+    }
+
     let rev_cherry_json = ctx.command(
         &["--json", "rev-list", "--cherry-pick", "main...rev-right"],
         repo.to_path_buf(),
@@ -120,6 +170,20 @@ pub(crate) fn assert_rev_list_cherry_filters(
     }
     if rev_cherry_json["data"]["commits"] != serde_json::json!([right_unique_id]) {
         bail!("rev-list cherry-pick JSON did not limit commits: {rev_cherry_json}");
+    }
+
+    let rev_cherry_json = ctx.command(
+        &["--json", "rev-list", "--cherry", "main...rev-right"],
+        repo.to_path_buf(),
+        true,
+    )?;
+    let rev_cherry_json: serde_json::Value = serde_json::from_slice(&rev_cherry_json.stdout)
+        .context("parse rev-list cherry JSON output")?;
+    if rev_cherry_json["data"]["cherry"] != serde_json::json!(true) {
+        bail!("rev-list --cherry JSON did not echo flag: {rev_cherry_json}");
+    }
+    if rev_cherry_json["data"]["cherry_mark"] != serde_json::json!(false) {
+        bail!("rev-list --cherry JSON incorrectly echoed cherry_mark: {rev_cherry_json}");
     }
 
     ctx.command(&["switch", "main"], repo.to_path_buf(), true)?;

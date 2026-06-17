@@ -29,6 +29,7 @@ pub(super) struct RevListMessageFilter {
 }
 
 pub(super) fn parent_count_filter(args: &RevListArgs) -> ParentCountFilter {
+    let no_merges = args.no_merges || args.cherry;
     let min = if args.no_min_parents {
         0
     } else {
@@ -39,7 +40,7 @@ pub(super) fn parent_count_filter(args: &RevListArgs) -> ParentCountFilter {
     let max = if args.no_max_parents {
         None
     } else {
-        match (args.max_parents, args.no_merges) {
+        match (args.max_parents, no_merges) {
             (Some(explicit), true) => Some(explicit.min(1)),
             (Some(explicit), false) => Some(explicit),
             (None, true) => Some(1),

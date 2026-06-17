@@ -14,23 +14,39 @@ fn test_format_rev_list_entry_matches_git_field_order() {
     };
 
     assert_eq!(
-        format_rev_list_entry(&entry, true, true, false, false),
+        format_rev_list_entry(&entry, true, true, false, false, false),
         "123 abc123 def456 789abc"
     );
     assert_eq!(
-        format_rev_list_entry(&entry, true, false, false, false),
+        format_rev_list_entry(&entry, true, false, false, false, false),
         "abc123 def456 789abc"
     );
     assert_eq!(
-        format_rev_list_entry(&entry, false, true, false, false),
+        format_rev_list_entry(&entry, false, true, false, false, false),
         "123 abc123"
     );
     assert_eq!(
-        format_rev_list_entry(&entry, false, false, true, false),
+        format_rev_list_entry(&entry, false, false, true, false, false),
         "<abc123"
     );
     assert_eq!(
-        format_rev_list_entry(&entry, false, false, true, true),
+        format_rev_list_entry(&entry, false, false, true, true, false),
         "+abc123"
+    );
+    assert_eq!(
+        format_rev_list_entry(&entry, false, false, false, false, true),
+        "+abc123"
+    );
+
+    let right = RevListEntry {
+        commit: "fed321".to_string(),
+        side: Some(RevListSide::Right),
+        cherry_equivalent: Some(false),
+        parents: Vec::new(),
+        timestamp: None,
+    };
+    assert_eq!(
+        format_rev_list_entry(&right, false, false, true, false, true),
+        ">fed321"
     );
 }

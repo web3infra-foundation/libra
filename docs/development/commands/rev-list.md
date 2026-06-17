@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra rev-list` 的目标是列出从一个或多个 revision 可达的提交对象。当前实现接受零个或多个 `[SPEC]`（缺省 `HEAD`），支持多 revision union、`^` 排除、`A..B` / `A...B` 范围，并按提交时间倒序打印可达提交哈希；`--count`、`-n`/`--max-count`、`--skip`、`--since`/`--after`、`--until`/`--before`、`--merges`、`--no-merges`、`--min-parents`、`--max-parents`、`--no-min-parents`、`--no-max-parents`、`--first-parent`、`--author`、`--committer`、`--grep`、`-- <PATH>...` path limitation、`--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--parents`、`--timestamp` 已支持。更高级对象遍历/输出等 Git plumbing 行为尚未实现（见“还未实现的功能”）。
+`libra rev-list` 的目标是列出从一个或多个 revision 可达的提交对象。当前实现接受零个或多个 `[SPEC]`（缺省 `HEAD`），支持多 revision union、`^` 排除、`A..B` / `A...B` 范围，并按提交时间倒序打印可达提交哈希；`--count`、`-n`/`--max-count`、`--skip`、`--since`/`--after`、`--until`/`--before`、`--merges`、`--no-merges`、`--min-parents`、`--max-parents`、`--no-min-parents`、`--no-max-parents`、`--first-parent`、`--author`、`--committer`、`--grep`、`-- <PATH>...` path limitation、`--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--cherry`、`--parents`、`--timestamp` 已支持。更高级对象遍历/输出等 Git plumbing 行为尚未实现（见“还未实现的功能”）。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。多 revision 可达提交列表、`^` 排除、`A..B` / `A...B` 范围、`--count`、`-n`/`--max-count`、`--skip`、committer 时间过滤（`--since`/`--after`、`--until`/`--before`）、父提交数量过滤（`--merges`、`--no-merges`、`--min-parents`、`--max-parents`、`--no-min-parents`、`--no-max-parents`）、`--first-parent`、`--author`、`--committer`、`--grep`、`-- <PATH>...` path limitation、`--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--parents` 和 `--timestamp` 已支持；`--cherry` 简写和更广义对象遍历输出尚未公开。
+- 兼容级别：`partial`。多 revision 可达提交列表、`^` 排除、`A..B` / `A...B` 范围、`--count`、`-n`/`--max-count`、`--skip`、committer 时间过滤（`--since`/`--after`、`--until`/`--before`）、父提交数量过滤（`--merges`、`--no-merges`、`--min-parents`、`--max-parents`、`--no-min-parents`、`--no-max-parents`）、`--first-parent`、`--author`、`--committer`、`--grep`、`-- <PATH>...` path limitation、`--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--cherry`、`--parents` 和 `--timestamp` 已支持；更广义对象遍历输出尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -14,7 +14,7 @@
 ## 设计方案
 
 - 入口与分发：已公开接入 `src/cli.rs::Commands`；已由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
-- 源码分层：入口与参数仍在 `src/command/rev_list.rs`；输出与帮助文本在 `src/command/rev_list_output.rs`；父提交数量、作者、提交者、message grep、path limitation 和时间过滤在 `src/command/rev_list_filter.rs`；multi-spec/range/exclusion 解析、symmetric-difference side 标记和 first-parent 可达集合在 `src/command/rev_list_spec.rs`；patch-equivalence 标记、`--left-only`/`--right-only` 和 `--cherry-pick`/`--cherry-mark` 过滤在 `src/command/rev_list_cherry.rs`。参数/子命令类型包括：`RevListArgs`；输出、错误或状态类型包括：crate 私有的命名输出结构体 `RevListOutput`（包含输入、提交列表、输出格式、作者/提交者/message/path 过滤、side/cherry 过滤、时间过滤、父提交过滤、first-parent、limit/skip 等字段，由 `resolve_rev_list` 返回并供 `emit_json_data` 序列化），错误通过 `CliResult` 或上层命令错误统一传播；主要执行函数包括：`execute`、`execute_safe`。
+- 源码分层：入口与参数仍在 `src/command/rev_list.rs`；输出与帮助文本在 `src/command/rev_list_output.rs`；父提交数量、作者、提交者、message grep、path limitation 和时间过滤在 `src/command/rev_list_filter.rs`；multi-spec/range/exclusion 解析、symmetric-difference side 标记和 first-parent 可达集合在 `src/command/rev_list_spec.rs`；patch-equivalence 标记、`--left-only`/`--right-only` 和 `--cherry-pick`/`--cherry-mark`/`--cherry` 过滤在 `src/command/rev_list_cherry.rs`。参数/子命令类型包括：`RevListArgs`；输出、错误或状态类型包括：crate 私有的命名输出结构体 `RevListOutput`（包含输入、提交列表、输出格式、作者/提交者/message/path 过滤、side/cherry 过滤、时间过滤、父提交过滤、first-parent、limit/skip 等字段，由 `resolve_rev_list` 返回并供 `emit_json_data` 序列化），错误通过 `CliResult` 或上层命令错误统一传播；主要执行函数包括：`execute`、`execute_safe`。
 - 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；对象路径会解析 revision 并读写 blob/tree/commit/tag 等对象。
 
 - 流程图：以下流程图按当前源码分层展示主路径和底层对象边界，便于维护者把代码入口、执行函数和副作用范围对应起来。
@@ -49,6 +49,7 @@ flowchart TD
 - 2026-06-17：补齐 message grep 过滤 `--grep <PATTERN>`；支持重复参数 OR 语义和大小写敏感正则匹配，无效正则返回 `LBR-CLI-002`，JSON 新增 `grep[]` 回显字段。
 - 2026-06-17：补齐 path limitation `rev-list <rev> -- <PATH>...`；按提交相对父提交的路径变化过滤提交，支持文件和目录 pathspec，JSON 新增 `pathspecs[]` 回显字段。
 - 2026-06-17：补齐 symmetric-difference side/cherry 过滤 `--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`；`A...B` 记录左右侧元数据，patch-equivalence 以提交相对第一父提交的归一化 diff 签名计算，JSON 新增 `left_right`、`left_only`、`right_only`、`cherry_pick`、`cherry_mark`、`entries[].side`、`entries[].cherry_equivalent` 和 count-only 场景的 `count_fields[]`。
+- 2026-06-17：补齐 Git 兼容 `--cherry` 简写；按 `--right-only --cherry-mark --no-merges` 组合语义保留右侧提交，等价提交用 `=`，唯一右侧提交在普通 `--cherry` 下用 `+`、在 `--left-right --cherry` 下用 `>`，JSON 新增 `cherry` 回显字段。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
 ## 当前状态
@@ -56,14 +57,13 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/rev-list.md`。
 - Synopsis：`libra rev-list [OPTIONS] [SPEC]... [-- <PATH>...]`。
-- 公开参数/子命令包括：`-n, --max-count <N>`、`--skip <N>`、`--count`、`--since <DATE>` / `--after <DATE>`、`--until <DATE>` / `--before <DATE>`、`--merges`、`--no-merges`、`--min-parents <N>`、`--max-parents <N>`、`--no-min-parents`、`--no-max-parents`、`--first-parent`、`--author <PATTERN>`、`--committer <PATTERN>`、`--grep <PATTERN>`、`--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`-- <PATH>...`、`--parents`、`--timestamp`、`[SPEC]...`（可选定位参数，缺省为 `HEAD`；支持多 revision、`^` 排除、`A..B` 和 `A...B`）；`--json` / `--quiet` 为全局参数，不在 `RevListArgs` 内本地声明。
+- 公开参数/子命令包括：`-n, --max-count <N>`、`--skip <N>`、`--count`、`--since <DATE>` / `--after <DATE>`、`--until <DATE>` / `--before <DATE>`、`--merges`、`--no-merges`、`--min-parents <N>`、`--max-parents <N>`、`--no-min-parents`、`--no-max-parents`、`--first-parent`、`--author <PATTERN>`、`--committer <PATTERN>`、`--grep <PATTERN>`、`--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--cherry`、`-- <PATH>...`、`--parents`、`--timestamp`、`[SPEC]...`（可选定位参数，缺省为 `HEAD`；支持多 revision、`^` 排除、`A..B` 和 `A...B`）；`--json` / `--quiet` 为全局参数，不在 `RevListArgs` 内本地声明。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 高级遍历过滤 | Git 的 `--cherry` 简写（等价于常见 `--right-only --cherry-mark --no-merges` 组合语义）尚未公开。 | 暂未公开；后续实现时需要补源码、测试、兼容矩阵和 integration scenario 证据。 |
 | 对象遍历输出 | `--objects`、`--objects-edge`、`--objects-edge-aggressive`、`--children`、`--boundary` 等对象枚举/边界输出尚未实现。 | 继续标记为 `partial`；后续按参数批次实现并补 runner owner scenario。 |
 
 ## 维护要求

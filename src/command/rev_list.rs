@@ -88,6 +88,10 @@ pub struct RevListArgs {
     #[clap(long = "cherry-mark", conflicts_with = "cherry_pick")]
     pub cherry_mark: bool,
 
+    /// Show right-side commits and mark patch-equivalent commits
+    #[clap(long = "cherry")]
+    pub cherry: bool,
+
     /// Show commits more recent than DATE
     #[clap(long, visible_alias = "after", value_name = "DATE")]
     pub since: Option<String>,
@@ -175,7 +179,11 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         Vec::new()
     };
     let entries = if args.count
-        || (!args.parents && !args.timestamp && !args.left_right && !args.cherry_mark)
+        || (!args.parents
+            && !args.timestamp
+            && !args.left_right
+            && !args.cherry_mark
+            && !args.cherry)
     {
         None
     } else {
@@ -185,7 +193,8 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
                 .map(|selected| RevListEntry {
                     commit: selected.commit.id.to_string(),
                     side: selected.side,
-                    cherry_equivalent: args.cherry_mark.then_some(selected.cherry_equivalent),
+                    cherry_equivalent: (args.cherry_mark || args.cherry)
+                        .then_some(selected.cherry_equivalent),
                     parents: if args.parents {
                         selected
                             .commit
@@ -229,6 +238,7 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         right_only: args.right_only,
         cherry_pick: args.cherry_pick,
         cherry_mark: args.cherry_mark,
+        cherry: args.cherry,
         since: args.since.clone(),
         until: args.until.clone(),
         merges: args.merges,
@@ -243,7 +253,7 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
 }
 
 fn rev_list_count_fields(commits: &[RevListSelectedCommit], args: &RevListArgs) -> Vec<usize> {
-    if args.left_right && args.cherry_mark {
+    if args.left_right && (args.cherry_mark || args.cherry) {
         return vec![
             side_count(commits, rev_list_spec::RevListSide::Left, false),
             side_count(commits, rev_list_spec::RevListSide::Right, false),
@@ -261,7 +271,7 @@ fn rev_list_count_fields(commits: &[RevListSelectedCommit], args: &RevListArgs) 
         ];
     }
 
-    if args.cherry_mark {
+    if args.cherry_mark || args.cherry {
         return vec![
             commits
                 .iter()
