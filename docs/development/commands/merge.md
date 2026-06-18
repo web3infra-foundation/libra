@@ -46,8 +46,9 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/merge.md`。
-- Synopsis：`libra merge <branch>` / `libra merge --continue` / `libra merge --abort`。
-- 公开参数/子命令包括：`<branch>`、`--continue`、`--abort`。
+- Synopsis：`libra merge [--ff-only | --no-ff] <branch>` / `libra merge --continue` / `libra merge --abort`。
+- 公开参数/子命令包括：`<branch>`、`--continue`、`--abort`、`--ff-only`、`--no-ff`。
+- `--ff-only`：仅当当前分支可 fast-forward 到目标时才合并，否则失败（非快进退出错误）。`--no-ff`：即使可以 fast-forward 也强制生成两亲合并提交。两者互斥，且与 `--continue`/`--abort` 互斥；底层复用 pull 已有的 `PullMergeOptions` 引擎路径。
 
 
 ## 还未实现的功能

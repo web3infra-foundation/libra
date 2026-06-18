@@ -46,8 +46,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/diff.md`。
-- Synopsis：`libra diff [--staged] [--old <COMMIT> --new <COMMIT>] [--stat | --numstat | --name-only | --name-status] [<pathspec>...]`。
-- 公开参数/子命令包括：`--old <COMMIT>`、`--new <COMMIT>`、`--staged`、`[<pathspec>...]`、`--algorithm <NAME>`、`--output <FILENAME>`、`--name-only`、`--name-status`、`--numstat`、`--stat`。
+- Synopsis：`libra diff [--staged | --cached] [--old <COMMIT> --new <COMMIT>] [--stat | --numstat | --name-only | --name-status] [<pathspec>...]`。
+- 公开参数/子命令包括：`--old <COMMIT>`、`--new <COMMIT>`、`--staged`（`--cached` 为 Git 兼容别名）、`[<pathspec>...]`、`--algorithm <NAME>`、`--output <FILENAME>`、`--name-only`、`--name-status`、`--numstat`、`--stat`。
 
 
 ## 还未实现的功能

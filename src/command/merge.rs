@@ -72,6 +72,14 @@ pub struct MergeArgs {
     /// Abort an in-progress merge and restore the pre-merge state
     #[arg(long, conflicts_with = "continue_merge")]
     pub abort: bool,
+
+    /// Refuse to merge unless the current branch can fast-forward to the target.
+    #[arg(long = "ff-only", conflicts_with_all = ["no_ff", "continue_merge", "abort"])]
+    pub ff_only: bool,
+
+    /// Always create a merge commit, even when a fast-forward would be possible.
+    #[arg(long = "no-ff", conflicts_with_all = ["ff_only", "continue_merge", "abort"])]
+    pub no_ff: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -304,7 +312,13 @@ pub async fn execute_safe(args: MergeArgs, output: &OutputConfig) -> CliResult<(
 
 async fn run_merge(args: MergeArgs, output: &OutputConfig) -> Result<MergeOutput, MergeError> {
     match (args.branch.as_deref(), args.continue_merge, args.abort) {
-        (Some(branch), false, false) => run_merge_for_pull(branch, branch, output).await,
+        (Some(branch), false, false) => {
+            let options = PullMergeOptions {
+                ff_only: args.ff_only,
+                no_ff: args.no_ff,
+            };
+            run_merge_for_pull_with_options(branch, branch, output, options).await
+        }
         (None, true, false) => run_merge_continue(output).await,
         (None, false, true) => run_merge_abort(output).await,
         (None, false, false) => Err(MergeError::MissingAction),
@@ -1446,6 +1460,25 @@ mod tests {
             hash: ObjectHash::new(&[byte; 20]),
             mode,
         }
+    }
+
+    #[test]
+    fn merge_args_parse_ff_flags() {
+        let no_ff = MergeArgs::try_parse_from(["merge", "--no-ff", "feature"]).unwrap();
+        assert!(no_ff.no_ff);
+        assert!(!no_ff.ff_only);
+        assert_eq!(no_ff.branch.as_deref(), Some("feature"));
+
+        let ff_only = MergeArgs::try_parse_from(["merge", "--ff-only", "feature"]).unwrap();
+        assert!(ff_only.ff_only);
+        assert!(!ff_only.no_ff);
+    }
+
+    #[test]
+    fn merge_args_ff_only_conflicts_with_no_ff() {
+        let err = MergeArgs::try_parse_from(["merge", "--ff-only", "--no-ff", "feature"])
+            .expect_err("--ff-only and --no-ff are mutually exclusive");
+        assert!(err.to_string().contains("cannot be used with"));
     }
 
     /// Pin the `Display` format for every variant of [`PullMergeError`]

@@ -373,6 +373,83 @@ fn test_rev_parse_invalid_target_returns_cli_error_code() {
 }
 
 #[test]
+fn test_rev_parse_verify_resolves_single_object() {
+    let repo = create_committed_repo_via_cli();
+    let verify = run_libra_command(&["rev-parse", "--verify", "HEAD"], repo.path());
+    assert_cli_success(&verify, "rev-parse --verify HEAD");
+    let plain = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert_eq!(
+        String::from_utf8_lossy(&verify.stdout).trim(),
+        String::from_utf8_lossy(&plain.stdout).trim(),
+        "--verify should print the same hash as a plain resolve"
+    );
+}
+
+#[test]
+fn test_rev_parse_verify_unresolvable_exits_128() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(
+        &["rev-parse", "--verify", "definitely-not-a-ref"],
+        repo.path(),
+    );
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Needed a single revision"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_rev_parse_verify_quiet_unresolvable_exits_1_silently() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["--quiet", "rev-parse", "--verify", "nope"], repo.path());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        output.stdout.is_empty(),
+        "quiet --verify must print nothing"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "quiet --verify must not print a diagnostic, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_rev_parse_default_used_when_no_spec() {
+    let repo = create_committed_repo_via_cli();
+    let with_default = run_libra_command(&["rev-parse", "--default", "HEAD"], repo.path());
+    assert_cli_success(&with_default, "rev-parse --default HEAD");
+    let head = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert_eq!(
+        String::from_utf8_lossy(&with_default.stdout).trim(),
+        String::from_utf8_lossy(&head.stdout).trim(),
+        "--default should resolve to HEAD when no SPEC is given"
+    );
+}
+
+#[test]
+fn test_rev_parse_is_inside_work_tree_true() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["rev-parse", "--is-inside-work-tree"], repo.path());
+    assert_cli_success(&output, "rev-parse --is-inside-work-tree");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+}
+
+#[test]
+fn test_rev_parse_git_dir_points_at_libra_dir() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["rev-parse", "--git-dir"], repo.path());
+    assert_cli_success(&output, "rev-parse --git-dir");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().contains(".libra"),
+        "git-dir should point at the .libra dir, got {stdout}"
+    );
+}
+
+#[test]
 fn test_rev_parse_rejects_tag_object_that_points_to_tree() {
     let repo = create_committed_repo_via_cli();
     let tag_id = create_non_commit_tag_object(repo.path());

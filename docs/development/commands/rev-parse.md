@@ -46,15 +46,15 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/rev-parse.md`。
 - Synopsis：`libra rev-parse [OPTIONS] [SPEC]`。
-- 公开参数/子命令包括：`--short`、`--abbrev-ref`、`--show-toplevel`、`[SPEC]`（位置参数，缺省为 `HEAD`）。
+- 公开参数/子命令包括：`--short`、`--abbrev-ref`、`--show-toplevel`、`--verify`、`--default <ARG>`、`--is-inside-work-tree`、`--is-bare-repository`、`--git-dir`、`[SPEC]`（位置参数，缺省为 `HEAD`）。
+- `--verify`：断言 SPEC 解析为唯一对象，失败退出 128；配合全局 `--quiet`/`-q` 时静默退出 1。`--default <ARG>`：未提供位置 SPEC 时回退到该修订。`--is-inside-work-tree` / `--is-bare-repository` 打印 `true`/`false`；`--git-dir` 打印 `.libra` 目录路径（Git `$GIT_DIR` 等价）。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 解析断言 | Git `--verify`、`--default` 的单对象断言与默认 fallback 语义；当前 `RevParseArgs` 未暴露。（`--quiet`/`-q` 不在此列：它是 `src/cli.rs` 的全局参数，写入 `OutputConfig.quiet`，`execute_safe` 已据此分支抑制输出，今已可用。） | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
-| 仓库状态查询 | Git `--is-inside-work-tree`、`--is-bare-repository`、`--is-inside-git-dir`、`--git-dir`、`--show-prefix`、`--show-cdup`；当前仅有 `--show-toplevel`。 | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
+| 仓库状态查询 | Git `--is-inside-git-dir`、`--show-prefix`、`--show-cdup`；当前已支持 `--show-toplevel`、`--is-inside-work-tree`、`--is-bare-repository`、`--git-dir`。 | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
 | 输出过滤 | Git `--symbolic`、`--symbolic-full-name`、`--flags`、`--no-flags`、`--revs-only`、`--no-revs`、`--abbrev=<n>`、`--short=<n>`、`--sq` 等输出/过滤选项；当前 `--short` 不接受位数参数。 | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
 | 参数解析模式 | Git `--parseopt`、`--keep-dashdash`、`--stuck-long`、`--sq-quote` 等 `--parseopt` 子模式；当前未实现。 | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
 

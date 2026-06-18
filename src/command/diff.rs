@@ -57,7 +57,8 @@ pub struct DiffArgs {
     pub new: Option<String>,
 
     /// Use stage as new commit. This option is conflict with --new.
-    #[clap(long)]
+    /// `--cached` is accepted as a Git-compatible alias for `--staged`.
+    #[clap(long, visible_alias = "cached")]
     #[clap(group = "op_new")]
     pub staged: bool,
 
@@ -885,6 +886,11 @@ mod test {
                 DiffArgs::try_parse_from(["diff", "--staged", "pathspec", "--output", "output"]);
             let args = args.unwrap();
             assert_eq!(args.old, None);
+            assert!(args.staged);
+        }
+        {
+            // --cached is a Git-compatible alias for --staged
+            let args = DiffArgs::try_parse_from(["diff", "--cached"]).unwrap();
             assert!(args.staged);
         }
         {
