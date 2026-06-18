@@ -89,6 +89,11 @@ pub struct MergeArgs {
     /// (no merge info recorded); finalize with a normal `commit`.
     #[arg(long, conflicts_with_all = ["ff_only", "continue_merge", "abort"])]
     pub squash: bool,
+
+    /// Perform the merge and stage the result but stop before committing,
+    /// recording merge state; finalize with `libra merge --continue`.
+    #[arg(long = "no-commit", conflicts_with_all = ["squash", "ff_only", "continue_merge", "abort"])]
+    pub no_commit: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -129,6 +134,10 @@ pub(crate) struct PullMergeOptions {
     /// create a commit or move HEAD (and never fast-forward), leaving the result
     /// staged for a subsequent normal `commit`.
     pub squash: bool,
+    /// `libra merge --no-commit`: perform the merge and stage the result (never
+    /// fast-forward) but stop before committing, recording a MergeState so
+    /// `libra merge --continue` can finalize the two-parent commit.
+    pub no_commit: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -334,6 +343,7 @@ async fn run_merge(args: MergeArgs, output: &OutputConfig) -> Result<MergeOutput
                 no_ff: args.no_ff,
                 message: args.message.clone(),
                 squash: args.squash,
+                no_commit: args.no_commit,
             };
             run_merge_for_pull_with_options(branch, branch, output, options).await
         }
@@ -367,6 +377,11 @@ fn render_merge_output(result: &MergeOutput, output: &OutputConfig) -> CliResult
         match result.strategy.as_str() {
             "three-way" => info_println!(output, "Merge made by the 'three-way' strategy."),
             "squash" => info_println!(output, "Squash commit -- not updating HEAD"),
+            "no-commit" => info_println!(
+                output,
+                "Automatic merge went well; stopped before committing as requested\n\
+                 finalize with 'libra merge --continue'"
+            ),
             _ => info_println!(output, "Fast-forward"),
         }
     }
@@ -445,7 +460,7 @@ pub(crate) async fn run_merge_for_pull_with_options(
         });
     }
 
-    if lca.id == current_commit.id && !options.no_ff && !options.squash {
+    if lca.id == current_commit.id && !options.no_ff && !options.squash && !options.no_commit {
         let files_changed = count_changed_files(Some(&current_commit), &target_commit)?;
         apply_fast_forward_merge(target_commit.clone(), upstream, output).await?;
         return Ok(PullMergeSummary {
@@ -478,6 +493,7 @@ pub(crate) async fn run_merge_for_pull_with_options(
         upstream,
         options.message.clone(),
         options.squash,
+        options.no_commit,
         output,
     )
     .await
@@ -501,6 +517,7 @@ async fn perform_three_way_merge(
     upstream: &str,
     message_override: Option<String>,
     squash: bool,
+    no_commit: bool,
     output: &OutputConfig,
 ) -> Result<PullMergeSummary, PullMergeError> {
     switch::ensure_clean_status(output)
@@ -551,6 +568,35 @@ async fn perform_three_way_merge(
             files_changed,
             up_to_date: false,
             parents: Vec::new(),
+            conflicted_paths: Vec::new(),
+            aborted: false,
+            continued: false,
+        });
+    }
+
+    if no_commit {
+        // `--no-commit`: stage the (conflict-free) merged tree but stop before
+        // committing, recording a MergeState with no conflicted paths so
+        // `libra merge --continue` finalizes the two-parent commit. (Unlike Git,
+        // a plain `commit` would record only one parent, so the result must be
+        // finalized via `merge --continue`.)
+        reset_index_and_workdir_to_tree(&tree_id)?;
+        MergeState {
+            head_name: head_name.clone(),
+            orig_head: current_commit.id.to_string(),
+            target: target_commit.id.to_string(),
+            target_ref: upstream.to_string(),
+            base: base_commit.id.to_string(),
+            conflicted_paths: Vec::new(),
+        }
+        .save()?;
+        return Ok(PullMergeSummary {
+            strategy: "no-commit".to_string(),
+            old_commit: Some(current_commit.id.to_string()),
+            commit: None,
+            files_changed,
+            up_to_date: false,
+            parents: vec![current_commit.id.to_string(), target_commit.id.to_string()],
             conflicted_paths: Vec::new(),
             aborted: false,
             continued: false,
@@ -1518,6 +1564,15 @@ mod tests {
 
         let with_msg = MergeArgs::try_parse_from(["merge", "-m", "custom", "feature"]).unwrap();
         assert_eq!(with_msg.message.as_deref(), Some("custom"));
+
+        let squash = MergeArgs::try_parse_from(["merge", "--squash", "feature"]).unwrap();
+        assert!(squash.squash);
+        let no_commit = MergeArgs::try_parse_from(["merge", "--no-commit", "feature"]).unwrap();
+        assert!(no_commit.no_commit);
+        // --squash and --no-commit are mutually exclusive.
+        assert!(
+            MergeArgs::try_parse_from(["merge", "--squash", "--no-commit", "feature"]).is_err()
+        );
     }
 
     #[test]

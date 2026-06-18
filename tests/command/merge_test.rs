@@ -471,6 +471,57 @@ fn test_merge_squash_stages_without_committing() {
     );
 }
 
+#[test]
+fn test_merge_no_commit_then_continue() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    assert!(
+        run_libra_command(&["checkout", "-b", "feat"], p)
+            .status
+            .success(),
+        "checkout -b feat"
+    );
+    commit_file(p, "feat.txt", "feat content", "feat commit");
+    assert!(
+        run_libra_command(&["checkout", "main"], p).status.success(),
+        "checkout main"
+    );
+    commit_file(p, "main.txt", "main content", "main commit");
+
+    let before = run_libra_command(&["rev-parse", "HEAD"], p);
+    let before_head = String::from_utf8_lossy(&before.stdout).trim().to_string();
+
+    // --no-commit stages the merge but does not move HEAD.
+    let merge = run_libra_command(&["merge", "--no-commit", "feat"], p);
+    assert_cli_success(&merge, "merge --no-commit feat");
+    assert!(
+        String::from_utf8_lossy(&merge.stdout).contains("stopped before committing"),
+        "expected the no-commit message, got: {}",
+        String::from_utf8_lossy(&merge.stdout)
+    );
+    let mid = run_libra_command(&["rev-parse", "HEAD"], p);
+    assert_eq!(
+        String::from_utf8_lossy(&mid.stdout).trim(),
+        before_head,
+        "--no-commit must not move HEAD"
+    );
+    assert!(
+        p.join("feat.txt").exists(),
+        "merged file should be staged into the worktree"
+    );
+
+    // merge --continue finalizes the two-parent commit and advances HEAD.
+    let cont = run_libra_command(&["merge", "--continue"], p);
+    assert_cli_success(&cont, "merge --continue");
+    let after = run_libra_command(&["rev-parse", "HEAD"], p);
+    assert_ne!(
+        String::from_utf8_lossy(&after.stdout).trim(),
+        before_head,
+        "HEAD should advance after merge --continue"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_merge_same_file_non_overlapping_edits_merges_without_conflict() {
