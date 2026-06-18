@@ -23,7 +23,7 @@ use crate::{
         branch::BranchStoreError, config::ConfigKv, db::get_db_conn_instance, head::Head,
         model::reference,
     },
-    utils::{client_storage::ClientStorage, path},
+    utils::{client_storage::ClientStorage, path, util},
 };
 
 // Constants for tag references
@@ -94,6 +94,8 @@ pub enum CreateTagError {
     StoreObject(#[source] io::Error),
     #[error("failed to persist tag reference: {0}")]
     PersistReference(#[source] DbErr),
+    #[error("failed to sign annotated tag: {0}")]
+    VaultSign(String),
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +114,7 @@ pub async fn create(
     name: &str,
     message: Option<String>,
     force: bool,
+    sign: bool,
 ) -> Result<CreateTagResult, CreateTagError> {
     let head_commit_id = match Head::current_commit_result().await {
         Ok(Some(head_commit_id)) => head_commit_id,
@@ -148,6 +151,42 @@ pub async fn create(
             .map(|e| e.value)
             .unwrap_or_else(|| DEFAULT_EMAIL.to_string());
         let tagger_signature = Signature::new(SignatureType::Tagger, user_name, user_email);
+
+        // `tag -s`: sign the canonical (unsigned) tag content with the vault PGP
+        // key and append the armored signature block to the message, matching
+        // Git's signed-tag layout. The tagger is built exactly once so the
+        // signed bytes match the stored object.
+        let msg = if sign {
+            let unseal_key = crate::internal::vault::load_unseal_key()
+                .await
+                .ok_or_else(|| {
+                    CreateTagError::VaultSign(
+                        "tag signing requested but no vault unseal key was found".to_string(),
+                    )
+                })?;
+            let unsigned_content = format!(
+                "object {}\ntype {}\ntag {}\ntagger {}\n\n{}",
+                head_commit_id,
+                ObjectType::Commit,
+                name,
+                tagger_signature,
+                msg
+            );
+            let root_dir = util::storage_path();
+            let sig_hex = crate::internal::vault::pgp_sign(
+                &root_dir,
+                &unseal_key,
+                unsigned_content.as_bytes(),
+            )
+            .await
+            .map_err(|e| CreateTagError::VaultSign(format!("vault PGP signing failed: {e}")))?;
+            let armored = crate::internal::vault::signature_to_armored(&sig_hex).map_err(|e| {
+                CreateTagError::VaultSign(format!("failed to format PGP signature: {e}"))
+            })?;
+            format!("{msg}\n{armored}")
+        } else {
+            msg
+        };
 
         let git_internal_tag = git_internalTag::new(
             head_commit_id,

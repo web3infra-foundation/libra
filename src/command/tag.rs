@@ -70,6 +70,11 @@ pub struct TagArgs {
     /// Only list tags whose commit does NOT contain COMMIT. Implies list mode.
     #[clap(long = "no-contains", value_name = "commit")]
     pub no_contains: Option<String>,
+
+    /// Create a vault-PGP-signed annotated tag (requires a message via `-m`,
+    /// since Libra does not open an editor for the tag body).
+    #[clap(short = 's', long = "sign", requires = "message")]
+    pub sign: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -178,6 +183,9 @@ enum TagError {
 
     #[error("failed to compute reachability for --contains/--no-contains: {0}")]
     Reachability(String),
+
+    #[error("failed to sign tag: {0}")]
+    VaultSign(String),
 }
 
 fn classify_tag_load_error(error: &anyhow::Error) -> StableErrorCode {
@@ -258,6 +266,9 @@ impl From<TagError> for CliError {
             TagError::Reachability(_) => {
                 CliError::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
             }
+            TagError::VaultSign(_) => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("ensure the vault is initialized and signing is configured"),
         }
     }
 }
@@ -293,7 +304,7 @@ async fn create_tag(tag_name: &str, message: Option<String>, force: bool) {
 
 #[cfg(test)]
 async fn create_tag_safe(tag_name: &str, message: Option<String>, force: bool) -> CliResult<()> {
-    run_create_tag(tag_name, message, force)
+    run_create_tag(tag_name, message, force, false)
         .await
         .map(|_| ())
         .map_err(CliError::from)?;
@@ -317,6 +328,7 @@ fn map_create_tag_error(tag_name: &str, error: tag::CreateTagError) -> TagError 
             name: tag_name.to_string(),
             source,
         },
+        tag::CreateTagError::VaultSign(detail) => TagError::VaultSign(detail),
     }
 }
 
@@ -367,7 +379,7 @@ async fn run_tag(args: &TagArgs) -> Result<TagOutput, TagError> {
         return run_delete_tag(name).await;
     }
 
-    run_create_tag(name, args.message.clone(), args.force).await
+    run_create_tag(name, args.message.clone(), args.force, args.sign).await
 }
 
 fn render_tag_output(result: &TagOutput, output: &OutputConfig) -> CliResult<()> {
@@ -431,8 +443,9 @@ async fn run_create_tag(
     tag_name: &str,
     message: Option<String>,
     force: bool,
+    sign: bool,
 ) -> Result<TagOutput, TagError> {
-    let created = tag::create(tag_name, message, force)
+    let created = tag::create(tag_name, message, force, sign)
         .await
         .map_err(|error| map_create_tag_error(tag_name, error))?;
     Ok(TagOutput::Create {

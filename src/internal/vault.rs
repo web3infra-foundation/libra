@@ -563,7 +563,10 @@ async fn store_ssh_private_key(private_key: &str) -> Result<()> {
 
 /// Convert a hex-encoded PGP detached signature into an armored PGP signature
 /// string suitable for embedding in a Git/Libra commit object.
-pub fn signature_to_gpgsig(signature_hex: &str) -> Result<String> {
+/// Build the ASCII-armored PGP signature block from a hex-encoded signature.
+/// Shared by commit `gpgsig` headers and annotated-tag signatures (which append
+/// this block verbatim to the tag message rather than indenting it as a header).
+pub fn signature_to_armored(signature_hex: &str) -> Result<String> {
     use base64::{Engine, engine::general_purpose::STANDARD};
 
     let sig_bytes = hex::decode(signature_hex).context("failed to decode signature hex")?;
@@ -576,6 +579,11 @@ pub fn signature_to_gpgsig(signature_hex: &str) -> Result<String> {
         armored.push('\n');
     }
     armored.push_str("-----END PGP SIGNATURE-----");
+    Ok(armored)
+}
+
+pub fn signature_to_gpgsig(signature_hex: &str) -> Result<String> {
+    let armored = signature_to_armored(signature_hex)?;
 
     let mut gpgsig = String::from("gpgsig ");
     for (i, line) in armored.lines().enumerate() {

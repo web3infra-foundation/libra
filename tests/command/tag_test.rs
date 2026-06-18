@@ -167,6 +167,40 @@ fn test_tag_contains_filter() {
 }
 
 #[test]
+fn test_tag_sign_embeds_pgp_signature() {
+    let repo = create_committed_repo_via_cli();
+
+    let out = run_libra_command(&["tag", "-s", "-m", "signed release", "v1.0"], repo.path());
+    assert_cli_success(&out, "tag -s -m 'signed release' v1.0");
+
+    // The signed annotated tag object must embed the armored PGP signature
+    // after the message.
+    let show = run_libra_command(&["cat-file", "-p", "v1.0"], repo.path());
+    assert_cli_success(&show, "cat-file -p v1.0");
+    let body = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        body.contains("-----BEGIN PGP SIGNATURE-----"),
+        "tag -s should embed a PGP signature block: {body}"
+    );
+    assert!(
+        body.contains("signed release"),
+        "tag message should precede the signature: {body}"
+    );
+}
+
+#[test]
+fn test_tag_sign_requires_message() {
+    let repo = create_committed_repo_via_cli();
+    // `-s` without `-m` is rejected at parse time (Libra has no tag editor).
+    let out = run_libra_command(&["tag", "-s", "v1.0"], repo.path());
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "tag -s without -m should be a usage error"
+    );
+}
+
+#[test]
 fn test_tag_create_outputs_concise_confirmation() {
     let repo = create_committed_repo_via_cli();
 
@@ -667,7 +701,9 @@ async fn test_basic_tag_creation() {
     let (_temp, _guard) = setup_repo_with_commit().await;
 
     // Create a lightweight tag that points to HEAD commit.
-    internal_tag::create("v1.0.0", None, false).await.unwrap();
+    internal_tag::create("v1.0.0", None, false, false)
+        .await
+        .unwrap();
 
     // Verify tag presence and that we can read the pointed object id.
     assert_tag_exists("v1.0.0").await;
@@ -684,7 +720,7 @@ async fn test_tag_with_message() {
     let (_temp, _guard) = setup_repo_with_commit_with("content", "Commit with message").await;
 
     // Annotated tag creation (includes tagger and message fields internally).
-    internal_tag::create("v1.0.1", Some("Release v1.0.1".into()), false)
+    internal_tag::create("v1.0.1", Some("Release v1.0.1".into()), false, false)
         .await
         .unwrap();
 
@@ -713,7 +749,7 @@ async fn test_force_tag() {
     // Verify that forcing a tag replaces the ref target.
     let (_temp, _guard) = setup_repo_with_commit_with("v1", "First").await;
 
-    internal_tag::create("v1.0", Some("Initial".into()), false)
+    internal_tag::create("v1.0", Some("Initial".into()), false, false)
         .await
         .unwrap();
     assert_tag_exists("v1.0").await;
@@ -759,6 +795,7 @@ async fn test_force_tag() {
         points_at: None,
         contains: None,
         no_contains: None,
+        sign: false,
     })
     .await;
     let after = read_tag_oid("v1.0").await;
@@ -776,7 +813,7 @@ async fn test_force_tag() {
 async fn test_force_tag_store_failure_preserves_existing_ref() {
     let (_temp, _guard) = setup_repo_with_commit_with("content", "Base").await;
 
-    internal_tag::create("v1.0", Some("Initial".into()), false)
+    internal_tag::create("v1.0", Some("Initial".into()), false, false)
         .await
         .unwrap();
     let (before_object, _) = internal_tag::find_tag_and_commit("v1.0")
@@ -793,7 +830,7 @@ async fn test_force_tag_store_failure_preserves_existing_ref() {
     collect_directory_modes(&objects_dir, &mut original_modes);
     set_directory_mode_recursive(&objects_dir, 0o555);
 
-    let result = internal_tag::create("v1.0", Some("Updated".into()), true).await;
+    let result = internal_tag::create("v1.0", Some("Updated".into()), true, false).await;
 
     restore_directory_modes(&original_modes);
 
@@ -819,7 +856,7 @@ async fn test_force_tag_store_failure_preserves_existing_ref() {
 async fn test_internal_create_returns_metadata_for_annotated_tag() {
     let (_temp, _guard) = setup_repo_with_commit_with("content", "Base").await;
 
-    let created = internal_tag::create("v1.0", Some("Release v1.0".into()), false)
+    let created = internal_tag::create("v1.0", Some("Release v1.0".into()), false, false)
         .await
         .unwrap();
 
@@ -843,8 +880,12 @@ async fn test_list_tags() {
     // Verify listing returns created tag names.
     let (_temp, _guard) = setup_repo_with_commit_with("content", "Base").await;
 
-    internal_tag::create("v1.0.0", None, false).await.unwrap();
-    internal_tag::create("v2.0.0", None, false).await.unwrap();
+    internal_tag::create("v1.0.0", None, false, false)
+        .await
+        .unwrap();
+    internal_tag::create("v2.0.0", None, false, false)
+        .await
+        .unwrap();
 
     let names = list_tag_names().await;
     assert!(names.contains("v1.0.0"));
@@ -857,7 +898,7 @@ async fn test_delete_tag() {
     // Verify delete removes the tag ref.
     let (_temp, _guard) = setup_repo_with_commit_with("content", "Delete base").await;
 
-    internal_tag::create("to-delete", None, false)
+    internal_tag::create("to-delete", None, false, false)
         .await
         .unwrap();
     assert_tag_exists("to-delete").await;
@@ -872,6 +913,7 @@ async fn test_delete_tag() {
         points_at: None,
         contains: None,
         no_contains: None,
+        sign: false,
     })
     .await;
     assert_tag_absent("to-delete").await;
@@ -883,7 +925,9 @@ async fn test_annotation_lines_tag() {
     let (_temp, _guard) = setup_repo_with_commit_with("lightweight-tag", "First").await;
 
     // lightweight tag creation
-    internal_tag::create("v1.0.0", None, false).await.unwrap();
+    internal_tag::create("v1.0.0", None, false, false)
+        .await
+        .unwrap();
 
     // Make second commit with updated content
     std::fs::write("file.txt", "annotation-tag").unwrap();
@@ -925,6 +969,7 @@ async fn test_annotation_lines_tag() {
         points_at: None,
         contains: None,
         no_contains: None,
+        sign: false,
     })
     .await;
 
@@ -967,6 +1012,7 @@ async fn test_annotation_lines_tag() {
         points_at: None,
         contains: None,
         no_contains: None,
+        sign: false,
     })
     .await;
 
