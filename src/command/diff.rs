@@ -200,10 +200,44 @@ pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()
     if util::require_repo().is_err() {
         return Err(CliError::from(DiffError::NotInRepo));
     }
+    let mut args = args;
+    normalize_diff_range(&mut args).await;
     validate_diff_algorithm(&args).map_err(CliError::from)?;
     emit_worktree_scan_progress(&args, output);
     let result = run_diff(&args).await.map_err(CliError::from)?;
     render_diff_output(&args, &result, output)
+}
+
+/// `diff A..B`: when no `--old`/`--new`/`--staged` is supplied and the first
+/// positional is a two-dot range whose sides both resolve to commits, rewrite it
+/// into `--old`/`--new`. `A..` diffs A against the working tree; `..B` diffs HEAD
+/// against B. The rewrite only fires when the sides resolve as commits, so a real
+/// path containing `..` is left untouched as a pathspec. Three-dot (`A...B`)
+/// merge-base ranges are not yet handled and fall through to pathspec matching.
+async fn normalize_diff_range(args: &mut DiffArgs) {
+    if args.old.is_some() || args.new.is_some() || args.staged {
+        return;
+    }
+    let Some(first) = args.pathspec.first().cloned() else {
+        return;
+    };
+    if first.contains("...") || !first.contains("..") {
+        return;
+    }
+    let Some((left, right)) = first.split_once("..") else {
+        return;
+    };
+    let left_spec = if left.is_empty() { "HEAD" } else { left };
+    let left_ok = crate::command::get_target_commit(left_spec).await.is_ok();
+    let right_ok = right.is_empty() || crate::command::get_target_commit(right).await.is_ok();
+    if !left_ok || !right_ok {
+        return;
+    }
+    args.old = Some(left_spec.to_string());
+    if !right.is_empty() {
+        args.new = Some(right.to_string());
+    }
+    args.pathspec.remove(0);
 }
 
 fn validate_diff_algorithm(args: &DiffArgs) -> Result<(), DiffError> {

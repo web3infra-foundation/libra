@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。staged/old-new/pathspec/name/stat/numstat/output/algorithm 已支持；位置性 revspec、summary、word/binary diff、whitespace 和 external diff 尚未公开。
+- 兼容级别：`partial`。staged/old-new/pathspec/name/stat/numstat/output/algorithm 与位置性两点范围 `A..B`（`diff A..B`）已支持；位置性 `diff A B`（空格分隔双 rev）、三点范围 `A...B`（merge-base）、summary、word/binary diff、whitespace 和 external diff 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -46,8 +46,9 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/diff.md`。
-- Synopsis：`libra diff [--staged | --cached] [--old <COMMIT> --new <COMMIT>] [--stat | --numstat | --name-only | --name-status] [<pathspec>...]`。
+- Synopsis：`libra diff [--staged | --cached] [--old <COMMIT> --new <COMMIT>] [<commit>..<commit>] [--stat | --numstat | --name-only | --name-status] [<pathspec>...]`。
 - 公开参数/子命令包括：`--old <COMMIT>`、`--new <COMMIT>`、`--staged`（`--cached` 为 Git 兼容别名）、`[<pathspec>...]`、`--algorithm <NAME>`、`--output <FILENAME>`、`--name-only`、`--name-status`、`--numstat`、`--stat`。
+- 位置性两点范围 `diff A..B`：未给 `--old`/`--new`/`--staged` 且首个位置参数是两点范围、且两侧均能解析为提交时，由 `normalize_diff_range` 重写为 `--old A --new B`（`A..` 对工作树，`..B` 以 HEAD 为 old）；任一侧无法解析为提交则原样作为 pathspec（含 `..` 的真实路径不受影响）。三点 `A...B` 暂不处理。
 
 
 ## 还未实现的功能

@@ -44,6 +44,45 @@ fn test_diff_json_output_includes_file_stats() {
 }
 
 #[test]
+fn test_diff_two_dot_range_positional() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    fs::write(p.join("a.txt"), "one\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "a.txt"], p), "add c1");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit c1",
+    );
+    let c1 = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+
+    fs::write(p.join("a.txt"), "two\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "a.txt"], p), "add c2");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c2", "--no-verify"], p),
+        "commit c2",
+    );
+    let c2 = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+
+    // `diff A..B` (positional two-dot range) should diff the two commits.
+    let out = run_libra_command(&["diff", &format!("{c1}..{c2}")], p);
+    assert_cli_success(&out, "diff A..B");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("a.txt"),
+        "diff A..B should mention a.txt: {stdout}"
+    );
+    assert!(
+        stdout.contains("one") && stdout.contains("two"),
+        "diff A..B should show the one->two change: {stdout}"
+    );
+}
+
+#[test]
 fn test_diff_machine_output_is_single_line_json() {
     let repo = create_committed_repo_via_cli();
     fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
