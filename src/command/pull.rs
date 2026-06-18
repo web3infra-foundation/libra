@@ -294,6 +294,7 @@ pub(crate) async fn run_pull(
             ff_only: args.ff_only,
             no_ff: args.no_ff,
             message: None,
+            squash: false,
         },
     )
     .await

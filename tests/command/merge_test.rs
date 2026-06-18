@@ -419,6 +419,58 @@ fn test_merge_custom_message_via_dash_m() {
     );
 }
 
+#[test]
+fn test_merge_squash_stages_without_committing() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    assert!(
+        run_libra_command(&["checkout", "-b", "feat"], p)
+            .status
+            .success(),
+        "checkout -b feat"
+    );
+    commit_file(p, "feat.txt", "feat content", "feat commit");
+    assert!(
+        run_libra_command(&["checkout", "main"], p).status.success(),
+        "checkout main"
+    );
+    commit_file(p, "main.txt", "main content", "main commit");
+
+    let before = run_libra_command(&["rev-parse", "HEAD"], p);
+    let before_head = String::from_utf8_lossy(&before.stdout).trim().to_string();
+
+    let merge = run_libra_command(&["merge", "--squash", "feat"], p);
+    assert_cli_success(&merge, "merge --squash feat");
+    let merge_out = String::from_utf8_lossy(&merge.stdout);
+    assert!(
+        merge_out.contains("Squash commit"),
+        "expected squash message, got: {merge_out}"
+    );
+
+    // --squash must NOT move HEAD, but the merged file must be in the worktree.
+    let after = run_libra_command(&["rev-parse", "HEAD"], p);
+    assert_eq!(
+        String::from_utf8_lossy(&after.stdout).trim(),
+        before_head,
+        "--squash must not move HEAD"
+    );
+    assert!(
+        p.join("feat.txt").exists(),
+        "merged file should be staged into the worktree"
+    );
+
+    // The staged result is finalized with a normal commit, which advances HEAD.
+    let commit = run_libra_command(&["commit", "-m", "squashed merge", "--no-verify"], p);
+    assert_cli_success(&commit, "commit after squash");
+    let final_head = run_libra_command(&["rev-parse", "HEAD"], p);
+    assert_ne!(
+        String::from_utf8_lossy(&final_head.stdout).trim(),
+        before_head,
+        "HEAD should advance after committing the squashed result"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_merge_same_file_non_overlapping_edits_merges_without_conflict() {

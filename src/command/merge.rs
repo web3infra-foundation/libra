@@ -84,6 +84,11 @@ pub struct MergeArgs {
     /// Use the given message for the merge commit instead of the default.
     #[arg(short = 'm', long = "message", value_name = "MSG", conflicts_with_all = ["continue_merge", "abort"])]
     pub message: Option<String>,
+
+    /// Merge changes but stage the result without committing or moving HEAD
+    /// (no merge info recorded); finalize with a normal `commit`.
+    #[arg(long, conflicts_with_all = ["ff_only", "continue_merge", "abort"])]
+    pub squash: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -120,6 +125,10 @@ pub(crate) struct PullMergeOptions {
     /// Override the merge-commit message (`libra merge -m <msg>`). `None` uses
     /// the default `Merge <upstream> into <head>` message.
     pub message: Option<String>,
+    /// `libra merge --squash`: produce the merged index/worktree but do NOT
+    /// create a commit or move HEAD (and never fast-forward), leaving the result
+    /// staged for a subsequent normal `commit`.
+    pub squash: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -324,6 +333,7 @@ async fn run_merge(args: MergeArgs, output: &OutputConfig) -> Result<MergeOutput
                 ff_only: args.ff_only,
                 no_ff: args.no_ff,
                 message: args.message.clone(),
+                squash: args.squash,
             };
             run_merge_for_pull_with_options(branch, branch, output, options).await
         }
@@ -356,6 +366,7 @@ fn render_merge_output(result: &MergeOutput, output: &OutputConfig) -> CliResult
     } else {
         match result.strategy.as_str() {
             "three-way" => info_println!(output, "Merge made by the 'three-way' strategy."),
+            "squash" => info_println!(output, "Squash commit -- not updating HEAD"),
             _ => info_println!(output, "Fast-forward"),
         }
     }
@@ -434,7 +445,7 @@ pub(crate) async fn run_merge_for_pull_with_options(
         });
     }
 
-    if lca.id == current_commit.id && !options.no_ff {
+    if lca.id == current_commit.id && !options.no_ff && !options.squash {
         let files_changed = count_changed_files(Some(&current_commit), &target_commit)?;
         apply_fast_forward_merge(target_commit.clone(), upstream, output).await?;
         return Ok(PullMergeSummary {
@@ -466,6 +477,7 @@ pub(crate) async fn run_merge_for_pull_with_options(
         lca,
         upstream,
         options.message.clone(),
+        options.squash,
         output,
     )
     .await
@@ -488,6 +500,7 @@ async fn perform_three_way_merge(
     base_commit: Commit,
     upstream: &str,
     message_override: Option<String>,
+    squash: bool,
     output: &OutputConfig,
 ) -> Result<PullMergeSummary, PullMergeError> {
     switch::ensure_clean_status(output)
@@ -525,6 +538,25 @@ async fn perform_three_way_merge(
 
     let tree_id = create_tree_from_items_map(&merge_result.merged_items)
         .map_err(PullMergeError::TreeCreate)?;
+
+    if squash {
+        // `--squash`: update the index/worktree to the merged tree but do not
+        // create a commit or move HEAD, leaving the result staged for a normal
+        // `commit`. No MERGE_HEAD/merge info is recorded (matches Git).
+        reset_index_and_workdir_to_tree(&tree_id)?;
+        return Ok(PullMergeSummary {
+            strategy: "squash".to_string(),
+            old_commit: Some(current_commit.id.to_string()),
+            commit: None,
+            files_changed,
+            up_to_date: false,
+            parents: Vec::new(),
+            conflicted_paths: Vec::new(),
+            aborted: false,
+            continued: false,
+        });
+    }
+
     let message = message_override.unwrap_or_else(|| format!("Merge {upstream} into {head_name}"));
     let merge_commit = Commit::from_tree_id(
         tree_id,
