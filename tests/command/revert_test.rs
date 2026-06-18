@@ -151,7 +151,7 @@ async fn test_basic_revert() {
     // --- 5. Test 1: Revert HEAD (C3) ---
     println!("\n--- Test 1: Revert HEAD (C3) ---");
     revert::execute(revert::RevertArgs {
-        commit: "HEAD".to_string(),
+        commit: vec!["HEAD".to_string()],
         no_commit: false,
         mainline: None,
         signoff: false,
@@ -266,7 +266,7 @@ async fn test_revert_no_commit() {
 
     // Test revert with no-commit flag
     revert::execute(revert::RevertArgs {
-        commit: "HEAD".to_string(),
+        commit: vec!["HEAD".to_string()],
         no_commit: true,
         mainline: None,
         signoff: false,
@@ -347,7 +347,7 @@ async fn test_revert_root_commit() {
 
     // Revert root commit
     revert::execute(revert::RevertArgs {
-        commit: root_hash,
+        commit: vec![root_hash],
         no_commit: false,
         mainline: None,
         signoff: false,
@@ -442,6 +442,58 @@ fn test_revert_signoff_adds_trailer() {
     );
 }
 
+#[test]
+#[serial]
+fn test_revert_multiple_commits_in_one_invocation() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    fs::write(p.join("a.txt"), "a\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "a.txt"], p), "add a");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1 add a", "--no-verify"], p),
+        "commit c1",
+    );
+    let c1 = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+
+    fs::write(p.join("b.txt"), "b\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "b.txt"], p), "add b");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c2 add b", "--no-verify"], p),
+        "commit c2",
+    );
+    let c2 = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+
+    // Revert both commits in one invocation (newest first).
+    let out = run_libra_command(&["revert", c2.as_str(), c1.as_str()], p);
+    assert_cli_success(&out, "revert c2 c1");
+    assert!(
+        !p.join("b.txt").exists(),
+        "reverting c2 should remove b.txt"
+    );
+    assert!(
+        !p.join("a.txt").exists(),
+        "reverting c1 should remove a.txt"
+    );
+}
+
+#[test]
+#[serial]
+fn test_revert_multiple_commits_rejects_no_commit() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // --no-commit with multiple commits needs the sequencer; it is rejected.
+    let out = run_libra_command(&["revert", "--no-commit", "HEAD", "HEAD~1"], p);
+    assert!(
+        !out.status.success(),
+        "revert --no-commit with multiple commits should be rejected"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_revert_json_output_skips_noop_paths_in_files_changed() {
@@ -507,7 +559,7 @@ async fn test_revert_errors() {
 
     // Test reverting non-existent commit should fail gracefully
     revert::execute(revert::RevertArgs {
-        commit: "nonexistent".to_string(),
+        commit: vec!["nonexistent".to_string()],
         no_commit: false,
         mainline: None,
         signoff: false,

@@ -1,8 +1,14 @@
-# Lore → Libra: A Capability-Gap Completion Plan
+# Lore ⇄ Libra: A Bidirectional Capability-Gap Completion Plan
 
-> Canonical planning document for closing the capability gap between **Epic Games' Lore VCS** and **Libra**, while keeping Libra **Git-format-compatible** and **AI-agent-native**.
+> Canonical planning document for closing the capability gap **in both directions** between **Epic Games' Lore VCS** and **Libra**.
 >
-> 本文为开发设计文档，主体用英文以保持技术术语精确（与 `docs/development/` 下多数设计文档一致）；下方 **§0 中文摘要** 给出完整的中文概览。
+> **The document has two halves, each anchored to the *other* system's identity:**
+> - **Part I — Lore → Libra** (§1–§7 + Appendix A): take **Lore** as the reference; plan what **Libra** must build to match it **while keeping Libra Git-format-compatible and AI-agent-native**. *(Original plan, unchanged.)*
+> - **Part II — Libra → Lore** (after Appendix A): the mirror image — take **Libra** as the reference; plan what **Lore** must build to match it (`libra 要补齐 lore 缺失功能`) **while keeping Lore content-addressed, partition-based, no-index, API-first, and server-centric.** The headline reverse-gap is Libra's entire **AI-native runtime**, which Lore lacks completely; the second is a set of **Git-style history-rewrite/inspection verbs** (rebase, squash, stash, reflog, blame, tag, grep, hooks).
+>
+> Neither half proposes importing the other system's *substrate* — Part I never adopts BLAKE3/partitions/no-index, and Part II never adopts the Git on-disk format/index/SQLite-refs. Each adopts the other's **user-facing capability**, expressed idiomatically to its own architecture. Where an idea conflicts with the host's identity, the plan **adapts or defers** it and says so (Part I §6; Part II §P2.6).
+>
+> 本文为开发设计文档，主体用英文以保持技术术语精确（与 `docs/development/` 下多数设计文档一致）；下方 **§0 中文摘要** 给出两个方向的完整中文概览。
 
 ## 0. 中文摘要（Executive summary）
 
@@ -15,13 +21,13 @@
 
 **"补齐"指什么。** 采纳 Lore 的**用户可见能力**，但用 **Libra 自己的底座**（SQLite 侧表、`Storage` trait、LFS、分层/云存储、hooks、MCP/agent 接口）来实现。**不**照搬 BLAKE3 寻址、320 字节 revision state、node-block、FastCDC 对象分块、partition=能力 等——它们与 Git 磁盘格式根本冲突，照搬等于重写一个 Lore。凡冲突处，本文都明确标注「改造」或「推迟」。
 
-**最大的差距（按主题）。** 稀疏/VFS/惰性水合；工作区人体工学（持久化 dirty 集合、常数时间 status、**每个 worktree 独立的 HEAD/index/refs**）；冲突解决 UX（`restore --ours/--theirs`、diff3 标记、`merge --dry-run`）；diff/merge 深度（位置化 revspec、空白选项、`--diff3`）；元数据与溯源（branch/repo/file 的 KV 元数据、commit trailer）；合规删除（obliteration）；认证/可观测性（`libra auth`、OTLP、shell 补全）；锁的强制力（从 push 强制扩展到 commit/add）；健壮性（云端退避、取数时校验哈希、`fsck --heal`）；组合能力（layers 可行；links/partitions/forks 多数推迟）；**服务端/协议/复制**（Libra 是纯 Git 客户端——无服务端、无自研 QUIC/gRPC 协议、无复制/分区——这一整类**多为架构性推迟**，可落地的仅 429 退避、token 认证、push `--atomic` 协议补齐、worktree 隔离）。
+**最大的差距（按主题）。** 稀疏/VFS/惰性水合；工作区人体工学（持久化 dirty 集合、常数时间 status、**每个 worktree 独立的 HEAD/index/refs**、大小写变更处理）；冲突解决 UX（`restore --ours/--theirs`、diff3 标记、`merge --dry-run`）；branch 便捷命令（`branch diff`/`reset`）；diff/merge 深度（位置化 revspec、空白选项、`--diff3`）；元数据与溯源（branch/repo/file 的 KV 元数据、commit trailer）；合规删除（obliteration）；认证/可观测性（`libra auth`、OTLP、shell 补全）；全局资源/并发控制旋钮（`--max-connections`、文件/压缩限制、`--non-interactive` 等）；锁的强制力（从 push 强制扩展到 commit/add）；健壮性（云端退避、取数时校验哈希、`fsck --heal`）；组合能力（layers 可行；links/partitions/forks 多数推迟）；**服务端/协议/复制**（Libra 是纯 Git 客户端——无服务端、无自研 QUIC/gRPC 协议、无复制/分区——这一整类**多为架构性推迟**，可落地的仅 429 退避、token 认证、push `--atomic` 协议补齐、worktree 隔离）。
 
 **分阶段计划速览。**
 
-- **Phase 0 — 速赢**（各几天，纯增量、与 Git 格式无关）：`libra completions`、D1/R2 退避、取数即校验、`fsck --heal`、`flush(sync_data)`、`exist_batch`、滚动日志、`--offline/--local/--remote`。内部次序：**0.2→0.3→0.4**（共用云端写缓存路径）。
-- **Phase 1 — 基础**（高价值、可行、解锁后续）：dirty 集合 + `libra dirty` + `status --cached`；`restore --ours/--theirs`（**前置条件已满足**，见 §4.4）；diff3 + `merge --dry-run/--restart`；位置化 diff + 空白选项；**branch/repo 元数据 KV（基石）**；typed metadata 命令族；`libra auth`（v1 token + host 作用域）；本地 `libra service`/notification v1；OTLP；`merge --autostash`；commit trailer + `log --trailer`。
-- **Phase 2 — 组合与规模**（结构性、部分牵涉面大）。**建议次序：2.3（object alternates/共享库）→ 2.2（稀疏）→ 2.1（worktree 隔离）**——2.3 独立、1–2 周、价值高且可能可从历史恢复；2.2 v1 **不依赖** 2.1。另含 index 标记式 obliteration、统一冲突 sequencer、interactive auth + OS keyring、commit/add 锁强制、后台缓存淘汰。
+- **Phase 0 — 速赢**（各几天，纯增量、与 Git 格式无关）：`libra completions`、D1/R2 退避、取数即校验、`fsck --heal`、`flush(sync_data)`、`exist_batch`、滚动日志、`--offline/--local/--remote`、全局资源/并发控制旋钮、store/cache 可调参数。内部次序：**0.2→0.3→0.4**（共用云端写缓存路径）。
+- **Phase 1 — 基础**（高价值、可行、解锁后续）：dirty 集合 + `libra dirty` + `status --cached`；`restore --ours/--theirs`（**前置条件已满足**，见 §4.4）；diff3 + `merge --dry-run/--restart`；位置化 diff + 空白选项；`branch diff`/`reset`；**branch/repo 元数据 KV（基石）**；typed metadata 命令族；`libra auth`（v1 token + host 作用域）；本地 `libra service`/notification v1；OTLP；`merge --autostash`；commit trailer + `log --trailer`；文件大小写变更处理。
+- **Phase 2 — 组合与规模**（结构性、部分牵涉面大）。**建议次序：2.3（object alternates/共享库）→ 2.2（稀疏）→ 2.1（worktree 隔离）**——2.3 独立、1–2 周、价值高且可能可从历史恢复；2.2 v1 **不依赖** 2.1。另含 index 标记式 obliteration、统一冲突 sequencer、interactive auth + OS keyring、commit/add 锁强制、后台缓存淘汰、`shared-store set-use-automatically`。
 - **Phase 3 — Lore-parity gated extensions**：文件依赖图 + dependency-filtered clone/sync、LFS 内 FastCDC 分块、水合式 VFS、link/subtree 组合 RFC。它们不再只是“永远推迟”，但必须等 metadata、sparse、shared-store、auth 的基石落地后再开工。
 - **Later / 推迟**：partitions/forks、C ABI + 多语言 SDK、QUIC/gRPC 存储协议、分布式锁存储、Hosted Libra Server——要么与 Git 格式冲突，要么需要一个目前并不存在的 Libra 托管服务端。
 
@@ -29,9 +35,32 @@
 
 **明确不做（§6）。** BLAKE3 对象寻址、320 字节 state/node-block、把 FastCDC 当对象寻址、仓内 partition、Context 文件身份字段、移除 index、内联 blob 的原地擦除、树内冲突标志位、把 C ABI 当第一产物、自研 QUIC/gRPC 存储协议、SWFS 专有驱动、跨仓 `parent_repository` 合并字段。理由统一是：**守住 Git 磁盘格式兼容这条 Libra 的立身之本**。
 
+### 0.B 反向摘要：Part II — Libra → Lore（以 Libra 为参照补齐 Lore）
+
+**目标。** 与上文相反：以 **Libra** 为参照，找出 **Lore** 相对缺失的能力，并设计一份「在保持 Lore 内容寻址 + 分区 + 无 index + API/C-ABI 优先 + 服务端中心」前提下、可落地的补全计划。约束镜像翻转——这一半要守住的是 **Lore 的立身之本**，不照搬 Git 磁盘格式/index/SQLite-refs/Git 协议/libvault。
+
+**最大的两个差距。** ① **整套 AI 原生子系统**——Lore 树中 AI/agent/LLM/MCP 命中数为 **0**，这是 Libra 独有、Lore 完全没有的能力（agents/orchestrator/MCP/sandbox/skills/automation/goal-supervisor/providers/usage/session/prompt/context-budget/TUI `libra code`）。② **Git 式历史改写与检视动词**：`rebase`、`squash`、`stash`、`reflog`、`blame`、`shortlog`、`describe`、`grep`、`tag`、客户端 `hooks`——Lore 命令面均无（`rebase`/`squash`/VFS 本就在 Lore 自己的路线图上）。
+
+**关键洞察。** Lore 现有底座**异常适合**承载 AI 层：① `lore service`/`notification` 的 **UDS IPC 守护进程** = 现成的 MCP/事件传输（Libra 在 Part I 1.11 还要费力从 `libra code` 里抽一个出来，Lore 已经有）；② **partitions/instances/shared-store** = 现成的「每 agent 独立可变状态」隔离（正是 Libra Part I 2.1 多月重构要解决的痛点，Lore 天生具备）；③ **typed metadata + JWT 鉴权 + OTLP + C-ABI** = 现成的溯源/权限/可观测/工具集成基座。所以「把 Libra 的 AI 能力搬到 Lore」是**顺架构**而非嫁接。反过来，`blame` 对 Lore 近乎白送——它内部已织入每文件历史（`NodeFileMetadata.revision[2]`），只差一个动词。
+
+**分阶段计划速览（详见 §P2.5）。**
+
+- **Phase L0 — 速赢**（小、独立、复用 Lore 现有引擎）：`lore tag`、`lore blame`（暴露既有织入历史）、`lore stash`（基于 staged-anchor + dirty-set）、`lore shortlog`/`describe`、`lore grep`、客户端 hook 生命周期（pre-commit/commit-msg/pre-push）。
+- **Phase L1 — 历史改写引擎**（对齐 Lore 路线图）：`rebase`、`squash`、interactive rebase、`merge --autostash`、全局 `reflog`（扩展 branch-latest-history）；落在 Lore 的 MergeType 引擎 + staged anchor + 一个 mutable-store 里的 sequencer 上。
+- **Phase L2 — AI 基座（头号差距，地基）**：新建 `lore-agent` crate——CompletionModel + provider 适配（anthropic/openai/…）、**MCP over `lore service` UDS**、工具注册表（read_file/apply_patch/shell/grep，落在 lore-revision/lore-storage 上）、sandbox（seatbelt/bwrap）、session 存储（内容寻址 / typed-metadata）、usage 计量（OTLP）。
+- **Phase L3 — AI 编排与自治**：orchestrator（plan/decide/execute/verify/replan + gate/ACL）、goal/supervisor/verifier、skills、automation（规则运行时 + 调度器，挂到 `lore-notification` 事件上）、context-budget、permission/intentspec/projection、observed-agent 捕获、prompt 工程、codex 桥。
+- **Phase L4 — 交互与分发**：`lore code` 式 agent TUI（复用 lore-client TUI 基建）、AI usage 仪表盘、只读 serverless 发布（`lore publish` 类比）、客户端托管备份。
+- **明确不做（§P2.6）。** Git 磁盘格式（loose/pack/index）、Git index/暂存快照模型、SQLite 作为权威 ref 存储、Git smart-HTTP/SSH/LFS 协议、libvault（Lore 已有 keyring + HashiCorp Vault）。理由统一是：**守住 Lore 内容寻址/无-index/分区/API-first 这条立身之本**。
+
+**最重要的一件事（反向）。** ⭐ **`lore-agent` AI 基座（计划项 L2）**：它是 Libra↔Lore 之间最大的、唯一「整类缺失」的能力，而 Lore 的 IPC/partition/metadata/JWT/OTLP 底座恰好为它铺好了路——这是反向补全里价值最高、且最顺架构的一项。
+
 > 如需把整篇文档转为中文，或反过来只保留英文，告诉我即可——这是一次机械的后续操作。
 
 ---
+
+# PART I — Lore → Libra (Libra closes its gaps against Lore)
+
+> **Reading guide.** Part I takes **Lore as the reference** and plans what **Libra** must build to reach parity *while staying Git-format-compatible and AI-agent-native*. Its non-goals (§6) are the Lore ideas Libra must **not** copy. The mirror image — **Part II — Libra → Lore** (Libra as the reference; what **Lore** must build, staying content-addressed/API-first) — begins after Appendix A.
 
 ## 1. Framing: two architectures, one comparison
 
@@ -42,12 +71,13 @@
 - **No Git-style index** — the filesystem is ground truth; dirty/staged are orthogonal flags on the Merkle tree.
 - **Genuine byte-level obliteration**, **per-directory access via partitions/links**, **per-machine layers**, **shared stores/instances**, and an on-demand-hydrating **VFS**.
 
-**Libra** is an **AI agent–native** VCS in Rust that implements a Git client with **full on-disk format compatibility** (loose objects, index, packfiles/pack-index via `git-internal`), while moving refs/HEAD/config/reflog into **SQLite** (`.libra/libra.db`, sea-orm). It adds tiered S3/R2 storage, a D1/R2 backup path, read-only Cloudflare-Worker publishing, and a large AI subsystem (agents, orchestrator, MCP server, sandbox, automation, providers).
+**Libra** is an **AI agent–native** VCS in Rust that implements a Git client with **full on-disk format compatibility** (loose objects, index, packfiles/pack-index via `git-internal`), while moving refs/HEAD/config/reflog into **SQLite** (`.libra/libra.db`, sea-orm). It adds tiered S3/R2 storage, a D1/R2 backup path, read-only Cloudflare-Worker publishing, and a large AI subsystem (agents, orchestrator, MCP server, sandbox, automation, providers, skills, goal/supervisor, TUI). **This AI substrate has no equivalent in Lore** and is the primary reason many plan items (dirty fast-path, per-worktree isolation, low-level tree construction, local service notifications) are prioritized — they are force-multipliers for concurrent AI agents and human+agent workflows.
 
 ### What "fill the gap" means here
 
 - **Adopt the user-facing capability** Lore offers, expressed in a way that is **idiomatic to Libra's Git-format + SQLite + AI-native architecture**.
 - Prefer **SQLite side-tables, the existing `Storage` trait, LFS, tiered/cloud storage, hooks, and the MCP/agent surface** as the implementation substrate.
+- **AI ergonomics lens.** Several Lore features become dramatically more valuable in an agent-native setting: constant-time dirty status (agents must not pay O(tree) for every decision), per-worktree mutable-state isolation (enables true parallel agent workstreams), local service notifications (watchers and sub-agents subscribe instead of polling), and low-level in-memory tree construction (agents and pipelines operate on structure without forcing checkouts that bloat context and disk). The phased plan explicitly weights these items.
 
 ### What it does NOT mean
 
@@ -62,12 +92,14 @@
 | Theme | What Libra lacks vs Lore | Headline gaps |
 |---|---|---|
 | **Sparse / VFS / lazy** | No sparse-checkout, no inbound view filter, no lazy on-open hydration, no cross-clone shared store | view filter; view-filtered checkout/sync; object alternates (shared store); hydrating FUSE VFS |
-| **Working-copy ergonomics** | No persisted dirty-set / notification path; status always recomputes; worktrees share HEAD/index/refs | `libra dirty` + dirty-set cache; `status --cached`; **per-worktree HEAD/index/refs isolation** |
+| **Working-copy ergonomics** | No persisted dirty-set / notification path; status always recomputes; worktrees share HEAD/index/refs; no explicit case-change handling | `libra dirty` + dirty-set cache; `status --cached`; **per-worktree HEAD/index/refs isolation**; case-change (`--case=keep|rename|error`) |
 | **Conflict UX** | No `resolve --ours/--theirs`, no diff3 markers, no `merge --dry-run`, three drifting sequencers | restore `--ours/--theirs`; diff3 conflict style; merge dry-run; unified sequencer |
-| **Diff/merge depth** | No positional-revspec diff, no whitespace flags, no diff3 output; merge base-relative preview missing | `diff A B`; whitespace flags; `--diff3`; merge-preview |
+| **Branch convenience** | No `branch diff`, no `branch reset` | `branch diff <branch> [<branch>]`, `branch reset <branch> [<revision>]` |
+| **Diff/merge depth** | No space-separated `diff A B` or three-dot `A...B` merge-base, no whitespace flags, no diff3 output; merge base-relative preview missing (two-dot `A..B` shipped) | `diff A B`; `A...B`; whitespace flags; `--diff3`; merge-preview |
 | **Metadata & provenance** | No typed metadata blob, no branch/repo/file metadata KV, no metadata search | branch/repo metadata KV (incl. `protect`, `archived`); commit trailers + `log --trailer` |
 | **Deletion / compliance** | No obliteration of any kind | index-flagged object obliteration (loose + LFS media); two-phase crash-safe state machine |
 | **Auth / ops** | No `libra auth`, no token storage, no OTLP telemetry, no shell completions | `libra auth` over vault; OTLP feature; `libra completions` |
+| **Global CLI controls** | Missing global `--identity`, `--non-interactive`, resource/concurrency limits, `--search-limit/--search-nearest`, `--gc` | Global flags over `TieredStorage`/command dispatch |
 | **Locking enforcement** | LFS locks are push-enforced but not commit/add-enforced; advisory beyond push | extend lock enforcement to commit/add; optional local lock store |
 | **Robustness** | No SlowDown/backoff, no fetch-time hash verification, no fsck `--heal` | D1/R2 backoff; verify-on-cache; `fsck --heal` |
 | **Composition (links/partitions/forks)** | No links, layers (partial), partitions, forks | **layers** (tractable); links/partitions/forks (largely defer) |
@@ -77,8 +109,8 @@
 
 | Priority | Items | Rationale |
 |---|---|---|
-| **Phase 0 — Quick wins** | `libra completions`; D1/R2 SlowDown backoff; verify-on-cache; `fsck --heal`; `flush(sync_data)`; `exist_batch`; rolling logs | Small, additive, Git-format-neutral, immediate robustness/UX value |
-| **Phase 1 — Foundational** | dirty-set + `libra dirty` + `status --cached`; restore `--ours/--theirs`; diff3 markers + `merge --dry-run`; positional diff + whitespace flags; typed metadata + branch/repo KV (`protect`/`archive`); `libra auth`; local service/notification v1; OTLP | High user value, tractable, unblock later work |
+| **Phase 0 — Quick wins** | `libra completions`; D1/R2 SlowDown backoff; verify-on-cache; `fsck --heal`; `flush(sync_data)`; `exist_batch`; rolling logs; global resource-limit flags; store/cache tunables | Small, additive, Git-format-neutral, immediate robustness/UX value |
+| **Phase 1 — Foundational** | dirty-set + `libra dirty` + `status --cached`; restore `--ours/--theirs`; diff3 markers + `merge --dry-run`; positional diff + whitespace flags; typed metadata + branch/repo KV (`protect`/`archive`); `libra auth`; local service/notification v1; OTLP; `merge --autostash`; commit trailer + `log --trailer`; `branch diff`/`reset`; file case-change handling; low-level revision tree (1.15); store tunables (0.10) | High user value, tractable, unblock later work |
 | **Phase 2 — Composition & scale** | **per-worktree HEAD/index/refs isolation**; sparse view filter + view-filtered ops; object alternates (shared store); layers; index-flagged obliteration; unified sequencer; interactive auth + OS-keyring credentials | Structural improvements; some large blast radius |
 | **Phase 3 — Lore-parity gated** | dependency graph + dependency-filtered clone/sync; LFS FastCDC chunking; hydrating VFS; link/subtree RFC | Real Lore parity items, but gated on Phase 1/2 foundations |
 | **Later / Defer** | partitions/forks; C ABI + multi-language SDKs; QUIC/gRPC storage protocol; distributed lock store; hosted multi-tenant server | Architectural conflict with Git format, or needs a hosted Libra server that does not exist |
@@ -88,6 +120,19 @@
 ### 2.3 Current-source merge snapshot (2026-06-18)
 
 This section records what was re-grounded before merging this plan into the existing document.
+
+#### 2026-06-18 Analysis Refresh (Lore 0.8.4 + LEPs + Libra spot-check)
+
+Fresh cross-check against live Lore tree (`/Volumes/Data/EpicGames/lore`), `lore --markdown-help` reference, CLI command modules, the Lore roadmap (`docs/roadmap.md`), and all three LEPs in `docs/proposals/`:
+
+- **LEP 2026-04-27 (Lore Enhancement Proposals)** is a **meta-LEP** that defines the LEP process itself (template, lifecycle, directory). It introduces **no feature or capability** — it is a documentation/governance artifact. No plan item needed; recorded here only to close the LEP inventory.
+- **LEP 2026-05-03 (Modified file tracking)** is exactly the dirty-set + `lore dirty` + `--scan`/`--cached` model already captured as plan item 1.1. The proposal's "notify without full scan" and "external integrations mark dirty" goals map 1:1 to `libra dirty` + SQLite `working_dirty` + watcher/agent integration.
+- **LEP 2026-05-14 (Low-level memory-based revision control API)** is **not yet explicitly tracked**. It bridges storage (bytes) and FS revision (working tree) with an in-memory node-id tree handle for pipelines/importers that must build or walk revisions without a checkout. Libra's closest surfaces are plumbing commands + MCP tools; this warrants a dedicated tractable item (added below as 1.15).
+- Command surface, global args, `auth` (token + `--no-browser` + resource scoping), `service` (UDS IPC loopback), `logfile`, `layer`, `file stage --case`, `file dirty move/copy`, `branch diff/reset`, `repository instance`/`update-path`, and store config tunables (`[store]` max_capacity/eviction/verify_write) are all covered by the existing Phase 0/1 items or explicitly mapped in Appendix A.
+- Libra spot-check (2026-06-18 tree): `worktree.rs:671,844` still symlinks `.libra` (confirms 2.1 gap); no `working_dirty` table or `status --cached` (1.1); no `libra completions` (0.1); no dedicated `libra auth` (1.6); no global read-policy flags (0.8); `status` is rich Git porcelain but always full-reconcile; auth surface is basic-interactive only. **One stale claim corrected:** `diff A..B` two-dot positional revspec **now exists** via `normalize_diff_range` (`src/command/diff.rs:211-241`); the earlier "no positional revision args" assertion was true only for space-separated `A B` and three-dot `A...B` merge-base forms. All other plan claims remain accurate.
+- Lore roadmap (VFS, scalable locks, links+layers, edge topologies, desktop/web/UE-editor clients, forks) largely maps to Phase 2/3 or "defer (needs hosted server or GUI)". The GUI/editor surfaces (VS Code plugin, desktop client, Unreal Editor plugin, web client) are out of scope for Libra's CLI/agent identity. Libra's unique AI substrate (agents, orchestrator, MCP, sandbox, TUI) has no Lore equivalent and is called out as a differentiator below.
+
+The plan surface is complete w.r.t. Lore's public CLI, the roadmap, and all three LEPs. Two small additions are merged in this refresh (see §5); one stale claim (`diff A..B`) is corrected throughout.
 
 **Lore evidence.**
 
@@ -99,15 +144,29 @@ This section records what was re-grounded before merging this plan into the exis
 
 **Libra evidence.**
 
-- `COMPATIBILITY.md` still marks `sparse-checkout` unsupported, `clone --sparse` unsupported, `restore` conflict options unexposed, `diff` missing positional revspec/whitespace/word/binary modes, `push --atomic`/`--signed`/`--push-option`/`--follow-tags` unwired, and `pull --autostash` absent.
-- `src/command/diff.rs` currently accepts `--old`, `--new`, `--staged`, pathspecs, algorithm, output, name/stat modes; no positional revision args or whitespace flags exist.
+- `COMPATIBILITY.md` still marks `sparse-checkout` unsupported, `clone --sparse` unsupported, `restore` conflict options unexposed, `push --atomic`/`--signed`/`--push-option`/`--follow-tags` unwired, and `pull --autostash` absent. (The `diff` row was updated 2026-06-18: two-dot `A..B` now works; space-separated `A B`, three-dot `A...B` merge-base, and whitespace/word/binary modes are still missing.)
+- `src/command/diff.rs` accepts `--old`, `--new`, `--staged`, pathspecs, algorithm, output, name/stat modes; **two-dot `A..B` positional revspec now exists** via `normalize_diff_range` (`diff.rs:211-241`, invoked at `:204`). Space-separated `diff A B`, three-dot `A...B` merge-base, and whitespace flags (`--ignore-space-at-eol`/`-w`/`-b`) are still absent.
 - `src/command/restore.rs` currently exposes pathspec, `--source`, `--worktree`, `--staged`, and pathspec-from-file; no `--ours`/`--theirs` surface exists.
 - `src/command/clone.rs` currently exposes `--branch`, `--single-branch`, `--bare`, and `--depth`; no `--reference`, `--shared`, `--dissociate`, `--filter`, `--view`, or sparse materialization exists.
 - `src/command/worktree.rs` still creates a `.libra` symlink to shared storage, so per-worktree mutable-state isolation remains the highest-impact structural gap.
+- A full command-by-command inventory of `lore-client/src/cli/commands/*` surfaced a handful of gaps not yet in the plan: `branch diff`, `branch reset`, file case-change handling (`FileStageCase`), `shared-store set-use-automatically`, and a richer set of global CLI knobs (`--identity`, `--non-interactive`, `--max-connections`, `--file-count-limit`, `--file-size-limit`, `--compress-limit`, `--max-threads`, `--search-limit`, `--search-nearest`). These are added to §5 as small, tractable items and summarized in Appendix A.
+- The 2026-06-18 refresh additionally incorporated (a) LEP 2026-05-14 low-level revision API (new 1.15) and (b) store/cache tunables surface parity (new 0.10), plus explicit UDS modeling for the local service (1.11). Both were cross-checked against live source and the two 2026-05 LEPs.
 
 ---
 
 ## 3. Capability comparison matrix
+
+**Libra differentiators (no Lore equivalent).** Beyond closing gaps, Libra ships capabilities Lore does not have and is unlikely to grow:
+
+- Full **Git on-disk and wire-format compatibility** (SHA-1/SHA-256 loose+pack+index, smart-HTTP/SSH/LFS interop with the entire existing ecosystem).
+- A complete **AI-agent runtime** (orchestrator, goal/supervisor/verifier, MCP server, sandbox with macOS seatbelt + Linux bwrap, skills, automation, TUI `libra code`, usage accounting, prompt engineering, codex bridge, hooks integration).
+- **Tiered cloud + managed backup** (local LRU + S3/R2 with threshold, D1/R2 incremental backup, read-only Cloudflare Worker `libra publish` for serverless edge hosting).
+- **SQLite transactional substrate** for all mutable state (refs, reflog, config_kv, AI runtime contracts) with rich queryability.
+- Vault-backed secret storage and first-class support for concurrent human + agent workflows inside the same repository.
+
+The gap-closure plan deliberately amplifies these strengths (e.g. dirty cache and per-worktree isolation are AI multipliers; `libra publish` is already the read-only edge analog of Lore's tiering).
+
+> These differentiators are exactly the inputs to the reverse direction: **Part II (Libra → Lore)** takes this list — above all the AI-native runtime — and plans how Lore would adopt each one idiomatically to *its* architecture. Read this matrix top-to-bottom for "what Libra must build" (Part I); read the same rows for "what Lore is missing" to seed Part II.
 
 | Domain | Lore model (essence) | Libra status | Gap verdict |
 |---|---|---|---|
@@ -175,7 +234,7 @@ Each section: **Lore's model → Libra today (with file/command evidence) → co
 | 320-byte state / node-blocks | missing / present-different | **Defer** — Git commit object + packfiles are the idiom; node-blocks break format. |
 | Revision number / `branch@N` | missing | **Medium** — derived per-branch first-parent ordinal in SQLite (cache, not in commit), `<branch>@{N}` via rev-parse. Unstable across rewrite — document. |
 | History-aware conflict suppression | partial | **Medium** — proper recursive merge with virtual merge-bases (DAG-native) + optional rerere store, not woven per-file flags. |
-| Two-revision positional diff | partial | **Easy** — wire revision args into `diff` engine. |
+| Two-revision positional diff | partial | **Easy** — two-dot `A..B` already shipped (`normalize_diff_range`, `diff.rs:211-241`); add space-separated `A B` + three-dot `A...B` merge-base. |
 | Unified `sync` verb | present-different | **Low** — keep distinct Git verbs; expose composite move in `libra agent`/`code` layer, not as a default human verb. |
 | Find by number/metadata | partial | `find-number` needs ordinal cache; `find-metadata` via commit trailers + `log --trailer`. **medium** |
 | Per-file woven history | present-different | **Medium** — SQLite path-history index (rebuildable cache), not tree-embedded. |
@@ -203,6 +262,7 @@ Each section: **Lore's model → Libra today (with file/command evidence) → co
 | size→mtime→hash ladder | **present** | Already in git-internal Index; ensure `status` short-circuits too. |
 | notify/scan/verify status | partial | **High** — `status --cached` (instant dirty-table read), keep full reconcile as `--scan`, add `--check-dirty`. Constant-time status matters for AI agents. |
 | `--targets` everywhere | partial | Extend `--pathspec-from-file` to status/diff/grep. **easy** |
+| Case-change handling (`stage --case=keep|rename|error`) | missing | **Low–Medium** — add `--case` to `add`/`mv`/restore paths; default `error` for Git compatibility. Plan 1.14. |
 | Per-instance staged state / multi-worktree | **present-different (key gap)** | **High** — see §4.5; worktrees currently share HEAD/index/refs (`src/command/worktree.rs:671,844` symlinked `.libra`). |
 | VFS-driven dirty | missing | **Defer** — needs `libra dirty` + sparse + FUSE hydration. |
 
@@ -231,6 +291,8 @@ Each section: **Lore's model → Libra today (with file/command evidence) → co
 | Branch protect/unprotect | missing | **Medium** — `protected` bit in branch metadata table; enforce on delete/push + pre-receive hook. |
 | Branch archive | missing | `archived` bit + `branch list --archived`. **low** |
 | Branch metadata KV | missing | **Medium (keystone)** — `branch_metadata` table backs protect/archive/identity/lineage as reserved keys. |
+| `branch diff` | missing | **Low** — `libra branch diff [<a>] [<b>]`, defaulting to `HEAD..<other>`; reuse `DiffArgs`. Plan 1.12. |
+| `branch reset` | missing | **Low** — reset a branch tip to an arbitrary revision without touching the worktree; guard protected branches. Plan 1.13. |
 
 **Strengths.** Real textual auto-merge (Lore frames diff3 as its path); Git-format markers (universal tool interop); crash-safe SQLite sequencers; cherry-pick/revert near-parity *and ahead* (rich flags); reflog = Lore's branch-latest-history; AI-orchestrator workspace merge has no Lore equivalent.
 
@@ -256,6 +318,7 @@ Each section: **Lore's model → Libra today (with file/command evidence) → co
 | Symmetric multi-worktree | partial | Depends on instance isolation + standalone shared store. **low** |
 | Instance list/prune/update-path | partial | `worktree list/prune/move` largely cover it; add stale detection + JSON. **easy/low** |
 | Shared store (cross-clone) | partial | **High** — Git object **alternates**: `clone --reference/--shared/--dissociate` + `shared-store create/info`. Recover vanished prior impl via `libra show <commit>`. |
+| `shared-store set-use-automatically` | missing | **Low** — persist default shared-store path in global config/vault; `clone` consults it. Plan 2.11. |
 | Forks (COW partition) | missing | **Defer** — promisor/partial clone is the Git-idiomatic analog; roadmap even in Lore. |
 
 **The per-worktree isolation fix (cross-cutting, Phase 2).** Add a per-worktree identity and namespace mutable state by it: `instance_id` column on `reference`/index/HEAD (sea-orm migration), so HEAD/current-branch/staged-index become per-worktree while objects stay shared. This is **Git's own worktree model** (shared objects, per-worktree HEAD/index) and removes the documented footgun. High blast radius (every ref/HEAD/index resolver), but it is the single most valuable structural improvement and unblocks parallel agent workstreams.
@@ -357,6 +420,7 @@ Each section: **Lore's model → Libra today (with file/command evidence) → co
 |---|---|---|
 | C ABI primary artifact | missing | **Defer** — Libra is process/agent-API-first; harden JSON CLI + MCP as the contract. Optional `libra-core` + thin `libra-capi` only if a native consumer appears. |
 | Uniform args + event callback | partial | Generalize `CodeUiEvent` into a `--json --stream` NDJSON event taxonomy across handlers. **low** |
+| Global CLI controls (`--identity`, `--non-interactive`, resource/concurrency limits, `--search-limit/--search-nearest`, `--gc`) | missing | **Low–Medium** — add global clap args and thread through dispatch context. Plan 0.9. |
 | Sync+async dual entry | partial | Only meaningful with `libra-core`. **defer** |
 | Allocator/thread/lifecycle | missing | Tractable subset: `LIBRA_MAX_THREADS`, `version()`/`user_directory()`; allocator/shutdown defer. **low** |
 | Structured logging config | partial | **Medium, easy** — `tracing-appender` rolling files + size/count caps. |
@@ -432,6 +496,8 @@ Each item: **what · why · feasibility · effort · dependencies · Libra-idiom
 | 0.6 | **`exist_batch(&[hash])`** | Faster dedup pre-check on push/sync | easy | 2–3 d | — | Additive `Storage` trait method; batch against remote tier. |
 | 0.7 | **Rolling logs + `logfile info`** | Production log hygiene and discoverability | easy | 1–2 d | — | `tracing-appender` daily rotation + size/count caps behind `LIBRA_LOG_ROTATION`; define precedence vs `LIBRA_LOG_FILE`; add `libra logfile info` or fold into `libra logs info` if command naming stays Git-lean. |
 | 0.8 | **`--offline/--local/--remote`** | User control over lazy-fetch source | easy | 3–5 d | — | Global flags setting a read policy on `TieredStorage` get; `--offline`/`--local` fail-fast on cache miss with clear error. |
+| 0.9 | **Global resource/concurrency knobs (`--max-connections`, `--file-count-limit`, `--file-size-limit`, `--compress-limit`, `--max-threads`, `--search-limit`, `--search-nearest`, `--non-interactive`)** | Scripting/CI parity and safety; prevent runaway resource use on huge repos | easy | 3–5 d | — | Add global clap args; thread through `LoreGlobalArgs`-equivalent dispatch context; `--non-interactive` disables all prompts; numeric limits clamp parallel I/O/compression/thread pools. Keep `--identity` for auth v1 (1.6). |
+| 0.10 | **Store / cache tunables surface (LRU budget, verify, compaction, eviction)** | Lore exposes first-class `[store]` (max_capacity, eviction_delay, verify_write, compaction) in per-repo config + CLI; Libra has the machinery (TieredStorage) but no user-visible equivalent | easy | 2–3 d | 0.3, 2.9 | Surface via `libra config` reserved keys or a small `libra cache configure` / `libra store` subcommand; wire into TieredStorage LRU + verify-on-write path; keep defaults conservative so the lean CLI remains unchanged. |
 
 > **Phase 0 internal ordering:** land **0.2 (backoff) → 0.3 (verify-on-cache) → 0.4 (`fsck --heal`)** in that order — they share the cloud cache-write path. `fsck --heal` re-fetches from the remote tier, so it must inherit 0.2's backoff (or it will hammer a throttling R2/D1) and 0.3's hash-verification (healed bytes must be verified before they land in the cache). The other Phase 0 items are order-independent.
 
@@ -442,14 +508,18 @@ Each item: **what · why · feasibility · effort · dependencies · Libra-idiom
 | 1.1 | **Dirty-set cache + `libra dirty` + `status --cached`** | Constant-time status for AI agents on huge trees; watcher/agent integration point | moderate | 2–4 w | migration | SQLite `working_dirty` table (worktree, path, action) + parent-prefix index; `libra dirty <paths>`/`move`/`copy` classify existence-vs-HEAD without hashing; `status --cached` reads it, `--scan` reconciles + refreshes, `--check-dirty` re-verifies dirty set; keep full reconcile the safe default. |
 | 1.2 | **`restore --ours/--theirs` (`-2/-3`)** | The missing conflict-resolution verb | moderate | 3–5 d | **precondition already met** — index stages 1/2/3 are written today (`merge.rs:1183-1204`, `cherry_pick.rs:1267-1291`) | Read index stages 2/3 for unmerged paths, write to worktree, optionally clear to stage 0; bulk via pathspec/`.`. No writer rework needed — stages exist; do a final confirm on rebase's conflict path before sign-off. |
 | 1.3 | **diff3 conflict markers + `merge --dry-run`/`--restart`** | Line-level conflicts + safe merge preview (Lore's auto-resolve preview) | moderate | 1 w | 1.2 | Per-hunk diff3 (`\|\|\|\|\|\|\| base`) via `similar`/`diffy`; `merge.conflictStyle`/optional sidecars; `--dry-run` computes resolution in-memory, reports conflict vs auto-merge, zero FS writes; `--restart` re-derives the 3-way from the OIDs already in `merge-state.json` (no schema change). |
-| 1.4 | **Positional diff + whitespace flags + `--diff3`** | Diff parity for review/merge | moderate | 1–2 w | rev-parse ranges | Accept `diff A B` / `A..B`; add `--ignore-space-at-eol/-change`; `--diff3` reusing merge marker code. |
+| 1.4 | **Positional diff + whitespace flags + `--diff3`** | Diff parity for review/merge | moderate | 1–2 w | rev-parse ranges | Two-dot `A..B` already shipped (`normalize_diff_range`, `diff.rs:211-241`); add space-separated `diff A B`, three-dot `A...B` merge-base, whitespace flags (`--ignore-space-at-eol`/`-w`/`-b`), `--diff3` reusing merge marker code. |
 | 1.5 | **Branch/repo metadata KV (keystone)** | Backs `protect`, `archive`, identity, lineage | moderate | 1 w | migration | `branch_metadata(branch, key, value, value_type)` + reserved keys; `libra branch metadata get/set/clear`; wire `protected` into delete/push guards + pre-receive hook; `archived` into list filter; `repository metadata` over `config_kv` reserved prefix. |
 | 1.6 | **`libra auth`** (v1: token-only) | No remote auth today beyond interactive basic-auth | moderate | 2–3 w | vault; per-domain token scoping | **v1 scope:** `libra auth login --token/--auth-url`, `info/list/logout/clear`; store per-domain tokens in libvault; credential-helper lookup in `https_client.rs` replaces `ask_basic_auth`; enforce host scoping (leak guard) **in the same change** before attaching `Authorization`. **Deferred to a follow-up:** interactive/OAuth/device-code login and OS-keyring backing (2.7). The 2–3 w reflects the repo's bar (no `unwrap`, actionable errors, EXAMPLES const, docs page, compat guards). |
 | 1.7 | **OTLP telemetry (feature-gated)** | Operable fleet observability | moderate | 1–2 w | opentelemetry crates | Optional feature: `tracing-opentelemetry` + `opentelemetry-otlp` behind `LIBRA_OTLP_ENDPOINT`; instruments around CLI dispatch + `Storage` trait; tower-http metric layer on the code server; default CLI stays lean. |
 | 1.8 | **`merge --autostash`** | Survive uncommitted edits across merge (Lore `merge_carry`) | moderate | 3–5 d | stash | Reuse `src/command/stash.rs`; auto-stash dirty tracked changes pre-merge, pop post-merge; on conflicted pop, follow Git (leave stash). |
 | 1.9 | **Commit trailers + `log --trailer`** | Provenance/metadata search (Lore find-metadata) | moderate | 1 w | — | Standardize reserved trailers (`Reviewed-by`/`Cherry-picked-from`/`Change-Request`); `log --trailer <key>[=value]` walk + notes-backed SQL fast path. |
 | 1.10 | **Typed metadata command family** | Lore exposes repository/branch/revision/file metadata as first-class APIs; Libra needs the same user-facing affordance without changing Git trees | moderate | 2–3 w | 1.5; 1.9; notes | Expose `libra metadata repository|branch|revision|file get/set/clear` (or nested `repository metadata`, `branch metadata`, etc. if CLI grammar prefers locality). Repo metadata uses reserved `config_kv`; branch metadata uses `branch_metadata`; revision metadata uses trailers + notes; file metadata uses a committed side-tree keyed by path. |
-| 1.11 | **Headless local service + notification v1** | Lore's `service` and `notification subscribe` are real CLI surfaces; Libra's equivalent should reuse `libra code` infrastructure without requiring the TUI | moderate | 2–4 w | 1.1; event bus extraction | Add `libra service run/start/stop/status` as a loopback-only process exposing status/dirty/cache-warm/notification events over NDJSON/SSE/MCP. Do not create a hosted server; this is a local repo daemon for agents, watchers, and IDEs. |
+| 1.11 | **Headless local service + notification v1** | Lore's `service` and `notification subscribe` are real CLI surfaces; Libra's equivalent should reuse `libra code` infrastructure without requiring the TUI | moderate | 2–4 w | 1.1; event bus extraction | Add `libra service run/start/stop/status` as a **UDS/loopback-only IPC daemon** (matching Lore's UDS model) exposing status/dirty/cache-warm/notification events over NDJSON/SSE/MCP. The service is deliberately small and headless — distinct from the rich interactive `libra code` TUI+web+MCP server. Do not create a hosted server; this is a local repo daemon for agents, watchers, IDEs, and external scripts. |
+| 1.12 | **`branch diff`** | Lore exposes branch-to-branch diff as a first-class verb; Libra requires users to know revspec syntax | easy | 2–3 d | rev-parse ranges | `libra branch diff [<branch-a>] [<branch-b>]` defaulting to `HEAD..<other>`; reuse `DiffArgs` engine; `--stat/--name-only/--json` parity. |
+| 1.13 | **`branch reset`** | Reset a branch tip to an arbitrary revision without touching the worktree (Lore `branch reset`) | easy | 2–3 d | ref update safety | `libra branch reset <branch> [<revision>]`; default revision = HEAD of current branch? Update SQLite `reference` row; guard protected branches (1.5); emit reflog entry. |
+| 1.14 | **Case-change handling for `add`/`stage`/`mv`** | Lore's `file stage --case=keep|rename|error` avoids accidental duplicate paths on case-insensitive filesystems | moderate | 3–5 d | index path normalization | Add `--case` to `add`, `mv`, and restore-style paths; `keep` updates filesystem to match index, `rename` updates index to match filesystem, `error` aborts on mismatch. Default `error` (Git-compatible). |
+| 1.15 | **Low-level in-memory revision tree construction (LEP 2026-05-14)** | Pipelines, importers, mirrors, and AI agents need to read/build revisions by path/node without materializing a full working tree | moderate | 2–3 w | 1.10 metadata; plumbing commands | Expose Git-idiomatic "update-index / commit-tree" style or a `RevisionTree` handle (MCP-first, optional `libra revision-tree` plumbing) that lets callers resolve paths → tree entries, add/modify/delete/move by path or tree OID, then commit without a checkout. Reuses existing object writers + index machinery; no new on-disk format. Directly serves the "no working tree" use cases in the LEP while staying inside Git trees. |
 
 ### Phase 2 — Composition & scale (structural; some large blast radius)
 
@@ -467,6 +537,7 @@ Each item: **what · why · feasibility · effort · dependencies · Libra-idiom
 | 2.8 | **Lock enforcement on commit/add + local lock store** | Move advisory→enforced beyond push | moderate | 1–2 w | LFS locks; hooks | `lfs.lockEnforce=warn\|block` consulting `get_locks` at commit/add; allow locking any path; optional SQLite-backed local lock store for offline/agent coordination. |
 | 2.9 | **Background cache evictor + config** | Decouple eviction from insert; cache hygiene | moderate | 3–5 d | — | Optional tokio interval evictor enforcing the byte budget oldest-first; surface `max_capacity`/`eviction_delay` in config. |
 | 2.10 | **Push protocol-layer parity (`--atomic`/`--signed`/`--push-option`/`--follow-tags`)** | Git-format-compatible push completeness; the analog of Lore's two-phase atomic push | moderate→hard | 2–3 w | receive-pack protocol extension in `src/internal/protocol` | Wire the deferred push flags through the receive-pack client: `--atomic` (all-or-nothing ref update), `--push-option` (pass-through), `--follow-tags`, `--signed` (push-cert). Protocol-invasive (parked in the push goal-state for exactly this reason); reuses Git's model, no new object graph. |
+| 2.11 | **`shared-store set-use-automatically`** | Lore can mark a shared store as the default for future clones on this machine | low | 1–2 d | 2.3 | Persist default shared-store path in libvault/global config; `clone` consults it before creating a standalone object store. |
 
 ### Phase 3 — Lore-parity gated extensions (after Phase 1/2 foundations)
 
@@ -528,6 +599,10 @@ These items are now part of the completion roadmap, but not part of the first tw
 - **Obliteration (2.5)** needs the `object_index` flag + read-path typed error + (for packed objects) a **repack** capability gc lacks today; **`fsck --heal` (0.4) must skip obliterated OIDs** or it fights 2.5; coordinate local + R2 + D1 backup so a backup never resurrects deleted bytes.
 - **Dependency-filtered clone/sync (3.2)** is blocked on metadata (1.10), sparse view (2.2), object alternates (2.3), and the dependency graph (3.1). It must reuse sparse semantics instead of inventing a second materialization state.
 - **Hydrating VFS (3.4)** is blocked on sparse view (2.2), object alternates (2.3), and a proven hydration/recovery story; LFS chunking (3.3) is optional for v1 but required for true range hydration.
+- **`branch diff`/`reset` (1.12/1.13)** are independent of each other but should reuse the branch metadata KV (1.5) for protected-branch guards; implement them after 1.5 so `reset` cannot bypass `protect`/`archive` bits.
+- **Low-level revision tree (1.15)** depends on typed metadata (1.10) for provenance attachment and on existing plumbing writers; it is intentionally sequenced after the metadata substrate so that agent-constructed revisions carry proper trailers and can be queried uniformly. It does **not** require sparse or worktree isolation.
+- **File case-change handling (1.14)** should land after the dirty-set cache (1.1) is stable, because both touch path-normalization and index-worktree reconciliation; keep the default `error` behavior to stay Git-compatible.
+- **`shared-store set-use-automatically` (2.11)** is a small config convenience that only makes sense after object alternates (2.3) are working.
 
 ### 7.2 Execution gates
 
@@ -546,7 +621,7 @@ Every plan item above is only considered done when the following are true:
 - **Sparse misclassification.** Highest correctness hazard: status/clean/add must treat unmaterialized in-view paths as sparse, not deleted, or risk clobbering. Merge/rebase must update tree objects for out-of-view paths without materializing.
 - **Obliteration honesty.** Git content-addressing means shared-content blobs are obliterated for all referents; real-git readers hard-fail on obliterated objects; backups can resurrect bytes. The doc page is mandatory and must be accurate about these sharper-than-Lore limits.
 - **Recovering vanished work, and memory-vs-tree drift.** Several auto-memories assert features that are **NOT in the current tree** — verified against `src/`:
-  - `diff` whitespace/word-diff/`-W`/positional-revspec — *absent*; `DiffArgs` (`src/command/diff.rs:49-96`) has only `--old/--new/--staged/--algorithm/--output/--name-only/--name-status/--numstat/--stat`.
+  - `diff` whitespace/word-diff/`-W` — *absent*; `DiffArgs` (`src/command/diff.rs:49-96`) has only `--old/--new/--staged/--algorithm/--output/--name-only/--name-status/--numstat/--stat`. (Two-dot `A..B` positional revspec **now exists** via `normalize_diff_range` at `diff.rs:211-241`; space-separated `A B`, three-dot `A...B` merge-base, and whitespace flags are still absent.)
   - `pull --autostash` / `run_merge_for_pull_with_autostash` — *absent*; zero `autostash` hits in `pull.rs`/`merge.rs`.
   - `restore --ours/--theirs` (`-2/-3`) — *absent*; `RestoreArgs` (`restore.rs:154-173`) has only `--staged/--worktree/--source/--pathspec-from-file`. (The index *stages* those flags would read **are** written — see §4.4 — so only the flag surface is missing.)
   - `clone --reference/--shared/--dissociate/--filter` — *absent* from `clone.rs`.
@@ -562,3 +637,331 @@ Every plan item above is only considered done when the following are true:
 4. **Where should obliteration's packed-object repack live?** gc does not repack today; obliterating a packed object requires writing a new pack minus the object. Is loose-object-only obliteration (plus LFS media) sufficient for v1?
 5. **Local lock store vs LFS lock server confusion.** A SQLite local lock store coordinates only one machine. How do we keep the local-vs-remote lock surfaces distinct and unambiguous?
 6. **Hosted Libra server?** Notifications, distributed locking, server-side push validation/FF-merge, forks-with-access-control, and multi-language streaming all presuppose a hosted multi-tenant Libra server that does not exist (publish is a read-only Worker). Is building one in scope, or do these stay permanently deferred / pushed into the publish+code surfaces?
+
+
+---
+
+## Appendix A — Lore CLI command inventory → Libra mapping
+
+This inventory was built from `lore-client/src/cli/commands/*` (`0.8.4-nightly`) and merged into the plan above. It makes the gap analysis executable: every Lore verb either has a Libra equivalent today, maps to a concrete plan item, or is explicitly deferred.
+
+| Lore command / subcommand | Libra analog today | Plan / verdict |
+|---|---|---|
+| **Global args** `--offline`, `--remote`, `--local`, `--sync-data`, `--cache`, `--gc`, `--force`, `--dry-run`, `--json`, `--no-pager`, `--non-interactive`, `--identity`, `--max-connections`, `--file-count-limit`, `--file-size-limit`, `--compress-limit`, `--max-threads`, `--search-limit`, `--search-nearest` | `--json`, `--no-pager`, `--quiet` present; most resource knobs missing | 0.2, 0.5, 0.8, 0.9 |
+| `repository status` | `libra status` | 1.1 (`status --cached` + dirty-set) |
+| `repository info` / `repository list` | `libra remote -v`, `libra status` | present-different / low |
+| `repository create` | `libra init` | present |
+| `repository clone` | `libra clone` | 2.2 (`--view`), 2.3 (`--reference/--shared`) |
+| `repository delete` | (remove `.libra` manually) | low; no plan |
+| `repository verify state/fragment` | `libra fsck`, `libra verify-pack` | present-different; 0.4 (`fsck --heal`) |
+| `repository dump` | `libra show`, `libra cat-file`, `libra rev-list` | present-different / low |
+| `repository gc` | `libra gc`, `libra maintenance` | present |
+| `repository store immutable query` | `libra cat-file`, `libra ls-tree` | present-different / low |
+| `repository config get` | `libra config` | present |
+| `repository metadata get/set/clear` | `libra config` (repo scope) | 1.5, 1.10 |
+| `repository instance list/prune`, `repository update-path` | `libra worktree list/prune/move` | present-different; 2.1 |
+| `branch list/info/create/switch/push` | `libra branch` / `switch` / `push` | present |
+| `branch merge start/restart/resolve/abort/unresolve/mine/theirs/into` | `libra merge` / `cherry-pick` / `revert` | 1.2, 1.3, 2.6 |
+| `branch diff` | `libra diff <branch>..<branch>` (requires revspec) | 1.12 |
+| `branch reset` | no direct equivalent | 1.13 |
+| `branch archive/protect/unprotect` | no direct equivalent | 1.5 |
+| `branch latest` | `libra branch -v` partially | 1.5 (`archived` filter) |
+| `branch metadata get/set/clear` | no direct equivalent | 1.5, 1.10 |
+| `revision history` | `libra log` | present |
+| `revision info` | `libra show` | present |
+| `revision commit` / `revision amend` | `libra commit` / `commit --amend` | present |
+| `revision sync` | `libra pull` | present |
+| `revision diff` | `libra diff` (`A..B` two-dot done) | 1.4 (`A B` / `A...B` / whitespace) |
+| `revision find metadata/number` | no direct equivalent | 1.9, §4.2 ordinal cache |
+| Low-level in-memory revision tree (LEP) | plumbing + MCP only | 1.15 |
+| `revision restore` | `libra restore --source` | present |
+| `revision cherry-pick/revert` + resolve mine/theirs/unresolve/restart/abort | `libra cherry-pick` / `revert` | 2.6 (unified sequencer) |
+| `revision bisect` | `libra bisect` | present |
+| `revision metadata get/set/clear` | no direct equivalent | 1.10 |
+| `file info` | `libra ls-files`, `libra status` | present-different |
+| `file metadata get/set/clear` | `libra notes` (free-form) | 1.10 |
+| `file dependency add/remove/list` | no direct equivalent | 3.1 |
+| `file stage` / `file stage --scan` / `file stage move/merge` | `libra add` / `libra mv` | present-different; 1.1 (`--scan`) |
+| `file dirty move/copy` | no direct equivalent | 1.1 |
+| `file unstage` / `file reset` | `libra restore --staged` / `libra reset` | present |
+| `file diff` | `libra diff` (`A..B` two-dot done) | 1.4 (`A B` / `A...B` / whitespace) |
+| `file obliterate` | no direct equivalent | 2.5 |
+| `file dump` / `file history` / `file write` / `file hash` | `libra cat-file` / `log --follow` / `hash-object` | present-different |
+| `file stage --case={keep,rename,error}` | no direct equivalent | 1.14 |
+| `auth login/info/list/logout/clear` | no `libra auth` command | 1.6, 2.7 |
+| `layer add/remove/list` | no direct equivalent | 2.4 |
+| `link add/remove/update/list` | no direct equivalent (submodule declined) | 3.5 (RFC) |
+| `lock acquire/status/query/release` | `libra lfs lock/unlock/locks` | present-different; 2.8 |
+| `service run/start/stop` | `libra code` (richer, TUI) | 1.11 |
+| `notification subscribe` | AI broadcast stream only | 1.11 |
+| `completions` | no `libra completions` | 0.1 |
+| `shared-store create/info/set-use-automatically` | no direct equivalent | 2.3, 2.11 |
+| `logfile info` | `LIBRA_LOG_FILE` only | 0.7 |
+| Store / cache tunables (`[store]`, LRU, verify_write) | TieredStorage internals only | 0.10 |
+| Low-level in-memory revision tree construction (LEP) | plumbing + MCP tools | 1.15 |
+
+> **How to read the table.** "present" means Libra already ships a Git-idiomatic equivalent; "present-different" means the capability exists in another shape; a plan number means it is scheduled above; "low; no plan" means the gap is real but too small or too low-value to track as a standalone phase item. The mapping intentionally does not include low-level Lore storage-admin commands (`repository store immutable query`, `repository dump`) that have no user-facing Libra equivalent because Libra's object graph is the public API.
+
+---
+
+# PART II — Libra → Lore (Lore closes its gaps against Libra)
+
+> **Reading guide.** Part II is the mirror image of Part I. It takes **Libra as the reference** and plans what **Lore** must build to reach parity — **while staying content-addressed (BLAKE3), partition-based, no-index, API/C-ABI-first, and server-centric.** The guiding constraint flips: Part I had to protect Libra's *Git-format compatibility*; Part II has to protect *Lore's* identity. Where a Libra idea conflicts with that identity (the Git on-disk format, the index, SQLite-as-canonical-refs, the Git wire protocols), Part II **adapts or defers** it — see the non-goals in §P2.6, the symmetric counterpart of §6.
+>
+> Evidence base: the live Lore tree (`/Volumes/Data/EpicGames/lore`, `0.8.4-nightly`), its `lore-client/src/cli/cli.rs` command enum, `docs/roadmap.md`, `docs/reference/lore-cli-commands.md`, and a full-tree probe (AI/agent/LLM/MCP matches in Lore source: **0**).
+
+## P2.1 Framing: the same two architectures, read the other way
+
+Part I established the asymmetry; Part II exploits it. The two systems **lead in different dimensions**, so the gap is lopsided rather than mutual:
+
+- **Libra leads on AI-native development and Git-ecosystem history depth.** Its `src/internal/ai/` subsystem (agents, orchestrator, MCP server, sandbox, providers, skills, automation, goal/supervisor/verifier, usage accounting, context-budget, session store, TUI `libra code`) **has no Lore equivalent whatsoever** — a full-tree search of Lore returns zero AI/LLM/MCP hits. Libra also ships the deep Git history-rewrite surface (rebase, stash, reflog, blame, tag, grep, shortlog, describe, client hooks) that Lore either lists as roadmap or does not have.
+- **Lore leads on storage scale, composition, and distribution** (BLAKE3 CAS, FastCDC chunking, partitions, links, layers, instances/shared-store, sparse/VFS, obliteration, the C-ABI, QUIC/gRPC protocol, a real multi-tenant server, scalable-locks roadmap, OS-keyring/JWT auth, OTLP). Part I is the plan for Libra to chase *those*.
+
+So Part II's job is narrow and deep: **adopt Libra's user-facing AI capability and its history-rewrite verbs, expressed idiomatically to Lore's substrate — never by importing Git mechanics.**
+
+**The keystone insight — Lore's substrate is unusually well-suited to host an AI layer.** The single hardest parts of Libra's AI stack were retrofits onto Git's model; Lore already has native equivalents:
+
+| Libra had to build / struggles with | Lore already ships (head-start for the AI layer) |
+|---|---|
+| Extract a loopback event bus out of `libra code` for agent/watcher notifications (Part I plan **1.11**) | `lore service run/start/stop` + `lore notification subscribe` — a **UDS IPC daemon with an event-dispatch model already in production** (`lore-client/src/cli/commands/service`, `lore-notification`) |
+| Per-worktree HEAD/index/refs isolation for parallel agents — a multi-month refactor of every ref/HEAD/index resolver (Part I plan **2.1**, the doc's "⭐ keystone") | **instances** (per-dir UUIDv7 identity, independent staged state) over a **shared-store** + **partitions** — symmetric, isolating, no privileged main repo, *by design* |
+| Provenance/permission/observability scaffolding (commit trailers, vault, tracing) | **typed metadata KV** (file/revision/branch/repo), **JWT auth + REBAC + OS-keyring** (`lore-credential`), **OTLP** (`lore-telemetry`), and a **C-ABI** tool-integration surface |
+
+The implication: porting Libra's AI runtime onto Lore is **with-the-grain**, not a graft. The control plane is new code, but the transport, isolation, identity, and telemetry it needs are already there.
+
+## P2.2 The biggest gaps (what Lore lacks vs Libra), grouped into themes
+
+| Theme | What Lore lacks vs Libra | Headline gaps |
+|---|---|---|
+| **AI-native development** | No agents, no LLM providers, no MCP server, no orchestrator, no agent sandbox, no skills, no automation rules, no goal/supervisor, no usage accounting, no agent session store | the whole **`lore-agent`** stack (P2.4.1) — the dominant gap |
+| **History rewrite** | No `rebase`, no `squash` (cherry-pick workaround), no `stash`, no global `reflog` | rebase/squash engine on Lore's MergeType + a mutable-store sequencer; autostash; ref-movement log |
+| **History inspection** | No `blame`, no `shortlog`, no `describe`, no `grep`, no `tag` | expose woven per-file history as `blame`; author/commit summaries; named immutable refs; content search |
+| **Client-side lifecycle** | Server-side hooks only; no client `pre-commit`/`commit-msg`/`pre-push` lifecycle | client hook runner + templates (and AI-lifecycle hooks once L2 lands) |
+| **Free-form annotation** | Typed metadata KV exists; no mutable free-text note attached post-hoc to a revision | `lore note` over a mutable-metadata pointer (mostly present-different) |
+| **Zero-ops distribution** | Server-centric; needs `loreserver`; no serverless read-only snapshot hosting | `lore publish` analog (read-only snapshot to S3/CDN); client-managed backup |
+| **Interactive agent surface** | CLI + GUI clients on roadmap; no terminal agent loop | `lore code`-style agent TUI (AI-gated, reuses lore-client TUI infra) |
+
+**Not gaps — what Lore already has at parity or ahead (do *not* re-plan these).** Several capabilities that look like "Libra features" are equal or better in Lore, and Part II deliberately excludes them: shell **completions** (`lore completions`), **auth/JWT/OS-keyring/HashiCorp-Vault** (`lore-credential`/`lore-hashicorp` — ahead of Libra's basic-auth + libvault), **OTLP telemetry** (`lore-telemetry`), **service/notification IPC**, **shared-store/layers/links/partitions/instances**, **obliteration**, **sparse/VFS** (roadmap), **typed metadata KV**, **file-dependency graph**, **FastCDC chunking**, the **C-ABI**, and **file locking**. Proposing Libra-shaped versions of these would be redundant or regressive.
+
+## P2.3 One-glance priority table (Lore's plan)
+
+| Priority | Items | Rationale |
+|---|---|---|
+| **Phase L0 — Quick parity wins** | `lore tag`; `lore blame` (expose woven history); `lore stash`; `lore shortlog`/`describe`; `lore grep`; client hook lifecycle | Small, independent, reuse Lore's existing revision engine + dirty-set; no new subsystem |
+| **Phase L1 — History-rewrite engine** | `rebase`; `squash`; interactive rebase; `merge --autostash`; global `reflog` | Aligns with Lore's *own* roadmap (rebase/squash); built on MergeType + staged anchor + a mutable-store sequencer |
+| **Phase L2 — AI substrate (headline, foundational)** | `lore-agent` crate: completion + providers; **MCP over `lore service`**; tool registry over lore-revision/lore-storage; sandbox; agent session store; usage accounting | The dominant gap; unblocks all autonomy work; rides Lore's IPC/partition/metadata head-start |
+| **Phase L3 — AI orchestration & autonomy** | orchestrator (plan/decide/execute/verify/replan, gate/ACL); goal/supervisor/verifier; skills; automation + scheduler (on `lore-notification`); context-budget; permission/intentspec/projection; observed-agent capture; prompt/codex bridge | Structural AI control plane; depends on L2 |
+| **Phase L4 — Interactive & distribution surfaces** | `lore code`-style agent TUI; AI usage dashboards; read-only serverless publish analog; client-managed backup | High-visibility surfaces; gated on L2/L3 and on a distribution decision |
+| **Later / Defer (non-goals)** | Git on-disk format; the index; SQLite-as-canonical-refs; Git smart-HTTP/SSH/LFS protocols; libvault | Conflict with Lore's content-addressed/no-index/API-first/server-centric identity (§P2.6) |
+
+> **⭐ Reverse keystone — the `lore-agent` AI substrate (plan item L2).** It is the only *entire category* of capability that exists in one system and is wholly absent in the other. Unlike Part I's keystone (a painful Git retrofit), this one is with-the-grain: Lore's UDS service is the MCP transport, partitions/instances are the agent isolation, typed metadata is the provenance store, JWT is the permission model, OTLP is the telemetry. Land L2 and Lore gains the differentiator that today separates the two projects most sharply.
+
+## P2.4 Per-domain reverse gaps
+
+Each subsection: **Libra's capability (with file evidence) → Lore today → the Lore-idiomatic landing.** This is the inverse of Part I §4.
+
+### P2.4.1 AI-native runtime — the headline gap
+
+**Libra.** A large, production AI subsystem under `src/internal/ai/`: agent framework (profiles architect/coder/…, runtime, classifier, budget); `agent_run` records (context_pack, decision, evidence, patchset, permission, task); orchestrator (planner/decider/executor/verifier/replan/gate/ACL); goal (state/supervisor/verifier/spec); MCP server (`ai/mcp`); LLM providers (anthropic/openai/deepseek/gemini/kimi/zhipu/ollama/fake) behind a `CompletionModel` trait with retry/throttle/JSON-repair; sandbox (command-safety policy, macOS seatbelt, Linux bwrap); skills (loader/scanner/parser/dispatcher); automation (rule runtime, scheduler, history, executor); context_budget (window allocator, compaction, handoff, memory anchors); prompt engineering; intentspec/projection/permission; observed_agents (Claude Code, Gemini capture); usage accounting (recorder, pricing, query); session store (JSONL + file history); TUI `libra code`.
+
+**Lore today.** **None.** Zero AI/agent/LLM/MCP code in the tree. But — per §P2.1 — the *substrate* is unusually ready.
+
+**Lore-idiomatic landing** (introduce a new workspace crate `lore-agent`, plus `lore-agent-tui` for L4; keep the storage/revision crates untouched):
+
+| Libra AI module | Lore landing (idiomatic) | Phase |
+|---|---|---|
+| `CompletionModel` trait + provider adapters (`ai/providers`, `ai/completion`) | New `lore-agent::completion` + provider clients (reqwest over `lore-transport`'s rustls); retry/throttle/JSON-repair ported verbatim — provider-agnostic, no Lore coupling | L2 |
+| MCP server (`ai/mcp`) | Expose MCP **over the existing `lore service` UDS IPC** + `lore-notification` dispatch; reuse `lore-proto` codegen conventions for the resource schema | L2 |
+| Tool registry + handlers `read_file`/`apply_patch`/`shell`/`grep`/`plan` (`ai/tools`) | Implement against **lore-revision** (staged anchor, dirty-set, `file stage`/`unstage`) and **lore-storage** (fragment reads); `apply_patch` writes through the staging path, not a Git index | L2 |
+| Sandbox (`ai/sandbox`: seatbelt/bwrap, command-safety) | Port wholesale — OS sandboxing is substrate-neutral; gate `shell` tool through it; first real command-execution sandbox in Lore | L2 |
+| Session store (`ai/session`: JSONL + file history) | Store sessions as **content-addressed blobs** in lore-storage (or typed metadata); use **instances/partitions** for per-agent isolation | L2 |
+| Usage accounting (`ai/usage`: recorder/pricing/query) | Emit through **`lore-telemetry` (OTLP)** + a local usage ledger; `lore usage` query command | L2 |
+| Orchestrator (`ai/orchestrator`) + goal/supervisor/verifier (`ai/goal`) | New `lore-agent::orchestrator`/`::goal` control plane; agent worktrees = **instances over shared-store** (Lore's native parallelism) | L3 |
+| Skills (`ai/skills`) | New loader/scanner/dispatcher; skills as content-addressed, optionally partition-scoped | L3 |
+| Automation + scheduler (`ai/automation`) | Rule runtime that **subscribes to `lore-notification` events** (branch push/create/delete, lock/unlock) — a natural trigger source Libra lacks | L3 |
+| context_budget / prompt / intentspec / projection / permission | New agent-internal modules; **permission can ride Lore's JWT/REBAC** instead of a bespoke model | L3 |
+| observed_agents (Claude Code/Gemini capture) + codex bridge | New adapters; redaction/preview as in Libra | L3 |
+| TUI `libra code` (`internal/tui`) | New `lore-agent-tui` reusing **lore-client's existing TUI/paging/progress infra** | L4 |
+
+**Why this ordering.** L2 is the irreducible foundation (a model can complete, call tools, run sandboxed, and persist a session). L3 is the autonomy layer (multi-step planning, goals, automation) that only makes sense once tools+sandbox+session exist. L4 is the human-facing surface. This mirrors how Libra's own stack is layered.
+
+### P2.4.2 History rewrite & inspection verbs
+
+**Libra.** Full Git-rich surface: `rebase` (`src/command/rebase.rs`, author/committer-preserving replay), `cherry_pick`/`revert` (SQLite sequencers), `stash`, `reflog` (SQLite, with `expire`), `blame`, `shortlog`, `describe`, `grep` (regex/context/binary modes), `tag` (lightweight + annotated), `bisect`, `merge --squash`/`--autostash` (planned), `notes`.
+
+**Lore today.** Has `revision cherry-pick`/`revert`/`bisect`, three-way `merge` with explicit resolve, `revision restore`, and per-branch latest-history. **Missing:** `rebase`/`squash` (both on Lore's roadmap), `stash`, global `reflog`, `blame` (the data exists, woven into `NodeFileMetadata.revision[2]` — only the verb is missing), `shortlog`, `describe`, `grep`, `tag`, client hooks.
+
+**Lore-idiomatic landing.**
+
+| Libra verb | Lore landing | Phase / effort |
+|---|---|---|
+| `blame` | **Expose existing woven per-file history** — Lore already records per-file revision provenance; add a read-only `lore blame <path>` formatter. Near-free. | L0 / low |
+| `tag` | Named **immutable refs** to a revision in the mutable store (lightweight); annotated tags carry typed metadata. Not Git tags — Lore-native named pointers complementing `branch@N` numbers. | L0 / low |
+| `stash` | Snapshot the **staged anchor + dirty-set** into a stash entry (a revision-like object in storage); restore re-applies. Reuses dirty-set machinery. | L0 / medium |
+| `shortlog` / `describe` | Aggregate over the revision DAG + `created-by`/`committed-by` metadata; `describe` = nearest-tag (once `tag` exists) + revision-number offset. | L0 / low |
+| `grep` | Content search over materialized files (and, opportunistically, the fragment store); regex + context flags. | L0 / low–medium |
+| client **hooks** | A client hook lifecycle (`pre-commit`/`commit-msg`/`pre-push`) invoked from the commit/push paths — Lore has only server hooks today. Foundation for AI-lifecycle hooks in L2/L3. | L0 / medium |
+| `rebase` / interactive rebase | Replay a revision chain onto a new parent using the **MergeType engine** + staged anchor, with conflict resolution through the existing `merge resolve mine/theirs` UX; persist a **sequence-state in the mutable store** (Lore's CAS analog of Libra's SQLite sequencer). **Aligns with Lore's roadmap.** Preserve author, set committer. | L1 / hard |
+| `squash` | Collapse a revision chain into one new revision (distinct from cherry-pick, per Lore's roadmap); shares the L1 sequencer. | L1 / medium |
+| `merge --autostash` | Auto-stash dirty state across merge/rebase, restore after (depends on L0 `stash`). | L1 / low |
+| global `reflog` | Generalize **branch latest-history** into a per-ref movement log with `expire`; store in the mutable KV store. | L1 / medium |
+| `note` (free-form) | Mutable free-text annotation on an existing revision via a **mutable-metadata pointer** (Lore's typed metadata is immutable when hash-referenced) — mostly present-different. | L0 / low |
+
+### P2.4.3 Client-side hook lifecycle
+
+**Libra.** Git hook templates + an `ai/hooks` lifecycle (config, lifecycle, runner, providers) wired into commit/push and the AI runtime.
+
+**Lore today.** Server-side hooks only (push/branch veto, noted in Part I §4.10). No client `pre-commit`/`commit-msg`/`pre-push`.
+
+**Lore-idiomatic landing.** A client hook runner invoked from the `commit`/`push`/`stage` paths, plus hook templates under `.lore/`. Keep it small at L0; once L2/L3 land, add **AI-lifecycle hooks** (pre-plan/post-verify) so automation rules and agents can veto or gate operations — the analog of Libra's `ai/hooks`.
+
+### P2.4.4 Zero-ops distribution & client-managed backup
+
+**Libra.** `libra publish` snapshots a repo into a **read-only Cloudflare Worker over D1/R2** (serverless edge hosting, zero ops); `libra cloud` does **incremental D1/R2 backup** of the object graph from the client.
+
+**Lore today.** Distribution is **server-centric** — reads/writes terminate at `loreserver` (QUIC/gRPC), with edge caches/read-replicas as a *server-fleet* concern. There is no client-driven, serverless, read-only snapshot of a repo for browse/clone without standing up a server, and no client-side "back up my repo to commodity object storage" path distinct from the production store.
+
+**Lore-idiomatic landing.** Both are **present-different / L4**, and must respect Lore's server-centric identity rather than mimic Cloudflare:
+
+- **Read-only snapshot publish** — export a revision's materialized tree (or a fragment manifest) to S3/CDN as a static, signed, read-only site, served without a `loreserver`. Reuses Lore's existing S3 backend (`lore-aws`) and content-addressing. *Decline* the Worker/D1 specifics (Cloudflare-bound).
+- **Client-managed backup** — a `lore backup` verb that pushes the local immutable store to a second object-store target and records sync state, independent of the production server. Lore's CAS makes this naturally incremental.
+
+These are lower priority than the AI layer and gated on a product decision about whether serverless read distribution belongs in Lore's centralized model at all.
+
+## P2.5 Prioritized, phased completion plan (for Lore)
+
+Each item: **what · why · feasibility · effort · dependencies · Lore-idiomatic approach.** Effort excludes each project's own per-command doc/test contract (Lore has its own equivalents: `docs/reference` regen, integration tests in `lore-integration-tests`, `lore --markdown-help`).
+
+### Phase L0 — Quick parity wins (independent, reuse Lore's revision engine)
+
+| # | Item | Why | Feasibility | Effort | Deps | Approach |
+|---|---|---|---|---|---|---|
+| L0.1 | **`lore blame <path>`** | Per-line provenance; data already exists | easy | 3–5 d | — | Read the existing woven per-file history (`NodeFileMetadata.revision[2]`); format per-line last-touched revision/author. Read-only; no engine change. |
+| L0.2 | **`lore tag`** | Human-friendly immutable aliases beside `branch@N` | easy | 1 w | — | Named immutable refs in the mutable store; annotated tags carry typed metadata. Lore-native, not Git tags. |
+| L0.3 | **`lore stash`** | Set work aside without a commit | moderate | 1–2 w | dirty-set | Snapshot staged anchor + dirty-set into a stash object in storage; `pop`/`apply`/`drop`/`list`. |
+| L0.4 | **`lore shortlog` / `lore describe`** | Release notes + human-readable revision names | easy | 3–5 d | L0.2 (describe) | Aggregate the revision DAG + `created-by` metadata; `describe` = nearest tag + revision-number offset. |
+| L0.5 | **`lore grep`** | Content search across the working set | easy | 1 w | — | Regex over materialized files (+ optional fragment scan); context/binary flags. |
+| L0.6 | **Client hook lifecycle** | `pre-commit`/`commit-msg`/`pre-push` gating | moderate | 1–2 w | — | Hook runner invoked from commit/push/stage; templates under `.lore/`. Foundation for AI-lifecycle hooks. |
+| L0.7 | **`lore note` (free-form)** | Mutable post-hoc annotation on a revision | easy | 3–5 d | — | Mutable-metadata pointer; complements immutable typed metadata. |
+
+### Phase L1 — History-rewrite engine (aligns with Lore's own roadmap)
+
+| # | Item | Why | Feasibility | Effort | Deps | Approach |
+|---|---|---|---|---|---|---|
+| L1.1 | **`lore rebase` (+ interactive)** | On Lore's roadmap; replay chains onto a new parent | hard | 1–2 mo | MergeType engine; mutable-store sequencer | Replay revisions via the existing three-way engine; conflict UX reuses `merge resolve mine/theirs`; persist `RebaseSequence` state in the **mutable CAS store**; preserve author, set committer. |
+| L1.2 | **`lore squash`** | On Lore's roadmap; collapse a chain into one revision | moderate | 2–3 w | L1.1 sequencer | Distinct verb (not cherry-pick); reuse the L1.1 sequence-state + merge engine. |
+| L1.3 | **`merge --autostash` / `rebase --autostash`** | Survive uncommitted edits across rewrite | easy | 3–5 d | L0.3 stash | Auto-stash dirty state pre-op, restore post-op. |
+| L1.4 | **Global `reflog`** | Recover lost revisions/branch tips after rewrite | moderate | 1–2 w | mutable store | Generalize per-branch latest-history into a per-ref movement log with `expire`. |
+
+### Phase L2 — AI substrate (the headline gap; new `lore-agent` crate)
+
+| # | Item | Why | Feasibility | Effort | Deps | Approach |
+|---|---|---|---|---|---|---|
+| L2.1 | **Completion + provider adapters** | No LLM access today; the irreducible base | moderate | 3–5 w | — | `lore-agent::completion` + provider clients (anthropic/openai/deepseek/gemini/ollama/…) over `lore-transport` rustls; retry/throttle/JSON-repair. Provider-agnostic; zero Lore coupling. |
+| L2.2 | **MCP server over `lore service`** | Standard tool/agent protocol for editors & external agents | moderate | 2–3 w | L2.1; existing service IPC | Serve MCP over the **existing UDS IPC daemon** + `lore-notification`; resource schema via `lore-proto` conventions. Big head-start vs Libra. |
+| L2.3 | **Tool registry over revision/storage** | Agents must read/edit/run inside the repo | moderate→hard | 3–5 w | L2.2 | `read_file`/`grep` over lore-storage fragments; `apply_patch`/`stage` through the staged anchor + dirty-set; `plan`. No Git index. |
+| L2.4 | **Agent command sandbox** | Safe `shell` execution for agents | moderate→hard | 3–4 w | L2.3 | Port Libra's command-safety policy + macOS seatbelt / Linux bwrap (substrate-neutral). Lore's first execution sandbox. |
+| L2.5 | **Agent session store** | Durable, resumable agent runs; per-agent isolation | moderate | 2 w | L2.1; instances | Sessions as content-addressed blobs (or typed metadata); isolate with **instances over shared-store**. |
+| L2.6 | **Usage accounting** | Cost/observability for model calls | moderate | 1–2 w | L2.1; lore-telemetry | Ledger + OTLP spans via `lore-telemetry`; `lore usage` query. |
+
+### Phase L3 — AI orchestration & autonomy (control plane on L2)
+
+| # | Item | Why | Feasibility | Effort | Deps | Approach |
+|---|---|---|---|---|---|---|
+| L3.1 | **Orchestrator (plan/decide/execute/verify/replan)** | Multi-step autonomous work, not single calls | hard | 1–2 mo | L2.3–L2.5 | New `lore-agent::orchestrator` with gate/ACL; agent worktrees = **instances over shared-store** (native parallelism). |
+| L3.2 | **Goal / supervisor / verifier** | Bounded, checkable autonomous tasks | hard | 1 mo | L3.1 | Goal spec + supervisor loop + independent verifier; reuse Lore's three-way merge for workspace integration. |
+| L3.3 | **Skills** | Reusable, discoverable agent capabilities | moderate | 2–3 w | L2.3 | Loader/scanner/dispatcher; skills content-addressed, optionally partition-scoped. |
+| L3.4 | **Automation rules + scheduler** | Event-driven agent triggers | moderate | 3–4 w | L2.2; lore-notification | Rule runtime **subscribing to `lore-notification`** (push/create/delete, lock/unlock) — a trigger source Libra lacks. |
+| L3.5 | **context-budget / prompt / intentspec / projection / permission** | Context-window discipline, provenance, gating | moderate→hard | 1 mo | L2.1–L2.5 | Agent-internal modules; **permission rides Lore's JWT/REBAC**. |
+| L3.6 | **observed-agent capture + codex bridge** | Interop with external agents (Claude Code/Gemini/Codex) | moderate | 2–3 w | L2.2 | Capture adapters + redaction/preview. |
+
+### Phase L4 — Interactive & distribution surfaces
+
+| # | Item | Why | Feasibility | Effort | Deps | Approach |
+|---|---|---|---|---|---|---|
+| L4.1 | **`lore code`-style agent TUI** | Human-facing agent loop in the terminal | moderate→hard | 1–2 mo | L2/L3 | New `lore-agent-tui` reusing **lore-client's TUI/paging/progress** infra. |
+| L4.2 | **AI usage dashboards** | Fleet cost/latency visibility | low–moderate | 1–2 w | L2.6 | Render the usage ledger; OTLP export already in place. |
+| L4.3 | **Read-only serverless snapshot publish** | Browse/clone without standing up a server | moderate | 3–4 w | — | Static signed export to S3/CDN via `lore-aws`; *decline* Cloudflare/D1 specifics. Present-different vs `libra publish`. |
+| L4.4 | **Client-managed backup** | Back up the local store to a second target | moderate | 2–3 w | — | `lore backup` pushes the immutable store to a second object-store target; CAS makes it incremental. |
+
+### Later / Defer (non-goals — conflict with Lore's identity)
+
+See §P2.6.
+
+## P2.6 Explicit non-goals for Lore (do NOT copy from Libra)
+
+The symmetric counterpart of §6. Each is a Libra trait Lore should **not** adopt, because it conflicts with Lore's defining choices.
+
+| Libra idea | Why Lore should not adopt it |
+|---|---|
+| **Git on-disk object format (loose/pack/index, SHA-1/SHA-256 OIDs)** | Breaks Lore's BLAKE3 content-addressing, FastCDC fragmentation, and partition model — Lore's defining promise, the mirror of Libra's Git-compat promise. |
+| **The Git index / stage-time snapshot model** | Lore deliberately has **no index** — the filesystem is ground truth and dirty/staged are flags. Adding an index forfeits the no-index ergonomics and the notify/scan/verify model. |
+| **SQLite as the canonical ref/HEAD/config store** | Lore's mutable CAS store **is** its single serialization point; a second SQLite source of truth would fracture consistency. Use the mutable store for sequencer/reflog/tag state instead. |
+| **Git smart-HTTP/SSH/git:// + Git-LFS wire protocols** | Lore has its own versioned QUIC + gRPC storage protocol; bolting on Git transports breaks its protocol story and buys nothing (Lore talks to `loreserver`, not Git hosts). |
+| **libvault (Libra's AES-256-GCM secret store)** | Lore already has **OS-keyring + HashiCorp Vault + JWT** (`lore-credential`/`lore-hashicorp`) — equal or ahead. Reuse those for agent credentials. |
+| **Cloudflare Worker / D1-specific publish + backup** | Vendor-bound. The *capability* (read-only snapshot, client backup) is L4.3/L4.4 over Lore's own S3 backend; the Cloudflare specifics are declined. |
+| **commit *trailers* as the provenance mechanism** | Lore already has **typed metadata KV** on revision/branch/repo/file — richer and queryable. Use it instead of parsing free-text trailers. |
+| **Per-worktree SQLite `instance_id` namespacing (Libra plan 2.1)** | Lore already solves this natively with **instances + shared-store + partitions**. Don't import Libra's retrofit; use the native model. |
+
+## P2.7 Sequencing, risks & open questions (reverse direction)
+
+**Sequencing.**
+- **L2 before L3 before L4** is hard-ordered: orchestration (L3) is meaningless without tools+sandbox+session (L2), and the TUI (L4) renders both. Within L2: **L2.1 → L2.2 → L2.3 → L2.4** (each strictly enables the next); L2.5/L2.6 can land in parallel once L2.1 exists.
+- **L0 and L1 are independent of the AI track** and can proceed in parallel with L2 — they touch the revision engine, not the agent crate. The **L1 mutable-store sequencer** (rebase/squash) should be built once and reused by both verbs (the mirror of Part I's "build the ordinal cache once").
+- **L1 aligns with Lore's published roadmap** (rebase/squash) — coordinate with Lore maintainers so the engine work is not duplicated upstream.
+- **Client hooks (L0.6)** should land before L3 so AI-lifecycle hooks have a runner to extend.
+
+**Top risks.**
+- **Scope realism.** The AI substrate (L2+L3) is a multi-quarter program — comparable in size to a large fraction of Libra's `src/internal/ai/`. It is the headline gap precisely because it is large; phase it (L2 alone is a shippable milestone: model + tools + sandbox + session).
+- **Don't fork the storage/revision crates.** Everything new lives in `lore-agent`/`lore-agent-tui` and *consumes* lore-storage/lore-revision through their public APIs. Any change that reaches into the CAS/fragment internals is a smell — re-check against §P2.6.
+- **Sandbox parity across platforms.** Lore targets the same OS matrix; port seatbelt/bwrap carefully and fail closed when no sandbox backend is available.
+- **Provider-secret handling.** Route model API keys through Lore's existing keyring/JWT credential store (§P2.6), never a new bespoke store.
+- **Upstream alignment.** Lore is an Epic open-source project with its own governance (LEPs, roadmap). A serious Libra→Lore contribution should enter as an **LEP**, especially the AI substrate, which is a strategic direction change for a "binary-first" VCS. This plan is the design input to such an LEP, not a unilateral fork.
+
+**Open questions.**
+1. **Is an AI substrate in scope for Lore at all?** Lore's stated identity is binary-first, scale-first version control; an agent runtime is a strategic addition. This plan assumes "yes, idiomatically"; the maintainers may scope it to the MCP/tool surface (L2.2–L2.3) only and stop short of full orchestration.
+2. **Where does agent state live** — content-addressed blobs, typed metadata, or a new mutable namespace? Each has different obliteration/GC implications under Lore's model.
+3. **Do instances/partitions fully cover agent isolation,** or is a lighter per-run scratch space needed for ephemeral agent work that should never become a revision?
+4. **Serverless distribution vs centralized identity.** Does read-only snapshot publish (L4.3) belong in a system whose whole point is a canonical server, or is that a Libra-only ergonomic that Lore should decline?
+
+---
+
+## Appendix B — Libra capability/command → Lore mapping
+
+The inverse of Appendix A. Every notable Libra capability either has a Lore equivalent today, maps to a Part II plan item, or is an explicit non-goal.
+
+| Libra capability / command | Lore analog today | Plan / verdict |
+|---|---|---|
+| `libra code` (agent TUI + web/MCP server) | none (GUI clients on roadmap) | L4.1 (+ L2/L3 substrate) |
+| `libra agent` / `agent_run` records | none | L2 / L3 |
+| `libra automation` | none | L3.4 (on `lore-notification`) |
+| MCP server (`src/internal/ai/mcp`) | `lore service`/`notification` UDS IPC (transport only) | L2.2 |
+| AI providers + `CompletionModel` (`ai/providers`, `ai/completion`) | none | L2.1 |
+| Tool registry (`ai/tools`: read_file/apply_patch/shell/grep/plan) | `file stage`/`unstage`, storage reads (no agent harness) | L2.3 |
+| Command sandbox (`ai/sandbox`: seatbelt/bwrap) | none | L2.4 |
+| Agent session store (`ai/session`) | instances/shared-store (isolation only) | L2.5 |
+| Usage accounting (`ai/usage`) | `lore-telemetry` (OTLP) partial | L2.6 |
+| Orchestrator/goal (`ai/orchestrator`, `ai/goal`) | none | L3.1 / L3.2 |
+| Skills (`ai/skills`) | none | L3.3 |
+| context-budget/prompt/intentspec/projection/permission | none (JWT/REBAC for permission) | L3.5 |
+| observed-agents / codex bridge | none | L3.6 |
+| `libra rebase` | roadmap (cherry-pick workaround) | L1.1 |
+| squash (`rebase -i` / `merge --squash`) | roadmap | L1.2 |
+| `libra stash` | none | L0.3 |
+| `libra reflog` | branch latest-history (partial) | L1.4 |
+| `libra blame` | woven per-file history (internal, no verb) | L0.1 (expose) |
+| `libra tag` | none (uses `branch@N` numbers) | L0.2 |
+| `libra grep` | none | L0.5 |
+| `libra shortlog` / `describe` | `revision history` partial | L0.4 |
+| client `hooks` lifecycle | server hooks only | L0.6 |
+| `libra notes` | typed metadata KV (present-different) | L0.7 (free-form note) |
+| `libra cherry-pick` / `revert` / `bisect` / `merge` | `revision cherry-pick`/`revert`/`bisect`, three-way `merge` | present |
+| `libra publish` (read-only CF Worker over D1/R2) | server tiering (present-different) | L4.3 (decline CF specifics) |
+| `libra cloud` (D1/R2 incremental backup) | S3/replication (server-tier) | L4.4 (present-different) |
+| `libra completions` | `lore completions` | present (Lore parity) |
+| `libra auth` (Part I 1.6, basic-auth today) | `lore auth` + JWT + OS-keyring + HashiCorp Vault | **present; Lore ahead** |
+| OTLP / telemetry | `lore-telemetry` | present (Lore parity) |
+| libvault secret storage | `lore-credential` (keyring) + `lore-hashicorp` | present-different (Lore ahead) — non-goal §P2.6 |
+| Git on-disk format / index / SQLite refs / Git protocols | Lore CAS / no-index / mutable store / QUIC+gRPC | **non-goal (§P2.6)** |
+
+> **How to read the table.** Same convention as Appendix A: "present" = Lore already ships an idiomatic equivalent; "present-different" = the capability exists in another shape; "Lore ahead" = Lore's version is more capable than Libra's; an `L#.#` is a Part II plan item; "non-goal" = deliberately declined to protect Lore's identity (§P2.6).

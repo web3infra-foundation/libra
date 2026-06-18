@@ -87,6 +87,9 @@ enum RevertError {
 
     #[error("failed to resolve committer identity for --signoff: {0}")]
     Signoff(String),
+
+    #[error("{0}")]
+    MultiCommitUnsupported(String),
 }
 
 /// Build the `Signed-off-by` trailer (prefixed with a blank line) for
@@ -121,6 +124,7 @@ impl RevertError {
             Self::IndexSave(_) => StableErrorCode::IoWriteFailed,
             Self::UpdateHead(_) => StableErrorCode::IoWriteFailed,
             Self::Signoff(_) => StableErrorCode::CliInvalidArguments,
+            Self::MultiCommitUnsupported(_) => StableErrorCode::CliInvalidArguments,
         }
     }
 }
@@ -179,9 +183,10 @@ pub struct RevertOutput {
 #[command(about = "Revert some existing commits")]
 #[command(after_help = REVERT_EXAMPLES)]
 pub struct RevertArgs {
-    /// Commit to revert (can be commit hash, branch name, or HEAD)
-    #[clap(required = true)]
-    pub commit: String,
+    /// Commits to revert, in order (commit hash, branch name, or HEAD). Multiple
+    /// commits are reverted sequentially, each as its own revert commit.
+    #[clap(required = true, num_args = 1..)]
+    pub commit: Vec<String>,
 
     /// Don't automatically commit the revert, just stage the changes
     #[clap(short = 'n', long)]
@@ -221,13 +226,38 @@ async fn run_revert(args: RevertArgs) -> Result<RevertOutput, RevertError> {
         return Err(RevertError::DetachedHead);
     }
 
-    let commit_id = resolve_commit(&args.commit)
-        .await
-        .map_err(|_| RevertError::InvalidCommit(args.commit.clone()))?;
+    // `--no-commit` and `-m` operate on a single revert; combining them with
+    // multiple commits would need the sequencer, so reject the combination
+    // rather than silently misbehave.
+    if args.commit.len() > 1 {
+        if args.no_commit {
+            return Err(RevertError::MultiCommitUnsupported(
+                "--no-commit cannot be combined with multiple commits".to_string(),
+            ));
+        }
+        if args.mainline.is_some() {
+            return Err(RevertError::MultiCommitUnsupported(
+                "-m/--mainline cannot be combined with multiple commits".to_string(),
+            ));
+        }
+    }
 
-    let (revert_commit_id, files_changed) = revert_single_commit(&commit_id, &args).await?;
+    // Revert each commit in order; each revert is applied relative to (and
+    // committed onto) the HEAD produced by the previous one. A failure stops the
+    // sequence, leaving already-completed reverts in place.
+    let mut last: Option<(String, Option<ObjectHash>)> = None;
+    let mut total_files_changed = 0usize;
+    for spec in &args.commit {
+        let commit_id = resolve_commit(spec)
+            .await
+            .map_err(|_| RevertError::InvalidCommit(spec.clone()))?;
+        let (revert_commit_id, files_changed) = revert_single_commit(&commit_id, &args).await?;
+        total_files_changed += files_changed;
+        last = Some((commit_id.to_string(), revert_commit_id));
+    }
 
-    let commit_str = commit_id.to_string();
+    let (commit_str, revert_commit_id) =
+        last.expect("clap guarantees at least one commit argument");
     Ok(RevertOutput {
         reverted_commit: commit_str.clone(),
         short_reverted: short_display_hash(&commit_str).to_string(),
@@ -236,7 +266,7 @@ async fn run_revert(args: RevertArgs) -> Result<RevertOutput, RevertError> {
             .as_ref()
             .map(|id| short_display_hash(&id.to_string()).to_string()),
         no_commit: args.no_commit,
-        files_changed,
+        files_changed: total_files_changed,
     })
 }
 
