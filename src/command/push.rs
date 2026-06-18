@@ -133,6 +133,11 @@ pub struct PushArgs {
     #[clap(long = "push-option", short = 'o', value_name = "OPTION")]
     pub push_option: Vec<String>,
 
+    /// Also push annotated tags that point at commits being pushed and are
+    /// missing on the remote.
+    #[clap(long)]
+    pub follow_tags: bool,
+
     /// Machine-readable single-line-per-ref output; conflicts with `--json`/`--machine`
     #[clap(long)]
     pub porcelain: bool,
@@ -165,6 +170,7 @@ impl PushArgs {
             no_thin: false,
             atomic: false,
             push_option: Vec::new(),
+            follow_tags: false,
             porcelain: false,
             dry_run: false,
             tags: false,
@@ -773,6 +779,27 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
                 &mut plans,
             )
             .await?;
+        }
+
+        if args.follow_tags {
+            // Tips of the refs already scheduled for update drive reachability.
+            let pushed_tips: Vec<ObjectHash> = plans
+                .iter()
+                .filter(|plan| plan.update.kind == PushRefUpdateKind::Update)
+                .filter_map(|plan| ObjectHash::from_str(&plan.update.new_oid).ok())
+                .collect();
+            for tag_ref in collect_follow_tag_refs(&pushed_tips, &remote_refs).await? {
+                let remote_ref = tag_ref.full_ref.clone();
+                add_update_ref_plan(
+                    tag_ref,
+                    remote_ref,
+                    &remote_refs,
+                    effective_force,
+                    &mut warnings,
+                    &mut seen_remote_refs,
+                    &mut plans,
+                )?;
+            }
         }
 
         plans
@@ -1439,6 +1466,47 @@ async fn add_all_tag_update_plans(
         )?;
     }
     Ok(())
+}
+
+/// Decide whether `--follow-tags` should push a given tag: only annotated tags
+/// whose target is reachable from a ref being pushed and which the remote does
+/// not already have.
+fn follow_tag_should_push(
+    is_annotated: bool,
+    target_reachable: bool,
+    full_ref: &str,
+    remote_refs: &HashMap<String, String>,
+) -> bool {
+    is_annotated && target_reachable && !remote_refs.contains_key(full_ref)
+}
+
+/// Collect the annotated tags that `--follow-tags` should add to the push: those
+/// whose target commit is reachable from one of `pushed_tips` and that are
+/// missing on the remote.
+async fn collect_follow_tag_refs(
+    pushed_tips: &[ObjectHash],
+    remote_refs: &HashMap<String, String>,
+) -> Result<Vec<ResolvedLocalRef>, PushError> {
+    let tags = tag::list()
+        .await
+        .map_err(|error| PushError::RepoState(error.to_string()))?;
+    let mut selected = Vec::new();
+    for local_tag in tags {
+        let (is_annotated, target) = match &local_tag.object {
+            tag::TagObject::Tag(tag_object) => (true, tag_object.object_hash),
+            other => (false, tag_object_hash(other)),
+        };
+        let target_reachable = pushed_tips.iter().any(|tip| is_ancestor(&target, tip));
+        let full_ref = normalize_tag_ref(&local_tag.name)?;
+        if follow_tag_should_push(is_annotated, target_reachable, &full_ref, remote_refs) {
+            selected.push(ResolvedLocalRef {
+                full_ref,
+                oid: tag_object_hash(&local_tag.object),
+                kind: LocalRefKind::Tag,
+            });
+        }
+    }
+    Ok(selected)
 }
 
 async fn build_mirror_update_plan(
@@ -2988,6 +3056,7 @@ mod test {
             no_thin: false,
             atomic: false,
             push_option: Vec::new(),
+            follow_tags: false,
             porcelain: false,
             dry_run: false,
             tags: false,
@@ -3059,6 +3128,30 @@ mod test {
             bytes.windows(12).any(|w| w == b"notify=false"),
             "second option is present in the encoded section"
         );
+    }
+
+    #[test]
+    fn follow_tags_selection_predicate() {
+        let mut remote = HashMap::new();
+        remote.insert("refs/tags/v1".to_string(), "abc".to_string());
+        // Annotated, reachable, and absent on the remote: push it.
+        assert!(follow_tag_should_push(true, true, "refs/tags/v2", &remote));
+        // Lightweight tags are never followed.
+        assert!(!follow_tag_should_push(
+            false,
+            true,
+            "refs/tags/v2",
+            &remote
+        ));
+        // Target not reachable from a pushed ref: skip.
+        assert!(!follow_tag_should_push(
+            true,
+            false,
+            "refs/tags/v2",
+            &remote
+        ));
+        // Already present on the remote: skip.
+        assert!(!follow_tag_should_push(true, true, "refs/tags/v1", &remote));
     }
 
     #[test]
