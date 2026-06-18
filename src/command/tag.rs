@@ -62,6 +62,14 @@ pub struct TagArgs {
     /// Only list tags pointing at the given object (peeled to its commit). Implies list mode.
     #[clap(long = "points-at", value_name = "object")]
     pub points_at: Option<String>,
+
+    /// Only list tags whose commit contains COMMIT (COMMIT is an ancestor). Implies list mode.
+    #[clap(long, value_name = "commit")]
+    pub contains: Option<String>,
+
+    /// Only list tags whose commit does NOT contain COMMIT. Implies list mode.
+    #[clap(long = "no-contains", value_name = "commit")]
+    pub no_contains: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -167,6 +175,9 @@ enum TagError {
 
     #[error("malformed object name '{0}'")]
     InvalidPointsAtObject(String),
+
+    #[error("failed to compute reachability for --contains/--no-contains: {0}")]
+    Reachability(String),
 }
 
 fn classify_tag_load_error(error: &anyhow::Error) -> StableErrorCode {
@@ -244,6 +255,9 @@ impl From<TagError> for CliError {
                     .with_stable_code(StableErrorCode::CliInvalidTarget)
                     .with_hint("use 'libra log --oneline' to see available commits.")
             }
+            TagError::Reachability(_) => {
+                CliError::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
+            }
         }
     }
 }
@@ -310,11 +324,27 @@ async fn run_tag(args: &TagArgs) -> Result<TagOutput, TagError> {
     validate_named_tag_action(args)?;
     util::require_repo().map_err(|_| TagError::NotInRepo)?;
 
-    if args.list || args.n_lines.is_some() || args.points_at.is_some() || args.name.is_none() {
+    if args.list
+        || args.n_lines.is_some()
+        || args.points_at.is_some()
+        || args.contains.is_some()
+        || args.no_contains.is_some()
+        || args.name.is_none()
+    {
         // `--points-at` peels each tag to its commit and keeps only those that
         // resolve to the requested object, mirroring `git tag --points-at`.
         // Like `-n`, it forces list mode even when a name is also supplied.
         let points_at = match args.points_at.as_deref() {
+            Some(object) => Some(resolve_points_at_object(object).await?),
+            None => None,
+        };
+        // `--contains`/`--no-contains` resolve to a commit and keep (or drop)
+        // tags whose peeled commit has that commit as an ancestor.
+        let contains = match args.contains.as_deref() {
+            Some(object) => Some(resolve_points_at_object(object).await?),
+            None => None,
+        };
+        let no_contains = match args.no_contains.as_deref() {
             Some(object) => Some(resolve_points_at_object(object).await?),
             None => None,
         };
@@ -325,6 +355,8 @@ async fn run_tag(args: &TagArgs) -> Result<TagOutput, TagError> {
                 args.n_lines.unwrap_or(0),
                 points_at.as_ref(),
                 pattern.as_ref(),
+                contains.as_ref(),
+                no_contains.as_ref(),
             )
             .await?,
         });
@@ -375,7 +407,7 @@ fn render_tag_output(result: &TagOutput, output: &OutputConfig) -> CliResult<()>
 }
 
 pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {
-    let tags = collect_tags(show_lines, None, None)
+    let tags = collect_tags(show_lines, None, None, None, None)
         .await
         .map_err(anyhow::Error::from)?;
     Ok(format_tag_entries(&tags))
@@ -433,6 +465,8 @@ async fn collect_tags(
     show_lines: usize,
     points_at: Option<&ObjectHash>,
     pattern: Option<&regex::Regex>,
+    contains: Option<&ObjectHash>,
+    no_contains: Option<&ObjectHash>,
 ) -> Result<Vec<TagListEntry>, TagError> {
     let tags = tag::list().await.map_err(TagError::ListFailed)?;
     let mut entries = Vec::with_capacity(tags.len());
@@ -447,6 +481,25 @@ async fn collect_tags(
             && &tag_peeled_commit(&tag.object) != target
         {
             continue;
+        }
+        // `--contains`/`--no-contains`: walk the tag's peeled commit's history
+        // once and keep (or drop) tags that reach the requested commit.
+        if contains.is_some() || no_contains.is_some() {
+            let peeled = tag_peeled_commit(&tag.object);
+            let reachable = crate::command::log::get_reachable_commits(peeled.to_string(), None)
+                .await
+                .map_err(|error| TagError::Reachability(error.to_string()))?;
+            let reaches = |target: &ObjectHash| reachable.iter().any(|commit| &commit.id == target);
+            if let Some(target) = contains
+                && !reaches(target)
+            {
+                continue;
+            }
+            if let Some(target) = no_contains
+                && reaches(target)
+            {
+                continue;
+            }
         }
         entries.push(tag_to_list_entry(tag, show_lines));
     }

@@ -123,6 +123,50 @@ fn test_tag_list_filters_by_glob_pattern() {
 }
 
 #[test]
+fn test_tag_contains_filter() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    std::fs::write(p.join("a.txt"), "1\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "a.txt"], p), "add a");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit c1",
+    );
+    assert_cli_success(&run_libra_command(&["tag", "v1"], p), "tag v1");
+
+    std::fs::write(p.join("b.txt"), "2\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "b.txt"], p), "add b");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c2", "--no-verify"], p),
+        "commit c2",
+    );
+    assert_cli_success(&run_libra_command(&["tag", "v2"], p), "tag v2");
+
+    let head = run_libra_command(&["rev-parse", "HEAD"], p);
+    let c2 = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    // Only v2 (at c2) contains c2; v1 (at c1) does not.
+    let out = run_libra_command(&["--json", "tag", "--contains", &c2], p);
+    assert_cli_success(&out, "tag --contains c2");
+    let json = parse_json_stdout(&out);
+    let names: Vec<String> = json["data"]["tags"]
+        .as_array()
+        .expect("expected tags array")
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(
+        names.contains(&"v2".to_string()),
+        "v2 should contain c2: {names:?}"
+    );
+    assert!(
+        !names.contains(&"v1".to_string()),
+        "v1 should NOT contain c2: {names:?}"
+    );
+}
+
+#[test]
 fn test_tag_create_outputs_concise_confirmation() {
     let repo = create_committed_repo_via_cli();
 
@@ -713,6 +757,8 @@ async fn test_force_tag() {
         force: true,
         n_lines: None,
         points_at: None,
+        contains: None,
+        no_contains: None,
     })
     .await;
     let after = read_tag_oid("v1.0").await;
@@ -824,6 +870,8 @@ async fn test_delete_tag() {
         force: false,
         n_lines: None,
         points_at: None,
+        contains: None,
+        no_contains: None,
     })
     .await;
     assert_tag_absent("to-delete").await;
@@ -875,6 +923,8 @@ async fn test_annotation_lines_tag() {
         force: false,
         n_lines: None,
         points_at: None,
+        contains: None,
+        no_contains: None,
     })
     .await;
 
@@ -915,6 +965,8 @@ async fn test_annotation_lines_tag() {
         force: false,
         n_lines: None,
         points_at: None,
+        contains: None,
+        no_contains: None,
     })
     .await;
 
