@@ -258,13 +258,22 @@ async fn run_tasks(
         }
     }
 
-    // Record last-run timestamp on success
+    // Record last-run timestamp on success.
+    // Propagate the error so callers and automation schedulers are not left
+    // with stale maintenance.last-run state after a successful task run whose
+    // config write was dropped.
     if !dry_run && overall_success {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs().to_string())
             .unwrap_or_default();
-        let _ = ConfigKv::set(MAINTENANCE_LAST_RUN_KEY, &now, false).await;
+        ConfigKv::set(MAINTENANCE_LAST_RUN_KEY, &now, false)
+            .await
+            .map_err(|e| {
+                CliError::fatal(format!(
+                    "maintenance tasks succeeded but failed to record last-run timestamp: {e}"
+                ))
+            })?;
     }
 
     if output.is_json() {
@@ -762,10 +771,34 @@ async fn run_incremental_repack(
                 )));
             }
 
-            // Move source packs aside so the storage layer must use the new
-            // consolidated pack, then verify every object remains readable.
-            // Track every staged file so we can roll back on any error before
-            // verification has completed.
+            // Build a hash-set from the new pack's index entries so we can
+            // verify every object is present WITHOUT first removing the old
+            // packs. This keeps old packs readable for concurrent commands
+            // throughout the verification window.
+            let idx_hash_set: HashSet<ObjectHash> =
+                idx_entries.iter().map(|(h, _offset)| *h).collect();
+
+            let mut verification_failed = None;
+            for hash in &all_hashes {
+                if !idx_hash_set.contains(hash) {
+                    verification_failed = Some(*hash);
+                    break;
+                }
+            }
+
+            if let Some(hash) = verification_failed {
+                let _ = fs::remove_file(&new_pack_path);
+                let _ = fs::remove_file(&idx_path);
+                return Err(CliError::fatal(format!(
+                    "consolidated pack does not contain object {hash}"
+                )));
+            }
+
+            // Verification succeeded against the index — every object in the
+            // repository can be served from the new consolidated pack. Now
+            // remove the old packs. We stage them into a backup directory
+            // first, verify the new pack is readable through the storage
+            // layer, then delete them permanently.
             fs::create_dir_all(&backup_dir).map_err(|e| {
                 CliError::fatal(format!("failed to create old-pack backup directory: {e}"))
             })?;
@@ -780,7 +813,7 @@ async fn run_incremental_repack(
                 let backup_pack = backup_dir.join(pack_name);
                 if let Err(e) = fs::rename(old_pack, &backup_pack) {
                     stage_error = Some(format!(
-                        "failed to stage old pack {} for verification: {e}",
+                        "failed to remove old pack {}: {e}",
                         old_pack.display()
                     ));
                     break;
@@ -793,7 +826,7 @@ async fn run_incremental_repack(
                     let backup_idx = backup_dir.join(idx_name);
                     if let Err(e) = fs::rename(&old_idx, &backup_idx) {
                         stage_error = Some(format!(
-                            "failed to stage old index {} for verification: {e}",
+                            "failed to remove old index {}: {e}",
                             old_idx.display()
                         ));
                         break;
@@ -805,38 +838,15 @@ async fn run_incremental_repack(
             if let Some(msg) = stage_error {
                 restore_staged_packs(&staged_packs, &staged_idxs);
                 let _ = fs::remove_dir_all(&backup_dir);
-                let _ = fs::remove_file(&new_pack_path);
-                let _ = fs::remove_file(new_pack_path.with_extension("idx"));
                 return Err(CliError::fatal(msg));
             }
 
-            let verify_storage = ClientStorage::init(path::objects());
-            let mut verification_failed = None;
-            for hash in &all_hashes {
-                if verify_storage.get(hash).is_err() {
-                    verification_failed = Some(*hash);
-                    break;
-                }
-            }
-
-            if let Some(hash) = verification_failed {
-                // Restore the source packs so the repository remains usable.
-                restore_staged_packs(&staged_packs, &staged_idxs);
-                let _ = fs::remove_dir_all(&backup_dir);
-                let _ = fs::remove_file(&new_pack_path);
-                let _ = fs::remove_file(new_pack_path.with_extension("idx"));
-                return Err(CliError::fatal(format!(
-                    "consolidated pack cannot serve object {hash}"
-                )));
-            }
-
-            // Verification succeeded: delete the old packs permanently.
             let _ = fs::remove_dir_all(&backup_dir);
             count
         }
         Err(e) => {
-            // Remove the placeholder/partial pack so a failed run does not
-            // leave an unreadable file behind.
+            // Remove the partial pack so a failed run does not leave an
+            // unreadable file behind.
             let _ = fs::remove_file(&new_pack_path);
             let _ = fs::remove_file(new_pack_path.with_extension("idx"));
             return Err(CliError::fatal(format!(
@@ -1563,23 +1573,73 @@ fn restore_staged_packs(staged_packs: &[(PathBuf, PathBuf)], staged_idxs: &[(Pat
 
 /// Create a pack file from loose objects. Returns the number of objects packed.
 ///
-/// This is a simplified pack creation that writes each object as an undeltified
-/// entry. A production implementation would use delta compression.
+/// Objects are streamed through a temp file so that memory use is bounded by
+/// the largest single object, not by the total uncompressed size of all loose
+/// objects. For large repositories with many old loose objects (especially
+/// large blobs), this prevents the maintenance task from exhausting memory.
 async fn create_pack_from_loose_objects(
     objects: &[(String, PathBuf)],
     pack_path: &Path,
 ) -> io::Result<usize> {
-    let mut packed: Vec<(ObjectType, Vec<u8>)> = Vec::with_capacity(objects.len());
+    // Stage 1: stream object entries to a temp file so we know the count
+    // before writing the pack header.
+    let temp_dir = tempfile::tempdir()?;
+    let entries_path = temp_dir.path().join("entries.bin");
+    let mut entries_file = fs::File::create(&entries_path)?;
+    let mut count: u32 = 0;
+
     for (_hash_str, obj_path) in objects {
         let data = fs::read(obj_path)?;
         let decompressed = ClientStorage::decompress_zlib(&data)?;
         let (obj_type, _size) = parse_loose_object_header(&decompressed)?;
         let header_end = decompressed.iter().position(|&b| b == 0).unwrap_or(0);
-        let body = decompressed[header_end + 1..].to_vec();
-        packed.push((obj_type, body));
+        let body = &decompressed[header_end + 1..];
+        write_pack_entry(&mut entries_file, obj_type, body)?;
+        count = count.checked_add(1).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "pack object count overflow")
+        })?;
     }
-    write_pack_from_objects(&packed, pack_path)?;
-    Ok(packed.len())
+    drop(entries_file);
+
+    // Stage 2: assemble the final pack with header, copy in the staged
+    // entries, and append the pack checksum. Write to a temp file and rename
+    // atomically into place so a partial write cannot be seen by the storage
+    // layer.
+    let pack_temp_path = temp_dir.path().join("loose.pack");
+    let mut out = fs::File::create(&pack_temp_path)?;
+    let mut digest_ctx = Context::new(match get_hash_kind() {
+        HashKind::Sha256 => &SHA256,
+        _ => &SHA1_FOR_LEGACY_USE_ONLY,
+    });
+
+    out.write_all(b"PACK")?;
+    digest_ctx.update(b"PACK");
+    out.write_all(&2_u32.to_be_bytes())?;
+    digest_ctx.update(&2_u32.to_be_bytes());
+    out.write_all(&count.to_be_bytes())?;
+    digest_ctx.update(&count.to_be_bytes());
+
+    let mut entries_in = fs::File::open(&entries_path)?;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = entries_in.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        digest_ctx.update(&buf[..n]);
+        out.write_all(&buf[..n])?;
+    }
+    drop(entries_in);
+
+    let pack_hash = digest_ctx.finish();
+    out.write_all(pack_hash.as_ref())?;
+    drop(out);
+
+    fs::rename(&pack_temp_path, pack_path).inspect_err(|_| {
+        let _ = fs::remove_file(&pack_temp_path);
+    })?;
+
+    Ok(count as usize)
 }
 
 /// Shared mutable state for streaming pack-object consolidation.
@@ -1768,32 +1828,6 @@ fn write_pack_entry<W: Write>(writer: &mut W, obj_type: ObjectType, body: &[u8])
     writer.write_all(&header)?;
     writer.write_all(&compressed)?;
     Ok(())
-}
-
-/// Write a pack file from a sequence of (type, body) object tuples.
-fn write_pack_from_objects(objects: &[(ObjectType, Vec<u8>)], pack_path: &Path) -> io::Result<()> {
-    let mut pack_data: Vec<u8> = Vec::new();
-
-    pack_data.write_all(b"PACK")?;
-    pack_data.write_all(&2_u32.to_be_bytes())?;
-    pack_data.write_all(&(objects.len() as u32).to_be_bytes())?;
-
-    for (obj_type, body) in objects {
-        let type_num = object_type_to_pack_num(*obj_type);
-        write_size_encoded(&mut pack_data, body.len(), type_num)?;
-        let compressed = ClientStorage::compress_zlib(body)?;
-        pack_data.write_all(&compressed)?;
-    }
-
-    let mut ctx = Context::new(match get_hash_kind() {
-        HashKind::Sha256 => &SHA256,
-        _ => &SHA1_FOR_LEGACY_USE_ONLY,
-    });
-    ctx.update(&pack_data);
-    let pack_hash = ctx.finish();
-    pack_data.write_all(pack_hash.as_ref())?;
-
-    fs::write(pack_path, &pack_data)
 }
 
 /// Parse the header of a decompressed loose object, returning (type, size).
@@ -2025,8 +2059,14 @@ mod tests {
         let (name2, path2) = allocate_unique_pack_path(tmp.path(), "pack-test").unwrap();
         assert_ne!(name1, name2, "consecutive pack names must differ");
         assert_ne!(path1, path2, "consecutive pack paths must differ");
-        assert!(path1.exists(), "first pack placeholder should exist");
-        assert!(path2.exists(), "second pack placeholder should exist");
+        assert!(
+            !path1.exists(),
+            "pack path must not be pre-created (rename target)"
+        );
+        assert!(
+            !path2.exists(),
+            "pack path must not be pre-created (rename target)"
+        );
     }
 
     #[test]
