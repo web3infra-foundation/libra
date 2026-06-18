@@ -1518,6 +1518,110 @@ fn test_maintenance_pack_refs_validates_refs() {
 
 #[test]
 
+/// Regression test: `maintenance run --task gc` must treat packed-refs and
+/// file-backed loose refs as GC roots.
+///
+/// When `pack-refs` removes loose ref files under `.libra/refs/heads/`, the
+/// only remaining copy of those refs lives in `.libra/packed-refs`. Without
+/// `collect_reachable_objects` reading `packed-refs`, a later `gc` would see
+/// zero refs pointing to those commits and could delete their objects once the
+/// mtime grace period expires. File-backed loose refs that were never packed
+/// (e.g. freshly created refs) must also be reachable.
+fn test_maintenance_gc_preserves_packed_refs_reachability() {
+    let repo = create_committed_repo_via_cli();
+
+    // Record the commit hashes in the history.
+    let log_output = run_libra_command(&["log", "--pretty=%H"], repo.path());
+    let stdout = String::from_utf8_lossy(&log_output.stdout);
+    let base_commit = stdout.lines().next().unwrap().trim().to_string();
+
+    // Create a second commit on a branch.
+    run_libra_command(&["branch", "side"], repo.path());
+    run_libra_command(&["switch", "side"], repo.path());
+    fs::write(repo.path().join("side.txt"), "side content\n").unwrap();
+    run_libra_command(&["add", "side.txt"], repo.path());
+    run_libra_command(&["commit", "-m", "side commit", "--no-verify"], repo.path());
+
+    let side_hash = rev_parse(repo.path(), "HEAD");
+
+    // Reset main to the base commit so the side commit is not reachable
+    // from HEAD or any SQLite-tracked ref.
+    run_libra_command(&["switch", "main"], repo.path());
+    run_libra_command(&["reset", "--hard", &base_commit], repo.path());
+
+    // Materialize a file-backed loose ref for the side branch under
+    // .libra/refs/heads/side so pack-refs can process it.
+    let refs_heads = repo.path().join(".libra").join("refs").join("heads");
+    fs::create_dir_all(&refs_heads).unwrap();
+    fs::write(refs_heads.join("side"), format!("{side_hash}\n")).unwrap();
+
+    // Run pack-refs to collapse the loose ref into packed-refs and delete
+    // the loose file. After this, the side branch ref exists *only* in
+    // packed-refs.
+    let pack_refs_output =
+        run_libra_command(&["maintenance", "run", "--task", "pack-refs"], repo.path());
+    assert!(
+        pack_refs_output.status.success(),
+        "pack-refs should pass, stderr: {}",
+        String::from_utf8_lossy(&pack_refs_output.stderr)
+    );
+
+    let packed_refs_path = repo.path().join(".libra").join("packed-refs");
+    assert!(
+        packed_refs_path.exists(),
+        "packed-refs must exist after pack-refs task"
+    );
+    let packed_content = fs::read_to_string(&packed_refs_path).unwrap();
+    assert!(
+        packed_content.contains("refs/heads/side"),
+        "packed-refs must contain side branch, got: {packed_content}"
+    );
+    assert!(
+        !refs_heads.join("side").exists(),
+        "loose refs/heads/side must be deleted after packing"
+    );
+
+    // Age all loose objects past the GC grace period so that GC would
+    // delete them if they were unreachable.
+    let objects_dir = repo.path().join(".libra").join("objects");
+    let old_time = SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+    for entry in WalkDir::new(&objects_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
+        let file = fs::File::open(entry.path()).unwrap();
+        file.set_modified(old_time).unwrap();
+    }
+
+    // Run GC. The side commit must survive because packed-refs keeps it
+    // reachable.
+    let gc_output = run_libra_command(
+        &["--json", "maintenance", "run", "--task", "gc"],
+        repo.path(),
+    );
+    assert!(
+        gc_output.status.success(),
+        "gc should pass, stderr: {}",
+        String::from_utf8_lossy(&gc_output.stderr)
+    );
+
+    // Verify the side commit is still readable after GC.
+    let cat_output = run_libra_command(&["cat-file", "-t", &side_hash], repo.path());
+    assert!(
+        cat_output.status.success(),
+        "side commit ({side_hash}) should still be readable after gc (reachable via packed-refs), stderr: {}",
+        String::from_utf8_lossy(&cat_output.stderr)
+    );
+    let cat_stdout = String::from_utf8_lossy(&cat_output.stdout);
+    assert!(
+        cat_stdout.contains("commit"),
+        "side commit object type should be readable, got: {cat_stdout}"
+    );
+}
+
+#[test]
+
 /// Regression test: `maintenance run --task incremental-repack` must be able to
 /// rename the consolidated pack into the allocated path without a placeholder
 /// file blocking the rename.

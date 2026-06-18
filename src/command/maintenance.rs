@@ -1092,6 +1092,45 @@ async fn collect_reachable_objects(
         }
     }
 
+    // Collect from file-backed loose refs under refs/ (heads, tags,
+    // remotes, notes, etc.). These are not stored in the SQLite reference
+    // table (which tracks refs in its own schema) but may exist as plain
+    // files on disk. Without this, a `pack-refs` run that deletes the
+    // loose files would leave these refs invisible to GC, and a subsequent
+    // `gc` would treat their commits as unreachable.
+    let refs_dir = repo_path.join("refs");
+    if refs_dir.is_dir() {
+        let mut file_hashes: Vec<ObjectHash> = Vec::new();
+        collect_file_ref_hashes(&refs_dir, &mut file_hashes)
+            .map_err(|e| CliError::fatal(format!("failed to collect file-backed refs: {e}")))?;
+        for hash in &file_hashes {
+            walk_reachable(hash, storage, &mut reachable)?;
+        }
+    }
+
+    // Collect from packed-refs. After `libra maintenance run --task pack-refs`
+    // removes loose ref files under refs/heads/, the only remaining copy of
+    // those refs lives in packed-refs. Without this, GC would see zero refs
+    // pointing to those commits and could delete their objects once the
+    // mtime grace period expires.
+    let packed_refs_path = repo_path.join("packed-refs");
+    if packed_refs_path.is_file() {
+        let content = fs::read_to_string(&packed_refs_path)
+            .map_err(|e| CliError::fatal(format!("failed to read packed-refs: {e}")))?;
+        for line in content.lines() {
+            let line = line.trim();
+            // Skip comments, empty lines, and peeled-tag markers (^<hash>).
+            if line.is_empty() || line.starts_with('#') || line.starts_with('^') {
+                continue;
+            }
+            if let Some((hash_str, _refname)) = line.split_once(' ')
+                && let Some(hash) = parse_object_hash(hash_str)
+            {
+                walk_reachable(&hash, storage, &mut reachable)?;
+            }
+        }
+    }
+
     // Collect from index. A corrupt or unreadable index must abort GC instead
     // of silently dropping staged objects from the reachable set.
     let index_path = path::index();
@@ -1425,6 +1464,39 @@ fn is_valid_ref_name(name: &str) -> bool {
     // Reject paths where any component ends with ".lock", e.g.
     // "refs/heads/foo.lock/bar".
     !name.split('/').any(|comp| comp.ends_with(".lock"))
+}
+
+/// Recursively scan a refs directory tree, collecting every valid object hash
+/// from loose ref files into `hashes`.
+///
+/// Lock files (`*.lock`) are skipped so that refs being updated concurrently
+/// are not read mid-write. This mirrors `collect_refs` but only collects
+/// hashes — it is used by GC to discover all file-backed refs that are not
+/// tracked in the SQLite reference table.
+fn collect_file_ref_hashes(dir: &Path, hashes: &mut Vec<ObjectHash>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            // Recurse into subdirectories (e.g. refs/heads/feature/).
+            collect_file_ref_hashes(&path, hashes)?;
+        } else if path.is_file() {
+            // Skip lock files left by concurrent ref updates.
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name.ends_with(".lock"))
+            {
+                continue;
+            }
+            if let Ok(content) = fs::read_to_string(&path)
+                && let Some(hash) = parse_object_hash(content.trim())
+            {
+                hashes.push(hash);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Remove empty directories under the given path.
