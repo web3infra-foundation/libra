@@ -401,6 +401,185 @@ fn test_maintenance_run_pack_refs() {
 
 #[test]
 
+/// Regression test: `maintenance run --task pack-refs` must write fully-qualified
+/// refnames such as `refs/heads/main` instead of bare `main`.
+///
+/// Previously collect_refs was rooted at `refs/heads` and stored relative names,
+/// so the resulting packed-refs file could not be resolved by standard readers.
+fn test_maintenance_pack_refs_writes_full_refnames() {
+    let repo = create_committed_repo_via_cli();
+
+    // Libra stores refs in SQLite by default; pack-refs operates on file-backed
+    // loose refs under .libra/refs/heads. Materialize two loose refs manually so
+    // the task has something to collapse into packed-refs.
+    let main_hash = rev_parse(repo.path(), "main");
+    let feature_hash = rev_parse(repo.path(), "main");
+    let refs_heads = repo.path().join(".libra").join("refs").join("heads");
+    fs::create_dir_all(&refs_heads).unwrap();
+    fs::write(refs_heads.join("main"), format!("{main_hash}\n")).unwrap();
+    fs::write(
+        refs_heads.join("feature-branch"),
+        format!("{feature_hash}\n"),
+    )
+    .unwrap();
+
+    let output = run_libra_command(&["maintenance", "run", "--task", "pack-refs"], repo.path());
+    assert!(
+        output.status.success(),
+        "pack-refs should pass, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let packed_refs = repo.path().join(".libra").join("packed-refs");
+    assert!(packed_refs.exists(), "packed-refs file should exist");
+    let content = fs::read_to_string(&packed_refs).unwrap();
+    assert!(
+        content.contains("refs/heads/main"),
+        "packed-refs must contain fully-qualified main ref, got: {content}"
+    );
+    assert!(
+        content.contains("refs/heads/feature-branch"),
+        "packed-refs must contain fully-qualified branch ref, got: {content}"
+    );
+    assert!(
+        !content.lines().any(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty()
+                && !trimmed.starts_with('#')
+                && (trimmed.ends_with(" main") || trimmed.ends_with(" feature-branch"))
+        }),
+        "packed-refs must not contain bare relative refnames, got: {content}"
+    );
+
+    // Loose ref files should have been removed after successful packing.
+    assert!(
+        !refs_heads.join("main").exists(),
+        "loose main ref should be removed after packing"
+    );
+    assert!(
+        !refs_heads.join("feature-branch").exists(),
+        "loose feature-branch ref should be removed after packing"
+    );
+}
+
+/// Resolve a ref to its full hex hash via `rev-parse`.
+fn rev_parse(repo: &std::path::Path, rev: &str) -> String {
+    let output = run_libra_command(&["rev-parse", rev], repo);
+    assert!(
+        output.status.success(),
+        "rev-parse {rev} should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+#[test]
+
+/// Regression test: `maintenance run --task gc` must preserve objects reachable
+/// from annotated tags.
+///
+/// Previously `walk_reachable` ignored `ObjectType::Tag`, so only the tag object
+/// itself was marked reachable and its target commit (and tree/blobs) could be
+/// pruned, leaving the tag dangling.
+fn test_maintenance_gc_preserves_annotated_tag_target() {
+    let repo = create_committed_repo_via_cli();
+
+    // Create a commit to tag.
+    fs::write(repo.path().join("tagged.txt"), "tagged content\n").unwrap();
+    run_libra_command(&["add", "tagged.txt"], repo.path());
+    run_libra_command(
+        &["commit", "-m", "tagged commit", "--no-verify"],
+        repo.path(),
+    );
+
+    let log_output = run_libra_command(&["log", "--pretty=%H"], repo.path());
+    let stdout = String::from_utf8_lossy(&log_output.stdout);
+    let tagged_commit = stdout.lines().next().unwrap().trim();
+
+    // Create an annotated tag pointing to the tagged commit.
+    run_libra_command(&["tag", "-m", "annotated tag", "v-tagged"], repo.path());
+
+    // Reset to the base commit so the tagged commit is no longer reachable
+    // from HEAD, but remains reachable via the tag.
+    let base_commit = stdout.lines().nth(1).unwrap().trim();
+    run_libra_command(&["reset", "--hard", base_commit], repo.path());
+
+    // Run GC and verify the tagged commit is still readable.
+    let output = run_libra_command(
+        &["--json", "maintenance", "run", "--task", "gc"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "gc should pass, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cat_output = run_libra_command(&["cat-file", "-t", tagged_commit], repo.path());
+    assert!(
+        cat_output.status.success(),
+        "tagged commit should still be readable after gc, stderr: {}",
+        String::from_utf8_lossy(&cat_output.stderr)
+    );
+    let cat_stdout = String::from_utf8_lossy(&cat_output.stdout);
+    assert!(
+        cat_stdout.contains("commit"),
+        "tagged commit object type should still be readable, got: {cat_stdout}"
+    );
+}
+
+#[test]
+
+/// Regression test: `maintenance run --task gc` must treat reflog old OIDs as
+/// reachability roots.
+///
+/// Previously GC only walked new_oid from reflog entries, so after a force reset
+/// the previous tip could be pruned even though users expect to recover it from
+/// the reflog.
+fn test_maintenance_gc_preserves_reflog_old_oid() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("second.txt"), "second content\n").unwrap();
+    run_libra_command(&["add", "second.txt"], repo.path());
+    run_libra_command(
+        &["commit", "-m", "second commit", "--no-verify"],
+        repo.path(),
+    );
+
+    let log_output = run_libra_command(&["log", "--pretty=%H"], repo.path());
+    let stdout = String::from_utf8_lossy(&log_output.stdout);
+    let second_commit = stdout.lines().next().unwrap().trim();
+    let first_commit = stdout.lines().nth(1).unwrap().trim();
+
+    // Reset hard to the first commit so the second commit is only reachable
+    // through reflog old_oid.
+    run_libra_command(&["reset", "--hard", first_commit], repo.path());
+
+    let output = run_libra_command(
+        &["--json", "maintenance", "run", "--task", "gc"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "gc should pass, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cat_output = run_libra_command(&["cat-file", "-t", second_commit], repo.path());
+    assert!(
+        cat_output.status.success(),
+        "reflog old OID commit should still be readable after gc, stderr: {}",
+        String::from_utf8_lossy(&cat_output.stderr)
+    );
+    let cat_stdout = String::from_utf8_lossy(&cat_output.stdout);
+    assert!(
+        cat_stdout.contains("commit"),
+        "old OID object type should still be readable, got: {cat_stdout}"
+    );
+}
+
+#[test]
+
 /// Tests `maintenance status --json` returns structured output.
 /// Verifies JSON output for the status subcommand.
 fn test_maintenance_status_json() {

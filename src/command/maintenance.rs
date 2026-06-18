@@ -34,7 +34,7 @@ use git_internal::{
     hash::{HashKind, ObjectHash, get_hash_kind},
     internal::{
         metadata::{EntryMeta, MetaAttached},
-        object::{commit::Commit, tree::Tree, types::ObjectType},
+        object::{commit::Commit, tag::Tag as GitTag, tree::Tree, types::ObjectType},
         pack::{Pack, entry::Entry},
     },
 };
@@ -425,12 +425,8 @@ async fn run_loose_objects(
         )));
     }
 
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let pack_name = format!("pack-maintenance-{timestamp}.pack");
-    let pack_path = pack_dir.join(&pack_name);
+    let (pack_name, pack_path) = allocate_unique_pack_path(&pack_dir, "pack-maintenance")
+        .map_err(|e| CliError::fatal(format!("failed to allocate unique pack name: {e}")))?;
 
     let packed = match create_pack_from_loose_objects(&old_loose, &pack_path).await {
         Ok(count) => {
@@ -535,7 +531,7 @@ async fn run_pack_refs(
     }
 
     let mut refs: HashMap<String, String> = HashMap::new();
-    collect_refs(&refs_dir, &refs_dir, &mut refs)
+    collect_refs(&refs_dir, &refs_dir, "refs/heads/", &mut refs)
         .map_err(|e| CliError::fatal(format!("failed to collect refs: {e}")))?;
 
     if refs.is_empty() {
@@ -594,6 +590,20 @@ async fn run_pack_refs(
     for (name, hash) in &existing {
         if let Err(e) = writeln!(file, "{hash} {name}") {
             return Err(CliError::fatal(format!("failed to write packed-refs: {e}")));
+        }
+    }
+    drop(file);
+
+    // Verify the file we just wrote is readable and contains the refs before
+    // deleting the loose ref files.
+    let written = fs::read_to_string(&packed_refs_path)
+        .map_err(|e| CliError::fatal(format!("failed to read back packed-refs: {e}")))?;
+    for (name, hash) in &existing {
+        let expected = format!("{hash} {name}");
+        if !written.lines().any(|line| line.trim() == expected) {
+            return Err(CliError::fatal(format!(
+                "packed-refs is missing entry for {name}"
+            )));
         }
     }
 
@@ -684,12 +694,11 @@ async fn run_incremental_repack(
     let all_hashes = list_all_objects_in_storage(&path::objects())
         .map_err(|e| CliError::fatal(format!("failed to list objects: {e}")))?;
 
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let new_pack_name = format!("pack-consolidated-{timestamp}.pack");
-    let new_pack_path = pack_dir.join(&new_pack_name);
+    let (new_pack_name, new_pack_path) = allocate_unique_pack_path(&pack_dir, "pack-consolidated")
+        .map_err(|e| CliError::fatal(format!("failed to allocate unique pack name: {e}")))?;
+    // The backup directory name must be unique per run and tied to the chosen
+    // pack name so concurrent runs do not share backup storage.
+    let backup_dir = pack_dir.join(format!(".old-packs-backup-{}", new_pack_name));
 
     let repacked = match create_consolidated_pack(&packs, &loose, &new_pack_path) {
         Ok(count) => {
@@ -713,34 +722,50 @@ async fn run_incremental_repack(
 
             // Move source packs aside so the storage layer must use the new
             // consolidated pack, then verify every object remains readable.
-            let backup_dir = pack_dir.join(format!(".old-packs-backup-{timestamp}"));
+            // Track every staged file so we can roll back on any error before
+            // verification has completed.
             fs::create_dir_all(&backup_dir).map_err(|e| {
                 CliError::fatal(format!("failed to create old-pack backup directory: {e}"))
             })?;
+            let mut staged_packs: Vec<(PathBuf, PathBuf)> = Vec::new();
+            let mut staged_idxs: Vec<(PathBuf, PathBuf)> = Vec::new();
+            let mut stage_error = None;
             for old_pack in &packs {
                 let old_idx = old_pack.with_extension("idx");
                 let pack_name = old_pack
                     .file_name()
                     .ok_or_else(|| CliError::fatal("invalid old pack path"))?;
                 let backup_pack = backup_dir.join(pack_name);
-                fs::rename(old_pack, &backup_pack).map_err(|e| {
-                    CliError::fatal(format!(
+                if let Err(e) = fs::rename(old_pack, &backup_pack) {
+                    stage_error = Some(format!(
                         "failed to stage old pack {} for verification: {e}",
                         old_pack.display()
-                    ))
-                })?;
+                    ));
+                    break;
+                }
+                staged_packs.push((old_pack.clone(), backup_pack));
                 if old_idx.exists() {
                     let idx_name = old_idx
                         .file_name()
                         .ok_or_else(|| CliError::fatal("invalid old index path"))?;
                     let backup_idx = backup_dir.join(idx_name);
-                    fs::rename(&old_idx, &backup_idx).map_err(|e| {
-                        CliError::fatal(format!(
+                    if let Err(e) = fs::rename(&old_idx, &backup_idx) {
+                        stage_error = Some(format!(
                             "failed to stage old index {} for verification: {e}",
                             old_idx.display()
-                        ))
-                    })?;
+                        ));
+                        break;
+                    }
+                    staged_idxs.push((old_idx, backup_idx));
                 }
+            }
+
+            if let Some(msg) = stage_error {
+                restore_staged_packs(&staged_packs, &staged_idxs);
+                let _ = fs::remove_dir_all(&backup_dir);
+                let _ = fs::remove_file(&new_pack_path);
+                let _ = fs::remove_file(new_pack_path.with_extension("idx"));
+                return Err(CliError::fatal(msg));
             }
 
             let verify_storage = ClientStorage::init(path::objects());
@@ -754,16 +779,10 @@ async fn run_incremental_repack(
 
             if let Some(hash) = verification_failed {
                 // Restore the source packs so the repository remains usable.
-                for old_pack in &packs {
-                    let pack_name = old_pack.file_name().unwrap_or_default();
-                    let backup_pack = backup_dir.join(pack_name);
-                    let _ = fs::rename(&backup_pack, old_pack);
-                    let old_idx = old_pack.with_extension("idx");
-                    let idx_name = old_idx.file_name().unwrap_or_default();
-                    let backup_idx = backup_dir.join(idx_name);
-                    let _ = fs::rename(&backup_idx, &old_idx);
-                }
+                restore_staged_packs(&staged_packs, &staged_idxs);
                 let _ = fs::remove_dir_all(&backup_dir);
+                let _ = fs::remove_file(&new_pack_path);
+                let _ = fs::remove_file(new_pack_path.with_extension("idx"));
                 return Err(CliError::fatal(format!(
                     "consolidated pack cannot serve object {hash}"
                 )));
@@ -774,6 +793,10 @@ async fn run_incremental_repack(
             count
         }
         Err(e) => {
+            // Remove the placeholder/partial pack so a failed run does not
+            // leave an unreadable file behind.
+            let _ = fs::remove_file(&new_pack_path);
+            let _ = fs::remove_file(new_pack_path.with_extension("idx"));
             return Err(CliError::fatal(format!(
                 "failed to create consolidated pack: {e}"
             )));
@@ -968,10 +991,14 @@ async fn collect_reachable_objects(storage: &ClientStorage) -> CliResult<HashSet
 
     let is_null_oid = |oid: &str| oid.chars().all(|c| c == '0');
     for entry in reflogs {
-        if !is_null_oid(&entry.new_oid)
-            && let Some(hash) = parse_object_hash(&entry.new_oid)
-        {
-            walk_reachable(&hash, storage, &mut reachable)?;
+        // Reflog old OIDs are GC roots too: after a force update or branch
+        // move the previous tip may only be reachable through old_oid.
+        for oid in [&entry.old_oid, &entry.new_oid] {
+            if !is_null_oid(oid)
+                && let Some(hash) = parse_object_hash(oid)
+            {
+                walk_reachable(&hash, storage, &mut reachable)?;
+            }
         }
     }
 
@@ -1016,6 +1043,14 @@ fn walk_reachable(
                 for item in &tree.tree_items {
                     walk_reachable(&item.id, storage, reachable)?;
                 }
+            }
+        }
+        ObjectType::Tag => {
+            // Annotated tags point to another object (commit/tree/blob/tag).
+            // The tag object itself must keep its target reachable, otherwise
+            // a tagged commit can be pruned while the tag remains.
+            if let Ok(tag) = load_object::<GitTag>(hash) {
+                walk_reachable(&tag.object_hash, storage, reachable)?;
             }
         }
         _ => {}
@@ -1280,17 +1315,56 @@ fn cleanup_empty_dirs(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Collect all refs under `refs_dir`, storing them as (ref_name, hash) pairs.
-fn collect_refs(base: &Path, current: &Path, refs: &mut HashMap<String, String>) -> io::Result<()> {
+/// Allocate a unique pack file name under `pack_dir`.
+///
+/// Uses nanosecond timestamps and `create_new` so two maintenance runs in the
+/// same second cannot overwrite each other's pack file.
+fn allocate_unique_pack_path(pack_dir: &Path, prefix: &str) -> io::Result<(String, PathBuf)> {
+    let base_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    for attempt in 0..1000 {
+        let pack_name = format!("{prefix}-{base_nanos}-{attempt}.pack");
+        let pack_path = pack_dir.join(&pack_name);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&pack_path)
+        {
+            Ok(file) => {
+                drop(file);
+                return Ok((pack_name, pack_path));
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other(format!(
+        "could not allocate unique pack name after 1000 attempts (base {base_nanos})"
+    )))
+}
+
+/// Collect all refs under `refs_dir`, storing them as (full_ref_name, hash) pairs.
+///
+/// `ref_prefix` is prepended to every collected relative name so the resulting
+/// refnames match the standard fully-qualified form (e.g. `refs/heads/main`).
+fn collect_refs(
+    base: &Path,
+    current: &Path,
+    ref_prefix: &str,
+    refs: &mut HashMap<String, String>,
+) -> io::Result<()> {
     for entry in fs::read_dir(current)? {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            collect_refs(base, &path, refs)?;
+            collect_refs(base, &path, ref_prefix, refs)?;
         } else if path.is_file() {
             let hash = fs::read_to_string(&path)?.trim().to_string();
             let relative = path.strip_prefix(base).unwrap_or(&path);
-            let name = relative.to_string_lossy().replace('\\', "/");
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            let name = format!("{ref_prefix}{relative}");
             if !hash.is_empty() {
                 refs.insert(name, hash);
             }
@@ -1319,6 +1393,18 @@ fn remove_packed_refs(base: &Path, current: &Path, count: &mut usize) -> io::Res
         }
     }
     Ok(())
+}
+
+/// Restore source packs and indexes from their backup locations after a
+/// failed incremental-repack staging step. Failures are best-effort because
+/// the repository is already in a broken state.
+fn restore_staged_packs(staged_packs: &[(PathBuf, PathBuf)], staged_idxs: &[(PathBuf, PathBuf)]) {
+    for (source, backup) in staged_packs {
+        let _ = fs::rename(backup, source);
+    }
+    for (source, backup) in staged_idxs {
+        let _ = fs::rename(backup, source);
+    }
 }
 
 /// Create a pack file from loose objects. Returns the number of objects packed.
@@ -1350,19 +1436,36 @@ fn read_pack_objects(pack_path: &Path) -> io::Result<Vec<(ObjectType, Vec<u8>, O
     let mut pack = Pack::new(Some(1), Some(128 * 1024 * 1024), None, true);
 
     let objects = Arc::new(Mutex::new(Vec::new()));
+    let decode_error = Arc::new(Mutex::new(None));
     let objects_c = objects.clone();
+    let decode_error_c = decode_error.clone();
     pack.decode(
         &mut reader,
         move |entry: MetaAttached<Entry, EntryMeta>| {
-            objects_c.lock().unwrap().push((
-                entry.inner.obj_type,
-                entry.inner.data,
-                entry.inner.hash,
-            ));
+            match objects_c.lock() {
+                Ok(mut guard) => {
+                    guard.push((entry.inner.obj_type, entry.inner.data, entry.inner.hash));
+                }
+                Err(e) => {
+                    // Record the poison failure so the caller can return a
+                    // user-facing error instead of panicking in maintenance code.
+                    let _ = decode_error_c.lock().map(|mut guard| {
+                        *guard = Some(io::Error::other(format!("pack decode mutex poisoned: {e}")));
+                    });
+                }
+            }
         },
         None::<fn(ObjectHash)>,
     )
     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
+    if let Some(e) = decode_error
+        .lock()
+        .map_err(|e| io::Error::other(e.to_string()))?
+        .take()
+    {
+        return Err(e);
+    }
 
     // INVARIANT: `pack.decode` holds the only other Arc clone and has returned,
     // so `try_unwrap` succeeds and no thread is still using the vector.
@@ -1660,5 +1763,63 @@ mod tests {
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("hourly"));
+    }
+
+    #[test]
+    fn test_allocate_unique_pack_path_is_unique() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (name1, path1) = allocate_unique_pack_path(tmp.path(), "pack-test").unwrap();
+        let (name2, path2) = allocate_unique_pack_path(tmp.path(), "pack-test").unwrap();
+        assert_ne!(name1, name2, "consecutive pack names must differ");
+        assert_ne!(path1, path2, "consecutive pack paths must differ");
+        assert!(path1.exists(), "first pack placeholder should exist");
+        assert!(path2.exists(), "second pack placeholder should exist");
+    }
+
+    #[test]
+    fn test_restore_staged_packs_returns_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pack_dir = tmp.path().join("pack");
+        fs::create_dir_all(&pack_dir).unwrap();
+
+        let source_pack = pack_dir.join("source.pack");
+        let backup_pack = pack_dir.join("backup.pack");
+        fs::write(&source_pack, b"pack data").unwrap();
+        fs::rename(&source_pack, &backup_pack).unwrap();
+
+        let source_idx = pack_dir.join("source.idx");
+        let backup_idx = pack_dir.join("backup.idx");
+        fs::write(&source_idx, b"idx data").unwrap();
+        fs::rename(&source_idx, &backup_idx).unwrap();
+
+        restore_staged_packs(
+            &[(source_pack.clone(), backup_pack.clone())],
+            &[(source_idx.clone(), backup_idx.clone())],
+        );
+
+        assert!(source_pack.exists(), "source pack should be restored");
+        assert!(!backup_pack.exists(), "backup pack should no longer exist");
+        assert!(source_idx.exists(), "source idx should be restored");
+        assert!(!backup_idx.exists(), "backup idx should no longer exist");
+    }
+
+    #[test]
+    fn test_collect_refs_prefixes_full_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let refs_dir = tmp.path().join("refs").join("heads");
+        fs::create_dir_all(&refs_dir).unwrap();
+        fs::write(refs_dir.join("main"), "abc123").unwrap();
+        let feature_dir = refs_dir.join("feature");
+        fs::create_dir_all(&feature_dir).unwrap();
+        fs::write(feature_dir.join("x"), "def456").unwrap();
+
+        let mut refs = HashMap::new();
+        collect_refs(&refs_dir, &refs_dir, "refs/heads/", &mut refs).unwrap();
+
+        assert_eq!(refs.get("refs/heads/main"), Some(&"abc123".to_string()));
+        assert_eq!(
+            refs.get("refs/heads/feature/x"),
+            Some(&"def456".to_string())
+        );
     }
 }
