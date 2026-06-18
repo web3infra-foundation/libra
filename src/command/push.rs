@@ -122,6 +122,12 @@ pub struct PushArgs {
     #[clap(long = "no-thin", conflicts_with = "thin")]
     pub no_thin: bool,
 
+    /// Request an atomic push: the remote applies all ref updates together or
+    /// none at all. Errors if the remote does not advertise the `atomic`
+    /// capability.
+    #[clap(long)]
+    pub atomic: bool,
+
     /// Machine-readable single-line-per-ref output; conflicts with `--json`/`--machine`
     #[clap(long)]
     pub porcelain: bool,
@@ -152,6 +158,7 @@ impl PushArgs {
             force_if_includes: false,
             thin: false,
             no_thin: false,
+            atomic: false,
             porcelain: false,
             dry_run: false,
             tags: false,
@@ -238,6 +245,9 @@ pub enum PushError {
 
     #[error("failed to read repository state: {0}")]
     RepoState(String),
+
+    #[error("the receiving end does not support --atomic push")]
+    AtomicUnsupported,
 }
 
 impl From<PushError> for CliError {
@@ -325,7 +335,27 @@ impl From<PushError> for CliError {
             PushError::RepoState(..) => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::RepoCorrupt)
                 .with_hint("try 'libra status' to verify repository state"),
+            PushError::AtomicUnsupported => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_hint("retry without --atomic, or push to a remote that supports atomic updates"),
         }
+    }
+}
+
+/// Decide whether to advertise the `atomic` capability. With `--atomic`, the
+/// remote must have advertised `atomic` during reference discovery; otherwise
+/// the push is refused up-front (matching Git's client behaviour).
+fn resolve_atomic_capability(
+    atomic_requested: bool,
+    server_capabilities: &[String],
+) -> Result<bool, PushError> {
+    if !atomic_requested {
+        return Ok(false);
+    }
+    if server_capabilities.iter().any(|cap| cap == "atomic") {
+        Ok(true)
+    } else {
+        Err(PushError::AtomicUnsupported)
     }
 }
 
@@ -772,10 +802,17 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         });
     }
 
+    // `--atomic`: only advertise the capability if the remote supports it,
+    // otherwise refuse before sending anything (matching Git).
+    let use_atomic = resolve_atomic_capability(args.atomic, &discovery.capabilities)?;
+
     let mut data = BytesMut::new();
     let mut capabilities = vec!["report-status"];
     if get_wire_hash_kind() == HashKind::Sha256 {
         capabilities.push("object-format=sha256");
+    }
+    if use_atomic {
+        capabilities.push("atomic");
     }
     let capability = capabilities.join(" ");
     let zero_oid = ObjectHash::zero_str(get_hash_kind());
@@ -2902,6 +2939,7 @@ mod test {
             force_if_includes: false,
             thin: false,
             no_thin: false,
+            atomic: false,
             porcelain: false,
             dry_run: false,
             tags: false,
@@ -2911,6 +2949,23 @@ mod test {
             validate_push_args(&args),
             Err(PushError::InvalidArguments(message))
                 if message == "repository is required when specifying refspecs, --tags, or --mirror"
+        ));
+    }
+
+    #[test]
+    fn atomic_capability_resolution() {
+        // Not requested: never advertised, regardless of server support.
+        assert!(!resolve_atomic_capability(false, &[]).unwrap());
+        assert!(!resolve_atomic_capability(false, &["atomic".to_string()]).unwrap());
+        // Requested and advertised by the server: include the capability.
+        assert!(
+            resolve_atomic_capability(true, &["report-status".to_string(), "atomic".to_string()])
+                .unwrap()
+        );
+        // Requested but unsupported: refuse up-front.
+        assert!(matches!(
+            resolve_atomic_capability(true, &["report-status".to_string()]),
+            Err(PushError::AtomicUnsupported)
         ));
     }
 

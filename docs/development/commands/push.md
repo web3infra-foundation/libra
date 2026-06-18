@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; `--force-with-lease[=<ref>[:<expect>]]`（发送前校验远端仍匹配 tracking-ref/expected OID，与 `--force` 互斥）和 `--porcelain`（机器可读的每 ref 行，与 `--json`/`--machine` 互斥）supported；`--force-if-includes` 与 `--thin`/`--no-thin` 作为 **no-op** 接受。**unsupported（尚未打通协议层）：** `--atomic`、`--signed`、`--push-option`/`-o`、`--follow-tags`。local file remote rejected — intentional (see [docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push](docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push))
+- 兼容级别：`partial`。branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; `--force-with-lease[=<ref>[:<expect>]]`（发送前校验远端仍匹配 tracking-ref/expected OID，与 `--force` 互斥）和 `--porcelain`（机器可读的每 ref 行，与 `--json`/`--machine` 互斥）supported；`--atomic` supported（经 `resolve_atomic_capability` 在远端 discovery 通告 `atomic` 时附加该 capability，使远端要么全部更新要么全部不更新；远端未通告则提前以 `PushError::AtomicUnsupported` 拒绝）；`--force-if-includes` 与 `--thin`/`--no-thin` 作为 **no-op** 接受。**unsupported（尚未打通协议层）：** `--signed`、`--push-option`/`-o`、`--follow-tags`。local file remote rejected — intentional (see [docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push](docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push))
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -55,8 +55,9 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| Git flag | `--atomic` | 当前 `PushArgs` 未公开（曾在 `6b11a315` 引入后回退）；恢复时需保证多 ref 更新的原子提交语义（需打通 `src/internal/protocol` receive-pack）。 |
 | Git flag | `--signed` / `--push-option` (`-o`) / `--follow-tags` | 当前 `PushArgs` 未公开；恢复时需补 push-cert 签名协议、push-option 转发或 tag 跟随逻辑和测试证据（均需协议层改造）。 |
+
+（`--atomic` 已实现：`resolve_atomic_capability` 在远端 discovery 通告 `atomic` 时附加该 capability，远端未通告则以 `PushError::AtomicUnsupported` 拒绝；`StableErrorCode::NetworkProtocol`。）
 
 ## 维护要求
 
