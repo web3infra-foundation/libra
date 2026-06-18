@@ -202,8 +202,13 @@ pub struct LogArgs {
 
     /// Pickaxe: show commits that change the number of occurrences of STRING
     /// in the files they touch (Git's `-S`).
-    #[clap(short = 'S', value_name = "STRING")]
+    #[clap(short = 'S', value_name = "STRING", conflicts_with = "pickaxe_regex")]
     pub pickaxe_string: Option<String>,
+
+    /// Pickaxe: show commits whose diff contains an added/removed line matching
+    /// the given regex (Git's `-G`).
+    #[clap(short = 'G', value_name = "REGEX")]
+    pub pickaxe_regex: Option<String>,
 
     /// Show commits in reverse order (oldest first).
     #[clap(long)]
@@ -306,8 +311,16 @@ struct CommitFilter {
     grep: Option<String>,
     min_parents: Option<usize>,
     max_parents: Option<usize>,
-    /// Pickaxe (`-S`): case-sensitive literal string.
-    pickaxe: Option<String>,
+    /// Pickaxe filter (`-S` literal occurrence count, or `-G` diff-line regex).
+    pickaxe: Option<PickaxeKind>,
+}
+
+/// The two pickaxe modes. `StringCount` matches when a commit changes the number
+/// of occurrences of the literal string in the files it touches (`-S`).
+/// `DiffRegex` matches when an added/removed diff line matches the regex (`-G`).
+enum PickaxeKind {
+    StringCount(String),
+    DiffRegex(regex::Regex),
 }
 
 impl CommitFilter {
@@ -321,7 +334,7 @@ impl CommitFilter {
         grep: Option<String>,
         min_parents: Option<usize>,
         max_parents: Option<usize>,
-        pickaxe: Option<String>,
+        pickaxe: Option<PickaxeKind>,
     ) -> Self {
         Self {
             author: author.map(|s| s.to_lowercase()),
@@ -418,10 +431,14 @@ impl CommitFilter {
             return Ok(false);
         }
 
-        if let Some(needle) = &self.pickaxe
-            && !commit_changes_string_count(commit, needle)?
-        {
-            return Ok(false);
+        if let Some(pickaxe) = &self.pickaxe {
+            let matched = match pickaxe {
+                PickaxeKind::StringCount(needle) => commit_changes_string_count(commit, needle)?,
+                PickaxeKind::DiffRegex(regex) => commit_diff_matches_regex(commit, regex)?,
+            };
+            if !matched {
+                return Ok(false);
+            }
         }
 
         self.matches_paths(commit, cached_changes).await
@@ -974,6 +991,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         args.min_parents,
         args.max_parents,
     );
+    let pickaxe = build_pickaxe(&args)?;
     let filter = CommitFilter::new(
         args.author.clone(),
         args.committer.clone(),
@@ -983,7 +1001,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         args.grep.clone(),
         min_parents,
         max_parents,
-        args.pickaxe_string.clone(),
+        pickaxe,
     );
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
@@ -1199,6 +1217,7 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
         args.min_parents,
         args.max_parents,
     );
+    let pickaxe = build_pickaxe(&args)?;
     let filter = CommitFilter::new(
         args.author.clone(),
         args.committer.clone(),
@@ -1208,7 +1227,7 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
         args.grep.clone(),
         min_parents,
         max_parents,
-        args.pickaxe_string.clone(),
+        pickaxe,
     );
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
@@ -1413,6 +1432,92 @@ fn count_string_occurrences(hash: &ObjectHash, needle: &str) -> Result<usize, Cl
     let blob = load_object::<Blob>(hash)
         .map_err(|e| log_repo_corrupt_error(format!("failed to load blob {hash}: {e}")))?;
     Ok(String::from_utf8_lossy(&blob.data).matches(needle).count())
+}
+
+/// Build the pickaxe filter from `-S`/`-G` (mutually exclusive at the clap
+/// layer). `-G`'s regex is compiled here so an invalid pattern is a usage error.
+fn build_pickaxe(args: &LogArgs) -> CliResult<Option<PickaxeKind>> {
+    if let Some(string) = &args.pickaxe_string {
+        Ok(Some(PickaxeKind::StringCount(string.clone())))
+    } else if let Some(pattern) = &args.pickaxe_regex {
+        let regex = regex::Regex::new(pattern).map_err(|e| {
+            CliError::command_usage(format!("invalid -G regex '{pattern}': {e}"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?;
+        Ok(Some(PickaxeKind::DiffRegex(regex)))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Pickaxe (`-G`) test: returns true when an added or removed diff line (vs the
+/// first parent) matches `regex`, in any file the commit touches.
+fn commit_diff_matches_regex(commit: &Commit, regex: &regex::Regex) -> Result<bool, CliError> {
+    use std::collections::HashMap;
+
+    use git_internal::diff::{DiffOperation, compute_diff};
+
+    fn load_tree_blobs(tree_id: &ObjectHash) -> Result<HashMap<PathBuf, ObjectHash>, CliError> {
+        let tree = load_object::<Tree>(tree_id)
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load tree {tree_id}: {e}")))?;
+        Ok(tree.get_plain_items().into_iter().collect())
+    }
+    fn blob_lines(hash: &ObjectHash) -> Result<Vec<String>, CliError> {
+        let blob = load_object::<Blob>(hash)
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load blob {hash}: {e}")))?;
+        Ok(String::from_utf8_lossy(&blob.data)
+            .lines()
+            .map(String::from)
+            .collect())
+    }
+
+    let new_blobs = load_tree_blobs(&commit.tree_id)?;
+    let old_blobs = if let Some(parent_id) = commit.parent_commit_ids.first() {
+        let parent = load_object::<Commit>(parent_id).map_err(|e| {
+            log_repo_corrupt_error(format!("failed to load parent commit {parent_id}: {e}"))
+        })?;
+        load_tree_blobs(&parent.tree_id)?
+    } else {
+        HashMap::new()
+    };
+
+    let mut seen: HashSet<&PathBuf> = HashSet::new();
+    for path in new_blobs.keys().chain(old_blobs.keys()) {
+        if !seen.insert(path) {
+            continue;
+        }
+        let old_hash = old_blobs.get(path);
+        let new_hash = new_blobs.get(path);
+        if old_hash == new_hash {
+            continue;
+        }
+        let old_lines = match old_hash {
+            Some(hash) => blob_lines(hash)?,
+            None => Vec::new(),
+        };
+        let new_lines = match new_hash {
+            Some(hash) => blob_lines(hash)?,
+            None => Vec::new(),
+        };
+        for op in compute_diff(&old_lines, &new_lines) {
+            match op {
+                DiffOperation::Insert { content, .. } => {
+                    if regex.is_match(&content) {
+                        return Ok(true);
+                    }
+                }
+                DiffOperation::Delete { line } => {
+                    if let Some(text) = old_lines.get(line.saturating_sub(1))
+                        && regex.is_match(text)
+                    {
+                        return Ok(true);
+                    }
+                }
+                DiffOperation::Equal { .. } => {}
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Interpret a `--pretty=<value>` argument. Recognizes the `oneline` preset and
@@ -2036,6 +2141,36 @@ mod tests {
             Some(3)
         );
         assert_eq!(LogArgs::parse_from(["libra", "-n", "3"]).number, Some(3));
+    }
+
+    #[test]
+    fn test_build_pickaxe_modes() {
+        let s = LogArgs::parse_from(["libra", "-S", "needle"]);
+        assert!(matches!(
+            build_pickaxe(&s).unwrap(),
+            Some(PickaxeKind::StringCount(_))
+        ));
+
+        let g = LogArgs::parse_from(["libra", "-G", "foo.*bar"]);
+        assert_eq!(g.pickaxe_regex.as_deref(), Some("foo.*bar"));
+        assert!(matches!(
+            build_pickaxe(&g).unwrap(),
+            Some(PickaxeKind::DiffRegex(_))
+        ));
+
+        // An invalid -G regex is a usage error.
+        let bad = LogArgs::parse_from(["libra", "-G", "("]);
+        assert!(build_pickaxe(&bad).is_err());
+
+        // -S and -G are mutually exclusive at the clap layer.
+        assert!(LogArgs::try_parse_from(["libra", "-S", "a", "-G", "b"]).is_err());
+
+        // No pickaxe flag => None.
+        assert!(
+            build_pickaxe(&LogArgs::parse_from(["libra"]))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

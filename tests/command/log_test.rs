@@ -171,6 +171,47 @@ fn test_log_pickaxe_s_finds_commit_that_changes_string_count() {
     );
 }
 
+#[test]
+fn test_log_pickaxe_g_matches_diff_line_regex() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+
+    // A commit whose added line does NOT match the regex.
+    std::fs::write(repo.path().join("a.txt"), "plain content\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "a.txt"], repo.path()),
+        "add a.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "GNOMATCH", "--no-verify"], repo.path()),
+        "commit GNOMATCH",
+    );
+
+    // A commit whose added line matches the regex.
+    std::fs::write(repo.path().join("b.txt"), "fn handler_v2() {}\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "b.txt"], repo.path()),
+        "add b.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "GMATCH", "--no-verify"], repo.path()),
+        "commit GMATCH",
+    );
+
+    let out = run_libra_command(&["log", "-G", "handler_v[0-9]", "--oneline"], repo.path());
+    assert_cli_success(&out, "log -G handler_v[0-9]");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("GMATCH"),
+        "-G should match the commit whose diff line matches the regex:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("GNOMATCH"),
+        "-G should skip commits with no matching added/removed line:\n{stdout}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_log_corrupt_head_reference_returns_repo_corrupt() {
