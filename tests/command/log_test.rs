@@ -60,6 +60,70 @@ fn test_log_cli_empty_repository_returns_fatal_128() {
     );
 }
 
+#[test]
+fn test_log_first_parent_skips_merged_branch_commits() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+
+    // main: a unique commit.
+    std::fs::write(repo.path().join("a.txt"), "a\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "a.txt"], repo.path()), "add a");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "MAIN_ONE", "--no-verify"], repo.path()),
+        "commit MAIN_ONE",
+    );
+
+    // feature: a side-branch commit with a distinct subject + file.
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "feature"], repo.path()),
+        "switch -c feature",
+    );
+    std::fs::write(repo.path().join("b.txt"), "b\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "b.txt"], repo.path()), "add b");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "SIDE_BRANCH", "--no-verify"], repo.path()),
+        "commit SIDE_BRANCH",
+    );
+
+    // main diverges, then merges feature -> a two-parent merge commit.
+    assert_cli_success(
+        &run_libra_command(&["switch", "main"], repo.path()),
+        "switch main",
+    );
+    std::fs::write(repo.path().join("a.txt"), "a2\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "a.txt"], repo.path()), "add a2");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "MAIN_TWO", "--no-verify"], repo.path()),
+        "commit MAIN_TWO",
+    );
+    assert_cli_success(
+        &run_libra_command(&["merge", "feature"], repo.path()),
+        "merge feature",
+    );
+
+    // Plain log includes the merged side-branch commit; --first-parent omits it.
+    let plain = run_libra_command(&["log", "--oneline"], repo.path());
+    assert_cli_success(&plain, "log --oneline");
+    let plain_out = String::from_utf8_lossy(&plain.stdout);
+    assert!(
+        plain_out.contains("SIDE_BRANCH"),
+        "plain log should include the side-branch commit:\n{plain_out}"
+    );
+
+    let fp = run_libra_command(&["log", "--first-parent", "--oneline"], repo.path());
+    assert_cli_success(&fp, "log --first-parent --oneline");
+    let fp_out = String::from_utf8_lossy(&fp.stdout);
+    assert!(
+        !fp_out.contains("SIDE_BRANCH"),
+        "--first-parent should omit the merged side-branch commit:\n{fp_out}"
+    );
+    assert!(
+        fp_out.contains("MAIN_TWO"),
+        "--first-parent should keep first-parent history:\n{fp_out}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_log_corrupt_head_reference_returns_repo_corrupt() {

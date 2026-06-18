@@ -196,6 +196,10 @@ pub struct LogArgs {
     #[clap(long, value_name = "N")]
     pub max_parents: Option<usize>,
 
+    /// Follow only the first parent of merge commits when traversing history.
+    #[clap(long)]
+    pub first_parent: bool,
+
     /// Show commits in reverse order (oldest first).
     #[clap(long)]
     pub reverse: bool,
@@ -715,6 +719,7 @@ async fn get_reachable_commits_excluding(
     starts: Vec<ObjectHash>,
     excludes: Option<HashSet<ObjectHash>>,
     depth: Option<usize>,
+    first_parent: bool,
 ) -> Result<Vec<Commit>, CliError> {
     let mut queue: VecDeque<(ObjectHash, usize)> = VecDeque::new();
     let mut commit_set: HashSet<ObjectHash> = HashSet::new();
@@ -740,7 +745,12 @@ async fn get_reachable_commits_excluding(
             continue;
         }
 
-        for parent_commit_id in &commit.parent_commit_ids {
+        for (idx, parent_commit_id) in commit.parent_commit_ids.iter().enumerate() {
+            // `--first-parent` follows only the first parent of merge commits,
+            // collapsing merged side branches out of the traversal.
+            if first_parent && idx > 0 {
+                break;
+            }
             queue.push_back((*parent_commit_id, current_depth + 1));
         }
 
@@ -967,7 +977,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     }
 
     let mut reachable_commits =
-        get_reachable_commits_excluding(start_commits, excludes, None).await?;
+        get_reachable_commits_excluding(start_commits, excludes, None, args.first_parent).await?;
     // newest first
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
     if args.reverse {
@@ -1191,7 +1201,7 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     }
 
     let mut reachable_commits =
-        get_reachable_commits_excluding(start_commits, excludes, None).await?;
+        get_reachable_commits_excluding(start_commits, excludes, None, args.first_parent).await?;
     // newest first
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
     if args.reverse {
