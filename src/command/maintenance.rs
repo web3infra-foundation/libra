@@ -64,6 +64,12 @@ const MAINTENANCE_LAST_RUN_KEY: &str = "maintenance.last-run";
 const DEFAULT_LOOSE_OBJECT_THRESHOLD: usize = 100;
 const DEFAULT_PACK_COUNT_THRESHOLD: usize = 5;
 const LOOSE_OBJECT_AGE_SECONDS: u64 = 14 * 24 * 60 * 60; // 2 weeks
+/// Grace period before an unreachable loose object may be deleted by `gc`.
+///
+/// This protects concurrent commands (add/commit/fetch/hash-object) that have
+/// just written objects but not yet updated refs/reflogs/index. Objects newer
+/// than this grace period are left in place even when unreachable.
+const GC_PRUNE_GRACE_SECONDS: u64 = 60 * 60; // 1 hour
 
 /// `--help` examples shown in `libra maintenance --help` output.
 pub const MAINTENANCE_EXAMPLES: &str = "\
@@ -305,11 +311,25 @@ async fn run_gc(
     let all_loose = list_loose_objects(repo_path)
         .map_err(|e| CliError::fatal(format!("failed to list loose objects: {e}")))?;
 
+    let now = SystemTime::now();
     let mut removed = 0;
     for (hash_str, obj_path) in &all_loose {
         if let Some(hash) = parse_object_hash(hash_str)
             && !reachable.contains(&hash)
         {
+            // Skip objects that are still within the grace period, to avoid
+            // racing with commands that just wrote objects before updating
+            // refs/reflogs/index.
+            let within_grace = fs::metadata(obj_path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|mtime| now.duration_since(mtime).ok())
+                .map(|age| age.as_secs() < GC_PRUNE_GRACE_SECONDS)
+                .unwrap_or(true);
+            if within_grace {
+                continue;
+            }
+
             removed += 1;
             if dry_run {
                 if !quiet {
@@ -581,31 +601,45 @@ async fn run_pack_refs(
         existing.insert(name, hash);
     }
 
-    // Write packed-refs
-    let mut file = fs::File::create(&packed_refs_path)
-        .map_err(|e| CliError::fatal(format!("failed to create packed-refs: {e}")))?;
+    // Write packed-refs atomically: stream to a temp file, sync it, then rename
+    // it into place. This ensures an ENOSPC/IO error or crash during the write
+    // cannot leave the previous packed-refs truncated.
+    let temp_path = packed_refs_path.with_extension("tmp");
+    let mut file = fs::File::create(&temp_path)
+        .map_err(|e| CliError::fatal(format!("failed to create packed-refs temp: {e}")))?;
     if let Err(e) = writeln!(file, "# packed-refs with peeled tags") {
+        let _ = fs::remove_file(&temp_path);
         return Err(CliError::fatal(format!("failed to write packed-refs: {e}")));
     }
     for (name, hash) in &existing {
         if let Err(e) = writeln!(file, "{hash} {name}") {
+            let _ = fs::remove_file(&temp_path);
             return Err(CliError::fatal(format!("failed to write packed-refs: {e}")));
         }
     }
+    if let Err(e) = file.flush() {
+        let _ = fs::remove_file(&temp_path);
+        return Err(CliError::fatal(format!("failed to flush packed-refs: {e}")));
+    }
     drop(file);
 
-    // Verify the file we just wrote is readable and contains the refs before
-    // deleting the loose ref files.
-    let written = fs::read_to_string(&packed_refs_path)
-        .map_err(|e| CliError::fatal(format!("failed to read back packed-refs: {e}")))?;
+    // Verify the temp file is readable and contains every entry before renaming.
+    let written = fs::read_to_string(&temp_path)
+        .map_err(|e| CliError::fatal(format!("failed to read back packed-refs temp: {e}")))?;
     for (name, hash) in &existing {
         let expected = format!("{hash} {name}");
         if !written.lines().any(|line| line.trim() == expected) {
+            let _ = fs::remove_file(&temp_path);
             return Err(CliError::fatal(format!(
                 "packed-refs is missing entry for {name}"
             )));
         }
     }
+
+    fs::rename(&temp_path, &packed_refs_path).map_err(|e| {
+        let _ = fs::remove_file(&temp_path);
+        CliError::fatal(format!("failed to install packed-refs: {e}"))
+    })?;
 
     // Remove packed loose ref files
     let mut removed_count = 0;
@@ -1251,9 +1285,14 @@ fn read_idx_entries(idx_path: &Path) -> io::Result<Vec<(ObjectHash, u64)>> {
             );
         }
 
-        file.seek(io::SeekFrom::Start(offsets_offset))?;
+        // Read offsets while remembering the next position in the 4-byte offset
+        // table, so a large-offset lookup does not leave the cursor in the
+        // large-offset table for the next iteration.
+        let mut next_offset_pos = offsets_offset;
         for hash in &hashes {
+            file.seek(io::SeekFrom::Start(next_offset_pos))?;
             let offset = file.read_u32::<byteorder::BigEndian>()?;
+            next_offset_pos += 4;
             let offset = if offset & 0x8000_0000 != 0 {
                 let large_index = (offset & 0x7fff_ffff) as u64;
                 file.seek(io::SeekFrom::Start(large_offsets_offset + large_index * 8))?;
@@ -1620,6 +1659,8 @@ fn info_println(output: &OutputConfig, message: &str) {
 
 #[cfg(test)]
 mod tests {
+    use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
     use super::*;
 
     #[test]
@@ -1821,5 +1862,62 @@ mod tests {
             refs.get("refs/heads/feature/x"),
             Some(&"def456".to_string())
         );
+    }
+
+    #[test]
+    fn test_read_idx_entries_v2_large_offset_seeks_back() {
+        let _guard = set_hash_kind_for_test(HashKind::Sha1);
+        let tmp = tempfile::tempdir().unwrap();
+        let idx_path = tmp.path().join("test.idx");
+
+        // Build a minimal v2 index with three objects. The middle object uses a
+        // large offset; if read_idx_entries does not seek back to the 4-byte
+        // offset table after the large-offset lookup, the third offset will be
+        // read from the wrong place.
+        let hash_a = ObjectHash::from_bytes(&[0u8; 20]).unwrap();
+        let hash_b =
+            ObjectHash::from_bytes(&[0u8; 19].into_iter().chain([1u8]).collect::<Vec<_>>())
+                .unwrap();
+        let hash_c =
+            ObjectHash::from_bytes(&[0u8; 19].into_iter().chain([2u8]).collect::<Vec<_>>())
+                .unwrap();
+
+        let mut data: Vec<u8> = Vec::new();
+        // header
+        data.extend_from_slice(&[0xFF, 0x74, 0x4F, 0x63]); // magic
+        data.extend_from_slice(&2_u32.to_be_bytes()); // version
+
+        // fanout (all objects start with 0x00)
+        let fanout: Vec<u8> = (0..256u32)
+            .flat_map(|_| 3u32.to_be_bytes().to_vec())
+            .collect();
+        data.extend_from_slice(&fanout);
+
+        // names
+        data.extend_from_slice(hash_a.as_ref());
+        data.extend_from_slice(hash_b.as_ref());
+        data.extend_from_slice(hash_c.as_ref());
+
+        // crcs
+        for _ in 0..3 {
+            data.extend_from_slice(&0_u32.to_be_bytes());
+        }
+
+        // offsets: A=100 (small), B=large index 0, C=200 (small)
+        data.extend_from_slice(&100_u32.to_be_bytes());
+        data.extend_from_slice(&0x8000_0000_u32.to_be_bytes());
+        data.extend_from_slice(&200_u32.to_be_bytes());
+
+        // large offsets table: one 8-byte entry
+        data.extend_from_slice(&0x0001_0000_0000_u64.to_be_bytes());
+
+        fs::write(&idx_path, &data).unwrap();
+
+        let entries = read_idx_entries(&idx_path).unwrap();
+        assert_eq!(entries.len(), 3);
+        let map: HashMap<_, _> = entries.into_iter().collect();
+        assert_eq!(map.get(&hash_a), Some(&100u64));
+        assert_eq!(map.get(&hash_b), Some(&0x0001_0000_0000u64));
+        assert_eq!(map.get(&hash_c), Some(&200u64));
     }
 }

@@ -475,6 +475,54 @@ fn rev_parse(repo: &std::path::Path, rev: &str) -> String {
 
 #[test]
 
+/// Regression test: `maintenance run --task pack-refs` must update packed-refs
+/// atomically and preserve entries that only exist in the existing file.
+///
+/// Previously `File::create(packed-refs)` truncated the file before the new
+/// content was durable, so a crash/IO error during the write could lose packed
+/// refs. The task now writes to a temp file and atomically renames it into place.
+fn test_maintenance_pack_refs_preserves_existing_entries() {
+    let repo = create_committed_repo_via_cli();
+    let main_hash = rev_parse(repo.path(), "main");
+
+    // Pre-populate packed-refs with an entry that has no corresponding loose ref.
+    let libra_dir = repo.path().join(".libra");
+    fs::write(
+        libra_dir.join("packed-refs"),
+        "# packed-refs with peeled tags\nabcd1234 refs/heads/legacy\n",
+    )
+    .unwrap();
+
+    // Add a new loose ref to be packed.
+    let refs_heads = libra_dir.join("refs").join("heads");
+    fs::create_dir_all(&refs_heads).unwrap();
+    fs::write(refs_heads.join("main"), format!("{main_hash}\n")).unwrap();
+
+    let output = run_libra_command(&["maintenance", "run", "--task", "pack-refs"], repo.path());
+    assert!(
+        output.status.success(),
+        "pack-refs should pass, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let packed_refs = libra_dir.join("packed-refs");
+    let content = fs::read_to_string(&packed_refs).unwrap();
+    assert!(
+        content.contains("refs/heads/main"),
+        "packed-refs must contain the new ref, got: {content}"
+    );
+    assert!(
+        content.contains("refs/heads/legacy"),
+        "packed-refs must preserve the pre-existing entry, got: {content}"
+    );
+    assert!(
+        !libra_dir.join("packed-refs.tmp").exists(),
+        "temporary packed-refs file should be cleaned up"
+    );
+}
+
+#[test]
+
 /// Regression test: `maintenance run --task gc` must preserve objects reachable
 /// from annotated tags.
 ///
@@ -860,6 +908,89 @@ fn test_maintenance_gc_preserves_reachable_objects() {
             && log_stdout.contains("commit a")
             && log_stdout.contains("base"),
         "history must remain intact after gc, got: {log_stdout}"
+    );
+}
+
+#[test]
+
+/// Regression test: `maintenance run --task gc` must leave fresh unreachable
+/// objects alone until a grace period has passed.
+///
+/// Without a grace period, GC can race with commands that have just written
+/// loose objects before updating refs/reflogs/index, corrupting the concurrent
+/// operation. Objects older than the grace period can still be pruned.
+fn test_maintenance_gc_skips_fresh_unreachable_objects() {
+    let repo = create_committed_repo_via_cli();
+
+    // Write a loose blob that is not referenced by any ref/index/reflog.
+    let blob_file = repo.path().join("dangling.txt");
+    fs::write(&blob_file, "dangling content\n").unwrap();
+    let hash_output = run_libra_command(&["hash-object", "-w", "dangling.txt"], repo.path());
+    assert!(
+        hash_output.status.success(),
+        "hash-object should succeed, stderr: {}",
+        String::from_utf8_lossy(&hash_output.stderr)
+    );
+    let blob_hash = String::from_utf8_lossy(&hash_output.stdout)
+        .trim()
+        .to_string();
+    fs::remove_file(&blob_file).unwrap();
+    let obj_path = loose_object_path(repo.path(), &blob_hash);
+    assert!(
+        obj_path.exists(),
+        "written blob should exist as loose object"
+    );
+
+    // A fresh unreachable object must not be deleted.
+    let fresh_output = run_libra_command(
+        &["--json", "maintenance", "run", "--task", "gc"],
+        repo.path(),
+    );
+    assert!(
+        fresh_output.status.success(),
+        "gc should pass on fresh object, stderr: {}",
+        String::from_utf8_lossy(&fresh_output.stderr)
+    );
+    assert!(
+        obj_path.exists(),
+        "fresh unreachable blob should survive gc grace period"
+    );
+
+    // Age the blob beyond the grace period, then GC should remove it.
+    let old_time = SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+    let file = fs::File::create(&obj_path).unwrap();
+    file.set_modified(old_time).unwrap();
+
+    let aged_output = run_libra_command(
+        &["--json", "maintenance", "run", "--task", "gc"],
+        repo.path(),
+    );
+    assert!(
+        aged_output.status.success(),
+        "gc should pass on aged object, stderr: {}",
+        String::from_utf8_lossy(&aged_output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&aged_output.stdout).expect("valid json");
+    let gc_task = json
+        .get("data")
+        .and_then(|d| d.get("tasks"))
+        .and_then(|t| t.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .find(|t| t.get("task").and_then(|v| v.as_str()) == Some("gc"))
+        })
+        .expect("gc task in results");
+    let removed = gc_task
+        .get("objects_removed")
+        .and_then(|v| v.as_u64())
+        .expect("objects_removed field");
+    assert!(
+        removed >= 1,
+        "aged unreachable objects should be removed, got task: {gc_task}"
+    );
+    assert!(
+        !obj_path.exists(),
+        "aged unreachable object file should be deleted"
     );
 }
 
