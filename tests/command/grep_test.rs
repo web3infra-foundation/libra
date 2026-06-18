@@ -92,6 +92,58 @@ async fn test_grep_working_tree_searches_only_tracked_files() {
 
 #[tokio::test]
 #[serial]
+async fn test_grep_after_context_marks_context_lines() {
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("f.txt", "alpha\nNEEDLE\nbeta\ngamma\n").expect("failed to write file");
+    add_and_commit("add f", vec!["f.txt".to_string()]).await;
+
+    let output = run_libra_command(
+        &["--json=compact", "grep", "-A", "1", "NEEDLE"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "grep -A 1 should succeed");
+
+    let json = parse_json_stdout(&output);
+    let matches = json["data"]["matches"]
+        .as_array()
+        .expect("expected grep matches array");
+    // The match line plus one trailing context line.
+    assert_eq!(matches.len(), 2);
+    assert_eq!(matches[0]["line"], "NEEDLE");
+    assert_eq!(matches[0]["line_number"], 2);
+    // Real match lines omit the is_context field (serde skip when false).
+    assert!(matches[0].get("is_context").is_none_or(|v| v == false));
+    assert_eq!(matches[1]["line"], "beta");
+    assert_eq!(matches[1]["line_number"], 3);
+    assert_eq!(matches[1]["is_context"], true);
+    // total_matches counts only real matches, not context lines.
+    assert_eq!(json["data"]["total_matches"], 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_grep_perl_regexp_is_rejected() {
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("f.txt", "needle\n").expect("failed to write file");
+    add_and_commit("add f", vec!["f.txt".to_string()]).await;
+
+    let output = run_libra_command(&["grep", "-P", "needle"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("perl-regexp is not supported"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_grep_tree_head_searches_committed_content() {
     let repo = tempdir().expect("failed to create repo dir");
     test::setup_with_new_libra_in(repo.path()).await;

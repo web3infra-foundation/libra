@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。tracked/index/tree search 与常用匹配/count/list/line flags 已支持；context、extended/Perl regex、untracked/no-index 和 binary controls 尚未公开。
+- 兼容级别：`partial`。tracked/index/tree search 与常用匹配/count/list/line flags 已支持；`-A`/`-B`/`-C` 上下文行、`-E`/`-G` 正则别名（`-P` 拒绝 129）、`-a`/`-I` 二进制控制已支持；`--untracked`、`--no-index`、`--heading`/`--break`、`-z`/`--null` 仍未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -51,24 +51,24 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/grep.md`。
 - Synopsis：`libra grep [<options>] [<pattern>] [<pathspec>...]`。
-- 公开参数/子命令包括：位置参数 `<PATTERN>`（可选，`pattern`）、位置参数 `<PATHS>...`（`pathspec`）、`-e, --regexp <PATTERN>`、`-f, --file <FILE>`、`--all-match`、`-F, --fixed-string`、`-i, --ignore-case`、`-c, --count`、`-l, --files-with-matches`、`-L, --files-without-matches`、`-n, --line-number`、`-w, --word-regexp`、`-v, --invert-match`、`-b, --byte-offset`、`--tree <REVISION>`、`--cached` 等。
+- 公开参数/子命令包括：位置参数 `<PATTERN>`（可选，`pattern`）、位置参数 `<PATHS>...`（`pathspec`）、`-e, --regexp <PATTERN>`、`-f, --file <FILE>`、`--all-match`、`-F, --fixed-string`、`-E, --extended-regexp`、`-G, --basic-regexp`、`-P, --perl-regexp`（拒绝，退出 129）、`-i, --ignore-case`、`-c, --count`、`-l, --files-with-matches`、`-L, --files-without-matches`、`-n, --line-number`、`-w, --word-regexp`、`-v, --invert-match`、`-b, --byte-offset`、`-A, --after-context <NUM>`、`-B, --before-context <NUM>`、`-C, --context <NUM>`、`-a, --text`、`-I`、`--tree <REVISION>`、`--cached` 等。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容差异项 | 上下文行 | 原始对照：不支持；相关参数/替代：-C / -A / -B；当前说明：`e3bfe11` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 扩展正则 | 原始对照：不支持；相关参数/替代：-E / --extended-regexp；当前说明：`3e17784` 曾添加 -E/-G 别名，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | Perl 正则 | 原始对照：不支持；相关参数/替代：-P / --perl-regexp；当前说明：`3e17784` 曾以 129 退出拒绝该标志，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | 上下文行 `-A`/`-B`/`-C` | 已重新实现：`-C` 为两侧默认，`-A`/`-B` 分别覆盖；上下文行在 JSON 中带 `is_context=true`，人类输出用 `-` 分隔符并在不相邻分组间打印 `--`；`total_matches`/`--count` 只计真实匹配。带单元测试（`search_in_content` 上下文）与集成测试。 |
+| ✅ 已实现 | 扩展/基本正则 `-E`/`-G` | 已重新实现：作为别名接受（Libra 的 `regex` 引擎默认即 ERE 近似；`-G` 不做严格 BRE 翻译，属有意近似）。 |
+| ✅ 已实现（拒绝） | Perl 正则 `-P` | 已重新实现：显式拒绝并以退出码 129 返回 `grep -P/--perl-regexp is not supported`（命令层 usage 错误）。带集成测试。 |
 | 兼容差异项 | 显示函数 | 原始对照：不支持；相关参数/替代：-p / --show-function；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 最大深度 | 原始对照：不支持；相关参数/替代：--max-depth；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 搜索未跟踪文件 | 原始对照：不支持；相关参数/替代：--untracked；当前说明：`01997f50` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 无仓库文件系统搜索 | 原始对照：不支持；相关参数/替代：--no-index；当前说明：`0e22f00d` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 文件名分组标题 | 原始对照：不支持；相关参数/替代：--heading / --no-heading；当前说明：`2d471be` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | NUL 分隔输出 | 原始对照：不支持；相关参数/替代：-z / --null；当前说明：`2d471be` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 强制文本搜索 | 原始对照：不支持；相关参数/替代：-a / --text；当前说明：`e8151a5` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 忽略二进制文件 | 原始对照：不支持；相关参数/替代：-I；当前说明：`e8151a5` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | 强制文本搜索 `-a`/`--text` | 已重新实现：跳过二进制检测，将二进制文件按文本（UTF-8 lossy）搜索。 |
+| ✅ 已实现（默认行为） | 忽略二进制文件 `-I` | 已重新实现：作为兼容标志接受；二进制文件默认即跳过，`-I` 显式表达该默认。 |
 
 ## 维护要求
 
