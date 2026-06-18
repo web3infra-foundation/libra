@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。轻量标签、message-based annotated tags、`-a`/`--annotate`、force/delete/list/`-n`、`--points-at <object>` 已支持；其余过滤（`--contains`/`--merged`/`--sort`/`--column`）、签名和验证尚未公开。
+- 兼容级别：`partial`。轻量标签、message-based annotated tags、`-a`/`--annotate`、force/delete/list/`-n`、`--points-at <object>`、列表模式下的 `<pattern>` glob 过滤（`tag -l 'v1.*'`）已支持；其余过滤（`--contains`/`--merged`/`--sort`/`--column`）、签名和验证尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -48,7 +48,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/tag.md`。
 - Synopsis：`libra tag [OPTIONS] [-l | -d | -f] [-m <MESSAGE>] [-n <N_LINES>] [NAME]`。
-- 公开参数/子命令包括：`-l, --list`、`-d, --delete`、`-m, --message <MESSAGE>`、`-a, --annotate`、`-f, --force`、`-n, --n-lines <N_LINES>`、`--points-at <object>`、`[NAME]`。
+- 公开参数/子命令包括：`-l, --list`、`-d, --delete`、`-m, --message <MESSAGE>`、`-a, --annotate`、`-f, --force`、`-n, --n-lines <N_LINES>`、`--points-at <object>`、`[NAME]`（创建时为标签名；列表模式下作为 fnmatch glob 过滤模式，如 `tag -l 'v1.*'`，`*`/`?`/`[...]` 经 `compile_tag_glob` 锚定匹配标签名）。
 
 
 ## 还未实现的功能

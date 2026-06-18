@@ -318,8 +318,15 @@ async fn run_tag(args: &TagArgs) -> Result<TagOutput, TagError> {
             Some(object) => Some(resolve_points_at_object(object).await?),
             None => None,
         };
+        // In list mode a positional name acts as a glob pattern (`tag -l 'v1.*'`).
+        let pattern = args.name.as_deref().map(compile_tag_glob);
         return Ok(TagOutput::List {
-            tags: collect_tags(args.n_lines.unwrap_or(0), points_at.as_ref()).await?,
+            tags: collect_tags(
+                args.n_lines.unwrap_or(0),
+                points_at.as_ref(),
+                pattern.as_ref(),
+            )
+            .await?,
         });
     }
 
@@ -368,7 +375,7 @@ fn render_tag_output(result: &TagOutput, output: &OutputConfig) -> CliResult<()>
 }
 
 pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {
-    let tags = collect_tags(show_lines, None)
+    let tags = collect_tags(show_lines, None, None)
         .await
         .map_err(anyhow::Error::from)?;
     Ok(format_tag_entries(&tags))
@@ -425,10 +432,17 @@ async fn run_delete_tag(tag_name: &str) -> Result<TagOutput, TagError> {
 async fn collect_tags(
     show_lines: usize,
     points_at: Option<&ObjectHash>,
+    pattern: Option<&regex::Regex>,
 ) -> Result<Vec<TagListEntry>, TagError> {
     let tags = tag::list().await.map_err(TagError::ListFailed)?;
     let mut entries = Vec::with_capacity(tags.len());
     for tag in tags {
+        // `tag -l <pattern>` keeps only tags whose name matches the fnmatch glob.
+        if let Some(re) = pattern
+            && !re.is_match(&tag.name)
+        {
+            continue;
+        }
         if let Some(target) = points_at
             && &tag_peeled_commit(&tag.object) != target
         {
@@ -437,6 +451,30 @@ async fn collect_tags(
         entries.push(tag_to_list_entry(tag, show_lines));
     }
     Ok(entries)
+}
+
+/// Compile a `tag -l <pattern>` shell-glob into an anchored regex. `*`/`?`
+/// become `.*`/`.`, `[...]` character classes pass through, other regex
+/// metacharacters are escaped. An unparseable glob falls back to a literal match.
+fn compile_tag_glob(glob: &str) -> regex::Regex {
+    let mut pattern = String::from("^");
+    for ch in glob.chars() {
+        match ch {
+            '*' => pattern.push_str(".*"),
+            '?' => pattern.push('.'),
+            '[' | ']' => pattern.push(ch),
+            c if ".+(){}|^$\\".contains(c) => {
+                pattern.push('\\');
+                pattern.push(c);
+            }
+            c => pattern.push(c),
+        }
+    }
+    pattern.push('$');
+    regex::Regex::new(&pattern).unwrap_or_else(|_| {
+        regex::Regex::new(&format!("^{}$", regex::escape(glob)))
+            .expect("escaped-literal regex is always valid")
+    })
 }
 
 /// Resolve the `--points-at` argument to an object hash, mapping an

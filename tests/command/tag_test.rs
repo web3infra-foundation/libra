@@ -92,6 +92,37 @@ fn test_tag_json_list_keeps_lightweight_message_null() {
 }
 
 #[test]
+fn test_tag_list_filters_by_glob_pattern() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["tag", "v1.0"], repo.path()),
+        "tag v1.0",
+    );
+    assert_cli_success(
+        &run_libra_command(&["tag", "v2.0"], repo.path()),
+        "tag v2.0",
+    );
+
+    let output = run_libra_command(&["--json", "tag", "-l", "v1*"], repo.path());
+    assert_cli_success(&output, "tag --json -l v1*");
+    let json = parse_json_stdout(&output);
+    let names: Vec<String> = json["data"]["tags"]
+        .as_array()
+        .expect("expected tags array")
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(
+        names.contains(&"v1.0".to_string()),
+        "v1.0 should match the glob 'v1*': {names:?}"
+    );
+    assert!(
+        !names.contains(&"v2.0".to_string()),
+        "v2.0 should NOT match the glob 'v1*': {names:?}"
+    );
+}
+
+#[test]
 fn test_tag_create_outputs_concise_confirmation() {
     let repo = create_committed_repo_via_cli();
 
