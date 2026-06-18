@@ -75,6 +75,10 @@ pub struct TagArgs {
     /// since Libra does not open an editor for the tag body).
     #[clap(short = 's', long = "sign", requires = "message")]
     pub sign: bool,
+
+    /// Verify the PGP signature of the named annotated tag.
+    #[clap(short = 'v', long = "verify", group = "action")]
+    pub verify: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -91,6 +95,8 @@ pub enum TagOutput {
     },
     #[serde(rename = "delete")]
     Delete { name: String, hash: Option<String> },
+    #[serde(rename = "verify")]
+    Verify { name: String, good: bool },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -186,6 +192,19 @@ enum TagError {
 
     #[error("failed to sign tag: {0}")]
     VaultSign(String),
+
+    #[error("{0}")]
+    VerifyFailed(String),
+
+    #[error("tag '{0}' has a bad signature")]
+    BadSignature(String),
+}
+
+fn map_verify_tag_error(error: tag::VerifyTagError) -> TagError {
+    match error {
+        tag::VerifyTagError::NotFound(name) => TagError::NotFound(name),
+        other => TagError::VerifyFailed(other.to_string()),
+    }
 }
 
 fn classify_tag_load_error(error: &anyhow::Error) -> StableErrorCode {
@@ -269,6 +288,12 @@ impl From<TagError> for CliError {
             TagError::VaultSign(_) => CliError::fatal(message)
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("ensure the vault is initialized and signing is configured"),
+            TagError::VerifyFailed(_) => {
+                CliError::fatal(message).with_stable_code(StableErrorCode::CliInvalidTarget)
+            }
+            // A bad signature is a verification failure, not a usage error: exit 1.
+            TagError::BadSignature(_) => CliError::failure(message)
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked),
         }
     }
 }
@@ -335,6 +360,20 @@ fn map_create_tag_error(tag_name: &str, error: tag::CreateTagError) -> TagError 
 async fn run_tag(args: &TagArgs) -> Result<TagOutput, TagError> {
     validate_named_tag_action(args)?;
     util::require_repo().map_err(|_| TagError::NotInRepo)?;
+
+    if args.verify {
+        let name = args.name.as_deref().ok_or_else(|| {
+            TagError::MissingName("tag name is required for --verify".to_string())
+        })?;
+        let good = tag::verify(name).await.map_err(map_verify_tag_error)?;
+        if !good {
+            return Err(TagError::BadSignature(name.to_string()));
+        }
+        return Ok(TagOutput::Verify {
+            name: name.to_string(),
+            good: true,
+        });
+    }
 
     if args.list
         || args.n_lines.is_some()
@@ -411,6 +450,11 @@ fn render_tag_output(result: &TagOutput, output: &OutputConfig) -> CliResult<()>
                 println!("Deleted tag '{name}' (was {})", short_display_hash(hash));
             } else {
                 println!("Deleted tag '{name}'");
+            }
+        }
+        TagOutput::Verify { name, good } => {
+            if *good {
+                println!("Good signature for tag '{name}'");
             }
         }
     }

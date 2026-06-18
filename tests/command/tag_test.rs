@@ -201,6 +201,41 @@ fn test_tag_sign_requires_message() {
 }
 
 #[test]
+fn test_tag_verify_accepts_own_signature() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-s", "-m", "signed release", "v1.0"], repo.path()),
+        "tag -s -m signed v1.0",
+    );
+
+    let out = run_libra_command(&["tag", "-v", "v1.0"], repo.path());
+    assert_cli_success(&out, "tag -v v1.0");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Good signature for tag 'v1.0'"),
+        "tag -v should accept the signature it produced: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn test_tag_verify_rejects_unsigned_tag() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "plain annotated", "v1.0"], repo.path()),
+        "tag -m plain v1.0",
+    );
+
+    // An annotated-but-unsigned tag has no signature to verify.
+    let out = run_libra_command(&["tag", "-v", "v1.0"], repo.path());
+    assert!(
+        !out.status.success(),
+        "tag -v on an unsigned tag should fail, stdout: {} stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn test_tag_create_outputs_concise_confirmation() {
     let repo = create_committed_repo_via_cli();
 
@@ -796,6 +831,7 @@ async fn test_force_tag() {
         contains: None,
         no_contains: None,
         sign: false,
+        verify: false,
     })
     .await;
     let after = read_tag_oid("v1.0").await;
@@ -914,6 +950,7 @@ async fn test_delete_tag() {
         contains: None,
         no_contains: None,
         sign: false,
+        verify: false,
     })
     .await;
     assert_tag_absent("to-delete").await;
@@ -970,6 +1007,7 @@ async fn test_annotation_lines_tag() {
         contains: None,
         no_contains: None,
         sign: false,
+        verify: false,
     })
     .await;
 
@@ -1013,6 +1051,7 @@ async fn test_annotation_lines_tag() {
         contains: None,
         no_contains: None,
         sign: false,
+        verify: false,
     })
     .await;
 

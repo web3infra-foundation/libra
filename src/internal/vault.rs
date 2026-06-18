@@ -255,6 +255,79 @@ pub async fn pgp_sign(root_dir: &Path, unseal_key: &[u8], data: &[u8]) -> Result
     Ok(signature_hex)
 }
 
+/// Verify a hex-encoded PGP `signature` over `data` using the vault PGP key.
+/// Mirrors [`pgp_sign`] but calls the `keys/verify` endpoint and returns whether
+/// the signature is valid.
+pub async fn pgp_verify(
+    root_dir: &Path,
+    unseal_key: &[u8],
+    data: &[u8],
+    signature_hex: &str,
+) -> Result<bool> {
+    let vault = create_vault(root_dir).await?;
+
+    vault
+        .unseal(&[unseal_key])
+        .await
+        .map_err(|e| anyhow!("vault unseal failed: {e}"))?;
+
+    let root_token = recover_root_token(unseal_key).await?;
+    vault.set_token(&root_token);
+
+    let req_data = serde_json::json!({
+        "key_name": PGP_KEY_NAME,
+        "data": hex::encode(data),
+        "signature": signature_hex,
+    });
+
+    let resp = vault
+        .write(
+            Some(root_token),
+            format!("{PKI_MOUNT_PATH}/keys/verify"),
+            req_data.as_object().cloned(),
+        )
+        .await
+        .map_err(|e| anyhow!("vault pgp verify failed: {e}"))?;
+
+    // The PGP verify path returns `{valid: bool}`; the generic key path returns
+    // `{result: bool}`. Accept either.
+    let valid = resp
+        .and_then(|r| r.data)
+        .and_then(|d| {
+            d.get("valid")
+                .or_else(|| d.get("result"))
+                .and_then(|v| v.as_bool())
+        })
+        .ok_or_else(|| anyhow!("no verification result in vault verify response"))?;
+
+    vault
+        .seal()
+        .await
+        .map_err(|e| anyhow!("vault seal failed: {e}"))?;
+
+    Ok(valid)
+}
+
+/// Decode an ASCII-armored PGP signature block back into the hex-encoded
+/// signature bytes (the inverse of [`signature_to_armored`]). Used to verify a
+/// signature that was embedded in an annotated tag.
+pub fn armored_to_signature_hex(armored: &str) -> Result<String> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    let b64: String = armored
+        .lines()
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with("-----BEGIN PGP SIGNATURE-----")
+                && !line.starts_with("-----END PGP SIGNATURE-----")
+        })
+        .collect();
+    let sig_bytes = STANDARD
+        .decode(b64.as_bytes())
+        .context("failed to base64-decode armored signature")?;
+    Ok(hex::encode(sig_bytes))
+}
+
 /// Generate an SSH key pair in the vault for Git transport authentication.
 ///
 /// Configures the SSH CA, creates a role, and issues a certificate with a
