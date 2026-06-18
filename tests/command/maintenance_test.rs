@@ -302,8 +302,8 @@ fn test_maintenance_run_quiet() {
 
 #[test]
 
-/// Tests `maintenance run --task commit-graph` reports skip gracefully.
-/// Verifies handling of unsupported tasks.
+/// Tests `maintenance run --task commit-graph` runs the commit-graph task.
+/// On a repository with commits it now writes a real commit-graph file.
 fn test_maintenance_run_commit_graph_skipped() {
     let repo = create_committed_repo_via_cli();
 
@@ -313,13 +313,13 @@ fn test_maintenance_run_commit_graph_skipped() {
     );
     assert!(
         output.status.success(),
-        "commit-graph should pass (skipped), stderr: {}",
+        "commit-graph task should pass, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("skipped") || stdout.contains("not yet supported"),
-        "should indicate skipped, got: {stdout}"
+        stdout.contains("commit-graph"),
+        "should report the commit-graph task, got: {stdout}"
     );
 }
 
@@ -579,6 +579,79 @@ fn test_maintenance_dry_run_no_changes() {
     assert_eq!(
         before_count, after_count,
         "dry-run should not change object count"
+    );
+}
+
+/// `maintenance run --task prefetch` with no configured remotes succeeds and
+/// reports that it skipped (no network access required).
+#[test]
+fn test_maintenance_prefetch_no_remotes_skips() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["maintenance", "run", "--task", "prefetch"], repo.path());
+    assert!(
+        output.status.success(),
+        "prefetch with no remotes should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("prefetch"),
+        "output should mention the prefetch task, got: {stdout}"
+    );
+}
+
+/// `maintenance run --task prefetch --dry-run` with a configured remote reports
+/// the planned prefetch without performing any network fetch.
+#[test]
+fn test_maintenance_prefetch_dry_run_lists_remotes() {
+    let repo = create_committed_repo_via_cli();
+    run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+
+    let output = run_libra_command(
+        &["maintenance", "run", "--task", "prefetch", "--dry-run"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "prefetch dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("would prefetch") || stdout.contains("prefetch"),
+        "dry-run output should describe the prefetch, got: {stdout}"
+    );
+}
+
+/// `maintenance run --task commit-graph` writes a Git-compatible commit-graph
+/// file beginning with the `CGPH` signature.
+#[test]
+fn test_maintenance_commit_graph_writes_file() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(
+        &["maintenance", "run", "--task", "commit-graph"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "commit-graph task should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let commit_graph = repo.path().join(".libra/objects/info/commit-graph");
+    assert!(
+        commit_graph.exists(),
+        "commit-graph file should be written to objects/info"
+    );
+    let bytes = fs::read(&commit_graph).unwrap();
+    assert_eq!(
+        &bytes[0..4],
+        b"CGPH",
+        "commit-graph should start with the CGPH signature"
     );
 }
 

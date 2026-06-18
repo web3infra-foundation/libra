@@ -37,7 +37,7 @@ use serde::Serialize;
 use sha1::Digest;
 
 use crate::{
-    command::{load_object, log::get_reachable_commits},
+    command::{fetch::fetch_repository_safe, load_object, log::get_reachable_commits},
     internal::{
         branch::Branch,
         config::ConfigKv,
@@ -881,20 +881,69 @@ fn build_commit_graph(commits: &HashMap<ObjectHash, Commit>) -> Option<Vec<u8>> 
 
 async fn run_prefetch(
     _repo_path: &Path,
-    _dry_run: bool,
+    dry_run: bool,
     _quiet: bool,
-    _output: &OutputConfig,
+    output: &OutputConfig,
 ) -> CliResult<TaskResult> {
-    // Prefetch requires remote configuration. In the absence of configured remotes
-    // we report that the task is not applicable.
-    Ok(TaskResult {
+    let skip = |msg: &str| TaskResult {
         task: "prefetch".to_string(),
         success: true,
         objects_removed: 0,
         objects_packed: 0,
         refs_packed: 0,
         packs_repacked: 0,
-        message: "prefetch requires remote configuration; skipped".to_string(),
+        message: msg.to_string(),
+    };
+
+    // Prefetch every configured remote so later fetches transfer less. Unlike
+    // Git (which stages tips under `refs/prefetch/`), Libra reuses the normal
+    // fetch path and refreshes the standard remote-tracking refs — an
+    // intentional difference, since `maintenance` is an explicit, opt-in run.
+    let remotes = ConfigKv::all_remote_configs()
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to read remote configuration: {e}")))?;
+    if remotes.is_empty() {
+        return Ok(skip("no remotes configured; skipped"));
+    }
+    if dry_run {
+        return Ok(TaskResult {
+            refs_packed: remotes.len(),
+            message: format!("would prefetch from {} remote(s)", remotes.len()),
+            ..skip("")
+        });
+    }
+
+    let mut fetched = 0usize;
+    let mut failures = Vec::new();
+    for remote in remotes {
+        let name = remote.name.clone();
+        match fetch_repository_safe(remote, None, false, None, output).await {
+            Ok(()) => fetched += 1,
+            Err(e) => failures.push(format!("{name}: {e}")),
+        }
+    }
+
+    // Report a hard failure only when nothing could be prefetched at all.
+    if fetched == 0 && !failures.is_empty() {
+        return Ok(TaskResult {
+            success: false,
+            message: format!("prefetch failed: {}", failures.join("; ")),
+            ..skip("")
+        });
+    }
+    let message = if failures.is_empty() {
+        format!("prefetched {fetched} remote(s)")
+    } else {
+        format!(
+            "prefetched {fetched} remote(s); {} failed ({})",
+            failures.len(),
+            failures.join("; ")
+        )
+    };
+    Ok(TaskResult {
+        refs_packed: fetched,
+        message,
+        ..skip("")
     })
 }
 
