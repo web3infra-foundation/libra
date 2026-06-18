@@ -87,6 +87,11 @@ pub struct CatFileArgs {
     #[clap(short = 'e', group = "mode")]
     pub check_exist: bool,
 
+    /// Read object names from stdin (one per line) and print
+    /// "<sha> <type> <size>" for each, or "<input> missing" when unresolved.
+    #[clap(long = "batch-check", group = "mode")]
+    pub batch_check: bool,
+
     // ── AI object modes ─────────────────────────────────────────────────
     /// Pretty-print an AI object by ID across all stored AI types, or disambiguate with TYPE:ID.
     #[clap(long = "ai", value_name = "ID", group = "mode")]
@@ -328,6 +333,10 @@ pub async fn execute(args: CatFileArgs) {
 pub async fn execute_safe(args: CatFileArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
+    if args.batch_check {
+        return run_batch_check().await;
+    }
+
     if args.check_exist && !output.is_json() {
         execute(args).await;
         return Ok(());
@@ -468,6 +477,48 @@ async fn execute_with_output_contract(args: CatFileArgs, output: &OutputConfig) 
 fn invalid_object_name_error(object_ref: &str) -> CliError {
     CliError::fatal(format!("Not a valid object name {}", object_ref))
         .with_stable_code(StableErrorCode::CliInvalidTarget)
+}
+
+/// `cat-file --batch-check`: read object names from stdin (one per line) and
+/// print `<objectname> <type> <size>` for each, or `<input> missing` when the
+/// name does not resolve to a single object. Input is read fully before
+/// processing (not streamed); object specs are ASCII so UTF-8 decoding is safe.
+async fn run_batch_check() -> CliResult<()> {
+    use std::io::{Read, Write};
+
+    let storage = ClientStorage::init(path::objects());
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input).map_err(|e| {
+        CliError::fatal(format!("failed to read cat-file --batch-check input: {e}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for raw in input.lines() {
+        let spec = raw.trim();
+        if spec.is_empty() {
+            continue;
+        }
+        let line = match resolve_object_safe(spec, &storage).await {
+            Ok(hash) => match (storage.get_object_type(&hash), storage.get(&hash)) {
+                (Ok(obj_type), Ok(data)) => format!("{hash} {obj_type} {}", data.len()),
+                _ => format!("{spec} missing"),
+            },
+            Err(_) => format!("{spec} missing"),
+        };
+        match writeln!(out, "{line}") {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
+            Err(e) => {
+                return Err(CliError::fatal(format!(
+                    "failed to write cat-file --batch-check output: {e}"
+                ))
+                .with_stable_code(StableErrorCode::IoWriteFailed));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn resolve_object_safe(object_ref: &str, storage: &ClientStorage) -> CliResult<ObjectHash> {
