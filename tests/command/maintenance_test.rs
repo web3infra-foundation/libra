@@ -1800,6 +1800,146 @@ fn test_maintenance_incremental_repack_streams_objects() {
     }
 }
 
+#[test]
+
+/// Regression test: `collect_file_ref_hashes` must fail GC when a file-backed
+/// ref contains a non-hex object hash instead of silently skipping it.
+///
+/// Previously the helper used `if let Some(hash) = parse_object_hash(…)` and
+/// dropped the ref on parse failure, letting GC proceed with an incomplete
+/// root set. Now it returns a fatal error so that GC aborts rather than
+/// risking deletion of objects reachable only from a malformed ref.
+fn test_maintenance_gc_fails_on_malformed_ref_content() {
+    let repo = create_committed_repo_via_cli();
+
+    // Materialize a file-backed ref with bogus (non-hex) content.
+    let refs_heads = repo.path().join(".libra").join("refs").join("heads");
+    fs::create_dir_all(&refs_heads).unwrap();
+    fs::write(refs_heads.join("corrupt-branch"), "not-a-hex-hash\n").unwrap();
+
+    // Age all loose objects past the GC grace period.
+    let objects_dir = repo.path().join(".libra").join("objects");
+    let old_time = SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+    for entry in WalkDir::new(&objects_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
+        let file = fs::File::open(entry.path()).unwrap();
+        file.set_modified(old_time).unwrap();
+    }
+
+    // GC must fail when a ref file contains an invalid hash. Use JSON
+    // output so we can inspect the per-task error message.
+    let gc_output = run_libra_command(
+        &["--json", "maintenance", "run", "--task", "gc"],
+        repo.path(),
+    );
+    assert!(
+        !gc_output.status.success(),
+        "gc should fail when ref file is malformed, but exited 0"
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&gc_output.stdout).expect("valid json");
+    let tasks = json
+        .get("data")
+        .and_then(|d| d.get("tasks"))
+        .expect("tasks array")
+        .as_array()
+        .expect("tasks is array");
+    let gc_task = tasks
+        .iter()
+        .find(|t| t.get("task").and_then(|v| v.as_str()) == Some("gc"))
+        .expect("gc task in results");
+    assert_eq!(
+        gc_task.get("success"),
+        Some(&serde_json::Value::Bool(false)),
+        "gc task must report success: false, got: {gc_task}"
+    );
+    let msg = gc_task
+        .get("message")
+        .and_then(|v| v.as_str())
+        .expect("gc task message");
+    assert!(
+        msg.contains("corrupt-branch")
+            && (msg.contains("does not contain a valid object hash")
+                || msg.contains("failed to read loose ref")),
+        "gc error message must mention the malformed ref, got: {msg}"
+    );
+}
+
+#[test]
+
+/// Regression test: `maintenance run --task pack-refs` must successfully
+/// replace an existing `packed-refs` file on all platforms.
+///
+/// On Unix `std::fs::rename` atomically replaces the destination file, but
+/// on Windows the rename fails when the destination already exists. After
+/// the fix the old `packed-refs` is removed before the rename so that a
+/// second `pack-refs` run succeeds on Windows-supported installs.
+fn test_maintenance_pack_refs_replaces_existing_file() {
+    let repo = create_committed_repo_via_cli();
+    let main_hash = rev_parse(repo.path(), "main");
+
+    // Pre-populate packed-refs as if a previous run already wrote it.
+    let libra_dir = repo.path().join(".libra");
+    let packed_refs_path = libra_dir.join("packed-refs");
+    fs::write(
+        &packed_refs_path,
+        "# packed-refs with peeled tags\ndeadbeef refs/heads/legacy\n",
+    )
+    .unwrap();
+
+    // Create a new loose ref to be packed.
+    let refs_heads = libra_dir.join("refs").join("heads");
+    fs::create_dir_all(&refs_heads).unwrap();
+    fs::write(refs_heads.join("main"), format!("{main_hash}\n")).unwrap();
+
+    // First pack-refs run — succeeds, legacy entry persists.
+    let output1 = run_libra_command(&["maintenance", "run", "--task", "pack-refs"], repo.path());
+    assert!(
+        output1.status.success(),
+        "first pack-refs should pass, stderr: {}",
+        String::from_utf8_lossy(&output1.stderr)
+    );
+
+    let content1 = fs::read_to_string(&packed_refs_path).unwrap();
+    assert!(
+        content1.contains("refs/heads/legacy"),
+        "legacy entry must be preserved after first pack-refs, got: {content1}"
+    );
+    assert!(
+        content1.contains("refs/heads/main"),
+        "main entry must be present after first pack-refs, got: {content1}"
+    );
+
+    // Second pack-refs run — must succeed even though packed-refs already
+    // exists (regression test for Windows rename failure).
+    let output2 = run_libra_command(&["maintenance", "run", "--task", "pack-refs"], repo.path());
+    assert!(
+        output2.status.success(),
+        "second pack-refs must pass when packed-refs already exists, stderr: {}",
+        String::from_utf8_lossy(&output2.stderr)
+    );
+
+    // Both entries must still be present after the second run.
+    let content2 = fs::read_to_string(&packed_refs_path).unwrap();
+    assert!(
+        content2.contains("refs/heads/legacy"),
+        "legacy entry must survive second pack-refs, got: {content2}"
+    );
+    assert!(
+        content2.contains("refs/heads/main"),
+        "main entry must survive second pack-refs, got: {content2}"
+    );
+
+    // No stale temp file must be left behind.
+    assert!(
+        !libra_dir.join("packed-refs.tmp").exists(),
+        "temporary packed-refs file must be cleaned up"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------

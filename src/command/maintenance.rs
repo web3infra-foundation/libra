@@ -645,6 +645,16 @@ async fn run_pack_refs(
         }
     }
 
+    // Install the new packed-refs. On Unix `rename` atomically replaces
+    // an existing destination; on Windows `rename` fails when the
+    // destination exists. Remove the old file first so that the install
+    // works portably across platforms.
+    if packed_refs_path.exists() {
+        fs::remove_file(&packed_refs_path).map_err(|e| {
+            let _ = fs::remove_file(&temp_path);
+            CliError::fatal(format!("failed to remove old packed-refs: {e}"))
+        })?;
+    }
     fs::rename(&temp_path, &packed_refs_path).map_err(|e| {
         let _ = fs::remove_file(&temp_path);
         CliError::fatal(format!("failed to install packed-refs: {e}"))
@@ -1489,11 +1499,26 @@ fn collect_file_ref_hashes(dir: &Path, hashes: &mut Vec<ObjectHash>) -> io::Resu
             {
                 continue;
             }
-            if let Ok(content) = fs::read_to_string(&path)
-                && let Some(hash) = parse_object_hash(content.trim())
-            {
-                hashes.push(hash);
-            }
+            // Fail loudly when a ref file cannot be read or does not
+            // contain a valid object hash. Silently skipping would let
+            // GC build an incomplete root set and potentially delete
+            // objects reachable only from this ref.
+            let content = fs::read_to_string(&path).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("failed to read loose ref {}: {e}", path.display()),
+                )
+            })?;
+            let hash = parse_object_hash(content.trim()).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "loose ref {} does not contain a valid object hash",
+                        path.display()
+                    ),
+                )
+            })?;
+            hashes.push(hash);
         }
     }
     Ok(())
@@ -1654,8 +1679,16 @@ async fn create_pack_from_loose_objects(
     pack_path: &Path,
 ) -> io::Result<usize> {
     // Stage 1: stream object entries to a temp file so we know the count
-    // before writing the pack header.
-    let temp_dir = tempfile::tempdir()?;
+    // before writing the pack header. The temp dir is placed inside the
+    // pack directory so that the final rename stays on the same filesystem
+    // and avoids cross-device errors when /tmp is a separate mount.
+    let pack_parent = pack_path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("pack path has no parent: {}", pack_path.display()),
+        )
+    })?;
+    let temp_dir = tempfile::tempdir_in(pack_parent)?;
     let entries_path = temp_dir.path().join("entries.bin");
     let mut entries_file = fs::File::create(&entries_path)?;
     let mut count: u32 = 0;
@@ -1785,7 +1818,16 @@ fn create_consolidated_pack(
     // Stage 1: stream object entries to a temp file. We cannot write the pack
     // header first because the object count is only known after deduplication,
     // and the checksum must hash the header in its natural byte order.
-    let temp_dir = tempfile::tempdir()?;
+    // The temp dir is placed inside the pack directory so that the final
+    // rename stays on the same filesystem and avoids cross-device errors
+    // when /tmp is a separate mount.
+    let pack_parent = pack_path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("pack path has no parent: {}", pack_path.display()),
+        )
+    })?;
+    let temp_dir = tempfile::tempdir_in(pack_parent)?;
     let entries_path = temp_dir.path().join("entries.bin");
     let entries_file = fs::File::create(&entries_path)?;
 
