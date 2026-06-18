@@ -76,6 +76,12 @@ pub struct SwitchArgs {
         help = "Set upstream tracking when switching to remote branch"
     )]
     pub track: bool,
+
+    /// Proceed even with local changes, discarding them when switching to a
+    /// different commit (untracked files that would be overwritten are still
+    /// guarded).
+    #[clap(short = 'f', long = "force", visible_alias = "discard-changes")]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -508,6 +514,22 @@ fn target_index_for_commit(commit_id: &ObjectHash) -> Result<Index, SwitchError>
     Ok(index)
 }
 
+/// Working-tree precondition before switching to `target_commit`. Without
+/// `--force` the worktree must be clean relative to the target; with `--force`
+/// local (tracked) changes are allowed to be discarded and only untracked files
+/// that the target would overwrite are guarded.
+async fn ensure_switch_clean_or_force(
+    force: bool,
+    target_commit: ObjectHash,
+    output: &OutputConfig,
+) -> Result<(), SwitchError> {
+    if force {
+        ensure_no_untracked_overwrite(target_commit)
+    } else {
+        ensure_clean_status_for_commit(target_commit, output).await
+    }
+}
+
 pub(crate) fn ensure_no_untracked_overwrite(target_commit: ObjectHash) -> Result<(), SwitchError> {
     let current_index =
         Index::load(path::index()).map_err(|err| SwitchError::StatusCheck(err.to_string()))?;
@@ -551,13 +573,14 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
         orphan,
         detach,
         track,
+        force,
     } = args;
     let (previous_branch, previous_commit) = current_switch_state().await;
 
     if track {
         let target = branch.ok_or(SwitchError::MissingTrackTarget)?;
         let tracked_target = resolve_tracked_remote_target(&target).await?;
-        ensure_clean_status_for_commit(tracked_target.commit, output).await?;
+        ensure_switch_clean_or_force(force, tracked_target.commit, output).await?;
 
         let tracked = switch_to_tracked_remote_branch(tracked_target, output).await?;
         return Ok(SwitchOutput {
@@ -578,7 +601,9 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
     if let Some(new_branch_name) = create {
         validate_new_branch_request(&new_branch_name, branch.as_deref(), false).await?;
         match resolve_create_switch_target(branch.as_deref()).await? {
-            Some(target_commit) => ensure_clean_status_for_commit(target_commit, output).await?,
+            Some(target_commit) => {
+                ensure_switch_clean_or_force(force, target_commit, output).await?
+            }
             None => ensure_clean_status(output).await?,
         }
 
@@ -620,7 +645,9 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
                 })?;
         }
         match resolve_create_switch_target(branch.as_deref()).await? {
-            Some(target_commit) => ensure_clean_status_for_commit(target_commit, output).await?,
+            Some(target_commit) => {
+                ensure_switch_clean_or_force(force, target_commit, output).await?
+            }
             None => ensure_clean_status(output).await?,
         }
         branch::create_branch_safe(new_branch_name.clone(), branch).await?;
@@ -694,7 +721,7 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
         let commit_base = get_commit_base(&target)
             .await
             .map_err(|e| SwitchError::CommitResolve(e.to_string()))?;
-        ensure_clean_status_for_commit(commit_base, output).await?;
+        ensure_switch_clean_or_force(force, commit_base, output).await?;
 
         let commit = switch_to_commit(commit_base, output).await?;
         return Ok(SwitchOutput {
@@ -724,7 +751,7 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
         });
     }
 
-    ensure_clean_status_for_commit(target_branch.commit, output).await?;
+    ensure_switch_clean_or_force(force, target_branch.commit, output).await?;
 
     let commit = switch_to_resolved_branch(target_branch, output).await?;
     Ok(SwitchOutput {

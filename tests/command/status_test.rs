@@ -1430,6 +1430,9 @@ async fn test_status_show_stash_with_existing_stash() {
 
     stash::execute(Stash::Push {
         message: Some("test stash".to_string()),
+        include_untracked: false,
+        all: false,
+        keep_index: false,
     })
     .await;
 
@@ -1627,6 +1630,7 @@ async fn test_status_branch_detached_head() {
         orphan: None,
         detach: true,
         track: false,
+        force: false,
     })
     .await;
 

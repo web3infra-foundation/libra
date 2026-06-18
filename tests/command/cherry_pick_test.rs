@@ -80,6 +80,7 @@ async fn test_basic_cherry_pick() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
     println!("Switched to new branch 'feature'.");
@@ -158,6 +159,7 @@ async fn test_basic_cherry_pick() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
     println!("Switched back to master.");
@@ -298,6 +300,7 @@ async fn test_cherry_pick_with_commit() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -341,6 +344,7 @@ async fn test_cherry_pick_with_commit() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -433,6 +437,7 @@ async fn test_cherry_pick_multiple_commits() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -504,6 +509,7 @@ async fn test_cherry_pick_multiple_commits() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -759,6 +765,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
     fs::write("feature.txt", "feature").unwrap();
@@ -799,6 +806,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
     let head_before = Head::current_commit().await.unwrap();

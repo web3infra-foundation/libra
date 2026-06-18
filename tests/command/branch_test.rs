@@ -855,6 +855,7 @@ async fn test_rename_current_branch() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -1145,6 +1146,7 @@ async fn test_branch_delete_safe() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -1172,6 +1174,7 @@ async fn test_branch_delete_safe() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -1208,6 +1211,7 @@ async fn test_branch_delete_safe() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -1218,6 +1222,7 @@ async fn test_branch_delete_safe() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -1340,6 +1345,7 @@ async fn test_branch_contains_commit_filter() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -1357,6 +1363,7 @@ async fn test_branch_contains_commit_filter() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 

@@ -753,6 +753,7 @@ async fn test_basic_rebase() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -821,6 +822,7 @@ async fn test_basic_rebase() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -860,6 +862,7 @@ async fn test_basic_rebase() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -956,6 +959,7 @@ async fn test_rebase_preserves_untracked_files() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -995,6 +999,7 @@ async fn test_rebase_preserves_untracked_files() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -1034,6 +1039,7 @@ async fn test_rebase_preserves_untracked_files() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -1133,6 +1139,7 @@ async fn test_rebase_already_up_to_date() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -1194,6 +1201,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -1233,6 +1241,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -1272,6 +1281,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -1368,6 +1378,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
     fs::write(temp_path.path().join("feature.txt"), "feature").unwrap();
@@ -1407,6 +1418,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
     fs::write(temp_path.path().join("master.txt"), "main").unwrap();
@@ -1446,6 +1458,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
     execute(RebaseArgs {
@@ -1661,6 +1674,7 @@ async fn test_rebase_with_conflict_and_abort() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -1704,6 +1718,7 @@ async fn test_rebase_with_conflict_and_abort() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -1743,6 +1758,7 @@ async fn test_rebase_with_conflict_and_abort() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -1858,6 +1874,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
     fs::write(&file_path, &feature_bytes).unwrap();
@@ -1896,6 +1913,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
     fs::write(&file_path, &master_bytes).unwrap();
@@ -1934,6 +1952,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
     execute(RebaseArgs {
@@ -2025,6 +2044,7 @@ async fn test_rebase_with_conflict_and_skip() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -2102,6 +2122,7 @@ async fn test_rebase_with_conflict_and_skip() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -2141,6 +2162,7 @@ async fn test_rebase_with_conflict_and_skip() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -2227,6 +2249,7 @@ async fn test_rebase_with_conflict_and_continue() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -2270,6 +2293,7 @@ async fn test_rebase_with_conflict_and_continue() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -2309,6 +2333,7 @@ async fn test_rebase_with_conflict_and_continue() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -2431,6 +2456,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -2533,6 +2559,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -2572,6 +2599,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -2675,6 +2703,7 @@ async fn test_rebase_state_persistence() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -2714,6 +2743,7 @@ async fn test_rebase_state_persistence() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -2753,6 +2783,7 @@ async fn test_rebase_state_persistence() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -2857,6 +2888,7 @@ async fn test_rebase_fast_forward_branch_behind() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -2868,6 +2900,7 @@ async fn test_rebase_fast_forward_branch_behind() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -2909,6 +2942,7 @@ async fn test_rebase_fast_forward_branch_behind() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -2981,6 +3015,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -2992,6 +3027,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -3031,6 +3067,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -3106,6 +3143,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -3117,6 +3155,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -3156,6 +3195,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -3231,6 +3271,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -3270,6 +3311,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -3309,6 +3351,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -3391,6 +3434,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -3431,6 +3475,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -3470,6 +3515,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -3550,6 +3596,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -3608,6 +3655,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -3647,6 +3695,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -3726,6 +3775,7 @@ async fn test_rebase_continue_requires_resolution() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -3765,6 +3815,7 @@ async fn test_rebase_continue_requires_resolution() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 
@@ -3804,6 +3855,7 @@ async fn test_rebase_continue_requires_resolution() {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     })
     .await;
 

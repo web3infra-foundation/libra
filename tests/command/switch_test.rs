@@ -297,6 +297,7 @@ async fn test_switch_function() {
             orphan: None,
             detach: false,
             track: false,
+            force: false,
         };
         switch::execute(args).await;
         let head = Head::current().await;
@@ -350,6 +351,7 @@ async fn test_switch_function() {
             orphan: None,
             detach: true,
             track: false,
+            force: false,
         };
         switch::execute(args).await;
         let head = Head::current().await;
@@ -374,6 +376,7 @@ async fn test_switch_function() {
             orphan: None,
             detach: false,
             track: false,
+            force: false,
         };
         switch::execute(args).await;
         let head = Head::current().await;
@@ -500,6 +503,7 @@ async fn test_switch_track_sets_upstream() {
         orphan: None,
         detach: false,
         track: true,
+        force: false,
     };
     switch::execute(args).await;
 
@@ -787,6 +791,7 @@ async fn switch_to_detach(branch_test: String) -> String {
         orphan: None,
         detach: true,
         track: false,
+        force: false,
     };
     switch::execute(args).await;
     let head = Head::current().await;
@@ -806,6 +811,51 @@ async fn switch_to_branch(branch_test: String) {
         orphan: None,
         detach: false,
         track: false,
+        force: false,
     };
     switch::execute(args).await;
+}
+
+#[test]
+#[serial]
+fn test_switch_force_discards_local_changes() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    std::fs::write(p.join("tracked.txt"), "v1\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], p), "add v1");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "v1", "--no-verify"], p),
+        "commit v1",
+    );
+
+    // `other` advances tracked.txt to v2; main stays at v1.
+    assert_cli_success(&run_libra_command(&["branch", "other"], p), "branch other");
+    assert_cli_success(&run_libra_command(&["switch", "other"], p), "switch other");
+    std::fs::write(p.join("tracked.txt"), "v2\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], p), "add v2");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "v2", "--no-verify"], p),
+        "commit v2",
+    );
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+
+    // Dirty the tracked file on main.
+    std::fs::write(p.join("tracked.txt"), "dirty\n").unwrap();
+
+    // A plain switch is refused while dirty (would clobber local changes)...
+    let blocked = run_libra_command(&["switch", "other"], p);
+    assert!(
+        !blocked.status.success(),
+        "dirty switch should be refused without -f"
+    );
+
+    // ...but -f discards the local change and switches to the target.
+    let forced = run_libra_command(&["switch", "-f", "other"], p);
+    assert_cli_success(&forced, "switch -f other");
+    assert_eq!(
+        std::fs::read_to_string(p.join("tracked.txt")).unwrap(),
+        "v2\n",
+        "-f should restore the target branch's content"
+    );
 }

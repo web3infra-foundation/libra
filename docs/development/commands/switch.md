@@ -45,8 +45,9 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/switch.md`。
-- Synopsis：`libra switch [-c|--create <CREATE>] [-C|--force-create <FORCE_CREATE>] [--orphan <ORPHAN>] [-d|--detach] [-t|--track] [<BRANCH>]`。
-- 公开参数/子命令包括：`<branch>`、`-c, --create <CREATE>`、`-C, --force-create <FORCE_CREATE>`、`--orphan <ORPHAN>`、`-d, --detach`、`-t, --track`。
+- Synopsis：`libra switch [-c|--create <CREATE>] [-C|--force-create <FORCE_CREATE>] [--orphan <ORPHAN>] [-d|--detach] [-t|--track] [-f|--force] [<BRANCH>]`。
+- 公开参数/子命令包括：`<branch>`、`-c, --create <CREATE>`、`-C, --force-create <FORCE_CREATE>`、`--orphan <ORPHAN>`、`-d, --detach`、`-t, --track`、`-f, --force`（别名 `--discard-changes`）。
+- `-f, --force`：切换到不同提交时丢弃本地（已跟踪）改动而非因 dirty 工作区报错；仍通过 `ensure_no_untracked_overwrite` 守卫会被覆盖的未跟踪文件。实现为 `ensure_switch_clean_or_force(force, target, output)`，作用于会改变工作树的 5 个 `_for_commit` 预检点（track/create 带 start-point/force-create 带 start-point/detach/普通分支切换）。**部分实现差异**：不改变树的路径（`-c` 无 start-point、`--orphan`）仍要求干净工作区。
 - `--track` 现已提供 Git 的 `-t` 短别名；Libra 仅支持布尔形式（设置远端上游），不支持 Git 的 `-t (direct|inherit)` 模式参数（有意差异）。
 
 
