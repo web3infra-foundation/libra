@@ -214,6 +214,10 @@ pub struct LogArgs {
     #[clap(short = 'G', value_name = "REGEX")]
     pub pickaxe_regex: Option<String>,
 
+    /// Skip the first N matching commits before printing.
+    #[clap(long, value_name = "N")]
+    pub skip: Option<usize>,
+
     /// Show commits in reverse order (oldest first).
     #[clap(long)]
     pub reverse: bool,
@@ -1034,6 +1038,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         &filter,
         &path_filters,
         max_output_number,
+        args.skip.unwrap_or(0),
         reuse_changed_files,
     )
     .await?;
@@ -1254,6 +1259,7 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     let ref_commits = create_reference_commit_map().await;
     let mut commits = Vec::new();
     let mut total = 0usize;
+    let skip = args.skip.unwrap_or(0);
 
     for commit in reachable_commits {
         if !include_total && commits.len() >= max_output_number {
@@ -1269,6 +1275,10 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
         }
 
         total += 1;
+        // `--skip N`: drop the first N matching commits from the output.
+        if total <= skip {
+            continue;
+        }
         if commits.len() >= max_output_number {
             continue;
         }
@@ -1328,9 +1338,11 @@ async fn select_log_commits(
     filter: &CommitFilter,
     path_filters: &[PathBuf],
     max_output_number: usize,
+    skip: usize,
     keep_changed_files: bool,
 ) -> Result<Vec<SelectedLogCommit>, CliError> {
     let mut selected = Vec::new();
+    let mut skipped = 0usize;
 
     for commit in reachable_commits {
         if selected.len() >= max_output_number {
@@ -1347,6 +1359,12 @@ async fn select_log_commits(
         };
 
         if !filter.matches(&commit, cached_changes.as_deref()).await? {
+            continue;
+        }
+
+        // `--skip N`: drop the first N matching commits before collecting output.
+        if skipped < skip {
+            skipped += 1;
             continue;
         }
 

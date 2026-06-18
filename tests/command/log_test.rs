@@ -212,6 +212,42 @@ fn test_log_pickaxe_g_matches_diff_line_regex() {
     );
 }
 
+#[test]
+fn test_log_skip_omits_leading_commits() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    for tag in ["SK_A", "SK_B", "SK_C"] {
+        let file = format!("{tag}.txt");
+        std::fs::write(repo.path().join(&file), "x\n").unwrap();
+        assert_cli_success(
+            &run_libra_command(&["add", file.as_str()], repo.path()),
+            "add skip file",
+        );
+        assert_cli_success(
+            &run_libra_command(&["commit", "-m", tag, "--no-verify"], repo.path()),
+            "commit skip",
+        );
+    }
+
+    // Newest is SK_C; --skip 1 -n 1 should show only the 2nd-newest (SK_B).
+    let out = run_libra_command(&["log", "--skip", "1", "-n", "1", "--oneline"], repo.path());
+    assert_cli_success(&out, "log --skip 1 -n 1");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("SK_B"),
+        "--skip 1 -n 1 should show the 2nd-newest commit:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("SK_C"),
+        "--skip 1 should omit the newest commit:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("SK_A"),
+        "-n 1 should not reach older commits:\n{stdout}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_log_corrupt_head_reference_returns_repo_corrupt() {
