@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 author summary、email、count sorting、时间过滤、单 revision、`-c`/`--committer` 分组、`--no-merges`、`--top`/`--min-count`/`--reverse` 已支持；`--group=trailer:<key>`、`--format`、stdin 输入、`--author` 过滤和 `-w` 换行宽度尚未公开。
+- 兼容级别：`partial`。基础 author summary、email、count sorting、时间过滤、单 revision、`-c`/`--committer` 分组、`--no-merges`、`--top`/`--min-count`/`--reverse`、`--author` 过滤已支持；`--group=trailer:<key>`、`--format`、stdin 输入和 `-w` 换行宽度尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -46,7 +46,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/shortlog.md`。
 - Synopsis：`libra shortlog [<revision>] [-n] [-s] [-e] [--since <date>] [--until <date>]`。
-- 公开参数/子命令包括：`-n, --numbered`、`-s, --summary`、`-e, --email`、`-c, --committer`、`--no-merges`、`--top <N>`、`--min-count <N>`、`--reverse`、`--since <DATE>`、`--until <DATE>`、`[<revision>]`。
+- 公开参数/子命令包括：`-n, --numbered`、`-s, --summary`、`-e, --email`、`-c, --committer`、`--no-merges`、`--top <N>`、`--min-count <N>`、`--reverse`、`--since <DATE>`、`--until <DATE>`、`--author <PATTERN>`、`[<revision>]`。
 
 
 ## 还未实现的功能
@@ -56,7 +56,7 @@ flowchart TD
 | 兼容差异项 | 分组方式 | 原始对照：不支持；相关参数/替代：--group=author\|committer\|trailer:<key>；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 格式化输出 | 原始对照：不支持；相关参数/替代：--format=<format>；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 管道输入 | 原始对照：不支持；相关参数/替代：从 stdin 读取管道输入；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 作者过滤 | 原始对照：不支持；相关参数/替代：--author=<pattern>；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | 作者过滤 `--author <PATTERN>` | 聚合前按作者 `name <email>` 的大小写不敏感子串过滤（即使配合 `-c` 也按作者过滤）。带 `author_identity_matches` 单元测试。 |
 | 兼容差异项 | 换行宽度 | 原始对照：不支持；相关参数/替代：-w[<width>[,<indent1>[,<indent2>]]]；当前说明：`ShortlogArgs` 当前无 `width` 字段。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求

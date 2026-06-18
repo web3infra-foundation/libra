@@ -102,6 +102,11 @@ pub struct ShortlogArgs {
     #[clap(long = "until", value_name = "DATE")]
     pub until: Option<String>,
 
+    /// Only summarize commits whose author matches PATTERN (case-insensitive
+    /// substring of `name <email>`). Filters on author even with `-c`.
+    #[clap(long = "author", value_name = "PATTERN")]
+    pub author: Option<String>,
+
     /// Group commits by committer identity instead of author.
     #[clap(short = 'c', long = "committer")]
     pub committer: bool,
@@ -233,6 +238,15 @@ async fn run_shortlog(args: &ShortlogArgs) -> CliResult<ShortlogOutput> {
     // aggregation so the counts and totals reflect only non-merge commits.
     if args.no_merges {
         commits.retain(|commit| commit.parent_commit_ids.len() <= 1);
+    }
+
+    // `--author=<pattern>` keeps only commits whose author identity contains the
+    // pattern (case-insensitive), matched before aggregation.
+    if let Some(pattern) = &args.author {
+        let needle = pattern.to_lowercase();
+        commits.retain(|commit| {
+            author_identity_matches(&commit.author.name, &commit.author.email, &needle)
+        });
     }
 
     Ok(aggregate_shortlog(args, &revision, commits))
@@ -377,6 +391,14 @@ async fn get_commits_for_shortlog(
     Ok(commits)
 }
 
+/// Case-insensitive substring match of a `shortlog --author` pattern against an
+/// identity rendered as `name <email>`. `needle_lowercase` must already be
+/// lowercased by the caller.
+fn author_identity_matches(name: &str, email: &str, needle_lowercase: &str) -> bool {
+    let identity = format!("{} <{}>", name.to_lowercase(), email.to_lowercase());
+    identity.contains(needle_lowercase)
+}
+
 fn passes_filter(commit: &Commit, since_ts: Option<i64>, until_ts: Option<i64>) -> bool {
     let commit_ts = commit.committer.timestamp as i64;
 
@@ -449,6 +471,26 @@ mod tests {
 
         let args = ShortlogArgs::parse_from(["shortlog", "--since", "2024-01-01"]);
         assert!(args.since.is_some());
+
+        let args = ShortlogArgs::parse_from(["shortlog", "--author", "Alice"]);
+        assert_eq!(args.author.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn test_author_identity_matches() {
+        // Caller lowercases the needle; match is a case-insensitive substring
+        // over "name <email>".
+        assert!(author_identity_matches(
+            "Alice Smith",
+            "alice@x.com",
+            "alice"
+        ));
+        assert!(author_identity_matches(
+            "Bob",
+            "bob@example.com",
+            "example.com"
+        ));
+        assert!(!author_identity_matches("Carol", "carol@x.com", "alice"));
     }
 
     #[test]
