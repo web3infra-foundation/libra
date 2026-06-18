@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`-t` / `-s` / `-p` / `-e` / `--batch-check` 已支持；`--batch`（带内容输出）、`--batch-command`、`--batch-all-objects`、batch 格式串和 `-e` 的 JSON/machine 输出尚未公开。
+- 兼容级别：`partial`。`-t` / `-s` / `-p` / `-e` / `--batch-check` / `--batch`（带内容输出）已支持；`--batch-command`、`--batch-all-objects`、batch 格式串和 `-e` 的 JSON/machine 输出尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -48,7 +48,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/cat-file.md`。
 - Synopsis：`libra cat-file [OPTIONS] [OBJECT]`。
-- 公开参数/子命令包括：`-t`、`-s`、`-p`、`-e`、`--batch-check`、`--ai <ID>`、`--ai-type <ID>`、`--ai-list <TYPE>`、`--ai-list-types`、`[OBJECT]`。
+- 公开参数/子命令包括：`-t`、`-s`、`-p`、`-e`、`--batch-check`、`--batch`、`--ai <ID>`、`--ai-type <ID>`、`--ai-list <TYPE>`、`--ai-list-types`、`[OBJECT]`。`--batch-check` 与 `--batch` 共享 `run_batch(include_content)`：前者仅 header，后者 header + raw 内容 + 换行；每个对象单次缓冲写出以统一处理 BrokenPipe。
 
 
 ## 还未实现的功能
@@ -58,7 +58,8 @@ flowchart TD
 | 兼容矩阵说明 | `-e` 已支持，但不支持 JSON / machine 输出 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 | 功能缺口 | cat-file -e does not support --json / --machine (it is purely an exit-code check) | 后续实现时需要同步源码、测试和兼容矩阵。 |
 | ✅ 已实现（部分） | Batch mode `--batch-check` | 从 stdin 逐行读对象名，输出 `<sha> <type> <size>`，无法解析时输出 `<input> missing`；默认格式（无 `=<format>` 自定义）。带 stdin 集成测试。 |
-| 兼容差异项 | Batch mode（其余） | 原始对照：未实现；相关参数/替代：`--batch`（带内容）、`--batch-command`、`--batch-all-objects`、batch 格式串；当前说明：`--batch` 需 raw 对象内容流式输出 + 二进制处理，延后。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现（部分） | Batch mode `--batch` | 从 stdin 逐行读对象名，输出 `<sha> <type> <size>` + raw 对象内容 + 换行（二进制安全，单次缓冲写出），无法解析时输出 `<input> missing`；复用 `run_batch(include_content)`。带 stdin 集成测试。 |
+| 兼容差异项 | Batch mode（其余） | 原始对照：未实现；相关参数/替代：`--batch-command`、`--batch-all-objects`、batch 格式串；当前说明：延后。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 不支持 argument combination | 当前状态：LBR-CLI-002；Git/相关参数：129。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求

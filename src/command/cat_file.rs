@@ -92,6 +92,11 @@ pub struct CatFileArgs {
     #[clap(long = "batch-check", group = "mode")]
     pub batch_check: bool,
 
+    /// Read object names from stdin (one per line) and print
+    /// "<sha> <type> <size>\n<contents>\n" for each, or "<input> missing".
+    #[clap(long = "batch", group = "mode")]
+    pub batch: bool,
+
     // ── AI object modes ─────────────────────────────────────────────────
     /// Pretty-print an AI object by ID across all stored AI types, or disambiguate with TYPE:ID.
     #[clap(long = "ai", value_name = "ID", group = "mode")]
@@ -334,7 +339,11 @@ pub async fn execute_safe(args: CatFileArgs, output: &OutputConfig) -> CliResult
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     if args.batch_check {
-        return run_batch_check().await;
+        return run_batch(false).await;
+    }
+
+    if args.batch {
+        return run_batch(true).await;
     }
 
     if args.check_exist && !output.is_json() {
@@ -483,13 +492,24 @@ fn invalid_object_name_error(object_ref: &str) -> CliError {
 /// print `<objectname> <type> <size>` for each, or `<input> missing` when the
 /// name does not resolve to a single object. Input is read fully before
 /// processing (not streamed); object specs are ASCII so UTF-8 decoding is safe.
-async fn run_batch_check() -> CliResult<()> {
+/// Shared driver for `--batch-check` (`include_content = false`) and `--batch`
+/// (`include_content = true`). Reads object names from stdin (one per line) and
+/// emits, per object, a `<sha> <type> <size>` header — followed by the raw
+/// object contents and a trailing newline when `include_content` is set — or
+/// `<input> missing` when the name does not resolve. Each object's output is
+/// buffered and written once so the BrokenPipe early-exit is handled uniformly.
+async fn run_batch(include_content: bool) -> CliResult<()> {
     use std::io::{Read, Write};
 
+    let mode = if include_content {
+        "--batch"
+    } else {
+        "--batch-check"
+    };
     let storage = ClientStorage::init(path::objects());
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).map_err(|e| {
-        CliError::fatal(format!("failed to read cat-file --batch-check input: {e}"))
+        CliError::fatal(format!("failed to read cat-file {mode} input: {e}"))
             .with_stable_code(StableErrorCode::IoReadFailed)
     })?;
 
@@ -500,19 +520,26 @@ async fn run_batch_check() -> CliResult<()> {
         if spec.is_empty() {
             continue;
         }
-        let line = match resolve_object_safe(spec, &storage).await {
+        let mut buf: Vec<u8> = Vec::new();
+        match resolve_object_safe(spec, &storage).await {
             Ok(hash) => match (storage.get_object_type(&hash), storage.get(&hash)) {
-                (Ok(obj_type), Ok(data)) => format!("{hash} {obj_type} {}", data.len()),
-                _ => format!("{spec} missing"),
+                (Ok(obj_type), Ok(data)) => {
+                    buf.extend_from_slice(format!("{hash} {obj_type} {}\n", data.len()).as_bytes());
+                    if include_content {
+                        buf.extend_from_slice(&data);
+                        buf.push(b'\n');
+                    }
+                }
+                _ => buf.extend_from_slice(format!("{spec} missing\n").as_bytes()),
             },
-            Err(_) => format!("{spec} missing"),
-        };
-        match writeln!(out, "{line}") {
+            Err(_) => buf.extend_from_slice(format!("{spec} missing\n").as_bytes()),
+        }
+        match out.write_all(&buf) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
             Err(e) => {
                 return Err(CliError::fatal(format!(
-                    "failed to write cat-file --batch-check output: {e}"
+                    "failed to write cat-file {mode} output: {e}"
                 ))
                 .with_stable_code(StableErrorCode::IoWriteFailed));
             }
