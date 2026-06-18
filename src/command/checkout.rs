@@ -57,6 +57,11 @@ pub struct CheckoutArgs {
     #[clap(short = 'B', group = "sub")]
     force_new_branch: Option<String>,
 
+    /// Proceed even when the working tree/index differs from HEAD, discarding
+    /// local modifications to tracked files. Untracked files are still preserved.
+    #[clap(short = 'f', long = "force")]
+    force: bool,
+
     /// Paths to restore after an explicit `--` separator
     #[clap(last = true, value_name = "pathspec")]
     pathspec: Vec<String>,
@@ -320,9 +325,23 @@ async fn run_checkout(
         None
     };
 
-    let clean_status = match target_commit {
-        Some(target_commit) => switch::ensure_clean_status_for_commit(target_commit, output).await,
-        None => switch::ensure_clean_status(output).await,
+    let clean_status = if args.force {
+        // `-f` discards local modifications to tracked files — `restore_to_commit`
+        // overwrites them below. We deliberately do NOT skip the whole gate:
+        // `ensure_clean_status*` returns only the first problem, so we still run
+        // the untracked-overwrite check independently to avoid silently clobbering
+        // an untracked file the target would write over.
+        match target_commit {
+            Some(target_commit) => switch::ensure_no_untracked_overwrite(target_commit),
+            None => Ok(()),
+        }
+    } else {
+        match target_commit {
+            Some(target_commit) => {
+                switch::ensure_clean_status_for_commit(target_commit, output).await
+            }
+            None => switch::ensure_clean_status(output).await,
+        }
     };
 
     match clean_status {

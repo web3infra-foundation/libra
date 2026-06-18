@@ -570,6 +570,106 @@ fn test_checkout_existing_branch_with_conflicting_untracked_file_returns_error()
 }
 
 #[test]
+fn test_checkout_force_discards_dirty_tracked_changes() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+
+    // Track f.txt on main.
+    std::fs::write(repo.path().join("f.txt"), "orig\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "f.txt"], repo.path()),
+        "add f.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "add f", "--no-verify"], repo.path()),
+        "commit f",
+    );
+
+    // On `other`, change f.txt to a different committed content.
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "other"], repo.path()),
+        "switch -c other",
+    );
+    std::fs::write(repo.path().join("f.txt"), "other-version\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "f.txt"], repo.path()),
+        "add f.txt on other",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "change f", "--no-verify"], repo.path()),
+        "commit f on other",
+    );
+
+    // Back on main, leave an uncommitted local modification to the tracked file.
+    assert_cli_success(
+        &run_libra_command(&["switch", "main"], repo.path()),
+        "switch main",
+    );
+    std::fs::write(repo.path().join("f.txt"), "dirty local\n").unwrap();
+
+    // Plain checkout refuses; -f discards the local change and switches.
+    let blocked = run_libra_command(&["checkout", "other"], repo.path());
+    assert_ne!(
+        blocked.status.code(),
+        Some(0),
+        "plain checkout should refuse to overwrite dirty tracked file"
+    );
+
+    let forced = run_libra_command(&["checkout", "-f", "other"], repo.path());
+    assert_cli_success(&forced, "checkout -f other");
+    let content = std::fs::read_to_string(repo.path().join("f.txt")).unwrap();
+    assert_eq!(
+        content, "other-version\n",
+        "-f should adopt the target branch's tracked content, discarding local edits"
+    );
+}
+
+#[test]
+fn test_checkout_force_still_refuses_untracked_overwrite() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "other"], repo.path()),
+        "switch -c other",
+    );
+    std::fs::write(repo.path().join("conflict.txt"), "tracked on other\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "conflict.txt"], repo.path()),
+        "add conflict.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "other adds conflict", "--no-verify"],
+            repo.path(),
+        ),
+        "commit conflict.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(&["switch", "main"], repo.path()),
+        "switch main",
+    );
+
+    // An untracked file on main that the target branch tracks.
+    std::fs::write(repo.path().join("conflict.txt"), "local untracked\n").unwrap();
+
+    // -f discards tracked-file changes but must NOT clobber untracked files.
+    let output = run_libra_command(&["checkout", "-f", "other"], repo.path());
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "checkout -f must still refuse to overwrite an untracked file"
+    );
+    let content = std::fs::read_to_string(repo.path().join("conflict.txt")).unwrap();
+    assert_eq!(
+        content, "local untracked\n",
+        "untracked file must be preserved under -f (no silent data loss)"
+    );
+}
+
+#[test]
 fn test_checkout_json_show_current_branch() {
     use super::{
         assert_cli_success, create_committed_repo_via_cli, parse_json_stdout, run_libra_command,

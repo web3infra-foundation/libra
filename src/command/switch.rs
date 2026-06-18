@@ -508,7 +508,7 @@ fn target_index_for_commit(commit_id: &ObjectHash) -> Result<Index, SwitchError>
     Ok(index)
 }
 
-fn ensure_no_untracked_overwrite(target_commit: ObjectHash) -> Result<(), SwitchError> {
+pub(crate) fn ensure_no_untracked_overwrite(target_commit: ObjectHash) -> Result<(), SwitchError> {
     let current_index =
         Index::load(path::index()).map_err(|err| SwitchError::StatusCheck(err.to_string()))?;
     let untracked_paths =
