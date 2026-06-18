@@ -555,8 +555,8 @@ async fn run_pack_refs(
     _quiet: bool,
     _output: &OutputConfig,
 ) -> CliResult<TaskResult> {
-    let refs_dir = repo_path.join("refs").join("heads");
-    if !refs_dir.exists() {
+    let base_refs_dir = repo_path.join("refs");
+    if !base_refs_dir.is_dir() {
         return Ok(TaskResult {
             task: "pack-refs".to_string(),
             success: true,
@@ -564,13 +564,28 @@ async fn run_pack_refs(
             objects_packed: 0,
             refs_packed: 0,
             packs_repacked: 0,
-            message: "no refs/heads directory".to_string(),
+            message: "no refs/ directory".to_string(),
         });
     }
 
+    // Walk every well-known ref category under refs/ so that tags and
+    // remote-tracking refs are packed alongside branches.  Each category
+    // gets the correct fully-qualified prefix (refs/heads/, refs/tags/,
+    // refs/remotes/).
+    let categories: [(&str, &str); 4] = [
+        ("heads", "refs/heads/"),
+        ("tags", "refs/tags/"),
+        ("remotes", "refs/remotes/"),
+        ("notes", "refs/notes/"),
+    ];
     let mut refs: HashMap<String, String> = HashMap::new();
-    collect_refs(&refs_dir, &refs_dir, "refs/heads/", &mut refs)
-        .map_err(|e| CliError::fatal(format!("failed to collect refs: {e}")))?;
+    for (subdir, prefix) in &categories {
+        let cat_dir = base_refs_dir.join(subdir);
+        if cat_dir.is_dir() {
+            collect_refs(&cat_dir, &cat_dir, prefix, &mut refs)
+                .map_err(|e| CliError::fatal(format!("failed to collect {prefix} refs: {e}")))?;
+        }
+    }
 
     if refs.is_empty() {
         return Ok(TaskResult {
@@ -934,9 +949,10 @@ async fn run_prefetch(
 ) -> CliResult<TaskResult> {
     // Check whether any remotes are configured. If none exist, prefetch is
     // not applicable; if remotes do exist, prefetch is relevant but not yet
-    // implemented. Returning success=false when remotes exist prevents a
-    // silent no-op that would mislead users into thinking the documented
-    // maintenance task is actually working.
+    // implemented. We return success: true with an explicit message either
+    // way so that the default `libra maintenance run` (which includes
+    // prefetch) does not fail on cloned repos that almost always have
+    // remote.origin.* configured.
     let has_remotes = ConfigKv::get_by_prefix("remote.")
         .await
         .map(|entries| !entries.is_empty())
@@ -968,12 +984,12 @@ async fn run_prefetch(
 
     Ok(TaskResult {
         task: "prefetch".to_string(),
-        success: false,
+        success: true,
         objects_removed: 0,
         objects_packed: 0,
         refs_packed: 0,
         packs_repacked: 0,
-        message: "prefetch is not yet implemented; scheduled run will no-op".to_string(),
+        message: "prefetch not yet implemented; skipping".to_string(),
     })
 }
 
@@ -2037,12 +2053,12 @@ fn build_pack_index(pack_path: &Path, idx_path: &Path) -> CliResult<()> {
         .to_str()
         .ok_or_else(|| CliError::fatal("invalid index file path"))?;
 
-    if get_hash_kind() == HashKind::Sha256 {
-        index_pack::build_index_v2(pack_str, idx_str)
-    } else {
-        index_pack::build_index_v1(pack_str, idx_str)
-    }
-    .map_err(|e| CliError::fatal(format!("failed to build pack index: {e}")))
+    // Always build a v2 index.  Version 1 stores pack offsets as u32, so
+    // objects past the 4 GiB boundary in SHA-1 consolidated packs get
+    // truncated offsets.  V2 includes a large-offset table for 64-bit
+    // offsets and is safe for packs of any size.
+    index_pack::build_index_v2(pack_str, idx_str)
+        .map_err(|e| CliError::fatal(format!("failed to build pack index: {e}")))
 }
 
 /// Print an informational message unless output is quiet or JSON mode.

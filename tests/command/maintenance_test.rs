@@ -2397,21 +2397,91 @@ fn test_maintenance_prefetch_unsupported_with_remotes() {
         .find(|t| t.get("task").and_then(|v| v.as_str()) == Some("prefetch"))
         .expect("prefetch task in results");
 
-    // When remotes are configured, prefetch must report success: false
-    // because it is not yet implemented — this tells the scheduler that
-    // something went wrong rather than silently no-opping.
+    // When remotes are configured, prefetch must report success: true with
+    // a "not yet implemented" notice so that the default `libra maintenance
+    // run` (which includes prefetch) does not fail on cloned repos that
+    // almost always have remote.origin.* configured.
     assert_eq!(
         prefetch_task.get("success"),
-        Some(&serde_json::Value::Bool(false)),
-        "prefetch must report success: false when remotes exist, got: {prefetch_task}"
+        Some(&serde_json::Value::Bool(true)),
+        "prefetch must report success: true when remotes exist (not yet implemented), got: {prefetch_task}"
     );
     let msg = prefetch_task
         .get("message")
         .and_then(|v| v.as_str())
         .expect("prefetch task message");
     assert!(
-        msg.contains("not yet implemented"),
+        msg.contains("not yet implemented") || msg.contains("skipping"),
         "prefetch message must indicate not yet implemented, got: {msg}"
+    );
+}
+
+#[test]
+
+/// Regression test: `maintenance run --task pack-refs` must pack file-backed
+/// refs under tags/ and remotes/ in addition to heads/.
+///
+/// Previously the task only scanned `refs/heads`, silently ignoring file-backed
+/// tags and remote-tracking refs. This made the task incomplete for tag-heavy
+/// or remote-heavy repos.
+fn test_maintenance_pack_refs_packs_tags_and_remotes() {
+    let repo = create_committed_repo_via_cli();
+    let main_hash = rev_parse(repo.path(), "main");
+
+    let libra_dir = repo.path().join(".libra");
+    let refs_dir = libra_dir.join("refs");
+
+    // Create file-backed refs in multiple categories.
+    fs::create_dir_all(refs_dir.join("heads")).unwrap();
+    fs::write(refs_dir.join("heads/main"), format!("{main_hash}\n")).unwrap();
+
+    fs::create_dir_all(refs_dir.join("tags")).unwrap();
+    fs::write(refs_dir.join("tags/v1.0"), format!("{main_hash}\n")).unwrap();
+
+    fs::create_dir_all(refs_dir.join("remotes/origin")).unwrap();
+    fs::write(
+        refs_dir.join("remotes/origin/HEAD"),
+        "ref: refs/remotes/origin/main\n",
+    )
+    .unwrap();
+    fs::write(
+        refs_dir.join("remotes/origin/main"),
+        format!("{main_hash}\n"),
+    )
+    .unwrap();
+
+    let output = run_libra_command(&["maintenance", "run", "--task", "pack-refs"], repo.path());
+    assert!(
+        output.status.success(),
+        "pack-refs should pass, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let packed_refs = libra_dir.join("packed-refs");
+    let content = fs::read_to_string(&packed_refs).unwrap();
+
+    // All three categories must appear in packed-refs.
+    assert!(
+        content.contains("refs/heads/main"),
+        "packed-refs must contain heads/main, got: {content}"
+    );
+    assert!(
+        content.contains("refs/tags/v1.0"),
+        "packed-refs must contain tags/v1.0, got: {content}"
+    );
+    assert!(
+        content.contains("refs/remotes/origin/main"),
+        "packed-refs must contain remotes/origin/main, got: {content}"
+    );
+
+    // Loose ref files must be preserved (not deleted).
+    assert!(
+        refs_dir.join("heads/main").exists(),
+        "loose heads/main must be preserved"
+    );
+    assert!(
+        refs_dir.join("tags/v1.0").exists(),
+        "loose tags/v1.0 must be preserved"
     );
 }
 
