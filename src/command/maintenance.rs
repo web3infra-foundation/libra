@@ -39,7 +39,7 @@ use git_internal::{
     },
 };
 use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY, SHA256};
-use sea_orm::EntityTrait;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::Serialize;
 
 use crate::{
@@ -47,7 +47,7 @@ use crate::{
     internal::{
         config::ConfigKv,
         db,
-        model::{reference, reflog},
+        model::{object_index, reference, reflog},
     },
     utils::{
         client_storage::ClientStorage,
@@ -347,11 +347,20 @@ async fn run_gc(
                         &format!("  would remove unreachable object {hash_str}"),
                     );
                 }
-            } else if let Err(e) = fs::remove_file(obj_path) {
-                return Err(CliError::fatal(format!(
-                    "failed to remove unreachable object {}: {e}",
-                    hash_str
-                )));
+            } else {
+                fs::remove_file(obj_path).map_err(|e| {
+                    CliError::fatal(format!(
+                        "failed to remove unreachable object {}: {e}",
+                        hash_str
+                    ))
+                })?;
+                // Drop the corresponding object_index row so that cloud
+                // sync does not keep trying to upload a pruned object and
+                // fail repeatedly. If the config DB is locked or the
+                // repo_id is unset we warn and continue — the object file
+                // is already gone, the index row is a recoverable stale
+                // entry.
+                let _ = gc_drop_object_index(hash_str).await;
             }
         }
     }
@@ -1559,6 +1568,29 @@ fn cleanup_empty_dirs(dir: &Path) -> io::Result<()> {
             let _ = fs::remove_dir(&path);
         }
     }
+    Ok(())
+}
+
+/// Remove the `object_index` row for a pruned loose object so that cloud
+/// sync does not keep trying to upload it and fail repeatedly.
+///
+/// Returns `Ok(())` when the row was deleted or did not exist, and quietly
+/// logs-and-returns when the config database is missing or the repo_id is
+/// unset — the object file is already gone, so a stale index row is a
+/// recoverable nuisance, not a fatal condition.
+async fn gc_drop_object_index(hash_str: &str) -> Result<(), String> {
+    let repo_id = match ConfigKv::get("libra.repoid").await {
+        Ok(Some(entry)) => entry.value,
+        _ => return Ok(()), // Not configured for cloud sync
+    };
+
+    let db_conn = db::get_db_conn_instance().await;
+    object_index::Entity::delete_many()
+        .filter(object_index::Column::OId.eq(hash_str))
+        .filter(object_index::Column::RepoId.eq(&repo_id))
+        .exec(&db_conn)
+        .await
+        .map_err(|e| format!("failed to delete object_index row for {hash_str}: {e}"))?;
     Ok(())
 }
 

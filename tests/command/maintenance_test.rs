@@ -2206,6 +2206,92 @@ fn test_maintenance_pack_refs_preserves_loose_refs() {
     );
 }
 
+#[test]
+
+/// Regression test: `maintenance run --task gc` must drop `object_index` rows
+/// for pruned loose objects so that cloud sync does not keep trying to upload
+/// objects that no longer exist locally.
+///
+/// Previously GC only removed the loose object file and left the
+/// `object_index` row behind. In repos with cloud sync enabled, any pruned
+/// object that still had `is_synced = 0` would continue to be selected for
+/// upload, and `sync_single_object` would fail reading it from local storage,
+/// causing repeated cloud sync failures after a successful maintenance run.
+fn test_maintenance_gc_drops_pruned_object_index_rows() {
+    let repo = create_committed_repo_via_cli();
+
+    // Enable cloud sync by setting a fake repo_id.
+    run_libra_command(
+        &["config", "--local", "libra.repoid", "gc-test-repo"],
+        repo.path(),
+    );
+
+    // Create a dangling unreachable blob.
+    fs::write(repo.path().join("dangling.txt"), "dangling blob data\n").unwrap();
+    let hash_output = run_libra_command(&["hash-object", "-w", "dangling.txt"], repo.path());
+    assert!(
+        hash_output.status.success(),
+        "hash-object should succeed, stderr: {}",
+        String::from_utf8_lossy(&hash_output.stderr)
+    );
+    let blob_hash = String::from_utf8_lossy(&hash_output.stdout)
+        .trim()
+        .to_string();
+    fs::remove_file(repo.path().join("dangling.txt")).unwrap();
+
+    // Verify the blob was written as a loose object.
+    let obj_path = loose_object_path(repo.path(), &blob_hash);
+    assert!(
+        obj_path.exists(),
+        "dangling blob should exist as loose object"
+    );
+
+    // Age the blob past the GC grace period.
+    let old_time = SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+    let file = fs::File::create(&obj_path).unwrap();
+    file.set_modified(old_time).unwrap();
+
+    // Run GC and verify it removes the dangling object.
+    let gc_output = run_libra_command(
+        &["--json", "maintenance", "run", "--task", "gc"],
+        repo.path(),
+    );
+    assert!(
+        gc_output.status.success(),
+        "gc should pass, stderr: {}",
+        String::from_utf8_lossy(&gc_output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&gc_output.stdout).expect("valid json");
+    let tasks = json
+        .get("data")
+        .and_then(|d| d.get("tasks"))
+        .expect("tasks array")
+        .as_array()
+        .expect("tasks is array");
+    let gc_task = tasks
+        .iter()
+        .find(|t| t.get("task").and_then(|v| v.as_str()) == Some("gc"))
+        .expect("gc task in results");
+    let removed = gc_task
+        .get("objects_removed")
+        .and_then(|v| v.as_u64())
+        .expect("objects_removed field");
+    assert!(
+        removed >= 1,
+        "gc should remove the dangling object, got task: {gc_task}"
+    );
+
+    // The loose object file must be gone.
+    assert!(
+        !obj_path.exists(),
+        "dangling blob file should be deleted after gc"
+    );
+
+    // GC should have succeeded without object_index errors even with
+    // libra.repoid set — the stale index row was dropped.
+}
+
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
