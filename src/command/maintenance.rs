@@ -24,19 +24,23 @@ use std::{
     fs,
     io::{self, Read, Seek, Write},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use byteorder::ReadBytesExt;
 use clap::{Parser, Subcommand, ValueEnum};
-use flate2::read::ZlibDecoder;
 use git_internal::{
     hash::{HashKind, ObjectHash, get_hash_kind},
-    internal::object::{commit::Commit, tree::Tree, types::ObjectType},
+    internal::{
+        metadata::{EntryMeta, MetaAttached},
+        object::{commit::Commit, tree::Tree, types::ObjectType},
+        pack::{Pack, entry::Entry},
+    },
 };
+use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY, SHA256};
 use sea_orm::EntityTrait;
 use serde::Serialize;
-use sha1::Digest;
 
 use crate::{
     command::{index_pack, load_object},
@@ -306,6 +310,7 @@ async fn run_gc(
         if let Some(hash) = parse_object_hash(hash_str)
             && !reachable.contains(&hash)
         {
+            removed += 1;
             if dry_run {
                 if !quiet {
                     info_println(
@@ -313,14 +318,11 @@ async fn run_gc(
                         &format!("  would remove unreachable object {hash_str}"),
                     );
                 }
-            } else {
-                if let Err(e) = fs::remove_file(obj_path) {
-                    return Err(CliError::fatal(format!(
-                        "failed to remove unreachable object {}: {e}",
-                        hash_str
-                    )));
-                }
-                removed += 1;
+            } else if let Err(e) = fs::remove_file(obj_path) {
+                return Err(CliError::fatal(format!(
+                    "failed to remove unreachable object {}: {e}",
+                    hash_str
+                )));
             }
         }
     }
@@ -900,20 +902,17 @@ async fn status(output: &OutputConfig) -> CliResult<()> {
 
     let enabled = ConfigKv::get(MAINTENANCE_ENABLED_KEY)
         .await
-        .ok()
-        .flatten()
+        .map_err(|e| CliError::fatal(format!("failed to read maintenance config: {e}")))?
         .is_some_and(|entry| entry.value == "true");
 
     let schedule = ConfigKv::get(MAINTENANCE_SCHEDULE_KEY)
         .await
-        .ok()
-        .flatten()
+        .map_err(|e| CliError::fatal(format!("failed to read maintenance schedule: {e}")))?
         .map(|entry| entry.value);
 
     let last_run = ConfigKv::get(MAINTENANCE_LAST_RUN_KEY)
         .await
-        .ok()
-        .flatten()
+        .map_err(|e| CliError::fatal(format!("failed to read maintenance last-run: {e}")))?
         .map(|entry| entry.value);
 
     let data = MaintenanceStatusOutput {
@@ -1244,33 +1243,6 @@ fn read_idx_entries(idx_path: &Path) -> io::Result<Vec<(ObjectHash, u64)>> {
     Ok(entries)
 }
 
-/// Read a single object from a pack file at the given offset.
-fn read_pack_object(pack_path: &Path, offset: u64) -> io::Result<(ObjectType, Vec<u8>)> {
-    let mut file = fs::File::open(pack_path)?;
-    file.seek(io::SeekFrom::Start(offset))?;
-    let (type_num, _size) = read_pack_object_header(&mut file)?;
-    let mut decoder = ZlibDecoder::new(file);
-    let mut body = Vec::new();
-    decoder.read_to_end(&mut body)?;
-    let obj_type = pack_num_to_object_type(type_num)?;
-    Ok((obj_type, body))
-}
-
-/// Decode a pack file object header, returning (type number, uncompressed size).
-fn read_pack_object_header(reader: &mut impl Read) -> io::Result<(u8, usize)> {
-    let mut byte = 0u8;
-    reader.read_exact(std::slice::from_mut(&mut byte))?;
-    let type_num = (byte >> 4) & 0x7;
-    let mut size = (byte & 0x0F) as usize;
-    let mut shift = 4;
-    while byte & 0x80 != 0 {
-        reader.read_exact(std::slice::from_mut(&mut byte))?;
-        size |= ((byte & 0x7F) as usize) << shift;
-        shift += 7;
-    }
-    Ok((type_num, size))
-}
-
 /// Map an `ObjectType` to the numeric type used in pack file entries.
 fn object_type_to_pack_num(obj_type: ObjectType) -> u8 {
     match obj_type {
@@ -1279,20 +1251,6 @@ fn object_type_to_pack_num(obj_type: ObjectType) -> u8 {
         ObjectType::Blob => 3,
         ObjectType::Tag => 4,
         _ => 0,
-    }
-}
-
-/// Map a pack file type number to an `ObjectType`.
-fn pack_num_to_object_type(type_num: u8) -> io::Result<ObjectType> {
-    match type_num {
-        1 => Ok(ObjectType::Commit),
-        2 => Ok(ObjectType::Tree),
-        3 => Ok(ObjectType::Blob),
-        4 => Ok(ObjectType::Tag),
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("unknown pack object type number: {type_num}"),
-        )),
     }
 }
 
@@ -1384,6 +1342,37 @@ async fn create_pack_from_loose_objects(
     Ok(packed.len())
 }
 
+/// Read all complete objects from a pack file, including offset and reference
+/// deltas, by reusing the shared pack decoder/delta reconstruction path.
+fn read_pack_objects(pack_path: &Path) -> io::Result<Vec<(ObjectType, Vec<u8>, ObjectHash)>> {
+    let file = fs::File::open(pack_path)?;
+    let mut reader = io::BufReader::new(file);
+    let mut pack = Pack::new(Some(1), Some(128 * 1024 * 1024), None, true);
+
+    let objects = Arc::new(Mutex::new(Vec::new()));
+    let objects_c = objects.clone();
+    pack.decode(
+        &mut reader,
+        move |entry: MetaAttached<Entry, EntryMeta>| {
+            objects_c.lock().unwrap().push((
+                entry.inner.obj_type,
+                entry.inner.data,
+                entry.inner.hash,
+            ));
+        },
+        None::<fn(ObjectHash)>,
+    )
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
+    // INVARIANT: `pack.decode` holds the only other Arc clone and has returned,
+    // so `try_unwrap` succeeds and no thread is still using the vector.
+    let objects = Arc::try_unwrap(objects)
+        .map_err(|_| io::Error::other("pack decode callback still active"))?
+        .into_inner()
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    Ok(objects)
+}
+
 /// Create a consolidated pack file from existing packs and loose objects.
 ///
 /// Objects that appear in multiple sources are only written once. This avoids
@@ -1397,15 +1386,12 @@ fn create_consolidated_pack(
     let mut objects: Vec<(ObjectType, Vec<u8>)> = Vec::new();
     let mut seen: HashSet<ObjectHash> = HashSet::new();
 
-    // Copy objects from existing packs.
+    // Copy complete objects from existing packs, resolving any delta entries.
     for pack in source_packs {
-        let idx_path = pack.with_extension("idx");
-        let entries = read_idx_entries(&idx_path)?;
-        for (hash, offset) in entries {
+        for (obj_type, body, hash) in read_pack_objects(pack)? {
             if !seen.insert(hash) {
                 continue;
             }
-            let (obj_type, body) = read_pack_object(pack, offset)?;
             objects.push((obj_type, body));
         }
     }
@@ -1445,8 +1431,13 @@ fn write_pack_from_objects(objects: &[(ObjectType, Vec<u8>)], pack_path: &Path) 
         pack_data.write_all(&compressed)?;
     }
 
-    let pack_hash = sha1::Sha1::digest(&pack_data);
-    pack_data.write_all(&pack_hash)?;
+    let mut ctx = Context::new(match get_hash_kind() {
+        HashKind::Sha256 => &SHA256,
+        _ => &SHA1_FOR_LEGACY_USE_ONLY,
+    });
+    ctx.update(&pack_data);
+    let pack_hash = ctx.finish();
+    pack_data.write_all(pack_hash.as_ref())?;
 
     fs::write(pack_path, &pack_data)
 }
@@ -1579,7 +1570,11 @@ mod tests {
     fn test_build_index_v1_small_pack() {
         use std::io::Write;
 
+        use git_internal::hash::set_hash_kind_for_test;
         use tempfile::tempdir;
+
+        // Version 1 indexes are SHA-1 only; pin the hash kind for this test.
+        let _guard = set_hash_kind_for_test(HashKind::Sha1);
 
         let tmp = tempdir().unwrap();
         let pack_path = tmp.path().join("test.pack");
@@ -1596,8 +1591,10 @@ mod tests {
         let compressed = ClientStorage::compress_zlib(body).unwrap();
         pack_data.write_all(&compressed).unwrap();
 
-        let pack_hash = sha1::Sha1::digest(&pack_data);
-        pack_data.write_all(&pack_hash).unwrap();
+        let mut ctx = Context::new(&SHA1_FOR_LEGACY_USE_ONLY);
+        ctx.update(&pack_data);
+        let pack_hash = ctx.finish();
+        pack_data.write_all(pack_hash.as_ref()).unwrap();
 
         std::fs::write(&pack_path, &pack_data).unwrap();
 

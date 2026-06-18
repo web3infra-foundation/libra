@@ -76,6 +76,7 @@ batch document.
 | hooks | intentionally-different | Hidden compatibility entry for hook configs installed by `libra agent enable` |
 | cat-file | supported | `-e` does not support JSON |
 | fsck | supported | |
+| maintenance | partial | `run` / `register` / `unregister` / `status` supported; `gc` / `loose-objects` / `pack-refs` / `incremental-repack` work locally; `commit-graph` / `prefetch` not yet implemented |
 | verify-pack | partial | validates one `.idx` file against a matching `.pack`; Git's multi-index form and `-s` / `--stat-only` are not exposed |
 | index-pack | supported | hidden plumbing command |
 | checkout | partial | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore`; detached HEAD and patch modes still partial |
