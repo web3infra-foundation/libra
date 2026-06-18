@@ -510,6 +510,7 @@ struct MergeTreeEntry {
     mode: TreeItemMode,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn perform_three_way_merge(
     current_commit: Commit,
     target_commit: Commit,
