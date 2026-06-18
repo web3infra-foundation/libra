@@ -154,6 +154,7 @@ async fn test_basic_revert() {
         commit: "HEAD".to_string(),
         no_commit: false,
         mainline: None,
+        signoff: false,
     })
     .await;
 
@@ -268,6 +269,7 @@ async fn test_revert_no_commit() {
         commit: "HEAD".to_string(),
         no_commit: true,
         mainline: None,
+        signoff: false,
     })
     .await;
 
@@ -348,6 +350,7 @@ async fn test_revert_root_commit() {
         commit: root_hash,
         no_commit: false,
         mainline: None,
+        signoff: false,
     })
     .await;
 
@@ -400,6 +403,42 @@ fn test_revert_json_output_reports_files_changed() {
         fs::read_to_string(&tracked_path).unwrap(),
         "tracked\n",
         "revert should restore the previous file content"
+    );
+}
+
+#[test]
+#[serial]
+fn test_revert_signoff_adds_trailer() {
+    let repo = create_committed_repo_via_cli();
+    let tracked_path = repo.path().join("tracked.txt");
+
+    fs::write(&tracked_path, "updated\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "tracked.txt"], repo.path()),
+        "stage modified tracked.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "update tracked", "--no-verify"],
+            repo.path(),
+        ),
+        "commit modified tracked.txt",
+    );
+
+    let out = run_libra_command(&["revert", "-s", "HEAD"], repo.path());
+    assert_cli_success(&out, "revert -s HEAD");
+
+    // The revert commit message should carry the Signed-off-by trailer.
+    let show = run_libra_command(&["cat-file", "-p", "HEAD"], repo.path());
+    assert_cli_success(&show, "cat-file -p HEAD");
+    let body = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        body.contains("Signed-off-by:"),
+        "revert -s should append a Signed-off-by trailer: {body}"
+    );
+    assert!(
+        body.contains("This reverts commit"),
+        "revert message body should be present: {body}"
     );
 }
 
@@ -471,6 +510,7 @@ async fn test_revert_errors() {
         commit: "nonexistent".to_string(),
         no_commit: false,
         mainline: None,
+        signoff: false,
     })
     .await;
 

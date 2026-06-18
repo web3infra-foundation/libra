@@ -84,6 +84,25 @@ enum RevertError {
 
     #[error("failed to update HEAD: {0}")]
     UpdateHead(String),
+
+    #[error("failed to resolve committer identity for --signoff: {0}")]
+    Signoff(String),
+}
+
+/// Build the `Signed-off-by` trailer (prefixed with a blank line) for
+/// `revert --signoff`, using the canonical committer identity. Returns an empty
+/// string when `signoff` is false.
+async fn signoff_trailer(signoff: bool) -> Result<String, RevertError> {
+    if !signoff {
+        return Ok(String::new());
+    }
+    let identity = crate::command::commit::resolve_committer_identity()
+        .await
+        .map_err(|e| RevertError::Signoff(e.to_string()))?;
+    Ok(format!(
+        "\n\nSigned-off-by: {} <{}>",
+        identity.name, identity.email
+    ))
 }
 
 impl RevertError {
@@ -101,6 +120,7 @@ impl RevertError {
             Self::WriteWorktree(_) => StableErrorCode::IoWriteFailed,
             Self::IndexSave(_) => StableErrorCode::IoWriteFailed,
             Self::UpdateHead(_) => StableErrorCode::IoWriteFailed,
+            Self::Signoff(_) => StableErrorCode::CliInvalidArguments,
         }
     }
 }
@@ -171,6 +191,11 @@ pub struct RevertArgs {
     /// commit. Required for merge commits; rejected for non-merge commits.
     #[clap(short = 'm', long, value_name = "parent-number")]
     pub mainline: Option<usize>,
+
+    /// Add a `Signed-off-by` trailer (using the committer identity) to the
+    /// revert commit message.
+    #[clap(short = 's', long)]
+    pub signoff: bool,
 }
 
 pub async fn execute(args: RevertArgs) {
@@ -338,8 +363,13 @@ async fn revert_single_commit(
     if args.no_commit {
         Ok((None, files_changed))
     } else {
-        let revert_commit_id =
-            create_revert_commit(commit_id, &current_head_commit_id, &final_tree_id).await?;
+        let revert_commit_id = create_revert_commit(
+            commit_id,
+            &current_head_commit_id,
+            &final_tree_id,
+            args.signoff,
+        )
+        .await?;
         Ok((Some(revert_commit_id), files_changed))
     }
 }
@@ -410,7 +440,7 @@ async fn revert_root_commit(args: &RevertArgs) -> Result<(Option<ObjectHash>, us
         let current_head = Head::current_commit()
             .await
             .ok_or_else(|| RevertError::LoadObject("failed to resolve current HEAD".into()))?;
-        let revert_commit_id = create_empty_revert_commit(&current_head).await?;
+        let revert_commit_id = create_empty_revert_commit(&current_head, args.signoff).await?;
         Ok((Some(revert_commit_id), files_changed))
     }
 }
@@ -516,14 +546,16 @@ async fn create_revert_commit(
     reverted_commit_id: &ObjectHash,
     parent_id: &ObjectHash,
     tree_id: &ObjectHash,
+    signoff: bool,
 ) -> Result<ObjectHash, RevertError> {
     let reverted_commit: Commit =
         load_object(reverted_commit_id).map_err(|e| RevertError::LoadObject(e.to_string()))?;
 
     let revert_message = format!(
-        "Revert \"{}\"\n\nThis reverts commit {}.",
+        "Revert \"{}\"\n\nThis reverts commit {}.{}",
         reverted_commit.message.lines().next().unwrap_or(""),
-        reverted_commit_id
+        reverted_commit_id,
+        signoff_trailer(signoff).await?
     );
 
     let commit = Commit::from_tree_id(
@@ -537,16 +569,22 @@ async fn create_revert_commit(
     Ok(commit.id)
 }
 
-async fn create_empty_revert_commit(parent_id: &ObjectHash) -> Result<ObjectHash, RevertError> {
+async fn create_empty_revert_commit(
+    parent_id: &ObjectHash,
+    signoff: bool,
+) -> Result<ObjectHash, RevertError> {
     let empty_tree =
         Tree::from_tree_items(Vec::new()).map_err(|e| RevertError::SaveObject(e.to_string()))?;
     save_object(&empty_tree, &empty_tree.id).map_err(|e| RevertError::SaveObject(e.to_string()))?;
 
-    let revert_message = "Revert root commit\n\nThis reverts the initial commit.";
+    let revert_message = format!(
+        "Revert root commit\n\nThis reverts the initial commit.{}",
+        signoff_trailer(signoff).await?
+    );
     let commit = Commit::from_tree_id(
         empty_tree.id,
         vec![*parent_id],
-        &format_commit_msg(revert_message, None),
+        &format_commit_msg(&revert_message, None),
     );
 
     save_object(&commit, &commit.id).map_err(|e| RevertError::SaveObject(e.to_string()))?;

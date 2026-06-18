@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。单提交 revert、`-n/--no-commit` 与 `-m/--mainline`（merge commit revert）已支持；edit/sequencer/strategy surface 尚未公开。
+- 兼容级别：`partial`。单提交 revert、`-n/--no-commit`、`-m/--mainline`（merge commit revert）与 `-s/--signoff`（Signed-off-by trailer，复用 commit 的 `resolve_committer_identity`）已支持；多提交 sequencer（continue/abort/skip）、edit、strategy surface 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -45,8 +45,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/revert.md`。
-- Synopsis：`libra revert [-n | --no-commit] [-m | --mainline <parent-number>] [--json] [--quiet] <commit>`。
-- 公开参数/子命令包括：`<commit>`（位置参数，必填）、`-n, --no-commit`、`-m, --mainline <parent-number>`、`--json`、`--quiet`。
+- Synopsis：`libra revert [-n | --no-commit] [-m | --mainline <parent-number>] [-s | --signoff] [--json] [--quiet] <commit>`。
+- 公开参数/子命令包括：`<commit>`（位置参数，必填）、`-n, --no-commit`、`-m, --mainline <parent-number>`、`-s, --signoff`、`--json`、`--quiet`。`-s/--signoff` 经 `signoff_trailer` 追加 `Signed-off-by: <name> <email>`（在普通 revert 与 root-commit revert 两条提交路径都生效）；身份解析失败映射为 `RevertError::Signoff`。
 
 
 ## 还未实现的功能

@@ -362,9 +362,9 @@ fn parse_author(author: &str) -> Result<(String, String), CommitError> {
 
 /// A user's name + email pair used for commit authoring and committing.
 #[derive(Clone, Debug)]
-struct UserIdentity {
-    name: String,
-    email: String,
+pub(crate) struct UserIdentity {
+    pub(crate) name: String,
+    pub(crate) email: String,
 }
 
 async fn get_user_config_value(key: &str) -> Option<String> {
@@ -384,7 +384,7 @@ fn missing_identity_error(name_missing: bool, email_missing: bool) -> CommitErro
     CommitError::IdentityMissing(detail.to_string())
 }
 
-async fn resolve_committer_identity() -> Result<UserIdentity, CommitError> {
+pub(crate) async fn resolve_committer_identity() -> Result<UserIdentity, CommitError> {
     let identity_sources = resolve_user_identity_sources(LocalIdentityTarget::CurrentRepo)
         .await
         .map_err(|error| CommitError::IdentityMissing(error.to_string()))?;
