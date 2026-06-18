@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; `--force-with-lease[=<ref>[:<expect>]]`（发送前校验远端仍匹配 tracking-ref/expected OID，与 `--force` 互斥）和 `--porcelain`（机器可读的每 ref 行，与 `--json`/`--machine` 互斥）supported；`--atomic` supported（经 `resolve_atomic_capability` 在远端 discovery 通告 `atomic` 时附加该 capability，使远端要么全部更新要么全部不更新；远端未通告则提前以 `PushError::AtomicUnsupported` 拒绝）；`--force-if-includes` 与 `--thin`/`--no-thin` 作为 **no-op** 接受。**unsupported（尚未打通协议层）：** `--signed`、`--push-option`/`-o`、`--follow-tags`。local file remote rejected — intentional (see [docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push](docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push))
+- 兼容级别：`partial`。branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; `--force-with-lease[=<ref>[:<expect>]]`（发送前校验远端仍匹配 tracking-ref/expected OID，与 `--force` 互斥）和 `--porcelain`（机器可读的每 ref 行，与 `--json`/`--machine` 互斥）supported；`--atomic` supported（经 `resolve_atomic_capability` 在远端 discovery 通告 `atomic` 时附加该 capability，使远端要么全部更新要么全部不更新；远端未通告则提前以 `PushError::AtomicUnsupported` 拒绝）；`--push-option`/`-o <opt>` supported（经 `resolve_push_options_capability` 在远端通告 `push-options` 时附加 capability + 在命令 flush 后经 `encode_push_options` 追加 push-options 段；未通告则 `PushError::PushOptionsUnsupported`）；`--force-if-includes` 与 `--thin`/`--no-thin` 作为 **no-op** 接受。**unsupported（尚未打通协议层）：** `--signed`、`--follow-tags`。local file remote rejected — intentional (see [docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push](docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push))
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -55,9 +55,9 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| Git flag | `--signed` / `--push-option` (`-o`) / `--follow-tags` | 当前 `PushArgs` 未公开；恢复时需补 push-cert 签名协议、push-option 转发或 tag 跟随逻辑和测试证据（均需协议层改造）。 |
+| Git flag | `--signed` / `--follow-tags` | 当前未公开；`--signed` 需 push-cert 签名协议（server nonce + 经 vault 签名 ref 更新），`--follow-tags` 需"被推送 ref 可达的 annotated tag"选择逻辑（均待补测试证据）。 |
 
-（`--atomic` 已实现：`resolve_atomic_capability` 在远端 discovery 通告 `atomic` 时附加该 capability，远端未通告则以 `PushError::AtomicUnsupported` 拒绝；`StableErrorCode::NetworkProtocol`。）
+（`--atomic`、`--push-option`/`-o` 已实现：`resolve_atomic_capability`/`resolve_push_options_capability` 在远端 discovery 通告对应 capability 时附加，未通告则以 `PushError::AtomicUnsupported`/`PushOptionsUnsupported` 拒绝；`StableErrorCode::NetworkProtocol`。push-options 段经 `encode_push_options` 在命令 flush 后写入。）
 
 ## 维护要求
 

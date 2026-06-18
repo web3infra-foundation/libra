@@ -128,6 +128,11 @@ pub struct PushArgs {
     #[clap(long)]
     pub atomic: bool,
 
+    /// Transmit a server-side option (repeatable). Errors if the remote does not
+    /// advertise the `push-options` capability.
+    #[clap(long = "push-option", short = 'o', value_name = "OPTION")]
+    pub push_option: Vec<String>,
+
     /// Machine-readable single-line-per-ref output; conflicts with `--json`/`--machine`
     #[clap(long)]
     pub porcelain: bool,
@@ -159,6 +164,7 @@ impl PushArgs {
             thin: false,
             no_thin: false,
             atomic: false,
+            push_option: Vec::new(),
             porcelain: false,
             dry_run: false,
             tags: false,
@@ -248,6 +254,9 @@ pub enum PushError {
 
     #[error("the receiving end does not support --atomic push")]
     AtomicUnsupported,
+
+    #[error("the receiving end does not support push options")]
+    PushOptionsUnsupported,
 }
 
 impl From<PushError> for CliError {
@@ -338,6 +347,9 @@ impl From<PushError> for CliError {
             PushError::AtomicUnsupported => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::NetworkProtocol)
                 .with_hint("retry without --atomic, or push to a remote that supports atomic updates"),
+            PushError::PushOptionsUnsupported => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_hint("retry without -o/--push-option, or push to a remote that supports push options"),
         }
     }
 }
@@ -357,6 +369,32 @@ fn resolve_atomic_capability(
     } else {
         Err(PushError::AtomicUnsupported)
     }
+}
+
+/// Decide whether to send a push-options section. When options are supplied the
+/// remote must have advertised the `push-options` capability during discovery;
+/// otherwise the push is refused up-front (matching Git).
+fn resolve_push_options_capability(
+    options: &[String],
+    server_capabilities: &[String],
+) -> Result<bool, PushError> {
+    if options.is_empty() {
+        return Ok(false);
+    }
+    if server_capabilities.iter().any(|cap| cap == "push-options") {
+        Ok(true)
+    } else {
+        Err(PushError::PushOptionsUnsupported)
+    }
+}
+
+/// Encode the push-options protocol section: one pkt-line per option followed by
+/// a flush-pkt, appended after the ref-update command flush and before the pack.
+fn encode_push_options(options: &[String], data: &mut BytesMut) {
+    for option in options {
+        add_pkt_line_string(data, option.clone());
+    }
+    data.extend_from_slice(b"0000");
 }
 
 // ---------------------------------------------------------------------------
@@ -802,9 +840,11 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         });
     }
 
-    // `--atomic`: only advertise the capability if the remote supports it,
-    // otherwise refuse before sending anything (matching Git).
+    // `--atomic` / `-o`: only advertise these capabilities if the remote
+    // supports them, otherwise refuse before sending anything (matching Git).
     let use_atomic = resolve_atomic_capability(args.atomic, &discovery.capabilities)?;
+    let use_push_options =
+        resolve_push_options_capability(&args.push_option, &discovery.capabilities)?;
 
     let mut data = BytesMut::new();
     let mut capabilities = vec!["report-status"];
@@ -813,6 +853,9 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     }
     if use_atomic {
         capabilities.push("atomic");
+    }
+    if use_push_options {
+        capabilities.push("push-options");
     }
     let capability = capabilities.join(" ");
     let zero_oid = ObjectHash::zero_str(get_hash_kind());
@@ -838,6 +881,10 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         );
     }
     data.extend_from_slice(b"0000");
+    // Push-options section follows the command flush, before the pack.
+    if use_push_options {
+        encode_push_options(&args.push_option, &mut data);
+    }
     tracing::debug!("{:?}", data);
 
     // Upload LFS files (only for HTTP remotes)
@@ -2940,6 +2987,7 @@ mod test {
             thin: false,
             no_thin: false,
             atomic: false,
+            push_option: Vec::new(),
             porcelain: false,
             dry_run: false,
             tags: false,
@@ -2967,6 +3015,50 @@ mod test {
             resolve_atomic_capability(true, &["report-status".to_string()]),
             Err(PushError::AtomicUnsupported)
         ));
+    }
+
+    #[test]
+    fn push_options_capability_resolution() {
+        // No options: never advertised.
+        assert!(!resolve_push_options_capability(&[], &["push-options".to_string()]).unwrap());
+        // Options + server support: advertise.
+        assert!(
+            resolve_push_options_capability(
+                &["ci.skip".to_string()],
+                &["report-status".to_string(), "push-options".to_string()]
+            )
+            .unwrap()
+        );
+        // Options + no support: refuse up-front.
+        assert!(matches!(
+            resolve_push_options_capability(
+                &["ci.skip".to_string()],
+                &["report-status".to_string()]
+            ),
+            Err(PushError::PushOptionsUnsupported)
+        ));
+    }
+
+    #[test]
+    fn push_options_section_encoding() {
+        let mut data = BytesMut::new();
+        encode_push_options(
+            &["ci.skip".to_string(), "notify=false".to_string()],
+            &mut data,
+        );
+        let bytes = &data[..];
+        assert!(
+            bytes.ends_with(b"0000"),
+            "push-options section ends with a flush-pkt"
+        );
+        assert!(
+            bytes.windows(7).any(|w| w == b"ci.skip"),
+            "first option is present in the encoded section"
+        );
+        assert!(
+            bytes.windows(12).any(|w| w == b"notify=false"),
+            "second option is present in the encoded section"
+        );
     }
 
     #[test]
