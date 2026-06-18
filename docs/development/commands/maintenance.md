@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`run` / `register` / `unregister` / `status` exposed; lower-level maintenance tasks such as `commit-graph` and `prefetch` are skipped when unsupported
+- 兼容级别：`partial`。`run` / `register` / `unregister` / `status` / `start` / `stop` exposed；`start`/`stop` 安装/移除 OS 调度入口（macOS 写 launchd LaunchAgents plist，登录时自动加载；其他 Unix 写 cron 片段），调度目录可由 `LIBRA_MAINTENANCE_AGENT_DIR` 覆盖（测试用）。lower-level maintenance tasks `commit-graph`（Libra 无 commit-graph reader/writer）与 `prefetch`（需 fetch 支持 refs/prefetch 命名空间）仍在无法支持时跳过
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -44,7 +44,8 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/maintenance.md`。
 - Synopsis：`libra maintenance <subcommand> [options]`。
-- 公开参数/子命令包括：`run`、`--task <task>`、`--dry-run`、`-q, --quiet`、`register`、`--schedule <schedule>`、`unregister`、`status`。
+- 公开参数/子命令包括：`run`、`--task <task>`、`--dry-run`、`-q, --quiet`、`register`、`--schedule <schedule>`、`unregister`、`status`、`start --schedule <schedule>`、`stop`。
+- `start`：设置 enabled/schedule 配置并经 `write_scheduler_entry` 写入 OS 调度入口（`scheduler_agent_dir()`：`LIBRA_MAINTENANCE_AGENT_DIR` 覆盖 → macOS `~/Library/LaunchAgents`/其他 `~/.config/libra/scheduler`；label = `tools.libra.maintenance.<sha1(repo)[..12]>`；schedule `hourly`/`daily`/`weekly` → launchd `StartInterval` 秒或 cron 表达式，运行 `libra maintenance run`）。`stop`：置 enabled=false 并 `remove_scheduler_entry`。artifact 生成是纯函数，按目录参数化以便单测（不触碰真实 launchd/cron）。
 
 
 ## 还未实现的功能

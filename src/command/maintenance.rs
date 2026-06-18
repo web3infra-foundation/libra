@@ -95,6 +95,15 @@ pub enum MaintenanceSubcommand {
     Unregister,
     /// Show whether this repository is registered for maintenance.
     Status,
+    /// Register the repository AND install an OS scheduler entry (launchd agent
+    /// on macOS, a cron fragment elsewhere) that runs `libra maintenance run`.
+    Start {
+        /// Schedule frequency: `hourly`, `daily`, or `weekly`.
+        #[arg(long, default_value = "hourly")]
+        schedule: String,
+    },
+    /// Unregister and remove the installed OS scheduler entry.
+    Stop,
 }
 
 /// Top-level arguments for `libra maintenance`.
@@ -174,6 +183,8 @@ pub async fn execute_safe(args: MaintenanceArgs, output: &OutputConfig) -> CliRe
         MaintenanceSubcommand::Register { schedule } => register(&schedule, output).await,
         MaintenanceSubcommand::Unregister => unregister(output).await,
         MaintenanceSubcommand::Status => status(output).await,
+        MaintenanceSubcommand::Start { schedule } => start(&schedule, output).await,
+        MaintenanceSubcommand::Stop => stop(output).await,
     }
 }
 
@@ -818,6 +829,177 @@ async fn status(output: &OutputConfig) -> CliResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// OS scheduler integration (start / stop)
+// ---------------------------------------------------------------------------
+
+/// Overrides the directory the scheduler entry is written to. Tests set this to
+/// a temp dir so `start`/`stop` never touch the real launchd/cron locations.
+const MAINTENANCE_AGENT_DIR_ENV: &str = "LIBRA_MAINTENANCE_AGENT_DIR";
+
+/// Resolve where the OS scheduler entry lives: the override env var, else the
+/// per-user LaunchAgents dir on macOS, else `~/.config/libra/scheduler`.
+fn scheduler_agent_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var(MAINTENANCE_AGENT_DIR_ENV) {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    if cfg!(target_os = "macos") {
+        PathBuf::from(home).join("Library").join("LaunchAgents")
+    } else {
+        PathBuf::from(home)
+            .join(".config")
+            .join("libra")
+            .join("scheduler")
+    }
+}
+
+/// Deterministic per-repository label/filename stem (sha1 of the repo path).
+fn scheduler_label(repo: &Path) -> String {
+    let mut hasher = sha1::Sha1::new();
+    hasher.update(repo.to_string_lossy().as_bytes());
+    let digest: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("tools.libra.maintenance.{}", &digest[..12])
+}
+
+fn schedule_interval_secs(schedule: &str) -> u64 {
+    match schedule {
+        "weekly" => 604_800,
+        "daily" => 86_400,
+        _ => 3_600, // hourly (default / unknown)
+    }
+}
+
+fn schedule_cron_expr(schedule: &str) -> &'static str {
+    match schedule {
+        "weekly" => "0 0 * * 0",
+        "daily" => "0 0 * * *",
+        _ => "0 * * * *",
+    }
+}
+
+/// Write the OS scheduler entry into `dir`, returning its path. macOS gets a
+/// launchd agent plist (LaunchAgents auto-load at the next login); other Unix
+/// gets a cron fragment that runs `libra maintenance run`.
+fn write_scheduler_entry(
+    dir: &Path,
+    label: &str,
+    exe: &Path,
+    repo: &Path,
+    schedule: &str,
+) -> std::io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
+    let exe = exe.to_string_lossy();
+    let repo = repo.to_string_lossy();
+    if cfg!(target_os = "macos") {
+        let path = dir.join(format!("{label}.plist"));
+        let interval = schedule_interval_secs(schedule);
+        let plist = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+<plist version=\"1.0\">\n<dict>\n    \
+<key>Label</key>\n    <string>{label}</string>\n    \
+<key>ProgramArguments</key>\n    <array>\n        <string>{exe}</string>\n        \
+<string>maintenance</string>\n        <string>run</string>\n    </array>\n    \
+<key>WorkingDirectory</key>\n    <string>{repo}</string>\n    \
+<key>StartInterval</key>\n    <integer>{interval}</integer>\n    \
+<key>RunAtLoad</key>\n    <false/>\n</dict>\n</plist>\n"
+        );
+        fs::write(&path, plist)?;
+        Ok(path)
+    } else {
+        let path = dir.join(format!("{label}.cron"));
+        let expr = schedule_cron_expr(schedule);
+        fs::write(
+            &path,
+            format!("{expr} cd \"{repo}\" && \"{exe}\" maintenance run\n"),
+        )?;
+        Ok(path)
+    }
+}
+
+/// Remove a previously-written scheduler entry; returns whether anything existed.
+fn remove_scheduler_entry(dir: &Path, label: &str) -> std::io::Result<bool> {
+    let mut removed = false;
+    for ext in ["plist", "cron"] {
+        let path = dir.join(format!("{label}.{ext}"));
+        if path.exists() {
+            fs::remove_file(&path)?;
+            removed = true;
+        }
+    }
+    Ok(removed)
+}
+
+async fn start(schedule: &str, output: &OutputConfig) -> CliResult<()> {
+    try_get_storage_path(None).map_err(|e| CliError::repo_not_found().with_hint(e.to_string()))?;
+
+    ConfigKv::set(MAINTENANCE_ENABLED_KEY, "true", false)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to set maintenance config: {e}")))?;
+    ConfigKv::set(MAINTENANCE_SCHEDULE_KEY, schedule, false)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to set maintenance schedule: {e}")))?;
+
+    let repo = std::env::current_dir()
+        .map_err(|e| CliError::fatal(format!("failed to resolve repository directory: {e}")))?;
+    let exe = std::env::current_exe()
+        .map_err(|e| CliError::fatal(format!("failed to resolve libra executable: {e}")))?;
+    let dir = scheduler_agent_dir();
+    let label = scheduler_label(&repo);
+    let entry = write_scheduler_entry(&dir, &label, &exe, &repo, schedule)
+        .map_err(|e| CliError::fatal(format!("failed to write scheduler entry: {e}")))?;
+
+    if output.is_json() {
+        return emit_json_data(
+            "maintenance.start",
+            &serde_json::json!({
+                "registered": true,
+                "schedule": schedule,
+                "scheduler_entry": entry.display().to_string(),
+            }),
+            output,
+        );
+    }
+    info_println(
+        output,
+        &format!(
+            "Maintenance scheduled ({schedule}); scheduler entry written to {}",
+            entry.display()
+        ),
+    );
+    Ok(())
+}
+
+async fn stop(output: &OutputConfig) -> CliResult<()> {
+    try_get_storage_path(None).map_err(|e| CliError::repo_not_found().with_hint(e.to_string()))?;
+
+    ConfigKv::set(MAINTENANCE_ENABLED_KEY, "false", false)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to unset maintenance config: {e}")))?;
+
+    let repo = std::env::current_dir()
+        .map_err(|e| CliError::fatal(format!("failed to resolve repository directory: {e}")))?;
+    let dir = scheduler_agent_dir();
+    let label = scheduler_label(&repo);
+    let removed = remove_scheduler_entry(&dir, &label)
+        .map_err(|e| CliError::fatal(format!("failed to remove scheduler entry: {e}")))?;
+
+    if output.is_json() {
+        return emit_json_data(
+            "maintenance.stop",
+            &serde_json::json!({ "registered": false, "removed": removed }),
+            output,
+        );
+    }
+    info_println(output, "Maintenance scheduler stopped");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1357,5 +1539,36 @@ mod tests {
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("hourly"));
+    }
+
+    #[test]
+    fn scheduler_entry_write_and_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Path::new("/tmp/example-repo");
+        let exe = Path::new("/usr/local/bin/libra");
+        let label = scheduler_label(repo);
+
+        // Label is deterministic for a given repo path.
+        assert_eq!(scheduler_label(repo), label);
+        assert!(label.starts_with("tools.libra.maintenance."));
+
+        let path = write_scheduler_entry(dir.path(), &label, exe, repo, "daily").unwrap();
+        assert!(path.exists(), "scheduler entry should be written");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("maintenance") && content.contains("/tmp/example-repo"),
+            "entry should invoke maintenance in the repo: {content}"
+        );
+        if cfg!(target_os = "macos") {
+            assert_eq!(path.extension().unwrap(), "plist");
+            assert!(content.contains("86400"), "daily => 86400s StartInterval");
+        } else {
+            assert!(content.contains("0 0 * * *"), "daily => daily cron expr");
+        }
+
+        // Removal is idempotent.
+        assert!(remove_scheduler_entry(dir.path(), &label).unwrap());
+        assert!(!path.exists());
+        assert!(!remove_scheduler_entry(dir.path(), &label).unwrap());
     }
 }

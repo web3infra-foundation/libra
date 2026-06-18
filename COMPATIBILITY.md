@@ -37,7 +37,7 @@ batch document.
 | restore | partial | `--source`, `--staged`, `--worktree`, and path restore are supported; overlay/conflict/progress variants are not exposed |
 | status | supported | common Git status surface plus `--porcelain` v1/v2, `--short`, `--branch`, `-z` NUL-terminated output, `--find-renames`, `--column`, and `--ahead-behind`/`--no-ahead-behind` supported |
 | clean | partial | `-n`, `-f`, `-d`, `-x`, `-X`, and `--exclude` are supported; `-i` is intentionally different/not exposed and pathspec filtering remains deferred |
-| stash | partial | `push` / `pop` / `list` / `apply` / `drop` / `show` / `branch` / `clear` supported; `create` / `store` deferred (see [docs/development/commands/_compatibility.md#d8-stash-create](docs/development/commands/_compatibility.md#d8-stash-create) and [#d9-stash-store](docs/development/commands/_compatibility.md#d9-stash-store)) |
+| stash | partial | `push` / `pop` / `list` / `apply` / `drop` / `show` / `branch` / `clear` supported. `stash push` supports `-m`, `-u` / `--include-untracked`, `-a` / `--all`, and `--keep-index`; included untracked/ignored files are stored in a third stash parent and restored by `apply` / `pop`. Deferred: `push -- <pathspec>`, `pop/apply --index`, `create`, and `store` (see [docs/development/commands/_compatibility.md#d8-stash-create](docs/development/commands/_compatibility.md#d8-stash-create) and [#d9-stash-store](docs/development/commands/_compatibility.md#d9-stash-store)) |
 | lfs | partial | built-in Libra LFS command; uses `.libra_attributes`, not Git LFS filters/hooks (see [docs/development/commands/_compatibility.md#d5-git-lfs-gitattributes-filter--hooks-bridge](docs/development/commands/_compatibility.md#d5-git-lfs-gitattributes-filter--hooks-bridge)) |
 | log | partial | common Git log surface plus `--range` revision expressions, `--all`, `--reverse`, `--follow`, and `-L` supported; positional revision range syntax and exact function-range tracking remain partial |
 | shortlog | partial | basic author summary, email, count sorting, time filters, single revision, `-c`/`--committer` grouping, `--no-merges`, `--top`/`--min-count`/`--reverse` supported; custom `--format`, stdin input, and `--author` filter are not exposed |
@@ -76,7 +76,7 @@ batch document.
 | cloud | intentionally-different | Libra cloud backup/restore extension, not a Git command |
 | publish | intentionally-different | Libra Cloudflare publish extension, not a Git command |
 | agent | intentionally-different | Libra external-agent capture extension, not a Git command |
-| maintenance | partial | `run` / `register` / `unregister` / `status` exposed; lower-level maintenance tasks such as `commit-graph` and `prefetch` are skipped when unsupported |
+| maintenance | partial | `run` / `register` / `unregister` / `status` / `start` / `stop` exposed; `start`/`stop` install/remove an OS scheduler entry (launchd LaunchAgents plist on macOS, cron fragment elsewhere; dir overridable via `LIBRA_MAINTENANCE_AGENT_DIR`); the `commit-graph` and `prefetch` tasks are skipped when unsupported |
 | hooks | intentionally-different | Hidden compatibility entry for hook configs installed by `libra agent enable` |
 | archive | partial | Creates tar/tar.gz/tar.bz2/zip archives from a committed tree; `--format`, `--output`, `--prefix` supported |
 | cat-file | partial | `-t`, `-s`, `-p`, `-e`, and AI object modes supported; batch modes and JSON/machine output for `-e` are not exposed |
