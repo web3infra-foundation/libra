@@ -491,10 +491,12 @@ pub(crate) async fn run_merge_for_pull_with_options(
         target_commit,
         lca,
         upstream,
-        options.message.clone(),
-        options.squash,
-        options.no_commit,
-        output,
+        ThreeWayMergeOptions {
+            message_override: options.message.clone(),
+            squash: options.squash,
+            no_commit: options.no_commit,
+            output,
+        },
     )
     .await
 }
@@ -510,17 +512,21 @@ struct MergeTreeEntry {
     mode: TreeItemMode,
 }
 
+struct ThreeWayMergeOptions<'a> {
+    message_override: Option<String>,
+    squash: bool,
+    no_commit: bool,
+    output: &'a OutputConfig,
+}
+
 async fn perform_three_way_merge(
     current_commit: Commit,
     target_commit: Commit,
     base_commit: Commit,
     upstream: &str,
-    message_override: Option<String>,
-    squash: bool,
-    no_commit: bool,
-    output: &OutputConfig,
+    options: ThreeWayMergeOptions<'_>,
 ) -> Result<PullMergeSummary, PullMergeError> {
-    switch::ensure_clean_status(output)
+    switch::ensure_clean_status(options.output)
         .await
         .map_err(|_| PullMergeError::DirtyWorktree)?;
 
@@ -556,7 +562,7 @@ async fn perform_three_way_merge(
     let tree_id = create_tree_from_items_map(&merge_result.merged_items)
         .map_err(PullMergeError::TreeCreate)?;
 
-    if squash {
+    if options.squash {
         // `--squash`: update the index/worktree to the merged tree but do not
         // create a commit or move HEAD, leaving the result staged for a normal
         // `commit`. No MERGE_HEAD/merge info is recorded (matches Git).
@@ -574,7 +580,7 @@ async fn perform_three_way_merge(
         });
     }
 
-    if no_commit {
+    if options.no_commit {
         // `--no-commit`: stage the (conflict-free) merged tree but stop before
         // committing, recording a MergeState with no conflicted paths so
         // `libra merge --continue` finalizes the two-parent commit. (Unlike Git,
@@ -603,7 +609,9 @@ async fn perform_three_way_merge(
         });
     }
 
-    let message = message_override.unwrap_or_else(|| format!("Merge {upstream} into {head_name}"));
+    let message = options
+        .message_override
+        .unwrap_or_else(|| format!("Merge {upstream} into {head_name}"));
     let merge_commit = Commit::from_tree_id(
         tree_id,
         vec![current_commit.id, target_commit.id],

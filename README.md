@@ -609,12 +609,11 @@ The following Git top-level commands are currently **not implemented** in Libra 
 - `prune` – remove loose objects that are no longer reachable
 - ~~`maintenance`~~ – ✅ `libra maintenance` (run, register, unregister, status)
 - `pack-objects` / `unpack-objects` – pack and unpack object collections
-- `remote-show` – show detailed remote info
+- `remote show <name>`-style detailed inspection – show detailed remote info
 - `fetch-pack` / `push-pack` – low-level fetch/push operations
 - `filter-branch` (or `git filter-repo`) – rewrite history
 - `notes` – attach arbitrary metadata to objects
 - `archive` – create tar/zip archives of tree snapshots
-- `rebase --autosquash` / `rebase --reapply-cherry-picks` – advanced rebase options
 
 These commands are slated for future implementation according to the project roadmap. The full per-command compatibility status (`supported` / `partial` / `unsupported` / `intentionally-different`) is tracked in [`COMPATIBILITY.md`](COMPATIBILITY.md).
 

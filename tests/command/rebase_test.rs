@@ -99,9 +99,11 @@ async fn test_rebase_json_abort_outputs_restored_branch() {
         onto: head,
         orig_head: head,
         todo: VecDeque::new(),
+        todo_actions: VecDeque::new(),
         done: Vec::new(),
         stopped_sha: None,
         current_head: head,
+        autosquash: false,
     }
     .save()
     .await
@@ -173,9 +175,11 @@ fn test_rebase_machine_abort_outputs_restored_branch() {
                 onto: head,
                 orig_head: head,
                 todo: VecDeque::new(),
+                todo_actions: VecDeque::new(),
                 done: Vec::new(),
                 stopped_sha: None,
                 current_head: head,
+                autosquash: false,
             }
             .save()
             .await
@@ -416,6 +420,490 @@ fn create_cli_rebase_ahead_repo() -> tempfile::TempDir {
     commit_file_via_cli(repo_path, "feature.txt", "feature\n", "Feature adds file");
 
     repo
+}
+
+#[test]
+fn test_rebase_autosquash_folds_fixup_commit() {
+    let repo = tempdir().expect("failed to create temp repo");
+    let repo_path = repo.path();
+    init_repo_via_cli(repo_path);
+    configure_identity_via_cli(repo_path);
+
+    commit_file_via_cli(repo_path, "base.txt", "base\n", "Base");
+
+    let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
+    assert_cli_success(&output, "failed to create feature branch");
+    commit_file_via_cli(repo_path, "feature.txt", "feature\n", "Feature adds file");
+    commit_file_via_cli(
+        repo_path,
+        "feature.txt",
+        "feature\nfixup\n",
+        "fixup! Feature adds file",
+    );
+
+    let output = run_libra_command(&["switch", "main"], repo_path);
+    assert_cli_success(&output, "failed to switch to main");
+    commit_file_via_cli(repo_path, "main.txt", "main\n", "Main adds file");
+
+    let output = run_libra_command(&["switch", "feature"], repo_path);
+    assert_cli_success(&output, "failed to switch to feature");
+
+    let output = run_libra_command(&["--json", "rebase", "--autosquash", "main"], repo_path);
+    assert_cli_success(&output, "autosquash rebase should succeed");
+
+    assert_eq!(
+        fs::read_to_string(repo_path.join("feature.txt")).unwrap(),
+        "feature\nfixup\n"
+    );
+
+    let output = run_libra_command(&["log", "--oneline", "-n", "4"], repo_path);
+    assert_cli_success(&output, "log after autosquash rebase");
+    let log = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        log.contains("Feature adds file"),
+        "autosquashed history should keep target commit subject, got: {log}"
+    );
+    assert!(
+        !log.contains("fixup! Feature adds file"),
+        "autosquashed history should fold the fixup commit, got: {log}"
+    );
+}
+
+#[test]
+fn test_rebase_autosquash_keeps_unmatched_fixup_as_pick() {
+    let repo = tempdir().expect("failed to create temp repo");
+    let repo_path = repo.path();
+    init_repo_via_cli(repo_path);
+    configure_identity_via_cli(repo_path);
+
+    commit_file_via_cli(repo_path, "base.txt", "base\n", "Base");
+
+    let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
+    assert_cli_success(&output, "failed to create feature branch");
+    commit_file_via_cli(repo_path, "feature.txt", "feature\n", "Feature adds file");
+    commit_file_via_cli(
+        repo_path,
+        "feature.txt",
+        "feature\nunmatched\n",
+        "fixup! Missing target",
+    );
+
+    let output = run_libra_command(&["switch", "main"], repo_path);
+    assert_cli_success(&output, "failed to switch to main");
+    commit_file_via_cli(repo_path, "main.txt", "main\n", "Main adds file");
+
+    let output = run_libra_command(&["switch", "feature"], repo_path);
+    assert_cli_success(&output, "failed to switch to feature");
+
+    let output = run_libra_command(&["--json", "rebase", "--autosquash", "main"], repo_path);
+    assert_cli_success(&output, "autosquash rebase should succeed");
+
+    assert_eq!(
+        fs::read_to_string(repo_path.join("feature.txt")).unwrap(),
+        "feature\nunmatched\n"
+    );
+
+    let output = run_libra_command(&["log", "--oneline", "-n", "4"], repo_path);
+    assert_cli_success(&output, "log after autosquash rebase");
+    let log = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        log.contains("Feature adds file"),
+        "target commit should remain in history, got: {log}"
+    );
+    assert!(
+        log.contains("fixup! Missing target"),
+        "unmatched fixup should remain a standalone pick, got: {log}"
+    );
+}
+
+#[test]
+fn test_rebase_autosquash_keeps_unmatched_fixup_at_original_position() {
+    let repo = tempdir().expect("failed to create temp repo");
+    let repo_path = repo.path();
+    init_repo_via_cli(repo_path);
+    configure_identity_via_cli(repo_path);
+
+    commit_file_via_cli(repo_path, "base.txt", "base\n", "Base");
+
+    let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
+    assert_cli_success(&output, "failed to create feature branch");
+    commit_file_via_cli(repo_path, "feature.txt", "feature\n", "Feature adds file");
+    commit_file_via_cli(
+        repo_path,
+        "unmatched.txt",
+        "unmatched\n",
+        "fixup! Missing target",
+    );
+    commit_file_via_cli(repo_path, "later.txt", "later\n", "Feature follow-up");
+
+    let output = run_libra_command(&["switch", "main"], repo_path);
+    assert_cli_success(&output, "failed to switch to main");
+    commit_file_via_cli(repo_path, "main.txt", "main\n", "Main adds file");
+
+    let output = run_libra_command(&["switch", "feature"], repo_path);
+    assert_cli_success(&output, "failed to switch to feature");
+
+    let output = run_libra_command(&["--json", "rebase", "--autosquash", "main"], repo_path);
+    assert_cli_success(&output, "autosquash rebase should succeed");
+
+    let output = run_libra_command(&["log", "--reverse", "--oneline", "-n", "6"], repo_path);
+    assert_cli_success(&output, "reverse log after autosquash rebase");
+    let log = String::from_utf8_lossy(&output.stdout);
+    let feature_idx = log
+        .find("Feature adds file")
+        .expect("feature commit should remain in history");
+    let fixup_idx = log
+        .find("fixup! Missing target")
+        .expect("unmatched fixup should remain in history");
+    let later_idx = log
+        .find("Feature follow-up")
+        .expect("later commit should remain in history");
+    assert!(
+        feature_idx < fixup_idx && fixup_idx < later_idx,
+        "unmatched fixup should keep its original position, got: {log}"
+    );
+}
+
+#[test]
+fn test_rebase_autosquash_peels_stacked_fixup_markers() {
+    let repo = tempdir().expect("failed to create temp repo");
+    let repo_path = repo.path();
+    init_repo_via_cli(repo_path);
+    configure_identity_via_cli(repo_path);
+
+    commit_file_via_cli(repo_path, "base.txt", "base\n", "Base");
+
+    let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
+    assert_cli_success(&output, "failed to create feature branch");
+    commit_file_via_cli(repo_path, "feature.txt", "feature\n", "Feature target");
+    commit_file_via_cli(
+        repo_path,
+        "feature.txt",
+        "feature\nnested fixup\n",
+        "fixup! fixup! Feature target",
+    );
+
+    let output = run_libra_command(&["switch", "main"], repo_path);
+    assert_cli_success(&output, "failed to switch to main");
+    commit_file_via_cli(repo_path, "main.txt", "main\n", "Main adds file");
+
+    let output = run_libra_command(&["switch", "feature"], repo_path);
+    assert_cli_success(&output, "failed to switch to feature");
+
+    let output = run_libra_command(&["--json", "rebase", "--autosquash", "main"], repo_path);
+    assert_cli_success(&output, "autosquash rebase should succeed");
+
+    assert_eq!(
+        fs::read_to_string(repo_path.join("feature.txt")).unwrap(),
+        "feature\nnested fixup\n"
+    );
+
+    let output = run_libra_command(&["log", "--oneline", "-n", "5"], repo_path);
+    assert_cli_success(&output, "log after stacked autosquash rebase");
+    let log = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        log.contains("Feature target"),
+        "target commit should remain in history, got: {log}"
+    );
+    assert!(
+        !log.contains("fixup! fixup! Feature target"),
+        "stacked fixup should fold into the peeled target, got: {log}"
+    );
+}
+
+#[test]
+fn test_rebase_autosquash_prefers_exact_target_before_prefix_target() {
+    let repo = tempdir().expect("failed to create temp repo");
+    let repo_path = repo.path();
+    init_repo_via_cli(repo_path);
+    configure_identity_via_cli(repo_path);
+
+    commit_file_via_cli(repo_path, "base.txt", "base\n", "Base");
+
+    let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
+    assert_cli_success(&output, "failed to create feature branch");
+    commit_file_via_cli(repo_path, "feature.txt", "extra\n", "Feature extra");
+    commit_file_via_cli(repo_path, "feature.txt", "feature\n", "Feature");
+    commit_file_via_cli(
+        repo_path,
+        "feature.txt",
+        "feature\nfixup\n",
+        "fixup! Feature",
+    );
+
+    let output = run_libra_command(&["switch", "main"], repo_path);
+    assert_cli_success(&output, "failed to switch to main");
+    commit_file_via_cli(repo_path, "main.txt", "main\n", "Main adds file");
+
+    let output = run_libra_command(&["switch", "feature"], repo_path);
+    assert_cli_success(&output, "failed to switch to feature");
+
+    let output = run_libra_command(&["--json", "rebase", "--autosquash", "main"], repo_path);
+    assert_cli_success(&output, "autosquash rebase should succeed");
+
+    assert_eq!(
+        fs::read_to_string(repo_path.join("feature.txt")).unwrap(),
+        "feature\nfixup\n"
+    );
+
+    let output = run_libra_command(&["log", "--oneline", "-n", "5"], repo_path);
+    assert_cli_success(&output, "log after autosquash rebase");
+    let log = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        log.contains("Feature extra"),
+        "prefix commit should remain in history, got: {log}"
+    );
+    assert!(
+        log.contains("Feature"),
+        "exact target commit should remain in history, got: {log}"
+    );
+    assert!(
+        !log.contains("fixup! Feature"),
+        "fixup should fold into exact target, got: {log}"
+    );
+}
+
+#[test]
+fn test_rebase_autosquash_does_not_fold_into_later_target() {
+    let repo = tempdir().expect("failed to create temp repo");
+    let repo_path = repo.path();
+    init_repo_via_cli(repo_path);
+    configure_identity_via_cli(repo_path);
+
+    commit_file_via_cli(repo_path, "base.txt", "base\n", "Base");
+
+    let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
+    assert_cli_success(&output, "failed to create feature branch");
+    commit_file_via_cli(repo_path, "early.txt", "early\n", "fixup! Feature");
+    commit_file_via_cli(repo_path, "feature.txt", "feature\n", "Feature");
+
+    let output = run_libra_command(&["switch", "main"], repo_path);
+    assert_cli_success(&output, "failed to switch to main");
+    commit_file_via_cli(repo_path, "main.txt", "main\n", "Main adds file");
+
+    let output = run_libra_command(&["switch", "feature"], repo_path);
+    assert_cli_success(&output, "failed to switch to feature");
+
+    let output = run_libra_command(&["--json", "rebase", "--autosquash", "main"], repo_path);
+    assert_cli_success(&output, "autosquash rebase should succeed");
+
+    assert_eq!(
+        fs::read_to_string(repo_path.join("early.txt")).unwrap(),
+        "early\n"
+    );
+    assert_eq!(
+        fs::read_to_string(repo_path.join("feature.txt")).unwrap(),
+        "feature\n"
+    );
+
+    let output = run_libra_command(&["log", "--oneline", "-n", "5"], repo_path);
+    assert_cli_success(&output, "log after autosquash rebase");
+    let log = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        log.contains("fixup! Feature"),
+        "fixup before its target should remain a standalone pick, got: {log}"
+    );
+    assert!(
+        log.contains("Feature"),
+        "later target commit should remain in history, got: {log}"
+    );
+}
+
+#[test]
+fn test_rebase_autosquash_skip_target_keeps_dependent_fixup_as_pick() {
+    let repo = tempdir().expect("failed to create temp repo");
+    let repo_path = repo.path();
+    init_repo_via_cli(repo_path);
+    configure_identity_via_cli(repo_path);
+
+    commit_file_via_cli(repo_path, "conflict.txt", "base\n", "Base");
+
+    let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
+    assert_cli_success(&output, "failed to create feature branch");
+    commit_file_via_cli(repo_path, "conflict.txt", "feature\n", "Feature target");
+    commit_file_via_cli(repo_path, "fixup.txt", "fixup\n", "fixup! Feature target");
+
+    let output = run_libra_command(&["switch", "main"], repo_path);
+    assert_cli_success(&output, "failed to switch to main");
+    commit_file_via_cli(repo_path, "conflict.txt", "main\n", "Main target");
+
+    let output = run_libra_command(&["switch", "feature"], repo_path);
+    assert_cli_success(&output, "failed to switch to feature");
+
+    let output = run_libra_command(&["--json", "rebase", "--autosquash", "main"], repo_path);
+    assert_eq!(output.status.code(), Some(128));
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-001");
+    assert!(
+        report.message.contains("Feature target"),
+        "rebase should stop on the autosquash target, got: {}",
+        report.message
+    );
+
+    let output = run_libra_command(&["--json", "rebase", "--skip"], repo_path);
+    assert_cli_success(&output, "autosquash rebase skip should complete");
+
+    assert_eq!(
+        fs::read_to_string(repo_path.join("conflict.txt")).unwrap(),
+        "main\n"
+    );
+    assert_eq!(
+        fs::read_to_string(repo_path.join("fixup.txt")).unwrap(),
+        "fixup\n"
+    );
+
+    let output = run_libra_command(&["log", "--oneline", "-n", "5"], repo_path);
+    assert_cli_success(&output, "log after autosquash skip");
+    let log = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        log.contains("fixup! Feature target"),
+        "dependent fixup should become a standalone pick after its target is skipped, got: {log}"
+    );
+}
+
+#[test]
+fn test_rebase_autosquash_skip_fixup_preserves_later_fixup_action() {
+    let repo = tempdir().expect("failed to create temp repo");
+    let repo_path = repo.path();
+    init_repo_via_cli(repo_path);
+    configure_identity_via_cli(repo_path);
+
+    commit_file_via_cli(repo_path, "conflict.txt", "base\n", "Base");
+
+    let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
+    assert_cli_success(&output, "failed to create feature branch");
+    commit_file_via_cli(repo_path, "feature.txt", "target\n", "Feature target");
+    commit_file_via_cli(
+        repo_path,
+        "conflict.txt",
+        "first fixup\n",
+        "fixup! Feature target",
+    );
+    commit_file_via_cli(repo_path, "second.txt", "second\n", "fixup! Feature target");
+
+    let output = run_libra_command(&["switch", "main"], repo_path);
+    assert_cli_success(&output, "failed to switch to main");
+    commit_file_via_cli(repo_path, "conflict.txt", "main\n", "Main target");
+
+    let output = run_libra_command(&["switch", "feature"], repo_path);
+    assert_cli_success(&output, "failed to switch to feature");
+
+    let output = run_libra_command(&["--json", "rebase", "--autosquash", "main"], repo_path);
+    assert_eq!(output.status.code(), Some(128));
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-001");
+    assert!(
+        report.message.contains("fixup! Feature target"),
+        "rebase should stop on the first fixup, got: {}",
+        report.message
+    );
+
+    let output = run_libra_command(&["--json", "rebase", "--skip"], repo_path);
+    assert_cli_success(&output, "autosquash rebase skip should complete");
+
+    assert_eq!(
+        fs::read_to_string(repo_path.join("conflict.txt")).unwrap(),
+        "main\n"
+    );
+    assert_eq!(
+        fs::read_to_string(repo_path.join("feature.txt")).unwrap(),
+        "target\n"
+    );
+    assert_eq!(
+        fs::read_to_string(repo_path.join("second.txt")).unwrap(),
+        "second\n"
+    );
+
+    let output = run_libra_command(&["log", "--oneline", "-n", "5"], repo_path);
+    assert_cli_success(&output, "log after skipping conflicted fixup");
+    let log = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !log.contains("fixup! Feature target"),
+        "later fixup should still fold after an earlier fixup is skipped, got: {log}"
+    );
+}
+
+#[test]
+fn test_rebase_autosquash_amend_replaces_target_message() {
+    use git_internal::internal::object::commit::Commit;
+    use libra::{command::load_object, internal::head::Head};
+
+    let repo = tempdir().expect("failed to create temp repo");
+    let repo_path = repo.path();
+    init_repo_via_cli(repo_path);
+    configure_identity_via_cli(repo_path);
+
+    commit_file_via_cli(repo_path, "base.txt", "base\n", "Base");
+
+    let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
+    assert_cli_success(&output, "failed to create feature branch");
+    commit_file_via_cli(
+        repo_path,
+        "feature.txt",
+        "feature\n",
+        "Feature adds file\n\nOriginal body",
+    );
+    commit_file_via_cli(
+        repo_path,
+        "feature.txt",
+        "feature\namended\n",
+        "amend! Feature adds file\n\nReplacement subject\n\nReplacement body",
+    );
+
+    let output = run_libra_command(&["switch", "main"], repo_path);
+    assert_cli_success(&output, "failed to switch to main");
+    commit_file_via_cli(repo_path, "main.txt", "main\n", "Main adds file");
+
+    let output = run_libra_command(&["switch", "feature"], repo_path);
+    assert_cli_success(&output, "failed to switch to feature");
+
+    let output = run_libra_command(&["--json", "rebase", "--autosquash", "main"], repo_path);
+    assert_cli_success(&output, "autosquash rebase should succeed");
+
+    assert_eq!(
+        fs::read_to_string(repo_path.join("feature.txt")).unwrap(),
+        "feature\namended\n"
+    );
+
+    let _guard = ChangeDirGuard::new(repo_path);
+    let runtime = tokio::runtime::Runtime::new().expect("failed to create runtime");
+    let head = runtime
+        .block_on(Head::current_commit())
+        .expect("rebased branch should have HEAD");
+    let commit: Commit = load_object(&head).expect("failed to load rebased HEAD commit");
+    let (clean_message, _trailers) = parse_commit_msg(&commit.message);
+    let subject = clean_message.lines().next().unwrap_or("");
+    assert_eq!(subject, "Replacement subject");
+    assert!(
+        clean_message.contains("Replacement body"),
+        "amend commit message should replace target message: {:?}",
+        clean_message
+    );
+    assert!(
+        !clean_message.contains("amend! Feature adds file"),
+        "amend marker should be stripped from replacement message: {:?}",
+        clean_message
+    );
+    assert!(
+        !clean_message.contains("Original body"),
+        "amend should not keep target commit message: {:?}",
+        clean_message
+    );
+}
+
+#[test]
+fn test_rebase_reapply_cherry_picks_flag_is_accepted() {
+    let repo = create_cli_rebase_success_repo();
+
+    let output = run_libra_command(
+        &["--json", "rebase", "--reapply-cherry-picks", "main"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "rebase --reapply-cherry-picks");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["status"], "completed");
+    assert_eq!(json["data"]["replay_count"], 1);
 }
 
 #[test]
@@ -871,6 +1359,8 @@ async fn test_basic_rebase() {
         continue_rebase: false,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -1051,6 +1541,8 @@ async fn test_rebase_preserves_untracked_files() {
         continue_rebase: false,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -1149,6 +1641,8 @@ async fn test_rebase_already_up_to_date() {
         continue_rebase: false,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -1291,6 +1785,8 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         continue_rebase: false,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -1308,6 +1804,8 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         continue_rebase: false,
         abort: true,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -1466,6 +1964,8 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         continue_rebase: false,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -1488,9 +1988,11 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         onto: master_head,
         orig_head,
         todo: VecDeque::new(),
+        todo_actions: VecDeque::new(),
         done: Vec::new(),
         stopped_sha: None,
         current_head: rebased_head,
+        autosquash: false,
     };
     state
         .save()
@@ -1508,6 +2010,8 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         continue_rebase: false,
         abort: true,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -1574,6 +2078,8 @@ async fn test_rebase_continue_no_rebase() {
         continue_rebase: true,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -1622,6 +2128,8 @@ async fn test_rebase_skip_no_rebase() {
         continue_rebase: false,
         abort: false,
         skip: true,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -1767,6 +2275,8 @@ async fn test_rebase_with_conflict_and_abort() {
         continue_rebase: false,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -1791,6 +2301,8 @@ async fn test_rebase_with_conflict_and_abort() {
         continue_rebase: false,
         abort: true,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -1960,6 +2472,8 @@ async fn test_rebase_binary_conflict_writes_markers() {
         continue_rebase: false,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -1987,6 +2501,8 @@ async fn test_rebase_binary_conflict_writes_markers() {
         continue_rebase: false,
         abort: true,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
     assert!(
@@ -2171,6 +2687,8 @@ async fn test_rebase_with_conflict_and_skip() {
         continue_rebase: false,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -2187,6 +2705,8 @@ async fn test_rebase_with_conflict_and_skip() {
         continue_rebase: false,
         abort: false,
         skip: true,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -2342,6 +2862,8 @@ async fn test_rebase_with_conflict_and_continue() {
         continue_rebase: false,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -2379,6 +2901,8 @@ async fn test_rebase_with_conflict_and_continue() {
         continue_rebase: true,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -2608,6 +3132,8 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         continue_rebase: false,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -2625,6 +3151,8 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         continue_rebase: false,
         abort: false,
         skip: true,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -2792,6 +3320,8 @@ async fn test_rebase_state_persistence() {
         continue_rebase: false,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -2826,6 +3356,8 @@ async fn test_rebase_state_persistence() {
         continue_rebase: false,
         abort: true,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -2951,6 +3483,8 @@ async fn test_rebase_fast_forward_branch_behind() {
         continue_rebase: false,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -3079,6 +3613,8 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         continue_rebase: false,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -3207,6 +3743,8 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         continue_rebase: false,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -3363,6 +3901,8 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         continue_rebase: false,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -3524,6 +4064,8 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         continue_rebase: false,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -3546,6 +4088,8 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         continue_rebase: false,
         abort: true,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 }
@@ -3706,6 +4250,8 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         continue_rebase: false,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -3725,6 +4271,8 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         continue_rebase: false,
         abort: true,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 }
@@ -3864,6 +4412,8 @@ async fn test_rebase_continue_requires_resolution() {
         continue_rebase: false,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -3882,6 +4432,8 @@ async fn test_rebase_continue_requires_resolution() {
         continue_rebase: true,
         abort: false,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 
@@ -3900,6 +4452,8 @@ async fn test_rebase_continue_requires_resolution() {
         continue_rebase: false,
         abort: true,
         skip: false,
+        autosquash: false,
+        reapply_cherry_picks: false,
     })
     .await;
 }

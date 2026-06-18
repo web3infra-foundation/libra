@@ -1289,7 +1289,10 @@ mod tests {
         Branch, BranchError, commit_contains, format_branch_name, load_remote_branches_with_conn,
         map_head_commit_store_error,
     };
-    use crate::utils::error::{CliError, StableErrorCode};
+    use crate::utils::{
+        error::{CliError, StableErrorCode},
+        test,
+    };
 
     struct ColorOverrideReset;
 
@@ -1364,7 +1367,13 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn commit_contains_surfaces_typed_commit_load_failure() {
+        let repo = tempfile::tempdir().expect("temp repo");
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(test::setup_with_new_libra_in(repo.path()));
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
         let corrupt_commit = any_hash();
         let branch = Branch {
             name: "corrupt".to_string(),
