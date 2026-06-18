@@ -112,8 +112,8 @@ fn log_repo_corrupt_error(message: impl Into<String>) -> CliError {
 #[derive(Parser, Debug)]
 #[command(after_help = LOG_EXAMPLES)]
 pub struct LogArgs {
-    /// Limit the number of output
-    #[clap(short, long)]
+    /// Limit the number of output (Git alias: `--max-count`)
+    #[clap(short, long, visible_alias = "max-count")]
     pub number: Option<usize>,
     /// Shorthand for --pretty=oneline --abbrev-commit
     #[clap(long)]
@@ -1023,8 +1023,8 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
 
     let format_type = if args.oneline {
         FormatType::Oneline
-    } else if let Some(template) = args.pretty.clone() {
-        FormatType::Custom(template)
+    } else if let Some(pretty) = args.pretty.clone() {
+        parse_pretty_format(pretty)
     } else {
         FormatType::Full
     };
@@ -1339,6 +1339,25 @@ async fn validate_selected_log_commits(
     }
 
     Ok(())
+}
+
+/// Interpret a `--pretty=<value>` argument. Recognizes the `oneline` preset and
+/// the `format:` / `tformat:` prefixes (which carry a custom template); `medium`
+/// (and the empty value) map to the default full format. Any other value is
+/// treated as a raw custom template, matching the prior behavior. Named presets
+/// beyond `oneline` (short/full/fuller/raw) are not yet rendered distinctly.
+fn parse_pretty_format(pretty: String) -> FormatType {
+    if pretty == "oneline" {
+        FormatType::Oneline
+    } else if pretty == "medium" || pretty.is_empty() {
+        FormatType::Full
+    } else if let Some(fmt) = pretty.strip_prefix("format:") {
+        FormatType::Custom(fmt.to_string())
+    } else if let Some(fmt) = pretty.strip_prefix("tformat:") {
+        FormatType::Custom(fmt.to_string())
+    } else {
+        FormatType::Custom(pretty)
+    }
 }
 
 fn format_log_timestamp(timestamp: i64) -> String {
@@ -1906,6 +1925,43 @@ mod tests {
             resolve_parent_bounds(true, true, Some(0), Some(5)),
             (Some(0), Some(5))
         );
+    }
+
+    #[test]
+    fn test_parse_pretty_format_presets() {
+        assert!(matches!(
+            parse_pretty_format("oneline".into()),
+            FormatType::Oneline
+        ));
+        assert!(matches!(
+            parse_pretty_format("medium".into()),
+            FormatType::Full
+        ));
+        assert!(matches!(
+            parse_pretty_format(String::new()),
+            FormatType::Full
+        ));
+        match parse_pretty_format("format:%h %s".into()) {
+            FormatType::Custom(t) => assert_eq!(t, "%h %s"),
+            _ => panic!("format: prefix should map to a custom template"),
+        }
+        match parse_pretty_format("tformat:%H".into()) {
+            FormatType::Custom(t) => assert_eq!(t, "%H"),
+            _ => panic!("tformat: prefix should map to a custom template"),
+        }
+        match parse_pretty_format("%an".into()) {
+            FormatType::Custom(t) => assert_eq!(t, "%an"),
+            _ => panic!("a bare template should map to a custom template"),
+        }
+    }
+
+    #[test]
+    fn test_log_max_count_alias() {
+        assert_eq!(
+            LogArgs::parse_from(["libra", "--max-count", "3"]).number,
+            Some(3)
+        );
+        assert_eq!(LogArgs::parse_from(["libra", "-n", "3"]).number, Some(3));
     }
 
     #[test]
