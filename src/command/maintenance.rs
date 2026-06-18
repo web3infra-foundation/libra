@@ -645,20 +645,28 @@ async fn run_pack_refs(
         }
     }
 
-    // Install the new packed-refs. On Unix `rename` atomically replaces
-    // an existing destination; on Windows `rename` fails when the
-    // destination exists. Remove the old file first so that the install
-    // works portably across platforms.
+    // Install the new packed-refs atomically. Keep a backup of the old
+    // file so that a rename failure after the old file is moved aside
+    // does not lose all refs that exist only in packed-refs (e.g. after
+    // a previous pack-refs).
+    let backup_path = packed_refs_path.with_extension("bak");
     if packed_refs_path.exists() {
-        fs::remove_file(&packed_refs_path).map_err(|e| {
+        fs::rename(&packed_refs_path, &backup_path).map_err(|e| {
             let _ = fs::remove_file(&temp_path);
-            CliError::fatal(format!("failed to remove old packed-refs: {e}"))
+            CliError::fatal(format!("failed to back up old packed-refs: {e}"))
         })?;
     }
-    fs::rename(&temp_path, &packed_refs_path).map_err(|e| {
-        let _ = fs::remove_file(&temp_path);
-        CliError::fatal(format!("failed to install packed-refs: {e}"))
-    })?;
+    fs::rename(&temp_path, &packed_refs_path)
+        .inspect_err(|_| {
+            // Restore the backup so packed-refs content survives.
+            let _ = fs::rename(&backup_path, &packed_refs_path);
+        })
+        .map_err(|e| {
+            let _ = fs::remove_file(&temp_path);
+            CliError::fatal(format!("failed to install packed-refs: {e}"))
+        })?;
+    // Clean up the backup on success.
+    let _ = fs::remove_file(&backup_path);
 
     // Remove only loose ref files whose current contents match the snapshot we
     // just packed. Refs created or updated after collect_refs must not be
@@ -1087,9 +1095,13 @@ async fn collect_reachable_objects(
     // `stash apply stash@{1}` etc. Each old_oid/new_oid on the reflog is a GC
     // root, otherwise a dropped stash entry's objects become unreachable.
     let stash_log_path = repo_path.join("logs/refs/stash");
-    if stash_log_path.is_file()
-        && let Ok(content) = fs::read_to_string(&stash_log_path)
-    {
+    if stash_log_path.is_file() {
+        let content = fs::read_to_string(&stash_log_path).map_err(|e| {
+            CliError::fatal(format!(
+                "failed to read stash reflog {}: {e}; aborting gc to protect stash objects",
+                stash_log_path.display()
+            ))
+        })?;
         for line in content.lines() {
             // Stash reflog format: "old_hash new_hash name <email> ..."
             for oid_str in line.split_whitespace().take(2) {
@@ -1127,17 +1139,31 @@ async fn collect_reachable_objects(
     if packed_refs_path.is_file() {
         let content = fs::read_to_string(&packed_refs_path)
             .map_err(|e| CliError::fatal(format!("failed to read packed-refs: {e}")))?;
-        for line in content.lines() {
+        for (line_no, line) in content.lines().enumerate() {
             let line = line.trim();
             // Skip comments, empty lines, and peeled-tag markers (^<hash>).
             if line.is_empty() || line.starts_with('#') || line.starts_with('^') {
                 continue;
             }
-            if let Some((hash_str, _refname)) = line.split_once(' ')
-                && let Some(hash) = parse_object_hash(hash_str)
-            {
-                walk_reachable(&hash, storage, &mut reachable)?;
-            }
+            // Non-comment lines must contain a well-formed "<hash> <refname>"
+            // entry. Silently skipping a malformed line would let GC build an
+            // incomplete root set and potentially delete objects reachable only
+            // from the ref recorded on that line.
+            let (hash_str, _refname) = line.split_once(' ').ok_or_else(|| {
+                CliError::fatal(format!(
+                    "malformed packed-refs line {}: expected '<hash> <refname>', got '{}'",
+                    line_no + 1,
+                    line
+                ))
+            })?;
+            let hash = parse_object_hash(hash_str).ok_or_else(|| {
+                CliError::fatal(format!(
+                    "packed-refs line {} has invalid object hash '{}'",
+                    line_no + 1,
+                    hash_str
+                ))
+            })?;
+            walk_reachable(&hash, storage, &mut reachable)?;
         }
     }
 

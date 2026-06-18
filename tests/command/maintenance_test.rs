@@ -1940,6 +1940,201 @@ fn test_maintenance_pack_refs_replaces_existing_file() {
     );
 }
 
+#[test]
+
+/// Regression test: `maintenance run --task pack-refs` must not leave a stale
+/// backup file behind after a successful run.
+///
+/// After the atomic install fix, the old packed-refs is renamed to a `.bak`
+/// backup, the new file is installed, and the backup is removed on success.
+/// This prevents data loss if the install step fails while also ensuring no
+/// stale `.bak` files accumulate.
+fn test_maintenance_pack_refs_no_stale_backup_after_success() {
+    let repo = create_committed_repo_via_cli();
+    let main_hash = rev_parse(repo.path(), "main");
+
+    // Pre-populate packed-refs with an existing entry.
+    let libra_dir = repo.path().join(".libra");
+    let packed_refs_path = libra_dir.join("packed-refs");
+    fs::write(
+        &packed_refs_path,
+        "# packed-refs with peeled tags\ndeadbeef refs/heads/old\n",
+    )
+    .unwrap();
+
+    // Create a loose ref to pack.
+    let refs_heads = libra_dir.join("refs").join("heads");
+    fs::create_dir_all(&refs_heads).unwrap();
+    fs::write(refs_heads.join("main"), format!("{main_hash}\n")).unwrap();
+
+    let output = run_libra_command(&["maintenance", "run", "--task", "pack-refs"], repo.path());
+    assert!(
+        output.status.success(),
+        "pack-refs should pass, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The backup file must be cleaned up after a successful install.
+    assert!(
+        !libra_dir.join("packed-refs.bak").exists(),
+        "backup packed-refs.bak must be removed after successful install"
+    );
+
+    // The packed-refs must contain both entries.
+    let content = fs::read_to_string(&packed_refs_path).unwrap();
+    assert!(
+        content.contains("refs/heads/old"),
+        "existing entry must survive"
+    );
+    assert!(
+        content.contains("refs/heads/main"),
+        "new entry must be present"
+    );
+}
+
+#[test]
+
+/// Regression test: `maintenance run --task gc` must abort when the stash
+/// reflog (`logs/refs/stash`) exists but cannot be read.
+///
+/// Previously `if let Ok(content) = fs::read_to_string(…)` silently skipped
+/// an unreadable stash reflog, letting GC proceed with only the current
+/// `refs/stash` entry. Older stash entries reachable only through the reflog
+/// could then be pruned.
+#[cfg(unix)]
+fn test_maintenance_gc_fails_on_unreadable_stash_reflog() {
+    if skip_permission_denied_test_if_root("test_maintenance_gc_fails_on_unreadable_stash_reflog") {
+        return;
+    }
+
+    let repo = create_committed_repo_via_cli();
+
+    // Create a stash to populate the reflog.
+    fs::write(repo.path().join("stashed.txt"), "stash content\n").unwrap();
+    run_libra_command(&["add", "stashed.txt"], repo.path());
+    let stash_output = run_libra_command(&["stash", "push", "-m", "test stash"], repo.path());
+    assert!(
+        stash_output.status.success(),
+        "stash push should succeed, stderr: {}",
+        String::from_utf8_lossy(&stash_output.stderr)
+    );
+
+    let stash_log_path = repo
+        .path()
+        .join(".libra")
+        .join("logs")
+        .join("refs")
+        .join("stash");
+    assert!(
+        stash_log_path.exists(),
+        "stash reflog should exist at {}",
+        stash_log_path.display()
+    );
+
+    // Make the reflog file unreadable.
+    let mut permissions = fs::metadata(&stash_log_path).unwrap().permissions();
+    permissions.set_mode(0o000);
+    fs::set_permissions(&stash_log_path, permissions).unwrap();
+
+    // GC must fail because the stash reflog exists but is unreadable.
+    // Use JSON output to inspect the per-task error message.
+    let gc_output = run_libra_command(
+        &["--json", "maintenance", "run", "--task", "gc"],
+        repo.path(),
+    );
+    assert!(
+        !gc_output.status.success(),
+        "gc should fail when stash reflog is unreadable, but exited 0"
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&gc_output.stdout).expect("valid json");
+    let tasks = json
+        .get("data")
+        .and_then(|d| d.get("tasks"))
+        .expect("tasks array")
+        .as_array()
+        .expect("tasks is array");
+    let gc_task = tasks
+        .iter()
+        .find(|t| t.get("task").and_then(|v| v.as_str()) == Some("gc"))
+        .expect("gc task in results");
+    assert_eq!(
+        gc_task.get("success"),
+        Some(&serde_json::Value::Bool(false)),
+        "gc task must report success: false, got: {gc_task}"
+    );
+    let msg = gc_task
+        .get("message")
+        .and_then(|v| v.as_str())
+        .expect("gc task message");
+    assert!(
+        msg.contains("stash reflog") || msg.contains("failed to read"),
+        "gc error must mention stash reflog, got: {msg}"
+    );
+
+    // Restore permissions for cleanup.
+    let mut permissions = fs::metadata(&stash_log_path).unwrap().permissions();
+    permissions.set_mode(0o644);
+    let _ = fs::set_permissions(&stash_log_path, permissions);
+}
+
+#[test]
+
+/// Regression test: `maintenance run --task gc` must abort when a non-comment
+/// packed-refs line contains an invalid object hash.
+///
+/// Previously `if let Some(hash) = parse_object_hash(…)` silently skipped such
+/// lines. After pack-refs deletes the loose ref files, a branch or tag that
+/// exists only in packed-refs would be omitted from GC roots and its old loose
+/// objects could be deleted.
+fn test_maintenance_gc_fails_on_malformed_packed_refs_entry() {
+    let repo = create_committed_repo_via_cli();
+
+    // Pre-populate packed-refs with a malformed entry.
+    let libra_dir = repo.path().join(".libra");
+    let packed_refs_path = libra_dir.join("packed-refs");
+    fs::write(
+        &packed_refs_path,
+        "# packed-refs with peeled tags\nnot-a-hex-hash refs/heads/broken\n",
+    )
+    .unwrap();
+
+    // GC must fail because packed-refs contains a malformed entry.
+    let gc_output = run_libra_command(
+        &["--json", "maintenance", "run", "--task", "gc"],
+        repo.path(),
+    );
+    assert!(
+        !gc_output.status.success(),
+        "gc should fail when packed-refs is malformed, but exited 0"
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&gc_output.stdout).expect("valid json");
+    let tasks = json
+        .get("data")
+        .and_then(|d| d.get("tasks"))
+        .expect("tasks array")
+        .as_array()
+        .expect("tasks is array");
+    let gc_task = tasks
+        .iter()
+        .find(|t| t.get("task").and_then(|v| v.as_str()) == Some("gc"))
+        .expect("gc task in results");
+    assert_eq!(
+        gc_task.get("success"),
+        Some(&serde_json::Value::Bool(false)),
+        "gc task must report success: false, got: {gc_task}"
+    );
+    let msg = gc_task
+        .get("message")
+        .and_then(|v| v.as_str())
+        .expect("gc task message");
+    assert!(
+        msg.contains("packed-refs") && msg.contains("invalid object hash"),
+        "gc error must mention packed-refs invalid hash, got: {msg}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
