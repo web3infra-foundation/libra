@@ -597,8 +597,8 @@ async fn run_pack_refs(
     }
 
     // Merge new refs, overwriting existing ones
-    for (name, hash) in refs {
-        existing.insert(name, hash);
+    for (name, hash) in &refs {
+        existing.insert(name.clone(), hash.clone());
     }
 
     // Write packed-refs atomically: stream to a temp file, sync it, then rename
@@ -641,10 +641,18 @@ async fn run_pack_refs(
         CliError::fatal(format!("failed to install packed-refs: {e}"))
     })?;
 
-    // Remove packed loose ref files
+    // Remove only loose ref files whose current contents match the snapshot we
+    // just packed. Refs created or updated after collect_refs must not be
+    // deleted, otherwise concurrent branch/fetch/ref updates could lose data.
     let mut removed_count = 0;
-    remove_packed_refs(&refs_dir, &refs_dir, &mut removed_count)
-        .map_err(|e| CliError::fatal(format!("failed to remove packed refs: {e}")))?;
+    remove_packed_refs(
+        &refs_dir,
+        &refs_dir,
+        "refs/heads/",
+        &refs,
+        &mut removed_count,
+    )
+    .map_err(|e| CliError::fatal(format!("failed to remove packed refs: {e}")))?;
 
     Ok(TaskResult {
         task: "pack-refs".to_string(),
@@ -1036,11 +1044,16 @@ async fn collect_reachable_objects(storage: &ClientStorage) -> CliResult<HashSet
         }
     }
 
-    // Collect from index
+    // Collect from index. A corrupt or unreadable index must abort GC instead
+    // of silently dropping staged objects from the reachable set.
     let index_path = path::index();
-    if index_path.exists()
-        && let Ok(index) = git_internal::internal::index::Index::load(&index_path)
-    {
+    if index_path.exists() {
+        let index = git_internal::internal::index::Index::load(&index_path).map_err(|e| {
+            CliError::fatal(format!(
+                "failed to load index from {}: {e}; aborting gc to protect staged objects",
+                index_path.display()
+            ))
+        })?;
         for entry in index.tracked_entries(0) {
             reachable.insert(entry.hash);
         }
@@ -1050,6 +1063,10 @@ async fn collect_reachable_objects(storage: &ClientStorage) -> CliResult<HashSet
 }
 
 /// Walk object references recursively, adding all transitive dependencies.
+///
+/// Errors are propagated rather than swallowed so that GC aborts with an
+/// incomplete reachability graph instead of pruning objects that may still be
+/// referenced.
 fn walk_reachable(
     hash: &ObjectHash,
     storage: &ClientStorage,
@@ -1059,33 +1076,44 @@ fn walk_reachable(
         return Ok(()); // Already visited
     }
 
-    let Ok(obj_type) = storage.get_object_type(hash) else {
-        return Ok(());
-    };
+    let obj_type = storage.get_object_type(hash).map_err(|e| {
+        CliError::fatal(format!(
+            "failed to determine object type for {hash} during gc: {e}"
+        ))
+    })?;
 
     match obj_type {
         ObjectType::Commit => {
-            if let Ok(commit) = load_object::<Commit>(hash) {
-                walk_reachable(&commit.tree_id, storage, reachable)?;
-                for parent in &commit.parent_commit_ids {
-                    walk_reachable(parent, storage, reachable)?;
-                }
+            let commit = load_object::<Commit>(hash).map_err(|e| {
+                CliError::fatal(format!(
+                    "failed to load commit {hash} during gc reachability walk: {e}"
+                ))
+            })?;
+            walk_reachable(&commit.tree_id, storage, reachable)?;
+            for parent in &commit.parent_commit_ids {
+                walk_reachable(parent, storage, reachable)?;
             }
         }
         ObjectType::Tree => {
-            if let Ok(tree) = load_object::<Tree>(hash) {
-                for item in &tree.tree_items {
-                    walk_reachable(&item.id, storage, reachable)?;
-                }
+            let tree = load_object::<Tree>(hash).map_err(|e| {
+                CliError::fatal(format!(
+                    "failed to load tree {hash} during gc reachability walk: {e}"
+                ))
+            })?;
+            for item in &tree.tree_items {
+                walk_reachable(&item.id, storage, reachable)?;
             }
         }
         ObjectType::Tag => {
             // Annotated tags point to another object (commit/tree/blob/tag).
             // The tag object itself must keep its target reachable, otherwise
             // a tagged commit can be pruned while the tag remains.
-            if let Ok(tag) = load_object::<GitTag>(hash) {
-                walk_reachable(&tag.object_hash, storage, reachable)?;
-            }
+            let tag = load_object::<GitTag>(hash).map_err(|e| {
+                CliError::fatal(format!(
+                    "failed to load tag {hash} during gc reachability walk: {e}"
+                ))
+            })?;
+            walk_reachable(&tag.object_hash, storage, reachable)?;
         }
         _ => {}
     }
@@ -1412,14 +1440,23 @@ fn collect_refs(
     Ok(())
 }
 
-/// Remove loose ref files that have been packed.
+/// Remove loose ref files whose current contents match the packed snapshot.
+///
+/// Only files that were actually captured by `collect_refs` are deleted; refs
+/// created or updated concurrently after the snapshot are left untouched.
 #[allow(clippy::only_used_in_recursion)]
-fn remove_packed_refs(base: &Path, current: &Path, count: &mut usize) -> io::Result<()> {
+fn remove_packed_refs(
+    base: &Path,
+    current: &Path,
+    ref_prefix: &str,
+    packed_refs: &HashMap<String, String>,
+    count: &mut usize,
+) -> io::Result<()> {
     for entry in fs::read_dir(current)? {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            remove_packed_refs(base, &path, count)?;
+            remove_packed_refs(base, &path, ref_prefix, packed_refs, count)?;
             // Remove empty directory
             if let Ok(mut iter) = fs::read_dir(&path)
                 && iter.next().is_none()
@@ -1427,8 +1464,14 @@ fn remove_packed_refs(base: &Path, current: &Path, count: &mut usize) -> io::Res
                 let _ = fs::remove_dir(&path);
             }
         } else if path.is_file() {
-            fs::remove_file(&path)?;
-            *count += 1;
+            let relative = path.strip_prefix(base).unwrap_or(&path);
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            let full_name = format!("{ref_prefix}{relative}");
+            let on_disk = fs::read_to_string(&path)?.trim().to_string();
+            if packed_refs.get(&full_name) == Some(&on_disk) {
+                fs::remove_file(&path)?;
+                *count += 1;
+            }
         }
     }
     Ok(())
@@ -1520,13 +1563,25 @@ fn read_pack_objects(pack_path: &Path) -> io::Result<Vec<(ObjectType, Vec<u8>, O
 /// Objects that appear in multiple sources are only written once. This avoids
 /// reading through `ClientStorage`, which can trigger race conditions in the
 /// pack cache when many packs are accessed concurrently.
+///
+/// Objects are streamed so that only hashes are kept in memory for
+/// deduplication; the consolidated object data is staged on disk until the
+/// final pack header (including the object count) and checksum can be written
+/// in the correct byte order.
 fn create_consolidated_pack(
     source_packs: &[PathBuf],
     loose_objects: &[(String, PathBuf)],
     pack_path: &Path,
 ) -> io::Result<usize> {
-    let mut objects: Vec<(ObjectType, Vec<u8>)> = Vec::new();
+    // Stage 1: stream object entries to a temp file. We cannot write the pack
+    // header first because the object count is only known after deduplication,
+    // and the checksum must hash the header in its natural byte order.
+    let temp_dir = tempfile::tempdir()?;
+    let entries_path = temp_dir.path().join("entries.bin");
+    let mut entries_file = fs::File::create(&entries_path)?;
+
     let mut seen: HashSet<ObjectHash> = HashSet::new();
+    let mut count: u32 = 0;
 
     // Copy complete objects from existing packs, resolving any delta entries.
     for pack in source_packs {
@@ -1534,7 +1589,10 @@ fn create_consolidated_pack(
             if !seen.insert(hash) {
                 continue;
             }
-            objects.push((obj_type, body));
+            write_pack_entry(&mut entries_file, obj_type, &body)?;
+            count = count.checked_add(1).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "pack object count overflow")
+            })?;
         }
     }
 
@@ -1550,12 +1608,65 @@ fn create_consolidated_pack(
         let decompressed = ClientStorage::decompress_zlib(&data)?;
         let (obj_type, _size) = parse_loose_object_header(&decompressed)?;
         let header_end = decompressed.iter().position(|&b| b == 0).unwrap_or(0);
-        let body = decompressed[header_end + 1..].to_vec();
-        objects.push((obj_type, body));
+        let body = &decompressed[header_end + 1..];
+        write_pack_entry(&mut entries_file, obj_type, body)?;
+        count = count.checked_add(1).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "pack object count overflow")
+        })?;
     }
+    drop(entries_file);
 
-    write_pack_from_objects(&objects, pack_path)?;
-    Ok(objects.len())
+    // Stage 2: assemble the final pack file with the correct header, copy the
+    // staged entries into it (updating the checksum as we go), and append the
+    // pack checksum. Keep the unfinished file outside objects/pack so a partial
+    // write cannot confuse the storage layer.
+    let pack_temp_path = temp_dir.path().join("consolidated.pack");
+    let mut out = fs::File::create(&pack_temp_path)?;
+    let mut ctx = Context::new(match get_hash_kind() {
+        HashKind::Sha256 => &SHA256,
+        _ => &SHA1_FOR_LEGACY_USE_ONLY,
+    });
+
+    out.write_all(b"PACK")?;
+    ctx.update(b"PACK");
+    out.write_all(&2_u32.to_be_bytes())?;
+    ctx.update(&2_u32.to_be_bytes());
+    out.write_all(&count.to_be_bytes())?;
+    ctx.update(&count.to_be_bytes());
+
+    let mut entries_file = fs::File::open(&entries_path)?;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = entries_file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        ctx.update(&buf[..n]);
+        out.write_all(&buf[..n])?;
+    }
+    drop(entries_file);
+
+    let pack_hash = ctx.finish();
+    out.write_all(pack_hash.as_ref())?;
+    drop(out);
+
+    fs::rename(&pack_temp_path, pack_path).inspect_err(|_| {
+        let _ = fs::remove_file(&pack_temp_path);
+    })?;
+
+    Ok(count as usize)
+}
+
+/// Write a single pack entry (type/size header + zlib compressed body) to a
+/// writer.
+fn write_pack_entry<W: Write>(writer: &mut W, obj_type: ObjectType, body: &[u8]) -> io::Result<()> {
+    let type_num = object_type_to_pack_num(obj_type);
+    let mut header = Vec::new();
+    write_size_encoded(&mut header, body.len(), type_num)?;
+    let compressed = ClientStorage::compress_zlib(body)?;
+    writer.write_all(&header)?;
+    writer.write_all(&compressed)?;
+    Ok(())
 }
 
 /// Write a pack file from a sequence of (type, body) object tuples.
