@@ -79,6 +79,83 @@ fn test_blame_json_output_includes_lines() {
     assert!(json["data"]["lines"].as_array().is_some());
 }
 
+/// Scenario: `blame --porcelain` emits the machine-readable format — a
+/// `<sha> <orig> <final> [<group>]` header followed (once per commit) by the
+/// author/committer/summary/filename metadata block and tab-prefixed content.
+#[test]
+fn test_blame_porcelain_emits_commit_metadata() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "alpha\nbeta\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "tracked.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(
+            &["commit", "-m", "add tracked porcelain", "--no-verify"],
+            repo.path()
+        )
+        .status
+        .success()
+    );
+
+    let output = run_libra_command(&["blame", "--porcelain", "tracked.txt"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // First line is the porcelain header: "<sha> <orig> <final> [<group>]".
+    let first = stdout.lines().next().unwrap_or("");
+    let header: Vec<&str> = first.split(' ').collect();
+    assert!(
+        header.len() >= 3,
+        "header needs sha/orig/final, got: {first}"
+    );
+    assert!(
+        header[0].len() >= 40 && header[0].chars().all(|c| c.is_ascii_hexdigit()),
+        "first token should be a full object hash, got: {first}"
+    );
+
+    // Metadata block (printed once for the single attributing commit).
+    assert!(
+        stdout.contains("\nauthor-mail <"),
+        "missing author-mail: {stdout}"
+    );
+    assert!(
+        stdout.contains("\nauthor-time "),
+        "missing author-time: {stdout}"
+    );
+    assert!(
+        stdout.contains("\nauthor-tz "),
+        "missing author-tz: {stdout}"
+    );
+    assert!(
+        stdout.contains("\ncommitter "),
+        "missing committer: {stdout}"
+    );
+    assert!(
+        stdout.contains("\nsummary add tracked porcelain"),
+        "missing summary: {stdout}"
+    );
+    assert!(
+        stdout.contains("\nfilename tracked.txt"),
+        "missing filename: {stdout}"
+    );
+    // Content lines are tab-prefixed.
+    assert!(
+        stdout.contains("\talpha"),
+        "missing tab-prefixed content: {stdout}"
+    );
+    assert!(
+        stdout.contains("\tbeta"),
+        "missing tab-prefixed content: {stdout}"
+    );
+}
+
 /// Scenario: `--machine blame` must emit exactly one non-empty stdout
 /// line of valid JSON (NDJSON-friendly). Mirrors `add_json_test`'s
 /// machine-mode contract.
@@ -447,6 +524,8 @@ async fn blame_runs_with_sha1() {
         file: "foo.txt".into(),
         commit: "HEAD".into(),
         line_range: None,
+        porcelain: false,
+        line_porcelain: false,
     })
     .await;
 }
@@ -466,6 +545,8 @@ async fn blame_runs_with_sha256() {
         file: "foo.txt".into(),
         commit: "HEAD".into(),
         line_range: None,
+        porcelain: false,
+        line_porcelain: false,
     })
     .await;
 }

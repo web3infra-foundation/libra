@@ -57,6 +57,14 @@ pub struct BlameArgs {
     /// The line range to blame
     #[clap(short = 'L', value_name = "RANGE")]
     pub line_range: Option<String>,
+
+    /// Emit the machine-readable porcelain format (commit metadata once per commit).
+    #[clap(long)]
+    pub porcelain: bool,
+
+    /// Like --porcelain, but repeat the commit metadata header for every line.
+    #[clap(long = "line-porcelain")]
+    pub line_porcelain: bool,
 }
 
 /// Single attributed line of a blame report. Serialised verbatim to JSON.
@@ -176,6 +184,10 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
 
     if out_config.quiet {
         return Ok(());
+    }
+
+    if args.porcelain || args.line_porcelain {
+        return render_blame_porcelain(&result, &args.file, args.line_porcelain);
     }
 
     if result.lines.is_empty() {
@@ -381,6 +393,82 @@ fn get_file_lines(
 
 /// Format an epoch second as RFC 3339 (UTC). Falls back to the raw integer
 /// when the timestamp is outside chrono's representable range.
+/// Render blame output in Git's porcelain format. With `line_porcelain`, the
+/// commit metadata header is repeated for every line; otherwise it is printed
+/// once per commit (subsequent lines from that commit print only the SHA header
+/// and the content). The commit metadata is read by reloading each attributing
+/// commit. NOTE: the original line number is approximated by the final line
+/// number — the blame walk does not track per-commit origin line numbers.
+fn render_blame_porcelain(result: &BlameOutput, file: &str, line_porcelain: bool) -> CliResult<()> {
+    use std::{collections::HashSet, io::Write, str::FromStr};
+
+    let lines = &result.lines;
+    // For each line, record the group size when it starts a new consecutive run
+    // of lines from the same commit (Git prints this count on the group's first
+    // line only).
+    let mut group_start_size: Vec<Option<usize>> = vec![None; lines.len()];
+    let mut i = 0;
+    while i < lines.len() {
+        let mut j = i + 1;
+        while j < lines.len() && lines[j].hash == lines[i].hash {
+            j += 1;
+        }
+        group_start_size[i] = Some(j - i);
+        i = j;
+    }
+
+    let mut emitted: HashSet<String> = HashSet::new();
+    let mut buf = String::new();
+    for (idx, line) in lines.iter().enumerate() {
+        // Header: "<sha> <orig-line> <final-line> [<group-size>]".
+        let (orig, final_no) = (line.line_number, line.line_number);
+        match group_start_size[idx] {
+            Some(n) => buf.push_str(&format!("{} {orig} {final_no} {n}\n", line.hash)),
+            None => buf.push_str(&format!("{} {orig} {final_no}\n", line.hash)),
+        }
+
+        if line_porcelain || emitted.insert(line.hash.clone()) {
+            let hash = ObjectHash::from_str(&line.hash).map_err(|_| {
+                CliError::fatal(format!("invalid blame commit hash '{}'", line.hash))
+                    .with_stable_code(StableErrorCode::RepoCorrupt)
+            })?;
+            let commit = load_object::<Commit>(&hash).map_err(|e| {
+                CliError::fatal(format!("failed to load commit {}: {e}", line.hash))
+                    .with_stable_code(StableErrorCode::RepoCorrupt)
+            })?;
+            // Strip any gpgsig/header block so the summary is the real subject.
+            let (parsed_message, _) = crate::common_utils::parse_commit_msg(&commit.message);
+            let summary = parsed_message
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            buf.push_str(&format!("author {}\n", commit.author.name));
+            buf.push_str(&format!("author-mail <{}>\n", commit.author.email));
+            buf.push_str(&format!("author-time {}\n", commit.author.timestamp));
+            buf.push_str(&format!("author-tz {}\n", commit.author.timezone));
+            buf.push_str(&format!("committer {}\n", commit.committer.name));
+            buf.push_str(&format!("committer-mail <{}>\n", commit.committer.email));
+            buf.push_str(&format!("committer-time {}\n", commit.committer.timestamp));
+            buf.push_str(&format!("committer-tz {}\n", commit.committer.timezone));
+            buf.push_str(&format!("summary {summary}\n"));
+            buf.push_str(&format!("filename {file}\n"));
+        }
+        buf.push_str(&format!("\t{}\n", line.content));
+    }
+
+    let stdout = std::io::stdout();
+    match stdout.lock().write_all(buf.as_bytes()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(
+            CliError::io(format!("failed to write blame porcelain output: {e}"))
+                .with_stable_code(StableErrorCode::IoWriteFailed),
+        ),
+    }
+}
+
 fn format_blame_timestamp(timestamp: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0)
         .map(|dt| dt.to_rfc3339())

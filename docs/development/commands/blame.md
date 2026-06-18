@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础文件 blame 与数字 `-L` 范围已支持；porcelain、reverse、email、whitespace、incremental 和 copy/move detection 尚未公开。
+- 兼容级别：`partial`。基础文件 blame、数字 `-L` 范围、`--porcelain`/`--line-porcelain` 已支持；reverse、`-w` 空白忽略、incremental 和 copy/move detection 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -47,7 +47,8 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/blame.md`。
 - Synopsis：`libra blame <file> [<commit>] [-L <range>]`。
-- 公开参数/子命令包括：`<FILE>`、`[<COMMIT>]`、`-L <RANGE>`。
+- 公开参数/子命令包括：`<FILE>`、`[<COMMIT>]`、`-L <RANGE>`、`--porcelain`、`--line-porcelain`。
+- `--porcelain`/`--line-porcelain`：机器可读输出，每行先打印 `<sha> <orig> <final> [<group>]` 头部，再（`--porcelain` 每个提交一次、`--line-porcelain` 每行）打印 author/author-mail/author-time/author-tz/committer*/summary/filename 元数据块，最后是 `\t<content>`。元数据通过重新加载归属提交读取。**有意差异/限制**：blame 遍历不跟踪每提交的原始行号，`<orig>` 以 `<final>` 近似。
 
 
 ## 还未实现的功能
@@ -57,7 +58,7 @@ flowchart TD
 | 兼容差异项 | 正则行范围 | 原始对照：不支持；相关参数/替代：-L :<funcname> / -L /regex/；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 反向 blame | 原始对照：不支持；相关参数/替代：--reverse；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 显示邮箱 | 原始对照：不支持；相关参数/替代：-e / --show-email；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | porcelain 格式 | 原始对照：不支持；相关参数/替代：--porcelain / --line-porcelain；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现（部分） | porcelain 格式 | `--porcelain`/`--line-porcelain` 已支持（重新加载提交取元数据；带集成测试）。限制：`<orig>` 原始行号以 `<final>` 近似（blame 遍历未跟踪每提交原始行号），未输出 `boundary`/`previous` 行。 |
 | 兼容差异项 | 忽略空白 | 原始对照：不支持；相关参数/替代：-w / --ignore-whitespace；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 增量输出 | 原始对照：不支持；相关参数/替代：--incremental；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 相似度阈值 | 原始对照：不支持；相关参数/替代：-M / -C (move/copy detection)；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
