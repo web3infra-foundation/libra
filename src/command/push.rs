@@ -138,6 +138,11 @@ pub struct PushArgs {
     #[clap(long)]
     pub follow_tags: bool,
 
+    /// GPG-sign the push with a push certificate. Errors if the remote does not
+    /// advertise the `push-cert` capability or no signing key is configured.
+    #[clap(long)]
+    pub signed: bool,
+
     /// Machine-readable single-line-per-ref output; conflicts with `--json`/`--machine`
     #[clap(long)]
     pub porcelain: bool,
@@ -171,6 +176,7 @@ impl PushArgs {
             atomic: false,
             push_option: Vec::new(),
             follow_tags: false,
+            signed: false,
             porcelain: false,
             dry_run: false,
             tags: false,
@@ -263,6 +269,15 @@ pub enum PushError {
 
     #[error("the receiving end does not support push options")]
     PushOptionsUnsupported,
+
+    #[error("the receiving end does not support signed push")]
+    PushSignUnsupported,
+
+    #[error("--signed requires a configured signing key, but none was found")]
+    PushSignNoKey,
+
+    #[error("failed to create push certificate signature: {0}")]
+    PushSignFailed(String),
 }
 
 impl From<PushError> for CliError {
@@ -356,6 +371,14 @@ impl From<PushError> for CliError {
             PushError::PushOptionsUnsupported => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::NetworkProtocol)
                 .with_hint("retry without -o/--push-option, or push to a remote that supports push options"),
+            PushError::PushSignUnsupported => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_hint("retry without --signed, or push to a remote that supports signed push"),
+            PushError::PushSignNoKey => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::AuthMissingCredentials)
+                .with_hint("configure a signing key (see 'libra config user.signingkey' / vault setup)"),
+            PushError::PushSignFailed(_) => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::InternalInvariant),
         }
     }
 }
@@ -400,6 +423,67 @@ fn encode_push_options(options: &[String], data: &mut BytesMut) {
     for option in options {
         add_pkt_line_string(data, option.clone());
     }
+    data.extend_from_slice(b"0000");
+}
+
+/// Resolve the push-certificate nonce for `--signed`. The remote must advertise
+/// `push-cert[=<nonce>]` during discovery; otherwise the push is refused.
+fn resolve_push_cert_nonce(
+    signed: bool,
+    server_capabilities: &[String],
+) -> Result<Option<String>, PushError> {
+    if !signed {
+        return Ok(None);
+    }
+    for cap in server_capabilities {
+        if let Some(nonce) = cap.strip_prefix("push-cert=") {
+            return Ok(Some(nonce.to_string()));
+        }
+        if cap == "push-cert" {
+            return Ok(Some(String::new()));
+        }
+    }
+    Err(PushError::PushSignUnsupported)
+}
+
+/// Build the signed payload of a push certificate (Git's `certificate
+/// version 0.1` text): a header block, a blank line, then one `<old> <new>
+/// <ref>` command per line. This exact text is what gets GPG-signed.
+fn build_push_certificate(
+    pusher: &str,
+    pushee: &str,
+    nonce: &str,
+    commands: &[(String, String, String)],
+) -> String {
+    let mut cert = String::new();
+    cert.push_str("certificate version 0.1\n");
+    cert.push_str(&format!("pusher {pusher}\n"));
+    cert.push_str(&format!("pushee {pushee}\n"));
+    cert.push_str(&format!("nonce {nonce}\n"));
+    cert.push('\n');
+    for (old, new, refname) in commands {
+        cert.push_str(&format!("{old} {new} {refname}\n"));
+    }
+    cert
+}
+
+/// Frame a signed push certificate into the send-pack stream: the `push-cert`
+/// announcement (carrying the capability list), the signed certificate body,
+/// the armored signature, and the `push-cert-end` terminator, then a flush.
+fn encode_push_cert_section(
+    capability: &str,
+    certificate: &str,
+    armored_signature: &str,
+    data: &mut BytesMut,
+) {
+    add_pkt_line_string(data, format!("push-cert\0{capability}\n"));
+    for line in certificate.lines() {
+        add_pkt_line_string(data, format!("{line}\n"));
+    }
+    for line in armored_signature.lines() {
+        add_pkt_line_string(data, format!("{line}\n"));
+    }
+    add_pkt_line_string(data, "push-cert-end\n".to_string());
     data.extend_from_slice(b"0000");
 }
 
@@ -867,11 +951,12 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         });
     }
 
-    // `--atomic` / `-o`: only advertise these capabilities if the remote
-    // supports them, otherwise refuse before sending anything (matching Git).
+    // `--atomic` / `-o` / `--signed`: only advertise these capabilities if the
+    // remote supports them, otherwise refuse before sending anything (Git).
     let use_atomic = resolve_atomic_capability(args.atomic, &discovery.capabilities)?;
     let use_push_options =
         resolve_push_options_capability(&args.push_option, &discovery.capabilities)?;
+    let push_cert_nonce = resolve_push_cert_nonce(args.signed, &discovery.capabilities)?;
 
     let mut data = BytesMut::new();
     let mut capabilities = vec!["report-status"];
@@ -884,33 +969,72 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     if use_push_options {
         capabilities.push("push-options");
     }
+    if push_cert_nonce.is_some() {
+        capabilities.push("push-cert");
+    }
     let capability = capabilities.join(" ");
     let zero_oid = ObjectHash::zero_str(get_hash_kind());
-    for (index, plan) in plans.iter().enumerate() {
-        let old_oid = plan
-            .update
-            .old_oid
-            .as_deref()
-            .unwrap_or(&zero_oid)
-            .to_string();
-        let new_oid = match plan.update.kind {
-            PushRefUpdateKind::Update => plan.update.new_oid.clone(),
-            PushRefUpdateKind::Delete => zero_oid.clone(),
-        };
-        let suffix = if index == 0 {
-            format!("\0{capability}")
-        } else {
-            String::new()
-        };
-        add_pkt_line_string(
-            &mut data,
-            format!("{old_oid} {new_oid} {}{suffix}\n", plan.update.remote_ref),
+
+    // Build the `<old> <new> <ref>` command tuples shared by both wire forms.
+    let commands: Vec<(String, String, String)> = plans
+        .iter()
+        .map(|plan| {
+            let old_oid = plan
+                .update
+                .old_oid
+                .as_deref()
+                .unwrap_or(&zero_oid)
+                .to_string();
+            let new_oid = match plan.update.kind {
+                PushRefUpdateKind::Update => plan.update.new_oid.clone(),
+                PushRefUpdateKind::Delete => zero_oid.clone(),
+            };
+            (old_oid, new_oid, plan.update.remote_ref.clone())
+        })
+        .collect();
+
+    if let Some(nonce) = push_cert_nonce {
+        // Signed push: build, GPG-sign, and frame a push certificate.
+        let identity = crate::command::commit::resolve_committer_identity()
+            .await
+            .map_err(|e| PushError::PushSignFailed(e.to_string()))?;
+        let pusher = format!(
+            "{} <{}> {} +0000",
+            identity.name,
+            identity.email,
+            chrono::Utc::now().timestamp()
         );
-    }
-    data.extend_from_slice(b"0000");
-    // Push-options section follows the command flush, before the pack.
-    if use_push_options {
-        encode_push_options(&args.push_option, &mut data);
+        let certificate = build_push_certificate(&pusher, &repo_url, &nonce, &commands);
+        let unseal_key = crate::internal::vault::load_unseal_key()
+            .await
+            .ok_or(PushError::PushSignNoKey)?;
+        let sig_hex = crate::internal::vault::pgp_sign(
+            &crate::utils::util::storage_path(),
+            &unseal_key,
+            certificate.as_bytes(),
+        )
+        .await
+        .map_err(|e| PushError::PushSignFailed(e.to_string()))?;
+        let armored = crate::internal::vault::signature_to_armored(&sig_hex)
+            .map_err(|e| PushError::PushSignFailed(e.to_string()))?;
+        encode_push_cert_section(&capability, &certificate, &armored, &mut data);
+    } else {
+        for (index, (old_oid, new_oid, remote_ref)) in commands.iter().enumerate() {
+            let suffix = if index == 0 {
+                format!("\0{capability}")
+            } else {
+                String::new()
+            };
+            add_pkt_line_string(
+                &mut data,
+                format!("{old_oid} {new_oid} {remote_ref}{suffix}\n"),
+            );
+        }
+        data.extend_from_slice(b"0000");
+        // Push-options section follows the command flush, before the pack.
+        if use_push_options {
+            encode_push_options(&args.push_option, &mut data);
+        }
     }
     tracing::debug!("{:?}", data);
 
@@ -3057,6 +3181,7 @@ mod test {
             atomic: false,
             push_option: Vec::new(),
             follow_tags: false,
+            signed: false,
             porcelain: false,
             dry_run: false,
             tags: false,
@@ -3152,6 +3277,76 @@ mod test {
         ));
         // Already present on the remote: skip.
         assert!(!follow_tag_should_push(true, true, "refs/tags/v1", &remote));
+    }
+
+    #[test]
+    fn push_cert_nonce_resolution() {
+        // Not signing: never resolves a nonce.
+        assert_eq!(
+            resolve_push_cert_nonce(false, &["push-cert=abc".to_string()]).unwrap(),
+            None
+        );
+        // Signing + server nonce: extract it.
+        assert_eq!(
+            resolve_push_cert_nonce(true, &["push-cert=abc123".to_string()]).unwrap(),
+            Some("abc123".to_string())
+        );
+        // Signing + bare push-cert: empty (stateless) nonce.
+        assert_eq!(
+            resolve_push_cert_nonce(true, &["push-cert".to_string()]).unwrap(),
+            Some(String::new())
+        );
+        // Signing + no support: refuse up-front.
+        assert!(matches!(
+            resolve_push_cert_nonce(true, &["report-status".to_string()]),
+            Err(PushError::PushSignUnsupported)
+        ));
+    }
+
+    #[test]
+    fn push_certificate_payload_and_framing() {
+        let commands = vec![(
+            "old1".to_string(),
+            "new1".to_string(),
+            "refs/heads/main".to_string(),
+        )];
+        let cert = build_push_certificate(
+            "A U Thor <a@e> 1000000000 +0000",
+            "https://example.com/r.git",
+            "nonceXYZ",
+            &commands,
+        );
+        assert_eq!(
+            cert,
+            "certificate version 0.1\n\
+pusher A U Thor <a@e> 1000000000 +0000\n\
+pushee https://example.com/r.git\n\
+nonce nonceXYZ\n\
+\n\
+old1 new1 refs/heads/main\n"
+        );
+
+        let mut data = BytesMut::new();
+        encode_push_cert_section(
+            "report-status push-cert",
+            &cert,
+            "-----BEGIN PGP SIGNATURE-----\nSIGDATA\n-----END PGP SIGNATURE-----",
+            &mut data,
+        );
+        let bytes = &data[..];
+        assert!(
+            bytes.windows(9).any(|w| w == b"push-cert"),
+            "section announces push-cert"
+        );
+        assert!(
+            bytes.windows(13).any(|w| w == b"push-cert-end"),
+            "section ends with push-cert-end"
+        );
+        assert!(
+            bytes.windows(7).any(|w| w == b"SIGDATA"),
+            "armored signature is embedded"
+        );
+        assert!(bytes.ends_with(b"0000"), "section flushed before the pack");
     }
 
     #[test]
