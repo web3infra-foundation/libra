@@ -117,6 +117,10 @@ libra rev-list --count --left-right --cherry main...rev-right
 libra --json rev-list --cherry-pick main...rev-right
 libra --json rev-list --cherry main...rev-right
 libra switch main
+libra rev-list --children HEAD
+libra rev-list --count --children HEAD
+libra --json rev-list --children --skip 1 --max-count 1 HEAD
+! libra rev-list --parents --children HEAD
 LATEST_HEAD="$(libra rev-parse HEAD)"
 libra fsck
 libra fsck --connectivity-only
@@ -135,8 +139,8 @@ libra --json for-each-ref --points-at "$LATEST_HEAD"
 关键断言：
 
 - `rev-parse`、`show`、`show-ref`、`for-each-ref`、`cat-file`、`hash-object`（含 `--path` / `--no-filters` 兼容入口）、`rev-list`、`fsck` 当前正向路径可用。
-- `rev-list --count` 输出过滤后的提交数量；`rev-list -n` 限制输出行数；`rev-list --skip --max-count` 可跳过当前 HEAD 后定位父提交；`--since` / `--after` 与 `--until` / `--before` 时间过滤可观察；multi revision、`A..B`、`^A`、`A...B`、`--first-parent`、`--author`、`--committer`、`--grep`、`-- <path>` path limitation、`--left-right`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--cherry` 和 parent bound reset aliases 均有正向断言；重复 `--grep` 按 OR 匹配，默认大小写敏感，path limitation 会在 JSON 中回显 `pathspecs[]`，`--cherry-pick` 会在 JSON 中回显 `cherry_pick` 并限制 `commits[]`，`--cherry` 会在 JSON 中回显 `cherry` 并保持 `cherry_mark=false`，`--count --left-right --cherry-mark` 与 `--count --left-right --cherry` 输出 Git 兼容三字段计数。
+- `rev-list --count` 输出过滤后的提交数量；`rev-list -n` 限制输出行数；`rev-list --skip --max-count` 可跳过当前 HEAD 后定位父提交；`--since` / `--after` 与 `--until` / `--before` 时间过滤可观察；multi revision、`A..B`、`^A`、`A...B`、`--first-parent`、`--author`、`--committer`、`--grep`、`-- <path>` path limitation、`--left-right`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--cherry`、`--children` 和 parent bound reset aliases 均有正向断言；重复 `--grep` 按 OR 匹配，默认大小写敏感，path limitation 会在 JSON 中回显 `pathspecs[]`，`--cherry-pick` 会在 JSON 中回显 `cherry_pick` 并限制 `commits[]`，`--cherry` 会在 JSON 中回显 `cherry` 并保持 `cherry_mark=false`，`--children` 会在 JSON 中回显 `children` 并通过 `entries[].children[]` 保留 child 元数据，`--parents --children` 会被解析层拒绝，`--count --left-right --cherry-mark` 与 `--count --left-right --cherry` 输出 Git 兼容三字段计数。
 - `show-ref --branches` 与 `--heads` 输出一致；`--no-branches` / `--no-tags` reset aliases 恢复默认 branch+tag 范围；`show-ref --abbrev=12` / `--hash=12` 输出 HEAD 的 12 位前缀；`--no-abbrev` 恢复完整哈希，`--no-hash` 按 Git 行为作为 hash-only alias；`show-ref --dereference` 对 annotated tag 输出 `refs/tags/<name>^{}` peeled 行，`--no-dereference` 取消 peeled 行；`--no-head`、`--no-verify`、`--no-exists` 可恢复对应默认行为；`show-ref --verify` 只接受完整 refname / `HEAD`；`show-ref --exists` 成功静默，缺失 ref 失败。
 - `for-each-ref --points-at` 对 branch、lightweight tag 和 annotated tag peeled target 的过滤可观察；`--json` 返回标准 envelope。
 - 缺失 revision/object 和非法 hash-object 类型必须失败。
-- `ls-files`、高级 `for-each-ref --contains/--merged`、高级 `rev-parse`、`rev-list` 对象/边界遍历输出不属于当前场景正向覆盖。
+- `ls-files`、高级 `for-each-ref --contains/--merged`、高级 `rev-parse`、`rev-list --objects*` / `--boundary` 对象/边界遍历输出不属于当前场景正向覆盖。

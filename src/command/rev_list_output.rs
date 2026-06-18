@@ -46,6 +46,7 @@ EXAMPLES:
     libra rev-list --cherry main...feature
                                     Show right side and mark equivalent commits
     libra rev-list --parents HEAD   Include parent commit IDs on each line
+    libra rev-list --children HEAD  Include child commit IDs on each line
     libra rev-list --timestamp HEAD Prefix each line with the committer timestamp
     libra rev-list main             Walk ancestry from refs/heads/main
     libra rev-list HEAD~5           Walk ancestry from a relative ref
@@ -61,6 +62,8 @@ pub(super) struct RevListEntry {
     pub(super) cherry_equivalent: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) parents: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) children: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) timestamp: Option<usize>,
 }
@@ -77,6 +80,7 @@ pub(super) struct RevListOutput {
     pub(super) count_fields: Vec<usize>,
     pub(super) count_only: bool,
     pub(super) parents: bool,
+    pub(super) children: bool,
     pub(super) timestamp: bool,
     pub(super) first_parent: bool,
     pub(super) author: Option<String>,
@@ -110,6 +114,7 @@ impl RevListOutput {
                     format_rev_list_entry(
                         entry,
                         self.parents,
+                        self.children,
                         self.timestamp,
                         self.left_right,
                         self.cherry_mark,
@@ -180,6 +185,7 @@ pub(super) fn write_rev_list_output<W: Write>(writer: &mut W, commits: &[String]
 pub(super) fn format_rev_list_entry(
     entry: &RevListEntry,
     show_parents: bool,
+    show_children: bool,
     show_timestamp: bool,
     show_left_right: bool,
     show_cherry_mark: bool,
@@ -197,6 +203,9 @@ pub(super) fn format_rev_list_entry(
     ));
     if show_parents {
         fields.extend(entry.parents.iter().cloned());
+    }
+    if show_children {
+        fields.extend(entry.children.iter().cloned());
     }
     fields.join(" ")
 }

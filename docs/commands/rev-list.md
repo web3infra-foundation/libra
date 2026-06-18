@@ -10,7 +10,7 @@ libra rev-list [OPTIONS] [SPEC]... [-- <PATH>...]
 
 ## Description
 
-`libra rev-list` resolves one or more revision inputs to commits, walks the reachable history, applies optional exclusion/range, symmetric-difference side, cherry-equivalence, first-parent, author, committer, message grep, path, time-window, parent-count, and count/limit filters, and prints commit IDs newest first. When `<SPEC>` is omitted, the command defaults to `HEAD`. Output formatting can include parent commit IDs (`--parents`), committer timestamps (`--timestamp`), side markers (`--left-right`), and cherry-equivalence markers (`--cherry-mark` / `--cherry`).
+`libra rev-list` resolves one or more revision inputs to commits, walks the reachable history, applies optional exclusion/range, symmetric-difference side, cherry-equivalence, first-parent, author, committer, message grep, path, time-window, parent-count, and count/limit filters, and prints commit IDs newest first. When `<SPEC>` is omitted, the command defaults to `HEAD`. Output formatting can include parent commit IDs (`--parents`), child commit IDs (`--children`), committer timestamps (`--timestamp`), side markers (`--left-right`), and cherry-equivalence markers (`--cherry-mark` / `--cherry`).
 
 ## Options
 
@@ -38,6 +38,7 @@ libra rev-list [OPTIONS] [SPEC]... [-- <PATH>...]
 | `--cherry-mark` | Mark patch-equivalent commits with `=` and non-equivalent commits with `+`. Conflicts with `--cherry-pick`. |
 | `--cherry` | Shorthand for right-side, cherry-marked, no-merge symmetric-difference output. Equivalent commits are prefixed with `=`, unique right-side commits with `+`, or `>` when combined with `--left-right`. |
 | `--parents` | Print parent commit IDs after each listed commit. |
+| `--children` | Print child commit IDs after each listed commit. Conflicts with `--parents`. Child relationships are built from the traversal before output filters such as `--skip`, `--max-count`, `--grep`, and parent-count filters are applied. |
 | `--timestamp` | Prefix each listed commit with its committer timestamp, matching Git's `timestamp commit [parents...]` field order. |
 | `<SPEC>...` | Revisions to enumerate from. Defaults to `HEAD`; accepts multiple positive revisions, `^<rev>` exclusions, `A..B`, and `A...B`. |
 | `-- <PATH>...` | Limit commits to changes that touched one of the listed paths. |
@@ -76,6 +77,7 @@ libra rev-list --left-right --cherry main...feature
 libra rev-list --count --left-right --cherry-mark main...feature
 libra rev-list --count --cherry main...feature
 libra rev-list --parents HEAD
+libra rev-list --children HEAD
 libra rev-list --timestamp --parents HEAD
 libra rev-list HEAD~1
 libra rev-list refs/remotes/origin/main
@@ -84,7 +86,7 @@ libra --json rev-list HEAD
 
 ## Human Output
 
-Output is one commit ID per line by default. Multiple positive revisions are unioned and de-duplicated. `^<rev>` excludes commits reachable from that revision. `A..B` is equivalent to `^A B`; `A...B` prints the symmetric difference between both sides. `--left-right` prefixes symmetric-difference commits with `<` or `>`, `--left-only` and `--right-only` keep one side, `--cherry-pick` removes patch-equivalent pairs across sides, `--cherry-mark` prefixes equivalent commits with `=` and unique commits with `+`, and `--cherry` keeps the right side, marks equivalent commits with `=`, marks unique right-side commits with `+`, and implies no-merge output. With `--left-right --cherry`, unique right-side commits use `>` while equivalent commits keep `=`. `--first-parent` limits traversal through merge commits to the first parent chain. Author, committer, message grep, path, time-window, side/cherry, and parent-count filters are applied before `--skip`, `--max-count`, and `--count`. `--author` and `--committer` match the respective `name <email>` string case-insensitively. `--grep` matches the full commit message with a case-sensitive regular expression; repeated `--grep` patterns use OR semantics. Path filters must follow an explicit `--` separator and match files or directories relative to the worktree root. `--since`/`--after` and `--until`/`--before` accept `YYYY-MM-DD`, RFC3339/full timestamps with timezone, Unix timestamps, and relative forms such as `2 weeks ago`. With `--parents`, each line becomes `commit parent...`. With `--timestamp`, each line becomes `timestamp commit`; combining both produces `timestamp commit parent...`. With `--count`, default output is a single decimal count; `--left-right` produces `<left>\t<right>`, `--cherry-mark` or `--cherry` produces `<unique>\t<equivalent>`, and combining `--left-right --cherry-mark` or `--left-right --cherry` produces `<left-unique>\t<right-unique>\t<equivalent>`.
+Output is one commit ID per line by default. Multiple positive revisions are unioned and de-duplicated. `^<rev>` excludes commits reachable from that revision. `A..B` is equivalent to `^A B`; `A...B` prints the symmetric difference between both sides. `--left-right` prefixes symmetric-difference commits with `<` or `>`, `--left-only` and `--right-only` keep one side, `--cherry-pick` removes patch-equivalent pairs across sides, `--cherry-mark` prefixes equivalent commits with `=` and unique commits with `+`, and `--cherry` keeps the right side, marks equivalent commits with `=`, marks unique right-side commits with `+`, and implies no-merge output. With `--left-right --cherry`, unique right-side commits use `>` while equivalent commits keep `=`. `--first-parent` limits traversal through merge commits to the first parent chain. Author, committer, message grep, path, time-window, side/cherry, and parent-count filters are applied before `--skip`, `--max-count`, and `--count`. `--children` child relationships are built from the traversal before those output filters, so a printed commit can list a child that was skipped or filtered out. `--author` and `--committer` match the respective `name <email>` string case-insensitively. `--grep` matches the full commit message with a case-sensitive regular expression; repeated `--grep` patterns use OR semantics. Path filters must follow an explicit `--` separator and match files or directories relative to the worktree root. `--since`/`--after` and `--until`/`--before` accept `YYYY-MM-DD`, RFC3339/full timestamps with timezone, Unix timestamps, and relative forms such as `2 weeks ago`. With `--parents`, each line becomes `commit parent...`. With `--children`, each line becomes `commit child...`. With `--timestamp`, each line becomes `timestamp commit`; combining `--timestamp --children` produces `timestamp commit child...`. `--parents` and `--children` are mutually exclusive. With `--count`, default output is a single decimal count; `--left-right` produces `<left>\t<right>`, `--cherry-mark` or `--cherry` produces `<unique>\t<equivalent>`, and combining `--left-right --cherry-mark` or `--left-right --cherry` produces `<left-unique>\t<right-unique>\t<equivalent>`.
 
 ```text
 abc1234def5678901234567890abcdef12345678
@@ -122,6 +124,7 @@ def5678901234567890abcdef12345678abc1234
     "total": 2,
     "count_only": false,
     "parents": false,
+    "children": false,
     "timestamp": false,
     "first_parent": false,
     "author": null,
@@ -148,7 +151,7 @@ def5678901234567890abcdef12345678abc1234
 }
 ```
 
-When `--parents`, `--timestamp`, `--left-right`, `--cherry-mark`, or `--cherry` is present, `commits[]` remains the plain commit-ID list for compatibility and `entries[]` carries the optional metadata used for human output.
+When `--parents`, `--children`, `--timestamp`, `--left-right`, `--cherry-mark`, or `--cherry` is present, `commits[]` remains the plain commit-ID list for compatibility and `entries[]` carries the optional metadata used for human output.
 
 ```json
 {
@@ -174,6 +177,7 @@ When `--parents`, `--timestamp`, `--left-right`, `--cherry-mark`, or `--cherry` 
     "total": 1,
     "count_only": false,
     "parents": true,
+    "children": false,
     "timestamp": true,
     "first_parent": false,
     "author": null,
@@ -200,6 +204,21 @@ When `--parents`, `--timestamp`, `--left-right`, `--cherry-mark`, or `--cherry` 
 }
 ```
 
+With `--children`, `entries[]` includes child commit IDs while `commits[]` remains plain:
+
+```json
+{
+  "children": true,
+  "commits": ["def5678901234567890abcdef12345678abc1234"],
+  "entries": [
+    {
+      "commit": "def5678901234567890abcdef12345678abc1234",
+      "children": ["abc1234def5678901234567890abcdef12345678"]
+    }
+  ]
+}
+```
+
 ## Parameter Comparison: Libra vs Git vs jj
 
 | Feature | Libra | Git | jj |
@@ -219,6 +238,7 @@ When `--parents`, `--timestamp`, `--left-right`, `--cherry-mark`, or `--cherry` 
 | Symmetric side output/filtering | `--left-right`, `--left-only`, `--right-only` | Same | revset predicates/templates |
 | Cherry-equivalence filtering | `--cherry`, `--cherry-pick`, `--cherry-mark` | Same | revset predicates/templates |
 | Parent output | `--parents` | Same | revset/template output |
+| Child output | `--children` | Same | revset/template output |
 | Timestamp output | `--timestamp` | Same | template output |
 | JSON output | `--json` | No | No |
 | Ordering | Newest first | Reachability order | Revset-dependent |
@@ -231,5 +251,6 @@ When `--parents`, `--timestamp`, `--left-right`, `--cherry-mark`, or `--cherry` 
 | Invalid date filter | `LBR-CLI-002` | 129 |
 | Invalid grep regex | `LBR-CLI-002` | 129 |
 | Conflicting side/cherry flags | `LBR-CLI-002` | 129 |
+| Conflicting parent/child output flags | `LBR-CLI-002` | 129 |
 | Failed to read repository metadata | `LBR-IO-001` | 128 |
 | Corrupt stored refs/objects | `LBR-REPO-002` | 128 |
