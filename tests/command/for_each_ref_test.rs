@@ -52,6 +52,46 @@ async fn test_for_each_ref_lists_heads() {
     );
 }
 
+#[test]
+fn test_for_each_ref_contains_filter() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    std::fs::write(p.join("f1.txt"), "1\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f1.txt"], p), "add f1");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit c1",
+    );
+    // `old` points at c1 and never advances.
+    assert_cli_success(&run_libra_command(&["branch", "old"], p), "branch old");
+
+    std::fs::write(p.join("f2.txt"), "2\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f2.txt"], p), "add f2");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c2", "--no-verify"], p),
+        "commit c2",
+    );
+
+    let head = run_libra_command(&["rev-parse", "HEAD"], p);
+    let c2 = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    // Only main (at c2) contains c2; `old` (at c1) does not.
+    let out = run_libra_command(&["for-each-ref", "--heads", "--contains", &c2], p);
+    assert_cli_success(&out, "for-each-ref --contains c2");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("refs/heads/main"),
+        "main should contain c2: {stdout}"
+    );
+    assert!(
+        !stdout.contains("refs/heads/old"),
+        "old should NOT contain c2: {stdout}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_for_each_ref_format_and_json() {

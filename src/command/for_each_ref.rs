@@ -63,6 +63,14 @@ pub struct ForEachRefArgs {
     #[clap(long, value_name = "OBJECT")]
     pub points_at: Option<String>,
 
+    /// Show only refs whose commit contains COMMIT (i.e. COMMIT is an ancestor).
+    #[clap(long, value_name = "COMMIT")]
+    pub contains: Option<String>,
+
+    /// Show only refs whose commit does NOT contain COMMIT.
+    #[clap(long = "no-contains", value_name = "COMMIT")]
+    pub no_contains: Option<String>,
+
     /// Refname patterns to match
     #[clap(value_name = "PATTERN")]
     pub patterns: Vec<String>,
@@ -148,6 +156,15 @@ async fn run_for_each_ref(_args: &ForEachRefArgs) -> CliResult<Vec<RefEntry>> {
         entries.retain(|entry| entry.points_at.iter().any(|hash| hash == &target));
     }
 
+    if let Some(commit_ref) = _args.contains.as_deref() {
+        let target = resolve_points_at_target(commit_ref).await?;
+        entries = retain_refs_containing(entries, &target, true).await?;
+    }
+    if let Some(commit_ref) = _args.no_contains.as_deref() {
+        let target = resolve_points_at_target(commit_ref).await?;
+        entries = retain_refs_containing(entries, &target, false).await?;
+    }
+
     if !_args.patterns.is_empty() {
         entries.retain(|entry| {
             _args
@@ -162,6 +179,31 @@ async fn run_for_each_ref(_args: &ForEachRefArgs) -> CliResult<Vec<RefEntry>> {
         entries.truncate(count);
     }
     Ok(entries)
+}
+
+/// Keep (or, when `want` is false, drop) refs whose commit has `target` as an
+/// ancestor — i.e. the ref "contains" `target` (`--contains`/`--no-contains`).
+/// A ref's commit is its first peeled object id; reachability reuses
+/// `log::get_reachable_commits`, so this walks history once per ref.
+async fn retain_refs_containing(
+    entries: Vec<RefEntry>,
+    target: &str,
+    want: bool,
+) -> CliResult<Vec<RefEntry>> {
+    let mut kept = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let contains = match entry.points_at.first() {
+            Some(commit) => crate::command::log::get_reachable_commits(commit.clone(), None)
+                .await?
+                .iter()
+                .any(|reachable| reachable.id.to_string().as_str() == target),
+            None => false,
+        };
+        if contains == want {
+            kept.push(entry);
+        }
+    }
+    Ok(kept)
 }
 
 fn direct_ref_entry(refname: String, objectname: String, objecttype: &str) -> RefEntry {
