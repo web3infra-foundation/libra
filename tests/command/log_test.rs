@@ -124,6 +124,53 @@ fn test_log_first_parent_skips_merged_branch_commits() {
     );
 }
 
+#[test]
+fn test_log_pickaxe_s_finds_commit_that_changes_string_count() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+
+    // A commit that does NOT touch the needle string.
+    std::fs::write(repo.path().join("plain.txt"), "nothing special here\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "plain.txt"], repo.path()),
+        "add plain.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "NEEDLE_ABSENT", "--no-verify"],
+            repo.path(),
+        ),
+        "commit NEEDLE_ABSENT",
+    );
+
+    // A commit that introduces the needle string.
+    std::fs::write(repo.path().join("target.txt"), "line with FINDME token\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "target.txt"], repo.path()),
+        "add target.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "NEEDLE_ADDED", "--no-verify"],
+            repo.path(),
+        ),
+        "commit NEEDLE_ADDED",
+    );
+
+    let out = run_libra_command(&["log", "-S", "FINDME", "--oneline"], repo.path());
+    assert_cli_success(&out, "log -S FINDME");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("NEEDLE_ADDED"),
+        "pickaxe -S should include the commit that added the string:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("NEEDLE_ABSENT"),
+        "pickaxe -S should skip commits that don't change the string count:\n{stdout}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_log_corrupt_head_reference_returns_repo_corrupt() {

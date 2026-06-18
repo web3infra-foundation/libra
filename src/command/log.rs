@@ -200,6 +200,11 @@ pub struct LogArgs {
     #[clap(long)]
     pub first_parent: bool,
 
+    /// Pickaxe: show commits that change the number of occurrences of STRING
+    /// in the files they touch (Git's `-S`).
+    #[clap(short = 'S', value_name = "STRING")]
+    pub pickaxe_string: Option<String>,
+
     /// Show commits in reverse order (oldest first).
     #[clap(long)]
     pub reverse: bool,
@@ -301,6 +306,8 @@ struct CommitFilter {
     grep: Option<String>,
     min_parents: Option<usize>,
     max_parents: Option<usize>,
+    /// Pickaxe (`-S`): case-sensitive literal string.
+    pickaxe: Option<String>,
 }
 
 impl CommitFilter {
@@ -314,6 +321,7 @@ impl CommitFilter {
         grep: Option<String>,
         min_parents: Option<usize>,
         max_parents: Option<usize>,
+        pickaxe: Option<String>,
     ) -> Self {
         Self {
             author: author.map(|s| s.to_lowercase()),
@@ -324,6 +332,7 @@ impl CommitFilter {
             grep,
             min_parents,
             max_parents,
+            pickaxe,
         }
     }
 
@@ -406,6 +415,12 @@ impl CommitFilter {
         cached_changes: Option<&[FileChange]>,
     ) -> Result<bool, CliError> {
         if !self.passes_non_path_filters(commit) {
+            return Ok(false);
+        }
+
+        if let Some(needle) = &self.pickaxe
+            && !commit_changes_string_count(commit, needle)?
+        {
             return Ok(false);
         }
 
@@ -968,6 +983,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         args.grep.clone(),
         min_parents,
         max_parents,
+        args.pickaxe_string.clone(),
     );
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
@@ -1192,6 +1208,7 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
         args.grep.clone(),
         min_parents,
         max_parents,
+        args.pickaxe_string.clone(),
     );
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
@@ -1339,6 +1356,63 @@ async fn validate_selected_log_commits(
     }
 
     Ok(())
+}
+
+/// Pickaxe (`-S`) test: returns true when the number of occurrences of `needle`
+/// in the files the commit touches differs from its first parent (i.e. the
+/// commit added or removed instances of the string). An empty needle never
+/// matches. Only files whose blob changed contribute to the delta.
+fn commit_changes_string_count(commit: &Commit, needle: &str) -> Result<bool, CliError> {
+    use std::collections::HashMap;
+
+    if needle.is_empty() {
+        return Ok(false);
+    }
+
+    fn load_tree_blobs(tree_id: &ObjectHash) -> Result<HashMap<PathBuf, ObjectHash>, CliError> {
+        let tree = load_object::<Tree>(tree_id)
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load tree {tree_id}: {e}")))?;
+        Ok(tree.get_plain_items().into_iter().collect())
+    }
+
+    let new_blobs = load_tree_blobs(&commit.tree_id)?;
+    let old_blobs = if let Some(parent_id) = commit.parent_commit_ids.first() {
+        let parent = load_object::<Commit>(parent_id).map_err(|e| {
+            log_repo_corrupt_error(format!("failed to load parent commit {parent_id}: {e}"))
+        })?;
+        load_tree_blobs(&parent.tree_id)?
+    } else {
+        HashMap::new()
+    };
+
+    let mut old_count = 0usize;
+    let mut new_count = 0usize;
+    let mut seen: HashSet<&PathBuf> = HashSet::new();
+    for path in new_blobs.keys().chain(old_blobs.keys()) {
+        if !seen.insert(path) {
+            continue;
+        }
+        let old_hash = old_blobs.get(path);
+        let new_hash = new_blobs.get(path);
+        if old_hash == new_hash {
+            continue; // unchanged file contributes nothing to the delta
+        }
+        if let Some(hash) = old_hash {
+            old_count += count_string_occurrences(hash, needle)?;
+        }
+        if let Some(hash) = new_hash {
+            new_count += count_string_occurrences(hash, needle)?;
+        }
+    }
+
+    Ok(old_count != new_count)
+}
+
+/// Count non-overlapping occurrences of `needle` in a blob's lossy-UTF-8 content.
+fn count_string_occurrences(hash: &ObjectHash, needle: &str) -> Result<usize, CliError> {
+    let blob = load_object::<Blob>(hash)
+        .map_err(|e| log_repo_corrupt_error(format!("failed to load blob {hash}: {e}")))?;
+    Ok(String::from_utf8_lossy(&blob.data).matches(needle).count())
 }
 
 /// Interpret a `--pretty=<value>` argument. Recognizes the `oneline` preset and
@@ -2001,6 +2075,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         assert!(filter.matches(&commit, None).await.unwrap());
@@ -2018,9 +2093,29 @@ mod tests {
         merge.committer.email = "alice@test.com".into();
 
         // --merges (min 2 parents) keeps it; --no-merges (max 1 parent) drops it.
-        let merges = CommitFilter::new(None, None, None, None, Vec::new(), None, Some(2), None);
+        let merges = CommitFilter::new(
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+            None,
+            Some(2),
+            None,
+            None,
+        );
         assert!(merges.matches(&merge, None).await.unwrap());
-        let no_merges = CommitFilter::new(None, None, None, None, Vec::new(), None, None, Some(1));
+        let no_merges = CommitFilter::new(
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+            Some(1),
+            None,
+        );
         assert!(!no_merges.matches(&merge, None).await.unwrap());
 
         // --committer matches on a case-insensitive substring of name/email.
@@ -2033,6 +2128,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(by_committer.matches(&merge, None).await.unwrap());
         let by_other = CommitFilter::new(
@@ -2041,6 +2137,7 @@ mod tests {
             None,
             None,
             Vec::new(),
+            None,
             None,
             None,
             None,
