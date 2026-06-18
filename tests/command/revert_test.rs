@@ -155,6 +155,8 @@ async fn test_basic_revert() {
         no_commit: false,
         mainline: None,
         signoff: false,
+        continue_revert: false,
+        abort: false,
     })
     .await;
 
@@ -270,6 +272,8 @@ async fn test_revert_no_commit() {
         no_commit: true,
         mainline: None,
         signoff: false,
+        continue_revert: false,
+        abort: false,
     })
     .await;
 
@@ -351,6 +355,8 @@ async fn test_revert_root_commit() {
         no_commit: false,
         mainline: None,
         signoff: false,
+        continue_revert: false,
+        abort: false,
     })
     .await;
 
@@ -494,6 +500,96 @@ fn test_revert_multiple_commits_rejects_no_commit() {
     );
 }
 
+/// Build a repo where reverting `c2` conflicts with a later change in `c3`,
+/// returning (repo, c2_hash).
+fn setup_revert_conflict() -> (tempfile::TempDir, String) {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::write(p.join("f.txt"), "line1\nline2\nline3\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add c1");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit c1",
+    );
+    fs::write(p.join("f.txt"), "line1\nCHANGED\nline3\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add c2");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c2", "--no-verify"], p),
+        "commit c2",
+    );
+    let c2 = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+    fs::write(p.join("f.txt"), "line1\nDIVERGED\nline3\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add c3");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c3", "--no-verify"], p),
+        "commit c3",
+    );
+    (repo, c2)
+}
+
+#[test]
+#[serial]
+fn test_revert_conflict_then_continue() {
+    let (repo, c2) = setup_revert_conflict();
+    let p = repo.path();
+
+    // Reverting c2 conflicts with c3's overlapping change.
+    let out = run_libra_command(&["revert", c2.as_str()], p);
+    assert!(
+        !out.status.success(),
+        "conflicting revert should fail and pause"
+    );
+    assert!(
+        p.join(".libra/revert-state.json").exists(),
+        "revert state should be recorded"
+    );
+    assert!(
+        fs::read_to_string(p.join("f.txt"))
+            .unwrap()
+            .contains("<<<<<<<"),
+        "worktree should carry conflict markers"
+    );
+
+    // Resolve and continue.
+    fs::write(p.join("f.txt"), "line1\nRESOLVED\nline3\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add resolved");
+    let cont = run_libra_command(&["revert", "--continue"], p);
+    assert_cli_success(&cont, "revert --continue");
+    assert!(
+        !p.join(".libra/revert-state.json").exists(),
+        "state should be cleared after --continue"
+    );
+    assert_eq!(
+        fs::read_to_string(p.join("f.txt")).unwrap(),
+        "line1\nRESOLVED\nline3\n"
+    );
+}
+
+#[test]
+#[serial]
+fn test_revert_conflict_then_abort() {
+    let (repo, c2) = setup_revert_conflict();
+    let p = repo.path();
+
+    let out = run_libra_command(&["revert", c2.as_str()], p);
+    assert!(!out.status.success(), "conflicting revert should pause");
+    assert!(p.join(".libra/revert-state.json").exists());
+
+    let ab = run_libra_command(&["revert", "--abort"], p);
+    assert_cli_success(&ab, "revert --abort");
+    assert!(
+        !p.join(".libra/revert-state.json").exists(),
+        "state should be cleared after --abort"
+    );
+    assert_eq!(
+        fs::read_to_string(p.join("f.txt")).unwrap(),
+        "line1\nDIVERGED\nline3\n",
+        "--abort should restore the pre-revert content"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_revert_json_output_skips_noop_paths_in_files_changed() {
@@ -563,6 +659,8 @@ async fn test_revert_errors() {
         no_commit: false,
         mainline: None,
         signoff: false,
+        continue_revert: false,
+        abort: false,
     })
     .await;
 
