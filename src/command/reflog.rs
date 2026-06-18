@@ -56,7 +56,23 @@ EXAMPLES:
 #[command(after_help = REFLOG_EXAMPLES)]
 pub struct ReflogArgs {
     #[clap(subcommand)]
-    command: Subcommands,
+    command: Option<Subcommands>,
+}
+
+/// Bare `libra reflog` (no subcommand) behaves like `libra reflog show HEAD`,
+/// matching Git's default.
+fn default_reflog_command() -> Subcommands {
+    Subcommands::Show {
+        ref_name: "HEAD".to_string(),
+        pretty: FormatterKind::default(),
+        since: None,
+        until: None,
+        grep: None,
+        author: None,
+        number: None,
+        patch: false,
+        stat: false,
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -141,7 +157,7 @@ pub async fn execute(args: ReflogArgs) {
 /// errors and exiting. Dispatches to the show, delete, or exists sub-command
 /// for reflog management.
 pub async fn execute_safe(args: ReflogArgs, output: &OutputConfig) -> CliResult<()> {
-    match args.command {
+    match args.command.unwrap_or_else(default_reflog_command) {
         Subcommands::Show {
             ref_name,
             pretty,

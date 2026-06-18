@@ -58,6 +58,22 @@ fn test_reflog_show_json_outputs_entries() {
 }
 
 #[test]
+fn test_reflog_bare_defaults_to_show() {
+    let repo = create_committed_repo_via_cli();
+
+    // No subcommand should behave like `reflog show HEAD`.
+    let output = run_libra_command(&["--json", "reflog"], repo.path());
+    assert_cli_success(&output, "bare json reflog");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "reflog.show");
+    assert_eq!(json["data"]["ref_name"], "HEAD");
+    let entries = json["data"]["entries"].as_array().expect("entries array");
+    assert!(!entries.is_empty(), "bare reflog should list HEAD entries");
+    assert_eq!(entries[0]["selector"], "HEAD@{0}");
+}
+
+#[test]
 fn test_reflog_show_json_invalid_date_reports_invalid_arguments() {
     let repo = create_committed_repo_via_cli();
 
