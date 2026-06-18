@@ -18,10 +18,15 @@ use serde::Serialize;
 use crate::{
     command::{
         load_object,
-        log::{ChangeType, generate_diff, get_changed_files_for_commit},
+        log::{ChangeType, generate_diff, get_changed_files_for_commit, parse_pretty_format},
     },
     common_utils::parse_commit_msg,
-    internal::{branch::Branch, head::Head, tag},
+    internal::{
+        branch::Branch,
+        head::Head,
+        log::formatter::{CommitFormatter, FormatContext},
+        tag,
+    },
     utils::{
         client_storage::ClientStorage,
         error::{CliError, CliResult, StableErrorCode},
@@ -56,6 +61,11 @@ pub struct ShowArgs {
     /// Shorthand for `--pretty=oneline`.
     #[clap(long)]
     pub oneline: bool,
+
+    /// Format the commit header with a pretty format
+    /// (`oneline` / `format:<tmpl>` / `tformat:<tmpl>` / custom template).
+    #[clap(long, value_name = "FORMAT")]
+    pub pretty: Option<String>,
 
     /// Show only changed file names.
     #[clap(long)]
@@ -536,6 +546,19 @@ async fn validate_commit_file(rev: &str, file_path: &str) -> CliResult<()> {
 
 /// Renders the commit header using the selected format.
 fn display_commit_info(output: &mut String, commit: &Commit, args: &ShowArgs) {
+    if let Some(pretty) = &args.pretty {
+        // `--pretty=<fmt>` renders the commit header through the shared log
+        // formatter (oneline / format:<tmpl> / tformat:<tmpl> / custom template).
+        let formatter = CommitFormatter::new(parse_pretty_format(pretty.clone()));
+        let ctx = FormatContext {
+            graph_prefix: "",
+            decoration: "",
+            abbrev_len: 7,
+        };
+        output.push_str(&formatter.format(commit, &ctx));
+        output.push('\n');
+        return;
+    }
     if args.oneline {
         // Oneline format prints the short hash and the first subject line.
         let short_hash = &commit.id.to_string()[..7];

@@ -1548,7 +1548,7 @@ fn commit_diff_matches_regex(commit: &Commit, regex: &regex::Regex) -> Result<bo
 /// (and the empty value) map to the default full format. Any other value is
 /// treated as a raw custom template, matching the prior behavior. Named presets
 /// beyond `oneline` (short/full/fuller/raw) are not yet rendered distinctly.
-fn parse_pretty_format(pretty: String) -> FormatType {
+pub(crate) fn parse_pretty_format(pretty: String) -> FormatType {
     if pretty == "oneline" {
         FormatType::Oneline
     } else if pretty == "medium" || pretty.is_empty() {
