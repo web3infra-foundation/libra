@@ -80,6 +80,10 @@ pub struct MergeArgs {
     /// Always create a merge commit, even when a fast-forward would be possible.
     #[arg(long = "no-ff", conflicts_with_all = ["ff_only", "continue_merge", "abort"])]
     pub no_ff: bool,
+
+    /// Use the given message for the merge commit instead of the default.
+    #[arg(short = 'm', long = "message", value_name = "MSG", conflicts_with_all = ["continue_merge", "abort"])]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,13 +110,16 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct PullMergeOptions {
     pub ff_only: bool,
     /// Force a real merge commit even when the integration could fast-forward
     /// (`libra pull --no-ff`). When set, the fast-forward short-circuit is
     /// skipped and a two-parent merge commit is recorded instead.
     pub no_ff: bool,
+    /// Override the merge-commit message (`libra merge -m <msg>`). `None` uses
+    /// the default `Merge <upstream> into <head>` message.
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,6 +323,7 @@ async fn run_merge(args: MergeArgs, output: &OutputConfig) -> Result<MergeOutput
             let options = PullMergeOptions {
                 ff_only: args.ff_only,
                 no_ff: args.no_ff,
+                message: args.message.clone(),
             };
             run_merge_for_pull_with_options(branch, branch, output, options).await
         }
@@ -460,7 +468,15 @@ pub(crate) async fn run_merge_for_pull_with_options(
         });
     }
 
-    perform_three_way_merge(current_commit, target_commit, lca, upstream, output).await
+    perform_three_way_merge(
+        current_commit,
+        target_commit,
+        lca,
+        upstream,
+        options.message.clone(),
+        output,
+    )
+    .await
 }
 
 struct ThreeWayMergeResult {
@@ -479,6 +495,7 @@ async fn perform_three_way_merge(
     target_commit: Commit,
     base_commit: Commit,
     upstream: &str,
+    message_override: Option<String>,
     output: &OutputConfig,
 ) -> Result<PullMergeSummary, PullMergeError> {
     switch::ensure_clean_status(output)
@@ -516,7 +533,7 @@ async fn perform_three_way_merge(
 
     let tree_id = create_tree_from_items_map(&merge_result.merged_items)
         .map_err(PullMergeError::TreeCreate)?;
-    let message = format!("Merge {upstream} into {head_name}");
+    let message = message_override.unwrap_or_else(|| format!("Merge {upstream} into {head_name}"));
     let merge_commit = Commit::from_tree_id(
         tree_id,
         vec![current_commit.id, target_commit.id],
@@ -1472,6 +1489,9 @@ mod tests {
         let ff_only = MergeArgs::try_parse_from(["merge", "--ff-only", "feature"]).unwrap();
         assert!(ff_only.ff_only);
         assert!(!ff_only.no_ff);
+
+        let with_msg = MergeArgs::try_parse_from(["merge", "-m", "custom", "feature"]).unwrap();
+        assert_eq!(with_msg.message.as_deref(), Some("custom"));
     }
 
     #[test]

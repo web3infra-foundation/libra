@@ -388,6 +388,37 @@ async fn test_merge_diverged_branch_creates_two_parent_commit() {
     );
 }
 
+#[test]
+fn test_merge_custom_message_via_dash_m() {
+    let temp_repo = create_committed_repo_via_cli();
+    let p = temp_repo.path();
+
+    assert!(
+        run_libra_command(&["checkout", "-b", "feat"], p)
+            .status
+            .success(),
+        "create+checkout feat"
+    );
+    commit_file(p, "feat.txt", "feat content", "feat commit");
+    assert!(
+        run_libra_command(&["checkout", "main"], p).status.success(),
+        "checkout main"
+    );
+    commit_file(p, "main.txt", "main content", "main commit");
+
+    let merge = run_libra_command(&["merge", "-m", "MY CUSTOM MERGE MSG", "feat"], p);
+    assert_cli_success(&merge, "merge -m custom feat");
+
+    // The merge commit (HEAD) should carry the custom subject.
+    let log = run_libra_command(&["log", "-n", "1", "--pretty=%s"], p);
+    assert_cli_success(&log, "log -n 1 --pretty=%s");
+    let subject = String::from_utf8_lossy(&log.stdout);
+    assert!(
+        subject.contains("MY CUSTOM MERGE MSG"),
+        "merge commit subject should be the -m message, got: {subject}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_merge_same_file_non_overlapping_edits_merges_without_conflict() {
