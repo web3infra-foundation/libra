@@ -888,6 +888,8 @@ async fn apply_fast_forward_merge(
             staged: true,
             source: None, // `restore` without source defaults to HEAD, which is now correct.
             pathspec: vec![util::working_dir_string()],
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         },
         &output.child_output_config(),
     )

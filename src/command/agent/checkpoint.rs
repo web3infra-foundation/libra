@@ -256,6 +256,8 @@ async fn rewind(args: CheckpointRewindArgs, output: &OutputConfig) -> CliResult<
         source: Some(parent_commit.clone()),
         worktree: true,
         staged: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     };
     execute_checked_typed(restore_args)
         .await

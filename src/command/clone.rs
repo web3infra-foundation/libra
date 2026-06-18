@@ -854,6 +854,12 @@ fn map_checkout_error(source: RestoreError) -> CliError {
             "internal error: clone checkout attempted to write worktree while on locked branch '{name}'"
         ))
         .with_stable_code(StableErrorCode::RepoStateInvalid),
+        // `clone` builds its own RestoreArgs and never sets --pathspec-from-file,
+        // so this is unreachable; surface it rather than panicking.
+        RestoreError::PathspecFileRead(detail) => CliError::fatal(format!(
+            "internal error: clone checkout reported a pathspec-file read failure: {detail}"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid),
     }
 }
 
@@ -1397,6 +1403,8 @@ async fn clone_cloud_publish_into_destination(
         staged: true,
         source: None,
         pathspec: vec![util::working_dir_string()],
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await
     .map_err(|source| CloneError::CheckoutFailed { source })?;
@@ -2971,6 +2979,8 @@ pub(crate) async fn setup_repository(
                 staged: true,
                 source: None,
                 pathspec: vec![util::working_dir_string()],
+                pathspec_from_file: None,
+                pathspec_file_nul: false,
             })
             .await
             .map_err(|source| CloneError::CheckoutFailed { source })?;
