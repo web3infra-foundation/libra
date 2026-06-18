@@ -1227,7 +1227,7 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
         args.min_parents,
         args.max_parents,
     );
-    let pickaxe = build_pickaxe(&args)?;
+    let pickaxe = build_pickaxe(args)?;
     let filter = CommitFilter::new(
         args.author.clone(),
         args.committer.clone(),

@@ -371,14 +371,6 @@ fn merge_error_to_cli(error: MergeError) -> CliError {
     }
 }
 
-pub(crate) async fn run_merge_for_pull(
-    target_ref: &str,
-    upstream: &str,
-    output: &OutputConfig,
-) -> Result<PullMergeSummary, PullMergeError> {
-    run_merge_for_pull_with_options(target_ref, upstream, output, PullMergeOptions::default()).await
-}
-
 pub(crate) async fn run_merge_for_pull_with_options(
     target_ref: &str,
     upstream: &str,

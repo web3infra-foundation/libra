@@ -1151,7 +1151,7 @@ mod tests {
             "commit",
         ]);
 
-        if let Subcommands::Show {
+        if let Some(Subcommands::Show {
             ref_name,
             pretty: _,
             since,
@@ -1161,7 +1161,7 @@ mod tests {
             number: _,
             patch: _,
             stat: _,
-        } = args.command
+        }) = args.command
         {
             assert_eq!(ref_name, "HEAD");
             assert_eq!(since.as_deref(), Some("2024-01-01"));
