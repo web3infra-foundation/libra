@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 tree inspection、子目录相对输出、`--full-name` 和 `--full-tree` 已公开；`--format` 与 Git 的 `REV:path` tree-ish 语法仍未公开。
+- 兼容级别：`partial`。基础 tree inspection、子目录相对输出、`--full-name`、`--full-tree` 和 `--format`（支持 `%(objectmode)`/`%(objecttype)`/`%(objectname)`/`%(objectsize)`/`%(path)` 原子与 `%x09`/`%x0a` 转义）已公开；Git 的 `REV:path` tree-ish 语法仍未公开。
 
 
 ## 设计方案
@@ -57,7 +57,7 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容差异项 | 自定义格式 | 原始对照：Deferred；相关参数/替代：--format；当前说明：Different model。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | 自定义格式 `--format=<FORMAT>` | 支持 `%(objectmode)`/`%(objecttype)`/`%(objectname)`/`%(objectsize)`/`%(path)` 原子与 `%x09`/`%x0a` 转义；未知原子按字面保留（宽松）。与 `--name-only`/`--name-status`/`--object-only`/`-l` 互斥。带单元测试。 |
 | 兼容差异项 | 不支持 REV:path syntax | 当前状态：LBR-UNSUPPORTED-001；Git/相关参数：128。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求

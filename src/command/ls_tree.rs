@@ -75,6 +75,12 @@ pub struct LsTreeArgs {
     #[arg(long = "object-only", conflicts_with_all = ["name_only", "name_status"])]
     pub object_only: bool,
 
+    /// Render each entry with a custom format string. Supports the atoms
+    /// `%(objectmode)`, `%(objecttype)`, `%(objectname)`, `%(objectsize)`,
+    /// `%(path)`, and the escapes `%x09` (tab) / `%x0a` (newline).
+    #[arg(long = "format", value_name = "FORMAT", conflicts_with_all = ["name_only", "name_status", "object_only", "long"])]
+    pub format: Option<String>,
+
     /// Print paths relative to the repository root when invoked from a subdirectory.
     #[arg(long = "full-name")]
     pub full_name: bool,
@@ -679,7 +685,27 @@ fn write_ls_tree_output<W: Write>(
     Ok(())
 }
 
+/// Render an entry through a `--format` string, substituting the supported
+/// atoms and `%x09`/`%x0a` escapes. Unknown atoms are left verbatim (lenient).
+fn render_format_entry(entry: &LsTreeEntry, format: &str) -> String {
+    let size = entry
+        .size
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    format
+        .replace("%(objectmode)", &entry.mode)
+        .replace("%(objecttype)", &entry.object_type)
+        .replace("%(objectname)", &entry.object)
+        .replace("%(objectsize)", &size)
+        .replace("%(path)", &entry.path)
+        .replace("%x09", "\t")
+        .replace("%x0a", "\n")
+}
+
 fn render_human_entry(entry: &LsTreeEntry, args: &LsTreeArgs) -> String {
+    if let Some(format) = &args.format {
+        return render_format_entry(entry, format);
+    }
     if args.object_only {
         return entry.object.clone();
     }
@@ -757,6 +783,26 @@ mod tests {
     fn parse_output_modes_are_mutually_exclusive() {
         let result =
             LsTreeArgs::try_parse_from(["ls-tree", "--name-only", "--object-only", "HEAD"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn render_format_substitutes_atoms() {
+        let args = LsTreeArgs::try_parse_from([
+            "ls-tree",
+            "--format",
+            "%(objectmode) %(objecttype) %(objectname) %(objectsize)%x09%(path)",
+            "HEAD",
+        ])
+        .expect("args should parse");
+        let rendered = render_human_entry(&entry("src/main.rs"), &args);
+        assert_eq!(rendered, "100644 blob 1234567890abcdef 12\tsrc/main.rs");
+    }
+
+    #[test]
+    fn parse_format_conflicts_with_name_only() {
+        let result =
+            LsTreeArgs::try_parse_from(["ls-tree", "--format", "%(path)", "--name-only", "HEAD"]);
         assert!(result.is_err());
     }
 
