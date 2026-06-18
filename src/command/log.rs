@@ -176,6 +176,26 @@ pub struct LogArgs {
     #[clap(long, value_name = "PATTERN")]
     pub grep: Option<String>,
 
+    /// Filter commits by committer name or email (case-insensitive substring match)
+    #[clap(long, value_name = "PATTERN")]
+    pub committer: Option<String>,
+
+    /// Show only merge commits (those with at least two parents).
+    #[clap(long, conflicts_with = "no_merges")]
+    pub merges: bool,
+
+    /// Hide merge commits (those with at least two parents).
+    #[clap(long)]
+    pub no_merges: bool,
+
+    /// Show only commits with at least N parents.
+    #[clap(long, value_name = "N")]
+    pub min_parents: Option<usize>,
+
+    /// Show only commits with at most N parents.
+    #[clap(long, value_name = "N")]
+    pub max_parents: Option<usize>,
+
     /// Show commits in reverse order (oldest first).
     #[clap(long)]
     pub reverse: bool,
@@ -254,28 +274,52 @@ pub struct LogOutput {
     pub total: Option<usize>,
 }
 
+/// Resolve `--merges`/`--no-merges`/`--min-parents`/`--max-parents` into
+/// effective parent-count bounds. `--merges` means ≥2 parents; `--no-merges`
+/// means ≤1 parent; the explicit `--min-parents`/`--max-parents` win.
+fn resolve_parent_bounds(
+    merges: bool,
+    no_merges: bool,
+    min_parents: Option<usize>,
+    max_parents: Option<usize>,
+) -> (Option<usize>, Option<usize>) {
+    let min = min_parents.or(if merges { Some(2) } else { None });
+    let max = max_parents.or(if no_merges { Some(1) } else { None });
+    (min, max)
+}
+
 struct CommitFilter {
     author: Option<String>,
+    committer: Option<String>,
     since: Option<i64>,
     until: Option<i64>,
     paths: Vec<PathBuf>,
     grep: Option<String>,
+    min_parents: Option<usize>,
+    max_parents: Option<usize>,
 }
 
 impl CommitFilter {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         author: Option<String>,
+        committer: Option<String>,
         since: Option<i64>,
         until: Option<i64>,
         paths: Vec<PathBuf>,
         grep: Option<String>,
+        min_parents: Option<usize>,
+        max_parents: Option<usize>,
     ) -> Self {
         Self {
             author: author.map(|s| s.to_lowercase()),
+            committer: committer.map(|s| s.to_lowercase()),
             since,
             until,
             paths,
             grep,
+            min_parents,
+            max_parents,
         }
     }
 
@@ -289,6 +333,29 @@ impl CommitFilter {
             if !author.contains(author_filter) {
                 return false;
             }
+        }
+
+        if let Some(committer_filter) = &self.committer {
+            let committer = format!(
+                "{} <{}>",
+                commit.committer.name.to_lowercase(),
+                commit.committer.email.to_lowercase()
+            );
+            if !committer.contains(committer_filter) {
+                return false;
+            }
+        }
+
+        let parent_count = commit.parent_commit_ids.len();
+        if let Some(min) = self.min_parents
+            && parent_count < min
+        {
+            return false;
+        }
+        if let Some(max) = self.max_parents
+            && parent_count > max
+        {
+            return false;
         }
 
         let ts = commit.committer.timestamp as i64;
@@ -876,12 +943,21 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     let since = args.since.as_deref().map(parse_date_arg).transpose()?;
     let until = args.until.as_deref().map(parse_date_arg).transpose()?;
     let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
+    let (min_parents, max_parents) = resolve_parent_bounds(
+        args.merges,
+        args.no_merges,
+        args.min_parents,
+        args.max_parents,
+    );
     let filter = CommitFilter::new(
         args.author.clone(),
+        args.committer.clone(),
         since,
         until,
         path_filters.clone(),
         args.grep.clone(),
+        min_parents,
+        max_parents,
     );
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
@@ -1091,12 +1167,21 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     let since = args.since.as_deref().map(parse_date_arg).transpose()?;
     let until = args.until.as_deref().map(parse_date_arg).transpose()?;
     let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
+    let (min_parents, max_parents) = resolve_parent_bounds(
+        args.merges,
+        args.no_merges,
+        args.min_parents,
+        args.max_parents,
+    );
     let filter = CommitFilter::new(
         args.author.clone(),
+        args.committer.clone(),
         since,
         until,
         path_filters.clone(),
         args.grep.clone(),
+        min_parents,
+        max_parents,
     );
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
@@ -1781,6 +1866,39 @@ mod tests {
     }
 
     #[test]
+    fn test_log_parent_and_committer_filters_parse() {
+        let args = LogArgs::parse_from([
+            "libra",
+            "--committer",
+            "bob",
+            "--merges",
+            "--min-parents",
+            "1",
+            "--max-parents",
+            "3",
+        ]);
+        assert_eq!(args.committer.as_deref(), Some("bob"));
+        assert!(args.merges);
+        assert_eq!(args.min_parents, Some(1));
+        assert_eq!(args.max_parents, Some(3));
+
+        // --no-merges => at most 1 parent; --merges => at least 2 parents.
+        assert_eq!(
+            resolve_parent_bounds(false, true, None, None),
+            (None, Some(1))
+        );
+        assert_eq!(
+            resolve_parent_bounds(true, false, None, None),
+            (Some(2), None)
+        );
+        // explicit bounds win over the flag shorthands.
+        assert_eq!(
+            resolve_parent_bounds(true, true, Some(0), Some(5)),
+            (Some(0), Some(5))
+        );
+    }
+
+    #[test]
     fn test_name_status_parsing() {
         let args = LogArgs::parse_from(["libra", "--name-status"]);
         assert!(args.name_status);
@@ -1810,13 +1928,58 @@ mod tests {
 
         let filter = CommitFilter::new(
             Some("lvy".to_string()),
+            None,
             Some(1_766_000_000),
             Some(1_766_200_000),
             Vec::new(),
             None,
+            None,
+            None,
         );
 
         assert!(filter.matches(&commit, None).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_commit_filter_merges_and_committer() {
+        // A merge commit (two parents) committed by alice.
+        let mut merge = Commit::from_tree_id(
+            ObjectHash::new(&[1; 20]),
+            vec![ObjectHash::new(&[2; 20]), ObjectHash::new(&[3; 20])],
+            "merge",
+        );
+        merge.committer.name = "alice".into();
+        merge.committer.email = "alice@test.com".into();
+
+        // --merges (min 2 parents) keeps it; --no-merges (max 1 parent) drops it.
+        let merges = CommitFilter::new(None, None, None, None, Vec::new(), None, Some(2), None);
+        assert!(merges.matches(&merge, None).await.unwrap());
+        let no_merges = CommitFilter::new(None, None, None, None, Vec::new(), None, None, Some(1));
+        assert!(!no_merges.matches(&merge, None).await.unwrap());
+
+        // --committer matches on a case-insensitive substring of name/email.
+        let by_committer = CommitFilter::new(
+            None,
+            Some("alice".to_string()),
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
+        assert!(by_committer.matches(&merge, None).await.unwrap());
+        let by_other = CommitFilter::new(
+            None,
+            Some("zzz".to_string()),
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
+        assert!(!by_other.matches(&merge, None).await.unwrap());
     }
 
     // Test parameter mutual exclusion logic
