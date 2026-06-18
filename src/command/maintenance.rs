@@ -668,27 +668,22 @@ async fn run_pack_refs(
     // Clean up the backup on success.
     let _ = fs::remove_file(&backup_path);
 
-    // Remove only loose ref files whose current contents match the snapshot we
-    // just packed. Refs created or updated after collect_refs must not be
-    // deleted, otherwise concurrent branch/fetch/ref updates could lose data.
-    let mut removed_count = 0;
-    remove_packed_refs(
-        &refs_dir,
-        &refs_dir,
-        "refs/heads/",
-        &refs,
-        &mut removed_count,
-    )
-    .map_err(|e| CliError::fatal(format!("failed to remove packed refs: {e}")))?;
+    // Keep the loose ref files in place. Normal ref-resolution paths
+    // (show-ref, rev-parse, revision walking, etc.) currently only query
+    // SQLite-backed refs and loose file-backed refs under refs/ — they
+    // do not yet read packed-refs. Deleting the loose files would make
+    // those refs invisible to everyday commands. Once the ref-resolution
+    // layer learns to read packed-refs, the loose files can be removed.
+    let count = refs.len();
 
     Ok(TaskResult {
         task: "pack-refs".to_string(),
         success: true,
         objects_removed: 0,
         objects_packed: 0,
-        refs_packed: removed_count,
+        refs_packed: count,
         packs_repacked: 0,
-        message: format!("packed {removed_count} refs"),
+        message: format!("packed {count} refs into packed-refs"),
     })
 }
 
@@ -1628,54 +1623,6 @@ fn collect_refs(
             // Validate the ref name and hash before inserting.
             if !hash.is_empty() && parse_object_hash(&hash).is_some() && is_valid_ref_name(&name) {
                 refs.insert(name, hash);
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Remove loose ref files whose current contents match the packed snapshot.
-///
-/// Only files that were actually captured by `collect_refs` are deleted; refs
-/// created or updated concurrently after the snapshot are left untouched.
-/// Lock files (`*.lock`) are never removed.
-#[allow(clippy::only_used_in_recursion)]
-fn remove_packed_refs(
-    base: &Path,
-    current: &Path,
-    ref_prefix: &str,
-    packed_refs: &HashMap<String, String>,
-    count: &mut usize,
-) -> io::Result<()> {
-    for entry in fs::read_dir(current)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            remove_packed_refs(base, &path, ref_prefix, packed_refs, count)?;
-            // Remove empty directory
-            if let Ok(mut iter) = fs::read_dir(&path)
-                && iter.next().is_none()
-            {
-                let _ = fs::remove_dir(&path);
-            }
-        } else if path.is_file() {
-            // Never touch lock files — they belong to concurrent ref updates
-            // and are not refs.
-            if path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|name| name.ends_with(".lock"))
-            {
-                continue;
-            }
-
-            let relative = path.strip_prefix(base).unwrap_or(&path);
-            let relative = relative.to_string_lossy().replace('\\', "/");
-            let full_name = format!("{ref_prefix}{relative}");
-            let on_disk = fs::read_to_string(&path)?.trim().to_string();
-            if packed_refs.get(&full_name) == Some(&on_disk) {
-                fs::remove_file(&path)?;
-                *count += 1;
             }
         }
     }

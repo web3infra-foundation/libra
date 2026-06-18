@@ -451,14 +451,17 @@ fn test_maintenance_pack_refs_writes_full_refnames() {
         "packed-refs must not contain bare relative refnames, got: {content}"
     );
 
-    // Loose ref files should have been removed after successful packing.
+    // Loose ref files must be preserved after packing. Normal ref-resolution
+    // paths (show-ref, rev-parse, etc.) do not yet read packed-refs, so
+    // deleting the loose files would make those refs invisible to everyday
+    // commands.
     assert!(
-        !refs_heads.join("main").exists(),
-        "loose main ref should be removed after packing"
+        refs_heads.join("main").exists(),
+        "loose main ref must be preserved after packing"
     );
     assert!(
-        !refs_heads.join("feature-branch").exists(),
-        "loose feature-branch ref should be removed after packing"
+        refs_heads.join("feature-branch").exists(),
+        "loose feature-branch ref must be preserved after packing"
     );
 }
 
@@ -1577,8 +1580,8 @@ fn test_maintenance_gc_preserves_packed_refs_reachability() {
         "packed-refs must contain side branch, got: {packed_content}"
     );
     assert!(
-        !refs_heads.join("side").exists(),
-        "loose refs/heads/side must be deleted after packing"
+        refs_heads.join("side").exists(),
+        "loose refs/heads/side must be preserved after packing"
     );
 
     // Age all loose objects past the GC grace period so that GC would
@@ -2132,6 +2135,74 @@ fn test_maintenance_gc_fails_on_malformed_packed_refs_entry() {
     assert!(
         msg.contains("packed-refs") && msg.contains("invalid object hash"),
         "gc error must mention packed-refs invalid hash, got: {msg}"
+    );
+}
+
+#[test]
+
+/// Regression test: `maintenance run --task pack-refs` must preserve loose
+/// ref files so that normal ref-resolution commands (show-ref, rev-parse,
+/// etc.) can still find them.
+///
+/// Normal ref-resolution paths currently only query SQLite-backed refs and
+/// file-backed loose refs under refs/ — they do not yet read packed-refs.
+/// Deleting the loose files would make those refs invisible. Once the
+/// ref-resolution layer learns to read packed-refs, the loose files can
+/// be safely removed.
+fn test_maintenance_pack_refs_preserves_loose_refs() {
+    let repo = create_committed_repo_via_cli();
+    let main_hash = rev_parse(repo.path(), "main");
+
+    // Create loose ref files.
+    let refs_heads = repo.path().join(".libra").join("refs").join("heads");
+    fs::create_dir_all(&refs_heads).unwrap();
+    fs::write(refs_heads.join("main"), format!("{main_hash}\n")).unwrap();
+    fs::write(refs_heads.join("feature"), format!("{main_hash}\n")).unwrap();
+
+    let output = run_libra_command(&["maintenance", "run", "--task", "pack-refs"], repo.path());
+    assert!(
+        output.status.success(),
+        "pack-refs should pass, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Packed-refs must exist with correct content.
+    let packed_refs_path = repo.path().join(".libra").join("packed-refs");
+    let content = fs::read_to_string(&packed_refs_path).unwrap();
+    assert!(
+        content.contains("refs/heads/main"),
+        "packed-refs must contain main ref"
+    );
+    assert!(
+        content.contains("refs/heads/feature"),
+        "packed-refs must contain feature ref"
+    );
+
+    // Loose ref files must NOT be removed — normal commands still need them.
+    assert!(
+        refs_heads.join("main").exists(),
+        "loose main ref must be preserved after pack-refs"
+    );
+    assert!(
+        refs_heads.join("feature").exists(),
+        "loose feature ref must be preserved after pack-refs"
+    );
+
+    // Normal ref resolution must still work after pack-refs.
+    let resolved = rev_parse(repo.path(), "main");
+    assert_eq!(
+        resolved, main_hash,
+        "rev-parse main must resolve after pack-refs"
+    );
+
+    // Verify the loose ref file content is correct and matches main_hash.
+    let feature_content = fs::read_to_string(refs_heads.join("feature"))
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_eq!(
+        feature_content, main_hash,
+        "loose ref feature must contain the correct hash"
     );
 }
 
