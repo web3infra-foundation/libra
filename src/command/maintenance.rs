@@ -928,20 +928,52 @@ async fn run_commit_graph(
 
 async fn run_prefetch(
     _repo_path: &Path,
-    _dry_run: bool,
+    dry_run: bool,
     _quiet: bool,
     _output: &OutputConfig,
 ) -> CliResult<TaskResult> {
-    // Prefetch requires remote configuration. In the absence of configured remotes
-    // we report that the task is not applicable.
+    // Check whether any remotes are configured. If none exist, prefetch is
+    // not applicable; if remotes do exist, prefetch is relevant but not yet
+    // implemented. Returning success=false when remotes exist prevents a
+    // silent no-op that would mislead users into thinking the documented
+    // maintenance task is actually working.
+    let has_remotes = ConfigKv::get_by_prefix("remote.")
+        .await
+        .map(|entries| !entries.is_empty())
+        .unwrap_or(false);
+
+    if !has_remotes {
+        return Ok(TaskResult {
+            task: "prefetch".to_string(),
+            success: true,
+            objects_removed: 0,
+            objects_packed: 0,
+            refs_packed: 0,
+            packs_repacked: 0,
+            message: "no remote configuration; prefetch not applicable".to_string(),
+        });
+    }
+
+    if dry_run {
+        return Ok(TaskResult {
+            task: "prefetch".to_string(),
+            success: true,
+            objects_removed: 0,
+            objects_packed: 0,
+            refs_packed: 0,
+            packs_repacked: 0,
+            message: "would prefetch from remotes (not yet implemented)".to_string(),
+        });
+    }
+
     Ok(TaskResult {
         task: "prefetch".to_string(),
-        success: true,
+        success: false,
         objects_removed: 0,
         objects_packed: 0,
         refs_packed: 0,
         packs_repacked: 0,
-        message: "prefetch requires remote configuration; skipped".to_string(),
+        message: "prefetch is not yet implemented; scheduled run will no-op".to_string(),
     })
 }
 
@@ -1181,8 +1213,10 @@ async fn collect_reachable_objects(
                 index_path.display()
             ))
         })?;
-        for entry in index.tracked_entries(0) {
-            reachable.insert(entry.hash);
+        for stage in 0..=3u8 {
+            for entry in index.tracked_entries(stage) {
+                reachable.insert(entry.hash);
+            }
         }
     }
 
