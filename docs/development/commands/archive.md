@@ -49,6 +49,13 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
+| Git flag | `<path>...` pathspec 限定（仅归档匹配路径/目录） | `ArchiveArgs` 只有单个 `treeish`，`collect_tree_entries` 无条件遍历整棵树；后续需新增尾随 pathspec 位置参数并在遍历时过滤。命令层即可完成。 |
+| Git flag | `-l` / `--list`（列出受支持的归档格式后退出） | 未公开；纯命令层，打印 `ArchiveFormat` 全集即可。 |
+| Git flag | `--add-file=<file>`（把未跟踪的工作区文件追加进归档） | 未公开；条目仅来自已解析的树，需要读文件系统并注入 `ArchiveEntry`。命令层。 |
+| Git flag | `-0`..`-9` / 压缩级别 | 未公开；gzip/bzip2/zip 均使用 `Compression::default()` 硬编码（`archive.rs`）。命令层。 |
+| Git flag | `-v` / `--verbose`（向 stderr 报告进度） | 未公开；命令当前只产出二进制流。命令层。 |
+| Git flag | `--remote=<repo>` / `--exec=<cmd>`（从远端取归档） | 未公开；依赖 `upload-archive` 协议，需打通 `src/internal/protocol`，协议层改造。 |
+| 行为差异 | `.gitattributes` 的 `export-ignore` / `export-subst` 属性过滤 | 未实现；与 D5（`.gitattributes` filter/hooks bridge 有意差异）相关，按对象内容属性处理设计后再评估。 |
 | 兼容矩阵 | `COMPATIBILITY.md` 已登记该命令。 | 已纳入用户可见兼容矩阵和矩阵守卫。 |
 | CLI 接入 | `src/cli.rs::Commands::Archive` 已公开。 | 已接入 CLI；后续扩展参数时同步文档、矩阵和测试。 |
 

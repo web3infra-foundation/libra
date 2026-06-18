@@ -540,6 +540,17 @@ pub async fn run_commit(
         })?;
         let grandpa_commit_id = parent_commit.parent_commit_ids;
 
+        // Git-compatible amend authorship: preserve the original commit's author
+        // (name, email, and authored date) unless the user explicitly resets it
+        // with `--reset-author` or supplies a new one with `--author`. Without this
+        // the amended commit would silently adopt the current committer identity,
+        // which makes `--reset-author` a no-op and diverges from Git.
+        let author = if args.reset_author || args.author.is_some() {
+            author
+        } else {
+            parent_commit.author.clone()
+        };
+
         let final_message = if args.no_edit {
             parent_commit.message.clone()
         } else {

@@ -715,6 +715,97 @@ async fn test_commit_amend_with_custom_author() {
 
 #[tokio::test]
 #[serial]
+async fn test_commit_amend_preserves_author_unless_reset() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    use libra::internal::config::ConfigKv;
+
+    // SAFETY: this test is #[serial], so no other threads are reading env vars.
+    // Clear identity env vars so the config-driven identity below is authoritative.
+    unsafe {
+        std::env::remove_var("GIT_COMMITTER_NAME");
+        std::env::remove_var("GIT_COMMITTER_EMAIL");
+        std::env::remove_var("GIT_AUTHOR_NAME");
+        std::env::remove_var("GIT_AUTHOR_EMAIL");
+        std::env::remove_var("EMAIL");
+        std::env::remove_var("LIBRA_COMMITTER_NAME");
+        std::env::remove_var("LIBRA_COMMITTER_EMAIL");
+    }
+
+    // Initial commit authored by the original identity.
+    ConfigKv::unset_all("user.name").await.unwrap();
+    ConfigKv::unset_all("user.email").await.unwrap();
+    ConfigKv::set("user.name", "Original Author", false)
+        .await
+        .unwrap();
+    ConfigKv::set("user.email", "original@example.com", false)
+        .await
+        .unwrap();
+
+    commit::execute(CommitArgs {
+        message: Some("initial commit".to_string()),
+        allow_empty: true,
+        disable_pre: true,
+        ..Default::default()
+    })
+    .await;
+    let initial_id = Head::current_commit().await.unwrap();
+    let initial: Commit = load_object(&initial_id).unwrap();
+    assert_eq!(initial.author.name, "Original Author");
+
+    // Switch identity, then amend WITHOUT --reset-author: the author must be
+    // preserved (Git behavior) while the committer reflects the new identity.
+    ConfigKv::set("user.name", "New Committer", false)
+        .await
+        .unwrap();
+    ConfigKv::set("user.email", "new@example.com", false)
+        .await
+        .unwrap();
+
+    commit::execute(CommitArgs {
+        message: Some("amended, author preserved".to_string()),
+        allow_empty: true,
+        amend: true,
+        disable_pre: true,
+        reset_author: false,
+        ..Default::default()
+    })
+    .await;
+    let preserved_id = Head::current_commit().await.unwrap();
+    let preserved: Commit = load_object(&preserved_id).unwrap();
+    assert_eq!(
+        preserved.author.name, "Original Author",
+        "amend should preserve the original author by default"
+    );
+    assert_eq!(preserved.author.email, "original@example.com");
+    assert_eq!(
+        preserved.committer.name, "New Committer",
+        "committer should reflect the current identity"
+    );
+
+    // Amend again WITH --reset-author: the author now adopts the current identity.
+    commit::execute(CommitArgs {
+        message: Some("amended, author reset".to_string()),
+        allow_empty: true,
+        amend: true,
+        disable_pre: true,
+        reset_author: true,
+        ..Default::default()
+    })
+    .await;
+    let reset_id = Head::current_commit().await.unwrap();
+    let reset: Commit = load_object(&reset_id).unwrap();
+    assert_eq!(
+        reset.author.name, "New Committer",
+        "--reset-author should adopt the current identity"
+    );
+    assert_eq!(reset.author.email, "new@example.com");
+}
+
+#[tokio::test]
+#[serial]
 async fn test_commit_empty_working_tree() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;

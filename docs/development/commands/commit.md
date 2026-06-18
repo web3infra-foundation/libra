@@ -9,6 +9,7 @@
 - 兼容级别：`partial`。
 
 - 当前矩阵承诺常用 Git commit 子集已支持；`--cleanup`、`--dry-run`、`--fixup`、`--squash`、`-C/-c`、`--trailer`、`--reset-author` 已补齐，编辑器/verbose/porcelain/status-template surface 仍为缺口。新增语义必须同步矩阵、用户文档和测试。
+- `--amend` 作者归属与 Git 对齐：默认**保留**被修订提交的原作者（name/email/authored date），只有显式 `--reset-author` 或 `--author <AUTHOR>` 才会改写为当前身份；committer 始终取当前身份。此前 `--amend` 会静默把作者改成当前身份、使 `--reset-author` 沦为空操作，已修正（见 `src/command/commit.rs` amend 分支）。
 
 
 ## 设计方案

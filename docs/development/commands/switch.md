@@ -45,8 +45,9 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/switch.md`。
-- Synopsis：`libra switch [-c|--create <CREATE>] [-C|--force-create <FORCE_CREATE>] [--orphan <ORPHAN>] [-d|--detach] [--track] [<BRANCH>]`。
-- 公开参数/子命令包括：`<branch>`、`-c, --create <CREATE>`、`-C, --force-create <FORCE_CREATE>`、`--orphan <ORPHAN>`、`-d, --detach`、`--track`。
+- Synopsis：`libra switch [-c|--create <CREATE>] [-C|--force-create <FORCE_CREATE>] [--orphan <ORPHAN>] [-d|--detach] [-t|--track] [<BRANCH>]`。
+- 公开参数/子命令包括：`<branch>`、`-c, --create <CREATE>`、`-C, --force-create <FORCE_CREATE>`、`--orphan <ORPHAN>`、`-d, --detach`、`-t, --track`。
+- `--track` 现已提供 Git 的 `-t` 短别名；Libra 仅支持布尔形式（设置远端上游），不支持 Git 的 `-t (direct|inherit)` 模式参数（有意差异）。
 
 
 ## 还未实现的功能

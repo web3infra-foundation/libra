@@ -70,6 +70,7 @@ pub struct SwitchArgs {
     pub detach: bool,
 
     #[clap(
+        short = 't',
         long,
         conflicts_with_all = ["create", "detach"],
         help = "Set upstream tracking when switching to remote branch"

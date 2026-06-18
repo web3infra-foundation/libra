@@ -1,5 +1,6 @@
 //! Fetch command to negotiate with remotes, download pack data, update
-//! remote-tracking refs, and honor prune/depth options.
+//! remote-tracking refs, and honor `--depth` shallow options. (Prune and tag
+//! fetching are not yet implemented — see `docs/development/commands/fetch.md`.)
 
 use std::{
     collections::{BTreeSet, HashSet},
