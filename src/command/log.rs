@@ -150,6 +150,10 @@ pub struct LogArgs {
     /// Custom pretty format string (e.g. `%h - %s`)
     #[clap(long, value_name = "FORMAT")]
     pub pretty: Option<String>,
+    /// Date rendering mode for author/committer dates: short / iso / iso-strict /
+    /// rfc / unix / raw (others fall back to the default form).
+    #[clap(long, value_name = "FORMAT")]
+    pub date: Option<String>,
     /// Print out ref names of any commits that are shown
     #[clap(
         long,
@@ -1062,7 +1066,8 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     } else {
         FormatType::Full
     };
-    let formatter = CommitFormatter::new(format_type);
+    let formatter =
+        CommitFormatter::new(format_type).with_date_mode(args.date.clone().unwrap_or_default());
 
     let mut graph_state = if args.graph {
         Some(GraphState::new())
@@ -2170,6 +2175,16 @@ mod tests {
             build_pickaxe(&LogArgs::parse_from(["libra"]))
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn test_log_date_mode_parses() {
+        assert_eq!(
+            LogArgs::parse_from(["libra", "--date", "short"])
+                .date
+                .as_deref(),
+            Some("short")
         );
     }
 
