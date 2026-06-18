@@ -1269,6 +1269,434 @@ fn test_maintenance_dry_run_no_changes() {
 }
 
 // ---------------------------------------------------------------------------
+// Bug-fix regression tests
+// ---------------------------------------------------------------------------
+
+#[test]
+
+/// Regression test: `maintenance run --task gc` must preserve file-backed stash
+/// refs and reflogs as GC roots.
+///
+/// Stash refs live as plain files under `.libra/refs/stash` (not in the SQLite
+/// reference table), so `collect_reachable_objects` previously missed them.
+/// After a stash push, GC could delete the stash commit/tree/blobs, making
+/// `stash apply`/`pop` fail with missing-object errors.
+fn test_maintenance_gc_preserves_stash_objects() {
+    let repo = create_committed_repo_via_cli();
+
+    // Create a file change and stash it.
+    fs::write(repo.path().join("stashed.txt"), "stash me\n").unwrap();
+    run_libra_command(&["add", "stashed.txt"], repo.path());
+    let stash_output = run_libra_command(&["stash", "push", "-m", "test stash"], repo.path());
+    assert!(
+        stash_output.status.success(),
+        "stash push should succeed, stderr: {}",
+        String::from_utf8_lossy(&stash_output.stderr)
+    );
+
+    // Verify the stash ref file exists on disk.
+    let stash_ref_path = repo.path().join(".libra").join("refs").join("stash");
+    assert!(
+        stash_ref_path.exists(),
+        "stash ref file should exist at {}",
+        stash_ref_path.display()
+    );
+
+    // Verify the stash reflog exists on disk.
+    let stash_log_path = repo
+        .path()
+        .join(".libra")
+        .join("logs")
+        .join("refs")
+        .join("stash");
+    assert!(
+        stash_log_path.exists(),
+        "stash reflog should exist at {}",
+        stash_log_path.display()
+    );
+
+    // Run GC. The stash objects must not be deleted.
+    let gc_output = run_libra_command(
+        &["--json", "maintenance", "run", "--task", "gc"],
+        repo.path(),
+    );
+    assert!(
+        gc_output.status.success(),
+        "gc should pass, stderr: {}",
+        String::from_utf8_lossy(&gc_output.stderr)
+    );
+
+    // Verify stash list still works (stash objects are reachable).
+    let list_output = run_libra_command(&["stash", "list"], repo.path());
+    assert!(
+        list_output.status.success(),
+        "stash list should succeed after gc, stderr: {}",
+        String::from_utf8_lossy(&list_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&list_output.stdout);
+    assert!(
+        stdout.contains("test stash"),
+        "stash entry should still be listed after gc, got: {stdout}"
+    );
+
+    // Verify stash apply works (the blob data is intact).
+    let pop_output = run_libra_command(&["stash", "pop"], repo.path());
+    assert!(
+        pop_output.status.success(),
+        "stash pop should succeed after gc, stderr: {}",
+        String::from_utf8_lossy(&pop_output.stderr)
+    );
+    assert!(
+        repo.path().join("stashed.txt").exists(),
+        "stashed file should be restored after pop"
+    );
+}
+
+#[test]
+
+/// Regression test: `maintenance run --task gc` must treat previous stash
+/// entries (stored in the stash reflog) as GC roots.
+///
+/// When a user creates multiple stashes, `stash pop`/`stash drop` removes the
+/// top entry but leaves older entries referenced only via `logs/refs/stash`.
+/// Without reflog scanning, GC can delete the second stash's commit/tree/blobs.
+fn test_maintenance_gc_preserves_multiple_stash_entries() {
+    let repo = create_committed_repo_via_cli();
+
+    // Create first stash.
+    fs::write(repo.path().join("first.txt"), "first\n").unwrap();
+    run_libra_command(&["add", "first.txt"], repo.path());
+    run_libra_command(&["stash", "push", "-m", "first stash"], repo.path());
+
+    // Create second stash on top.
+    fs::write(repo.path().join("second.txt"), "second\n").unwrap();
+    run_libra_command(&["add", "second.txt"], repo.path());
+    run_libra_command(&["stash", "push", "-m", "second stash"], repo.path());
+
+    // Pop the top stash, so the first stash is only reachable via reflog.
+    let pop_output = run_libra_command(&["stash", "pop"], repo.path());
+    assert!(
+        pop_output.status.success(),
+        "stash pop should succeed, stderr: {}",
+        String::from_utf8_lossy(&pop_output.stderr)
+    );
+
+    // Run GC and verify both stashes' data is preserved.
+    let gc_output = run_libra_command(
+        &["--json", "maintenance", "run", "--task", "gc"],
+        repo.path(),
+    );
+    assert!(
+        gc_output.status.success(),
+        "gc should pass, stderr: {}",
+        String::from_utf8_lossy(&gc_output.stderr)
+    );
+
+    // The first stash should still be listable via stash@{1}.
+    let list_output = run_libra_command(&["stash", "list"], repo.path());
+    assert!(
+        list_output.status.success(),
+        "stash list should succeed after gc, stderr: {}",
+        String::from_utf8_lossy(&list_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&list_output.stdout);
+    assert!(
+        stdout.contains("first stash"),
+        "first stash entry should still be listed after gc, got: {stdout}"
+    );
+
+    // Pop the first stash to verify the blob is intact.
+    let pop2_output = run_libra_command(&["stash", "pop"], repo.path());
+    assert!(
+        pop2_output.status.success(),
+        "second stash pop should succeed after gc, stderr: {}",
+        String::from_utf8_lossy(&pop2_output.stderr)
+    );
+    assert!(
+        repo.path().join("first.txt").exists(),
+        "first stashed file should be restored after pop"
+    );
+}
+
+#[test]
+
+/// Regression test: `maintenance run --task pack-refs` must skip `.lock` files
+/// under `refs/heads`.
+///
+/// Concurrent ref updates create temporary lock files (e.g.
+/// `refs/heads/main.lock`). Without filtering, `collect_refs` treats the lock
+/// file as a valid ref and writes a bogus entry into `packed-refs`. Worse,
+/// `remove_packed_refs` can delete the lock file if its content matches,
+/// breaking the concurrent update.
+fn test_maintenance_pack_refs_skips_lock_files() {
+    let repo = create_committed_repo_via_cli();
+    let main_hash = rev_parse(repo.path(), "main");
+
+    // Materialize a loose ref.
+    let refs_heads = repo.path().join(".libra").join("refs").join("heads");
+    fs::create_dir_all(&refs_heads).unwrap();
+    fs::write(refs_heads.join("main"), format!("{main_hash}\n")).unwrap();
+
+    // Create a fake lock file alongside the real ref.
+    fs::write(refs_heads.join("main.lock"), format!("{main_hash}\n")).unwrap();
+
+    // Create a lock file in a subdirectory.
+    let nested_dir = refs_heads.join("feature");
+    fs::create_dir_all(&nested_dir).unwrap();
+    fs::write(nested_dir.join("branch.lock"), format!("{main_hash}\n")).unwrap();
+
+    let output = run_libra_command(&["maintenance", "run", "--task", "pack-refs"], repo.path());
+    assert!(
+        output.status.success(),
+        "pack-refs should pass, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The packed-refs file must NOT contain any .lock entry.
+    let packed_refs = repo.path().join(".libra").join("packed-refs");
+    let content = fs::read_to_string(&packed_refs).unwrap();
+    assert!(
+        !content.contains(".lock"),
+        "packed-refs must not contain lock file entries, got: {content}"
+    );
+    assert!(
+        content.contains("refs/heads/main"),
+        "packed-refs must still contain the real ref, got: {content}"
+    );
+
+    // Lock files must NOT be deleted by pack-refs.
+    assert!(
+        refs_heads.join("main.lock").exists(),
+        "main.lock must survive pack-refs"
+    );
+    assert!(
+        nested_dir.join("branch.lock").exists(),
+        "nested branch.lock must survive pack-refs"
+    );
+}
+
+#[test]
+
+/// Regression test: `maintenance run --task pack-refs` must validate ref names
+/// and object hashes before inserting them into packed-refs.
+///
+/// Without validation, a file with a bogus name or non-hex content under
+/// `refs/heads` produces a corrupted packed-refs entry.
+fn test_maintenance_pack_refs_validates_refs() {
+    let repo = create_committed_repo_via_cli();
+    let main_hash = rev_parse(repo.path(), "main");
+
+    // Create a valid loose ref.
+    let refs_heads = repo.path().join(".libra").join("refs").join("heads");
+    fs::create_dir_all(&refs_heads).unwrap();
+    fs::write(refs_heads.join("main"), format!("{main_hash}\n")).unwrap();
+
+    // Create a file with non-hex content that should be rejected.
+    fs::write(refs_heads.join("bogus"), "not-a-hash\n").unwrap();
+
+    // Create an empty file that should be skipped.
+    fs::write(refs_heads.join("empty"), "\n").unwrap();
+
+    let output = run_libra_command(&["maintenance", "run", "--task", "pack-refs"], repo.path());
+    assert!(
+        output.status.success(),
+        "pack-refs should pass, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let packed_refs = repo.path().join(".libra").join("packed-refs");
+    let content = fs::read_to_string(&packed_refs).unwrap();
+    assert!(
+        content.contains("refs/heads/main"),
+        "packed-refs must contain valid ref, got: {content}"
+    );
+    assert!(
+        !content.contains("bogus") && !content.contains("empty"),
+        "packed-refs must not contain invalid ref entries, got: {content}"
+    );
+}
+
+#[test]
+
+/// Regression test: `maintenance run --task incremental-repack` must be able to
+/// rename the consolidated pack into the allocated path without a placeholder
+/// file blocking the rename.
+///
+/// Previously `allocate_unique_pack_path` pre-created an empty file via
+/// `create_new(true)`, causing `std::fs::rename` to fail on Windows where the
+/// destination must not exist. After the fix, the path is reserved but not
+/// pre-created, and the consolidated pack is renamed into place cleanly.
+fn test_maintenance_incremental_repack_path_not_precreated() {
+    let repo = create_committed_repo_via_cli();
+    let pack_dir = repo.path().join(".libra").join("objects").join("pack");
+
+    // Run incremental-repack on a repo with few packs — it will try to
+    // allocate a name and rename into it.
+    let output = run_libra_command(
+        &["maintenance", "run", "--task", "incremental-repack"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "incremental-repack should pass, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify no orphaned placeholder files remain in the pack directory.
+    // The only .pack files should be actual pack files with matching .idx.
+    if pack_dir.exists() {
+        for entry in fs::read_dir(&pack_dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "pack") {
+                // Every .pack must be a real pack (non-empty, with header).
+                let metadata = fs::metadata(&path).unwrap();
+                assert!(
+                    metadata.len() > 0,
+                    "pack file {} must not be empty (placeholder)",
+                    path.display()
+                );
+                // Must have a matching .idx.
+                let idx = path.with_extension("idx");
+                assert!(
+                    idx.exists(),
+                    "pack file {} must have matching index",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+/// Helper: create enough packs so incremental-repack actually repacks.
+fn create_many_packs(repo: &std::path::Path) {
+    for pack_idx in 0..5 {
+        for file_idx in 0..105 {
+            fs::write(
+                repo.join(format!("p{pack_idx}_f{file_idx:03}.txt")),
+                format!("c {pack_idx} {file_idx}\n"),
+            )
+            .unwrap();
+        }
+        run_libra_command(&["add", "."], repo);
+        run_libra_command(
+            &["commit", "-m", &format!("pc {pack_idx}"), "--no-verify"],
+            repo,
+        );
+
+        let objects_dir = repo.join(".libra").join("objects");
+        let old_time = SystemTime::now() - Duration::from_secs(30 * 24 * 60 * 60);
+        for entry in WalkDir::new(&objects_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            let file = fs::File::open(entry.path()).unwrap();
+            file.set_modified(old_time).unwrap();
+        }
+
+        let output = run_libra_command(&["maintenance", "run", "--task", "loose-objects"], repo);
+        assert!(
+            output.status.success(),
+            "loose-objects run {pack_idx} should pass, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+
+/// Regression test: `maintenance run --task incremental-repack` streams pack
+/// objects instead of loading them all into memory.
+///
+/// Previously `read_pack_objects` returned a `Vec` containing every decoded
+/// object from a pack, risking OOM on large packs. After the fix, objects are
+/// streamed through a callback and only the dedup set grows with the unique
+/// object count.
+fn test_maintenance_incremental_repack_streams_objects() {
+    let repo = create_committed_repo_via_cli();
+
+    // Create 5 packs so incremental-repack triggers.
+    create_many_packs(repo.path());
+
+    let pack_dir = repo.path().join(".libra").join("objects").join("pack");
+    let initial_packs: Vec<_> = fs::read_dir(&pack_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "pack"))
+        .collect();
+    assert!(
+        initial_packs.len() >= 5,
+        "should have at least 5 packs before repack, got {}",
+        initial_packs.len()
+    );
+
+    // Run incremental repack.
+    let output = run_libra_command(
+        &[
+            "--json",
+            "maintenance",
+            "run",
+            "--task",
+            "incremental-repack",
+        ],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "incremental-repack should pass, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    let tasks = json
+        .get("data")
+        .and_then(|d| d.get("tasks"))
+        .expect("tasks array");
+    let repack_task = tasks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t.get("task").and_then(|v| v.as_str()) == Some("incremental-repack"))
+        .expect("incremental-repack task");
+    let packs_repacked = repack_task
+        .get("packs_repacked")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert!(
+        packs_repacked >= 5,
+        "should repack all packs, got task: {repack_task}"
+    );
+
+    // Verify a single consolidated .pack remains and is valid.
+    let final_packs: Vec<_> = fs::read_dir(&pack_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "pack"))
+        .collect();
+    assert_eq!(
+        final_packs.len(),
+        1,
+        "should be left with exactly one consolidated .pack"
+    );
+
+    // Verify history remains readable.
+    let log_output = run_libra_command(&["log", "--pretty=%s"], repo.path());
+    assert!(
+        log_output.status.success(),
+        "log should succeed after repack, stderr: {}",
+        String::from_utf8_lossy(&log_output.stderr)
+    );
+    let log_stdout = String::from_utf8_lossy(&log_output.stdout);
+    for pack_idx in 0..5 {
+        assert!(
+            log_stdout.contains(&format!("pc {pack_idx}")),
+            "history must contain commit for pack {pack_idx}, got: {log_stdout}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
 

@@ -307,7 +307,7 @@ async fn run_gc(
     output: &OutputConfig,
 ) -> CliResult<TaskResult> {
     let storage = ClientStorage::init(path::objects());
-    let reachable = collect_reachable_objects(&storage).await?;
+    let reachable = collect_reachable_objects(&storage, repo_path).await?;
     let all_loose = list_loose_objects(repo_path)
         .map_err(|e| CliError::fatal(format!("failed to list loose objects: {e}")))?;
 
@@ -1006,8 +1006,14 @@ async fn status(output: &OutputConfig) -> CliResult<()> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Collect all reachable objects from refs, index, and reflogs.
-async fn collect_reachable_objects(storage: &ClientStorage) -> CliResult<HashSet<ObjectHash>> {
+/// Collect all reachable objects from refs, index, reflogs, and file-backed
+/// refs/reflogs (stash). File-backed refs live outside the SQLite database and
+/// must be treated as GC roots, otherwise GC can delete stash commits/blobs and
+/// make `stash apply`/`pop` fail with missing-object errors.
+async fn collect_reachable_objects(
+    storage: &ClientStorage,
+    repo_path: &Path,
+) -> CliResult<HashSet<ObjectHash>> {
     let mut reachable: HashSet<ObjectHash> = HashSet::new();
     let db_conn = db::get_db_conn_instance().await;
 
@@ -1040,6 +1046,38 @@ async fn collect_reachable_objects(storage: &ClientStorage) -> CliResult<HashSet
                 && let Some(hash) = parse_object_hash(oid)
             {
                 walk_reachable(&hash, storage, &mut reachable)?;
+            }
+        }
+    }
+
+    // Collect from file-backed stash ref. Stash uses `refs/stash` on disk
+    // instead of the SQLite reference table, so it is invisible to the loops
+    // above. Without this, GC can delete stash commit/tree/blob objects and
+    // make `stash apply`/`pop` lose work.
+    let stash_ref_path = repo_path.join("refs/stash");
+    if stash_ref_path.is_file()
+        && let Ok(content) = fs::read_to_string(&stash_ref_path)
+        && let Some(hash) = parse_object_hash(content.trim())
+    {
+        walk_reachable(&hash, storage, &mut reachable)?;
+    }
+
+    // Collect from file-backed stash reflog. The stash reflog
+    // (`logs/refs/stash`) records previous stash entries so users can
+    // `stash apply stash@{1}` etc. Each old_oid/new_oid on the reflog is a GC
+    // root, otherwise a dropped stash entry's objects become unreachable.
+    let stash_log_path = repo_path.join("logs/refs/stash");
+    if stash_log_path.is_file()
+        && let Ok(content) = fs::read_to_string(&stash_log_path)
+    {
+        for line in content.lines() {
+            // Stash reflog format: "old_hash new_hash name <email> ..."
+            for oid_str in line.split_whitespace().take(2) {
+                if !is_null_oid(oid_str)
+                    && let Some(hash) = parse_object_hash(oid_str)
+                {
+                    walk_reachable(&hash, storage, &mut reachable)?;
+                }
             }
         }
     }
@@ -1365,6 +1403,20 @@ fn parse_object_hash(hex_str: &str) -> Option<ObjectHash> {
     ObjectHash::from_bytes(&bytes).ok()
 }
 
+/// Return `true` when `name` looks like a well-formed fully-qualified ref name.
+///
+/// Rejects empty names, names ending with `.lock`, and names that contain
+/// internal `.lock` path components — all of which are lock files that
+/// `collect_refs` / `remove_packed_refs` must ignore.
+fn is_valid_ref_name(name: &str) -> bool {
+    if name.is_empty() || name.ends_with(".lock") {
+        return false;
+    }
+    // Reject paths where any component ends with ".lock", e.g.
+    // "refs/heads/foo.lock/bar".
+    !name.split('/').any(|comp| comp.ends_with(".lock"))
+}
+
 /// Remove empty directories under the given path.
 fn cleanup_empty_dirs(dir: &Path) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
@@ -1384,8 +1436,11 @@ fn cleanup_empty_dirs(dir: &Path) -> io::Result<()> {
 
 /// Allocate a unique pack file name under `pack_dir`.
 ///
-/// Uses nanosecond timestamps and `create_new` so two maintenance runs in the
-/// same second cannot overwrite each other's pack file.
+/// Uses nanosecond timestamps plus an attempt counter so two maintenance runs
+/// in the same second cannot pick the same name. The path is NOT pre-created:
+/// callers use the returned path as a rename target and must write to a temp
+/// file first, then atomically rename into place. Pre-creating the file would
+/// break `std::fs::rename` on Windows where the destination must not exist.
 fn allocate_unique_pack_path(pack_dir: &Path, prefix: &str) -> io::Result<(String, PathBuf)> {
     let base_nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1394,17 +1449,8 @@ fn allocate_unique_pack_path(pack_dir: &Path, prefix: &str) -> io::Result<(Strin
     for attempt in 0..1000 {
         let pack_name = format!("{prefix}-{base_nanos}-{attempt}.pack");
         let pack_path = pack_dir.join(&pack_name);
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&pack_path)
-        {
-            Ok(file) => {
-                drop(file);
-                return Ok((pack_name, pack_path));
-            }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
+        if !pack_path.exists() {
+            return Ok((pack_name, pack_path));
         }
     }
     Err(io::Error::other(format!(
@@ -1416,6 +1462,10 @@ fn allocate_unique_pack_path(pack_dir: &Path, prefix: &str) -> io::Result<(Strin
 ///
 /// `ref_prefix` is prepended to every collected relative name so the resulting
 /// refnames match the standard fully-qualified form (e.g. `refs/heads/main`).
+///
+/// Lock files (`*.lock`) are skipped so that concurrent ref updates do not
+/// produce bogus packed-refs entries or delete lock files. Ref names and hash
+/// values are validated to protect against corrupted or unexpected files.
 fn collect_refs(
     base: &Path,
     current: &Path,
@@ -1428,11 +1478,22 @@ fn collect_refs(
         if path.is_dir() {
             collect_refs(base, &path, ref_prefix, refs)?;
         } else if path.is_file() {
+            // Skip lock files left by concurrent ref updates.
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name.ends_with(".lock"))
+            {
+                continue;
+            }
+
             let hash = fs::read_to_string(&path)?.trim().to_string();
             let relative = path.strip_prefix(base).unwrap_or(&path);
             let relative = relative.to_string_lossy().replace('\\', "/");
             let name = format!("{ref_prefix}{relative}");
-            if !hash.is_empty() {
+
+            // Validate the ref name and hash before inserting.
+            if !hash.is_empty() && parse_object_hash(&hash).is_some() && is_valid_ref_name(&name) {
                 refs.insert(name, hash);
             }
         }
@@ -1444,6 +1505,7 @@ fn collect_refs(
 ///
 /// Only files that were actually captured by `collect_refs` are deleted; refs
 /// created or updated concurrently after the snapshot are left untouched.
+/// Lock files (`*.lock`) are never removed.
 #[allow(clippy::only_used_in_recursion)]
 fn remove_packed_refs(
     base: &Path,
@@ -1464,6 +1526,16 @@ fn remove_packed_refs(
                 let _ = fs::remove_dir(&path);
             }
         } else if path.is_file() {
+            // Never touch lock files — they belong to concurrent ref updates
+            // and are not refs.
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name.ends_with(".lock"))
+            {
+                continue;
+            }
+
             let relative = path.strip_prefix(base).unwrap_or(&path);
             let relative = relative.to_string_lossy().replace('\\', "/");
             let full_name = format!("{ref_prefix}{relative}");
@@ -1510,38 +1582,49 @@ async fn create_pack_from_loose_objects(
     Ok(packed.len())
 }
 
-/// Read all complete objects from a pack file, including offset and reference
-/// deltas, by reusing the shared pack decoder/delta reconstruction path.
-fn read_pack_objects(pack_path: &Path) -> io::Result<Vec<(ObjectType, Vec<u8>, ObjectHash)>> {
+/// Shared mutable state for streaming pack-object consolidation.
+///
+/// Held behind `Arc<Mutex<>>` so it can be accessed from the `Pack::decode`
+/// callback, which requires `Send + Sync + 'static`.
+struct ConsolidateCtx {
+    entries_file: fs::File,
+    seen: HashSet<ObjectHash>,
+    count: u32,
+    error: Option<io::Error>,
+}
+
+/// Read objects from a pack file, calling `cb` for each decoded entry as it
+/// becomes available.
+///
+/// Entries are streamed through the callback instead of being collected into a
+/// `Vec`, so memory use is bounded by the pack decoder's internal buffers
+/// rather than by the total uncompressed size of all objects in the pack.
+/// This prevents incremental-repack from OOM-ing on large production packs.
+fn read_pack_objects<F>(pack_path: &Path, cb: F) -> io::Result<()>
+where
+    F: Fn(ObjectType, Vec<u8>, ObjectHash) -> io::Result<()> + Send + Sync + 'static,
+{
     let file = fs::File::open(pack_path)?;
     let mut reader = io::BufReader::new(file);
     let mut pack = Pack::new(Some(1), Some(128 * 1024 * 1024), None, true);
 
-    let objects = Arc::new(Mutex::new(Vec::new()));
-    let decode_error = Arc::new(Mutex::new(None));
-    let objects_c = objects.clone();
-    let decode_error_c = decode_error.clone();
+    let error: Arc<Mutex<Option<io::Error>>> = Arc::new(Mutex::new(None));
+    let error_c = error.clone();
+
     pack.decode(
         &mut reader,
         move |entry: MetaAttached<Entry, EntryMeta>| {
-            match objects_c.lock() {
-                Ok(mut guard) => {
-                    guard.push((entry.inner.obj_type, entry.inner.data, entry.inner.hash));
-                }
-                Err(e) => {
-                    // Record the poison failure so the caller can return a
-                    // user-facing error instead of panicking in maintenance code.
-                    let _ = decode_error_c.lock().map(|mut guard| {
-                        *guard = Some(io::Error::other(format!("pack decode mutex poisoned: {e}")));
-                    });
-                }
+            if let Err(e) = cb(entry.inner.obj_type, entry.inner.data, entry.inner.hash) {
+                let _ = error_c.lock().map(|mut guard| {
+                    *guard = Some(e);
+                });
             }
         },
         None::<fn(ObjectHash)>,
     )
     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-    if let Some(e) = decode_error
+    if let Some(e) = error
         .lock()
         .map_err(|e| io::Error::other(e.to_string()))?
         .take()
@@ -1549,13 +1632,7 @@ fn read_pack_objects(pack_path: &Path) -> io::Result<Vec<(ObjectType, Vec<u8>, O
         return Err(e);
     }
 
-    // INVARIANT: `pack.decode` holds the only other Arc clone and has returned,
-    // so `try_unwrap` succeeds and no thread is still using the vector.
-    let objects = Arc::try_unwrap(objects)
-        .map_err(|_| io::Error::other("pack decode callback still active"))?
-        .into_inner()
-        .map_err(|e| io::Error::other(e.to_string()))?;
-    Ok(objects)
+    Ok(())
 }
 
 /// Create a consolidated pack file from existing packs and loose objects.
@@ -1578,30 +1655,54 @@ fn create_consolidated_pack(
     // and the checksum must hash the header in its natural byte order.
     let temp_dir = tempfile::tempdir()?;
     let entries_path = temp_dir.path().join("entries.bin");
-    let mut entries_file = fs::File::create(&entries_path)?;
+    let entries_file = fs::File::create(&entries_path)?;
 
-    let mut seen: HashSet<ObjectHash> = HashSet::new();
-    let mut count: u32 = 0;
+    let ctx = Arc::new(Mutex::new(ConsolidateCtx {
+        entries_file,
+        seen: HashSet::new(),
+        count: 0,
+        error: None,
+    }));
 
     // Copy complete objects from existing packs, resolving any delta entries.
+    // Objects are streamed through the callback so only the dedup set grows
+    // with the total number of unique objects — not the uncompressed data.
     for pack in source_packs {
-        for (obj_type, body, hash) in read_pack_objects(pack)? {
-            if !seen.insert(hash) {
-                continue;
+        let ctx_for_cb = ctx.clone();
+        read_pack_objects(pack, move |obj_type, body, hash| -> io::Result<()> {
+            let mut guard = ctx_for_cb
+                .lock()
+                .map_err(|e| io::Error::other(format!("consolidation mutex poisoned: {e}")))?;
+            if !guard.seen.insert(hash) {
+                return Ok(());
             }
-            write_pack_entry(&mut entries_file, obj_type, &body)?;
-            count = count.checked_add(1).ok_or_else(|| {
+            write_pack_entry(&mut guard.entries_file, obj_type, &body)?;
+            guard.count = guard.count.checked_add(1).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "pack object count overflow")
             })?;
+            Ok(())
+        })?;
+        // Propagate any error recorded inside the callback.
+        let mut guard = ctx
+            .lock()
+            .map_err(|e| io::Error::other(format!("consolidation mutex poisoned: {e}")))?;
+        if let Some(e) = guard.error.take() {
+            return Err(e);
         }
     }
+
+    // Extract state from the Arc so the caller can continue with loose objects.
+    let mut ctx = Arc::try_unwrap(ctx)
+        .map_err(|_| io::Error::other("consolidation context still referenced"))?
+        .into_inner()
+        .map_err(|e| io::Error::other(e.to_string()))?;
 
     // Add remaining loose objects.
     for (hash_str, obj_path) in loose_objects {
         let Some(hash) = parse_object_hash(hash_str) else {
             continue;
         };
-        if !seen.insert(hash) {
+        if !ctx.seen.insert(hash) {
             continue;
         }
         let data = fs::read(obj_path)?;
@@ -1609,12 +1710,12 @@ fn create_consolidated_pack(
         let (obj_type, _size) = parse_loose_object_header(&decompressed)?;
         let header_end = decompressed.iter().position(|&b| b == 0).unwrap_or(0);
         let body = &decompressed[header_end + 1..];
-        write_pack_entry(&mut entries_file, obj_type, body)?;
-        count = count.checked_add(1).ok_or_else(|| {
+        write_pack_entry(&mut ctx.entries_file, obj_type, body)?;
+        ctx.count = ctx.count.checked_add(1).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "pack object count overflow")
         })?;
     }
-    drop(entries_file);
+    drop(ctx.entries_file);
 
     // Stage 2: assemble the final pack file with the correct header, copy the
     // staged entries into it (updating the checksum as we go), and append the
@@ -1622,17 +1723,17 @@ fn create_consolidated_pack(
     // write cannot confuse the storage layer.
     let pack_temp_path = temp_dir.path().join("consolidated.pack");
     let mut out = fs::File::create(&pack_temp_path)?;
-    let mut ctx = Context::new(match get_hash_kind() {
+    let mut digest_ctx = Context::new(match get_hash_kind() {
         HashKind::Sha256 => &SHA256,
         _ => &SHA1_FOR_LEGACY_USE_ONLY,
     });
 
     out.write_all(b"PACK")?;
-    ctx.update(b"PACK");
+    digest_ctx.update(b"PACK");
     out.write_all(&2_u32.to_be_bytes())?;
-    ctx.update(&2_u32.to_be_bytes());
-    out.write_all(&count.to_be_bytes())?;
-    ctx.update(&count.to_be_bytes());
+    digest_ctx.update(&2_u32.to_be_bytes());
+    out.write_all(&ctx.count.to_be_bytes())?;
+    digest_ctx.update(&ctx.count.to_be_bytes());
 
     let mut entries_file = fs::File::open(&entries_path)?;
     let mut buf = [0u8; 64 * 1024];
@@ -1641,12 +1742,12 @@ fn create_consolidated_pack(
         if n == 0 {
             break;
         }
-        ctx.update(&buf[..n]);
+        digest_ctx.update(&buf[..n]);
         out.write_all(&buf[..n])?;
     }
     drop(entries_file);
 
-    let pack_hash = ctx.finish();
+    let pack_hash = digest_ctx.finish();
     out.write_all(pack_hash.as_ref())?;
     drop(out);
 
@@ -1654,7 +1755,7 @@ fn create_consolidated_pack(
         let _ = fs::remove_file(&pack_temp_path);
     })?;
 
-    Ok(count as usize)
+    Ok(ctx.count as usize)
 }
 
 /// Write a single pack entry (type/size header + zlib compressed body) to a
