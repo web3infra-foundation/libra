@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`run` / `register` / `unregister` / `status` / `start` / `stop` exposed；`start`/`stop` 安装/移除 OS 调度入口（macOS 写 launchd LaunchAgents plist，登录时自动加载；其他 Unix 写 cron 片段），调度目录可由 `LIBRA_MAINTENANCE_AGENT_DIR` 覆盖（测试用）。lower-level maintenance tasks `commit-graph`（Libra 无 commit-graph reader/writer）与 `prefetch`（需 fetch 支持 refs/prefetch 命名空间）仍在无法支持时跳过
+- 兼容级别：`partial`。`run` / `register` / `unregister` / `status` / `start` / `stop` exposed；`start`/`stop` 安装/移除 OS 调度入口（macOS 写 launchd LaunchAgents plist，登录时自动加载；其他 Unix 写 cron 片段），调度目录可由 `LIBRA_MAINTENANCE_AGENT_DIR` 覆盖（测试用）。`commit-graph` task 现写出 Git 兼容 v1 commit-graph 文件（`build_commit_graph`：CGPH 头 + OIDF/OIDL/CDAT chunk + 拓扑 generation + SHA-1 trailer → `.libra/objects/info/commit-graph`；octopus(>2 父) 与 SHA-256 仓库暂跳过并提示）；`prefetch` task（需 fetch 支持 refs/prefetch 命名空间）仍在无法支持时跳过
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 

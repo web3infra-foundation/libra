@@ -76,7 +76,7 @@ batch document.
 | cloud | intentionally-different | Libra cloud backup/restore extension, not a Git command |
 | publish | intentionally-different | Libra Cloudflare publish extension, not a Git command |
 | agent | intentionally-different | Libra external-agent capture extension, not a Git command |
-| maintenance | partial | `run` / `register` / `unregister` / `status` / `start` / `stop` exposed; `start`/`stop` install/remove an OS scheduler entry (launchd LaunchAgents plist on macOS, cron fragment elsewhere; dir overridable via `LIBRA_MAINTENANCE_AGENT_DIR`); the `commit-graph` and `prefetch` tasks are skipped when unsupported |
+| maintenance | partial | `run` / `register` / `unregister` / `status` / `start` / `stop` exposed; `start`/`stop` install/remove an OS scheduler entry (launchd LaunchAgents plist on macOS, cron fragment elsewhere; dir overridable via `LIBRA_MAINTENANCE_AGENT_DIR`); the `commit-graph` task writes a Git-compatible v1 commit-graph file (OIDF/OIDL/CDAT chunks + topological generation numbers; octopus merges and SHA-256 repos are skipped); the `prefetch` task is skipped when unsupported |
 | hooks | intentionally-different | Hidden compatibility entry for hook configs installed by `libra agent enable` |
 | archive | partial | Creates tar/tar.gz/tar.bz2/zip archives from a committed tree; `--format`, `--output`, `--prefix` supported |
 | cat-file | partial | `-t`, `-s`, `-p`, `-e`, and AI object modes supported; batch modes and JSON/machine output for `-e` are not exposed |
