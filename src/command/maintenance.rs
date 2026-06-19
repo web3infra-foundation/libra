@@ -32,7 +32,7 @@ use git_internal::{
     hash::{HashKind, ObjectHash},
     internal::object::{commit::Commit, tree::Tree, types::ObjectType},
 };
-use sea_orm::EntityTrait;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::Serialize;
 use sha1::Digest;
 
@@ -42,7 +42,7 @@ use crate::{
         branch::Branch,
         config::ConfigKv,
         db,
-        model::{reference, reflog},
+        model::{object_index, reference, reflog},
     },
     utils::{
         client_storage::ClientStorage,
@@ -59,6 +59,8 @@ const MAINTENANCE_LAST_RUN_KEY: &str = "maintenance.last-run";
 const DEFAULT_LOOSE_OBJECT_THRESHOLD: usize = 100;
 const DEFAULT_PACK_COUNT_THRESHOLD: usize = 5;
 const LOOSE_OBJECT_AGE_SECONDS: u64 = 14 * 24 * 60 * 60; // 2 weeks
+/// Grace period before an unreachable loose object may be deleted by `gc`.
+const GC_PRUNE_GRACE_SECONDS: u64 = 60 * 60; // 1 hour
 
 /// `--help` examples shown in `libra maintenance --help` output.
 pub const MAINTENANCE_EXAMPLES: &str = "\
@@ -264,7 +266,13 @@ async fn run_tasks(
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs().to_string())
             .unwrap_or_default();
-        let _ = ConfigKv::set(MAINTENANCE_LAST_RUN_KEY, &now, false).await;
+        ConfigKv::set(MAINTENANCE_LAST_RUN_KEY, &now, false)
+            .await
+            .map_err(|e| {
+                CliError::fatal(format!(
+                    "maintenance tasks succeeded but failed to record last-run timestamp: {e}"
+                ))
+            })?;
     }
 
     if output.is_json() {
@@ -303,15 +311,27 @@ async fn run_gc(
     output: &OutputConfig,
 ) -> CliResult<TaskResult> {
     let storage = ClientStorage::init(path::objects());
-    let reachable = collect_reachable_objects(&storage).await?;
+    let reachable = collect_reachable_objects(&storage, repo_path).await?;
     let all_loose = list_loose_objects(repo_path)
         .map_err(|e| CliError::fatal(format!("failed to list loose objects: {e}")))?;
 
+    let now = SystemTime::now();
     let mut removed = 0;
     for (hash_str, obj_path) in &all_loose {
         if let Some(hash) = parse_object_hash(hash_str)
             && !reachable.contains(&hash)
         {
+            // Skip objects still within the grace period
+            let within_grace = fs::metadata(obj_path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|mtime| now.duration_since(mtime).ok())
+                .map(|age| age.as_secs() < GC_PRUNE_GRACE_SECONDS)
+                .unwrap_or(true);
+            if within_grace {
+                continue;
+            }
+
             if dry_run {
                 if !quiet {
                     info_println(
@@ -320,13 +340,14 @@ async fn run_gc(
                     );
                 }
             } else {
-                if let Err(e) = fs::remove_file(obj_path) {
-                    return Err(CliError::fatal(format!(
+                fs::remove_file(obj_path).map_err(|e| {
+                    CliError::fatal(format!(
                         "failed to remove unreachable object {}: {e}",
                         hash_str
-                    )));
-                }
+                    ))
+                })?;
                 removed += 1;
+                let _ = gc_drop_object_index(hash_str).await;
             }
         }
     }
@@ -484,8 +505,8 @@ async fn run_pack_refs(
     _quiet: bool,
     _output: &OutputConfig,
 ) -> CliResult<TaskResult> {
-    let refs_dir = repo_path.join("refs").join("heads");
-    if !refs_dir.exists() {
+    let base_refs_dir = repo_path.join("refs");
+    if !base_refs_dir.is_dir() {
         return Ok(TaskResult {
             task: "pack-refs".to_string(),
             success: true,
@@ -493,13 +514,26 @@ async fn run_pack_refs(
             objects_packed: 0,
             refs_packed: 0,
             packs_repacked: 0,
-            message: "no refs/heads directory".to_string(),
+            message: "no refs/ directory".to_string(),
         });
     }
 
+    // Walk every well-known ref category so tags and remote-tracking refs
+    // are packed alongside branches.
+    let categories: [(&str, &str); 4] = [
+        ("heads", "refs/heads/"),
+        ("tags", "refs/tags/"),
+        ("remotes", "refs/remotes/"),
+        ("notes", "refs/notes/"),
+    ];
     let mut refs: HashMap<String, String> = HashMap::new();
-    collect_refs(&refs_dir, &refs_dir, &mut refs)
-        .map_err(|e| CliError::fatal(format!("failed to collect refs: {e}")))?;
+    for (subdir, prefix) in &categories {
+        let cat_dir = base_refs_dir.join(subdir);
+        if cat_dir.is_dir() {
+            collect_refs(&cat_dir, &cat_dir, prefix, &mut refs)
+                .map_err(|e| CliError::fatal(format!("failed to collect {prefix} refs: {e}")))?;
+        }
+    }
 
     if refs.is_empty() {
         return Ok(TaskResult {
@@ -544,35 +578,55 @@ async fn run_pack_refs(
     }
 
     // Merge new refs, overwriting existing ones
+    let count = refs.len();
     for (name, hash) in refs {
         existing.insert(name, hash);
     }
 
-    // Write packed-refs
-    let mut file = fs::File::create(&packed_refs_path)
-        .map_err(|e| CliError::fatal(format!("failed to create packed-refs: {e}")))?;
+    // Write to temp file first, then atomically install via backup.
+    let temp_path = packed_refs_path.with_extension("tmp");
+    let mut file = fs::File::create(&temp_path)
+        .map_err(|e| CliError::fatal(format!("failed to create packed-refs temp: {e}")))?;
     if let Err(e) = writeln!(file, "# packed-refs with peeled tags") {
+        let _ = fs::remove_file(&temp_path);
         return Err(CliError::fatal(format!("failed to write packed-refs: {e}")));
     }
     for (name, hash) in &existing {
         if let Err(e) = writeln!(file, "{hash} {name}") {
+            let _ = fs::remove_file(&temp_path);
             return Err(CliError::fatal(format!("failed to write packed-refs: {e}")));
         }
     }
+    drop(file);
 
-    // Remove packed loose ref files
-    let mut removed_count = 0;
-    remove_packed_refs(&refs_dir, &refs_dir, &mut removed_count)
-        .map_err(|e| CliError::fatal(format!("failed to remove packed refs: {e}")))?;
+    // Atomic install: back up old file, rename temp into place, remove backup.
+    let backup_path = packed_refs_path.with_extension("bak");
+    if packed_refs_path.exists() {
+        fs::rename(&packed_refs_path, &backup_path).map_err(|e| {
+            let _ = fs::remove_file(&temp_path);
+            CliError::fatal(format!("failed to back up old packed-refs: {e}"))
+        })?;
+    }
+    fs::rename(&temp_path, &packed_refs_path)
+        .inspect_err(|_| {
+            let _ = fs::rename(&backup_path, &packed_refs_path);
+        })
+        .map_err(|e| {
+            let _ = fs::remove_file(&temp_path);
+            CliError::fatal(format!("failed to install packed-refs: {e}"))
+        })?;
+    let _ = fs::remove_file(&backup_path);
 
+    // Keep the loose ref files in place — normal ref-resolution paths
+    // do not yet read packed-refs, so deleting them would hide refs.
     Ok(TaskResult {
         task: "pack-refs".to_string(),
         success: true,
         objects_removed: 0,
         objects_packed: 0,
-        refs_packed: removed_count,
+        refs_packed: count,
         packs_repacked: 0,
-        message: format!("packed {removed_count} refs"),
+        message: format!("packed {count} refs into packed-refs"),
     })
 }
 
@@ -1215,7 +1269,10 @@ async fn stop(output: &OutputConfig) -> CliResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Collect all reachable objects from refs, index, and reflogs.
-async fn collect_reachable_objects(storage: &ClientStorage) -> CliResult<HashSet<ObjectHash>> {
+async fn collect_reachable_objects(
+    storage: &ClientStorage,
+    repo_path: &Path,
+) -> CliResult<HashSet<ObjectHash>> {
     let mut reachable: HashSet<ObjectHash> = HashSet::new();
     let db_conn = db::get_db_conn_instance().await;
 
@@ -1226,15 +1283,19 @@ async fn collect_reachable_objects(storage: &ClientStorage) -> CliResult<HashSet
         .map_err(|e| CliError::fatal(format!("failed to load refs: {e}")))?;
 
     for ref_entry in refs {
-        if let Some(commit_hash_str) = &ref_entry.commit
-            && let Some(hash) = parse_object_hash(commit_hash_str)
-        {
-            reachable.insert(hash);
+        if let Some(commit_hash_str) = &ref_entry.commit {
+            let hash = parse_object_hash(commit_hash_str).ok_or_else(|| {
+                CliError::fatal(format!(
+                    "SQLite ref '{}' has a malformed commit value '{}'",
+                    ref_entry.name.as_deref().unwrap_or("(unnamed)"),
+                    commit_hash_str
+                ))
+            })?;
             walk_reachable(&hash, storage, &mut reachable)?;
         }
     }
 
-    // Collect from reflogs
+    // Collect from reflogs (both old_oid and new_oid)
     let reflogs = reflog::Entity::find()
         .all(&db_conn)
         .await
@@ -1242,21 +1303,94 @@ async fn collect_reachable_objects(storage: &ClientStorage) -> CliResult<HashSet
 
     let is_null_oid = |oid: &str| oid.chars().all(|c| c == '0');
     for entry in reflogs {
-        if !is_null_oid(&entry.new_oid)
-            && let Some(hash) = parse_object_hash(&entry.new_oid)
-        {
-            reachable.insert(hash);
+        for oid in [&entry.old_oid, &entry.new_oid] {
+            if !is_null_oid(oid)
+                && let Some(hash) = parse_object_hash(oid)
+            {
+                walk_reachable(&hash, storage, &mut reachable)?;
+            }
+        }
+    }
+
+    // Collect from file-backed stash ref and reflog
+    let stash_ref_path = repo_path.join("refs/stash");
+    if stash_ref_path.is_file()
+        && let Ok(content) = fs::read_to_string(&stash_ref_path)
+        && let Some(hash) = parse_object_hash(content.trim())
+    {
+        walk_reachable(&hash, storage, &mut reachable)?;
+    }
+    let stash_log_path = repo_path.join("logs/refs/stash");
+    if stash_log_path.is_file() {
+        let content = fs::read_to_string(&stash_log_path).map_err(|e| {
+            CliError::fatal(format!(
+                "failed to read stash reflog {}: {e}; aborting gc to protect stash objects",
+                stash_log_path.display()
+            ))
+        })?;
+        for line in content.lines() {
+            for oid_str in line.split_whitespace().take(2) {
+                if !is_null_oid(oid_str)
+                    && let Some(hash) = parse_object_hash(oid_str)
+                {
+                    walk_reachable(&hash, storage, &mut reachable)?;
+                }
+            }
+        }
+    }
+
+    // Collect from file-backed loose refs under refs/
+    let refs_dir = repo_path.join("refs");
+    if refs_dir.is_dir() {
+        let mut file_hashes: Vec<ObjectHash> = Vec::new();
+        collect_file_ref_hashes(&refs_dir, &mut file_hashes)
+            .map_err(|e| CliError::fatal(format!("failed to collect file-backed refs: {e}")))?;
+        for hash in &file_hashes {
+            walk_reachable(hash, storage, &mut reachable)?;
+        }
+    }
+
+    // Collect from packed-refs
+    let packed_refs_path = repo_path.join("packed-refs");
+    if packed_refs_path.is_file() {
+        let content = fs::read_to_string(&packed_refs_path)
+            .map_err(|e| CliError::fatal(format!("failed to read packed-refs: {e}")))?;
+        for (line_no, line) in content.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with('^') {
+                continue;
+            }
+            let (hash_str, _refname) = line.split_once(' ').ok_or_else(|| {
+                CliError::fatal(format!(
+                    "malformed packed-refs line {}: expected '<hash> <refname>', got '{}'",
+                    line_no + 1,
+                    line
+                ))
+            })?;
+            let hash = parse_object_hash(hash_str).ok_or_else(|| {
+                CliError::fatal(format!(
+                    "packed-refs line {} has invalid object hash '{}'",
+                    line_no + 1,
+                    hash_str
+                ))
+            })?;
             walk_reachable(&hash, storage, &mut reachable)?;
         }
     }
 
-    // Collect from index
+    // Collect from index (all stages 0-3)
     let index_path = path::index();
-    if index_path.exists()
-        && let Ok(index) = git_internal::internal::index::Index::load(&index_path)
-    {
-        for entry in index.tracked_entries(0) {
-            reachable.insert(entry.hash);
+    if index_path.exists() {
+        let index = git_internal::internal::index::Index::load(&index_path).map_err(|e| {
+            CliError::fatal(format!(
+                "failed to load index from {}: {e}; aborting gc to protect staged objects",
+                index_path.display()
+            ))
+        })?;
+        for stage in 0..=3u8 {
+            for entry in index.tracked_entries(stage) {
+                reachable.insert(entry.hash);
+            }
         }
     }
 
@@ -1273,9 +1407,11 @@ fn walk_reachable(
         return Ok(()); // Already visited
     }
 
-    let Ok(obj_type) = storage.get_object_type(hash) else {
-        return Ok(());
-    };
+    let obj_type = storage.get_object_type(hash).map_err(|e| {
+        CliError::fatal(format!(
+            "failed to determine object type for {hash} during gc: {e}"
+        ))
+    })?;
 
     match obj_type {
         ObjectType::Commit => {
@@ -1395,42 +1531,90 @@ fn cleanup_empty_dirs(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Collect all refs under `refs_dir`, storing them as (ref_name, hash) pairs.
-fn collect_refs(base: &Path, current: &Path, refs: &mut HashMap<String, String>) -> io::Result<()> {
-    for entry in fs::read_dir(current)? {
+/// Remove the `object_index` row for a pruned loose object so that cloud
+/// sync does not keep trying to upload it and fail repeatedly.
+async fn gc_drop_object_index(hash_str: &str) -> Result<(), String> {
+    let repo_id = match ConfigKv::get("libra.repoid").await {
+        Ok(Some(entry)) => entry.value,
+        _ => return Ok(()),
+    };
+    let db_conn = db::get_db_conn_instance().await;
+    object_index::Entity::delete_many()
+        .filter(object_index::Column::OId.eq(hash_str))
+        .filter(object_index::Column::RepoId.eq(&repo_id))
+        .exec(&db_conn)
+        .await
+        .map_err(|e| format!("failed to delete object_index row for {hash_str}: {e}"))?;
+    Ok(())
+}
+
+/// Recursively scan a refs directory tree, collecting every valid object hash
+/// from loose ref files. Lock files and unreadable/malformed refs cause
+/// fatal errors rather than being silently skipped.
+fn collect_file_ref_hashes(dir: &Path, hashes: &mut Vec<ObjectHash>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            collect_refs(base, &path, refs)?;
+            collect_file_ref_hashes(&path, hashes)?;
         } else if path.is_file() {
-            let hash = fs::read_to_string(&path)?.trim().to_string();
-            let relative = path.strip_prefix(base).unwrap_or(&path);
-            let name = relative.to_string_lossy().replace('\\', "/");
-            if !hash.is_empty() {
-                refs.insert(name, hash);
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name.ends_with(".lock"))
+            {
+                continue;
             }
+            let content = fs::read_to_string(&path).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("failed to read loose ref {}: {e}", path.display()),
+                )
+            })?;
+            let hash = parse_object_hash(content.trim()).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "loose ref {} does not contain a valid object hash",
+                        path.display()
+                    ),
+                )
+            })?;
+            hashes.push(hash);
         }
     }
     Ok(())
 }
 
-/// Remove loose ref files that have been packed.
-#[allow(clippy::only_used_in_recursion)]
-fn remove_packed_refs(base: &Path, current: &Path, count: &mut usize) -> io::Result<()> {
+/// Collect all refs under `refs_dir`, storing them as (ref_name, hash) pairs.
+/// Collect all refs under `base`, storing them as (full_ref_name, hash)
+/// pairs. `ref_prefix` is prepended to produce standard FQN form.
+fn collect_refs(
+    base: &Path,
+    current: &Path,
+    ref_prefix: &str,
+    refs: &mut HashMap<String, String>,
+) -> io::Result<()> {
     for entry in fs::read_dir(current)? {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            remove_packed_refs(base, &path, count)?;
-            // Remove empty directory
-            if let Ok(mut iter) = fs::read_dir(&path)
-                && iter.next().is_none()
-            {
-                let _ = fs::remove_dir(&path);
-            }
+            collect_refs(base, &path, ref_prefix, refs)?;
         } else if path.is_file() {
-            fs::remove_file(&path)?;
-            *count += 1;
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name.ends_with(".lock"))
+            {
+                continue;
+            }
+            let hash = fs::read_to_string(&path)?.trim().to_string();
+            let relative = path.strip_prefix(base).unwrap_or(&path);
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            let name = format!("{ref_prefix}{relative}");
+            if !hash.is_empty() && parse_object_hash(&hash).is_some() {
+                refs.insert(name, hash);
+            }
         }
     }
     Ok(())
