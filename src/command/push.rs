@@ -56,8 +56,10 @@ use crate::{
 
 const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
 
-/// Connection/idle timeout for push network operations (discovery, send-pack, receive-pack).
-const PUSH_TIMEOUT: Duration = Duration::from_secs(60);
+/// Total timeout for push reference discovery and initial connection setup.
+const PUSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Idle timeout for push send-pack / receive-pack operations.
+const PUSH_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Push local refs and objects to a remote repository.
 ///
@@ -756,37 +758,42 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
                 detail: e.to_string(),
             }
         })?;
+    let remote_client = remote_client
+        .with_network_timeouts(PUSH_CONNECT_TIMEOUT, PUSH_IDLE_TIMEOUT)
+        .map_err(|e| PushError::Network(format!("failed to configure remote transport: {e}")))?;
 
-    let discovery =
-        tokio::time::timeout(PUSH_TIMEOUT, remote_client.discovery_reference(ReceivePack))
-            .await
-            .map_err(|_| PushError::Timeout {
-                phase: "discovery".to_string(),
-                seconds: PUSH_TIMEOUT.as_secs(),
-            })?
-            .map_err(|e| match e {
-                GitError::UnAuthorized(_) => PushError::AuthenticationFailed {
-                    url: repo_url.clone(),
-                },
-                GitError::NetworkError(detail) => {
-                    let lower = detail.to_lowercase();
-                    if lower.contains("timeout") || lower.contains("timed out") {
-                        PushError::Timeout {
-                            phase: "discovery".to_string(),
-                            seconds: PUSH_TIMEOUT.as_secs(),
-                        }
-                    } else {
-                        PushError::DiscoveryFailed {
-                            url: repo_url.clone(),
-                            detail,
-                        }
-                    }
+    let discovery = tokio::time::timeout(
+        PUSH_CONNECT_TIMEOUT,
+        remote_client.discovery_reference(ReceivePack),
+    )
+    .await
+    .map_err(|_| PushError::Timeout {
+        phase: "discovery".to_string(),
+        seconds: PUSH_CONNECT_TIMEOUT.as_secs(),
+    })?
+    .map_err(|e| match e {
+        GitError::UnAuthorized(_) => PushError::AuthenticationFailed {
+            url: repo_url.clone(),
+        },
+        GitError::NetworkError(detail) => {
+            let lower = detail.to_lowercase();
+            if lower.contains("timeout") || lower.contains("timed out") {
+                PushError::Timeout {
+                    phase: "discovery".to_string(),
+                    seconds: PUSH_CONNECT_TIMEOUT.as_secs(),
                 }
-                other => PushError::DiscoveryFailed {
+            } else {
+                PushError::DiscoveryFailed {
                     url: repo_url.clone(),
-                    detail: other.to_string(),
-                },
-            })?;
+                    detail,
+                }
+            }
+        }
+        other => PushError::DiscoveryFailed {
+            url: repo_url.clone(),
+            detail: other.to_string(),
+        },
+    })?;
 
     let local_kind = get_hash_kind();
     if discovery.hash_kind != local_kind {
@@ -1100,9 +1107,9 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     let bytes_pushed = pack_data.len() as u64;
     data.extend_from_slice(&pack_data);
 
-    // Send pack via the appropriate transport.
-    // Idle timeouts (60s) are enforced at the transport layer: SSH wraps each
-    // read/write/wait call, HTTPS uses reqwest connect_timeout + read_timeout.
+    // Send pack via the appropriate transport. SSH wraps each read/write/wait
+    // operation with the push idle timeout, and HTTPS uses reqwest's
+    // connect_timeout + read_timeout.
     match &remote_client {
         RemoteClient::Ssh(ssh_client) => {
             let response_bytes = ssh_client
@@ -2119,7 +2126,7 @@ fn classify_transport_error(phase: &str, e: std::io::Error) -> PushError {
     if lower.contains("timed out") || lower.contains("timeout") {
         PushError::Timeout {
             phase: phase.to_string(),
-            seconds: PUSH_TIMEOUT.as_secs(),
+            seconds: PUSH_IDLE_TIMEOUT.as_secs(),
         }
     } else {
         PushError::Network(format!("{phase} failed: {detail}"))
@@ -3476,10 +3483,23 @@ old1 new1 refs/heads/main\n"
     fn test_push_error_to_cli_error_timeout() {
         let err: CliError = PushError::Timeout {
             phase: "discovery".to_string(),
-            seconds: PUSH_TIMEOUT.as_secs(),
+            seconds: PUSH_CONNECT_TIMEOUT.as_secs(),
         }
         .into();
         assert_eq!(err.stable_code(), StableErrorCode::NetworkUnavailable);
+    }
+
+    #[test]
+    fn transport_timeout_uses_push_idle_timeout() {
+        let err = classify_transport_error(
+            "send-pack",
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out"),
+        );
+        assert!(matches!(
+            err,
+            PushError::Timeout { phase, seconds }
+                if phase == "send-pack" && seconds == PUSH_IDLE_TIMEOUT.as_secs()
+        ));
     }
 
     #[test]

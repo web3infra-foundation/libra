@@ -130,6 +130,20 @@ impl RemoteClient {
         }
     }
 
+    pub(crate) fn with_network_timeouts(
+        self,
+        connect_timeout: Duration,
+        idle_timeout: Duration,
+    ) -> Result<Self, String> {
+        match self {
+            Self::Http(client) => Ok(Self::Http(
+                client.with_timeouts(connect_timeout, idle_timeout)?,
+            )),
+            Self::Ssh(client) => Ok(Self::Ssh(client.with_idle_timeout(idle_timeout))),
+            other => Ok(other),
+        }
+    }
+
     pub(crate) async fn discovery_reference(
         &self,
         service: ServiceType,
