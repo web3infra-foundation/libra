@@ -22,6 +22,7 @@ It also supports `--show-toplevel` to print the absolute repository root for a w
 
 | Flag | Description |
 |------|-------------|
+| `--verify` | Assert that `<SPEC>` resolves to exactly one object; print it, or exit 128 on failure (silent exit 1 under the global `--quiet` / `-q`). |
 | `--short` | Print a non-ambiguous abbreviated object ID. |
 | `--abbrev-ref` | Print the symbolic branch name instead of a commit hash. |
 | `--show-toplevel` | Print the absolute path to the top-level working tree. |

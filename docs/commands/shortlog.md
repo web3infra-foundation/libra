@@ -207,10 +207,10 @@ The `--since`/`--until` filters use the committer timestamp (not the author time
 | Revision | `<revision>` (positional) | `<revision range>...` | N/A |
 | Group by | Not supported | `--group=author\|committer\|trailer:<key>` | N/A |
 | Format | Not supported | `--format=<format>` | N/A |
-| Committer grouping | Not supported | `--committer` (deprecated, use `--group=committer`) | N/A |
+| Committer grouping | `-c` / `--committer` | `--committer` (deprecated, use `--group=committer`) | N/A |
 | Piped input | Not supported | Reads from stdin when piped | N/A |
-| No merges | Not supported | `--no-merges` | N/A |
-| Author filter | Not supported | `--author=<pattern>` | N/A |
+| No merges | `--no-merges` | `--no-merges` | N/A |
+| Author filter | `--author=<pattern>` | `--author=<pattern>` | N/A |
 | Grep filter | Not supported | `--grep=<pattern>` | N/A |
 | Width limit | Not supported | `-w[<width>[,<indent1>[,<indent2>]]]` | N/A |
 | JSON output | `--json` | Not supported | N/A |

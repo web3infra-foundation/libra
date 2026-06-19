@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`-n` / `-f` / `-d` / `-x` / `-X` / `--exclude` 已支持；`-i` 与 pathspec filtering 尚未公开。
+- 兼容级别：`partial`。`-n` / `-f` / `-d` / `-x` / `-X` / `--exclude` / `<pathspec>...` 已支持；`-i` 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -46,8 +46,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/clean.md`。
-- Synopsis：`libra clean (-n | -f) [-d] [-x | -X] [--exclude <pattern>]... [--json] [--quiet]`。
-- 公开参数/子命令包括：`-n, --dry-run`、`-f, --force`、`-d, --dir`、`-x`、`-X`、`--exclude <pattern>`。
+- Synopsis：`libra clean (-n | -f) [-d] [-x | -X] [--exclude <pattern>]... [<pathspec>...] [--json] [--quiet]`。
+- 公开参数/子命令包括：`-n, --dry-run`、`-f, --force`、`-d, --dir`、`-x`、`-X`、`--exclude <pattern>`、`<pathspec>...`。
 
 
 ## 还未实现的功能
@@ -56,7 +56,7 @@ flowchart TD
 |---|---|---|
 | 功能缺口 | 原始 clean 设计曾有意拒绝目录相关行为；当前以兼容矩阵为准。 | 后续实现时需要同步源码、测试和兼容矩阵。 |
 | 兼容差异项 | 交互模式 | 原始对照：不支持；相关参数/替代：-i；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 路径规格过滤 | 原始对照：不支持；相关参数/替代：<pathspec>...；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | 路径规格过滤 | 原始对照：不支持；相关参数/替代：<pathspec>...；当前说明：已支持（文件/目录前缀匹配，空 pathspec 清理全部未跟踪文件）。 |
 
 ## 维护要求
 

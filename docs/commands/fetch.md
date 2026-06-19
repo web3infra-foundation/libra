@@ -31,6 +31,9 @@ are loaded automatically when configured via `vault.ssh.<remote>.privkey`.
 | `<refspec>` | Branch name to fetch. Requires `<repository>`. When omitted, all branches from the remote are fetched. | `libra fetch origin main` |
 | `-a`, `--all` | Fetch from every configured remote. Conflicts with `<repository>`. | `libra fetch --all` |
 | `--depth <N>` | Limit fetching to the specified number of commits from the tip of each remote branch (shallow fetch). Public stable flag. | `libra fetch origin --depth 1` |
+| `--tags` | Fetch every tag from the remote into the local `refs/tags/*` (overrides the default auto-follow and `remote.<name>.tagOpt`). | `libra fetch origin --tags` |
+| `--no-tags` | Fetch no tags at all, not even tags reachable from fetched commits (overrides the default auto-follow). | `libra fetch origin --no-tags` |
+| `-f`, `--force` | Allow non-fast-forward updates and overwrite (clobber) a local tag that points elsewhere. Forced updates are marked `+` in `--porcelain` / `(forced update)` in human output. | `libra fetch origin --tags --force` |
 | `--dry-run` | Preview the remote-tracking ref updates the fetch would produce without downloading any objects or writing refs, reflog, or `FETCH_HEAD`. | `libra fetch origin --dry-run` |
 | `--append` | Append fetched ref records to `.libra/FETCH_HEAD` instead of overwriting it. (`-a` is reserved for `--all`.) | `libra fetch origin --append` |
 | `-v`, `--verbose` | Announce the remote being contacted on stderr; the stdout result contract is unchanged. | `libra fetch origin -v` |
@@ -48,6 +51,7 @@ libra fetch origin
 libra fetch origin main
 libra fetch --all
 libra fetch origin --depth 1               # shallow fetch
+libra fetch origin --tags                  # also fetch all tags into refs/tags/*
 libra fetch --all --depth 3                # shallow across all remotes
 libra fetch origin --dry-run               # preview ref updates, write nothing
 libra fetch origin --porcelain             # machine-readable per-ref lines
@@ -224,7 +228,9 @@ by default for maximum script friendliness.
 | Porcelain output | `libra fetch --porcelain` | `git fetch --porcelain` | No |
 | Append FETCH_HEAD | `libra fetch --append` | `git fetch --append` | No |
 | Verbose diagnostics | `libra fetch -v` | `git fetch -v` | No |
-| Force / tag fetch | Not supported (deferred — needs tag subsystem) | `git fetch --force` / `--tags` | Automatic |
+| Tag auto-follow (default) | Tags reachable from fetched commits are followed automatically (via `include-tag`) | Same (default) | Automatic |
+| Tag fetch control | `libra fetch --tags` / `--no-tags`; `remote.<name>.tagOpt` | `git fetch --tags` / `--no-tags`; `remote.<name>.tagOpt` | Automatic |
+| Force fetch | `libra fetch -f` / `--force` (non-FF + tag clobber) | `git fetch --force` | Automatic |
 | Atomic / refmap | Not supported (deferred) | `git fetch --atomic` / `--refmap` | No |
 | Structured output | `--json` / `--machine` | No | No |
 | Progress events | NDJSON on stderr | Text on stderr | Text on stderr |

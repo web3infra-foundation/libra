@@ -53,7 +53,7 @@ libra --json for-each-ref --remotes
 
 ## Compatibility
 
-Compatibility tier is `partial`. Deferred Git features include the full atom language, full sort keys, `--contains` / `--no-contains`, `--merged` / `--no-merged`, and shell/perl/python/tcl quoting modes. Git flat-file ref storage parity is intentionally not applicable to Libra.
+Compatibility tier is `partial`. `--contains` / `--no-contains` are supported (filter refs whose tip has, or does not have, the given commit as an ancestor). Deferred Git features include the full atom language, full sort keys, `--merged` / `--no-merged`, and shell/perl/python/tcl quoting modes. Git flat-file ref storage parity is intentionally not applicable to Libra.
 
 ## Structured Output
 

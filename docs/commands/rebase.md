@@ -8,6 +8,7 @@ Reapply commits on top of another base tip.
 
 ```
 libra rebase <upstream>
+libra rebase --onto <newbase> <upstream> [<branch>]
 libra rebase --continue
 libra rebase --abort
 libra rebase --skip
@@ -87,6 +88,12 @@ libra rebase main
 
 # Rebase onto a specific commit
 libra rebase abc1234
+
+# Transplant the dev..HEAD range onto main (keep the range, move the base)
+libra rebase --onto main dev
+
+# Same, naming the branch to rebase as the third positional
+libra rebase --onto main dev topic
 
 # Continue after resolving conflicts
 libra rebase --continue
@@ -259,11 +266,35 @@ Git's interactive rebase opens an editor with a list of commits that can be reor
 
 Libra targets AI-agent and automation workflows where interactive editor sessions are not feasible. Instead of interactive rebase, Libra encourages breaking complex history rewriting into discrete operations: use `rebase` for linear replay, and (in the future) dedicated commands for squashing or reordering.
 
-### Why no `--onto`?
+### Using `--onto`
 
-Git's `--onto` flag allows rebasing a subset of commits onto an arbitrary base, independent of the upstream reference. This is a powerful but rarely used feature that creates confusion about the three-argument form (`git rebase --onto <newbase> <upstream> [<branch>]`).
+`libra rebase --onto <newbase> <upstream> [<branch>]` replays the commit range
+`<upstream>..HEAD` onto `<newbase>` instead of onto `<upstream>`. The **range of
+commits replayed is unchanged** (still `<upstream>..HEAD`); only the landing
+point moves. This is the classic "transplant a topic branch onto a different
+base" operation:
 
-Libra simplifies by always rebasing all commits from the common ancestor to HEAD onto the specified upstream. This covers the vast majority of rebase use cases. The `--onto` flag may be added in the future if there is demand for more precise commit range selection.
+```bash
+# Move the commits unique to `topic` (relative to `dev`) onto `main`.
+libra switch topic
+libra rebase --onto main dev
+```
+
+The optional third positional `<branch>` checks that branch out first, so
+`libra rebase --onto main dev topic` is equivalent to
+`libra switch topic && libra rebase --onto main dev`.
+
+Notes and current limitations:
+
+- When `--onto` is given, the fast-forward / already-up-to-date short-circuits
+  are skipped — an explicit landing point always replays (even when `<upstream>`
+  is an ancestor of `HEAD`). An **empty** `<upstream>..HEAD` range still does
+  nothing and leaves the branch where it is.
+- The replay range is computed first-parent only (merge commits in the range are
+  not preserved), matching plain `libra rebase`. Use `--onto` on linear or
+  simple-fork history.
+- `<upstream>` must be given explicitly; Libra does not infer it from an upstream
+  tracking branch.
 
 ### Why persist state in SQLite?
 
@@ -292,13 +323,13 @@ Libra provides a middle ground: a linear rebase with conflict-stop semantics (fa
 | Abort | `--abort` | `--abort` | `jj op undo` |
 | Skip | `--skip` | `--skip` | N/A |
 | Interactive | Not supported | `-i` / `--interactive` | N/A |
-| Onto | Not supported | `--onto <newbase>` | `-d` with `-s` / `--source` |
+| Onto | `--onto <newbase>` | `--onto <newbase>` | `-d` with `-s` / `--source` |
 | Exec | Not supported | `--exec <cmd>` | N/A |
 | Autosquash | Not supported | `--autosquash` | N/A |
 | Rebase merges | Not supported | `--rebase-merges` | Default behavior |
 | Keep empty | Not supported | `--keep-empty` / `--no-keep-empty` | Default keeps empty |
 | Force rebase | Not supported | `--force-rebase` | N/A |
-| Branch | Not supported | `<branch>` (third positional) | `-s` / `--source` |
+| Branch | `<branch>` (third positional) | `<branch>` (third positional) | `-s` / `--source` |
 | Revision set | Not supported | N/A | `-r` / `--revisions` |
 | State persistence | SQLite database | `.git/rebase-merge/` directory | Not applicable |
 

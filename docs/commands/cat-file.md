@@ -208,7 +208,7 @@ instead -- if the object does not exist, the JSON response will contain an error
 | Print object size | `-s` | `-s` | N/A |
 | Pretty-print content | `-p` | `-p` | N/A (`jj file show` for blobs) |
 | Check existence | `-e` | `-e` | N/A |
-| Batch mode | Not implemented | `--batch`, `--batch-check` | N/A |
+| Batch mode | `--batch[=<format>]`, `--batch-check[=<format>]` (default output plus `%(objectname)`/`%(objecttype)`/`%(objectsize)` atoms; `--batch-command` / `--batch-all-objects` not exposed) | `--batch`, `--batch-check` | N/A |
 | AI object inspection | `--ai`, `--ai-type` | N/A | N/A |
 | AI object listing | `--ai-list`, `--ai-list-types` | N/A | N/A |
 | JSON output | `--json` | No | No |

@@ -266,7 +266,58 @@ async fn test_cat_file_batch_reports_header_and_contents() {
     );
 }
 
-/// Scenario: `cat-file -t --json HEAD` must emit
+/// Scenario: `cat-file --batch-check="%(objecttype) %(objectsize)"` must
+/// expand the format atoms instead of the default `<sha> <type> <size>` line.
+#[tokio::test]
+async fn test_cat_file_batch_check_custom_format_expands_atoms() {
+    use std::process::Stdio;
+
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    configure_user_identity(temp_path);
+    create_commit(temp_path, "hello.txt", "hello world\n", "first commit");
+
+    let head = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("Failed to resolve HEAD");
+    let head_hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "--batch-check=%(objecttype) %(objectsize)"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn cat-file --batch-check with format");
+
+    {
+        let mut stdin = child.stdin.take().expect("Failed to open stdin");
+        stdin
+            .write_all(format!("{head_hash}\n").as_bytes())
+            .expect("Failed to write batch-check input");
+    }
+
+    let output = child
+        .wait_with_output()
+        .expect("Failed to wait for cat-file --batch-check with format");
+
+    assert!(
+        output.status.success(),
+        "cat-file --batch-check with format failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.starts_with("commit "),
+        "expected format-expanded line starting with 'commit', got: {stdout}"
+    );
+}
+
 /// `command="cat-file"`, `data.mode="type"`, `data.object="HEAD"` and
 /// `data.object_type="commit"`. Schema pin for the type-mode envelope.
 #[tokio::test]

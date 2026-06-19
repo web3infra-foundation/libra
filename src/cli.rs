@@ -972,6 +972,7 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
             )),
             Err(_) => Ok(CommandPreflight::sha1_without_repo()),
         },
+        Commands::Archive(args) if args.list => Ok(CommandPreflight::none()),
         #[cfg(unix)]
         Commands::Worktree(command::worktree::WorktreeArgs {
             command: command::worktree::WorktreeSubcommand::Umount { .. },

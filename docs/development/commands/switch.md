@@ -2,13 +2,13 @@
 
 ## 命令实现目标
 
-`libra switch` 的目标是在分支之间切换，或创建/重置分支后切换。实现需要支持 track、force-create、orphan、锁定分支保护、结构化输出和错误码，并把 Git `switch` 的强制丢弃、guess 和 merge/submodule 相关兼容行为留在差异记录中。
+`libra switch` 的目标是在分支之间切换，或创建/重置分支后切换。实现需要支持 track、guess、force-create、orphan、锁定分支保护、结构化输出和错误码，并把 Git `switch` 的强制丢弃和 merge/submodule 相关兼容行为留在差异记录中。
 
 ## 对比 Git 与兼容性
 
 - 兼容级别：`partial`。
 
-- 当前矩阵承诺常用 Git 行为已支持；但 Git `switch` 的 `-f/--discard-changes`、`--guess` / `--no-guess`、`--merge` / conflict style / submodule 等参数尚未公开。新增语义必须同步矩阵、用户文档和测试。
+- 当前矩阵承诺常用 Git 行为已支持；`--guess` / `--no-guess`（DWIM 远端跟踪猜测，默认开启）已公开；但 Git `switch` 的 `-f/--discard-changes`、`--merge` / conflict style / submodule 等参数尚未公开。新增语义必须同步矩阵、用户文档和测试。
 
 
 ## 设计方案
@@ -45,10 +45,11 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/switch.md`。
-- Synopsis：`libra switch [-c|--create <CREATE>] [-C|--force-create <FORCE_CREATE>] [--orphan <ORPHAN>] [-d|--detach] [-t|--track] [-f|--force] [<BRANCH>]`。
-- 公开参数/子命令包括：`<branch>`、`-c, --create <CREATE>`、`-C, --force-create <FORCE_CREATE>`、`--orphan <ORPHAN>`、`-d, --detach`、`-t, --track`、`-f, --force`（别名 `--discard-changes`）。
+- Synopsis：`libra switch [-c|--create <CREATE>] [-C|--force-create <FORCE_CREATE>] [--orphan <ORPHAN>] [-d|--detach] [-t|--track] [-f|--force] [--guess] [--no-guess] [<BRANCH>]`。
+- 公开参数/子命令包括：`<branch>`、`-c, --create <CREATE>`、`-C, --force-create <FORCE_CREATE>`、`--orphan <ORPHAN>`、`-d, --detach`、`-t, --track`、`-f, --force`（别名 `--discard-changes`）、`--guess`、`--no-guess`。
 - `-f, --force`：切换到不同提交时丢弃本地（已跟踪）改动而非因 dirty 工作区报错；仍通过 `ensure_no_untracked_overwrite` 守卫会被覆盖的未跟踪文件。实现为 `ensure_switch_clean_or_force(force, target, output)`，作用于会改变工作树的 5 个 `_for_commit` 预检点（track/create 带 start-point/force-create 带 start-point/detach/普通分支切换）。**部分实现差异**：不改变树的路径（`-c` 无 start-point、`--orphan`）仍要求干净工作区。
 - `--track` 现已提供 Git 的 `-t` 短别名；Libra 仅支持布尔形式（设置远端上游），不支持 Git 的 `-t (direct|inherit)` 模式参数（有意差异）。
+- `--guess` / `--no-guess`：当 `<branch>` 不是本地分支但恰好唯一匹配某个远端跟踪分支时，自动创建同名本地跟踪分支并切换（Git 的 DWIM 行为，复用 `--track` 的 `switch_to_tracked_remote_branch` 路径，输出 `created=true` 与 `tracking`）。默认开启，按 `--no-guess` > `--guess` > `checkout.guess`（默认 `true`）的优先级解析；`--no-guess` 强制要求本地分支或显式 `--track <remote>/<branch>`。多个远端同名时返回歧义错误（`ConflictOperationBlocked`，退出码 128），`checkout.defaultRemote` 可消歧。`remote/branch` 形式仍按 Git `switch` 语义报 `GotRemoteBranch` 并提示使用 `--track`，不受 guess 影响。
 
 
 ## 还未实现的功能
@@ -56,7 +57,6 @@ flowchart TD
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | Git 兼容参数 | `-f` / `--discard-changes`。 | 当前未公开；集成场景保留负向检查，后续实现时需明确 dirty worktree 覆盖、JSON 输出与错误码。 |
-| Git 兼容参数 | `--guess` / `--no-guess`。 | 当前仅通过 `--track` 显式跟踪远端分支；默认/显式 guess 行为未公开。 |
 | Git 兼容参数 | `--merge`、`--conflict=<style>`、`--recurse-submodules`、`--ignore-other-worktrees` 等切换策略参数。 | 当前未公开；后续需要先补工作树冲突模型和多工作树隔离契约。 |
 
 ## 维护要求

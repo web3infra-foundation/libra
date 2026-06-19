@@ -223,6 +223,9 @@ async fn test_changes_to_be_staged() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -358,6 +361,9 @@ async fn test_status_porcelain() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -371,6 +377,9 @@ async fn test_status_porcelain() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     file2.write_all(b"modified content").unwrap();
@@ -508,6 +517,9 @@ async fn test_status_short_format() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -521,6 +533,9 @@ async fn test_status_short_format() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -615,6 +630,9 @@ async fn test_status_porcelain_v2_basic() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     file1.write_all(b" more").unwrap(); // unstaged modification
@@ -692,6 +710,9 @@ async fn test_status_porcelain_v2_branch_metadata_includes_upstream_counts() {
             ignore_errors: false,
             refresh: false,
             force: false,
+
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -762,6 +783,9 @@ async fn test_status_porcelain_v2_untracked_files_no() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -819,6 +843,9 @@ async fn test_status_porcelain_v2_untracked_files_all() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -868,6 +895,9 @@ async fn test_status_untracked_files_no() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -925,6 +955,9 @@ async fn test_status_untracked_files_all() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1008,6 +1041,9 @@ async fn test_status_mixed_changes() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1071,6 +1107,9 @@ async fn test_status_deleted_files() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1139,6 +1178,9 @@ async fn test_status_with_subdirectories() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1224,6 +1266,9 @@ async fn test_status_verbose_output() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1277,6 +1322,9 @@ async fn test_status_short_format_with_branch() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1340,6 +1388,9 @@ async fn test_status_porcelain_format_with_branch() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1403,6 +1454,9 @@ async fn test_status_show_stash_with_existing_stash() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1425,6 +1479,8 @@ async fn test_status_show_stash_with_existing_stash() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1542,6 +1598,9 @@ async fn test_status_show_stash_without_stash() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1596,6 +1655,9 @@ async fn test_status_branch_detached_head() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1617,6 +1679,9 @@ async fn test_status_branch_detached_head() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1631,6 +1696,8 @@ async fn test_status_branch_detached_head() {
         detach: true,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -1683,6 +1750,9 @@ async fn test_status_porcelain_v2_file_modes_and_hashes() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(create_commit_args("Initial commit")).await;
@@ -1698,6 +1768,9 @@ async fn test_status_porcelain_v2_file_modes_and_hashes() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1712,6 +1785,9 @@ async fn test_status_porcelain_v2_file_modes_and_hashes() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1834,6 +1910,9 @@ async fn test_status_porcelain_v2_executable_file() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1897,6 +1976,9 @@ async fn test_status_porcelain_v2_deleted_file() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(create_commit_args("Initial commit")).await;
@@ -1982,6 +2064,8 @@ async fn test_status_after_add() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 

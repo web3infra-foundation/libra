@@ -85,7 +85,7 @@ pub async fn convert_from_git_repository(
         ..Default::default()
     };
 
-    fetch::fetch_repository_safe(remote.clone(), None, false, None, &child_output)
+    fetch::fetch_repository_safe(remote.clone(), None, false, None, None, &child_output)
         .await
         .map_err(|error| InitError::ConversionFailed {
             repo: git_dir.clone(),

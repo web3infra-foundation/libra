@@ -70,6 +70,7 @@ gha-creds-*.json
 .claude
 .antigravitycli
 .omo
+.opencode
 
 # Integration
 target*

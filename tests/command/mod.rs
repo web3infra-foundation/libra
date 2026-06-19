@@ -282,6 +282,7 @@ mod cloud_test;
 mod code_control_help_test;
 mod code_test;
 mod code_thread_id_test;
+mod commit_editor_test;
 mod commit_error_test;
 mod commit_json_test;
 mod commit_test;

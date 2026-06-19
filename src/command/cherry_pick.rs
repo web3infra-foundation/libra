@@ -1131,29 +1131,19 @@ async fn build_cherry_pick_message(
     Ok(message)
 }
 
-/// Launch the resolved editor on a scratch message file. A missing or failing
-/// editor leaves the message intact.
+/// Launch the resolved editor on a scratch message file via the shared editor
+/// helper. A missing or failing editor leaves the message intact
+/// (`abort_on_failure = false`). Cherry-pick keeps its own editor precedence
+/// (`core.editor` → `$VISUAL` → `$EDITOR`, no `$GIT_EDITOR`) via `resolve_editor`
+/// above and passes the resolved command to the shared launcher.
 async fn maybe_edit_cherry_pick_message(message: &str) -> Result<String, CherryPickSingleError> {
     let Some(editor) = resolve_editor().await else {
         return Ok(message.to_string());
     };
     let path = util::storage_path().join("CHERRY_PICK_MSG");
-    fs::write(&path, message).map_err(|e| {
-        CherryPickSingleError::SaveFailed(format!(
-            "failed to write edit buffer {}: {e}",
-            path.display()
-        ))
-    })?;
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("{editor} \"{}\"", path.display()))
-        .status();
-    match status {
-        Ok(code) if code.success() => fs::read_to_string(&path).map_err(|e| {
-            CherryPickSingleError::LoadObject(format!("failed to read edited message: {e}"))
-        }),
-        _ => Ok(message.to_string()),
-    }
+    crate::command::editor::edit_message(&path, message, &editor, false)
+        .await
+        .map_err(|e| CherryPickSingleError::SaveFailed(e.to_string()))
 }
 
 async fn create_cherry_pick_commit(

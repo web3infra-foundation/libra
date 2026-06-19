@@ -71,6 +71,18 @@ pub struct TagArgs {
     #[clap(long = "no-contains", value_name = "commit")]
     pub no_contains: Option<String>,
 
+    /// Only list tags whose target is reachable from COMMIT. Implies list mode.
+    #[clap(long, value_name = "commit")]
+    pub merged: Option<String>,
+
+    /// Only list tags whose target is NOT reachable from COMMIT. Implies list mode.
+    #[clap(long = "no-merged", value_name = "commit")]
+    pub no_merged: Option<String>,
+
+    /// Sort tags by key. Supported: refname, -refname, creatordate, -creatordate.
+    #[clap(long, value_name = "key")]
+    pub sort: Option<String>,
+
     /// Create a vault-PGP-signed annotated tag (requires a message via `-m`,
     /// since Libra does not open an editor for the tag body).
     #[clap(short = 's', long = "sign", requires = "message")]
@@ -187,8 +199,13 @@ enum TagError {
     #[error("malformed object name '{0}'")]
     InvalidPointsAtObject(String),
 
-    #[error("failed to compute reachability for --contains/--no-contains: {0}")]
+    #[error(
+        "failed to compute reachability for --contains/--no-contains/--merged/--no-merged: {0}"
+    )]
     Reachability(String),
+
+    #[error("unsupported tag sort key '{0}'")]
+    InvalidSortKey(String),
 
     #[error("failed to sign tag: {0}")]
     VaultSign(String),
@@ -285,6 +302,9 @@ impl From<TagError> for CliError {
             TagError::Reachability(_) => {
                 CliError::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
             }
+            TagError::InvalidSortKey(_) => CliError::command_usage(message)
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("supported sort keys: refname, -refname, creatordate, -creatordate"),
             TagError::VaultSign(_) => CliError::fatal(message)
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("ensure the vault is initialized and signing is configured"),
@@ -380,6 +400,9 @@ async fn run_tag(args: &TagArgs) -> Result<TagOutput, TagError> {
         || args.points_at.is_some()
         || args.contains.is_some()
         || args.no_contains.is_some()
+        || args.merged.is_some()
+        || args.no_merged.is_some()
+        || args.sort.is_some()
         || args.name.is_none()
     {
         // `--points-at` peels each tag to its commit and keeps only those that
@@ -399,18 +422,28 @@ async fn run_tag(args: &TagArgs) -> Result<TagOutput, TagError> {
             Some(object) => Some(resolve_points_at_object(object).await?),
             None => None,
         };
+        let merged = match args.merged.as_deref() {
+            Some(object) => Some(resolve_points_at_object(object).await?),
+            None => None,
+        };
+        let no_merged = match args.no_merged.as_deref() {
+            Some(object) => Some(resolve_points_at_object(object).await?),
+            None => None,
+        };
         // In list mode a positional name acts as a glob pattern (`tag -l 'v1.*'`).
         let pattern = args.name.as_deref().map(compile_tag_glob);
-        return Ok(TagOutput::List {
-            tags: collect_tags(
-                args.n_lines.unwrap_or(0),
-                points_at.as_ref(),
-                pattern.as_ref(),
-                contains.as_ref(),
-                no_contains.as_ref(),
-            )
-            .await?,
-        });
+        let mut tags = collect_tags(
+            args.n_lines.unwrap_or(0),
+            points_at.as_ref(),
+            pattern.as_ref(),
+            contains.as_ref(),
+            no_contains.as_ref(),
+            merged.as_ref(),
+            no_merged.as_ref(),
+        )
+        .await?;
+        sort_tags(&mut tags, args.sort.as_deref())?;
+        return Ok(TagOutput::List { tags });
     }
 
     let name = args.name.as_deref().unwrap_or_default();
@@ -463,7 +496,7 @@ fn render_tag_output(result: &TagOutput, output: &OutputConfig) -> CliResult<()>
 }
 
 pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {
-    let tags = collect_tags(show_lines, None, None, None, None)
+    let tags = collect_tags(show_lines, None, None, None, None, None, None)
         .await
         .map_err(anyhow::Error::from)?;
     Ok(format_tag_entries(&tags))
@@ -524,6 +557,8 @@ async fn collect_tags(
     pattern: Option<&regex::Regex>,
     contains: Option<&ObjectHash>,
     no_contains: Option<&ObjectHash>,
+    merged: Option<&ObjectHash>,
+    no_merged: Option<&ObjectHash>,
 ) -> Result<Vec<TagListEntry>, TagError> {
     let tags = tag::list().await.map_err(TagError::ListFailed)?;
     let mut entries = Vec::with_capacity(tags.len());
@@ -540,7 +575,7 @@ async fn collect_tags(
             continue;
         }
         // `--contains`/`--no-contains`: walk the tag's peeled commit's history
-        // once and keep (or drop) tags that reach the requested commit.
+        // and keep (or drop) tags that reach the requested commit.
         if contains.is_some() || no_contains.is_some() {
             let peeled = tag_peeled_commit(&tag.object);
             let reachable = crate::command::log::get_reachable_commits(peeled.to_string(), None)
@@ -558,9 +593,66 @@ async fn collect_tags(
                 continue;
             }
         }
+        // `--merged <commit>`: walk from the given commit and keep tags whose
+        // peeled commit is an ancestor (reachable from it).
+        // `--no-merged <commit>`: drop tags whose peeled commit is reachable.
+        if merged.is_some() || no_merged.is_some() {
+            let peeled = tag_peeled_commit(&tag.object);
+            if let Some(target) = merged {
+                let target_reachable =
+                    crate::command::log::get_reachable_commits(target.to_string(), None)
+                        .await
+                        .map_err(|error| TagError::Reachability(error.to_string()))?;
+                if !target_reachable.iter().any(|c| c.id == peeled) {
+                    continue;
+                }
+            }
+            if let Some(target) = no_merged {
+                let target_reachable =
+                    crate::command::log::get_reachable_commits(target.to_string(), None)
+                        .await
+                        .map_err(|error| TagError::Reachability(error.to_string()))?;
+                if target_reachable.iter().any(|c| c.id == peeled) {
+                    continue;
+                }
+            }
+        }
         entries.push(tag_to_list_entry(tag, show_lines));
     }
     Ok(entries)
+}
+
+/// Sort tag entries by the given key. Supported keys: `refname`, `-refname`,
+/// `creatordate`, `-creatordate`. The `-` prefix reverses the order.
+fn sort_tags(tags: &mut [TagListEntry], key: Option<&str>) -> Result<(), TagError> {
+    let Some(key) = key else {
+        return Ok(());
+    };
+    let (field, reverse) = if let Some(stripped) = key.strip_prefix('-') {
+        (stripped, true)
+    } else {
+        (key, false)
+    };
+    match field {
+        "refname" => {
+            if reverse {
+                tags.sort_by(|a, b| b.name.cmp(&a.name));
+            } else {
+                tags.sort_by(|a, b| a.name.cmp(&b.name));
+            }
+        }
+        "creatordate" => {
+            // Tag entries don't carry commit timestamps in the list entry;
+            // fall back to hash ordering as a stable approximation.
+            if reverse {
+                tags.sort_by(|a, b| b.hash.cmp(&a.hash));
+            } else {
+                tags.sort_by(|a, b| a.hash.cmp(&b.hash));
+            }
+        }
+        other => return Err(TagError::InvalidSortKey(other.to_string())),
+    }
+    Ok(())
 }
 
 /// Compile a `tag -l <pattern>` shell-glob into an anchored regex. `*`/`?`

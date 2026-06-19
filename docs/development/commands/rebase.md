@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra rebase` 的目标是把提交重放到新的 base 上，并支持 continue/abort/skip 等冲突恢复流程。实现需要保持作者/提交者语义、文件模式、错误分类和 pull --rebase 交互，同时把 interactive、onto、exec、autosquash、rebase-merges 等能力列为未完成。
+`libra rebase` 的目标是把提交重放到新的 base 上，并支持 continue/abort/skip 等冲突恢复流程。实现需要保持作者/提交者语义、文件模式、错误分类和 pull --rebase 交互。已支持 `--onto <newbase> [<upstream>] [<branch>]`（重放 `<upstream>..HEAD` 区间到 `<newbase>`，第三 positional 先切换分支）；interactive、exec、autosquash、rebase-merges 等能力仍列为未完成。
 
 ## 对比 Git 与兼容性
 
@@ -41,6 +41,7 @@ flowchart TD
 - 2026-05-15 `802c4b4f`（`feat(rebase): route human start through runner`）：功能演进：route human start through runner；该节点扩展了当前命令可用的参数或行为。
 - 2026-06-07 `f5824987`（`fix(rebase): preserve ambiguous merge-base errors`）：实现修正：preserve ambiguous merge-base errors；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 2026-05-21 `af91d0c6`（`test(rebase): pin From<RebaseError> for CliError stable_code mapping (v0.17.709)`）：测试契约：pin From<RebaseError> for CliError stable_code mapping (v0.17.709)；相关行为已有回归守卫，后续变更需要继续满足。
+- 2026-06-19（PR-14）：新增 `--onto <newbase> [<upstream>] [<branch>]`。抽出 `newbase_id`（onto 缺省退化为 upstream），`run_rebase_start(upstream, onto)` 把 replay 落点（detach 目标、`state.onto`/`current_head`、start reflog、worktree guard 用 newbase 树）与 replay 区间（仍由 `find_merge_base(HEAD, upstream)` 决定）解耦；`--onto` 给定时跳过 fast-forward / already-up-to-date 短路（显式落点恒重放，空区间不移动分支）。第三 positional `<branch>` 经 `switch::execute_safe` 先切换。新增 `RebaseError::OntoResolve`（映射既有 `CliInvalidTarget`/128）。JSON `onto` 填 newbase id、`upstream` 填 upstream 串；人类 "Rebasing from X onto upstream" 文案沿用既有（区间来源），不破坏既有断言。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
 ## 当前状态
@@ -57,7 +58,6 @@ flowchart TD
 |---|---|---|
 | 兼容矩阵说明 | `--autosquash` / `--reapply-cherry-picks` not 支持 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 | 兼容差异项 | Interactive | 原始对照：不支持；相关参数/替代：-i / --interactive；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | Onto | 原始对照：不支持；相关参数/替代：--onto <newbase>；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | Exec | 原始对照：不支持；相关参数/替代：--exec <cmd>；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | Autosquash | 原始对照：不支持；相关参数/替代：--autosquash；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | Rebase merges | 原始对照：不支持；相关参数/替代：--rebase-merges；当前说明：默认行为。 后续实现时需要补对应回归测试并同步兼容矩阵。 |

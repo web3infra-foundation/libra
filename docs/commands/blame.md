@@ -143,7 +143,7 @@ The commit argument is positional (second argument after the file path) rather t
 | Reverse blame | Not supported | `--reverse` | N/A |
 | Show email | Not supported | `-e` / `--show-email` | N/A |
 | Show timestamp | Included by default | `-t` (raw timestamp) | N/A |
-| Porcelain format | Not supported | `--porcelain` / `--line-porcelain` | N/A |
+| Porcelain format | `--porcelain` / `--line-porcelain` (no original line numbers, `boundary`, or `previous` metadata) | `--porcelain` / `--line-porcelain` | N/A |
 | Incremental output | Not supported | `--incremental` | N/A |
 | Score threshold | Not supported | `-M` / `-C` (move/copy detection) | N/A |
 | Ignore revisions | Not supported | `--ignore-rev` / `--ignore-revs-file` | N/A |

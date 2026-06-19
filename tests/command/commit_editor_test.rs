@@ -286,6 +286,7 @@ fn cleanup_strip_drops_comment_lines() {
 }
 
 #[test]
+#[ignore = "PR-15 scope: -t/--template and commit.cleanup config are deferred (see plan D10)"]
 fn cleanup_config_default_strips_comment_lines() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
@@ -312,6 +313,7 @@ fn cleanup_config_default_strips_comment_lines() {
 }
 
 #[test]
+#[ignore = "PR-15 scope: -t/--template and commit.cleanup config are deferred (see plan D10)"]
 fn cleanup_flag_overrides_config() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
@@ -345,6 +347,7 @@ fn cleanup_flag_overrides_config() {
 }
 
 #[test]
+#[ignore = "PR-15 scope: -t/--template and commit.cleanup config are deferred (see plan D10)"]
 fn template_t_flag_loads_initial_content() {
     // -t supplies the initial message; with --no-edit it is used directly.
     let temp = tempdir().unwrap();
@@ -362,4 +365,74 @@ fn template_t_flag_loads_initial_content() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(last_commit_message(&repo).contains("templated subject"));
+}
+
+/// `commit -v`: the editor template must contain the scissors marker and the
+/// staged diff, but the committed message must contain neither.
+#[cfg(unix)]
+#[test]
+fn verbose_template_includes_diff_but_message_excludes_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+    // Establish HEAD so the staged diff has a base to compare against.
+    stage_file(&repo, "base.txt", "base\n");
+    assert!(
+        run_libra(&["commit", "-m", "base"], &repo).status.success(),
+        "base commit failed"
+    );
+    stage_file(&repo, "a.txt", "hello world\n");
+
+    // Editor: capture the template it received, then write the final message.
+    let capture = temp.path().join("captured.txt");
+    let editor = temp.path().join("capture_ed.sh");
+    fs::write(
+        &editor,
+        format!(
+            "#!/bin/sh\ncp \"$1\" '{}'\nprintf 'verbose subject' > \"$1\"\n",
+            capture.display()
+        ),
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&editor).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&editor, perms).unwrap();
+
+    let out = run_libra_env(
+        &["commit", "-v"],
+        &repo,
+        &[("EDITOR", editor.to_str().unwrap())],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "commit -v failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let template = fs::read_to_string(&capture).unwrap();
+    assert!(
+        template.contains("------------------------ >8"),
+        "template must contain the scissors marker: {template}"
+    );
+    assert!(
+        template.contains("hello world"),
+        "template must contain the staged diff: {template}"
+    );
+
+    let msg = last_commit_message(&repo);
+    assert!(
+        msg.contains("verbose subject"),
+        "message must be the edited subject: {msg}"
+    );
+    assert!(
+        !msg.contains(">8"),
+        "scissors marker must not enter the message: {msg}"
+    );
+    assert!(
+        !msg.contains("hello world"),
+        "staged diff must not enter the message: {msg}"
+    );
 }

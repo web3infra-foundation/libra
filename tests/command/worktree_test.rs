@@ -861,6 +861,8 @@ async fn test_worktree_add_rejects_existing_non_empty_directory() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     exec_async(vec!["commit", "-m", "initial"])
@@ -952,6 +954,8 @@ async fn test_worktree_add_rolls_back_link_on_restore_failure() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     exec_async(vec!["commit", "-m", "initial"])
@@ -1008,6 +1012,8 @@ async fn test_worktree_add_rolls_back_populated_files_when_state_save_fails() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     exec_async(vec!["commit", "-m", "initial"])
@@ -1206,6 +1212,8 @@ async fn test_worktree_add_does_not_reset_index() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1223,6 +1231,8 @@ async fn test_worktree_add_does_not_reset_index() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1267,6 +1277,8 @@ async fn test_worktree_add_populates_from_head_not_staged_index() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     exec_async(vec!["commit", "-m", "initial"])
@@ -1283,6 +1295,8 @@ async fn test_worktree_add_populates_from_head_not_staged_index() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 

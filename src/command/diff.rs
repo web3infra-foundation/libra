@@ -126,7 +126,7 @@ pub struct DiffOutput {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum DiffError {
+pub(crate) enum DiffError {
     #[error("not a libra repository")]
     NotInRepo,
 
@@ -701,6 +701,25 @@ fn format_unified_diff(result: &DiffOutput) -> String {
         .map(|file| file.raw_diff.trim_end_matches('\n'))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Render the staged (index-vs-HEAD) changes as an uncolorized unified diff.
+/// Used by `commit -v` to embed the diff into the editor template / stderr.
+pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
+    let args = DiffArgs {
+        old: None,
+        new: None,
+        staged: true,
+        pathspec: Vec::new(),
+        algorithm: Some("histogram".to_string()),
+        output: None,
+        name_only: false,
+        name_status: false,
+        numstat: false,
+        stat: false,
+    };
+    let result = run_diff(&args).await?;
+    Ok(format_unified_diff(&result))
 }
 
 fn maybe_colorize_diff(diff_text: &str, should_colorize: bool) -> String {

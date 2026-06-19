@@ -13,6 +13,7 @@ libra switch -C <name> [<start-point>]
 libra switch --orphan <name>
 libra switch -d <commit|tag|branch>
 libra switch --track <remote/branch>
+libra switch [--guess | --no-guess] <branch>
 ```
 
 ## Description
@@ -33,6 +34,8 @@ Fuzzy branch name suggestions are provided via Levenshtein distance when a branc
 | | `--orphan` | `<name>` | Create a new orphan branch with no parents and switch to it |
 | `-d` | `--detach` | | Detach HEAD at the given commit, tag, or branch |
 | | `--track` | | Create a local branch tracking the given remote branch and switch to it |
+| | `--guess` | | Auto-create a tracking branch when `<branch>` uniquely matches one remote (default; DWIM) |
+| | `--no-guess` | | Disable the remote-tracking guess; require a local branch or explicit `--track` |
 
 ### Flag details
 
@@ -71,6 +74,13 @@ libra switch --track origin/main       # Track and switch to remote branch
 libra switch --track feature            # Assumes origin/feature
 ```
 
+**`--guess` / `--no-guess`**: When `<branch>` is not an existing local branch but exactly one remote has a tracking branch of that name, `--guess` (the default) creates a local branch of the same name, sets it to track that remote branch, and switches to it -- the same single-step behavior as `--track <remote>/<branch>`. Guessing is on by default; the effective setting follows `--no-guess` > `--guess` > `checkout.guess` (default `true`), so an explicit flag always overrides the config. When several remotes carry the name, the switch fails with an ambiguity error (exit 128) unless `checkout.defaultRemote` selects one. The explicit `remote/branch` form (e.g. `libra switch origin/main`) is unaffected and still errors with a hint to use `--track`.
+
+```bash
+libra switch feature                   # Auto-track origin/feature if only origin has it
+libra switch --no-guess feature        # Fail instead of guessing a remote branch
+```
+
 ## Common Commands
 
 ```bash
@@ -81,6 +91,8 @@ libra switch -C feature-x              # Reset branch to HEAD and switch
 libra switch --orphan fresh-start      # Create branch with no history
 libra switch --detach v1.0             # Detach HEAD at a tag
 libra switch --track origin/main       # Track and switch to remote branch
+libra switch feature                   # Auto-create a tracking branch from a unique remote (guess)
+libra switch --no-guess feature        # Disable remote-tracking guessing
 libra switch --json main               # Structured JSON output for agents
 ```
 
@@ -206,8 +218,8 @@ Track and switch to a remote branch:
 - `previous_branch` is `null` when HEAD was detached before the switch
 - `branch` is `null` when HEAD is now detached (`--detach`)
 - `already_on` is `true` when the target branch equals the current branch (no-op)
-- `tracking` is present only with `--track`, containing `remote` and `remote_branch`
-- `created` is `true` when `--create` or `--track` created a new local branch
+- `tracking` is present with `--track` or a successful guess, containing `remote` and `remote_branch`
+- `created` is `true` when `--create`, `--track`, or a guess created a new local branch
 
 ## Design Rationale
 
@@ -255,6 +267,7 @@ Every `SwitchError` variant maps to an explicit `StableErrorCode`.
 | Got remote branch | `LBR-CLI-003` | 129 | "use 'libra switch --track ...' to create a local tracking branch." |
 | Remote branch not found | `LBR-CLI-003` | 129 | "Run 'libra fetch {remote}' to update remote-tracking branches." |
 | Invalid remote branch | `LBR-CLI-003` | 129 | "expected format: 'remote/branch'." |
+| Ambiguous guess remote | `LBR-CONFLICT-002` | 128 | "it exists on remotes: ..." + "use 'libra switch --track <remote>/<branch>' to pick one, or set checkout.defaultRemote." |
 | Branch already exists | `LBR-CONFLICT-002` | 128 | "use 'libra switch {name}' if you meant the existing local branch." |
 | Internal branch blocked | `LBR-CLI-003` | 129 | -- |
 | Unstaged changes | `LBR-REPO-003` | 128 | "commit or stash your changes before switching." |

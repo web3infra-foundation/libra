@@ -917,7 +917,7 @@ async fn run_prefetch(
     let mut failures = Vec::new();
     for remote in remotes {
         let name = remote.name.clone();
-        match fetch_repository_safe(remote, None, false, None, output).await {
+        match fetch_repository_safe(remote, None, false, None, None, output).await {
             Ok(()) => fetched += 1,
             Err(e) => failures.push(format!("{name}: {e}")),
         }

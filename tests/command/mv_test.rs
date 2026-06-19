@@ -32,6 +32,8 @@ async fn stage_file(path: &str, content: &str) {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 }

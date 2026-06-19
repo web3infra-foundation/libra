@@ -611,6 +611,9 @@ async fn setup_repo_with_commit_with(
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -801,6 +804,9 @@ async fn test_force_tag() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -830,6 +836,9 @@ async fn test_force_tag() {
         points_at: None,
         contains: None,
         no_contains: None,
+        merged: None,
+        no_merged: None,
+        sort: None,
         sign: false,
         verify: false,
     })
@@ -949,6 +958,9 @@ async fn test_delete_tag() {
         points_at: None,
         contains: None,
         no_contains: None,
+        merged: None,
+        no_merged: None,
+        sort: None,
         sign: false,
         verify: false,
     })
@@ -977,6 +989,9 @@ async fn test_annotation_lines_tag() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1006,6 +1021,9 @@ async fn test_annotation_lines_tag() {
         points_at: None,
         contains: None,
         no_contains: None,
+        merged: None,
+        no_merged: None,
+        sort: None,
         sign: false,
         verify: false,
     })
@@ -1021,6 +1039,9 @@ async fn test_annotation_lines_tag() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1050,6 +1071,9 @@ async fn test_annotation_lines_tag() {
         points_at: None,
         contains: None,
         no_contains: None,
+        merged: None,
+        no_merged: None,
+        sort: None,
         sign: false,
         verify: false,
     })
@@ -1185,5 +1209,101 @@ fn test_tag_points_at_invalid_object_errors() {
     assert!(
         stderr.contains("not a valid object name"),
         "expected 'not a valid object name' in stderr, got: {stderr}",
+    );
+}
+
+#[test]
+fn test_tag_sort_by_refname() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["tag", "v3.0"], repo.path()),
+        "tag v3.0",
+    );
+    assert_cli_success(
+        &run_libra_command(&["tag", "v1.0"], repo.path()),
+        "tag v1.0",
+    );
+    assert_cli_success(
+        &run_libra_command(&["tag", "v2.0"], repo.path()),
+        "tag v2.0",
+    );
+
+    let out = run_libra_command(&["tag", "--sort=refname"], repo.path());
+    assert_cli_success(&out, "tag --sort=refname");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let names: Vec<&str> = stdout.lines().collect();
+    assert_eq!(names, vec!["v1.0", "v2.0", "v3.0"]);
+
+    let out = run_libra_command(&["tag", "--sort=-refname"], repo.path());
+    assert_cli_success(&out, "tag --sort=-refname");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let names: Vec<&str> = stdout.lines().collect();
+    assert_eq!(names, vec!["v3.0", "v2.0", "v1.0"]);
+}
+
+#[test]
+fn test_tag_sort_invalid_key_errors() {
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["tag", "--sort=bogus"], repo.path());
+    assert!(
+        !out.status.success(),
+        "expected failure for invalid sort key"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unsupported tag sort key"),
+        "expected sort key error in stderr, got: {stderr}",
+    );
+}
+
+#[test]
+fn test_tag_merged_filters_reachable_tags() {
+    let repo = create_committed_repo_via_cli();
+
+    // Tag the current HEAD
+    assert_cli_success(
+        &run_libra_command(&["tag", "v-base"], repo.path()),
+        "tag v-base",
+    );
+
+    // Make a second commit and tag it
+    std::fs::write(repo.path().join("new.txt"), "new\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "new.txt"], repo.path()),
+        "add new.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path()),
+        "commit second",
+    );
+    assert_cli_success(
+        &run_libra_command(&["tag", "v-second"], repo.path()),
+        "tag v-second",
+    );
+
+    // --merged HEAD: both tags should be reachable from HEAD
+    let out = run_libra_command(&["tag", "--merged", "HEAD"], repo.path());
+    assert_cli_success(&out, "tag --merged HEAD");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("v-base"),
+        "v-base should be merged: {stdout}"
+    );
+    assert!(
+        stdout.contains("v-second"),
+        "v-second should be merged: {stdout}"
+    );
+
+    // --no-merged HEAD: no tags should be unreachable from HEAD
+    let out = run_libra_command(&["tag", "--no-merged", "HEAD"], repo.path());
+    assert_cli_success(&out, "tag --no-merged HEAD");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("v-base"),
+        "v-base should not be in no-merged: {stdout}"
+    );
+    assert!(
+        !stdout.contains("v-second"),
+        "v-second should not be in no-merged: {stdout}"
     );
 }

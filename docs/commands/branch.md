@@ -8,11 +8,12 @@ Create, delete, rename, inspect, or list branches.
 
 ```
 libra branch [<new_branch>] [<commit_hash>]
-libra branch -l [-r | -a] [--contains <commit>] [--no-contains <commit>]
+libra branch -l [-r | -a] [--contains <commit>] [--no-contains <commit>] [--points-at <object>] [--ignore-case]
 libra branch -d <name>
 libra branch -D <name>
 libra branch -m [<old>] <new>
 libra branch -u <upstream>
+libra branch --unset-upstream [<branch>]
 libra branch --show-current
 ```
 
@@ -22,7 +23,7 @@ libra branch --show-current
 
 Deletion comes in two flavours: `-d` performs a safe delete that checks whether the branch has been fully merged into the current branch before removing it, while `-D` force-deletes regardless of merge status. Both refuse to delete the branch you are currently on.
 
-The `--contains` and `--no-contains` filters (aliased as `--with` and `--without`) let you narrow the branch list to those whose history does or does not include a particular commit, defaulting to HEAD when the commit argument is omitted.
+The `--contains` and `--no-contains` filters (aliased as `--with` and `--without`) let you narrow the branch list to those whose history does or does not include a particular commit, defaulting to HEAD when the commit argument is omitted. `--points-at <object>` lists branches whose tip is exactly the resolved object. `--ignore-case` makes list sorting case-insensitive.
 
 ## Options
 
@@ -34,12 +35,15 @@ The `--contains` and `--no-contains` filters (aliased as `--with` and `--without
 | `-D` | `--delete-force` | `<name>` | Force-delete a branch, even if not fully merged |
 | `-d` | `--delete` | `<name>` | Safe-delete a branch (must be fully merged) |
 | `-u` | `--set-upstream-to` | `<upstream>` | Set upstream tracking for the current branch |
+| | `--unset-upstream` | `[branch]` | Remove upstream tracking for the current branch or the named branch |
 | | `--show-current` | | Print the current branch name or detached HEAD state |
 | `-m` | `--move` | `<old> <new>` or `<new>` | Rename a branch; with one argument renames the current branch |
 | `-r` | `--remotes` | | Show remote-tracking branches only |
 | `-a` | `--all` | | Show local and remote-tracking branches |
 | | `--contains` | `[commit]` (default HEAD) | Only list branches containing the commit. Alias: `--with` |
 | | `--no-contains` | `[commit]` (default HEAD) | Only list branches not containing the commit. Alias: `--without` |
+| | `--points-at` | `<object>` | Only list branches whose tip points at the object |
+| | `--ignore-case` | | Sort branch names case-insensitively where applicable |
 
 ### Flag examples
 
@@ -78,6 +82,12 @@ libra branch -m old-name new-name
 # Set upstream tracking
 libra branch -u origin/main
 
+# Clear upstream tracking for the current branch
+libra branch --unset-upstream
+
+# List branches whose tip is exactly HEAD
+libra branch --points-at HEAD
+
 # Show current branch name
 libra branch --show-current
 
@@ -102,6 +112,7 @@ libra branch --json --show-current      # Structured JSON output for agents
 - List: prints the branch list with `*` marking the current branch
 - Safe delete: `Deleted branch feature (was abc123...)`
 - Rename: `Renamed branch 'old' to 'new'`
+- Unset upstream: `Branch 'main' no longer tracks an upstream branch`
 - `--show-current`: prints the current branch name, or `HEAD detached at <hash>` when detached
 
 ## Structured Output (JSON examples)
@@ -158,6 +169,7 @@ Supported actions:
 - `delete`: `name`, `commit`, `force`
 - `rename`: `old_name`, `new_name`
 - `set-upstream`: `branch`, `upstream`
+- `unset-upstream`: `branch`
 - `show-current`: `name`, `detached`, `commit`
 
 ## Design Rationale
@@ -192,10 +204,12 @@ The trade-off is that refs are not directly inspectable as plain files. Libra co
 | Delete (force) | `git branch -D <name>` | `libra branch -D <name>` | `jj branch delete <name>` (always force) |
 | Rename | `git branch -m <old> <new>` | `libra branch -m <old> <new>` | Not supported |
 | Set upstream | `git branch -u <upstream>` | `libra branch -u <upstream>` | N/A (no upstream concept) |
+| Unset upstream | `git branch --unset-upstream [branch]` | `libra branch --unset-upstream [branch]` | N/A |
 | Show current | `git branch --show-current` | `libra branch --show-current` | `jj log -r @` |
 | Remote branches | `git branch -r` | `libra branch -r` | `jj branch list --all` |
 | All branches | `git branch -a` | `libra branch -a` | `jj branch list --all` |
 | Contains filter | `git branch --contains <commit>` | `libra branch --contains <commit>` | `jj log -r 'branches() & ancestors(<rev>)'` |
+| Points-at filter | `git branch --points-at <object>` | `libra branch --points-at <object>` | N/A |
 | Auto-track | `git branch --track` | N/A (use `switch --track`) | N/A |
 | Structured output | No | `--json` / `--machine` | `--template` |
 | Fuzzy suggestions | No | Levenshtein-based "did you mean" | No |

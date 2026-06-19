@@ -23,7 +23,7 @@ use serde::Serialize;
 
 use crate::{
     cli_error,
-    command::{load_object, save_object, status},
+    command::{load_object, save_object, status, switch},
     common_utils::parse_commit_msg,
     internal::{
         branch::Branch,
@@ -507,6 +507,7 @@ impl ReplayResult {
 pub const REBASE_EXAMPLES: &str = "\
 EXAMPLES:
     libra rebase main             Replay current branch on top of main
+    libra rebase --onto main dev  Replay dev..HEAD onto main, keeping the upstream range
     libra rebase --continue       Resume an in-progress rebase after fixing conflicts
     libra rebase --skip           Drop the current conflicting commit and continue
     libra rebase --abort          Restore the original branch and clear rebase state
@@ -520,6 +521,15 @@ pub struct RebaseArgs {
     /// This can be a branch name, commit hash, or other Git reference.
     #[clap(required_unless_present_any = ["continue_rebase", "abort", "skip"])]
     pub upstream: Option<String>,
+
+    /// Replay the <upstream>..HEAD range onto <newbase> instead of onto
+    /// <upstream> (the replayed range is still <upstream>..HEAD).
+    #[clap(long, value_name = "NEWBASE", conflicts_with_all = ["continue_rebase", "abort", "skip"])]
+    pub onto: Option<String>,
+
+    /// Check out <branch> before rebasing; defaults to the current branch.
+    #[clap(value_name = "BRANCH", conflicts_with_all = ["continue_rebase", "abort", "skip"])]
+    pub branch: Option<String>,
 
     /// Continue an in-progress rebase after resolving conflicts
     #[clap(long = "continue", conflicts_with_all = ["abort", "skip", "upstream"])]
@@ -588,6 +598,8 @@ pub(crate) enum RebaseError {
     BranchHasNoCommits { branch: String },
     #[error("failed to resolve upstream '{upstream}': {detail}")]
     UpstreamResolve { upstream: String, detail: String },
+    #[error("failed to resolve --onto target '{onto}': {detail}")]
+    OntoResolve { onto: String, detail: String },
     #[error("no common ancestor found")]
     NoCommonAncestor,
     #[error("failed to determine working tree status: {0}")]
@@ -652,10 +664,10 @@ impl From<RebaseError> for CliError {
                 CliError::fatal(error.to_string())
                     .with_stable_code(StableErrorCode::RepoStateInvalid)
             }
-            RebaseError::UpstreamResolve { .. } | RebaseError::NoCommonAncestor => {
-                CliError::fatal(error.to_string())
-                    .with_stable_code(StableErrorCode::CliInvalidTarget)
-            }
+            RebaseError::UpstreamResolve { .. }
+            | RebaseError::OntoResolve { .. }
+            | RebaseError::NoCommonAncestor => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidTarget),
             RebaseError::WorktreeStatus(..) => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
             }
@@ -814,10 +826,45 @@ pub async fn execute_safe(args: RebaseArgs, output: &OutputConfig) -> CliResult<
         return render_rebase_output(&result, output);
     }
     if let Some(upstream) = args.upstream.as_deref() {
-        let result = run_rebase_start(upstream).await.map_err(CliError::from)?;
+        // `git rebase --onto <newbase> <upstream> <branch>` form: check out the
+        // named branch first (no-op when it is already current), so the rest of
+        // the start path rebases it as "the current branch".
+        if let Some(branch) = args.branch.as_deref() {
+            switch_to_rebase_branch(branch, output).await?;
+        }
+        let result = run_rebase_start(upstream, args.onto.as_deref())
+            .await
+            .map_err(CliError::from)?;
         return render_rebase_output(&result, output);
     }
     Ok(())
+}
+
+/// Check out `<branch>` before a `rebase ... <branch>` start, unless it is
+/// already the current branch. Uses `switch::execute_safe` (not `execute`) so a
+/// switch failure (dirty worktree, missing branch) propagates as a non-zero
+/// exit / structured error instead of being swallowed.
+async fn switch_to_rebase_branch(branch: &str, output: &OutputConfig) -> CliResult<()> {
+    if let Head::Branch(current) = Head::current().await
+        && current == branch
+    {
+        return Ok(());
+    }
+    switch::execute_safe(
+        switch::SwitchArgs {
+            branch: Some(branch.to_string()),
+            create: None,
+            force_create: None,
+            orphan: None,
+            detach: false,
+            track: false,
+            force: false,
+            guess: false,
+            no_guess: false,
+        },
+        output,
+    )
+    .await
 }
 
 fn render_rebase_output(result: &RebaseOutput, output: &OutputConfig) -> CliResult<()> {
@@ -982,10 +1029,19 @@ async fn preflight_rebase(args: &RebaseArgs) -> CliResult<()> {
     resolve_branch_or_commit(upstream)
         .await
         .map_err(CliError::from_legacy_string)?;
+
+    // Pre-resolve the --onto target so an unresolvable newbase fails fast,
+    // before any worktree/state mutation (run_rebase_start re-resolves it for
+    // the typed `OntoResolve` error).
+    if let Some(onto) = args.onto.as_deref() {
+        resolve_branch_or_commit(onto)
+            .await
+            .map_err(CliError::from_legacy_string)?;
+    }
     Ok(())
 }
 
-async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
+async fn run_rebase_start(upstream: &str, onto: Option<&str>) -> Result<RebaseOutput, RebaseError> {
     let db = get_db_conn_instance().await;
 
     let current_branch_name = match Head::current().await {
@@ -1007,6 +1063,21 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
         }
     })?;
 
+    // The landing point ("onto") defaults to the upstream when --onto is absent,
+    // so existing behaviour is unchanged. With --onto, the replayed range stays
+    // <upstream>..HEAD (computed from `upstream_id`) but the commits land on
+    // `newbase_id` instead.
+    let newbase_id =
+        match onto {
+            Some(target) => resolve_branch_or_commit(target).await.map_err(|detail| {
+                RebaseError::OntoResolve {
+                    onto: target.to_string(),
+                    detail,
+                }
+            })?,
+            None => upstream_id,
+        };
+
     let base_id = find_merge_base(&head_to_rebase_id, &upstream_id)
         .await
         .map_err(|detail| RebaseError::CommitLoad {
@@ -1015,7 +1086,12 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
         })?
         .ok_or(RebaseError::NoCommonAncestor)?;
 
-    if base_id == head_to_rebase_id {
+    // Fast-forward and already-up-to-date short-circuits apply only to a plain
+    // rebase (no explicit --onto). With --onto, an explicit landing point must
+    // always replay <upstream>..HEAD onto <newbase>, even when upstream is an
+    // ancestor of HEAD (range non-empty) — otherwise the commits would never be
+    // moved onto the new base.
+    if onto.is_none() && base_id == head_to_rebase_id {
         let upstream_commit: Commit =
             load_object(&upstream_id).map_err(|e| RebaseError::CommitLoad {
                 commit: upstream_id.to_string(),
@@ -1090,7 +1166,7 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
         });
     }
 
-    if base_id == upstream_id {
+    if onto.is_none() && base_id == upstream_id {
         return Ok(RebaseOutput {
             action: "start".to_string(),
             status: "already-up-to-date".to_string(),
@@ -1122,7 +1198,7 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
             branch: current_branch_name,
             commit: head_to_rebase_id.to_string(),
             upstream: Some(upstream.to_string()),
-            onto: Some(upstream_id.to_string()),
+            onto: Some(newbase_id.to_string()),
             common_ancestor: Some(base_id.to_string()),
             replay_count: Some(0),
             previous_commit: Some(head_to_rebase_id.to_string()),
@@ -1134,34 +1210,41 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
         });
     }
 
-    let upstream_commit: Commit =
-        load_object(&upstream_id).map_err(|e| RebaseError::CommitLoad {
-            commit: upstream_id.to_string(),
-            detail: e.to_string(),
-        })?;
-    let upstream_tree: Tree =
-        load_object(&upstream_commit.tree_id).map_err(|e| RebaseError::OriginalTreeLoad {
-            tree: upstream_commit.tree_id.to_string(),
+    // Build the worktree guard against the LANDING (newbase) tree, since the
+    // start detaches HEAD onto `newbase_id` before replaying. For a plain rebase
+    // `newbase_id == upstream_id`, so this is unchanged there.
+    let newbase_commit: Commit = load_object(&newbase_id).map_err(|e| RebaseError::CommitLoad {
+        commit: newbase_id.to_string(),
+        detail: e.to_string(),
+    })?;
+    let newbase_tree: Tree =
+        load_object(&newbase_commit.tree_id).map_err(|e| RebaseError::OriginalTreeLoad {
+            tree: newbase_commit.tree_id.to_string(),
             detail: e.to_string(),
         })?;
     let mut guard_index = git_internal::internal::index::Index::new();
-    rebuild_index_from_tree(&upstream_tree, &mut guard_index, "")
+    rebuild_index_from_tree(&newbase_tree, &mut guard_index, "")
         .map_err(RebaseError::IndexRebuild)?;
     rebase_worktree_guard_structured(&guard_index, "rebase").await?;
 
+    // The replay lands on `newbase_id` (== upstream_id for a plain rebase): the
+    // initial detach, the rebase state's onto/current_head, and the start reflog
+    // all point at the landing commit, while the replayed range was computed
+    // from `upstream`.
+    let landing_display = onto.unwrap_or(upstream);
     let start_action = ReflogAction::Rebase {
         state: "start".to_string(),
-        details: format!("checkout {}", upstream),
+        details: format!("checkout {}", landing_display),
     };
     let start_context = ReflogContext {
         old_oid: head_to_rebase_id.to_string(),
-        new_oid: upstream_id.to_string(),
+        new_oid: newbase_id.to_string(),
         action: start_action,
     };
     db.transaction(|txn| {
         Box::pin(async move {
             reflog::Reflog::insert_single_entry(txn, &start_context, "HEAD").await?;
-            Head::update_with_conn(txn, Head::Detached(upstream_id), None).await;
+            Head::update_with_conn(txn, Head::Detached(newbase_id), None).await;
             Ok::<_, ReflogError>(())
         })
     })
@@ -1171,18 +1254,18 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
     let replay_count = commits_to_replay.len();
     let mut state = RebaseState {
         head_name: current_branch_name.clone(),
-        onto: upstream_id,
+        onto: newbase_id,
         orig_head: head_to_rebase_id,
         todo: VecDeque::from(commits_to_replay),
         done: Vec::new(),
         stopped_sha: None,
-        current_head: upstream_id,
+        current_head: newbase_id,
     };
 
     state.save().await.map_err(RebaseError::StateSave)?;
-    Head::update_with_conn(&db, Head::Detached(upstream_id), None).await;
+    Head::update_with_conn(&db, Head::Detached(newbase_id), None).await;
 
-    let replay = continue_replay(&mut state, &current_branch_name, upstream, false).await?;
+    let replay = continue_replay(&mut state, &current_branch_name, landing_display, false).await?;
 
     Ok(RebaseOutput {
         action: "start".to_string(),
@@ -1190,7 +1273,7 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
         branch: current_branch_name,
         commit: state.current_head.to_string(),
         upstream: Some(upstream.to_string()),
-        onto: Some(upstream_id.to_string()),
+        onto: Some(newbase_id.to_string()),
         common_ancestor: Some(base_id.to_string()),
         replay_count: Some(replay_count),
         previous_commit: Some(head_to_rebase_id.to_string()),
@@ -1232,7 +1315,7 @@ pub(crate) struct PullRebaseSummary {
 /// with structured hints — pull just wraps it in its own error
 /// variant so the `phase=rebase` detail can be attached.
 pub(crate) async fn run_rebase_for_pull(upstream: &str) -> Result<PullRebaseSummary, RebaseError> {
-    let output = run_rebase_start(upstream).await?;
+    let output = run_rebase_start(upstream, None).await?;
     let old_commit = output
         .previous_commit
         .clone()

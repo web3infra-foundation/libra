@@ -212,7 +212,7 @@ scenarios:
   - id: cli.branch-switch-checkout
     wave: 1
     group: branching
-    purpose: "Cover branch/switch/checkout creation, switching, switch -c, switch -C, switch --orphan, checkout -b, --detach, path checkout, rename, safe/forced delete, remote branch visibility, and negative checks for unsupported switch -f/guess flags."
+    purpose: "Cover branch/switch/checkout creation, switching, switch -c, switch -C, switch --orphan, checkout -b, --detach, path checkout, rename, safe/forced delete, remote branch visibility, switch --guess/--no-guess DWIM remote-tracking, and negative checks for the unsupported switch -f flag."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck, negative_exit]
@@ -410,7 +410,7 @@ scenarios:
   - id: cli.archive-smoke
     wave: 2
     group: maintenance
-    purpose: "Cover the public archive command: committed tree can generate tar file output with --prefix, --output and --format=zip, and safe prefix rejection."
+    purpose: "Cover the public archive command: committed tree can generate tar file output with --prefix, --output, --list, pathspec limiting and --format=zip, and safe prefix rejection."
     gh_required: false
     requires_git: false
     key_assertion_categories: [fsck, file_exists, negative_exit]

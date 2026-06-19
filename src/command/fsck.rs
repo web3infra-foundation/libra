@@ -6,6 +6,7 @@ use std::{
     collections::HashSet,
     fs, io,
     io::{Read, Seek},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use clap::Parser;
@@ -39,10 +40,18 @@ use crate::{
     utils::{
         client_storage::ClientStorage,
         error::{CliError, CliResult},
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
         path,
     },
 };
+
+/// When true, suppress human-readable stdout progress messages so JSON output
+/// stays clean on stdout. Error messages still go to stderr.
+static SUPPRESS_STDOUT: AtomicBool = AtomicBool::new(false);
+
+fn stdout_suppressed() -> bool {
+    SUPPRESS_STDOUT.load(Ordering::Relaxed)
+}
 
 /// Fsck message types - diagnostic messages go to stdout, errors to stderr
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,7 +182,7 @@ pub fn report(msg_id: FsckMsgId, obj_type: &str, obj_id: &str) -> bool {
     let output = msg_id.format(obj_type, obj_id);
     if msg_id.is_error() {
         eprintln!("{}", output);
-    } else {
+    } else if !stdout_suppressed() {
         println!("{}", output);
     }
     msg_id.causes_failure()
@@ -378,8 +387,19 @@ async fn run_fsck(args: &FsckArgs) -> CliResult<FsckResult> {
     }
 }
 
-pub async fn execute_safe(args: FsckArgs, _output: &OutputConfig) -> CliResult<()> {
-    let fsck_result = run_fsck(&args).await?;
+pub async fn execute_safe(args: FsckArgs, output: &OutputConfig) -> CliResult<()> {
+    let json_mode = output.is_json();
+    if json_mode {
+        SUPPRESS_STDOUT.store(true, Ordering::Relaxed);
+    }
+    let fsck_result = run_fsck(&args).await;
+    if json_mode {
+        SUPPRESS_STDOUT.store(false, Ordering::Relaxed);
+    }
+    let fsck_result = fsck_result?;
+    if json_mode {
+        emit_json_data("fsck", &fsck_result, output)?;
+    }
     if fsck_result.has_errors {
         return Err(CliError::failure("fsck found repository integrity issues").with_exit_code(1));
     }
@@ -608,14 +628,16 @@ fn check_directories(
     // Print directory progress
     if verbose {
         // --verbose: match git fsck output
-        println!("Checking object directory");
-    } else {
+        if !stdout_suppressed() {
+            println!("Checking object directory");
+        }
+    } else if !stdout_suppressed() {
         // default: show progress
         println!("Checking object directories: 100% (256/256), done.");
     }
 
     // Print pack objects if any
-    if pack_count > 0 {
+    if pack_count > 0 && !stdout_suppressed() {
         println!(
             "Checking objects: 100% ({}/{}), done.",
             pack_count, pack_count
@@ -1152,7 +1174,9 @@ async fn find_and_report_roots(storage: &ClientStorage) -> CliResult<()> {
 
         if commit.parent_commit_ids.is_empty() {
             // This is a root commit
-            println!("root {}", hash);
+            if !stdout_suppressed() {
+                println!("root {}", hash);
+            }
         }
     }
 
@@ -1196,7 +1220,9 @@ async fn find_and_report_tags() -> CliResult<()> {
 
         // Check if this is an annotated tag (tag object exists)
         // For now, just report the tagged commit
-        println!("tagged commit {} ({})", commit_hash, tag_name);
+        if !stdout_suppressed() {
+            println!("tagged commit {} ({})", commit_hash, tag_name);
+        }
     }
 
     Ok(())

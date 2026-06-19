@@ -124,6 +124,17 @@ libra clone --depth 1 git@github.com:user/repo.git
 libra clone --depth 50 git@github.com:user/repo.git
 ```
 
+### `--tags` / `--no-tags`
+
+`libra clone` fetches **all** tags by default (matching Git). `--no-tags` clones
+without any tags and records `remote.origin.tagOpt=--no-tags`, so subsequent
+`libra fetch` calls also skip tags. `--tags` is accepted for compatibility and to
+override an earlier `--no-tags` (last flag wins).
+
+```bash
+libra clone --no-tags git@github.com:user/repo.git
+```
+
 ## Common Commands
 
 ```bash

@@ -529,3 +529,64 @@ fn test_rev_parse_help_lists_examples_banner() {
         );
     }
 }
+
+#[test]
+fn test_rev_parse_show_prefix_at_root() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["rev-parse", "--show-prefix"], repo.path());
+    assert_cli_success(&output, "rev-parse --show-prefix");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "show-prefix at repo root should be empty"
+    );
+}
+
+#[test]
+fn test_rev_parse_show_prefix_in_subdir() {
+    let repo = create_committed_repo_via_cli();
+    let subdir = repo.path().join("src");
+    std::fs::create_dir_all(&subdir).expect("create subdir");
+    let output = run_libra_command(&["rev-parse", "--show-prefix"], &subdir);
+    assert_cli_success(&output, "rev-parse --show-prefix in subdir");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "src/",
+        "show-prefix in subdir should be 'src/'"
+    );
+}
+
+#[test]
+fn test_rev_parse_show_cdup_at_root() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["rev-parse", "--show-cdup"], repo.path());
+    assert_cli_success(&output, "rev-parse --show-cdup");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), "", "show-cdup at repo root should be empty");
+}
+
+#[test]
+fn test_rev_parse_show_cdup_in_subdir() {
+    let repo = create_committed_repo_via_cli();
+    let subdir = repo.path().join("a").join("b");
+    std::fs::create_dir_all(&subdir).expect("create subdir");
+    let output = run_libra_command(&["rev-parse", "--show-cdup"], &subdir);
+    assert_cli_success(&output, "rev-parse --show-cdup in subdir");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "../../",
+        "show-cdup in a/b should be '../../'"
+    );
+}
+
+#[test]
+fn test_rev_parse_short_with_length() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["rev-parse", "--short=8", "HEAD"], repo.path());
+    assert_cli_success(&output, "rev-parse --short=8 HEAD");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim().len(), 8, "short=8 should produce 8-char hash");
+}

@@ -29,6 +29,7 @@ pub mod config;
 pub mod db;
 pub mod describe;
 pub mod diff;
+pub mod editor;
 pub mod fetch;
 pub mod for_each_ref;
 pub mod fsck;

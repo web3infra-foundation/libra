@@ -52,9 +52,9 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵说明 | `run` / `register` / `unregister` / `status` exposed; lower-level maintenance tasks such as `commit-graph` and `prefetch` are skipped when 不支持 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
-| 兼容差异项 | commit-graph | 当前状态：Update commit-graph (not yet 支持; skipped)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | prefetch | 当前状态：Prefetch (requires remote configuration; skipped)，与 commit-graph 同为始终立即跳过的占位实现。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容矩阵说明 | `run` / `register` / `unregister` / `status` / `start` / `stop` exposed; `commit-graph` 与 `prefetch` 已有实际任务实现，但仍保留 Git 语义差异 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
+| 兼容差异项 | commit-graph | 当前会写 Git-compatible v1 commit-graph 文件；octopus merge 和 SHA-256 仓库会跳过并提示。后续若补齐这些边界，需要同步兼容矩阵和回归测试。 |
+| 兼容差异项 | prefetch | 当前复用普通 fetch 路径刷新标准 remote-tracking refs；不同于 Git 的 `refs/prefetch/` namespace。无 remote 时跳过；后续若改为 Git namespace 语义，需要同步兼容矩阵和测试。 |
 
 ## 维护要求
 

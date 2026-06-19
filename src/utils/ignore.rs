@@ -417,6 +417,8 @@ mod tests {
             verbose: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         })
         .await;
 
@@ -490,6 +492,8 @@ mod tests {
             verbose: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         })
         .await;
 
@@ -525,6 +529,8 @@ mod tests {
             verbose: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         })
         .await;
 
