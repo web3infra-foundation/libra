@@ -856,6 +856,10 @@ async fn test_force_tag() {
 #[tokio::test]
 #[serial]
 async fn test_force_tag_store_failure_preserves_existing_ref() {
+    if skip_permission_denied_test_if_root("test_force_tag_store_failure_preserves_existing_ref") {
+        return;
+    }
+
     let (_temp, _guard) = setup_repo_with_commit_with("content", "Base").await;
 
     internal_tag::create("v1.0", Some("Initial".into()), false, false)

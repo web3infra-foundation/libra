@@ -998,6 +998,12 @@ async fn test_worktree_add_rolls_back_link_on_restore_failure() {
 #[serial]
 /// If state persistence fails after restore, rollback removes partially restored files in an existing target.
 async fn test_worktree_add_rolls_back_populated_files_when_state_save_fails() {
+    if skip_permission_denied_test_if_root(
+        "test_worktree_add_rolls_back_populated_files_when_state_save_fails",
+    ) {
+        return;
+    }
+
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
