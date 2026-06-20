@@ -1194,7 +1194,7 @@ async fn local_config_entry_for_target(
         LocalIdentityTarget::CurrentRepo => {
             let storage = match crate::utils::util::try_get_storage_path(None) {
                 Ok(storage) => storage,
-                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                 Err(error) => {
                     return Err(error).context("failed to resolve current repository storage");
                 }
@@ -1251,7 +1251,7 @@ async fn local_config_value_for_target(
         LocalIdentityTarget::CurrentRepo => {
             let storage = match try_get_storage_path(None) {
                 Ok(storage) => storage,
-                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                 Err(error) => {
                     return Err(error).context("failed to resolve current repository storage");
                 }

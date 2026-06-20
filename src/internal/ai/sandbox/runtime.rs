@@ -1172,6 +1172,47 @@ fn macos_dir_params() -> Vec<(String, PathBuf)> {
 mod tests {
     use super::{super::NetworkAccess, *};
 
+    #[cfg(target_os = "linux")]
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: callers are serialized with `#[serial_test::serial(sandbox_env)]`.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: callers are serialized with `#[serial_test::serial(sandbox_env)]`.
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, previous }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: callers are serialized with `#[serial_test::serial(sandbox_env)]`.
+            unsafe {
+                if let Some(previous) = &self.previous {
+                    std::env::set_var(self.key, previous);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
     #[test]
     fn select_initial_uses_none_for_escalated_permissions() {
         let manager = SandboxManager::new();
@@ -1218,7 +1259,10 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[serial_test::serial(sandbox_env)]
     fn transform_linux_seccomp_falls_back_when_helper_is_missing() {
+        let _helper = EnvVarGuard::unset("LIBRA_LINUX_SANDBOX_EXE");
+        let _bwrap = EnvVarGuard::set("LIBRA_BWRAP_BINARY", "/does/not/exist/bwrap");
         let manager = SandboxManager::new();
         let cwd = std::env::temp_dir();
         let request = SandboxTransformRequest {
@@ -1253,7 +1297,10 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[serial_test::serial(sandbox_env)]
     fn transform_linux_required_enforcement_rejects_missing_helper() {
+        let _helper = EnvVarGuard::unset("LIBRA_LINUX_SANDBOX_EXE");
+        let _bwrap = EnvVarGuard::set("LIBRA_BWRAP_BINARY", "/does/not/exist/bwrap");
         let manager = SandboxManager::new();
         let cwd = std::env::temp_dir();
         let request = SandboxTransformRequest {
@@ -1635,6 +1682,7 @@ mod tests {
     /// built-in bwrap path is gated to that platform.
     #[cfg(target_os = "linux")]
     #[test]
+    #[serial_test::serial(sandbox_env)]
     fn transform_threads_seccomp_policy_into_exec_env_on_linux_bwrap_path() {
         let tmpdir = tempfile::tempdir().expect("tempdir for seccomp threading test");
         let fake_bwrap = tmpdir.path().join("bwrap");
@@ -1707,6 +1755,7 @@ mod tests {
     /// matrix can run the built-in bwrap path without relying on
     /// host-installed bubblewrap.
     #[test]
+    #[serial_test::serial(sandbox_env)]
     fn locate_bwrap_binary_honours_override_env_var() {
         let tmpdir = tempfile::tempdir().expect("tempdir for override probe");
         let fake_bwrap = tmpdir.path().join("bwrap");
@@ -1797,6 +1846,7 @@ mod tests {
     /// gated behind `#[cfg(target_os = "linux")]`.
     #[cfg(target_os = "linux")]
     #[test]
+    #[serial_test::serial(sandbox_env)]
     fn transform_uses_built_in_bwrap_when_helper_is_missing_but_bwrap_is_available() {
         let tmpdir = tempfile::tempdir().expect("tempdir for built-in bwrap test");
         let fake_bwrap = tmpdir.path().join("bwrap");
