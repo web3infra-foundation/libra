@@ -13,7 +13,7 @@ async fn create_operation_schema(db: &DatabaseConnection) {
         "CREATE TABLE IF NOT EXISTS operation(\
             op_id TEXT PRIMARY KEY,\
             repo_id TEXT NOT NULL,\
-            view_id TEXT NOT NULL UNIQUE,\
+            view_id TEXT NOT NULL,\
             command_name TEXT NOT NULL,\
             description TEXT NOT NULL,\
             actor TEXT NOT NULL,\
@@ -533,22 +533,16 @@ async fn graph_roundtrip_and_duplicate_constraint_failure() {
         OperationServiceError::Storage(_)
     ));
 
-    let duplicate_view_record = OperationRecord {
-        op_id: "op_graph_2".to_string(),
-        repo_id: "repo_graph".to_string(),
+    let duplicate_view = OperationViewRecord {
         view_id: "view_graph".to_string(),
-        command_name: "reset".to_string(),
-        description: "reset to previous".to_string(),
-        actor: "alice".to_string(),
-        args_digest: None,
-        start_ts: 520,
-        end_ts: Some(521),
-        status: OperationStatus::Succeeded,
+        repo_id: "repo_graph".to_string(),
+        head_kind: "branch".to_string(),
+        head_target: "main".to_string(),
+        created_at: 520,
     };
-    let duplicate_view_error =
-        OperationService::insert_operation_with_conn(&db, &duplicate_view_record)
-            .await
-            .unwrap_err();
+    let duplicate_view_error = OperationService::insert_view_with_conn(&db, &duplicate_view)
+        .await
+        .unwrap_err();
     assert!(matches!(
         duplicate_view_error,
         OperationServiceError::Storage(_)

@@ -2,10 +2,12 @@
 
 use std::collections::HashSet;
 
-use libra::internal::operation::{OperationRecord, OperationService, OperationStatus};
-use libra::internal::operation_wrapper::{
-    OperationError, OperationMeta, OperationParentPolicy, OperationScope, ParentSelectionMode,
-    resolve_parent_selection_with_conn, with_operation_log_with_conn,
+use libra::internal::{
+    operation::{OperationRecord, OperationService, OperationStatus},
+    operation_wrapper::{
+        OperationError, OperationMeta, OperationParentPolicy, OperationScope, ParentSelectionMode,
+        resolve_parent_selection_with_conn, with_operation_log_with_conn,
+    },
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, DbErr, Statement};
 use uuid::Uuid;
