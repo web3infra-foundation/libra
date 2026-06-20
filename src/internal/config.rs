@@ -22,8 +22,7 @@
 //!   encrypt-by-default policy in `libra config`.
 //! - [`encrypt_value`] / [`decrypt_value`]: thin wrappers over the vault module.
 
-use std::io::ErrorKind;
-use std::{collections::HashSet, mem::swap, path::Path};
+use std::{collections::HashSet, io::ErrorKind, mem::swap, path::Path};
 
 use anyhow::{Context, Result, anyhow};
 use sea_orm::{
