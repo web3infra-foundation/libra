@@ -49,6 +49,7 @@ top-level `[[test]]` entries in `Cargo.toml`.
 | `command_docs_examples_section.rs` | cross-cutting item B (v0.17.851) | every `docs/commands/<name>.md` page carries an `## Examples` / `## Common Commands` heading |
 | `help_flag_descriptions.rs` | cross-cutting item B (v0.17.887, extended v0.17.900 / v0.17.902 / v0.17.904) | every visible flag and positional argument under `Options:` / `Arguments:` in `libra <cmd> --help` carries a non-empty description line — scans 42 root commands + 53 sub/sub-sub commands (110 surfaces). Rejects clap auto-annotations like `[default: ...]` masquerading as descriptions |
 | `help_no_impl_meta_leak.rs` | cross-cutting item B (v0.17.894, extended v0.17.901 / v0.17.911) | no `libra <cmd> --help` body contains contributor-facing rustdoc that should not have leaked into clap's `long_about`. Currently forbids 6 phrase classes: `for the same EXAMPLES rendered through clap`, `for the same examples rendered through clap`, `CLI arguments for the`, `type is wired into the top-level CLI`, `Codex pass-`, `\`\`\`text `, and `# Examples` (raw markdown heading + code fence) |
+| `format_patch_flag_surface.rs` | format-patch (2026-06-20) | `format-patch --help` lists `--output-directory`, `--stdout`, `--numbered`, `--start-number`, `--subject-prefix`, `--cover-letter`, `--thread`/`--no-thread`, `--in-reply-to`, `--reroll-count`, `--signoff`, `--full-index`, `--no-stat`, `--keep-subject` and `revision-range`; EXAMPLES banner is wired |
 
 ## Authoring guidelines
 
