@@ -189,8 +189,8 @@ async fn handle_op_log(
         per_page: number.unwrap_or(OperationQueryPage::DEFAULT_PER_PAGE),
     };
 
-    let result = query_operation_log_page(&db, &repo_id, query_page, command_filter.as_deref())
-        .await?;
+    let result =
+        query_operation_log_page(&db, &repo_id, query_page, command_filter.as_deref()).await?;
 
     let entries: Vec<OpLogEntry> = result.items.iter().map(log_entry_from_item).collect();
     let op_output = OpOutput::Log {
@@ -215,7 +215,10 @@ async fn handle_op_log(
     );
     println!();
 
-    let page_start = result.page.saturating_sub(1).saturating_mul(result.per_page) as usize;
+    let page_start = result
+        .page
+        .saturating_sub(1)
+        .saturating_mul(result.per_page) as usize;
     for (page_offset, op) in entries.iter().enumerate() {
         let idx = page_start + page_offset;
         let short_id = &op.op_id[..8.min(op.op_id.len())];
@@ -250,7 +253,9 @@ async fn query_operation_log_page<C: sea_orm::ConnectionTrait>(
     query_page: OperationQueryPage,
     command_filter: Option<&str>,
 ) -> CliResult<OperationPage<OperationLogListItem>> {
-    let command_filter = command_filter.map(str::trim).filter(|value| !value.is_empty());
+    let command_filter = command_filter
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     if let Some(filter) = command_filter {
         let mut matching = Vec::new();
         let mut fetch_page = 1;
@@ -427,7 +432,9 @@ async fn handle_op_restore(
                         .map_err(|e| DbErr::Custom(e.to_string()))?,
                 )
             };
-            Head::update_with_conn(txn, new_head, None).await;
+            Head::update_result_with_conn(txn, new_head, None)
+                .await
+                .map_err(|e| DbErr::Custom(e.to_string()))?;
 
             for ref_rec in &restore_graph.refs {
                 if ref_rec.ref_kind == "branch" {

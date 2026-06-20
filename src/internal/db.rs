@@ -126,22 +126,7 @@ pub async fn establish_connection_with_busy_timeout(
     let conn = Database::connect(option)
         .await
         .map_err(|err| IOError::other(format!("Database connection error: {err:?}")))?;
-    ensure_config_kv_schema(&conn)
-        .await
-        .map_err(|err| IOError::other(format!("Failed to ensure config_kv schema: {err}")))?;
-    ensure_ai_projection_schema(&conn)
-        .await
-        .map_err(|err| IOError::other(format!("Failed to ensure AI projection schema: {err}")))?;
-    ensure_ai_runtime_contract_schema(&conn)
-        .await
-        .map_err(|err| {
-            IOError::other(format!(
-                "Failed to ensure AI runtime contract schema: {err}"
-            ))
-        })?;
-    ensure_operation_schema(&conn)
-        .await
-        .map_err(|err| IOError::other(format!("Failed to ensure operation schema: {err}")))?;
+    ensure_database_schema_is_compatible(&conn).await?;
     Ok(conn)
 }
 // #[cfg(not(test))]
@@ -335,6 +320,32 @@ async fn inspect_database_schema_for_connection(
             latest_version: latest,
         }),
     }
+}
+
+async fn ensure_database_schema_is_compatible(conn: &DatabaseConnection) -> io::Result<()> {
+    match inspect_database_schema_for_connection(conn).await? {
+        SchemaCompatibility::Compatible { .. } => Ok(()),
+        SchemaCompatibility::UpgradeRequired {
+            current_version,
+            latest_version,
+        } => Err(IOError::other(format!(
+            "repository database schema is out of date (current: {}, required: {latest_version}); run 'libra db upgrade'",
+            format_schema_version(current_version)
+        ))),
+        SchemaCompatibility::UnsupportedFuture {
+            current_version,
+            latest_version,
+        } => Err(IOError::other(format!(
+            "repository database schema version {current_version} is newer than this Libra binary supports (latest supported: {})",
+            format_schema_version(latest_version)
+        ))),
+    }
+}
+
+fn format_schema_version(version: Option<i64>) -> String {
+    version
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_string())
 }
 
 /// Embedded canonical SQLite schema. Compiled into the binary via `include_str!`.
@@ -578,6 +589,9 @@ async fn apply_database_schema_upgrades(
                 "Failed to ensure AI runtime contract schema: {err}"
             ))
         })?;
+    ensure_operation_schema(conn)
+        .await
+        .map_err(|err| IOError::other(format!("Failed to ensure operation schema: {err}")))?;
     // CEX-12.5: apply every migration registered in
     // `migration::builtin_migrations`. The runner is idempotent — on a
     // fresh DB or a legacy DB it ensures the `schema_versions` tracking
