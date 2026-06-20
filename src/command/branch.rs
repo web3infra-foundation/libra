@@ -1406,7 +1406,7 @@ pub fn is_valid_git_branch_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, str::FromStr};
+    use std::{collections::HashSet, path::PathBuf, str::FromStr};
 
     use git_internal::hash::{ObjectHash, get_hash_kind};
     use sea_orm::Database;
@@ -1423,6 +1423,24 @@ mod tests {
     impl Drop for ColorOverrideReset {
         fn drop(&mut self) {
             colored::control::unset_override();
+        }
+    }
+
+    struct CurrentDirGuard {
+        original: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn change_to(path: &std::path::Path) -> Self {
+            let original = std::env::current_dir().expect("failed to read current dir");
+            std::env::set_current_dir(path).expect("failed to change current dir");
+            Self { original }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
         }
     }
 
@@ -1493,6 +1511,13 @@ mod tests {
     #[test]
     #[serial]
     fn commit_contains_surfaces_typed_commit_load_failure() {
+        let repo = tempfile::tempdir().expect("failed to create temp repo");
+        std::fs::create_dir_all(repo.path().join(".libra").join("objects"))
+            .expect("failed to create temp object storage");
+        std::fs::write(repo.path().join(".libra").join("libra.db"), b"")
+            .expect("failed to create temp repo database marker");
+        let _cwd = CurrentDirGuard::change_to(repo.path());
+
         let corrupt_commit = any_hash();
         let branch = Branch {
             name: "corrupt".to_string(),
