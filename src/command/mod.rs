@@ -45,6 +45,7 @@ pub mod init;
 pub mod lfs;
 pub mod lfs_schema;
 pub mod log;
+pub mod ls_files;
 pub mod ls_remote;
 pub mod ls_tree;
 pub mod maintenance;
