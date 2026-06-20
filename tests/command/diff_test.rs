@@ -477,6 +477,8 @@ async fn test_basic_diff() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -542,6 +544,8 @@ async fn test_diff_staged() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -574,6 +578,8 @@ async fn test_diff_staged() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -632,6 +638,8 @@ async fn test_diff_between_commits() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -666,6 +674,8 @@ async fn test_diff_between_commits() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -741,6 +751,8 @@ async fn test_diff_with_pathspec() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -814,6 +826,8 @@ async fn test_diff_output_to_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -882,6 +896,8 @@ async fn test_diff_algorithms() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 

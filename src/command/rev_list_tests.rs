@@ -62,6 +62,7 @@ fn test_rev_list_args_default() {
     assert!(!args.cherry_pick);
     assert!(!args.cherry_mark);
     assert!(!args.cherry);
+    assert!(!args.children);
     assert_eq!(args.min_parents, None);
     assert_eq!(args.max_parents, None);
 }
@@ -97,6 +98,13 @@ fn test_rev_list_args_parse_parent_and_timestamp_output() {
     assert!(args.parents);
     assert!(args.timestamp);
     assert_eq!(args.specs, vec!["HEAD"]);
+
+    let args = RevListArgs::try_parse_from(["rev-list", "--children", "HEAD"]).unwrap();
+    assert!(args.children);
+    assert_eq!(args.specs, vec!["HEAD"]);
+
+    let args = RevListArgs::try_parse_from(["rev-list", "--parents", "--children", "HEAD"]);
+    assert!(args.is_err());
 }
 
 #[test]

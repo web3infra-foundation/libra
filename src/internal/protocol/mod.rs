@@ -202,7 +202,10 @@ pub fn generate_upload_pack_content(
     let mut buf = BytesMut::new();
     let mut write_first_line = false;
 
-    let mut capability = vec!["side-band-64k", "multi_ack_detailed"];
+    // `include-tag` asks the server to also send annotated tag objects that
+    // point at objects in the returned pack — this powers Git's default tag
+    // auto-follow on `fetch`. Servers that don't support it ignore it.
+    let mut capability = vec!["side-band-64k", "multi_ack_detailed", "include-tag"];
     if get_wire_hash_kind() == HashKind::Sha256 {
         capability.push("object-format=sha256");
     }

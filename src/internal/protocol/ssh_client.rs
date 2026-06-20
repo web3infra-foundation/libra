@@ -3,13 +3,16 @@
 //! Supports both `ssh://[user@]host[:port]/path` and `user@host:path` URL formats.
 //! Uses the vault-generated SSH private key for authentication when available.
 
-use std::{io::Error as IoError, time::Duration};
+use std::{
+    io::{Error as IoError, ErrorKind},
+    time::Duration,
+};
 
 use bytes::{Bytes, BytesMut};
 use futures_util::stream::StreamExt;
 use git_internal::errors::GitError;
 use tempfile::NamedTempFile;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
@@ -19,12 +22,13 @@ use crate::git_protocol::ServiceType;
 
 const DEFAULT_SSH_PORT: u16 = 22;
 
-/// Idle timeout for SSH I/O operations. Triggers when a single read/write or
-/// process-wait call makes no progress for this duration. As long as data keeps
-/// flowing the timer resets — large transfers are not penalized.
-const SSH_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Default idle timeout for SSH I/O operations. Read/write loops reset this
+/// timeout after each successful I/O operation; process-wait phases use it as
+/// the maximum silent processing window.
+const DEFAULT_SSH_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const SSH_SEND_PACK_CHUNK_SIZE: usize = 64 * 1024;
 
-fn ssh_idle_timeout() -> Duration {
+fn default_ssh_idle_timeout() -> Duration {
     #[cfg(test)]
     if let Ok(raw) = std::env::var("LIBRA_TEST_SSH_IDLE_TIMEOUT_MS")
         && let Ok(ms) = raw.parse::<u64>()
@@ -33,7 +37,7 @@ fn ssh_idle_timeout() -> Duration {
         return Duration::from_millis(ms);
     }
 
-    SSH_IDLE_TIMEOUT
+    DEFAULT_SSH_IDLE_TIMEOUT
 }
 
 pub struct SshClient {
@@ -44,6 +48,7 @@ pub struct SshClient {
     key_path: Option<String>,
     temp_key_file: Option<NamedTempFile>,
     strict_host_key_checking: String,
+    idle_timeout: Duration,
 }
 
 impl SshClient {
@@ -66,6 +71,13 @@ impl SshClient {
     pub fn with_temp_key_file(mut self, temp_key_file: NamedTempFile) -> Self {
         self.temp_key_file = Some(temp_key_file);
         self.key_path = None;
+        self
+    }
+
+    /// Override the SSH per-operation idle timeout for callers that need a
+    /// longer-lived transport, such as push send-pack.
+    pub fn with_idle_timeout(mut self, idle_timeout: Duration) -> Self {
+        self.idle_timeout = idle_timeout;
         self
     }
 
@@ -106,6 +118,7 @@ impl SshClient {
             key_path: None,
             temp_key_file: None,
             strict_host_key_checking: "yes".to_string(),
+            idle_timeout: default_ssh_idle_timeout(),
         })
     }
 
@@ -128,6 +141,7 @@ impl SshClient {
             key_path: None,
             temp_key_file: None,
             strict_host_key_checking: "yes".to_string(),
+            idle_timeout: default_ssh_idle_timeout(),
         })
     }
 
@@ -172,15 +186,17 @@ impl SshClient {
 
     /// Read pkt-line advertisement from the SSH child's stdout.
     ///
-    /// Each individual `read_exact` call is wrapped with [`SSH_IDLE_TIMEOUT`] so
-    /// a stalled remote triggers a timely error instead of blocking forever.
+    /// Each individual `read_exact` call is wrapped with the configured idle
+    /// timeout so a stalled remote triggers a timely error instead of blocking
+    /// forever.
     async fn read_advertisement(
+        &self,
         stdout: &mut tokio::process::ChildStdout,
     ) -> Result<Bytes, IoError> {
         let mut buf = BytesMut::new();
         loop {
             let mut len_buf = [0u8; 4];
-            let timeout = ssh_idle_timeout();
+            let timeout = self.idle_timeout;
             tokio::time::timeout(timeout, stdout.read_exact(&mut len_buf))
                 .await
                 .map_err(|_| {
@@ -199,7 +215,7 @@ impl SshClient {
                 break;
             }
             let mut data = vec![0u8; len - 4];
-            let timeout = ssh_idle_timeout();
+            let timeout = self.idle_timeout;
             tokio::time::timeout(timeout, stdout.read_exact(&mut data))
                 .await
                 .map_err(|_| {
@@ -226,7 +242,7 @@ impl SshClient {
             let stdout = child.stdout.as_mut().ok_or_else(|| {
                 GitError::NetworkError("SSH child stdout not captured".to_string())
             })?;
-            Self::read_advertisement(stdout).await
+            self.read_advertisement(stdout).await
         };
         let response = match response {
             Ok(response) => response,
@@ -272,7 +288,7 @@ impl SshClient {
                 .stdout
                 .as_mut()
                 .ok_or_else(|| IoError::other("SSH child stdout not captured"))?;
-            Self::read_advertisement(stdout).await
+            self.read_advertisement(stdout).await
         };
         if let Err(read_err) = advertisement {
             let output = child.wait_with_output().await.map_err(|wait_err| {
@@ -304,6 +320,7 @@ impl SshClient {
             .take()
             .ok_or_else(|| IoError::other("SSH child stderr not captured"))?;
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, IoError>>(32);
+        let idle_timeout = self.idle_timeout;
 
         tokio::spawn(async move {
             let stderr_task = tokio::spawn(async move {
@@ -316,7 +333,7 @@ impl SshClient {
             let mut forward_err: Option<IoError> = None;
             let mut sent_any_stdout = false;
             loop {
-                match tokio::time::timeout(ssh_idle_timeout(), stdout.read(&mut buf)).await {
+                match tokio::time::timeout(idle_timeout, stdout.read(&mut buf)).await {
                     Err(_) => {
                         let _ = child.start_kill();
                         if !sent_any_stdout {
@@ -324,7 +341,7 @@ impl SshClient {
                                 std::io::ErrorKind::TimedOut,
                                 format!(
                                     "SSH upload-pack stdout timed out after {}s (idle)",
-                                    ssh_idle_timeout().as_secs()
+                                    idle_timeout.as_secs()
                                 ),
                             ));
                         }
@@ -400,7 +417,7 @@ impl SshClient {
                 .stdout
                 .as_mut()
                 .ok_or_else(|| IoError::other("SSH child stdout not captured"))?;
-            Self::read_advertisement(stdout).await
+            self.read_advertisement(stdout).await
         };
         if let Err(read_err) = advertisement {
             let output = child.wait_with_output().await.map_err(|wait_err| {
@@ -414,22 +431,15 @@ impl SshClient {
             )));
         }
 
-        // Send the pack data (with idle timeout on write)
+        // Send the pack data with the timeout resetting after each successful
+        // write. A single write_all over the whole pack would incorrectly turn
+        // this into a total-transfer timeout for large pushes.
         let stdin = child
             .stdin
             .as_mut()
             .ok_or_else(|| IoError::other("SSH child stdin not captured"))?;
-        let timeout = ssh_idle_timeout();
-        tokio::time::timeout(timeout, stdin.write_all(&data))
-            .await
-            .map_err(|_| {
-                IoError::other(format!(
-                    "SSH write timed out after {}s (idle)",
-                    timeout.as_secs()
-                ))
-            })?
-            .map_err(|e| IoError::other(format!("SSH write failed: {e}")))?;
-        let timeout = ssh_idle_timeout();
+        Self::write_all_with_idle_timeout(stdin, data.as_ref(), self.idle_timeout).await?;
+        let timeout = self.idle_timeout;
         tokio::time::timeout(timeout, stdin.shutdown())
             .await
             .map_err(|_| {
@@ -441,7 +451,7 @@ impl SshClient {
             .map_err(|e| IoError::other(format!("SSH shutdown failed: {e}")))?;
 
         // Wait for remote to process the pack (with idle timeout)
-        let timeout = ssh_idle_timeout();
+        let timeout = self.idle_timeout;
         let output = tokio::time::timeout(timeout, child.wait_with_output())
             .await
             .map_err(|_| {
@@ -458,6 +468,40 @@ impl SshClient {
             )));
         }
         Ok(Bytes::from(output.stdout))
+    }
+
+    async fn write_all_with_idle_timeout<W>(
+        writer: &mut W,
+        data: &[u8],
+        idle_timeout: Duration,
+    ) -> Result<(), IoError>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        let mut written = 0;
+        while written < data.len() {
+            let chunk_end = (written + SSH_SEND_PACK_CHUNK_SIZE).min(data.len());
+            let n = tokio::time::timeout(idle_timeout, writer.write(&data[written..chunk_end]))
+                .await
+                .map_err(|_| {
+                    IoError::new(
+                        ErrorKind::TimedOut,
+                        format!(
+                            "SSH write timed out after {}s (idle)",
+                            idle_timeout.as_secs()
+                        ),
+                    )
+                })?
+                .map_err(|e| IoError::other(format!("SSH write failed: {e}")))?;
+            if n == 0 {
+                return Err(IoError::new(
+                    ErrorKind::WriteZero,
+                    "SSH write failed: wrote zero bytes",
+                ));
+            }
+            written += n;
+        }
+        Ok(())
     }
 }
 
@@ -600,5 +644,33 @@ mod tests {
         assert!(result.is_err(), "invalid mode should be rejected");
         let err = result.err().unwrap();
         assert!(err.contains("expected 'yes' or 'accept-new'"));
+    }
+
+    #[tokio::test]
+    async fn send_pack_write_helper_writes_large_payload_in_chunks() {
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        let data = vec![42u8; SSH_SEND_PACK_CHUNK_SIZE * 2 + 17];
+        let expected_len = data.len();
+
+        let reader_task = tokio::spawn(async move {
+            let mut received = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut received)
+                .await
+                .expect("duplex reader should drain written bytes");
+            received.len()
+        });
+
+        SshClient::write_all_with_idle_timeout(&mut writer, &data, Duration::from_secs(1))
+            .await
+            .expect("chunked write should complete while the reader drains data");
+        writer
+            .shutdown()
+            .await
+            .expect("duplex writer should shut down cleanly");
+
+        assert_eq!(
+            reader_task.await.expect("reader task should finish"),
+            expected_len
+        );
     }
 }

@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`run` / `register` / `unregister` / `status` exposed; lower-level maintenance tasks such as `commit-graph` and `prefetch` are skipped when unsupported
+- 兼容级别：`partial`。`run` / `register` / `unregister` / `status` / `start` / `stop` exposed；`start`/`stop` 安装/移除 OS 调度入口（macOS 写 launchd LaunchAgents plist，登录时自动加载；其他 Unix 写 cron 片段），调度目录可由 `LIBRA_MAINTENANCE_AGENT_DIR` 覆盖（测试用）。`commit-graph` task 现写出 Git 兼容 v1 commit-graph 文件（`build_commit_graph`：CGPH 头 + OIDF/OIDL/CDAT chunk + 拓扑 generation + SHA-1 trailer → `.libra/objects/info/commit-graph`；octopus(>2 父) 与 SHA-256 仓库暂跳过并提示）；`prefetch` task 现遍历 `ConfigKv::all_remote_configs()` 并复用 `fetch_repository_safe` 预取所有已配置远端（无远端时跳过；`--dry-run` 仅列出）——与 Git 不同：Libra 复用普通 fetch 路径、刷新标准 remote-tracking refs 而非 `refs/prefetch/` 命名空间（intentionally-different，因 `maintenance` 是显式 opt-in 运行）
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -44,16 +44,17 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/maintenance.md`。
 - Synopsis：`libra maintenance <subcommand> [options]`。
-- 公开参数/子命令包括：`run`、`--task <task>`、`--dry-run`、`-q, --quiet`、`register`、`--schedule <schedule>`、`unregister`、`status`。
+- 公开参数/子命令包括：`run`、`--task <task>`、`--dry-run`、`-q, --quiet`、`register`、`--schedule <schedule>`、`unregister`、`status`、`start --schedule <schedule>`、`stop`。
+- `start`：设置 enabled/schedule 配置并经 `write_scheduler_entry` 写入 OS 调度入口（`scheduler_agent_dir()`：`LIBRA_MAINTENANCE_AGENT_DIR` 覆盖 → macOS `~/Library/LaunchAgents`/其他 `~/.config/libra/scheduler`；label = `tools.libra.maintenance.<sha1(repo)[..12]>`；schedule `hourly`/`daily`/`weekly` → launchd `StartInterval` 秒或 cron 表达式，运行 `libra maintenance run`）。`stop`：置 enabled=false 并 `remove_scheduler_entry`。artifact 生成是纯函数，按目录参数化以便单测（不触碰真实 launchd/cron）。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵说明 | `run` / `register` / `unregister` / `status` exposed; lower-level maintenance tasks such as `commit-graph` and `prefetch` are skipped when 不支持 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
-| 兼容差异项 | commit-graph | 当前状态：Update commit-graph (not yet 支持; skipped)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | prefetch | 当前状态：Prefetch (requires remote configuration; skipped)，与 commit-graph 同为始终立即跳过的占位实现。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容矩阵说明 | `run` / `register` / `unregister` / `status` / `start` / `stop` exposed; `commit-graph` 与 `prefetch` 已有实际任务实现，但仍保留 Git 语义差异 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
+| 兼容差异项 | commit-graph | 当前会写 Git-compatible v1 commit-graph 文件；octopus merge 和 SHA-256 仓库会跳过并提示。后续若补齐这些边界，需要同步兼容矩阵和回归测试。 |
+| 兼容差异项 | prefetch | 当前复用普通 fetch 路径刷新标准 remote-tracking refs；不同于 Git 的 `refs/prefetch/` namespace。无 remote 时跳过；后续若改为 Git namespace 语义，需要同步兼容矩阵和测试。 |
 
 ## 维护要求
 

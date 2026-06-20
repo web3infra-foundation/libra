@@ -212,7 +212,7 @@ scenarios:
   - id: cli.branch-switch-checkout
     wave: 1
     group: branching
-    purpose: "Cover branch/switch/checkout creation, switching, switch -c, switch -C, switch --orphan, checkout -b, --detach, path checkout, rename, safe/forced delete, remote branch visibility, and negative checks for unsupported switch -f/guess flags."
+    purpose: "Cover branch/switch/checkout creation, switching, switch -c, switch -C, switch --orphan, checkout -b, --detach, path checkout, rename, safe/forced delete, remote branch visibility, switch --guess/--no-guess DWIM remote-tracking, and negative checks for the unsupported switch -f flag."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck, negative_exit]
@@ -366,7 +366,7 @@ scenarios:
   - id: cli.object-readback
     wave: 2
     group: objects
-    purpose: "End-to-end object roundtrip over current plumbing: rev-parse HEAD/--short/--show-toplevel, show commit/path/blob, show-ref --head/--no-head/--heads/--branches/--no-branches/--tags/--no-tags/--hash[=<n>]/--no-hash/--abbrev[=<n>]/--no-abbrev/--dereference/--no-dereference/--verify/--no-verify/--exists/--no-exists, for-each-ref --points-at, cat-file type/size/pretty/exists, hash-object file/stdin/--path/--no-filters, rev-list HEAD/multi-revision/A..B/^A/A...B/--count/-n/--skip/--since/--after/--until/--before/--merges/--no-merges/--min-parents/--max-parents/--no-min-parents/--no-max-parents/--first-parent/--author/--committer/--grep/pathspec/--left-right/--left-only/--right-only/--cherry-pick/--cherry-mark/--cherry/--parents/--timestamp, fsck, and negative object/revision paths."
+    purpose: "End-to-end object roundtrip over current plumbing: rev-parse HEAD/--short/--show-toplevel, show commit/path/blob, show-ref --head/--no-head/--heads/--branches/--no-branches/--tags/--no-tags/--hash[=<n>]/--no-hash/--abbrev[=<n>]/--no-abbrev/--dereference/--no-dereference/--verify/--no-verify/--exists/--no-exists, for-each-ref --points-at, cat-file type/size/pretty/exists, hash-object file/stdin/--path/--no-filters, rev-list HEAD/multi-revision/A..B/^A/A...B/--count/-n/--skip/--since/--after/--until/--before/--merges/--no-merges/--min-parents/--max-parents/--no-min-parents/--no-max-parents/--first-parent/--author/--committer/--grep/pathspec/--left-right/--left-only/--right-only/--cherry-pick/--cherry-mark/--cherry/--parents/--children/--timestamp, fsck, and negative object/revision paths."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck, negative_exit]
@@ -410,7 +410,7 @@ scenarios:
   - id: cli.archive-smoke
     wave: 2
     group: maintenance
-    purpose: "Cover the public archive command: committed tree can generate tar file output with --prefix, --output and --format=zip, and safe prefix rejection."
+    purpose: "Cover the public archive command: committed tree can generate tar file output with --prefix, --output, --list, pathspec limiting and --format=zip, and safe prefix rejection."
     gh_required: false
     requires_git: false
     key_assertion_categories: [fsck, file_exists, negative_exit]

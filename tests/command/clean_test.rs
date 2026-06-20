@@ -30,6 +30,7 @@ async fn test_clean_dry_run_keeps_files() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -54,6 +55,7 @@ async fn test_clean_force_removes_files() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -106,6 +108,8 @@ async fn test_clean_force_keeps_tracked_files() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -116,6 +120,7 @@ async fn test_clean_force_keeps_tracked_files() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -141,6 +146,7 @@ async fn test_clean_force_removes_nested_untracked() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -166,6 +172,8 @@ async fn test_clean_force_respects_ignore_rules() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -179,6 +187,7 @@ async fn test_clean_force_respects_ignore_rules() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -205,6 +214,8 @@ async fn test_clean_force_multiple_untracked_with_tracked() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -218,6 +229,7 @@ async fn test_clean_force_multiple_untracked_with_tracked() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -248,6 +260,7 @@ async fn test_clean_force_with_missing_index() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -367,6 +380,7 @@ async fn test_clean_force_with_long_path() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -395,6 +409,7 @@ async fn test_clean_force_does_not_follow_symlink_dirs() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -478,6 +493,7 @@ async fn test_clean_d_flag_removes_untracked_dirs() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -504,6 +520,8 @@ async fn test_clean_d_flag_keeps_dirs_with_tracked_files() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -517,6 +535,7 @@ async fn test_clean_d_flag_keeps_dirs_with_tracked_files() {
         ignored: false,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -545,6 +564,8 @@ async fn test_clean_x_flag_removes_ignored_files() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -559,6 +580,7 @@ async fn test_clean_x_flag_removes_ignored_files() {
         ignored: true,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -586,6 +608,8 @@ async fn test_clean_x_flag_removes_only_ignored_files() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -600,6 +624,7 @@ async fn test_clean_x_flag_removes_only_ignored_files() {
         ignored: false,
         only_ignored: true,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
@@ -627,6 +652,7 @@ async fn test_clean_exclude_flag_excludes_patterns() {
         ignored: false,
         only_ignored: false,
         exclude: vec!["*.txt".to_string()],
+        pathspec: vec![],
     })
     .await;
 
@@ -655,6 +681,7 @@ async fn test_clean_exclude_multiple_patterns() {
         ignored: false,
         only_ignored: false,
         exclude: vec!["*.txt".to_string(), "*.log".to_string()],
+        pathspec: vec![],
     })
     .await;
 
@@ -726,6 +753,8 @@ async fn test_clean_dx_removes_ignored_directories() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -739,8 +768,158 @@ async fn test_clean_dx_removes_ignored_directories() {
         ignored: true,
         only_ignored: false,
         exclude: vec![],
+        pathspec: vec![],
     })
     .await;
 
     assert!(!std::path::Path::new("ignored_dir").exists());
+}
+
+#[tokio::test]
+#[serial]
+/// Tests pathspec limits cleaning to the matching file.
+async fn test_clean_pathspec_matches_single_file() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    fs::write("keep.txt", "keep").unwrap();
+    fs::write("remove.txt", "remove").unwrap();
+    fs::write("other.log", "log").unwrap();
+
+    clean::execute(CleanArgs {
+        dry_run: false,
+        force: true,
+        directories: false,
+        ignored: false,
+        only_ignored: false,
+        exclude: vec![],
+        pathspec: vec!["remove.txt".to_string()],
+    })
+    .await;
+
+    assert!(!std::path::Path::new("remove.txt").exists());
+    assert!(std::path::Path::new("keep.txt").exists());
+    assert!(std::path::Path::new("other.log").exists());
+}
+
+#[tokio::test]
+#[serial]
+/// Tests pathspec limits cleaning to files under a matching directory prefix.
+async fn test_clean_pathspec_matches_directory_prefix() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    fs::create_dir_all("build/out").unwrap();
+    fs::write("build/out/artifact.o", "obj").unwrap();
+    fs::write("build/debug.log", "log").unwrap();
+    fs::write("keep.txt", "keep").unwrap();
+    fs::write("other.log", "log").unwrap();
+
+    clean::execute(CleanArgs {
+        dry_run: false,
+        force: true,
+        directories: false,
+        ignored: false,
+        only_ignored: false,
+        exclude: vec![],
+        pathspec: vec!["build".to_string()],
+    })
+    .await;
+
+    assert!(!std::path::Path::new("build/out/artifact.o").exists());
+    assert!(!std::path::Path::new("build/debug.log").exists());
+    assert!(std::path::Path::new("keep.txt").exists());
+    assert!(std::path::Path::new("other.log").exists());
+}
+
+#[tokio::test]
+#[serial]
+/// Tests pathspec matching nothing cleans nothing.
+async fn test_clean_pathspec_matches_nothing_cleans_nothing() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    fs::write("untracked.txt", "content").unwrap();
+    fs::write("other.log", "log").unwrap();
+
+    clean::execute(CleanArgs {
+        dry_run: false,
+        force: true,
+        directories: false,
+        ignored: false,
+        only_ignored: false,
+        exclude: vec![],
+        pathspec: vec!["nonexistent".to_string()],
+    })
+    .await;
+
+    assert!(std::path::Path::new("untracked.txt").exists());
+    assert!(std::path::Path::new("other.log").exists());
+}
+
+#[tokio::test]
+#[serial]
+/// Tests pathspec with -d removes a matching untracked directory.
+async fn test_clean_pathspec_with_d_removes_matching_dir() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    fs::create_dir_all("remove_dir/sub").unwrap();
+    fs::write("remove_dir/file.txt", "content").unwrap();
+    fs::write("remove_dir/sub/nested.txt", "nested").unwrap();
+    fs::create_dir_all("keep_dir").unwrap();
+    fs::write("keep_dir/file.txt", "content").unwrap();
+
+    clean::execute(CleanArgs {
+        dry_run: false,
+        force: true,
+        directories: true,
+        ignored: false,
+        only_ignored: false,
+        exclude: vec![],
+        pathspec: vec!["remove_dir".to_string()],
+    })
+    .await;
+
+    assert!(!std::path::Path::new("remove_dir").exists());
+    assert!(std::path::Path::new("keep_dir").exists());
+}
+
+#[tokio::test]
+#[serial]
+/// Tests pathspec filtering shows only matching paths in dry-run JSON output.
+async fn test_clean_pathspec_dry_run_json_filters_candidates() {
+    let repo = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    fs::write(repo.path().join("alpha.txt"), "alpha").unwrap();
+    fs::write(repo.path().join("beta.txt"), "beta").unwrap();
+    fs::write(repo.path().join("gamma.log"), "gamma").unwrap();
+
+    let output = run_libra_command(&["clean", "-n", "--json", "alpha.txt"], repo.path());
+    assert_cli_success(&output, "clean -n --json alpha.txt should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "clean");
+    assert_eq!(json["data"]["dry_run"], true);
+
+    let removed = json["data"]["removed"]
+        .as_array()
+        .expect("removed should be an array");
+    assert!(
+        removed.iter().any(|path| path == "alpha.txt"),
+        "alpha.txt should be in dry-run output"
+    );
+    assert!(
+        !removed.iter().any(|path| path == "beta.txt"),
+        "beta.txt should not be in dry-run output"
+    );
+    assert!(
+        !removed.iter().any(|path| path == "gamma.log"),
+        "gamma.log should not be in dry-run output"
+    );
 }

@@ -1187,6 +1187,9 @@ async fn test_basic_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1215,6 +1218,9 @@ async fn test_basic_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1242,6 +1248,8 @@ async fn test_basic_rebase() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -1256,6 +1264,9 @@ async fn test_basic_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1284,6 +1295,9 @@ async fn test_basic_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1311,6 +1325,8 @@ async fn test_basic_rebase() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -1324,6 +1340,9 @@ async fn test_basic_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1351,10 +1370,14 @@ async fn test_basic_rebase() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: Some("main".to_string()),
         continue_rebase: false,
         abort: false,
@@ -1423,6 +1446,9 @@ async fn test_rebase_preserves_untracked_files() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1450,6 +1476,8 @@ async fn test_rebase_preserves_untracked_files() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -1463,6 +1491,9 @@ async fn test_rebase_preserves_untracked_files() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1490,6 +1521,8 @@ async fn test_rebase_preserves_untracked_files() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -1503,6 +1536,9 @@ async fn test_rebase_preserves_untracked_files() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1530,6 +1566,8 @@ async fn test_rebase_preserves_untracked_files() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -1537,6 +1575,8 @@ async fn test_rebase_preserves_untracked_files() {
     fs::write(temp_path.path().join("notes.txt"), "keep me").unwrap();
 
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: Some("main".to_string()),
         continue_rebase: false,
         abort: false,
@@ -1577,6 +1617,9 @@ async fn test_rebase_already_up_to_date() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1605,6 +1648,9 @@ async fn test_rebase_already_up_to_date() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1632,11 +1678,15 @@ async fn test_rebase_already_up_to_date() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
     // Try to rebase feature onto master (should be up to date)
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: Some("main".to_string()),
         continue_rebase: false,
         abort: false,
@@ -1669,6 +1719,9 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1696,6 +1749,8 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -1709,6 +1764,9 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1736,6 +1794,8 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -1749,6 +1809,9 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1776,11 +1839,15 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
     // Start rebase
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: Some("main".to_string()),
         continue_rebase: false,
         abort: false,
@@ -1800,6 +1867,8 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
     // Rebase should complete (no conflict in this case)
     // But let's test abort when no rebase is in progress
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: None,
         continue_rebase: false,
         abort: true,
@@ -1850,6 +1919,9 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1877,6 +1949,8 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
     fs::write(temp_path.path().join("feature.txt"), "feature").unwrap();
@@ -1889,6 +1963,9 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1917,6 +1994,8 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
     fs::write(temp_path.path().join("master.txt"), "main").unwrap();
@@ -1929,6 +2008,9 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1957,9 +2039,13 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: Some("main".to_string()),
         continue_rebase: false,
         abort: false,
@@ -2006,6 +2092,8 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
 
     // Abort should restore the original branch ref.
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: None,
         continue_rebase: false,
         abort: true,
@@ -2054,6 +2142,9 @@ async fn test_rebase_continue_no_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2074,6 +2165,8 @@ async fn test_rebase_continue_no_rebase() {
 
     // Try to continue when no rebase is in progress
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: None,
         continue_rebase: true,
         abort: false,
@@ -2104,6 +2197,9 @@ async fn test_rebase_skip_no_rebase() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2124,6 +2220,8 @@ async fn test_rebase_skip_no_rebase() {
 
     // Try to skip when no rebase is in progress
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: None,
         continue_rebase: false,
         abort: false,
@@ -2156,6 +2254,9 @@ async fn test_rebase_with_conflict_and_abort() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2183,6 +2284,8 @@ async fn test_rebase_with_conflict_and_abort() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -2200,6 +2303,9 @@ async fn test_rebase_with_conflict_and_abort() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2227,6 +2333,8 @@ async fn test_rebase_with_conflict_and_abort() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -2240,6 +2348,9 @@ async fn test_rebase_with_conflict_and_abort() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2267,10 +2378,14 @@ async fn test_rebase_with_conflict_and_abort() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: Some("main".to_string()),
         continue_rebase: false,
         abort: false,
@@ -2297,6 +2412,8 @@ async fn test_rebase_with_conflict_and_abort() {
 
     // 6. Abort the rebase
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: None,
         continue_rebase: false,
         abort: true,
@@ -2360,6 +2477,9 @@ async fn test_rebase_binary_conflict_writes_markers() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2387,6 +2507,8 @@ async fn test_rebase_binary_conflict_writes_markers() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
     fs::write(&file_path, &feature_bytes).unwrap();
@@ -2399,6 +2521,9 @@ async fn test_rebase_binary_conflict_writes_markers() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2426,6 +2551,8 @@ async fn test_rebase_binary_conflict_writes_markers() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
     fs::write(&file_path, &master_bytes).unwrap();
@@ -2438,6 +2565,9 @@ async fn test_rebase_binary_conflict_writes_markers() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2465,9 +2595,13 @@ async fn test_rebase_binary_conflict_writes_markers() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: Some("main".to_string()),
         continue_rebase: false,
         abort: false,
@@ -2497,6 +2631,8 @@ async fn test_rebase_binary_conflict_writes_markers() {
 
     // Cleanup: abort rebase
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: None,
         continue_rebase: false,
         abort: true,
@@ -2534,6 +2670,9 @@ async fn test_rebase_with_conflict_and_skip() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2561,6 +2700,8 @@ async fn test_rebase_with_conflict_and_skip() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -2579,6 +2720,9 @@ async fn test_rebase_with_conflict_and_skip() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2612,6 +2756,9 @@ async fn test_rebase_with_conflict_and_skip() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2639,6 +2786,8 @@ async fn test_rebase_with_conflict_and_skip() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -2652,6 +2801,9 @@ async fn test_rebase_with_conflict_and_skip() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2679,10 +2831,14 @@ async fn test_rebase_with_conflict_and_skip() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: Some("main".to_string()),
         continue_rebase: false,
         abort: false,
@@ -2701,6 +2857,8 @@ async fn test_rebase_with_conflict_and_skip() {
     );
 
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: None,
         continue_rebase: false,
         abort: false,
@@ -2743,6 +2901,9 @@ async fn test_rebase_with_conflict_and_continue() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2770,6 +2931,8 @@ async fn test_rebase_with_conflict_and_continue() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -2787,6 +2950,9 @@ async fn test_rebase_with_conflict_and_continue() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2814,6 +2980,8 @@ async fn test_rebase_with_conflict_and_continue() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -2827,6 +2995,9 @@ async fn test_rebase_with_conflict_and_continue() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2854,10 +3025,14 @@ async fn test_rebase_with_conflict_and_continue() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: Some("main".to_string()),
         continue_rebase: false,
         abort: false,
@@ -2892,11 +3067,16 @@ async fn test_rebase_with_conflict_and_continue() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
     // Continue the rebase
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: None,
         continue_rebase: true,
         abort: false,
@@ -2954,6 +3134,9 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2981,6 +3164,8 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -2995,6 +3180,9 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3028,6 +3216,9 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3057,6 +3248,9 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3084,6 +3278,8 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -3097,6 +3293,9 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3124,10 +3323,14 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: Some("main".to_string()),
         continue_rebase: false,
         abort: false,
@@ -3147,6 +3350,8 @@ async fn test_rebase_multiple_commits_partial_conflict() {
 
     // Skip the conflicting commit (F1)
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: None,
         continue_rebase: false,
         abort: false,
@@ -3205,6 +3410,9 @@ async fn test_rebase_state_persistence() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3232,6 +3440,8 @@ async fn test_rebase_state_persistence() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -3245,6 +3455,9 @@ async fn test_rebase_state_persistence() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3272,6 +3485,8 @@ async fn test_rebase_state_persistence() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -3285,6 +3500,9 @@ async fn test_rebase_state_persistence() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3312,10 +3530,14 @@ async fn test_rebase_state_persistence() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: Some("main".to_string()),
         continue_rebase: false,
         abort: false,
@@ -3352,6 +3574,8 @@ async fn test_rebase_state_persistence() {
 
     // Clean up - abort the rebase
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: None,
         continue_rebase: false,
         abort: true,
@@ -3394,6 +3618,9 @@ async fn test_rebase_fast_forward_branch_behind() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3421,6 +3648,8 @@ async fn test_rebase_fast_forward_branch_behind() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -3433,6 +3662,8 @@ async fn test_rebase_fast_forward_branch_behind() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -3446,6 +3677,9 @@ async fn test_rebase_fast_forward_branch_behind() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3475,10 +3709,14 @@ async fn test_rebase_fast_forward_branch_behind() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: Some("main".to_string()),
         continue_rebase: false,
         abort: false,
@@ -3523,6 +3761,9 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3550,6 +3791,8 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -3562,6 +3805,8 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -3575,6 +3820,9 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3602,6 +3850,8 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -3609,6 +3859,8 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
     fs::write(temp_path.path().join("file.txt"), "local-modification").unwrap();
 
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: Some("main".to_string()),
         continue_rebase: false,
         abort: false,
@@ -3653,6 +3905,9 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3680,6 +3935,8 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -3692,6 +3949,8 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -3705,6 +3964,9 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3732,6 +3994,8 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -3739,6 +4003,8 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
     fs::write(temp_path.path().join("new.txt"), "local-untracked").unwrap();
 
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: Some("main".to_string()),
         continue_rebase: false,
         abort: false,
@@ -3783,6 +4049,9 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3810,6 +4079,8 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -3823,6 +4094,9 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3850,6 +4124,8 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -3863,6 +4139,9 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3890,6 +4169,8 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -3897,6 +4178,8 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
     fs::write(temp_path.path().join("file.txt"), "dirty").unwrap();
 
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: Some("main".to_string()),
         continue_rebase: false,
         abort: false,
@@ -3948,6 +4231,9 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3975,6 +4261,8 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -3989,6 +4277,9 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4016,6 +4307,8 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -4029,6 +4322,9 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4056,10 +4352,14 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: Some("main".to_string()),
         continue_rebase: false,
         abort: false,
@@ -4084,6 +4384,8 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
 
     // Clean up
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: None,
         continue_rebase: false,
         abort: true,
@@ -4114,6 +4416,9 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4141,6 +4446,8 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -4155,6 +4462,9 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4200,6 +4510,8 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -4213,6 +4525,9 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4240,12 +4555,16 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
     fs::write(temp_path.path().join("new.txt"), "keep me").unwrap();
 
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: Some("main".to_string()),
         continue_rebase: false,
         abort: false,
@@ -4267,6 +4586,8 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
 
     // Clean up
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: None,
         continue_rebase: false,
         abort: true,
@@ -4297,6 +4618,9 @@ async fn test_rebase_continue_requires_resolution() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4324,6 +4648,8 @@ async fn test_rebase_continue_requires_resolution() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -4337,6 +4663,9 @@ async fn test_rebase_continue_requires_resolution() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4364,6 +4693,8 @@ async fn test_rebase_continue_requires_resolution() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -4377,6 +4708,9 @@ async fn test_rebase_continue_requires_resolution() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4404,10 +4738,14 @@ async fn test_rebase_continue_requires_resolution() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: Some("main".to_string()),
         continue_rebase: false,
         abort: false,
@@ -4428,6 +4766,8 @@ async fn test_rebase_continue_requires_resolution() {
 
     // Continue without resolving conflicts
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: None,
         continue_rebase: true,
         abort: false,
@@ -4448,6 +4788,8 @@ async fn test_rebase_continue_requires_resolution() {
 
     // Clean up
     execute(RebaseArgs {
+        onto: None,
+        branch: None,
         upstream: None,
         continue_rebase: false,
         abort: true,
@@ -4489,4 +4831,274 @@ fn test_rebase_help_lists_examples_banner() {
             "rebase --help should include `{invocation}`, stdout: {stdout}"
         );
     }
+}
+
+// ── PR-14: rebase --onto <newbase> [<upstream>] [<branch>] ──────────────────
+
+/// Resolve a revision to its full OID via the CLI.
+fn rev_parse_cli(repo: &Path, rev: &str) -> String {
+    let output = run_libra_command(&["rev-parse", rev], repo);
+    assert_cli_success(&output, &format!("rev-parse {rev}"));
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// HEAD-first first-parent commit messages via `log --oneline`.
+fn log_messages_cli(repo: &Path) -> Vec<String> {
+    let output = run_libra_command(&["log", "--oneline"], repo);
+    assert_cli_success(&output, "log --oneline");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| {
+            line.split_once(' ')
+                .map(|(_, msg)| msg)
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
+        .collect()
+}
+
+/// Build `base -> A` on main; `topic` (from A) -> `T1, T2`; main -> `B`. Returns
+/// `(repo, A_oid, B_oid)`. Leaves `topic` checked out. The `A..topic` range is
+/// `{T1, T2}`; `B` is the newbase candidate.
+fn create_cli_rebase_onto_repo() -> (tempfile::TempDir, String, String) {
+    let repo = tempdir().expect("failed to create temp repo");
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+
+    commit_file_via_cli(p, "base.txt", "base\n", "base");
+    commit_file_via_cli(p, "a.txt", "a\n", "A");
+    let a = rev_parse_cli(p, "HEAD");
+
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "topic"], p),
+        "switch -c topic",
+    );
+    commit_file_via_cli(p, "t1.txt", "t1\n", "T1");
+    commit_file_via_cli(p, "t2.txt", "t2\n", "T2");
+
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    commit_file_via_cli(p, "b.txt", "b\n", "B");
+    let b = rev_parse_cli(p, "HEAD");
+
+    assert_cli_success(&run_libra_command(&["switch", "topic"], p), "switch topic");
+    (repo, a, b)
+}
+
+#[test]
+fn test_rebase_onto_basic_graph_replays_range_onto_newbase() {
+    let (repo, a, _b) = create_cli_rebase_onto_repo();
+    let p = repo.path();
+
+    let output = run_libra_command(&["--json", "rebase", "--onto", "main", &a], p);
+    assert_cli_success(&output, "rebase --onto main <A>");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["status"], "completed");
+    assert_eq!(json["data"]["replay_count"], 2);
+
+    // topic must land T1/T2 onto B: base -> A -> B -> T1' -> T2' (HEAD-first).
+    let msgs = log_messages_cli(p);
+    assert!(msgs.len() >= 5, "unexpected history: {msgs:?}");
+    assert_eq!(
+        &msgs[..5],
+        &["T2", "T1", "B", "A", "base"],
+        "range A..topic must replay onto B, got: {msgs:?}"
+    );
+}
+
+#[test]
+fn test_rebase_onto_json_distinguishes_onto_from_upstream() {
+    let (repo, a, b) = create_cli_rebase_onto_repo();
+
+    let output = run_libra_command(&["--json", "rebase", "--onto", &b, &a], repo.path());
+    assert_cli_success(&output, "rebase --onto <B> <A>");
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["onto"].as_str().unwrap(),
+        b,
+        "onto must be the newbase OID, not the upstream"
+    );
+    assert_eq!(
+        json["data"]["upstream"].as_str().unwrap(),
+        a,
+        "upstream must be the upstream argument"
+    );
+    assert_eq!(json["data"]["replay_count"], 2);
+}
+
+#[test]
+fn test_rebase_without_onto_lands_on_upstream() {
+    let repo = create_cli_rebase_success_repo();
+    let p = repo.path();
+
+    let main_oid = rev_parse_cli(p, "main");
+    let output = run_libra_command(&["--json", "rebase", "main"], p);
+    assert_cli_success(&output, "plain rebase main");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["status"], "completed");
+    // Plain rebase: the landing point IS the upstream commit.
+    assert_eq!(json["data"]["onto"].as_str().unwrap(), main_oid);
+    assert_eq!(json["data"]["upstream"], "main");
+}
+
+#[test]
+fn test_rebase_onto_empty_range_does_not_move_branch() {
+    let repo = tempdir().expect("failed to create temp repo");
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    commit_file_via_cli(p, "base.txt", "base\n", "base");
+    commit_file_via_cli(p, "a.txt", "a\n", "A");
+    let a = rev_parse_cli(p, "HEAD");
+
+    // topic stays AT A (no extra commits) -> A..topic is empty.
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "topic"], p),
+        "switch -c topic",
+    );
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    commit_file_via_cli(p, "b.txt", "b\n", "B");
+    let b = rev_parse_cli(p, "main");
+    assert_cli_success(&run_libra_command(&["switch", "topic"], p), "switch topic");
+
+    let topic_before = rev_parse_cli(p, "topic");
+    let output = run_libra_command(&["--json", "rebase", "--onto", &b, &a], p);
+    assert_cli_success(&output, "rebase --onto B A (empty range)");
+    let json = parse_json_stdout(&output);
+    assert!(
+        matches!(
+            json["data"]["status"].as_str(),
+            Some("no-commits") | Some("already-up-to-date")
+        ),
+        "empty range must not replay, status: {}",
+        json["data"]["status"]
+    );
+    assert_eq!(json["data"]["onto"].as_str().unwrap(), b);
+    assert_eq!(
+        rev_parse_cli(p, "topic"),
+        topic_before,
+        "an empty --onto range must not move the branch"
+    );
+}
+
+#[test]
+fn test_rebase_onto_conflict_then_continue() {
+    let repo = tempdir().expect("failed to create temp repo");
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    commit_file_via_cli(p, "conflict.txt", "base\n", "base");
+    commit_file_via_cli(p, "a.txt", "a\n", "A");
+    let a = rev_parse_cli(p, "HEAD");
+
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "topic"], p),
+        "switch -c topic",
+    );
+    commit_file_via_cli(p, "conflict.txt", "topic\n", "T edits conflict");
+
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    commit_file_via_cli(p, "conflict.txt", "newbase\n", "B edits conflict");
+
+    assert_cli_success(&run_libra_command(&["switch", "topic"], p), "switch topic");
+
+    // Replaying T (base->topic) onto B (conflict=newbase) conflicts.
+    let output = run_libra_command(&["rebase", "--onto", "main", &a], p);
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "expected a replay conflict"
+    );
+    let conflicted = fs::read_to_string(p.join("conflict.txt")).unwrap();
+    assert!(
+        conflicted.contains("<<<<<<<"),
+        "expected conflict markers: {conflicted}"
+    );
+
+    // Resolve and continue.
+    fs::write(p.join("conflict.txt"), "resolved\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "conflict.txt"], p),
+        "stage resolution",
+    );
+    let cont = run_libra_command(&["--json", "rebase", "--continue"], p);
+    assert_cli_success(&cont, "rebase --continue after onto conflict");
+
+    // topic landed on B: base -> A -> B -> T' (HEAD-first).
+    let msgs = log_messages_cli(p);
+    assert_eq!(
+        &msgs[..4],
+        &["T edits conflict", "B edits conflict", "A", "base"],
+        "continued rebase must land on the newbase chain, got: {msgs:?}"
+    );
+}
+
+#[test]
+fn test_rebase_onto_with_branch_positional_switches_first() {
+    let (repo, a, _b) = create_cli_rebase_onto_repo();
+    let p = repo.path();
+
+    // Move off topic, then name it as the third positional.
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    let output = run_libra_command(&["--json", "rebase", "--onto", "main", &a, "topic"], p);
+    assert_cli_success(&output, "rebase --onto main A topic");
+
+    let current = run_libra_command(&["branch", "--show-current"], p);
+    assert_eq!(
+        String::from_utf8_lossy(&current.stdout).trim(),
+        "topic",
+        "the named <branch> must be checked out"
+    );
+    let msgs = log_messages_cli(p);
+    assert_eq!(
+        &msgs[..5],
+        &["T2", "T1", "B", "A", "base"],
+        "history: {msgs:?}"
+    );
+}
+
+#[test]
+fn test_rebase_onto_nonexistent_branch_fails() {
+    let (repo, a, _b) = create_cli_rebase_onto_repo();
+    let output = run_libra_command(
+        &["rebase", "--onto", "main", &a, "no-such-branch"],
+        repo.path(),
+    );
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "a missing <branch> must fail rather than silently rebase the current branch"
+    );
+}
+
+#[test]
+fn test_rebase_onto_unresolvable_newbase_fails() {
+    let (repo, a, _b) = create_cli_rebase_onto_repo();
+    let output = run_libra_command(&["rebase", "--onto", "does-not-exist", &a], repo.path());
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "unresolvable --onto must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("does-not-exist"),
+        "error should name the bad --onto target, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_rebase_help_lists_onto_and_examples() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["rebase", "--help"], repo.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--onto"),
+        "rebase --help must list --onto: {stdout}"
+    );
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "rebase --help must render the EXAMPLES banner: {stdout}"
+    );
 }

@@ -16,6 +16,7 @@ fn create_annotated_tag(repo: &std::path::Path, name: &str) -> String {
             name,
             Some("release notes".to_string()),
             false,
+            false,
         ))
         .expect("failed to create annotated tag")
         .target
@@ -26,7 +27,7 @@ fn create_lightweight_tag(repo: &std::path::Path, name: &str) {
     let _guard = ChangeDirGuard::new(repo);
     let runtime = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     runtime
-        .block_on(internal_tag::create(name, None, false))
+        .block_on(internal_tag::create(name, None, false, false))
         .expect("failed to create lightweight tag");
 }
 

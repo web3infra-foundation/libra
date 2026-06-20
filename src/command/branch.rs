@@ -86,6 +86,8 @@ pub enum BranchOutput {
         detached_head: Option<String>,
         #[serde(skip_serializing)]
         show_unborn_head: bool,
+        #[serde(skip_serializing)]
+        ignore_case: bool,
     },
     /// `branch <name> [base]` succeeded.
     #[serde(rename = "create")]
@@ -105,6 +107,9 @@ pub enum BranchOutput {
     /// `--set-upstream-to` succeeded. `upstream` is in `remote/branch` form.
     #[serde(rename = "set-upstream")]
     SetUpstream { branch: String, upstream: String },
+    /// `--unset-upstream` succeeded.
+    #[serde(rename = "unset-upstream")]
+    UnsetUpstream { branch: String },
     /// `--show-current` result. `detached` is true when HEAD is detached;
     /// `name` is `None` in that case.
     #[serde(rename = "show-current")]
@@ -123,6 +128,7 @@ impl BranchOutput {
                 | Self::Delete { .. }
                 | Self::Rename { .. }
                 | Self::SetUpstream { .. }
+                | Self::UnsetUpstream { .. }
         )
     }
 }
@@ -178,6 +184,10 @@ pub struct BranchArgs {
     #[clap(short = 'u', long, group = "action", value_name = "UPSTREAM")]
     pub set_upstream_to: Option<String>,
 
+    /// Remove the branch's upstream configuration. Defaults to current branch.
+    #[clap(long = "unset-upstream", group = "action", value_name = "BRANCH", num_args = 0..=1, default_missing_value = "")]
+    pub unset_upstream: Option<String>,
+
     /// show current branch
     #[clap(long, group = "action")]
     pub show_current: bool,
@@ -202,6 +212,14 @@ pub struct BranchArgs {
     /// Only list branches which don’t contain the specified commit (HEAD if not specified). Implies --list.
     #[clap(long, group = "query", alias = "without", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD", action = clap::ArgAction::Append)]
     pub no_contains: Vec<String>,
+
+    /// Only list branches pointing at the given object. Implies --list.
+    #[clap(long = "points-at", group = "query", value_name = "object")]
+    pub points_at: Option<String>,
+
+    /// Sorting and name comparisons ignore case where applicable.
+    #[clap(long = "ignore-case", group = "query")]
+    pub ignore_case: bool,
 }
 /// Fire-and-forget entry: prints the rendered error to stderr but does not
 /// signal exit code.
@@ -582,6 +600,20 @@ async fn set_upstream_impl(branch: &str, upstream: &str) -> Result<(), BranchErr
     set_upstream_with_conn(&db, branch, upstream).await
 }
 
+async fn unset_upstream_impl(branch: &str) -> Result<(), BranchError> {
+    require_existing_local_branch(branch).await?;
+    let db = get_db_conn_instance().await;
+    for key in [
+        format!("branch.{branch}.remote"),
+        format!("branch.{branch}.merge"),
+    ] {
+        ConfigKv::unset_all_with_conn(&db, &key)
+            .await
+            .map_err(|e| branch_config_write_error(&key, e))?;
+    }
+    Ok(())
+}
+
 /// Enumerate every branch stored under each known remote.
 ///
 /// Functional scope:
@@ -835,7 +867,8 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
     } else {
         BranchListMode::Local
     };
-    let has_commit_filters = !args.contains.is_empty() || !args.no_contains.is_empty();
+    let has_commit_filters =
+        !args.contains.is_empty() || !args.no_contains.is_empty() || args.points_at.is_some();
     let (head_name, detached_head) = match Head::current().await {
         Head::Branch(name) => (Some(name), None),
         Head::Detached(commit_hash) => (None, Some(commit_hash.to_string())),
@@ -852,6 +885,19 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
     } else {
         vec![]
     };
+
+    let points_at = match args.points_at.as_deref() {
+        Some(points_at) => Some(
+            get_target_commit(points_at)
+                .await
+                .map_err(|_| BranchError::InvalidCommit(points_at.to_string()))?,
+        ),
+        None => None,
+    };
+    if let Some(points_at) = points_at {
+        local_branches.retain(|branch| branch.commit == points_at);
+        remote_branches.retain(|branch| branch.commit == points_at);
+    }
 
     let contains_set = resolve_commits(&args.contains).await?;
     let no_contains_set = resolve_commits(&args.no_contains).await?;
@@ -890,6 +936,7 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
         head_name,
         detached_head,
         show_unborn_head,
+        ignore_case: args.ignore_case,
     })
 }
 
@@ -940,6 +987,17 @@ async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
             branch,
             upstream: upstream.to_string(),
         })
+    } else if let Some(branch) = args.unset_upstream.as_deref() {
+        let branch = if branch.is_empty() {
+            match Head::current().await {
+                Head::Branch(name) => name,
+                Head::Detached(_) => return Err(detached_head_branch_error()),
+            }
+        } else {
+            branch.to_string()
+        };
+        unset_upstream_impl(&branch).await?;
+        Ok(BranchOutput::UnsetUpstream { branch })
     } else if !args.rename.is_empty() {
         rename_branch_impl(&args.rename).await
     } else {
@@ -968,6 +1026,7 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
             head_name,
             detached_head,
             show_unborn_head,
+            ignore_case,
         } => {
             if let Some(detached_head) = detached_head {
                 println!(
@@ -988,6 +1047,8 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
                     std::cmp::Ordering::Less
                 } else if b.current {
                     std::cmp::Ordering::Greater
+                } else if *ignore_case {
+                    a.name.to_lowercase().cmp(&b.name.to_lowercase())
                 } else {
                     a.name.cmp(&b.name)
                 }
@@ -1019,6 +1080,9 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
         }
         BranchOutput::SetUpstream { branch, upstream } => {
             println!("Branch '{branch}' set up to track remote branch '{upstream}'");
+        }
+        BranchOutput::UnsetUpstream { branch } => {
+            println!("Branch '{branch}' no longer tracks an upstream branch");
         }
         BranchOutput::ShowCurrent {
             name,
@@ -1134,12 +1198,15 @@ pub async fn list_branches(
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: matches!(list_mode, BranchListMode::Remote),
         all: matches!(list_mode, BranchListMode::All),
         contains: commits_contains.to_vec(),
         no_contains: commits_no_contains.to_vec(),
+        points_at: None,
+        ignore_case: false,
     };
     let result = collect_branch_output(&args).await.map_err(CliError::from)?;
     render_branch_output(&result, &OutputConfig::default())

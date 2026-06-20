@@ -802,6 +802,8 @@ async fn test_log_patch_no_pathspec() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -831,6 +833,8 @@ async fn test_log_patch_no_pathspec() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -921,6 +925,8 @@ async fn test_log_patch_with_pathspec() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1050,6 +1056,8 @@ async fn test_log_stat() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1078,6 +1086,8 @@ async fn test_log_stat() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1134,6 +1144,8 @@ async fn test_log_stat_with_modifications() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1162,6 +1174,8 @@ async fn test_log_stat_with_modifications() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1369,6 +1383,8 @@ async fn test_log_graph_simple_chain() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1397,6 +1413,8 @@ async fn test_log_graph_simple_chain() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1443,6 +1461,8 @@ async fn test_log_stat_and_graph_combined() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1574,6 +1594,8 @@ async fn test_log_double_dash_disables_short_number_rewrite() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1603,6 +1625,8 @@ async fn test_log_double_dash_disables_short_number_rewrite() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1848,6 +1872,8 @@ async fn test_log_grep_filtering() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1877,6 +1903,8 @@ async fn test_log_grep_filtering() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1906,6 +1934,8 @@ async fn test_log_grep_filtering() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1990,6 +2020,8 @@ async fn test_log_reverse_outputs_oldest_first() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2009,6 +2041,8 @@ async fn test_log_reverse_outputs_oldest_first() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2044,6 +2078,8 @@ async fn test_log_range_excludes_start_commit() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2064,6 +2100,8 @@ async fn test_log_range_excludes_start_commit() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2098,6 +2136,8 @@ async fn test_log_all_includes_branches() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2114,12 +2154,15 @@ async fn test_log_all_includes_branches() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 
@@ -2133,6 +2176,8 @@ async fn test_log_all_includes_branches() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2170,6 +2215,8 @@ async fn test_log_follow_detects_rename() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2190,6 +2237,8 @@ async fn test_log_follow_detects_rename() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2225,6 +2274,8 @@ async fn test_log_line_range_flag_accepted() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {

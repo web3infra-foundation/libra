@@ -2,7 +2,7 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use std::fs;
+use std::{fs, path::Path, str::FromStr};
 
 use libra::{
     command::{
@@ -16,6 +16,15 @@ use serial_test::serial;
 use tempfile::tempdir;
 
 use super::*;
+
+fn latest_stash_commit(repo: &Path) -> Commit {
+    let _guard = ChangeDirGuard::new(repo);
+    let stash_ref =
+        fs::read_to_string(repo.join(".libra/refs/stash")).expect("failed to read refs/stash");
+    let stash_hash =
+        ObjectHash::from_str(stash_ref.trim()).expect("refs/stash must contain a valid object id");
+    load_object::<Commit>(&stash_hash).expect("failed to load latest stash commit")
+}
 
 #[test]
 #[serial]
@@ -48,6 +57,9 @@ async fn test_stash_push_no_changes() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -93,6 +105,9 @@ async fn test_stash_push_no_changes_json_output() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -139,6 +154,9 @@ async fn test_stash_push_and_pop() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -216,6 +234,9 @@ async fn test_stash_push_and_pop_preserves_dotfiles() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -290,6 +311,9 @@ async fn test_stash_list() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -411,6 +435,9 @@ async fn test_stash_drop() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -472,6 +499,9 @@ async fn test_stash_drop_missing_reflog_returns_no_stash_found() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -529,6 +559,9 @@ async fn test_stash_json_output() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -609,6 +642,238 @@ fn stash_round_trip_preserves_nested_dotfile_paths() {
     assert!(
         !repo.path().join("tool.toml").exists(),
         "stash pop should not flatten nested dotfiles into the repo root"
+    );
+}
+
+#[test]
+fn test_stash_push_default_excludes_untracked() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("tracked.txt"), "modified tracked\n")
+        .expect("failed to modify tracked file");
+    fs::write(repo.path().join("untracked.txt"), "untracked\n")
+        .expect("failed to write untracked file");
+
+    let output = run_libra_command(&["stash", "push"], repo.path());
+    assert_cli_success(&output, "default stash push");
+    assert!(
+        repo.path().join("untracked.txt").exists(),
+        "default stash push should leave untracked files in the worktree"
+    );
+
+    let output = run_libra_command(&["stash", "show", "--json"], repo.path());
+    assert_cli_success(&output, "stash show after default push");
+    let json = parse_json_stdout(&output);
+    let files = json["data"]["files"]
+        .as_array()
+        .expect("stash show files array");
+    assert!(
+        files.iter().all(|file| file["path"] != "untracked.txt"),
+        "default stash push must not record untracked files: {json}"
+    );
+}
+
+#[test]
+fn test_stash_push_untracked_only_not_noop() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("untracked.txt"), "untracked\n")
+        .expect("failed to write untracked file");
+
+    let output = run_libra_command(&["stash", "push", "-u", "--json"], repo.path());
+    assert_cli_success(&output, "stash push -u with only untracked files");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["action"], "push");
+    assert_eq!(json["data"]["included_untracked"], 1);
+    assert!(
+        !repo.path().join("untracked.txt").exists(),
+        "stash push -u should remove included untracked files"
+    );
+}
+
+#[test]
+fn test_stash_push_include_untracked() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("tracked.txt"), "modified tracked\n")
+        .expect("failed to modify tracked file");
+    fs::write(repo.path().join("untracked.txt"), "untracked\n")
+        .expect("failed to write untracked file");
+    fs::write(repo.path().join(".libraignore"), "ignored.log\n")
+        .expect("failed to update libraignore");
+    fs::write(repo.path().join("ignored.log"), "ignored\n").expect("failed to write ignored file");
+
+    let output = run_libra_command(&["stash", "push", "-u"], repo.path());
+    assert_cli_success(&output, "stash push -u");
+
+    assert_eq!(
+        fs::read_to_string(repo.path().join("tracked.txt")).expect("tracked file after stash -u"),
+        "tracked\n"
+    );
+    assert!(
+        !repo.path().join("untracked.txt").exists(),
+        "stash push -u should remove included untracked files from the worktree"
+    );
+    assert!(
+        repo.path().join("ignored.log").exists(),
+        "stash push -u must leave ignored files alone"
+    );
+
+    let stash_commit = latest_stash_commit(repo.path());
+    assert_eq!(
+        stash_commit.parent_commit_ids.len(),
+        3,
+        "stash push -u should write HEAD, index, and untracked parents"
+    );
+}
+
+#[test]
+fn test_stash_push_all_includes_ignored() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join(".libraignore"), "ignored.log\n")
+        .expect("failed to update libraignore");
+    fs::write(repo.path().join("untracked.txt"), "untracked\n")
+        .expect("failed to write untracked file");
+    fs::write(repo.path().join("ignored.log"), "ignored\n").expect("failed to write ignored file");
+
+    let output = run_libra_command(&["stash", "push", "--all", "--json"], repo.path());
+    assert_cli_success(&output, "stash push --all");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["included_untracked"], 2);
+
+    assert!(
+        !repo.path().join("untracked.txt").exists(),
+        "stash push --all should remove visible untracked files"
+    );
+    assert!(
+        !repo.path().join("ignored.log").exists(),
+        "stash push --all should remove included ignored files from the worktree"
+    );
+}
+
+#[test]
+fn test_stash_push_keep_index() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("tracked.txt"), "staged version\n")
+        .expect("failed to write staged version");
+    let output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert_cli_success(&output, "stage tracked file before stash --keep-index");
+    fs::write(repo.path().join("tracked.txt"), "worktree version\n")
+        .expect("failed to write unstaged version");
+
+    let output = run_libra_command(&["stash", "push", "--keep-index"], repo.path());
+    assert_cli_success(&output, "stash push --keep-index");
+
+    assert_eq!(
+        fs::read_to_string(repo.path().join("tracked.txt"))
+            .expect("tracked file after stash --keep-index"),
+        "staged version\n",
+        "stash --keep-index should keep staged content in the worktree"
+    );
+
+    let status = run_libra_command(&["status", "--json"], repo.path());
+    assert_cli_success(&status, "status --json after stash --keep-index");
+    let json = parse_json_stdout(&status);
+    let staged = json["data"]["staged"]["modified"]
+        .as_array()
+        .expect("staged modified array");
+    assert!(
+        staged.iter().any(|path| path == "tracked.txt"),
+        "pre-stash staged state should remain in the index: {json}"
+    );
+    let unstaged = json["data"]["unstaged"]["modified"]
+        .as_array()
+        .expect("unstaged modified array");
+    assert!(
+        unstaged.iter().all(|path| path != "tracked.txt"),
+        "unstaged delta should be removed by --keep-index: {json}"
+    );
+}
+
+#[test]
+fn test_stash_push_keep_index_mixed_file() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("tracked.txt"), "staged version\n")
+        .expect("failed to write staged version");
+    let output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert_cli_success(&output, "stage tracked file before stash --keep-index");
+    fs::write(repo.path().join("tracked.txt"), "worktree version\n")
+        .expect("failed to write unstaged version");
+
+    let output = run_libra_command(&["stash", "push", "--keep-index", "--json"], repo.path());
+    assert_cli_success(&output, "stash push --keep-index --json");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["kept_index"], true);
+
+    assert_eq!(
+        fs::read_to_string(repo.path().join("tracked.txt"))
+            .expect("tracked file after stash --keep-index"),
+        "staged version\n"
+    );
+}
+
+#[test]
+fn test_stash_apply_restores_included_untracked() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("untracked.txt"), "untracked\n")
+        .expect("failed to write untracked file");
+    let output = run_libra_command(&["stash", "push", "-u"], repo.path());
+    assert_cli_success(&output, "stash push -u before apply");
+    assert!(
+        !repo.path().join("untracked.txt").exists(),
+        "stash push -u should remove included untracked file"
+    );
+
+    let output = run_libra_command(&["stash", "apply"], repo.path());
+    assert_cli_success(
+        &output,
+        "stash apply should restore included untracked file",
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join("untracked.txt"))
+            .expect("restored untracked file should exist"),
+        "untracked\n"
+    );
+
+    let status = run_libra_command(&["status", "--json"], repo.path());
+    assert_cli_success(&status, "status --json after restoring untracked file");
+    let json = parse_json_stdout(&status);
+    let untracked = json["data"]["untracked"]
+        .as_array()
+        .expect("untracked array");
+    assert!(
+        untracked.iter().any(|path| path == "untracked.txt"),
+        "restored parent3 file should remain untracked: {json}"
+    );
+}
+
+#[test]
+fn test_stash_apply_untracked_collision_errors() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("untracked.txt"), "stashed\n")
+        .expect("failed to write stashed untracked file");
+    let output = run_libra_command(&["stash", "push", "-u"], repo.path());
+    assert_cli_success(&output, "stash push -u before collision");
+    fs::write(repo.path().join("untracked.txt"), "local\n")
+        .expect("failed to write colliding untracked file");
+
+    let output = run_libra_command(&["stash", "apply"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("untracked files would be overwritten by stash apply"),
+        "collision should name untracked overwrite risk, stderr: {stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join("untracked.txt"))
+            .expect("colliding local file should remain"),
+        "local\n",
+        "stash apply must not overwrite a colliding untracked file"
     );
 }
 

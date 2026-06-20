@@ -238,6 +238,186 @@ async fn test_switch_track_human_output_keeps_tracking_message() {
     );
 }
 
+/// Default-on DWIM guess: `libra switch <name>` with no local branch but a
+/// unique remote-tracking branch creates a local tracking branch and switches.
+#[tokio::test]
+#[serial]
+async fn test_switch_guess_creates_tracking_branch() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    let head = Head::current_commit().await.unwrap();
+    let output = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "add origin remote for guess test");
+
+    Branch::update_branch(
+        "refs/remotes/origin/guessed",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
+
+    // No --guess flag: guessing is enabled by default (Git parity).
+    let output = run_libra_command(&["switch", "guessed"], repo.path());
+    assert_cli_success(&output, "switch guessed (default guess)");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Branch 'guessed' set up to track remote branch 'origin/guessed'"),
+        "expected upstream tracking message in stdout, got: {stdout}"
+    );
+
+    let output = run_libra_command(&["branch", "--show-current"], repo.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("guessed"),
+        "expected to be on the guessed branch, got: {stdout}"
+    );
+}
+
+/// `--no-guess` disables the DWIM behaviour: a remote-only name is rejected as
+/// not-found instead of being auto-created.
+#[tokio::test]
+#[serial]
+async fn test_switch_no_guess_rejects_remote_only_branch() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    let head = Head::current_commit().await.unwrap();
+    let output = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "add origin remote for no-guess test");
+
+    Branch::update_branch(
+        "refs/remotes/origin/guessed",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
+
+    let output = run_libra_command(&["switch", "--no-guess", "guessed"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("branch 'guessed' not found"),
+        "expected not-found error with --no-guess, got: {stderr}"
+    );
+
+    // The guess must not have created a local branch as a side effect.
+    let output = run_libra_command(&["branch", "--list"], repo.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("guessed"),
+        "no local 'guessed' branch should exist after --no-guess, got: {stdout}"
+    );
+}
+
+/// `checkout.guess=false` disables guessing when neither flag is supplied; an
+/// explicit `--guess` still overrides the config back on.
+#[tokio::test]
+#[serial]
+async fn test_switch_guess_config_disables_then_flag_overrides() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    let head = Head::current_commit().await.unwrap();
+    let output = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "add origin remote for guess-config test");
+
+    Branch::update_branch(
+        "refs/remotes/origin/guessed",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
+
+    let output = run_libra_command(&["config", "set", "checkout.guess", "false"], repo.path());
+    assert_cli_success(&output, "set checkout.guess=false");
+
+    // Config off, no flag: guessing disabled -> not found.
+    let output = run_libra_command(&["switch", "guessed"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+
+    // Explicit --guess overrides the config.
+    let output = run_libra_command(&["switch", "--guess", "guessed"], repo.path());
+    assert_cli_success(&output, "switch --guess overrides checkout.guess=false");
+    let output = run_libra_command(&["branch", "--show-current"], repo.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("guessed"),
+        "expected to be on guessed after explicit --guess, got: {stdout}"
+    );
+}
+
+/// When several remotes carry the guessed name the switch is blocked as
+/// ambiguous, but `checkout.defaultRemote` breaks the tie.
+#[tokio::test]
+#[serial]
+async fn test_switch_guess_ambiguous_resolved_by_default_remote() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    let head = Head::current_commit().await.unwrap();
+    for remote in ["origin", "upstream"] {
+        let output = run_libra_command(
+            &[
+                "remote",
+                "add",
+                remote,
+                &format!("https://example.com/{remote}.git"),
+            ],
+            repo.path(),
+        );
+        assert_cli_success(&output, "add remote for ambiguity test");
+        Branch::update_branch(
+            &format!("refs/remotes/{remote}/feature"),
+            &head.to_string(),
+            Some(remote),
+        )
+        .await
+        .unwrap();
+    }
+
+    // Two remotes match -> ambiguous, exit 128, nothing created.
+    let output = run_libra_command(&["switch", "feature"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("matched multiple remote-tracking branches"),
+        "expected ambiguity error, got: {stderr}"
+    );
+    let output = run_libra_command(&["branch", "--list"], repo.path());
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("feature"),
+        "ambiguous guess must not create a local branch"
+    );
+
+    // checkout.defaultRemote breaks the tie.
+    let output = run_libra_command(
+        &["config", "set", "checkout.defaultRemote", "upstream"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "set checkout.defaultRemote=upstream");
+
+    let output = run_libra_command(&["switch", "feature"], repo.path());
+    assert_cli_success(&output, "switch feature resolved by defaultRemote");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Branch 'feature' set up to track remote branch 'upstream/feature'"),
+        "expected upstream tracking via defaultRemote, got: {stdout}"
+    );
+}
+
 // async fn test_check_status() {
 //     println!("\n\x1b[1mTest check_status function.\x1b[0m");
 //
@@ -298,6 +478,8 @@ async fn test_switch_function() {
             detach: false,
             track: false,
             force: false,
+            guess: false,
+            no_guess: false,
         };
         switch::execute(args).await;
         let head = Head::current().await;
@@ -352,6 +534,8 @@ async fn test_switch_function() {
             detach: true,
             track: false,
             force: false,
+            guess: false,
+            no_guess: false,
         };
         switch::execute(args).await;
         let head = Head::current().await;
@@ -377,6 +561,8 @@ async fn test_switch_function() {
             detach: false,
             track: false,
             force: false,
+            guess: false,
+            no_guess: false,
         };
         switch::execute(args).await;
         let head = Head::current().await;
@@ -504,6 +690,8 @@ async fn test_switch_track_sets_upstream() {
         detach: false,
         track: true,
         force: false,
+        guess: false,
+        no_guess: false,
     };
     switch::execute(args).await;
 
@@ -792,6 +980,8 @@ async fn switch_to_detach(branch_test: String) -> String {
         detach: true,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     };
     switch::execute(args).await;
     let head = Head::current().await;
@@ -812,6 +1002,8 @@ async fn switch_to_branch(branch_test: String) {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     };
     switch::execute(args).await;
 }

@@ -3,10 +3,11 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
+    cmp::Reverse,
     collections::{HashMap, HashSet},
     fs,
     io::{BufRead, BufReader},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     str::FromStr,
 };
 
@@ -34,6 +35,7 @@ use crate::{
             rebuild_index_from_tree, remove_empty_directories, reset_index_to_commit,
             restore_working_directory_from_tree,
         },
+        status,
     },
     internal::{
         branch::{Branch as InternalBranch, BranchStoreError},
@@ -167,7 +169,14 @@ pub enum StashOutput {
     #[serde(rename = "noop")]
     Noop { message: String },
     #[serde(rename = "push")]
-    Push { message: String, stash_id: String },
+    Push {
+        message: String,
+        stash_id: String,
+        #[serde(default, skip_serializing_if = "is_zero_usize")]
+        included_untracked: usize,
+        #[serde(default, skip_serializing_if = "is_false")]
+        kept_index: bool,
+    },
     #[serde(rename = "pop")]
     Pop {
         index: usize,
@@ -230,10 +239,21 @@ pub struct StashFilesChangedStats {
     pub deleted: usize,
 }
 
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// `--help` examples shown in `libra stash --help` output.
 pub const STASH_EXAMPLES: &str = "\
 EXAMPLES:
     libra stash push -m 'WIP'         Save current changes
+    libra stash push -u               Include untracked files
+    libra stash push -a               Include untracked and ignored files
+    libra stash push --keep-index     Keep staged changes in place
     libra stash list                  Show all stash entries
     libra stash show                  File-level summary of stash@{0}
     libra stash show stash@{1}        Inspect a specific stash entry
@@ -264,7 +284,20 @@ async fn run_stash(stash_cmd: Stash, output: &OutputConfig) -> Result<StashOutpu
     util::require_repo().map_err(|_| StashError::NotInRepo)?;
 
     match stash_cmd {
-        Stash::Push { message } => run_push(message).await,
+        Stash::Push {
+            message,
+            include_untracked,
+            all,
+            keep_index,
+        } => {
+            run_push(StashPushOptions {
+                message,
+                include_untracked: include_untracked || all,
+                include_ignored: all,
+                keep_index,
+            })
+            .await
+        }
         Stash::Pop { stash } => run_pop(stash).await,
         Stash::List => run_list().await,
         Stash::Apply { stash } => run_apply(stash).await,
@@ -279,17 +312,26 @@ async fn run_stash(stash_cmd: Stash, output: &OutputConfig) -> Result<StashOutpu
     }
 }
 
-async fn run_push(message: Option<String>) -> Result<StashOutput, StashError> {
-    if !has_changes().await {
-        return Ok(StashOutput::Noop {
-            message: "No local changes to save".to_string(),
-        });
-    }
+#[derive(Debug, Default)]
+struct StashPushOptions {
+    message: Option<String>,
+    include_untracked: bool,
+    include_ignored: bool,
+    keep_index: bool,
+}
 
+async fn run_push(options: StashPushOptions) -> Result<StashOutput, StashError> {
     let git_dir =
         util::try_get_storage_path(None).map_err(|e| StashError::ReadObject(e.to_string()))?;
     let index_path = git_dir.join("index");
     let index = Index::load(&index_path).unwrap_or_else(|_| Index::new());
+    let included_untracked_paths = collect_included_untracked_paths(&options)?;
+
+    if !has_changes().await && included_untracked_paths.is_empty() {
+        return Ok(StashOutput::Noop {
+            message: "No local changes to save".to_string(),
+        });
+    }
 
     let head_commit_hash = Head::current_commit()
         .await
@@ -320,13 +362,14 @@ async fn run_push(message: Option<String>) -> Result<StashOutput, StashError> {
         }
     };
 
+    let head_commit_short = head_commit_hash_str
+        .get(..7)
+        .unwrap_or(head_commit_hash_str.as_str());
     let wip_message = format!(
         "WIP on {}: {} {}",
-        current_branch_name,
-        &head_commit_hash_str[..7],
-        head_commit_summary
+        current_branch_name, head_commit_short, head_commit_summary
     );
-    let final_message = message.unwrap_or(wip_message);
+    let final_message = options.message.unwrap_or(wip_message);
 
     let index_commit = Commit::new(
         author.clone(),
@@ -352,11 +395,34 @@ async fn run_push(message: Option<String>) -> Result<StashOutput, StashError> {
     let worktree_tree_hash = object::write_git_object(&git_dir, "tree", &worktree_tree_data)
         .map_err(|e| StashError::WriteObject(e.to_string()))?;
 
+    let untracked_parent = if included_untracked_paths.is_empty() {
+        None
+    } else {
+        let short_head = head_commit_hash_str
+            .get(..7)
+            .unwrap_or(head_commit_hash_str.as_str());
+        let untracked_message =
+            format!("untracked files on {current_branch_name}: {short_head} {head_commit_summary}");
+        Some(create_untracked_parent_commit(
+            workdir,
+            &git_dir,
+            &included_untracked_paths,
+            &author,
+            &committer,
+            &untracked_message,
+        )?)
+    };
+
+    let mut parents = vec![head_commit_hash, index_commit_hash];
+    if let Some(untracked_commit_hash) = untracked_parent {
+        parents.push(untracked_commit_hash);
+    }
+
     let stash_commit = Commit::new(
         author,
         committer.clone(),
         worktree_tree_hash,
-        vec![head_commit_hash, index_commit_hash],
+        parents,
         &final_message,
     );
     let stash_commit_data = stash_commit
@@ -371,10 +437,21 @@ async fn run_push(message: Option<String>) -> Result<StashOutput, StashError> {
     perform_hard_reset(&head_commit_hash)
         .await
         .map_err(StashError::ResetFailed)?;
+    if options.keep_index {
+        restore_worktree_to_index(&index, &head_commit_hash, workdir, &git_dir)
+            .map_err(StashError::ResetFailed)?;
+        index
+            .save(&index_path)
+            .map_err(|e| StashError::IndexSave(e.to_string()))?;
+    }
+    remove_included_untracked_paths(workdir, &included_untracked_paths)
+        .map_err(StashError::ResetFailed)?;
 
     Ok(StashOutput::Push {
         message: final_message,
         stash_id: stash_commit_hash.to_string(),
+        included_untracked: included_untracked_paths.len(),
+        kept_index: options.keep_index,
     })
 }
 
@@ -762,6 +839,7 @@ async fn do_apply(stash: Option<String>) -> Result<StashOutput, StashError> {
         .map_err(|e| StashError::ReadObject(e.to_string()))?;
     let stash_tree = Tree::from_bytes(&stash_tree_data, stash_commit.tree_id)
         .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let untracked_tree = load_untracked_parent_tree(&stash_commit, &git_dir)?;
 
     let merged_tree = merge_trees(&base_tree, &head_tree, &stash_tree, &git_dir)
         .map_err(StashError::MergeConflict)?;
@@ -779,6 +857,9 @@ async fn do_apply(stash: Option<String>) -> Result<StashOutput, StashError> {
         .map_err(|e| StashError::ReadObject(e.to_string()))?;
     let merged_files = tree::get_tree_files_recursive(&merged_tree, &git_dir, &PathBuf::new())
         .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    if let Some(untracked_tree) = untracked_tree.as_ref() {
+        ensure_untracked_restore_paths_clear(untracked_tree, workdir, &git_dir)?;
+    }
 
     for path in head_files.keys() {
         if !merged_files.contains_key(path) {
@@ -792,6 +873,10 @@ async fn do_apply(stash: Option<String>) -> Result<StashOutput, StashError> {
     restore_working_directory_from_tree(&merged_tree, workdir, "")
         .map_err(StashError::WriteObject)?;
     rebuild_index_from_tree(&merged_tree, &mut new_index, "").map_err(StashError::IndexSave)?;
+    if let Some(untracked_tree) = untracked_tree.as_ref() {
+        restore_working_directory_from_tree(untracked_tree, workdir, "")
+            .map_err(StashError::WriteObject)?;
+    }
 
     new_index
         .save(&index_path)
@@ -807,6 +892,49 @@ async fn do_apply(stash: Option<String>) -> Result<StashOutput, StashError> {
         stash_id: hash_str,
         branch,
     })
+}
+
+fn load_untracked_parent_tree(
+    stash_commit: &Commit,
+    git_dir: &Path,
+) -> Result<Option<Tree>, StashError> {
+    let Some(untracked_commit_hash) = stash_commit.parent_commit_ids.get(2) else {
+        return Ok(None);
+    };
+
+    let untracked_commit_data = object::read_git_object(git_dir, untracked_commit_hash)
+        .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let untracked_commit = Commit::from_bytes(&untracked_commit_data, *untracked_commit_hash)
+        .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let untracked_tree_data = object::read_git_object(git_dir, &untracked_commit.tree_id)
+        .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    Tree::from_bytes(&untracked_tree_data, untracked_commit.tree_id)
+        .map(Some)
+        .map_err(|e| StashError::ReadObject(e.to_string()))
+}
+
+fn ensure_untracked_restore_paths_clear(
+    untracked_tree: &Tree,
+    workdir: &Path,
+    git_dir: &Path,
+) -> Result<(), StashError> {
+    let files = tree::get_tree_files_recursive(untracked_tree, git_dir, &PathBuf::new())
+        .map_err(StashError::ReadObject)?;
+    let mut conflicts: Vec<String> = files
+        .keys()
+        .filter(|path| workdir.join(Path::new(path)).exists())
+        .cloned()
+        .collect();
+    conflicts.sort();
+
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+
+    Err(StashError::MergeConflict(format!(
+        "untracked files would be overwritten by stash apply:\n  {}",
+        conflicts.join("\n  ")
+    )))
 }
 
 fn do_drop(stash: Option<String>) -> Result<StashOutput, StashError> {
@@ -1184,39 +1312,28 @@ fn create_tree_from_workdir(workdir: &Path, git_dir: &Path, index: &Index) -> Re
                     .to_str()
                     .ok_or_else(|| format!("invalid path encoding: {}", relative_path.display()))?;
 
-                if let Some(entry) = index.get(relative_path_str, 0) {
-                    let mtime = Time::from_system_time(
-                        metadata.modified().unwrap_or(std::time::SystemTime::now()),
-                    );
-                    let size = metadata.len() as u32;
+                // Skip files that are not tracked in the index. Untracked files
+                // are only captured when `-u`/`--include-untracked` requests it,
+                // via the stash's dedicated third (untracked) parent commit.
+                let Some(entry) = index.get(relative_path_str, 0) else {
+                    continue;
+                };
 
-                    if entry.mtime == mtime && entry.size == size {
-                        #[cfg(unix)]
-                        let mode = if metadata.permissions().mode() & 0o111 != 0 {
-                            TreeItemMode::BlobExecutable
-                        } else {
-                            TreeItemMode::Blob
-                        };
-                        #[cfg(not(unix))]
-                        let mode = TreeItemMode::Blob;
-                        items.push(TreeItem::new(mode, entry.hash, file_name));
-                        continue;
-                    }
+                let mtime = Time::from_system_time(
+                    metadata.modified().unwrap_or(std::time::SystemTime::now()),
+                );
+                let size = metadata.len() as u32;
+
+                if entry.mtime == mtime && entry.size == size {
+                    let mode = tree_item_mode_from_metadata(&metadata);
+                    items.push(TreeItem::new(mode, entry.hash, file_name));
+                    continue;
                 }
 
                 let content = fs::read(&path).map_err(|e| e.to_string())?;
                 let blob_hash = object::write_git_object(git_dir, "blob", &content)
                     .map_err(|e| e.to_string())?;
-
-                #[cfg(unix)]
-                let mode = if metadata.permissions().mode() & 0o111 != 0 {
-                    TreeItemMode::BlobExecutable
-                } else {
-                    TreeItemMode::Blob
-                };
-                #[cfg(not(unix))]
-                let mode = TreeItemMode::Blob;
-
+                let mode = tree_item_mode_from_metadata(&metadata);
                 items.push(TreeItem::new(mode, blob_hash, file_name));
             }
         }
@@ -1402,6 +1519,222 @@ pub(crate) fn get_stash_num() -> Result<usize, String> {
             .len();
 
     Ok(count)
+}
+
+// ── `stash push -u` / `--keep-index` helpers ──────────────────────────
+
+/// Collects the worktree-relative paths of untracked files that should be
+/// captured in the stash's third parent commit. Returns an empty vector when
+/// `-u`/`--include-untracked` was not requested. `--all` additionally folds in
+/// ignored files. Libra's own metadata directory is always excluded.
+fn collect_included_untracked_paths(
+    options: &StashPushOptions,
+) -> Result<Vec<PathBuf>, StashError> {
+    if !options.include_untracked {
+        return Ok(Vec::new());
+    }
+
+    let (mut visible, ignored) = if options.include_ignored {
+        status::changes_to_be_staged_split_force()
+    } else {
+        status::changes_to_be_staged_split_safe()
+    }
+    .map_err(|error| {
+        StashError::ReadObject(format!(
+            "failed to inspect working tree for untracked files: {error}"
+        ))
+    })?;
+
+    if options.include_ignored {
+        visible.new.extend(ignored.new);
+    }
+    visible.new.retain(|path| !is_internal_untracked_path(path));
+    visible.new.sort();
+    visible.new.dedup();
+    Ok(visible.new)
+}
+
+fn is_internal_untracked_path(path: &Path) -> bool {
+    let Some(Component::Normal(first)) = path.components().next() else {
+        return false;
+    };
+    let Some(first) = first.to_str() else {
+        return false;
+    };
+
+    first == util::ROOT_DIR || first == ".git" || first == ".libra-test-home"
+}
+
+/// Writes a parentless commit whose tree captures the included untracked files.
+/// The resulting commit becomes the stash commit's third parent, mirroring
+/// Git's `stash` layout for `-u`/`--include-untracked`.
+fn create_untracked_parent_commit(
+    workdir: &Path,
+    git_dir: &Path,
+    paths: &[PathBuf],
+    author: &Signature,
+    committer: &Signature,
+    message: &str,
+) -> Result<ObjectHash, StashError> {
+    let untracked_tree =
+        create_tree_from_paths(workdir, git_dir, paths).map_err(StashError::WriteObject)?;
+    let untracked_tree_data = untracked_tree
+        .to_data()
+        .map_err(|error| StashError::WriteObject(error.to_string()))?;
+    let untracked_tree_hash = object::write_git_object(git_dir, "tree", &untracked_tree_data)
+        .map_err(|error| StashError::WriteObject(error.to_string()))?;
+    let untracked_commit = Commit::new(
+        author.clone(),
+        committer.clone(),
+        untracked_tree_hash,
+        Vec::new(),
+        message,
+    );
+    let untracked_commit_data = untracked_commit
+        .to_data()
+        .map_err(|error| StashError::WriteObject(error.to_string()))?;
+    object::write_git_object(git_dir, "commit", &untracked_commit_data)
+        .map_err(|error| StashError::WriteObject(error.to_string()))
+}
+
+fn create_tree_from_paths(
+    workdir: &Path,
+    git_dir: &Path,
+    paths: &[PathBuf],
+) -> Result<Tree, String> {
+    let mut files = HashMap::new();
+    for relative_path in paths {
+        let full_path = workdir.join(relative_path);
+        if !full_path.is_file() {
+            return Err(format!(
+                "included untracked path is not a file: {}",
+                relative_path.display()
+            ));
+        }
+        let path_str = worktree_relative_path_to_string(relative_path)?;
+        let metadata = fs::metadata(&full_path).map_err(|error| error.to_string())?;
+        let content = fs::read(&full_path).map_err(|error| error.to_string())?;
+        let blob_hash = object::write_git_object(git_dir, "blob", &content)
+            .map_err(|error| error.to_string())?;
+        let mode = tree_item_mode_from_metadata(&metadata);
+        files.insert(path_str.clone(), TreeItem::new(mode, blob_hash, path_str));
+    }
+
+    build_tree_from_flat_items(&files, git_dir)
+}
+
+fn worktree_relative_path_to_string(path: &Path) -> Result<String, String> {
+    path.to_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("invalid path encoding: {}", path.display()))
+}
+
+fn tree_item_mode_from_metadata(metadata: &fs::Metadata) -> TreeItemMode {
+    #[cfg(unix)]
+    {
+        if metadata.permissions().mode() & 0o111 != 0 {
+            TreeItemMode::BlobExecutable
+        } else {
+            TreeItemMode::Blob
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        TreeItemMode::Blob
+    }
+}
+
+/// Restores the working tree to the staged index state after a `--keep-index`
+/// push. Files present at HEAD but absent from the index are removed, then the
+/// index tree is materialised on disk so staged content survives the stash.
+fn restore_worktree_to_index(
+    index: &Index,
+    head_commit_hash: &ObjectHash,
+    workdir: &Path,
+    git_dir: &Path,
+) -> Result<(), String> {
+    let target_commit: Commit = load_object(head_commit_hash)
+        .map_err(|error| format!("failed to load target commit: {error}"))?;
+    let target_tree: Tree = load_object(&target_commit.tree_id)
+        .map_err(|error| format!("failed to load target tree: {error}"))?;
+    let head_files = tree::get_tree_files_recursive(&target_tree, git_dir, &PathBuf::new())?;
+
+    for path in head_files.keys() {
+        if index.get(path, 0).is_none() {
+            let full_path = workdir.join(path);
+            if full_path.exists() {
+                fs::remove_file(&full_path).map_err(|error| {
+                    format!("failed to remove file {}: {error}", full_path.display())
+                })?;
+            }
+        }
+    }
+
+    let index_tree = tree::create_tree_from_index(index).map_err(|error| error.to_string())?;
+    restore_working_directory_from_tree(&index_tree, workdir, "")?;
+    remove_empty_directories(workdir)?;
+    Ok(())
+}
+
+/// Removes the untracked files that were captured into the stash so the working
+/// tree is left clean, trimming any directories that become empty as a result.
+fn remove_included_untracked_paths(workdir: &Path, paths: &[PathBuf]) -> Result<(), String> {
+    let mut sorted_paths = paths.to_vec();
+    sorted_paths.sort_by_key(|path| Reverse(path.components().count()));
+
+    for relative_path in &sorted_paths {
+        let full_path = workdir.join(relative_path);
+        if full_path.is_dir() {
+            fs::remove_dir_all(&full_path).map_err(|error| {
+                format!(
+                    "failed to remove directory {}: {error}",
+                    full_path.display()
+                )
+            })?;
+        } else if full_path.exists() {
+            fs::remove_file(&full_path).map_err(|error| {
+                format!("failed to remove file {}: {error}", full_path.display())
+            })?;
+        }
+        remove_empty_parent_dirs(workdir, relative_path)?;
+    }
+
+    Ok(())
+}
+
+fn remove_empty_parent_dirs(workdir: &Path, relative_path: &Path) -> Result<(), String> {
+    let Some(parent) = relative_path.parent() else {
+        return Ok(());
+    };
+    let mut current = workdir.join(parent);
+    while current != workdir && current.starts_with(workdir) {
+        if current.file_name().and_then(|name| name.to_str()) == Some(util::ROOT_DIR) {
+            break;
+        }
+        match fs::remove_dir(&current) {
+            Ok(()) => {
+                let Some(next) = current.parent() else {
+                    break;
+                };
+                current = next.to_path_buf();
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(next) = current.parent() else {
+                    break;
+                };
+                current = next.to_path_buf();
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => break,
+            Err(error) => {
+                return Err(format!(
+                    "failed to remove empty directory {}: {error}",
+                    current.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

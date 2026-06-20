@@ -19,7 +19,7 @@ use crate::{
         db::get_db_conn_instance,
         head::Head,
         model::reference,
-        protocol::set_wire_hash_kind,
+        protocol::{DiscRef, set_wire_hash_kind},
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -85,7 +85,9 @@ EXAMPLES:
     libra remote prune --dry-run origin            Preview which tracking refs would be removed
     libra remote set-branches origin main          Track only the named branch(es)
     libra remote set-head origin main              Point the remote's default branch at main
-    libra remote show origin                       Show detailed information about a remote
+    libra remote set-head origin --auto            Query the remote and set HEAD automatically
+    libra remote show origin                       Query the remote and show tracked/new/stale branches
+    libra remote show --no-query origin            Show cached remote-tracking data without contacting the remote
     libra remote --json -v                         Structured JSON output for agents";
 
 #[derive(Subcommand, Debug)]
@@ -116,8 +118,9 @@ pub enum RemoteCmds {
     Show {
         /// Remote name to inspect. Omit to list configured remote names.
         name: Option<String>,
-        /// Skip network discovery and show cached remote-tracking refs only
-        /// (currently always implied — Libra's `show` is offline).
+        /// Do not contact the remote; show cached remote-tracking refs only
+        /// (status `cached`). By default `show` queries the remote and classifies
+        /// branches as tracked / new / stale.
         #[arg(short = 'n', long = "no-query")]
         no_query: bool,
         /// Include additional detail where available
@@ -184,9 +187,9 @@ pub enum RemoteCmds {
     },
     /// Set or delete the default branch for a remote (`refs/remotes/<name>/HEAD`).
     ///
-    /// Examples:{n}{n}  libra remote set-head origin main   # point remote HEAD at main{n}  libra remote set-head origin -d    # delete the remote HEAD ref
+    /// Examples:{n}{n}  libra remote set-head origin main   # point remote HEAD at main{n}  libra remote set-head origin --auto # query the remote and set HEAD automatically{n}  libra remote set-head origin -d    # delete the remote HEAD ref
     SetHead {
-        /// Determine the remote HEAD automatically (deferred — not yet implemented)
+        /// Query the remote and set its HEAD to the branch the remote points at
         #[arg(short = 'a', long = "auto", conflicts_with_all = ["delete", "branch"])]
         auto: bool,
         /// Delete the remote HEAD ref
@@ -241,6 +244,12 @@ enum RemoteError {
 
     #[error("no such remote-tracking branch '{remote}/{branch}'")]
     RemoteTrackingBranchNotFound { remote: String, branch: String },
+
+    #[error("failed to query remote '{remote}': {detail}")]
+    Discovery { remote: String, detail: String },
+
+    #[error("could not determine the default branch for remote '{remote}'")]
+    NoRemoteHead { remote: String },
 
     #[error(transparent)]
     Fetch(#[from] fetch::FetchError),
@@ -306,6 +315,20 @@ impl From<RemoteError> for CliError {
                 CliError::fatal(format!("no such remote-tracking branch '{remote}/{branch}'"))
                     .with_stable_code(StableErrorCode::CliInvalidTarget)
                     .with_hint("fetch the remote first, or run 'libra remote -v' to inspect remotes")
+            }
+            RemoteError::Discovery { remote, detail } => {
+                CliError::fatal(format!("failed to query remote '{remote}': {detail}"))
+                    .with_stable_code(StableErrorCode::NetworkUnavailable)
+                    .with_hint(format!(
+                        "ensure the remote is reachable, or run 'libra remote show --no-query {remote}' to show cached data"
+                    ))
+            }
+            RemoteError::NoRemoteHead { remote } => {
+                CliError::fatal(format!(
+                    "could not determine the default branch for remote '{remote}'"
+                ))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("the remote advertised no branches; specify a branch explicitly with 'libra remote set-head <name> <branch>'")
             }
             RemoteError::Fetch(source) => CliError::from(source),
         }
@@ -420,8 +443,8 @@ pub async fn execute_safe(command: RemoteCmds, output: &OutputConfig) -> CliResu
     render_remote_output(&result, output)
 }
 
-/// Reject usage errors (invalid branch names, the deferred `set-head --auto`)
-/// before any work runs, mapping them to `command_usage` (exit 129).
+/// Reject usage errors (e.g. invalid tracking-branch names) before any work
+/// runs, mapping them to `command_usage` (exit 129).
 fn validate_remote_usage(command: &RemoteCmds) -> CliResult<()> {
     match command {
         RemoteCmds::SetBranches { branches, .. } => {
@@ -429,18 +452,11 @@ fn validate_remote_usage(command: &RemoteCmds) -> CliResult<()> {
                 validate_tracking_branch_name(branch)?;
             }
         }
-        RemoteCmds::SetHead { auto, branch, .. } => {
-            if *auto {
-                return Err(CliError::command_usage(
-                    "automatic remote HEAD detection (--auto) is not yet supported",
-                )
-                .with_hint(
-                    "specify a branch explicitly: 'libra remote set-head <name> <branch>'",
-                ));
-            }
-            if let Some(branch) = branch {
-                validate_tracking_branch_name(branch)?;
-            }
+        RemoteCmds::SetHead {
+            branch: Some(branch),
+            ..
+        } => {
+            validate_tracking_branch_name(branch)?;
         }
         _ => {}
     }
@@ -475,10 +491,10 @@ async fn run_remote(command: RemoteCmds) -> Result<RemoteOutput, RemoteError> {
         RemoteCmds::List => run_list_remotes(true).await,
         RemoteCmds::Show {
             name,
-            no_query: _,
+            no_query,
             verbose: _,
         } => match name {
-            Some(name) => run_show_remote(name).await,
+            Some(name) => run_show_remote(name, no_query).await,
             None => run_list_remotes(false).await,
         },
         RemoteCmds::GetUrl { push, all, name } => run_get_url(name, push, all).await,
@@ -891,21 +907,66 @@ fn effective_push_urls(fetch_urls: &[String], push_urls: &[String]) -> Vec<Strin
     }
 }
 
-/// Detailed `remote show <name>`. Offline: reports the configured fetch/push
-/// URLs, the cached remote HEAD (`refs/remotes/<name>/HEAD`), cached
-/// remote-tracking branches and the local `branch.<b>.remote`/`.merge` pull
-/// configuration. Network discovery is not performed, so `queried` is always
-/// `false` (Libra's `show` is self-contained — `--no-query` is accepted but the
-/// behaviour is the same with or without it).
-async fn run_show_remote(name: String) -> Result<RemoteOutput, RemoteError> {
+/// Contact the remote and return its advertised branch heads, capability
+/// strings, and HEAD ref — the inputs to `fetch::resolve_remote_default_branch`
+/// and to online `remote show` classification.
+async fn discover_remote_refs(
+    name: &str,
+) -> Result<(Vec<DiscRef>, Vec<String>, Option<DiscRef>), RemoteError> {
+    let entry = load_remote_entry(name).await?;
+    let url = entry
+        .fetch_urls
+        .first()
+        .ok_or_else(|| RemoteError::NoUrlConfigured {
+            name: name.to_string(),
+        })?;
+    let (_, discovery) = fetch::discover_remote_with_name(url, Some(name))
+        .await
+        .map_err(|error| RemoteError::Discovery {
+            remote: name.to_string(),
+            detail: error.to_string(),
+        })?;
+    let ref_heads = discovery
+        .refs
+        .iter()
+        .filter(|reference| reference._ref.starts_with("refs/heads/"))
+        .cloned()
+        .collect();
+    let remote_head = discovery
+        .refs
+        .iter()
+        .find(|reference| reference._ref == "HEAD")
+        .cloned();
+    Ok((ref_heads, discovery.capabilities, remote_head))
+}
+
+/// Detailed `remote show <name>`. By default it contacts the remote (like
+/// `git remote show`) to report the live remote HEAD and classify branches as
+/// `tracked` / `new` / `stale` against the local remote-tracking refs. With
+/// `--no-query` it stays fully offline: the cached remote HEAD
+/// (`refs/remotes/<name>/HEAD`) and the cached tracking branches (status
+/// `cached`). Both modes also report the configured fetch/push URLs and the
+/// local `branch.<b>.remote`/`.merge` pull configuration.
+async fn run_show_remote(name: String, no_query: bool) -> Result<RemoteOutput, RemoteError> {
     ensure_remote_exists(&name).await?;
     let entry = load_remote_entry(&name).await?;
-
-    let head_branch = load_cached_remote_head(&name).await?;
     let local_tracking = load_local_tracking_refs(&name).await?;
-    let remote_branches = classify_cached_remote_branches(&local_tracking);
     let pull_config = load_pull_config(&name).await?;
     let push_config = load_config_urls(&name, "pushurl").await?;
+
+    let (head_branch, remote_branches, queried) = if no_query {
+        (
+            load_cached_remote_head(&name).await?,
+            classify_cached_remote_branches(&local_tracking),
+            false,
+        )
+    } else {
+        let (ref_heads, capabilities, remote_head) = discover_remote_refs(&name).await?;
+        let head_branch =
+            fetch::resolve_remote_default_branch(&capabilities, &ref_heads, remote_head.as_ref());
+        let remote_branches = classify_remote_branches_online(&ref_heads, &local_tracking);
+        (head_branch, remote_branches, true)
+    };
 
     Ok(RemoteOutput::Show {
         name,
@@ -915,7 +976,7 @@ async fn run_show_remote(name: String) -> Result<RemoteOutput, RemoteError> {
         remote_branches,
         pull_config,
         push_config,
-        queried: false,
+        queried,
     })
 }
 
@@ -954,6 +1015,54 @@ async fn load_local_tracking_refs(name: &str) -> Result<HashMap<String, String>,
         }
     }
     Ok(refs)
+}
+
+/// Classify branches online by comparing the remote's advertised heads against
+/// the local remote-tracking refs:
+/// - `tracked`: advertised by the remote and already tracked locally (carries
+///   both the remote and local OIDs),
+/// - `new`: advertised by the remote but not yet tracked locally (a later
+///   `fetch` will create it) — remote OID only,
+/// - `stale`: tracked locally but no longer advertised by the remote (a `remote
+///   prune` would drop it) — local OID only.
+///
+/// Output is sorted by branch name for deterministic rendering.
+fn classify_remote_branches_online(
+    ref_heads: &[DiscRef],
+    local_tracking: &HashMap<String, String>,
+) -> Vec<RemoteBranchStatus> {
+    let mut out = Vec::new();
+    let mut remote_names = HashSet::new();
+    for reference in ref_heads {
+        let Some(branch) = reference._ref.strip_prefix("refs/heads/") else {
+            continue;
+        };
+        remote_names.insert(branch.to_string());
+        let local_oid = local_tracking.get(branch).cloned();
+        let status = if local_oid.is_some() {
+            "tracked"
+        } else {
+            "new"
+        };
+        out.push(RemoteBranchStatus {
+            branch: branch.to_string(),
+            status: status.to_string(),
+            local_oid,
+            remote_oid: Some(reference._hash.clone()),
+        });
+    }
+    for (branch, local_oid) in local_tracking {
+        if !remote_names.contains(branch) {
+            out.push(RemoteBranchStatus {
+                branch: branch.clone(),
+                status: "stale".to_string(),
+                local_oid: Some(local_oid.clone()),
+                remote_oid: None,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.branch.cmp(&b.branch));
+    out
 }
 
 /// Classify cached remote-tracking branches (offline). Every cached branch is
@@ -1082,7 +1191,7 @@ async fn run_set_branches(
 /// is rejected earlier in `validate_remote_usage`.
 async fn run_set_head(
     name: String,
-    _auto: bool,
+    auto: bool,
     delete: bool,
     branch: Option<String>,
 ) -> Result<RemoteOutput, RemoteError> {
@@ -1114,12 +1223,21 @@ async fn run_set_head(
         });
     }
 
-    // `--auto` is rejected in validate_remote_usage; reaching here means an
-    // explicit branch was given.
-    let branch = branch.ok_or_else(|| RemoteError::RemoteTrackingBranchNotFound {
-        remote: name.clone(),
-        branch: String::new(),
-    })?;
+    // Resolve the target branch: `--auto` queries the remote for its HEAD
+    // (symref capability, else OID match, else main/master/first); otherwise the
+    // explicit `<branch>` argument is required.
+    let branch = if auto {
+        let (ref_heads, capabilities, remote_head) = discover_remote_refs(&name).await?;
+        fetch::resolve_remote_default_branch(&capabilities, &ref_heads, remote_head.as_ref())
+            .ok_or_else(|| RemoteError::NoRemoteHead {
+                remote: name.clone(),
+            })?
+    } else {
+        branch.ok_or_else(|| RemoteError::RemoteTrackingBranchNotFound {
+            remote: name.clone(),
+            branch: String::new(),
+        })?
+    };
 
     // The tracking branch must already exist locally. It is stored under the
     // full ref `refs/remotes/<name>/<branch>` with the `remote` column = name.
@@ -1392,7 +1510,14 @@ fn render_remote_output(result: &RemoteOutput, output: &OutputConfig) -> CliResu
                 writeln!(writer, "    (none)").map_err(write_err)?;
             } else {
                 for branch in remote_branches {
-                    writeln!(writer, "    {} {}", branch.branch, branch.status)
+                    let suffix = match branch.status.as_str() {
+                        "new" => {
+                            format!(" (next fetch will store in remotes/{name})")
+                        }
+                        "stale" => " (use 'libra remote prune' to remove)".to_string(),
+                        _ => String::new(),
+                    };
+                    writeln!(writer, "    {} {}{}", branch.branch, branch.status, suffix)
                         .map_err(write_err)?;
                 }
             }

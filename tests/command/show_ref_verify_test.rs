@@ -16,6 +16,7 @@ fn create_annotated_tag(repo: &std::path::Path, name: &str) -> String {
             name,
             Some("release notes".to_string()),
             false,
+            false,
         ))
         .expect("failed to create annotated tag")
         .target

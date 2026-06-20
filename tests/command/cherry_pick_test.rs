@@ -53,6 +53,9 @@ async fn test_basic_cherry_pick() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -81,6 +84,8 @@ async fn test_basic_cherry_pick() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
     println!("Switched to new branch 'feature'.");
@@ -97,6 +102,9 @@ async fn test_basic_cherry_pick() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -132,6 +140,9 @@ async fn test_basic_cherry_pick() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -160,6 +171,8 @@ async fn test_basic_cherry_pick() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
     println!("Switched back to master.");
@@ -274,6 +287,9 @@ async fn test_cherry_pick_with_commit() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -301,6 +317,8 @@ async fn test_cherry_pick_with_commit() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -314,6 +332,9 @@ async fn test_cherry_pick_with_commit() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -345,6 +366,8 @@ async fn test_cherry_pick_with_commit() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -411,6 +434,9 @@ async fn test_cherry_pick_multiple_commits() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -438,6 +464,8 @@ async fn test_cherry_pick_multiple_commits() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -452,6 +480,9 @@ async fn test_cherry_pick_multiple_commits() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -482,6 +513,9 @@ async fn test_cherry_pick_multiple_commits() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -510,6 +544,8 @@ async fn test_cherry_pick_multiple_commits() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -739,6 +775,9 @@ async fn test_cherry_pick_sha256_hash_handling() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(commit::CommitArgs {
@@ -766,6 +805,8 @@ async fn test_cherry_pick_sha256_hash_handling() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
     fs::write("feature.txt", "feature").unwrap();
@@ -778,6 +819,9 @@ async fn test_cherry_pick_sha256_hash_handling() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(commit::CommitArgs {
@@ -807,6 +851,8 @@ async fn test_cherry_pick_sha256_hash_handling() {
         detach: false,
         track: false,
         force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
     let head_before = Head::current_commit().await.unwrap();

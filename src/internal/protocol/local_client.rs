@@ -6,6 +6,7 @@ use std::{
     future::Future,
     io::Error as IoError,
     path::{Path, PathBuf},
+    str::FromStr,
     sync::OnceLock,
 };
 
@@ -410,8 +411,46 @@ impl LocalClient {
                         seen.insert(hash.clone());
                     });
 
+                    // Classify each want. An annotated-tag object contributes the
+                    // tag object(s) to the pack and resolves to a target commit;
+                    // every other want is treated as a commit (lightweight tags
+                    // and branch tips already point at commits). This lets a
+                    // libra-native server honour `fetch --tags` of annotated tags.
+                    // Requires git-internal >= 0.7.6 so a tag's id is the canonical
+                    // hash of its `to_data()` (otherwise the receiver re-hashes to a
+                    // different OID and the fetched `refs/tags/*` dangles).
+                    let mut tag_entries: Vec<Entry> = Vec::new();
+                    let mut commit_targets: Vec<String> = Vec::new();
+                    for want_hash in want {
+                        let Ok(oid) = git_internal::hash::ObjectHash::from_str(want_hash) else {
+                            commit_targets.push(want_hash.clone());
+                            continue;
+                        };
+                        match tag::load_object_trait(&oid).await {
+                            Ok(tag::TagObject::Tag(tag_obj)) => {
+                                let mut current = tag_obj;
+                                for _ in 0..32 {
+                                    let target = current.object_hash;
+                                    if seen.insert(current.id.to_string()) {
+                                        tag_entries.push(Entry::from(current));
+                                    }
+                                    match tag::load_object_trait(&target).await {
+                                        Ok(tag::TagObject::Tag(inner)) => current = inner,
+                                        Ok(tag::TagObject::Commit(commit)) => {
+                                            commit_targets.push(commit.id.to_string());
+                                            break;
+                                        }
+                                        // Tag of a tree/blob, or a missing target.
+                                        _ => break,
+                                    }
+                                }
+                            }
+                            _ => commit_targets.push(want_hash.clone()),
+                        }
+                    }
+
                     let mut reachable_commits = Vec::new();
-                    for branch_hash in want {
+                    for branch_hash in &commit_targets {
                         let commits = get_reachable_commits(branch_hash.to_string(), depth)
                             .await
                             .map_err(|error| {
@@ -474,6 +513,7 @@ impl LocalClient {
                     all_entries.extend(commit_entries);
                     all_entries.extend(tree_entries);
                     all_entries.extend(blob_entries);
+                    all_entries.extend(tag_entries);
 
                     let (entry_tx, entry_rx) =
                         tokio::sync::mpsc::channel::<MetaAttached<Entry, EntryMeta>>(1_000);

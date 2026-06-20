@@ -66,6 +66,7 @@ worker/coverage/
 .claude
 .antigravitycli
 .omo
+.opencode
 
 # Integration
 target*

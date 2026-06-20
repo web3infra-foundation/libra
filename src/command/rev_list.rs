@@ -10,6 +10,8 @@ use crate::utils::{
 
 #[path = "rev_list_cherry.rs"]
 mod rev_list_cherry;
+#[path = "rev_list_children.rs"]
+mod rev_list_children;
 #[path = "rev_list_filter.rs"]
 mod rev_list_filter;
 #[path = "rev_list_output.rs"]
@@ -18,6 +20,7 @@ mod rev_list_output;
 mod rev_list_spec;
 
 use rev_list_cherry::{RevListSelectedCommit, apply_cherry_filters, attach_cherry_metadata};
+use rev_list_children::build_rev_list_children;
 #[cfg(test)]
 use rev_list_filter::ParentCountFilter;
 use rev_list_filter::{
@@ -45,8 +48,12 @@ pub struct RevListArgs {
     pub count: bool,
 
     /// Print parent commit IDs after each commit
-    #[clap(long)]
+    #[clap(long, conflicts_with = "children")]
     pub parents: bool,
+
+    /// Print child commit IDs after each commit
+    #[clap(long)]
+    pub children: bool,
 
     /// Prefix each output line with the commit timestamp
     #[clap(long)]
@@ -154,6 +161,7 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
     let selection = resolve_revision_selection(&args.specs, args.first_parent).await?;
     let mut commits = selection.commits;
     sort_rev_list_commits(&mut commits);
+    let children = build_rev_list_children(&commits);
     let commits = filter_commits_by_pathspecs(commits, &args.pathspecs).await?;
     let commits = attach_cherry_metadata(commits, &selection.sides);
     let commits = apply_cherry_filters(commits, args)?;
@@ -180,6 +188,7 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
     };
     let entries = if args.count
         || (!args.parents
+            && !args.children
             && !args.timestamp
             && !args.left_right
             && !args.cherry_mark
@@ -205,6 +214,14 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
                     } else {
                         Vec::new()
                     },
+                    children: if args.children {
+                        children
+                            .get(&selected.commit.id.to_string())
+                            .cloned()
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    },
                     timestamp: args
                         .timestamp
                         .then_some(selected.commit.committer.timestamp),
@@ -227,6 +244,7 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         count_fields,
         count_only: args.count,
         parents: args.parents,
+        children: args.children,
         timestamp: args.timestamp,
         first_parent: args.first_parent,
         author: args.author.clone(),

@@ -70,6 +70,14 @@ pub struct PullArgs {
     /// Limit the fetch to the given number of commits from each tip (shallow fetch)
     #[clap(long, conflicts_with = "rebase")]
     depth: Option<usize>,
+
+    /// Produce the merged tree but do not commit or move HEAD (merge mode only)
+    #[clap(long, conflicts_with_all = ["rebase", "no_commit"])]
+    squash: bool,
+
+    /// Perform the merge but stop before committing, recording merge state
+    #[clap(long = "no-commit", conflicts_with_all = ["rebase", "squash"])]
+    no_commit: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -192,6 +200,8 @@ impl PullArgs {
             ff: false,
             no_ff: false,
             depth: None,
+            squash: false,
+            no_commit: false,
         }
     }
 }
@@ -240,6 +250,9 @@ pub(crate) async fn run_pull(
         Some(target.remote_branch.clone()),
         false,
         args.depth,
+        false,
+        // `git pull` auto-follows tags (and honours remote.<name>.tagOpt).
+        None,
         false,
         &child_output,
     )
@@ -294,8 +307,8 @@ pub(crate) async fn run_pull(
             ff_only: args.ff_only,
             no_ff: args.no_ff,
             message: None,
-            squash: false,
-            no_commit: false,
+            squash: args.squash,
+            no_commit: args.no_commit,
         },
     )
     .await

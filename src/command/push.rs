@@ -56,8 +56,10 @@ use crate::{
 
 const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
 
-/// Connection/idle timeout for push network operations (discovery, send-pack, receive-pack).
-const PUSH_TIMEOUT: Duration = Duration::from_secs(60);
+/// Total timeout for push reference discovery and initial connection setup.
+const PUSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Idle timeout for push send-pack / receive-pack operations.
+const PUSH_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Push local refs and objects to a remote repository.
 ///
@@ -122,6 +124,27 @@ pub struct PushArgs {
     #[clap(long = "no-thin", conflicts_with = "thin")]
     pub no_thin: bool,
 
+    /// Request an atomic push: the remote applies all ref updates together or
+    /// none at all. Errors if the remote does not advertise the `atomic`
+    /// capability.
+    #[clap(long)]
+    pub atomic: bool,
+
+    /// Transmit a server-side option (repeatable). Errors if the remote does not
+    /// advertise the `push-options` capability.
+    #[clap(long = "push-option", short = 'o', value_name = "OPTION")]
+    pub push_option: Vec<String>,
+
+    /// Also push annotated tags that point at commits being pushed and are
+    /// missing on the remote.
+    #[clap(long)]
+    pub follow_tags: bool,
+
+    /// GPG-sign the push with a push certificate. Errors if the remote does not
+    /// advertise the `push-cert` capability or no signing key is configured.
+    #[clap(long)]
+    pub signed: bool,
+
     /// Machine-readable single-line-per-ref output; conflicts with `--json`/`--machine`
     #[clap(long)]
     pub porcelain: bool,
@@ -152,6 +175,10 @@ impl PushArgs {
             force_if_includes: false,
             thin: false,
             no_thin: false,
+            atomic: false,
+            push_option: Vec::new(),
+            follow_tags: false,
+            signed: false,
             porcelain: false,
             dry_run: false,
             tags: false,
@@ -238,6 +265,21 @@ pub enum PushError {
 
     #[error("failed to read repository state: {0}")]
     RepoState(String),
+
+    #[error("the receiving end does not support --atomic push")]
+    AtomicUnsupported,
+
+    #[error("the receiving end does not support push options")]
+    PushOptionsUnsupported,
+
+    #[error("the receiving end does not support signed push")]
+    PushSignUnsupported,
+
+    #[error("--signed requires a configured signing key, but none was found")]
+    PushSignNoKey,
+
+    #[error("failed to create push certificate signature: {0}")]
+    PushSignFailed(String),
 }
 
 impl From<PushError> for CliError {
@@ -325,8 +367,126 @@ impl From<PushError> for CliError {
             PushError::RepoState(..) => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::RepoCorrupt)
                 .with_hint("try 'libra status' to verify repository state"),
+            PushError::AtomicUnsupported => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_hint("retry without --atomic, or push to a remote that supports atomic updates"),
+            PushError::PushOptionsUnsupported => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_hint("retry without -o/--push-option, or push to a remote that supports push options"),
+            PushError::PushSignUnsupported => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_hint("retry without --signed, or push to a remote that supports signed push"),
+            PushError::PushSignNoKey => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::AuthMissingCredentials)
+                .with_hint("configure a signing key (see 'libra config user.signingkey' / vault setup)"),
+            PushError::PushSignFailed(_) => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::InternalInvariant),
         }
     }
+}
+
+/// Decide whether to advertise the `atomic` capability. With `--atomic`, the
+/// remote must have advertised `atomic` during reference discovery; otherwise
+/// the push is refused up-front (matching Git's client behaviour).
+fn resolve_atomic_capability(
+    atomic_requested: bool,
+    server_capabilities: &[String],
+) -> Result<bool, PushError> {
+    if !atomic_requested {
+        return Ok(false);
+    }
+    if server_capabilities.iter().any(|cap| cap == "atomic") {
+        Ok(true)
+    } else {
+        Err(PushError::AtomicUnsupported)
+    }
+}
+
+/// Decide whether to send a push-options section. When options are supplied the
+/// remote must have advertised the `push-options` capability during discovery;
+/// otherwise the push is refused up-front (matching Git).
+fn resolve_push_options_capability(
+    options: &[String],
+    server_capabilities: &[String],
+) -> Result<bool, PushError> {
+    if options.is_empty() {
+        return Ok(false);
+    }
+    if server_capabilities.iter().any(|cap| cap == "push-options") {
+        Ok(true)
+    } else {
+        Err(PushError::PushOptionsUnsupported)
+    }
+}
+
+/// Encode the push-options protocol section: one pkt-line per option followed by
+/// a flush-pkt, appended after the ref-update command flush and before the pack.
+fn encode_push_options(options: &[String], data: &mut BytesMut) {
+    for option in options {
+        add_pkt_line_string(data, option.clone());
+    }
+    data.extend_from_slice(b"0000");
+}
+
+/// Resolve the push-certificate nonce for `--signed`. The remote must advertise
+/// `push-cert[=<nonce>]` during discovery; otherwise the push is refused.
+fn resolve_push_cert_nonce(
+    signed: bool,
+    server_capabilities: &[String],
+) -> Result<Option<String>, PushError> {
+    if !signed {
+        return Ok(None);
+    }
+    for cap in server_capabilities {
+        if let Some(nonce) = cap.strip_prefix("push-cert=") {
+            return Ok(Some(nonce.to_string()));
+        }
+        if cap == "push-cert" {
+            return Ok(Some(String::new()));
+        }
+    }
+    Err(PushError::PushSignUnsupported)
+}
+
+/// Build the signed payload of a push certificate (Git's `certificate
+/// version 0.1` text): a header block, a blank line, then one `<old> <new>
+/// <ref>` command per line. This exact text is what gets GPG-signed.
+fn build_push_certificate(
+    pusher: &str,
+    pushee: &str,
+    nonce: &str,
+    commands: &[(String, String, String)],
+) -> String {
+    let mut cert = String::new();
+    cert.push_str("certificate version 0.1\n");
+    cert.push_str(&format!("pusher {pusher}\n"));
+    cert.push_str(&format!("pushee {pushee}\n"));
+    cert.push_str(&format!("nonce {nonce}\n"));
+    cert.push('\n');
+    for (old, new, refname) in commands {
+        cert.push_str(&format!("{old} {new} {refname}\n"));
+    }
+    cert
+}
+
+/// Frame a signed push certificate into the send-pack stream: the `push-cert`
+/// announcement (carrying the capability list), the signed certificate body,
+/// the armored signature, and the `push-cert-end` terminator, then a flush.
+fn encode_push_cert_section(
+    capability: &str,
+    certificate: &str,
+    armored_signature: &str,
+    data: &mut BytesMut,
+) {
+    add_pkt_line_string(data, format!("push-cert\0{capability}\n"));
+    for line in certificate.lines() {
+        add_pkt_line_string(data, format!("{line}\n"));
+    }
+    for line in armored_signature.lines() {
+        add_pkt_line_string(data, format!("{line}\n"));
+    }
+    add_pkt_line_string(data, "push-cert-end\n".to_string());
+    data.extend_from_slice(b"0000");
 }
 
 // ---------------------------------------------------------------------------
@@ -598,37 +758,42 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
                 detail: e.to_string(),
             }
         })?;
+    let remote_client = remote_client
+        .with_network_timeouts(PUSH_CONNECT_TIMEOUT, PUSH_IDLE_TIMEOUT)
+        .map_err(|e| PushError::Network(format!("failed to configure remote transport: {e}")))?;
 
-    let discovery =
-        tokio::time::timeout(PUSH_TIMEOUT, remote_client.discovery_reference(ReceivePack))
-            .await
-            .map_err(|_| PushError::Timeout {
-                phase: "discovery".to_string(),
-                seconds: PUSH_TIMEOUT.as_secs(),
-            })?
-            .map_err(|e| match e {
-                GitError::UnAuthorized(_) => PushError::AuthenticationFailed {
-                    url: repo_url.clone(),
-                },
-                GitError::NetworkError(detail) => {
-                    let lower = detail.to_lowercase();
-                    if lower.contains("timeout") || lower.contains("timed out") {
-                        PushError::Timeout {
-                            phase: "discovery".to_string(),
-                            seconds: PUSH_TIMEOUT.as_secs(),
-                        }
-                    } else {
-                        PushError::DiscoveryFailed {
-                            url: repo_url.clone(),
-                            detail,
-                        }
-                    }
+    let discovery = tokio::time::timeout(
+        PUSH_CONNECT_TIMEOUT,
+        remote_client.discovery_reference(ReceivePack),
+    )
+    .await
+    .map_err(|_| PushError::Timeout {
+        phase: "discovery".to_string(),
+        seconds: PUSH_CONNECT_TIMEOUT.as_secs(),
+    })?
+    .map_err(|e| match e {
+        GitError::UnAuthorized(_) => PushError::AuthenticationFailed {
+            url: repo_url.clone(),
+        },
+        GitError::NetworkError(detail) => {
+            let lower = detail.to_lowercase();
+            if lower.contains("timeout") || lower.contains("timed out") {
+                PushError::Timeout {
+                    phase: "discovery".to_string(),
+                    seconds: PUSH_CONNECT_TIMEOUT.as_secs(),
                 }
-                other => PushError::DiscoveryFailed {
+            } else {
+                PushError::DiscoveryFailed {
                     url: repo_url.clone(),
-                    detail: other.to_string(),
-                },
-            })?;
+                    detail,
+                }
+            }
+        }
+        other => PushError::DiscoveryFailed {
+            url: repo_url.clone(),
+            detail: other.to_string(),
+        },
+    })?;
 
     let local_kind = get_hash_kind();
     if discovery.hash_kind != local_kind {
@@ -707,6 +872,27 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             .await?;
         }
 
+        if args.follow_tags {
+            // Tips of the refs already scheduled for update drive reachability.
+            let pushed_tips: Vec<ObjectHash> = plans
+                .iter()
+                .filter(|plan| plan.update.kind == PushRefUpdateKind::Update)
+                .filter_map(|plan| ObjectHash::from_str(&plan.update.new_oid).ok())
+                .collect();
+            for tag_ref in collect_follow_tag_refs(&pushed_tips, &remote_refs).await? {
+                let remote_ref = tag_ref.full_ref.clone();
+                add_update_ref_plan(
+                    tag_ref,
+                    remote_ref,
+                    &remote_refs,
+                    effective_force,
+                    &mut warnings,
+                    &mut seen_remote_refs,
+                    &mut plans,
+                )?;
+            }
+        }
+
         plans
     };
 
@@ -772,35 +958,91 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         });
     }
 
+    // `--atomic` / `-o` / `--signed`: only advertise these capabilities if the
+    // remote supports them, otherwise refuse before sending anything (Git).
+    let use_atomic = resolve_atomic_capability(args.atomic, &discovery.capabilities)?;
+    let use_push_options =
+        resolve_push_options_capability(&args.push_option, &discovery.capabilities)?;
+    let push_cert_nonce = resolve_push_cert_nonce(args.signed, &discovery.capabilities)?;
+
     let mut data = BytesMut::new();
     let mut capabilities = vec!["report-status"];
     if get_wire_hash_kind() == HashKind::Sha256 {
         capabilities.push("object-format=sha256");
     }
+    if use_atomic {
+        capabilities.push("atomic");
+    }
+    if use_push_options {
+        capabilities.push("push-options");
+    }
+    if push_cert_nonce.is_some() {
+        capabilities.push("push-cert");
+    }
     let capability = capabilities.join(" ");
     let zero_oid = ObjectHash::zero_str(get_hash_kind());
-    for (index, plan) in plans.iter().enumerate() {
-        let old_oid = plan
-            .update
-            .old_oid
-            .as_deref()
-            .unwrap_or(&zero_oid)
-            .to_string();
-        let new_oid = match plan.update.kind {
-            PushRefUpdateKind::Update => plan.update.new_oid.clone(),
-            PushRefUpdateKind::Delete => zero_oid.clone(),
-        };
-        let suffix = if index == 0 {
-            format!("\0{capability}")
-        } else {
-            String::new()
-        };
-        add_pkt_line_string(
-            &mut data,
-            format!("{old_oid} {new_oid} {}{suffix}\n", plan.update.remote_ref),
+
+    // Build the `<old> <new> <ref>` command tuples shared by both wire forms.
+    let commands: Vec<(String, String, String)> = plans
+        .iter()
+        .map(|plan| {
+            let old_oid = plan
+                .update
+                .old_oid
+                .as_deref()
+                .unwrap_or(&zero_oid)
+                .to_string();
+            let new_oid = match plan.update.kind {
+                PushRefUpdateKind::Update => plan.update.new_oid.clone(),
+                PushRefUpdateKind::Delete => zero_oid.clone(),
+            };
+            (old_oid, new_oid, plan.update.remote_ref.clone())
+        })
+        .collect();
+
+    if let Some(nonce) = push_cert_nonce {
+        // Signed push: build, GPG-sign, and frame a push certificate.
+        let identity = crate::command::commit::resolve_committer_identity()
+            .await
+            .map_err(|e| PushError::PushSignFailed(e.to_string()))?;
+        let pusher = format!(
+            "{} <{}> {} +0000",
+            identity.name,
+            identity.email,
+            chrono::Utc::now().timestamp()
         );
+        let certificate = build_push_certificate(&pusher, &repo_url, &nonce, &commands);
+        let unseal_key = crate::internal::vault::load_unseal_key()
+            .await
+            .ok_or(PushError::PushSignNoKey)?;
+        let sig_hex = crate::internal::vault::pgp_sign(
+            &crate::utils::util::storage_path(),
+            &unseal_key,
+            certificate.as_bytes(),
+        )
+        .await
+        .map_err(|e| PushError::PushSignFailed(e.to_string()))?;
+        let armored = crate::internal::vault::signature_to_armored(&sig_hex)
+            .map_err(|e| PushError::PushSignFailed(e.to_string()))?;
+        encode_push_cert_section(&capability, &certificate, &armored, &mut data);
+    } else {
+        for (index, (old_oid, new_oid, remote_ref)) in commands.iter().enumerate() {
+            let suffix = if index == 0 {
+                format!("\0{capability}")
+            } else {
+                String::new()
+            };
+            add_pkt_line_string(
+                &mut data,
+                format!("{old_oid} {new_oid} {remote_ref}{suffix}\n"),
+            );
+        }
+        data.extend_from_slice(b"0000");
+        // Push-options section follows the command flush, before the pack.
+        if use_push_options {
+            encode_push_options(&args.push_option, &mut data);
+        }
     }
-    data.extend_from_slice(b"0000");
     tracing::debug!("{:?}", data);
 
     // Upload LFS files (only for HTTP remotes)
@@ -865,9 +1107,9 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     let bytes_pushed = pack_data.len() as u64;
     data.extend_from_slice(&pack_data);
 
-    // Send pack via the appropriate transport.
-    // Idle timeouts (60s) are enforced at the transport layer: SSH wraps each
-    // read/write/wait call, HTTPS uses reqwest connect_timeout + read_timeout.
+    // Send pack via the appropriate transport. SSH wraps each read/write/wait
+    // operation with the push idle timeout, and HTTPS uses reqwest's
+    // connect_timeout + read_timeout.
     match &remote_client {
         RemoteClient::Ssh(ssh_client) => {
             let response_bytes = ssh_client
@@ -1357,6 +1599,47 @@ async fn add_all_tag_update_plans(
     Ok(())
 }
 
+/// Decide whether `--follow-tags` should push a given tag: only annotated tags
+/// whose target is reachable from a ref being pushed and which the remote does
+/// not already have.
+fn follow_tag_should_push(
+    is_annotated: bool,
+    target_reachable: bool,
+    full_ref: &str,
+    remote_refs: &HashMap<String, String>,
+) -> bool {
+    is_annotated && target_reachable && !remote_refs.contains_key(full_ref)
+}
+
+/// Collect the annotated tags that `--follow-tags` should add to the push: those
+/// whose target commit is reachable from one of `pushed_tips` and that are
+/// missing on the remote.
+async fn collect_follow_tag_refs(
+    pushed_tips: &[ObjectHash],
+    remote_refs: &HashMap<String, String>,
+) -> Result<Vec<ResolvedLocalRef>, PushError> {
+    let tags = tag::list()
+        .await
+        .map_err(|error| PushError::RepoState(error.to_string()))?;
+    let mut selected = Vec::new();
+    for local_tag in tags {
+        let (is_annotated, target) = match &local_tag.object {
+            tag::TagObject::Tag(tag_object) => (true, tag_object.object_hash),
+            other => (false, tag_object_hash(other)),
+        };
+        let target_reachable = pushed_tips.iter().any(|tip| is_ancestor(&target, tip));
+        let full_ref = normalize_tag_ref(&local_tag.name)?;
+        if follow_tag_should_push(is_annotated, target_reachable, &full_ref, remote_refs) {
+            selected.push(ResolvedLocalRef {
+                full_ref,
+                oid: tag_object_hash(&local_tag.object),
+                kind: LocalRefKind::Tag,
+            });
+        }
+    }
+    Ok(selected)
+}
+
 async fn build_mirror_update_plan(
     remote_refs: &HashMap<String, String>,
     warnings: &mut Vec<String>,
@@ -1843,7 +2126,7 @@ fn classify_transport_error(phase: &str, e: std::io::Error) -> PushError {
     if lower.contains("timed out") || lower.contains("timeout") {
         PushError::Timeout {
             phase: phase.to_string(),
-            seconds: PUSH_TIMEOUT.as_secs(),
+            seconds: PUSH_IDLE_TIMEOUT.as_secs(),
         }
     } else {
         PushError::Network(format!("{phase} failed: {detail}"))
@@ -2902,6 +3185,10 @@ mod test {
             force_if_includes: false,
             thin: false,
             no_thin: false,
+            atomic: false,
+            push_option: Vec::new(),
+            follow_tags: false,
+            signed: false,
             porcelain: false,
             dry_run: false,
             tags: false,
@@ -2912,6 +3199,161 @@ mod test {
             Err(PushError::InvalidArguments(message))
                 if message == "repository is required when specifying refspecs, --tags, or --mirror"
         ));
+    }
+
+    #[test]
+    fn atomic_capability_resolution() {
+        // Not requested: never advertised, regardless of server support.
+        assert!(!resolve_atomic_capability(false, &[]).unwrap());
+        assert!(!resolve_atomic_capability(false, &["atomic".to_string()]).unwrap());
+        // Requested and advertised by the server: include the capability.
+        assert!(
+            resolve_atomic_capability(true, &["report-status".to_string(), "atomic".to_string()])
+                .unwrap()
+        );
+        // Requested but unsupported: refuse up-front.
+        assert!(matches!(
+            resolve_atomic_capability(true, &["report-status".to_string()]),
+            Err(PushError::AtomicUnsupported)
+        ));
+    }
+
+    #[test]
+    fn push_options_capability_resolution() {
+        // No options: never advertised.
+        assert!(!resolve_push_options_capability(&[], &["push-options".to_string()]).unwrap());
+        // Options + server support: advertise.
+        assert!(
+            resolve_push_options_capability(
+                &["ci.skip".to_string()],
+                &["report-status".to_string(), "push-options".to_string()]
+            )
+            .unwrap()
+        );
+        // Options + no support: refuse up-front.
+        assert!(matches!(
+            resolve_push_options_capability(
+                &["ci.skip".to_string()],
+                &["report-status".to_string()]
+            ),
+            Err(PushError::PushOptionsUnsupported)
+        ));
+    }
+
+    #[test]
+    fn push_options_section_encoding() {
+        let mut data = BytesMut::new();
+        encode_push_options(
+            &["ci.skip".to_string(), "notify=false".to_string()],
+            &mut data,
+        );
+        let bytes = &data[..];
+        assert!(
+            bytes.ends_with(b"0000"),
+            "push-options section ends with a flush-pkt"
+        );
+        assert!(
+            bytes.windows(7).any(|w| w == b"ci.skip"),
+            "first option is present in the encoded section"
+        );
+        assert!(
+            bytes.windows(12).any(|w| w == b"notify=false"),
+            "second option is present in the encoded section"
+        );
+    }
+
+    #[test]
+    fn follow_tags_selection_predicate() {
+        let mut remote = HashMap::new();
+        remote.insert("refs/tags/v1".to_string(), "abc".to_string());
+        // Annotated, reachable, and absent on the remote: push it.
+        assert!(follow_tag_should_push(true, true, "refs/tags/v2", &remote));
+        // Lightweight tags are never followed.
+        assert!(!follow_tag_should_push(
+            false,
+            true,
+            "refs/tags/v2",
+            &remote
+        ));
+        // Target not reachable from a pushed ref: skip.
+        assert!(!follow_tag_should_push(
+            true,
+            false,
+            "refs/tags/v2",
+            &remote
+        ));
+        // Already present on the remote: skip.
+        assert!(!follow_tag_should_push(true, true, "refs/tags/v1", &remote));
+    }
+
+    #[test]
+    fn push_cert_nonce_resolution() {
+        // Not signing: never resolves a nonce.
+        assert_eq!(
+            resolve_push_cert_nonce(false, &["push-cert=abc".to_string()]).unwrap(),
+            None
+        );
+        // Signing + server nonce: extract it.
+        assert_eq!(
+            resolve_push_cert_nonce(true, &["push-cert=abc123".to_string()]).unwrap(),
+            Some("abc123".to_string())
+        );
+        // Signing + bare push-cert: empty (stateless) nonce.
+        assert_eq!(
+            resolve_push_cert_nonce(true, &["push-cert".to_string()]).unwrap(),
+            Some(String::new())
+        );
+        // Signing + no support: refuse up-front.
+        assert!(matches!(
+            resolve_push_cert_nonce(true, &["report-status".to_string()]),
+            Err(PushError::PushSignUnsupported)
+        ));
+    }
+
+    #[test]
+    fn push_certificate_payload_and_framing() {
+        let commands = vec![(
+            "old1".to_string(),
+            "new1".to_string(),
+            "refs/heads/main".to_string(),
+        )];
+        let cert = build_push_certificate(
+            "A U Thor <a@e> 1000000000 +0000",
+            "https://example.com/r.git",
+            "nonceXYZ",
+            &commands,
+        );
+        assert_eq!(
+            cert,
+            "certificate version 0.1\n\
+pusher A U Thor <a@e> 1000000000 +0000\n\
+pushee https://example.com/r.git\n\
+nonce nonceXYZ\n\
+\n\
+old1 new1 refs/heads/main\n"
+        );
+
+        let mut data = BytesMut::new();
+        encode_push_cert_section(
+            "report-status push-cert",
+            &cert,
+            "-----BEGIN PGP SIGNATURE-----\nSIGDATA\n-----END PGP SIGNATURE-----",
+            &mut data,
+        );
+        let bytes = &data[..];
+        assert!(
+            bytes.windows(9).any(|w| w == b"push-cert"),
+            "section announces push-cert"
+        );
+        assert!(
+            bytes.windows(13).any(|w| w == b"push-cert-end"),
+            "section ends with push-cert-end"
+        );
+        assert!(
+            bytes.windows(7).any(|w| w == b"SIGDATA"),
+            "armored signature is embedded"
+        );
+        assert!(bytes.ends_with(b"0000"), "section flushed before the pack");
     }
 
     #[test]
@@ -3041,10 +3483,23 @@ mod test {
     fn test_push_error_to_cli_error_timeout() {
         let err: CliError = PushError::Timeout {
             phase: "discovery".to_string(),
-            seconds: PUSH_TIMEOUT.as_secs(),
+            seconds: PUSH_CONNECT_TIMEOUT.as_secs(),
         }
         .into();
         assert_eq!(err.stable_code(), StableErrorCode::NetworkUnavailable);
+    }
+
+    #[test]
+    fn transport_timeout_uses_push_idle_timeout() {
+        let err = classify_transport_error(
+            "send-pack",
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out"),
+        );
+        assert!(matches!(
+            err,
+            PushError::Timeout { phase, seconds }
+                if phase == "send-pack" && seconds == PUSH_IDLE_TIMEOUT.as_secs()
+        ));
     }
 
     #[test]

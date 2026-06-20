@@ -22,7 +22,7 @@ subagent-scaffold = []  # CEX-S2-10 schema-only scaffold (Step 2 sub-agent contr
 
 [dependencies]
 uuid = { version = "1.23.1", features = ["v4", "v5", "v7"] }
-git-internal = "0.7.4"
+git-internal = "0.7.6"
 anyhow = "1.0.102"
 byte-unit = "5.2.0"
 byteorder = "1.5.0"

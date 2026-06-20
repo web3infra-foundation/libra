@@ -465,6 +465,23 @@ pub enum Stash {
     Push {
         #[arg(short, long, help = "The message to display for the stash")]
         message: Option<String>,
+        #[arg(
+            short = 'u',
+            long = "include-untracked",
+            help = "Include untracked files in the stash"
+        )]
+        include_untracked: bool,
+        #[arg(
+            short = 'a',
+            long = "all",
+            help = "Include untracked and ignored files in the stash"
+        )]
+        all: bool,
+        #[arg(
+            long = "keep-index",
+            help = "Keep staged changes in the index and working tree"
+        )]
+        keep_index: bool,
     },
     #[command(about = "Remove a single stashed state from the stash list")]
     Pop {
@@ -955,6 +972,7 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
             )),
             Err(_) => Ok(CommandPreflight::sha1_without_repo()),
         },
+        Commands::Archive(args) if args.list => Ok(CommandPreflight::none()),
         #[cfg(unix)]
         Commands::Worktree(command::worktree::WorktreeArgs {
             command: command::worktree::WorktreeSubcommand::Umount { .. },

@@ -49,6 +49,8 @@ mod rev_list_author_filter_test;
 mod rev_list_cherry_filter_test;
 #[path = "rev_list_cherry_shorthand_test.rs"]
 mod rev_list_cherry_shorthand_test;
+#[path = "rev_list_children_test.rs"]
+mod rev_list_children_test;
 #[path = "rev_list_committer_filter_test.rs"]
 mod rev_list_committer_filter_test;
 #[path = "rev_list_grep_filter_test.rs"]

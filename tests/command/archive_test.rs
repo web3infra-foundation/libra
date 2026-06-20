@@ -62,6 +62,69 @@ fn archive_default_produces_tar() {
 }
 
 #[test]
+fn archive_lists_supported_formats_without_repository() {
+    let temp = tempdir().expect("failed to create non-repository archive list test directory");
+
+    let output = run_libra_command(&["archive", "--list"], temp.path());
+
+    assert_cli_success(&output, "archive --list");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("tar\n"), "format list should include tar");
+    assert!(
+        stdout.contains("tar.gz"),
+        "format list should include tar.gz"
+    );
+    assert!(
+        stdout.contains("tar.bz2"),
+        "format list should include tar.bz2"
+    );
+    assert!(stdout.contains("zip"), "format list should include zip");
+}
+
+#[test]
+fn archive_pathspec_limits_tar_entries_to_matching_directory() {
+    let repo = create_archive_test_repo();
+    let out = repo.path().join("src-only.tar");
+    let out_str = out.to_str().expect("archive output path should be UTF-8");
+
+    let output = run_libra_command(&["archive", "-o", out_str, "HEAD", "src"], repo.path());
+
+    assert_cli_success(&output, "archive HEAD src");
+    let text = String::from_utf8_lossy(&read_bytes(&out)).to_string();
+    assert!(
+        text.contains("src/main.rs"),
+        "tar should contain matched path"
+    );
+    assert!(
+        !text.contains("README.md"),
+        "tar should omit unmatched root file"
+    );
+}
+
+#[test]
+fn archive_pathspec_limits_tar_entries_to_matching_file() {
+    let repo = create_archive_test_repo();
+    let out = repo.path().join("readme-only.tar");
+    let out_str = out.to_str().expect("archive output path should be UTF-8");
+
+    let output = run_libra_command(
+        &["archive", "-o", out_str, "HEAD", "README.md"],
+        repo.path(),
+    );
+
+    assert_cli_success(&output, "archive HEAD README.md");
+    let text = String::from_utf8_lossy(&read_bytes(&out)).to_string();
+    assert!(
+        text.contains("README.md"),
+        "tar should contain matched file"
+    );
+    assert!(
+        !text.contains("src/main.rs"),
+        "tar should omit unmatched nested file"
+    );
+}
+
+#[test]
 fn archive_supports_compressed_and_zip_formats() {
     let repo = create_archive_test_repo();
 

@@ -55,9 +55,8 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵说明 | `--ff-only` / `-r,--rebase` / `--ff` / `--no-ff` 与 fetch `--depth` 已公开并生效（`--no-ff` 强制生成 merge commit，`--depth` 透传到 fetch 浅历史）；`--squash` / `--commit` / `--no-commit` / `--autostash` 仍未公开 | 这几个 strategy 标志依赖当前 HEAD 已回退的 merge 引擎（squash 暂存、no-commit 暂停、autostash 状态机），属于 merge 引擎恢复范畴，暂不在 `PullArgs` 中暴露；恢复 merge 引擎后再同步 `COMPATIBILITY.md` 与测试。 |
-| 兼容差异项 | Squash | 原始对照：不支持；相关参数/替代：git pull --squash；当前说明：依赖 merge 引擎 squash 暂存能力，待 merge 引擎恢复后补齐。 |
-| 兼容差异项 | No-commit / Autostash | 原始对照：不支持；相关参数/替代：git pull --no-commit / --autostash；当前说明：依赖 merge 引擎的 no-commit 暂停与 autostash 状态机，待其恢复后补齐。 |
+| 兼容矩阵说明 | `--ff-only` / `-r,--rebase` / `--ff` / `--no-ff`、fetch `--depth`、`--squash` 与 `--no-commit` 已公开并生效（`--no-ff` 强制生成 merge commit，`--depth` 透传到 fetch 浅历史，`--squash` 暂存合并树但不提交、不移动 HEAD，`--no-commit` 合并后暂停并记录 merge state，由 `libra merge --continue` 收尾）；`--commit`（强制提交覆盖）/ `--autostash` 仍未公开 | `--squash` / `--no-commit` 透传到 `merge::PullMergeOptions` 并复用 merge 引擎逻辑；`--commit` / `--autostash` 依赖尚未实现的 autostash 状态机，暂不在 `PullArgs` 中暴露，实现后再同步 `COMPATIBILITY.md` 与测试。 |
+| 兼容差异项 | Force-commit override / Autostash | 原始对照：不支持；相关参数/替代：git pull --commit / --autostash；当前说明：依赖尚未实现的 autostash 状态机，待其落地后补齐。 |
 
 ## 维护要求
 

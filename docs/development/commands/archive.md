@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra archive` 的目标是按 commit、branch、tag 或缩写提交解析出树对象，并把该树中的已跟踪文件写成归档流。该设计不修改工作区和索引；省略 `TREEISH` 时使用 `HEAD`，默认输出未压缩 tar 到 stdout，也支持通过 `--output <FILE>`（短选项 `-o`）写入文件。归档格式由 `--format`/`-f`（默认 `tar`）控制，支持四种格式：`tar`、`tar.gz`/`tgz`、`tar.bz2`/`tbz2`/`tbz`、`zip`（bzip2 经 `BzEncoder`、zip 经 `zip::ZipWriter` 实现）。`--prefix <PREFIX>` 可为每个归档路径前置一个相对目录前缀，前缀经 `validate_prefix` 校验并拒绝绝对路径与 `..` 穿越。
+`libra archive` 的目标是按 commit、branch、tag 或缩写提交解析出树对象，并把该树中的已跟踪文件写成归档流。该设计不修改工作区和索引；省略 `TREEISH` 时使用 `HEAD`，默认输出未压缩 tar 到 stdout，也支持通过 `--output <FILE>`（短选项 `-o`）写入文件。归档格式由 `--format`/`-f`（默认 `tar`）控制，支持四种格式：`tar`、`tar.gz`/`tgz`、`tar.bz2`/`tbz2`/`tbz`、`zip`（bzip2 经 `BzEncoder`、zip 经 `zip::ZipWriter` 实现）。`--prefix <PREFIX>` 可为每个归档路径前置一个相对目录前缀，前缀经 `validate_prefix` 校验并拒绝绝对路径与 `..` 穿越。`-l`/`--list` 可在不要求仓库的情况下列出支持格式；`TREEISH` 后的 `<path>...` 可把归档限制到匹配文件或目录。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 archive 创建能力已公开；`--format`、`--output`、`--prefix` 均已支持。
+- 兼容级别：`partial`。基础 archive 创建能力已公开；`--format`、`--output`、`--prefix`、`--list` 和 `TREEISH <path>...` pathspec 限定均已支持。
 
 
 ## 设计方案
@@ -41,16 +41,14 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：`src/command/mod.rs` 导出 `archive`，`src/cli.rs::Commands::Archive` 负责 CLI 接入。
 - 用户文档：`docs/commands/archive.md`。
-- Synopsis：`libra archive [OPTIONS] [TREEISH]`。
-- 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。
+- Synopsis：`libra archive [OPTIONS] [TREEISH] [PATH]...` / `libra archive --list`。
+- 公开参数包括：`[TREEISH]`、`[PATH]...`、`-l, --list`、`-f, --format <FMT>`、`-o, --output <FILE>`、`--prefix <PREFIX>`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| Git flag | `<path>...` pathspec 限定（仅归档匹配路径/目录） | `ArchiveArgs` 只有单个 `treeish`，`collect_tree_entries` 无条件遍历整棵树；后续需新增尾随 pathspec 位置参数并在遍历时过滤。命令层即可完成。 |
-| Git flag | `-l` / `--list`（列出受支持的归档格式后退出） | 未公开；纯命令层，打印 `ArchiveFormat` 全集即可。 |
 | Git flag | `--add-file=<file>`（把未跟踪的工作区文件追加进归档） | 未公开；条目仅来自已解析的树，需要读文件系统并注入 `ArchiveEntry`。命令层。 |
 | Git flag | `-0`..`-9` / 压缩级别 | 未公开；gzip/bzip2/zip 均使用 `Compression::default()` 硬编码（`archive.rs`）。命令层。 |
 | Git flag | `-v` / `--verbose`（向 stderr 报告进度） | 未公开；命令当前只产出二进制流。命令层。 |

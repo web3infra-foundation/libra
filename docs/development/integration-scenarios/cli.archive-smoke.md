@@ -1,6 +1,6 @@
 ### `cli.archive-smoke`
 
-目的：覆盖 `archive` 作为已公开 Git 兼容命令的最小黑盒行为，确保 committed tree 可以生成 tar/zip 文件输出，安全前缀生效，非法前缀被拒绝。
+目的：覆盖 `archive` 作为已公开 Git 兼容命令的最小黑盒行为，确保 committed tree 可以生成 tar/zip 文件输出，`--list` 可列出格式，pathspec 可限制归档内容，安全前缀生效，非法前缀被拒绝。
 
 最小步骤：
 

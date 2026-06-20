@@ -41,6 +41,8 @@ async fn test_add_single_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -78,6 +80,8 @@ async fn test_add_dispatches_vcs_automation_history() {
             verbose: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -120,6 +124,8 @@ async fn test_add_dry_run_does_not_dispatch_vcs_automation_history() {
             verbose: false,
             dry_run: true,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -163,6 +169,8 @@ async fn test_add_multiple_files() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -216,6 +224,8 @@ async fn test_add_all_flag() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -273,6 +283,8 @@ async fn test_add_update_flag() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -301,6 +313,8 @@ async fn test_add_update_flag() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -367,6 +381,8 @@ async fn test_add_with_ignore_patterns() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -448,6 +464,8 @@ async fn test_add_force_tracks_ignored_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -469,6 +487,8 @@ async fn test_add_force_tracks_ignored_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -500,6 +520,8 @@ async fn test_add_force_tracks_ignored_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -545,6 +567,8 @@ async fn test_add_force_dot_includes_ignored_directory() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -574,6 +598,8 @@ async fn test_add_force_dot_includes_ignored_directory() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -613,6 +639,8 @@ async fn test_add_dry_run() {
         verbose: false,
         dry_run: true,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -647,6 +675,8 @@ async fn test_add_without_path_should_error() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -680,6 +710,8 @@ async fn test_add_nonexistent_file_should_error() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -717,6 +749,8 @@ async fn test_add_duplicate_file_should_not_duplicate_index() {
             verbose: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         })
         .await;
 
@@ -759,6 +793,8 @@ async fn test_add_empty_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -796,6 +832,8 @@ async fn test_add_sub_directory_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -807,5 +845,100 @@ async fn test_add_sub_directory_file() {
             .iter()
             .any(|x| x.to_str().unwrap().replace("\\", "/") == file_path),
         "File in nested subdirectory should be added to index"
+    );
+}
+
+/// `--pathspec-from-file` (newline-separated) stages only the listed paths and
+/// merges with any pathspecs passed on the command line.
+#[tokio::test]
+#[serial]
+async fn test_add_pathspec_from_file_newline_stages_listed_paths() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    fs::write("file1.txt", "one\n").unwrap();
+    fs::write("file2.txt", "two\n").unwrap();
+    fs::write("file3.txt", "three\n").unwrap();
+    // file1 via the file list, file3 via the CLI pathspec; file2 in neither.
+    fs::write("paths.txt", "file1.txt\n").unwrap();
+
+    add::execute(AddArgs {
+        pathspec: vec![String::from("file3.txt")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: Some(String::from("paths.txt")),
+        pathspec_file_nul: false,
+    })
+    .await;
+
+    let changes = changes_to_be_committed().await;
+    let staged = |name: &str| changes.new.iter().any(|x| x.to_str().unwrap() == name);
+    assert!(
+        staged("file1.txt"),
+        "file1.txt (from file list) should be staged"
+    );
+    assert!(
+        staged("file3.txt"),
+        "file3.txt (from CLI pathspec) should be staged"
+    );
+    assert!(!staged("file2.txt"), "file2.txt should NOT be staged");
+}
+
+/// `--pathspec-from-file` with `--pathspec-file-nul` reads a NUL-separated list.
+#[tokio::test]
+#[serial]
+async fn test_add_pathspec_from_file_nul_stages_listed_paths() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    fs::write("keep.txt", "keep\n").unwrap();
+    fs::write("skip.txt", "skip\n").unwrap();
+    // NUL-separated list naming only keep.txt.
+    fs::write("paths.bin", b"keep.txt\0").unwrap();
+
+    add::execute(AddArgs {
+        pathspec: vec![],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: Some(String::from("paths.bin")),
+        pathspec_file_nul: true,
+    })
+    .await;
+
+    let changes = changes_to_be_committed().await;
+    let staged = |name: &str| changes.new.iter().any(|x| x.to_str().unwrap() == name);
+    assert!(
+        staged("keep.txt"),
+        "keep.txt (from NUL list) should be staged"
+    );
+    assert!(!staged("skip.txt"), "skip.txt should NOT be staged");
+}
+
+/// `--pathspec-file-nul` requires `--pathspec-from-file` (clap `requires`); using
+/// it alone is a usage error.
+#[test]
+fn test_add_pathspec_file_nul_requires_from_file() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["add", "--pathspec-file-nul", "."], repo.path());
+    assert!(
+        !output.status.success(),
+        "--pathspec-file-nul without --pathspec-from-file should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("pathspec-from-file"),
+        "error should mention the required --pathspec-from-file, got: {stderr}"
     );
 }

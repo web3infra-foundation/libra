@@ -443,5 +443,5 @@ trigger a fuzzy match suggestion via edit distance.
 ### Timeout Policy
 
 - Discovery / connection: 60s connection timeout
-- Upload / receive-pack: 60s idle timeout (no data progress triggers timeout)
+- Upload / receive-pack: 600s idle timeout (no data progress triggers timeout)
 - Timeouts are mapped to `NetworkUnavailable` with `phase` detail

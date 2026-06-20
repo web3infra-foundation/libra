@@ -31,7 +31,8 @@ pub const ARCHIVE_EXAMPLES: &str = "\
 EXAMPLES:
     libra archive -o project.tar HEAD
     libra archive --format=tar.gz --prefix=project-v1/ -o project-v1.tar.gz v1.0
-    libra archive --format=zip -o feature.zip feature-branch";
+    libra archive --format=zip -o feature.zip feature-branch
+    libra archive --list";
 
 /// Supported archive output formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,15 +64,27 @@ impl ArchiveFormat {
             )),
         }
     }
+
+    fn list_supported() -> &'static str {
+        "tar\ntar.gz\ntar.bz2\nzip\n"
+    }
 }
 
 /// Create an archive of files from a named tree.
 #[derive(Parser, Debug)]
 #[command(after_help = ARCHIVE_EXAMPLES)]
 pub struct ArchiveArgs {
+    /// List supported archive formats and exit.
+    #[arg(short = 'l', long = "list")]
+    pub list: bool,
+
     /// Commit, branch, tag, or abbreviated commit hash to archive. Defaults to HEAD.
-    #[arg(default_value = "HEAD", value_name = "TREEISH")]
-    pub treeish: String,
+    #[arg(value_name = "TREEISH")]
+    pub treeish: Option<String>,
+
+    /// Limit the archive to matching paths or directories inside TREEISH.
+    #[arg(value_name = "PATH", num_args = 0.., trailing_var_arg = true)]
+    pub paths: Vec<String>,
 
     /// Archive format: tar, tar.gz, tar.bz2, or zip.
     #[arg(short = 'f', long, default_value = "tar", value_name = "FMT")]
@@ -152,6 +165,68 @@ fn entry_has_archive_metadata(entry: &ArchiveEntry) -> bool {
     !entry.path.as_os_str().is_empty()
         && !entry.hash.to_string().is_empty()
         && !matches!(entry.mode, TreeItemMode::Tree | TreeItemMode::Commit)
+}
+
+fn validate_pathspec(pathspec: &str) -> Result<PathBuf, CliError> {
+    if pathspec.is_empty() {
+        return Err(
+            CliError::command_usage("archive pathspec must not be empty")
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+        );
+    }
+
+    let path = Path::new(pathspec);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(CliError::command_usage(format!(
+            "invalid archive pathspec '{pathspec}': use a relative path without '..'"
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+
+    Ok(path.to_path_buf())
+}
+
+fn entry_matches_pathspec(entry: &ArchiveEntry, pathspec: &Path) -> bool {
+    entry.path == pathspec || entry.path.starts_with(pathspec)
+}
+
+fn filter_entries_by_pathspecs(
+    entries: Vec<ArchiveEntry>,
+    pathspecs: &[String],
+) -> Result<Vec<ArchiveEntry>, CliError> {
+    if pathspecs.is_empty() {
+        return Ok(entries);
+    }
+
+    let normalized = pathspecs
+        .iter()
+        .map(|pathspec| validate_pathspec(pathspec))
+        .collect::<Result<Vec<_>, _>>()?;
+    let filtered = entries
+        .into_iter()
+        .filter(|entry| {
+            normalized
+                .iter()
+                .any(|pathspec| entry_matches_pathspec(entry, pathspec))
+        })
+        .collect::<Vec<_>>();
+
+    if filtered.is_empty() {
+        return Err(CliError::fatal(format!(
+            "pathspec '{}' did not match any files in the archive tree",
+            pathspecs.join(", ")
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidTarget));
+    }
+
+    Ok(filtered)
 }
 
 /// Resolve a tree-ish string to the archiveable entries from that commit tree.
@@ -494,18 +569,23 @@ fn create_archive(
 /// Returns `CliInvalidTarget` when the tree-ish cannot be resolved.
 /// Returns `RepoCorrupt` when referenced commit or tree objects cannot be read.
 pub async fn execute_safe(args: ArchiveArgs, _output: &OutputConfig) -> CliResult<()> {
+    if args.list {
+        print!("{}", ArchiveFormat::list_supported());
+        return Ok(());
+    }
+
     let format = ArchiveFormat::parse_strict(&args.format).map_err(|message| {
         CliError::command_usage(message).with_stable_code(StableErrorCode::CliInvalidArguments)
     })?;
     let prefix = validate_prefix(args.prefix.as_deref())?;
-    let entries = resolve_entries(&args.treeish).await?;
+    let treeish = args.treeish.as_deref().unwrap_or("HEAD");
+    let entries = filter_entries_by_pathspecs(resolve_entries(treeish).await?, &args.paths)?;
 
     if entries.is_empty() {
-        return Err(CliError::fatal(format!(
-            "tree '{}' contains no files to archive",
-            args.treeish
-        ))
-        .with_stable_code(StableErrorCode::CliInvalidTarget));
+        return Err(
+            CliError::fatal(format!("tree '{}' contains no files to archive", treeish))
+                .with_stable_code(StableErrorCode::CliInvalidTarget),
+        );
     }
     debug_assert!(entries.iter().all(entry_has_archive_metadata));
 
@@ -583,6 +663,23 @@ mod tests {
     }
 
     #[test]
+    fn validate_pathspec_accepts_safe_relative_paths() {
+        assert_eq!(
+            validate_pathspec("README.md").unwrap(),
+            PathBuf::from("README.md")
+        );
+        assert_eq!(validate_pathspec("src/").unwrap(), PathBuf::from("src/"));
+    }
+
+    #[test]
+    fn validate_pathspec_rejects_archive_slip_paths() {
+        assert!(validate_pathspec("").is_err());
+        assert!(validate_pathspec("../README.md").is_err());
+        assert!(validate_pathspec("/tmp/README.md").is_err());
+        assert!(validate_pathspec("src/../README.md").is_err());
+    }
+
+    #[test]
     fn apply_prefix_prepends_relative_prefix() {
         assert_eq!(
             apply_prefix(Some(Path::new("release")), Path::new("src/lib.rs")),
@@ -648,6 +745,35 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, PathBuf::from("README.md"));
+    }
+
+    #[test]
+    fn filter_entries_by_pathspecs_keeps_matching_files_and_dirs() {
+        let hash =
+            ObjectHash::from_str("8ab686eafeb1f44702738c8b0f24f2567c36da6d").expect("valid hash");
+        let entries = vec![
+            ArchiveEntry {
+                path: PathBuf::from("README.md"),
+                hash,
+                mode: TreeItemMode::Blob,
+            },
+            ArchiveEntry {
+                path: PathBuf::from("src/main.rs"),
+                hash,
+                mode: TreeItemMode::Blob,
+            },
+            ArchiveEntry {
+                path: PathBuf::from("src/lib.rs"),
+                hash,
+                mode: TreeItemMode::Blob,
+            },
+        ];
+
+        let filtered = filter_entries_by_pathspecs(entries, &["src".to_string()])
+            .expect("src pathspec should match");
+
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|entry| entry.path.starts_with("src")));
     }
 
     #[test]

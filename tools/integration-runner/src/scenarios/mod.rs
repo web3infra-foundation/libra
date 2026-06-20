@@ -29,6 +29,7 @@ mod merge_conflict_continue;
 mod merge_rebase_cherry_revert_smoke;
 mod notes_smoke;
 mod object_readback;
+mod object_readback_rev_list_children;
 mod object_readback_rev_list_cherry;
 mod object_readback_rev_list_filters;
 mod object_readback_rev_list_output;

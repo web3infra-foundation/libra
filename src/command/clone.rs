@@ -111,6 +111,16 @@ pub struct CloneArgs {
     /// Create a shallow clone with history truncated to N commits (must be > 0)
     #[clap(long, value_name = "N", value_parser = validate_depth)]
     pub depth: Option<usize>,
+
+    /// Fetch all tags (the default). Accepted for Git compatibility and to
+    /// override an earlier `--no-tags`.
+    #[clap(long, overrides_with = "no_tags")]
+    pub tags: bool,
+
+    /// Do not clone any tags, and set `remote.origin.tagOpt=--no-tags` so future
+    /// fetches also skip tags (matches `git clone --no-tags`).
+    #[clap(long = "no-tags", overrides_with = "tags")]
+    pub no_tags: bool,
 }
 
 const REPO_MARKERS: &[&str] = &["description", "libra.db", "info/exclude", "objects"];
@@ -2810,11 +2820,20 @@ async fn clone_into_destination(
         name: "origin".to_string(),
         url: remote_url.to_string(),
     };
+    // `git clone` fetches ALL tags by default; `--no-tags` skips them and records
+    // `remote.origin.tagOpt=--no-tags` so later fetches also skip tags.
+    let clone_tag_mode = if args.no_tags {
+        let _ = ConfigKv::set("remote.origin.tagOpt", "--no-tags", false).await;
+        fetch::TagFetchMode::NoTags
+    } else {
+        fetch::TagFetchMode::All
+    };
     fetch::fetch_repository_safe(
         remote_config.clone(),
         args.branch.clone(),
         args.single_branch,
         args.depth,
+        Some(clone_tag_mode),
         &child_output,
     )
     .await
@@ -3355,6 +3374,8 @@ mod tests {
             single_branch: false,
             bare: false,
             depth: None,
+            tags: false,
+            no_tags: false,
         }
     }
 
@@ -3562,6 +3583,8 @@ mod tests {
             single_branch: false,
             bare: false,
             depth: None,
+            tags: false,
+            no_tags: false,
         };
         let output = OutputConfig {
             quiet: true,
@@ -3657,6 +3680,8 @@ mod tests {
             single_branch: false,
             bare: false,
             depth: None,
+            tags: false,
+            no_tags: false,
         };
         let output = OutputConfig {
             quiet: true,
@@ -3719,6 +3744,8 @@ mod tests {
             single_branch: false,
             bare: false,
             depth: None,
+            tags: false,
+            no_tags: false,
         };
         let output = OutputConfig {
             quiet: true,
@@ -3779,6 +3806,8 @@ mod tests {
             single_branch: false,
             bare: false,
             depth: None,
+            tags: false,
+            no_tags: false,
         };
         let output = OutputConfig {
             quiet: true,

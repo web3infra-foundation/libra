@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra revert` 的目标是生成抵消已有提交的反向变更，并保留冲突处理和提交控制的清晰边界。当前实现支持单父提交的反向变更、merge commit mainline revert（`-m/--mainline`）、no-commit 流程和稳定错误输出，同时把 sequencer continue/abort/skip 与自定义策略列为未完成。
+`libra revert` 的目标是生成抵消已有提交的反向变更，并保留冲突处理和提交控制的清晰边界。当前实现支持单父提交的反向变更、merge commit mainline revert（`-m/--mainline`）、no-commit 流程、`--continue`/`--abort` 冲突恢复和稳定错误输出，同时把 `--skip`、多提交冲突自动续作、编辑器消息和自定义策略列为未完成。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。单提交 revert、`-n/--no-commit`、`-m/--mainline`（merge commit revert）与 `-s/--signoff`（Signed-off-by trailer，复用 commit 的 `resolve_committer_identity`）已支持；多提交 sequencer（continue/abort/skip）、edit、strategy surface 尚未公开。
+- 兼容级别：`partial`。单/多提交 revert、`-n/--no-commit`、`-m/--mainline`（merge commit revert）、`-s/--signoff`（Signed-off-by trailer）与冲突 sequencer（`--continue`/`--abort`，3-way 冲突标记 + `revert-state.json`）已支持；`--skip`、多提交冲突的自动续作（todo 列表）、edit、strategy surface 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -45,8 +45,9 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/revert.md`。
-- Synopsis：`libra revert [-n | --no-commit] [-m | --mainline <parent-number>] [-s | --signoff] [--json] [--quiet] <commit>`。
-- 公开参数/子命令包括：`<commit>`（位置参数，必填）、`-n, --no-commit`、`-m, --mainline <parent-number>`、`-s, --signoff`、`--json`、`--quiet`。`-s/--signoff` 经 `signoff_trailer` 追加 `Signed-off-by: <name> <email>`（在普通 revert 与 root-commit revert 两条提交路径都生效）；身份解析失败映射为 `RevertError::Signoff`。
+- Synopsis：`libra revert [-n | --no-commit] [-m | --mainline <parent-number>] [-s | --signoff] [--json] [--quiet] <commit>...` ｜ `libra revert --continue` ｜ `libra revert --abort`。
+- 公开参数/子命令包括：`<commit>...`（位置参数，`--continue`/`--abort` 时可省略）、`-n, --no-commit`、`-m, --mainline <parent-number>`、`-s, --signoff`、`--continue`、`--abort`、`--json`、`--quiet`。多个 commit 按给定顺序依次 revert，每个相对前一次产生的 HEAD 各自生成一个 revert commit；中途失败即停止，已完成的保留。`-n/--no-commit` 与 `-m/--mainline` 与多 commit 互斥（映射 `RevertError::MultiCommitUnsupported`）。`-s/--signoff` 经 `signoff_trailer` 追加 `Signed-off-by`。
+- **冲突 sequencer**：当某文件自被 revert 的提交后又被改动且 revert 与之重叠时，`three_way_revert_blob`（`diffy::merge_bytes`，base=被 revert 提交的 blob / ours=当前 / theirs=父提交）写入冲突标记到 index+worktree，并把 `RevertState`（orig_head/reverted_commit/signoff/conflicted_paths）持久化到 `.libra/revert-state.json`，revert 以 exit 1 暂停（`RevertError::Conflicts`）。`--continue` 拒绝 index 中仍含 `<<<<<<<` 标记（`UnresolvedConflicts`），否则从已解决的 index 构建单亲 revert commit 并清理 state；`--abort` reset 到 `orig_head` 并清理 state。开始新 revert 前若已有进行中的 revert 会报 `RevertInProgress`。（区别于 cherry-pick 的 SQLite stage-1/2/3 模型：revert 用 JSON state + stage-0 标记。）
 
 
 ## 还未实现的功能
@@ -54,9 +55,8 @@ flowchart TD
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | 兼容差异项 | 编辑消息 | 原始对照：--edit / --no-edit；相关参数/替代：不适用；当前说明：不支持 (use -n then commit -m)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 冲突后继续 | 原始对照：--continue；相关参数/替代：不适用；当前说明：不支持 (resolve then commit)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 中止进行中操作 | 原始对照：--abort；相关参数/替代：不适用；当前说明：不支持 (no sequencer state)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | Skip 当前 commit | 原始对照：--skip；相关参数/替代：不适用；当前说明：不支持。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | 多提交冲突自动续作 | 原始对照：Git sequencer todo；相关参数/替代：`--continue`；当前说明：`--continue` 可完成当前冲突 revert，但未维护剩余 todo 自动续作。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 策略 | 原始对照：--strategy <s>；相关参数/替代：不适用；当前说明：不支持。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求

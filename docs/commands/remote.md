@@ -34,20 +34,24 @@ by agents and tooling.
 
 With no name, lists configured remote names, one per line. With a `<name>`,
 prints detailed information about that remote: configured fetch/push URLs, the
-cached remote HEAD branch (`refs/remotes/<name>/HEAD`), cached remote-tracking
-branches, and the local branches/refs configured for pull/push.
+remote HEAD branch, the remote branches, and the local branches/refs configured
+for pull/push. By default it **contacts the remote** (like `git remote show`):
+the HEAD is the live default branch, branches are classified `tracked` /
+`new` / `stale` against the local remote-tracking refs, and `queried` is `true`.
 
 | Flag / Argument | Description | Example |
 |-----------------|-------------|---------|
 | (none) | Prints all remote names | `libra remote show` |
 | `<name>` | Remote to inspect in detail | `libra remote show origin` |
-| `-n`, `--no-query` | Skip network discovery (accepted; Libra's `show` is always offline, so this is the default behaviour) | `libra remote show --no-query origin` |
+| `-n`, `--no-query` | Do not contact the remote; report the cached HEAD (`refs/remotes/<name>/HEAD`) and cached tracking branches offline (status `cached`, `queried = false`) | `libra remote show --no-query origin` |
 | `-v`, `--verbose` | Include additional detail where available | `libra remote show -v origin` |
 
-> Detailed `remote show <name>` is **offline**: it reads only Libra's local
-> config and cached remote-tracking refs (`queried` is always `false`). Live
-> remote HEAD discovery and `remote update` are not yet implemented (see
-> `COMPATIBILITY.md`).
+> Branch classification (online): `tracked` (advertised by the remote and
+> already fetched), `new` (advertised but not yet fetched — a later `fetch`
+> stores it), `stale` (fetched locally but no longer advertised — `libra remote
+> prune` removes it). When the remote is unreachable, `show` fails with a hint to
+> retry with `--no-query`. `remote update` (multi-remote fetch) is not yet
+> implemented (see `COMPATIBILITY.md`).
 
 ### Subcommand: `-v` (list verbose)
 
@@ -135,13 +139,13 @@ Set or delete a remote's default branch pointer (`refs/remotes/<name>/HEAD`).
 | `<name>` | Remote name | `origin` |
 | `<branch>` | Branch to set as the remote HEAD (must already exist as a tracking branch) | `libra remote set-head origin main` |
 | `-d`, `--delete` | Delete the remote HEAD ref (idempotent) | `libra remote set-head origin -d` |
-| `-a`, `--auto` | Detect the remote HEAD automatically — **deferred / not yet implemented** (returns a usage error directing you to specify a branch) | `libra remote set-head origin -a` |
+| `-a`, `--auto` | Query the remote and set its HEAD to the branch the remote points at | `libra remote set-head origin -a` |
 
 > The three modes (`<branch>`, `--delete`, `--auto`) are mutually exclusive.
-> `set-head <branch>` requires the tracking branch `refs/remotes/<name>/<branch>`
-> to already exist (fetch it first). `--auto` is deferred pending remote HEAD
-> discovery; live `remote show <name>` discovery and `remote update` are likewise
-> not yet implemented (see `COMPATIBILITY.md`).
+> Both `set-head <branch>` and `--auto` require the resolved branch's tracking
+> ref `refs/remotes/<name>/<branch>` to already exist (fetch it first); `--auto`
+> additionally contacts the remote to discover its default branch. `remote
+> update` (multi-remote fetch) is not yet implemented (see `COMPATIBILITY.md`).
 
 ## Common Commands
 
@@ -157,27 +161,35 @@ libra remote set-url --add --push origin ssh://git@example.com/repo.git
 libra remote prune --dry-run origin
 libra remote set-branches origin main dev
 libra remote set-head origin main
+libra remote set-head origin --auto
 libra remote set-head origin -d
+libra remote show origin
+libra remote show --no-query origin
 ```
 
 ## Human Output
 
 - `remote show` (no name) prints configured remote names, one per line.
-- `remote show <name>` prints a detailed, offline report:
+- `remote show <name>` queries the remote and prints a detailed report
+  (branches classified `tracked` / `new` / `stale`):
 
 ```text
 * remote origin
   Fetch URL: https://example.com/repo.git
   Push URL: https://example.com/repo.git
-  HEAD branch: (unknown)
-  Remote branch data: cached
+  HEAD branch: main
   Remote branches:
-    (none)
+    main tracked
+    feature-x new (next fetch will store in remotes/origin)
+    old-topic stale (use 'libra remote prune' to remove)
   Local branches configured for 'git pull':
     (none)
   Local refs configured for 'git push':
     (none)
 ```
+
+- `remote show --no-query <name>` stays offline; it prints `Remote branch data:
+  cached` and reports cached tracking branches with the `cached` status.
 
 - `remote -v` prints every fetch URL and effective push URL:
 
@@ -215,7 +227,7 @@ Would prune 2 stale remote-tracking branch(es).
 - `urls`: `name`, `push`, `all`, `urls[]`
 - `set-url`: `name`, `role`, `mode`, `urls[]`, `removed`
 - `prune`: `name`, `dry_run`, `stale_branches[]`
-- `show`: `name`, `fetch_urls[]`, `push_urls[]`, `head_branch`, `remote_branches[]`, `pull_config[]`, `push_config[]`, `queried` (always `false` — offline)
+- `show`: `name`, `fetch_urls[]`, `push_urls[]`, `head_branch`, `remote_branches[]` (each `{branch, status, local_oid, remote_oid}`; `status` is `tracked`/`new`/`stale` online or `cached` with `--no-query`), `pull_config[]`, `push_config[]`, `queried` (`true` when the remote was contacted, `false` with `--no-query`)
 - `set-branches`: `name`, `added`, `fetch_refspecs[]`
 - `set-head`: `name`, `mode` (`set`/`delete`), `target`
 

@@ -29,7 +29,7 @@ use std::{
 
 use clap::{Parser, Subcommand, ValueEnum};
 use git_internal::{
-    hash::ObjectHash,
+    hash::{HashKind, ObjectHash},
     internal::object::{commit::Commit, tree::Tree, types::ObjectType},
 };
 use sea_orm::EntityTrait;
@@ -37,8 +37,9 @@ use serde::Serialize;
 use sha1::Digest;
 
 use crate::{
-    command::load_object,
+    command::{fetch::fetch_repository_safe, load_object, log::get_reachable_commits},
     internal::{
+        branch::Branch,
         config::ConfigKv,
         db,
         model::{reference, reflog},
@@ -95,6 +96,15 @@ pub enum MaintenanceSubcommand {
     Unregister,
     /// Show whether this repository is registered for maintenance.
     Status,
+    /// Register the repository AND install an OS scheduler entry (launchd agent
+    /// on macOS, a cron fragment elsewhere) that runs `libra maintenance run`.
+    Start {
+        /// Schedule frequency: `hourly`, `daily`, or `weekly`.
+        #[arg(long, default_value = "hourly")]
+        schedule: String,
+    },
+    /// Unregister and remove the installed OS scheduler entry.
+    Stop,
 }
 
 /// Top-level arguments for `libra maintenance`.
@@ -174,6 +184,8 @@ pub async fn execute_safe(args: MaintenanceArgs, output: &OutputConfig) -> CliRe
         MaintenanceSubcommand::Register { schedule } => register(&schedule, output).await,
         MaintenanceSubcommand::Unregister => unregister(output).await,
         MaintenanceSubcommand::Status => status(output).await,
+        MaintenanceSubcommand::Start { schedule } => start(&schedule, output).await,
+        MaintenanceSubcommand::Stop => stop(output).await,
     }
 }
 
@@ -685,21 +697,182 @@ async fn run_incremental_repack(
 
 async fn run_commit_graph(
     _repo_path: &Path,
-    _dry_run: bool,
+    dry_run: bool,
     _quiet: bool,
     _output: &OutputConfig,
 ) -> CliResult<TaskResult> {
-    // Libra does not currently maintain a commit-graph file. We report this
-    // transparently so callers know the task was considered but not applicable.
-    Ok(TaskResult {
+    let skip = |msg: &str| TaskResult {
         task: "commit-graph".to_string(),
         success: true,
         objects_removed: 0,
         objects_packed: 0,
         refs_packed: 0,
         packs_repacked: 0,
-        message: "commit-graph not yet supported in Libra; skipped".to_string(),
+        message: msg.to_string(),
+    };
+
+    // Collect every commit reachable from a local branch tip.
+    let branches = Branch::list_branches_result(None)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to list branches: {e}")))?;
+    let mut commits: HashMap<ObjectHash, Commit> = HashMap::new();
+    for branch in &branches {
+        for commit in get_reachable_commits(branch.commit.to_string(), None).await? {
+            commits.entry(commit.id).or_insert(commit);
+        }
+    }
+
+    if commits.is_empty() {
+        return Ok(skip("no commits to index; skipped"));
+    }
+    if commits.values().any(|c| c.parent_commit_ids.len() > 2) {
+        return Ok(skip(
+            "octopus merges (>2 parents) are not yet supported by the commit-graph writer; skipped",
+        ));
+    }
+    if commits.keys().next().map(ObjectHash::kind) == Some(HashKind::Sha256) {
+        return Ok(skip(
+            "commit-graph for SHA-256 repositories is not yet supported; skipped",
+        ));
+    }
+
+    let count = commits.len();
+    if dry_run {
+        return Ok(TaskResult {
+            objects_packed: count,
+            message: format!("would write commit-graph for {count} commits"),
+            ..skip("")
+        });
+    }
+
+    let bytes = build_commit_graph(&commits)
+        .ok_or_else(|| CliError::fatal("failed to build commit-graph".to_string()))?;
+    let info_dir = path::objects().join("info");
+    fs::create_dir_all(&info_dir)
+        .map_err(|e| CliError::fatal(format!("failed to create objects/info: {e}")))?;
+    fs::write(info_dir.join("commit-graph"), &bytes)
+        .map_err(|e| CliError::fatal(format!("failed to write commit-graph: {e}")))?;
+
+    Ok(TaskResult {
+        objects_packed: count,
+        message: format!("wrote commit-graph for {count} commits"),
+        ..skip("")
     })
+}
+
+/// Topological generation numbers: `gen(c) = 1 + max(gen(parents))`, roots = 1.
+/// Iterates to a fixpoint (converges in O(history depth) passes).
+fn compute_generations(commits: &HashMap<ObjectHash, Commit>) -> HashMap<ObjectHash, u32> {
+    let mut generations: HashMap<ObjectHash, u32> = commits.keys().map(|k| (*k, 1u32)).collect();
+    loop {
+        let mut changed = false;
+        for (oid, commit) in commits {
+            let parent_max = commit
+                .parent_commit_ids
+                .iter()
+                .filter_map(|p| generations.get(p))
+                .copied()
+                .max()
+                .unwrap_or(0);
+            if parent_max + 1 > generations[oid] {
+                generations.insert(*oid, parent_max + 1);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    generations
+}
+
+/// Encode a v1 commit-graph file (SHA-1, ≤2 parents per commit) with the OIDF,
+/// OIDL, and CDAT chunks and a trailing SHA-1 checksum, matching Git's format.
+fn build_commit_graph(commits: &HashMap<ObjectHash, Commit>) -> Option<Vec<u8>> {
+    /// Sentinel parent slot meaning "no parent" (GRAPH_PARENT_NONE).
+    const GRAPH_PARENT_NONE: u32 = 0x7000_0000;
+    if commits.is_empty() {
+        return None;
+    }
+
+    let mut oids: Vec<ObjectHash> = commits.keys().copied().collect();
+    oids.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
+    let pos: HashMap<ObjectHash, u32> = oids
+        .iter()
+        .enumerate()
+        .map(|(i, o)| (*o, i as u32))
+        .collect();
+    let hash_len = oids[0].size();
+    let n = oids.len();
+    let generations = compute_generations(commits);
+
+    // Cumulative OID fanout over the first OID byte.
+    let mut fanout = [0u32; 256];
+    for o in &oids {
+        fanout[o.as_ref()[0] as usize] += 1;
+    }
+    let mut acc = 0u32;
+    for slot in fanout.iter_mut() {
+        acc += *slot;
+        *slot = acc;
+    }
+
+    let toc_len = 4u64 * 12; // OIDF, OIDL, CDAT + terminator
+    let oidf_off = 8 + toc_len;
+    let oidl_off = oidf_off + 1024;
+    let cdat_off = oidl_off + (n as u64) * (hash_len as u64);
+    let trailer_off = cdat_off + (n as u64) * (hash_len as u64 + 16);
+
+    let mut buf: Vec<u8> = Vec::with_capacity(trailer_off as usize + hash_len);
+    // Header: "CGPH", version 1, hash version 1 (SHA-1), 3 chunks, 0 base graphs.
+    buf.extend_from_slice(b"CGPH");
+    buf.extend_from_slice(&[1, 1, 3, 0]);
+    // Chunk table of contents.
+    buf.extend_from_slice(b"OIDF");
+    buf.extend_from_slice(&oidf_off.to_be_bytes());
+    buf.extend_from_slice(b"OIDL");
+    buf.extend_from_slice(&oidl_off.to_be_bytes());
+    buf.extend_from_slice(b"CDAT");
+    buf.extend_from_slice(&cdat_off.to_be_bytes());
+    buf.extend_from_slice(&[0u8; 4]);
+    buf.extend_from_slice(&trailer_off.to_be_bytes());
+    // OIDF.
+    for f in fanout {
+        buf.extend_from_slice(&f.to_be_bytes());
+    }
+    // OIDL.
+    for o in &oids {
+        buf.extend_from_slice(o.as_ref());
+    }
+    // CDAT.
+    for o in &oids {
+        let commit = &commits[o];
+        buf.extend_from_slice(commit.tree_id.as_ref());
+        let parents = &commit.parent_commit_ids;
+        let p1 = parents
+            .first()
+            .and_then(|p| pos.get(p))
+            .copied()
+            .unwrap_or(GRAPH_PARENT_NONE);
+        let p2 = parents
+            .get(1)
+            .and_then(|p| pos.get(p))
+            .copied()
+            .unwrap_or(GRAPH_PARENT_NONE);
+        buf.extend_from_slice(&p1.to_be_bytes());
+        buf.extend_from_slice(&p2.to_be_bytes());
+        // Last 8 bytes pack generation (top 30 bits) + commit time (34 bits).
+        let g = generations[o] as u64;
+        let t = commit.committer.timestamp as u64;
+        let first = ((g << 2) | ((t >> 32) & 0x3)) as u32;
+        let second = (t & 0xFFFF_FFFF) as u32;
+        buf.extend_from_slice(&first.to_be_bytes());
+        buf.extend_from_slice(&second.to_be_bytes());
+    }
+    // Trailer: SHA-1 checksum of everything written so far.
+    let digest = sha1::Sha1::digest(&buf);
+    buf.extend_from_slice(&digest);
+    Some(buf)
 }
 
 // ---------------------------------------------------------------------------
@@ -708,20 +881,69 @@ async fn run_commit_graph(
 
 async fn run_prefetch(
     _repo_path: &Path,
-    _dry_run: bool,
+    dry_run: bool,
     _quiet: bool,
-    _output: &OutputConfig,
+    output: &OutputConfig,
 ) -> CliResult<TaskResult> {
-    // Prefetch requires remote configuration. In the absence of configured remotes
-    // we report that the task is not applicable.
-    Ok(TaskResult {
+    let skip = |msg: &str| TaskResult {
         task: "prefetch".to_string(),
         success: true,
         objects_removed: 0,
         objects_packed: 0,
         refs_packed: 0,
         packs_repacked: 0,
-        message: "prefetch requires remote configuration; skipped".to_string(),
+        message: msg.to_string(),
+    };
+
+    // Prefetch every configured remote so later fetches transfer less. Unlike
+    // Git (which stages tips under `refs/prefetch/`), Libra reuses the normal
+    // fetch path and refreshes the standard remote-tracking refs — an
+    // intentional difference, since `maintenance` is an explicit, opt-in run.
+    let remotes = ConfigKv::all_remote_configs()
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to read remote configuration: {e}")))?;
+    if remotes.is_empty() {
+        return Ok(skip("no remotes configured; skipped"));
+    }
+    if dry_run {
+        return Ok(TaskResult {
+            refs_packed: remotes.len(),
+            message: format!("would prefetch from {} remote(s)", remotes.len()),
+            ..skip("")
+        });
+    }
+
+    let mut fetched = 0usize;
+    let mut failures = Vec::new();
+    for remote in remotes {
+        let name = remote.name.clone();
+        match fetch_repository_safe(remote, None, false, None, None, output).await {
+            Ok(()) => fetched += 1,
+            Err(e) => failures.push(format!("{name}: {e}")),
+        }
+    }
+
+    // Report a hard failure only when nothing could be prefetched at all.
+    if fetched == 0 && !failures.is_empty() {
+        return Ok(TaskResult {
+            success: false,
+            message: format!("prefetch failed: {}", failures.join("; ")),
+            ..skip("")
+        });
+    }
+    let message = if failures.is_empty() {
+        format!("prefetched {fetched} remote(s)")
+    } else {
+        format!(
+            "prefetched {fetched} remote(s); {} failed ({})",
+            failures.len(),
+            failures.join("; ")
+        )
+    };
+    Ok(TaskResult {
+        refs_packed: fetched,
+        message,
+        ..skip("")
     })
 }
 
@@ -814,6 +1036,177 @@ async fn status(output: &OutputConfig) -> CliResult<()> {
         info_println(output, "Maintenance: not registered");
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// OS scheduler integration (start / stop)
+// ---------------------------------------------------------------------------
+
+/// Overrides the directory the scheduler entry is written to. Tests set this to
+/// a temp dir so `start`/`stop` never touch the real launchd/cron locations.
+const MAINTENANCE_AGENT_DIR_ENV: &str = "LIBRA_MAINTENANCE_AGENT_DIR";
+
+/// Resolve where the OS scheduler entry lives: the override env var, else the
+/// per-user LaunchAgents dir on macOS, else `~/.config/libra/scheduler`.
+fn scheduler_agent_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var(MAINTENANCE_AGENT_DIR_ENV) {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    if cfg!(target_os = "macos") {
+        PathBuf::from(home).join("Library").join("LaunchAgents")
+    } else {
+        PathBuf::from(home)
+            .join(".config")
+            .join("libra")
+            .join("scheduler")
+    }
+}
+
+/// Deterministic per-repository label/filename stem (sha1 of the repo path).
+fn scheduler_label(repo: &Path) -> String {
+    let mut hasher = sha1::Sha1::new();
+    hasher.update(repo.to_string_lossy().as_bytes());
+    let digest: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("tools.libra.maintenance.{}", &digest[..12])
+}
+
+fn schedule_interval_secs(schedule: &str) -> u64 {
+    match schedule {
+        "weekly" => 604_800,
+        "daily" => 86_400,
+        _ => 3_600, // hourly (default / unknown)
+    }
+}
+
+fn schedule_cron_expr(schedule: &str) -> &'static str {
+    match schedule {
+        "weekly" => "0 0 * * 0",
+        "daily" => "0 0 * * *",
+        _ => "0 * * * *",
+    }
+}
+
+/// Write the OS scheduler entry into `dir`, returning its path. macOS gets a
+/// launchd agent plist (LaunchAgents auto-load at the next login); other Unix
+/// gets a cron fragment that runs `libra maintenance run`.
+fn write_scheduler_entry(
+    dir: &Path,
+    label: &str,
+    exe: &Path,
+    repo: &Path,
+    schedule: &str,
+) -> std::io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
+    let exe = exe.to_string_lossy();
+    let repo = repo.to_string_lossy();
+    if cfg!(target_os = "macos") {
+        let path = dir.join(format!("{label}.plist"));
+        let interval = schedule_interval_secs(schedule);
+        let plist = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+<plist version=\"1.0\">\n<dict>\n    \
+<key>Label</key>\n    <string>{label}</string>\n    \
+<key>ProgramArguments</key>\n    <array>\n        <string>{exe}</string>\n        \
+<string>maintenance</string>\n        <string>run</string>\n    </array>\n    \
+<key>WorkingDirectory</key>\n    <string>{repo}</string>\n    \
+<key>StartInterval</key>\n    <integer>{interval}</integer>\n    \
+<key>RunAtLoad</key>\n    <false/>\n</dict>\n</plist>\n"
+        );
+        fs::write(&path, plist)?;
+        Ok(path)
+    } else {
+        let path = dir.join(format!("{label}.cron"));
+        let expr = schedule_cron_expr(schedule);
+        fs::write(
+            &path,
+            format!("{expr} cd \"{repo}\" && \"{exe}\" maintenance run\n"),
+        )?;
+        Ok(path)
+    }
+}
+
+/// Remove a previously-written scheduler entry; returns whether anything existed.
+fn remove_scheduler_entry(dir: &Path, label: &str) -> std::io::Result<bool> {
+    let mut removed = false;
+    for ext in ["plist", "cron"] {
+        let path = dir.join(format!("{label}.{ext}"));
+        if path.exists() {
+            fs::remove_file(&path)?;
+            removed = true;
+        }
+    }
+    Ok(removed)
+}
+
+async fn start(schedule: &str, output: &OutputConfig) -> CliResult<()> {
+    try_get_storage_path(None).map_err(|e| CliError::repo_not_found().with_hint(e.to_string()))?;
+
+    ConfigKv::set(MAINTENANCE_ENABLED_KEY, "true", false)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to set maintenance config: {e}")))?;
+    ConfigKv::set(MAINTENANCE_SCHEDULE_KEY, schedule, false)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to set maintenance schedule: {e}")))?;
+
+    let repo = std::env::current_dir()
+        .map_err(|e| CliError::fatal(format!("failed to resolve repository directory: {e}")))?;
+    let exe = std::env::current_exe()
+        .map_err(|e| CliError::fatal(format!("failed to resolve libra executable: {e}")))?;
+    let dir = scheduler_agent_dir();
+    let label = scheduler_label(&repo);
+    let entry = write_scheduler_entry(&dir, &label, &exe, &repo, schedule)
+        .map_err(|e| CliError::fatal(format!("failed to write scheduler entry: {e}")))?;
+
+    if output.is_json() {
+        return emit_json_data(
+            "maintenance.start",
+            &serde_json::json!({
+                "registered": true,
+                "schedule": schedule,
+                "scheduler_entry": entry.display().to_string(),
+            }),
+            output,
+        );
+    }
+    info_println(
+        output,
+        &format!(
+            "Maintenance scheduled ({schedule}); scheduler entry written to {}",
+            entry.display()
+        ),
+    );
+    Ok(())
+}
+
+async fn stop(output: &OutputConfig) -> CliResult<()> {
+    try_get_storage_path(None).map_err(|e| CliError::repo_not_found().with_hint(e.to_string()))?;
+
+    ConfigKv::set(MAINTENANCE_ENABLED_KEY, "false", false)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to unset maintenance config: {e}")))?;
+
+    let repo = std::env::current_dir()
+        .map_err(|e| CliError::fatal(format!("failed to resolve repository directory: {e}")))?;
+    let dir = scheduler_agent_dir();
+    let label = scheduler_label(&repo);
+    let removed = remove_scheduler_entry(&dir, &label)
+        .map_err(|e| CliError::fatal(format!("failed to remove scheduler entry: {e}")))?;
+
+    if output.is_json() {
+        return emit_json_data(
+            "maintenance.stop",
+            &serde_json::json!({ "registered": false, "removed": removed }),
+            output,
+        );
+    }
+    info_println(output, "Maintenance scheduler stopped");
     Ok(())
 }
 
@@ -1357,5 +1750,99 @@ mod tests {
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("hourly"));
+    }
+
+    #[test]
+    fn scheduler_entry_write_and_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Path::new("/tmp/example-repo");
+        let exe = Path::new("/usr/local/bin/libra");
+        let label = scheduler_label(repo);
+
+        // Label is deterministic for a given repo path.
+        assert_eq!(scheduler_label(repo), label);
+        assert!(label.starts_with("tools.libra.maintenance."));
+
+        let path = write_scheduler_entry(dir.path(), &label, exe, repo, "daily").unwrap();
+        assert!(path.exists(), "scheduler entry should be written");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("maintenance") && content.contains("/tmp/example-repo"),
+            "entry should invoke maintenance in the repo: {content}"
+        );
+        if cfg!(target_os = "macos") {
+            assert_eq!(path.extension().unwrap(), "plist");
+            assert!(content.contains("86400"), "daily => 86400s StartInterval");
+        } else {
+            assert!(content.contains("0 0 * * *"), "daily => daily cron expr");
+        }
+
+        // Removal is idempotent.
+        assert!(remove_scheduler_entry(dir.path(), &label).unwrap());
+        assert!(!path.exists());
+        assert!(!remove_scheduler_entry(dir.path(), &label).unwrap());
+    }
+
+    #[test]
+    fn commit_graph_build_roundtrip() {
+        use std::str::FromStr;
+
+        use git_internal::internal::object::signature::Signature;
+
+        git_internal::hash::set_hash_kind(HashKind::Sha1);
+
+        let tree = ObjectHash::from_str("1111111111111111111111111111111111111111").unwrap();
+        let sig =
+            Signature::from_data(b"committer t <t@example.com> 1000000000 +0000".to_vec()).unwrap();
+        let root = Commit::new(sig.clone(), sig.clone(), tree, vec![], "root");
+        let root_id = root.id;
+        let child = Commit::new(sig.clone(), sig.clone(), tree, vec![root_id], "child");
+        let child_id = child.id;
+
+        let mut commits = HashMap::new();
+        commits.insert(root_id, root);
+        commits.insert(child_id, child);
+
+        let bytes = build_commit_graph(&commits).expect("commit-graph bytes");
+
+        // Header: signature + version 1 + hash version 1 + 3 chunks + 0 base graphs.
+        assert_eq!(&bytes[0..4], b"CGPH");
+        assert_eq!(&bytes[4..8], &[1, 1, 3, 0]);
+
+        // Chunk TOC offsets (OIDF immediately follows the 8-byte header + 48-byte TOC).
+        let oidf_off = u64::from_be_bytes(bytes[12..20].try_into().unwrap()) as usize;
+        assert_eq!(oidf_off, 56);
+        let cdat_off = u64::from_be_bytes(bytes[36..44].try_into().unwrap()) as usize;
+
+        // Final fanout bucket equals the commit count.
+        let last = oidf_off + 255 * 4;
+        assert_eq!(
+            u32::from_be_bytes(bytes[last..last + 4].try_into().unwrap()),
+            2
+        );
+
+        // Trailing SHA-1 checksum covers everything before it.
+        let body = &bytes[..bytes.len() - 20];
+        assert_eq!(&sha1::Sha1::digest(body)[..], &bytes[bytes.len() - 20..]);
+
+        // Verify CDAT parent linkage + generation numbers per sorted position.
+        let mut oids: Vec<ObjectHash> = commits.keys().copied().collect();
+        oids.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
+        let root_pos = oids.iter().position(|o| *o == root_id).unwrap() as u32;
+        let stride = 20 + 16; // tree + parent1 + parent2 + gen/time
+        for (i, o) in oids.iter().enumerate() {
+            let base = cdat_off + i * stride;
+            let p1 = u32::from_be_bytes(bytes[base + 20..base + 24].try_into().unwrap());
+            let genhi = u32::from_be_bytes(bytes[base + 28..base + 32].try_into().unwrap());
+            let time = u32::from_be_bytes(bytes[base + 32..base + 36].try_into().unwrap());
+            assert_eq!(time, 1_000_000_000);
+            if *o == child_id {
+                assert_eq!(p1, root_pos, "child's first parent points at root");
+                assert_eq!(genhi >> 2, 2, "child generation is 2");
+            } else {
+                assert_eq!(p1, 0x7000_0000, "root has no parent (GRAPH_PARENT_NONE)");
+                assert_eq!(genhi >> 2, 1, "root generation is 1");
+            }
+        }
     }
 }

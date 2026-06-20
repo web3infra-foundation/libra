@@ -42,9 +42,10 @@ EXAMPLES:
 #[derive(Parser, Debug)]
 #[command(after_help = REV_PARSE_EXAMPLES)]
 pub struct RevParseArgs {
-    /// Show a non-ambiguous short object name.
-    #[clap(long, conflicts_with_all = ["abbrev_ref", "show_toplevel"])]
-    pub short: bool,
+    /// Show a non-ambiguous short object name. Accepts an optional length
+    /// (e.g. `--short=8`) to request a specific abbreviation.
+    #[clap(long, num_args = 0..=1, require_equals = true, default_missing_value = "7", conflicts_with_all = ["abbrev_ref", "show_toplevel"])]
+    pub short: Option<String>,
 
     /// Show the branch name instead of the commit hash.
     #[clap(long = "abbrev-ref", conflicts_with_all = ["show_toplevel", "short"])]
@@ -71,9 +72,17 @@ pub struct RevParseArgs {
     #[clap(long = "is-bare-repository", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec", "git_dir"])]
     pub is_bare_repository: bool,
 
-    /// Print the path to the repository metadata directory (Git's `$GIT_DIR`; the `.libra` dir).
+    /// Print the path to the `.libra` directory.
     #[clap(long = "git-dir", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec"])]
     pub git_dir: bool,
+
+    /// Print the path relative from the current directory to the repository root.
+    #[clap(long = "show-cdup", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec"])]
+    pub show_cdup: bool,
+
+    /// Print the path of the current directory relative to the repository root.
+    #[clap(long = "show-prefix", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec"])]
+    pub show_prefix: bool,
 
     /// Revision to parse. Defaults to HEAD when omitted.
     #[clap(value_name = "SPEC")]
@@ -180,6 +189,42 @@ async fn resolve_rev_parse(args: &RevParseArgs) -> CliResult<RevParseOutput> {
         });
     }
 
+    if args.show_prefix {
+        let storage = util::try_get_storage_path(None).map_err(map_repo_path_error)?;
+        let cwd = util::cur_dir();
+        let prefix = cwd
+            .strip_prefix(storage.parent().unwrap_or(&storage))
+            .unwrap_or(&cwd);
+        let value = if prefix.as_os_str().is_empty() {
+            String::new()
+        } else {
+            format!("{}/", prefix.display())
+        };
+        return Ok(RevParseOutput {
+            mode: "show_prefix",
+            input: None,
+            value,
+        });
+    }
+
+    if args.show_cdup {
+        let storage = util::try_get_storage_path(None).map_err(map_repo_path_error)?;
+        let worktree_root = storage.parent().unwrap_or(&storage);
+        let cwd = util::cur_dir();
+        let value = if cwd == *worktree_root {
+            String::new()
+        } else {
+            let rel = cwd.strip_prefix(worktree_root).unwrap_or(&cwd);
+            let depth = rel.components().count();
+            "../".repeat(depth)
+        };
+        return Ok(RevParseOutput {
+            mode: "show_cdup",
+            input: None,
+            value,
+        });
+    }
+
     // `--default <arg>` supplies the revision when no positional SPEC is given.
     let spec = args
         .spec
@@ -199,14 +244,22 @@ async fn resolve_rev_parse(args: &RevParseArgs) -> CliResult<RevParseOutput> {
     let commit = util::get_commit_base_typed(spec)
         .await
         .map_err(|err| rev_parse_target_error(spec, err))?;
-    let value = if args.short {
-        resolve_short_commit(&commit).await?
+    let value = if let Some(short_len) = &args.short {
+        let requested_len: usize = short_len.parse().map_err(|_| {
+            CliError::command_usage(format!("invalid --short length: '{short_len}'"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?;
+        resolve_short_commit(&commit, Some(requested_len)).await?
     } else {
         commit.to_string()
     };
 
     Ok(RevParseOutput {
-        mode: if args.short { "short" } else { "resolve" },
+        mode: if args.short.is_some() {
+            "short"
+        } else {
+            "resolve"
+        },
         input: Some(spec.to_string()),
         value,
     })
@@ -275,11 +328,16 @@ async fn resolve_remote_tracking_ref(spec: &str, short_name: &str) -> CliResult<
     Ok(false)
 }
 
-async fn resolve_short_commit(commit: &ObjectHash) -> CliResult<String> {
+async fn resolve_short_commit(
+    commit: &ObjectHash,
+    requested_len: Option<usize>,
+) -> CliResult<String> {
     let full = commit.to_string();
     let storage = util::objects_storage();
 
-    for len in SHORT_HASH_LEN..=full.len() {
+    let min_len = requested_len.unwrap_or(SHORT_HASH_LEN).max(1);
+
+    for len in min_len..=full.len() {
         let prefix = &full[..len];
         let matches = storage.search_result(prefix).await.map_err(|error| {
             CliError::fatal(format!(
@@ -433,7 +491,7 @@ mod tests {
     #[test]
     fn test_rev_parse_args_default() {
         let args = RevParseArgs::try_parse_from(["rev-parse"]).unwrap();
-        assert!(!args.short);
+        assert!(args.short.is_none());
         assert!(!args.abbrev_ref);
         assert!(!args.show_toplevel);
         assert!(args.spec.is_none());
@@ -442,7 +500,9 @@ mod tests {
     #[test]
     fn test_rev_parse_args_short_head() {
         let args = RevParseArgs::try_parse_from(["rev-parse", "--short", "HEAD"]).unwrap();
-        assert!(args.short);
+        // `--short` without `=<n>` takes its default_missing_value ("7"); "HEAD"
+        // is consumed as the positional spec.
+        assert_eq!(args.short.as_deref(), Some("7"));
         assert_eq!(args.spec.as_deref(), Some("HEAD"));
     }
 

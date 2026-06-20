@@ -30,6 +30,8 @@ async fn setup_repo_with_commit(temp: &tempfile::TempDir) -> ChangeDirGuard {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -317,7 +319,7 @@ async fn test_show_ref_lists_tag() {
     let _guard = setup_repo_with_commit(&temp).await;
 
     // Create a lightweight tag via the internal API (same pattern as tag_test.rs)
-    libra::internal::tag::create("v1.0", None, false)
+    libra::internal::tag::create("v1.0", None, false, false)
         .await
         .unwrap();
 
@@ -487,7 +489,7 @@ async fn test_show_ref_default_shows_both() {
     let temp = tempdir().unwrap();
     let _guard = setup_repo_with_commit(&temp).await;
 
-    libra::internal::tag::create("v2.0", None, false)
+    libra::internal::tag::create("v2.0", None, false, false)
         .await
         .unwrap();
 

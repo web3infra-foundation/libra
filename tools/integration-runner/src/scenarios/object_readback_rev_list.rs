@@ -101,6 +101,9 @@ pub(crate) fn assert_rev_list_readback(
     super::object_readback_rev_list_output::assert_rev_list_output(
         ctx, repo, head_id, &latest_id,
     )?;
+    super::object_readback_rev_list_children::assert_rev_list_children(
+        ctx, repo, head_id, &latest_id,
+    )?;
 
     Ok(())
 }

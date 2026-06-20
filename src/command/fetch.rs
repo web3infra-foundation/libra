@@ -1,6 +1,7 @@
 //! Fetch command to negotiate with remotes, download pack data, update
-//! remote-tracking refs, and honor `--depth` shallow options. (Prune and tag
-//! fetching are not yet implemented — see `docs/development/commands/fetch.md`.)
+//! remote-tracking refs, and honor `--depth` shallow options and `--tags` /
+//! `--no-tags`. (Prune is not yet implemented — see
+//! `docs/development/commands/fetch.md`.)
 
 use std::{
     collections::{BTreeSet, HashSet},
@@ -18,7 +19,10 @@ use git_internal::{
     internal::object::commit::Commit,
 };
 use indicatif::ProgressBar;
-use sea_orm::{TransactionError, TransactionTrait};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set, TransactionError,
+    TransactionTrait,
+};
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::io::StreamReader;
@@ -32,6 +36,7 @@ use crate::{
         config::{ConfigKv, ConfigKvEntry, RemoteConfig},
         db::get_db_conn_instance,
         head::Head,
+        model::reference as ref_model,
         protocol::{
             DiscRef, DiscoveryResult, FetchStream, ProtocolClient,
             git_client::GitClient,
@@ -41,6 +46,7 @@ use crate::{
             ssh_client::{SshClient, is_ssh_spec},
         },
         reflog::{HEAD, Reflog, ReflogAction, ReflogContext},
+        tag::{self, TagObject},
         vault::{decrypt_token, load_unseal_key},
     },
     utils::{
@@ -59,6 +65,7 @@ EXAMPLES:
     libra fetch --all                      Fetch every configured remote
     libra fetch origin --depth 1           Shallow fetch (latest commit only)
     libra fetch --all --depth 3            Shallow fetch across all remotes
+    libra fetch origin --tags              Fetch all tags into refs/tags/* as well
     libra fetch origin --dry-run           Preview ref updates without downloading
     libra fetch origin --porcelain         Machine-readable per-ref update lines
     libra fetch origin -v                  Announce the remote on stderr
@@ -120,6 +127,20 @@ impl RemoteClient {
             let client = LocalClient::from_path(normalized)
                 .map_err(|e| format!("invalid local repository '{}': {}", spec, e))?;
             Ok(Self::Local(client))
+        }
+    }
+
+    pub(crate) fn with_network_timeouts(
+        self,
+        connect_timeout: Duration,
+        idle_timeout: Duration,
+    ) -> Result<Self, String> {
+        match self {
+            Self::Http(client) => Ok(Self::Http(
+                client.with_timeouts(connect_timeout, idle_timeout)?,
+            )),
+            Self::Ssh(client) => Ok(Self::Ssh(client.with_idle_timeout(idle_timeout))),
+            other => Ok(other),
         }
     }
 
@@ -511,6 +532,35 @@ pub struct FetchArgs {
     /// `<flag> <old-oid> <new-oid> <local-ref>`. Mutually exclusive with `--json`.
     #[clap(long)]
     pub porcelain: bool,
+
+    /// Allow updates that are not fast-forward and overwrite (clobber) a local
+    /// tag that points elsewhere. Without it, conflicting tags are kept.
+    #[clap(long, short = 'f')]
+    pub force: bool,
+
+    /// Fetch every tag from the remote into `refs/tags/*` (in addition to the
+    /// selected branches). Overrides the default auto-follow and
+    /// `remote.<name>.tagOpt`.
+    #[clap(long, overrides_with = "no_tags")]
+    pub tags: bool,
+
+    /// Do not fetch any tags (not even tags reachable from fetched commits).
+    /// Overrides the default auto-follow and an earlier `--tags`.
+    #[clap(long = "no-tags", overrides_with = "tags")]
+    pub no_tags: bool,
+}
+
+/// How tags are handled for a fetch, resolved per-remote from CLI flags then
+/// `remote.<name>.tagOpt` then the Git default (auto-follow).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagFetchMode {
+    /// Fetch no tags at all (`--no-tags` / `tagOpt = --no-tags`).
+    NoTags,
+    /// Auto-follow: persist tags whose objects/targets are present after the
+    /// branch fetch (Git's default; `include-tag` brings annotated tag objects).
+    AutoFollow,
+    /// Fetch every advertised tag (`--tags` / `tagOpt = --tags`).
+    All,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -518,6 +568,10 @@ pub struct FetchRefUpdate {
     pub remote_ref: String,
     pub old_oid: Option<String>,
     pub new_oid: String,
+    /// True when the update was not a fast-forward (a branch that moved
+    /// non-linearly, or a tag that was force-clobbered).
+    #[serde(default)]
+    pub forced: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -825,6 +879,8 @@ fn format_fetch_porcelain(result: &FetchOutput) -> String {
                 // New ref: space-flag is reserved for fast-forward; new refs use
                 // `*` with an all-zero old object id sized to the hash kind.
                 None => ('*', "0".repeat(update.new_oid.len())),
+                // `+` marks a forced (non-fast-forward / clobbered) update.
+                Some(old) if update.forced => ('+', old.clone()),
                 Some(old) => (' ', old.clone()),
             };
             lines.push(format!(
@@ -848,7 +904,22 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         append: _,
         verbose,
         porcelain: _,
+        force,
+        tags,
+        no_tags,
     } = args;
+
+    // Resolve the CLI tag intent: `--tags` -> All, `--no-tags` -> NoTags, neither
+    // -> None (let each remote fall back to `remote.<name>.tagOpt` then the Git
+    // default auto-follow). `overrides_with` guarantees the two flags can't both
+    // be set.
+    let tag_cli = if tags {
+        Some(TagFetchMode::All)
+    } else if no_tags {
+        Some(TagFetchMode::NoTags)
+    } else {
+        None
+    };
 
     if all {
         let remotes = ConfigKv::all_remote_configs().await.map_err(|error| {
@@ -866,9 +937,11 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
                 );
             }
             results.push(
-                fetch_repository_with_result(remote, None, false, depth, dry_run, output)
-                    .await
-                    .map_err(CliError::from)?,
+                fetch_repository_with_result(
+                    remote, None, false, depth, dry_run, tag_cli, force, output,
+                )
+                .await
+                .map_err(CliError::from)?,
             );
         }
 
@@ -925,6 +998,8 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         false,
         depth,
         dry_run,
+        tag_cli,
+        force,
         output,
     )
     .await
@@ -974,20 +1049,37 @@ fn render_fetch_output(result: &FetchOutput, output: &OutputConfig) -> CliResult
         }
 
         for update in &remote.refs_updated {
+            let is_tag = update.remote_ref.starts_with("refs/tags/");
             let ref_name = update
                 .remote_ref
                 .strip_prefix("refs/remotes/")
                 .unwrap_or(&update.remote_ref);
             match &update.old_oid {
+                None if is_tag => {
+                    writeln!(writer, " * [new tag]         {}", ref_name).map_err(|error| {
+                        CliError::io(format!("failed to write fetch output: {error}"))
+                    })?
+                }
                 None => writeln!(writer, " * [new ref]         {}", ref_name).map_err(|error| {
                     CliError::io(format!("failed to write fetch output: {error}"))
                 })?,
                 Some(old_oid) => {
                     let old_short = &old_oid[..7.min(old_oid.len())];
                     let new_short = &update.new_oid[..7.min(update.new_oid.len())];
-                    writeln!(writer, "   {}..{}  {}", old_short, new_short, ref_name).map_err(
-                        |error| CliError::io(format!("failed to write fetch output: {error}")),
-                    )?;
+                    if update.forced {
+                        writeln!(
+                            writer,
+                            " + {}...{}  {} (forced update)",
+                            old_short, new_short, ref_name
+                        )
+                        .map_err(|error| {
+                            CliError::io(format!("failed to write fetch output: {error}"))
+                        })?;
+                    } else {
+                        writeln!(writer, "   {}..{}  {}", old_short, new_short, ref_name).map_err(
+                            |error| CliError::io(format!("failed to write fetch output: {error}")),
+                        )?;
+                    }
                 }
             }
         }
@@ -1100,6 +1192,7 @@ pub async fn fetch_repository(
         branch,
         single_branch,
         depth,
+        None,
         &OutputConfig::default(),
     )
     .await
@@ -1113,19 +1206,32 @@ pub async fn fetch_repository_safe(
     branch: Option<String>,
     single_branch: bool,
     depth: Option<usize>,
+    tag_cli: Option<TagFetchMode>,
     output: &OutputConfig,
 ) -> Result<(), FetchError> {
-    fetch_repository_with_result(remote_config, branch, single_branch, depth, false, output)
-        .await
-        .map(|_| ())
+    fetch_repository_with_result(
+        remote_config,
+        branch,
+        single_branch,
+        depth,
+        false,
+        tag_cli,
+        false,
+        output,
+    )
+    .await
+    .map(|_| ())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn fetch_repository_with_result(
     remote_config: RemoteConfig,
     branch: Option<String>,
     single_branch: bool,
     depth: Option<usize>,
     dry_run: bool,
+    tag_cli: Option<TagFetchMode>,
+    force: bool,
     output: &OutputConfig,
 ) -> Result<FetchRepositoryResult, FetchError> {
     let (remote_client, discovery) =
@@ -1173,13 +1279,32 @@ pub(crate) async fn fetch_repository_with_result(
         .cloned()
         .collect::<Vec<_>>();
 
-    // Only request refs we will actually persist as remote-tracking refs.
-    // `update_references` saves `refs/heads/*` and `refs/mr/*`; asking for
-    // anything else (HEAD symref, `refs/pull/*`, `refs/tags/*`) makes the
-    // server include unreachable objects that the next fetch's `have` cannot
-    // cover, which forces the same pack to be re-downloaded every time.
+    // Resolve tag handling for this remote (CLI > `remote.<name>.tagOpt` > auto).
+    let tag_mode = resolve_tag_mode(&remote_config.name, tag_cli).await;
+    // Every advertised tag ref (excluding peeled `^{}` lines), captured before
+    // the want-filter drops them. Used to persist `--tags` / auto-followed tags.
+    let discovered_tags: Vec<DiscRef> = discovery
+        .refs
+        .iter()
+        .filter(|r| r._ref.starts_with("refs/tags/") && !r._ref.ends_with("^{}"))
+        .cloned()
+        .collect();
+
+    // Only request refs we will actually persist. `update_references` saves
+    // `refs/heads/*` and `refs/mr/*`; with `--tags` (`All`) we also explicitly
+    // `want` `refs/tags/*`. Asking for anything else (HEAD symref, `refs/pull/*`)
+    // makes the server include unreachable objects that the next fetch's `have`
+    // cannot cover, forcing the same pack to be re-downloaded every time. Tags
+    // are safe to keep because `current_have_safe` seeds `have` from local
+    // `refs/tags/*` (peeling annotated tags). Auto-followed tags are NOT wanted
+    // here — they arrive via the `include-tag` capability and are persisted
+    // post-fetch only when their object/target is present.
     refs.retain(|reference| {
-        reference._ref.starts_with("refs/heads/") || reference._ref.starts_with("refs/mr/")
+        reference._ref.starts_with("refs/heads/")
+            || reference._ref.starts_with("refs/mr/")
+            || (tag_mode == TagFetchMode::All
+                && reference._ref.starts_with("refs/tags/")
+                && !reference._ref.ends_with("^{}"))
     });
 
     if let Some(branch_name) = &branch
@@ -1244,8 +1369,37 @@ pub(crate) async fn fetch_repository_with_result(
     }
     apply_shallow_updates(&fetch_data.shallow, &fetch_data.unshallow)?;
 
-    let refs_updated =
-        update_references(&remote_config, &refs, &ref_heads, remote_head, branch).await?;
+    let mut refs_updated = update_references(
+        &remote_config,
+        &refs,
+        &ref_heads,
+        remote_head,
+        branch,
+        discovery.capabilities.clone(),
+    )
+    .await?;
+
+    // Persist tags per the resolved mode. `All`: every advertised tag (already
+    // in `want`). `AutoFollow`: tags whose object/target is now present locally
+    // — annotated tag objects arrive via the `include-tag` capability when their
+    // target was fetched; lightweight tags need only their commit. `NoTags`: none.
+    let tags_to_persist: Vec<DiscRef> = match tag_mode {
+        TagFetchMode::NoTags => Vec::new(),
+        TagFetchMode::All => discovered_tags,
+        TagFetchMode::AutoFollow => {
+            let storage = util::objects_storage();
+            discovered_tags
+                .into_iter()
+                .filter(|tag| {
+                    ObjectHash::from_str(&tag._hash)
+                        .map(|oid| storage.exist(&oid))
+                        .unwrap_or(false)
+                })
+                .collect()
+        }
+    };
+    refs_updated.extend(persist_fetched_tags(&tags_to_persist, force).await?);
+
     Ok(FetchRepositoryResult {
         remote: remote_config.name,
         url: normalized_url,
@@ -1846,6 +2000,33 @@ async fn compute_fetch_ref_preview(
 ) -> Result<Vec<FetchRefUpdate>, FetchError> {
     let mut updates = Vec::new();
     for reference in refs {
+        // `--tags --dry-run`: preview only the tags that would be newly created
+        // (absent locally). Up-to-date and conflicting tags are not previewed as
+        // updates because fetch never clobbers them.
+        if let Some(tag_name) = reference._ref.strip_prefix("refs/tags/") {
+            if reference._ref.ends_with("^{}") {
+                continue;
+            }
+            let existing =
+                tag::find_tag_ref(tag_name)
+                    .await
+                    .map_err(|error| FetchError::UpdateRefs {
+                        message: format!(
+                            "failed to inspect existing tag '{}': {error}",
+                            reference._ref
+                        ),
+                    })?;
+            if existing.is_none() {
+                updates.push(FetchRefUpdate {
+                    remote_ref: reference._ref.clone(),
+                    old_oid: None,
+                    new_oid: reference._hash.clone(),
+                    forced: false,
+                });
+            }
+            continue;
+        }
+
         let full_ref_name = if let Some(branch_name) = reference._ref.strip_prefix("refs/heads/") {
             format!("refs/remotes/{}/{}", remote_config.name, branch_name)
         } else if let Some(mr_name) = reference._ref.strip_prefix("refs/mr/") {
@@ -1870,6 +2051,7 @@ async fn compute_fetch_ref_preview(
             remote_ref: full_ref_name,
             old_oid,
             new_oid: reference._hash.clone(),
+            forced: false,
         });
     }
     Ok(updates)
@@ -1891,6 +2073,13 @@ fn format_fetch_head(result: &FetchOutput) -> String {
     for remote in &result.remotes {
         let tracking_prefix = format!("refs/remotes/{}/", remote.remote);
         for update in &remote.refs_updated {
+            if let Some(tag_name) = update.remote_ref.strip_prefix("refs/tags/") {
+                lines.push(format!(
+                    "{}\tnot-for-merge\ttag '{}' of {}",
+                    update.new_oid, tag_name, remote.url
+                ));
+                continue;
+            }
             let branch = update
                 .remote_ref
                 .strip_prefix(&tracking_prefix)
@@ -1946,12 +2135,55 @@ fn write_fetch_head(result: &FetchOutput, append: bool) -> Result<(), FetchError
     })
 }
 
+/// Resolve the short branch name a remote's HEAD points at. Prefers the
+/// server's `symref=HEAD:refs/heads/<branch>` capability (exact, advertised by
+/// `git-upload-pack`); otherwise matches HEAD's advertised OID against a branch
+/// tip; otherwise falls back to `main`, then `master`, then the first branch.
+/// Shared by `fetch` (to cache the remote HEAD) and `remote show` /
+/// `remote set-head --auto`.
+pub(crate) fn resolve_remote_default_branch(
+    capabilities: &[String],
+    ref_heads: &[DiscRef],
+    remote_head: Option<&DiscRef>,
+) -> Option<String> {
+    // 1. `symref=HEAD:refs/heads/<branch>` capability.
+    for cap in capabilities {
+        if let Some(rest) = cap.strip_prefix("symref=HEAD:")
+            && let Some(branch) = rest.strip_prefix("refs/heads/")
+            && !branch.is_empty()
+        {
+            return Some(branch.to_string());
+        }
+    }
+    // 2. Match HEAD's advertised OID against a branch tip.
+    if let Some(remote_head) = remote_head
+        && let Some(branch) = ref_heads
+            .iter()
+            .find(|r| r._hash == remote_head._hash)
+            .and_then(|r| r._ref.strip_prefix("refs/heads/"))
+    {
+        return Some(branch.to_string());
+    }
+    // 3. Heuristic fallback: main, then master, then the first branch.
+    if ref_heads.is_empty() {
+        return None;
+    }
+    ref_heads
+        .iter()
+        .find(|r| r._ref == "refs/heads/main")
+        .or_else(|| ref_heads.iter().find(|r| r._ref == "refs/heads/master"))
+        .or(ref_heads.first())
+        .and_then(|r| r._ref.strip_prefix("refs/heads/"))
+        .map(str::to_owned)
+}
+
 async fn update_references(
     remote_config: &RemoteConfig,
     refs: &[DiscRef],
     ref_heads: &[DiscRef],
     remote_head: Option<DiscRef>,
     branch: Option<String>,
+    capabilities: Vec<String>,
 ) -> Result<Vec<FetchRefUpdate>, FetchError> {
     let db = get_db_conn_instance().await;
     let remote_config = remote_config.clone();
@@ -1961,6 +2193,13 @@ async fn update_references(
         Box::pin(async move {
             let mut updates = Vec::new();
             for reference in &refs {
+                // Tags are persisted separately by `persist_fetched_tags` (they
+                // live in the shared `refs/tags/*` namespace and have their own
+                // create/skip/clobber policy).
+                if reference._ref.starts_with("refs/tags/") {
+                    continue;
+                }
+
                 let full_ref_name: String;
                 if let Some(branch_name) = reference._ref.strip_prefix("refs/heads/") {
                     full_ref_name = format!("refs/remotes/{}/{}", remote_config.name, branch_name);
@@ -2020,38 +2259,17 @@ async fn update_references(
                     })?;
                 updates.push(FetchRefUpdate {
                     remote_ref: full_ref_name,
+                    forced: fetch_update_is_forced(old_oid.as_deref(), &reference._hash),
                     old_oid,
                     new_oid: reference._hash.clone(),
                 });
             }
 
-            // Determine the remote default branch.
-            // When the remote HEAD is advertised, match it by hash against fetched
-            // branches.  When it is absent (e.g. the remote HEAD symref points to
-            // an unborn branch), fall back to the first available branch, preferring
-            // "main" then "master" – mirroring the heuristic used by git itself.
-            let resolved_remote_head: Option<&str> = if let Some(ref remote_head) = remote_head {
-                ref_heads
-                    .iter()
-                    .find(|reference| reference._hash == remote_head._hash)
-                    .and_then(|r| r._ref.strip_prefix("refs/heads/"))
-            } else {
-                None
-            };
-
-            let remote_default_branch = resolved_remote_head.map(str::to_owned).or_else(|| {
-                if ref_heads.is_empty() {
-                    return None;
-                }
-                ref_heads
-                    .iter()
-                    .find(|r| r._ref == "refs/heads/main")
-                    .or_else(|| ref_heads.iter().find(|r| r._ref == "refs/heads/master"))
-                    .or(ref_heads.first())
-                    .and_then(|r| r._ref.strip_prefix("refs/heads/"))
-                    .map(str::to_owned)
-            });
-
+            // Update the cached remote HEAD to the branch it points at, resolved
+            // via the shared helper (symref capability, else OID match, else
+            // main/master/first).
+            let remote_default_branch =
+                resolve_remote_default_branch(&capabilities, &ref_heads, remote_head.as_ref());
             if let Some(branch_name) = remote_default_branch {
                 Head::update_with_conn(txn, Head::Branch(branch_name), Some(&remote_config.name))
                     .await;
@@ -2071,12 +2289,166 @@ async fn update_references(
     })
 }
 
+/// Whether `new_oid` updating `old_oid` is a forced (non-fast-forward) change.
+/// Best-effort: `false` for a new ref or when ancestry cannot be computed.
+fn fetch_update_is_forced(old_oid: Option<&str>, new_oid: &str) -> bool {
+    let Some(old_str) = old_oid else {
+        return false;
+    };
+    let (Ok(old), Ok(new)) = (ObjectHash::from_str(old_str), ObjectHash::from_str(new_oid)) else {
+        return false;
+    };
+    if old == new {
+        return false;
+    }
+    !commit_is_ancestor(&old, &new)
+}
+
+/// True when `ancestor` is reachable from `descendant` by walking parents.
+fn commit_is_ancestor(ancestor: &ObjectHash, descendant: &ObjectHash) -> bool {
+    if ancestor == descendant {
+        return true;
+    }
+    let mut queue = std::collections::VecDeque::new();
+    let mut visited = HashSet::new();
+    queue.push_back(*descendant);
+    visited.insert(*descendant);
+    while let Some(id) = queue.pop_front() {
+        let Ok(commit) = load_object::<Commit>(&id) else {
+            continue;
+        };
+        for parent in &commit.parent_commit_ids {
+            if parent == ancestor {
+                return true;
+            }
+            if visited.insert(*parent) {
+                queue.push_back(*parent);
+            }
+        }
+    }
+    false
+}
+
+/// Resolve the effective [`TagFetchMode`] for `remote_name`: an explicit CLI
+/// choice (`tag_cli`) wins; otherwise `remote.<name>.tagOpt` (`--tags` /
+/// `--no-tags`); otherwise Git's default auto-follow.
+async fn resolve_tag_mode(remote_name: &str, tag_cli: Option<TagFetchMode>) -> TagFetchMode {
+    if let Some(mode) = tag_cli {
+        return mode;
+    }
+    match ConfigKv::get(&format!("remote.{remote_name}.tagOpt")).await {
+        Ok(Some(entry)) => match entry.value.trim() {
+            "--tags" => TagFetchMode::All,
+            "--no-tags" => TagFetchMode::NoTags,
+            _ => TagFetchMode::AutoFollow,
+        },
+        _ => TagFetchMode::AutoFollow,
+    }
+}
+
+/// Persist fetched tags into the shared `refs/tags/*` namespace (kind=Tag,
+/// remote=None), matching Git. Policy: create when absent; skip when already at
+/// the same target; on a conflicting local tag, clobber when `force`, else keep
+/// the local tag with a warning. Tags carry no reflog. Returns one
+/// [`FetchRefUpdate`] per created/clobbered tag.
+async fn persist_fetched_tags(
+    tags: &[DiscRef],
+    force: bool,
+) -> Result<Vec<FetchRefUpdate>, FetchError> {
+    if tags.is_empty() {
+        return Ok(Vec::new());
+    }
+    let db = get_db_conn_instance().await;
+    let tags = tags.to_vec();
+    db.transaction(|txn| {
+        Box::pin(async move {
+            let mut updates = Vec::new();
+            for tag in &tags {
+                if tag._ref.ends_with("^{}") || !tag._ref.starts_with("refs/tags/") {
+                    continue;
+                }
+                let existing = ref_model::Entity::find()
+                    .filter(ref_model::Column::Name.eq(tag._ref.clone()))
+                    .filter(ref_model::Column::Kind.eq(ref_model::ConfigKind::Tag))
+                    .one(txn)
+                    .await
+                    .map_err(|error| FetchError::UpdateRefs {
+                        message: format!("failed to inspect existing tag '{}': {error}", tag._ref),
+                    })?;
+                match existing {
+                    Some(row) if row.commit.as_deref() == Some(tag._hash.as_str()) => {
+                        // Already up to date — nothing to report.
+                    }
+                    Some(row) if force => {
+                        let old = row.commit.clone();
+                        let mut active: ref_model::ActiveModel = row.into();
+                        active.commit = Set(Some(tag._hash.clone()));
+                        active
+                            .update(txn)
+                            .await
+                            .map_err(|source| FetchError::UpdateRefs {
+                                message: format!(
+                                    "failed to force-update tag '{}': {source}",
+                                    tag._ref
+                                ),
+                            })?;
+                        updates.push(FetchRefUpdate {
+                            remote_ref: tag._ref.clone(),
+                            old_oid: old,
+                            new_oid: tag._hash.clone(),
+                            forced: true,
+                        });
+                    }
+                    Some(_) => {
+                        tracing::warn!(
+                            "tag '{}' already exists with a different target; keeping the local tag (use --force to overwrite)",
+                            tag._ref
+                        );
+                    }
+                    None => {
+                        let new_ref = ref_model::ActiveModel {
+                            name: Set(Some(tag._ref.clone())),
+                            kind: Set(ref_model::ConfigKind::Tag),
+                            commit: Set(Some(tag._hash.clone())),
+                            ..Default::default()
+                        };
+                        new_ref
+                            .insert(txn)
+                            .await
+                            .map_err(|source| FetchError::UpdateRefs {
+                                message: format!("failed to persist tag '{}': {source}", tag._ref),
+                            })?;
+                        updates.push(FetchRefUpdate {
+                            remote_ref: tag._ref.clone(),
+                            old_oid: None,
+                            new_oid: tag._hash.clone(),
+                            forced: false,
+                        });
+                    }
+                }
+            }
+            Ok::<_, FetchError>(updates)
+        })
+    })
+    .await
+    .map_err(|source| FetchError::UpdateRefs {
+        message: match source {
+            TransactionError::Connection(error) => error.to_string(),
+            TransactionError::Transaction(error) => error.to_string(),
+        },
+    })
+}
+
 /// Soft cap on the number of commits we walk back from each branch tip when
 /// constructing the `have` list. Each `have` line is small, but we still want
 /// to keep the request bounded for repos with deep history. Tips themselves
 /// always go into `have` regardless of this limit so that the server can
 /// recognise every local/remote-tracking branch as a potential common ancestor.
 const HAVE_HISTORY_LIMIT: usize = 256;
+
+/// Maximum chain length when peeling a (possibly tag-of-tag) annotated tag to
+/// its target while building the `have` set. Bounds runaway/cyclic tag chains.
+const MAX_TAG_PEEL_DEPTH: usize = 32;
 
 async fn current_have_safe() -> Result<Vec<String>, FetchError> {
     #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -2139,6 +2511,52 @@ async fn current_have_safe() -> Result<Vec<String>, FetchError> {
             let oid = branch.commit.to_string();
             if have_set.insert(oid.clone()) {
                 have.push(oid);
+            }
+        }
+    }
+
+    // Phase 1b: local tags are `have` candidates too. Every tag ref tip (the
+    // annotated tag object, or the commit/target for a lightweight tag) is
+    // added, and annotated tags are peeled — best effort — so their target
+    // commit seeds the parent walk. Without this, a `--tags` fetch re-downloads
+    // the tag objects and their history on every run (the bug that previously
+    // forced tag fetching to be backed out). This is unconditional: the client
+    // genuinely has these objects, so advertising them is always correct.
+    let db = get_db_conn_instance().await;
+    let tag_rows = ref_model::Entity::find()
+        .filter(ref_model::Column::Kind.eq(ref_model::ConfigKind::Tag))
+        .all(&db)
+        .await
+        .map_err(|source| FetchError::LocalState {
+            message: format!("failed to list local tags for have-set: {source}"),
+        })?;
+    for row in tag_rows {
+        let Some(ref_oid) = row.commit else {
+            continue;
+        };
+        if have_set.insert(ref_oid.clone()) {
+            have.push(ref_oid.clone());
+        }
+        // Peel annotated tags best-effort: a missing object simply means this
+        // tag contributes only its own oid. The bounded loop guards cycles.
+        let Ok(mut current) = ObjectHash::from_str(&ref_oid) else {
+            continue;
+        };
+        for _ in 0..MAX_TAG_PEEL_DEPTH {
+            match tag::load_object_trait(&current).await {
+                Ok(TagObject::Tag(inner)) => {
+                    let target_oid = inner.object_hash.to_string();
+                    if have_set.insert(target_oid.clone()) {
+                        have.push(target_oid);
+                    }
+                    current = inner.object_hash;
+                }
+                Ok(TagObject::Commit(commit)) => {
+                    check_and_insert(&commit, &mut inserted, &mut c_pending);
+                    break;
+                }
+                // Tree/Blob targets, or a missing object: nothing more to seed.
+                _ => break,
             }
         }
     }
@@ -2232,6 +2650,44 @@ mod tests {
     };
 
     #[test]
+    fn resolve_remote_default_branch_prefers_symref_then_oid_then_heuristic() {
+        use super::{DiscRef, resolve_remote_default_branch};
+        let dr = |oid: &str, name: &str| DiscRef {
+            _hash: oid.to_string(),
+            _ref: name.to_string(),
+        };
+        let heads = vec![
+            dr("aaa", "refs/heads/master"),
+            dr("bbb", "refs/heads/dev"),
+            dr("ccc", "refs/heads/main"),
+        ];
+        // 1. `symref=HEAD:` capability wins, even over a conflicting HEAD OID.
+        let caps = vec![
+            "side-band-64k".to_string(),
+            "symref=HEAD:refs/heads/dev".to_string(),
+        ];
+        let head_main = dr("ccc", "HEAD");
+        assert_eq!(
+            resolve_remote_default_branch(&caps, &heads, Some(&head_main)).as_deref(),
+            Some("dev")
+        );
+        // 2. No symref -> match HEAD's advertised OID against a branch tip.
+        let head_master = dr("aaa", "HEAD");
+        assert_eq!(
+            resolve_remote_default_branch(&[], &heads, Some(&head_master)).as_deref(),
+            Some("master")
+        );
+        // 3. No symref and HEAD OID matches nothing -> `main` heuristic.
+        let head_unknown = dr("zzz", "HEAD");
+        assert_eq!(
+            resolve_remote_default_branch(&[], &heads, Some(&head_unknown)).as_deref(),
+            Some("main")
+        );
+        // 4. No branches at all -> None.
+        assert_eq!(resolve_remote_default_branch(&[], &[], None), None);
+    }
+
+    #[test]
     fn format_fetch_porcelain_layout_is_space_separated() {
         use super::{FetchOutput, FetchRefUpdate, FetchRepositoryResult, format_fetch_porcelain};
 
@@ -2248,11 +2704,13 @@ mod tests {
                         remote_ref: "refs/remotes/origin/main".to_string(),
                         old_oid: Some("a".repeat(40)),
                         new_oid: "b".repeat(40),
+                        forced: false,
                     },
                     FetchRefUpdate {
                         remote_ref: "refs/remotes/origin/dev".to_string(),
                         old_oid: None,
                         new_oid: "c".repeat(40),
+                        forced: false,
                     },
                 ],
             }],
@@ -2292,6 +2750,7 @@ mod tests {
                     remote_ref: "refs/remotes/origin/main".to_string(),
                     old_oid: None,
                     new_oid: "d".repeat(40),
+                    forced: false,
                 }],
             }],
         };

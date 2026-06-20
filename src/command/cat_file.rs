@@ -89,13 +89,15 @@ pub struct CatFileArgs {
 
     /// Read object names from stdin (one per line) and print
     /// "<sha> <type> <size>" for each, or "<input> missing" when unresolved.
-    #[clap(long = "batch-check", group = "mode")]
-    pub batch_check: bool,
+    /// Accepts an optional format string (e.g. `--batch-check="%(objectname) %(objecttype)"`).
+    #[clap(long = "batch-check", group = "mode", num_args = 0..=1, require_equals = true, default_missing_value = "")]
+    pub batch_check: Option<String>,
 
     /// Read object names from stdin (one per line) and print
     /// "<sha> <type> <size>\n<contents>\n" for each, or "<input> missing".
-    #[clap(long = "batch", group = "mode")]
-    pub batch: bool,
+    /// Accepts an optional format string (e.g. `--batch="%(objectname) %(objecttype)"`).
+    #[clap(long = "batch", group = "mode", num_args = 0..=1, require_equals = true, default_missing_value = "")]
+    pub batch: Option<String>,
 
     // ── AI object modes ─────────────────────────────────────────────────
     /// Pretty-print an AI object by ID across all stored AI types, or disambiguate with TYPE:ID.
@@ -338,12 +340,12 @@ pub async fn execute(args: CatFileArgs) {
 pub async fn execute_safe(args: CatFileArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
-    if args.batch_check {
-        return run_batch(false).await;
+    if let Some(fmt) = &args.batch_check {
+        return run_batch(false, fmt).await;
     }
 
-    if args.batch {
-        return run_batch(true).await;
+    if let Some(fmt) = &args.batch {
+        return run_batch(true, fmt).await;
     }
 
     if args.check_exist && !output.is_json() {
@@ -498,7 +500,7 @@ fn invalid_object_name_error(object_ref: &str) -> CliError {
 /// object contents and a trailing newline when `include_content` is set — or
 /// `<input> missing` when the name does not resolve. Each object's output is
 /// buffered and written once so the BrokenPipe early-exit is handled uniformly.
-async fn run_batch(include_content: bool) -> CliResult<()> {
+async fn run_batch(include_content: bool, format: &str) -> CliResult<()> {
     use std::io::{Read, Write};
 
     let mode = if include_content {
@@ -524,7 +526,12 @@ async fn run_batch(include_content: bool) -> CliResult<()> {
         match resolve_object_safe(spec, &storage).await {
             Ok(hash) => match (storage.get_object_type(&hash), storage.get(&hash)) {
                 (Ok(obj_type), Ok(data)) => {
-                    buf.extend_from_slice(format!("{hash} {obj_type} {}\n", data.len()).as_bytes());
+                    let header = if format.is_empty() {
+                        format!("{hash} {obj_type} {}\n", data.len())
+                    } else {
+                        format_batch_line(format, &hash, &obj_type.to_string(), data.len())
+                    };
+                    buf.extend_from_slice(header.as_bytes());
                     if include_content {
                         buf.extend_from_slice(&data);
                         buf.push(b'\n');
@@ -546,6 +553,19 @@ async fn run_batch(include_content: bool) -> CliResult<()> {
         }
     }
     Ok(())
+}
+
+/// Expand a `--batch-check`/`--batch` format string into a single output line.
+///
+/// Supported atoms: `%(objectname)`, `%(objecttype)`, `%(objectsize)`.
+/// Unknown atoms are left as-is. A trailing newline is appended.
+fn format_batch_line(format: &str, hash: &ObjectHash, obj_type: &str, size: usize) -> String {
+    let mut result = format.to_string();
+    result = result.replace("%(objectname)", &hash.to_string());
+    result = result.replace("%(objecttype)", obj_type);
+    result = result.replace("%(objectsize)", &size.to_string());
+    result.push('\n');
+    result
 }
 
 async fn resolve_object_safe(object_ref: &str, storage: &ClientStorage) -> CliResult<ObjectHash> {

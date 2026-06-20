@@ -167,6 +167,75 @@ fn test_tag_contains_filter() {
 }
 
 #[test]
+fn test_tag_sign_embeds_pgp_signature() {
+    let repo = create_committed_repo_via_cli();
+
+    let out = run_libra_command(&["tag", "-s", "-m", "signed release", "v1.0"], repo.path());
+    assert_cli_success(&out, "tag -s -m 'signed release' v1.0");
+
+    // The signed annotated tag object must embed the armored PGP signature
+    // after the message.
+    let show = run_libra_command(&["cat-file", "-p", "v1.0"], repo.path());
+    assert_cli_success(&show, "cat-file -p v1.0");
+    let body = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        body.contains("-----BEGIN PGP SIGNATURE-----"),
+        "tag -s should embed a PGP signature block: {body}"
+    );
+    assert!(
+        body.contains("signed release"),
+        "tag message should precede the signature: {body}"
+    );
+}
+
+#[test]
+fn test_tag_sign_requires_message() {
+    let repo = create_committed_repo_via_cli();
+    // `-s` without `-m` is rejected at parse time (Libra has no tag editor).
+    let out = run_libra_command(&["tag", "-s", "v1.0"], repo.path());
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "tag -s without -m should be a usage error"
+    );
+}
+
+#[test]
+fn test_tag_verify_accepts_own_signature() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-s", "-m", "signed release", "v1.0"], repo.path()),
+        "tag -s -m signed v1.0",
+    );
+
+    let out = run_libra_command(&["tag", "-v", "v1.0"], repo.path());
+    assert_cli_success(&out, "tag -v v1.0");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Good signature for tag 'v1.0'"),
+        "tag -v should accept the signature it produced: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn test_tag_verify_rejects_unsigned_tag() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "plain annotated", "v1.0"], repo.path()),
+        "tag -m plain v1.0",
+    );
+
+    // An annotated-but-unsigned tag has no signature to verify.
+    let out = run_libra_command(&["tag", "-v", "v1.0"], repo.path());
+    assert!(
+        !out.status.success(),
+        "tag -v on an unsigned tag should fail, stdout: {} stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn test_tag_create_outputs_concise_confirmation() {
     let repo = create_committed_repo_via_cli();
 
@@ -542,6 +611,9 @@ async fn setup_repo_with_commit_with(
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -667,7 +739,9 @@ async fn test_basic_tag_creation() {
     let (_temp, _guard) = setup_repo_with_commit().await;
 
     // Create a lightweight tag that points to HEAD commit.
-    internal_tag::create("v1.0.0", None, false).await.unwrap();
+    internal_tag::create("v1.0.0", None, false, false)
+        .await
+        .unwrap();
 
     // Verify tag presence and that we can read the pointed object id.
     assert_tag_exists("v1.0.0").await;
@@ -684,7 +758,7 @@ async fn test_tag_with_message() {
     let (_temp, _guard) = setup_repo_with_commit_with("content", "Commit with message").await;
 
     // Annotated tag creation (includes tagger and message fields internally).
-    internal_tag::create("v1.0.1", Some("Release v1.0.1".into()), false)
+    internal_tag::create("v1.0.1", Some("Release v1.0.1".into()), false, false)
         .await
         .unwrap();
 
@@ -713,7 +787,7 @@ async fn test_force_tag() {
     // Verify that forcing a tag replaces the ref target.
     let (_temp, _guard) = setup_repo_with_commit_with("v1", "First").await;
 
-    internal_tag::create("v1.0", Some("Initial".into()), false)
+    internal_tag::create("v1.0", Some("Initial".into()), false, false)
         .await
         .unwrap();
     assert_tag_exists("v1.0").await;
@@ -730,6 +804,9 @@ async fn test_force_tag() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -759,6 +836,11 @@ async fn test_force_tag() {
         points_at: None,
         contains: None,
         no_contains: None,
+        merged: None,
+        no_merged: None,
+        sort: None,
+        sign: false,
+        verify: false,
     })
     .await;
     let after = read_tag_oid("v1.0").await;
@@ -776,7 +858,7 @@ async fn test_force_tag() {
 async fn test_force_tag_store_failure_preserves_existing_ref() {
     let (_temp, _guard) = setup_repo_with_commit_with("content", "Base").await;
 
-    internal_tag::create("v1.0", Some("Initial".into()), false)
+    internal_tag::create("v1.0", Some("Initial".into()), false, false)
         .await
         .unwrap();
     let (before_object, _) = internal_tag::find_tag_and_commit("v1.0")
@@ -793,7 +875,7 @@ async fn test_force_tag_store_failure_preserves_existing_ref() {
     collect_directory_modes(&objects_dir, &mut original_modes);
     set_directory_mode_recursive(&objects_dir, 0o555);
 
-    let result = internal_tag::create("v1.0", Some("Updated".into()), true).await;
+    let result = internal_tag::create("v1.0", Some("Updated".into()), true, false).await;
 
     restore_directory_modes(&original_modes);
 
@@ -819,7 +901,7 @@ async fn test_force_tag_store_failure_preserves_existing_ref() {
 async fn test_internal_create_returns_metadata_for_annotated_tag() {
     let (_temp, _guard) = setup_repo_with_commit_with("content", "Base").await;
 
-    let created = internal_tag::create("v1.0", Some("Release v1.0".into()), false)
+    let created = internal_tag::create("v1.0", Some("Release v1.0".into()), false, false)
         .await
         .unwrap();
 
@@ -843,8 +925,12 @@ async fn test_list_tags() {
     // Verify listing returns created tag names.
     let (_temp, _guard) = setup_repo_with_commit_with("content", "Base").await;
 
-    internal_tag::create("v1.0.0", None, false).await.unwrap();
-    internal_tag::create("v2.0.0", None, false).await.unwrap();
+    internal_tag::create("v1.0.0", None, false, false)
+        .await
+        .unwrap();
+    internal_tag::create("v2.0.0", None, false, false)
+        .await
+        .unwrap();
 
     let names = list_tag_names().await;
     assert!(names.contains("v1.0.0"));
@@ -857,7 +943,7 @@ async fn test_delete_tag() {
     // Verify delete removes the tag ref.
     let (_temp, _guard) = setup_repo_with_commit_with("content", "Delete base").await;
 
-    internal_tag::create("to-delete", None, false)
+    internal_tag::create("to-delete", None, false, false)
         .await
         .unwrap();
     assert_tag_exists("to-delete").await;
@@ -872,6 +958,11 @@ async fn test_delete_tag() {
         points_at: None,
         contains: None,
         no_contains: None,
+        merged: None,
+        no_merged: None,
+        sort: None,
+        sign: false,
+        verify: false,
     })
     .await;
     assert_tag_absent("to-delete").await;
@@ -883,7 +974,9 @@ async fn test_annotation_lines_tag() {
     let (_temp, _guard) = setup_repo_with_commit_with("lightweight-tag", "First").await;
 
     // lightweight tag creation
-    internal_tag::create("v1.0.0", None, false).await.unwrap();
+    internal_tag::create("v1.0.0", None, false, false)
+        .await
+        .unwrap();
 
     // Make second commit with updated content
     std::fs::write("file.txt", "annotation-tag").unwrap();
@@ -896,6 +989,9 @@ async fn test_annotation_lines_tag() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -925,6 +1021,11 @@ async fn test_annotation_lines_tag() {
         points_at: None,
         contains: None,
         no_contains: None,
+        merged: None,
+        no_merged: None,
+        sort: None,
+        sign: false,
+        verify: false,
     })
     .await;
 
@@ -938,6 +1039,9 @@ async fn test_annotation_lines_tag() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -967,6 +1071,11 @@ async fn test_annotation_lines_tag() {
         points_at: None,
         contains: None,
         no_contains: None,
+        merged: None,
+        no_merged: None,
+        sort: None,
+        sign: false,
+        verify: false,
     })
     .await;
 
@@ -1100,5 +1209,101 @@ fn test_tag_points_at_invalid_object_errors() {
     assert!(
         stderr.contains("not a valid object name"),
         "expected 'not a valid object name' in stderr, got: {stderr}",
+    );
+}
+
+#[test]
+fn test_tag_sort_by_refname() {
+    let repo = create_committed_repo_via_cli();
+    assert_cli_success(
+        &run_libra_command(&["tag", "v3.0"], repo.path()),
+        "tag v3.0",
+    );
+    assert_cli_success(
+        &run_libra_command(&["tag", "v1.0"], repo.path()),
+        "tag v1.0",
+    );
+    assert_cli_success(
+        &run_libra_command(&["tag", "v2.0"], repo.path()),
+        "tag v2.0",
+    );
+
+    let out = run_libra_command(&["tag", "--sort=refname"], repo.path());
+    assert_cli_success(&out, "tag --sort=refname");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let names: Vec<&str> = stdout.lines().collect();
+    assert_eq!(names, vec!["v1.0", "v2.0", "v3.0"]);
+
+    let out = run_libra_command(&["tag", "--sort=-refname"], repo.path());
+    assert_cli_success(&out, "tag --sort=-refname");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let names: Vec<&str> = stdout.lines().collect();
+    assert_eq!(names, vec!["v3.0", "v2.0", "v1.0"]);
+}
+
+#[test]
+fn test_tag_sort_invalid_key_errors() {
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["tag", "--sort=bogus"], repo.path());
+    assert!(
+        !out.status.success(),
+        "expected failure for invalid sort key"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unsupported tag sort key"),
+        "expected sort key error in stderr, got: {stderr}",
+    );
+}
+
+#[test]
+fn test_tag_merged_filters_reachable_tags() {
+    let repo = create_committed_repo_via_cli();
+
+    // Tag the current HEAD
+    assert_cli_success(
+        &run_libra_command(&["tag", "v-base"], repo.path()),
+        "tag v-base",
+    );
+
+    // Make a second commit and tag it
+    std::fs::write(repo.path().join("new.txt"), "new\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "new.txt"], repo.path()),
+        "add new.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path()),
+        "commit second",
+    );
+    assert_cli_success(
+        &run_libra_command(&["tag", "v-second"], repo.path()),
+        "tag v-second",
+    );
+
+    // --merged HEAD: both tags should be reachable from HEAD
+    let out = run_libra_command(&["tag", "--merged", "HEAD"], repo.path());
+    assert_cli_success(&out, "tag --merged HEAD");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("v-base"),
+        "v-base should be merged: {stdout}"
+    );
+    assert!(
+        stdout.contains("v-second"),
+        "v-second should be merged: {stdout}"
+    );
+
+    // --no-merged HEAD: no tags should be unreachable from HEAD
+    let out = run_libra_command(&["tag", "--no-merged", "HEAD"], repo.path());
+    assert_cli_success(&out, "tag --no-merged HEAD");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("v-base"),
+        "v-base should not be in no-merged: {stdout}"
+    );
+    assert!(
+        !stdout.contains("v-second"),
+        "v-second should not be in no-merged: {stdout}"
     );
 }

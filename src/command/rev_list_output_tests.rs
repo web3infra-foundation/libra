@@ -10,31 +10,36 @@ fn test_format_rev_list_entry_matches_git_field_order() {
         side: Some(RevListSide::Left),
         cherry_equivalent: Some(false),
         parents: vec!["def456".to_string(), "789abc".to_string()],
+        children: vec!["child1".to_string(), "child2".to_string()],
         timestamp: Some(123),
     };
 
     assert_eq!(
-        format_rev_list_entry(&entry, true, true, false, false, false),
+        format_rev_list_entry(&entry, true, false, true, false, false, false),
         "123 abc123 def456 789abc"
     );
     assert_eq!(
-        format_rev_list_entry(&entry, true, false, false, false, false),
+        format_rev_list_entry(&entry, true, false, false, false, false, false),
         "abc123 def456 789abc"
     );
     assert_eq!(
-        format_rev_list_entry(&entry, false, true, false, false, false),
+        format_rev_list_entry(&entry, false, true, true, false, false, false),
+        "123 abc123 child1 child2"
+    );
+    assert_eq!(
+        format_rev_list_entry(&entry, false, false, true, false, false, false),
         "123 abc123"
     );
     assert_eq!(
-        format_rev_list_entry(&entry, false, false, true, false, false),
+        format_rev_list_entry(&entry, false, false, false, true, false, false),
         "<abc123"
     );
     assert_eq!(
-        format_rev_list_entry(&entry, false, false, true, true, false),
+        format_rev_list_entry(&entry, false, false, false, true, true, false),
         "+abc123"
     );
     assert_eq!(
-        format_rev_list_entry(&entry, false, false, false, false, true),
+        format_rev_list_entry(&entry, false, false, false, false, false, true),
         "+abc123"
     );
 
@@ -43,10 +48,11 @@ fn test_format_rev_list_entry_matches_git_field_order() {
         side: Some(RevListSide::Right),
         cherry_equivalent: Some(false),
         parents: Vec::new(),
+        children: Vec::new(),
         timestamp: None,
     };
     assert_eq!(
-        format_rev_list_entry(&right, false, false, true, false, true),
+        format_rev_list_entry(&right, false, false, false, true, false, true),
         ">fed321"
     );
 }
