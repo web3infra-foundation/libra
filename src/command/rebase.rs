@@ -24,7 +24,7 @@ use serde::Serialize;
 use crate::{
     cli_error,
     command::{load_object, save_object, status, switch},
-    common_utils::parse_commit_msg,
+    common_utils::{format_commit_msg, parse_commit_msg},
     internal::{
         branch::Branch,
         db::get_db_conn_instance,
@@ -52,12 +52,16 @@ pub struct RebaseState {
     pub orig_head: ObjectHash,
     /// Remaining commits to replay (in order)
     pub todo: VecDeque<ObjectHash>,
+    /// Replay action for each remaining commit.
+    pub todo_actions: VecDeque<RebaseTodoAction>,
     /// Commits already replayed
     pub done: Vec<ObjectHash>,
     /// Current commit being applied (stopped due to conflict)
     pub stopped_sha: Option<ObjectHash>,
     /// Current new base (HEAD of rebased commits so far)
     pub current_head: ObjectHash,
+    /// Whether fixup!/squash! commits should be folded during this rebase.
+    pub autosquash: bool,
 }
 
 impl RebaseState {
@@ -135,7 +139,7 @@ impl RebaseState {
         {
             let count: i64 = result.try_get_by_index(0).unwrap_or(0);
             if count > 0 {
-                return Ok(());
+                return Self::ensure_rebase_state_columns(db).await;
             }
         }
 
@@ -149,8 +153,10 @@ impl RebaseState {
                     `orig_head`    TEXT NOT NULL,
                     `current_head` TEXT NOT NULL,
                     `todo`         TEXT NOT NULL,
+                    `todo_actions` TEXT NOT NULL DEFAULT '',
                     `done`         TEXT NOT NULL,
-                    `stopped_sha`  TEXT
+                    `stopped_sha`  TEXT,
+                    `autosquash`   INTEGER NOT NULL DEFAULT 0
                 );
             "#
             .to_string(),
@@ -159,6 +165,42 @@ impl RebaseState {
         db.execute(create_table_stmt)
             .await
             .map_err(|e| format!("failed to create rebase_state table: {e}"))?;
+        Self::ensure_rebase_state_columns(db).await
+    }
+
+    async fn ensure_rebase_state_columns<C: ConnectionTrait>(db: &C) -> Result<(), String> {
+        let stmt = Statement::from_string(DbBackend::Sqlite, "PRAGMA table_info(rebase_state)");
+        let rows = db
+            .query_all(stmt)
+            .await
+            .map_err(|e| format!("failed to inspect rebase_state schema: {e}"))?;
+        let mut columns = HashSet::new();
+        for row in rows {
+            let name: String = row
+                .try_get_by_index(1)
+                .map_err(|e| format!("failed to inspect rebase_state column: {e}"))?;
+            columns.insert(name);
+        }
+        if !columns.contains("autosquash") {
+            let stmt = Statement::from_string(
+                DbBackend::Sqlite,
+                "ALTER TABLE rebase_state ADD COLUMN autosquash INTEGER NOT NULL DEFAULT 0"
+                    .to_string(),
+            );
+            db.execute(stmt)
+                .await
+                .map_err(|e| format!("failed to add rebase_state.autosquash: {e}"))?;
+        }
+        if !columns.contains("todo_actions") {
+            let stmt = Statement::from_string(
+                DbBackend::Sqlite,
+                "ALTER TABLE rebase_state ADD COLUMN todo_actions TEXT NOT NULL DEFAULT ''"
+                    .to_string(),
+            );
+            db.execute(stmt)
+                .await
+                .map_err(|e| format!("failed to add rebase_state.todo_actions: {e}"))?;
+        }
         Ok(())
     }
 
@@ -178,7 +220,7 @@ impl RebaseState {
         let stmt = Statement::from_string(
             DbBackend::Sqlite,
             r#"
-                SELECT head_name, onto, orig_head, current_head, todo, done, stopped_sha
+                SELECT head_name, onto, orig_head, current_head, todo, done, stopped_sha, autosquash, todo_actions
                 FROM rebase_state
                 LIMIT 1
             "#
@@ -213,6 +255,12 @@ impl RebaseState {
         let stopped_str: Option<String> = row
             .try_get_by_index(6)
             .map_err(|e| format!("invalid stopped_sha: {e}"))?;
+        let autosquash_value: i64 = row
+            .try_get_by_index(7)
+            .map_err(|e| format!("invalid autosquash: {e}"))?;
+        let todo_actions_str: String = row
+            .try_get_by_index(8)
+            .map_err(|e| format!("invalid todo_actions: {e}"))?;
 
         let onto =
             ObjectHash::from_str(onto_str.trim()).map_err(|e| format!("Invalid onto hash: {e}"))?;
@@ -221,6 +269,9 @@ impl RebaseState {
         let current_head = ObjectHash::from_str(current_head_str.trim())
             .map_err(|e| format!("Invalid current_head hash: {e}"))?;
         let todo = VecDeque::from(Self::parse_hash_list(&todo_str)?);
+        let autosquash = autosquash_value != 0;
+        let todo_actions =
+            Self::parse_action_list(&todo_actions_str, todo.len(), autosquash, &todo)?;
         let done = Self::parse_hash_list(&done_str)?;
         let stopped_sha = match stopped_str {
             Some(s) if !s.trim().is_empty() => Some(
@@ -235,9 +286,11 @@ impl RebaseState {
             onto,
             orig_head,
             todo,
+            todo_actions,
             done,
             stopped_sha,
             current_head,
+            autosquash,
         }))
     }
 
@@ -249,6 +302,15 @@ impl RebaseState {
             .map_err(|e| format!("failed to clear existing rebase_state: {e}"))?;
 
         let todo = Self::format_hash_list(state.todo.iter().cloned());
+        let todo_actions = if state.todo_actions.len() == state.todo.len() {
+            Self::format_action_list(state.todo_actions.iter().copied())
+        } else {
+            Self::format_action_list(
+                Self::default_todo_actions(&state.todo, state.autosquash)
+                    .iter()
+                    .copied(),
+            )
+        };
         let done = Self::format_hash_list(state.done.iter().cloned());
         let stopped_value = match &state.stopped_sha {
             Some(sha) => sha.to_string().into(),
@@ -259,8 +321,8 @@ impl RebaseState {
             DbBackend::Sqlite,
             r#"
                 INSERT INTO rebase_state
-                (head_name, onto, orig_head, current_head, todo, done, stopped_sha)
-                VALUES (?, ?, ?, ?, ?, ?, ?);
+                (head_name, onto, orig_head, current_head, todo, todo_actions, done, stopped_sha, autosquash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
             "#,
             [
                 state.head_name.clone().into(),
@@ -268,8 +330,10 @@ impl RebaseState {
                 state.orig_head.to_string().into(),
                 state.current_head.to_string().into(),
                 todo.into(),
+                todo_actions.into(),
                 done.into(),
                 stopped_value,
+                (state.autosquash as i64).into(),
             ],
         );
 
@@ -333,6 +397,7 @@ impl RebaseState {
 
         let todo_content = fs::read_to_string(dir.join("todo")).unwrap_or_default();
         let todo = VecDeque::from(Self::parse_hash_list(&todo_content)?);
+        let todo_actions = Self::default_todo_actions(&todo, false);
 
         let done_content = fs::read_to_string(dir.join("done")).unwrap_or_default();
         let done = Self::parse_hash_list(&done_content)?;
@@ -353,9 +418,11 @@ impl RebaseState {
             onto,
             orig_head,
             todo,
+            todo_actions,
             done,
             stopped_sha,
             current_head,
+            autosquash: false,
         })
     }
 
@@ -372,6 +439,48 @@ impl RebaseState {
         Ok(commits)
     }
 
+    fn parse_action_list(
+        content: &str,
+        expected_len: usize,
+        autosquash: bool,
+        todo: &VecDeque<ObjectHash>,
+    ) -> Result<VecDeque<RebaseTodoAction>, String> {
+        let tokens: Vec<_> = content
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        if tokens.is_empty() {
+            return Ok(Self::default_todo_actions(todo, autosquash));
+        }
+        if tokens.len() != expected_len {
+            return Err(format!(
+                "invalid todo_actions length: expected {expected_len}, got {}",
+                tokens.len()
+            ));
+        }
+        tokens
+            .into_iter()
+            .map(RebaseTodoAction::from_token)
+            .collect()
+    }
+
+    fn default_todo_actions(
+        todo: &VecDeque<ObjectHash>,
+        autosquash: bool,
+    ) -> VecDeque<RebaseTodoAction> {
+        if !autosquash {
+            return todo.iter().map(|_| RebaseTodoAction::Pick).collect();
+        }
+        todo.iter()
+            .map(|commit_id| {
+                load_object::<Commit>(commit_id)
+                    .map(|commit| RebaseTodoAction::from_message(&commit.message))
+                    .unwrap_or(RebaseTodoAction::Pick)
+            })
+            .collect()
+    }
+
     fn format_hash_list(list: impl IntoIterator<Item = ObjectHash>) -> String {
         let mut out = String::new();
         for (idx, hash) in list.into_iter().enumerate() {
@@ -379,6 +488,17 @@ impl RebaseState {
                 out.push('\n');
             }
             out.push_str(&hash.to_string());
+        }
+        out
+    }
+
+    fn format_action_list(list: impl IntoIterator<Item = RebaseTodoAction>) -> String {
+        let mut out = String::new();
+        for (idx, action) in list.into_iter().enumerate() {
+            if idx > 0 {
+                out.push('\n');
+            }
+            out.push_str(action.as_str());
         }
         out
     }
@@ -507,6 +627,8 @@ impl ReplayResult {
 pub const REBASE_EXAMPLES: &str = "\
 EXAMPLES:
     libra rebase main             Replay current branch on top of main
+    libra rebase --autosquash main Fold fixup!/squash! commits while replaying
+    libra rebase --reapply-cherry-picks main
     libra rebase --onto main dev  Replay dev..HEAD onto main, keeping the upstream range
     libra rebase --continue       Resume an in-progress rebase after fixing conflicts
     libra rebase --skip           Drop the current conflicting commit and continue
@@ -542,6 +664,14 @@ pub struct RebaseArgs {
     /// Skip the current commit and continue with the next
     #[clap(long, conflicts_with_all = ["continue_rebase", "abort", "upstream"])]
     pub skip: bool,
+
+    /// Move fixup!/squash! commits next to their targets and fold them while replaying
+    #[clap(long, conflicts_with_all = ["continue_rebase", "abort", "skip"])]
+    pub autosquash: bool,
+
+    /// Explicitly replay clean cherry-pick commits instead of dropping them
+    #[clap(long = "reapply-cherry-picks", conflicts_with_all = ["continue_rebase", "abort", "skip"])]
+    pub reapply_cherry_picks: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -832,9 +962,14 @@ pub async fn execute_safe(args: RebaseArgs, output: &OutputConfig) -> CliResult<
         if let Some(branch) = args.branch.as_deref() {
             switch_to_rebase_branch(branch, output).await?;
         }
-        let result = run_rebase_start(upstream, args.onto.as_deref())
-            .await
-            .map_err(CliError::from)?;
+        let result = run_rebase_start(
+            upstream,
+            args.onto.as_deref(),
+            args.autosquash,
+            args.reapply_cherry_picks,
+        )
+        .await
+        .map_err(CliError::from)?;
         return render_rebase_output(&result, output);
     }
     Ok(())
@@ -996,6 +1131,222 @@ fn commit_subject_lossy(commit_id: &ObjectHash, emit_human: bool) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebaseTodoAction {
+    Pick,
+    Fixup,
+    Squash,
+    Amend,
+}
+
+impl RebaseTodoAction {
+    fn from_message(message: &str) -> Self {
+        let subject = commit_subject_from_message(message);
+        if subject.starts_with("fixup! ") {
+            Self::Fixup
+        } else if subject.starts_with("squash! ") {
+            Self::Squash
+        } else if subject.starts_with("amend! ") {
+            Self::Amend
+        } else {
+            Self::Pick
+        }
+    }
+
+    fn from_token(value: &str) -> Result<Self, String> {
+        match value {
+            "pick" => Ok(Self::Pick),
+            "fixup" => Ok(Self::Fixup),
+            "squash" => Ok(Self::Squash),
+            "amend" => Ok(Self::Amend),
+            other => Err(format!("invalid rebase todo action '{other}'")),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pick => "pick",
+            Self::Fixup => "fixup",
+            Self::Squash => "squash",
+            Self::Amend => "amend",
+        }
+    }
+
+    fn folds_into_previous(self) -> bool {
+        matches!(self, Self::Fixup | Self::Squash | Self::Amend)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RebaseTodoItem {
+    commit: ObjectHash,
+    action: RebaseTodoAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AutosquashTodoItem {
+    item: RebaseTodoItem,
+    original_index: usize,
+}
+
+fn autosquash_commits(commits: Vec<ObjectHash>) -> Result<Vec<RebaseTodoItem>, RebaseError> {
+    let mut picks = Vec::new();
+    let mut fixups = Vec::new();
+
+    for (original_index, commit_id) in commits.into_iter().enumerate() {
+        let commit: Commit = load_object(&commit_id).map_err(|error| RebaseError::CommitLoad {
+            commit: commit_id.to_string(),
+            detail: error.to_string(),
+        })?;
+        let action = RebaseTodoAction::from_message(&commit.message);
+        if action.folds_into_previous() {
+            fixups.push(AutosquashTodoItem {
+                item: RebaseTodoItem {
+                    commit: commit_id,
+                    action,
+                },
+                original_index,
+            });
+        } else {
+            picks.push(AutosquashTodoItem {
+                item: RebaseTodoItem {
+                    commit: commit_id,
+                    action: RebaseTodoAction::Pick,
+                },
+                original_index,
+            });
+        }
+    }
+
+    for fixup in fixups {
+        let fixup_commit: Commit =
+            load_object(&fixup.item.commit).map_err(|error| RebaseError::CommitLoad {
+                commit: fixup.item.commit.to_string(),
+                detail: error.to_string(),
+            })?;
+        let Some(target) = autosquash_target(&fixup_commit.message) else {
+            insert_pick_by_original_index(
+                &mut picks,
+                AutosquashTodoItem {
+                    item: RebaseTodoItem {
+                        commit: fixup.item.commit,
+                        action: RebaseTodoAction::Pick,
+                    },
+                    original_index: fixup.original_index,
+                },
+            );
+            continue;
+        };
+        let Some(target_pos) = autosquash_target_position(&picks, fixup.original_index, &target)
+        else {
+            insert_pick_by_original_index(
+                &mut picks,
+                AutosquashTodoItem {
+                    item: RebaseTodoItem {
+                        commit: fixup.item.commit,
+                        action: RebaseTodoAction::Pick,
+                    },
+                    original_index: fixup.original_index,
+                },
+            );
+            continue;
+        };
+
+        let mut insert_at = target_pos + 1;
+        while insert_at < picks.len() {
+            if picks[insert_at].item.action.folds_into_previous() {
+                insert_at += 1;
+            } else {
+                break;
+            }
+        }
+        picks.insert(insert_at, fixup);
+    }
+
+    Ok(picks.into_iter().map(|entry| entry.item).collect())
+}
+
+fn insert_pick_by_original_index(picks: &mut Vec<AutosquashTodoItem>, item: AutosquashTodoItem) {
+    let insert_at = picks
+        .iter()
+        .position(|candidate| candidate.original_index > item.original_index)
+        .unwrap_or(picks.len());
+    picks.insert(insert_at, item);
+}
+
+fn autosquash_target(message: &str) -> Option<String> {
+    let mut subject = commit_subject_from_message(message);
+    let mut peeled = false;
+
+    while let Some(target) = autosquash_target_once(&subject) {
+        if target.is_empty() {
+            return None;
+        }
+        subject = target.to_string();
+        peeled = true;
+    }
+
+    peeled.then_some(subject)
+}
+
+fn autosquash_target_once(subject: &str) -> Option<&str> {
+    for prefix in ["fixup! ", "squash! ", "amend! "] {
+        if let Some(target) = subject.strip_prefix(prefix) {
+            return Some(target.trim());
+        }
+    }
+    None
+}
+
+fn autosquash_target_position(
+    picks: &[AutosquashTodoItem],
+    fixup_original_index: usize,
+    target: &str,
+) -> Option<usize> {
+    let mut prefix_match = None;
+    for (index, candidate) in picks.iter().enumerate() {
+        if candidate.original_index >= fixup_original_index {
+            continue;
+        }
+        match autosquash_target_match_kind(&candidate.item.commit, target) {
+            Some(AutosquashTargetMatch::Exact) => return Some(index),
+            Some(AutosquashTargetMatch::Prefix) if prefix_match.is_none() => {
+                prefix_match = Some(index);
+            }
+            _ => {}
+        }
+    }
+    prefix_match
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutosquashTargetMatch {
+    Exact,
+    Prefix,
+}
+
+fn autosquash_target_match_kind(
+    commit_id: &ObjectHash,
+    target: &str,
+) -> Option<AutosquashTargetMatch> {
+    let full = commit_id.to_string();
+    if full.starts_with(target) {
+        return Some(AutosquashTargetMatch::Exact);
+    }
+    load_object::<Commit>(commit_id)
+        .map(|commit| {
+            let subject = commit_subject_from_message(&commit.message);
+            if subject == target {
+                Some(AutosquashTargetMatch::Exact)
+            } else if subject.starts_with(target) {
+                Some(AutosquashTargetMatch::Prefix)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(None)
+}
+
 async fn preflight_rebase(args: &RebaseArgs) -> CliResult<()> {
     if args.continue_rebase || args.abort || args.skip {
         return Ok(());
@@ -1041,7 +1392,12 @@ async fn preflight_rebase(args: &RebaseArgs) -> CliResult<()> {
     Ok(())
 }
 
-async fn run_rebase_start(upstream: &str, onto: Option<&str>) -> Result<RebaseOutput, RebaseError> {
+async fn run_rebase_start(
+    upstream: &str,
+    onto: Option<&str>,
+    autosquash: bool,
+    _reapply_cherry_picks: bool,
+) -> Result<RebaseOutput, RebaseError> {
     let db = get_db_conn_instance().await;
 
     let current_branch_name = match Head::current().await {
@@ -1185,12 +1541,18 @@ async fn run_rebase_start(upstream: &str, onto: Option<&str>) -> Result<RebaseOu
         });
     }
 
-    let commits_to_replay = collect_commits_to_replay(&base_id, &head_to_rebase_id)
+    let mut commits_to_replay = collect_commits_to_replay(&base_id, &head_to_rebase_id)
         .await
         .map_err(|detail| RebaseError::CommitLoad {
             commit: head_to_rebase_id.to_string(),
             detail,
         })?;
+    let mut todo_actions = VecDeque::from(vec![RebaseTodoAction::Pick; commits_to_replay.len()]);
+    if autosquash {
+        let planned_todo = autosquash_commits(commits_to_replay)?;
+        commits_to_replay = planned_todo.iter().map(|item| item.commit).collect();
+        todo_actions = planned_todo.iter().map(|item| item.action).collect();
+    }
     if commits_to_replay.is_empty() {
         return Ok(RebaseOutput {
             action: "start".to_string(),
@@ -1257,9 +1619,11 @@ async fn run_rebase_start(upstream: &str, onto: Option<&str>) -> Result<RebaseOu
         onto: newbase_id,
         orig_head: head_to_rebase_id,
         todo: VecDeque::from(commits_to_replay),
+        todo_actions,
         done: Vec::new(),
         stopped_sha: None,
         current_head: newbase_id,
+        autosquash,
     };
 
     state.save().await.map_err(RebaseError::StateSave)?;
@@ -1315,7 +1679,7 @@ pub(crate) struct PullRebaseSummary {
 /// with structured hints — pull just wraps it in its own error
 /// variant so the `phase=rebase` detail can be attached.
 pub(crate) async fn run_rebase_for_pull(upstream: &str) -> Result<PullRebaseSummary, RebaseError> {
-    let output = run_rebase_start(upstream, None).await?;
+    let output = run_rebase_start(upstream, None, false, false).await?;
     let old_commit = output
         .previous_commit
         .clone()
@@ -1350,12 +1714,18 @@ async fn continue_replay(
     }
 
     while let Some(commit_id) = state.todo.front().cloned() {
-        match replay_commit_with_conflict_detection(&commit_id, &state.current_head).await {
+        let action = state
+            .todo_actions
+            .front()
+            .copied()
+            .unwrap_or(RebaseTodoAction::Pick);
+        match replay_commit_with_conflict_detection(&commit_id, &state.current_head, action).await {
             ReplayResult::Success(replayed_commit_id) => {
                 let subject = commit_subject_lossy(&commit_id, emit_human);
                 state.current_head = replayed_commit_id;
                 // Move commit from todo to done
                 state.todo.pop_front();
+                state.todo_actions.pop_front();
                 state.done.push(commit_id);
                 state.stopped_sha = None;
 
@@ -1567,16 +1937,23 @@ async fn run_rebase_continue() -> Result<RebaseOutput, RebaseError> {
             })?;
         let subject = commit_subject_from_message(&original_commit.message);
 
-        let new_commit = Commit::from_tree_id(
-            new_tree_id,
-            vec![state.current_head],
-            &original_commit.message,
-        );
+        let action = state
+            .todo_actions
+            .front()
+            .copied()
+            .unwrap_or(RebaseTodoAction::Pick);
+        let new_commit =
+            create_replayed_commit(&original_commit, new_tree_id, state.current_head, action)
+                .map_err(|detail| RebaseError::CommitLoad {
+                    commit: state.current_head.to_string(),
+                    detail,
+                })?;
         save_object(&new_commit, &new_commit.id)
             .map_err(|e| RebaseError::CommitSave(e.to_string()))?;
 
         state.current_head = new_commit.id;
         state.todo.pop_front();
+        state.todo_actions.pop_front();
         state.done.push(stopped_sha);
         state.stopped_sha = None;
 
@@ -1745,7 +2122,11 @@ async fn run_rebase_skip() -> Result<RebaseOutput, RebaseError> {
     };
 
     state.todo.pop_front();
+    let skipped_action = state.todo_actions.pop_front();
     state.stopped_sha = None;
+    if skipped_action.unwrap_or(RebaseTodoAction::Pick) == RebaseTodoAction::Pick {
+        downgrade_leading_autosquash_dependents(&mut state.todo_actions);
+    }
 
     let current_commit: Commit =
         load_object(&state.current_head).map_err(|e| RebaseError::CommitLoad {
@@ -1797,6 +2178,16 @@ async fn run_rebase_skip() -> Result<RebaseOutput, RebaseError> {
         skipped_subject,
         remaining: Some(state.todo.len()),
     })
+}
+
+fn downgrade_leading_autosquash_dependents(todo_actions: &mut VecDeque<RebaseTodoAction>) {
+    for action in todo_actions.iter_mut() {
+        if action.folds_into_previous() {
+            *action = RebaseTodoAction::Pick;
+        } else {
+            break;
+        }
+    }
 }
 
 /// Check if index has unmerged entries (conflict markers)
@@ -2876,6 +3267,7 @@ fn write_conflict_markers(
 async fn replay_commit_with_conflict_detection(
     commit_to_replay_id: &ObjectHash,
     new_parent_id: &ObjectHash,
+    action: RebaseTodoAction,
 ) -> ReplayResult {
     let index_file = path::index();
     let current_index = match git_internal::internal::index::Index::load(&index_file) {
@@ -3070,7 +3462,10 @@ async fn replay_commit_with_conflict_detection(
     };
 
     let new_commit =
-        Commit::from_tree_id(new_tree_id, vec![*new_parent_id], &commit_to_replay.message);
+        match create_replayed_commit(&commit_to_replay, new_tree_id, *new_parent_id, action) {
+            Ok(commit) => commit,
+            Err(e) => return ReplayResult::internal(ReplayErrorKind::CommitLoad, e),
+        };
 
     if let Err(e) = save_object(&new_commit, &new_commit.id) {
         return ReplayResult::internal(ReplayErrorKind::CommitSave, e.to_string());
@@ -3093,6 +3488,65 @@ async fn replay_commit_with_conflict_detection(
     }
 
     ReplayResult::Success(new_commit.id)
+}
+
+fn create_replayed_commit(
+    original_commit: &Commit,
+    tree_id: ObjectHash,
+    new_parent_id: ObjectHash,
+    action: RebaseTodoAction,
+) -> Result<Commit, String> {
+    match action {
+        RebaseTodoAction::Pick => Ok(Commit::from_tree_id(
+            tree_id,
+            vec![new_parent_id],
+            &original_commit.message,
+        )),
+        RebaseTodoAction::Fixup => {
+            let target: Commit = load_object(&new_parent_id).map_err(|error| error.to_string())?;
+            Ok(Commit::from_tree_id(
+                tree_id,
+                target.parent_commit_ids.clone(),
+                &target.message,
+            ))
+        }
+        RebaseTodoAction::Squash => {
+            let target: Commit = load_object(&new_parent_id).map_err(|error| error.to_string())?;
+            let mut message = target.message.clone();
+            message.push_str("\n\n");
+            message.push_str(original_commit.message.trim());
+            Ok(Commit::from_tree_id(
+                tree_id,
+                target.parent_commit_ids.clone(),
+                &message,
+            ))
+        }
+        RebaseTodoAction::Amend => {
+            let target: Commit = load_object(&new_parent_id).map_err(|error| error.to_string())?;
+            let message = amend_replacement_message(&original_commit.message);
+            Ok(Commit::from_tree_id(
+                tree_id,
+                target.parent_commit_ids.clone(),
+                &message,
+            ))
+        }
+    }
+}
+
+fn amend_replacement_message(message: &str) -> String {
+    let (clean_message, gpg_sig) = parse_commit_msg(message);
+    let subject = clean_message.lines().next().unwrap_or("");
+    if !subject.starts_with("amend! ") {
+        return message.to_string();
+    }
+    let replacement = clean_message
+        .split_once('\n')
+        .map(|(_, replacement)| replacement.trim_start_matches('\n'))
+        .unwrap_or_default();
+    match gpg_sig {
+        Some(signature) => format_commit_msg(replacement, Some(&format!("gpgsig {signature}"))),
+        None => format_commit_msg(replacement, None),
+    }
 }
 
 /// Find the merge base (common ancestor) of two commits

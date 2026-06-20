@@ -8,6 +8,7 @@ Reapply commits on top of another base tip.
 
 ```
 libra rebase <upstream>
+libra rebase [--autosquash] [--reapply-cherry-picks] <upstream>
 libra rebase --onto <newbase> <upstream> [<branch>]
 libra rebase --continue
 libra rebase --abort
@@ -20,6 +21,8 @@ libra rebase --skip
 
 If a conflict occurs during replay, the rebase stops and reports the conflicting files. The user resolves conflicts manually, stages the resolved files, and then runs `libra rebase --continue` to proceed. Alternatively, `--abort` restores the original branch state and `--skip` discards the current commit and moves on to the next.
 
+With `--autosquash`, commits whose subject starts with `fixup!`, `squash!`, or `amend!` are moved next to the matching target commit and folded while replaying. Fixup commits keep the target commit message, squash commits append their message to the target message, and amend commits replace the target message with the amend commit message. `--reapply-cherry-picks` is accepted as an explicit request to keep Libra's default behavior of replaying clean cherry-pick commits.
+
 Rebase state (the list of remaining and completed commits, the original HEAD, and the target base) is persisted in the SQLite database. This makes rebase state survive process restarts and avoids the fragile file-based state that Git uses. Legacy file-based state from older Libra versions is automatically migrated to the database on first access.
 
 ## Options
@@ -27,9 +30,12 @@ Rebase state (the list of remaining and completed commits, the original HEAD, an
 | Option | Long | Description |
 |--------|------|-------------|
 | `<upstream>` | | The upstream branch or commit to rebase onto. Required unless `--continue`, `--abort`, or `--skip` is specified. Can be a branch name, commit hash, or any Git reference. |
+| | `--onto <newbase>` | Replay the `<upstream>..HEAD` range onto `<newbase>` instead of onto `<upstream>`. |
 | | `--continue` | Continue the rebase after resolving conflicts. Mutually exclusive with `--abort`, `--skip`, and `<upstream>`. |
 | | `--abort` | Abort the current rebase and restore the original branch to its pre-rebase state. Mutually exclusive with `--continue`, `--skip`, and `<upstream>`. |
 | | `--skip` | Skip the current commit and continue with the next commit in the rebase sequence. Mutually exclusive with `--continue`, `--abort`, and `<upstream>`. |
+| | `--autosquash` | Move and fold `fixup!`, `squash!`, and `amend!` commits into their target commits during replay. |
+| | `--reapply-cherry-picks` | Explicitly replay clean cherry-pick commits. This matches Libra's default linear replay behavior. |
 
 ### Option Details
 
@@ -80,6 +86,19 @@ Applied: 13579bd test: add parser tests
 Successfully rebased branch 'feature' onto '1234567'.
 ```
 
+**`--autosquash`**
+
+Fold fixup and squash commits while rebasing:
+
+```bash
+$ libra rebase --autosquash main
+Found common ancestor: abc1234
+Rebasing 2 commits from `feature` onto `main`...
+Applied: def5678 feat: add parser
+Applied: 13579bd fixup! feat: add parser
+Successfully rebased branch 'feature' onto '1234567'.
+```
+
 ## Common Commands
 
 ```bash
@@ -88,6 +107,12 @@ libra rebase main
 
 # Rebase onto a specific commit
 libra rebase abc1234
+
+# Fold fixup!/squash! commits into their targets
+libra rebase --autosquash main
+
+# Explicitly keep replaying clean cherry-picks
+libra rebase --reapply-cherry-picks main
 
 # Transplant the dev..HEAD range onto main (keep the range, move the base)
 libra rebase --onto main dev
@@ -255,8 +280,10 @@ Rebase state is stored in a `rebase_state` SQLite table with the following field
 | `orig_head` | TEXT | Original HEAD commit before rebase started |
 | `current_head` | TEXT | Current new base (HEAD of rebased commits so far) |
 | `todo` | TEXT | Remaining commits to replay (newline-separated hashes) |
+| `todo_actions` | TEXT | Remaining replay actions (newline-separated `pick` / `fixup` / `squash` / `amend`) |
 | `done` | TEXT | Commits already replayed (newline-separated hashes) |
 | `stopped_sha` | TEXT (nullable) | Current commit that caused a conflict |
+| `autosquash` | INTEGER | Whether the current rebase folds autosquash commits (`0` or `1`) |
 
 ## Design Rationale
 
@@ -325,7 +352,8 @@ Libra provides a middle ground: a linear rebase with conflict-stop semantics (fa
 | Interactive | Not supported | `-i` / `--interactive` | N/A |
 | Onto | `--onto <newbase>` | `--onto <newbase>` | `-d` with `-s` / `--source` |
 | Exec | Not supported | `--exec <cmd>` | N/A |
-| Autosquash | Not supported | `--autosquash` | N/A |
+| Autosquash | Supported | `--autosquash` | N/A |
+| Reapply cherry-picks | Supported; Libra replays by default | `--reapply-cherry-picks` | N/A |
 | Rebase merges | Not supported | `--rebase-merges` | Default behavior |
 | Keep empty | Not supported | `--keep-empty` / `--no-keep-empty` | Default keeps empty |
 | Force rebase | Not supported | `--force-rebase` | N/A |
