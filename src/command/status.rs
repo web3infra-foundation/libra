@@ -3,7 +3,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     io,
-    io::Write,
+    io::{IsTerminal, Write},
     path::PathBuf,
 };
 
@@ -22,7 +22,7 @@ use git_internal::{
 };
 use serde::Serialize;
 
-use super::stash;
+use super::{merge, stash};
 use crate::{
     command::calc_file_blob_hash,
     internal::{
@@ -58,8 +58,10 @@ EXAMPLES:
     libra status --quiet --exit-code   Silent dirty check for scripts";
 
 /// Show the working tree status.
-///
-/// See `libra status --help` for the same EXAMPLES rendered through clap.
+// EXAMPLES are wired via `#[command(after_help = STATUS_EXAMPLES)]` and render
+// at the bottom of `libra status --help`. The meta-commentary that used to
+// live here as a `///` line leaked into clap's `--help` body (see
+// `tests/command/status_test.rs::test_status_help_does_not_leak_impl_meta`).
 #[derive(Parser, Debug, Default)]
 #[command(after_help = STATUS_EXAMPLES)]
 pub struct StatusArgs {
@@ -81,6 +83,15 @@ pub struct StatusArgs {
     #[clap(long = "branch")]
     pub branch: bool,
 
+    /// Show ahead/behind counts in branch info (default: true).
+    /// Use --no-ahead-behind to suppress the counts.
+    #[clap(long = "ahead-behind")]
+    pub ahead_behind: bool,
+
+    /// Suppress ahead/behind counts in branch info.
+    #[clap(long = "no-ahead-behind", overrides_with = "ahead_behind")]
+    pub no_ahead_behind: bool,
+
     /// Output with stash info (only in standard mode)
     #[clap(long = "show-stash")]
     pub show_stash: bool,
@@ -97,10 +108,36 @@ pub struct StatusArgs {
     )]
     pub untracked_files: UntrackedFiles,
 
+    /// Print status entries with columns aligned (human output only).
+    #[clap(long = "column")]
+    pub column: bool,
+
+    /// Terminate each status entry with a NUL byte instead of a newline.
+    /// This is intended for machine-readable short/porcelain output.
+    #[clap(short = 'z')]
+    pub null_terminated: bool,
+
+    /// Detect renames in staged/unstaged changes.
+    /// The optional value is the similarity threshold percentage (default 50).
+    #[clap(
+        long = "find-renames",
+        value_name = "PERCENT",
+        num_args = 0..=1,
+        default_missing_value = "50"
+    )]
+    pub find_renames: Option<u8>,
+
     /// Exit with code 1 if the working tree has changes.
     /// Can be combined with --quiet for silent dirty checking.
     #[clap(long = "exit-code")]
     pub exit_code: bool,
+}
+
+impl StatusArgs {
+    /// Whether ahead/behind counts should be shown in branch info.
+    fn show_ahead_behind(&self) -> bool {
+        !self.no_ahead_behind
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -132,11 +169,16 @@ pub struct Changes {
     pub new: Vec<PathBuf>,
     pub modified: Vec<PathBuf>,
     pub deleted: Vec<PathBuf>,
+    /// Detected renames: (source_path, target_path) pairs.
+    pub renamed: Vec<(PathBuf, PathBuf)>,
 }
 
 impl Changes {
     pub fn is_empty(&self) -> bool {
-        self.new.is_empty() && self.modified.is_empty() && self.deleted.is_empty()
+        self.new.is_empty()
+            && self.modified.is_empty()
+            && self.deleted.is_empty()
+            && self.renamed.is_empty()
     }
 
     /// to relative path(to cur_dir)
@@ -147,12 +189,23 @@ impl Changes {
             .for_each(|paths| {
                 *paths = paths.iter().map(util::workdir_to_current).collect();
             });
+        change.renamed = change
+            .renamed
+            .into_iter()
+            .map(|(old, new)| {
+                (
+                    util::workdir_to_current(&old),
+                    util::workdir_to_current(&new),
+                )
+            })
+            .collect();
         change
     }
     pub fn polymerization(&self) -> Vec<PathBuf> {
         let mut poly = self.new.clone();
         poly.extend(self.modified.clone());
         poly.extend(self.deleted.clone());
+        poly.extend(self.renamed.iter().map(|(_, new)| new.clone()));
         poly
     }
 
@@ -160,6 +213,7 @@ impl Changes {
         self.new.extend(other.new);
         self.modified.extend(other.modified);
         self.deleted.extend(other.deleted);
+        self.renamed.extend(other.renamed);
     }
 }
 
@@ -221,6 +275,13 @@ pub struct UpstreamInfo {
     pub gone: bool,
 }
 
+/// In-progress merge metadata surfaced by `status` for recovery guidance.
+#[derive(Debug, Clone, Serialize)]
+pub struct MergeStatusInfo {
+    pub target_ref: String,
+    pub conflicted_paths: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // StatusData — shared data layer
 // ---------------------------------------------------------------------------
@@ -235,12 +296,13 @@ struct StatusData {
     ignored_files: Vec<PathBuf>,
     stash_count: Option<usize>,
     upstream: Option<UpstreamInfo>,
+    merge_state: Option<MergeStatusInfo>,
     porcelain_v2: Option<PorcelainV2Data>,
 }
 
 impl StatusData {
     fn is_dirty(&self) -> bool {
-        !self.staged.is_empty() || !self.unstaged.is_empty()
+        !self.staged.is_empty() || !self.unstaged.is_empty() || self.merge_state.is_some()
     }
 }
 
@@ -261,7 +323,7 @@ async fn collect_status_data(args: &StatusArgs) -> CliResult<StatusData> {
         .map_err(|error| status_branch_store_error("resolve HEAD commit", error))?;
     let has_commits = head_oid.is_some();
 
-    let staged = changes_to_be_committed_safe()
+    let mut staged = changes_to_be_committed_safe()
         .await
         .map(|c| c.to_relative())
         .map_err(CliError::from)?;
@@ -299,6 +361,14 @@ async fn collect_status_data(args: &StatusArgs) -> CliResult<StatusData> {
         UntrackedFiles::All => {}
     }
 
+    // Apply rename detection before collapsing untracked dirs / porcelain metadata.
+    if let Some(threshold) = args.find_renames
+        && threshold > 0
+    {
+        detect_renames_in_changes(&mut staged, threshold, head_oid.as_ref()).await?;
+        detect_renames_in_changes(&mut unstaged, threshold, head_oid.as_ref()).await?;
+    }
+
     let stash_count = if args.show_stash {
         Some(stash::get_stash_num().unwrap_or(0))
     } else {
@@ -307,6 +377,27 @@ async fn collect_status_data(args: &StatusArgs) -> CliResult<StatusData> {
 
     // Resolve upstream tracking info
     let upstream = resolve_upstream_info(&head, head_oid.as_ref()).await?;
+    let merge_state = match merge::MergeState::load_optional_sync().map_err(|detail| {
+        CliError::fatal(format!("failed to inspect merge state: {detail}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })? {
+        Some(state) => {
+            if maybe_index.is_none() {
+                maybe_index = Some(load_status_index()?);
+            }
+            let index = maybe_index
+                .as_ref()
+                .ok_or_else(|| CliError::internal("status index should be loaded"))?;
+            Some(MergeStatusInfo {
+                target_ref: state.target_ref,
+                conflicted_paths: merge::unresolved_conflicted_paths(
+                    index,
+                    &state.conflicted_paths,
+                ),
+            })
+        }
+        None => None,
+    };
     let porcelain_v2 = if matches!(args.porcelain, Some(PorcelainVersion::V2)) {
         let index = maybe_index
             .take()
@@ -325,8 +416,128 @@ async fn collect_status_data(args: &StatusArgs) -> CliResult<StatusData> {
         ignored_files,
         stash_count,
         upstream,
+        merge_state,
         porcelain_v2,
     })
+}
+
+/// Detect renames between deleted and new files in `changes`.
+///
+/// Matches are selected greedily by best similarity score. A file may only
+/// participate in one rename pair. The threshold is a percentage (0-100).
+async fn detect_renames_in_changes(
+    changes: &mut Changes,
+    threshold: u8,
+    head_oid: Option<&ObjectHash>,
+) -> CliResult<()> {
+    if changes.deleted.is_empty() || changes.new.is_empty() {
+        return Ok(());
+    }
+
+    let head_blobs = head_oid.map(load_head_tree_blobs).unwrap_or_default();
+
+    // Pre-compute blob hashes for new files.
+    let mut new_hashes: HashMap<usize, ObjectHash> = HashMap::new();
+    for (idx, path) in changes.new.iter().enumerate() {
+        let abs = util::workdir_to_absolute(path);
+        if let Ok(hash) = calc_file_blob_hash(&abs) {
+            new_hashes.insert(idx, hash);
+        }
+    }
+
+    let mut used_new: HashSet<usize> = HashSet::new();
+    let mut remaining_deleted: Vec<PathBuf> = Vec::new();
+    let mut renamed: Vec<(PathBuf, PathBuf)> = Vec::new();
+
+    for deleted in &changes.deleted {
+        let deleted_name = file_name_lossy(deleted);
+        let deleted_head_blob = head_blobs.get(deleted).cloned();
+
+        let mut best: Option<(usize, u8)> = None;
+        for (idx, new_path) in changes.new.iter().enumerate() {
+            if used_new.contains(&idx) {
+                continue;
+            }
+            let score = if deleted_head_blob
+                .as_ref()
+                .zip(new_hashes.get(&idx))
+                .is_some_and(|(a, b)| a == b)
+            {
+                100
+            } else {
+                let new_name = file_name_lossy(new_path);
+                filename_similarity(&deleted_name, &new_name)
+            };
+            if score >= threshold {
+                match best {
+                    None => best = Some((idx, score)),
+                    Some((_, current)) if score > current => best = Some((idx, score)),
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some((idx, _)) = best {
+            used_new.insert(idx);
+            renamed.push((deleted.clone(), changes.new[idx].clone()));
+        } else {
+            remaining_deleted.push(deleted.clone());
+        }
+    }
+
+    let mut remaining_new: Vec<PathBuf> = changes
+        .new
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| !used_new.contains(idx))
+        .map(|(_, p)| p.clone())
+        .collect();
+
+    // Sort both remaining lists to preserve deterministic output.
+    remaining_deleted.sort();
+    remaining_new.sort();
+    renamed.sort_by(|a, b| a.1.cmp(&b.1));
+
+    changes.deleted = remaining_deleted;
+    changes.new = remaining_new;
+    changes.renamed.extend(renamed);
+    Ok(())
+}
+
+fn load_head_tree_blobs(head_oid: &ObjectHash) -> HashMap<PathBuf, ObjectHash> {
+    let commit = Commit::load(head_oid);
+    let tree = Tree::load(&commit.tree_id);
+    tree.get_plain_items_with_mode()
+        .into_iter()
+        .map(|(path, hash, _mode)| (path, hash))
+        .collect()
+}
+
+fn file_name_lossy(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Simple filename similarity based on longest common subsequence length.
+fn filename_similarity(a: &str, b: &str) -> u8 {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let mut prev = vec![0u16; b.len() + 1];
+    let mut curr = vec![0u16; b.len() + 1];
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            if a[i - 1] == b[j - 1] {
+                curr[j] = prev[j - 1] + 1;
+            } else {
+                curr[j] = curr[j - 1].max(prev[j]);
+            }
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    let lcs = prev[b.len()] as usize;
+    let max_len = a.len().max(b.len());
+    (lcs.saturating_mul(100) / max_len.max(1)).min(100) as u8
 }
 
 fn load_status_index() -> CliResult<Index> {
@@ -449,6 +660,8 @@ async fn render_status_to_writer(
                     &data.head,
                     data.head_oid.as_ref(),
                     data.upstream.as_ref(),
+                    args.show_ahead_behind(),
+                    args.null_terminated,
                     &mut buffer,
                 )?;
             }
@@ -457,6 +670,7 @@ async fn render_status_to_writer(
                 &data.unstaged,
                 &data.ignored_files,
                 data.porcelain_v2.as_ref(),
+                args.null_terminated,
                 &mut buffer,
             )?;
             writer.write_all(&buffer).map_err(write_error)?;
@@ -464,12 +678,28 @@ async fn render_status_to_writer(
         }
         Some(PorcelainVersion::V1) => {
             if args.branch {
-                print_branch_info(&data.head, data.upstream.as_ref(), &mut buffer)?;
+                print_branch_info(
+                    &data.head,
+                    data.upstream.as_ref(),
+                    args.show_ahead_behind(),
+                    args.null_terminated,
+                    &mut buffer,
+                )?;
             }
-            output_porcelain(&data.staged, &data.unstaged, &mut buffer)?;
+            output_porcelain(
+                &data.staged,
+                &data.unstaged,
+                args.null_terminated,
+                &mut buffer,
+            )?;
             if args.ignored && !data.ignored_files.is_empty() {
                 for file in &data.ignored_files {
-                    writeln!(&mut buffer, "!! {}", file.display()).map_err(write_error)?;
+                    if args.null_terminated {
+                        write!(&mut buffer, "!! {}", file.display()).map_err(write_error)?;
+                        buffer.push(b'\0');
+                    } else {
+                        writeln!(&mut buffer, "!! {}", file.display()).map_err(write_error)?;
+                    }
                 }
             }
             writer.write_all(&buffer).map_err(write_error)?;
@@ -481,12 +711,30 @@ async fn render_status_to_writer(
     // Short format
     if args.short {
         if args.branch {
-            print_branch_info(&data.head, data.upstream.as_ref(), &mut buffer)?;
+            print_branch_info(
+                &data.head,
+                data.upstream.as_ref(),
+                args.show_ahead_behind(),
+                args.null_terminated,
+                &mut buffer,
+            )?;
         }
-        output_short_format_with_config(&data.staged, &data.unstaged, output, &mut buffer).await?;
+        output_short_format_with_config(
+            &data.staged,
+            &data.unstaged,
+            output,
+            args.null_terminated,
+            &mut buffer,
+        )
+        .await?;
         if args.ignored {
             for file in &data.ignored_files {
-                writeln!(&mut buffer, "!! {}", file.display()).map_err(write_error)?;
+                if args.null_terminated {
+                    write!(&mut buffer, "!! {}", file.display()).map_err(write_error)?;
+                    buffer.push(b'\0');
+                } else {
+                    writeln!(&mut buffer, "!! {}", file.display()).map_err(write_error)?;
+                }
             }
         }
         writer.write_all(&buffer).map_err(write_error)?;
@@ -527,6 +775,10 @@ fn render_human_status(
         render_upstream_human(upstream, buffer)?;
     }
 
+    if let Some(merge_state) = &data.merge_state {
+        render_merge_state_human(merge_state, buffer)?;
+    }
+
     if !data.has_commits {
         writeln!(buffer, "\nNo commits yet\n").map_err(write_error)?;
     }
@@ -557,17 +809,23 @@ fn render_human_status(
             "  use \"libra restore --staged <file>...\" to unstage"
         )
         .map_err(write_error)?;
-        for f in &data.staged.deleted {
-            let str = format!("\tdeleted: {}", f.display());
-            writeln!(buffer, "{}", str.bright_green()).map_err(write_error)?;
-        }
-        for f in &data.staged.modified {
-            let str = format!("\tmodified: {}", f.display());
-            writeln!(buffer, "{}", str.bright_green()).map_err(write_error)?;
-        }
-        for f in &data.staged.new {
-            let str = format!("\tnew file: {}", f.display());
-            writeln!(buffer, "{}", str.bright_green()).map_err(write_error)?;
+        let entries = build_human_entries(
+            &data.staged.deleted,
+            "deleted:",
+            &data.staged.modified,
+            "modified:",
+            &data.staged.new,
+            "new file:",
+            &data.staged.renamed,
+            "renamed:",
+        );
+        if args.column {
+            render_columnated_labeled_entries(buffer, &entries, colored::Color::BrightGreen)?;
+        } else {
+            for (label, path) in entries {
+                let line = format!("\t{label} {path}");
+                writeln!(buffer, "{}", line.bright_green()).map_err(write_error)?;
+            }
         }
     }
 
@@ -584,13 +842,23 @@ fn render_human_status(
             "  use \"libra restore <file>...\" to discard changes in working directory"
         )
         .map_err(write_error)?;
-        for f in &data.unstaged.deleted {
-            let str = format!("\tdeleted: {}", f.display());
-            writeln!(buffer, "{}", str.bright_red()).map_err(write_error)?;
-        }
-        for f in &data.unstaged.modified {
-            let str = format!("\tmodified: {}", f.display());
-            writeln!(buffer, "{}", str.bright_red()).map_err(write_error)?;
+        let entries = build_human_entries(
+            &data.unstaged.deleted,
+            "deleted:",
+            &data.unstaged.modified,
+            "modified:",
+            &[],
+            "",
+            &data.unstaged.renamed,
+            "renamed:",
+        );
+        if args.column {
+            render_columnated_labeled_entries(buffer, &entries, colored::Color::BrightRed)?;
+        } else {
+            for (label, path) in entries {
+                let line = format!("\t{label} {path}");
+                writeln!(buffer, "{}", line.bright_red()).map_err(write_error)?;
+            }
         }
     }
 
@@ -602,9 +870,13 @@ fn render_human_status(
             "  use \"libra add <file>...\" to include in what will be committed"
         )
         .map_err(write_error)?;
-        for f in &data.unstaged.new {
-            let str = format!("\t{}", f.display());
-            writeln!(buffer, "{}", str.bright_red()).map_err(write_error)?;
+        if args.column {
+            render_columnated_paths(buffer, &data.unstaged.new)?;
+        } else {
+            for f in &data.unstaged.new {
+                let str = format!("\t{}", f.display());
+                writeln!(buffer, "{}", str.bright_red()).map_err(write_error)?;
+            }
         }
     }
 
@@ -616,12 +888,150 @@ fn render_human_status(
             "  (modify .libraignore to change which files are ignored)"
         )
         .map_err(write_error)?;
-        for f in &data.ignored_files {
-            let str = format!("\t{}", f.display());
-            writeln!(buffer, "{}", str.bright_red()).map_err(write_error)?;
+        if args.column {
+            render_columnated_paths(buffer, &data.ignored_files)?;
+        } else {
+            for f in &data.ignored_files {
+                let str = format!("\t{}", f.display());
+                writeln!(buffer, "{}", str.bright_red()).map_err(write_error)?;
+            }
         }
     }
 
+    Ok(())
+}
+
+/// Build a flat list of (label, path) for human output.
+#[allow(clippy::too_many_arguments)]
+fn build_human_entries<'a>(
+    deleted: &[PathBuf],
+    deleted_label: &'a str,
+    modified: &[PathBuf],
+    modified_label: &'a str,
+    new_files: &[PathBuf],
+    new_label: &'a str,
+    renamed: &[(PathBuf, PathBuf)],
+    renamed_label: &'a str,
+) -> Vec<(&'a str, String)> {
+    let mut entries = Vec::new();
+    for f in deleted {
+        entries.push((deleted_label, f.display().to_string()));
+    }
+    for f in modified {
+        entries.push((modified_label, f.display().to_string()));
+    }
+    for (old, new) in renamed {
+        entries.push((
+            renamed_label,
+            format!("{} -> {}", old.display(), new.display()),
+        ));
+    }
+    for f in new_files {
+        entries.push((new_label, f.display().to_string()));
+    }
+    entries
+}
+
+/// Render labeled entries in aligned columns.
+fn render_columnated_labeled_entries(
+    buffer: &mut Vec<u8>,
+    entries: &[(&str, String)],
+    color: colored::Color,
+) -> CliResult<()> {
+    let write_error =
+        |err: io::Error| CliError::io(format!("failed to write status output: {err}"));
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let max_label_width = entries.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
+    for (label, path) in entries {
+        let line = format!("\t{label:max_label_width$} {path}");
+        let colored = match color {
+            colored::Color::BrightGreen => line.bright_green().to_string(),
+            colored::Color::BrightRed => line.bright_red().to_string(),
+            _ => line,
+        };
+        writeln!(buffer, "{colored}").map_err(write_error)?;
+    }
+    Ok(())
+}
+
+/// Render plain paths in multiple columns like `ls`.
+fn render_columnated_paths(buffer: &mut Vec<u8>, paths: &[PathBuf]) -> CliResult<()> {
+    let write_error =
+        |err: io::Error| CliError::io(format!("failed to write status output: {err}"));
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+    let widths: Vec<usize> = names.iter().map(|n| n.len()).collect();
+    let max_width = *widths.iter().max().unwrap_or(&0);
+    let term_width = terminal_width().unwrap_or(80);
+    // Leave a leading tab and some padding room.
+    let usable_width = term_width.saturating_sub(8);
+    let col_width = max_width + 2;
+    let num_cols = usable_width
+        .checked_div(col_width)
+        .unwrap_or(usable_width)
+        .max(1);
+    let num_rows = names.len().div_ceil(num_cols);
+
+    for row in 0..num_rows {
+        write!(buffer, "\t").map_err(write_error)?;
+        for col in 0..num_cols {
+            let idx = col * num_rows + row;
+            if idx >= names.len() {
+                break;
+            }
+            let name = &names[idx];
+            if col + 1 < num_cols {
+                write!(buffer, "{name:col_width$}").map_err(write_error)?;
+            } else {
+                write!(buffer, "{name}").map_err(write_error)?;
+            }
+        }
+        writeln!(buffer).map_err(write_error)?;
+    }
+    Ok(())
+}
+
+/// Best-effort terminal width.
+fn terminal_width() -> Option<usize> {
+    if std::io::stdout().is_terminal() {
+        std::env::var("COLUMNS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .or(Some(80))
+    } else {
+        None
+    }
+}
+
+fn render_merge_state_human(merge_state: &MergeStatusInfo, buffer: &mut Vec<u8>) -> CliResult<()> {
+    let write_error =
+        |err: io::Error| CliError::io(format!("failed to write status output: {err}"));
+
+    writeln!(
+        buffer,
+        "You are in the middle of a merge with '{}'.",
+        merge_state.target_ref
+    )
+    .map_err(write_error)?;
+    if merge_state.conflicted_paths.is_empty() {
+        writeln!(
+            buffer,
+            "  (all conflicts fixed: run \"libra merge --continue\")"
+        )
+        .map_err(write_error)?;
+    } else {
+        writeln!(
+            buffer,
+            "  (fix conflicts and run \"libra merge --continue\")"
+        )
+        .map_err(write_error)?;
+    }
+    writeln!(buffer, "  (use \"libra merge --abort\" to abort the merge)").map_err(write_error)?;
     Ok(())
 }
 
@@ -714,6 +1124,18 @@ fn build_status_json(data: &StatusData, _args: &StatusArgs) -> serde_json::Value
             .collect()
     };
 
+    let renamed_to_json = |renamed: &[(PathBuf, PathBuf)]| -> Vec<serde_json::Value> {
+        renamed
+            .iter()
+            .map(|(old, new)| {
+                serde_json::json!({
+                    "from": old.display().to_string(),
+                    "to": new.display().to_string(),
+                })
+            })
+            .collect()
+    };
+
     let head = match &data.head {
         Head::Branch(name) => serde_json::json!({"type": "branch", "name": name}),
         Head::Detached(hash) => {
@@ -739,15 +1161,29 @@ fn build_status_json(data: &StatusData, _args: &StatusArgs) -> serde_json::Value
             "new": paths_to_json(&data.staged.new),
             "modified": paths_to_json(&data.staged.modified),
             "deleted": paths_to_json(&data.staged.deleted),
+            "renamed": renamed_to_json(&data.staged.renamed),
         },
         "unstaged": {
             "modified": paths_to_json(&data.unstaged.modified),
             "deleted": paths_to_json(&data.unstaged.deleted),
+            "renamed": renamed_to_json(&data.unstaged.renamed),
         },
         "untracked": paths_to_json(&data.unstaged.new),
         "ignored": paths_to_json(&data.ignored_files),
         "is_clean": !data.is_dirty(),
     });
+
+    if let Some(merge_state) = &data.merge_state
+        && let Some(map) = json_data.as_object_mut()
+    {
+        map.insert(
+            "merge_state".to_string(),
+            serde_json::json!({
+                "target_ref": merge_state.target_ref,
+                "conflicted_paths": merge_state.conflicted_paths,
+            }),
+        );
+    }
 
     if let Some(stash_count) = data.stash_count
         && let Some(map) = json_data.as_object_mut()
@@ -765,18 +1201,25 @@ fn build_status_json(data: &StatusData, _args: &StatusArgs) -> serde_json::Value
 pub fn output_porcelain(
     staged: &Changes,
     unstaged: &Changes,
+    null_terminated: bool,
     writer: &mut impl Write,
 ) -> CliResult<()> {
     let status_list = generate_short_format_status(staged, unstaged);
+    let write_err = |e: io::Error| CliError::io(format!("failed to write status output: {e}"));
     for (file, staged_status, unstaged_status) in status_list {
-        writeln!(
+        write!(
             writer,
             "{}{} {}",
             staged_status,
             unstaged_status,
             file.display()
         )
-        .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
+        .map_err(write_err)?;
+        if null_terminated {
+            writer.write_all(b"\0").map_err(write_err)?;
+        } else {
+            writer.write_all(b"\n").map_err(write_err)?;
+        }
     }
     Ok(())
 }
@@ -878,17 +1321,23 @@ fn output_porcelain_v2(
     unstaged: &Changes,
     ignored: &[PathBuf],
     metadata: Option<&PorcelainV2Data>,
+    null_terminated: bool,
     writer: &mut impl Write,
 ) -> CliResult<()> {
     let metadata =
         metadata.ok_or_else(|| CliError::internal("missing porcelain v2 metadata for status"))?;
     let zero_hash = zero_hash_str();
+    let write_err = |e: io::Error| CliError::io(format!("failed to write status output: {e}"));
 
     let status_list = generate_short_format_status(staged, unstaged);
     for (file, staged_status, unstaged_status) in status_list {
         if staged_status == '?' && unstaged_status == '?' {
-            writeln!(writer, "? {}", file.display())
-                .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
+            write!(writer, "? {}", file.display()).map_err(write_err)?;
+            if null_terminated {
+                writer.write_all(b"\0").map_err(write_err)?;
+            } else {
+                writer.write_all(b"\n").map_err(write_err)?;
+            }
             continue;
         }
 
@@ -921,7 +1370,7 @@ fn output_porcelain_v2(
             "N...".to_string()
         };
 
-        writeln!(
+        write!(
             writer,
             "1 {}{} {} {} {} {} {} {} {}",
             staged_status,
@@ -934,12 +1383,21 @@ fn output_porcelain_v2(
             hash_index,
             file.display()
         )
-        .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
+        .map_err(write_err)?;
+        if null_terminated {
+            writer.write_all(b"\0").map_err(write_err)?;
+        } else {
+            writer.write_all(b"\n").map_err(write_err)?;
+        }
     }
 
     for file in ignored {
-        writeln!(writer, "! {}", file.display())
-            .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
+        write!(writer, "! {}", file.display()).map_err(write_err)?;
+        if null_terminated {
+            writer.write_all(b"\0").map_err(write_err)?;
+        } else {
+            writer.write_all(b"\n").map_err(write_err)?;
+        }
     }
     Ok(())
 }
@@ -968,6 +1426,10 @@ pub fn generate_short_format_status(
     for file in &staged.deleted {
         file_status.insert(file.clone(), ('D', ' '));
     }
+    for (old, new) in &staged.renamed {
+        file_status.insert(old.clone(), ('R', ' '));
+        file_status.insert(new.clone(), ('R', ' '));
+    }
 
     fn process_unstaged_changes(
         files: &[PathBuf],
@@ -986,6 +1448,10 @@ pub fn generate_short_format_status(
 
     process_unstaged_changes(&unstaged.modified, &mut file_status, 'M');
     process_unstaged_changes(&unstaged.deleted, &mut file_status, 'D');
+    for (old, new) in &unstaged.renamed {
+        process_unstaged_changes(std::slice::from_ref(old), &mut file_status, 'R');
+        process_unstaged_changes(std::slice::from_ref(new), &mut file_status, 'R');
+    }
 
     for file in &unstaged.new {
         file_status.insert(file.clone(), ('?', '?'));
@@ -1008,7 +1474,7 @@ pub async fn output_short_format(
     unstaged: &Changes,
     writer: &mut impl Write,
 ) -> CliResult<()> {
-    output_short_format_with_config(staged, unstaged, &OutputConfig::default(), writer).await
+    output_short_format_with_config(staged, unstaged, &OutputConfig::default(), false, writer).await
 }
 
 /// Short format output with color controlled by OutputConfig.
@@ -1016,26 +1482,32 @@ async fn output_short_format_with_config(
     staged: &Changes,
     unstaged: &Changes,
     output: &OutputConfig,
+    null_terminated: bool,
     writer: &mut impl Write,
 ) -> CliResult<()> {
     let use_colors = should_use_colors(output).await;
+    let write_err = |e: io::Error| CliError::io(format!("failed to write status output: {e}"));
 
     let status_list = generate_short_format_status(staged, unstaged);
 
     for (file, staged_status, unstaged_status) in status_list {
         if use_colors {
             let colored_output = format_colored_status(staged_status, unstaged_status, &file);
-            writeln!(writer, "{}", colored_output)
-                .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
+            write!(writer, "{}", colored_output).map_err(write_err)?;
         } else {
-            writeln!(
+            write!(
                 writer,
                 "{}{} {}",
                 staged_status,
                 unstaged_status,
                 file.display()
             )
-            .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
+            .map_err(write_err)?;
+        }
+        if null_terminated {
+            writer.write_all(b"\0").map_err(write_err)?;
+        } else {
+            writer.write_all(b"\n").map_err(write_err)?;
         }
     }
     Ok(())
@@ -1128,48 +1600,49 @@ fn format_colored_status(
 fn print_branch_info(
     head: &Head,
     upstream: Option<&UpstreamInfo>,
+    show_ahead_behind: bool,
+    null_terminated: bool,
     writer: &mut impl Write,
 ) -> CliResult<()> {
+    let write_err = |e: io::Error| CliError::io(format!("failed to write status output: {e}"));
     match head {
         Head::Detached(commit_hash) => {
-            writeln!(
-                writer,
-                "## HEAD (detached at {})",
-                &commit_hash.to_string()[..8]
-            )
-            .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
+            let line = format!("## HEAD (detached at {})", &commit_hash.to_string()[..8]);
+            if null_terminated {
+                write!(writer, "{line}").map_err(write_err)?;
+                writer.write_all(b"\0").map_err(write_err)?;
+            } else {
+                writeln!(writer, "{line}").map_err(write_err)?;
+            }
         }
         Head::Branch(branch) => {
-            if let Some(u) = upstream {
+            let line = if let Some(u) = upstream {
                 let tracking = format!("{}...{}", branch, u.remote_ref);
                 if u.gone {
-                    writeln!(writer, "## {tracking} [gone]")
-                        .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
-                } else {
+                    format!("## {tracking} [gone]")
+                } else if show_ahead_behind {
                     let ahead = u.ahead.unwrap_or(0);
                     let behind = u.behind.unwrap_or(0);
                     if ahead > 0 && behind > 0 {
-                        writeln!(writer, "## {tracking} [ahead {ahead}, behind {behind}]")
-                            .map_err(|e| {
-                                CliError::io(format!("failed to write status output: {e}"))
-                            })?;
+                        format!("## {tracking} [ahead {ahead}, behind {behind}]")
                     } else if ahead > 0 {
-                        writeln!(writer, "## {tracking} [ahead {ahead}]").map_err(|e| {
-                            CliError::io(format!("failed to write status output: {e}"))
-                        })?;
+                        format!("## {tracking} [ahead {ahead}]")
                     } else if behind > 0 {
-                        writeln!(writer, "## {tracking} [behind {behind}]").map_err(|e| {
-                            CliError::io(format!("failed to write status output: {e}"))
-                        })?;
+                        format!("## {tracking} [behind {behind}]")
                     } else {
-                        writeln!(writer, "## {tracking}").map_err(|e| {
-                            CliError::io(format!("failed to write status output: {e}"))
-                        })?;
+                        format!("## {tracking}")
                     }
+                } else {
+                    format!("## {tracking}")
                 }
             } else {
-                writeln!(writer, "## {branch}")
-                    .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
+                format!("## {branch}")
+            };
+            if null_terminated {
+                write!(writer, "{line}").map_err(write_err)?;
+                writer.write_all(b"\0").map_err(write_err)?;
+            } else {
+                writeln!(writer, "{line}").map_err(write_err)?;
             }
         }
     }
@@ -1181,31 +1654,39 @@ fn write_branch_info_v2(
     head: &Head,
     head_oid: Option<&ObjectHash>,
     upstream: Option<&UpstreamInfo>,
+    show_ahead_behind: bool,
+    null_terminated: bool,
     writer: &mut impl Write,
 ) -> CliResult<()> {
     let write_err = |e: io::Error| CliError::io(format!("failed to write status output: {e}"));
+    let term = if null_terminated { b"\0" } else { b"\n" };
 
     match head {
         Head::Detached(_) => {
-            writeln!(writer, "# branch.head (detached)").map_err(write_err)?;
+            write!(writer, "# branch.head (detached)").map_err(write_err)?;
+            writer.write_all(term).map_err(write_err)?;
         }
         Head::Branch(name) => {
-            writeln!(writer, "# branch.head {}", name).map_err(write_err)?;
+            write!(writer, "# branch.head {}", name).map_err(write_err)?;
+            writer.write_all(term).map_err(write_err)?;
         }
     }
 
     if let Some(oid) = head_oid {
-        writeln!(writer, "# branch.oid {oid}").map_err(write_err)?;
+        write!(writer, "# branch.oid {oid}").map_err(write_err)?;
     } else {
-        writeln!(writer, "# branch.oid (initial)").map_err(write_err)?;
+        write!(writer, "# branch.oid (initial)").map_err(write_err)?;
     }
+    writer.write_all(term).map_err(write_err)?;
 
     if let Some(u) = upstream {
-        writeln!(writer, "# branch.upstream {}", u.remote_ref).map_err(write_err)?;
-        if !u.gone {
+        write!(writer, "# branch.upstream {}", u.remote_ref).map_err(write_err)?;
+        writer.write_all(term).map_err(write_err)?;
+        if !u.gone && show_ahead_behind {
             let ahead = u.ahead.unwrap_or(0);
             let behind = u.behind.unwrap_or(0);
-            writeln!(writer, "# branch.ab +{ahead} -{behind}").map_err(write_err)?;
+            write!(writer, "# branch.ab +{ahead} -{behind}").map_err(write_err)?;
+            writer.write_all(term).map_err(write_err)?;
         }
     }
 

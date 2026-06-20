@@ -4,6 +4,7 @@ import {
   IconArrow,
   IconBranch,
   IconClock,
+  IconFile,
   IconFlask,
   IconPlay,
   IconShield,
@@ -19,6 +20,7 @@ import type {
   IntentDoc,
   Plan,
   PlanStep,
+  WorkflowTask,
 } from "./types";
 
 type IntentCardProps = {
@@ -90,11 +92,16 @@ export function PlanCard({
   return (
     <Card
       badge={phaseBadge}
-      title={title}
+      title={plan.title?.trim() || title}
       subtitle={`${subtitle} · ${plan.steps.length} steps`}
       icon={icon}
       tone={active ? "active" : gated ? "muted" : "default"}
     >
+      {plan.summary?.trim() && (
+        <div className="mb-2.5 text-[12px] leading-[1.5] text-ink-2">
+          {plan.summary.trim()}
+        </div>
+      )}
       {gated && (
         <div className="mono mb-2.5 flex items-center gap-1.5 rounded-md bg-paper-2 px-2 py-1.5 text-[11px] text-ink-3">
           <IconClock size={11} /> Stage barrier — runs after execution DAG settles
@@ -115,7 +122,13 @@ export function PlanCard({
               onClick={() =>
                 onOpen({
                   kind: "plan-step",
-                  data: { step, planKind, planId: plan.id },
+                  data: {
+                    step,
+                    planKind,
+                    planId: plan.id,
+                    planTitle: plan.title,
+                    planSummary: plan.summary,
+                  },
                 })
               }
             />
@@ -197,6 +210,68 @@ export function RunsCard({ onOpen, activeDetail, execPlan, runs }: RunsCardProps
           />
         ))}
       </div>
+    </Card>
+  );
+}
+
+export function TasksCard({
+  tasks,
+  onOpen,
+  activeDetail,
+}: {
+  tasks: WorkflowTask[];
+  onOpen: (d: DetailState) => void;
+  activeDetail: DetailState | null;
+}) {
+  return (
+    <Card
+      badge="Phase 2"
+      title="Tasks"
+      subtitle={`${tasks.length} projected`}
+      icon={<IconFile size={12} />}
+      tone={tasks.length > 0 ? "active" : "muted"}
+    >
+      {tasks.length > 0 ? (
+        <div className="flex flex-col gap-1.5">
+          {tasks.map((task) => {
+            const meta = statusMeta(task.status);
+            const selected =
+              activeDetail?.kind === "task" && activeDetail.data.id === task.id;
+            return (
+              <button
+                key={task.id}
+                type="button"
+                onClick={() => onOpen({ kind: "task", data: task })}
+                className={cn(
+                  "flex items-center gap-2 rounded-md border bg-paper px-2.5 py-1.5 text-left transition-[background,border-color] duration-150",
+                  selected ? "border-accent bg-accent-soft" : "border-rule",
+                )}
+              >
+                <span className="mono w-[68px] shrink-0 overflow-hidden text-ellipsis whitespace-nowrap text-[10.5px] text-ink-3">
+                  {task.id}
+                </span>
+                <span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-[12.5px] text-ink">
+                  {task.title}
+                </span>
+                <span
+                  className="mono shrink-0 rounded-sm px-1.5 py-px text-[9.5px] tracking-[0.05em]"
+                  style={{ color: meta.color, background: meta.bg }}
+                >
+                  {meta.label}
+                </span>
+                <span className="w-[30px] shrink-0 text-right text-[10.5px] text-ink-3">
+                  {task.ago}
+                </span>
+                <IconArrow size={11} className="shrink-0 text-ink-3" />
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="text-[11px] italic text-ink-3">
+          no task snapshots yet
+        </div>
+      )}
     </Card>
   );
 }

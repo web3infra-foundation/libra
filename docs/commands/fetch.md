@@ -31,6 +31,13 @@ are loaded automatically when configured via `vault.ssh.<remote>.privkey`.
 | `<refspec>` | Branch name to fetch. Requires `<repository>`. When omitted, all branches from the remote are fetched. | `libra fetch origin main` |
 | `-a`, `--all` | Fetch from every configured remote. Conflicts with `<repository>`. | `libra fetch --all` |
 | `--depth <N>` | Limit fetching to the specified number of commits from the tip of each remote branch (shallow fetch). Public stable flag. | `libra fetch origin --depth 1` |
+| `--tags` | Fetch every tag from the remote into the local `refs/tags/*` (overrides the default auto-follow and `remote.<name>.tagOpt`). | `libra fetch origin --tags` |
+| `--no-tags` | Fetch no tags at all, not even tags reachable from fetched commits (overrides the default auto-follow). | `libra fetch origin --no-tags` |
+| `-f`, `--force` | Allow non-fast-forward updates and overwrite (clobber) a local tag that points elsewhere. Forced updates are marked `+` in `--porcelain` / `(forced update)` in human output. | `libra fetch origin --tags --force` |
+| `--dry-run` | Preview the remote-tracking ref updates the fetch would produce without downloading any objects or writing refs, reflog, or `FETCH_HEAD`. | `libra fetch origin --dry-run` |
+| `--append` | Append fetched ref records to `.libra/FETCH_HEAD` instead of overwriting it. (`-a` is reserved for `--all`.) | `libra fetch origin --append` |
+| `-v`, `--verbose` | Announce the remote being contacted on stderr; the stdout result contract is unchanged. | `libra fetch origin -v` |
+| `--porcelain` | Print a machine-readable `<flag> <old-oid> <new-oid> <local-ref>` line per ref update. Mutually exclusive with `--json`. | `libra fetch origin --porcelain` |
 | `--json` | Emit structured JSON envelope to stdout (global flag). | `libra --json fetch origin` |
 | `--machine` | Compact single-line JSON; suppresses progress (global flag). | `libra --machine fetch origin` |
 | `--progress none` | Suppress NDJSON progress events on stderr in JSON mode. | `libra --json fetch origin --progress none` |
@@ -44,10 +51,23 @@ libra fetch origin
 libra fetch origin main
 libra fetch --all
 libra fetch origin --depth 1               # shallow fetch
+libra fetch origin --tags                  # also fetch all tags into refs/tags/*
 libra fetch --all --depth 3                # shallow across all remotes
+libra fetch origin --dry-run               # preview ref updates, write nothing
+libra fetch origin --porcelain             # machine-readable per-ref lines
+libra fetch origin -v                      # announce the remote on stderr
+libra fetch origin --append                # accumulate into FETCH_HEAD
 libra --json fetch origin
 libra --json fetch origin --progress none
 ```
+
+## FETCH_HEAD
+
+Every successful fetch records the fetched refs in `.libra/FETCH_HEAD`, one
+`<oid>\tnot-for-merge\tbranch '<name>' of <url>` line per ref. Libra never
+designates a merge target (merge with `libra pull`), so every line is marked
+`not-for-merge`. `--append` accumulates into the file instead of overwriting it;
+`--dry-run` writes nothing.
 
 ## Human Output
 
@@ -163,7 +183,7 @@ fast and predictable while giving users a deliberate pruning path.
 ### Shallow fetch (`--depth`) is exposed as a stable flag
 
 `libra fetch --depth N` is a public stable flag (audited C3 in
-[`docs/improvement/compatibility/shallow.md`](../improvement/compatibility/shallow.md)).
+[`docs/development/commands/clone.md`](../development/commands/clone.md)).
 The internal `fetch_repository(..., depth)` plumbing has supported shallow fetch
 for some time; C3 surfaces it on the CLI and binds the contract:
 
@@ -175,7 +195,7 @@ for some time; C3 surfaces it on the CLI and binds the contract:
   idempotent: Libra persists server-advertised shallow boundaries in
   `.libra/shallow` and sends them during later upload-pack negotiation.
 - Sparse checkout (`clone --sparse`) is **not** part of this contract — see
-  [`docs/improvement/compatibility/declined.md`](../improvement/compatibility/declined.md)
+  [`docs/development/commands/_compatibility.md`](../development/commands/_compatibility.md)
   for why sparse-checkout is intentionally deferred.
 
 Shallow fetch does introduce the usual Git "shallow boundary" caveats (blame,
@@ -204,6 +224,14 @@ by default for maximum script friendliness.
 | All remotes | `libra fetch --all` | `git fetch --all` | `jj git fetch --all-remotes` |
 | Prune stale refs | `libra remote prune <name>` | `git fetch --prune` | Automatic |
 | Shallow fetch | `libra fetch --depth N` | `git fetch --depth N` | Not supported |
+| Dry-run preview | `libra fetch --dry-run` | `git fetch --dry-run` | Not supported |
+| Porcelain output | `libra fetch --porcelain` | `git fetch --porcelain` | No |
+| Append FETCH_HEAD | `libra fetch --append` | `git fetch --append` | No |
+| Verbose diagnostics | `libra fetch -v` | `git fetch -v` | No |
+| Tag auto-follow (default) | Tags reachable from fetched commits are followed automatically (via `include-tag`) | Same (default) | Automatic |
+| Tag fetch control | `libra fetch --tags` / `--no-tags`; `remote.<name>.tagOpt` | `git fetch --tags` / `--no-tags`; `remote.<name>.tagOpt` | Automatic |
+| Force fetch | `libra fetch -f` / `--force` (non-FF + tag clobber) | `git fetch --force` | Automatic |
+| Atomic / refmap | Not supported (deferred) | `git fetch --atomic` / `--refmap` | No |
 | Structured output | `--json` / `--machine` | No | No |
 | Progress events | NDJSON on stderr | Text on stderr | Text on stderr |
 

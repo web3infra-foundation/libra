@@ -8,7 +8,7 @@
 //! fails loud at deserialization time rather than silently changing
 //! behaviour.
 //!
-//! Per-case JSON shape (subset; see `docs/improvement/test.md`):
+//! Per-case JSON shape (subset; see `docs/development/commands/_general.md`):
 //!
 //! ```jsonc
 //! {
@@ -46,7 +46,7 @@ use super::{CodeSession, CodeSessionOptions, EventStream, SseEvent};
 /// Loaded matrix file. Cases are kept as raw JSON values and only
 /// deserialised into typed [`Case`]s on demand by [`find_case`].
 ///
-/// Why lazy: each Wave (`docs/improvement/test.md`) lands new
+/// Why lazy: each Wave (`docs/development/commands/_general.md`) lands new
 /// `Step` variants alongside the runner code. If we deserialised
 /// every case upfront, Wave 1's runner would refuse to load the
 /// shared `sse_cases.json` file just because Wave 2's case relies
@@ -678,7 +678,7 @@ fn effective_options(defaults: &CaseOptions, case: &CaseOptions) -> CaseOptions 
 /// per-case overrides for `control`, `leaseDurationMs`, and
 /// `fixture`. Codex pass-1 P3: case-level `fixture` overrides the
 /// file's default, matching the JSON schema documented in
-/// `docs/improvement/test.md`.
+/// `docs/development/commands/_general.md`.
 ///
 /// Wave 11 / PR 11 — when the case (or file defaults) carries a
 /// `provider` block in `model_from_env_file` mode AND the live
@@ -749,7 +749,7 @@ pub fn build_session_options(file: &CaseFile, case: &Case) -> CodeSessionOptions
                 // Wave 11 Codex pass-2 fix: §5.19 specifies the
                 // DeepSeek live invocation runs with thinking
                 // mode + high reasoning effort
-                // (`docs/improvement/test.md:581`). Without
+                // (`docs/development/commands/_general.md:581`). Without
                 // those flags the nightly matrix would exercise
                 // the wrong code path. Apply them automatically
                 // when the env-resolved provider is deepseek so

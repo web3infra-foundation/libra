@@ -1,0 +1,60 @@
+name: Code UI SSE soak (nightly + manual)
+
+# Wave 12 / docs/improvement/test.md §5.18 — the normal PR
+# suite runs the scaled in-process SSE smoke. This workflow runs
+# the real HTTP/SSE Code UI soak for one hour on a nightly
+# schedule and on manual dispatch. It uses the deterministic fake
+# provider, so no model secrets are required.
+
+on:
+  schedule:
+    # Daily at 05:30 UTC, after model generation and live compat.
+    - cron: "30 5 * * *"
+  workflow_dispatch:
+    inputs:
+      soak-seconds:
+        description: "SSE soak duration in seconds"
+        required: false
+        default: "3600"
+      heartbeat-seconds:
+        description: "Seconds between automation heartbeat submits"
+        required: false
+        default: "15"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  code-ui-sse-soak:
+    name: code_ui_http_sse_soak
+    runs-on: [self-hosted]
+    timeout-minutes: 75
+
+    env:
+      CARGO_TERM_COLOR: always
+      LIBRA_RUN_PERF: "1"
+      LIBRA_ENABLE_TEST_PROVIDER: "1"
+      LIBRA_SSE_SOAK_SECS: ${{ github.event.inputs['soak-seconds'] || '3600' }}
+      LIBRA_SSE_SOAK_INTERVAL_SECS: ${{ github.event.inputs['heartbeat-seconds'] || '15' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Run HTTP SSE soak
+        run: |
+          cargo test --features test-provider \
+            --test code_ui_perf_smoke_test \
+            perf_sse_http_stream_survives_configured_soak_duration \
+            -- --ignored --test-threads=1 --nocapture

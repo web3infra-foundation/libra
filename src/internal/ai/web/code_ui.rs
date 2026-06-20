@@ -12,7 +12,7 @@ use std::{
     },
 };
 
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -304,14 +304,33 @@ impl Default for CodeUiSessionSnapshot {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeUiEventType {
+    #[default]
+    SessionUpdated,
+    StatusChanged,
+    ControllerChanged,
+}
+
+impl CodeUiEventType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionUpdated => "session_updated",
+            Self::StatusChanged => "status_changed",
+            Self::ControllerChanged => "controller_changed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeUiEventEnvelope {
     pub seq: u64,
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: CodeUiEventType,
     pub at: DateTime<Utc>,
-    pub data: serde_json::Value,
+    pub data: CodeUiSessionSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,6 +369,16 @@ pub struct CodeUiMessageRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CodeUiAckResponse {
     pub accepted: bool,
+}
+
+/// `POST /api/code/task/dispatch` body. This is the Code Control
+/// equivalent of `/task <agent> <prompt>` and enters the dispatcher as
+/// `UserInitiated { bypass_permission_ask: true }`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeUiTaskDispatchRequest {
+    pub agent: String,
+    pub prompt: String,
 }
 
 /// `POST /api/code/goal/start` body. The objective is validated
@@ -459,7 +488,7 @@ impl CodeUiSession {
         self.tx.subscribe()
     }
 
-    pub async fn mutate<F>(&self, event_type: &str, f: F)
+    pub async fn mutate<F>(&self, event_type: CodeUiEventType, f: F)
     where
         F: FnOnce(&mut CodeUiSessionSnapshot),
     {
@@ -472,7 +501,11 @@ impl CodeUiSession {
         self.broadcast_snapshot(event_type, &snapshot);
     }
 
-    pub async fn replace_snapshot(&self, event_type: &str, snapshot: CodeUiSessionSnapshot) {
+    pub async fn replace_snapshot(
+        &self,
+        event_type: CodeUiEventType,
+        snapshot: CodeUiSessionSnapshot,
+    ) {
         {
             let mut current = self.snapshot.write().await;
             *current = snapshot;
@@ -482,28 +515,63 @@ impl CodeUiSession {
     }
 
     pub async fn set_controller_state(&self, controller: CodeUiControllerState) {
-        self.mutate("controller_changed", |snapshot| {
+        self.mutate(CodeUiEventType::ControllerChanged, |snapshot| {
             snapshot.controller = controller;
         })
         .await;
     }
 
     pub async fn set_status(&self, status: CodeUiSessionStatus) {
-        self.mutate("status_changed", |snapshot| {
+        self.mutate(CodeUiEventType::StatusChanged, |snapshot| {
             snapshot.status = status;
         })
         .await;
     }
 
+    pub async fn cancel_active_turn(&self, message: impl Into<String>) {
+        let message = message.into();
+        self.mutate(CodeUiEventType::SessionUpdated, move |snapshot| {
+            let now = Utc::now();
+            snapshot.status = CodeUiSessionStatus::Idle;
+            for tool_call in &mut snapshot.tool_calls {
+                if matches!(tool_call.status.as_str(), "preview" | "running") {
+                    tool_call.status = "failed".to_string();
+                    tool_call.details = Some(message.clone());
+                    tool_call.updated_at = now;
+                }
+            }
+            for entry in &mut snapshot.transcript {
+                match entry.kind {
+                    CodeUiTranscriptEntryKind::AssistantMessage if entry.streaming => {
+                        entry.content = Some(message.clone());
+                        entry.status = Some("cancelled".to_string());
+                        entry.streaming = false;
+                        entry.updated_at = now;
+                    }
+                    CodeUiTranscriptEntryKind::ToolCall
+                        if matches!(entry.status.as_deref(), Some("preview" | "running")) =>
+                    {
+                        entry.content = Some(message.clone());
+                        entry.status = Some("failed".to_string());
+                        entry.streaming = false;
+                        entry.updated_at = now;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await;
+    }
+
     pub async fn upsert_transcript_entry(&self, entry: CodeUiTranscriptEntry) {
-        self.mutate("session_updated", |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             upsert_by_id(&mut snapshot.transcript, entry, |item| item.id.as_str());
         })
         .await;
     }
 
     pub async fn append_assistant_delta(&self, entry_id: &str, delta: &str) {
-        self.mutate("session_updated", |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             if let Some(entry) = snapshot
                 .transcript
                 .iter_mut()
@@ -532,7 +600,7 @@ impl CodeUiSession {
     }
 
     pub async fn upsert_interaction(&self, request: CodeUiInteractionRequest) {
-        self.mutate("session_updated", |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             upsert_by_id(&mut snapshot.interactions, request, |item| item.id.as_str());
         })
         .await;
@@ -540,7 +608,7 @@ impl CodeUiSession {
 
     pub async fn resolve_interaction(&self, interaction_id: &str) {
         let interaction_id = interaction_id.to_string();
-        self.mutate("session_updated", |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             if let Some(interaction) = snapshot
                 .interactions
                 .iter_mut()
@@ -555,7 +623,7 @@ impl CodeUiSession {
 
     pub async fn clear_interaction(&self, interaction_id: &str) {
         let interaction_id = interaction_id.to_string();
-        self.mutate("session_updated", |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             snapshot
                 .interactions
                 .retain(|interaction| interaction.id != interaction_id);
@@ -564,45 +632,45 @@ impl CodeUiSession {
     }
 
     pub async fn upsert_plan(&self, plan: CodeUiPlanSnapshot) {
-        self.mutate("session_updated", |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             upsert_by_id(&mut snapshot.plans, plan, |item| item.id.as_str());
         })
         .await;
     }
 
     pub async fn upsert_task(&self, task: CodeUiTaskSnapshot) {
-        self.mutate("session_updated", |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             upsert_by_id(&mut snapshot.tasks, task, |item| item.id.as_str());
         })
         .await;
     }
 
     pub async fn upsert_tool_call(&self, tool_call: CodeUiToolCallSnapshot) {
-        self.mutate("session_updated", |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             upsert_by_id(&mut snapshot.tool_calls, tool_call, |item| item.id.as_str());
         })
         .await;
     }
 
     pub async fn upsert_patchset(&self, patchset: CodeUiPatchsetSnapshot) {
-        self.mutate("session_updated", |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             upsert_by_id(&mut snapshot.patchsets, patchset, |item| item.id.as_str());
         })
         .await;
     }
 
-    pub async fn emit_current_snapshot(&self, event_type: &str) {
+    pub async fn emit_current_snapshot(&self, event_type: CodeUiEventType) {
         let snapshot = self.snapshot().await;
         self.broadcast_snapshot(event_type, &snapshot);
     }
 
-    fn broadcast_snapshot(&self, event_type: &str, snapshot: &CodeUiSessionSnapshot) {
+    fn broadcast_snapshot(&self, event_type: CodeUiEventType, snapshot: &CodeUiSessionSnapshot) {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         let event = CodeUiEventEnvelope {
             seq,
-            event_type: event_type.to_string(),
+            event_type,
             at: Utc::now(),
-            data: serde_json::to_value(snapshot).unwrap_or_else(|_| json!({})),
+            data: snapshot.clone(),
         };
         let _ = self.tx.send(event);
     }
@@ -648,6 +716,15 @@ pub trait CodeUiCommandAdapter: Send + Sync {
     async fn cancel_turn(&self) -> anyhow::Result<()> {
         Err(anyhow!(
             "This libra code session does not support turn cancel"
+        ))
+    }
+
+    /// `task.dispatch` — explicitly run a sub-agent from automation.
+    /// Default implementation returns "not supported" for adapters
+    /// that do not expose the local TUI sub-agent runtime.
+    async fn task_dispatch(&self, _agent: String, _prompt: String) -> anyhow::Result<String> {
+        Err(anyhow!(
+            "This libra code session does not support task.dispatch"
         ))
     }
 
@@ -1096,6 +1173,22 @@ impl CodeUiRuntimeHandle {
             .map_err(CodeUiApiError::unsupported_from_error)
     }
 
+    /// `task.dispatch { agent, prompt }` — user-initiated sub-agent
+    /// dispatch. Requires controller write-access because it mutates
+    /// the session transcript and may run tools.
+    pub async fn task_dispatch(
+        &self,
+        token: Option<&str>,
+        agent: String,
+        prompt: String,
+    ) -> Result<String, CodeUiApiError> {
+        self.ensure_controller_write_access(token).await?;
+        self.adapter
+            .task_dispatch(agent, prompt)
+            .await
+            .map_err(CodeUiApiError::unsupported_from_error)
+    }
+
     /// `goal.start { objective }` — open an active Goal in this
     /// session. Requires controller write-access (a controller
     /// token validated against the active lease) because creating
@@ -1351,13 +1444,13 @@ impl CodeUiApiError {
 
 /// Wave 2 / PR 2 — single source-of-truth catalogue of every
 /// Code UI error code the API exposes, paired with the HTTP status
-/// it MUST resolve to. Per `docs/improvement/test.md` §5.20, this
+/// it MUST resolve to. Per `docs/development/commands/_general.md` §5.20, this
 /// list is enforced by `code_ui_error_code_contract*` in `tests`
 /// below: any new error code added by a constructor OR emitted by
 /// a route handler as an inline `WebApiError {…}` literal must be
 /// appended here, otherwise the test fails. The list is also the
-/// reference for `docs/automation/local-tui-control.md` and the
-/// Worker frontend error rendering.
+/// reference for `docs/commands/code.md` and the Worker frontend
+/// error rendering.
 ///
 /// Codex pass-1 P3: the list is grouped by gate-rejection layer
 /// (loopback first, then body limit, then control-token, then
@@ -1487,7 +1580,10 @@ pub fn apply_thread_bundle_to_snapshot(
     } else {
         CodeUiSessionStatus::Idle
     };
-    snapshot.plans = code_ui_plan_snapshots(&bundle.scheduler.selected_plan_ids);
+    snapshot.plans = code_ui_plan_snapshots(
+        &bundle.scheduler.selected_plan_ids,
+        bundle.scheduler.updated_at,
+    );
     snapshot.tasks = bundle
         .scheduler
         .active_task_id
@@ -1503,7 +1599,20 @@ pub fn apply_thread_bundle_to_snapshot(
     snapshot.updated_at = bundle.thread.updated_at.max(bundle.scheduler.updated_at);
 }
 
-fn code_ui_plan_snapshots(plan_heads: &[PlanHeadRef]) -> Vec<CodeUiPlanSnapshot> {
+/// Build the [`CodeUiPlanSnapshot`] list for a snapshot from the
+/// scheduler's selected-plan heads.
+///
+/// `scheduler_updated_at` is the upstream `SchedulerState::updated_at`
+/// — *not* `Utc::now()` — so every plan entry surfaces the same
+/// projection revision timestamp as the rest of the snapshot. Using
+/// `Utc::now()` here would make every render emit a different
+/// `updatedAt` even when the underlying projection is unchanged, which
+/// breaks browser change-detection heuristics and makes contract
+/// snapshot tests non-deterministic.
+fn code_ui_plan_snapshots(
+    plan_heads: &[PlanHeadRef],
+    scheduler_updated_at: DateTime<Utc>,
+) -> Vec<CodeUiPlanSnapshot> {
     plan_heads
         .iter()
         .map(|plan| CodeUiPlanSnapshot {
@@ -1512,7 +1621,7 @@ fn code_ui_plan_snapshots(plan_heads: &[PlanHeadRef]) -> Vec<CodeUiPlanSnapshot>
             summary: Some(format!("Selected plan ordinal {}", plan.ordinal)),
             status: "selected".to_string(),
             steps: Vec::new(),
-            updated_at: Utc::now(),
+            updated_at: scheduler_updated_at,
         })
         .collect()
 }
@@ -1526,7 +1635,7 @@ pub fn browser_controller_token_from_headers(headers: &axum::http::HeaderMap) ->
 }
 
 pub fn snapshot_from_event(event: &CodeUiEventEnvelope) -> anyhow::Result<CodeUiSessionSnapshot> {
-    serde_json::from_value(event.data.clone()).context("failed to parse Code UI event snapshot")
+    Ok(event.data.clone())
 }
 
 impl CodeUiControllerKind {
@@ -1546,10 +1655,9 @@ pub fn ensure_session_updated_event(
 ) -> anyhow::Result<CodeUiEventEnvelope> {
     Ok(CodeUiEventEnvelope {
         seq: 0,
-        event_type: "session_updated".to_string(),
+        event_type: CodeUiEventType::SessionUpdated,
         at: Utc::now(),
-        data: serde_json::to_value(snapshot)
-            .map_err(|error| anyhow!("failed to serialize Code UI snapshot: {error}"))?,
+        data: snapshot.clone(),
     })
 }
 
@@ -1573,19 +1681,11 @@ mod tests {
         ))
     }
 
-    /// Wave 12 / PR 12 — Codex pass-1 fix: pin the
-    /// `docs/automation/local-tui-control.md` "Error code reference"
-    /// table against `code_ui_error_codes()` so a code-only
-    /// addition can't silently desync the publicly-documented
-    /// contract. Parses every Markdown row whose first cell is
-    /// a backtick-wrapped identifier and compares the
-    /// `(code, status)` set against the source-of-truth table.
     #[test]
     fn code_ui_error_code_listing_matches_authoritative_doc() {
-        let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("docs/automation/local-tui-control.md");
-        let doc =
-            std::fs::read_to_string(&doc_path).expect("read docs/automation/local-tui-control.md");
+        let doc_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/commands/code.md");
+        let doc = std::fs::read_to_string(&doc_path).expect("read docs/commands/code.md");
         let mut doc_pairs: Vec<(String, u16)> = Vec::new();
         for line in doc.lines() {
             // Markdown table rows look like `| \`CODE\` | 403 | gate description |`.
@@ -1621,11 +1721,11 @@ mod tests {
             .collect();
         assert!(
             !doc_pairs.is_empty(),
-            "error code reference table not found in docs/automation/local-tui-control.md",
+            "Code UI API error table not found in docs/commands/code.md",
         );
         assert_eq!(
             doc_pairs, source_pairs,
-            "docs/automation/local-tui-control.md error code table is out of sync with code_ui_error_codes(); regenerate the table to match (order matters — the table mirrors the runtime gate ordering).",
+            "docs/commands/code.md Code UI API error table is out of sync with code_ui_error_codes(); regenerate the table to match (order matters — the table mirrors the runtime gate ordering).",
         );
     }
 
@@ -1637,10 +1737,44 @@ mod tests {
         assert_eq!(request.kind, CodeUiControllerKind::Browser);
     }
 
+    #[tokio::test]
+    async fn interaction_update_broadcasts_typed_session_snapshot_event() {
+        let session = test_session();
+        let mut rx = session.subscribe();
+        let requested_at = Utc::now();
+
+        session
+            .upsert_interaction(CodeUiInteractionRequest {
+                id: "interaction-1".to_string(),
+                kind: CodeUiInteractionKind::RequestUserInput,
+                title: Some("Pick one".to_string()),
+                description: None,
+                prompt: Some("Continue?".to_string()),
+                options: vec![CodeUiInteractionOption {
+                    id: "yes".to_string(),
+                    label: "Yes".to_string(),
+                    description: None,
+                }],
+                status: CodeUiInteractionStatus::Pending,
+                metadata: json!({"source": "test"}),
+                requested_at,
+                resolved_at: None,
+            })
+            .await;
+
+        let event = rx.recv().await.expect("interaction update event");
+        assert_eq!(event.event_type, CodeUiEventType::SessionUpdated);
+        assert_eq!(event.data.interactions.len(), 1);
+        let interaction = &event.data.interactions[0];
+        assert_eq!(interaction.id, "interaction-1");
+        assert_eq!(interaction.kind, CodeUiInteractionKind::RequestUserInput);
+        assert_eq!(interaction.status, CodeUiInteractionStatus::Pending);
+    }
+
     /// Wave 2 / PR 2 — error code source-of-truth contract.
     ///
     /// `code_ui_error_codes()` lists every Code UI error code the
-    /// API may return. Per `docs/improvement/test.md` §5.20 we
+    /// API may return. Per `docs/development/commands/_general.md` §5.20 we
     /// pin both:
     ///
     /// 1. the (code, status) tuples themselves are stable — any

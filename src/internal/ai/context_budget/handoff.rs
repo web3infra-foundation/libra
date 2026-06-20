@@ -1,7 +1,7 @@
 //! Context handoff types + 8-section SUMMARY parser.
 //!
 //! This module is the OC-Phase 4 P4.3 deliverable from
-//! `docs/improvement/opencode.md`. The dispatcher (OC-Phase 3) and the
+//! `docs/development/commands/_general.md`. The dispatcher (OC-Phase 3) and the
 //! compaction agent (OC-Phase 4 P4.4) both need a way to describe a
 //! point-in-time **handoff** of session context — what the model has
 //! done, what is still in flight, what the caller should pick up
@@ -32,7 +32,7 @@
 //!   that signal; this module only validates the produced summary.
 //!
 //! [literal 8-section SUMMARY template]:
-//! https://github.com/genedna/libra/blob/main/docs/improvement/opencode.md#literal-summary-template
+//! https://github.com/genedna/libra/blob/main/docs/development/commands/_general.md#literal-summary-template
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,7 @@ use super::frame::{ContextAttachmentRef, ContextFrameSegment};
 /// history.
 ///
 /// Field semantics (verbatim from
-/// `docs/improvement/opencode.md`):
+/// `docs/development/commands/_general.md`):
 ///
 /// - `summary` — the 8-section markdown produced by the compaction
 ///   agent. Validated by [`parse_handoff_template`] before this struct
@@ -71,6 +71,163 @@ pub struct ContextHandoff {
     pub source_frame_id: Uuid,
     pub remaining_budget_tokens: u64,
     pub created_at: DateTime<Utc>,
+}
+
+impl ContextHandoff {
+    /// Materialise the handoff into a `Vec<Message>` the child
+    /// sub-agent's tool loop can consume as pre-populated history.
+    /// This is the OC-Phase 4 P4.4 compacted counterpart to
+    /// `ContextFrameEvent::to_handoff_messages` (v0.17.773): the
+    /// raw-segment path feeds the child the parent's working
+    /// context verbatim; this path feeds it the compaction agent's
+    /// validated SUMMARY plus the retained tail segments.
+    ///
+    /// Message layout, in order:
+    /// 1. One System-style header user message announcing the
+    ///    handoff. The literal `[parent-handoff]` prefix lets the
+    ///    child model attribute the content the same way it does
+    ///    raw-segment handoffs.
+    /// 2. One user message carrying the SUMMARY text verbatim.
+    /// 3. Per-segment user messages for each `recent_tail` entry,
+    ///    using the same `[kind:source_kind:label]` header format
+    ///    as `ContextFrameEvent::to_handoff_messages` so the
+    ///    serialisation surface stays uniform across the two
+    ///    paths.
+    ///
+    /// `attachment_refs` are NOT inlined — they live on the
+    /// handoff itself; a future tool call from the child resolves
+    /// them via the runtime context. Inlining would either bloat
+    /// the prompt or require sidecar reads here.
+    pub fn to_handoff_messages(&self) -> Vec<crate::internal::ai::completion::Message> {
+        use crate::internal::ai::completion::Message;
+        let mut messages = Vec::with_capacity(2 + self.recent_tail.len());
+        messages.push(Message::user(format!(
+            "[parent-handoff:source_frame={}:budget_tokens={}]",
+            self.source_frame_id, self.remaining_budget_tokens,
+        )));
+        messages.push(Message::user(format!(
+            "[parent-handoff:summary]\n{}",
+            self.summary.trim(),
+        )));
+        for segment in &self.recent_tail {
+            let content = segment
+                .content
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty());
+            if let Some(content) = content {
+                messages.push(Message::user(format!(
+                    "[parent-handoff:tail:{}:{:?}:{}]\n{}",
+                    segment.segment.as_str(),
+                    segment.source.kind,
+                    segment.source.label,
+                    content,
+                )));
+            }
+        }
+        messages
+    }
+}
+
+/// Build a validated [`ContextHandoff`] from a parent
+/// [`super::frame::ContextFrameEvent`] and a compaction-agent-produced
+/// summary.
+///
+/// The builder exists because the OC-Phase 3 sub-agent dispatcher
+/// (`SubAgentDispatcher::dispatch`, step 10) and the OC-Phase 4
+/// compaction loop both need to fold the same inputs into the same
+/// `ContextHandoff` envelope. Centralising the construction here
+/// means:
+///
+/// 1. The literal-template parse happens exactly once — at
+///    `build()` time — so a populated `ContextHandoff` is always
+///    schema-valid.
+/// 2. `source_frame_id` and `attachment_refs` are derived from the
+///    parent frame, never accepted from the caller. The dispatcher
+///    cannot accidentally hand a child a handoff that points at the
+///    wrong frame.
+/// 3. `recent_tail` is supplied separately because the dispatcher's
+///    tail-window calculation is doc rule 5 of `filter_compacted`
+///    (`[compaction marker, summary, retained tail]`). The compaction
+///    loop and the dispatcher pick different windows and a builder
+///    that hard-coded one would force the other to bypass it.
+///
+/// Field semantics match the verbatim doc table at line 1062 of
+/// `docs/development/commands/_general.md`.
+#[derive(Debug)]
+pub struct ContextHandoffBuilder<'a> {
+    parent_frame: &'a super::frame::ContextFrameEvent,
+    summary: String,
+    recent_tail: Vec<ContextFrameSegment>,
+    remaining_budget_tokens: u64,
+    created_at: Option<DateTime<Utc>>,
+}
+
+impl<'a> ContextHandoffBuilder<'a> {
+    /// Start a builder bound to a specific parent
+    /// [`super::frame::ContextFrameEvent`]. The frame's `frame_id` is
+    /// stamped onto the produced handoff as `source_frame_id` and the
+    /// frame's attachment refs become the handoff's
+    /// `attachment_refs`. `recent_tail` defaults to empty —
+    /// callers must call [`with_recent_tail`](Self::with_recent_tail)
+    /// when their compaction policy keeps a tail window.
+    pub fn from_parent_frame(parent_frame: &'a super::frame::ContextFrameEvent) -> Self {
+        Self {
+            parent_frame,
+            summary: String::new(),
+            recent_tail: Vec::new(),
+            remaining_budget_tokens: 0,
+            created_at: None,
+        }
+    }
+
+    /// Supply the 8-section markdown summary produced by the
+    /// compaction agent. [`build`](Self::build) validates this via
+    /// [`parse_handoff_template`] before producing a `ContextHandoff`.
+    pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = summary.into();
+        self
+    }
+
+    /// Override the retained tail. Doc rule 5 of
+    /// [`super::projection::filter_compacted`] keeps `[compaction
+    /// marker, summary, retained tail]` ordering; the caller decides
+    /// the window per its compaction policy.
+    pub fn with_recent_tail(mut self, recent_tail: Vec<ContextFrameSegment>) -> Self {
+        self.recent_tail = recent_tail;
+        self
+    }
+
+    /// Stamp the token budget the receiving runtime should plan
+    /// against. Defaults to `0` so a forgotten call surfaces as an
+    /// obvious "no headroom" signal rather than a silent overflow.
+    pub fn with_remaining_budget_tokens(mut self, remaining_budget_tokens: u64) -> Self {
+        self.remaining_budget_tokens = remaining_budget_tokens;
+        self
+    }
+
+    /// Override the `created_at` timestamp. Mostly useful in tests
+    /// that need a deterministic value; production callers should
+    /// rely on the default `Utc::now()`.
+    pub fn with_created_at(mut self, created_at: DateTime<Utc>) -> Self {
+        self.created_at = Some(created_at);
+        self
+    }
+
+    /// Validate the supplied summary against the canonical 8-section
+    /// template and produce the handoff. Returns the parser error
+    /// verbatim when the summary fails the literal-template rule.
+    pub fn build(self) -> Result<ContextHandoff, ContextHandoffParseError> {
+        parse_handoff_template(&self.summary)?;
+        Ok(ContextHandoff {
+            summary: self.summary,
+            recent_tail: self.recent_tail,
+            attachment_refs: self.parent_frame.attachment_refs(),
+            source_frame_id: self.parent_frame.frame_id,
+            remaining_budget_tokens: self.remaining_budget_tokens,
+            created_at: self.created_at.unwrap_or_else(Utc::now),
+        })
+    }
 }
 
 /// Failure modes produced by [`parse_handoff_template`] (and by the
@@ -990,6 +1147,277 @@ This is prose, not a bullet.
             }
             .to_string(),
             "context handoff summary contains duplicate heading: ## Goal",
+        );
+    }
+
+    /// Build a minimal `ContextFrameEvent` parents can hand in. Each
+    /// attribute that the builder reads is populated explicitly; the
+    /// rest get cheap defaults.
+    fn parent_frame_with_attachment() -> super::super::frame::ContextFrameEvent {
+        super::super::frame::ContextFrameEvent {
+            event_id: Uuid::new_v4(),
+            recorded_at: Utc::now(),
+            frame_id: Uuid::new_v4(),
+            kind: super::super::frame::ContextFrameKind::ToolResult,
+            prompt_id: None,
+            segments: vec![super::super::frame::ContextFrameSegment {
+                id: "seg-attach".to_string(),
+                segment: super::super::ContextSegmentKind::ToolResults,
+                source: super::super::frame::ContextFrameSource::tool("shell", "captured stdout"),
+                trust: super::super::frame::ContextTrustLevel::Untrusted,
+                token_estimate: 4_096,
+                content: None,
+                summary: Some("see attachment".to_string()),
+                attachment: Some(ContextAttachmentRef {
+                    sha256: "deadbeef".to_string(),
+                    bytes: 4_096,
+                    line_count: 12,
+                    relative_path: "build.log".to_string(),
+                    read_hint: "open in pager".to_string(),
+                }),
+                non_compressible: false,
+            }],
+            omissions: Vec::new(),
+            total_candidate_tokens: 4_096,
+            total_selected_tokens: 4_096,
+            budget_exceeded_by: 0,
+        }
+    }
+
+    /// Scenario: builder happy path — `source_frame_id` and
+    /// `attachment_refs` are derived from the supplied parent frame;
+    /// the validated summary survives unchanged; the supplied tail and
+    /// budget reach the produced handoff verbatim.
+    #[test]
+    fn context_handoff_builder_happy_path_uses_parent_frame_metadata() {
+        let parent = parent_frame_with_attachment();
+        let tail = vec![ContextFrameSegment {
+            id: "tail-1".to_string(),
+            segment: super::super::ContextSegmentKind::RecentMessages,
+            source: super::super::frame::ContextFrameSource::runtime("user"),
+            trust: super::super::frame::ContextTrustLevel::Trusted,
+            token_estimate: 64,
+            content: Some("post-summary tail message".to_string()),
+            summary: None,
+            attachment: None,
+            non_compressible: true,
+        }];
+        let pinned_now = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+
+        let handoff = ContextHandoffBuilder::from_parent_frame(&parent)
+            .with_summary(CANONICAL_FILLED)
+            .with_recent_tail(tail.clone())
+            .with_remaining_budget_tokens(12_000)
+            .with_created_at(pinned_now)
+            .build()
+            .expect("canonical summary must parse cleanly");
+
+        assert_eq!(
+            handoff.source_frame_id, parent.frame_id,
+            "source_frame_id must come from the parent, not the caller"
+        );
+        assert_eq!(
+            handoff.attachment_refs,
+            parent.attachment_refs(),
+            "attachment_refs must be materialised from the parent's segments"
+        );
+        assert_eq!(handoff.summary, CANONICAL_FILLED);
+        assert_eq!(handoff.recent_tail, tail);
+        assert_eq!(handoff.remaining_budget_tokens, 12_000);
+        assert_eq!(handoff.created_at, pinned_now);
+    }
+
+    /// Scenario: a malformed summary — here the `## Goal` heading is
+    /// missing — propagates the parser's `SchemaMismatch` verbatim and
+    /// the `ContextHandoff` is never produced. The dispatcher relies
+    /// on this contract to refuse forwarding an invalid handoff.
+    #[test]
+    fn context_handoff_builder_propagates_parser_error_on_invalid_summary() {
+        let parent = parent_frame_with_attachment();
+        let no_goal = CANONICAL_FILLED.replace("## Goal\n", "");
+
+        let result = ContextHandoffBuilder::from_parent_frame(&parent)
+            .with_summary(&no_goal)
+            .build();
+
+        assert!(
+            matches!(result, Err(ContextHandoffParseError::SchemaMismatch { .. })),
+            "missing top-level heading must surface as SchemaMismatch, got {result:?}"
+        );
+    }
+
+    /// Scenario: a builder with no `with_recent_tail` call lands a
+    /// handoff with an empty tail. The dispatcher's `filter_compacted`
+    /// step relies on this — a forgotten setter must not silently
+    /// reuse the parent frame's segments as the tail.
+    #[test]
+    fn context_handoff_builder_defaults_recent_tail_to_empty() {
+        let parent = parent_frame_with_attachment();
+        let handoff = ContextHandoffBuilder::from_parent_frame(&parent)
+            .with_summary(CANONICAL_FILLED)
+            .build()
+            .unwrap();
+        assert!(
+            handoff.recent_tail.is_empty(),
+            "recent_tail must default to empty, not inherit parent.segments"
+        );
+        assert_eq!(handoff.remaining_budget_tokens, 0);
+    }
+
+    /// OC-Phase 4 P4.4 (v0.17.781): `ContextHandoff::to_handoff_messages`
+    /// produces the literal `[parent-handoff:source_frame=…]` /
+    /// `[parent-handoff:summary]` envelope plus one
+    /// `[parent-handoff:tail:…]` message per non-empty recent_tail
+    /// segment.
+    #[test]
+    fn handoff_to_handoff_messages_emits_header_summary_and_per_tail_segment() {
+        use crate::internal::ai::completion::{Message, UserContent};
+
+        let parent = parent_frame_with_attachment();
+        // Build a segment WITH content for the tail; the
+        // attachment-only segment from `parent_frame_with_attachment`
+        // would be filtered out by `to_handoff_messages` because
+        // its content is None.
+        let tail_seg = super::super::frame::ContextFrameSegment {
+            id: "seg-tail".to_string(),
+            segment: super::super::ContextSegmentKind::RecentMessages,
+            source: super::super::frame::ContextFrameSource::runtime("transcript"),
+            trust: super::super::frame::ContextTrustLevel::Trusted,
+            token_estimate: 128,
+            content: Some("last message from the parent before compaction".to_string()),
+            summary: None,
+            attachment: None,
+            non_compressible: false,
+        };
+        let handoff = ContextHandoffBuilder::from_parent_frame(&parent)
+            .with_summary(CANONICAL_FILLED)
+            .with_recent_tail(vec![tail_seg])
+            .with_remaining_budget_tokens(123)
+            .build()
+            .unwrap();
+
+        let messages = handoff.to_handoff_messages();
+        // Expect: 1 header + 1 summary + 1 tail segment = 3 total.
+        assert_eq!(
+            messages.len(),
+            3,
+            "handoff with 1 tail segment must produce 3 messages, got: {messages:?}",
+        );
+
+        let texts: Vec<String> = messages
+            .iter()
+            .map(|m| match m {
+                Message::User { content } => content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::Text(t) => Some(t.text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(""),
+                _ => panic!("expected User message"),
+            })
+            .collect();
+
+        assert!(
+            texts[0].starts_with("[parent-handoff:source_frame="),
+            "first message must be the parent-handoff header, got: {}",
+            texts[0],
+        );
+        assert!(
+            texts[0].contains("budget_tokens=123"),
+            "header must carry remaining_budget_tokens, got: {}",
+            texts[0],
+        );
+        assert!(
+            texts[1].starts_with("[parent-handoff:summary]\n"),
+            "second message must be the summary, got: {}",
+            texts[1],
+        );
+        assert!(
+            texts[2].starts_with("[parent-handoff:tail:"),
+            "third message must be the tail segment, got: {}",
+            texts[2],
+        );
+    }
+
+    /// CEX-13c / OC-Phase 4 P4.4 freeze the `ContextHandoff` wire
+    /// contract (`#[serde(deny_unknown_fields)]`) — the compacted
+    /// parent→child handoff envelope whose `source_frame_id` lets replay
+    /// match the transcript. All six fields are required (no optionals,
+    /// no skip, no `#[serde(default)]`). Pin the EXACT key set, that both
+    /// Vec fields serialize as `[]`, the `deny_unknown_fields` rejection,
+    /// and a full round-trip — so a rename / added field silently
+    /// breaking replay trips here.
+    #[test]
+    fn context_handoff_wire_contract_is_frozen() {
+        let handoff = ContextHandoff {
+            summary: "compacted parent summary".to_string(),
+            recent_tail: Vec::new(),
+            attachment_refs: Vec::new(),
+            source_frame_id: Uuid::new_v4(),
+            remaining_budget_tokens: 4096,
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_value(&handoff).expect("serialize ContextHandoff");
+        let keys: std::collections::BTreeSet<&str> = json
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let required: std::collections::BTreeSet<&str> = [
+            "summary",
+            "recent_tail",
+            "attachment_refs",
+            "source_frame_id",
+            "remaining_budget_tokens",
+            "created_at",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            keys, required,
+            "ContextHandoff must serialize EXACTLY its six required fields (no optionals), \
+             got: {json}",
+        );
+        assert_eq!(
+            json["recent_tail"],
+            serde_json::json!([]),
+            "empty recent_tail must serialize as [], not be omitted",
+        );
+        assert_eq!(json["attachment_refs"], serde_json::json!([]));
+
+        // deny_unknown_fields: an unknown field is rejected on read.
+        let mut with_extra = json.as_object().expect("object").clone();
+        with_extra.insert("bogus".to_string(), serde_json::Value::Bool(true));
+        assert!(
+            serde_json::from_value::<ContextHandoff>(serde_json::Value::Object(with_extra))
+                .is_err(),
+            "deny_unknown_fields must reject an unknown field",
+        );
+
+        // Every field is required on read: removing any one must fail
+        // deserialization. Guards against a future #[serde(default)] (or
+        // skip) silently weakening the contract to admit an incomplete
+        // handoff envelope.
+        for key in &required {
+            let mut missing = json.as_object().expect("object").clone();
+            missing.remove(*key);
+            assert!(
+                serde_json::from_value::<ContextHandoff>(serde_json::Value::Object(missing))
+                    .is_err(),
+                "removing required field `{key}` must fail deserialization",
+            );
+        }
+
+        // Round-trip: the wire shape deserializes and re-serializes intact.
+        let back: ContextHandoff =
+            serde_json::from_value(json.clone()).expect("deserialize ContextHandoff");
+        assert_eq!(
+            serde_json::to_value(&back).expect("re-serialize"),
+            json,
+            "ContextHandoff must round-trip its wire shape",
         );
     }
 }

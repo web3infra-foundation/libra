@@ -1,0 +1,13 @@
+{
+  "responses": [
+    {
+      "match": { "contains": "summarise" },
+      "type": "text",
+      "text": "explorer sub-agent: the parent asked for a summary, here is one."
+    }
+  ],
+  "fallback": {
+    "type": "text",
+    "text": "explorer sub-agent: fallback response"
+  }
+}

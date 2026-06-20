@@ -18,7 +18,23 @@ use crate::{
 const HEAD_REF: &str = "HEAD";
 const HEADS_PREFIX: &str = "refs/heads/";
 
+/// `--help` examples shown in `libra symbolic-ref --help` output.
+///
+/// `symbolic-ref` reads or updates the symbolic target of `HEAD` (the
+/// only symbolic ref Libra currently supports). The banner pins the
+/// read, short-read, set, quiet, and JSON forms so users see all
+/// supported forms without reading the design doc. Cross-cutting
+/// `--help` EXAMPLES rollout per `docs/development/commands/_general.md` item B.
+pub const SYMBOLIC_REF_EXAMPLES: &str = "\
+EXAMPLES:
+    libra symbolic-ref HEAD                       Print HEAD's symbolic target (refs/heads/<branch>)
+    libra symbolic-ref --short HEAD               Print only the short branch name
+    libra symbolic-ref HEAD refs/heads/main       Update HEAD to point at refs/heads/main
+    libra symbolic-ref -q HEAD                    Suppress error output when HEAD is detached
+    libra symbolic-ref --json HEAD                Structured JSON output for agents";
+
 #[derive(Parser, Debug)]
+#[command(after_help = SYMBOLIC_REF_EXAMPLES)]
 pub struct SymbolicRefArgs {
     /// Suppress error output when the ref is not symbolic.
     #[clap(short = 'q', long)]

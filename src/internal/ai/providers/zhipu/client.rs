@@ -55,12 +55,15 @@ pub type Client = GenericClient<ZhipuProvider>;
 impl Client {
     /// Creates a Zhipu client from environment variables.
     ///
-    /// Reads the `ZHIPU_API_KEY` environment variable.
-    /// Also supports `ZHIPU_BASE_URL` for custom endpoints.
+    /// Resolves `ZHIPU_API_KEY` and optional `ZHIPU_BASE_URL` through the
+    /// same vault-aware sync lookup used by the other providers, while keeping
+    /// the legacy `std::env::VarError` return type for backward compatibility.
+    /// New async call sites should prefer [`Client::from_resolved_env`] so they
+    /// can pass an explicit [`crate::internal::config::LocalIdentityTarget`].
     pub fn from_env() -> Result<Self, std::env::VarError> {
-        let api_key = std::env::var("ZHIPU_API_KEY")?;
-        let base_url = std::env::var("ZHIPU_BASE_URL")
-            .unwrap_or_else(|_| "https://open.bigmodel.cn/api/paas/v4".to_string());
+        let api_key = resolve_zhipu_env_required("ZHIPU_API_KEY")?;
+        let base_url = resolve_zhipu_env_optional("ZHIPU_BASE_URL")?
+            .unwrap_or_else(|| "https://open.bigmodel.cn/api/paas/v4".to_string());
 
         let provider = ZhipuProvider::new(api_key);
         Ok(Self::new(&base_url, provider))
@@ -105,6 +108,39 @@ impl Client {
     pub fn with_base_url(base_url: &str, api_key: String) -> Self {
         let provider = ZhipuProvider::new(api_key);
         Self::new(base_url, provider)
+    }
+}
+
+fn resolve_zhipu_env_required(name: &'static str) -> Result<String, std::env::VarError> {
+    match crate::internal::config::resolve_env_sync(name) {
+        Ok(Some(value)) => Ok(value),
+        Ok(None) => Err(std::env::VarError::NotPresent),
+        Err(error) => {
+            tracing::warn!(
+                env_var = name,
+                error = %error,
+                "vault-aware Zhipu env resolution failed; falling back to process env"
+            );
+            std::env::var(name)
+        }
+    }
+}
+
+fn resolve_zhipu_env_optional(name: &'static str) -> Result<Option<String>, std::env::VarError> {
+    match crate::internal::config::resolve_env_sync(name) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            tracing::warn!(
+                env_var = name,
+                error = %error,
+                "vault-aware Zhipu env resolution failed; falling back to process env"
+            );
+            match std::env::var(name) {
+                Ok(value) => Ok(Some(value)),
+                Err(std::env::VarError::NotPresent) => Ok(None),
+                Err(error) => Err(error),
+            }
+        }
     }
 }
 
@@ -165,6 +201,42 @@ mod tests {
         );
 
         drop(key_guard);
+        drop(base_guard);
+        drop(global_guard);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn from_env_process_env_overrides_global_vault_and_vault_is_fallback() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let key_guard = TestEnvGuard::set("ZHIPU_API_KEY", Some("zh-env-key"));
+        let base_guard = TestEnvGuard::set("ZHIPU_BASE_URL", None);
+        let global_dir = tempfile::tempdir().unwrap();
+        let global_db_path = global_dir.path().join("zhipu-global-config.db");
+        let global_db_string = global_db_path.to_string_lossy().into_owned();
+        let global_guard = TestEnvGuard::set("LIBRA_CONFIG_GLOBAL_DB", Some(&global_db_string));
+
+        let global_conn = runtime
+            .block_on(crate::internal::db::create_database(&global_db_string))
+            .unwrap();
+        runtime
+            .block_on(crate::internal::config::ConfigKv::set_with_conn(
+                &global_conn,
+                "vault.env.ZHIPU_API_KEY",
+                "zh-vault-key",
+                false,
+            ))
+            .unwrap();
+
+        let client = Client::from_env().expect("from_env should prefer process ZHIPU_API_KEY");
+        assert_eq!(client.provider.api_key(), "zh-env-key");
+
+        drop(key_guard);
+        let key_unset = TestEnvGuard::set("ZHIPU_API_KEY", None);
+        let client = Client::from_env().expect("from_env should fall back to vault");
+        assert_eq!(client.provider.api_key(), "zh-vault-key");
+
+        drop(key_unset);
         drop(base_guard);
         drop(global_guard);
     }

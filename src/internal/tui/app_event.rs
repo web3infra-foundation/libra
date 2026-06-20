@@ -21,6 +21,7 @@ use super::history_cell::HistoryCell;
 use crate::internal::ai::{
     agent::TaskIntent,
     completion::{CompletionUsageSummary, Message},
+    goal::{GoalEventEnvelope, GoalLoopDecision, GoalState},
     intentspec::types::IntentSpec,
     orchestrator::types::{
         ExecutionPlanSpec, OrchestratorResult, PersistedPlanReviewBundle,
@@ -57,6 +58,16 @@ pub enum AgentEvent {
         text: String,
         new_history: Vec<Message>,
     },
+    /// Complete response for a Goal-bound turn. Carries the updated
+    /// Goal projection and the envelopes the App must persist before
+    /// rendering the turn as terminal or paused.
+    GoalResponseComplete {
+        text: String,
+        new_history: Vec<Message>,
+        goal_state: Box<GoalState>,
+        goal_events: Vec<GoalEventEnvelope>,
+        decision: GoalLoopDecision,
+    },
     /// Managed provider produced a streamed delta for the current response.
     /// The TUI accumulates these into the in-flight assistant cell.
     ResponseDelta { delta: String },
@@ -85,6 +96,17 @@ pub enum AgentEvent {
     UsageUpdated {
         usage: CompletionUsageSummary,
         wall_clock_ms: u64,
+    },
+    /// OC-Phase 5 P5.3 per-agent attribution: a sub-agent
+    /// dispatch completed and its accumulated `CompletionUsageSummary`
+    /// is being routed to the parent's `BudgetTracker` with the
+    /// child's spec name attached so `check_agent` can enforce
+    /// per-agent caps. Distinct from `UsageUpdated` because the
+    /// latter carries no agent name and would silently accumulate
+    /// sub-agent cost into the session-wide bucket only.
+    SubAgentUsageUpdated {
+        agent_name: String,
+        usage: CompletionUsageSummary,
     },
 }
 

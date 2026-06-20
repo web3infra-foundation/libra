@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { IconSpark, IconTerm, IconTool, IconX } from "@/components/icons";
+import { getDiagnostics } from "@/lib/code-ui/client";
 import { useCodeUiStore } from "@/lib/code-ui/store";
+import type { CodeUiDiagnostics } from "@/lib/code-ui/types";
 import { deriveTerminalRows, type TerminalRow } from "@/lib/code-ui/view-model";
 import { cn } from "@/lib/utils";
 
@@ -17,9 +19,32 @@ type Props = {
 export function Terminal({ height, onClose }: Props) {
   const { snapshot, connection } = useCodeUiStore();
   const [tab, setTab] = useState<Tab>("sandbox");
+  const [diagnostics, setDiagnostics] = useState<CodeUiDiagnostics | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  const rows = useMemo(() => deriveTerminalRows(snapshot), [snapshot]);
+  useEffect(() => {
+    let cancelled = false;
+    getDiagnostics()
+      .then((value) => {
+        if (!cancelled) setDiagnostics(value);
+      })
+      .catch(() => {
+        // Diagnostics are observe-only; terminal output should keep rendering
+        // even when the runtime is unavailable or the diagnostics endpoint
+        // rejects the request.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const rows = useMemo(
+    () => [
+      ...deriveTerminalRows(snapshot),
+      ...deriveDiagnosticsRows(diagnostics),
+    ],
+    [snapshot, diagnostics],
+  );
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -183,6 +208,37 @@ function rowTone(kind: TerminalRow["kind"]) {
     default:
       return { mark: "var(--ink-3)", text: "var(--ink-2)" };
   }
+}
+
+function deriveDiagnosticsRows(
+  diagnostics: CodeUiDiagnostics | null,
+): TerminalRow[] {
+  if (!diagnostics) return [];
+
+  const parts = [
+    `diagnostics: pid ${diagnostics.pid}`,
+    `status ${diagnostics.status}`,
+  ];
+  if (diagnostics.threadId) parts.push(`thread ${diagnostics.threadId}`);
+  if (diagnostics.ports?.web !== undefined) {
+    parts.push(`web ${diagnostics.ports.web}`);
+  }
+  if (diagnostics.ports?.mcp !== undefined) {
+    parts.push(`mcp ${diagnostics.ports.mcp}`);
+  }
+  if (diagnostics.logFile) parts.push(`log ${diagnostics.logFile}`);
+
+  const rows: TerminalRow[] = [{ kind: "info", text: parts.join(" · ") }];
+  if (diagnostics.activeInteractionId) {
+    rows.push({
+      kind: "info",
+      text: `active interaction ${diagnostics.activeInteractionId}`,
+    });
+  }
+  if (diagnostics.lastError) {
+    rows.push({ kind: "warn", text: `last error: ${diagnostics.lastError}` });
+  }
+  return rows;
 }
 
 function filterByTab(row: TerminalRow, tab: Tab) {

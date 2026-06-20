@@ -178,3 +178,38 @@ fn test_cloud_sync_human_progress_json_emits_event_without_stdout_progress() {
         "progress=json must not leak legacy start message: {stderr}"
     );
 }
+
+/// `libra cloud --help` surfaces the EXAMPLES banner so users see the
+/// canonical invocation per sub-command (`status`, `sync`, `restore`)
+/// plus force-sync and JSON variants without reading the design doc.
+/// Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/development/commands/_general.md` item B.
+#[test]
+fn test_cloud_help_lists_examples_banner() {
+    let repo = tempdir().expect("tempdir for cloud --help");
+    let output = run_libra_command(&["cloud", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "cloud --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "cloud --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra cloud status",
+        "libra cloud sync",
+        "libra cloud sync --force",
+        "libra cloud restore --name my-project",
+        "libra cloud restore --repo-id",
+        "libra cloud --json sync",
+        "libra cloud sync --progress=json",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "cloud --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}

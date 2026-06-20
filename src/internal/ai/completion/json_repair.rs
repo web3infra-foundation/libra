@@ -416,15 +416,80 @@ fn normalize_smart_quotes(input: &str) -> Option<String> {
     {
         return None;
     }
-    let normalized = input
-        .chars()
-        .map(|ch| match ch {
-            '“' | '”' | '„' | '‟' => '"',
-            '‘' | '’' | '‚' | '‛' => '\'',
-            other => other,
-        })
-        .collect();
-    Some(normalized)
+
+    // Track which kind of JSON string the cursor is currently inside so smart
+    // quotes nested in legitimate `"…"` string literals stay verbatim while
+    // smart quotes used as the outer delimiters (`{"a": “v”}`) are still
+    // promoted to ASCII `"` and matched as their own terminators. Without
+    // this guard the agent.md 2026-05-04 follow-up (c) bug surfaces: an LLM
+    // emits `"He said “hi”"` and we silently rewrite the literal smart quotes
+    // inside the string, corrupting the persisted text payload.
+    let mut output = String::with_capacity(input.len());
+    let mut in_literal_string = false;
+    let mut in_smart_string = false;
+    let mut escaped = false;
+    let mut changed = false;
+
+    for ch in input.chars() {
+        if in_literal_string {
+            output.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_literal_string = false;
+            }
+            continue;
+        }
+
+        if in_smart_string {
+            match ch {
+                '“' | '”' | '„' | '‟' => {
+                    output.push('"');
+                    in_smart_string = false;
+                    changed = true;
+                }
+                '‘' | '’' | '‚' | '‛' => {
+                    // Smart single quotes inside a smart-quoted string are
+                    // legitimate content (e.g. apostrophes); preserve them
+                    // verbatim — they do not terminate the string.
+                    output.push(ch);
+                }
+                '"' => {
+                    // An ASCII `"` inside a smart-quote-delimited string
+                    // would have been escaped by the producer if it were
+                    // content; treat it as the intended terminator.
+                    output.push(ch);
+                    in_smart_string = false;
+                }
+                _ => output.push(ch),
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                output.push(ch);
+                in_literal_string = true;
+            }
+            '“' | '”' | '„' | '‟' => {
+                output.push('"');
+                in_smart_string = true;
+                changed = true;
+            }
+            '‘' | '’' | '‚' | '‛' => {
+                // Smart single quotes outside any string become ASCII `'`
+                // so the downstream `single_quoted_strings_to_double` repair
+                // step can recognise them. They do not open a JSON string.
+                output.push('\'');
+                changed = true;
+            }
+            other => output.push(other),
+        }
+    }
+
+    if changed { Some(output) } else { None }
 }
 
 fn strip_json_comments(input: &str) -> Option<String> {
@@ -851,7 +916,7 @@ fn is_identifier_continue(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{JsonRepairError, JsonRepairErrorKind};
+    use super::*;
 
     #[test]
     fn json_repair_error_kind_display_pins_snake_case_for_each_variant() {
@@ -874,5 +939,249 @@ mod tests {
             err.to_string(),
             "parse_failed: unexpected token at offset 7",
         );
+    }
+
+    /// `JsonRepairErrorKind::as_str` and `Display::fmt` must produce
+    /// identical output for every variant. Pin so a future refactor
+    /// that changes one but not the other gets caught at this gate.
+    #[test]
+    fn json_repair_error_kind_as_str_matches_display() {
+        for kind in [
+            JsonRepairErrorKind::EmptyInput,
+            JsonRepairErrorKind::NoJsonCandidate,
+            JsonRepairErrorKind::ParseFailed,
+        ] {
+            assert_eq!(kind.as_str(), kind.to_string().as_str());
+        }
+    }
+
+    /// `JsonRepairErrorKind` serde round-trip uses snake_case tags.
+    /// Pin so a serde rename can't silently break audit-log
+    /// parsability.
+    #[test]
+    fn json_repair_error_kind_serde_round_trips_snake_case() {
+        for (kind, tag) in [
+            (JsonRepairErrorKind::EmptyInput, "empty_input"),
+            (JsonRepairErrorKind::NoJsonCandidate, "no_json_candidate"),
+            (JsonRepairErrorKind::ParseFailed, "parse_failed"),
+        ] {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{tag}\""),);
+            let back: JsonRepairErrorKind = serde_json::from_str(&format!("\"{tag}\"")).unwrap();
+            assert_eq!(back, kind);
+        }
+    }
+
+    /// `JsonRepairError.parse_error` is `skip_serializing_if =
+    /// "Option::is_none"`. Pin the serialised shape for both branches.
+    #[test]
+    fn json_repair_error_serde_skips_parse_error_when_none() {
+        let err = JsonRepairError {
+            kind: JsonRepairErrorKind::ParseFailed,
+            message: "msg".to_string(),
+            parse_error: None,
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(!json.contains("parse_error"), "got {json}");
+
+        let err_with = JsonRepairError {
+            kind: JsonRepairErrorKind::ParseFailed,
+            message: "msg".to_string(),
+            parse_error: Some("trailing garbage".to_string()),
+        };
+        let json = serde_json::to_string(&err_with).unwrap();
+        assert!(
+            json.contains("\"parse_error\":\"trailing garbage\""),
+            "got {json}",
+        );
+    }
+
+    /// `JsonRepairFixKind` serde round-trip uses snake_case tags for
+    /// all 10 variants. Pin so adding a new variant doesn't silently
+    /// drift the audit-log shape.
+    #[test]
+    fn json_repair_fix_kind_serde_round_trips_snake_case() {
+        let cases = [
+            (
+                JsonRepairFixKind::ExtractedJsonCandidate,
+                "extracted_json_candidate",
+            ),
+            (JsonRepairFixKind::StrippedCodeFence, "stripped_code_fence"),
+            (
+                JsonRepairFixKind::NormalizedSmartQuotes,
+                "normalized_smart_quotes",
+            ),
+            (JsonRepairFixKind::StrippedComments, "stripped_comments"),
+            (
+                JsonRepairFixKind::NormalizedPythonLiterals,
+                "normalized_python_literals",
+            ),
+            (
+                JsonRepairFixKind::ConvertedSingleQuotedStrings,
+                "converted_single_quoted_strings",
+            ),
+            (JsonRepairFixKind::QuotedObjectKeys, "quoted_object_keys"),
+            (
+                JsonRepairFixKind::RemovedTrailingCommas,
+                "removed_trailing_commas",
+            ),
+            (
+                JsonRepairFixKind::WrappedTopLevelObjectFields,
+                "wrapped_top_level_object_fields",
+            ),
+            (JsonRepairFixKind::BalancedDelimiters, "balanced_delimiters"),
+        ];
+        for (kind, tag) in cases {
+            assert_eq!(
+                serde_json::to_string(&kind).unwrap(),
+                format!("\"{tag}\""),
+                "{kind:?}",
+            );
+            let back: JsonRepairFixKind = serde_json::from_str(&format!("\"{tag}\"")).unwrap();
+            assert_eq!(back, kind);
+        }
+    }
+
+    /// `parse_json_repaired("")` and whitespace-only input must return
+    /// `EmptyInput`. Pin so the trim+empty-check guard stays in place.
+    #[test]
+    fn parse_json_repaired_rejects_empty_input() {
+        for raw in ["", "   ", "\n\n\t"] {
+            let err = parse_json_repaired(raw).expect_err("empty must error");
+            assert_eq!(err.kind, JsonRepairErrorKind::EmptyInput, "raw {raw:?}",);
+        }
+    }
+
+    /// Valid JSON must parse without flagging `repaired = true`.
+    #[test]
+    fn parse_json_repaired_clean_input_does_not_flag_repaired() {
+        let outcome = parse_json_repaired(r#"{"a": 1, "b": [2, 3]}"#).expect("valid JSON");
+        assert!(
+            !outcome.repaired,
+            "clean JSON must not be flagged as repaired; got fixes={:?}",
+            outcome.fixes,
+        );
+        assert!(outcome.fixes.is_empty());
+        assert_eq!(outcome.value, serde_json::json!({"a": 1, "b": [2, 3]}));
+    }
+
+    /// Trailing-comma JSON must be repaired and the
+    /// `RemovedTrailingCommas` fix must appear in the outcome.
+    #[test]
+    fn parse_json_repaired_strips_trailing_comma_and_records_fix() {
+        let outcome = parse_json_repaired(r#"{"a": 1, "b": 2,}"#).expect("repairable");
+        assert!(outcome.repaired);
+        assert!(
+            outcome
+                .fixes
+                .iter()
+                .any(|f| f.kind == JsonRepairFixKind::RemovedTrailingCommas),
+            "expected RemovedTrailingCommas in {:?}",
+            outcome.fixes,
+        );
+        assert_eq!(outcome.value, serde_json::json!({"a": 1, "b": 2}));
+    }
+
+    /// `parse_tool_call_arguments_with_repair` happy path: valid JSON
+    /// input parses directly to the Value without going through repair.
+    #[test]
+    fn parse_tool_call_args_happy_path_returns_parsed_value() {
+        let value =
+            parse_tool_call_arguments_with_repair("test-provider", "shell", r#"{"cmd": "ls"}"#);
+        assert_eq!(value, serde_json::json!({"cmd": "ls"}));
+    }
+
+    /// `parse_tool_call_arguments_with_repair` malformed-but-repairable:
+    /// the wrapper successfully extracts the Value via the repair path.
+    #[test]
+    fn parse_tool_call_args_repairable_returns_parsed_value() {
+        // Trailing comma is one of the simpler repair paths.
+        let value =
+            parse_tool_call_arguments_with_repair("test-provider", "shell", r#"{"cmd": "ls",}"#);
+        assert_eq!(value, serde_json::json!({"cmd": "ls"}));
+    }
+
+    /// `parse_tool_call_arguments_with_repair` unrepairable input must
+    /// fall back to wrapping the raw string in `Value::String`. Pin
+    /// this so a future "panic on unrepairable" refactor breaks the
+    /// test instead of production code.
+    #[test]
+    fn parse_tool_call_args_unrepairable_wraps_raw_string() {
+        let value =
+            parse_tool_call_arguments_with_repair("test-provider", "shell", "this is not json");
+        assert_eq!(value, Value::String("this is not json".to_string()));
+    }
+
+    /// `JsonRepairOutcome` serde round-trip preserves the repaired_source
+    /// + fixes for downstream audit replay.
+    #[test]
+    fn json_repair_outcome_serde_round_trips() {
+        let outcome = JsonRepairOutcome {
+            value: serde_json::json!({"a": 1}),
+            repaired_source: r#"{"a": 1}"#.to_string(),
+            repaired: true,
+            fixes: vec![JsonRepairFix::new(JsonRepairFixKind::RemovedTrailingCommas)],
+        };
+        let json = serde_json::to_string(&outcome).unwrap();
+        let back: JsonRepairOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, outcome);
+    }
+
+    /// agent.md 2026-05-04 follow-up (c): smart quotes nested inside a
+    /// legitimate `"..."` JSON string must NOT be rewritten — they are
+    /// content, not delimiters. Before the in_string guard the LLM payload
+    /// `{"q": "He said “hi”"}` ended up persisted as
+    /// `{"q": "He said "hi""}` which is unparseable.
+    #[test]
+    fn normalize_smart_quotes_preserves_smart_quotes_inside_literal_string() {
+        // Smart quotes here are entirely inside the literal `"..."` value,
+        // so no normalization is needed; the helper signals "nothing to do"
+        // by returning `None` and the caller keeps the original payload —
+        // crucially, with the smart quotes intact.
+        let input = "{\"q\": \"He said \u{201C}hi\u{201D}\"}";
+        assert!(
+            normalize_smart_quotes(input).is_none(),
+            "smart quotes that only appear inside a literal string must not \
+             trigger a rewrite (the smart quotes are content, not delimiters)",
+        );
+        // The untouched payload still parses and the smart quotes survive
+        // the round-trip.
+        let parsed: serde_json::Value = serde_json::from_str(input).unwrap();
+        assert_eq!(parsed["q"], "He said \u{201C}hi\u{201D}");
+    }
+
+    /// Smart quotes used as the top-level JSON string delimiters (a common
+    /// LLM mistake) must still be promoted to ASCII `"` so the payload
+    /// parses — the in_string guard tracks that the smart-opened string is
+    /// terminated by the matching smart quote.
+    #[test]
+    fn normalize_smart_quotes_promotes_smart_quote_delimiters_to_ascii() {
+        let input = "{\u{201C}a\u{201D}: \u{201C}value\u{201D}}";
+        let normalized =
+            normalize_smart_quotes(input).expect("smart quotes present so a copy is returned");
+        let parsed: serde_json::Value = serde_json::from_str(&normalized).unwrap();
+        assert_eq!(parsed["a"], "value");
+    }
+
+    /// Smart single quotes outside any string become ASCII `'` so the
+    /// downstream single-quote-to-double-quote repair step still triggers.
+    /// Inside a smart-quoted string they are treated as content (apostrophe).
+    #[test]
+    fn normalize_smart_quotes_handles_smart_single_quotes() {
+        // Outside a string: smart single quotes become ASCII so the next
+        // repair step can convert them to double quotes.
+        let bare = "{\u{2018}a\u{2019}: 1}";
+        let normalized = normalize_smart_quotes(bare).expect("changed");
+        assert!(
+            normalized.contains('\''),
+            "expected ASCII single quotes, got `{normalized}`",
+        );
+
+        // Inside a smart-quoted string (the apostrophe in "don\u{2019}t"
+        // is content): the single quote must stay as a smart quote so the
+        // string content is preserved.
+        let with_apostrophe = "{\u{201C}a\u{201D}: \u{201C}don\u{2019}t\u{201D}}";
+        let normalized = normalize_smart_quotes(with_apostrophe).expect("changed");
+        let parsed: serde_json::Value = serde_json::from_str(&normalized).unwrap();
+        assert_eq!(parsed["a"], "don\u{2019}t");
     }
 }

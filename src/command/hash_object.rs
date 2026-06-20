@@ -19,12 +19,12 @@ use crate::{
 };
 
 const HASH_OBJECT_EXAMPLES: &str = "\
-Examples:
-  libra hash-object README.md
-  libra hash-object -w src/main.rs
-  printf 'hello' | libra hash-object --stdin
-  printf 'hello' | libra hash-object --stdin --json
-";
+EXAMPLES:
+    libra hash-object README.md                         Compute the blob id (no write)
+    libra hash-object -w src/main.rs                    Compute and write the object to .libra/objects/
+    printf 'hello' | libra hash-object --stdin          Hash stdin instead of a file
+    printf 'hello' | libra hash-object --stdin --path README.md  Label stdin with a path context
+    printf 'hello' | libra hash-object --stdin --json   Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
 #[command(after_help = HASH_OBJECT_EXAMPLES)]
@@ -49,6 +49,14 @@ pub struct HashObjectArgs {
     /// File paths to hash
     #[arg(value_name = "PATH", required_unless_present = "stdin")]
     pub paths: Vec<PathBuf>,
+
+    /// Path context label for compatibility with Git hash-object
+    #[arg(long = "path", value_name = "PATH", conflicts_with = "no_filters")]
+    pub filter_path: Option<PathBuf>,
+
+    /// Hash raw bytes without path-based content filters
+    #[arg(long = "no-filters", conflicts_with = "filter_path")]
+    pub no_filters: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -101,7 +109,11 @@ pub async fn execute_safe(args: HashObjectArgs, output: &OutputConfig) -> CliRes
 
 fn hash_objects(args: &HashObjectArgs) -> CliResult<HashObjectOutput> {
     let objects = if args.stdin {
-        vec![hash_one_source("-", read_stdin()?, args.write)?]
+        vec![hash_one_source(
+            stdin_source(args),
+            read_stdin()?,
+            args.write,
+        )?]
     } else {
         let mut entries = Vec::with_capacity(args.paths.len());
         for path in &args.paths {
@@ -130,7 +142,7 @@ fn hash_objects_streaming(args: &HashObjectArgs, output: &OutputConfig) -> CliRe
     let mut writer = stdout.lock();
 
     if args.stdin {
-        let entry = hash_one_source("-", read_stdin()?, args.write)?;
+        let entry = hash_one_source(stdin_source(args), read_stdin()?, args.write)?;
         write_hash_line(&mut writer, &entry.oid)?;
         return Ok(());
     }
@@ -141,6 +153,12 @@ fn hash_objects_streaming(args: &HashObjectArgs, output: &OutputConfig) -> CliRe
     }
 
     Ok(())
+}
+
+fn stdin_source(args: &HashObjectArgs) -> String {
+    args.filter_path
+        .as_ref()
+        .map_or_else(|| "-".to_string(), |path| path.display().to_string())
 }
 
 fn hash_one_source(

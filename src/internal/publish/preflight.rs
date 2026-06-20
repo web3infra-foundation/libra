@@ -1,5 +1,5 @@
 //! Publish preflight: ignore + deny-rule evaluation per
-//! `docs/improvement/publish.md`.
+//! `docs/development/commands/publish.md`.
 //!
 //! Phase 3 requires every file the snapshot builder considers to
 //! pass the built-in deny rules and the optional

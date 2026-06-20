@@ -8,7 +8,7 @@ version description.
 ## Synopsis
 
 ```
-libra describe [OPTIONS] [<COMMIT>]
+libra describe [OPTIONS] [COMMIT]
 ```
 
 ## Description
@@ -28,6 +28,18 @@ annotated tags are preferred; ties are broken lexicographically.
 When no tag can be found and `--always` is absent, the command fails with an
 actionable hint suggesting `--tags` or `--always`.
 
+`--exact-match` restricts the command to tags that point directly at the target
+commit. If no exact tag exists, it fails even when `--always` is also present.
+
+`--long` forces Git's long format when a tag describes the target. Exact matches
+therefore print `v1.2.3-0-gabc1234` instead of `v1.2.3`. Like Git,
+`--long --abbrev=0` is rejected because the long form requires a hash suffix.
+
+`--dirty[=<mark>]` appends a suffix when tracked content differs from `HEAD`.
+The default suffix is `-dirty`; custom marks are accepted with
+`--dirty=<mark>`. Untracked files are ignored, matching Git's dirty check for
+this command.
+
 ## Options
 
 | Flag | Description | Default |
@@ -36,6 +48,12 @@ actionable hint suggesting `--tags` or `--always`.
 | `--tags` | Include lightweight tags in the search (not just annotated tags). | Off |
 | `--abbrev <N>` | Number of hex digits for the abbreviated commit hash in the output. | `7` |
 | `--always` | When no tag can describe the target, fall back to the abbreviated commit hash instead of failing. | Off |
+| `--exact-match` | Only succeed when the target commit exactly matches a tag. | Off |
+| `--long` | Force `tag-N-gHASH` output when a tag describes the target, including `tag-0-gHASH` for exact matches. | Off |
+| `--dirty[=<mark>]` | Append a dirty mark when tracked content differs from `HEAD`. | Off, default mark `-dirty` when enabled |
+| `--first-parent` | Follow only the first parent of merge commits when walking history. | Off |
+| `--match <pattern>` | Only consider tags whose name matches the glob (repeatable; OR semantics, wax globs ≤256 chars). | None |
+| `--exclude <pattern>` | Exclude tags whose name matches the glob (repeatable; takes precedence over `--match`). | None |
 
 ### Examples
 
@@ -49,11 +67,32 @@ libra describe --tags
 # Always produce output, even without tags
 libra describe --always
 
+# Only succeed on an exact tag match
+libra describe --exact-match
+
+# Force tag-0-gHASH output on an exact tag match
+libra describe --long
+
 # Describe a specific commit
 libra describe HEAD~5
 
 # Use longer abbreviated hashes
 libra describe --abbrev 12
+
+# Append -dirty when tracked content differs from HEAD
+libra describe --dirty
+
+# Use a custom dirty mark
+libra describe --dirty=-worktree
+
+# Follow only the first parent of merge commits
+libra describe --first-parent
+
+# Only consider tags matching a glob
+libra describe --match 'v1.*'
+
+# Skip release-candidate tags
+libra describe --exclude '*rc*'
 
 # JSON output for automation
 libra describe --json
@@ -65,6 +104,9 @@ libra describe --json
 libra describe
 libra describe --tags
 libra describe --always
+libra describe --exact-match
+libra describe --long
+libra describe --dirty
 libra describe HEAD~1
 libra describe --json
 libra describe --tags --abbrev 10
@@ -73,8 +115,11 @@ libra describe --tags --abbrev 10
 ## Human Output
 
 - Exact tag match: `v1.2.3`
+- Exact tag match with `--long`: `v1.2.3-0-gabc1234`
 - Reachable tag: `v1.2.3-4-gabc1234`
 - `--always` fallback: `abc1234`
+- `--dirty` on tracked changes: `v1.2.3-dirty`
+- `--dirty=-worktree` on tracked changes: `v1.2.3-worktree`
 
 `--quiet` suppresses `stdout`.
 
@@ -96,7 +141,10 @@ libra describe --tags --abbrev 10
     "distance": 0,
     "abbreviated_commit": null,
     "exact_match": true,
-    "used_always": false
+    "used_always": false,
+    "long_format": false,
+    "dirty": false,
+    "dirty_mark": null
   }
 }
 ```
@@ -115,7 +163,10 @@ libra describe --tags --abbrev 10
     "distance": 4,
     "abbreviated_commit": "abc1234",
     "exact_match": false,
-    "used_always": false
+    "used_always": false,
+    "long_format": false,
+    "dirty": false,
+    "dirty_mark": null
   }
 }
 ```
@@ -134,7 +185,10 @@ libra describe --tags --abbrev 10
     "distance": null,
     "abbreviated_commit": "abc1234",
     "exact_match": false,
-    "used_always": true
+    "used_always": true,
+    "long_format": false,
+    "dirty": false,
+    "dirty_mark": null
   }
 }
 ```
@@ -142,30 +196,46 @@ libra describe --tags --abbrev 10
 When `--always` is used and no tag matches, `tag` and `distance` are `null` and
 `abbreviated_commit` contains the emitted hash.
 
+### Dirty suffix
+
+```json
+{
+  "ok": true,
+  "command": "describe",
+  "data": {
+    "input": "HEAD",
+    "resolved_commit": "abc1234def5678901234567890abcdef12345678",
+    "result": "v1.2.3-dirty",
+    "tag": "v1.2.3",
+    "distance": 0,
+    "abbreviated_commit": null,
+    "exact_match": true,
+    "used_always": false,
+    "long_format": false,
+    "dirty": true,
+    "dirty_mark": "-dirty"
+  }
+}
+```
+
 ## Design Rationale
 
-### Why no `--long`, `--match`, `--exclude`?
+### `--match`, `--exclude`, `--first-parent`, and what is still missing
 
-Git's `describe` has accumulated many options over the years: `--long` forces
-the long format even on exact matches, `--match` and `--exclude` filter tag
-names by glob, `--candidates` controls how many tags to consider, and
-`--first-parent` restricts the traversal. Libra deliberately ships a minimal
-subset that covers the primary use cases: identifying a build version and
-providing a human-readable commit reference. The BFS-based algorithm is
-straightforward and predictable. Additional flags can be added incrementally
-if real users or agents need them, but starting small avoids the combinatorial
-complexity that makes Git's `describe` behavior hard to reason about (e.g.,
-the interaction between `--match`, `--exclude`, and `--candidates`).
+Libra exposes `--match` and `--exclude` (wax globs, capped at 256 chars, with
+exclude taking precedence over match) and `--first-parent` (follow only the
+first parent of merge commits during the BFS walk). `--candidates`,
+`--contains`, and `--all` remain unimplemented: they depend on Git's
+multi-candidate / reverse-walk containment algorithm, which Libra's predictable
+BFS does not provide. They can be added incrementally if real users or agents
+need them.
 
-### Why simplified output format?
+### Why include both string and structured fields?
 
-Libra always produces the standard `tag-N-gHASH` format (or just the tag name
-for exact matches). There is no `--long` flag to force the long format on
-exact matches. The JSON output already includes separate `tag`, `distance`,
-`abbreviated_commit`, and `exact_match` fields, so any consumer that needs to
-distinguish exact-match from non-exact can check `exact_match` directly. This
-is strictly more informative than Git's `--long` flag, which merely changes
-the string format.
+Human output follows Git's string format, including `--long` for exact matches.
+The JSON output also includes separate `tag`, `distance`, `abbreviated_commit`,
+`exact_match`, and `long_format` fields, so automation can avoid parsing the
+human string when it needs to distinguish exact matches from reachable tags.
 
 ### Why BFS instead of Git's candidate algorithm?
 
@@ -187,12 +257,13 @@ search, but this has not been a problem in practice.
 | Include lightweight tags | `--tags` | `--tags` | N/A |
 | Abbreviated hash length | `--abbrev <N>` (default 7) | `--abbrev=<N>` (default dynamically chosen) | N/A |
 | Fallback to hash | `--always` | `--always` | N/A |
-| Force long format | Not implemented (use JSON `exact_match`) | `--long` | N/A |
-| Match tag pattern | Not implemented | `--match <glob>` | N/A |
-| Exclude tag pattern | Not implemented | `--exclude <glob>` | N/A |
+| Exact match only | `--exact-match` | `--exact-match` | N/A |
+| Force long format | `--long` | `--long` | N/A |
+| Match tag pattern | `--match <glob>` (wax, ≤256 chars, repeatable) | `--match <glob>` | N/A |
+| Exclude tag pattern | `--exclude <glob>` (exclude wins over match) | `--exclude <glob>` | N/A |
 | Candidate count | All tags (BFS) | `--candidates=<N>` (default 10) | N/A |
-| First-parent only | Not implemented | `--first-parent` | N/A |
-| Dirty suffix | Not implemented | `--dirty[=<mark>]` | N/A |
+| First-parent only | `--first-parent` | `--first-parent` | N/A |
+| Dirty suffix | `--dirty[=<mark>]` | `--dirty[=<mark>]` | N/A |
 | JSON output | `--json` with typed fields | No | No |
 | Algorithm | BFS (shortest path) | Heuristic multi-candidate | N/A |
 
@@ -203,4 +274,6 @@ search, but this has not been a problem in practice.
 | Invalid revision | `LBR-CLI-003` | 129 |
 | `HEAD` has no commit | `LBR-REPO-003` | 128 |
 | No tags can describe the target and `--always` is absent | `LBR-REPO-003` | 128 |
+| `--exact-match` target has no exact tag | `LBR-REPO-003` | 128 |
+| `--long --abbrev=0` | `LBR-CLI-002` | 129 |
 | Failed to read refs or objects | `LBR-IO-001` / `LBR-REPO-002` | 128 |

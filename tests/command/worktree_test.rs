@@ -29,6 +29,35 @@ fn test_worktree_cli_outside_repository_returns_fatal_128() {
     );
 }
 
+/// Regression guard for v0.17.888: `libra worktree --help` previously
+/// leaked the implementation-detail rustdoc on `WorktreeArgs` ("CLI
+/// arguments for the `worktree` subcommand. This type is wired into
+/// the top-level CLI and dispatches to …") into the user-facing help
+/// header instead of showing a clean one-liner. Pin the cleaned
+/// header and make sure the impl-detail phrasing cannot return.
+#[test]
+fn test_worktree_help_header_is_user_facing() {
+    let temp = tempdir().unwrap();
+    let output = run_libra_command(&["worktree", "--help"], temp.path());
+    assert_cli_success(&output, "worktree --help");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("CLI arguments for"),
+        "worktree --help leaks impl-detail rustdoc 'CLI arguments for …'. \
+         Update WorktreeArgs in src/command/worktree.rs so its doc / \
+         long_about reads as user-facing prose. Got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("type is wired into"),
+        "worktree --help leaks impl-detail rustdoc 'type is wired into …'. \
+         See src/command/worktree.rs::WorktreeArgs. Got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Manage multiple working trees"),
+        "worktree --help missing the user-facing header. Got:\n{stdout}"
+    );
+}
+
 /// Mirror of the on-disk `WorktreeEntry` used only in tests.
 ///
 /// This type allows tests to deserialize `worktrees.json` without depending
@@ -832,6 +861,8 @@ async fn test_worktree_add_rejects_existing_non_empty_directory() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     exec_async(vec!["commit", "-m", "initial"])
@@ -923,6 +954,8 @@ async fn test_worktree_add_rolls_back_link_on_restore_failure() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     exec_async(vec!["commit", "-m", "initial"])
@@ -979,6 +1012,8 @@ async fn test_worktree_add_rolls_back_populated_files_when_state_save_fails() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     exec_async(vec!["commit", "-m", "initial"])
@@ -1177,6 +1212,8 @@ async fn test_worktree_add_does_not_reset_index() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1194,6 +1231,8 @@ async fn test_worktree_add_does_not_reset_index() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1238,6 +1277,8 @@ async fn test_worktree_add_populates_from_head_not_staged_index() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     exec_async(vec!["commit", "-m", "initial"])
@@ -1254,6 +1295,8 @@ async fn test_worktree_add_populates_from_head_not_staged_index() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 

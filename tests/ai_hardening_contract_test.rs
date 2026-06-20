@@ -12,7 +12,7 @@
 use chrono::Utc;
 use libra::internal::ai::runtime::{
     AuditEvent, AuditSink, InMemoryAuditSink, PrincipalContext, PrincipalRole, SecretRedactor,
-    ToolBoundaryPolicy, ToolOperation,
+    ToolBoundaryPolicy, ToolOperation, ToolOperationDetails,
 };
 use uuid::Uuid;
 
@@ -28,24 +28,13 @@ fn tool_boundary_blocks_observer_mutations_and_network_by_default() {
         role: PrincipalRole::Observer,
     };
 
-    let mutation = policy.decide(
-        &observer,
-        &ToolOperation {
-            tool_name: "apply_patch".to_string(),
-            mutates_state: true,
-            requires_network: false,
-        },
-    );
+    let mutation = policy.decide(&observer, &ToolOperation::tool("apply_patch", true, false));
     assert!(!mutation.allowed);
     assert!(!mutation.approval_required);
 
     let network_read = policy.decide(
         &PrincipalContext::system(),
-        &ToolOperation {
-            tool_name: "read_file".to_string(),
-            mutates_state: false,
-            requires_network: true,
-        },
+        &ToolOperation::tool("read_file", false, true),
     );
     assert!(!network_read.allowed);
 }
@@ -61,17 +50,46 @@ fn mutating_tool_requires_runtime_mediated_approval_for_humans() {
         role: PrincipalRole::Owner,
     };
 
-    let decision = policy.decide(
-        &human,
-        &ToolOperation {
-            tool_name: "shell".to_string(),
-            mutates_state: true,
-            requires_network: false,
-        },
-    );
+    let decision = policy.decide(&human, &ToolOperation::tool("shell", true, false));
 
     assert!(decision.allowed);
     assert!(decision.approval_required);
+}
+
+/// Scenario: a sub-agent spawn is represented as the mutating `task`
+/// operation with structured spawn details. Contributors may request it
+/// only through the approval-mediated path; observers are denied before
+/// any child session can be created.
+#[test]
+fn sub_agent_spawn_is_a_mutating_task_boundary_operation() {
+    let policy = ToolBoundaryPolicy::default_runtime();
+    let operation = ToolOperation::sub_agent_spawn("explore", "inspect src");
+    assert_eq!(operation.tool_name, "task");
+    assert!(operation.mutates_state);
+    assert!(!operation.requires_network);
+    assert_eq!(
+        operation.details,
+        ToolOperationDetails::SubAgentSpawn {
+            name: "explore".to_string(),
+            prompt_digest: "inspect src".to_string(),
+        }
+    );
+
+    let contributor = PrincipalContext {
+        principal_id: "alice".to_string(),
+        role: PrincipalRole::Contributor,
+    };
+    let contributor_decision = policy.decide(&contributor, &operation);
+    assert!(contributor_decision.allowed);
+    assert!(contributor_decision.approval_required);
+
+    let observer = PrincipalContext {
+        principal_id: "readonly".to_string(),
+        role: PrincipalRole::Observer,
+    };
+    let observer_decision = policy.decide(&observer, &operation);
+    assert!(!observer_decision.allowed);
+    assert!(!observer_decision.approval_required);
 }
 
 /// Scenario: MCP tool naming conventions classify into the right policy bucket.
@@ -85,11 +103,7 @@ fn mcp_read_and_write_tool_prefixes_are_classified() {
 
     let list_decisions = policy.decide(
         &PrincipalContext::system(),
-        &ToolOperation {
-            tool_name: "list_decisions".to_string(),
-            mutates_state: false,
-            requires_network: false,
-        },
+        &ToolOperation::tool("list_decisions", false, false),
     );
     assert!(list_decisions.allowed);
     assert!(!list_decisions.approval_required);
@@ -99,11 +113,7 @@ fn mcp_read_and_write_tool_prefixes_are_classified() {
             principal_id: "alice".to_string(),
             role: PrincipalRole::Owner,
         },
-        &ToolOperation {
-            tool_name: "create_decision".to_string(),
-            mutates_state: true,
-            requires_network: false,
-        },
+        &ToolOperation::tool("create_decision", true, false),
     );
     assert!(create_decision.allowed);
     assert!(create_decision.approval_required);
@@ -180,11 +190,7 @@ mod cex_00_5 {
     }
 
     fn operation(name: &str, mutates: bool) -> ToolOperation {
-        ToolOperation {
-            tool_name: name.to_string(),
-            mutates_state: mutates,
-            requires_network: false,
-        }
+        ToolOperation::tool(name, mutates, false)
     }
 
     fn lifecycle(kind: LifecycleEventKind, session: &str) -> LifecycleEvent {

@@ -79,6 +79,83 @@ fn test_blame_json_output_includes_lines() {
     assert!(json["data"]["lines"].as_array().is_some());
 }
 
+/// Scenario: `blame --porcelain` emits the machine-readable format — a
+/// `<sha> <orig> <final> [<group>]` header followed (once per commit) by the
+/// author/committer/summary/filename metadata block and tab-prefixed content.
+#[test]
+fn test_blame_porcelain_emits_commit_metadata() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "alpha\nbeta\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "tracked.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(
+            &["commit", "-m", "add tracked porcelain", "--no-verify"],
+            repo.path()
+        )
+        .status
+        .success()
+    );
+
+    let output = run_libra_command(&["blame", "--porcelain", "tracked.txt"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // First line is the porcelain header: "<sha> <orig> <final> [<group>]".
+    let first = stdout.lines().next().unwrap_or("");
+    let header: Vec<&str> = first.split(' ').collect();
+    assert!(
+        header.len() >= 3,
+        "header needs sha/orig/final, got: {first}"
+    );
+    assert!(
+        header[0].len() >= 40 && header[0].chars().all(|c| c.is_ascii_hexdigit()),
+        "first token should be a full object hash, got: {first}"
+    );
+
+    // Metadata block (printed once for the single attributing commit).
+    assert!(
+        stdout.contains("\nauthor-mail <"),
+        "missing author-mail: {stdout}"
+    );
+    assert!(
+        stdout.contains("\nauthor-time "),
+        "missing author-time: {stdout}"
+    );
+    assert!(
+        stdout.contains("\nauthor-tz "),
+        "missing author-tz: {stdout}"
+    );
+    assert!(
+        stdout.contains("\ncommitter "),
+        "missing committer: {stdout}"
+    );
+    assert!(
+        stdout.contains("\nsummary add tracked porcelain"),
+        "missing summary: {stdout}"
+    );
+    assert!(
+        stdout.contains("\nfilename tracked.txt"),
+        "missing filename: {stdout}"
+    );
+    // Content lines are tab-prefixed.
+    assert!(
+        stdout.contains("\talpha"),
+        "missing tab-prefixed content: {stdout}"
+    );
+    assert!(
+        stdout.contains("\tbeta"),
+        "missing tab-prefixed content: {stdout}"
+    );
+}
+
 /// Scenario: `--machine blame` must emit exactly one non-empty stdout
 /// line of valid JSON (NDJSON-friendly). Mirrors `add_json_test`'s
 /// machine-mode contract.
@@ -268,6 +345,8 @@ async fn prepare_history() -> (ObjectHash, ObjectHash) {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -293,6 +372,8 @@ async fn prepare_history() -> (ObjectHash, ObjectHash) {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -304,6 +385,137 @@ async fn prepare_history() -> (ObjectHash, ObjectHash) {
 
     let second = get_target_commit("HEAD").await.unwrap();
     (first, second)
+}
+
+/// Stage and commit the current `foo.txt` with `message`, returning the
+/// resulting commit hash. Assumes a `ChangeDirGuard` is already active.
+async fn commit_foo(message: &str) -> ObjectHash {
+    add::execute(AddArgs {
+        pathspec: vec!["foo.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some(message.into()),
+        ..Default::default()
+    })
+    .await;
+    get_target_commit("HEAD").await.unwrap()
+}
+
+/// Build a fixed three-commit history of `foo.txt` where each commit
+/// introduces exactly one line:
+///   c1: "line1\n"                          (first  -> line 1)
+///   c2: "line1\nline2\n"                    (second -> line 2)
+///   c3: "line1\nline2\nline3\n"             (third  -> line 3)
+/// Returns `(first, second, third)` in chronological order. Assumes a
+/// `ChangeDirGuard` is already active.
+async fn prepare_three_commit_history() -> (ObjectHash, ObjectHash, ObjectHash) {
+    let mut f = fs::File::create("foo.txt").unwrap();
+    writeln!(f, "line1").unwrap();
+    drop(f);
+    let first = commit_foo("c1").await;
+
+    let mut f = fs::File::create("foo.txt").unwrap();
+    writeln!(f, "line1").unwrap();
+    writeln!(f, "line2").unwrap();
+    drop(f);
+    let second = commit_foo("c2").await;
+
+    let mut f = fs::File::create("foo.txt").unwrap();
+    writeln!(f, "line1").unwrap();
+    writeln!(f, "line2").unwrap();
+    writeln!(f, "line3").unwrap();
+    drop(f);
+    let third = commit_foo("c3").await;
+
+    (first, second, third)
+}
+
+/// Scenario (blame.md "（新增）blame 归属正确性 / 3 个 commit 链"): with a
+/// three-commit history where each commit appends one line, every blame
+/// line must be attributed to the commit that introduced it.
+#[tokio::test]
+#[serial]
+async fn test_blame_json_three_commit_chain_attributes_each_line() {
+    let repo = tempdir().unwrap();
+    let _guard = setup_repo_with_hash(&repo, "sha1").await;
+    let (first, second, third) = prepare_three_commit_history().await;
+
+    let output = run_libra_command(&["--json", "blame", "foo.txt"], repo.path());
+    assert_cli_success(&output, "json blame foo.txt (3-commit chain)");
+
+    let json = parse_json_stdout(&output);
+    let lines = json["data"]["lines"]
+        .as_array()
+        .expect("blame lines should be an array");
+    assert_eq!(lines.len(), 3, "expected three blamed lines: {json}");
+    assert_eq!(lines[0]["line_number"], 1);
+    assert_eq!(lines[0]["hash"], first.to_string());
+    assert_eq!(lines[1]["line_number"], 2);
+    assert_eq!(lines[1]["hash"], second.to_string());
+    assert_eq!(lines[2]["line_number"], 3);
+    assert_eq!(lines[2]["hash"], third.to_string());
+}
+
+/// Scenario (blame.md "（新增）empty file"): blaming a committed empty file
+/// returns an empty result (no blame lines) in JSON mode and prints
+/// "File is empty" in human mode, rather than erroring.
+#[tokio::test]
+#[serial]
+async fn test_blame_empty_file_returns_empty_result() {
+    let repo = tempdir().unwrap();
+    let _guard = setup_repo_with_hash(&repo, "sha1").await;
+
+    // Commit an empty file.
+    fs::File::create("empty.txt").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["empty.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("add empty file".into()),
+        ..Default::default()
+    })
+    .await;
+
+    // JSON mode: empty result, not an error.
+    let output = run_libra_command(&["--json", "blame", "empty.txt"], repo.path());
+    assert_cli_success(&output, "json blame empty.txt");
+    let json = parse_json_stdout(&output);
+    let lines = json["data"]["lines"]
+        .as_array()
+        .expect("blame lines should be an array");
+    assert!(
+        lines.is_empty(),
+        "an empty file must yield no blame lines: {json}"
+    );
+
+    // Human mode: an explicit "File is empty" notice on success.
+    let human = run_libra_command(&["blame", "empty.txt"], repo.path());
+    assert_cli_success(&human, "human blame empty.txt");
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        stdout.contains("File is empty"),
+        "human blame of an empty file should say 'File is empty', got: {stdout}"
+    );
 }
 
 /// Scenario: `blame::execute` against a SHA-1 repo must complete without
@@ -320,6 +532,8 @@ async fn blame_runs_with_sha1() {
         file: "foo.txt".into(),
         commit: "HEAD".into(),
         line_range: None,
+        porcelain: false,
+        line_porcelain: false,
     })
     .await;
 }
@@ -339,6 +553,8 @@ async fn blame_runs_with_sha256() {
         file: "foo.txt".into(),
         commit: "HEAD".into(),
         line_range: None,
+        porcelain: false,
+        line_porcelain: false,
     })
     .await;
 }

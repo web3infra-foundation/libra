@@ -1,7 +1,7 @@
 //! Sub-agent permission inheritance + escalation gate.
 //!
 //! This module is the OC-Phase 3 P3.3 deliverable from
-//! `docs/improvement/opencode.md`. It implements the two doc-specified
+//! `docs/development/commands/_general.md`. It implements the two doc-specified
 //! pure helpers the dispatcher uses to derive a child agent's effective
 //! permission ruleset and to refuse a child that would silently override
 //! a parent `Deny`:
@@ -62,7 +62,7 @@ pub fn agent_permission_spec_to_ruleset(spec: &AgentPermissionSpec) -> Permissio
 
 /// Compute the effective ruleset for a child sub-agent dispatch.
 ///
-/// Algorithm (verbatim from `docs/improvement/opencode.md` "Sub-Agent
+/// Algorithm (verbatim from `docs/development/commands/_general.md` "Sub-Agent
 /// Permission Inheritance Algorithm"):
 ///
 /// ```text

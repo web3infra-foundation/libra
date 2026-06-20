@@ -26,11 +26,22 @@ pub struct FormatContext<'a> {
 
 pub struct CommitFormatter {
     format: FormatType,
+    /// `--date=<mode>` rendering mode for author/committer dates ("" = default).
+    date_mode: String,
 }
 
 impl CommitFormatter {
     pub fn new(format: FormatType) -> Self {
-        Self { format }
+        Self {
+            format,
+            date_mode: String::new(),
+        }
+    }
+
+    /// Set the `--date=<mode>` rendering mode applied to author/committer dates.
+    pub fn with_date_mode(mut self, date_mode: String) -> Self {
+        self.date_mode = date_mode;
+        self
     }
 
     pub fn format(&self, commit: &Commit, ctx: &FormatContext<'_>) -> String {
@@ -68,7 +79,7 @@ impl CommitFormatter {
         ));
         out.push_str(&format!(
             "Date:   {}\n\n",
-            format_timestamp(commit.committer.timestamp as i64)
+            format_timestamp_with(commit.committer.timestamp as i64, &self.date_mode)
         ));
 
         let (subject, _) = parse_commit_msg(&commit.message);
@@ -122,10 +133,16 @@ impl CommitFormatter {
         result = result.replace("%f", &subject_line.replace(' ', "-"));
         result = result.replace("%an", commit.author.name.trim());
         result = result.replace("%ae", commit.author.email.trim());
-        result = result.replace("%ad", &format_timestamp(commit.author.timestamp as i64));
+        result = result.replace(
+            "%ad",
+            &format_timestamp_with(commit.author.timestamp as i64, &self.date_mode),
+        );
         result = result.replace("%cn", commit.committer.name.trim());
         result = result.replace("%ce", commit.committer.email.trim());
-        result = result.replace("%cd", &format_timestamp(commit.committer.timestamp as i64));
+        result = result.replace(
+            "%cd",
+            &format_timestamp_with(commit.committer.timestamp as i64, &self.date_mode),
+        );
         result = result.replace("%d", &decoration);
 
         format!("{}{}", ctx.graph_prefix, result)
@@ -133,9 +150,27 @@ impl CommitFormatter {
 }
 
 pub fn format_timestamp(timestamp: i64) -> String {
+    format_timestamp_with(timestamp, "")
+}
+
+/// Render a commit timestamp according to a `--date=<mode>` value. Supported
+/// modes: `short`, `iso`/`iso8601`, `iso-strict`/`iso8601-strict`, `rfc`/`rfc2822`,
+/// `unix`, `raw`; any other value (including "" and `default`) uses Git's default
+/// `Day Mon DD HH:MM:SS YYYY +ZZZZ` form. Timestamps are rendered in UTC, so the
+/// zone is always `+0000` (Libra stores a per-signature tz that this i64-only
+/// entry point does not receive).
+pub fn format_timestamp_with(timestamp: i64, mode: &str) -> String {
     use chrono::{DateTime, Utc};
     let dt = DateTime::<Utc>::from_timestamp(timestamp, 0).unwrap_or(chrono::DateTime::UNIX_EPOCH);
-    dt.format("%a %b %d %H:%M:%S %Y %z").to_string()
+    match mode {
+        "short" => dt.format("%Y-%m-%d").to_string(),
+        "iso" | "iso8601" => dt.format("%Y-%m-%d %H:%M:%S %z").to_string(),
+        "iso-strict" | "iso8601-strict" => dt.to_rfc3339(),
+        "rfc" | "rfc2822" => dt.to_rfc2822(),
+        "unix" => timestamp.to_string(),
+        "raw" => format!("{timestamp} +0000"),
+        _ => dt.format("%a %b %d %H:%M:%S %Y %z").to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -207,5 +242,22 @@ mod tests {
         assert!(out.contains(&committer_date));
         assert!(out.contains(" (tag: v1.0)"));
         assert_ne!(author_date, committer_date);
+    }
+
+    #[test]
+    fn format_timestamp_with_modes() {
+        // 2020-09-13 12:26:40 UTC.
+        let ts = 1_600_000_000;
+        assert_eq!(format_timestamp_with(ts, "short"), "2020-09-13");
+        assert_eq!(format_timestamp_with(ts, "unix"), "1600000000");
+        assert_eq!(format_timestamp_with(ts, "raw"), "1600000000 +0000");
+        assert_eq!(
+            format_timestamp_with(ts, "iso"),
+            "2020-09-13 12:26:40 +0000"
+        );
+        assert!(format_timestamp_with(ts, "iso-strict").starts_with("2020-09-13T12:26:40"));
+        // Unknown / default fall back to the canonical form (same as the wrapper).
+        assert_eq!(format_timestamp_with(ts, "bogus"), format_timestamp(ts));
+        assert_eq!(format_timestamp_with(ts, ""), format_timestamp(ts));
     }
 }

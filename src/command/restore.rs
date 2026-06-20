@@ -73,6 +73,12 @@ pub enum RestoreError {
     /// should not be able to overwrite with `restore --source`.
     #[error("refusing to restore from locked branch '{0}'")]
     LockedSource(String),
+    /// Refused to mutate the worktree while HEAD is attached to a
+    /// Libra-managed AI branch.
+    #[error("refusing to restore worktree while on locked branch '{0}'")]
+    LockedCurrentBranch(String),
+    #[error("failed to read pathspec file: {0}")]
+    PathspecFileRead(String),
 }
 
 impl RestoreError {
@@ -88,6 +94,8 @@ impl RestoreError {
             Self::WriteWorktree => StableErrorCode::IoWriteFailed,
             Self::LfsDownload => StableErrorCode::NetworkUnavailable,
             Self::LockedSource(_) => StableErrorCode::CliInvalidTarget,
+            Self::LockedCurrentBranch(_) => StableErrorCode::ConflictOperationBlocked,
+            Self::PathspecFileRead(_) => StableErrorCode::IoReadFailed,
         }
     }
 }
@@ -119,6 +127,9 @@ impl From<RestoreError> for CliError {
                 .with_hint(
                     "Libra-managed branches like 'intent' and 'agent-traces' cannot be used as restore sources",
                 ),
+            RestoreError::LockedCurrentBranch(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("switch to a user branch before modifying the worktree"),
             _ => CliError::fatal(message).with_stable_code(stable_code),
         }
     }
@@ -142,7 +153,7 @@ pub struct RestoreOutput {
 #[command(after_help = RESTORE_EXAMPLES)]
 pub struct RestoreArgs {
     /// files or dir to restore
-    #[clap(required = true)]
+    #[clap(required_unless_present = "pathspec_from_file")]
     pub pathspec: Vec<String>,
     /// source
     #[clap(long, short)]
@@ -153,6 +164,12 @@ pub struct RestoreArgs {
     /// staged
     #[clap(long, short = 'S')]
     pub staged: bool,
+    /// Read pathspecs from the given file, one per line (`-` reads stdin).
+    #[clap(long = "pathspec-from-file", value_name = "FILE")]
+    pub pathspec_from_file: Option<String>,
+    /// Pathspecs read via --pathspec-from-file are separated by NUL, not newlines.
+    #[clap(long = "pathspec-file-nul", requires = "pathspec_from_file")]
+    pub pathspec_file_nul: bool,
 }
 
 pub async fn execute(args: RestoreArgs) {
@@ -180,9 +197,50 @@ pub async fn execute_safe(args: RestoreArgs, output: &OutputConfig) -> CliResult
     render_restore_output(&result, output)
 }
 
+pub(crate) async fn execute_to_output(args: RestoreArgs) -> CliResult<RestoreOutput> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    run_restore(args).await.map_err(CliError::from)
+}
+
 // ── Core execution ───────────────────────────────────────────────────
 
-async fn run_restore(args: RestoreArgs) -> Result<RestoreOutput, RestoreError> {
+/// Read pathspecs from a file for `--pathspec-from-file`. Entries are separated
+/// by newlines, or by NUL when `--pathspec-file-nul` is set; `-` reads stdin.
+/// Empty entries are dropped (and a trailing `\r` is stripped in newline mode).
+fn read_restore_pathspec_file(path: &str, nul: bool) -> Result<Vec<String>, RestoreError> {
+    let raw = if path == "-" {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|error| RestoreError::PathspecFileRead(error.to_string()))?;
+        buf
+    } else {
+        std::fs::read_to_string(path)
+            .map_err(|error| RestoreError::PathspecFileRead(format!("{path}: {error}")))?
+    };
+
+    let separator = if nul { '\0' } else { '\n' };
+    Ok(raw
+        .split(separator)
+        .map(|entry| {
+            if nul {
+                entry
+            } else {
+                entry.strip_suffix('\r').unwrap_or(entry)
+            }
+        })
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+async fn run_restore(mut args: RestoreArgs) -> Result<RestoreOutput, RestoreError> {
+    // `--pathspec-from-file` populates the pathspec list from a file (or stdin
+    // for `-`) before the normal restore logic runs.
+    if let Some(file) = args.pathspec_from_file.take() {
+        args.pathspec = read_restore_pathspec_file(&file, args.pathspec_file_nul)?;
+    }
     let staged = args.staged;
     let mut worktree = args.worktree;
     if !staged {
@@ -202,6 +260,9 @@ async fn run_restore(args: RestoreArgs) -> Result<RestoreOutput, RestoreError> {
         && branch::is_locked_revision(src)
     {
         return Err(RestoreError::LockedSource(src.to_string()));
+    }
+    if worktree {
+        reject_restore_on_ai_managed_current_branch().await?;
     }
 
     let storage = util::objects_storage();
@@ -658,6 +719,18 @@ fn map_restore_branch_store_error(error: BranchStoreError) -> RestoreError {
     }
 }
 
+async fn reject_restore_on_ai_managed_current_branch() -> Result<(), RestoreError> {
+    match Head::current_result()
+        .await
+        .map_err(map_restore_branch_store_error)?
+    {
+        Head::Branch(name) if branch::is_ai_managed_branch(&name) => {
+            Err(RestoreError::LockedCurrentBranch(name))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn preprocess_blobs(blobs: &[(PathBuf, ObjectHash)]) -> HashMap<PathBuf, ObjectHash> {
     blobs
         .iter()
@@ -1039,6 +1112,69 @@ mod tests {
         assert_eq!(
             RestoreError::LockedSource("intent".to_string()).to_string(),
             "refusing to restore from locked branch 'intent'",
+        );
+        assert_eq!(
+            RestoreError::LockedCurrentBranch("agent-traces".to_string()).to_string(),
+            "refusing to restore worktree while on locked branch 'agent-traces'",
+        );
+    }
+
+    /// Pin the `stable_code()` mapping for every variant of
+    /// [`RestoreError`]. JSON consumers branch on the
+    /// [`StableErrorCode`] in the error envelope — three of the read
+    /// variants share `IoReadFailed`, three of the target variants
+    /// share `CliInvalidTarget`, and `LfsDownload` is the only
+    /// network-coded variant in the family. A future refactor that
+    /// reroutes any of them (for example flipping `LfsDownload` from
+    /// `NetworkUnavailable` to `IoReadFailed`) silently changes
+    /// client retry classification unless every variant has its own
+    /// guard. Enumerate all 11 variants so a new variant trips both
+    /// this exhaustive list and the `stable_code()` impl's match.
+    #[test]
+    fn restore_error_stable_code_pins_each_variant() {
+        assert_eq!(
+            RestoreError::ResolveSource.stable_code(),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            RestoreError::ReferenceNotCommit.stable_code(),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            RestoreError::PathspecNotMatched("ignored".to_string()).stable_code(),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            RestoreError::ReadIndex.stable_code(),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            RestoreError::ReadObject.stable_code(),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            RestoreError::ReadWorktree.stable_code(),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            RestoreError::InvalidPathEncoding.stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            RestoreError::WriteWorktree.stable_code(),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            RestoreError::LfsDownload.stable_code(),
+            StableErrorCode::NetworkUnavailable,
+        );
+        assert_eq!(
+            RestoreError::LockedSource("ignored".to_string()).stable_code(),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            RestoreError::LockedCurrentBranch("ignored".to_string()).stable_code(),
+            StableErrorCode::ConflictOperationBlocked,
         );
     }
 }

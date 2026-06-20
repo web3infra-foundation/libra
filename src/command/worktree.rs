@@ -40,12 +40,16 @@ EXAMPLES:
                                                    (refused on a dirty worktree)
     libra worktree repair                          Fix stale or duplicate registry rows";
 
-/// CLI arguments for the `worktree` subcommand.
-///
-/// This type is wired into the top-level CLI and dispatches to individual
-/// worktree subcommands such as `add`, `list`, `move`, etc.
-
+/// Manage multiple working trees attached to this repository.
+//
+// Note: the user-facing summary for `libra worktree --help` is set via
+// `#[command(about = "...", long_about = ...)]` on the Cli enum binding
+// in src/cli.rs. We use `long_about` here so clap renders the same one-
+// liner in both the top-level command list and `worktree --help`'s
+// header, instead of leaking the previous "CLI arguments for the
+// `worktree` subcommand. This type is wired into..." rustdoc body.
 #[derive(Parser, Debug)]
+#[command(long_about = "Manage multiple working trees attached to this repository.")]
 pub struct WorktreeArgs {
     #[clap(subcommand)]
     pub command: WorktreeSubcommand,
@@ -67,8 +71,8 @@ pub enum WorktreeSubcommand {
     Lock {
         /// Filesystem path of the worktree to lock.
         path: String,
-        /// Optional explanation for why this worktree is locked.
-        #[clap(long)]
+        /// Optional free-form explanation for why this worktree is locked (shown in `worktree list`)
+        #[clap(long, value_name = "TEXT")]
         reason: Option<String>,
     },
     /// Remove the lock from a previously locked worktree.
@@ -130,18 +134,18 @@ struct WorktreeState {
 }
 
 #[derive(Debug, Serialize)]
-struct WorktreeListOutput {
-    worktrees: Vec<WorktreeListEntry>,
+pub(crate) struct WorktreeListOutput {
+    pub(crate) worktrees: Vec<WorktreeListEntry>,
 }
 
 #[derive(Debug, Serialize)]
-struct WorktreeListEntry {
-    kind: &'static str,
-    path: String,
-    is_main: bool,
-    locked: bool,
-    lock_reason: Option<String>,
-    exists: bool,
+pub(crate) struct WorktreeListEntry {
+    pub(crate) kind: &'static str,
+    pub(crate) path: String,
+    pub(crate) is_main: bool,
+    pub(crate) locked: bool,
+    pub(crate) lock_reason: Option<String>,
+    pub(crate) exists: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -201,10 +205,10 @@ struct WorktreeUmountOutput {
     cleanup_root_removed: bool,
 }
 
-type WorktreeResult<T> = Result<T, WorktreeError>;
+pub(crate) type WorktreeResult<T> = Result<T, WorktreeError>;
 
 #[derive(Debug)]
-enum WorktreeError {
+pub(crate) enum WorktreeError {
     InvalidTarget(String),
     OperationBlocked(String),
     NoSuchWorktree { path: String },
@@ -235,7 +239,7 @@ impl WorktreeError {
         }
     }
 
-    fn into_cli_error(self) -> CliError {
+    pub(crate) fn into_cli_error(self) -> CliError {
         let code = self.stable_code();
         let mut error = CliError::fatal(self.to_string()).with_stable_code(code);
         if matches!(self, Self::DirtyWorktree { .. }) {
@@ -304,13 +308,21 @@ impl std::error::Error for WorktreeError {}
 /// the original directory, even if the inner operation panics or early-returns.
 struct DirGuard {
     old_dir: PathBuf,
+    #[cfg(test)]
+    _cwd_lock: crate::utils::test::CwdLockGuard,
 }
 
 impl DirGuard {
     fn change_to(new_dir: &Path) -> io::Result<Self> {
+        #[cfg(test)]
+        let cwd_lock = crate::utils::test::cwd_lock_guard();
         let old_dir = env::current_dir()?;
         env::set_current_dir(new_dir)?;
-        Ok(Self { old_dir })
+        Ok(Self {
+            old_dir,
+            #[cfg(test)]
+            _cwd_lock: cwd_lock,
+        })
     }
 }
 
@@ -782,6 +794,8 @@ async fn add_worktree(path: String) -> WorktreeResult<WorktreeAddOutput> {
             source: Some("HEAD".to_string()),
             worktree: true,
             staged: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         })
         .await
         {
@@ -848,7 +862,7 @@ fn remove_worktree_storage_link(link_path: &Path) -> io::Result<()> {
 /// Each registered worktree is printed on its own line as either
 /// `main <path>` or `worktree <path>`, with optional `[locked: <reason>]`
 /// suffix when the entry is locked.
-fn run_list_worktrees() -> WorktreeResult<WorktreeListOutput> {
+pub(crate) fn run_list_worktrees() -> WorktreeResult<WorktreeListOutput> {
     let state = load_state()?;
     let worktrees = state
         .worktrees

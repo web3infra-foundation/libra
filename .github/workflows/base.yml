@@ -100,6 +100,17 @@ jobs:
       - name: Build web (static export → web/out/)
         run: pnpm --dir web build
 
+      - name: Check web/out static export drift
+        shell: bash
+        run: |
+          status="$(git status --porcelain -- web/out)"
+          if [[ -n "$status" ]]; then
+            echo "web/out has untracked, staged, or unstaged files after the static export build." >&2
+            echo "Run 'pnpm --dir web build' locally and commit the updated web/out files." >&2
+            printf '%s\n' "$status" >&2
+            exit 1
+          fi
+
   redundancy:
     name: compat-redundancy
     runs-on: [self-hosted]
@@ -186,7 +197,7 @@ jobs:
           rg --version
 
       - name: Check compatibility matrix drift
-        run: bash scripts/check_compat_matrix.sh
+        run: cargo test --test compat_matrix_alignment compatibility_matrix_matches_cli_commands -- --exact
 
       - name: Run tests (L1 + L2 + L3)
         env:
@@ -202,7 +213,7 @@ jobs:
           LIBRA_STORAGE_SECRET_KEY: ${{ secrets.LIBRA_STORAGE_SECRET_KEY }}
         run: cargo test --all
 
-      # Phase 6 — Local TUI Automation Control scenario suite (docs/improvement/tui.md).
+      # Phase 6 — Local TUI Automation Control scenario suite (docs/improvement/agent.md Part C).
       # Without `--features test-provider` + `LIBRA_ENABLE_TEST_PROVIDER=1`, the scenarios
       # in tests/code_ui_scenarios.rs and tests/harness_self_test.rs short-circuit; CI
       # would silently skip them. `--test-threads=1` because each scenario spawns a

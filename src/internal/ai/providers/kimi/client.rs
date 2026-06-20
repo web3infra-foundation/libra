@@ -5,9 +5,9 @@
 //! injects Bearer-token authentication into every outgoing request.
 //!
 //! The default base URL is `https://api.moonshot.cn/v1`; a custom URL can be
-//! supplied via [`Client::with_base_url`] or the `MOONSHOT_BASE_URL`
-//! environment variable. Authentication uses `MOONSHOT_API_KEY`, matching the
-//! official Kimi platform documentation.
+//! supplied via [`Client::with_base_url`], `vault.env.MOONSHOT_BASE_URL`, or
+//! the `MOONSHOT_BASE_URL` environment variable. Authentication uses
+//! `MOONSHOT_API_KEY`, matching the official Kimi platform documentation.
 
 use std::fmt;
 
@@ -109,26 +109,38 @@ const DEFAULT_BASE_URL: &str = "https://api.moonshot.cn/v1";
 ///
 /// A type alias for the generic [`crate::internal::ai::client::Client`]
 /// parameterized with [`KimiProvider`]. Use [`Client::from_env`] to construct
-/// from the `MOONSHOT_API_KEY` environment variable, or
+/// from `vault.env.MOONSHOT_API_KEY` / the `MOONSHOT_API_KEY` environment variable, or
 /// [`Client::with_api_key`] / [`Client::with_base_url`] for programmatic
 /// construction.
 pub type Client = GenericClient<KimiProvider>;
 
 impl Client {
-    /// Creates a Kimi client from environment variables.
+    /// Creates a Kimi client from environment variables or Vault.
     ///
-    /// Reads `MOONSHOT_API_KEY` for authentication. The base URL defaults to
-    /// `https://api.moonshot.cn/v1` and can be overridden with
-    /// `MOONSHOT_BASE_URL` (useful for the international endpoint or a
-    /// self-hosted proxy).
+    /// Priority chain for `MOONSHOT_API_KEY` (12-Factor, see
+    /// `docs/development/commands/config.md`):
+    /// 1. Process env `MOONSHOT_API_KEY`
+    /// 2. Local repo config (`vault.env.MOONSHOT_API_KEY`)
+    /// 3. Global config (`vault.env.MOONSHOT_API_KEY`)
+    ///
+    /// The base URL defaults to `https://api.moonshot.cn/v1` and can be
+    /// overridden with `MOONSHOT_BASE_URL` / `vault.env.MOONSHOT_BASE_URL`
+    /// (useful for the international endpoint or a self-hosted proxy).
+    ///
+    /// New call sites should prefer [`Client::from_resolved_env`], which
+    /// performs the same lookup chain asynchronously and accepts an
+    /// explicit `LocalIdentityTarget<'_>` so vault values from a specific
+    /// repository are honored. `from_env` is retained for backward
+    /// compatibility and currently delegates to the same vault-aware
+    /// resolvers.
     ///
     /// # Errors
     ///
-    /// Returns [`std::env::VarError`] if `MOONSHOT_API_KEY` is not set.
-    pub fn from_env() -> std::result::Result<Self, std::env::VarError> {
-        let api_key = std::env::var("MOONSHOT_API_KEY")?;
-        let base_url =
-            std::env::var("MOONSHOT_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+    /// Returns an actionable error if `MOONSHOT_API_KEY` is not configured.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let api_key = crate::internal::config::resolve_required_env_sync("MOONSHOT_API_KEY")?;
+        let base_url = crate::internal::config::resolve_optional_env_sync("MOONSHOT_BASE_URL")?
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
 
         let provider = KimiProvider::new(api_key);
         Ok(Self::new(&base_url, provider))
@@ -139,8 +151,8 @@ impl Client {
     /// store credentials in repo-local or global `vault.env.*` config without
     /// also exporting them into the process environment.
     ///
-    /// Priority order:
-    /// 1. Process env var
+    /// Priority order (12-Factor):
+    /// 1. Process env var (`MOONSHOT_API_KEY` / `MOONSHOT_BASE_URL`)
     /// 2. Local repo config (`vault.env.MOONSHOT_API_KEY` / `vault.env.MOONSHOT_BASE_URL`)
     /// 3. Global config
     ///
@@ -150,7 +162,10 @@ impl Client {
         let api_key = resolve_env_for_target("MOONSHOT_API_KEY", local_target)
             .await?
             .ok_or_else(|| {
-                anyhow::anyhow!("MOONSHOT_API_KEY is not set in env, repo vault, or global config")
+                anyhow::anyhow!(
+                    "MOONSHOT_API_KEY is not configured; set vault.env.MOONSHOT_API_KEY with \
+                     `libra config set vault.env.MOONSHOT_API_KEY <key>` or export MOONSHOT_API_KEY"
+                )
             })?;
         let base_url = resolve_env_for_target("MOONSHOT_BASE_URL", local_target)
             .await?

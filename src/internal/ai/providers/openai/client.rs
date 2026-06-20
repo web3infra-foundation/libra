@@ -10,7 +10,7 @@
 //! There are three ways to create a client:
 //!
 //! - [`Client::from_env`] -- reads `OPENAI_API_KEY` (and optionally `OPENAI_BASE_URL`)
-//!   from environment variables. This is the recommended path for CLI usage.
+//!   from Vault or environment variables.
 //! - [`Client::with_api_key`] -- uses the default `https://api.openai.com/v1` base URL.
 //! - [`Client::with_base_url`] -- allows pointing at a custom or proxy endpoint while
 //!   still using OpenAI-compatible authentication.
@@ -64,14 +64,27 @@ impl Provider for OpenAIProvider {
 pub type Client = GenericClient<OpenAIProvider>;
 
 impl Client {
-    /// Creates an OpenAI client from environment variables.
+    /// Creates an OpenAI client from environment variables or Vault.
     ///
-    /// Reads the `OPENAI_API_KEY` environment variable.
-    /// Also supports `OPENAI_BASE_URL` for custom endpoints.
-    pub fn from_env() -> Result<Self, std::env::VarError> {
-        let api_key = std::env::var("OPENAI_API_KEY")?;
-        let base_url = std::env::var("OPENAI_BASE_URL")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+    /// Priority chain for `OPENAI_API_KEY` (12-Factor, see
+    /// `docs/development/commands/config.md`):
+    /// 1. Process env `OPENAI_API_KEY`
+    /// 2. Local repo config (`vault.env.OPENAI_API_KEY`)
+    /// 3. Global config (`vault.env.OPENAI_API_KEY`)
+    ///
+    /// `OPENAI_BASE_URL` follows the same chain for custom endpoints
+    /// (optional).
+    ///
+    /// New call sites should prefer [`Client::from_resolved_env`], which
+    /// performs the same lookup chain asynchronously and accepts an
+    /// explicit `LocalIdentityTarget<'_>` so vault values from a specific
+    /// repository are honored. `from_env` is retained for backward
+    /// compatibility and currently delegates to the same vault-aware
+    /// resolvers.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let api_key = crate::internal::config::resolve_required_env_sync("OPENAI_API_KEY")?;
+        let base_url = crate::internal::config::resolve_optional_env_sync("OPENAI_BASE_URL")?
+            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
 
         let provider = OpenAIProvider::new(api_key);
         Ok(Self::new(&base_url, provider))
@@ -79,9 +92,9 @@ impl Client {
 
     /// Vault-aware async constructor: resolves `OPENAI_API_KEY` (required)
     /// and `OPENAI_BASE_URL` (optional override) through the libra-aware
-    /// lookup chain: process env → local `.libra/libra.db`
-    /// (`vault.env.<name>`, when `local_target` selects a repo) → global
-    /// `~/.libra/config.db`.
+    /// lookup chain: local `.libra/libra.db` (`vault.env.<name>`, when
+    /// `local_target` selects a repo) → global `~/.libra/config.db` →
+    /// process env.
     ///
     /// Mirrors the [`super::super::deepseek`] and [`super::super::gemini`]
     /// `from_resolved_env` signatures — same `LocalIdentityTarget<'_>`
@@ -104,9 +117,8 @@ impl Client {
             .await?
             .ok_or_else(|| {
                 anyhow!(
-                    "OPENAI_API_KEY is not set in env, repo vault, or global config \
-                     (set the environment variable or run `libra config --global add \
-                     vault.env.OPENAI_API_KEY <key>`)"
+                    "OPENAI_API_KEY is not configured; set vault.env.OPENAI_API_KEY with \
+                     `libra config set vault.env.OPENAI_API_KEY <key>` or export OPENAI_API_KEY"
                 )
             })?;
         let base_url = resolve_env_for_target("OPENAI_BASE_URL", local_target)

@@ -135,6 +135,8 @@ async fn test_remove_single_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -210,6 +212,8 @@ async fn test_remove_cached() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -266,6 +270,8 @@ async fn test_remove_directory_recursive() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -354,6 +360,8 @@ async fn test_remove_directory_without_recursive() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -440,6 +448,8 @@ async fn test_remove_modified_file() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -515,6 +525,8 @@ async fn test_remove_multiple_files() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -570,6 +582,8 @@ async fn test_remove_dry_run() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -634,6 +648,8 @@ async fn test_remove_dry_run_cached() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -687,6 +703,8 @@ async fn test_remove_dry_run_recursive() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -748,6 +766,8 @@ async fn test_remove_ignore_unmatch() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -799,6 +819,8 @@ async fn test_remove_pathspec_from_file_newline() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -843,6 +865,8 @@ async fn test_remove_pathspec_from_file_nul() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -887,6 +911,8 @@ async fn test_remove_pathspec_from_file_ignore_unmatch() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -912,4 +938,39 @@ async fn test_remove_pathspec_from_file_ignore_unmatch() {
     args.ignore_unmatch = true;
     remove::execute(args).await;
     assert!(!file1.exists(), "file1.txt should be removed");
+}
+
+/// `libra rm --help` surfaces the EXAMPLES banner so users see the
+/// single-file, recursive, `--cached`, force, dry-run, pathspec-from-file,
+/// and JSON forms before they hit one of `rm`'s strict
+/// conflicting-state safety errors. Cross-cutting `--help` EXAMPLES
+/// rollout per `docs/development/commands/_general.md` item B.
+#[test]
+fn test_rm_help_lists_examples_banner() {
+    let repo = tempdir().expect("tempdir for rm --help");
+    let output = run_libra_command(&["rm", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "rm --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "rm --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra rm stale.txt",
+        "libra rm -r logs/",
+        "libra rm --cached secrets.env",
+        "libra rm -f conflicted.txt",
+        "libra rm --dry-run",
+        "libra rm --pathspec-from-file",
+        "libra rm --json",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "rm --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
 }

@@ -1,6 +1,6 @@
 //! Integration tests for the `2026050303_agent_capture` migration.
 //!
-//! See `docs/improvement/entire.md` (section 4.4) for the acceptance criteria
+//! See `docs/development/commands/_general.md` (section 4.4) for the acceptance criteria
 //! these tests pin: fresh-DB up, legacy-DB compatibility, and `up → down → up`
 //! idempotency.
 
@@ -123,16 +123,20 @@ async fn agent_capture_rollback_drops_tables_and_indexes_only() {
 
     // Rolling back to before agent_capture also rolls back every migration
     // sitting on top of it (parent_commit nullable, approved_permission,
-    // agent_usage_stats agent_name column). Rollback returns versions in
-    // reverse-application order — newest first — so the list reads from
-    // the most recent built-in migration down to the agent_capture itself.
+    // agent_usage_stats agent_name column, source_call_log, notes). Rollback
+    // returns versions in reverse-application order — newest first — so the
+    // list reads from the most recent built-in migration down to
+    // agent_capture itself.
     let rolled_back = runner
         .rollback_to(&conn, 2026050302)
         .await
         .expect("rollback_to(2026050302)");
     assert_eq!(
         rolled_back,
-        vec![2026050801, 2026050601, 2026050501, 2026050303]
+        vec![
+            2026061401, 2026060801, 2026060401, 2026060201, 2026053101, 2026052301, 2026050801,
+            2026050601, 2026050501, 2026050303
+        ]
     );
 
     // agent_capture artifacts gone.

@@ -3,7 +3,9 @@
 //! **Layer:** L1 — deterministic, no external dependencies.
 
 use libra::{
-    internal::{db::get_db_conn_instance, head::Head, model::reference},
+    internal::{
+        branch::AGENT_TRACES_BRANCH, db::get_db_conn_instance, head::Head, model::reference,
+    },
     utils::test::ChangeDirGuard,
 };
 use sea_orm::{ActiveModelTrait, Set};
@@ -62,6 +64,40 @@ fn test_restore_missing_pathspec_returns_cli_invalid_target() {
     );
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert_eq!(report.exit_code, 129);
+}
+
+#[test]
+#[serial]
+fn test_restore_pathspec_from_file_restores_listed_paths() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    std::fs::write(p.join("a.txt"), "committed-a\n").unwrap();
+    std::fs::write(p.join("b.txt"), "committed-b\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "a.txt", "b.txt"], p), "add a/b");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "add a/b", "--no-verify"], p),
+        "commit a/b",
+    );
+
+    // Dirty both files, then list them in a pathspec file.
+    std::fs::write(p.join("a.txt"), "dirty-a\n").unwrap();
+    std::fs::write(p.join("b.txt"), "dirty-b\n").unwrap();
+    std::fs::write(p.join("specs.txt"), "a.txt\nb.txt\n").unwrap();
+
+    let output = run_libra_command(&["restore", "--pathspec-from-file", "specs.txt"], p);
+    assert_cli_success(&output, "restore --pathspec-from-file");
+
+    assert_eq!(
+        std::fs::read_to_string(p.join("a.txt")).unwrap(),
+        "committed-a\n",
+        "a.txt should be restored from the pathspec file"
+    );
+    assert_eq!(
+        std::fs::read_to_string(p.join("b.txt")).unwrap(),
+        "committed-b\n",
+        "b.txt should be restored from the pathspec file"
+    );
 }
 
 #[tokio::test]
@@ -317,4 +353,34 @@ fn test_restore_source_refuses_locked_branch_with_revision_suffix() {
         "unexpected stderr: {human}"
     );
     assert_eq!(report.error_code, "LBR-CLI-003");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_restore_worktree_refuses_ai_managed_current_branch() {
+    let repo = create_committed_repo_via_cli();
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        Head::update_result(Head::Branch(AGENT_TRACES_BRANCH.to_string()), None)
+            .await
+            .expect("point HEAD at agent-traces");
+    }
+    std::fs::write(repo.path().join("tracked.txt"), "modified\n")
+        .expect("failed to modify tracked file");
+
+    let output = run_libra_command(&["restore", "tracked.txt"], repo.path());
+
+    assert_eq!(output.status.code(), Some(128));
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
+    assert!(
+        human.contains("refusing to restore worktree while on locked branch 'agent-traces'"),
+        "unexpected stderr: {human}"
+    );
+    let content = std::fs::read_to_string(repo.path().join("tracked.txt"))
+        .expect("failed to read tracked file");
+    assert_eq!(
+        content, "modified\n",
+        "locked-current-branch guard must not modify the worktree"
+    );
 }

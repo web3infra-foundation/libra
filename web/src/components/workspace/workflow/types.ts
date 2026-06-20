@@ -16,6 +16,8 @@ export type PlanStep = {
 
 export type Plan = {
   id: string;
+  title?: string;
+  summary?: string;
   steps: PlanStep[];
 };
 
@@ -28,6 +30,14 @@ export type ExecutionRun = {
   ago: string;
   label: string;
   details?: string;
+};
+
+export type WorkflowTask = {
+  id: string;
+  title: string;
+  status: StepStatus;
+  details?: string;
+  ago: string;
 };
 
 export type EvidenceKind = "tool" | "frame" | "patch";
@@ -50,6 +60,7 @@ export type WorkflowState = {
   currentPhase: number;
   intent: IntentDoc;
   plans: { execution: Plan; test: Plan };
+  tasks: WorkflowTask[];
   runs: ExecutionRun[];
   evidence: EvidenceRow[];
 };
@@ -57,6 +68,7 @@ export type WorkflowState = {
 export type DetailKind =
   | "intent"
   | "plan-step"
+  | "task"
   | "run"
   | "validation"
   | "release";
@@ -65,8 +77,15 @@ export type DetailState =
   | { kind: "intent"; data: IntentDoc }
   | {
       kind: "plan-step";
-      data: { step: PlanStep; planKind: "execution" | "test"; planId: string };
+      data: {
+        step: PlanStep;
+        planKind: "execution" | "test";
+        planId: string;
+        planTitle?: string;
+        planSummary?: string;
+      };
     }
+  | { kind: "task"; data: WorkflowTask }
   | { kind: "run"; data: ExecutionRun }
   | { kind: "validation" }
   | { kind: "release" };
@@ -85,6 +104,7 @@ export const EMPTY_WORKFLOW: WorkflowState = {
     execution: { id: "—", steps: [] },
     test: { id: "—", steps: [] },
   },
+  tasks: [],
   runs: [],
   evidence: [],
 };

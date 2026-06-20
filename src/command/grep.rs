@@ -32,8 +32,31 @@ enum GrepReadError {
     Fatal(String),
 }
 
+/// `--help` examples shown in `libra grep --help` output.
+///
+/// `grep` searches tracked files in the working tree, index, or a
+/// revision tree. The banner pins the most common invocations
+/// (literal vs regex pattern, multi-pattern, `--cached` index search,
+/// `--tree REV` historical search, count, filename listing, line
+/// numbers, JSON for agents) so users can map intent to invocation
+/// without reading the design doc. Cross-cutting `--help` EXAMPLES
+/// rollout per `docs/development/commands/_general.md` item B.
+pub const GREP_EXAMPLES: &str = "\
+EXAMPLES:
+    libra grep 'TODO'                     Search the working tree for the regex 'TODO'
+    libra grep -F 'fn foo()'              Treat the pattern as a literal string
+    libra grep -i 'panic'                 Case-insensitive search
+    libra grep -n 'TODO' src/             Show 1-based line numbers, restricted to src/
+    libra grep -c 'unsafe' src/           Per-file match counts
+    libra grep -l 'unwrap()' src/         Just the filenames that have matches
+    libra grep -e 'TODO' -e 'FIXME'       Match either of multiple regexps
+    libra grep --cached 'TODO'            Search files staged in the index instead of the worktree
+    libra grep --tree HEAD~5 'TODO'       Search files inside a historical revision
+    libra grep --json 'TODO'              Structured JSON output for agents";
+
 /// Search for patterns in tracked files in the working tree, index, or commit trees.
 #[derive(Parser, Debug)]
+#[command(after_help = GREP_EXAMPLES)]
 pub struct GrepArgs {
     /// The pattern to search for. Supports regular expressions by default.
     #[clap(value_name = "PATTERN", required_unless_present_any = ["regexp", "pattern_file"])]
@@ -54,6 +77,38 @@ pub struct GrepArgs {
     /// Interpret pattern as a fixed string, not a regular expression.
     #[clap(short = 'F', long)]
     fixed_string: bool,
+
+    /// Use POSIX extended regular expressions (the default dialect; accepted for Git compatibility).
+    #[clap(short = 'E', long = "extended-regexp")]
+    extended_regexp: bool,
+
+    /// Use POSIX basic regular expressions (accepted; treated as the default dialect).
+    #[clap(short = 'G', long = "basic-regexp")]
+    basic_regexp: bool,
+
+    /// Perl-compatible regular expressions (not supported in Libra).
+    #[clap(short = 'P', long = "perl-regexp")]
+    perl_regexp: bool,
+
+    /// Process binary files as if they were text instead of skipping them.
+    #[clap(short = 'a', long = "text")]
+    text: bool,
+
+    /// Never match in binary files (the default behavior; accepted for Git compatibility).
+    #[clap(short = 'I')]
+    no_binary: bool,
+
+    /// Print NUM lines of trailing context after matching lines.
+    #[clap(short = 'A', long = "after-context", value_name = "NUM")]
+    after_context: Option<usize>,
+
+    /// Print NUM lines of leading context before matching lines.
+    #[clap(short = 'B', long = "before-context", value_name = "NUM")]
+    before_context: Option<usize>,
+
+    /// Print NUM lines of context before and after matching lines.
+    #[clap(short = 'C', long = "context", value_name = "NUM")]
+    context: Option<usize>,
 
     /// Ignore case distinctions in patterns and data.
     #[clap(short = 'i', long)]
@@ -100,6 +155,10 @@ pub struct GrepArgs {
     cached: bool,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// A single grep match result.
 #[derive(Debug, Clone, Serialize)]
 pub struct GrepMatch {
@@ -112,6 +171,9 @@ pub struct GrepMatch {
     /// The 0-based byte offset of the match start, if --byte-offset was requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub byte_offset: Option<usize>,
+    /// True when this line is surrounding context (-A/-B/-C), not an actual match.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_context: bool,
 }
 
 /// Internal representation of a file to search, with optional blob hash for tree/index searches.
@@ -226,6 +288,14 @@ fn is_binary(content: &[u8]) -> bool {
 }
 
 async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
+    if args.perl_regexp {
+        return Err(
+            CliError::command_usage("grep -P/--perl-regexp is not supported")
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("use the default regex dialect (-E) or -F for a fixed-string search"),
+        );
+    }
+
     let patterns = collect_patterns(args)?;
     let matcher = build_matcher(&patterns, args)?;
     let all_matchers = if args.all_match && patterns.len() > 1 {
@@ -276,7 +346,9 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
             }
         };
 
-        if is_binary(&content) {
+        // Binary files are skipped by default (Git's `-I` is the default here);
+        // `-a`/`--text` forces them to be searched as text instead.
+        if is_binary(&content) && !args.text {
             warnings.push(GrepWarning {
                 path: search_file.path.display().to_string(),
                 message: "skipped binary file".to_string(),
@@ -293,8 +365,10 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
                     .any(|line| pattern_matcher.is_match(&line))
             })
         });
+        // Count only real matches, not the surrounding -A/-B/-C context lines.
+        let actual_match_count = file_matches.iter().filter(|entry| !entry.3).count();
         let match_count = if all_patterns_match {
-            file_matches.len()
+            actual_match_count
         } else {
             0
         };
@@ -310,15 +384,16 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
             } else if args.count {
                 counts.push(GrepCount {
                     path: search_file.path.display().to_string(),
-                    count: file_matches.len(),
+                    count: actual_match_count,
                 });
             } else {
-                for (line_num, line, byte_off) in file_matches {
+                for (line_num, line, byte_off, is_ctx) in file_matches {
                     matches.push(GrepMatch {
                         path: search_file.path.display().to_string(),
                         line_number: line_num,
                         line,
-                        byte_offset: args.byte_offset.then_some(byte_off),
+                        byte_offset: (args.byte_offset && !is_ctx).then_some(byte_off),
+                        is_context: is_ctx,
                     });
                 }
             }
@@ -690,37 +765,74 @@ fn read_loose_blob_size(
 
 /// Search for pattern matches in file content.
 /// Returns a list of (line_number, line_content, byte_offset) tuples.
+/// Resolve the effective (before, after) context-line counts from `-B`/`-A`/`-C`.
+/// `-C` provides the default for either side; the side-specific flags win.
+fn context_window(args: &GrepArgs) -> (usize, usize) {
+    let before = args.before_context.or(args.context).unwrap_or(0);
+    let after = args.after_context.or(args.context).unwrap_or(0);
+    (before, after)
+}
+
+/// Search `content` line by line, returning `(line_number, line, byte_offset,
+/// is_context)` tuples. When `-A`/`-B`/`-C` context is requested, surrounding
+/// lines are included with `is_context = true`; `byte_offset` is only meaningful
+/// for actual match lines.
 fn search_in_content(
     content: &[u8],
     matcher: &regex::Regex,
     args: &GrepArgs,
-) -> Vec<(usize, String, usize)> {
+) -> Vec<(usize, String, usize, bool)> {
     let content_str = String::from_utf8_lossy(content);
     let lines: Vec<&str> = content_str.lines().collect();
+    let (before, after) = context_window(args);
 
-    let mut results: Vec<(usize, String, usize)> = Vec::new();
+    // First pass: collect the 0-based indices of matching lines.
+    let match_indices: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            let m = matcher.is_match(line);
+            if args.invert_match { !m } else { m }
+        })
+        .map(|(idx, _)| idx)
+        .collect();
 
-    for (idx, line) in lines.iter().enumerate() {
-        let line_num = idx + 1;
-        let has_match = if args.invert_match {
-            !matcher.is_match(line)
+    let byte_off_of = |idx: usize| -> usize {
+        if args.byte_offset {
+            matcher.find(lines[idx]).map(|m| m.start()).unwrap_or(0)
         } else {
-            matcher.is_match(line)
-        };
+            0
+        }
+    };
 
-        if has_match {
-            // Find byte offset of first match
-            let byte_off = if args.byte_offset {
-                matcher.find(line).map(|m| m.start()).unwrap_or(0)
-            } else {
-                0
-            };
+    // Fast path: no context requested.
+    if before == 0 && after == 0 {
+        return match_indices
+            .into_iter()
+            .map(|idx| (idx + 1, lines[idx].to_string(), byte_off_of(idx), false))
+            .collect();
+    }
 
-            results.push((line_num, line.to_string(), byte_off));
+    // Expand each match to its context window, deduping overlapping windows via
+    // an ordered set, then mark which emitted lines are real matches.
+    let match_set: std::collections::HashSet<usize> = match_indices.iter().copied().collect();
+    let mut emit: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    let last = lines.len().saturating_sub(1);
+    for &idx in &match_indices {
+        let lo = idx.saturating_sub(before);
+        let hi = (idx + after).min(last);
+        for i in lo..=hi {
+            emit.insert(i);
         }
     }
 
-    results
+    emit.into_iter()
+        .map(|idx| {
+            let is_match = match_set.contains(&idx);
+            let byte_off = if is_match { byte_off_of(idx) } else { 0 };
+            (idx + 1, lines[idx].to_string(), byte_off, !is_match)
+        })
+        .collect()
 }
 
 /// Render grep output to stdout or JSON.
@@ -764,30 +876,48 @@ fn render_grep_output(
             pager.write_line(&format!("{}:{}", count.path, count.count))?;
         }
     } else {
-        // Regular match output with optional highlighting
+        // Regular match output with optional highlighting and -A/-B/-C context.
+        // Match lines use ':' separators; context lines use '-'. A "--" line
+        // separates non-adjacent context groups (Git's behavior).
+        let (before, after) = context_window(args);
+        let context_active = before > 0 || after > 0;
+        let mut prev: Option<(String, usize)> = None;
         for match_item in result.matches.as_ref().unwrap_or(&Vec::new()) {
-            let line = if let Some(matcher) = matcher.as_ref().filter(|_| !args.invert_match) {
+            if context_active
+                && let Some((prev_path, prev_line)) = &prev
+                && (*prev_path != match_item.path || match_item.line_number > *prev_line + 1)
+            {
+                pager.write_line("--")?;
+            }
+
+            let sep = if match_item.is_context { "-" } else { ":" };
+            let rendered = if match_item.is_context {
+                match_item.line.clone()
+            } else if let Some(matcher) = matcher.as_ref().filter(|_| !args.invert_match) {
                 colorize_match(&match_item.line, matcher)
             } else {
                 match_item.line.clone()
             };
 
-            if args.byte_offset {
-                pager.write_line(&format!(
+            let formatted = if args.byte_offset && !match_item.is_context {
+                format!(
                     "{}:{}:{}:{}",
                     match_item.path,
                     match_item.line_number,
                     match_item.byte_offset.unwrap_or(0),
-                    line
-                ))?;
-            } else if args.line_number {
-                pager.write_line(&format!(
-                    "{}:{}:{}",
-                    match_item.path, match_item.line_number, line
-                ))?;
+                    rendered
+                )
+            } else if args.line_number || args.byte_offset {
+                format!(
+                    "{}{sep}{}{sep}{}",
+                    match_item.path, match_item.line_number, rendered
+                )
             } else {
-                pager.write_line(&format!("{}:{}", match_item.path, line))?;
-            }
+                format!("{}{sep}{}", match_item.path, rendered)
+            };
+            pager.write_line(&formatted)?;
+
+            prev = Some((match_item.path.clone(), match_item.line_number));
         }
     }
 
@@ -871,6 +1001,15 @@ mod tests {
 
         let args = GrepArgs::parse_from(["grep", "pattern", "src/", "lib/"]);
         assert_eq!(args.pathspec, vec!["src/", "lib/"]);
+    }
+
+    #[test]
+    fn test_grep_args_dialect_and_binary_flags() {
+        assert!(GrepArgs::parse_from(["grep", "-E", "pat"]).extended_regexp);
+        assert!(GrepArgs::parse_from(["grep", "-G", "pat"]).basic_regexp);
+        assert!(GrepArgs::parse_from(["grep", "-P", "pat"]).perl_regexp);
+        assert!(GrepArgs::parse_from(["grep", "-a", "pat"]).text);
+        assert!(GrepArgs::parse_from(["grep", "-I", "pat"]).no_binary);
     }
 
     #[test]
@@ -968,6 +1107,43 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 2);
         assert_eq!(results[0].2, 4); // "bar" starts at byte offset 4 in "foo bar"
+    }
+
+    #[test]
+    fn test_search_in_content_after_context() {
+        let content = b"a\nMATCH\nb\nc\n";
+        let args = GrepArgs::parse_from(["grep", "-A", "1", "MATCH"]);
+        let patterns = collect_patterns(&args).unwrap();
+        let matcher = build_matcher(&patterns, &args).unwrap();
+        let results = search_in_content(content, &matcher, &args);
+        // line 2 (match) + line 3 (trailing context)
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, 2);
+        assert!(!results[0].3, "match line must not be marked context");
+        assert_eq!(results[1].0, 3);
+        assert!(results[1].3, "trailing line must be marked context");
+    }
+
+    #[test]
+    fn test_search_in_content_symmetric_context() {
+        let content = b"a\nb\nMATCH\nc\nd\n";
+        let args = GrepArgs::parse_from(["grep", "-C", "1", "MATCH"]);
+        let patterns = collect_patterns(&args).unwrap();
+        let matcher = build_matcher(&patterns, &args).unwrap();
+        let results = search_in_content(content, &matcher, &args);
+        // lines 2 (ctx), 3 (match), 4 (ctx)
+        assert_eq!(results.len(), 3);
+        assert_eq!(
+            results.iter().filter(|r| !r.3).count(),
+            1,
+            "exactly one match"
+        );
+        assert_eq!(results[0].0, 2);
+        assert!(results[0].3);
+        assert_eq!(results[1].0, 3);
+        assert!(!results[1].3);
+        assert_eq!(results[2].0, 4);
+        assert!(results[2].3);
     }
 
     #[test]

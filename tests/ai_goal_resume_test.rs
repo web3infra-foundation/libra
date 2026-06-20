@@ -1,6 +1,6 @@
 //! OC-Phase 6 P6.7 — resume replay determinism.
 //!
-//! Spec: `docs/improvement/opencode.md` lines 1499 ("--resume <thread>
+//! Spec: `docs/development/commands/_general.md` lines 1499 ("--resume <thread>
 //! replay active Goal").
 //!
 //! When the user runs `libra code --resume <thread>` the supervisor

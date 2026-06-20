@@ -148,3 +148,47 @@ fn code_ui_snapshot_uses_projection_thread_identity_and_scheduler_state() {
         bundle.scheduler.active_task_id.unwrap().to_string()
     );
 }
+
+/// Plan snapshots must carry `updated_at` from the scheduler revision,
+/// not `Utc::now()`. Otherwise two renders of the same projection
+/// emit different `updatedAt` values, breaking browser change-detection
+/// heuristics and making snapshot contract tests non-deterministic.
+/// Pins the fix that replaced `Utc::now()` with
+/// `bundle.scheduler.updated_at` in `code_ui_plan_snapshots`.
+#[test]
+fn code_ui_plan_snapshot_updated_at_tracks_scheduler_revision_not_wall_clock() {
+    let bundle = sample_thread_bundle();
+    let scheduler_updated_at = bundle.scheduler.updated_at;
+    let first = snapshot_from_thread_bundle(
+        "/repo",
+        CodeUiProviderInfo::default(),
+        CodeUiCapabilities::default(),
+        &bundle,
+    );
+
+    // Sleep beyond clock granularity so wall-clock changes are
+    // observable; the deterministic plan timestamp must NOT change.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    let second = snapshot_from_thread_bundle(
+        "/repo",
+        CodeUiProviderInfo::default(),
+        CodeUiCapabilities::default(),
+        &bundle,
+    );
+
+    assert_eq!(first.plans.len(), 2);
+    assert_eq!(second.plans.len(), 2);
+    for plan in first.plans.iter().chain(second.plans.iter()) {
+        assert_eq!(
+            plan.updated_at, scheduler_updated_at,
+            "plan snapshot updated_at must equal scheduler.updated_at, \
+             not wall-clock Utc::now()",
+        );
+    }
+    assert_eq!(
+        first.plans[0].updated_at, second.plans[0].updated_at,
+        "two renders of the same scheduler revision must produce \
+         identical plan updated_at",
+    );
+}

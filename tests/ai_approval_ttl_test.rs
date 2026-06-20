@@ -9,7 +9,7 @@ use std::{
 use chrono::{TimeZone, Utc};
 use libra::internal::ai::sandbox::{
     ApprovalCachePolicy, ApprovalScope, ApprovalSensitivityTier, ApprovalStore, AskForApproval,
-    ExecApprovalRequest, ReviewDecision, SandboxPermissions, ToolApprovalContext,
+    ExecApprovalRequest, NetworkAccess, ReviewDecision, SandboxPermissions, ToolApprovalContext,
     request_cached_approval_with_keys, shell_approval_key, shell_approval_key_with_scope,
 };
 use tokio::sync::{Mutex, mpsc::error::TryRecvError};
@@ -248,7 +248,7 @@ fn test_approval_request(
         reason: None,
         is_retry: false,
         sandbox_label: "workspace-write".to_string(),
-        network_access: false,
+        network_access: NetworkAccess::Denied,
         writable_roots: vec![PathBuf::from("/workspace")],
         cache_disabled_reason: None,
         response_tx,

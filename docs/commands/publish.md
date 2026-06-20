@@ -44,7 +44,7 @@ Current implementation status:
   Git objects, refs metadata, and publish AI index/graph/bundle/object
   envelopes from D1/R2 into a local Libra repository.
 - The remaining live-only publish gate is tracked in
-  `docs/improvement/publish.md`; it requires a real all-refs sync,
+  `docs/development/commands/publish.md`; it requires a real all-refs sync,
   cloud clone restore, deployed Worker refs/tree/file API smoke, and
   Cloudflare credentials with deploy permissions.
 
@@ -127,9 +127,10 @@ Current behavior:
 - Without `--dry-run`, the command requires `publish.site_id` plus
   `LIBRA_D1_ACCOUNT_ID`, `LIBRA_D1_API_TOKEN`, `LIBRA_D1_DATABASE_ID`,
   `LIBRA_STORAGE_ENDPOINT`, `LIBRA_STORAGE_BUCKET`,
-  `LIBRA_STORAGE_ACCESS_KEY`, and `LIBRA_STORAGE_SECRET_KEY`. It loads
-  the matching `publish_sites` row from D1 for `repo_id`, visibility,
-  max preview bytes, and `refs_generation`.
+  `LIBRA_STORAGE_ACCESS_KEY`, and `LIBRA_STORAGE_SECRET_KEY`. Libra reads
+  repo-local `vault.env.*` first, then global `vault.env.*`, then exported
+  environment variables. It loads the matching `publish_sites` row from D1
+  for `repo_id`, visibility, max preview bytes, and `refs_generation`.
 - Full sync writes one code snapshot per unique local branch/tag
   revision, uploads text previews and `code-manifest.json` to R2, writes
   binary, too-large, and ignored files as D1 metadata only, uploads
@@ -203,7 +204,7 @@ Current behavior:
   from `libra publish init`.
 - Fails before running commands when the template is missing,
   conflicted, outdated, or when `worker/wrangler.jsonc` still contains
-  `REPLACE_WITH_D1_DATABASE_ID`.
+  `REPLACE_WITH_D1_DATABASE_ID` or `REPLACE_WITH_R2_BUCKET_NAME`.
 - Allows a `modified` template status so user-owned Worker edits can be
   deployed intentionally.
 - Runs `pnpm build` from `worker/`.
@@ -261,8 +262,8 @@ configuration keys when they are present:
 `libra publish sync`, `libra publish status --site-id`, and
 `libra+cloud://` clone restore read Cloudflare account ids, API tokens,
 and R2 S3 credentials from the same `LIBRA_D1_*` / `LIBRA_STORAGE_*`
-environment variables that `libra cloud` uses. These secrets are never
-written into the Worker template or to `ConfigKv`.
+keys that `libra cloud` uses, with `vault.env.*` taking priority over the
+process environment. These secrets are never written into the Worker template.
 
 ## Files
 
@@ -337,8 +338,8 @@ LIBRA_ENABLE_TEST_LIVE_CLOUD=1 \
 cargo test --features test-live-cloud publish_live -- --test-threads=1
 ```
 
-Required for the D1/R2 prerequisite portion, either as exported
-environment variables or as key/value lines in the repository
+Required for the D1/R2 prerequisite portion, either as `vault.env.*` config
+entries, exported environment variables, or key/value lines in the repository
 `.env.test` file:
 
 - `LIBRA_D1_ACCOUNT_ID`
@@ -358,12 +359,56 @@ the D1 `clone_domain`, set `LIBRA_PUBLISH_LIVE_SLUG` only when probing
 a pre-existing deployed site, and set `LIBRA_PUBLISH_LIVE_FILE_PATH`
 when the root tree has no direct file entry to probe.
 
+## Examples
+
+```bash
+# Materialise the local Worker template scaffold
+libra publish init --slug my-site --clone-domain code.example.com
+
+# Inspect local Worker template / D1 ref drift
+libra publish status
+
+# Inspect a specific published site by UUID
+libra publish status --site-id <uuid>
+
+# Plan the publish without writing to D1/R2
+libra publish sync --dry-run
+
+# Sync default refs to D1/R2
+libra publish sync
+
+# Sync a single named ref
+libra publish sync --ref refs/heads/main
+
+# Re-upload every file/object regardless of CAS revision
+libra publish sync --force
+
+# Allow a path the deny list normally blocks (private sites)
+libra publish sync --allow-sensitive-path docs/private.md
+
+# Build the Worker and deploy to Cloudflare
+libra publish deploy
+
+# Build only; skip Cloudflare mutation
+libra publish deploy --skip-deploy
+
+# Disable a published site without deleting D1/R2 data
+libra publish unpublish --site-id <uuid> --yes
+
+# Structured JSON envelope for agents
+libra publish --json sync --dry-run
+```
+
+The same banner is rendered by `libra publish --help` so the doc and the
+CLI surface stay in sync (cross-cutting `--help` EXAMPLES rollout, see
+`docs/development/commands/_general.md` item B).
+
 ## See also
 
 - `libra clone` — restores Cloudflare D1 / R2 publish snapshots via
   the `libra+cloud://<clone-domain>/<slug>` source scheme.
 - `libra cloud` — private Cloudflare backup that `publish` builds on
   top of.
-- `docs/improvement/publish.md` — internal design + phased rollout.
+- `docs/development/commands/publish.md` — internal design + phased rollout.
 - `docs/agent/ai-object-model-reference.md` — the AI object model
   contract `publish` exports.

@@ -119,6 +119,32 @@ async fn test_lfs_track_untrack() {
 }
 
 #[tokio::test]
+/// Pre-v0.17.1065 `libra lfs track` (list mode) printed nothing at all
+/// on a fresh repo with no tracked patterns — the user could not tell
+/// whether the command had run or hung. Pin the new behavior: the
+/// "Listing tracked patterns" header is always emitted so empty is a
+/// confirmed-empty, not a silent no-op.
+async fn test_lfs_track_list_prints_header_on_empty_repo() {
+    let temp_repo = init_temp_repo();
+    let temp_path = temp_repo.path();
+
+    let output = libra_command(temp_path)
+        .args(["lfs", "track"])
+        .output()
+        .expect("failed to run lfs track");
+    assert!(
+        output.status.success(),
+        "lfs track (list) should succeed on empty repo: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Listing tracked patterns"),
+        "empty-repo lfs track should still print the header, stdout={stdout:?}"
+    );
+}
+
+#[tokio::test]
 /// Test JSON output for local LFS tracking operations.
 async fn test_lfs_track_and_untrack_json_output() {
     let temp_repo = init_temp_repo();
@@ -300,6 +326,131 @@ async fn test_lfs_locks_cli_returns_locks_from_mock_server() {
     assert_eq!(stdout["data"]["locks"][0]["id"], "lock-1");
 }
 
+#[tokio::test]
+/// Pre-v0.17.1067 `libra lfs track "*.txt"` ran twice in a row would
+/// produce zero stdout on the second invocation — the dedup fix in
+/// v0.17.1057 returned an empty `added` Vec and the human renderer
+/// silently no-op'd. Pin the confirmed-already-tracked notice so the
+/// command never looks like a hang.
+async fn test_lfs_track_prints_notice_when_all_patterns_already_tracked() {
+    let temp_repo = init_temp_repo();
+    let temp_path = temp_repo.path();
+
+    // First track adds the pattern; second track has nothing new to add.
+    libra_command(temp_path)
+        .args(["lfs", "track", "*.txt"])
+        .output()
+        .expect("first track should succeed");
+
+    let output = libra_command(temp_path)
+        .args(["lfs", "track", "*.txt"])
+        .output()
+        .expect("second track should succeed");
+    assert!(
+        output.status.success(),
+        "second track should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No new patterns added (already tracked)"),
+        "duplicate-track should print the already-tracked notice, stdout={stdout:?}"
+    );
+}
+
+#[tokio::test]
+/// Pre-v0.17.1067 `libra lfs untrack "*.txt"` on a pattern that was
+/// never tracked produced zero stdout — the human renderer silently
+/// no-op'd. Pin the confirmed-no-match notice.
+async fn test_lfs_untrack_prints_notice_when_no_match() {
+    let temp_repo = init_temp_repo();
+    let temp_path = temp_repo.path();
+
+    let output = libra_command(temp_path)
+        .args(["lfs", "untrack", "*.never-tracked"])
+        .output()
+        .expect("untrack should succeed");
+    assert!(
+        output.status.success(),
+        "untrack of an untracked pattern should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No matching LFS patterns to untrack"),
+        "no-match untrack should print the no-op notice, stdout={stdout:?}"
+    );
+}
+
+#[tokio::test]
+/// Pre-v0.17.1067 `libra lfs ls-files` on a repo with no LFS-tracked
+/// files printed zero stdout. Pin the confirmed-empty notice for the
+/// default human path while preserving silence under `--name-only`
+/// (which shell pipelines rely on).
+async fn test_lfs_ls_files_prints_notice_when_empty_but_silent_with_name_only() {
+    let temp_repo = init_temp_repo();
+    let temp_path = temp_repo.path();
+
+    // Default human mode → notice present.
+    let output = libra_command(temp_path)
+        .args(["lfs", "ls-files"])
+        .output()
+        .expect("ls-files should succeed");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No LFS files"),
+        "empty ls-files should print the no-op notice, stdout={stdout:?}"
+    );
+
+    // --name-only → silent (pipeline consumers).
+    let output = libra_command(temp_path)
+        .args(["lfs", "ls-files", "--name-only"])
+        .output()
+        .expect("ls-files --name-only should succeed");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "empty ls-files --name-only should stay silent, stdout={stdout:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Pre-v0.17.1066 `libra lfs locks` (human mode) printed nothing when
+/// the server returned an empty list — same silent-no-op UX class as
+/// the `track-list` fix in v0.17.1065. Pin the new "No locks on the
+/// current branch" notice so users always see a confirmed-empty signal.
+async fn test_lfs_locks_human_prints_notice_when_empty() {
+    let app = Router::new().route(
+        "/locks",
+        get(|| async { Json(json!({ "locks": [], "next_cursor": "" })) }),
+    );
+    let addr = spawn_mock_lfs_server(app).await;
+    let repo = init_repo_with_mock_remote(&format!("http://{addr}"));
+    let repo_path = repo.path().to_path_buf();
+
+    let output = tokio::task::spawn_blocking(move || {
+        libra_command(&repo_path)
+            .args(["lfs", "locks"])
+            .output()
+            .expect("failed to run lfs locks")
+    })
+    .await
+    .expect("spawn_blocking join failed");
+
+    assert!(
+        output.status.success(),
+        "lfs locks should succeed on empty server response; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No locks"),
+        "empty `lfs locks` should still print a notice, stdout={stdout:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 /// `lfs locks --json` against a mock server that returns 403; verifies the CLI surfaces
 /// stable error code `LBR-AUTH-002` and exits non-zero.
@@ -451,4 +602,303 @@ async fn test_lfs_unlock_cli_success_with_force_and_id() {
     assert_eq!(stdout["command"], "lfs");
     assert_eq!(stdout["data"]["action"], "unlock");
     assert_eq!(stdout["data"]["path"], "tracked.txt");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// `lfs unlock <path>` (no `--id`) exercises the path → id lookup
+/// branch in `LfsCmds::Unlock`: the CLI first calls `GET /locks?path=...`
+/// to resolve the lock id, then issues `POST /locks/<id>/unlock`. No
+/// prior CLI test covered this branch — only the `--id`-supplied paths.
+async fn test_lfs_unlock_by_path_resolves_lock_id_via_get_locks() {
+    let app = Router::new()
+        .route(
+            "/locks",
+            get(|| async {
+                Json(json!({
+                    "locks": [{
+                        "id": "lock-by-path",
+                        "path": "tracked.bin",
+                        "locked_at": "2026-01-01T00:00:00Z",
+                        "owner": { "name": "tester" }
+                    }],
+                    "next_cursor": ""
+                }))
+            }),
+        )
+        .route(
+            "/locks/{id}/unlock",
+            post(|| async {
+                Json(json!({
+                    "lock": {
+                        "id": "lock-by-path",
+                        "path": "tracked.bin",
+                        "locked_at": "2026-01-01T00:00:00Z",
+                        "owner": { "name": "tester" }
+                    }
+                }))
+            }),
+        );
+    let addr = spawn_mock_lfs_server(app).await;
+    let repo = init_repo_with_mock_remote(&format!("http://{addr}"));
+    let repo_path = repo.path().to_path_buf();
+
+    // Use `--force` to bypass the path-existence + clean-tree pre-checks.
+    // `force` short-circuits the pre-check guard in `LfsCmds::Unlock` but
+    // does *not* skip the `id.is_none()` lookup branch in the unlock body,
+    // which is exactly what this test exercises: the path → id resolution
+    // via `get_locks`. We assert the resolved id came from the server
+    // response, proving we went through the path branch and not a `--id`
+    // arg.
+    let output = tokio::task::spawn_blocking(move || {
+        libra_command(&repo_path)
+            .args(["--json", "lfs", "unlock", "tracked.bin", "--force"])
+            .output()
+            .expect("failed to run lfs unlock")
+    })
+    .await
+    .expect("spawn_blocking join failed");
+
+    assert!(
+        output.status.success(),
+        "lfs unlock by path should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("unlock stdout should be JSON");
+    assert_eq!(stdout["data"]["action"], "unlock");
+    assert_eq!(stdout["data"]["path"], "tracked.bin");
+    // The id must come from the get_locks response, not from a --id arg.
+    assert_eq!(stdout["data"]["id"], "lock-by-path");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Pre-v0.17.1071 `current_refspec` printed
+/// `"fatal: HEAD is detached"` via `emit_legacy_stderr` then returned
+/// `None`. Every caller wrapped the `None` in a typed error and
+/// reported it again through the normal `OutputConfig` error renderer.
+/// Net effect: detached-HEAD users (especially `--json` consumers) saw
+/// two stderr lines for a single failure — the legacy text plus the
+/// typed envelope.
+///
+/// Pin the deduplicated behavior by running `lfs locks --json` on a
+/// detached HEAD and asserting stderr parses as exactly one JSON
+/// envelope (no leading legacy line, no trailing duplicate).
+async fn test_lfs_locks_on_detached_head_emits_single_error_envelope() {
+    let temp_repo = init_temp_repo();
+    let temp_path = temp_repo.path();
+
+    // Need at least one commit so HEAD can be detached to it.
+    for (k, v) in [
+        ("user.name", "tester"),
+        ("user.email", "tester@example.com"),
+    ] {
+        let cfg = libra_command(temp_path)
+            .args(["config", k, v])
+            .output()
+            .unwrap();
+        assert!(
+            cfg.status.success(),
+            "config {k}: {}",
+            String::from_utf8_lossy(&cfg.stderr)
+        );
+    }
+    fs::write(temp_path.join("seed.txt"), b"hi").unwrap();
+    let add = libra_command(temp_path)
+        .args(["add", "seed.txt"])
+        .output()
+        .unwrap();
+    assert!(
+        add.status.success(),
+        "add: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let commit = libra_command(temp_path)
+        .args(["commit", "-m", "seed"])
+        .output()
+        .unwrap();
+    assert!(
+        commit.status.success(),
+        "commit: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+
+    // Detach HEAD by checking out the commit hash directly.
+    let head = libra_command(temp_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let head_hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    assert!(
+        !head_hash.is_empty(),
+        "rev-parse HEAD returned empty; stderr={}",
+        String::from_utf8_lossy(&head.stderr)
+    );
+    let detach = libra_command(temp_path)
+        .args(["switch", "--detach", &head_hash])
+        .output()
+        .unwrap();
+    assert!(
+        detach.status.success(),
+        "switch --detach {head_hash}: {}",
+        String::from_utf8_lossy(&detach.stderr)
+    );
+
+    let output = libra_command(temp_path)
+        .args(["--json", "lfs", "locks"])
+        .output()
+        .expect("lfs locks should run");
+    assert!(
+        !output.status.success(),
+        "lfs locks on detached HEAD should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let trimmed = stderr.trim();
+
+    // The whole stderr must parse as exactly one JSON envelope; no
+    // unwrapped "fatal: HEAD is detached" line leaking before it.
+    let envelope: serde_json::Value = serde_json::from_str(trimmed).unwrap_or_else(|err| {
+        panic!("stderr should parse as a single JSON envelope: {err}; stderr={trimmed:?}")
+    });
+    assert_eq!(envelope["error_code"], "LBR-REPO-003");
+
+    // Defensive: the legacy text "fatal: HEAD is detached" must NOT
+    // appear as a standalone line before the JSON envelope.
+    assert!(
+        !trimmed.starts_with("fatal: HEAD is detached"),
+        "stderr should not begin with the legacy plain-text error; stderr={trimmed:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// `lfs unlock <path>` (no `--id`) must surface a typed error when
+/// `get_locks?path=...` returns an empty list — there is no id to
+/// unlock by. Asserts the fatal error envelope carries
+/// `LBR-REPO-001` (`RepoStateInvalid`) and a hint-bearing message
+/// rather than a generic 500 from the unlock leg or, worse, a panic.
+async fn test_lfs_unlock_by_path_returns_typed_error_when_no_lock_found() {
+    let app = Router::new().route(
+        "/locks",
+        get(|| async { Json(json!({ "locks": [], "next_cursor": "" })) }),
+    );
+    let addr = spawn_mock_lfs_server(app).await;
+    let repo = init_repo_with_mock_remote(&format!("http://{addr}"));
+    let repo_path = repo.path().to_path_buf();
+
+    let output = tokio::task::spawn_blocking(move || {
+        libra_command(&repo_path)
+            .args(["--json", "lfs", "unlock", "absent.bin", "--force"])
+            .output()
+            .expect("failed to run lfs unlock")
+    })
+    .await
+    .expect("spawn_blocking join failed");
+
+    assert!(
+        !output.status.success(),
+        "lfs unlock without a lock should fail; stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let envelope: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|err| panic!("error envelope should be JSON: {err}; stderr={stderr}"));
+    assert_eq!(envelope["error_code"], "LBR-REPO-003");
+    assert!(
+        envelope["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("no lock found for path 'absent.bin'")),
+        "message should mention the offending path; envelope={envelope}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// `lfs unlock --id <id> <path>` should succeed when the path does not
+/// exist locally — `--id` makes the path purely a label (the id is the
+/// lookup key on the server). Prior to the fix, this case required
+/// `--force`, which has stronger semantics (force-release a lock you do
+/// not own).
+async fn test_lfs_unlock_with_id_skips_path_existence_check() {
+    let app = Router::new().route(
+        "/locks/{id}/unlock",
+        post(|| async {
+            Json(json!({
+                "lock": {
+                    "id": "lock-99",
+                    "path": "deleted.bin",
+                    "locked_at": "2026-01-01T00:00:00Z",
+                    "owner": { "name": "tester" }
+                }
+            }))
+        }),
+    );
+    let addr = spawn_mock_lfs_server(app).await;
+    let repo = init_repo_with_mock_remote(&format!("http://{addr}"));
+    let repo_path = repo.path().to_path_buf();
+
+    // Note: no `--force`, and `deleted.bin` does not exist in the repo.
+    let output = tokio::task::spawn_blocking(move || {
+        libra_command(&repo_path)
+            .args(["--json", "lfs", "unlock", "deleted.bin", "--id", "lock-99"])
+            .output()
+            .expect("failed to run lfs unlock")
+    })
+    .await
+    .expect("spawn_blocking join failed");
+
+    assert!(
+        output.status.success(),
+        "lfs unlock --id should bypass path check; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("unlock stdout should be JSON");
+    assert_eq!(stdout["data"]["action"], "unlock");
+    assert_eq!(stdout["data"]["id"], "lock-99");
+    assert_eq!(stdout["data"]["path"], "deleted.bin");
+}
+
+/// `libra lfs --help` surfaces the EXAMPLES banner so users see the
+/// canonical invocation per sub-command (`track`, `untrack`, `ls-files`,
+/// `locks`, `lock`, `unlock`) plus a JSON variant without reading the
+/// design doc. Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/development/commands/_general.md` item B.
+#[test]
+fn test_lfs_help_lists_examples_banner() {
+    let repo = tempfile::tempdir().expect("tempdir for lfs --help");
+    let output = libra_command(repo.path())
+        .args(["lfs", "--help"])
+        .output()
+        .expect("failed to run libra lfs --help");
+    assert!(
+        output.status.success(),
+        "lfs --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "lfs --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(".libra_attributes"),
+        "lfs --help should name the real Libra attributes file, stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains(".libraattributes"),
+        "lfs --help should not mention the old misspelled attributes file, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra lfs track",
+        "libra lfs untrack",
+        "libra lfs ls-files",
+        "libra lfs locks",
+        "libra lfs lock build/output.bin",
+        "libra lfs unlock build/output.bin",
+        "libra lfs unlock --force",
+        "libra lfs --json ls-files",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "lfs --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
 }

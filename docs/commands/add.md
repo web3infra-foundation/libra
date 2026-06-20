@@ -102,6 +102,23 @@ in the output but do not cause the command to exit with an error.
 libra add --ignore-errors src/
 ```
 
+### `--pathspec-from-file <file>`
+
+Read pathspecs from `<file>` (one per line) and merge them with any pathspecs given on
+the command line. Use `-` is not supported; pass a real path. Pair with
+`--pathspec-file-nul` when the list is NUL-separated (e.g. produced by another tool's
+`-z` output). Empty lines are ignored.
+
+```bash
+libra add --pathspec-from-file paths.txt
+libra add --pathspec-from-file paths.bin --pathspec-file-nul
+```
+
+### `--pathspec-file-nul`
+
+Treat the `--pathspec-from-file` input as NUL-separated rather than newline-separated.
+Requires `--pathspec-from-file`; using it alone is a usage error.
+
 ## Common Commands
 
 ```bash
@@ -111,6 +128,7 @@ libra add .
 libra add -n file.txt
 libra add --refresh
 libra add --ignore-errors src/
+libra add --pathspec-from-file paths.txt
 ```
 
 ## Human Output

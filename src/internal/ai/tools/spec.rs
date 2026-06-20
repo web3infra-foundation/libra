@@ -353,7 +353,7 @@ impl ToolSpec {
 
     /// Create a ToolSpec for `update_goal_progress`.
     ///
-    /// Used inside Goal mode (`docs/improvement/opencode.md` lines
+    /// Used inside Goal mode (`docs/development/commands/_general.md` lines
     /// 540-560, 1808). The model invokes this between `submit_goal_complete`
     /// attempts to record progress without claiming completion. The
     /// supervisor (P6.3) turns each successful call into a
@@ -418,7 +418,7 @@ impl ToolSpec {
 
     /// Create a ToolSpec for `submit_goal_complete`.
     ///
-    /// Used inside Goal mode (`docs/improvement/opencode.md` lines
+    /// Used inside Goal mode (`docs/development/commands/_general.md` lines
     /// 657-661, 1808). The model invokes this when it believes the Goal
     /// is satisfied. The supervisor (P6.3) turns each successful call
     /// into a `GoalEvent::CompletionClaimed` envelope and runs the
@@ -829,7 +829,7 @@ It is important to remember:
     /// flag-off invariant.
     ///
     /// Wire shape (mirrors `TaskInvocation` in
-    /// `docs/improvement/opencode.md`):
+    /// `docs/development/commands/_general.md`):
     ///
     /// ```json
     /// {

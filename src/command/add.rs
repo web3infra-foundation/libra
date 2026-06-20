@@ -58,8 +58,10 @@ EXAMPLES:
     libra add --refresh                Refresh index metadata without staging";
 
 /// Stage file contents for the next commit.
-///
-/// See `libra add --help` for the same EXAMPLES rendered through clap.
+// EXAMPLES are wired via `#[command(after_help = ADD_EXAMPLES)]` and render
+// at the bottom of `libra add --help`. The meta-commentary that used to live
+// here as a `///` line leaked into clap's `--help` body (see
+// `tests/command/add_test.rs::test_add_help_does_not_leak_impl_meta`).
 #[derive(Parser, Debug)]
 #[command(after_help = ADD_EXAMPLES)]
 pub struct AddArgs {
@@ -101,6 +103,14 @@ pub struct AddArgs {
     /// ignore errors
     #[clap(long)]
     pub ignore_errors: bool,
+
+    /// Read pathspecs from a file (one per line, or NUL-separated with --pathspec-file-nul).
+    #[clap(long = "pathspec-from-file", value_name = "FILE")]
+    pub pathspec_from_file: Option<String>,
+
+    /// Use NUL as the pathspec separator when reading from --pathspec-from-file.
+    #[clap(long = "pathspec-file-nul", requires = "pathspec_from_file")]
+    pub pathspec_file_nul: bool,
 }
 
 /// Domain error for `libra add`.
@@ -341,9 +351,31 @@ pub async fn execute(args: AddArgs) {
 ///   runs after a successful staging pass.
 ///
 /// See: tests::test_add_single_file in tests/command/add_test.rs:12.
-pub async fn execute_safe(args: AddArgs, output: &OutputConfig) -> CliResult<()> {
+pub async fn execute_safe(mut args: AddArgs, output: &OutputConfig) -> CliResult<()> {
     let verbose = args.verbose;
     let dry_run = args.dry_run;
+
+    // If --pathspec-from-file is specified, read and merge pathspecs.
+    if let Some(file) = args.pathspec_from_file.take() {
+        let data = std::fs::read(&file).map_err(|e| {
+            CliError::fatal(format!("cannot read pathspec file '{}': {}", file, e))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+        let separator: u8 = if args.pathspec_file_nul { 0 } else { b'\n' };
+        let from_file: Vec<String> = data
+            .split(|b| *b == separator)
+            .filter_map(|s| {
+                let s = std::str::from_utf8(s).ok()?.trim();
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.to_string())
+                }
+            })
+            .collect();
+        args.pathspec.extend(from_file);
+    }
+
     let result = run_add(&args).await?;
 
     // --- Render output ---
@@ -1073,7 +1105,7 @@ fn check_file_status(file: &Path, index: &Index, workdir: &Path) -> Result<FileS
 /// Generate a `Blob` from a file.
 ///
 /// Functional scope:
-/// - When the file matches a `.libraattributes` LFS filter, returns a pointer
+/// - When the file matches a `.libra_attributes` LFS filter, returns a pointer
 ///   blob via [`Blob::from_lfs_file`]; otherwise reads the file content
 ///   verbatim into a regular blob.
 fn gen_blob_from_file(path: impl AsRef<Path>) -> Blob {

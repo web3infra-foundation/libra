@@ -1,7 +1,7 @@
 # Libra 集成测试计划（可落地执行版）
 
 > 目标：把当前仓库的集成测试能力整理成一份“今天就能跑”的执行手册。
-> 原则：只写仓库里真实存在的命令、测试文件、脚本和 gate；未实现能力统一标记为 `BASELINE_GAP-*`。
+> 原则：只写仓库里真实存在的命令、测试文件和 gate；未实现能力统一标记为 `BASELINE_GAP-*`。
 
 ---
 
@@ -22,8 +22,7 @@
 cargo +nightly fmt --all --check && \
   cargo clippy --all-targets --all-features -- -D warnings && \
   cargo test --no-run --all-targets --features test-provider,test-network,test-live-ai,test-live-cloud && \
-  bash scripts/check_compat_matrix.sh && bash scripts/check_docs_consistency.sh && \
-  bash scripts/check_integration_plan_consistency.sh
+  cargo test --test compat_matrix_alignment -- --test-threads=1
 
 # Wave 1：命令层 + 兼容性
 cargo test --test command_test -- --test-threads=1
@@ -61,8 +60,8 @@ cargo test --test ai_agent_test -- --test-threads=1
 | codex runtime 回归 | 已存在 | `tests/code_codex_runtime_test.rs` |
 | 网络层集成测试 | 已存在 | `tests/network_remotes_test.rs`（`test-network`） |
 | Cloud live 集成测试 | 已存在 | `tests/cloud_storage_backup_test.rs`、`tests/publish_live_test.rs`（`test-live-cloud`） |
-| 文档一致性脚本 | 已存在 | `scripts/check_docs_consistency.sh` |
-| 兼容矩阵一致性脚本 | 已存在 | `scripts/check_compat_matrix.sh` |
+| 文档/兼容一致性 Rust 守卫 | 已存在 | `tests/compat/matrix_alignment.rs` |
+| 集成计划一致性 Rust 守卫 | 已存在 | `tests/compat/matrix_alignment.rs` |
 
 ---
 
@@ -76,9 +75,33 @@ cargo test --test ai_agent_test -- --test-threads=1
 
 ### 2.2 暂不纳入（转 `BASELINE_GAP`）
 
-1. 多机编排脚本（`scripts/integration/*`）与远程分发自动化。
+1. 多机编排调度器与远程分发自动化。
 2. 自定义 `FA-*` 测试 ID 体系（当前仓库无对应测试命名体系）。
 3. `tests/integration/scenarios/*.yml` 驱动器（当前仓库无该目录/运行器）。
+
+### 2.3 Command Coverage Matrix
+
+`tools/integration-runner check-plan` 以本表作为命令覆盖索引：每一行的 `Owner scenarios` 必须只引用 `docs/development/integration-scenarios.yaml` 中已经注册的 `cli.*` / `live.*` 场景。修改 Git 兼容命令、命令参数、输出契约或可观测错误时，必须同步更新 YAML、对应场景文档、runner 实现和本表，确保 `check-plan`、`list`、默认本地 wave 以及相关集成测试方案保持一致。
+
+| 覆盖域 | 主要命令/能力 | Wave | 当前状态 | Owner scenarios |
+|---|---|---:|---|---|
+| Config 基础读写 | `config set/get/list/unset`、默认 local scope、JSON envelope、global DB 隔离 | 1 | 已实现 | `cli.config-basic-kv`, `cli.config-scopes`, `cli.config-unset-compat-flags` |
+| Config 输入、密钥与兼容入口 | `--stdin`、`--encrypt`、`--plaintext`、`--import`、`path`、`edit`、Git 兼容隐藏 flag、SSH/GPG key 生成 | 1 | 已实现 | `cli.config-set-input-and-encryption`, `cli.config-get-default-and-patterns`, `cli.config-list-variants`, `cli.config-import-path-edit`, `cli.config-key-generation`, `cli.config-git-compat-mode` |
+| Init 参数矩阵 | 普通仓库、目标目录、quiet、初始分支、object/ref format、bare/shared、template、from-git、vault | 1 | 已实现 | `cli.init-basic`, `cli.init-directory-and-quiet`, `cli.init-branch-and-format-options`, `cli.init-bare-and-shared`, `cli.init-template`, `cli.init-from-git-repository`, `cli.init-vault` |
+| Core 写入闭环 | `status`、`add`、`commit`、`log`、message source、amend、dry-run、porcelain v2、rename/typechange | 1 | 已实现 | `cli.commit-status-log` |
+| 分支与工作区切换 | `branch`、`switch`、`checkout`、detach、path checkout、远端分支可见性、`switch --guess`/`--no-guess` DWIM、未支持 switch flag 的负向路径、符号引用行为 | 1 | 已实现 | `cli.branch-switch-checkout` |
+| 工作区恢复与差异 | `diff`、`restore`、`reset` 的当前参数面，以及 pathspec-from-file、overlay、keep/merge reset 的负向路径 | 1 | 已实现 | `cli.restore-reset-diff` |
+| 工作流命令 | `stash`、`bisect`、`worktree` 当前参数面及未支持 Git 参数的负向路径 | 1 | 已实现 | `cli.stash-bisect-worktree` |
+| 历史与引用检查 | `tag`、`notes`、`reflog`、`symbolic-ref`、`grep`、`blame`、`describe`、`shortlog` | 1 | 已实现 | `cli.tag-basic`, `cli.notes-smoke`, `cli.reflog-symbolic-ref`, `cli.grep-blame-describe-shortlog` |
+| 历史编辑 | `merge`、`rebase`、`cherry-pick` / `cherry-pick -x`、`revert`、conflict/continue/abort 状态 | 1 | 已实现 | `cli.merge-rebase-cherry-revert-smoke`, `cli.merge-conflict-continue`, `cli.rebase-conflict-continue` |
+| 文件级命令与 LFS 本地能力 | `clean`、`rm`、`mv`、`lfs track/untrack/ls-files`、本地 lock 负向路径 | 1 | 已实现 | `cli.clean-rm-mv-lfs-basic` |
+| 其他 CLI 外壳能力 | `open`、root `--json/-J`、`--machine`、`--quiet`、颜色/progress/exit-code-on-warning | 1 | 已实现 | `cli.open-smoke`, `cli.cross-cutting-flags` |
+| Schema 与本地协议 | `db status/upgrade`、local clone/remote/ls-remote/fetch/pull、shallow fetch、拒绝 file remote push | 2 | 已实现 | `cli.schema-upgrade-observable`, `cli.clone-fetch-pull-local`, `cli.fetch-depth-local`, `cli.push-local-file-remote-rejected` |
+| 对象读取与树遍历 | `rev-parse`、`show-ref` / `show-ref --branches` / `show-ref --no-branches` / `show-ref --no-tags` / `show-ref --hash[=<n>]` / `show-ref --no-hash` / `show-ref --abbrev[=<n>]` / `show-ref --no-abbrev` / `show-ref --dereference` / `show-ref --no-dereference` / `show-ref --verify` / `show-ref --no-verify` / `show-ref --exists` / `show-ref --no-exists` / `show-ref --head` / `show-ref --no-head` / `show-ref --exclude-existing[=<pattern>]`、`for-each-ref --points-at`、`cat-file`、`hash-object --stdin` / `--path` / `--no-filters`、`show`、`rev-list` / multi revision / `A..B` / `^A` / `A...B` / `rev-list --count` / `rev-list -n` / `rev-list --skip` / `rev-list --since` / `rev-list --after` / `rev-list --until` / `rev-list --before` / `rev-list --merges` / `rev-list --no-merges` / `rev-list --min-parents` / `rev-list --max-parents` / `rev-list --no-min-parents` / `rev-list --no-max-parents` / `rev-list --first-parent` / `rev-list --author` / `rev-list --committer` / `rev-list --grep` / `rev-list -- <path>` / `rev-list --left-right` / `rev-list --left-only` / `rev-list --right-only` / `rev-list --cherry-pick` / `rev-list --cherry-mark` / `rev-list --cherry` / `rev-list --parents` / `rev-list --children` / `rev-list --timestamp`、`fsck`、sha256 object format；`ls-tree` 默认/递归/子目录/`--full-name`/`--full-tree` 路径场景 | 2 | 已实现 | `cli.object-readback`, `cli.show-ref-exclude-existing`, `cli.ls-tree-smoke`, `cli.sha256-object-readback` |
+| 维护命令 | `gc`、`prune`、`archive`（tar/zip、`--prefix`、`--output`、`--list`、`TREEISH <path>...` pathspec）、`verify-pack <idx>...` / `verify-pack --pack` / `verify-pack -v` / `verify-pack -s`、内部 `index-pack --stdin` / `--keep` / `--progress` / `--no-progress` fixture | 2 | 已实现 | `cli.gc-smoke`, `cli.archive-smoke`, `cli.verify-pack-smoke` |
+| GitHub live remote | `gh` 创建/清理私有临时 repo、`push` refspec/tag/delete/force/mirror、真实 clone/fetch/pull | 3 | 已实现，需显式 live gate | `live.github-create-push-clone-fetch` |
+
+**剩余覆盖缺口**：默认本地 wave 已覆盖当前 runner 注册的 `cli.*` 场景；需要真实 GitHub 远端的 `live.*` 场景不进入默认阻断门，只能在具备 `gh` 登录态和仓库创建/删除权限时运行。新增或修改 Git 兼容命令时，必须把对应场景加入本表、YAML、场景文档和 runner registry；如果当前 runner 尚未实现，必须在 YAML 和文档中保留明确的未实现状态，而不能只在本表声明覆盖。
 
 ---
 
@@ -99,9 +122,7 @@ cargo test --no-run --all-targets
 cargo test --no-run --all-targets --features test-provider,test-network,test-live-ai,test-live-cloud
 
 # 文档/兼容性一致性
-bash scripts/check_compat_matrix.sh
-bash scripts/check_docs_consistency.sh
-bash scripts/check_integration_plan_consistency.sh   # 本计划自检（见 §9.6）
+cargo test --test compat_matrix_alignment -- --test-threads=1
 ```
 
 ### 3.2 Live 测试前置（可选）
@@ -139,7 +160,7 @@ set -a; source .env.test; set +a
 | `src/internal/protocol/**`、`src/git_protocol.rs` | 1 | + 3 |
 | `src/utils/client_storage.rs`、`src/utils/d1_client.rs` | 1 | + 5 |
 | `src/internal/model/**`、`sql/*.sql` | 1, 2 | — |
-| `Cargo.toml`、`.env.test.example` | 0, 1, 2 | 强制跑 `check_integration_plan_consistency.sh` |
+| `Cargo.toml`、`.env.test.example` | 0, 1, 2 | 强制跑 `compat_matrix_alignment` |
 | `docs/**`、`README.md` | 仅 Wave 0（docs 一致性） | — |
 | `tests/**` | 仅相关 wave | 若动 `tests/harness/**`，跑全 Wave 2 |
 
@@ -148,7 +169,7 @@ set -a; source .env.test; set +a
 ```bash
 git diff --name-only origin/main...HEAD | \
   xargs -n1 -I{} echo "{}" | \
-  awk '...'   # 后续可由 scripts/integration/pick-waves.sh 自动化（见 BASELINE_GAP-INTEG-006）
+  awk '...'   # 后续可由 integration runner 的 pick-waves 子命令自动化（见 BASELINE_GAP-INTEG-006）
 ```
 
 在该脚本落地前，作者手动对照本表，PR 描述里在 `## Test Plan` 段列出实际跑的 wave 集合（见 §9.1）。
@@ -314,7 +335,7 @@ Wave 3/4/5 作为 nightly 或 release 前增强门。
 2. 把 `env-file`、`features`、`provider` 与日志产物绑定，支持 `Wave 4 / 5` 的差异化路由。
 3. 统一产物 schema，便于多节点结果汇总与回放。
 
-### 7.2 推荐文件与示例（建议路径：`scripts/integration/nodes.yaml`）
+### 7.2 推荐文件与示例（建议路径：`tools/integration-runner/config/nodes.yaml`）
 
 ```yaml
 version: 1
@@ -399,8 +420,8 @@ runtime:
     target_permission: "0600"
     redacted_reporting: true
   commands:
-    preflight: "bash scripts/integration/preflight.sh"
-    run_wave_tpl: "bash scripts/integration/run-wave.sh --run-id {run_id} --node {node_id} --wave {wave} --env-file {env_file}"
+    preflight: "cargo test --test compat_matrix_alignment -- --test-threads=1"
+    run_wave_tpl: "cargo run --manifest-path tools/integration-runner/Cargo.toml -- run --waves {wave}"
   reporting:
     format: "jsonl"
     summary_path: "target/integration-runs/{run_id}/nodes.jsonl"
@@ -433,13 +454,13 @@ runtime:
 
 以下能力不再伪装成“已可执行”，统一登记为后续工程任务。
 
-### BASELINE_GAP-INTEG-001：多机调度脚本缺失
+### BASELINE_GAP-INTEG-001：多机调度器缺失
 
-- 现状：`scripts/integration/` 不存在。
+- 现状：辅助脚本目录已移除；`tools/integration-runner` 已覆盖本地 runner、plan 检查和已实现场景，但还没有远程节点调度器。
 - 需要补充：
-  1. `scripts/integration/preflight.sh`
-  2. `scripts/integration/run-wave.sh`
-  3. `scripts/integration/report.sh`
+  1. 远程节点 preflight 子命令
+  2. 远程节点 run-wave 子命令
+  3. 远程节点 report 子命令
 
 ### BASELINE_GAP-INTEG-002：场景 YAML 驱动缺失
 
@@ -468,12 +489,12 @@ runtime:
   2. 超限时输出可定位的 panic 信息，包含已用 / 上限 / 当前测试名。
 - 优先级：P0（防止 AI agent 自动 retry 烧钱）。
 
-### BASELINE_GAP-INTEG-006：`scripts/integration/pick-waves.sh` 未实现
+### BASELINE_GAP-INTEG-006：自动 pick-waves 未实现
 
 - 现状：§3.3 Path → Wave 映射目前靠人工对照。
 - 需要补充：
   1. 输入 `git diff --name-only`，输出推荐 wave 集合。
-  2. 与 `scripts/check_integration_plan_consistency.sh` 共享同一份映射表（建议抽到 `scripts/integration/path-wave-map.toml`）。
+  2. 与 `compat_matrix_alignment` 共享同一份映射表（建议落到 `tools/integration-runner/config/path-wave-map.toml`）。
 - 优先级：P1。
 
 ### BASELINE_GAP-INTEG-007：`tests/INDEX.md` TODO 行收尾
@@ -542,11 +563,11 @@ quarantined_at   = "<YYYY-MM-DD>"
 
 - 每次把测试加入 quarantine，必须同时开 issue 跟踪。
 - 修复后必须从 quarantine 移除并在 PR 描述说明；不允许"修了但忘记移除"。
-- quarantine 文件由 `scripts/check_integration_plan_consistency.sh` 校验：每条 `test` 必须能 grep 到对应 `#[test]` 函数。
+- quarantine 文件由 `compat_matrix_alignment` 校验：每条 `test` 必须能定位到对应 `#[test]` 函数。
 
-### 9.6 本计划自检脚本
+### 9.6 本计划自检命令
 
-`scripts/check_integration_plan_consistency.sh`（需新建）执行以下校验：
+`cargo test --test compat_matrix_alignment integration_test_plan_references_existing_targets_and_features -- --exact` 执行以下校验：
 
 1. 计划里所有 `--test <name>` 必须对应 `tests/<name>.rs` 或 `Cargo.toml [[test]]` 条目。
 2. 计划里所有 `--features <flag>` 必须出现在 `Cargo.toml [features]`。
@@ -562,5 +583,5 @@ CI 在 Wave 0 调用此脚本，失败即阻断 PR。
 1. 新增集成测试文件时，必须把执行命令补到本计划相应 Wave，并在 `tests/INDEX.md` 加一行索引。
 2. 删除/重命名测试目标时，必须同步更新本计划命令、`tests/INDEX.md`、以及 `flaky_quarantine.toml` 中对应条目。
 3. 未实现能力必须用 `BASELINE_GAP-*` 标记，不允许写成默认可执行步骤。
-4. 若引入新的 live gate 环境变量，必须同步更新 `.env.test.example`、本计划 Wave 说明、`scripts/check_integration_plan_consistency.sh` 豁免列表（如需）。
-5. 修改 §3.3 Path → Wave 映射，须同步更新 `scripts/integration/path-wave-map.toml`（如已落地）。
+4. 若引入新的 live gate 环境变量，必须同步更新 `.env.test.example`、本计划 Wave 说明、`compat_matrix_alignment` 的 env 规则（如需）。
+5. 修改 §3.3 Path → Wave 映射，须同步更新 `tools/integration-runner/config/path-wave-map.toml`（如已落地）。

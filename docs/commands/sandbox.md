@@ -16,7 +16,9 @@ execution diagnostics. It does not require a repository, so it can be used while
 debugging provider or CI hosts before running `libra code`.
 
 The default runtime is best-effort: Linux uses the external helper configured by
-`LIBRA_LINUX_SANDBOX_EXE`, macOS uses Seatbelt when `/usr/bin/sandbox-exec` is
+`LIBRA_LINUX_SANDBOX_EXE`, and if that helper is unavailable `libra` will try
+the built-in `bwrap` backend (optionally overridden by
+`LIBRA_BWRAP_BINARY`). macOS uses Seatbelt when `/usr/bin/sandbox-exec` is
 available, and unsupported or unconfigured hosts report warnings instead of
 claiming isolation. Set `LIBRA_SANDBOX_ENFORCEMENT=required` to fail commands
 that request Libra's internal sandbox when no supported backend can be applied.
@@ -39,7 +41,7 @@ Sandbox status
   enforcement: best_effort
   effective_enforcement: best_effort
   network: denied
-  proxy_backend: none
+  proxy_backend: noop
   bwrap_available: false
   bwrap_requested: false
   seatbelt_available: false
@@ -67,7 +69,7 @@ Sandbox status
       "mode": "denied",
       "allowlist": []
     },
-    "proxy_backend": "none",
+    "proxy_backend": "noop",
     "bwrap_available": false,
     "bwrap_requested": false,
     "seatbelt_available": false,
@@ -87,13 +89,30 @@ Sandbox status
 | `platform` | Rust target OS for the running Libra binary |
 | `sandbox_type` | Effective OS sandbox backend, or `none` when no backend is currently usable |
 | `enforcement` | Current enforcement policy from `LIBRA_SANDBOX_ENFORCEMENT`; `required` rejects missing internal sandboxes, while `best_effort` reports downgrade risk without failing commands |
-| `effective_enforcement` | Enforcement mode after environment parsing and fallback warnings; currently matches `enforcement` until network allowlist/proxy fallback lands |
+| `effective_enforcement` | Enforcement mode after environment parsing and fallback warnings |
 | `writable_roots` | Default workspace-write roots after resolving the current directory and temporary directories |
-| `network.mode` | Current network policy summary; the default policy is `denied` |
-| `network.allowlist` | Reserved for the planned network allowlist model; currently empty |
-| `proxy_backend` | Reserved for the planned network proxy; currently `none` |
+| `network.mode` | Current network policy summary (`denied`, `allowlist`, `full`) |
+| `network.allowlist` | Host/service allowlist when `network.mode` is `allowlist` |
+| `proxy_backend` | Selected network proxy strategy: `noop` (deny-all, used by `denied` mode), `allowlist` (per-host allowlist proxy, used by `allowlist` mode), `loopback-only` (the `full`-mode diagnostic placeholder), or `none` (an `allowlist`-mode proxy was requested but could not be constructed — either the `required` enforcement tier rejected the run, or `prefer_strict` / `best_effort` degraded it to deny-all; see `warnings` for the reason) |
 | `bwrap_available` | Whether `bwrap` is executable on `PATH` |
 | `bwrap_requested` | Whether `LIBRA_USE_LINUX_SANDBOX_BWRAP` is enabled |
 | `seatbelt_available` | Whether `/usr/bin/sandbox-exec` is executable |
 | `helper_path` | `LIBRA_LINUX_SANDBOX_EXE` path and executable probe result |
 | `warnings` | Downgrade or unsupported-platform diagnostics |
+
+## Examples
+
+```bash
+# Show effective sandbox diagnostics for AI tool execution
+libra sandbox status
+
+# Structured JSON output for agents
+libra sandbox --json status
+
+# Machine-strict JSON (implies --json=ndjson --no-pager --color=never --quiet)
+libra sandbox --machine status
+```
+
+The same banner is rendered by `libra sandbox --help` so the doc and the
+CLI surface stay in sync (cross-cutting `--help` EXAMPLES rollout, see
+`docs/development/commands/_general.md` item B).

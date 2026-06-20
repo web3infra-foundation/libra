@@ -29,7 +29,7 @@
 //! Both loops have bounded iteration counts so misuse cannot deadlock the
 //! caller.
 
-use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+use std::{collections::HashSet, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use git_internal::{
@@ -42,13 +42,17 @@ use git_internal::{
     },
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr, EntityTrait,
-    QueryFilter, Set, SqlErr, TransactionTrait, sea_query::Expr,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr,
+    EntityTrait, QueryFilter, QueryResult, Set, SqlErr, Statement, TransactionTrait, Value,
+    sea_query::Expr,
 };
 use tokio::time::sleep;
 
 use crate::{
-    internal::model::reference::{self, ConfigKind},
+    internal::{
+        ai::observed_agents::RedactedBytes,
+        model::reference::{self, ConfigKind},
+    },
     utils::{
         object::{read_git_object, write_git_object},
         storage::Storage,
@@ -869,7 +873,7 @@ impl HistoryManager {
     /// events/<provider>.jsonl}` and merges it into the parent commit's tree
     /// so successive checkpoints accumulate (rather than overwrite). The
     /// resulting commit message carries `Libra-*` trailers per the design
-    /// spec (see `docs/improvement/entire.md` §3.3).
+    /// spec (see `docs/development/commands/_general.md` §3.3).
     ///
     /// Returns the freshly-written commit hash plus the OIDs callers need to
     /// stamp onto `agent_checkpoint` (root tree OID and metadata blob OID).
@@ -882,7 +886,7 @@ impl HistoryManager {
         let metadata_blob_oid = write_git_object(&self.repo_path, "blob", params.metadata_json)
             .context("failed to write checkpoint metadata.json blob")?;
         let transcript_blob_oid =
-            write_git_object(&self.repo_path, "blob", params.transcript_redacted)
+            write_git_object(&self.repo_path, "blob", params.transcript_redacted.bytes())
                 .context("failed to write checkpoint transcript blob")?;
         let events_blob_oid = match params.events_jsonl {
             Some(bytes) => Some(
@@ -1045,6 +1049,373 @@ impl HistoryManager {
         unreachable!("CAS retry loop must return on success or terminal error")
     }
 
+    /// Remove checkpoint commits from this manager's ref and delete their
+    /// `agent_checkpoint` rows.
+    ///
+    /// This is the `libra agent clean` counterpart to
+    /// [`Self::append_checkpoint_commit`]. It rewrites the orphan
+    /// `refs/libra/agent-traces` chain from the checkpoint catalog, omitting
+    /// the supplied checkpoint IDs. Rewriting is necessary because later
+    /// committed checkpoints may descend from temporary checkpoints; simply
+    /// moving the ref to an ancestor would either keep those temporary commits
+    /// reachable or discard later retained checkpoints.
+    ///
+    /// Repositories that only have catalog rows and an empty agent-traces ref
+    /// (older fixtures, partial migrations, or pre-Phase-2 data) still get the
+    /// catalog deletion without a ref rewrite.
+    pub async fn prune_checkpoint_commits(
+        &self,
+        checkpoint_ids_to_remove: &[String],
+    ) -> Result<CheckpointPruneOutcome> {
+        let remove_set: HashSet<&str> = checkpoint_ids_to_remove
+            .iter()
+            .map(String::as_str)
+            .collect();
+        if remove_set.is_empty() {
+            return Ok(CheckpointPruneOutcome {
+                removed_checkpoints: 0,
+                rewritten_checkpoints: 0,
+                ref_rewritten: false,
+            });
+        }
+
+        for attempt in 0..=HISTORY_HEAD_CONFLICT_MAX_RETRIES {
+            let expected_head = self.resolve_history_head().await?;
+            let rows = self.load_checkpoint_history_rows().await?;
+            let existing_remove_ids = rows
+                .iter()
+                .filter(|row| remove_set.contains(row.checkpoint_id.as_str()))
+                .map(|row| row.checkpoint_id.clone())
+                .collect::<HashSet<_>>();
+
+            if existing_remove_ids.is_empty() {
+                return Ok(CheckpointPruneOutcome {
+                    removed_checkpoints: 0,
+                    rewritten_checkpoints: 0,
+                    ref_rewritten: false,
+                });
+            }
+
+            let retained_rows = rows
+                .into_iter()
+                .filter(|row| !existing_remove_ids.contains(&row.checkpoint_id))
+                .collect::<Vec<_>>();
+
+            let (new_head, rewritten) = match expected_head {
+                Some(head) => self.rebuild_checkpoint_history(head, &retained_rows)?,
+                None => (None, Vec::new()),
+            };
+
+            match self
+                .commit_checkpoint_prune(expected_head, new_head, &rewritten, &existing_remove_ids)
+                .await?
+            {
+                (RefUpdateOutcome::Updated, removed_checkpoints) => {
+                    return Ok(CheckpointPruneOutcome {
+                        removed_checkpoints,
+                        rewritten_checkpoints: rewritten.len(),
+                        ref_rewritten: expected_head != new_head,
+                    });
+                }
+                (RefUpdateOutcome::HeadChanged, _)
+                    if attempt < HISTORY_HEAD_CONFLICT_MAX_RETRIES =>
+                {
+                    continue;
+                }
+                (RefUpdateOutcome::HeadChanged, _) => {
+                    return Err(anyhow!(
+                        "agent-traces head changed repeatedly while pruning checkpoints"
+                    ));
+                }
+            }
+        }
+
+        unreachable!("checkpoint prune retry loop must return on success or terminal error")
+    }
+
+    async fn load_checkpoint_history_rows(&self) -> Result<Vec<CheckpointHistoryRow>> {
+        let backend = self.db_conn.get_database_backend();
+        let rows = self
+            .db_conn
+            .query_all(Statement::from_string(
+                backend,
+                "SELECT cp.checkpoint_id, cp.session_id, cp.scope, cp.parent_commit, \
+                        cp.traces_commit, cp.created_at, COALESCE(s.agent_kind, 'unknown') AS agent_kind \
+                 FROM agent_checkpoint cp \
+                 LEFT JOIN agent_session s ON s.session_id = cp.session_id \
+                 ORDER BY cp.created_at ASC, cp.checkpoint_id ASC"
+                    .to_string(),
+            ))
+            .await
+            .context("failed to load agent_checkpoint rows for agent-traces rewrite")?;
+
+        rows.into_iter()
+            .map(CheckpointHistoryRow::from_query_result)
+            .collect()
+    }
+
+    fn rebuild_checkpoint_history(
+        &self,
+        current_head: ObjectHash,
+        retained_rows: &[CheckpointHistoryRow],
+    ) -> Result<(Option<ObjectHash>, Vec<RewrittenCheckpoint>)> {
+        if retained_rows.is_empty() {
+            return Ok((None, Vec::new()));
+        }
+
+        let current_root = self.load_commit_tree(&current_head)?;
+        let mut parent = None;
+        let mut rewritten = Vec::with_capacity(retained_rows.len());
+
+        for row in retained_rows {
+            let inner_tree = self
+                .checkpoint_inner_tree_from_root(&current_root, &row.checkpoint_id)?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "agent-traces tree is missing retained checkpoint {}",
+                        row.checkpoint_id
+                    )
+                })?;
+            let (prefix, rest) = checkpoint_tree_path(&row.checkpoint_id)?;
+            let root_tree = self.splice_checkpoint_tree(parent, &prefix, &rest, inner_tree)?;
+            let commit_hash = self.write_rewritten_checkpoint_commit(parent, root_tree, row)?;
+            rewritten.push(RewrittenCheckpoint {
+                checkpoint_id: row.checkpoint_id.clone(),
+                traces_commit: commit_hash,
+                tree_oid: root_tree,
+            });
+            parent = Some(commit_hash);
+        }
+
+        Ok((parent, rewritten))
+    }
+
+    fn checkpoint_inner_tree_from_root(
+        &self,
+        root_items: &[TreeItem],
+        checkpoint_id: &str,
+    ) -> Result<Option<ObjectHash>> {
+        let (prefix, rest) = checkpoint_tree_path(checkpoint_id)?;
+        let Some(checkpoint_entry) = root_items.iter().find(|item| item.name == "checkpoint")
+        else {
+            return Ok(None);
+        };
+        if checkpoint_entry.mode != TreeItemMode::Tree {
+            return Err(anyhow!(
+                "agent-traces tree corruption: 'checkpoint' entry expected to be a tree, got mode {:?}",
+                checkpoint_entry.mode
+            ));
+        }
+
+        let checkpoint_items = self.load_tree(&checkpoint_entry.id)?;
+        let Some(prefix_entry) = checkpoint_items.iter().find(|item| item.name == prefix) else {
+            return Ok(None);
+        };
+        if prefix_entry.mode != TreeItemMode::Tree {
+            return Err(anyhow!(
+                "agent-traces tree corruption: 'checkpoint/{prefix}' entry expected to be a tree, got mode {:?}",
+                prefix_entry.mode
+            ));
+        }
+
+        let prefix_items = self.load_tree(&prefix_entry.id)?;
+        let Some(rest_entry) = prefix_items.iter().find(|item| item.name == rest) else {
+            return Ok(None);
+        };
+        if rest_entry.mode != TreeItemMode::Tree {
+            return Err(anyhow!(
+                "agent-traces tree corruption: 'checkpoint/{prefix}/{rest}' entry expected to be a tree, got mode {:?}",
+                rest_entry.mode
+            ));
+        }
+        Ok(Some(rest_entry.id))
+    }
+
+    fn write_rewritten_checkpoint_commit(
+        &self,
+        parent: Option<ObjectHash>,
+        root_tree: ObjectHash,
+        row: &CheckpointHistoryRow,
+    ) -> Result<ObjectHash> {
+        let message = format!(
+            "agent-traces: {} checkpoint {}\n\n{}",
+            row.scope,
+            row.checkpoint_id,
+            format_rewritten_checkpoint_trailers(row)
+        );
+        let author = Signature::new(
+            SignatureType::Author,
+            "Libra".to_string(),
+            "agent-traces@libra".to_string(),
+        );
+        let committer = Signature::new(
+            SignatureType::Committer,
+            "Libra".to_string(),
+            "agent-traces@libra".to_string(),
+        );
+        let parents = parent.into_iter().collect::<Vec<_>>();
+        let commit = Commit::new(author, committer, root_tree, parents, &message);
+        let commit_data = commit
+            .to_data()
+            .context("failed to serialize rewritten checkpoint commit")?;
+        let commit_hash = write_git_object(&self.repo_path, "commit", &commit_data)?;
+        crate::utils::client_storage::enqueue_agent_blob_object_index_update(
+            &self.repo_path,
+            &commit_hash.to_string(),
+            "commit",
+            commit_data.len() as i64,
+        );
+        Ok(commit_hash)
+    }
+
+    async fn commit_checkpoint_prune(
+        &self,
+        expected_head: Option<ObjectHash>,
+        new_head: Option<ObjectHash>,
+        rewritten: &[RewrittenCheckpoint],
+        remove_ids: &HashSet<String>,
+    ) -> Result<(RefUpdateOutcome, u64)> {
+        let expected_commit = expected_head.map(|hash| hash.to_string());
+        let new_commit = new_head.map(|hash| hash.to_string());
+
+        'retry_sqlite: for attempt in 0..=SQLITE_BUSY_MAX_RETRIES {
+            let txn: DatabaseTransaction = match self.db_conn.begin().await {
+                Ok(txn) => txn,
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                    continue;
+                }
+                Err(err) => {
+                    return Err(err).context("Failed to begin checkpoint prune transaction");
+                }
+            };
+
+            let existing = match reference::Entity::find()
+                .filter(reference::Column::Name.eq(&self.ref_name))
+                .filter(reference::Column::Kind.eq(ConfigKind::Branch))
+                .one(&txn)
+                .await
+            {
+                Ok(existing) => existing,
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    let _ = txn.rollback().await;
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                    continue;
+                }
+                Err(err) => return Err(err).context("Failed to query checkpoint prune ref"),
+            };
+
+            let write_ref = match existing {
+                Some(model) if model.commit != expected_commit => {
+                    let _ = txn.rollback().await;
+                    return Ok((RefUpdateOutcome::HeadChanged, 0));
+                }
+                Some(model) => {
+                    let mut active: reference::ActiveModel = model.into();
+                    active.commit = Set(new_commit.clone());
+                    active.update(&txn).await.map(|_| ())
+                }
+                None if expected_commit.is_some() => {
+                    let _ = txn.rollback().await;
+                    return Ok((RefUpdateOutcome::HeadChanged, 0));
+                }
+                None => {
+                    let new_ref = reference::ActiveModel {
+                        name: Set(Some(self.ref_name.clone())),
+                        kind: Set(ConfigKind::Branch),
+                        commit: Set(new_commit.clone()),
+                        remote: Set(None),
+                        ..Default::default()
+                    };
+                    new_ref.insert(&txn).await.map(|_| ())
+                }
+            };
+
+            if let Err(err) = write_ref {
+                if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES {
+                    let _ = txn.rollback().await;
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                    continue;
+                }
+                return Err(err).context("Failed to update checkpoint prune ref");
+            }
+
+            let backend = txn.get_database_backend();
+            for item in rewritten {
+                if let Err(err) = txn
+                    .execute(Statement::from_sql_and_values(
+                        backend,
+                        "UPDATE agent_checkpoint SET traces_commit = ?, tree_oid = ? \
+                         WHERE checkpoint_id = ?",
+                        vec![
+                            Value::from(item.traces_commit.to_string()),
+                            Value::from(item.tree_oid.to_string()),
+                            Value::from(item.checkpoint_id.clone()),
+                        ],
+                    ))
+                    .await
+                {
+                    if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES {
+                        let _ = txn.rollback().await;
+                        sleep(Duration::from_millis(
+                            SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                        ))
+                        .await;
+                        continue 'retry_sqlite;
+                    }
+                    return Err(err).context("Failed to update rewritten checkpoint row");
+                }
+            }
+
+            let mut removed = 0;
+            for id in remove_ids {
+                match txn
+                    .execute(Statement::from_sql_and_values(
+                        backend,
+                        "DELETE FROM agent_checkpoint WHERE checkpoint_id = ?",
+                        [Value::from(id.clone())],
+                    ))
+                    .await
+                {
+                    Ok(result) => removed += result.rows_affected(),
+                    Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                        let _ = txn.rollback().await;
+                        sleep(Duration::from_millis(
+                            SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                        ))
+                        .await;
+                        continue 'retry_sqlite;
+                    }
+                    Err(err) => return Err(err).context("Failed to delete pruned checkpoint row"),
+                }
+            }
+
+            match txn.commit().await {
+                Ok(()) => return Ok((RefUpdateOutcome::Updated, removed)),
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                }
+                Err(err) => {
+                    return Err(err).context("Failed to commit checkpoint prune transaction");
+                }
+            }
+        }
+
+        unreachable!("sqlite busy retry loop must return on success or terminal error")
+    }
+
     /// Splice `inner_tree` into `parent`'s tree at the path
     /// `checkpoint/<prefix>/<rest>`, preserving any existing entries in the
     /// surrounding subtrees. Phase 2.1 helper for [`append_checkpoint_commit`].
@@ -1150,8 +1521,12 @@ pub struct CheckpointCommitParams<'a> {
     pub tool_use_id: Option<&'a str>,
     /// Pre-serialised metadata JSON to land at `metadata.json`.
     pub metadata_json: &'a [u8],
-    /// Already-redacted transcript bytes.
-    pub transcript_redacted: &'a [u8],
+    /// Already-redacted transcript bytes. Typed as [`RedactedBytes`]
+    /// (not `&[u8]`) so the agent-traces write path can only ever receive
+    /// bytes that passed through the redaction type — entire.md §8.1 /
+    /// §13 P0: every transcript blob written to `agent-traces` must go
+    /// through `RedactedBytes`.
+    pub transcript_redacted: &'a RedactedBytes,
     /// File-name component used inside `transcript/<name>` and
     /// `events/<name>.jsonl`. Conventionally the agent's slug
     /// (`claude_code`, `gemini`, …).
@@ -1188,6 +1563,62 @@ pub struct CheckpointCommit {
     pub metadata_blob_oid: ObjectHash,
 }
 
+/// Result of pruning checkpoint commits from `refs/libra/agent-traces`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointPruneOutcome {
+    pub removed_checkpoints: u64,
+    pub rewritten_checkpoints: usize,
+    pub ref_rewritten: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CheckpointHistoryRow {
+    checkpoint_id: String,
+    session_id: String,
+    agent_kind: String,
+    scope: String,
+    parent_commit: Option<String>,
+}
+
+impl CheckpointHistoryRow {
+    fn from_query_result(row: QueryResult) -> Result<Self> {
+        Ok(Self {
+            checkpoint_id: row
+                .try_get_by("checkpoint_id")
+                .context("decode agent_checkpoint.checkpoint_id")?,
+            session_id: row
+                .try_get_by("session_id")
+                .context("decode agent_checkpoint.session_id")?,
+            agent_kind: row
+                .try_get_by("agent_kind")
+                .context("decode agent_session.agent_kind")?,
+            scope: row
+                .try_get_by("scope")
+                .context("decode agent_checkpoint.scope")?,
+            parent_commit: row.try_get_by("parent_commit").ok().flatten(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RewrittenCheckpoint {
+    checkpoint_id: String,
+    traces_commit: ObjectHash,
+    tree_oid: ObjectHash,
+}
+
+fn checkpoint_tree_path(checkpoint_id: &str) -> Result<(String, String)> {
+    let prefix = checkpoint_id
+        .get(..2)
+        .ok_or_else(|| anyhow!("checkpoint_id must be at least 2 characters"))?
+        .to_string();
+    let rest = checkpoint_id
+        .get(2..)
+        .ok_or_else(|| anyhow!("checkpoint_id must be valid UTF-8 at byte 2"))?
+        .to_string();
+    Ok((prefix, rest))
+}
+
 fn format_libra_trailers(params: &CheckpointCommitParams<'_>) -> String {
     let mut buf = String::new();
     buf.push_str(&format!("Libra-Session: {}\n", params.session_id));
@@ -1200,6 +1631,18 @@ fn format_libra_trailers(params: &CheckpointCommitParams<'_>) -> String {
     if let Some(tool) = params.tool_use_id {
         buf.push_str(&format!("Libra-Tool-Use-ID: {tool}\n"));
     }
+    buf
+}
+
+fn format_rewritten_checkpoint_trailers(row: &CheckpointHistoryRow) -> String {
+    let mut buf = String::new();
+    buf.push_str(&format!("Libra-Session: {}\n", row.session_id));
+    buf.push_str(&format!("Libra-Agent: {}\n", row.agent_kind));
+    if let Some(commit) = &row.parent_commit {
+        buf.push_str(&format!("Libra-Parent-Commit: {commit}\n"));
+    }
+    buf.push_str(&format!("Libra-Checkpoint-ID: {}\n", row.checkpoint_id));
+    buf.push_str(&format!("Libra-Scope: {}\n", row.scope));
     buf
 }
 

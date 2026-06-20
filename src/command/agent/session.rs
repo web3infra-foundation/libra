@@ -1,6 +1,6 @@
-//! `libra agent session …` subcommands. V1 ships read-only `list` and `show`
-//! that surface rows from `agent_session`; mutating verbs (`stop`, `resume`)
-//! return a phase-2 stub. Phase 4.1 follow-up `promote --as-intent` lifts
+//! `libra agent session …` subcommands. V1 surfaces rows from `agent_session`
+//! and lets operators mark captured sessions stopped/active again without
+//! rewriting provider transcripts. Phase 4.1 follow-up `promote --as-intent` lifts
 //! a captured external-agent session into Libra's own `refs/libra/intent`
 //! AI history (entire.md §14.4 item 2).
 
@@ -24,10 +24,10 @@ pub enum SessionSubcommand {
     /// Show a single session by id.
     #[command(about = "Show a captured session")]
     Show(SessionShowArgs),
-    /// Stop a session (phase 2).
+    /// Stop a captured session.
     #[command(about = "Stop a captured session")]
     Stop(SessionStopArgs),
-    /// Resume a stopped session (phase 2).
+    /// Resume a stopped session.
     #[command(about = "Resume a stopped session")]
     Resume(SessionResumeArgs),
     /// Cross-system promotion: surface a captured session on
@@ -53,19 +53,25 @@ pub struct SessionListArgs {
 
 #[derive(Args, Debug)]
 pub struct SessionShowArgs {
+    /// `agent_session.session_id` of the session to inspect (from `libra agent session list`)
+    #[arg(value_name = "SESSION_ID")]
     pub session_id: String,
-    /// Materialise the captured transcript at the given path. Phase 2.
+    /// Materialise the captured transcript at the given path (Phase 2)
     #[arg(long, value_name = "PATH")]
     pub extract_transcript: Option<String>,
 }
 
 #[derive(Args, Debug)]
 pub struct SessionStopArgs {
+    /// `agent_session.session_id` of the session to mark as stopped
+    #[arg(value_name = "SESSION_ID")]
     pub session_id: String,
 }
 
 #[derive(Args, Debug)]
 pub struct SessionResumeArgs {
+    /// `agent_session.session_id` of the stopped session to resume
+    #[arg(value_name = "SESSION_ID")]
     pub session_id: String,
 }
 
@@ -103,15 +109,8 @@ pub async fn execute_safe(cmd: SessionSubcommand, output: &OutputConfig) -> CliR
     match cmd {
         SessionSubcommand::List(args) => list(args, output).await,
         SessionSubcommand::Show(args) => show(args, output).await,
-        SessionSubcommand::Stop(_) | SessionSubcommand::Resume(_) => {
-            if !output.quiet {
-                println!(
-                    "libra agent session: stop / resume not yet implemented in v1 phase 1; \
-                     landing in phase 2."
-                );
-            }
-            Ok(())
-        }
+        SessionSubcommand::Stop(args) => stop(args, output).await,
+        SessionSubcommand::Resume(args) => resume(args, output).await,
         SessionSubcommand::Promote(args) => promote(args, output).await,
         SessionSubcommand::DeriveToolCalls(args) => derive_tool_calls(args, output).await,
     }
@@ -180,6 +179,90 @@ struct SessionRow {
     working_dir: String,
     started_at: i64,
     last_event_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionMutationOutput {
+    action: &'static str,
+    session_id: String,
+    previous_state: String,
+    state: String,
+    updated: bool,
+    stopped_at: Option<i64>,
+    last_event_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct TranscriptExtraction {
+    source_path: String,
+    output_path: String,
+    bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SessionMutationKind {
+    Stop,
+    Resume,
+}
+
+impl SessionMutationKind {
+    fn action(self) -> &'static str {
+        match self {
+            SessionMutationKind::Stop => "stop",
+            SessionMutationKind::Resume => "resume",
+        }
+    }
+
+    fn json_kind(self) -> &'static str {
+        match self {
+            SessionMutationKind::Stop => "agent_session_stop",
+            SessionMutationKind::Resume => "agent_session_resume",
+        }
+    }
+}
+
+fn extract_transcript_from_metadata(
+    metadata_json: &str,
+    output_path: &str,
+) -> CliResult<TranscriptExtraction> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json).map_err(|e| {
+        CliError::fatal(format!(
+            "captured session metadata_json is not valid JSON; cannot extract transcript: {e}"
+        ))
+    })?;
+    let source = metadata
+        .get("transcript_path")
+        .and_then(|value| value.as_str())
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| {
+            CliError::fatal(
+                "captured session metadata_json does not contain transcript_path; cannot extract transcript",
+            )
+        })?;
+    let source_path = std::path::PathBuf::from(source);
+    let output = std::path::PathBuf::from(output_path);
+    if let Some(parent) = output.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            CliError::fatal(format!(
+                "failed to create transcript output directory '{}': {e}",
+                parent.display()
+            ))
+        })?;
+    }
+    let bytes = std::fs::copy(&source_path, &output).map_err(|e| {
+        CliError::fatal(format!(
+            "failed to copy transcript from '{}' to '{}': {e}",
+            source_path.display(),
+            output.display()
+        ))
+    })?;
+    Ok(TranscriptExtraction {
+        source_path: source_path.display().to_string(),
+        output_path: output.display().to_string(),
+        bytes,
+    })
 }
 
 async fn list(args: SessionListArgs, output: &OutputConfig) -> CliResult<()> {
@@ -254,7 +337,8 @@ async fn show(args: SessionShowArgs, output: &OutputConfig) -> CliResult<()> {
 
     let stmt = Statement::from_sql_and_values(
         backend,
-        "SELECT session_id, agent_kind, state, working_dir, started_at, last_event_at \
+        "SELECT session_id, agent_kind, state, working_dir, started_at, last_event_at, \
+                COALESCE(metadata_json, '{}') AS metadata_json \
          FROM agent_session WHERE session_id = ? LIMIT 1",
         [args.session_id.clone().into()],
     );
@@ -280,19 +364,191 @@ async fn show(args: SessionShowArgs, output: &OutputConfig) -> CliResult<()> {
                     .try_get_by::<i64, _>("last_event_at")
                     .unwrap_or_default(),
             };
-            if args.extract_transcript.is_some() && !output.quiet {
-                println!(
-                    "Note: --extract-transcript is not yet implemented in v1 phase 1 \
-                     (transcripts ship in phase 2)."
+            let transcript = if let Some(path) = args.extract_transcript.as_deref() {
+                let metadata_json = row.try_get_by::<String, _>("metadata_json").map_err(|e| {
+                    CliError::fatal(format!(
+                        "agent_session.metadata_json for '{}' could not be decoded as TEXT: {e}",
+                        args.session_id
+                    ))
+                })?;
+                Some(extract_transcript_from_metadata(&metadata_json, path)?)
+            } else {
+                None
+            };
+            if output.is_json() && transcript.is_some() {
+                return emit_json_data(
+                    "agent_session",
+                    &serde_json::json!({
+                        "session": payload,
+                        "extracted_transcript": transcript,
+                    }),
+                    output,
                 );
             }
-            emit_one(&payload, output)
+            emit_one(&payload, output)?;
+            if let Some(transcript) = transcript
+                && !output.quiet
+            {
+                println!("transcript     : {}", transcript.output_path);
+                println!("transcript_src : {}", transcript.source_path);
+                println!("transcript_len : {} bytes", transcript.bytes);
+            }
+            Ok(())
         }
         None => Err(CliError::fatal(format!(
             "no captured session matches id '{}'",
             args.session_id
         ))),
     }
+}
+
+async fn stop(args: SessionStopArgs, output: &OutputConfig) -> CliResult<()> {
+    let conn = get_db_conn_instance().await;
+    let result = mutate_session_state(&conn, &args.session_id, SessionMutationKind::Stop).await?;
+    emit_session_mutation(&result, output)
+}
+
+async fn resume(args: SessionResumeArgs, output: &OutputConfig) -> CliResult<()> {
+    let conn = get_db_conn_instance().await;
+    let result = mutate_session_state(&conn, &args.session_id, SessionMutationKind::Resume).await?;
+    emit_session_mutation(&result, output)
+}
+
+async fn mutate_session_state(
+    conn: &(impl ConnectionTrait + ?Sized),
+    session_id: &str,
+    kind: SessionMutationKind,
+) -> CliResult<SessionMutationOutput> {
+    let backend = conn.get_database_backend();
+    if !table_exists(conn, "agent_session").await? {
+        return Err(CliError::fatal(format!(
+            "no captured session matches '{session_id}': agent_session table not yet present (run `libra init`?)"
+        )));
+    }
+
+    let row = conn
+        .query_one(Statement::from_sql_and_values(
+            backend,
+            "SELECT state, stopped_at, last_event_at \
+             FROM agent_session WHERE session_id = ? LIMIT 1",
+            [session_id.into()],
+        ))
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to query agent_session: {e}")))?
+        .ok_or_else(|| CliError::fatal(format!("no captured session matches id '{session_id}'")))?;
+
+    let current_state = row.try_get_by::<String, _>("state").map_err(|e| {
+        CliError::fatal(format!(
+            "agent_session.state for '{session_id}' could not be decoded as TEXT: {e}"
+        ))
+    })?;
+    let current_stopped_at = row
+        .try_get_by::<Option<i64>, _>("stopped_at")
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "agent_session.stopped_at for '{session_id}' could not be decoded as INTEGER: {e}"
+            ))
+        })?;
+    let current_last_event_at = row.try_get_by::<i64, _>("last_event_at").map_err(|e| {
+        CliError::fatal(format!(
+            "agent_session.last_event_at for '{session_id}' could not be decoded as INTEGER: {e}"
+        ))
+    })?;
+
+    if current_state == "quarantined" {
+        return Err(CliError::fatal(format!(
+            "cannot {} captured session '{session_id}' because it is quarantined; inspect the capture state before mutating it",
+            kind.action()
+        )));
+    }
+
+    match kind {
+        SessionMutationKind::Stop if current_state == "stopped" => {
+            return Ok(SessionMutationOutput {
+                action: kind.action(),
+                session_id: session_id.to_string(),
+                previous_state: current_state.clone(),
+                state: current_state,
+                updated: false,
+                stopped_at: current_stopped_at,
+                last_event_at: current_last_event_at,
+            });
+        }
+        SessionMutationKind::Resume if current_state == "active" => {
+            return Ok(SessionMutationOutput {
+                action: kind.action(),
+                session_id: session_id.to_string(),
+                previous_state: current_state.clone(),
+                state: current_state,
+                updated: false,
+                stopped_at: current_stopped_at,
+                last_event_at: current_last_event_at,
+            });
+        }
+        SessionMutationKind::Resume if current_state != "stopped" => {
+            return Err(CliError::fatal(format!(
+                "cannot resume captured session '{session_id}' from state '{current_state}'; only stopped sessions can be resumed"
+            )));
+        }
+        _ => {}
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let (new_state, new_stopped_at) = match kind {
+        SessionMutationKind::Stop => ("stopped", Some(now)),
+        SessionMutationKind::Resume => ("active", None),
+    };
+    conn.execute(Statement::from_sql_and_values(
+        backend,
+        "UPDATE agent_session \
+         SET state = ?, last_event_at = ?, stopped_at = ? \
+         WHERE session_id = ?",
+        vec![
+            new_state.into(),
+            now.into(),
+            new_stopped_at.into(),
+            session_id.to_string().into(),
+        ],
+    ))
+    .await
+    .map_err(|e| {
+        CliError::fatal(format!(
+            "failed to update agent_session state for '{session_id}': {e}"
+        ))
+    })?;
+
+    Ok(SessionMutationOutput {
+        action: kind.action(),
+        session_id: session_id.to_string(),
+        previous_state: current_state,
+        state: new_state.to_string(),
+        updated: true,
+        stopped_at: new_stopped_at,
+        last_event_at: now,
+    })
+}
+
+fn emit_session_mutation(result: &SessionMutationOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        let kind = match result.action {
+            "stop" => SessionMutationKind::Stop,
+            "resume" => SessionMutationKind::Resume,
+            _ => SessionMutationKind::Stop,
+        };
+        return emit_json_data(kind.json_kind(), result, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+    if result.updated {
+        println!(
+            "session '{}' {}: {} -> {}",
+            result.session_id, result.action, result.previous_state, result.state
+        );
+    } else {
+        println!("session '{}' already {}", result.session_id, result.state);
+    }
+    Ok(())
 }
 
 fn emit_list(rows: &[SessionRow], output: &OutputConfig) -> CliResult<()> {
@@ -692,6 +948,158 @@ mod tests {
         ensure_ai_runtime_contract_schema(&conn).await.unwrap();
         run_builtin_migrations(&conn).await.unwrap();
         (dir, conn, repo_path)
+    }
+
+    async fn insert_agent_session_fixture(
+        conn: &DatabaseConnection,
+        session_id: &str,
+        state: &str,
+        stopped_at: Option<i64>,
+    ) {
+        insert_agent_session_fixture_with_metadata(conn, session_id, state, stopped_at, "{}").await;
+    }
+
+    async fn insert_agent_session_fixture_with_metadata(
+        conn: &DatabaseConnection,
+        session_id: &str,
+        state: &str,
+        stopped_at: Option<i64>,
+        metadata_json: &str,
+    ) {
+        let backend = conn.get_database_backend();
+        conn.execute(Statement::from_sql_and_values(
+            backend,
+            "INSERT INTO agent_session (
+                session_id, agent_kind, provider_session_id, state, working_dir,
+                metadata_json, redaction_report, started_at, last_event_at, stopped_at
+             ) VALUES (?, 'claude_code', ?, ?, '/tmp/repo', ?, '{}', 1700000000, \
+                       1700000100, ?)",
+            vec![
+                session_id.to_string().into(),
+                format!("{session_id}-provider").into(),
+                state.to_string().into(),
+                metadata_json.to_string().into(),
+                stopped_at.into(),
+            ],
+        ))
+        .await
+        .unwrap();
+    }
+
+    async fn read_agent_session_state(
+        conn: &DatabaseConnection,
+        session_id: &str,
+    ) -> (String, Option<i64>, i64) {
+        let backend = conn.get_database_backend();
+        let row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT state, stopped_at, last_event_at \
+                 FROM agent_session WHERE session_id = ? LIMIT 1",
+                [session_id.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        (
+            row.try_get_by::<String, _>("state").unwrap(),
+            row.try_get_by::<Option<i64>, _>("stopped_at").unwrap(),
+            row.try_get_by::<i64, _>("last_event_at").unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn agent_session_stop_marks_active_session_stopped() {
+        let (_dir, conn, _repo_path) = fresh_repo().await;
+        insert_agent_session_fixture(&conn, "claude__stop-active", "active", None).await;
+
+        let result = mutate_session_state(&conn, "claude__stop-active", SessionMutationKind::Stop)
+            .await
+            .unwrap();
+
+        assert_eq!(result.action, "stop");
+        assert!(result.updated);
+        assert_eq!(result.previous_state, "active");
+        assert_eq!(result.state, "stopped");
+        assert_eq!(result.stopped_at, Some(result.last_event_at));
+
+        let (state, stopped_at, last_event_at) =
+            read_agent_session_state(&conn, "claude__stop-active").await;
+        assert_eq!(state, "stopped");
+        assert_eq!(stopped_at, result.stopped_at);
+        assert_eq!(last_event_at, result.last_event_at);
+    }
+
+    #[tokio::test]
+    async fn agent_session_resume_marks_stopped_session_active() {
+        let (_dir, conn, _repo_path) = fresh_repo().await;
+        insert_agent_session_fixture(
+            &conn,
+            "claude__resume-stopped",
+            "stopped",
+            Some(1_700_000_100),
+        )
+        .await;
+
+        let result =
+            mutate_session_state(&conn, "claude__resume-stopped", SessionMutationKind::Resume)
+                .await
+                .unwrap();
+
+        assert_eq!(result.action, "resume");
+        assert!(result.updated);
+        assert_eq!(result.previous_state, "stopped");
+        assert_eq!(result.state, "active");
+        assert_eq!(result.stopped_at, None);
+
+        let (state, stopped_at, last_event_at) =
+            read_agent_session_state(&conn, "claude__resume-stopped").await;
+        assert_eq!(state, "active");
+        assert_eq!(stopped_at, None);
+        assert_eq!(last_event_at, result.last_event_at);
+    }
+
+    #[tokio::test]
+    async fn agent_session_resume_rejects_non_stopped_session_states() {
+        let (_dir, conn, _repo_path) = fresh_repo().await;
+        insert_agent_session_fixture(&conn, "claude__resume-condensed", "condensed", None).await;
+
+        let err = mutate_session_state(
+            &conn,
+            "claude__resume-condensed",
+            SessionMutationKind::Resume,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("only stopped sessions can be resumed"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn agent_session_extract_transcript_copies_metadata_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("captured.jsonl");
+        let output = dir.path().join("nested").join("copy.jsonl");
+        std::fs::write(&source, "{\"type\":\"message\"}\n").unwrap();
+        let metadata = serde_json::json!({
+            "transcript_path": source,
+        })
+        .to_string();
+
+        let result =
+            extract_transcript_from_metadata(&metadata, output.to_string_lossy().as_ref()).unwrap();
+
+        assert_eq!(result.bytes, 19);
+        assert_eq!(result.source_path, source.display().to_string());
+        assert_eq!(result.output_path, output.display().to_string());
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap(),
+            "{\"type\":\"message\"}\n"
+        );
     }
 
     /// Phase 4.2 acceptance: promoting a captured session writes an

@@ -69,3 +69,9 @@ gha-creds-*.json
 # AI
 .codex
 .claude
+.antigravitycli
+.omo
+.opencode
+
+# Integration
+target*

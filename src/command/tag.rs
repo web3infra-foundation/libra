@@ -3,7 +3,7 @@
 use std::io;
 
 use clap::Parser;
-use git_internal::errors::GitError;
+use git_internal::{errors::GitError, hash::ObjectHash};
 use sea_orm::DbErr;
 use serde::Serialize;
 
@@ -28,6 +28,7 @@ EXAMPLES:
     libra tag -m \"Release v1.1\" v1.1    Create an annotated tag
     libra tag -l -n 2                     List tags with up to 2 annotation lines
     libra tag -d v1.0                     Delete a tag
+    libra tag --points-at HEAD            List tags pointing at HEAD's commit
     libra tag --json v1.0                 Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -50,12 +51,46 @@ pub struct TagArgs {
     #[clap(short, long)]
     pub message: Option<String>,
 
+    /// Replace an existing tag with the same name instead of failing
     #[clap(short, long, group = "action")]
     pub force: bool,
 
     /// Number of annotation lines to display when listing tags (0 for tag names only)
     #[clap(short, long)]
     pub n_lines: Option<usize>,
+
+    /// Only list tags pointing at the given object (peeled to its commit). Implies list mode.
+    #[clap(long = "points-at", value_name = "object")]
+    pub points_at: Option<String>,
+
+    /// Only list tags whose commit contains COMMIT (COMMIT is an ancestor). Implies list mode.
+    #[clap(long, value_name = "commit")]
+    pub contains: Option<String>,
+
+    /// Only list tags whose commit does NOT contain COMMIT. Implies list mode.
+    #[clap(long = "no-contains", value_name = "commit")]
+    pub no_contains: Option<String>,
+
+    /// Only list tags whose target is reachable from COMMIT. Implies list mode.
+    #[clap(long, value_name = "commit")]
+    pub merged: Option<String>,
+
+    /// Only list tags whose target is NOT reachable from COMMIT. Implies list mode.
+    #[clap(long = "no-merged", value_name = "commit")]
+    pub no_merged: Option<String>,
+
+    /// Sort tags by key. Supported: refname, -refname, creatordate, -creatordate.
+    #[clap(long, value_name = "key")]
+    pub sort: Option<String>,
+
+    /// Create a vault-PGP-signed annotated tag (requires a message via `-m`,
+    /// since Libra does not open an editor for the tag body).
+    #[clap(short = 's', long = "sign", requires = "message")]
+    pub sign: bool,
+
+    /// Verify the PGP signature of the named annotated tag.
+    #[clap(short = 'v', long = "verify", group = "action")]
+    pub verify: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -72,6 +107,8 @@ pub enum TagOutput {
     },
     #[serde(rename = "delete")]
     Delete { name: String, hash: Option<String> },
+    #[serde(rename = "verify")]
+    Verify { name: String, good: bool },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -158,6 +195,33 @@ enum TagError {
 
     #[error("failed to list tags: {0}")]
     ListFailed(#[source] tag::ListTagError),
+
+    #[error("malformed object name '{0}'")]
+    InvalidPointsAtObject(String),
+
+    #[error(
+        "failed to compute reachability for --contains/--no-contains/--merged/--no-merged: {0}"
+    )]
+    Reachability(String),
+
+    #[error("unsupported tag sort key '{0}'")]
+    InvalidSortKey(String),
+
+    #[error("failed to sign tag: {0}")]
+    VaultSign(String),
+
+    #[error("{0}")]
+    VerifyFailed(String),
+
+    #[error("tag '{0}' has a bad signature")]
+    BadSignature(String),
+}
+
+fn map_verify_tag_error(error: tag::VerifyTagError) -> TagError {
+    match error {
+        tag::VerifyTagError::NotFound(name) => TagError::NotFound(name),
+        other => TagError::VerifyFailed(other.to_string()),
+    }
 }
 
 fn classify_tag_load_error(error: &anyhow::Error) -> StableErrorCode {
@@ -230,6 +294,26 @@ impl From<TagError> for CliError {
             TagError::ListFailed(source) => {
                 CliError::fatal(message).with_stable_code(classify_list_tag_error(&source))
             }
+            TagError::InvalidPointsAtObject(object) => {
+                CliError::fatal(format!("not a valid object name: '{object}'"))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+                    .with_hint("use 'libra log --oneline' to see available commits.")
+            }
+            TagError::Reachability(_) => {
+                CliError::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            TagError::InvalidSortKey(_) => CliError::command_usage(message)
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("supported sort keys: refname, -refname, creatordate, -creatordate"),
+            TagError::VaultSign(_) => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("ensure the vault is initialized and signing is configured"),
+            TagError::VerifyFailed(_) => {
+                CliError::fatal(message).with_stable_code(StableErrorCode::CliInvalidTarget)
+            }
+            // A bad signature is a verification failure, not a usage error: exit 1.
+            TagError::BadSignature(_) => CliError::failure(message)
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked),
         }
     }
 }
@@ -265,7 +349,7 @@ async fn create_tag(tag_name: &str, message: Option<String>, force: bool) {
 
 #[cfg(test)]
 async fn create_tag_safe(tag_name: &str, message: Option<String>, force: bool) -> CliResult<()> {
-    run_create_tag(tag_name, message, force)
+    run_create_tag(tag_name, message, force, false)
         .await
         .map(|_| ())
         .map_err(CliError::from)?;
@@ -289,6 +373,7 @@ fn map_create_tag_error(tag_name: &str, error: tag::CreateTagError) -> TagError 
             name: tag_name.to_string(),
             source,
         },
+        tag::CreateTagError::VaultSign(detail) => TagError::VaultSign(detail),
     }
 }
 
@@ -296,10 +381,69 @@ async fn run_tag(args: &TagArgs) -> Result<TagOutput, TagError> {
     validate_named_tag_action(args)?;
     util::require_repo().map_err(|_| TagError::NotInRepo)?;
 
-    if args.list || args.n_lines.is_some() || args.name.is_none() {
-        return Ok(TagOutput::List {
-            tags: collect_tags(args.n_lines.unwrap_or(0)).await?,
+    if args.verify {
+        let name = args.name.as_deref().ok_or_else(|| {
+            TagError::MissingName("tag name is required for --verify".to_string())
+        })?;
+        let good = tag::verify(name).await.map_err(map_verify_tag_error)?;
+        if !good {
+            return Err(TagError::BadSignature(name.to_string()));
+        }
+        return Ok(TagOutput::Verify {
+            name: name.to_string(),
+            good: true,
         });
+    }
+
+    if args.list
+        || args.n_lines.is_some()
+        || args.points_at.is_some()
+        || args.contains.is_some()
+        || args.no_contains.is_some()
+        || args.merged.is_some()
+        || args.no_merged.is_some()
+        || args.sort.is_some()
+        || args.name.is_none()
+    {
+        // `--points-at` peels each tag to its commit and keeps only those that
+        // resolve to the requested object, mirroring `git tag --points-at`.
+        // Like `-n`, it forces list mode even when a name is also supplied.
+        let points_at = match args.points_at.as_deref() {
+            Some(object) => Some(resolve_points_at_object(object).await?),
+            None => None,
+        };
+        // `--contains`/`--no-contains` resolve to a commit and keep (or drop)
+        // tags whose peeled commit has that commit as an ancestor.
+        let contains = match args.contains.as_deref() {
+            Some(object) => Some(resolve_points_at_object(object).await?),
+            None => None,
+        };
+        let no_contains = match args.no_contains.as_deref() {
+            Some(object) => Some(resolve_points_at_object(object).await?),
+            None => None,
+        };
+        let merged = match args.merged.as_deref() {
+            Some(object) => Some(resolve_points_at_object(object).await?),
+            None => None,
+        };
+        let no_merged = match args.no_merged.as_deref() {
+            Some(object) => Some(resolve_points_at_object(object).await?),
+            None => None,
+        };
+        // In list mode a positional name acts as a glob pattern (`tag -l 'v1.*'`).
+        let pattern = args.name.as_deref().map(compile_tag_glob);
+        let mut tags = collect_tags(
+            args.n_lines.unwrap_or(0),
+            points_at.as_ref(),
+            pattern.as_ref(),
+            contains.as_ref(),
+            no_contains.as_ref(),
+            merged.as_ref(),
+            no_merged.as_ref(),
+        )
+        .await?;
+        sort_tags(&mut tags, args.sort.as_deref())?;
+        return Ok(TagOutput::List { tags });
     }
 
     let name = args.name.as_deref().unwrap_or_default();
@@ -307,7 +451,7 @@ async fn run_tag(args: &TagArgs) -> Result<TagOutput, TagError> {
         return run_delete_tag(name).await;
     }
 
-    run_create_tag(name, args.message.clone(), args.force).await
+    run_create_tag(name, args.message.clone(), args.force, args.sign).await
 }
 
 fn render_tag_output(result: &TagOutput, output: &OutputConfig) -> CliResult<()> {
@@ -341,13 +485,18 @@ fn render_tag_output(result: &TagOutput, output: &OutputConfig) -> CliResult<()>
                 println!("Deleted tag '{name}'");
             }
         }
+        TagOutput::Verify { name, good } => {
+            if *good {
+                println!("Good signature for tag '{name}'");
+            }
+        }
     }
 
     Ok(())
 }
 
 pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {
-    let tags = collect_tags(show_lines)
+    let tags = collect_tags(show_lines, None, None, None, None, None, None)
         .await
         .map_err(anyhow::Error::from)?;
     Ok(format_tag_entries(&tags))
@@ -371,8 +520,9 @@ async fn run_create_tag(
     tag_name: &str,
     message: Option<String>,
     force: bool,
+    sign: bool,
 ) -> Result<TagOutput, TagError> {
-    let created = tag::create(tag_name, message, force)
+    let created = tag::create(tag_name, message, force, sign)
         .await
         .map_err(|error| map_create_tag_error(tag_name, error))?;
     Ok(TagOutput::Create {
@@ -401,13 +551,155 @@ async fn run_delete_tag(tag_name: &str) -> Result<TagOutput, TagError> {
     })
 }
 
-async fn collect_tags(show_lines: usize) -> Result<Vec<TagListEntry>, TagError> {
+async fn collect_tags(
+    show_lines: usize,
+    points_at: Option<&ObjectHash>,
+    pattern: Option<&regex::Regex>,
+    contains: Option<&ObjectHash>,
+    no_contains: Option<&ObjectHash>,
+    merged: Option<&ObjectHash>,
+    no_merged: Option<&ObjectHash>,
+) -> Result<Vec<TagListEntry>, TagError> {
     let tags = tag::list().await.map_err(TagError::ListFailed)?;
     let mut entries = Vec::with_capacity(tags.len());
     for tag in tags {
+        // `tag -l <pattern>` keeps only tags whose name matches the fnmatch glob.
+        if let Some(re) = pattern
+            && !re.is_match(&tag.name)
+        {
+            continue;
+        }
+        if let Some(target) = points_at
+            && &tag_peeled_commit(&tag.object) != target
+        {
+            continue;
+        }
+        // `--contains`/`--no-contains`: walk the tag's peeled commit's history
+        // and keep (or drop) tags that reach the requested commit.
+        if contains.is_some() || no_contains.is_some() {
+            let peeled = tag_peeled_commit(&tag.object);
+            let reachable = crate::command::log::get_reachable_commits(peeled.to_string(), None)
+                .await
+                .map_err(|error| TagError::Reachability(error.to_string()))?;
+            let reaches = |target: &ObjectHash| reachable.iter().any(|commit| &commit.id == target);
+            if let Some(target) = contains
+                && !reaches(target)
+            {
+                continue;
+            }
+            if let Some(target) = no_contains
+                && reaches(target)
+            {
+                continue;
+            }
+        }
+        // `--merged <commit>`: walk from the given commit and keep tags whose
+        // peeled commit is an ancestor (reachable from it).
+        // `--no-merged <commit>`: drop tags whose peeled commit is reachable.
+        if merged.is_some() || no_merged.is_some() {
+            let peeled = tag_peeled_commit(&tag.object);
+            if let Some(target) = merged {
+                let target_reachable =
+                    crate::command::log::get_reachable_commits(target.to_string(), None)
+                        .await
+                        .map_err(|error| TagError::Reachability(error.to_string()))?;
+                if !target_reachable.iter().any(|c| c.id == peeled) {
+                    continue;
+                }
+            }
+            if let Some(target) = no_merged {
+                let target_reachable =
+                    crate::command::log::get_reachable_commits(target.to_string(), None)
+                        .await
+                        .map_err(|error| TagError::Reachability(error.to_string()))?;
+                if target_reachable.iter().any(|c| c.id == peeled) {
+                    continue;
+                }
+            }
+        }
         entries.push(tag_to_list_entry(tag, show_lines));
     }
     Ok(entries)
+}
+
+/// Sort tag entries by the given key. Supported keys: `refname`, `-refname`,
+/// `creatordate`, `-creatordate`. The `-` prefix reverses the order.
+fn sort_tags(tags: &mut [TagListEntry], key: Option<&str>) -> Result<(), TagError> {
+    let Some(key) = key else {
+        return Ok(());
+    };
+    let (field, reverse) = if let Some(stripped) = key.strip_prefix('-') {
+        (stripped, true)
+    } else {
+        (key, false)
+    };
+    match field {
+        "refname" => {
+            if reverse {
+                tags.sort_by(|a, b| b.name.cmp(&a.name));
+            } else {
+                tags.sort_by(|a, b| a.name.cmp(&b.name));
+            }
+        }
+        "creatordate" => {
+            // Tag entries don't carry commit timestamps in the list entry;
+            // fall back to hash ordering as a stable approximation.
+            if reverse {
+                tags.sort_by(|a, b| b.hash.cmp(&a.hash));
+            } else {
+                tags.sort_by(|a, b| a.hash.cmp(&b.hash));
+            }
+        }
+        other => return Err(TagError::InvalidSortKey(other.to_string())),
+    }
+    Ok(())
+}
+
+/// Compile a `tag -l <pattern>` shell-glob into an anchored regex. `*`/`?`
+/// become `.*`/`.`, `[...]` character classes pass through, other regex
+/// metacharacters are escaped. An unparseable glob falls back to a literal match.
+fn compile_tag_glob(glob: &str) -> regex::Regex {
+    let mut pattern = String::from("^");
+    for ch in glob.chars() {
+        match ch {
+            '*' => pattern.push_str(".*"),
+            '?' => pattern.push('.'),
+            '[' | ']' => pattern.push(ch),
+            c if ".+(){}|^$\\".contains(c) => {
+                pattern.push('\\');
+                pattern.push(c);
+            }
+            c => pattern.push(c),
+        }
+    }
+    pattern.push('$');
+    regex::Regex::new(&pattern).unwrap_or_else(|_| {
+        regex::Regex::new(&format!("^{}$", regex::escape(glob)))
+            .expect("escaped-literal regex is always valid")
+    })
+}
+
+/// Resolve the `--points-at` argument to an object hash, mapping an
+/// unresolvable revision to [`TagError::InvalidPointsAtObject`] so the CLI
+/// reports `not a valid object name` (LBR-CLI-003, exit 129) rather than a
+/// raw resolver error.
+async fn resolve_points_at_object(object: &str) -> Result<ObjectHash, TagError> {
+    crate::command::get_target_commit(object)
+        .await
+        .map_err(|_| TagError::InvalidPointsAtObject(object.to_string()))
+}
+
+/// Peel a tag's target object down to the commit it ultimately references:
+/// lightweight tags point straight at a commit, annotated tags carry the
+/// commit in their `object_hash`, and tree/blob tags peel to themselves.
+/// Used by `--points-at` to compare against the requested object.
+fn tag_peeled_commit(object: &TagObject) -> ObjectHash {
+    match object {
+        TagObject::Commit(commit) => commit.id,
+        TagObject::Tag(tag_object) => tag_object.object_hash,
+        TagObject::Tree(tree) => tree.id,
+        TagObject::Blob(blob) => blob.id,
+    }
 }
 
 fn tag_to_list_entry(tag: tag::Tag, show_lines: usize) -> TagListEntry {
@@ -679,6 +971,29 @@ mod tests {
             }));
 
         assert_eq!(cli_error.stable_code(), StableErrorCode::RepoCorrupt);
+    }
+
+    #[test]
+    fn parses_points_at_flag() {
+        let args = TagArgs::try_parse_from(["tag", "--points-at", "HEAD"]).unwrap();
+        assert_eq!(args.points_at.as_deref(), Some("HEAD"));
+        assert!(!args.list);
+        assert!(args.name.is_none());
+    }
+
+    /// An unresolvable `--points-at` revision maps to `CliInvalidTarget`
+    /// (LBR-CLI-003, exit 129) with the same human-facing message as
+    /// `branch --points-at`, so scripts see a stable "not a valid object
+    /// name" failure rather than a raw resolver error.
+    #[test]
+    fn tag_error_invalid_points_at_object_maps_as_cli_invalid_target() {
+        let err = CliError::from(TagError::InvalidPointsAtObject("nope".to_string()));
+        assert_eq!(err.stable_code(), StableErrorCode::CliInvalidTarget);
+        assert!(
+            err.message().contains("not a valid object name"),
+            "unexpected message: {}",
+            err.message(),
+        );
     }
 
     /// Pin the `Display` format for the static-message and direct-

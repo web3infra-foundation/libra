@@ -12,7 +12,7 @@ libra mv [<options>] <source>... <destination>
 
 `libra mv` moves or renames files and directories in the working tree and updates the index accordingly. The last argument is always the destination; all preceding arguments are sources. When there are multiple sources, the destination must be an existing directory.
 
-The command validates that all source paths exist, are tracked in the index, are not in a conflicted state, and reside within the repository working directory. Directory moves are performed as a single filesystem rename, with individual index entries updated for each tracked file within the directory. Untracked files inside a moved directory are carried along by the filesystem rename but are not added to the index.
+The command validates that all source paths exist, are tracked in the index, are not in a conflicted state, and reside within the repository working directory. With `-k` / `--skip-errors`, invalid source candidates are skipped and valid candidates continue. Directory moves are performed as a single filesystem rename, with individual index entries updated for each tracked file within the directory. Untracked files inside a moved directory are carried along by the filesystem rename but are not added to the index.
 
 After all filesystem moves succeed, the index is updated atomically: old entries are removed and new entries (with recalculated blob hashes) are inserted. The index is saved only after all operations complete successfully.
 
@@ -23,6 +23,8 @@ After all filesystem moves succeed, the index is updated atomically: old entries
 | Verbose | `-v` | `--verbose` | Print each rename operation as it happens. |
 | Dry run | `-n` | `--dry-run` | Show what would be moved without actually performing any moves. |
 | Force | `-f` | `--force` | Overwrite an existing destination file instead of reporting an error. Only works for regular files and symlinks; directories cannot be overwritten. |
+| Skip errors | `-k` | `--skip-errors` | Skip invalid source candidates and move the remaining valid candidates. |
+| Sparse | | `--sparse` | Accept Git's sparse-checkout flag as a no-op because Libra does not maintain sparse-checkout state. |
 
 ### Option Details
 
@@ -55,6 +57,20 @@ Allows overwriting an existing destination. Without this flag, moving to an exis
 $ libra mv -f src/old.rs src/new.rs
 ```
 
+**`-k` / `--skip-errors`**
+
+Skips source candidates that would fail pre-validation and continues with the remaining valid candidates:
+
+```bash
+$ libra mv -k missing.rs tracked.rs src/
+```
+
+If every source is skipped, the command exits successfully without changing the worktree or index, matching Git's `mv -k` behavior. Repository-boundary errors and multi-source moves to a non-directory destination remain fatal.
+
+**`--sparse`**
+
+Accepted for Git CLI compatibility. Libra has no sparse-checkout cone state, so the flag does not change move planning, filesystem writes, index updates, or structured output.
+
 ## Common Commands
 
 ```bash
@@ -75,6 +91,12 @@ libra mv -n old.rs new.rs
 
 # Force overwrite
 libra mv -f src/draft.rs src/final.rs
+
+# Skip invalid sources
+libra mv -k missing.rs tracked.rs src/
+
+# Accept Git sparse flag as a no-op
+libra mv --sparse old.rs new.rs
 
 # Verbose output
 libra mv -v old.rs new.rs
@@ -112,6 +134,8 @@ warnings and errors on stderr.
 - `--machine` writes the same schema as compact single-line JSON
 - `stderr` stays clean on success
 - dry-run output reports the planned move pairs without changing the filesystem or index
+- `-k` reports only the source candidates that are actually planned or moved
+- `--sparse` is a no-op and does not add a `sparse` field
 
 Example:
 
@@ -173,9 +197,9 @@ Libra follows the same convention as Git's `mv` and the Unix `mv` command: the l
 
 The trade-off is that the command requires at least two arguments and the semantics change depending on whether the destination is an existing directory. This is the same trade-off that Unix `mv` and Git `mv` make, and decades of usage have shown it to be intuitive in practice.
 
-### Why no `--sparse`?
+### Why is `--sparse` a no-op?
 
-Git's `mv` supports `--sparse` to allow moving files outside the sparse-checkout cone. Libra does not yet implement sparse checkout, so this flag has no meaning. It will be added if and when sparse checkout support is implemented.
+Git's `mv` supports `--sparse` to allow moving files outside the sparse-checkout cone. Libra does not yet implement sparse checkout state, so there is no cone membership to relax. The flag is accepted to keep Git-compatible scripts working, but it intentionally leaves normal repository-boundary validation unchanged.
 
 ### Why validate tracked status?
 
@@ -187,7 +211,7 @@ Moving a file that is in a conflicted state (stages 1-3 in the index) would lose
 
 ### How does this compare to Git and jj?
 
-Git's `mv` command is similar in design: it moves files in the working tree and updates the index. It supports a few additional flags (`-k` to skip move errors, `--sparse`) but is otherwise straightforward.
+Git's `mv` command is similar in design: it moves files in the working tree and updates the index. Libra supports the common Git flags, including `-k` / `--skip-errors`; `--sparse` is accepted as a no-op until Libra gains sparse-checkout state.
 
 jj does not have a `mv` command. Because jj uses automatic snapshotting of the working tree, file moves are detected automatically by the working-copy scanner. Users simply move files with the system `mv` command and jj records the change on the next snapshot. This works well for simple renames but cannot reliably detect moves (as opposed to delete-then-create) for large refactors.
 
@@ -203,8 +227,8 @@ Libra provides an explicit `mv` command (like Git) because its index-based model
 | Dry run | `-n` / `--dry-run` | `-n` / `--dry-run` | N/A |
 | Force overwrite | `-f` / `--force` | `-f` / `--force` | N/A |
 | Structured JSON output | `--json` / `--machine` | N/A | N/A |
-| Skip errors | Not supported | `-k` | N/A |
-| Sparse checkout | Not supported | `--sparse` | N/A |
+| Skip errors | `-k` / `--skip-errors` | `-k` | N/A |
+| Sparse checkout | `--sparse` accepted as no-op | `--sparse` | N/A |
 
 Note: jj does not have a dedicated mv command. File renames are detected automatically by the working-copy snapshot mechanism.
 
@@ -222,5 +246,6 @@ Note: jj does not have a dedicated mv command. File renames are detected automat
 | Directory destination already has source name | `fatal: destination already exists, source=<src>, destination=<dst>` |
 | Path outside repository | `fatal: '<path>' is outside of the repository at '<workdir>'` |
 | Multiple sources targeting the same path | `fatal: multiple sources moving to the same target path` |
+| Invalid source with `-k` | Source is skipped; command succeeds if no fatal repository-boundary or destination-shape error occurs |
 | Filesystem rename failed | `fatal: failed to move, source=<src>, destination=<dst>, error=<err>` |
 | Index save failed | `fatal: failed to save index after mv: <err>` |

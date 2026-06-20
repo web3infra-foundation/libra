@@ -2,7 +2,7 @@
 
 This directory holds the Next.js source for the embedded `libra code` browser UI. The build is consumed two ways:
 
-1. **`pnpm dev`** during local development serves the UI on `http://localhost:3000` and proxies API calls to a separately-running `libra code` process on its default `http://127.0.0.1:3000` web port. Use `LIBRA_DEV_API_BASE` to point at a non-default backend host/port.
+1. **`pnpm dev`** during local development serves the UI on the Next.js dev server's default `http://localhost:3000`. All API calls use relative `/api/...` paths with `same-origin` credentials (see `src/lib/code-ui/client.ts`), so the dev server must share its origin with a running `libra code` process. The typical workflow is to launch the backend on a non-default port — `libra code --web-only --port 4400` — and then run `pnpm dev -- --port 4400` so both share the loopback origin. There is **no** `LIBRA_DEV_API_BASE`-style env-var-based proxy: the client speaks to `/api/*` directly and the Rust side's `ensure_loopback_api_request` guard refuses remote callers regardless.
 2. **`pnpm build`** emits a static export to `web/out/`. The Rust binary embeds that directory at compile time via `WebAssets` (`src/command/web_assets.rs`) and serves it from `axum::Router::fallback`. Any production change to the UI therefore requires `pnpm build` so the embedded snapshot stays current; CI fails closed if `web/out/` falls behind the source.
 
 ## Scripts

@@ -36,7 +36,7 @@
         {
           "name": "call Code service with live model generation prompt",
           "op": "submitAndWaitIdle",
-          "text": "/chat Create a complete Rust source file named generated_model_greeting.rs. Use apply_patch to add the file. The file must define `pub fn greeting(name: &str) -> String` returning `hello, {name}` and include self-contained unit tests proving greeting(\"libra\") == \"hello, libra\". After the patch is applied, reply with exactly: Generated generated_model_greeting.rs.",
+          "text": "/run Create a complete Rust source file named generated_model_greeting.rs. Use apply_patch to add the file. The file must define `pub fn greeting(name: &str) -> String` returning `hello, {name}` and include self-contained unit tests proving greeting(\"libra\") == \"hello, libra\". After the patch is applied, reply with exactly: Generated generated_model_greeting.rs.",
           "token": "current",
           "auth": "valid_control",
           "timeoutMs": 120000,
@@ -96,7 +96,7 @@
         {
           "name": "call Code service with linked Cargo CLI project prompt",
           "op": "submitAndWaitIdle",
-          "text": "/chat Execute this end-to-end test case in the current workspace. 1. Initialize a Rust project named `linked` by using the cargo command and disable Version Control System support with `cargo new linked --vcs none`. 2. Implement a clap-based CLI with exactly three subcommands: `code`, `cloud`, and `backup`; each command must print only its command name followed by a newline. 3. Make `cargo fmt --all --check` pass. 4. Make `cargo clippy --all-targets --all-features -- -D warnings` pass. 5. Add test code under `linked/tests/` so `cargo test --all` passes and verifies the subcommands plus empty config behavior. 6. Implement config loading from the user's `$HOME` directory by reading `$HOME/.linked/config`; an empty config file must be valid. 7. Use Rust edition 2024. 8. Update the workspace `.libraignore` to include Rust build output directories, especially `target/`. When finished, reply with exactly: Generated linked Cargo CLI project.",
+          "text": "/run Execute this end-to-end test case in the current workspace. 1. Initialize a Rust project named `linked` by using the cargo command and disable Version Control System support with `cargo new linked --vcs none`. 2. Implement a clap-based CLI with exactly three subcommands: `code`, `cloud`, and `backup`; each command must print only its command name followed by a newline. 3. Make `cargo fmt --all --check` pass. 4. Make `cargo clippy --all-targets --all-features -- -D warnings` pass. 5. Add test code under `linked/tests/` so `cargo test --all` passes and verifies the subcommands plus empty config behavior. 6. Implement config loading from the user's `$HOME` directory by reading `$HOME/.linked/config`; an empty config file must be valid. 7. Use Rust edition 2024. 8. Update the workspace `.libraignore` to include Rust build output directories, especially `target/`. When finished, reply with exactly: Generated linked Cargo CLI project.",
           "token": "current",
           "auth": "valid_control",
           "timeoutMs": 180000,

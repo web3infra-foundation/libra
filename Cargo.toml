@@ -1,7 +1,15 @@
 [package]
 name = "libra"
-version = "0.17.581"
+version = "0.17.1513"
 edition = "2024"
+license = "MIT"
+description = "AI agent-native version control system with Git on-disk compatibility, SQLite-backed metadata, and tiered cloud storage"
+repository = "https://github.com/web3infra-foundation/libra"
+homepage = "https://github.com/web3infra-foundation/libra"
+authors = ["Web3 Infrastructure Foundation"]
+keywords = ["git", "version-control", "ai", "agent", "vcs"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
 
 [features]
 default        = []
@@ -10,11 +18,11 @@ test-network   = []   # L2: tests requiring outbound network but no secrets
 test-live-ai   = []   # L3: tests calling real LLM APIs
 test-live-cloud = []  # L3: tests hitting real D1/R2 endpoints
 test-provider  = []   # deterministic hidden provider for local TUI automation tests
-subagent-scaffold = []  # CEX-S2-10 schema-only scaffold (Step 2 sub-agent contracts; gated on CP-4 in production — see docs/improvement/agent.md "Step 2 audit closure")
+subagent-scaffold = []  # CEX-S2-10 schema-only scaffold (Step 2 sub-agent contracts; gated on CP-4 in production — see docs/development/commands/agent.md "Step 2 audit closure")
 
 [dependencies]
 uuid = { version = "1.23.1", features = ["v4", "v5", "v7"] }
-git-internal = "0.7.4"
+git-internal = "0.7.6"
 anyhow = "1.0.102"
 byte-unit = "5.2.0"
 byteorder = "1.5.0"
@@ -25,6 +33,9 @@ chrono = { version = "0.4.44", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive"] }
 colored = "3.1.1"
 flate2 = "1.1.9"  # add features = ["zlib"] if slow
+tar = "0.4"
+zip = "0.6"
+bzip2 = "0.6"
 futures = "0.3.32"
 futures-util = "0.3.32"
 hex = "0.4.3"
@@ -55,10 +66,14 @@ serde_json = "1.0.149"
 sha1 = "0.11.0"
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = [
+    "io-util",
+    "net",
     "rt-multi-thread",
     "rt",
     "macros",
-    "process"
+    "process",
+    "sync",
+    "time"
 ]}
 tokio-util = { version = "0.7.18", features = ["io"] }
 tokio-tungstenite = { version = "0.29.0", features = ["native-tls"] }
@@ -118,13 +133,20 @@ pager = "0.16.1"
 libc = "0.2"
 rfuse3 = { version = "0.0.8", features = ["tokio-runtime", "unprivileged"] }
 
+[target.'cfg(target_os = "linux")'.dependencies] # Linux-only seccomp BPF compiler
+seccompiler = { version = "0.5.0", features = ["json"] }
+
 [dev-dependencies]
 serial_test = { version = "3.4.0", default-features = false, features = ["async"] }
 tokio = { version = "1.52.1", features = [
+    "io-util",
+    "net",
     "rt-multi-thread",
     "rt",
     "macros",
-    "process"
+    "process",
+    "sync",
+    "time"
 ]}
 testcontainers = { version = "0.27.3", features = [
     "http_wait",
@@ -144,6 +166,10 @@ name = "compat_stash_subcommand_surface"
 path = "tests/compat/stash_subcommand_surface.rs"
 
 [[test]]
+name = "compat_pull_strategy_flags_surface"
+path = "tests/compat/pull_strategy_flags_surface.rs"
+
+[[test]]
 name = "compat_bisect_subcommand_surface"
 path = "tests/compat/bisect_subcommand_surface.rs"
 
@@ -158,6 +184,10 @@ path = "tests/compat/checkout_alias_help.rs"
 [[test]]
 name = "compat_matrix_alignment"
 path = "tests/compat/matrix_alignment.rs"
+
+[[test]]
+name = "compat_live_compat_workflow"
+path = "tests/compat/live_compat_workflow.rs"
 
 [[test]]
 name = "compat_branch_lossy_wrapper_guard"
@@ -190,3 +220,31 @@ path = "tests/compat/extra_production_unwrap_guard.rs"
 [[test]]
 name = "compat_all_production_unwrap_guard"
 path = "tests/compat/all_production_unwrap_guard.rs"
+
+[[test]]
+name = "compat_agent_run_non_exhaustive_guard"
+path = "tests/compat/agent_run_non_exhaustive_guard.rs"
+
+[[test]]
+name = "compat_agent_docs_contract"
+path = "tests/compat/agent_docs_contract.rs"
+
+[[test]]
+name = "compat_help_examples_banner"
+path = "tests/compat/help_examples_banner.rs"
+
+[[test]]
+name = "compat_error_codes_doc_sync"
+path = "tests/compat/error_codes_doc_sync.rs"
+
+[[test]]
+name = "compat_command_docs_examples_section"
+path = "tests/compat/command_docs_examples_section.rs"
+
+[[test]]
+name = "compat_help_flag_descriptions"
+path = "tests/compat/help_flag_descriptions.rs"
+
+[[test]]
+name = "compat_help_no_impl_meta_leak"
+path = "tests/compat/help_no_impl_meta_leak.rs"

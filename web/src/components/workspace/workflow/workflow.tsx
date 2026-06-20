@@ -22,6 +22,7 @@ import {
   PlanCard,
   ReleaseCard,
   RunsCard,
+  TasksCard,
   ValidationCard,
 } from "./cards";
 import { deriveWorkflow } from "./derive";
@@ -200,7 +201,11 @@ export function Workflow({ width }: Props) {
         </div>
       </footer>
 
-      <DetailPanel detail={detail} onClose={() => setDetail(null)} />
+      <DetailPanel
+        detail={detail}
+        snapshot={snapshot}
+        onClose={() => setDetail(null)}
+      />
     </section>
   );
 }
@@ -260,6 +265,11 @@ function PipelineView({
         plan={workflow.plans.test}
         planKind="test"
         gated
+        onOpen={onOpen}
+        activeDetail={activeDetail}
+      />
+      <TasksCard
+        tasks={workflow.tasks}
         onOpen={onOpen}
         activeDetail={activeDetail}
       />

@@ -4,7 +4,7 @@
 //! stub handlers for the rest of the CLI surface so users can discover the
 //! shape via `libra agent --help`. Subsequent phases fill in checkpoint /
 //! session / hook routing on top of this scaffold; see
-//! `docs/improvement/entire.md` section 9.
+//! `docs/development/commands/_general.md` section 9.
 
 use clap::{Args, Subcommand};
 
@@ -31,7 +31,38 @@ mod rpc;
 mod session;
 mod status;
 
+/// `--help` examples shown in `libra agent --help` output.
+///
+/// `agent` is the operator surface for the external Agent capture
+/// pipeline. It exposes eight visible sub-commands (status, enable,
+/// disable, session, checkpoint, clean, doctor, push, rpc) plus a
+/// hidden `hooks` entry point invoked by installed provider hooks.
+/// The banner pins the canonical invocation per sub-command plus the
+/// `--all` clean form, a named `--remote` push, and a JSON variant
+/// for agents so users see all supported forms without reading the
+/// design doc. Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/development/commands/_general.md` item B.
+pub const AGENT_EXAMPLES: &str = "\
+EXAMPLES:
+    libra agent status                              Show captured-session counts and recent checkpoint summary
+    libra agent enable --agent claude               Enable Claude Code capture and install its hooks
+    libra agent enable                              Enable every stable external agent
+    libra agent disable --agent claude              Disable Claude Code capture and uninstall its hooks
+    libra agent session list                        List captured sessions
+    libra agent checkpoint list                     List captured checkpoints
+    libra agent checkpoint show <id>                Show a single checkpoint by id
+    libra agent checkpoint rewind <id>              Preview/apply checkpoint rewind
+    libra agent clean                               Drop temporary checkpoints from the most recent stopped session
+    libra agent clean --all                         Drop temporary checkpoints from every stopped session
+    libra agent doctor                              Diagnose hook installation and capture state
+    libra agent push                                Push refs/libra/agent-traces to the default remote
+    libra agent push --remote origin                Push refs/libra/agent-traces to a named remote
+    libra agent rpc list                            Discover libra-agent-<name> RPC binaries on PATH
+    libra agent rpc invoke <slug> <method>          Invoke a single JSON-RPC method (use --params '<json>' for arguments)
+    libra agent --json status                       Structured JSON output for agents";
+
 #[derive(Args, Debug)]
+#[command(after_help = AGENT_EXAMPLES)]
 pub struct AgentArgs {
     #[command(subcommand)]
     pub command: AgentSubcommand,
@@ -90,6 +121,7 @@ pub struct EnableArgs {
 
 #[derive(Args, Debug)]
 pub struct DisableArgs {
+    /// One or more agent names to disable. Empty means "all stable agents"
     #[arg(long = "agent", value_name = "NAME")]
     pub agents: Vec<String>,
 }
@@ -107,6 +139,7 @@ pub struct DoctorArgs {}
 
 #[derive(Args, Debug)]
 pub struct PushArgs {
+    /// Remote name to push refs/libra/agent-traces to (default: origin)
     #[arg(long, value_name = "NAME")]
     pub remote: Option<String>,
 }
@@ -119,34 +152,39 @@ pub enum CheckpointSubcommand {
     /// Show a single checkpoint's metadata and tree summary.
     #[command(about = "Show checkpoint metadata")]
     Show(CheckpointShowArgs),
-    /// Inspect what `rewind` would do (`--apply` to actually run; v1 only
-    /// restores the working tree and leaves the agent's own transcript file
-    /// untouched, with a warning).
+    /// Inspect what `rewind` would do (`--apply` to actually run). Apply
+    /// restores the working tree and truncates supported agent transcripts
+    /// (currently Claude Code) when metadata includes a transcript path.
     #[command(
-        about = "Rewind a checkpoint (v1: --dry-run by default; --apply restores worktree only)"
+        about = "Rewind a checkpoint (dry-run by default; --apply restores worktree and supported transcripts)"
     )]
     Rewind(CheckpointRewindArgs),
 }
 
 #[derive(Args, Debug)]
 pub struct CheckpointListArgs {
+    /// Filter checkpoints to those belonging to a single session id
     #[arg(long, value_name = "ID")]
     pub session: Option<String>,
 }
 
 #[derive(Args, Debug)]
 pub struct CheckpointShowArgs {
+    /// Checkpoint identifier returned by `libra agent checkpoint list`
+    #[arg(value_name = "CHECKPOINT_ID")]
     pub checkpoint_id: String,
 }
 
 #[derive(Args, Debug)]
 pub struct CheckpointRewindArgs {
+    /// Checkpoint identifier to rewind to (from `libra agent checkpoint list`)
+    #[arg(value_name = "CHECKPOINT_ID")]
     pub checkpoint_id: String,
-    /// Show the impact without modifying anything (default).
+    /// Show the impact without modifying anything (default)
     #[arg(long, conflicts_with = "apply")]
     pub dry_run: bool,
-    /// Actually restore. v1 limits this to working-tree restore; the agent's
-    /// transcript file is NOT rewritten and a warning is printed.
+    /// Actually restore the working tree and truncate supported agent transcripts
+    /// (currently Claude Code) when metadata includes a transcript path
     #[arg(long)]
     pub apply: bool,
 }

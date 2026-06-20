@@ -531,75 +531,132 @@ async fn apply_down_migration(
 /// isolated runner.
 pub fn builtin_migrations() -> Vec<Migration> {
     vec![
-        Migration {
-            version: 2026050301,
-            name: "automation_log",
-            up: include_str!("../../../sql/migrations/2026050301_automation_log.sql"),
-            down: Some(include_str!(
-                "../../../sql/migrations/2026050301_automation_log_down.sql"
-            )),
-        },
-        Migration {
-            version: 2026050302,
-            name: "agent_usage_stats",
-            up: include_str!("../../../sql/migrations/2026050302_agent_usage_stats.sql"),
-            down: Some(include_str!(
-                "../../../sql/migrations/2026050302_agent_usage_stats_down.sql"
-            )),
-        },
+        sql_migration(
+            2026050301,
+            "automation_log",
+            include_str!("../../../sql/migrations/2026050301_automation_log.sql"),
+            include_str!("../../../sql/migrations/2026050301_automation_log_down.sql"),
+        ),
+        sql_migration(
+            2026050302,
+            "agent_usage_stats",
+            include_str!("../../../sql/migrations/2026050302_agent_usage_stats.sql"),
+            include_str!("../../../sql/migrations/2026050302_agent_usage_stats_down.sql"),
+        ),
         // CEX-EntireIO Phase 1.1: external-agent capture catalog. Uses
         // `include_str!` to keep DDL out of the Rust file — the path resolves
         // from `src/internal/db/migration.rs` (three `..` segments to repo
         // root, then descend into `sql/migrations/`).
-        Migration {
-            version: 2026050303,
-            name: "agent_capture",
-            up: include_str!("../../../sql/migrations/2026050303_agent_capture.sql"),
-            down: Some(include_str!(
-                "../../../sql/migrations/2026050303_agent_capture_down.sql"
-            )),
-        },
+        sql_migration(
+            2026050303,
+            "agent_capture",
+            include_str!("../../../sql/migrations/2026050303_agent_capture.sql"),
+            include_str!("../../../sql/migrations/2026050303_agent_capture_down.sql"),
+        ),
         // CEX-EntireIO Phase 2.1 follow-up: relax `agent_checkpoint.parent_commit`
         // to NULLable so the runtime can distinguish "user branch unborn / no
         // HEAD" from "lookup error" — see Codex review round 1 NEEDS-CHANGES.
-        Migration {
-            version: 2026050501,
-            name: "agent_checkpoint_parent_nullable",
-            up: include_str!(
-                "../../../sql/migrations/2026050501_agent_checkpoint_parent_nullable.sql"
-            ),
-            down: Some(include_str!(
+        sql_migration(
+            2026050501,
+            "agent_checkpoint_parent_nullable",
+            include_str!("../../../sql/migrations/2026050501_agent_checkpoint_parent_nullable.sql"),
+            include_str!(
                 "../../../sql/migrations/2026050501_agent_checkpoint_parent_nullable_down.sql"
-            )),
-        },
+            ),
+        ),
         // OC-Phase 2 P2.5: persistent `Always`-reply ruleset, populated when
         // a user clicks "Always" on a permission prompt and reloaded on the
-        // next session. See docs/improvement/opencode.md "Permission Ruleset
+        // next session. See docs/development/commands/_general.md "Permission Ruleset
         // 与 Approval 反馈协议".
-        Migration {
-            version: 2026050601,
-            name: "approved_permission",
-            up: include_str!("../../../sql/migrations/2026050601_approved_permission.sql"),
-            down: Some(include_str!(
-                "../../../sql/migrations/2026050601_approved_permission_down.sql"
-            )),
-        },
+        sql_migration(
+            2026050601,
+            "approved_permission",
+            include_str!("../../../sql/migrations/2026050601_approved_permission.sql"),
+            include_str!("../../../sql/migrations/2026050601_approved_permission_down.sql"),
+        ),
         // OC-Phase 5 P5.2: add the `agent_name` dimension to
         // `agent_usage_stats` so the multi-agent runtime can attribute spend
         // to a specific agent profile (planner / explorer / reviewer / …)
         // on top of the existing (provider, model) aggregation. Additive;
         // legacy rows keep `agent_name = NULL` and remain queryable through
-        // the existing indexes. See docs/improvement/opencode.md OC-Phase 5
+        // the existing indexes. See docs/development/commands/_general.md OC-Phase 5
         // P5.2.
-        Migration {
-            version: 2026050801,
-            name: "agent_usage_stats_agent_name",
-            up: include_str!("../../../sql/migrations/2026050801_agent_usage_stats_agent_name.sql"),
-            down: Some(include_str!(
+        sql_migration(
+            2026050801,
+            "agent_usage_stats_agent_name",
+            include_str!("../../../sql/migrations/2026050801_agent_usage_stats_agent_name.sql"),
+            include_str!(
                 "../../../sql/migrations/2026050801_agent_usage_stats_agent_name_down.sql"
-            )),
-        },
+            ),
+        ),
+        // v0.17.800 source telemetry persistence: new
+        // `source_call_log` table that mirrors the in-memory
+        // `SourceCallLog::records` Vec<SourceCallRecord> shape with
+        // a UUID primary key + created_at timestamp. Producer wire-up
+        // (replacing the Mutex<Vec> store with a SeaORM-backed
+        // recorder) lands in a follow-up; this migration is the
+        // schema-side prerequisite so the producer change doesn't
+        // need to register the migration itself. See agent.md
+        // Storage / migration row for the gap this closes.
+        sql_migration(
+            2026052301,
+            "source_call_log",
+            include_str!("../../../sql/migrations/2026052301_source_call_log.sql"),
+            include_str!("../../../sql/migrations/2026052301_source_call_log_down.sql"),
+        ),
+        // Phase 4 completion: the formal final `Decision` artifact table,
+        // closing the ValidationReport -> RiskScoreBreakdown ->
+        // DecisionProposal -> Decision chain. Mirrors `ai_decision_proposal`
+        // (per-thread latest pointer). See docs/development/commands/agent.md
+        // Implementation Phase 4.
+        sql_migration(
+            2026053101,
+            "ai_final_decision",
+            include_str!("../../../sql/migrations/2026053101_ai_final_decision.sql"),
+            include_str!("../../../sql/migrations/2026053101_ai_final_decision_down.sql"),
+        ),
+        sql_migration(
+            2026060201,
+            "source_call_log_agent_run_id",
+            include_str!("../../../sql/migrations/2026060201_source_call_log_agent_run_id.sql"),
+            include_str!(
+                "../../../sql/migrations/2026060201_source_call_log_agent_run_id_down.sql"
+            ),
+        ),
+        sql_migration(
+            2026060401,
+            "cherry_pick_state",
+            include_str!("../../../sql/migrations/2026060401_cherry_pick_state.sql"),
+            include_str!("../../../sql/migrations/2026060401_cherry_pick_state_down.sql"),
+        ),
+        sql_migration(
+            2026060801,
+            "revert_sequence",
+            include_str!("../../../sql/migrations/2026060801_revert_sequence.sql"),
+            include_str!("../../../sql/migrations/2026060801_revert_sequence_down.sql"),
+        ),
+        // Phase 1.12: persistent `notes` table for `libra notes` add/show/list/remove.
+        sql_migration(
+            2026061401,
+            "notes",
+            include_str!("../../../sql/migrations/2026061401_notes.sql"),
+            include_str!("../../../sql/migrations/2026061401_notes_down.sql"),
+        ),
     ]
+}
+
+fn sql_migration(
+    version: i64,
+    name: &'static str,
+    up: &'static str,
+    down: &'static str,
+) -> Migration {
+    Migration {
+        version,
+        name,
+        up,
+        down: Some(down),
+    }
 }
 
 /// Convenience: build a runner pre-loaded with [`builtin_migrations`].
@@ -713,9 +770,9 @@ mod tests {
         // `builtin_migrations()` so silent registry regressions surface
         // here in addition to `tests/db_migration_test.rs`.
         let runner = builtin_runner().expect("CEX-12.5 builtin registry must build clean");
-        assert_eq!(runner.len(), 6);
+        assert_eq!(runner.len(), 12);
         assert!(!runner.is_empty());
-        assert_eq!(runner.max_registered_version(), Some(2026050801));
+        assert_eq!(runner.max_registered_version(), Some(2026061401));
     }
 
     #[test]

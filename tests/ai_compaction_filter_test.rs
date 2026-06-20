@@ -2,7 +2,7 @@
 //! projection that implements PR #25851's compaction reorder rule.
 //!
 //! Doc reference:
-//! `docs/improvement/opencode.md#filterCompacted-等价函数`. The doc
+//! `docs/development/commands/_general.md#filterCompacted-等价函数`. The doc
 //! prescribes three reordering scenarios via a table; the unit
 //! tests in `src/internal/ai/context_budget/projection.rs` cover
 //! those scenarios on hand-built [`MessageProjection`] fixtures,

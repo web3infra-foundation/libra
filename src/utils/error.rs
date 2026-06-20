@@ -984,14 +984,6 @@ pub fn emit_legacy_stderr(message: impl Into<String>) {
     CliError::from_legacy_string(message).print_stderr();
 }
 
-/// Emit a legacy CLI message to stderr and terminate the process with the
-/// inferred exit code.
-pub fn exit_with_legacy_stderr(message: impl Into<String>) -> ! {
-    let err = CliError::from_legacy_string(message.into());
-    err.print_stderr();
-    std::process::exit(err.exit_code());
-}
-
 /// Print a user-facing error to stderr.
 ///
 /// New command code should prefer returning [`CliError`] instead of printing
@@ -1381,8 +1373,8 @@ mod tests {
     use serial_test::serial;
 
     use super::{
-        CliError, CliErrorKind, LIBRA_ERROR_JSON_ENV, LIBRA_FINE_EXIT_CODES_ENV, StableErrorCode,
-        StderrRenderMode, StructuredStderrMode, stderr_render_mode,
+        CliError, CliErrorCategory, CliErrorKind, LIBRA_ERROR_JSON_ENV, LIBRA_FINE_EXIT_CODES_ENV,
+        StableErrorCode, StderrRenderMode, StructuredStderrMode, stderr_render_mode,
     };
     use crate::utils::test::ScopedEnvVar;
 
@@ -1631,6 +1623,180 @@ mod tests {
         assert_eq!(
             CliError::unknown_command("libra: 'wat' is not a libra command.").exit_code(),
             2
+        );
+    }
+
+    /// Pin the `LBR-*` stable identifier emitted by
+    /// [`StableErrorCode::as_str`] for every variant. The strings
+    /// are the canonical public CLI surface — `docs/error-codes.md`
+    /// references them by name, every typed-error pin test landed
+    /// in v0.17.701..v0.17.709 routes UP to these codes, and JSON
+    /// consumers branch on the literal string ("LBR-IO-001") not on
+    /// the Rust variant name. A silent rename (e.g. dropping the
+    /// `LBR-` prefix or renumbering `LBR-NET-001` → `LBR-NET-002`)
+    /// would invalidate every downstream pin without tripping any
+    /// test until end-to-end JSON harness assertions caught it.
+    ///
+    /// Enumerate all 22 variants so a new addition trips both this
+    /// list and the `as_str` impl's exhaustive match.
+    #[test]
+    fn stable_error_code_as_str_pins_each_variant() {
+        assert_eq!(StableErrorCode::CliUnknownCommand.as_str(), "LBR-CLI-001");
+        assert_eq!(StableErrorCode::CliInvalidArguments.as_str(), "LBR-CLI-002",);
+        assert_eq!(StableErrorCode::CliInvalidTarget.as_str(), "LBR-CLI-003");
+        assert_eq!(StableErrorCode::RepoNotFound.as_str(), "LBR-REPO-001");
+        assert_eq!(StableErrorCode::RepoCorrupt.as_str(), "LBR-REPO-002");
+        assert_eq!(StableErrorCode::RepoStateInvalid.as_str(), "LBR-REPO-003");
+        assert_eq!(
+            StableErrorCode::ConflictUnresolved.as_str(),
+            "LBR-CONFLICT-001",
+        );
+        assert_eq!(
+            StableErrorCode::ConflictOperationBlocked.as_str(),
+            "LBR-CONFLICT-002",
+        );
+        assert_eq!(StableErrorCode::NetworkUnavailable.as_str(), "LBR-NET-001",);
+        assert_eq!(StableErrorCode::NetworkProtocol.as_str(), "LBR-NET-002");
+        assert_eq!(
+            StableErrorCode::AuthMissingCredentials.as_str(),
+            "LBR-AUTH-001",
+        );
+        assert_eq!(
+            StableErrorCode::AuthPermissionDenied.as_str(),
+            "LBR-AUTH-002",
+        );
+        assert_eq!(StableErrorCode::IoReadFailed.as_str(), "LBR-IO-001");
+        assert_eq!(StableErrorCode::IoWriteFailed.as_str(), "LBR-IO-002");
+        assert_eq!(
+            StableErrorCode::InternalInvariant.as_str(),
+            "LBR-INTERNAL-001",
+        );
+        assert_eq!(StableErrorCode::WarningEmitted.as_str(), "LBR-WARN-001");
+        assert_eq!(StableErrorCode::AddNothingStaged.as_str(), "LBR-ADD-001");
+        assert_eq!(StableErrorCode::Unsupported.as_str(), "LBR-UNSUPPORTED-001",);
+        assert_eq!(StableErrorCode::BisectNotActive.as_str(), "LBR-BISECT-001");
+        assert_eq!(StableErrorCode::BisectRunFailed.as_str(), "LBR-BISECT-002");
+        assert_eq!(
+            StableErrorCode::BisectNoCandidates.as_str(),
+            "LBR-BISECT-003",
+        );
+        assert_eq!(
+            StableErrorCode::AgentBudgetExceeded.as_str(),
+            "LBR-AGENT-001",
+        );
+    }
+
+    /// Pin the [`CliErrorCategory`] grouping returned by
+    /// [`StableErrorCode::category`] for every variant. Categories
+    /// drive both `fine_exit_code()` (2..=9) and the inferred
+    /// `exit_code()` default (Usage / Warning / Fatal). A silent
+    /// re-bucketing — e.g. moving `BisectNotActive` from `Repo` to
+    /// `Internal` — would change shell-script exit-code branching
+    /// without invalidating any other test.
+    ///
+    /// Note three deliberate non-obvious groupings worth pinning.
+    /// `AddNothingStaged` routes to `Cli` (per `:275`).
+    /// `BisectNotActive` and `BisectNoCandidates` route to `Repo`
+    /// (per `:276`). `AgentBudgetExceeded` routes to `Internal`
+    /// (per `:281`) because an operator-configured budget cap is a
+    /// runtime invariant, not a user-input error. Future refactors
+    /// that "tidy" these into their lexical bucket will trip this
+    /// guard.
+    #[test]
+    fn stable_error_code_category_pins_each_variant() {
+        assert_eq!(
+            StableErrorCode::CliUnknownCommand.category(),
+            CliErrorCategory::Cli,
+        );
+        assert_eq!(
+            StableErrorCode::CliInvalidArguments.category(),
+            CliErrorCategory::Cli,
+        );
+        assert_eq!(
+            StableErrorCode::CliInvalidTarget.category(),
+            CliErrorCategory::Cli,
+        );
+        assert_eq!(
+            StableErrorCode::RepoNotFound.category(),
+            CliErrorCategory::Repo,
+        );
+        assert_eq!(
+            StableErrorCode::RepoCorrupt.category(),
+            CliErrorCategory::Repo,
+        );
+        assert_eq!(
+            StableErrorCode::RepoStateInvalid.category(),
+            CliErrorCategory::Repo,
+        );
+        assert_eq!(
+            StableErrorCode::ConflictUnresolved.category(),
+            CliErrorCategory::Conflict,
+        );
+        assert_eq!(
+            StableErrorCode::ConflictOperationBlocked.category(),
+            CliErrorCategory::Conflict,
+        );
+        assert_eq!(
+            StableErrorCode::NetworkUnavailable.category(),
+            CliErrorCategory::Network,
+        );
+        assert_eq!(
+            StableErrorCode::NetworkProtocol.category(),
+            CliErrorCategory::Network,
+        );
+        assert_eq!(
+            StableErrorCode::AuthMissingCredentials.category(),
+            CliErrorCategory::Auth,
+        );
+        assert_eq!(
+            StableErrorCode::AuthPermissionDenied.category(),
+            CliErrorCategory::Auth,
+        );
+        assert_eq!(
+            StableErrorCode::IoReadFailed.category(),
+            CliErrorCategory::Io,
+        );
+        assert_eq!(
+            StableErrorCode::IoWriteFailed.category(),
+            CliErrorCategory::Io,
+        );
+        assert_eq!(
+            StableErrorCode::InternalInvariant.category(),
+            CliErrorCategory::Internal,
+        );
+        assert_eq!(
+            StableErrorCode::WarningEmitted.category(),
+            CliErrorCategory::Warning,
+        );
+        // Deliberate exception per `:275`: AddNothingStaged → Cli.
+        assert_eq!(
+            StableErrorCode::AddNothingStaged.category(),
+            CliErrorCategory::Cli,
+        );
+        assert_eq!(
+            StableErrorCode::Unsupported.category(),
+            CliErrorCategory::Internal,
+        );
+        // Deliberate exception per `:276`: BisectNotActive +
+        // BisectNoCandidates → Repo (BisectRunFailed → Internal).
+        assert_eq!(
+            StableErrorCode::BisectNotActive.category(),
+            CliErrorCategory::Repo,
+        );
+        assert_eq!(
+            StableErrorCode::BisectRunFailed.category(),
+            CliErrorCategory::Internal,
+        );
+        assert_eq!(
+            StableErrorCode::BisectNoCandidates.category(),
+            CliErrorCategory::Repo,
+        );
+        // Deliberate exception per `:281`: operator-configured cap
+        // surfaces under Internal, not under a hypothetical Budget
+        // category.
+        assert_eq!(
+            StableErrorCode::AgentBudgetExceeded.category(),
+            CliErrorCategory::Internal,
         );
     }
 }

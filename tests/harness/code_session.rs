@@ -491,7 +491,7 @@ impl CodeSession {
     /// The returned [`super::EventStream`] reads events on a worker
     /// thread; per-event timeouts are configured by the caller.
     ///
-    /// Wave 1 of `docs/improvement/test.md` makes this the central
+    /// Wave 1 of `docs/development/commands/_general.md` makes this the central
     /// entry point for the SSE matrix and downstream Waves
     /// (state / generation / approval) that need to observe runtime
     /// notifications without polling `/session`.
@@ -1109,6 +1109,22 @@ impl CodeSession {
         if !status.is_success() {
             bail!(
                 "message submit failed with {status}: {}",
+                response.text().unwrap_or_default()
+            );
+        }
+        Ok(status)
+    }
+
+    pub fn detach_automation(&self, client_id: &str) -> Result<StatusCode> {
+        let response = self
+            .authorized_post("/controller/detach")
+            .json(&json!({ "clientId": client_id }))
+            .send()
+            .context("failed to send automation detach request")?;
+        let status = response.status();
+        if !status.is_success() {
+            bail!(
+                "automation detach failed with {status}: {}",
                 response.text().unwrap_or_default()
             );
         }

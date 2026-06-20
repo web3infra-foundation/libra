@@ -73,6 +73,40 @@ pub enum DagStage {
     Test,
 }
 
+impl DagStage {
+    /// Stable lower-snake-case identifier matching the
+    /// `#[serde(rename_all = "snake_case")]` tag values. Used by
+    /// `apply_scheduler_mutation(StartStage)` when writing the `stage`
+    /// metadata field — keeping the string in one place protects
+    /// against drift between metadata strings and serialised payloads.
+    pub fn variant_name(self) -> &'static str {
+        match self {
+            DagStage::Execution => "execution",
+            DagStage::Test => "test",
+        }
+    }
+
+    /// Inverse of [`variant_name`](Self::variant_name): parse a
+    /// snake_case stage tag back into the enum. Returns `None` for
+    /// unknown / kebab-case input. Mirrors the
+    /// [`FinalDecisionVerdict::from_variant_name`] pattern — audit
+    /// readers that encounter an unknown value must fail closed
+    /// rather than substituting a default stage.
+    pub fn from_variant_name(value: &str) -> Option<Self> {
+        match value {
+            "execution" => Some(Self::Execution),
+            "test" => Some(Self::Test),
+            _ => None,
+        }
+    }
+
+    /// Every variant of [`DagStage`] in declaration order. Lets the
+    /// round-trip regression sweep every variant.
+    pub fn all() -> [Self; 2] {
+        [Self::Execution, Self::Test]
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SchedulerClearReason {
@@ -83,6 +117,58 @@ pub enum SchedulerClearReason {
     Rebuild,
 }
 
+impl SchedulerClearReason {
+    /// Stable lower-snake-case identifier matching the
+    /// `#[serde(rename_all = "snake_case")]` tag values. Used by audit
+    /// log emission so the `reason` field of a `ClearActiveRun` mutation
+    /// can be stringified without reaching for `serde_json::to_value`.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            SchedulerClearReason::Completed => "completed",
+            SchedulerClearReason::Cancelled => "cancelled",
+            SchedulerClearReason::Interrupted => "interrupted",
+            SchedulerClearReason::Failed => "failed",
+            SchedulerClearReason::Rebuild => "rebuild",
+        }
+    }
+
+    /// Inverse of [`variant_name`](Self::variant_name): parse a
+    /// snake_case audit tag back into the enum. Returns `None` for
+    /// unknown / kebab-case input. Mirrors the
+    /// [`FinalDecisionVerdict::from_variant_name`] pattern — audit
+    /// readers that encounter an unknown value must fail closed.
+    pub fn from_variant_name(value: &str) -> Option<Self> {
+        match value {
+            "completed" => Some(Self::Completed),
+            "cancelled" => Some(Self::Cancelled),
+            "interrupted" => Some(Self::Interrupted),
+            "failed" => Some(Self::Failed),
+            "rebuild" => Some(Self::Rebuild),
+            _ => None,
+        }
+    }
+
+    /// Every variant of [`SchedulerClearReason`] in declaration order.
+    /// Lets the round-trip regression sweep every variant.
+    pub fn all() -> [Self; 5] {
+        [
+            Self::Completed,
+            Self::Cancelled,
+            Self::Interrupted,
+            Self::Failed,
+            Self::Rebuild,
+        ]
+    }
+
+    /// `true` when the clear reason represents a clean task completion
+    /// (the only variant that does NOT signal a failure or interruption).
+    /// Phase 3 routing uses this to decide whether to move on or
+    /// escalate.
+    pub fn is_clean_completion(&self) -> bool {
+        matches!(self, SchedulerClearReason::Completed)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectionStaleReason {
@@ -91,6 +177,55 @@ pub enum ProjectionStaleReason {
     CasConflict,
     Backpressure,
     ManualRepair,
+}
+
+impl ProjectionStaleReason {
+    /// Stable lower-snake-case identifier matching the
+    /// `#[serde(rename_all = "snake_case")]` tag values. Used by audit
+    /// log emission so the `reason` field of a `MarkProjectionStale`
+    /// mutation can be stringified without reaching for
+    /// `serde_json::to_value`.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            ProjectionStaleReason::RebuildRequired => "rebuild_required",
+            ProjectionStaleReason::DerivedRecordStale => "derived_record_stale",
+            ProjectionStaleReason::CasConflict => "cas_conflict",
+            ProjectionStaleReason::Backpressure => "backpressure",
+            ProjectionStaleReason::ManualRepair => "manual_repair",
+        }
+    }
+
+    /// Inverse of [`variant_name`](Self::variant_name): parse a
+    /// snake_case audit tag back into the enum. Returns `None` for
+    /// unknown / kebab-case input. Mirrors the
+    /// [`FinalDecisionVerdict::from_variant_name`] pattern — audit
+    /// readers that encounter an unknown value must fail closed
+    /// rather than substituting a default, since the reason drives
+    /// scheduler stale-repair routing.
+    pub fn from_variant_name(value: &str) -> Option<Self> {
+        match value {
+            "rebuild_required" => Some(Self::RebuildRequired),
+            "derived_record_stale" => Some(Self::DerivedRecordStale),
+            "cas_conflict" => Some(Self::CasConflict),
+            "backpressure" => Some(Self::Backpressure),
+            "manual_repair" => Some(Self::ManualRepair),
+            _ => None,
+        }
+    }
+
+    /// Every variant of [`ProjectionStaleReason`] in declaration
+    /// order. Lets the round-trip regression sweep every variant via
+    /// `all()`, so adding a sixth reason lands round-trip coverage
+    /// automatically.
+    pub fn all() -> [Self; 5] {
+        [
+            Self::RebuildRequired,
+            Self::DerivedRecordStale,
+            Self::CasConflict,
+            Self::Backpressure,
+            Self::ManualRepair,
+        ]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +302,27 @@ impl SchedulerMutation {
             | SchedulerMutation::ApplyRebuild { expected, .. } => *expected,
         }
     }
+
+    /// Stable lower-snake-case identifier for the mutation variant.
+    ///
+    /// Used by audit log emission, the `ApplySchedulerMutationError::
+    /// VariantNotWired { variant }` field, and any other site that needs
+    /// to refer to "which mutation" without pattern-matching the full
+    /// enum. The strings match the `#[serde(rename_all = "snake_case")]`
+    /// tag values so a stringified variant name lines up with what
+    /// observers see in serialised mutation payloads.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            SchedulerMutation::SeedThread { .. } => "seed_thread",
+            SchedulerMutation::SetCurrentPlanHeads { .. } => "set_current_plan_heads",
+            SchedulerMutation::SelectPlanSet { .. } => "select_plan_set",
+            SchedulerMutation::StartStage { .. } => "start_stage",
+            SchedulerMutation::MarkTaskActive { .. } => "mark_task_active",
+            SchedulerMutation::ClearActiveRun { .. } => "clear_active_run",
+            SchedulerMutation::MarkProjectionStale { .. } => "mark_projection_stale",
+            SchedulerMutation::ApplyRebuild { .. } => "apply_rebuild",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +332,60 @@ pub enum FinalDecisionVerdict {
     Rejected,
     Cancelled,
     Abandon,
+}
+
+impl FinalDecisionVerdict {
+    /// Stable lower-snake-case identifier matching the
+    /// `#[serde(rename_all = "snake_case")]` tag values.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            FinalDecisionVerdict::Accepted => "accepted",
+            FinalDecisionVerdict::Rejected => "rejected",
+            FinalDecisionVerdict::Cancelled => "cancelled",
+            FinalDecisionVerdict::Abandon => "abandon",
+        }
+    }
+
+    /// Inverse of [`variant_name`](Self::variant_name): parse a
+    /// snake_case audit tag back into the enum. Returns `None` for
+    /// unknown / kebab-case input. Audit readers that encounter an
+    /// unknown value must fail closed rather than substituting a
+    /// default verdict, since the verdict drives commit / abandon
+    /// routing downstream.
+    pub fn from_variant_name(value: &str) -> Option<Self> {
+        match value {
+            "accepted" => Some(Self::Accepted),
+            "rejected" => Some(Self::Rejected),
+            "cancelled" => Some(Self::Cancelled),
+            "abandon" => Some(Self::Abandon),
+            _ => None,
+        }
+    }
+
+    /// Every variant of [`FinalDecisionVerdict`] in declaration order.
+    /// Lets the round-trip regression sweep every variant via `all()`,
+    /// so adding a fifth verdict lands round-trip coverage automatically.
+    pub fn all() -> [Self; 4] {
+        [
+            Self::Accepted,
+            Self::Rejected,
+            Self::Cancelled,
+            Self::Abandon,
+        ]
+    }
+
+    /// `true` only for `Accepted` — the loop committed the change.
+    pub fn is_accepted(&self) -> bool {
+        matches!(self, FinalDecisionVerdict::Accepted)
+    }
+
+    /// `true` when the verdict ended the workflow without committing
+    /// the change: `Rejected`, `Cancelled`, or `Abandon`. Distinguished
+    /// from `is_accepted()` so callers can route on "did this loop
+    /// produce an artifact?" without enumerating three variants.
+    pub fn is_uncommitted(&self) -> bool {
+        !self.is_accepted()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,6 +433,16 @@ impl ProjectionFreshness {
             ProjectionFreshness::Fresh | ProjectionFreshness::StaleReadOnly
         )
     }
+
+    /// Every variant of [`ProjectionFreshness`] in declaration order
+    /// (`Fresh`, `StaleReadOnly`, `Unavailable`). The fixed-length
+    /// array makes the enumeration size part of the public API — a
+    /// future fourth tier requires extending this list in the same
+    /// patch, which forces the three `allows_*` predicates to be
+    /// revisited together.
+    pub fn all() -> [Self; 3] {
+        [Self::Fresh, Self::StaleReadOnly, Self::Unavailable]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,6 +451,21 @@ pub enum ApprovalMediationState {
     LegacyInteractive,
     RuntimeMediatedInteractive,
     RuntimeMediatedNever,
+}
+
+impl ApprovalMediationState {
+    /// Every variant of [`ApprovalMediationState`] in declaration
+    /// order (`LegacyInteractive`, `RuntimeMediatedInteractive`,
+    /// `RuntimeMediatedNever`). Mirrors the v0.17.660+ `*::all()`
+    /// pattern: the fixed-length array forces a future variant to
+    /// extend this list in the same patch.
+    pub fn all() -> [Self; 3] {
+        [
+            Self::LegacyInteractive,
+            Self::RuntimeMediatedInteractive,
+            Self::RuntimeMediatedNever,
+        ]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,6 +628,107 @@ mod tests {
         );
     }
 
+    /// `variant_name()` must produce stable lower-snake-case strings
+    /// matching the `#[serde(rename_all = "snake_case")]` tag values, so
+    /// audit consumers can correlate the string against the serialised
+    /// `mutation` field of the same payload.
+    #[test]
+    fn scheduler_mutation_variant_names_match_serde_tags() {
+        let expected = ProjectionVersions::default();
+        let logical = Uuid::new_v4();
+        let selected = SelectedPlanSet {
+            execution_plan_id: Uuid::new_v4(),
+            test_plan_id: Uuid::new_v4(),
+        };
+        let bundle = Phase0Bundle {
+            thread_id: Uuid::new_v4(),
+            intent_id: Uuid::new_v4(),
+            context_snapshot_id: None,
+        };
+
+        let cases: Vec<(SchedulerMutation, &str)> = vec![
+            (
+                SchedulerMutation::SeedThread {
+                    expected,
+                    bundle: bundle.clone(),
+                },
+                "seed_thread",
+            ),
+            (
+                SchedulerMutation::SetCurrentPlanHeads {
+                    expected,
+                    execution_plan_id: logical,
+                    test_plan_id: logical,
+                },
+                "set_current_plan_heads",
+            ),
+            (
+                SchedulerMutation::SelectPlanSet {
+                    expected,
+                    selected: selected.clone(),
+                },
+                "select_plan_set",
+            ),
+            (
+                SchedulerMutation::StartStage {
+                    expected,
+                    stage: DagStage::Execution,
+                },
+                "start_stage",
+            ),
+            (
+                SchedulerMutation::MarkTaskActive {
+                    expected,
+                    task_id: logical,
+                    run_id: Some(logical),
+                },
+                "mark_task_active",
+            ),
+            (
+                SchedulerMutation::ClearActiveRun {
+                    expected,
+                    reason: SchedulerClearReason::Completed,
+                },
+                "clear_active_run",
+            ),
+            (
+                SchedulerMutation::MarkProjectionStale {
+                    expected,
+                    reason: ProjectionStaleReason::RebuildRequired,
+                },
+                "mark_projection_stale",
+            ),
+            (
+                SchedulerMutation::ApplyRebuild {
+                    expected,
+                    materialized: MaterializedProjection {
+                        thread_id: bundle.thread_id,
+                        versions: expected,
+                        freshness: ProjectionFreshness::Fresh,
+                        summary: serde_json::Value::Null,
+                    },
+                },
+                "apply_rebuild",
+            ),
+        ];
+
+        for (mutation, expected_name) in cases {
+            // The variant_name() must match the const string.
+            assert_eq!(
+                mutation.variant_name(),
+                expected_name,
+                "variant_name mismatch for {expected_name}",
+            );
+            // It must also match the serialised `mutation` tag.
+            let serialised = serde_json::to_value(&mutation).unwrap();
+            assert_eq!(
+                serialised.get("mutation").and_then(|v| v.as_str()),
+                Some(expected_name),
+                "serde tag mismatch for {expected_name}",
+            );
+        }
+    }
+
     #[test]
     fn final_decision_verdict_serializes_cancelled_and_abandon() {
         assert_eq!(
@@ -467,5 +803,262 @@ mod tests {
                  which is outside the current stage plan",
             ),
         );
+    }
+
+    /// `DagStage::variant_name` and serde tag must agree — they're both
+    /// public surfaces and drift would silently break the `stage`
+    /// metadata field written by `apply_scheduler_mutation(StartStage)`.
+    #[test]
+    fn dag_stage_variant_name_matches_serde_tag() {
+        for (stage, expected) in [(DagStage::Execution, "execution"), (DagStage::Test, "test")] {
+            assert_eq!(stage.variant_name(), expected);
+            assert_eq!(
+                serde_json::to_string(&stage).unwrap(),
+                format!("\"{expected}\""),
+            );
+        }
+    }
+
+    /// `SchedulerClearReason::variant_name` and serde tag must agree
+    /// for all 5 variants. `is_clean_completion()` must be the
+    /// `Completed`-only predicate.
+    #[test]
+    fn scheduler_clear_reason_variant_name_and_clean_completion() {
+        for (reason, expected) in [
+            (SchedulerClearReason::Completed, "completed"),
+            (SchedulerClearReason::Cancelled, "cancelled"),
+            (SchedulerClearReason::Interrupted, "interrupted"),
+            (SchedulerClearReason::Failed, "failed"),
+            (SchedulerClearReason::Rebuild, "rebuild"),
+        ] {
+            assert_eq!(reason.variant_name(), expected);
+            assert_eq!(
+                serde_json::to_string(&reason).unwrap(),
+                format!("\"{expected}\""),
+            );
+        }
+
+        assert!(SchedulerClearReason::Completed.is_clean_completion());
+        for reason in [
+            SchedulerClearReason::Cancelled,
+            SchedulerClearReason::Interrupted,
+            SchedulerClearReason::Failed,
+            SchedulerClearReason::Rebuild,
+        ] {
+            assert!(
+                !reason.is_clean_completion(),
+                "{reason:?} must NOT be a clean completion",
+            );
+        }
+    }
+
+    /// `DagStage::from_variant_name` round-trips every variant via
+    /// `all()` and rejects unknown / kebab-case input.
+    #[test]
+    fn dag_stage_from_variant_name_round_trips_every_variant_and_rejects_unknowns() {
+        for stage in DagStage::all() {
+            assert_eq!(
+                DagStage::from_variant_name(stage.variant_name()),
+                Some(stage),
+                "round-trip mismatch for {stage:?}",
+            );
+        }
+        assert_eq!(DagStage::from_variant_name("Execution"), None);
+        assert_eq!(DagStage::from_variant_name("planning"), None);
+        assert_eq!(DagStage::from_variant_name(""), None);
+    }
+
+    /// `SchedulerClearReason::from_variant_name` round-trips every
+    /// variant via `all()` and rejects unknown / kebab-case input.
+    #[test]
+    fn scheduler_clear_reason_from_variant_name_round_trips_every_variant_and_rejects_unknowns() {
+        for reason in SchedulerClearReason::all() {
+            assert_eq!(
+                SchedulerClearReason::from_variant_name(reason.variant_name()),
+                Some(reason.clone()),
+                "round-trip mismatch for {reason:?}",
+            );
+        }
+        assert_eq!(SchedulerClearReason::from_variant_name("Done"), None);
+        // Hyphenated form of a real tag must be rejected.
+        assert_eq!(
+            SchedulerClearReason::from_variant_name("clean-completion"),
+            None,
+        );
+        assert_eq!(SchedulerClearReason::from_variant_name(""), None);
+    }
+
+    /// `ProjectionStaleReason::variant_name` must match serde tags for
+    /// all 5 variants — same drift-detection logic as the other enums.
+    #[test]
+    fn projection_stale_reason_variant_name_matches_serde_tag() {
+        for (reason, expected) in [
+            (ProjectionStaleReason::RebuildRequired, "rebuild_required"),
+            (
+                ProjectionStaleReason::DerivedRecordStale,
+                "derived_record_stale",
+            ),
+            (ProjectionStaleReason::CasConflict, "cas_conflict"),
+            (ProjectionStaleReason::Backpressure, "backpressure"),
+            (ProjectionStaleReason::ManualRepair, "manual_repair"),
+        ] {
+            assert_eq!(reason.variant_name(), expected);
+            assert_eq!(
+                serde_json::to_string(&reason).unwrap(),
+                format!("\"{expected}\""),
+            );
+        }
+    }
+
+    /// Round-trip every variant through
+    /// `from_variant_name(v.variant_name()) == Some(v)`. Pin both
+    /// directions over `all()` so a future rename lands at this gate
+    /// rather than at the scheduler-audit callsite.
+    #[test]
+    fn projection_stale_reason_from_variant_name_round_trips_every_variant() {
+        for reason in ProjectionStaleReason::all() {
+            assert_eq!(
+                ProjectionStaleReason::from_variant_name(reason.variant_name()),
+                Some(reason.clone()),
+                "round-trip mismatch for {reason:?}",
+            );
+        }
+    }
+
+    /// Unknown / kebab-case / empty input must yield `None`. Pin the
+    /// rejection shape so a future "lenient" parser cannot silently
+    /// map an audit log row's typo back to a valid reason.
+    #[test]
+    fn projection_stale_reason_from_variant_name_rejects_unknowns_and_kebab_form() {
+        assert_eq!(ProjectionStaleReason::from_variant_name("Stale"), None);
+        // Hyphenated form of a real tag must be rejected.
+        assert_eq!(
+            ProjectionStaleReason::from_variant_name("rebuild-required"),
+            None,
+        );
+        assert_eq!(ProjectionStaleReason::from_variant_name(""), None);
+    }
+
+    /// `FinalDecisionVerdict::variant_name` for all 4 variants +
+    /// `is_accepted` / `is_uncommitted` partition.
+    #[test]
+    fn final_decision_verdict_variant_name_and_partition() {
+        for (verdict, expected) in [
+            (FinalDecisionVerdict::Accepted, "accepted"),
+            (FinalDecisionVerdict::Rejected, "rejected"),
+            (FinalDecisionVerdict::Cancelled, "cancelled"),
+            (FinalDecisionVerdict::Abandon, "abandon"),
+        ] {
+            assert_eq!(verdict.variant_name(), expected);
+            assert_eq!(
+                serde_json::to_string(&verdict).unwrap(),
+                format!("\"{expected}\""),
+            );
+        }
+
+        // Partition: is_accepted XOR is_uncommitted across all 4 variants.
+        assert!(FinalDecisionVerdict::Accepted.is_accepted());
+        assert!(!FinalDecisionVerdict::Accepted.is_uncommitted());
+        for verdict in [
+            FinalDecisionVerdict::Rejected,
+            FinalDecisionVerdict::Cancelled,
+            FinalDecisionVerdict::Abandon,
+        ] {
+            assert!(!verdict.is_accepted(), "{verdict:?} must NOT be accepted",);
+            assert!(
+                verdict.is_uncommitted(),
+                "{verdict:?} must flag as uncommitted",
+            );
+        }
+    }
+
+    /// `FinalDecisionVerdict::from_variant_name` is the inverse of
+    /// `variant_name` — every variant round-trips through
+    /// `from_variant_name(v.variant_name()) == Some(v)`. Pin both
+    /// directions over `all()` so a future rename lands at this gate
+    /// rather than at the audit-reader callsite.
+    #[test]
+    fn final_decision_verdict_from_variant_name_round_trips_every_variant() {
+        for verdict in FinalDecisionVerdict::all() {
+            assert_eq!(
+                FinalDecisionVerdict::from_variant_name(verdict.variant_name()),
+                Some(verdict.clone()),
+                "round-trip mismatch for {verdict:?}",
+            );
+        }
+    }
+
+    /// Unknown / kebab-case / empty input must yield `None`. Pin the
+    /// rejection shape so a future "lenient" parser cannot silently
+    /// map an audit log row's typo back to a valid verdict.
+    #[test]
+    fn final_decision_verdict_from_variant_name_rejects_unknowns_and_kebab_form() {
+        assert_eq!(FinalDecisionVerdict::from_variant_name("approved"), None);
+        // Hyphenated form of a real tag must be rejected — the audit
+        // pipeline writes snake_case verbatim.
+        assert_eq!(
+            FinalDecisionVerdict::from_variant_name("not-accepted"),
+            None,
+        );
+        assert_eq!(FinalDecisionVerdict::from_variant_name(""), None);
+    }
+
+    /// `ProjectionFreshness::all()` enumerates every variant in
+    /// declaration order. Cross-check each variant's three
+    /// `allows_*` predicates so a future fourth tier extends `all()`
+    /// and the predicate arms together.
+    #[test]
+    fn projection_freshness_all_enumerates_every_variant_and_pins_predicates() {
+        let variants = ProjectionFreshness::all();
+        assert_eq!(variants.len(), 3);
+        assert_eq!(
+            variants,
+            [
+                ProjectionFreshness::Fresh,
+                ProjectionFreshness::StaleReadOnly,
+                ProjectionFreshness::Unavailable,
+            ]
+        );
+        for variant in ProjectionFreshness::all() {
+            let (scheduler, decision, resume) = match variant {
+                ProjectionFreshness::Fresh => (true, true, true),
+                ProjectionFreshness::StaleReadOnly => (false, false, true),
+                ProjectionFreshness::Unavailable => (false, false, false),
+            };
+            assert_eq!(variant.allows_scheduler_write(), scheduler);
+            assert_eq!(variant.allows_final_decision_write(), decision);
+            assert_eq!(variant.allows_resume_read(), resume);
+        }
+    }
+
+    /// `ApprovalMediationState::all()` enumerates every variant in
+    /// declaration order. Pin the wire serialisation alongside so a
+    /// future variant extending `all()` is forced to extend the
+    /// serde tag mapping in the same patch.
+    #[test]
+    fn approval_mediation_state_all_enumerates_every_variant_and_pins_wire_tags() {
+        let variants = ApprovalMediationState::all();
+        assert_eq!(variants.len(), 3);
+        assert_eq!(
+            variants,
+            [
+                ApprovalMediationState::LegacyInteractive,
+                ApprovalMediationState::RuntimeMediatedInteractive,
+                ApprovalMediationState::RuntimeMediatedNever,
+            ]
+        );
+        for variant in &ApprovalMediationState::all() {
+            let expected_tag = match variant {
+                ApprovalMediationState::LegacyInteractive => "\"legacy_interactive\"",
+                ApprovalMediationState::RuntimeMediatedInteractive => {
+                    "\"runtime_mediated_interactive\""
+                }
+                ApprovalMediationState::RuntimeMediatedNever => "\"runtime_mediated_never\"",
+            };
+            let serialised = serde_json::to_string(variant).unwrap();
+            assert_eq!(serialised, expected_tag);
+            let back: ApprovalMediationState = serde_json::from_str(&serialised).unwrap();
+            assert_eq!(&back, variant);
+        }
     }
 }

@@ -1,9 +1,9 @@
 //! S7 acceptance scenario: multi-agent declarative config E2E
 //! (OC-Phase 5 P5.5).
 //!
-//! Per docs/improvement/opencode.md:1724-1732 the scenario covers:
+//! Per docs/development/commands/_general.md:1724-1732 the scenario covers:
 //!
-//! 1. Load `examples/multi_agent.toml` and validate the documented
+//! 1. Load `tests/fixtures/ai/multi_agent.toml` and validate the canonical
 //!    `planner → coder → reviewer` pipeline parses cleanly under the
 //!    OC-Phase 5 P5.1 schema + validator.
 //! 2. Each of the three agents records usage with a distinct
@@ -40,7 +40,7 @@ use libra::internal::{
 };
 use sea_orm::Database;
 
-const SAMPLE_TOML_PATH: &str = "examples/multi_agent.toml";
+const SAMPLE_TOML_PATH: &str = "tests/fixtures/ai/multi_agent.toml";
 
 fn fake_usage(input: u64, output: u64, cost_usd: f64) -> CompletionUsageSummary {
     CompletionUsageSummary {
@@ -68,19 +68,19 @@ fn agent_context(agent: &str, provider: &str, model: &str) -> UsageContext {
 }
 
 /// S7 phase 1: the canonical declarative config in
-/// `examples/multi_agent.toml` parses + validates cleanly under the
+/// `tests/fixtures/ai/multi_agent.toml` parses + validates cleanly under the
 /// P5.1 schema. Pins the documented `planner → coder → reviewer`
 /// pipeline shape so a future schema change either updates the
-/// example or breaks this test (whichever the operator notices
+/// fixture or breaks this test (whichever the operator notices
 /// first).
 #[test]
 fn s7_canonical_example_toml_parses_and_validates() {
     let toml_str = std::fs::read_to_string(SAMPLE_TOML_PATH)
-        .expect("examples/multi_agent.toml must be readable from the repo root");
+        .expect("tests/fixtures/ai/multi_agent.toml must be readable from the repo root");
     let cfg = AgentsConfig::from_toml_str(&toml_str)
-        .expect("examples/multi_agent.toml must parse under the P5.1 schema");
+        .expect("tests/fixtures/ai/multi_agent.toml must parse under the P5.1 schema");
     cfg.validate()
-        .expect("examples/multi_agent.toml must pass P5.1 validation");
+        .expect("tests/fixtures/ai/multi_agent.toml must pass P5.1 validation");
 
     // Documented pipeline shape.
     assert!(cfg.multi_agent.enabled, "feature flag must be on");
@@ -277,4 +277,56 @@ fn s7_session_cost_cap_breach_surfaces_agent_budget_exceeded_code() {
     // operator can see how much they are over.
     assert!(budget_render.contains("$0.0015"));
     assert!(budget_render.contains("$0.0010"));
+}
+
+/// S7 phase 3b: a tight per-agent cap must fail only the named
+/// agent bucket, not the whole session. This pins the P5.3
+/// attribution path that `SubAgentUsageUpdated` feeds in the TUI:
+/// usage is accumulated with `Some(agent_name)` and `check_agent`
+/// returns `LBR-AGENT-001` with `BudgetScope::Agent`.
+#[test]
+fn s7_per_agent_cost_cap_breach_surfaces_agent_budget_exceeded_code() {
+    use libra::{
+        internal::ai::agent::{BudgetAxis, BudgetScope},
+        utils::error::StableErrorCode,
+    };
+
+    let mut cfg =
+        AgentsConfig::from_toml_str(&std::fs::read_to_string(SAMPLE_TOML_PATH).unwrap()).unwrap();
+    cfg.budget
+        .per_agent
+        .get_mut("reviewer")
+        .expect("fixture declares reviewer per-agent budget")
+        .max_cost_usd = Some(0.0005);
+
+    let mut tracker = BudgetTracker::new();
+    tracker.accumulate(&fake_usage(10, 5, 0.0006), Some(500), Some("reviewer"));
+    tracker.accumulate(&fake_usage(500, 250, 0.0100), Some(1_500), Some("coder"));
+
+    let err = tracker
+        .check_agent("reviewer", &cfg)
+        .expect_err("reviewer per-agent cost cap must be breached");
+    assert_eq!(err.axis, BudgetAxis::Cost);
+    assert_eq!(
+        err.scope,
+        BudgetScope::Agent {
+            name: "reviewer".to_string(),
+        }
+    );
+    assert_eq!(err.stable_code(), StableErrorCode::AgentBudgetExceeded);
+
+    let rendered = err.to_string();
+    assert!(rendered.contains("LBR-AGENT-001"));
+    assert!(rendered.contains("agent 'reviewer'"));
+    assert!(rendered.contains("$0.0005"));
+    assert!(rendered.contains("$0.0006"));
+
+    tracker
+        .check_agent("coder", &cfg)
+        .expect("coder usage stays below its documented per-agent cap");
+
+    let budget_render = format_budget_status(&cfg, &tracker, &[]);
+    assert!(budget_render.contains("reviewer"));
+    assert!(budget_render.contains("$0.0006"));
+    assert!(budget_render.contains("$0.0005"));
 }

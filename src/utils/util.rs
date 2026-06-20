@@ -7,14 +7,15 @@ use std::{
     fs, io,
     io::Write,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
+    time::SystemTime,
 };
 
 use git_internal::{
     hash::ObjectHash,
     internal::object::{commit::Commit, types::ObjectType},
 };
-use ignore::{Match, gitignore::Gitignore};
+use ignore::{Match, WalkBuilder, gitignore::Gitignore};
 use indicatif::{ProgressBar, ProgressStyle};
 use once_cell::sync::Lazy;
 use path_absolutize::*;
@@ -27,7 +28,7 @@ use crate::{
         head::Head,
         tag,
     },
-    utils::{client_storage::ClientStorage, error::emit_legacy_stderr, path, path_ext::PathExt},
+    utils::{client_storage::ClientStorage, path, path_ext::PathExt},
 };
 
 // SAFETY: The unwrap() and expect() calls in this module are documented with safety
@@ -35,11 +36,20 @@ use crate::{
 // or cases where invariants are guaranteed by the code structure.
 
 pub const ROOT_DIR: &str = ".libra";
+const LIBRAIGNORE_FILE: &str = ".libraignore";
 pub const DATABASE: &str = "libra.db";
 pub const ATTRIBUTES: &str = ".libra_attributes";
 
 static OBJECTS_STORAGE_CACHE: Lazy<Mutex<HashMap<PathBuf, ClientStorage>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+static LIBRAIGNORE_CACHE: Lazy<Mutex<HashMap<PathBuf, CachedGitignore>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+struct CachedGitignore {
+    len: u64,
+    modified: SystemTime,
+    matcher: Arc<Gitignore>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitRepositoryLocation {
@@ -252,17 +262,6 @@ pub fn storage_path() -> PathBuf {
 /// Return an error instead of printing when the current directory is not a repository.
 pub fn require_repo() -> io::Result<()> {
     try_get_storage_path(None).map(|_| ())
-}
-
-/// Legacy repository check that still prints for commands not yet migrated.
-pub fn check_repo_exist() -> bool {
-    if require_repo().is_err() {
-        emit_legacy_stderr(
-            "fatal: not a libra repository (or any of the parent directories): .libra",
-        );
-        return false;
-    }
-    true
 }
 
 /// Get `ClientStorage` for the `objects` directory
@@ -532,10 +531,47 @@ pub fn list_files(path: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// list all files in the working dir(include sub_dir)
+/// list all non-ignored files in the working dir(include sub_dir)
 /// - output: to workdir path
 pub fn list_workdir_files() -> io::Result<Vec<PathBuf>> {
+    list_files_respecting_libraignore(&working_dir())
+}
+
+/// list all files in the working dir(include sub_dir), including ignored files
+/// - output: to workdir path
+pub fn list_workdir_files_unfiltered() -> io::Result<Vec<PathBuf>> {
     list_files(&working_dir())
+}
+
+fn list_files_respecting_libraignore(path: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    if !path.is_dir() || path.file_name().unwrap_or_default() == ROOT_DIR {
+        return Ok(files);
+    }
+
+    let mut builder = WalkBuilder::new(path);
+    builder
+        .hidden(false)
+        .parents(true)
+        .ignore(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .add_custom_ignore_filename(LIBRAIGNORE_FILE)
+        .filter_entry(|entry| entry.file_name() != OsStr::new(ROOT_DIR));
+
+    for entry in builder.build() {
+        let entry = entry.map_err(|error| io::Error::other(error.to_string()))?;
+        let entry_path = entry.path();
+        if entry_path == path {
+            continue;
+        }
+        if entry_path.is_file() {
+            files.push(to_workdir_path(entry_path));
+        }
+    }
+
+    Ok(files)
 }
 
 /// Integrate the input paths (relative, absolute, file, dir) to workdir paths.
@@ -1018,12 +1054,7 @@ pub fn check_gitignore(work_dir: &PathBuf, target_file: &PathBuf) -> bool {
             continue;
         }
 
-        let (ignore, err) = Gitignore::new(&gitignore_path);
-        if let Some(e) = err {
-            eprintln!(
-                "warning: There are some invalid globs in libraignore file {gitignore_path:#?}:\n{e}\n"
-            );
-        }
+        let ignore = cached_libraignore(&gitignore_path);
 
         match ignore.matched(target_file, target_file.is_dir()) {
             Match::Ignore(_) => return true,
@@ -1058,6 +1089,48 @@ pub fn check_gitignore(work_dir: &PathBuf, target_file: &PathBuf) -> bool {
     }
 
     false
+}
+
+fn cached_libraignore(gitignore_path: &Path) -> Arc<Gitignore> {
+    let Ok(metadata) = fs::metadata(gitignore_path) else {
+        return load_libraignore(gitignore_path);
+    };
+    let Ok(modified) = metadata.modified() else {
+        return load_libraignore(gitignore_path);
+    };
+    let len = metadata.len();
+
+    let mut cache = match LIBRAIGNORE_CACHE.lock() {
+        Ok(cache) => cache,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(cached) = cache.get(gitignore_path)
+        && cached.len == len
+        && cached.modified == modified
+    {
+        return Arc::clone(&cached.matcher);
+    }
+
+    let matcher = load_libraignore(gitignore_path);
+    cache.insert(
+        gitignore_path.to_path_buf(),
+        CachedGitignore {
+            len,
+            modified,
+            matcher: Arc::clone(&matcher),
+        },
+    );
+    matcher
+}
+
+fn load_libraignore(gitignore_path: &Path) -> Arc<Gitignore> {
+    let (ignore, err) = Gitignore::new(gitignore_path);
+    if let Some(e) = err {
+        eprintln!(
+            "warning: There are some invalid globs in libraignore file {gitignore_path:#?}:\n{e}\n"
+        );
+    }
+    Arc::new(ignore)
 }
 
 use git_internal::internal::object::signature::{Signature, SignatureType};
@@ -1189,6 +1262,61 @@ mod test {
         assert!(is_sub_path("src/main.rs", "."));
     }
 
+    /// Containment is **component-wise**, never a byte prefix: a sibling
+    /// whose name merely starts with the parent's name (`srcfoo` vs
+    /// `src`) must NOT be treated as inside the parent, and an unrelated
+    /// sibling is likewise rejected. If `is_sub_path` ever regressed to
+    /// a string `starts_with`, `srcfoo/x` would falsely read as inside
+    /// `src` — a scope-escape. Pin the rejection.
+    #[test]
+    fn test_is_sub_path_rejects_byte_prefix_sibling_and_unrelated_paths() {
+        let _guard = test::ChangeDirGuard::new(Path::new(env!("CARGO_MANIFEST_DIR")));
+
+        // Positive control: a genuine child IS inside, so a regression
+        // that returned `false` for everything can't make the negative
+        // assertions below pass vacuously.
+        assert!(is_sub_path("src/main.rs", "src"), "genuine child is inside");
+
+        assert!(
+            !is_sub_path("srcfoo/x.rs", "src"),
+            "a byte-prefix sibling must not be inside the parent",
+        );
+        assert!(
+            !is_sub_path("srcfoo", "src"),
+            "the byte-prefix sibling dir itself must not be inside the parent",
+        );
+        assert!(
+            !is_sub_path("lib/x.rs", "src"),
+            "an unrelated sibling must not be inside the parent",
+        );
+    }
+
+    /// Interior `..` is resolved before the containment check: a
+    /// `..` that stays within the parent keeps the path in scope, while
+    /// a `..` that climbs out to a sibling escapes it. Pins that the
+    /// normalization happens before `starts_with`, not after.
+    ///
+    /// Covers both input branches: relative inputs (resolved by
+    /// `.absolutize()`) and absolute inputs (resolved by the internal
+    /// `normalize_abs_path`), so the absolute branch — exercised
+    /// otherwise only by the root-escape test — is pinned for the
+    /// in-scope / sibling-escape cases too.
+    #[test]
+    fn test_is_sub_path_resolves_interior_parent_dir() {
+        let _guard = test::ChangeDirGuard::new(Path::new(env!("CARGO_MANIFEST_DIR")));
+
+        // Relative inputs (the `.absolutize()` branch):
+        // src/sub/../main.rs -> src/main.rs, still under src.
+        assert!(is_sub_path("src/sub/../main.rs", "src"));
+        // src/../lib/x.rs -> lib/x.rs, NOT under src.
+        assert!(!is_sub_path("src/../lib/x.rs", "src"));
+
+        // Absolute inputs (the `normalize_abs_path` branch): same
+        // interior-`..` semantics, independent of the current dir.
+        assert!(is_sub_path("/repo/src/sub/../main.rs", "/repo/src"));
+        assert!(!is_sub_path("/repo/src/../lib/x.rs", "/repo/src"));
+    }
+
     #[test]
     fn test_is_sub_path_parent_dir_cannot_escape_root() {
         assert!(!is_sub_path("/../../etc/passwd", "/tmp"));
@@ -1206,6 +1334,25 @@ mod test {
     fn test_to_relative() {
         assert_eq!(to_relative("src/main.rs", "src"), PathBuf::from("main.rs"));
         assert_eq!(to_relative(".", "src"), PathBuf::from(".."));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn list_workdir_files_prunes_libraignored_directories() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        fs::write(".libraignore", "target/\n").unwrap();
+        fs::create_dir_all("target/debug/deps").unwrap();
+        fs::write("target/debug/deps/ignored.rlib", "ignored").unwrap();
+        fs::write("visible.txt", "visible").unwrap();
+
+        let files = list_workdir_files().unwrap();
+
+        assert!(files.contains(&PathBuf::from(".libraignore")));
+        assert!(files.contains(&PathBuf::from("visible.txt")));
+        assert!(!files.contains(&PathBuf::from("target/debug/deps/ignored.rlib")));
     }
 
     #[test]
@@ -1237,6 +1384,8 @@ mod test {
             force: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         })
         .await;
         commit::execute(CommitArgs {
@@ -1306,6 +1455,8 @@ mod test {
             force: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         })
         .await;
         commit::execute(CommitArgs {
@@ -1319,7 +1470,7 @@ mod test {
         let head_commit = Head::current_commit()
             .await
             .expect("expected committed HEAD");
-        let created = internal_tag::create("v1.0.0", Some("release".into()), false)
+        let created = internal_tag::create("v1.0.0", Some("release".into()), false, false)
             .await
             .expect("failed to create annotated tag");
 
@@ -1346,6 +1497,8 @@ mod test {
             force: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         })
         .await;
         commit::execute(CommitArgs {
@@ -1359,7 +1512,7 @@ mod test {
         let head_commit = Head::current_commit()
             .await
             .expect("expected committed HEAD");
-        let inner = internal_tag::create("inner", Some("inner tag".into()), false)
+        let inner = internal_tag::create("inner", Some("inner tag".into()), false, false)
             .await
             .expect("failed to create inner tag");
         let outer = test_tag_object(inner.target, ObjectType::Tag, "outer");
@@ -1389,6 +1542,8 @@ mod test {
             force: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         })
         .await;
         commit::execute(CommitArgs {

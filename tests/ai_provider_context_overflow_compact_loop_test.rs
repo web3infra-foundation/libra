@@ -1,6 +1,6 @@
 //! OC-Phase 4 context-overflow compaction loop integration test.
 //!
-//! Spec: `docs/improvement/opencode.md` → "Provider Error Taxonomy &
+//! Spec: `docs/development/commands/_general.md` → "Provider Error Taxonomy &
 //! Retry Policy" — `ContextOverflow` is *not* retryable through the
 //! transient-error retry budget; the runtime instead takes a separate
 //! `compaction → retry-once` branch that does **not** consume the
@@ -51,7 +51,7 @@ use uuid::Uuid;
 
 /// Canonical 8-section summary the fake compaction agent emits.
 /// Matches the literal SUMMARY_TEMPLATE from
-/// `docs/improvement/opencode.md` line 1176-1206 byte-for-byte (modulo
+/// `docs/development/commands/_general.md` line 1176-1206 byte-for-byte (modulo
 /// fixture content) so the strict parser is the authority on shape.
 const VALID_SUMMARY: &str = "\
 ## Goal
@@ -485,7 +485,7 @@ impl CompletionModel for OverflowThenTransientModel {
 /// transient retry budget — the budget is still fully available for
 /// real transient retries that happen later in the same session.
 ///
-/// The doc's invariant at `docs/improvement/opencode.md` line 1129:
+/// The doc's invariant at `docs/development/commands/_general.md` line 1129:
 ///
 /// > `ContextOverflow` → 调 compaction agent，重建 transcript 后重试一次
 /// > （一次，不计入 max_retries）

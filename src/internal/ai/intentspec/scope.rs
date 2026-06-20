@@ -152,4 +152,102 @@ mod tests {
             vec![".github/workflows/**".to_string(), "vendor/".to_string()]
         );
     }
+
+    /// `./<path>` must be normalised to `<path>` (relative-prefix
+    /// stripping is part of the canonical scope shape). Trailing/leading
+    /// whitespace must be trimmed.
+    #[test]
+    fn effective_write_scope_strips_relative_prefix_and_whitespace() {
+        let mut intent = intent();
+        intent.in_scope = vec![
+            "./src/main.rs".into(),
+            "  Cargo.toml  ".into(),
+            "./tests/".into(),
+        ];
+
+        assert_eq!(
+            effective_write_scope(&intent),
+            vec![
+                "Cargo.toml".to_string(),
+                "src/main.rs".to_string(),
+                "tests/".to_string(),
+            ],
+        );
+    }
+
+    /// Windows-style backslash paths must be normalised to forward
+    /// slashes. The `src\dir` pattern becomes a recognised path pattern
+    /// because the normalised form contains `/`.
+    #[test]
+    fn effective_write_scope_normalises_backslashes_to_forward_slashes() {
+        let mut intent = intent();
+        intent.in_scope = vec!["src\\nested\\file.rs".into()];
+
+        assert_eq!(
+            effective_write_scope(&intent),
+            vec!["src/nested/file.rs".to_string()],
+        );
+    }
+
+    /// Glob characters (`?`, `[`, `{`, `*`) make a candidate qualify
+    /// as a path pattern even when it has no slash. Whitespace inside
+    /// the candidate still disqualifies it as a freeform sentence.
+    #[test]
+    fn effective_write_scope_recognises_glob_metacharacters() {
+        let mut intent = intent();
+        intent.in_scope = vec![
+            "**/*.rs".into(),
+            "tests/?ase.rs".into(),
+            "src/{a,b}.rs".into(),
+            "[abc]_test.rs".into(),
+            // Mixed with a freeform sentence — must be filtered out.
+            "Add coverage for the parser".into(),
+        ];
+
+        assert_eq!(
+            effective_write_scope(&intent),
+            vec![
+                "**/*.rs".to_string(),
+                "[abc]_test.rs".to_string(),
+                "src/{a,b}.rs".to_string(),
+                "tests/?ase.rs".to_string(),
+            ],
+        );
+    }
+
+    /// Duplicate patterns must be deduplicated (the underlying
+    /// `BTreeSet` collapses identical entries) so callers don't see
+    /// the same path twice when the same string appears in both
+    /// `in_scope` and `touch_hints.files`.
+    #[test]
+    fn effective_write_scope_dedupes_repeated_patterns_across_sources() {
+        let mut intent = intent();
+        intent.in_scope = vec!["src/main.rs".into()];
+        intent.touch_hints = Some(TouchHints {
+            files: vec!["src/main.rs".into(), "src/lib.rs".into()],
+            symbols: vec![],
+            apis: vec![],
+        });
+
+        assert_eq!(
+            effective_write_scope(&intent),
+            vec!["src/lib.rs".to_string(), "src/main.rs".to_string()],
+        );
+    }
+
+    /// Empty/whitespace-only entries must be dropped after
+    /// normalisation. The result is an empty vec, not a vec with an
+    /// empty string.
+    #[test]
+    fn effective_write_scope_drops_empty_and_whitespace_only_entries() {
+        let mut intent = intent();
+        intent.in_scope = vec!["".into(), "   ".into(), "./   ".into()];
+        intent.touch_hints = Some(TouchHints {
+            files: vec!["\t".into(), "  ".into()],
+            symbols: vec![],
+            apis: vec![],
+        });
+
+        assert!(effective_write_scope(&intent).is_empty());
+    }
 }

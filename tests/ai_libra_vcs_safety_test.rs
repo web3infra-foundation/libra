@@ -213,11 +213,7 @@ fn ai_libra_vcs_tool_boundary_allows_read_only_run_libra_vcs() {
             principal_id: "reviewer".to_string(),
             role: PrincipalRole::Observer,
         },
-        &ToolOperation {
-            tool_name: "run_libra_vcs".to_string(),
-            mutates_state: false,
-            requires_network: false,
-        },
+        &ToolOperation::tool("run_libra_vcs", false, false),
     );
 
     assert!(decision.allowed, "{}", decision.reason);

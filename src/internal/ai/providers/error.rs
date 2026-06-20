@@ -1,7 +1,7 @@
 //! Structured provider error taxonomy + retry policy types.
 //!
 //! This module is the OC-Phase 4 pre-P4.1 deliverable from
-//! `docs/improvement/opencode.md`. It mirrors opencode's
+//! `docs/development/commands/_general.md`. It mirrors opencode's
 //! `provider/error.ts:105-202` so a Libra runtime that wraps a real
 //! HTTP failure can pick the right recovery strategy:
 //!

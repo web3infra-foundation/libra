@@ -36,6 +36,8 @@ pub struct AgentProfile {
     pub description: String,
     /// List of tool names this agent is allowed to use.
     pub tools: Vec<String>,
+    /// Parsed permission categories from nested `permission:` frontmatter.
+    pub permission: AgentPermissionSpec,
     /// Model preference (e.g., "default", "fast", "powerful").
     ///
     /// Holds the **literal** `model:` frontmatter string when it does **not**
@@ -98,10 +100,9 @@ impl AgentProfile {
     ///   resolves "inherit" contextually — primary agents inherit the
     ///   session allow-list, sub-agents fall back to deny-everything per
     ///   S2-INV-05).
-    /// - `permission` is the default-deny [`AgentPermissionSpec`]; the
-    ///   parser does not yet read structured permission rules from the
-    ///   frontmatter (OC-Phase 2 P2.5 wires `ApprovedRuleset` and the
-    ///   ruleset frontmatter shape).
+    /// - `permission` round-trips from nested `permission:` frontmatter.
+    ///   Missing permission frontmatter keeps the default-deny
+    ///   [`AgentPermissionSpec`].
     /// - `system_prompt`, `name`, and `description` round-trip verbatim
     ///   so the TUI surface can render the same text it does today.
     pub fn to_execution_spec(&self) -> AgentExecutionSpec {
@@ -116,7 +117,7 @@ impl AgentProfile {
             } else {
                 ToolSelection::Allow(self.tools.clone())
             },
-            permission: AgentPermissionSpec::default(),
+            permission: self.permission.clone(),
             temperature: self.temperature,
             top_p: self.top_p,
             max_steps: self.max_steps,
@@ -132,8 +133,8 @@ impl AgentProfile {
 ///   fence becomes the system prompt body.
 /// - Accepts a small fixed set of keys: the legacy four (`name`, `description`,
 ///   `tools`, `model`) plus the OC-Phase 2 additions (`mode`, `variant`,
-///   `temperature`, `top_p`, `steps`). Unknown keys are ignored so future
-///   schema additions stay forward-compatible.
+///   `temperature`, `top_p`, `steps`, `permission`). Unknown keys are ignored
+///   so future schema additions stay forward-compatible.
 /// - When `model:` carries a `provider/model[@variant]` value, the parser lifts
 ///   it into [`AgentProfile::model_binding`] alongside the literal string in
 ///   `model_preference`. Legacy aliases like `default` / `fast` / `powerful`
@@ -161,6 +162,9 @@ impl AgentProfile {
 /// model: anthropic/claude-3-5-sonnet-latest
 /// mode: primary
 /// temperature: 0.5
+/// permission:
+///   edit: deny
+///   task: allow
 /// steps: 30
 /// ---
 ///
@@ -196,9 +200,13 @@ pub fn parse_agent_profile(content: &str) -> Option<AgentProfile> {
     let mut temperature: Option<f32> = None;
     let mut top_p: Option<f32> = None;
     let mut max_steps: Option<u32> = None;
+    let mut permission = AgentPermissionSpec::default();
 
-    for line in frontmatter.lines() {
-        let line = line.trim();
+    let frontmatter_lines: Vec<&str> = frontmatter.lines().collect();
+    let mut index = 0usize;
+    while index < frontmatter_lines.len() {
+        let raw_line = frontmatter_lines[index];
+        let line = raw_line.trim();
         if let Some(val) = line.strip_prefix("name:") {
             name = Some(val.trim().to_string());
         } else if let Some(val) = line.strip_prefix("description:") {
@@ -210,19 +218,18 @@ pub fn parse_agent_profile(content: &str) -> Option<AgentProfile> {
             // — we keep the documented "default" preference rather than
             // overwriting it with the empty string.
             let raw = unquote(val.trim()).trim().to_string();
-            if raw.is_empty() {
-                continue;
-            }
-            // Lift `provider/model[@variant]` into a structured binding;
-            // legacy aliases (`default`, `fast`, `powerful`, …) stay in
-            // `model_preference` and report `model_binding = None`.
-            if let Some(binding) = ModelBinding::parse(&raw) {
-                if let Some(v) = binding.variant.clone() {
-                    variant_from_model = Some(v);
+            if !raw.is_empty() {
+                // Lift `provider/model[@variant]` into a structured binding;
+                // legacy aliases (`default`, `fast`, `powerful`, …) stay in
+                // `model_preference` and report `model_binding = None`.
+                if let Some(binding) = ModelBinding::parse(&raw) {
+                    if let Some(v) = binding.variant.clone() {
+                        variant_from_model = Some(v);
+                    }
+                    model_binding = Some(binding);
                 }
-                model_binding = Some(binding);
+                model_preference = raw;
             }
-            model_preference = raw;
         } else if let Some(val) = line.strip_prefix("tools:") {
             tools = parse_string_list(val.trim());
         } else if let Some(val) = line.strip_prefix("mode:")
@@ -251,7 +258,13 @@ pub fn parse_agent_profile(content: &str) -> Option<AgentProfile> {
             && let Ok(v) = unquote(val.trim()).parse::<u32>()
         {
             max_steps = Some(v);
+        } else if is_permission_header(line) {
+            let (parsed_permission, consumed) =
+                parse_permission_block(&frontmatter_lines[index + 1..], leading_indent(raw_line));
+            permission = parsed_permission;
+            index += consumed;
         }
+        index += 1;
     }
 
     // The structured `model: provider/model@variant` form always wins over a
@@ -263,6 +276,7 @@ pub fn parse_agent_profile(content: &str) -> Option<AgentProfile> {
         name: name?,
         description: description.unwrap_or_default(),
         tools,
+        permission,
         model_preference,
         system_prompt: body.to_string(),
         mode,
@@ -299,6 +313,65 @@ fn unquote(s: &str) -> &str {
     } else {
         s
     }
+}
+
+fn is_permission_header(line: &str) -> bool {
+    line.strip_prefix("permission:")
+        .is_some_and(|value| unquote(value.trim()).trim().is_empty())
+}
+
+fn parse_permission_block(lines: &[&str], parent_indent: usize) -> (AgentPermissionSpec, usize) {
+    let mut permission = AgentPermissionSpec::default();
+    let mut consumed = 0usize;
+
+    for raw_line in lines {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            consumed += 1;
+            continue;
+        }
+        if leading_indent(raw_line) <= parent_indent {
+            break;
+        }
+        consumed += 1;
+
+        let Some((permission_key, policy)) = trimmed.split_once(':') else {
+            continue;
+        };
+        apply_permission_rule(&mut permission, permission_key, policy);
+    }
+
+    (permission, consumed)
+}
+
+fn apply_permission_rule(permission: &mut AgentPermissionSpec, key: &str, policy: &str) {
+    let key = normalize_permission_key(unquote(key.trim()).trim());
+    if key.is_empty() {
+        return;
+    }
+    match unquote(policy.trim()).trim().to_ascii_lowercase().as_str() {
+        "allow" | "ask" => {
+            permission.allowed_tools.insert(key);
+        }
+        "deny" => {
+            permission.denied_tools.insert(key);
+        }
+        _ => {}
+    }
+}
+
+fn normalize_permission_key(permission: &str) -> String {
+    match permission {
+        "write" => "edit".to_string(),
+        "bash" => "shell".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn leading_indent(line: &str) -> usize {
+    line.chars()
+        .take_while(|ch| matches!(ch, ' ' | '\t'))
+        .count()
 }
 
 /// Load an agent profile from a file path.
@@ -780,6 +853,68 @@ You are an implementation planner.
         let def = parse_agent_profile(content).unwrap();
         let spec = def.to_execution_spec();
         assert!(spec.model.is_none());
+    }
+
+    #[test]
+    fn test_to_execution_spec_legacy_fast_alias_carries_no_binding() {
+        let content = "---\nname: planner\nmodel: fast\n---\nbody";
+        let def = parse_agent_profile(content).unwrap();
+        let spec = def.to_execution_spec();
+        assert_eq!(def.model_preference, "fast");
+        assert!(spec.model.is_none());
+    }
+
+    /// Scenario: the opencode plan's Markdown profile fixture carries
+    /// nested `permission:` frontmatter. The parser must lift those rules
+    /// into `AgentExecutionSpec.permission` using the same category
+    /// normalization as TOML config (`write -> edit`, `bash -> shell`).
+    #[test]
+    fn test_to_execution_spec_lifts_permission_frontmatter() {
+        let content = concat!(
+            "---\n",
+            "name: planner\n",
+            "mode: primary\n",
+            "model: anthropic/claude-3-5-sonnet-latest\n",
+            "temperature: 0.5\n",
+            "steps: 30\n",
+            "permission:\n",
+            "  edit: deny\n",
+            "  task: allow\n",
+            "  write: deny\n",
+            "  bash: allow\n",
+            "---\n",
+            "You are a planner.",
+        );
+        let def = parse_agent_profile(content).unwrap();
+        let spec = def.to_execution_spec();
+
+        assert!(spec.permission.denied_tools.contains("edit"));
+        assert!(spec.permission.allowed_tools.contains("task"));
+        assert!(spec.permission.allowed_tools.contains("shell"));
+        assert!(!spec.permission.denied_tools.contains("write"));
+        assert!(!spec.permission.allowed_tools.contains("bash"));
+        assert_eq!(spec.max_steps, Some(30));
+        assert_eq!(spec.temperature, Some(0.5));
+        assert!(spec.model.is_some());
+    }
+
+    #[test]
+    fn test_to_execution_spec_permission_frontmatter_denies_override_alias_allows() {
+        let content = concat!(
+            "---\n",
+            "name: planner\n",
+            "permission:\n",
+            "  write: deny\n",
+            "  edit: allow\n",
+            "---\n",
+            "You are a planner.",
+        );
+        let def = parse_agent_profile(content).unwrap();
+        let spec = def.to_execution_spec();
+
+        assert!(spec.permission.allowed_tools.contains("edit"));
+        assert!(spec.permission.denied_tools.contains("edit"));
+        assert!(!spec.permission.permits_tool("edit"));
     }
 
     /// Scenario: a profile that omits everything optional lifts to a spec

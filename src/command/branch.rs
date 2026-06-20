@@ -54,18 +54,17 @@ pub enum BranchListMode {
 }
 
 const BRANCH_AFTER_HELP: &str = "\
-Compatibility Notes:
-  Libra's global --quiet suppresses the branch listing itself.
-  This differs from `git branch --quiet`, which still prints the primary list.
+NOTES:
+    Libra's global --quiet suppresses the branch listing itself.
+    This differs from `git branch --quiet`, which still prints the primary list.
 
 EXAMPLES:
-  libra branch feature-x                  Create a branch from HEAD
-  libra branch feature-x main             Create a branch from another branch
-  libra branch -d topic                   Delete a fully merged branch
-  libra branch -D topic                   Force-delete a branch
-  libra branch --set-upstream-to origin/main
-                                          Set upstream for the current branch
-  libra branch --json --show-current      Structured JSON output for agents";
+    libra branch feature-x                Create a branch from HEAD
+    libra branch feature-x main           Create a branch from another branch
+    libra branch -d topic                 Delete a fully merged branch
+    libra branch -D topic                 Force-delete a branch
+    libra branch -u origin/main           Set upstream for the current branch
+    libra branch --json --show-current    Structured JSON output for agents";
 
 /// Tagged-union output type for `libra branch`.
 ///
@@ -88,6 +87,8 @@ pub enum BranchOutput {
         detached_head: Option<String>,
         #[serde(skip_serializing)]
         show_unborn_head: bool,
+        #[serde(skip_serializing)]
+        ignore_case: bool,
     },
     /// `branch <name> [base]` succeeded.
     #[serde(rename = "create")]
@@ -107,6 +108,9 @@ pub enum BranchOutput {
     /// `--set-upstream-to` succeeded. `upstream` is in `remote/branch` form.
     #[serde(rename = "set-upstream")]
     SetUpstream { branch: String, upstream: String },
+    /// `--unset-upstream` succeeded.
+    #[serde(rename = "unset-upstream")]
+    UnsetUpstream { branch: String },
     /// `--show-current` result. `detached` is true when HEAD is detached;
     /// `name` is `None` in that case.
     #[serde(rename = "show-current")]
@@ -125,6 +129,7 @@ impl BranchOutput {
                 | Self::Delete { .. }
                 | Self::Rename { .. }
                 | Self::SetUpstream { .. }
+                | Self::UnsetUpstream { .. }
         )
     }
 }
@@ -176,9 +181,13 @@ pub struct BranchArgs {
     #[clap(short = 'd', long = "delete", group = "action")]
     pub delete_safe: Option<String>,
 
-    ///  Set up `branchname`>`'s tracking information so `<`upstream`>` is considered `<`branchname`>`'s upstream branch.
-    #[clap(short = 'u', long, group = "action")]
+    /// Set up the branch's tracking information so `upstream` is considered its upstream branch.
+    #[clap(short = 'u', long, group = "action", value_name = "UPSTREAM")]
     pub set_upstream_to: Option<String>,
+
+    /// Remove the branch's upstream configuration. Defaults to current branch.
+    #[clap(long = "unset-upstream", group = "action", value_name = "BRANCH", num_args = 0..=1, default_missing_value = "")]
+    pub unset_upstream: Option<String>,
 
     /// show current branch
     #[clap(long, group = "action")]
@@ -204,6 +213,14 @@ pub struct BranchArgs {
     /// Only list branches which don’t contain the specified commit (HEAD if not specified). Implies --list.
     #[clap(long, group = "query", alias = "without", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD", action = clap::ArgAction::Append)]
     pub no_contains: Vec<String>,
+
+    /// Only list branches pointing at the given object. Implies --list.
+    #[clap(long = "points-at", group = "query", value_name = "object")]
+    pub points_at: Option<String>,
+
+    /// Sorting and name comparisons ignore case where applicable.
+    #[clap(long = "ignore-case", group = "query")]
+    pub ignore_case: bool,
 }
 /// Fire-and-forget entry: prints the rendered error to stderr but does not
 /// signal exit code.
@@ -267,6 +284,9 @@ enum BranchError {
     #[error("invalid upstream '{0}'")]
     InvalidUpstream(String),
 
+    #[error("remote '{0}' not found")]
+    RemoteNotFound(String),
+
     #[error("{0}")]
     ConfigReadFailed(String),
 
@@ -287,6 +307,9 @@ enum BranchError {
 
     #[error("failed to record branch operation: {0}")]
     OperationLogFailed(String),
+
+    #[error("failed to load commit {commit}: {detail}")]
+    CommitLoadFailed { commit: String, detail: String },
 
     #[error("too many arguments")]
     RenameTooManyArgs,
@@ -349,6 +372,11 @@ impl From<BranchError> for CliError {
                     .with_stable_code(StableErrorCode::CliInvalidTarget)
                     .with_hint("expected format: 'remote/branch'")
             }
+            BranchError::RemoteNotFound(remote) => {
+                CliError::fatal(format!("remote '{remote}' not found"))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+                    .with_hint("use 'libra remote -v' to inspect configured remotes")
+            }
             BranchError::ConfigReadFailed(detail) => CliError::fatal(detail)
                 .with_stable_code(StableErrorCode::IoReadFailed)
                 .with_hint("check whether the repository database is readable."),
@@ -376,6 +404,10 @@ impl From<BranchError> for CliError {
                 CliError::fatal(format!("failed to record branch operation: {detail}"))
                     .with_stable_code(StableErrorCode::IoWriteFailed)
                     .with_hint("check whether the repository database is writable.")
+            }
+            BranchError::CommitLoadFailed { commit, detail } => {
+                CliError::fatal(format!("failed to load commit {commit}: {detail}"))
+                    .with_stable_code(StableErrorCode::RepoCorrupt)
             }
             BranchError::RenameTooManyArgs => CliError::command_usage("too many arguments")
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
@@ -550,6 +582,16 @@ async fn set_upstream_with_conn<C: ConnectionTrait>(
     let (remote, remote_branch) = upstream
         .split_once('/')
         .ok_or_else(|| BranchError::InvalidUpstream(upstream.to_string()))?;
+    if remote.is_empty() || remote_branch.is_empty() {
+        return Err(BranchError::InvalidUpstream(upstream.to_string()));
+    }
+    if ConfigKv::remote_config_with_conn(db, remote)
+        .await
+        .map_err(|e| branch_config_read_error(format!("remote '{remote}' configuration"), e))?
+        .is_none()
+    {
+        return Err(BranchError::RemoteNotFound(remote.to_string()));
+    }
     let branch_config = ConfigKv::branch_config_with_conn(db, branch)
         .await
         .map_err(|e| {
@@ -582,6 +624,20 @@ async fn set_upstream_with_conn<C: ConnectionTrait>(
 async fn set_upstream_impl(branch: &str, upstream: &str) -> Result<(), BranchError> {
     let db = get_db_conn_instance().await;
     set_upstream_with_conn(&db, branch, upstream).await
+}
+
+async fn unset_upstream_impl(branch: &str) -> Result<(), BranchError> {
+    require_existing_local_branch(branch).await?;
+    let db = get_db_conn_instance().await;
+    for key in [
+        format!("branch.{branch}.remote"),
+        format!("branch.{branch}.merge"),
+    ] {
+        ConfigKv::unset_all_with_conn(&db, &key)
+            .await
+            .map_err(|e| branch_config_write_error(&key, e))?;
+    }
+    Ok(())
 }
 
 /// Enumerate every branch stored under each known remote.
@@ -871,7 +927,8 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
     } else {
         BranchListMode::Local
     };
-    let has_commit_filters = !args.contains.is_empty() || !args.no_contains.is_empty();
+    let has_commit_filters =
+        !args.contains.is_empty() || !args.no_contains.is_empty() || args.points_at.is_some();
     let (head_name, detached_head) = match Head::current().await {
         Head::Branch(name) => (Some(name), None),
         Head::Detached(commit_hash) => (None, Some(commit_hash.to_string())),
@@ -889,15 +946,23 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
         vec![]
     };
 
-    let contains_set = resolve_commits(&args.contains)
-        .await
-        .map_err(BranchError::DelegatedCli)?;
-    let no_contains_set = resolve_commits(&args.no_contains)
-        .await
-        .map_err(BranchError::DelegatedCli)?;
+    let points_at = match args.points_at.as_deref() {
+        Some(points_at) => Some(
+            get_target_commit(points_at)
+                .await
+                .map_err(|_| BranchError::InvalidCommit(points_at.to_string()))?,
+        ),
+        None => None,
+    };
+    if let Some(points_at) = points_at {
+        local_branches.retain(|branch| branch.commit == points_at);
+        remote_branches.retain(|branch| branch.commit == points_at);
+    }
+
+    let contains_set = resolve_commits(&args.contains).await?;
+    let no_contains_set = resolve_commits(&args.no_contains).await?;
     for branches in [&mut local_branches, &mut remote_branches] {
-        filter_branches(branches, &contains_set, &no_contains_set)
-            .map_err(BranchError::DelegatedCli)?;
+        filter_branches_result(branches, &contains_set, &no_contains_set)?;
     }
     let local_branches_empty = local_branches.is_empty();
 
@@ -931,6 +996,7 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
         head_name,
         detached_head,
         show_unborn_head,
+        ignore_case: args.ignore_case,
     })
 }
 
@@ -981,6 +1047,17 @@ async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
             branch,
             upstream: upstream.to_string(),
         })
+    } else if let Some(branch) = args.unset_upstream.as_deref() {
+        let branch = if branch.is_empty() {
+            match Head::current().await {
+                Head::Branch(name) => name,
+                Head::Detached(_) => return Err(detached_head_branch_error()),
+            }
+        } else {
+            branch.to_string()
+        };
+        unset_upstream_impl(&branch).await?;
+        Ok(BranchOutput::UnsetUpstream { branch })
     } else if !args.rename.is_empty() {
         rename_branch_impl(&args.rename).await
     } else {
@@ -1009,6 +1086,7 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
             head_name,
             detached_head,
             show_unborn_head,
+            ignore_case,
         } => {
             if let Some(detached_head) = detached_head {
                 println!(
@@ -1029,6 +1107,8 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
                     std::cmp::Ordering::Less
                 } else if b.current {
                     std::cmp::Ordering::Greater
+                } else if *ignore_case {
+                    a.name.to_lowercase().cmp(&b.name.to_lowercase())
                 } else {
                     a.name.cmp(&b.name)
                 }
@@ -1060,6 +1140,9 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
         }
         BranchOutput::SetUpstream { branch, upstream } => {
             println!("Branch '{branch}' set up to track remote branch '{upstream}'");
+        }
+        BranchOutput::UnsetUpstream { branch } => {
+            println!("Branch '{branch}' no longer tracks an upstream branch");
         }
         BranchOutput::ShowCurrent {
             name,
@@ -1175,12 +1258,15 @@ pub async fn list_branches(
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: matches!(list_mode, BranchListMode::Remote),
         all: matches!(list_mode, BranchListMode::All),
         contains: commits_contains.to_vec(),
         no_contains: commits_no_contains.to_vec(),
+        points_at: None,
+        ignore_case: false,
     };
     let result = collect_branch_output(&args).await.map_err(CliError::from)?;
     render_branch_output(&result, &OutputConfig::default())
@@ -1195,10 +1281,18 @@ pub fn filter_branches(
     contains_set: &HashSet<ObjectHash>,
     no_contains_set: &HashSet<ObjectHash>,
 ) -> CliResult<()> {
+    filter_branches_result(branches, contains_set, no_contains_set).map_err(CliError::from)
+}
+
+fn filter_branches_result(
+    branches: &mut Vec<Branch>,
+    contains_set: &HashSet<ObjectHash>,
+    no_contains_set: &HashSet<ObjectHash>,
+) -> Result<(), BranchError> {
     // Filter branches, propagating errors.
     // `retain` doesn't support fallible predicates, so we capture the first
     // error and short-circuit the remaining iterations.
-    let mut error: Option<CliError> = None;
+    let mut error: Option<BranchError> = None;
     branches.retain(|branch| {
         if error.is_some() {
             return false;
@@ -1228,12 +1322,12 @@ pub fn filter_branches(
 }
 
 /// Resolve commit references to ObjectHash set.
-async fn resolve_commits(commits: &[String]) -> CliResult<HashSet<ObjectHash>> {
+async fn resolve_commits(commits: &[String]) -> Result<HashSet<ObjectHash>, BranchError> {
     let mut set = HashSet::new();
     for commit in commits {
-        let target_commit = get_target_commit(commit).await.map_err(|e| {
-            CliError::fatal(format!("{}", e)).with_stable_code(StableErrorCode::CliInvalidTarget)
-        })?;
+        let target_commit = get_target_commit(commit)
+            .await
+            .map_err(|_| BranchError::InvalidCommit(commit.clone()))?;
         set.insert(target_commit);
     }
     Ok(set)
@@ -1245,7 +1339,7 @@ async fn resolve_commits(commits: &[String]) -> CliResult<HashSet<ObjectHash>> {
 fn commit_contains(
     branch: &Branch,
     target_commits: &HashSet<ObjectHash>,
-) -> Result<bool, CliError> {
+) -> Result<bool, BranchError> {
     // do BFS to find out whether `branch` contains `target_commit` or not
     let mut q = VecDeque::new();
     let mut visited = HashSet::new();
@@ -1260,10 +1354,11 @@ fn commit_contains(
         }
 
         // enqueue all parent commits of `current_commit`
-        let current_commit_object: Commit = load_object(&current_commit).map_err(|e| {
-            CliError::fatal(format!("failed to load commit {}: {}", current_commit, e))
-                .with_stable_code(StableErrorCode::RepoCorrupt)
-        })?;
+        let current_commit_object: Commit =
+            load_object(&current_commit).map_err(|error| BranchError::CommitLoadFailed {
+                commit: current_commit.to_string(),
+                detail: error.to_string(),
+            })?;
         for parent_commit in current_commit_object.parent_commit_ids {
             if !visited.contains(&parent_commit) {
                 visited.insert(parent_commit);
@@ -1311,14 +1406,14 @@ pub fn is_valid_git_branch_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{collections::HashSet, str::FromStr};
 
     use git_internal::hash::{ObjectHash, get_hash_kind};
     use sea_orm::Database;
     use serial_test::serial;
 
     use super::{
-        Branch, BranchError, format_branch_name, load_remote_branches_with_conn,
+        Branch, BranchError, commit_contains, format_branch_name, load_remote_branches_with_conn,
         map_head_commit_store_error,
     };
     use crate::utils::error::{CliError, StableErrorCode};
@@ -1342,7 +1437,7 @@ mod tests {
     ///
     /// Source-chained / wrapper variants (ConfigReadFailed,
     /// ConfigWriteFailed, StorageQueryFailed, StoredReferenceCorrupt,
-    /// CreateFailed, DeleteFailed, DelegatedCli) wrap upstream error
+    /// CreateFailed, DeleteFailed, CommitLoadFailed, DelegatedCli) wrap upstream error
     /// messages and are intentionally skipped — their content is owned
     /// by the wrapped type.
     #[test]
@@ -1386,8 +1481,41 @@ mod tests {
             "invalid upstream 'origin/missing'",
         );
         assert_eq!(
+            BranchError::RemoteNotFound("origin".to_string()).to_string(),
+            "remote 'origin' not found",
+        );
+        assert_eq!(
             BranchError::RenameTooManyArgs.to_string(),
             "too many arguments",
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn commit_contains_surfaces_typed_commit_load_failure() {
+        let corrupt_commit = any_hash();
+        let branch = Branch {
+            name: "corrupt".to_string(),
+            commit: corrupt_commit,
+            remote: None,
+        };
+        let mut targets = HashSet::new();
+        targets.insert(
+            ObjectHash::from_str(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap(),
+        );
+
+        let error = commit_contains(&branch, &targets)
+            .expect_err("corrupt branch commit should fail traversal");
+        let BranchError::CommitLoadFailed { commit, .. } = &error else {
+            panic!("expected CommitLoadFailed, got: {error:?}");
+        };
+        assert_eq!(commit, &corrupt_commit.to_string());
+        assert_eq!(
+            CliError::from(error).stable_code(),
+            StableErrorCode::RepoCorrupt
         );
     }
 

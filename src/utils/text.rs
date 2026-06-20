@@ -54,6 +54,23 @@ mod tests {
         assert_eq!(short_display_hash("éééééééé"), "ééééééé");
     }
 
+    /// Inputs at or below `SHORT_HASH_LEN` (7 chars) are returned whole
+    /// — the `<=` early-return branch. Pins the boundary: exactly 7
+    /// chars passes through unchanged, 8 chars truncates to 7. A
+    /// regression to `<` would drop the last char of a 7-char hash.
+    #[test]
+    fn short_display_hash_passes_through_short_and_boundary_inputs() {
+        // Shorter than the limit → unchanged.
+        assert_eq!(short_display_hash(""), "");
+        assert_eq!(short_display_hash("abc"), "abc");
+        // Exactly at the limit (7) → unchanged (inclusive boundary).
+        assert_eq!(short_display_hash("1234567"), "1234567");
+        // One over the limit (8) → truncated to the first 7.
+        assert_eq!(short_display_hash("12345678"), "1234567");
+        // UTF-8: exactly 7 multibyte chars → unchanged.
+        assert_eq!(short_display_hash("ßßßßßßß"), "ßßßßßßß");
+    }
+
     #[test]
     fn levenshtein_handles_basic_edge_cases() {
         assert_eq!(levenshtein("", ""), 0);

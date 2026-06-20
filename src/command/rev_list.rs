@@ -1,31 +1,143 @@
-//! Implements `rev-list` to enumerate commits reachable from a revision.
-
-use std::io::Write;
+//! Implements `rev-list` to enumerate commits reachable from revisions.
 
 use clap::Parser;
-use serde::Serialize;
 
-use crate::{
-    command::log,
-    utils::{
-        error::{CliError, CliResult, StableErrorCode},
-        output::{OutputConfig, emit_json_data},
-        util::{self, CommitBaseError},
-    },
+use crate::utils::{
+    error::{CliError, CliResult},
+    output::{OutputConfig, emit_json_data},
+    util,
 };
 
-#[derive(Parser, Debug)]
-pub struct RevListArgs {
-    /// Revision to list from. Defaults to HEAD when omitted.
-    #[clap(value_name = "SPEC")]
-    pub spec: Option<String>,
-}
+#[path = "rev_list_cherry.rs"]
+mod rev_list_cherry;
+#[path = "rev_list_children.rs"]
+mod rev_list_children;
+#[path = "rev_list_filter.rs"]
+mod rev_list_filter;
+#[path = "rev_list_output.rs"]
+mod rev_list_output;
+#[path = "rev_list_spec.rs"]
+mod rev_list_spec;
 
-#[derive(Debug, Clone, Serialize)]
-struct RevListOutput {
-    input: String,
-    commits: Vec<String>,
-    total: usize,
+use rev_list_cherry::{RevListSelectedCommit, apply_cherry_filters, attach_cherry_metadata};
+use rev_list_children::build_rev_list_children;
+#[cfg(test)]
+use rev_list_filter::ParentCountFilter;
+use rev_list_filter::{
+    commit_matches_author, commit_matches_committer, commit_matches_message,
+    commit_matches_parent_count, commit_matches_time_window, filter_commits_by_pathspecs,
+    parent_count_filter, rev_list_author_filter, rev_list_committer_filter,
+    rev_list_message_filter, rev_list_time_window, sort_rev_list_commits,
+};
+use rev_list_output::{REV_LIST_EXAMPLES, RevListEntry, RevListOutput, emit_human_rev_list};
+use rev_list_spec::resolve_revision_selection;
+
+#[derive(Parser, Debug)]
+#[command(after_help = REV_LIST_EXAMPLES)]
+pub struct RevListArgs {
+    /// Limit output to at most N commits
+    #[clap(short = 'n', long = "max-count", value_name = "N")]
+    pub max_count: Option<usize>,
+
+    /// Skip the first N commits before output or counting
+    #[clap(long, value_name = "N", default_value_t = 0)]
+    pub skip: usize,
+
+    /// Print only the number of commits after filters
+    #[clap(long)]
+    pub count: bool,
+
+    /// Print parent commit IDs after each commit
+    #[clap(long, conflicts_with = "children")]
+    pub parents: bool,
+
+    /// Print child commit IDs after each commit
+    #[clap(long)]
+    pub children: bool,
+
+    /// Prefix each output line with the commit timestamp
+    #[clap(long)]
+    pub timestamp: bool,
+
+    /// Follow only the first parent of merge commits
+    #[clap(long = "first-parent")]
+    pub first_parent: bool,
+
+    /// Filter commits by author name or email
+    #[clap(long, value_name = "PATTERN")]
+    pub author: Option<String>,
+
+    /// Filter commits by committer name or email
+    #[clap(long, value_name = "PATTERN")]
+    pub committer: Option<String>,
+
+    /// Filter commits by message using a regular expression
+    #[clap(long, value_name = "PATTERN")]
+    pub grep: Vec<String>,
+
+    /// Prefix symmetric-difference commits with '<' or '>'
+    #[clap(long = "left-right")]
+    pub left_right: bool,
+
+    /// Show only the left side of a symmetric difference
+    #[clap(long = "left-only", conflicts_with = "right_only")]
+    pub left_only: bool,
+
+    /// Show only the right side of a symmetric difference
+    #[clap(long = "right-only", conflicts_with = "left_only")]
+    pub right_only: bool,
+
+    /// Omit patch-equivalent commits across symmetric-difference sides
+    #[clap(long = "cherry-pick", conflicts_with = "cherry_mark")]
+    pub cherry_pick: bool,
+
+    /// Mark patch-equivalent commits with '=' and others with '+'
+    #[clap(long = "cherry-mark", conflicts_with = "cherry_pick")]
+    pub cherry_mark: bool,
+
+    /// Show right-side commits and mark patch-equivalent commits
+    #[clap(long = "cherry")]
+    pub cherry: bool,
+
+    /// Show commits more recent than DATE
+    #[clap(long, visible_alias = "after", value_name = "DATE")]
+    pub since: Option<String>,
+
+    /// Show commits older than DATE
+    #[clap(long, visible_alias = "before", value_name = "DATE")]
+    pub until: Option<String>,
+
+    /// Print only commits with at least two parents
+    #[clap(long)]
+    pub merges: bool,
+
+    /// Omit commits with at least two parents
+    #[clap(long = "no-merges")]
+    pub no_merges: bool,
+
+    /// Print only commits with at least N parents
+    #[clap(long = "min-parents", value_name = "N")]
+    pub min_parents: Option<usize>,
+
+    /// Print only commits with at most N parents
+    #[clap(long = "max-parents", value_name = "N")]
+    pub max_parents: Option<usize>,
+
+    /// Clear the lower parent-count bound
+    #[clap(long = "no-min-parents")]
+    pub no_min_parents: bool,
+
+    /// Clear the upper parent-count bound
+    #[clap(long = "no-max-parents")]
+    pub no_max_parents: bool,
+
+    /// Revisions to include or exclude. Defaults to HEAD when omitted.
+    #[clap(value_name = "SPEC")]
+    pub specs: Vec<String>,
+
+    /// Paths to limit the commit list after an explicit `--` separator
+    #[clap(last = true, value_name = "PATH")]
+    pub pathspecs: Vec<String>,
 }
 
 pub async fn execute(args: RevListArgs) -> Result<(), String> {
@@ -40,191 +152,185 @@ pub async fn execute_safe(args: RevListArgs, output: &OutputConfig) -> CliResult
 
     if output.is_json() {
         emit_json_data("rev-list", &result, output)
-    } else if output.quiet {
-        Ok(())
     } else {
-        let stdout = std::io::stdout();
-        let mut writer = stdout.lock();
-        write_rev_list_output(&mut writer, &result.commits)
+        emit_human_rev_list(output, &result)
     }
-}
-
-fn write_rev_list_output<W: Write>(writer: &mut W, commits: &[String]) -> CliResult<()> {
-    for commit in commits {
-        match writeln!(writer, "{commit}") {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
-            Err(error) => {
-                return Err(
-                    CliError::fatal(format!("failed to write rev-list output: {error}"))
-                        .with_stable_code(StableErrorCode::IoWriteFailed),
-                );
-            }
-        }
-    }
-    Ok(())
 }
 
 async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
-    let spec = args.spec.as_deref().unwrap_or("HEAD");
-    let commit = util::get_commit_base_typed(spec)
-        .await
-        .map_err(|err| rev_list_target_error(spec, err))?;
-    let mut commits = log::get_reachable_commits(commit.to_string(), None).await?;
+    let selection = resolve_revision_selection(&args.specs, args.first_parent).await?;
+    let mut commits = selection.commits;
     sort_rev_list_commits(&mut commits);
+    let children = build_rev_list_children(&commits);
+    let commits = filter_commits_by_pathspecs(commits, &args.pathspecs).await?;
+    let commits = attach_cherry_metadata(commits, &selection.sides);
+    let commits = apply_cherry_filters(commits, args)?;
+    let time_window = rev_list_time_window(args)?;
+    let author_filter = rev_list_author_filter(args);
+    let committer_filter = rev_list_committer_filter(args);
+    let message_filter = rev_list_message_filter(args)?;
+    let parent_filter = parent_count_filter(args);
 
     let commits = commits
         .into_iter()
-        .map(|commit| commit.id.to_string())
+        .filter(|selected| commit_matches_author(&selected.commit, author_filter.as_deref()))
+        .filter(|selected| commit_matches_committer(&selected.commit, committer_filter.as_deref()))
+        .filter(|selected| commit_matches_message(&selected.commit, message_filter.as_ref()))
+        .filter(|selected| commit_matches_time_window(&selected.commit, time_window))
+        .filter(|selected| commit_matches_parent_count(&selected.commit, parent_filter))
+        .skip(args.skip)
+        .take(args.max_count.unwrap_or(usize::MAX))
+        .collect::<Vec<_>>();
+    let count_fields = if args.count {
+        rev_list_count_fields(&commits, args)
+    } else {
+        Vec::new()
+    };
+    let entries = if args.count
+        || (!args.parents
+            && !args.children
+            && !args.timestamp
+            && !args.left_right
+            && !args.cherry_mark
+            && !args.cherry)
+    {
+        None
+    } else {
+        Some(
+            commits
+                .iter()
+                .map(|selected| RevListEntry {
+                    commit: selected.commit.id.to_string(),
+                    side: selected.side,
+                    cherry_equivalent: (args.cherry_mark || args.cherry)
+                        .then_some(selected.cherry_equivalent),
+                    parents: if args.parents {
+                        selected
+                            .commit
+                            .parent_commit_ids
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
+                    children: if args.children {
+                        children
+                            .get(&selected.commit.id.to_string())
+                            .cloned()
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    },
+                    timestamp: args
+                        .timestamp
+                        .then_some(selected.commit.committer.timestamp),
+                })
+                .collect(),
+        )
+    };
+    let commits = commits
+        .iter()
+        .map(|selected| selected.commit.id.to_string())
         .collect::<Vec<_>>();
     let total = commits.len();
 
     Ok(RevListOutput {
-        input: spec.to_string(),
+        input: selection.input,
+        inputs: selection.inputs,
         commits,
+        entries,
         total,
+        count_fields,
+        count_only: args.count,
+        parents: args.parents,
+        children: args.children,
+        timestamp: args.timestamp,
+        first_parent: args.first_parent,
+        author: args.author.clone(),
+        committer: args.committer.clone(),
+        grep: args.grep.clone(),
+        pathspecs: args.pathspecs.clone(),
+        left_right: args.left_right,
+        left_only: args.left_only,
+        right_only: args.right_only,
+        cherry_pick: args.cherry_pick,
+        cherry_mark: args.cherry_mark,
+        cherry: args.cherry,
+        since: args.since.clone(),
+        until: args.until.clone(),
+        merges: args.merges,
+        no_merges: args.no_merges,
+        min_parents: args.min_parents,
+        max_parents: args.max_parents,
+        no_min_parents: args.no_min_parents,
+        no_max_parents: args.no_max_parents,
+        max_count: args.max_count,
+        skip: args.skip,
     })
 }
 
-fn sort_rev_list_commits(commits: &mut [git_internal::internal::object::commit::Commit]) {
-    // `sort_by_key` is stable, so equal timestamps keep the traversal order
-    // returned by `get_reachable_commits` (HEAD before parent in linear history).
-    commits.sort_by_key(|commit| std::cmp::Reverse(commit.committer.timestamp));
+fn rev_list_count_fields(commits: &[RevListSelectedCommit], args: &RevListArgs) -> Vec<usize> {
+    if args.left_right && (args.cherry_mark || args.cherry) {
+        return vec![
+            side_count(commits, rev_list_spec::RevListSide::Left, false),
+            side_count(commits, rev_list_spec::RevListSide::Right, false),
+            commits
+                .iter()
+                .filter(|selected| selected.cherry_equivalent)
+                .count(),
+        ];
+    }
+
+    if args.left_right {
+        return vec![
+            side_total(commits, rev_list_spec::RevListSide::Left),
+            side_total(commits, rev_list_spec::RevListSide::Right),
+        ];
+    }
+
+    if args.cherry_mark || args.cherry {
+        return vec![
+            commits
+                .iter()
+                .filter(|selected| !selected.cherry_equivalent)
+                .count(),
+            commits
+                .iter()
+                .filter(|selected| selected.cherry_equivalent)
+                .count(),
+        ];
+    }
+
+    vec![commits.len()]
 }
 
-fn rev_list_target_error(spec: &str, error: CommitBaseError) -> CliError {
-    match error {
-        CommitBaseError::HeadUnborn => CliError::failure(format!(
-            "not a valid object name: '{spec}' (HEAD does not point to a commit)"
-        ))
-        .with_stable_code(StableErrorCode::CliInvalidTarget)
-        .with_hint("create a commit before resolving HEAD."),
-        CommitBaseError::InvalidReference(detail) => {
-            CliError::failure(format!("not a valid object name: '{spec}' ({detail})"))
-                .with_stable_code(StableErrorCode::CliInvalidTarget)
-        }
-        CommitBaseError::ReadFailure(detail) => {
-            CliError::fatal(format!("failed to resolve '{spec}': {detail}"))
-                .with_stable_code(StableErrorCode::IoReadFailed)
-        }
-        CommitBaseError::CorruptReference(detail) => {
-            CliError::fatal(format!("failed to resolve '{spec}': {detail}"))
-                .with_stable_code(StableErrorCode::RepoCorrupt)
-        }
-    }
+fn side_total(commits: &[RevListSelectedCommit], side: rev_list_spec::RevListSide) -> usize {
+    commits
+        .iter()
+        .filter(|selected| selected.side == Some(side))
+        .count()
+}
+
+fn side_count(
+    commits: &[RevListSelectedCommit],
+    side: rev_list_spec::RevListSide,
+    cherry_equivalent: bool,
+) -> usize {
+    commits
+        .iter()
+        .filter(|selected| {
+            selected.side == Some(side) && selected.cherry_equivalent == cherry_equivalent
+        })
+        .count()
 }
 
 #[cfg(test)]
-mod tests {
-    use std::io::{self, Write};
-
-    use clap::Parser;
-    use git_internal::{
-        hash::{ObjectHash, get_hash_kind},
-        internal::object::{
-            commit::Commit,
-            signature::{Signature, SignatureType},
-        },
-    };
-
-    use super::{RevListArgs, sort_rev_list_commits, write_rev_list_output};
-    use crate::utils::error::StableErrorCode;
-
-    struct FailingWriter {
-        kind: io::ErrorKind,
-    }
-
-    impl Write for FailingWriter {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::new(self.kind, "test write failure"))
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    fn test_signature(timestamp: usize) -> Signature {
-        Signature {
-            signature_type: SignatureType::Committer,
-            name: "tester".to_string(),
-            email: "tester@example.com".to_string(),
-            timestamp,
-            timezone: "+0000".to_string(),
-        }
-    }
-
-    fn test_hash(byte: u8) -> ObjectHash {
-        ObjectHash::from_bytes(&vec![byte; get_hash_kind().size()])
-            .expect("test hash bytes should match active hash kind")
-    }
-
-    fn test_commit(id: ObjectHash, timestamp: usize) -> Commit {
-        Commit {
-            id,
-            tree_id: id,
-            parent_commit_ids: Vec::new(),
-            author: test_signature(timestamp),
-            committer: test_signature(timestamp),
-            message: "test".to_string(),
-        }
-    }
-
-    #[test]
-    fn test_rev_list_args_default() {
-        let args = RevListArgs::try_parse_from(["rev-list"]).unwrap();
-        assert!(args.spec.is_none());
-    }
-
-    #[test]
-    fn test_rev_list_args_with_spec() {
-        let args = RevListArgs::try_parse_from(["rev-list", "HEAD~1"]).unwrap();
-        assert_eq!(args.spec.as_deref(), Some("HEAD~1"));
-    }
-
-    #[test]
-    fn test_sort_rev_list_commits_preserves_equal_timestamp_order() {
-        let high = test_hash(0xff);
-        let low = test_hash(0x01);
-        let mut commits = vec![test_commit(high, 1), test_commit(low, 1)];
-
-        sort_rev_list_commits(&mut commits);
-
-        assert_eq!(commits[0].id, high);
-        assert_eq!(commits[1].id, low);
-    }
-
-    #[test]
-    fn test_sort_rev_list_commits_orders_newest_first() {
-        let old = test_hash(0x01);
-        let new = test_hash(0xff);
-        let mut commits = vec![test_commit(old, 1), test_commit(new, 2)];
-
-        sort_rev_list_commits(&mut commits);
-
-        assert_eq!(commits[0].id, new);
-        assert_eq!(commits[1].id, old);
-    }
-
-    #[test]
-    fn test_write_rev_list_output_maps_write_failure_to_write_code() {
-        let mut writer = FailingWriter {
-            kind: io::ErrorKind::PermissionDenied,
-        };
-
-        let error = write_rev_list_output(&mut writer, &["abc123".to_string()])
-            .expect_err("write should fail");
-
-        assert_eq!(error.stable_code(), StableErrorCode::IoWriteFailed);
-    }
-
-    #[test]
-    fn test_write_rev_list_output_ignores_broken_pipe() {
-        let mut writer = FailingWriter {
-            kind: io::ErrorKind::BrokenPipe,
-        };
-
-        write_rev_list_output(&mut writer, &["abc123".to_string()])
-            .expect("broken pipe should be ignored");
-    }
-}
+#[path = "rev_list_output_tests.rs"]
+mod output_tests;
+#[cfg(test)]
+#[path = "rev_list_tests.rs"]
+mod tests;
+#[cfg(test)]
+#[path = "rev_list_write_tests.rs"]
+mod write_tests;

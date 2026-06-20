@@ -1,5 +1,32 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## ⚠️ This repository is a Libra repository — use `libra`, not `git`
+
+This working tree is version-controlled by **Libra**, not Git: its metadata lives in `.libra/` (there is no `.git/`). Run **`libra <command>`** for all version-control operations — `git` commands will not work here.
+
+`libra` is installed on `PATH`. If it is missing locally, install it with:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://download.libra.tools/install.sh | sh
+```
+
+Its CLI is largely Git-compatible, so the everyday commands map one-to-one — just swap the binary name:
+
+```bash
+libra status              # not: git status
+libra add <path>          # not: git add
+libra commit -m "..."     # not: git commit
+libra log                 # not: git log
+libra diff                # not: git diff
+libra branch / switch / checkout / merge / rebase / push / pull / fetch …
+```
+
+Compatibility is *partial* and governed by the four-tier matrix in [`COMPATIBILITY.md`](COMPATIBILITY.md) (`supported` / `partial` / `unsupported` / `intentionally-different`) — consult it before assuming a Git flag or subcommand behaves identically. Libra also adds AI-native subcommands with no Git equivalent (`code`, `code-control`, `automation`, `usage`, `graph`, `sandbox`, `agent`, `publish`).
+
+(Note: this constraint is about operating *in* this repo. To build/test the Libra source itself, use the `cargo` commands in **Build & Development Commands** below; to run the in-tree build of the CLI use `cargo run -- <command>`.)
+
 ## Project Overview
 
 Libra is an **AI agent–native version control system** written in Rust. It partially implements a Git client with full on-disk format compatibility (`objects`, `index`, `pack`, `pack-index`) while using SQLite for transactional metadata (`config`, `HEAD`, `refs`). It is designed for monorepo/trunk-based development with tiered cloud storage (S3/R2) and a Cloudflare D1/R2 backup path.
@@ -16,7 +43,7 @@ src/
 ├── lib.rs                       # Library root, sync/async exec helpers
 ├── cli.rs                       # Clap CLI definition, subcommand dispatch, hash-kind preflight
 ├── common_utils.rs, git_protocol.rs, lfs_structs.rs
-├── command/                     # All subcommand implementations (~57 modules)
+├── command/                     # All subcommand implementations (~61 top-level modules + 9 under agent/)
 │   ├── mod.rs                   # Re-exports, shared helpers (load/save objects, auth)
 │   ├── init.rs, clone.rs, add.rs, commit.rs, push.rs, pull.rs, fetch.rs, fsck.rs
 │   ├── status.rs, log.rs, show.rs, diff.rs, blame.rs, shortlog.rs, describe.rs
@@ -71,9 +98,9 @@ src/
     ├── error.rs, output.rs      # CliError/CliResult + stable error codes; OutputConfig (--json / --machine)
     ├── pager.rs, ignore.rs, lfs.rs, fuse.rs, worktree.rs
     ├── object.rs, object_ext.rs, tree.rs, path.rs, path_ext.rs, storage_ext.rs, text.rs, convert.rs, util.rs
-    └── test.rs                  # Test helpers (ChangeDirGuard, setup_with_new_libra_in, require_env!)
+    └── test.rs                  # Test helpers (ChangeDirGuard, setup_with_new_libra_in)
 
-tests/                           # 98 integration test files, layered L1/L2/L3 (see "Test Layers" below)
+tests/                           # ~98 top-level integration test files + ~21 tests/compat/ surface guards, layered L1/L2/L3 (see "Test Layers" below)
 ├── command/                     # Per-command integration tests mirroring real Git workflows
 ├── compat/                      # Compatibility-surface guards (must be registered as [[test]] in Cargo.toml)
 ├── harness/, helpers/, fixtures/, data/, objects/
@@ -82,8 +109,6 @@ tests/                           # 98 integration test files, layered L1/L2/L3 (
 ├── publish_*.rs                 # Publish snapshot/upload/preflight/refs/redaction/ai_export tests
 └── command_test.rs, e2e_mcp_flow.rs, mcp_integration_test.rs, network_remotes_test.rs, storage_r2_test.rs, …
 
-benches/ai_runtime_baseline.rs   # Criterion-style runtime baseline benchmark
-examples/                        # `hello_world.rs`, `multi_agent.toml`
 build.rs                         # Builds the Next.js web frontend into web/out/ unless LIBRA_SKIP_WEB_BUILD=1
 docs/                            # Community docs, contributing guide, agent specs, improvement walkthroughs, error-codes
 sql/
@@ -91,9 +116,8 @@ sql/
 ├── sqlite_20260415_ai_runtime_contract.sql  # AI runtime contract extension
 ├── migrations/                              # Versioned forward + matching `_down.sql` migrations (YYYYMMDDNN naming)
 └── publish/                                 # Publish Worker D1 schema (0001_publish.sql, …)
-scripts/                         # check_compat_matrix.sh, check_docs_consistency.sh, check_integration_plan_consistency.sh, compare/
-template/                        # Git hook templates (pre-commit.sh, pre-commit.ps1, exclude, description)
-web/                             # Next.js 15 frontend (pnpm); built into web/out/ and embedded via rust-embed
+template/                        # Git hook templates (pre-commit.sh, pre-commit.ps1, exclude, description) + sandbox seccomp filter (seccomp-default.json)
+web/                             # Next.js 16 frontend (pnpm); built into web/out/ and embedded via rust-embed
 worker/                          # Cloudflare Worker for read-only publishing (OpenNext + wrangler + playwright)
 ```
 
@@ -144,7 +168,7 @@ All PRs must pass these jobs on the `[self-hosted]` runner pool:
 2. **compat-clippy** — `cargo clippy --all-targets --all-features -- -D warnings` (with `LIBRA_SKIP_WEB_BUILD=1`)
 3. **compat-web-check** — `pnpm --dir web lint` + `pnpm --dir web build` so `web/out/` cannot drift from `WebAssets`
 4. **compat-redundancy** — directory-shape check on `third-party/rust/crates`
-5. **compat-offline-core** — `scripts/check_compat_matrix.sh` + `cargo test --all` + a second pass with `--features test-provider` for the TUI automation matrices (`code_ui_scenarios`, `harness_self_test`, `code_codex_default_tui_test`, `code_ui_remote_lease_matrix`, `code_ui_remote_sse_matrix`) under `--test-threads=1`
+5. **compat-offline-core** — `cargo test --test compat_matrix_alignment compatibility_matrix_matches_cli_commands -- --exact` + `cargo test --all` + a second pass with `--features test-provider` for the TUI automation matrices (`code_ui_scenarios`, `harness_self_test`, `code_codex_default_tui_test`, `code_ui_remote_lease_matrix`, `code_ui_remote_sse_matrix`) under `--test-threads=1`
 6. **compat-network-remotes** — `cargo test --features test-network --test network_remotes_test`
 
 Additional workflows: `codeql.yml` (security analysis), `model-generation-nightly.yml` (nightly model-generation matrix), `release.yml` (release pipeline).
@@ -159,7 +183,7 @@ Libra tests are organised into three layers — `cargo test --all` runs L1 only;
 | **L2 — Network** | GitHub token for temporary repo creation | `LIBRA_TEST_GITHUB_TOKEN` + `LIBRA_TEST_GITHUB_NAMESPACE` |
 | **L3 — Live Services** | Real AI API keys (`DEEPSEEK_API_KEY`, `MOONSHOT_API_KEY`, …) or cloud credentials (`LIBRA_D1_*`, `LIBRA_STORAGE_*`, `LIBRA_TEST_S3_*`) | Set the relevant env vars |
 
-Gate tests with the `require_env!` macro — missing vars print "skipped", never fail. Copy `.env.test.example` → `.env.test` and `source` it before running the full suite (the `export` prefix is required).
+Gate L2 / L3 tests with the small `env_var_is_set(name) -> bool` helper (see e.g. [`tests/cloud_storage_backup_test.rs:30`](tests/cloud_storage_backup_test.rs)) followed by an early `eprintln!("skipped (...)")` return when a required var is unset — missing vars print "skipped", never fail. Copy `.env.test.example` → `.env.test` and `source` it before running the full suite (the `export` prefix is required).
 
 ## Coding Conventions
 
@@ -185,6 +209,7 @@ Gate tests with the `require_env!` macro — missing vars print "skipped", never
 - **Builder pattern**: Used for `AgentBuilder`, with validation in builder methods returning `Result`
 - **Guard pattern (RAII)**: `ChangeDirGuard` for safe directory changes in tests
 - **Provider pattern**: Each AI provider has `mod.rs` + `client.rs` + `completion.rs`
+- **Global hash-kind preflight**: Before dispatching most object-touching subcommands, `cli.rs` reads `core.objectformat` (defaulting to `"sha1"`, also accepting `"sha256"`) and calls `git_internal::hash::set_hash_kind` so the entire process hashes consistently. New commands that read/write objects must run through this preflight rather than assuming SHA-1 or hard-coding object-ID byte lengths (20 vs 32).
 
 ### Documentation
 
@@ -196,13 +221,24 @@ Gate tests with the `require_env!` macro — missing vars print "skipped", never
 ## Testing Guidelines
 
 - **Integration tests** in `tests/command/` mirror real Git workflows; prefer these for new commands
-- **Compatibility-surface tests** in `tests/compat/` guard against regressions in CLI flag/help wording, declined-feature drift, and the production `unwrap()` audit. Each `*.rs` under `tests/compat/` must be registered as a `[[test]]` entry in `Cargo.toml` (Cargo's default discovery only picks up files directly under `tests/`)
+- **Compatibility-surface tests** in `tests/compat/` guard against regressions in CLI flag/help wording, declined-feature drift, and the production `unwrap()` audit. Each `*.rs` under `tests/compat/` must be registered as a `[[test]]` entry in `Cargo.toml` (Cargo's default discovery only picks up files directly under `tests/`). New compat guards must also add a row to the inventory table in [`tests/compat/README.md`](tests/compat/README.md). See [`docs/tests.md`](docs/tests.md) `Compatibility-surface tests` section for the full convention.
+- **Cross-cutting `--help` EXAMPLES contract**: every visible command in `src/cli.rs::Commands` ships with a `pub const <CMD>_EXAMPLES` constant wired via `#[command(after_help = …)]` (or `after_help = command::<name>::<CMD>_EXAMPLES` on the parent subcommand binding in `cli.rs` for `Subcommand`-style commands). Three compat guards protect this contract: `compat_help_examples_banner` (every `<cmd> --help` renders an EXAMPLES section), `cli::tests::root_after_help_lists_every_visible_command` (every non-hidden command appears in a Command Groups row), and `compat_command_docs_examples_section` (every `docs/commands/<name>.md` page carries an Examples / Common Commands heading). New commands must satisfy all three.
 - **Isolation**: Use `tempfile::tempdir()` and `utils::test::ChangeDirGuard` to isolate state
 - **Serial execution**: Mark tests `#[serial]` (from `serial_test` crate) if they mutate shared state
 - **Async tests**: Use `#[tokio::test]` (or `flavor = "multi_thread"` when needed)
 - **Fixtures**: Keep small and local in `tests/data/` and `tests/fixtures/`; reuse helpers from `tests/command/mod.rs`, `tests/harness/`, and `tests/helpers/`
-- **Gating**: Use the `require_env!` macro for tests that need network or credentials so missing vars skip cleanly. Match the L1/L2/L3 layering and the matching `test-network` / `test-live-ai` / `test-live-cloud` Cargo features
-- **Coverage**: Pair new commands/options with at least one end-to-end test plus a focused unit test, and an entry in `COMPATIBILITY.md` if you change the Git surface
+- **Gating**: Use the `env_var_is_set(name)` helper pattern (see `tests/cloud_storage_backup_test.rs:30`) plus an early `eprintln!("skipped (set ...)")` return so missing vars print a skip notice and do not fail the test. Match the L1/L2/L3 layering and the matching `test-network` / `test-live-ai` / `test-live-cloud` Cargo features
+- **Coverage**: Pair new commands/options with at least one end-to-end test plus a focused unit test, and an entry in `COMPATIBILITY.md` if you change the Git surface. New `StableErrorCode` variants must also be added to `docs/error-codes.md` (the `compat_error_codes_doc_sync` guard fails the build otherwise).
+
+## Quality Acceptance Criteria (质量验收标准)
+
+A change is considered done only when all three of the following pass locally with no manual fix-ups:
+
+1. **Formatting** — `cargo +nightly fmt --all --check` reports no formatting differences.
+2. **Lint** — `cargo clippy --all-targets --all-features -- -D warnings` reports no warnings.
+3. **Tests** — `source .env.test && cargo test --all` passes in full (L1 always runs; L2/L3 print "skipped" rather than fail when their env vars are unset — that is acceptable, an actual failure is not).
+
+These mirror the `compat-rustfmt`, `compat-clippy`, and `compat-offline-core` CI jobs, so passing them locally is the precondition for opening a PR. Run all three before reporting work as complete.
 
 ## Commit & PR Conventions
 
@@ -270,7 +306,7 @@ The publish Worker uses its own D1 schema in `sql/publish/` (`0001_publish.sql`,
 | `gemini` | `GEMINI_API_KEY` | — |
 | `openai` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
 | `anthropic` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
-| `deepseek` | `DEEPSEEK_API_KEY` | — |
+| `deepseek` | `DEEPSEEK_API_KEY` | `--api-base` only (no env var) |
 | `kimi` | `MOONSHOT_API_KEY` | `MOONSHOT_BASE_URL` |
 | `zhipu` | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
 | `ollama` | — | `OLLAMA_BASE_URL` or `--api-base` |
@@ -291,10 +327,18 @@ The publish Worker uses its own D1 schema in `sql/publish/` (`0001_publish.sql`,
 - `LIBRA_COMMITTER_NAME` / `LIBRA_COMMITTER_EMAIL` — committer identity overrides
 - `LIBRA_SSH_COMMAND`, `LIBRA_SSH_STRICT_HOST_KEY_CHECKING` — SSH protocol tuning
 - `LIBRA_CODE_LEASE_DURATION_MS` — `libra code` automation lease length
-- `LIBRA_SANDBOX_ENFORCEMENT`, `LIBRA_SANDBOX_NETWORK_DISABLED`, `LIBRA_LINUX_SANDBOX_EXE`, `LIBRA_USE_LINUX_SANDBOX_BWRAP` — sandbox toggles (`docs/improvement/sandbox.md`)
-- `LIBRA_VCS_TIMEOUT_SECONDS`, `LIBRA_VCS_DEFAULT_APPROVAL_SCOPE` — AI-VCS tool guardrails
+- `LIBRA_SANDBOX_ENFORCEMENT`, `LIBRA_SANDBOX_NETWORK_DISABLED`, `LIBRA_LINUX_SANDBOX_EXE`, `LIBRA_USE_LINUX_SANDBOX_BWRAP` — sandbox toggles (`docs/development/commands/sandbox.md`)
 - `LIBRA_ERROR_JSON`, `LIBRA_FINE_EXIT_CODES` — stable-error-code surface toggles
-- `LIBRA_ISSUES_URL` — override the "report an issue" URL printed on internal errors
+
+The following are baked-in constants (no env-var override) — listed
+here so contributors do not waste time trying to set them at runtime:
+
+- `LIBRA_VCS_TIMEOUT_SECONDS` (`src/internal/ai/mcp/resource.rs:86`) —
+  MCP-side AI-VCS tool timeout, currently fixed at 120 s.
+- `LIBRA_VCS_DEFAULT_APPROVAL_SCOPE` (`src/internal/ai/sources/mcp.rs:28`)
+  — default approval scope for `run_libra_vcs`, currently `interactive`.
+- `LIBRA_ISSUES_URL` (`src/utils/error.rs:59`) — canonical GitHub
+  issues URL appended to internal-invariant error hints.
 
 ### Tests
 - `LIBRA_TEST_GITHUB_TOKEN`, `LIBRA_TEST_GITHUB_NAMESPACE` — L2 GitHub gate (creates/deletes a temporary `libra-test-*` repo)

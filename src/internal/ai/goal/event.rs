@@ -1,10 +1,10 @@
 //! Goal event stream — append-only log of everything that happened.
 //!
-//! Per `docs/improvement/opencode.md` lines 578-590, every state change
+//! Per `docs/development/commands/_general.md` lines 578-590, every state change
 //! the supervisor records flows through a [`GoalEvent`] variant. Wrapped
 //! in a [`GoalEventEnvelope`] (id, goal_id, recorded_at), each event is
 //! persisted to the same JSONL stream as the rest of the session — see
-//! `docs/improvement/opencode.md` line 595 for the
+//! `docs/development/commands/_general.md` line 595 for the
 //! `SessionEvent::Goal(GoalEventEnvelope)` integration.
 //!
 //! Replay is the only way to reconstitute [`super::state::GoalState`].
@@ -129,16 +129,15 @@ pub struct GoalCompletionClaim {
 /// audit-grade artefact the user sees in `/goal status` after the Goal
 /// finishes; it is the verifier's signed-off view of the claim.
 ///
-/// Per `docs/improvement/opencode.md` line 1519 the report must carry
+/// Per `docs/development/commands/_general.md` line 1519 the report must carry
 /// "changed files, verification, residual risk, **budget summary**".
 /// The first three already live above; the budget-summary trio
 /// ([`Self::total_spent_micro_usd`],
 /// [`Self::elapsed_wall_clock_seconds`],
 /// [`Self::continuation_loops_used`]) is shipped here so the wire
-/// shape is final before P6.2/P6.3 land verifier and supervisor code
-/// against it. All three default to `0` so older logs (which never
-/// existed: P6.1 has not shipped) and forged streams that omit them
-/// surface as "unmetered" rather than crashing replay.
+/// shape remains stable for verifier and supervisor code. All three
+/// default to `0` so older or forged streams that omit them surface
+/// as "unmetered" rather than crashing replay.
 ///
 /// `claim_envelope_id` binds a report to the specific
 /// `GoalEvent::CompletionClaimed` envelope the verifier accepted.
@@ -146,9 +145,8 @@ pub struct GoalCompletionClaim {
 /// before transitioning to `Completed`, so a forged stream cannot
 /// claim under one envelope and then ship a different report
 /// against an unrelated active claim (Codex pass-8 P2). The field
-/// is required: legacy logs do not exist (P6.1 has not shipped) and
-/// every verifier-emitted report knows the claim envelope it just
-/// resolved.
+/// is required because every verifier-emitted report knows the claim
+/// envelope it just resolved.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GoalCompletionReport {
     pub summary: String,
@@ -504,7 +502,7 @@ pub enum GoalEvent {
     Created(GoalSpec),
     /// Plan refreshed (initial draft, replan, pruned dead steps).
     PlanUpdated { steps: Vec<GoalPlanStep> },
-    /// User-driven criteria revision — `docs/improvement/opencode.md`
+    /// User-driven criteria revision — `docs/development/commands/_general.md`
     /// line 690's `/goal criteria add <text>` entry point. The full
     /// post-revision criteria list is carried inline so replay can
     /// produce a self-consistent state without consulting prior
@@ -575,9 +573,8 @@ pub enum GoalEvent {
 /// time (for ordering when multiple events share the same logical
 /// step).
 ///
-/// `SessionEvent::Goal(GoalEventEnvelope)` is added in P6.1 too so the
-/// integration is byte-stable from day one — but the supervisor that
-/// actually emits these envelopes lands in P6.3.
+/// `SessionEvent::Goal(GoalEventEnvelope)` keeps the integration
+/// byte-stable while the supervisor emits these envelopes at runtime.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GoalEventEnvelope {
     pub envelope_id: Uuid,

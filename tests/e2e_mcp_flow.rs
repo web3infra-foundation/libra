@@ -181,6 +181,7 @@ async fn test_e2e_mcp_flow() {
         .env("HOME", &home_dir)
         .env("XDG_CONFIG_HOME", &config_home)
         .env("USERPROFILE", &home_dir)
+        .env("GEMINI_API_KEY", "test-gemini-api-key")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

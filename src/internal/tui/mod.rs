@@ -34,6 +34,8 @@
 //! Only a handful of items are re-exported; everything else is module-private
 //! so the public surface stays small and refactoring-friendly.
 
+// Pure projection of the `/agents` sub-agent run pane (CEX-S2-16).
+mod agent_run_pane;
 // Top-level event loop and exit handling.
 mod app;
 // Typed bus carrying events between agent and UI.
@@ -70,6 +72,9 @@ mod theme;
 mod welcome_shader;
 
 // Curated public surface: only types that callers outside the module need.
+pub use agent_run_pane::{
+    format_agent_run_pane_with_usage, format_agent_run_pane_with_usage_and_sources,
+};
 pub use app::{App, AppConfig, AppExitInfo, ExitReason};
 pub use app_event::{AgentEvent, AgentStatus, AppEvent};
 pub use code_ui_adapter::TuiCodeUiAdapter;

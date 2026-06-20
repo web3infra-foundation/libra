@@ -22,7 +22,7 @@ use crate::{
     },
     lfs_structs::LockListQuery,
     utils::{
-        error::{CliError, CliResult, StableErrorCode, emit_legacy_stderr},
+        error::{CliError, CliResult, StableErrorCode},
         lfs,
         output::{OutputConfig, emit_json_data},
         path,
@@ -31,20 +31,51 @@ use crate::{
     },
 };
 
+/// `--help` examples shown in `libra lfs --help` output (attached in
+/// `src/cli.rs` via `after_help` on the `Lfs` subcommand).
+///
+/// `lfs` exposes six sub-commands: `track` (read/add attributes patterns),
+/// `untrack`, `ls-files`, and the three lock-server flows (`locks`,
+/// `lock`, `unlock`). The banner pins the canonical invocation per
+/// sub-command plus a JSON variant so users can map intent to invocation
+/// without reading the design doc. Cross-cutting `--help` EXAMPLES
+/// rollout per `docs/development/commands/_general.md` item B.
+pub const LFS_EXAMPLES: &str = "\
+EXAMPLES:
+    libra lfs track                       List currently tracked LFS attribute patterns
+    libra lfs track '*.bin' '*.psd'       Add LFS patterns to .libra_attributes
+    libra lfs untrack '*.bin'             Remove an LFS pattern
+    libra lfs ls-files                    List LFS-tracked files in the working tree
+    libra lfs ls-files --long --size      Show full OIDs and sizes
+    libra lfs locks                       List remote locks for the current branch
+    libra lfs lock build/output.bin       Acquire a remote lock on a file
+    libra lfs unlock build/output.bin     Release a lock you own
+    libra lfs unlock --force --id <id>    Force-release a lock owned by someone else
+    libra lfs --json ls-files             Structured JSON output for agents";
+
 /// [Docs](https://github.com/git-lfs/git-lfs/tree/main/docs/man)
 #[derive(Subcommand, Debug)]
 pub enum LfsCmds {
     /// View or add LFS paths to Libra Attributes (root)
-    Track { pattern: Option<Vec<String>> },
+    Track {
+        /// One or more glob patterns to mark as LFS-tracked (e.g. `*.bin`). Omit to list current patterns
+        pattern: Option<Vec<String>>,
+    },
     /// Remove LFS paths from Libra Attributes
-    Untrack { path: Vec<String> },
+    Untrack {
+        /// One or more glob patterns to remove from `.libra_attributes`
+        path: Vec<String>,
+    },
     /// Lists currently locked files from the Libra LFS server. (Current Branch)
     Locks {
-        #[clap(long, short)]
+        /// Filter to a single lock id
+        #[clap(long, short, value_name = "ID")]
         id: Option<String>,
-        #[clap(long, short)]
+        /// Filter locks to a specific repository-relative path
+        #[clap(long, short, value_name = "PATH")]
         path: Option<String>,
-        #[clap(long, short)]
+        /// Maximum number of locks to return
+        #[clap(long, short, value_name = "N")]
         limit: Option<u64>,
     },
     /// Set a file as "locked" on the Libra LFS server
@@ -54,13 +85,16 @@ pub enum LfsCmds {
     },
     /// Remove "locked" setting for a file on the Libra LFS server
     Unlock {
+        /// Repository-relative path of the file to unlock
         path: String,
+        /// Force-release a lock you do not own (requires server-side permission)
         #[clap(long, short)]
         force: bool,
-        #[clap(long, short)]
+        /// Unlock by lock id instead of by path
+        #[clap(long, short, value_name = "ID")]
         id: Option<String>,
     },
-    /// Show information about Git LFS files in the index and working tree (current branch)
+    /// Show information about Libra LFS files in the index and working tree (current branch)
     LsFiles {
         /// Show the entire 64 character OID, instead of just first 10.
         #[clap(long, short)]
@@ -89,7 +123,6 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
     let attr_path = path::attributes().to_string_or_panic();
     match cmd {
         LfsCmds::Track { pattern } => {
-            // TODO: deduplicate
             match pattern {
                 Some(pattern) => {
                     let pattern = convert_patterns_to_workdir(pattern); //
@@ -168,7 +201,11 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
                         .with_stable_code(StableErrorCode::NetworkUnavailable)
                 })?
                 .lock(path.clone(), refspec.clone())
-                .await;
+                .await
+                .map_err(|e| {
+                    CliError::network(format!("LFS lock request failed: {e}"))
+                        .with_stable_code(StableErrorCode::NetworkUnavailable)
+                })?;
             if code == StatusCode::FORBIDDEN {
                 return Err(
                     CliError::fatal("You must have push access to create a lock")
@@ -192,7 +229,13 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
             })
         }
         LfsCmds::Unlock { path, force, id } => {
-            if !force {
+            // When `--id` is provided the lock is looked up by id on the
+            // server (see the `Some(id) => id` branch below); `path` is
+            // only kept as a label for the audit output. Skipping the
+            // path-existence and clean-tree checks in that case avoids
+            // friction when unlocking a file that has been deleted
+            // locally but still holds a server-side lock.
+            if !force && id.is_none() {
                 if !Path::new(&path).exists() {
                     return Err(CliError::fatal(format!(
                         "pathspec '{path}' did not match any files"
@@ -239,7 +282,11 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
                         .with_stable_code(StableErrorCode::NetworkUnavailable)
                 })?
                 .unlock(id.clone(), refspec.clone(), force)
-                .await;
+                .await
+                .map_err(|e| {
+                    CliError::network(format!("LFS unlock request failed: {e}"))
+                        .with_stable_code(StableErrorCode::NetworkUnavailable)
+                })?;
             if code == StatusCode::FORBIDDEN {
                 return Err(CliError::fatal("You must have push access to unlock")
                     .with_stable_code(StableErrorCode::AuthPermissionDenied));
@@ -324,35 +371,66 @@ fn render_lfs_output(result: &LfsOutput, output: &OutputConfig) -> CliResult<()>
 
     match result.action.as_str() {
         "track" => {
-            for pattern in &result.patterns {
-                println!("Tracking \"{pattern}\"");
+            // Same silent-empty UX class as the `track-list` and `locks`
+            // fixes (v0.17.1065 / v0.17.1066): if every requested pattern
+            // was already tracked, `add_lfs_patterns` returns an empty
+            // `added` Vec and the user previously saw zero output. Emit
+            // a confirmed-already-tracked notice so the command never
+            // looks like a hang.
+            if result.patterns.is_empty() {
+                println!("No new patterns added (already tracked)");
+            } else {
+                for pattern in &result.patterns {
+                    println!("Tracking \"{pattern}\"");
+                }
             }
         }
-        "track-list" if !result.patterns.is_empty() => {
+        "track-list" => {
+            // Always print the header so `libra lfs track` (list mode) is
+            // never silent — pre-v0.17.1065 an empty pattern list rendered
+            // nothing at all and the user couldn't tell whether the command
+            // ran or hung. Matches `git lfs track`'s behavior on an empty
+            // repo (header + no rows).
             println!("Listing tracked patterns");
             for pattern in &result.patterns {
                 println!("    {} ({})", pattern, util::ATTRIBUTES);
             }
         }
         "untrack" => {
-            for pattern in &result.patterns {
-                println!("Untracking \"{pattern}\"");
+            // Same silent-empty fix: if the file had no matching LFS
+            // patterns for the user-supplied args, we previously
+            // printed nothing. Emit a confirmed-no-op notice.
+            if result.patterns.is_empty() {
+                println!("No matching LFS patterns to untrack");
+            } else {
+                for pattern in &result.patterns {
+                    println!("Untracking \"{pattern}\"");
+                }
             }
         }
         "locks" => {
-            let max_path_len = result
-                .locks
-                .iter()
-                .map(|lock| lock.path.len())
-                .max()
-                .unwrap_or(0);
-            for lock in &result.locks {
-                println!(
-                    "{:<path_width$}\tID:{}",
-                    lock.path,
-                    lock.id,
-                    path_width = max_path_len
-                );
+            // Same UX class as the `track-list` empty fix in v0.17.1065:
+            // an empty lock list previously printed nothing, leaving the
+            // user unable to distinguish "no locks held" from "command
+            // hung" or "wrong subcommand". Emit a confirmed-empty notice
+            // so the success signal is always visible.
+            if result.locks.is_empty() {
+                println!("No locks on the current branch");
+            } else {
+                let max_path_len = result
+                    .locks
+                    .iter()
+                    .map(|lock| lock.path.len())
+                    .max()
+                    .unwrap_or(0);
+                for lock in &result.locks {
+                    println!(
+                        "{:<path_width$}\tID:{}",
+                        lock.path,
+                        lock.id,
+                        path_width = max_path_len
+                    );
+                }
             }
         }
         "lock" => {
@@ -366,12 +444,22 @@ fn render_lfs_output(result: &LfsOutput, output: &OutputConfig) -> CliResult<()>
             }
         }
         "ls-files" => {
-            for file in &result.files {
-                let tail = file.display_size.as_deref().unwrap_or("");
-                if result.name_only {
-                    println!("{}{}", file.path, tail);
-                } else {
-                    println!("{} {} {}{}", file.oid, file.marker, file.path, tail);
+            // Same silent-empty fix: a repo with no LFS-tracked files
+            // previously rendered zero stdout. `--name-only` consumers
+            // (e.g. shell pipelines) intentionally expect bare output,
+            // so the notice is gated on the not-name-only path.
+            if result.files.is_empty() {
+                if !result.name_only {
+                    println!("No LFS files in the working tree");
+                }
+            } else {
+                for file in &result.files {
+                    let tail = file.display_size.as_deref().unwrap_or("");
+                    if result.name_only {
+                        println!("{}{}", file.path, tail);
+                    } else {
+                        println!("{} {} {}{}", file.oid, file.marker, file.path, tail);
+                    }
                 }
             }
         }
@@ -384,10 +472,14 @@ fn render_lfs_output(result: &LfsOutput, output: &OutputConfig) -> CliResult<()>
 pub(crate) async fn current_refspec() -> Option<String> {
     match Head::current().await {
         Head::Branch(name) => Some(format!("refs/heads/{name}")),
-        Head::Detached(_) => {
-            emit_legacy_stderr("fatal: HEAD is detached");
-            None
-        }
+        // Return None silently — every caller wraps the None branch in
+        // a typed error (`current_refspec_or_err` → CliError, the
+        // `lfs_client.rs` `push_objects` site → LfsPushError). Pre-fix
+        // we also `emit_legacy_stderr("fatal: HEAD is detached")` here,
+        // which doubled the error envelope on stderr (legacy line +
+        // typed-error envelope from the caller), confusing `--json` /
+        // `--machine` consumers.
+        Head::Detached(_) => None,
     }
 }
 
@@ -451,9 +543,9 @@ fn add_lfs_patterns(file_path: &str, patterns: Vec<String>) -> io::Result<Vec<St
     }
 
     let lfs_patterns = lfs::extract_lfs_patterns(file_path)?;
-    let mut added = Vec::new();
+    let mut added: Vec<String> = Vec::new();
     for pattern in patterns {
-        if lfs_patterns.contains(&pattern) {
+        if lfs_patterns.contains(&pattern) || added.contains(&pattern) {
             continue;
         }
         added.push(pattern.clone());
@@ -479,11 +571,15 @@ fn untrack_lfs_patterns(file_path: &str, patterns: Vec<String>) -> io::Result<Ve
     for line in reader.lines() {
         let line = line?;
         let mut matched_pattern = None;
-        // delete the specified lfs patterns
+        // delete the specified lfs patterns. We compare against the
+        // on-disk (escaped-space) form, but record the *original* input
+        // pattern in `removed` so the return value is symmetric with
+        // `add_lfs_patterns` (both surface the un-escaped user-facing
+        // form).
         for pattern in &patterns {
-            let pattern = pattern.replace(" ", r"\ ");
-            if line.trim_start().starts_with(&pattern) && line.contains("filter=lfs") {
-                matched_pattern = Some(pattern);
+            let escaped = pattern.replace(" ", r"\ ");
+            if line.trim_start().starts_with(&escaped) && line.contains("filter=lfs") {
+                matched_pattern = Some(pattern.clone());
                 break;
             }
         }
@@ -540,5 +636,45 @@ mod tests {
             err.details().get("body"),
             Some(&serde_json::json!("upstream unavailable"))
         );
+    }
+
+    #[test]
+    fn add_lfs_patterns_deduplicates_within_a_single_call() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_string_lossy().into_owned();
+        let added = add_lfs_patterns(
+            &path,
+            vec![
+                "*.png".to_string(),
+                "*.png".to_string(),
+                "*.jpg".to_string(),
+            ],
+        )
+        .expect("add_lfs_patterns");
+        assert_eq!(added, vec!["*.png".to_string(), "*.jpg".to_string()]);
+
+        let on_disk = lfs::extract_lfs_patterns(&path).expect("extract");
+        assert_eq!(on_disk, vec!["*.png".to_string(), "*.jpg".to_string()]);
+    }
+
+    #[test]
+    fn untrack_lfs_patterns_returns_unescaped_form_symmetric_with_add() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_string_lossy().into_owned();
+
+        // Track a pattern with an internal space; on-disk form is escaped.
+        let added =
+            add_lfs_patterns(&path, vec!["my dir/*.png".to_string()]).expect("add_lfs_patterns");
+        assert_eq!(added, vec!["my dir/*.png".to_string()]);
+
+        // Untrack with the un-escaped user-facing form. The return value
+        // must match the input, not the on-disk escaped form, so that
+        // `LfsOutput.patterns` from track and untrack is symmetric.
+        let removed = untrack_lfs_patterns(&path, vec!["my dir/*.png".to_string()])
+            .expect("untrack_lfs_patterns");
+        assert_eq!(removed, vec!["my dir/*.png".to_string()]);
+
+        let on_disk = lfs::extract_lfs_patterns(&path).expect("extract");
+        assert!(on_disk.is_empty(), "expected empty, got {on_disk:?}");
     }
 }

@@ -6,89 +6,91 @@ use git_internal::{
     hash::ObjectHash,
     internal::object::{commit::Commit, types::ObjectType},
 };
-use serde::Serialize;
 
 use crate::{
-    command::load_object,
+    command::{load_object, status},
     internal::tag::{self, TagObject},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
-        util::{self, CommitBaseError},
+        util,
     },
 };
 
+#[path = "describe_format.rs"]
+mod describe_format;
+#[path = "describe_types.rs"]
+mod describe_types;
+use describe_format::{abbreviate_hash, describe_output};
+use describe_types::{DescribeError, DescribeOutput};
+
 const DESCRIBE_EXAMPLES: &str = "\
 EXAMPLES:
-  libra describe
-  libra describe --tags
-  libra describe --always
-  libra describe HEAD~1
-  libra describe --json
-";
+    libra describe                  Describe HEAD using the nearest annotated tag
+    libra describe --tags           Include lightweight tags (not just annotated ones) in the search
+    libra describe --always         Fall back to abbreviated commit hash when no tag matches
+    libra describe --exact-match    Only succeed when HEAD exactly matches a tag
+    libra describe --long           Force tag-0-gHASH form for exact tag matches
+    libra describe --dirty          Append -dirty when tracked content differs from HEAD
+    libra describe --first-parent   Follow only the first parent of merge commits when walking history
+    libra describe --match 'v1.*'   Only consider tags whose name matches the glob
+    libra describe --exclude '*rc*' Skip tags whose name matches the glob
+    libra describe HEAD~1           Describe a specific commit-ish (hash, ref, or HEAD~N)
+    libra describe --abbrev 12      Use 12 hex digits instead of the default 7 in the hash portion
+    libra describe --json           Structured JSON output for agents";
+
+/// Maximum byte length accepted for a `--match`/`--exclude` glob pattern, guarding
+/// against pathological inputs. Longer patterns are rejected up front with
+/// [`DescribeError::InvalidArgument`] (`CliInvalidArguments`, exit 129).
+const MAX_GLOB_LEN: usize = 256;
 
 #[derive(Parser, Debug)]
 #[command(after_help = DESCRIBE_EXAMPLES)]
 pub struct DescribeArgs {
-    // The commit object name, Defaults to HEAD.
+    /// Commit-ish (hash, ref, or tag) to describe. Defaults to HEAD
     pub commit: Option<String>,
 
-    // Instead of only using annotated tags, use any tag found in refs/tags namespace.
+    /// Consider any tag in refs/tags (not just annotated tags) when describing
     #[clap(long)]
     pub tags: bool,
 
-    // Instead of using the default 7 hexadecimal digits as the abbreviated object name, use <n> digits.
-    #[clap(long)]
+    /// Use N hex digits for the abbreviated commit hash (default: 7)
+    #[clap(long, value_name = "N")]
     pub abbrev: Option<usize>,
 
     /// Show an abbreviated commit hash when no tag can describe the target.
     #[clap(long)]
     pub always: bool,
+
+    /// Only output exact tag matches.
+    #[clap(long)]
+    pub exact_match: bool,
+
+    /// Always output the long format when a tag describes the target.
+    #[clap(long)]
+    pub long: bool,
+
+    /// Append MARK when tracked content differs from HEAD.
+    #[clap(long, value_name = "MARK", num_args = 0..=1, require_equals = true, default_missing_value = "-dirty")]
+    pub dirty: Option<String>,
+
+    /// Follow only the first parent of merge commits when walking history.
+    #[clap(long = "first-parent")]
+    pub first_parent: bool,
+
+    /// Only consider tags whose name matches the glob (repeatable; OR semantics).
+    #[clap(long = "match", value_name = "PATTERN")]
+    pub match_patterns: Vec<String>,
+
+    /// Exclude tags whose name matches the glob (repeatable; takes precedence over --match).
+    #[clap(long, value_name = "PATTERN")]
+    pub exclude: Vec<String>,
 }
 
 // Entry in tag lookup map
 struct TagInfo {
     name: String,
     is_annotated: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct DescribeOutput {
-    input: String,
-    resolved_commit: String,
-    result: String,
-    tag: Option<String>,
-    distance: Option<usize>,
-    abbreviated_commit: Option<String>,
-    exact_match: bool,
-    used_always: bool,
-}
-
-#[derive(Debug, thiserror::Error)]
-enum DescribeError {
-    #[error("HEAD does not point to a commit")]
-    HeadUnborn,
-    #[error("{0}")]
-    InvalidReference(String),
-    #[error("{0}")]
-    ReadFailure(String),
-    #[error("{0}")]
-    CorruptReference(String),
-    #[error("failed to load commit '{commit_id}': {detail}")]
-    LoadCommit { commit_id: String, detail: String },
-    #[error("no names found, cannot describe anything")]
-    NoNamesFound,
-}
-
-impl From<CommitBaseError> for DescribeError {
-    fn from(error: CommitBaseError) -> Self {
-        match error {
-            CommitBaseError::HeadUnborn => Self::HeadUnborn,
-            CommitBaseError::InvalidReference(message) => Self::InvalidReference(message),
-            CommitBaseError::ReadFailure(message) => Self::ReadFailure(message),
-            CommitBaseError::CorruptReference(message) => Self::CorruptReference(message),
-        }
-    }
 }
 
 pub async fn execute(args: DescribeArgs) {
@@ -119,6 +121,20 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
         .map_err(DescribeError::from)?;
     let resolved_commit = start_hash.to_string();
     let abbrev = args.abbrev.unwrap_or(7);
+    let long_format = args.long;
+    if long_format && abbrev == 0 {
+        return Err(DescribeError::LongWithAbbrevZero);
+    }
+    let include_lightweight = args.tags;
+    let exact_match = args.exact_match;
+    let always = args.always;
+    let dirty_mark = args.dirty;
+    let first_parent = args.first_parent;
+
+    // Compile the --match / --exclude name filters once. Overly long or malformed
+    // patterns are rejected up front as usage errors (CliInvalidArguments, 129).
+    let matchers = compile_globs(&args.match_patterns)?;
+    let excluders = compile_globs(&args.exclude)?;
 
     // 2. Load all tags and build a mapping table: commit hash -> tag info (name, is_annotated)
     let all_tags = tag::list()
@@ -130,8 +146,12 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
         let is_annotated = t.object.get_type() == ObjectType::Tag;
 
         // Only include light-weight tags if --tags is specified
-        if is_annotated || args.tags {
+        if is_annotated || include_lightweight {
             let tag_name = t.name;
+            // Apply --match / --exclude name filters (exclude wins over match).
+            if !tag_passes_filters(&tag_name, &matchers, &excluders) {
+                continue;
+            }
             let target_commit_hash = match t.object {
                 TagObject::Commit(c) => c.id,
                 TagObject::Tag(tg) => tg.object_hash,
@@ -164,13 +184,19 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
     while let Some((curr_hash, dist)) = queue.pop_front() {
         // Check if current commit has a matching tag
         if let Some(tag_info) = tag_map.get(&curr_hash) {
-            return Ok(describe_output(
+            let output = describe_output(
                 input.clone(),
                 resolved_commit.clone(),
                 &tag_info.name,
                 dist,
                 abbrev,
-            ));
+                long_format,
+            );
+            return apply_dirty_mark(output, dirty_mark).await;
+        }
+
+        if exact_match {
+            break;
         }
 
         // Load commit to find parents
@@ -180,17 +206,31 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
                 detail: error.to_string(),
             })?;
 
-        for parent_id_str in commit.parent_commit_ids {
-            if !visited.contains(&parent_id_str) {
-                visited.insert(parent_id_str);
-                queue.push_back((parent_id_str, dist + 1));
+        // With --first-parent only the first parent is followed, so merge commits
+        // do not pull in their merged-in side history.
+        let parents = commit.parent_commit_ids;
+        let parents: &[ObjectHash] = if first_parent {
+            &parents[..parents.len().min(1)]
+        } else {
+            &parents
+        };
+        for parent_id_str in parents {
+            if !visited.contains(parent_id_str) {
+                visited.insert(*parent_id_str);
+                queue.push_back((*parent_id_str, dist + 1));
             }
         }
     }
 
-    if args.always {
+    if exact_match {
+        return Err(DescribeError::NoExactMatch {
+            commit_id: resolved_commit,
+        });
+    }
+
+    if always {
         let abbreviated = abbreviate_hash(&resolved_commit, abbrev);
-        return Ok(DescribeOutput {
+        let output = DescribeOutput {
             input,
             resolved_commit,
             result: abbreviated.clone(),
@@ -199,52 +239,82 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
             abbreviated_commit: Some(abbreviated),
             exact_match: false,
             used_always: true,
-        });
+            long_format,
+            dirty: false,
+            dirty_mark: None,
+        };
+        return apply_dirty_mark(output, dirty_mark).await;
     }
 
     Err(DescribeError::NoNamesFound)
 }
 
-// Formats the output string based on Git's describe rules.
-fn format_describe_result(tag_name: &str, dist: usize, full_sha: &str, abbrev: usize) -> String {
-    if dist == 0 || abbrev == 0 {
-        // If the current commit is exactly at the tag, just return the tag name
-        tag_name.to_string()
-    } else {
-        // Extract the abbreviated hash based on the specified length (default 7)
-        let short_sha = abbreviate_hash(full_sha, abbrev);
-        // format: <tag_name>-<distance>-g<abbreviated_sha>
-        format!("{}-{}-g{}", tag_name, dist, short_sha)
+async fn apply_dirty_mark(
+    mut output: DescribeOutput,
+    dirty_mark: Option<String>,
+) -> Result<DescribeOutput, DescribeError> {
+    if let Some(mark) = dirty_mark
+        && has_tracked_dirty_changes().await?
+    {
+        output.result.push_str(&mark);
+        output.dirty = true;
+        output.dirty_mark = Some(mark);
     }
+
+    Ok(output)
 }
 
-fn describe_output(
-    input: String,
-    resolved_commit: String,
-    tag_name: &str,
-    distance: usize,
-    abbrev: usize,
-) -> DescribeOutput {
-    let abbreviated_commit =
-        (distance > 0 && abbrev > 0).then(|| abbreviate_hash(&resolved_commit, abbrev));
-    DescribeOutput {
-        input,
-        resolved_commit: resolved_commit.clone(),
-        result: format_describe_result(tag_name, distance, &resolved_commit, abbrev),
-        tag: Some(tag_name.to_string()),
-        distance: Some(distance),
-        abbreviated_commit,
-        exact_match: distance == 0,
-        used_always: false,
+async fn has_tracked_dirty_changes() -> Result<bool, DescribeError> {
+    let staged = status::changes_to_be_committed_safe()
+        .await
+        .map_err(|error| DescribeError::ReadFailure(format!("{error}")))?;
+    if !staged.is_empty() {
+        return Ok(true);
     }
+
+    let unstaged = status::changes_to_be_staged()
+        .map_err(|error| DescribeError::ReadFailure(format!("{error}")))?;
+    Ok(!unstaged.modified.is_empty()
+        || !unstaged.deleted.is_empty()
+        || !unstaged.renamed.is_empty())
 }
 
-fn abbreviate_hash(full_sha: &str, abbrev: usize) -> String {
-    if abbrev == 0 || abbrev >= full_sha.len() {
-        full_sha.to_string()
-    } else {
-        full_sha[..abbrev].to_string()
+/// Compile `--match`/`--exclude` glob patterns, rejecting overly long or malformed
+/// patterns with [`DescribeError::InvalidArgument`] (`CliInvalidArguments`, exit 129).
+/// Returned globs borrow `patterns`, so the slice must outlive the filter loop.
+fn compile_globs(patterns: &[String]) -> Result<Vec<wax::Glob<'_>>, DescribeError> {
+    let mut globs = Vec::with_capacity(patterns.len());
+    for pattern in patterns {
+        if pattern.len() > MAX_GLOB_LEN {
+            return Err(DescribeError::InvalidArgument(format!(
+                "glob pattern too long ({} chars); the limit is {MAX_GLOB_LEN}",
+                pattern.len()
+            )));
+        }
+        let glob = wax::Glob::new(pattern.as_str()).map_err(|error| {
+            DescribeError::InvalidArgument(format!("invalid glob pattern '{pattern}': {error}"))
+        })?;
+        globs.push(glob);
     }
+    Ok(globs)
+}
+
+/// Whether a tag name survives the `--match`/`--exclude` filters. An exclude match
+/// always rejects; with no `--match` patterns every non-excluded name passes,
+/// otherwise the name must match at least one `--match` glob.
+fn tag_passes_filters(name: &str, matchers: &[wax::Glob<'_>], excluders: &[wax::Glob<'_>]) -> bool {
+    if excluders
+        .iter()
+        .any(|glob| wax::Program::is_match(glob, name))
+    {
+        return false;
+    }
+    if matchers.is_empty() {
+        return true;
+    }
+    matchers
+        .iter()
+        .any(|glob| wax::Program::is_match(glob, name))
 }
 
 fn prefer_tag(existing: &TagInfo, candidate_name: &str, candidate_is_annotated: bool) -> bool {
@@ -274,6 +344,17 @@ fn describe_cli_error(error: DescribeError) -> CliError {
             .with_hint(
                 "create a tag, pass '--tags' to include lightweight tags, or use '--always'.",
             ),
+        DescribeError::NoExactMatch { commit_id } => {
+            CliError::fatal(format!("no tag exactly matches '{commit_id}'"))
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("move to a tagged commit or omit '--exact-match'.")
+        }
+        DescribeError::LongWithAbbrevZero => CliError::command_usage(error.to_string())
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint("omit '--long' or choose a positive '--abbrev <N>'."),
+        DescribeError::InvalidArgument(message) => CliError::command_usage(message)
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint("check the --match/--exclude glob syntax."),
         DescribeError::LoadCommit { commit_id, detail } => {
             CliError::fatal(format!("failed to load commit '{commit_id}': {detail}"))
                 .with_stable_code(StableErrorCode::RepoCorrupt)
@@ -282,43 +363,5 @@ fn describe_cli_error(error: DescribeError) -> CliError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Pin the `Display` format for every variant of [`DescribeError`].
-    /// These strings are used directly as the CliError message via
-    /// `describe_cli_error` (lines above) and surface in both human
-    /// and `--json` envelopes.
-    #[test]
-    fn describe_error_display_pins_each_variant() {
-        assert_eq!(
-            DescribeError::HeadUnborn.to_string(),
-            "HEAD does not point to a commit",
-        );
-        // `{0}`-only variants echo the inner string verbatim.
-        assert_eq!(
-            DescribeError::InvalidReference("bad-ref".to_string()).to_string(),
-            "bad-ref",
-        );
-        assert_eq!(
-            DescribeError::ReadFailure("db locked".to_string()).to_string(),
-            "db locked",
-        );
-        assert_eq!(
-            DescribeError::CorruptReference("bad commit hash".to_string()).to_string(),
-            "bad commit hash",
-        );
-        assert_eq!(
-            DescribeError::LoadCommit {
-                commit_id: "deadbeef".to_string(),
-                detail: "object not found".to_string(),
-            }
-            .to_string(),
-            "failed to load commit 'deadbeef': object not found",
-        );
-        assert_eq!(
-            DescribeError::NoNamesFound.to_string(),
-            "no names found, cannot describe anything",
-        );
-    }
-}
+#[path = "describe_tests.rs"]
+mod tests;

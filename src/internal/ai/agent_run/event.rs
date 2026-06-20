@@ -30,8 +30,6 @@
 //! CEX-S2-12 hook dispatch implementation may NOT add fields to these types;
 //! field additions require a new CEX-S2-* card.
 
-#![cfg(feature = "subagent-scaffold")]
-
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -45,6 +43,7 @@ use super::{AgentRunId, ApprovalRequestId, BudgetDimension, PackageId, Sha256, T
 /// Phase of the hook dispatch lifecycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum HookPhase {
     PreToolUse,
     PostToolUse,
@@ -54,6 +53,7 @@ pub enum HookPhase {
 /// for CEX-S2-17 capability packages.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum HookKind {
     Builtin,
     ProjectLocal,
@@ -83,6 +83,7 @@ pub struct HookInvocationPayload {
 /// values match the table at "Step 2.2 Hook exit-code 权威映射表" verbatim.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum HookFailureReason {
     /// Exit code was not 0/2/3; treated as deny per fail-closed default.
     UnknownExitCode { exit_code: i32 },
@@ -106,7 +107,7 @@ pub enum HookFailureReason {
 
 /// Reason payload for `AgentRunEvent::PostToolReviewRequired`.
 ///
-/// Per the audit-closure schema in `docs/improvement/agent.md` Step 2.2 hook
+/// Per the audit-closure schema in `docs/development/commands/agent.md` Step 2.2 hook
 /// table: same variant set as `HookFailureReason` PLUS the two PostToolUse-
 /// only literals `hook_deny` / `hook_needs_human`. The variants are listed
 /// flat (not wrapped in a `Failure(HookFailureReason)` newtype) so the wire
@@ -117,6 +118,7 @@ pub enum HookFailureReason {
 /// completeness with `HookFailureReason`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum PostToolReason {
     /// PostToolUse-only: hook returned exit 2 after dispatch.
     HookDeny,
@@ -147,6 +149,7 @@ pub enum PostToolReason {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum WorkspaceStrategy {
     /// `.git` < 1GB and worktree files < 100K (default).
     Worktree,
@@ -194,6 +197,26 @@ pub struct RunUsage {
     pub tool_call_count: u32,
 }
 
+impl RunUsage {
+    /// Total tokens counted against an [`AgentBudget`]'s `max_tokens`
+    /// dimension: prompt + completion + cached + reasoning (matching the
+    /// `max_tokens` doc — "prompt + completion + cached + reasoning").
+    /// `provider_latency_ms` and `wall_clock_ms` are latency dimensions,
+    /// not token counts, and are excluded.
+    ///
+    /// Uses saturating addition so a pathological provider report can
+    /// never wrap the sum around `u64::MAX` and under-report usage to
+    /// the budget check.
+    ///
+    /// [`AgentBudget`]: super::budget::AgentBudget
+    pub fn total_tokens(&self) -> u64 {
+        self.prompt_tokens
+            .saturating_add(self.completion_tokens)
+            .saturating_add(self.cached_tokens)
+            .saturating_add(self.reasoning_tokens)
+    }
+}
+
 // ----------------------------------------------------------------------------
 // AgentRunEvent — append-only stream
 // ----------------------------------------------------------------------------
@@ -205,6 +228,7 @@ pub type FailureReason = String;
 /// Reason payload for `AgentRunEvent::Cancelled`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CancellationReason {
     UserRequested,
     LayerOneTimeout,
@@ -234,6 +258,17 @@ pub enum CancellationReason {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum AgentRunEvent {
+    Spawned {
+        agent_run_id: AgentRunId,
+        parent_thread_id: String,
+        parent_session_id: String,
+        parent_message_id: String,
+        subagent_name: String,
+        provider_id: String,
+        model_id: String,
+        depth: u8,
+        prompt_digest: String,
+    },
     Started {
         agent_run_id: AgentRunId,
     },
@@ -325,6 +360,7 @@ pub enum AgentRunEvent {
 impl crate::internal::ai::runtime::Event for AgentRunEvent {
     fn event_kind(&self) -> &'static str {
         match self {
+            Self::Spawned { .. } => "spawned",
             Self::Started { .. } => "started",
             Self::ToolCall { .. } => "tool_call",
             Self::Blocked { .. } => "blocked",
@@ -351,7 +387,8 @@ impl crate::internal::ai::runtime::Event for AgentRunEvent {
         // `agent_run_id`" and gives audit/dedupe code something stable to
         // group by per run.
         match self {
-            Self::Started { agent_run_id }
+            Self::Spawned { agent_run_id, .. }
+            | Self::Started { agent_run_id }
             | Self::ToolCall { agent_run_id, .. }
             | Self::Blocked { agent_run_id, .. }
             | Self::Completed { agent_run_id }
@@ -374,6 +411,16 @@ impl crate::internal::ai::runtime::Event for AgentRunEvent {
         // consumers requiring full payloads should inspect the JSONL row;
         // this is the audit-channel sketch.
         match self {
+            Self::Spawned {
+                agent_run_id,
+                subagent_name,
+                provider_id,
+                model_id,
+                ..
+            } => format!(
+                "spawned run={} agent={subagent_name} model={provider_id}/{model_id}",
+                agent_run_id.0
+            ),
             Self::Started { agent_run_id } => format!("started run={}", agent_run_id.0),
             Self::ToolCall {
                 agent_run_id,
@@ -498,5 +545,45 @@ impl AgentRunEventEnvelope {
 impl From<AgentRunEvent> for AgentRunEventEnvelope {
     fn from(event: AgentRunEvent) -> Self {
         Self::Known(Box::new(event))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `total_tokens` sums the four token dimensions (prompt +
+    /// completion + cached + reasoning) and excludes the latency /
+    /// cost / tool-call fields. Pins the `max_tokens` accounting so a
+    /// future field addition can't silently change what counts against
+    /// the token budget.
+    #[test]
+    fn run_usage_total_tokens_sums_only_token_dimensions() {
+        let usage = RunUsage {
+            prompt_tokens: 100,
+            completion_tokens: 40,
+            cached_tokens: 8,
+            reasoning_tokens: 12,
+            // Non-token dimensions must NOT contribute to the token sum.
+            wall_clock_ms: 9_999,
+            provider_latency_ms: 5_555,
+            cost_estimate_micro_dollars: 1_000_000,
+            tool_call_count: 7,
+        };
+        assert_eq!(usage.total_tokens(), 160);
+        assert_eq!(RunUsage::default().total_tokens(), 0);
+    }
+
+    /// Token totalling saturates instead of wrapping, so a pathological
+    /// provider report near `u64::MAX` can't underflow the budget
+    /// check into reporting tiny usage.
+    #[test]
+    fn run_usage_total_tokens_saturates_on_overflow() {
+        let usage = RunUsage {
+            prompt_tokens: u64::MAX,
+            completion_tokens: 10,
+            ..RunUsage::default()
+        };
+        assert_eq!(usage.total_tokens(), u64::MAX);
     }
 }

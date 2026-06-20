@@ -5,7 +5,7 @@
 //! `read_transcript`, and `protected_dirs`. Hooks, transcript truncation, and
 //! chunking are all opt-in.
 //!
-//! See `docs/improvement/entire.md` (section 5) for the rationale and the v1
+//! See `docs/development/commands/_general.md` (section 5) for the rationale and the v1
 //! adapter matrix (Claude Code + Gemini stable; 5 preview stubs).
 
 use std::path::PathBuf;
@@ -46,6 +46,33 @@ impl AgentKind {
             Self::OpenCode => "opencode",
             Self::Copilot => "copilot",
             Self::FactoryAi => "factory_ai",
+        }
+    }
+
+    /// Parse the `agent_session.agent_kind` db tag back into an
+    /// [`AgentKind`]. Inverse of [`as_db_str`](Self::as_db_str): for
+    /// every variant `kind`, `AgentKind::from_db_str(kind.as_db_str())
+    /// == Some(kind)`. Returns `None` for tags that don't match a
+    /// known variant — callers that read from `agent_session` rows
+    /// should treat that as a schema mismatch and fail closed rather
+    /// than silently dispatching to the wrong adapter.
+    ///
+    /// Unlike [`from_cli_slug`](Self::from_cli_slug), this accepts the
+    /// snake_case wire form exclusively — db rows have a fixed
+    /// canonical shape, while CLI slugs accept aliases. Keep the two
+    /// helpers separate so a `agent_session` row that somehow
+    /// contains `"claude-code"` (CLI slug shape) fails the lookup
+    /// instead of silently round-tripping to `ClaudeCode`.
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "claude_code" => Some(Self::ClaudeCode),
+            "cursor" => Some(Self::Cursor),
+            "codex" => Some(Self::Codex),
+            "gemini" => Some(Self::Gemini),
+            "opencode" => Some(Self::OpenCode),
+            "copilot" => Some(Self::Copilot),
+            "factory_ai" => Some(Self::FactoryAi),
+            _ => None,
         }
     }
 
@@ -211,7 +238,7 @@ pub trait ObservedAgentHooks: ObservedAgent {
 /// Required by `libra agent checkpoint rewind --apply` once Phase 2 lands.
 /// V1 adapters do NOT implement this — `rewind --apply` therefore leaves the
 /// agent's transcript file untouched and prints a warning, per
-/// `docs/improvement/entire.md` section 7.3.
+/// `docs/development/commands/_general.md` section 7.3.
 pub trait TranscriptTruncator: ObservedAgent {
     fn truncate_transcript(&self, transcript_data: &[u8], checkpoint_id: &str) -> Result<Vec<u8>>;
 }
@@ -260,11 +287,134 @@ mod tests {
         assert_eq!(AgentKind::from_cli_slug(""), None);
     }
 
+    /// `from_db_str` is the inverse of `as_db_str` — for every variant,
+    /// the round-trip `from_db_str(kind.as_db_str()) == Some(kind)`.
+    /// Pin both directions across every variant so a future rename
+    /// that touches only one side of the pair fails to compile through
+    /// the exhaustive match arms, and silently shipping a desync
+    /// becomes impossible.
+    #[test]
+    fn agent_kind_from_db_str_round_trips_every_variant() {
+        for kind in AgentKind::all() {
+            assert_eq!(
+                AgentKind::from_db_str(kind.as_db_str()),
+                Some(*kind),
+                "round-trip mismatch for {kind:?}",
+            );
+        }
+    }
+
+    /// `from_db_str` accepts ONLY the snake_case wire form — it does
+    /// not fall through to CLI-slug aliases. A `agent_session.agent_kind`
+    /// row that somehow contains `"claude-code"` (the CLI slug shape)
+    /// should be rejected as a schema mismatch, not silently mapped to
+    /// `ClaudeCode`. Pinning the rejection here protects the
+    /// dispatch-on-db-tag pattern from accidentally lifting CLI-side
+    /// alias permissiveness into the storage layer.
+    #[test]
+    fn agent_kind_from_db_str_rejects_cli_slug_aliases_and_unknowns() {
+        // Hyphenated CLI slugs are rejected even when the underlying
+        // kind is real — the wire form must use the snake_case db tag.
+        assert_eq!(AgentKind::from_db_str("claude-code"), None);
+        assert_eq!(AgentKind::from_db_str("factory-ai"), None);
+        // Unknown values return None instead of panicking.
+        assert_eq!(AgentKind::from_db_str("not-an-agent"), None);
+        assert_eq!(AgentKind::from_db_str(""), None);
+    }
+
     #[test]
     fn agent_error_display_pins_not_yet_implemented_template() {
         assert_eq!(
             AgentError::NotYetImplemented("Gemini").to_string(),
             "adapter for 'Gemini' is preview-only and not yet implemented",
+        );
+    }
+
+    /// `as_db_str` produces stable snake_case identifiers for every
+    /// variant. Pin the 7 strings explicitly — downstream tooling
+    /// joins on the `agent_session.agent_kind` column, so a rename
+    /// would break sessions persisted by older binaries.
+    #[test]
+    fn agent_kind_as_db_str_pins_seven_snake_case_strings() {
+        for (kind, expected) in [
+            (AgentKind::ClaudeCode, "claude_code"),
+            (AgentKind::Cursor, "cursor"),
+            (AgentKind::Codex, "codex"),
+            (AgentKind::Gemini, "gemini"),
+            (AgentKind::OpenCode, "opencode"),
+            (AgentKind::Copilot, "copilot"),
+            (AgentKind::FactoryAi, "factory_ai"),
+        ] {
+            assert_eq!(kind.as_db_str(), expected);
+        }
+    }
+
+    /// `as_cli_slug` produces hyphenated strings (different from DB
+    /// form for the two two-word agents). Pin all 7 so a rename can
+    /// be reviewed at this gate.
+    #[test]
+    fn agent_kind_as_cli_slug_pins_seven_hyphenated_strings() {
+        for (kind, expected) in [
+            (AgentKind::ClaudeCode, "claude-code"),
+            (AgentKind::Cursor, "cursor"),
+            (AgentKind::Codex, "codex"),
+            (AgentKind::Gemini, "gemini"),
+            (AgentKind::OpenCode, "opencode"),
+            (AgentKind::Copilot, "copilot"),
+            (AgentKind::FactoryAi, "factory-ai"),
+        ] {
+            assert_eq!(kind.as_cli_slug(), expected);
+        }
+    }
+
+    /// `from_cli_slug` accepts the documented short-form aliases:
+    /// `"claude"` → ClaudeCode, `"open-code"` → OpenCode,
+    /// `"factory"` → FactoryAi. Pin them all so a refactor that
+    /// tightens the matcher gets caught.
+    #[test]
+    fn agent_kind_from_cli_slug_accepts_short_form_aliases() {
+        assert_eq!(
+            AgentKind::from_cli_slug("claude"),
+            Some(AgentKind::ClaudeCode),
+        );
+        assert_eq!(
+            AgentKind::from_cli_slug("open-code"),
+            Some(AgentKind::OpenCode),
+        );
+        assert_eq!(
+            AgentKind::from_cli_slug("factory"),
+            Some(AgentKind::FactoryAi),
+        );
+    }
+
+    /// `AgentKind::all()` returns exactly the 7 documented variants
+    /// in registration order. Adding an 8th variant must force a
+    /// test update.
+    #[test]
+    fn agent_kind_all_returns_seven_variants_in_registration_order() {
+        let all = AgentKind::all();
+        assert_eq!(all.len(), 7);
+        assert_eq!(all[0], AgentKind::ClaudeCode);
+        assert_eq!(all[6], AgentKind::FactoryAi);
+
+        // All 7 must be distinct via HashSet.
+        use std::collections::HashSet;
+        let set: HashSet<AgentKind> = all.iter().copied().collect();
+        assert_eq!(set.len(), 7);
+    }
+
+    /// `AgentStability` serde-serialises as snake_case — the
+    /// `libra agent doctor --json` public CLI contract depends on
+    /// these strings. Pin both variants.
+    #[test]
+    fn agent_stability_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&AgentStability::Stable).unwrap(),
+            "\"stable\"",
+        );
+        assert_eq!(
+            serde_json::to_string(&AgentStability::Preview).unwrap(),
+            "\"preview\"",
         );
     }
 }

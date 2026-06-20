@@ -7,7 +7,9 @@ Summarize reachable commits by author.
 ## Synopsis
 
 ```
-libra shortlog [<revision>] [-n] [-s] [-e] [--since <date>] [--until <date>]
+libra shortlog [<revision>] [-n] [-s] [-e] [-c] [--no-merges]
+               [--top <N>] [--min-count <N>] [--reverse]
+               [--since <date>] [--until <date>]
 ```
 
 ## Description
@@ -25,6 +27,11 @@ Date filtering via `--since` and `--until` restricts which commits are included 
 | Numbered | `-n` | `--numbered` | Sort output by number of commits per author (descending) instead of alphabetically. |
 | Summary | `-s` | `--summary` | Suppress commit descriptions; show only per-author commit counts. |
 | Email | `-e` | `--email` | Show the email address of each author alongside their name. When enabled, authors are grouped by `name <email>` pair. |
+| Committer | `-c` | `--committer` | Group commits by committer identity instead of author. |
+| No merges | | `--no-merges` | Exclude merge commits (commits with more than one parent) before aggregation. |
+| Top | | `--top <N>` | Show only the top N identities (after sorting). |
+| Min count | | `--min-count <N>` | Show only identities with at least N commits. |
+| Reverse | | `--reverse` | Reverse the output order. |
 | Since | | `--since <date>` | Only include commits more recent than the specified date. |
 | Until | | `--until <date>` | Only include commits older than the specified date. |
 | Revision | | positional (optional) | The revision to summarize from. Defaults to `HEAD`. |
@@ -200,10 +207,10 @@ The `--since`/`--until` filters use the committer timestamp (not the author time
 | Revision | `<revision>` (positional) | `<revision range>...` | N/A |
 | Group by | Not supported | `--group=author\|committer\|trailer:<key>` | N/A |
 | Format | Not supported | `--format=<format>` | N/A |
-| Committer grouping | Not supported | `--committer` (deprecated, use `--group=committer`) | N/A |
+| Committer grouping | `-c` / `--committer` | `--committer` (deprecated, use `--group=committer`) | N/A |
 | Piped input | Not supported | Reads from stdin when piped | N/A |
-| No merges | Not supported | `--no-merges` | N/A |
-| Author filter | Not supported | `--author=<pattern>` | N/A |
+| No merges | `--no-merges` | `--no-merges` | N/A |
+| Author filter | `--author=<pattern>` | `--author=<pattern>` | N/A |
 | Grep filter | Not supported | `--grep=<pattern>` | N/A |
 | Width limit | Not supported | `-w[<width>[,<indent1>[,<indent2>]]]` | N/A |
 | JSON output | `--json` | Not supported | N/A |

@@ -12,9 +12,14 @@
 //! output (`tree <hash>`, tree entries `mode blob <hash>\t<name>`); these
 //! parsers must therefore stay in sync with the cat-file pretty-printer.
 
-use std::process::Command;
+use std::{
+    io::{Read, Write},
+    process::Command,
+};
 
-use super::{parse_cli_error_stderr, parse_json_stdout};
+use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
+
+use super::{loose_object_path, parse_cli_error_stderr, parse_json_stdout};
 
 /// Spawn `libra init` in a fresh tempdir and return the `TempDir` (kept
 /// alive by the caller for RAII cleanup).
@@ -142,7 +147,177 @@ async fn test_cat_file_size_commit() {
     assert!(size > 0, "Commit object size should be > 0, got {}", size);
 }
 
-/// Scenario: `cat-file -t --json HEAD` must emit
+/// Scenario: `cat-file --batch-check` reads object names from stdin and prints
+/// `<sha> <type> <size>` per resolvable line and `<input> missing` otherwise.
+#[tokio::test]
+async fn test_cat_file_batch_check_reports_type_size_and_missing() {
+    use std::process::Stdio;
+
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    configure_user_identity(temp_path);
+    create_commit(temp_path, "hello.txt", "hello world\n", "first commit");
+
+    let head = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("Failed to resolve HEAD");
+    let head_hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "--batch-check"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn cat-file --batch-check");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(b"HEAD\nnot-a-real-ref\n")
+        .expect("Failed to write batch-check input");
+    let output = child
+        .wait_with_output()
+        .expect("Failed to wait on cat-file");
+    assert!(
+        output.status.success(),
+        "cat-file --batch-check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "expected two output lines, got: {stdout}");
+    assert!(
+        lines[0].starts_with(&format!("{head_hash} commit ")),
+        "first line should be '<hash> commit <size>', got: {}",
+        lines[0]
+    );
+    let size_token = lines[0].rsplit(' ').next().unwrap_or("");
+    assert!(
+        size_token.parse::<usize>().is_ok(),
+        "size should be numeric, got: {}",
+        lines[0]
+    );
+    assert_eq!(lines[1], "not-a-real-ref missing");
+}
+
+/// Scenario: `cat-file --batch` prints the `<sha> <type> <size>` header AND the
+/// raw object contents for each resolvable line, and `<input> missing` otherwise.
+#[tokio::test]
+async fn test_cat_file_batch_reports_header_and_contents() {
+    use std::process::Stdio;
+
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    configure_user_identity(temp_path);
+    create_commit(temp_path, "hello.txt", "hello world\n", "first commit");
+
+    let head = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("Failed to resolve HEAD");
+    let head_hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "--batch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn cat-file --batch");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(b"HEAD\nnot-a-real-ref\n")
+        .expect("Failed to write batch input");
+    let output = child
+        .wait_with_output()
+        .expect("Failed to wait on cat-file");
+    assert!(
+        output.status.success(),
+        "cat-file --batch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("{head_hash} commit ")),
+        "expected '<hash> commit <size>' header, got: {stdout}"
+    );
+    // The commit contents follow the header line.
+    assert!(
+        stdout.contains("first commit"),
+        "expected the commit message in the contents, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("tree "),
+        "expected the commit tree line in the contents, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("not-a-real-ref missing"),
+        "expected the missing line, got: {stdout}"
+    );
+}
+
+/// Scenario: `cat-file --batch-check="%(objecttype) %(objectsize)"` must
+/// expand the format atoms instead of the default `<sha> <type> <size>` line.
+#[tokio::test]
+async fn test_cat_file_batch_check_custom_format_expands_atoms() {
+    use std::process::Stdio;
+
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    configure_user_identity(temp_path);
+    create_commit(temp_path, "hello.txt", "hello world\n", "first commit");
+
+    let head = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("Failed to resolve HEAD");
+    let head_hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "--batch-check=%(objecttype) %(objectsize)"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn cat-file --batch-check with format");
+
+    {
+        let mut stdin = child.stdin.take().expect("Failed to open stdin");
+        stdin
+            .write_all(format!("{head_hash}\n").as_bytes())
+            .expect("Failed to write batch-check input");
+    }
+
+    let output = child
+        .wait_with_output()
+        .expect("Failed to wait for cat-file --batch-check with format");
+
+    assert!(
+        output.status.success(),
+        "cat-file --batch-check with format failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.starts_with("commit "),
+        "expected format-expanded line starting with 'commit', got: {stdout}"
+    );
+}
+
 /// `command="cat-file"`, `data.mode="type"`, `data.object="HEAD"` and
 /// `data.object_type="commit"`. Schema pin for the type-mode envelope.
 #[tokio::test]
@@ -388,6 +563,28 @@ async fn test_cat_file_panic_handling() {
     assert!(stderr.contains("fatal:"));
 }
 
+#[tokio::test]
+async fn test_cat_file_json_invalid_object_returns_cli_003() {
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args([
+            "cat-file",
+            "-p",
+            "0000000000000000000000000000000000000000",
+            "--json",
+        ])
+        .output()
+        .expect("Failed to execute cat-file");
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(129));
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+}
+
 /// Scenario: `cat-file -e <object>` must be silent in both directions —
 /// existing object → exit 0 with empty stderr; missing object → exit 1
 /// with empty stderr. Pins Git-compatible status-only semantics so
@@ -601,6 +798,80 @@ async fn test_cat_file_ai_list_invalid_type() {
         "Should report unknown type: {}",
         stderr
     );
+}
+
+#[tokio::test]
+async fn test_cat_file_ai_list_invalid_type_json_returns_cli_003() {
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "--ai-list", "foobar", "--json"])
+        .output()
+        .expect("Failed to execute cat-file");
+
+    assert!(!output.status.success());
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+}
+
+#[tokio::test]
+async fn test_cat_file_json_pretty_print_io_read_failed_when_object_body_corrupted() {
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    configure_user_identity(temp_path);
+    create_commit(temp_path, "hello.txt", "hello world\n", "first commit");
+
+    let head_output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("Failed to execute rev-parse");
+    assert!(
+        head_output.status.success(),
+        "rev-parse HEAD failed: {}",
+        String::from_utf8_lossy(&head_output.stderr)
+    );
+    let head = String::from_utf8_lossy(&head_output.stdout)
+        .trim()
+        .to_string();
+
+    let object_path = loose_object_path(temp_path, &head);
+    let raw_data = std::fs::read(&object_path).expect("Failed to read commit object file");
+
+    let mut decoder = ZlibDecoder::new(raw_data.as_slice());
+    let mut decompressed = Vec::new();
+    decoder
+        .read_to_end(&mut decompressed)
+        .expect("Failed to decode commit object payload");
+    let header_end = decompressed
+        .iter()
+        .position(|&b| b == b'\0')
+        .expect("Malformed object payload");
+    let mut corrupted = Vec::with_capacity(header_end + 1 + 5);
+    corrupted.extend_from_slice(&decompressed[..=header_end]);
+    corrupted.extend_from_slice(b"\xff\xff");
+
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+    encoder
+        .write_all(&corrupted)
+        .expect("Failed to re-encode corrupted commit object");
+    let encoded = encoder
+        .finish()
+        .expect("Failed to finish corrupted commit object encoding");
+    std::fs::write(&object_path, encoded).expect("Failed to write corrupted commit object");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "-p", &head, "--json"])
+        .output()
+        .expect("Failed to execute cat-file");
+
+    assert!(!output.status.success());
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-002");
 }
 
 /// Test `cat-file --ai <uuid>` with a non-existent UUID.

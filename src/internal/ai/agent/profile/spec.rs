@@ -1,6 +1,6 @@
 //! `AgentExecutionSpec` and friends — the executable agent contract.
 //!
-//! This module is the OC-Phase 0 deliverable from `docs/improvement/opencode.md`.
+//! This module is the OC-Phase 0 deliverable from `docs/development/commands/_general.md`.
 //! It defines the **schema** an agent profile gets lifted to once we move past the
 //! "system prompt + tool name list" representation in [`super::parser::AgentProfile`].
 //!
@@ -184,6 +184,56 @@ pub enum ToolSelection {
     Deny(Vec<String>),
 }
 
+impl ToolSelection {
+    /// Resolve this selection against the runtime's `available` tool
+    /// names, returning the effective allowed set.
+    ///
+    /// This is the pure application of the recorded intent — it does
+    /// **not** decide what `Inherit` means (that is the OC-Phase 3
+    /// runtime's contextual call per this type's doc). The caller
+    /// supplies `inherited`: the session allow-list for a primary
+    /// agent, or an empty slice for a `task`-dispatched sub-agent
+    /// (default deny per S2-INV-05).
+    ///
+    /// - [`Inherit`](Self::Inherit) → the `inherited` tools that are
+    ///   actually `available`.
+    /// - [`Allow`](Self::Allow) → the listed tools that are actually
+    ///   `available` (a listed tool the runtime does not expose cannot
+    ///   be granted).
+    /// - [`Deny`](Self::Deny) → `available` minus the listed tools
+    ///   (deny wins).
+    ///
+    /// The result is always a subset of `available` and preserves
+    /// `available`'s order — every arm filters `available` by a
+    /// membership predicate, so a tool the runtime never offered can
+    /// never appear in the output. It does not de-duplicate: if
+    /// `available` itself contains duplicates the output may too
+    /// (`available` is expected to be the runtime's deduplicated
+    /// registered-tool set).
+    pub fn resolve(&self, available: &[String], inherited: &[String]) -> Vec<String> {
+        let retain_if_member = |members: &[String]| -> Vec<String> {
+            let set: BTreeSet<&str> = members.iter().map(String::as_str).collect();
+            available
+                .iter()
+                .filter(|tool| set.contains(tool.as_str()))
+                .cloned()
+                .collect()
+        };
+        match self {
+            Self::Inherit => retain_if_member(inherited),
+            Self::Allow(list) => retain_if_member(list),
+            Self::Deny(list) => {
+                let denied: BTreeSet<&str> = list.iter().map(String::as_str).collect();
+                available
+                    .iter()
+                    .filter(|tool| !denied.contains(tool.as_str()))
+                    .cloned()
+                    .collect()
+            }
+        }
+    }
+}
+
 /// Where approval prompts route when the agent invokes a tool that requires
 /// human consent. Mirrors
 /// [`crate::internal::ai::agent_run::permission::ApprovalRouting`] so the
@@ -233,6 +283,29 @@ pub struct AgentPermissionSpec {
     /// spawner unless an operator explicitly opts in via config.
     #[serde(default)]
     pub may_spawn_sub_agents: bool,
+}
+
+impl AgentPermissionSpec {
+    /// Whether `tool` may be invoked under this permission spec.
+    ///
+    /// Encodes the same S2-INV-05 contract as the feature-gated
+    /// [`AgentPermissionProfile::permits_tool`] so the default-build
+    /// config / parsing layer evaluates tool gating identically to the
+    /// runtime profile it converts into:
+    ///
+    /// - **default deny** — an empty spec permits nothing; a tool must
+    ///   be explicitly present in `allowed_tools`;
+    /// - **deny wins** — a tool in `denied_tools` is rejected even if it
+    ///   also appears in `allowed_tools`.
+    ///
+    /// Tool names are matched **exactly** against the `BTreeSet`s (no
+    /// `*` wildcard / glob / prefix matching). A tool is permitted iff
+    /// it is in `allowed_tools` AND not in `denied_tools`.
+    ///
+    /// [`AgentPermissionProfile::permits_tool`]: crate::internal::ai::agent_run::permission::AgentPermissionProfile::permits_tool
+    pub fn permits_tool(&self, tool: &str) -> bool {
+        !self.denied_tools.contains(tool) && self.allowed_tools.contains(tool)
+    }
 }
 
 /// The executable form of an agent profile.
@@ -285,6 +358,123 @@ pub struct AgentExecutionSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn permission_spec(allowed: &[&str], denied: &[&str]) -> AgentPermissionSpec {
+        AgentPermissionSpec {
+            allowed_tools: allowed.iter().map(|t| t.to_string()).collect(),
+            denied_tools: denied.iter().map(|t| t.to_string()).collect(),
+            ..AgentPermissionSpec::default()
+        }
+    }
+
+    /// S2-INV-05 default deny: the `Default` (empty) spec permits no
+    /// tool. Mirrors the feature-gated `AgentPermissionProfile`
+    /// behavior so the default-build config layer gates identically.
+    #[test]
+    fn permission_spec_default_permits_nothing() {
+        let spec = AgentPermissionSpec::default();
+        for tool in ["read_file", "shell", "apply_patch", "spawn_subagent"] {
+            assert!(
+                !spec.permits_tool(tool),
+                "default spec must reject `{tool}`"
+            );
+        }
+    }
+
+    /// Only explicitly-allowed (and not denied) tools are permitted; an
+    /// unlisted tool is denied by default.
+    #[test]
+    fn permission_spec_permits_only_allowed_tools() {
+        let spec = permission_spec(&["read_file", "grep"], &[]);
+        assert!(spec.permits_tool("read_file"));
+        assert!(spec.permits_tool("grep"));
+        assert!(!spec.permits_tool("shell"));
+    }
+
+    /// Deny wins: a tool in both `allowed_tools` and `denied_tools` is
+    /// rejected — the unbypassable hard-deny property, evaluated
+    /// identically to `AgentPermissionProfile`.
+    #[test]
+    fn permission_spec_denied_overrides_allowed() {
+        let spec = permission_spec(&["read_file", "shell"], &["shell"]);
+        assert!(spec.permits_tool("read_file"));
+        assert!(!spec.permits_tool("shell"), "deny must win over allow");
+    }
+
+    fn tools(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `Inherit` resolves to the caller-supplied `inherited` set,
+    /// filtered to what's actually available. A sub-agent passes an
+    /// empty `inherited` (default deny) and gets nothing.
+    #[test]
+    fn tool_selection_inherit_uses_caller_context() {
+        let available = tools(&["read_file", "grep", "shell"]);
+
+        let primary = ToolSelection::Inherit.resolve(&available, &tools(&["read_file", "grep"]));
+        assert_eq!(primary, tools(&["read_file", "grep"]));
+
+        // Sub-agent: empty inherited = default deny.
+        let subagent = ToolSelection::Inherit.resolve(&available, &[]);
+        assert!(subagent.is_empty());
+
+        // An inherited tool the runtime doesn't expose is dropped.
+        let filtered = ToolSelection::Inherit.resolve(&available, &tools(&["read_file", "ghost"]));
+        assert_eq!(filtered, tools(&["read_file"]));
+    }
+
+    /// `Allow` keeps only listed tools that are actually available, in
+    /// `available` order; a listed-but-unavailable tool is dropped.
+    #[test]
+    fn tool_selection_allow_intersects_available() {
+        let available = tools(&["read_file", "grep", "shell"]);
+        let allow = ToolSelection::Allow(tools(&["shell", "read_file", "ghost"]));
+        // Order follows `available` (read_file before shell), ghost dropped.
+        assert_eq!(
+            allow.resolve(&available, &[]),
+            tools(&["read_file", "shell"])
+        );
+    }
+
+    /// `Deny` returns available minus the denied list (deny wins),
+    /// preserving `available` order.
+    #[test]
+    fn tool_selection_deny_subtracts_from_available() {
+        let available = tools(&["read_file", "grep", "shell"]);
+        let deny = ToolSelection::Deny(tools(&["shell"]));
+        assert_eq!(deny.resolve(&available, &[]), tools(&["read_file", "grep"]));
+
+        // Denying a tool that isn't available is a no-op.
+        let deny_ghost = ToolSelection::Deny(tools(&["ghost"]));
+        assert_eq!(deny_ghost.resolve(&available, &[]), available);
+    }
+
+    /// Every arm yields a subset of `available` — a tool the runtime
+    /// never offered can never be granted, even if named in an Allow
+    /// list or the inherited set.
+    #[test]
+    fn tool_selection_resolve_never_exceeds_available() {
+        let available = tools(&["read_file"]);
+        for selection in [
+            ToolSelection::Inherit,
+            ToolSelection::Allow(tools(&["read_file", "shell"])),
+            ToolSelection::Deny(tools(&["grep"])),
+        ] {
+            let resolved = selection.resolve(&available, &tools(&["read_file", "shell"]));
+            assert!(
+                resolved.iter().all(|t| available.contains(t)),
+                "{selection:?} produced a tool outside `available`: {resolved:?}",
+            );
+        }
+
+        // Empty available always resolves to empty.
+        assert!(
+            ToolSelection::Allow(tools(&["read_file"]))
+                .resolve(&[], &tools(&["read_file"]))
+                .is_empty()
+        );
+    }
 
     /// Scenario: bare `provider/model` lifts cleanly; legacy `default` / `fast`
     /// strings stay un-lifted so the caller can keep them as `model_preference`.

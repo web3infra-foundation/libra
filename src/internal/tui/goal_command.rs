@@ -1,6 +1,6 @@
 //! Parser for the `/goal` family of TUI slash commands.
 //!
-//! Per `docs/improvement/opencode.md` lines 686-693, Goal mode exposes
+//! Per `docs/development/commands/_general.md` lines 686-693, Goal mode exposes
 //! three primary user-facing slash commands plus one criteria-tweak:
 //!
 //! - `/goal start <objective>` — create a fresh active Goal in this

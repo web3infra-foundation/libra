@@ -4,6 +4,17 @@
 
 use std::fs;
 
+use git_internal::{
+    hash::{HashKind, ObjectHash, set_hash_kind_for_test},
+    internal::object::{
+        ObjectTrait,
+        commit::Commit,
+        signature::{Signature, SignatureType},
+        tree::{Tree, TreeItem, TreeItemMode},
+        types::ObjectType,
+    },
+};
+use libra::utils::client_storage::ClientStorage;
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -187,15 +198,12 @@ fn test_fsck_exit_code_zero_on_success() {
 fn test_fsck_with_empty_object_id() {
     let repo = create_committed_repo_via_cli();
 
-    // fsck with empty argument should not crash
+    // fsck with empty argument should be classified as command usage, not crash
     let output = run_libra_command(&["fsck", ""], repo.path());
-    // Should return non-zero exit code for invalid input, but not crash
-    assert!(
-        output.status.code() == Some(1)
-            || output.status.code() == Some(128)
-            || output.status.code() == Some(0),
-        "fsck with empty arg should return valid exit code, got: {:?}",
-        output.status.code()
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "fsck with empty arg should return CLI usage exit code"
     );
 }
 
@@ -216,6 +224,34 @@ fn test_fsck_with_short_invalid_object_id() {
         stderr.contains("invalid") || stderr.contains("not a valid"),
         "should report invalid format, stderr: {}",
         stderr
+    );
+}
+
+#[test]
+#[serial]
+/// Tests global --json fsck errors stay in the structured CLI envelope instead
+/// of bypassing the dispatcher through a process exit.
+fn test_fsck_json_invalid_object_id_returns_structured_error() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "fsck", "abc123"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "invalid object id should remain a CLI usage error"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "json error should keep stdout empty, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_eq!(report.category, "cli");
+    assert!(
+        report.message.contains("invalid object ID: abc123"),
+        "unexpected message: {}",
+        report.message
     );
 }
 
@@ -459,6 +495,47 @@ fn test_fsck_corrupted_object() {
 
 #[test]
 #[serial]
+/// Tests fsck rejects annotated tag objects that are syntactically valid UTF-8
+/// but missing required tag headers.
+fn test_fsck_rejects_tag_object_missing_tagger() {
+    let repo = create_committed_repo_via_cli();
+
+    let log_output = run_libra_command(&["log", "--pretty=%H"], repo.path());
+    assert_cli_success(&log_output, "log --pretty=%H");
+    let stdout = String::from_utf8_lossy(&log_output.stdout);
+    let commit_hash = stdout.lines().next().unwrap().trim();
+
+    let tag_data = format!(
+        "object {commit_hash}\ntype commit\ntag broken-tag\n\nmalformed tag without tagger\n"
+    );
+    let tag_hash = git_internal::hash::ObjectHash::from_type_and_data(
+        git_internal::internal::object::types::ObjectType::Tag,
+        tag_data.as_bytes(),
+    );
+    let storage =
+        libra::utils::client_storage::ClientStorage::init(repo.path().join(".libra/objects"));
+    storage
+        .put(
+            &tag_hash,
+            tag_data.as_bytes(),
+            git_internal::internal::object::types::ObjectType::Tag,
+        )
+        .expect("write malformed tag object");
+
+    let output = run_libra_command(&["fsck"], repo.path());
+    assert!(
+        !output.status.success(),
+        "fsck should fail on malformed tag object"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("missing tagger"),
+        "fsck should report missing tagger, stderr: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
 /// Tests fsck with missing object file.
 /// Verifies that fsck detects and reports missing objects.
 fn test_fsck_missing_object() {
@@ -678,4 +755,136 @@ fn test_fsck_broken_tag_reference() {
         "should handle broken tag reference, got: {}",
         combined
     );
+}
+
+/// Build a signature with a fixed name/timestamp but caller-chosen email and
+/// timezone (so `--strict` checks can be exercised).
+fn strict_signature(email: &str, tz: &str, ty: SignatureType) -> Signature {
+    Signature {
+        signature_type: ty,
+        name: "Test".to_string(),
+        email: email.to_string(),
+        timestamp: 1_700_000_000,
+        timezone: tz.to_string(),
+    }
+}
+
+/// Store an in-process commit with the given author/committer email and
+/// timezone into the repo's object store, returning its object id (hex).
+fn store_strict_commit(repo: &std::path::Path, email: &str, tz: &str) -> String {
+    let _kind = set_hash_kind_for_test(HashKind::Sha1);
+    let storage = ClientStorage::init(repo.join(".libra/objects"));
+    let commit = Commit::new(
+        strict_signature(email, tz, SignatureType::Author),
+        strict_signature(email, tz, SignatureType::Committer),
+        ObjectHash::default(),
+        vec![],
+        "strict fixture",
+    );
+    storage
+        .put(
+            &commit.id,
+            &commit.to_data().expect("serialize commit"),
+            ObjectType::Commit,
+        )
+        .expect("store commit");
+    commit.id.to_string()
+}
+
+/// `--strict` flags a commit whose author/committer email lacks `@`; the default
+/// (non-strict) check does not.
+#[test]
+#[serial]
+fn test_strict_commit_bad_email() {
+    let repo = tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+    let id = store_strict_commit(repo.path(), "noatsign", "+0000");
+
+    let plain = run_libra_command(&["fsck", &id], repo.path());
+    assert!(
+        !String::from_utf8_lossy(&plain.stderr).contains("bad email"),
+        "non-strict fsck must not flag email format"
+    );
+
+    let strict = run_libra_command(&["fsck", "--strict", &id], repo.path());
+    let stderr = String::from_utf8_lossy(&strict.stderr);
+    assert!(
+        stderr.contains("bad email"),
+        "strict must flag a missing @: {stderr}"
+    );
+    assert_eq!(strict.status.code(), Some(1));
+}
+
+/// `--strict` flags a commit whose timezone is out of range; the default check
+/// does not.
+#[test]
+#[serial]
+fn test_strict_commit_bad_timezone() {
+    let repo = tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+    let id = store_strict_commit(repo.path(), "test@example.com", "+9900");
+
+    let plain = run_libra_command(&["fsck", &id], repo.path());
+    assert!(
+        !String::from_utf8_lossy(&plain.stderr).contains("bad timezone"),
+        "non-strict fsck must not flag the timezone"
+    );
+
+    let strict = run_libra_command(&["fsck", "--strict", &id], repo.path());
+    let stderr = String::from_utf8_lossy(&strict.stderr);
+    assert!(
+        stderr.contains("bad timezone"),
+        "strict must flag a bad timezone: {stderr}"
+    );
+    assert_eq!(strict.status.code(), Some(1));
+}
+
+/// `--strict` flags a tree whose entries are not in Git's canonical sort order;
+/// the default check does not.
+#[test]
+#[serial]
+fn test_strict_tree_unsorted() {
+    let repo = tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+
+    let id = {
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let storage = ClientStorage::init(repo.path().join(".libra/objects"));
+        // Deliberately out of order: "b" precedes "a".
+        let items = vec![
+            TreeItem {
+                mode: TreeItemMode::Blob,
+                id: ObjectHash::from_bytes(&[0x22; 20]).unwrap(),
+                name: "b".to_string(),
+            },
+            TreeItem {
+                mode: TreeItemMode::Blob,
+                id: ObjectHash::from_bytes(&[0x11; 20]).unwrap(),
+                name: "a".to_string(),
+            },
+        ];
+        let tree = Tree::from_tree_items(items).expect("build tree");
+        storage
+            .put(
+                &tree.id,
+                &tree.to_data().expect("serialize tree"),
+                ObjectType::Tree,
+            )
+            .expect("store tree");
+        tree.id.to_string()
+    };
+
+    let plain = run_libra_command(&["fsck", &id], repo.path());
+    assert!(
+        !String::from_utf8_lossy(&plain.stderr).contains("tree not sorted"),
+        "non-strict fsck must not flag tree ordering"
+    );
+
+    let strict = run_libra_command(&["fsck", "--strict", &id], repo.path());
+    let stderr = String::from_utf8_lossy(&strict.stderr);
+    assert!(
+        stderr.contains("tree not sorted"),
+        "strict must flag an unsorted tree: {stderr}"
+    );
+    assert_eq!(strict.status.code(), Some(1));
 }

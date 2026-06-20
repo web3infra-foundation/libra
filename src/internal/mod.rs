@@ -29,6 +29,7 @@ pub mod log;
 pub mod model;
 pub mod operation;
 pub mod operation_wrapper;
+pub mod notes;
 pub mod protocol;
 pub mod publish;
 pub mod reflog;

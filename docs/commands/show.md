@@ -5,7 +5,7 @@ Show a commit, tag, tree, blob, or the blob referenced by `REV:path`.
 ## Synopsis
 
 ```
-libra show [OPTIONS] [<OBJECT>] [-- <PATHS>...]
+libra show [OPTIONS] [OBJECT] [-- <PATHS>...]
 ```
 
 ## Description
@@ -29,6 +29,7 @@ list their entries and blobs print their text content (or a binary summary).
 | `--no-patch` | `-s` | Skip patch output and only show object metadata. |
 | `--oneline` | | Shorthand for `--pretty=oneline` -- prints hash and subject on one line. |
 | `--name-only` | | Show only changed file names (no diff hunks). |
+| `--name-status` | | Show changed file names prefixed by a status letter (`A`/`M`/`D`), tab-separated. |
 | `--stat` | | Show diff statistics (insertions / deletions per file). |
 | `<PATHS>...` | | Limit output to matching paths (pathspec filter for commit diffs). |
 
@@ -62,6 +63,7 @@ libra show HEAD~3                   # show an ancestor commit
 libra show -s v2.0.0                # metadata only for a tag
 libra show HEAD:Cargo.toml          # print a file at HEAD
 libra show --name-only HEAD         # list changed files
+libra show --name-status HEAD       # list changed files with A/M/D status
 libra show --stat HEAD              # diff statistics
 libra --json show HEAD              # structured JSON output
 ```

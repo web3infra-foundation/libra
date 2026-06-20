@@ -511,6 +511,16 @@ where
                             reason,
                             Some(review.clone()),
                         )
+                    } else if let Some(reason) =
+                        submit_task_complete_evidence_mismatch(&accumulated_tool_calls)
+                    {
+                        (
+                            Some(reason.clone()),
+                            tool_calls,
+                            policy_violations,
+                            reason,
+                            review,
+                        )
                     } else if let Some(violation_message) = workspace_contract_failure(task, config)
                     {
                         // Surface workspace contract violations (e.g. files
@@ -740,6 +750,72 @@ fn submit_task_complete_fail_reason(tool_calls: &[ToolCallRecord]) -> Option<Str
     ))
 }
 
+fn submit_task_complete_evidence_mismatch(tool_calls: &[ToolCallRecord]) -> Option<String> {
+    let (submit_index, submit_call) =
+        latest_successful_submit_task_complete_with_index(tool_calls)?;
+    let args = submit_call.arguments_json.as_ref()?;
+    let result = args.get("result").and_then(|value| value.as_str())?;
+    if !matches!(result, "pass" | "no_changes_needed") {
+        return None;
+    }
+    let evidence = args.get("evidence")?.as_array()?;
+
+    for (idx, entry) in evidence.iter().enumerate() {
+        let command = entry
+            .get("command")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|command| !command.is_empty())?;
+        let claimed_exit = entry
+            .get("exit_code")
+            .and_then(|value| value.as_i64())
+            .and_then(|code| i32::try_from(code).ok())?;
+        let observed = observed_shell_exit_codes_before(tool_calls, submit_index, command);
+        if observed.contains(&claimed_exit) {
+            continue;
+        }
+        let observed_text = if observed.is_empty() {
+            "not observed".to_string()
+        } else {
+            format!("observed exit codes: {:?}", observed)
+        };
+        return Some(format!(
+            "submit_task_complete evidence[{idx}] does not match executed tool history: command '{}' claimed exit {}; {}",
+            command, claimed_exit, observed_text
+        ));
+    }
+
+    None
+}
+
+fn observed_shell_exit_codes_before(
+    tool_calls: &[ToolCallRecord],
+    submit_index: usize,
+    command: &str,
+) -> Vec<i32> {
+    tool_calls
+        .iter()
+        .take(submit_index)
+        .filter(|call| call.tool_name == "shell")
+        .filter(|call| {
+            call.arguments_json
+                .as_ref()
+                .and_then(|args| args.get("command"))
+                .and_then(|value| value.as_str())
+                .is_some_and(|observed| observed.trim() == command)
+        })
+        .filter_map(shell_call_exit_code)
+        .collect()
+}
+
+fn shell_call_exit_code(call: &ToolCallRecord) -> Option<i32> {
+    call.summary
+        .as_deref()
+        .and_then(|summary| summary.strip_prefix("Exit code: "))
+        .and_then(|code| code.split_whitespace().next())
+        .and_then(|code| code.parse::<i32>().ok())
+}
+
 fn submit_task_complete_result(tool_calls: &[ToolCallRecord]) -> Option<&str> {
     latest_successful_submit_task_complete(tool_calls)
         .and_then(|call| call.arguments_json.as_ref())
@@ -761,10 +837,17 @@ fn task_completion_allows_blocked_escalation(
 fn latest_successful_submit_task_complete(
     tool_calls: &[ToolCallRecord],
 ) -> Option<&ToolCallRecord> {
+    latest_successful_submit_task_complete_with_index(tool_calls).map(|(_, call)| call)
+}
+
+fn latest_successful_submit_task_complete_with_index(
+    tool_calls: &[ToolCallRecord],
+) -> Option<(usize, &ToolCallRecord)> {
     tool_calls
         .iter()
+        .enumerate()
         .rev()
-        .find(|call| call.success && call.tool_name == "submit_task_complete")
+        .find(|(_, call)| call.success && call.tool_name == "submit_task_complete")
 }
 
 fn reviewer_infrastructure_failure_outcome(message: &str) -> ReviewOutcome {
@@ -2081,6 +2164,14 @@ where
                 status = ?report.status,
                 "dagrs execution completed"
             );
+            run_state
+                .record_graph_execution_report(
+                    report.node_succeeded,
+                    report.node_failed,
+                    report.node_skipped,
+                    report.node_total,
+                )
+                .await;
             (Some(report), None)
         }
         Err(err) => {
@@ -2526,10 +2617,10 @@ fn runtime_context_for_task(
     working_dir: &Path,
     inherited_runtime: Option<&ToolRuntimeContext>,
 ) -> ToolRuntimeContext {
-    let network_access = matches!(
+    let network_access = NetworkAccess::from_legacy_bool(matches!(
         spec.constraints.security.network_policy,
         NetworkPolicy::Allow
-    );
+    ));
     let writable_roots = collect_writable_roots(spec, task, working_dir);
     let policy = SandboxPolicy::WorkspaceWrite {
         writable_roots,
@@ -2558,10 +2649,10 @@ fn runtime_context_for_gate_task(
         sandbox: Some(ToolSandboxContext {
             policy: SandboxPolicy::WorkspaceWrite {
                 writable_roots: vec![working_dir.to_path_buf()],
-                network_access: matches!(
+                network_access: NetworkAccess::from_legacy_bool(matches!(
                     spec.constraints.security.network_policy,
                     NetworkPolicy::Allow
-                ),
+                )),
                 exclude_tmpdir_env_var: false,
                 exclude_slash_tmp: false,
             },
@@ -2583,7 +2674,7 @@ fn runtime_context_for_reviewer(
         NetworkPolicy::Allow
     ) {
         SandboxPolicy::ExternalSandbox {
-            network_access: NetworkAccess::Enabled,
+            network_access: NetworkAccess::Full,
         }
     } else {
         SandboxPolicy::ReadOnly
@@ -2771,6 +2862,60 @@ mod tests {
                 })
             }
         }
+    }
+
+    fn shell_record(command: &str, exit_code: i32) -> ToolCallRecord {
+        ToolCallRecord {
+            tool_name: "shell".into(),
+            action: "execute".into(),
+            arguments_json: Some(serde_json::json!({ "command": command })),
+            success: exit_code == 0,
+            summary: Some(format!("Exit code: {exit_code}")),
+            ..ToolCallRecord::default()
+        }
+    }
+
+    fn submit_task_complete_record(command: &str, exit_code: i32) -> ToolCallRecord {
+        ToolCallRecord {
+            tool_name: "submit_task_complete".into(),
+            action: "execute".into(),
+            arguments_json: Some(serde_json::json!({
+                "result": "pass",
+                "summary": "verification passed",
+                "evidence": [{
+                    "command": command,
+                    "exit_code": exit_code,
+                    "output_excerpt": "ok"
+                }]
+            })),
+            success: true,
+            summary: Some("Task complete: pass (1 evidence entries)".into()),
+            ..ToolCallRecord::default()
+        }
+    }
+
+    #[test]
+    fn submit_task_complete_evidence_matches_prior_shell_history() {
+        let tool_calls = vec![
+            shell_record("cargo test", 0),
+            submit_task_complete_record("cargo test", 0),
+        ];
+
+        assert!(submit_task_complete_evidence_mismatch(&tool_calls).is_none());
+    }
+
+    #[test]
+    fn submit_task_complete_evidence_rejects_unobserved_success_claim() {
+        let tool_calls = vec![
+            shell_record("cargo test", 101),
+            submit_task_complete_record("cargo test", 0),
+        ];
+
+        let reason = submit_task_complete_evidence_mismatch(&tool_calls)
+            .expect("mismatched evidence must be rejected");
+
+        assert!(reason.contains("claimed exit 0"));
+        assert!(reason.contains("observed exit codes: [101]"));
     }
 
     #[derive(Clone)]

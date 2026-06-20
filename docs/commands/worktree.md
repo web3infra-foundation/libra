@@ -2,7 +2,7 @@
 
 Manage multiple working trees attached to this repository.
 
-**Alias:** `libra wt`
+**Alias:** `wt`
 
 ## Synopsis
 
@@ -147,7 +147,7 @@ Behavior intentionally differs from Git: Git's default deletes the directory.
 Libra keeps it by default to prevent accidental data loss; `--delete-dir`
 restores Git-like semantics opt-in. See
 [`COMPATIBILITY.md`](../../COMPATIBILITY.md) and
-[`compatibility/worktree-surface.md`](../improvement/compatibility/worktree-surface.md)
+[`compatibility/worktree-surface.md`](../development/commands/worktree.md)
 for the rationale.
 
 ### Subcommand: `umount`

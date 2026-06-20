@@ -22,15 +22,17 @@ pub use contracts::{PromptPackage, WorkflowPhase};
 pub use event::{Event, audit_action_for};
 pub use hardening::{
     AuditEvent, AuditSink, BoundaryDecision, InMemoryAuditSink, PrincipalContext, PrincipalRole,
-    SecretRedactor, ToolBoundaryPolicy, ToolBoundaryRuntime, ToolOperation, TracingAuditSink,
+    SecretRedactor, ToolBoundaryPolicy, ToolBoundaryRuntime, ToolOperation, ToolOperationDetails,
+    TracingAuditSink,
 };
 pub use phase3::{
     ArtifactLedger, ValidationOutcome, ValidationReport, ValidationReportStore, ValidationStage,
     ValidationStageResult, ValidatorEngine,
 };
 pub use phase4::{
-    DecisionPolicy, DecisionProposal, DecisionProposalRoute, DecisionProposalStore,
-    RiskScoreBreakdown, aggregate_risk_score, build_decision_proposal,
+    DecisionPolicy, DecisionProposal, DecisionProposalRoute, DecisionProposalStore, FinalDecision,
+    FinalDecisionStore, FinalDecisionSummary, RiskScoreBreakdown, aggregate_risk_score,
+    build_decision_proposal,
 };
 pub use prompt_builders::{IntentPromptBuilder, PlanningPromptBuilder, TaskPromptBuilder};
 pub use snapshot::Snapshot;

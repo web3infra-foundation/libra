@@ -1,6 +1,6 @@
 //! Libra publish — read-only Cloudflare-backed publishing.
 //!
-//! Per `docs/improvement/publish.md`, the `publish` module is the
+//! Per `docs/development/commands/publish.md`, the `publish` module is the
 //! outward-facing counterpart to `cloud`: it reuses Git object backup
 //! plumbing for raw artefacts but adds a publish-specific snapshot
 //! pipeline that materialises code previews, tree manifests and the

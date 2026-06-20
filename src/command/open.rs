@@ -23,16 +23,16 @@ use crate::{
 
 const OPEN_EXAMPLES: &str = "\
 EXAMPLES:
-  libra open
-  libra open origin
-  libra open https://github.com/web3infra-foundation/libra
-  libra open --json
-";
+    libra open                                            Open the auto-detected upstream in the browser
+    libra open origin                                     Open a specific remote
+    libra open https://github.com/web3infra-foundation/libra    Open a direct URL
+    libra open --json                                     Structured JSON output for agents (no browser)";
 
 #[derive(Parser, Debug)]
 #[command(after_help = OPEN_EXAMPLES)]
 pub struct OpenArgs {
-    /// The remote to open
+    /// Remote name (e.g. `origin`) or a direct URL. Omit to auto-detect from the current branch's upstream
+    #[arg(value_name = "REMOTE_OR_URL")]
     pub remote: Option<String>,
 }
 

@@ -11,7 +11,7 @@
 //! `GeminiProvider` and exposes convenience constructors. The base URL
 //! defaults to `https://generativelanguage.googleapis.com`.
 
-use std::{env, fmt};
+use std::fmt;
 
 use crate::internal::ai::client::{Client as HttpClient, Provider};
 
@@ -61,19 +61,30 @@ impl Provider for GeminiProvider {
 pub type Client = HttpClient<GeminiProvider>;
 
 impl Client {
-    /// Creates a Gemini Client from environment variables.
+    /// Creates a Gemini Client from environment variables or Vault.
     ///
-    /// Functional scope: reads `GEMINI_API_KEY` and points at the public
-    /// `generativelanguage.googleapis.com` endpoint.
+    /// Functional scope: priority chain (12-Factor, see
+    /// `docs/development/commands/config.md`):
+    /// 1. Process env `GEMINI_API_KEY`
+    /// 2. Local repo config (`vault.env.GEMINI_API_KEY`)
+    /// 3. Global config (`vault.env.GEMINI_API_KEY`)
     ///
-    /// Boundary conditions: returns `env::VarError::NotPresent` when
-    /// `GEMINI_API_KEY` is unset so callers can render a friendly "no API key"
-    /// message; the CLI deliberately does not expose a base-URL override —
-    /// Gemini's public API has no stable proxy contract for end users.
-    /// Test-only consumers that need to point at a localhost stub should
-    /// use [`Client::with_base_url`].
-    pub fn from_env() -> Result<Self, env::VarError> {
-        let api_key = env::var("GEMINI_API_KEY")?;
+    /// Points at the public `generativelanguage.googleapis.com` endpoint.
+    ///
+    /// Boundary conditions: returns an actionable error when `GEMINI_API_KEY`
+    /// is unset across Vault and process env; the CLI deliberately does not
+    /// expose a base-URL override — Gemini's public API has no stable proxy
+    /// contract for end users. Test-only consumers that need to point at a
+    /// localhost stub should use [`Client::with_base_url`].
+    ///
+    /// New call sites should prefer [`Client::from_resolved_env`], which
+    /// performs the same lookup chain asynchronously and accepts an
+    /// explicit `LocalIdentityTarget<'_>` so vault values from a specific
+    /// repository are honored. `from_env` is retained for backward
+    /// compatibility and currently delegates to the same vault-aware
+    /// resolver.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let api_key = crate::internal::config::resolve_required_env_sync("GEMINI_API_KEY")?;
         let provider = GeminiProvider::new(api_key);
         Ok(Self::new(
             "https://generativelanguage.googleapis.com",
@@ -91,10 +102,9 @@ impl Client {
     /// 1. The lookup honours the `libra config --global add
     ///    vault.env.GEMINI_API_KEY <…>` setting, so users who configured the
     ///    key once via the CLI no longer need to re-export it in every shell.
-    /// 2. The error surface is `anyhow::Error` rather than `env::VarError`,
-    ///    so callers can attach context (which key was missing, whether the
-    ///    config DB was unreachable, …) and surface the underlying chain via
-    ///    `format!("{error:#}")` instead of the bare "not present" tag.
+    /// 2. The error surface is `anyhow::Error`, so callers can attach context
+    ///    (which key was missing, whether the config DB was unreachable, …)
+    ///    and surface the underlying chain via `format!("{error:#}")`.
     ///
     /// The `local_target` argument mirrors the
     /// [`super::super::deepseek::client::Client::from_resolved_env`]
@@ -119,9 +129,8 @@ impl Client {
             .await?
             .ok_or_else(|| {
                 anyhow!(
-                    "GEMINI_API_KEY is not set in env, repo vault, or global config \
-                     (set the environment variable or run `libra config --global add \
-                     vault.env.GEMINI_API_KEY <key>`)"
+                    "GEMINI_API_KEY is not configured; set vault.env.GEMINI_API_KEY with \
+                     `libra config set vault.env.GEMINI_API_KEY <key>` or export GEMINI_API_KEY"
                 )
             })?;
         let provider = GeminiProvider::new(api_key);

@@ -200,3 +200,82 @@ fn code_rejects_deepseek_flags_for_other_providers() {
         "expected provider-scoped flag error, got {rendered}"
     );
 }
+
+/// `libra code --help` surfaces the EXAMPLES banner so users see the
+/// most common invocations across the three modes (TUI / --web / --stdio)
+/// plus --browser-control loopback, --control write, --resume,
+/// --plan-mode, and --env-file without reading the design doc. Cross-cutting
+/// `--help` EXAMPLES rollout per `docs/development/commands/_general.md` item B.
+#[test]
+fn test_code_help_lists_examples_banner() {
+    let repo = tempdir().expect("tempdir for code --help");
+    let output = run_libra_command(&["code", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "code --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "code --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "Launch the default TUI session",
+        "libra code --provider deepseek",
+        "libra code --web",
+        "libra code --web-only --provider ollama",
+        "libra code --web-only --provider codex --browser-control loopback",
+        "libra code --control write",
+        "libra code --resume <thread-uuid>",
+        "libra code --plan-mode",
+        "libra code --env-file",
+        "libra code --stdio",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "code --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}
+
+/// Regression guard for v0.17.832..v0.17.876 — CODE_EXAMPLES used to
+/// show `--control automation` as a canonical invocation, but the
+/// actual `ControlMode` ValueEnum only defines `observe` / `write`
+/// (see `src/command/code.rs:230`). Anyone copy-pasting the broken
+/// invocation from `--help` would hit:
+///   error: invalid value 'automation' for '--control <CONTROL>'
+///     [possible values: observe, write]
+///
+/// Lock this contract end-to-end by spawning the real binary so a
+/// future CODE_EXAMPLES revision cannot reintroduce an invalid
+/// ValueEnum variant without flipping the assertion. (We can't reach
+/// `Cli::command()` directly because `Cli` is private to `src/cli.rs`.)
+#[test]
+fn test_code_control_value_enum_rejects_invalid_and_accepts_write() {
+    let repo = tempdir().expect("tempdir for code --control test");
+
+    // The invalid value must be rejected by clap with a non-zero exit.
+    // The error message goes to stderr; we don't care about its exact
+    // wording, only that the parse failed.
+    let bad = run_libra_command(&["code", "--control", "automation", "--help"], repo.path());
+    assert!(
+        !bad.status.success(),
+        "`libra code --control automation --help` must fail clap parsing; \
+         CODE_EXAMPLES previously advertised this invalid value (v0.17.832..v0.17.876); \
+         stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&bad.stdout),
+        String::from_utf8_lossy(&bad.stderr)
+    );
+
+    // Valid values must parse cleanly (we use --help to short-circuit
+    // any further startup work and exit 0 immediately after clap parse).
+    for valid in ["observe", "write"] {
+        let ok = run_libra_command(&["code", "--control", valid, "--help"], repo.path());
+        assert!(
+            ok.status.success(),
+            "`libra code --control {valid} --help` must parse cleanly; clap rejected with: {}",
+            String::from_utf8_lossy(&ok.stderr)
+        );
+    }
+}

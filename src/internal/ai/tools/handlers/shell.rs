@@ -8,6 +8,7 @@ use std::{
     ffi::OsStr,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use async_trait::async_trait;
@@ -19,7 +20,14 @@ use super::parse_arguments;
 use crate::{
     internal::ai::{
         runtime::hardening::{CommandSafetySurface, SafetyDecision, SafetyDisposition},
-        sandbox::{ShellCommandRequest, run_shell_command_with_approval},
+        sandbox::{
+            ShellCommandRequest,
+            evidence::{
+                FanoutSandboxEvidenceSink, InMemorySandboxEvidenceSink, SandboxEvidenceSink,
+                TracingSandboxEvidenceSink,
+            },
+            run_shell_command_with_approval,
+        },
         tools::{
             context::{ShellArgs, ToolInvocation, ToolKind, ToolOutput, ToolPayload},
             error::{ToolError, ToolResult},
@@ -29,7 +37,7 @@ use crate::{
         },
         workspace_snapshot::{
             WorkspaceSnapshot, changed_paths_since_baseline as changed_workspace_paths,
-            snapshot_workspace,
+            is_cargo_cache_path, snapshot_workspace,
         },
     },
     utils::util::is_sub_path,
@@ -103,6 +111,13 @@ impl ToolHandler for ShellHandler {
         let sandbox_runtime = runtime_context
             .as_ref()
             .and_then(|ctx| ctx.sandbox_runtime.clone());
+        let sandbox_evidence_capture = Arc::new(InMemorySandboxEvidenceSink::new());
+        let sandbox_evidence_sink = shell_sandbox_evidence_sink(
+            sandbox_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.evidence_sink.clone()),
+            sandbox_evidence_capture.clone(),
+        );
         let approval = runtime_context
             .as_ref()
             .and_then(|ctx| ctx.approval.clone());
@@ -119,7 +134,7 @@ impl ToolHandler for ShellHandler {
             capture_cargo_manifest_contents(&working_dir, &baseline_snapshot)?;
 
         let command_for_error = args.command.clone();
-        let output = run_shell_command_with_approval(ShellCommandRequest {
+        let output = match run_shell_command_with_approval(ShellCommandRequest {
             call_id,
             command: args.command,
             cwd: cwd.clone(),
@@ -127,22 +142,37 @@ impl ToolHandler for ShellHandler {
             max_output_bytes,
             sandbox,
             sandbox_runtime,
+            evidence_sink: Some(sandbox_evidence_sink),
             approval,
             justification: args.justification,
             safety_decision: Some(safety_decision.clone()),
         })
         .await
-        .map_err(|err| {
-            // Surface the command and cwd so the LLM has full context when the
-            // sandbox refuses to execute, rather than just a bare runtime
-            // error string.
-            ToolError::ExecutionFailed(format!(
-                "shell sandbox refused command (cwd={}): {}\ncommand: {}",
-                cwd.display(),
-                err,
-                command_for_error
-            ))
-        })?;
+        {
+            Ok(output) => output,
+            Err(err) => {
+                // Surface the command and cwd so the LLM has full context when
+                // the sandbox refuses to execute, rather than just a bare
+                // runtime error string.
+                let rendered_error = format!(
+                    "shell sandbox refused command (cwd={}): {}\ncommand: {}",
+                    cwd.display(),
+                    err,
+                    command_for_error
+                );
+                let sandbox_evidence = sandbox_evidence_metadata(&sandbox_evidence_capture);
+                if sandbox_evidence.is_empty() {
+                    return Err(ToolError::ExecutionFailed(rendered_error));
+                }
+                let metadata = serde_json::json!({
+                    "paths_written": [],
+                    "diffs": [],
+                    "safety": shell_safety_metadata(&safety_decision),
+                    "sandbox_evidence": sandbox_evidence,
+                });
+                return Ok(ToolOutput::failure(rendered_error).with_metadata(metadata));
+            }
+        };
         let final_snapshot = snapshot_workspace(&working_dir).map_err(|err| {
             ToolError::ExecutionFailed(format!(
                 "failed to inspect workspace changes after shell command: {err}"
@@ -159,6 +189,7 @@ impl ToolHandler for ShellHandler {
                 &baseline_manifest_contents,
             )?,
             "safety": shell_safety_metadata(&safety_decision),
+            "sandbox_evidence": sandbox_evidence_metadata(&sandbox_evidence_capture),
         });
 
         let formatted = format_output(
@@ -179,6 +210,28 @@ impl ToolHandler for ShellHandler {
     fn schema(&self) -> ToolSpec {
         ToolSpec::shell()
     }
+}
+
+fn shell_sandbox_evidence_sink(
+    runtime_sink: Option<Arc<dyn SandboxEvidenceSink>>,
+    capture: Arc<InMemorySandboxEvidenceSink>,
+) -> Arc<dyn SandboxEvidenceSink> {
+    let mut sinks: Vec<Arc<dyn SandboxEvidenceSink>> = Vec::new();
+    if let Some(sink) = runtime_sink {
+        sinks.push(sink);
+    } else {
+        sinks.push(Arc::new(TracingSandboxEvidenceSink));
+    }
+    sinks.push(capture);
+    Arc::new(FanoutSandboxEvidenceSink::new(sinks))
+}
+
+fn sandbox_evidence_metadata(capture: &InMemorySandboxEvidenceSink) -> Vec<serde_json::Value> {
+    capture
+        .events()
+        .iter()
+        .map(|event| event.to_metadata_value())
+        .collect()
 }
 
 // ── Output formatting ─────────────────────────────────────────────────────────
@@ -519,7 +572,7 @@ fn read_capped_utf8_file(path: &Path) -> ToolResult<Option<String>> {
 }
 
 fn is_cargo_manifest_path(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| name == "Cargo.toml")
+    path.file_name().is_some_and(|name| name == "Cargo.toml") && !is_cargo_cache_path(path)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -534,7 +587,7 @@ mod tests {
     use super::*;
     use crate::internal::ai::{
         sandbox::{
-            ApprovalCachePolicy, ApprovalStore, AskForApproval, ExecApprovalRequest,
+            ApprovalCachePolicy, ApprovalStore, AskForApproval, ExecApprovalRequest, NetworkAccess,
             ReviewDecision, SandboxPermissions, SandboxPolicy, ToolApprovalContext,
             ToolRuntimeContext, ToolSandboxContext,
         },
@@ -552,6 +605,15 @@ mod tests {
         )
     }
 
+    async fn handle_invocation_with_tempdir(
+        inv: ToolInvocation,
+        keepalive: &TempDir,
+    ) -> ToolResult<ToolOutput> {
+        let result = ShellHandler.handle(inv).await;
+        let _ = keepalive.path();
+        result
+    }
+
     fn runtime_with_approval(
         policy: AskForApproval,
     ) -> (
@@ -564,7 +626,7 @@ mod tests {
                 sandbox: Some(ToolSandboxContext {
                     policy: SandboxPolicy::WorkspaceWrite {
                         writable_roots: Vec::new(),
-                        network_access: false,
+                        network_access: NetworkAccess::Denied,
                         exclude_tmpdir_env_var: false,
                         exclude_slash_tmp: false,
                     },
@@ -707,49 +769,53 @@ mod tests {
     // ── Basic execution ───────────────────────────────────────────────────────
 
     #[tokio::test]
+    #[serial(rpc_path_env)]
     async fn test_shell_echo() {
         let temp = TempDir::new().unwrap();
         let inv = make_invocation(
             serde_json::json!({ "command": "echo hello" }),
             temp.path().to_path_buf(),
         );
-        let result = ShellHandler.handle(inv).await.unwrap();
+        let result = handle_invocation_with_tempdir(inv, &temp).await.unwrap();
         assert!(result.is_success());
         assert!(result.as_text().unwrap().contains("hello"));
     }
 
     #[tokio::test]
+    #[serial(rpc_path_env)]
     async fn test_shell_exit_code_zero() {
         let temp = TempDir::new().unwrap();
         let inv = make_invocation(
             serde_json::json!({ "command": "true" }),
             temp.path().to_path_buf(),
         );
-        let result = ShellHandler.handle(inv).await.unwrap();
+        let result = handle_invocation_with_tempdir(inv, &temp).await.unwrap();
         assert!(result.is_success());
         assert!(result.as_text().unwrap().contains("Exit code: 0"));
     }
 
     #[tokio::test]
+    #[serial(rpc_path_env)]
     async fn test_shell_exit_code_nonzero() {
         let temp = TempDir::new().unwrap();
         let inv = make_invocation(
             serde_json::json!({ "command": "exit 42" }),
             temp.path().to_path_buf(),
         );
-        let result = ShellHandler.handle(inv).await.unwrap();
+        let result = handle_invocation_with_tempdir(inv, &temp).await.unwrap();
         assert!(!result.is_success());
         assert!(result.as_text().unwrap().contains("Exit code: 42"));
     }
 
     #[tokio::test]
+    #[serial(rpc_path_env)]
     async fn test_shell_multiline_output() {
         let temp = TempDir::new().unwrap();
         let inv = make_invocation(
             serde_json::json!({ "command": "printf 'line1\\nline2\\nline3\\n'" }),
             temp.path().to_path_buf(),
         );
-        let result = ShellHandler.handle(inv).await.unwrap();
+        let result = handle_invocation_with_tempdir(inv, &temp).await.unwrap();
         let text = result.as_text().unwrap();
         assert!(text.contains("line1"), "{text}");
         assert!(text.contains("line2"), "{text}");
@@ -759,25 +825,27 @@ mod tests {
     // ── Stderr ────────────────────────────────────────────────────────────────
 
     #[tokio::test]
+    #[serial(rpc_path_env)]
     async fn test_shell_stderr_captured() {
         let temp = TempDir::new().unwrap();
         let inv = make_invocation(
             serde_json::json!({ "command": "echo error_msg >&2" }),
             temp.path().to_path_buf(),
         );
-        let result = ShellHandler.handle(inv).await.unwrap();
+        let result = handle_invocation_with_tempdir(inv, &temp).await.unwrap();
         let text = result.as_text().unwrap();
         assert!(text.contains("error_msg"), "stderr not captured:\n{text}");
     }
 
     #[tokio::test]
+    #[serial(rpc_path_env)]
     async fn test_shell_stderr_section_label() {
         let temp = TempDir::new().unwrap();
         let inv = make_invocation(
             serde_json::json!({ "command": "echo out; echo err >&2" }),
             temp.path().to_path_buf(),
         );
-        let result = ShellHandler.handle(inv).await.unwrap();
+        let result = handle_invocation_with_tempdir(inv, &temp).await.unwrap();
         let text = result.as_text().unwrap();
         assert!(
             text.contains("[stderr]"),
@@ -790,11 +858,12 @@ mod tests {
     // ── Working directory ─────────────────────────────────────────────────────
 
     #[tokio::test]
+    #[serial(rpc_path_env)]
     async fn test_shell_workdir_default() {
         let temp = TempDir::new().unwrap();
         let working_dir = temp.path().to_path_buf();
         let inv = make_invocation(serde_json::json!({ "command": "pwd" }), working_dir.clone());
-        let result = ShellHandler.handle(inv).await.unwrap();
+        let result = handle_invocation_with_tempdir(inv, &temp).await.unwrap();
         let text = result.as_text().unwrap();
         // Compare the last path component to avoid macOS /tmp → /private/tmp symlink issues.
         let dir_name = working_dir.file_name().unwrap().to_str().unwrap();
@@ -805,6 +874,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(rpc_path_env)]
     async fn test_shell_workdir_override() {
         let outer = TempDir::new().unwrap();
         let inner_path = outer.path().join("inner_subdir");
@@ -817,7 +887,7 @@ mod tests {
             }),
             outer.path().to_path_buf(),
         );
-        let result = ShellHandler.handle(inv).await.unwrap();
+        let result = handle_invocation_with_tempdir(inv, &outer).await.unwrap();
         let text = result.as_text().unwrap();
         assert!(
             text.contains("inner_subdir"),
@@ -869,6 +939,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(rpc_path_env)]
     async fn test_shell_workdir_relative_path_is_resolved_inside_sandbox() {
         let temp = TempDir::new().unwrap();
         let inner_path = temp.path().join("relative").join("path");
@@ -881,7 +952,7 @@ mod tests {
             }),
             temp.path().to_path_buf(),
         );
-        let result = ShellHandler.handle(inv).await.unwrap();
+        let result = handle_invocation_with_tempdir(inv, &temp).await.unwrap();
         let text = result.as_text().unwrap();
         assert!(
             text.contains("relative/path") || text.contains("relative\\path"),
@@ -890,6 +961,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(rpc_path_env)]
     async fn test_shell_workdir_dot_uses_sandbox_root() {
         let temp = TempDir::new().unwrap();
         let inv = make_invocation(
@@ -899,7 +971,7 @@ mod tests {
             }),
             temp.path().to_path_buf(),
         );
-        let result = ShellHandler.handle(inv).await.unwrap();
+        let result = handle_invocation_with_tempdir(inv, &temp).await.unwrap();
         let text = result.as_text().unwrap();
         let dir_name = temp.path().file_name().unwrap().to_str().unwrap();
         assert!(
@@ -911,13 +983,14 @@ mod tests {
     // ── Timeout ───────────────────────────────────────────────────────────────
 
     #[tokio::test]
+    #[serial(rpc_path_env)]
     async fn test_shell_timeout() {
         let temp = TempDir::new().unwrap();
         let inv = make_invocation(
             serde_json::json!({ "command": "sleep 60", "timeout_ms": 200 }),
             temp.path().to_path_buf(),
         );
-        let result = ShellHandler.handle(inv).await.unwrap();
+        let result = handle_invocation_with_tempdir(inv, &temp).await.unwrap();
         let text = result.as_text().unwrap();
         assert!(
             text.contains("[Command timed out]"),
@@ -931,6 +1004,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(rpc_path_env)]
     async fn test_shell_background_child_does_not_hang() {
         let temp = TempDir::new().unwrap();
         let inv = make_invocation(
@@ -938,10 +1012,13 @@ mod tests {
             temp.path().to_path_buf(),
         );
 
-        let result = tokio::time::timeout(Duration::from_secs(2), ShellHandler.handle(inv))
-            .await
-            .expect("shell handler should not hang")
-            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            handle_invocation_with_tempdir(inv, &temp),
+        )
+        .await
+        .expect("shell handler should not hang")
+        .unwrap();
         let text = result.as_text().unwrap();
         assert!(text.contains("Exit code: 0"), "{text}");
         assert!(text.contains("done"), "{text}");
@@ -950,6 +1027,7 @@ mod tests {
     // ── Output truncation ─────────────────────────────────────────────────────
 
     #[tokio::test]
+    #[serial(rpc_path_env)]
     async fn test_shell_large_output_truncated() {
         let temp = TempDir::new().unwrap();
         // seq 1 200000 produces ~1.4 MB; MAX_OUTPUT_BYTES = 100 KiB → should truncate.
@@ -957,7 +1035,7 @@ mod tests {
             serde_json::json!({ "command": "seq 1 200000" }),
             temp.path().to_path_buf(),
         );
-        let result = ShellHandler.handle(inv).await.unwrap();
+        let result = handle_invocation_with_tempdir(inv, &temp).await.unwrap();
         let text = result.as_text().unwrap();
         assert!(
             text.contains("truncated"),
@@ -966,7 +1044,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(rpc_path_env)]
     async fn test_shell_metadata_tracks_written_paths() {
         let temp = TempDir::new().unwrap();
         let outside_repo = TempDir::new().unwrap();
@@ -975,7 +1053,7 @@ mod tests {
             serde_json::json!({ "command": "printf 'hello\\n' > touched.txt" }),
             temp.path().to_path_buf(),
         );
-        let result = ShellHandler.handle(inv).await.unwrap();
+        let result = handle_invocation_with_tempdir(inv, &temp).await.unwrap();
 
         let metadata = result
             .metadata()
@@ -987,7 +1065,44 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    async fn test_shell_metadata_captures_sandbox_rejection_evidence() {
+        let temp = TempDir::new().unwrap();
+        let inv = make_invocation(
+            serde_json::json!({ "command": "true" }),
+            temp.path().to_path_buf(),
+        )
+        .with_runtime_context(ToolRuntimeContext {
+            sandbox: Some(ToolSandboxContext {
+                policy: SandboxPolicy::WorkspaceWrite {
+                    writable_roots: vec![PathBuf::from("/")],
+                    network_access: NetworkAccess::Denied,
+                    exclude_tmpdir_env_var: false,
+                    exclude_slash_tmp: false,
+                },
+                permissions: SandboxPermissions::UseDefault,
+            }),
+            sandbox_runtime: None,
+            approval: None,
+            file_history: None,
+            max_output_bytes: Some(DEFAULT_MAX_OUTPUT_BYTES),
+        });
+
+        let result = handle_invocation_with_tempdir(inv, &temp).await.unwrap();
+
+        assert!(!result.is_success());
+        let metadata = result
+            .metadata()
+            .expect("sandbox failures should keep evidence metadata");
+        let events = metadata["sandbox_evidence"]
+            .as_array()
+            .expect("sandbox evidence should be an array");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["kind"], "writable_root_rejected");
+        assert_eq!(events[0]["root"], "/");
+    }
+
+    #[tokio::test]
+    #[serial(rpc_path_env)]
     async fn test_shell_metadata_includes_text_file_diffs() {
         let temp = TempDir::new().unwrap();
         std::fs::write(temp.path().join("Cargo.toml"), "[dependencies]\n").unwrap();
@@ -997,7 +1112,7 @@ mod tests {
             serde_json::json!({ "command": "printf 'serde = \"1\"\\n' >> Cargo.toml" }),
             temp.path().to_path_buf(),
         );
-        let result = ShellHandler.handle(inv).await.unwrap();
+        let result = handle_invocation_with_tempdir(inv, &temp).await.unwrap();
 
         let metadata = result
             .metadata()
@@ -1018,7 +1133,33 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(rpc_path_env)]
+    async fn test_shell_metadata_ignores_cargo_home_registry_manifest_diffs() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("cargo-home/registry/src/index/dep-1.0.0"))
+            .unwrap();
+        let manifest = temp
+            .path()
+            .join("cargo-home/registry/src/index/dep-1.0.0/Cargo.toml");
+        std::fs::write(&manifest, "[dependencies]\n").unwrap();
+        let outside_repo = TempDir::new().unwrap();
+        let _cwd = crate::utils::test::ChangeDirGuard::new(outside_repo.path());
+        let inv = make_invocation(
+            serde_json::json!({
+                "command": "printf 'clap = \"4\"\\n' >> cargo-home/registry/src/index/dep-1.0.0/Cargo.toml"
+            }),
+            temp.path().to_path_buf(),
+        );
+        let result = handle_invocation_with_tempdir(inv, &temp).await.unwrap();
+
+        let metadata = result
+            .metadata()
+            .expect("shell results should include metadata");
+        assert_eq!(metadata["diffs"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    #[serial(rpc_path_env)]
     async fn test_shell_metadata_omits_non_manifest_diffs() {
         let temp = TempDir::new().unwrap();
         std::fs::create_dir(temp.path().join("src")).unwrap();
@@ -1029,7 +1170,7 @@ mod tests {
             serde_json::json!({ "command": "printf 'pub fn changed() {}\\n' > src/lib.rs" }),
             temp.path().to_path_buf(),
         );
-        let result = ShellHandler.handle(inv).await.unwrap();
+        let result = handle_invocation_with_tempdir(inv, &temp).await.unwrap();
 
         let metadata = result
             .metadata()

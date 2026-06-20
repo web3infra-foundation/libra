@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use clap::Parser;
@@ -18,14 +18,15 @@ use crate::utils::{
 
 const CLEAN_EXAMPLES: &str = "\
 EXAMPLES:
-  libra clean -n
-  libra clean -f
-  libra clean -fd
-  libra clean -fx
-  libra clean -fX
-  libra clean -f --exclude '*.log'
-  libra clean -n --json
-";
+    libra clean -n                      Preview what would be removed (dry-run)
+    libra clean -f                      Remove untracked files (files only)
+    libra clean -fd                     Also remove untracked directories
+    libra clean -fx                     Remove untracked files including ignored ones
+    libra clean -fX                     Remove only ignored files
+    libra clean -f --exclude '*.log'    Layer an additional exclusion on top of .libraignore
+    libra clean -f untracked.txt        Remove only files matching the pathspec
+    libra clean -fd build/              Remove untracked paths under a directory pathspec
+    libra clean -n --json               Structured JSON output for agents";
 
 #[derive(Parser, Debug, Clone)]
 #[command(after_help = CLEAN_EXAMPLES)]
@@ -48,6 +49,9 @@ pub struct CleanArgs {
     /// Exclude files matching the given pattern (can be repeated)
     #[clap(long = "exclude", value_name = "pattern")]
     pub exclude: Vec<String>,
+    /// Limit cleaning to paths matching the given pathspecs (file or directory prefix match)
+    #[clap(value_name = "pathspec")]
+    pub pathspec: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,6 +129,13 @@ fn run_clean(args: CleanArgs) -> Result<CleanOutput, CleanError> {
         ));
     }
 
+    // Validate pathspec arguments early so invalid input fails before filesystem work.
+    let normalized_pathspecs: Vec<PathBuf> = args
+        .pathspec
+        .iter()
+        .map(|ps| validate_pathspec(ps))
+        .collect::<Result<Vec<_>, _>>()?;
+
     let index_path = path::index();
     let index = match Index::load(&index_path) {
         Ok(index) => index,
@@ -146,9 +157,15 @@ fn run_clean(args: CleanArgs) -> Result<CleanOutput, CleanError> {
         IgnorePolicy::Respect
     };
 
-    // Collect all workdir files and apply ignore policy
-    let workdir_files =
-        util::list_workdir_files().map_err(|e| CleanError::ScanUntracked(e.to_string()))?;
+    // Collect workdir files and apply ignore policy. The default path can prune ignored
+    // directories; -x/-X must still inspect ignored files because those modes target them.
+    let workdir_files = match policy {
+        IgnorePolicy::Respect => util::list_workdir_files(),
+        IgnorePolicy::IncludeIgnored | IgnorePolicy::OnlyIgnored => {
+            util::list_workdir_files_unfiltered()
+        }
+    }
+    .map_err(|e| CleanError::ScanUntracked(e.to_string()))?;
     let filtered_files = ignore::filter_workdir_paths(workdir_files, policy, &index);
 
     // Find untracked files
@@ -188,6 +205,15 @@ fn run_clean(args: CleanArgs) -> Result<CleanOutput, CleanError> {
                 .exclude
                 .iter()
                 .any(|pattern| matches_exclude_pattern(&path_str, pattern))
+        });
+    }
+
+    // Apply <pathspec>... limiting (file or directory prefix match).
+    if !normalized_pathspecs.is_empty() {
+        untracked.retain(|path| {
+            normalized_pathspecs
+                .iter()
+                .any(|ps| path == ps || path.starts_with(ps))
         });
     }
 
@@ -270,6 +296,11 @@ fn find_untracked_dirs(index: &Index, policy: IgnorePolicy) -> Result<Vec<PathBu
                 if name == ".git" || name == util::ROOT_DIR {
                     continue;
                 }
+                if policy == IgnorePolicy::Respect
+                    && ignore::should_ignore(relative, IgnorePolicy::Respect, index)
+                {
+                    continue;
+                }
                 subdirs.push(path.clone());
             } else if let Some(path_str) = relative.to_str() {
                 // Check if this file is tracked
@@ -310,6 +341,32 @@ fn find_untracked_dirs(index: &Index, policy: IgnorePolicy) -> Result<Vec<PathBu
 
     scan_dir(&workdir, &workdir, index, policy, &mut untracked_dirs)?;
     Ok(untracked_dirs)
+}
+
+/// Validate a clean pathspec: must be non-empty, relative, and free of `..`
+/// or root components so it cannot escape the working tree.
+fn validate_pathspec(pathspec: &str) -> Result<PathBuf, CleanError> {
+    if pathspec.is_empty() {
+        return Err(CleanError::InvalidArgs(
+            "clean pathspec must not be empty".to_string(),
+        ));
+    }
+
+    let path = Path::new(pathspec);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(CleanError::InvalidArgs(format!(
+            "invalid clean pathspec '{pathspec}': use a relative path without '..'"
+        )));
+    }
+
+    Ok(path.to_path_buf())
 }
 
 /// Check if a path matches an exclude pattern using glob-style matching.

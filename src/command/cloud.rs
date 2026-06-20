@@ -44,8 +44,30 @@ use crate::{
     },
 };
 
+/// `--help` examples shown in `libra cloud --help` output.
+///
+/// `cloud` exposes three sub-commands: `sync` (push local repo to
+/// D1 + R2), `restore` (pull a remote repo back down), `status`
+/// (compare local objects against the cloud manifest). The banner pins
+/// the most common invocation per sub-command plus a force-sync and a
+/// JSON variant so users can map intent to invocation without reading
+/// the design doc. Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/development/commands/_general.md` item B.
+pub const CLOUD_EXAMPLES: &str = "\
+EXAMPLES:
+    libra cloud status                            Show cloud sync coverage for current repo
+    libra cloud status --verbose                  Per-object detail of synced/missing objects
+    libra cloud sync                              Sync only objects missing from R2
+    libra cloud sync --force                      Re-upload every object regardless of cloud state
+    libra cloud restore --name my-project         Restore by repository name
+    libra cloud restore --repo-id <uuid>          Restore by repository ID
+    libra cloud restore --name my-project --metadata-only
+                                                  Restore object index only (no blob payloads)
+    libra cloud --json sync                       Structured JSON output for agents
+    libra cloud sync --progress=json              NDJSON progress events for automation";
+
 #[derive(Parser, Debug)]
-#[command(about = "Cloud backup and restore operations")]
+#[command(about = "Cloud backup and restore operations", after_help = CLOUD_EXAMPLES)]
 pub struct CloudArgs {
     #[command(subcommand)]
     pub command: CloudCommand,
@@ -67,19 +89,29 @@ pub struct SyncArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Batch size for sync operations
-    #[arg(long, default_value = "50")]
+    /// Number of objects to upload per D1/R2 batch (default: 50)
+    #[arg(long, value_name = "N", default_value = "50")]
     pub batch_size: usize,
 }
 
 #[derive(Parser, Debug)]
 pub struct RestoreArgs {
-    /// Repository ID to restore
-    #[arg(long, required_unless_present = "name", conflicts_with = "name")]
+    /// Repository ID (UUID) to restore from the cloud (mutually exclusive with --name)
+    #[arg(
+        long,
+        value_name = "UUID",
+        required_unless_present = "name",
+        conflicts_with = "name"
+    )]
     pub repo_id: Option<String>,
 
-    /// Repository name to restore
-    #[arg(long, required_unless_present = "repo_id", conflicts_with = "repo_id")]
+    /// Repository name to restore from the cloud (mutually exclusive with --repo-id)
+    #[arg(
+        long,
+        value_name = "NAME",
+        required_unless_present = "repo_id",
+        conflicts_with = "repo_id"
+    )]
     pub name: Option<String>,
 
     /// Only restore metadata (object index), not objects
@@ -1504,6 +1536,8 @@ async fn restore_worktree_to_head(render_human: bool) -> CloudResult<()> {
         source: Some("HEAD".to_string()),
         worktree: true,
         staged: true,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     };
 
     if let Err(e) = restore_cmd::execute_checked(restore_args).await {

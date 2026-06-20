@@ -11,6 +11,7 @@ import type {
   CodeUiPlanSnapshot,
   CodeUiPlanStep,
   CodeUiSessionSnapshot,
+  CodeUiTaskSnapshot,
   CodeUiToolCallSnapshot,
 } from "@/lib/code-ui/types";
 
@@ -21,6 +22,7 @@ import type {
   PlanStep,
   StepStatus,
   WorkflowState,
+  WorkflowTask,
 } from "./types";
 import { EMPTY_WORKFLOW } from "./types";
 
@@ -30,11 +32,13 @@ export function deriveWorkflow(
   if (!snapshot) return EMPTY_WORKFLOW;
   const intent = deriveIntent(snapshot);
   const [executionPlan, testPlan] = deriveCanonicalPlans(snapshot.plans);
+  const tasks = deriveTasks(snapshot.tasks);
   const runs = deriveRuns(snapshot.toolCalls);
   return {
     currentPhase: deriveCurrentPhase(snapshot),
     intent,
     plans: { execution: executionPlan, test: testPlan },
+    tasks,
     runs,
     evidence: [],
   };
@@ -69,6 +73,8 @@ function deriveCanonicalPlans(plans: CodeUiPlanSnapshot[]): [Plan, Plan] {
 function planFromSnapshot(snapshot: CodeUiPlanSnapshot): Plan {
   return {
     id: snapshot.id,
+    title: snapshot.title,
+    summary: snapshot.summary,
     steps: snapshot.steps.map(stepFromSnapshot),
   };
 }
@@ -89,23 +95,34 @@ function normalizeStepStatus(status: string): StepStatus {
   return "queued";
 }
 
+function deriveTasks(tasks: CodeUiTaskSnapshot[]): WorkflowTask[] {
+  return tasks.map((task) => ({
+    id: task.id,
+    title: task.title ?? task.id,
+    status: normalizeStepStatus(task.status),
+    details: task.details,
+    ago: relativeAgo(task.updatedAt),
+  }));
+}
+
 function deriveRuns(toolCalls: CodeUiToolCallSnapshot[]): ExecutionRun[] {
   return toolCalls.map((tool) => {
-    const result =
-      tool.status === "succeeded"
-        ? "pass"
-        : tool.status === "failed"
-          ? "fail"
-          : "running";
     return {
       id: tool.id,
       step: tool.toolName,
-      result,
+      result: normalizeRunResult(tool.status),
       ago: relativeAgo(tool.updatedAt),
       label: tool.summary ?? tool.toolName,
       details: tool.details,
     };
   });
+}
+
+function normalizeRunResult(status: string): ExecutionRun["result"] {
+  const lower = status.toLowerCase();
+  if (lower === "succeeded" || lower === "completed") return "pass";
+  if (lower === "failed" || lower === "error" || lower === "cancelled") return "fail";
+  return "running";
 }
 
 function relativeAgo(updatedAt: string | undefined): string {
@@ -145,6 +162,9 @@ function deriveCurrentPhase(snapshot: CodeUiSessionSnapshot): number {
     return 4;
   }
   if (snapshot.toolCalls.length > 0) {
+    return 2;
+  }
+  if (snapshot.tasks.length > 0) {
     return 2;
   }
   if (snapshot.plans.length > 0) {

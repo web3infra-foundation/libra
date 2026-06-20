@@ -2,7 +2,7 @@
 //! [`ModelBinding`] and per-call build options.
 //!
 //! This module is the second half of OC-Phase 1 P1.2 from
-//! `docs/improvement/opencode.md`. The command layer is responsible for
+//! `docs/development/commands/_general.md`. The command layer is responsible for
 //! turning CLI flags / dotenv into a [`ProviderBuildOptions`]; the factory is
 //! responsible for one thing only: dispatching to the right provider client
 //! constructor and wrapping the resulting `Model` into [`AnyCompletionModel`].
@@ -363,7 +363,9 @@ pub enum ProviderFactoryError {
     /// The provider needs an API key (or other credential) that was not
     /// supplied via [`ProviderBuildOptions::api_key`]. `env_var` is the
     /// canonical env var name so the surface can prompt the user to set it.
-    #[error("provider '{provider_id}' requires an API key; set {env_var}")]
+    #[error(
+        "provider '{provider_id}' requires an API key; set vault.env.{env_var} or export {env_var}"
+    )]
     MissingApiKey {
         provider_id: String,
         env_var: &'static str,
@@ -623,7 +625,7 @@ mod tests {
                 env_var: "OPENAI_API_KEY",
             }
             .to_string(),
-            "provider 'openai' requires an API key; set OPENAI_API_KEY",
+            "provider 'openai' requires an API key; set vault.env.OPENAI_API_KEY or export OPENAI_API_KEY",
         );
         assert_eq!(
             ProviderFactoryError::BuildFailed {

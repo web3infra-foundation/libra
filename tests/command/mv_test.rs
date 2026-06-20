@@ -32,6 +32,8 @@ async fn stage_file(path: &str, content: &str) {
         force: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 }
@@ -52,6 +54,8 @@ async fn test_mv_moves_tracked_file_to_new_path() {
             verbose: false,
             dry_run: false,
             force: false,
+            skip_errors: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )
@@ -83,6 +87,8 @@ async fn test_mv_moves_tracked_file_into_directory() {
             verbose: false,
             dry_run: false,
             force: false,
+            skip_errors: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )
@@ -114,6 +120,8 @@ async fn test_mv_resolves_paths_from_current_subdirectory() {
             verbose: false,
             dry_run: false,
             force: false,
+            skip_errors: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )
@@ -146,6 +154,8 @@ async fn test_mv_moves_directory_with_tracked_files() {
             verbose: false,
             dry_run: false,
             force: false,
+            skip_errors: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )
@@ -181,6 +191,8 @@ async fn test_mv_force_overwrites_tracked_destination_and_replaces_index_entry()
             verbose: false,
             dry_run: false,
             force: true,
+            skip_errors: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )
@@ -220,6 +232,8 @@ async fn test_mv_rebuilds_index_entry_from_destination_file() {
             verbose: false,
             dry_run: false,
             force: false,
+            skip_errors: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )
@@ -403,9 +417,11 @@ async fn test_mv_usage_output_matches_command_text() {
     assert_eq!(report.error_code, "LBR-CLI-002");
     assert_eq!(report.exit_code, 129);
     assert!(stderr.contains("usage: libra mv [<options>] <source>... <destination>"));
-    assert!(stderr.contains("-v, --verbose    be verbose"));
-    assert!(stderr.contains("-n, --dry-run    dry run"));
-    assert!(stderr.contains("-f, --force      force move/rename even if target exists"));
+    assert!(stderr.contains("-v, --verbose         be verbose"));
+    assert!(stderr.contains("-n, --dry-run         dry run"));
+    assert!(stderr.contains("-f, --force           force move/rename even if target exists"));
+    assert!(stderr.contains("-k, --skip-errors     skip invalid sources"));
+    assert!(stderr.contains("    --sparse          accept Git sparse-checkout flag as no-op"));
 }
 
 #[tokio::test]
@@ -606,6 +622,132 @@ async fn test_mv_rejects_multiple_sources_with_same_target_name() {
 
 #[tokio::test]
 #[serial]
+async fn test_mv_skip_errors_moves_valid_sources_and_skips_invalid_sources() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file("valid.txt", "tracked").await;
+    test::ensure_file("untracked.txt", Some("untracked"));
+    fs::create_dir_all("dest").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .args([
+            "mv",
+            "-k",
+            "missing.txt",
+            "untracked.txt",
+            "valid.txt",
+            "dest",
+        ])
+        .output()
+        .expect("failed to execute libra mv -k mixed source case");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).is_empty(),
+        "skip-errors should not report skipped sources on stderr, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!temp_path.path().join("valid.txt").exists());
+    assert!(temp_path.path().join("dest/valid.txt").exists());
+    assert!(temp_path.path().join("untracked.txt").exists());
+
+    let index = Index::load(path::index()).unwrap();
+    assert!(!index.tracked("valid.txt", 0));
+    assert!(index.tracked("dest/valid.txt", 0));
+    assert!(!index.tracked("untracked.txt", 0));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_mv_skip_errors_succeeds_when_all_sources_are_skipped() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    fs::create_dir_all("dest").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .args(["mv", "-k", "missing.txt", "dest"])
+        .output()
+        .expect("failed to execute libra mv -k all skipped case");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).is_empty(),
+        "skip-errors should keep all-skipped stderr clean, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!temp_path.path().join("dest/missing.txt").exists());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_mv_skip_errors_keeps_first_source_when_targets_duplicate() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file("a/same.txt", "from-a").await;
+    stage_file("b/same.txt", "from-b").await;
+    fs::create_dir_all("dest").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .args(["mv", "-k", "a/same.txt", "b/same.txt", "dest"])
+        .output()
+        .expect("failed to execute libra mv -k duplicate target case");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).is_empty(),
+        "skip-errors should keep duplicate-target stderr clean, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!temp_path.path().join("a/same.txt").exists());
+    assert!(temp_path.path().join("b/same.txt").exists());
+    assert_eq!(
+        fs::read_to_string(temp_path.path().join("dest/same.txt")).unwrap(),
+        "from-a"
+    );
+
+    let index = Index::load(path::index()).unwrap();
+    assert!(!index.tracked("a/same.txt", 0));
+    assert!(index.tracked("b/same.txt", 0));
+    assert!(index.tracked("dest/same.txt", 0));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_mv_sparse_flag_is_accepted_as_json_noop() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file("sparse.txt", "s").await;
+
+    let output = run_libra_command(
+        &["--json", "mv", "--sparse", "sparse.txt", "sparse_new.txt"],
+        temp_path.path(),
+    );
+    assert_cli_success(&output, "mv --json --sparse");
+
+    let value = parse_json_stdout(&output);
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["command"], "mv");
+    assert_eq!(value["data"]["moves"][0]["source"], "sparse.txt");
+    assert_eq!(value["data"]["moves"][0]["destination"], "sparse_new.txt");
+    assert!(
+        !value["data"].as_object().unwrap().contains_key("sparse"),
+        "--sparse is a no-op and must not appear in MvOutput JSON"
+    );
+
+    assert!(!temp_path.path().join("sparse.txt").exists());
+    assert!(temp_path.path().join("sparse_new.txt").exists());
+}
+
+#[tokio::test]
+#[serial]
 /// Moves a directory even when it contains only untracked files.
 async fn test_mv_moves_directory_without_tracked_files() {
     let temp_path = tempdir().unwrap();
@@ -650,6 +792,8 @@ async fn test_mv_moves_mixed_directory_and_updates_only_tracked_index_entries() 
             verbose: false,
             dry_run: false,
             force: false,
+            skip_errors: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )
@@ -745,4 +889,38 @@ async fn test_mv_rejects_moving_directory_into_subdirectory() {
     );
 
     assert!(temp_path.path().join("dir/file.txt").exists());
+}
+
+/// `libra mv --help` surfaces the EXAMPLES banner so users see the
+/// rename / move-into-dir / multi-source / dry-run / force / JSON forms
+/// without having to read the design doc. Cross-cutting `--help` EXAMPLES
+/// rollout per `docs/development/commands/_general.md` item B.
+#[test]
+fn test_mv_help_lists_examples_banner() {
+    let repo = tempdir().expect("tempdir for mv --help");
+    let output = run_libra_command(&["mv", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "mv --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "mv --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra mv old.txt new.txt",
+        "libra mv src/file.rs lib/",
+        "libra mv -n",
+        "libra mv -f",
+        "libra mv -k",
+        "libra mv --sparse",
+        "libra mv --json",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "mv --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
 }

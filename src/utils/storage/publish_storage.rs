@@ -1,6 +1,6 @@
 //! Publish-specific arbitrary-object storage on top of `object_store`.
 //!
-//! Per `docs/improvement/publish.md` Phase 2, this module is the
+//! Per `docs/development/commands/publish.md` Phase 2, this module is the
 //! Worker- and CLI-side wrapper for non-Git artefacts the publish
 //! pipeline writes to R2 (or any S3-compatible bucket): code
 //! manifests, file previews keyed by sha256, AI object JSONs, AI

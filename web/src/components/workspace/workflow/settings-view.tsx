@@ -4,7 +4,7 @@
  * Shows the active provider/model/context, capability flags, controller
  * ownership, and the loopback-only safety badge. All values are derived from
  * the live `CodeUiSessionSnapshot`; nothing is mutable in v1 because the
- * backend has no settings-mutation endpoints yet (per the docs/improvement/web.md
+ * backend has no settings-mutation endpoints yet (per the docs/development/commands/_general.md
  * Phase 4 brief).
  */
 "use client";

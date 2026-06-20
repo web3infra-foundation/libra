@@ -99,6 +99,10 @@ per file.
 
 ```bash
 libra log --stat
+libra log --range main..feature
+libra log --all --oneline
+libra log --reverse --oneline
+libra log --follow src/main.rs
 ```
 
 ### `--author <PATTERN>`
@@ -162,6 +166,54 @@ merging visually.
 ```bash
 libra log --graph
 libra log --oneline --graph
+```
+
+### `--range <SPEC>`
+
+Limit history to a revision range. Supported forms:
+- `A..B` — commits reachable from `B` but not `A`.
+- `A...B` — symmetric difference (commits in `A` or `B` but not their merge base).
+- Single ref, e.g. `main` or `HEAD~3`.
+
+```bash
+libra log --range main..feature
+libra log --range HEAD~3..HEAD
+```
+
+### `--all`
+
+Show commits reachable from all local branches and tags instead of only HEAD.
+
+```bash
+libra log --all
+libra log --all --oneline
+```
+
+### `--reverse`
+
+Print commits in reverse chronological order (oldest first).
+
+```bash
+libra log --reverse
+libra log --reverse --oneline
+```
+
+### `--follow <FILE>`
+
+Best-effort continuation of a file's history across renames. The file is resolved
+relative to the current directory.
+
+```bash
+libra log --follow src/main.rs
+```
+
+### `-L <RANGE:FILE>`
+
+Accept Git-style line-range syntax. Full blame-level precision is not yet
+implemented; the flag is parsed and applied as a path filter.
+
+```bash
+libra log -L1,10:src/main.rs
 ```
 
 ### `[PATHS...]`
@@ -260,25 +312,34 @@ Graph format:
 
 ## Design Rationale
 
-### No `--all` / `--branches` / `--remotes` flags yet
+### `--range` instead of positional revision syntax
 
-Git's `--all` shows commits reachable from all refs (branches, tags, stashes), while
-`--branches` and `--remotes` filter to local or remote branches respectively. Libra
-currently walks the commit graph from HEAD only. Implementing `--all` requires a ref
-enumeration pass over the SQLite `reference` table to collect all branch tips and tag
-targets, then merging multiple commit walks into a single timeline. This is planned but
-not yet implemented. The current single-HEAD walk covers the most common use case
-(inspecting the current branch history) and avoids the complexity of multi-root graph
-merging.
+Git accepts `git log A..B` where the revision expression is a positional argument.
+Libra exposes the same semantics via `--range A..B` to keep positional arguments
+reserved for pathspecs and to avoid ambiguity with the existing `-- -N` test
+pattern.
 
-### No revision range (`A..B`) syntax yet
+### `--all` implementation
 
-Git's revision range syntax (`main..feature`, `main...feature`, `HEAD~3..HEAD`) is a
-powerful but complex feature that requires a full revision parser supporting symbolic refs,
-ancestry operators (`~`, `^`), and set operations (difference, symmetric difference). Libra
-does not yet implement a revision parser. The `-n` flag and `--since`/`--until` date filters
-provide basic history scoping. A full revision range parser is on the roadmap and will
-support both Git-compatible syntax and additional Libra-specific extensions.
+`--all` enumerates local branches and lightweight tags from the SQLite
+`reference` table, collects their tip commits, and walks the union of those
+histories.
+
+### `--reverse`
+
+`--reverse` collects the filtered commits and prints them oldest-first. It
+applies after all other filters, so `-n` still limits the result set.
+
+### `--follow`
+
+`--follow` performs best-effort rename detection by walking history and matching
+removed/added blob hashes. It does not handle complex directory renames or
+content-similar renames.
+
+### `-L`
+
+`-L` is parsed and accepted; full blame-level line attribution is not yet
+implemented. The flag acts as a path filter in the current release.
 
 ### `--graph` with text rendering
 
@@ -319,15 +380,14 @@ flag only affects the human rendering layer.
 | Decorate refs | `git log --decorate` | Always shown | `libra log --decorate` |
 | No decorate | `git log --no-decorate` | N/A | `libra log --no-decorate` |
 | Graph view | `git log --graph` | `jj log` (default has graph) | `libra log --graph` |
-| All refs | `git log --all` | `jj log -r 'all()'` | N/A (not yet implemented) |
+| All refs | `git log --all` | `jj log -r 'all()'` | `libra log --all` |
 | Branches only | `git log --branches` | `jj log -r 'branches()'` | N/A |
 | Remotes only | `git log --remotes` | `jj log -r 'remote_branches()'` | N/A |
-| Revision range | `git log A..B` | `jj log -r 'A..B'` | N/A (not yet implemented) |
-| Grep message | `git log --grep=<pat>` | Revset `description()` | N/A |
+| Revision range | `git log A..B` | `jj log -r 'A..B'` | `libra log --range A..B` |
+| Grep message | `git log --grep=<pat>` | Revset `description()` | `libra log --grep <pat>` |
 | Path filter | `git log -- <paths>` | N/A (use revset) | `libra log -- <paths>` |
-| Reverse order | `git log --reverse` | `jj log --reversed` | N/A |
-| Merge commits only | `git log --merges` | N/A | N/A |
-| First parent only | `git log --first-parent` | N/A | N/A |
+| Reverse order | `git log --reverse` | `jj log --reversed` | `libra log --reverse` |
+| Follow renames | `git log --follow <file>` | N/A | `libra log --follow <file>` |
 | Structured JSON output | N/A | N/A | `--json` / `--machine` |
 | Error hints | Minimal | Minimal | Every error type has an actionable hint |
 
@@ -345,9 +405,13 @@ flag only affects the human rendering layer.
 
 ## Compatibility Notes
 
-- `--all`, `--branches`, and `--remotes` are not yet implemented; log walks from HEAD only
-- Revision range syntax (`A..B`, `A...B`) is not yet supported; use `-n` and `--since`/`--until` for scoping
+- `--branches` and `--remotes` are not yet implemented
+- `--all` traverses local branches and lightweight tags; remote tracking refs and
+  stashes are not included
+- Revision range syntax is available via `--range A..B` and `--range A...B`;
+  positional `git log A..B` syntax is not supported
+- `--follow` uses best-effort rename detection and may miss complex renames
+- `-L` is accepted but does not yet provide blame-level line precision
+- `--reverse` is supported
 - jj's log uses a template language (`-T`) for formatting; Libra uses Git-compatible `--pretty` format strings
-- `--grep` for message filtering is not yet implemented
-- `--reverse` for chronological order is not yet implemented
 - In JSON mode, `files` contains structured change summaries; patch text is never included in JSON output

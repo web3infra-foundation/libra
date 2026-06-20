@@ -3,7 +3,13 @@
 //! **Layer:** L1 — deterministic, no external dependencies.
 
 use git_internal::internal::index::Index;
-use libra::utils::{client_storage::ClientStorage, path};
+use libra::{
+    internal::{
+        branch::{AGENT_TRACES_BRANCH, Branch as InternalBranch},
+        head::Head,
+    },
+    utils::{client_storage::ClientStorage, path, test::ChangeDirGuard},
+};
 
 use super::*;
 
@@ -15,6 +21,70 @@ fn test_switch_cli_missing_branch_returns_cli_exit_code() {
 
     assert_eq!(output.status.code(), Some(129));
     assert!(String::from_utf8_lossy(&output.stderr).contains("branch 'no-such' not found"));
+}
+
+/// opencode.md OC-Phase 3 acceptance criterion 5 requires that
+/// `switch` refuse to create a branch named `intent` or
+/// `agent-traces`. The runtime guard at
+/// `src/command/switch.rs::is_locked_branch` covers both, but the
+/// `switch_test` suite previously had no coverage at all for the
+/// locked-name refusal — a regression that dropped the guard could
+/// have shipped silently.
+#[test]
+fn test_switch_create_intent_branch_is_blocked() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["switch", "-c", "intent"], repo.path());
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("intent"),
+        "expected the locked branch name in the message, got: {stderr}"
+    );
+}
+
+/// Companion to `test_switch_create_intent_branch_is_blocked` for the
+/// `agent-traces` locked name. Without the guard, `switch -c
+/// agent-traces` could shadow the reserved capture ref locally and
+/// then propagate via `push`.
+#[test]
+fn test_switch_create_agent_traces_branch_is_blocked() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["switch", "-c", "agent-traces"], repo.path());
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("agent-traces"),
+        "expected the agent-traces branch name in the message, got: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_switch_existing_agent_traces_branch_is_blocked() {
+    let repo = create_committed_repo_via_cli();
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        let head = Head::current_commit()
+            .await
+            .expect("committed repo should have HEAD");
+        InternalBranch::update_branch(AGENT_TRACES_BRANCH, &head.to_string(), None)
+            .await
+            .expect("seed agent-traces branch");
+    }
+
+    let output = run_libra_command(&["switch", AGENT_TRACES_BRANCH], repo.path());
+
+    assert!(!output.status.success());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        stderr.contains(AGENT_TRACES_BRANCH),
+        "expected the agent-traces branch name in the message, got: {stderr}"
+    );
 }
 
 #[test]
@@ -35,6 +105,70 @@ fn test_switch_json_create_output_reports_new_branch() {
     assert_eq!(json["data"]["detached"], false);
 }
 
+#[test]
+fn test_switch_force_create_resets_existing_branch() {
+    let repo = create_committed_repo_via_cli();
+
+    // Create an old branch from HEAD and make a new commit on main
+    let output = run_libra_command(&["switch", "-c", "feature"], repo.path());
+    assert_cli_success(&output, "create feature should succeed");
+
+    let output = run_libra_command(&["switch", "main"], repo.path());
+    assert_cli_success(&output, "switch back to main should succeed");
+
+    std::fs::write(repo.path().join("second.txt"), "second\n").unwrap();
+    let output = run_libra_command(&["add", "second.txt"], repo.path());
+    assert_cli_success(&output, "add second.txt should succeed");
+    let output = run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    assert_cli_success(&output, "commit second should succeed");
+
+    let head = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    let head_hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    // -C should reset feature to current main and switch
+    let output = run_libra_command(&["switch", "-C", "feature"], repo.path());
+    assert_cli_success(&output, "force-create feature should succeed");
+
+    let output = run_libra_command(&["rev-parse", "feature"], repo.path());
+    let feature_hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(
+        feature_hash, head_hash,
+        "feature should point to current HEAD"
+    );
+}
+
+#[test]
+fn test_switch_force_create_refuses_current_branch() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["switch", "-c", "feature"], repo.path());
+    assert_cli_success(&output, "create feature should succeed");
+
+    let output = run_libra_command(&["switch", "-C", "feature"], repo.path());
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot force-create the currently checked-out branch"),
+        "got: {stderr}"
+    );
+}
+
+#[test]
+fn test_switch_orphan_creates_branch_with_no_history() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["switch", "--orphan", "fresh"], repo.path());
+    assert_cli_success(&output, "create orphan branch should succeed");
+
+    let output = run_libra_command(&["log", "--oneline"], repo.path());
+    assert_cli_success(&output, "log should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("orphan branch root commit"),
+        "expected orphan root commit in log, got: {stdout}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_switch_json_track_output_stays_clean() {
@@ -42,6 +176,12 @@ async fn test_switch_json_track_output_stays_clean() {
     let _guard = ChangeDirGuard::new(repo.path());
 
     let head = Head::current_commit().await.unwrap();
+    let output = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "add origin remote for track test");
+
     Branch::update_branch(
         "refs/remotes/origin/feature",
         &head.to_string(),
@@ -74,6 +214,12 @@ async fn test_switch_track_human_output_keeps_tracking_message() {
     let _guard = ChangeDirGuard::new(repo.path());
 
     let head = Head::current_commit().await.unwrap();
+    let output = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "add origin remote for track test");
+
     Branch::update_branch(
         "refs/remotes/origin/feature",
         &head.to_string(),
@@ -89,6 +235,186 @@ async fn test_switch_track_human_output_keeps_tracking_message() {
     assert!(
         stdout.contains("Branch 'feature' set up to track remote branch 'origin/feature'"),
         "expected upstream tracking message in stdout, got: {stdout}"
+    );
+}
+
+/// Default-on DWIM guess: `libra switch <name>` with no local branch but a
+/// unique remote-tracking branch creates a local tracking branch and switches.
+#[tokio::test]
+#[serial]
+async fn test_switch_guess_creates_tracking_branch() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    let head = Head::current_commit().await.unwrap();
+    let output = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "add origin remote for guess test");
+
+    Branch::update_branch(
+        "refs/remotes/origin/guessed",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
+
+    // No --guess flag: guessing is enabled by default (Git parity).
+    let output = run_libra_command(&["switch", "guessed"], repo.path());
+    assert_cli_success(&output, "switch guessed (default guess)");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Branch 'guessed' set up to track remote branch 'origin/guessed'"),
+        "expected upstream tracking message in stdout, got: {stdout}"
+    );
+
+    let output = run_libra_command(&["branch", "--show-current"], repo.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("guessed"),
+        "expected to be on the guessed branch, got: {stdout}"
+    );
+}
+
+/// `--no-guess` disables the DWIM behaviour: a remote-only name is rejected as
+/// not-found instead of being auto-created.
+#[tokio::test]
+#[serial]
+async fn test_switch_no_guess_rejects_remote_only_branch() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    let head = Head::current_commit().await.unwrap();
+    let output = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "add origin remote for no-guess test");
+
+    Branch::update_branch(
+        "refs/remotes/origin/guessed",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
+
+    let output = run_libra_command(&["switch", "--no-guess", "guessed"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("branch 'guessed' not found"),
+        "expected not-found error with --no-guess, got: {stderr}"
+    );
+
+    // The guess must not have created a local branch as a side effect.
+    let output = run_libra_command(&["branch", "--list"], repo.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("guessed"),
+        "no local 'guessed' branch should exist after --no-guess, got: {stdout}"
+    );
+}
+
+/// `checkout.guess=false` disables guessing when neither flag is supplied; an
+/// explicit `--guess` still overrides the config back on.
+#[tokio::test]
+#[serial]
+async fn test_switch_guess_config_disables_then_flag_overrides() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    let head = Head::current_commit().await.unwrap();
+    let output = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "add origin remote for guess-config test");
+
+    Branch::update_branch(
+        "refs/remotes/origin/guessed",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
+
+    let output = run_libra_command(&["config", "set", "checkout.guess", "false"], repo.path());
+    assert_cli_success(&output, "set checkout.guess=false");
+
+    // Config off, no flag: guessing disabled -> not found.
+    let output = run_libra_command(&["switch", "guessed"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+
+    // Explicit --guess overrides the config.
+    let output = run_libra_command(&["switch", "--guess", "guessed"], repo.path());
+    assert_cli_success(&output, "switch --guess overrides checkout.guess=false");
+    let output = run_libra_command(&["branch", "--show-current"], repo.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("guessed"),
+        "expected to be on guessed after explicit --guess, got: {stdout}"
+    );
+}
+
+/// When several remotes carry the guessed name the switch is blocked as
+/// ambiguous, but `checkout.defaultRemote` breaks the tie.
+#[tokio::test]
+#[serial]
+async fn test_switch_guess_ambiguous_resolved_by_default_remote() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    let head = Head::current_commit().await.unwrap();
+    for remote in ["origin", "upstream"] {
+        let output = run_libra_command(
+            &[
+                "remote",
+                "add",
+                remote,
+                &format!("https://example.com/{remote}.git"),
+            ],
+            repo.path(),
+        );
+        assert_cli_success(&output, "add remote for ambiguity test");
+        Branch::update_branch(
+            &format!("refs/remotes/{remote}/feature"),
+            &head.to_string(),
+            Some(remote),
+        )
+        .await
+        .unwrap();
+    }
+
+    // Two remotes match -> ambiguous, exit 128, nothing created.
+    let output = run_libra_command(&["switch", "feature"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("matched multiple remote-tracking branches"),
+        "expected ambiguity error, got: {stderr}"
+    );
+    let output = run_libra_command(&["branch", "--list"], repo.path());
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("feature"),
+        "ambiguous guess must not create a local branch"
+    );
+
+    // checkout.defaultRemote breaks the tie.
+    let output = run_libra_command(
+        &["config", "set", "checkout.defaultRemote", "upstream"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "set checkout.defaultRemote=upstream");
+
+    let output = run_libra_command(&["switch", "feature"], repo.path());
+    assert_cli_success(&output, "switch feature resolved by defaultRemote");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Branch 'feature' set up to track remote branch 'upstream/feature'"),
+        "expected upstream tracking via defaultRemote, got: {stdout}"
     );
 }
 
@@ -137,6 +463,7 @@ async fn test_switch_function() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
     }
@@ -146,8 +473,13 @@ async fn test_switch_function() {
         let args = SwitchArgs {
             branch: None,
             create: Some("test_branch".to_string()),
+            force_create: None,
+            orphan: None,
             detach: false,
             track: false,
+            force: false,
+            guess: false,
+            no_guess: false,
         };
         switch::execute(args).await;
         let head = Head::current().await;
@@ -170,7 +502,7 @@ async fn test_switch_function() {
             _ => panic!("head not in branch,unreachable"),
             // Head::Detached(name) => name.to_string(),
         };
-        // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+        // Migrated from lossy `Branch::find_branch` per docs/development/commands/branch.md.
         let branch = Branch::find_branch_result(&ref_name, None)
             .await
             .expect("failed to query current branch")
@@ -190,14 +522,20 @@ async fn test_switch_function() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
 
         let args = SwitchArgs {
             branch: Some(commit_id_str.clone()),
             create: None,
+            force_create: None,
+            orphan: None,
             detach: true,
             track: false,
+            force: false,
+            guess: false,
+            no_guess: false,
         };
         switch::execute(args).await;
         let head = Head::current().await;
@@ -218,8 +556,13 @@ async fn test_switch_function() {
         let args = SwitchArgs {
             branch: Some("main".to_string()),
             create: None,
+            force_create: None,
+            orphan: None,
             detach: false,
             track: false,
+            force: false,
+            guess: false,
+            no_guess: false,
         };
         switch::execute(args).await;
         let head = Head::current().await;
@@ -320,8 +663,15 @@ async fn test_switch_track_sets_upstream() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(args).await;
+
+    let output = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        temp_path.path(),
+    );
+    assert_cli_success(&output, "add origin remote for track test");
 
     let master_commit = Head::current_commit().await.unwrap();
     Branch::update_branch(
@@ -335,8 +685,13 @@ async fn test_switch_track_sets_upstream() {
     let args = SwitchArgs {
         branch: Some("origin/feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: true,
+        force: false,
+        guess: false,
+        no_guess: false,
     };
     switch::execute(args).await;
 
@@ -381,6 +736,7 @@ async fn test_detach_head_basic() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
     }
@@ -426,6 +782,7 @@ async fn test_detach_head_basic() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         commit::execute(args).await;
     }
@@ -474,7 +831,7 @@ async fn test_detach_head_basic() {
         let commit_message = switch_to_detach("main^~^~^~^~^~^".to_string()).await;
         assert_eq!(&commit_message, "commit_0");
     }
-    // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+    // Migrated from lossy `Branch::find_branch` per docs/development/commands/branch.md.
     let master_commit_id = Branch::find_branch_result("main", None)
         .await
         .expect("failed to query main branch")
@@ -600,7 +957,7 @@ async fn test_detach_head_extra() {
         assert_eq!(commit_message, "commit_0".to_string());
         switch_to_branch("main".to_string()).await;
     }
-    // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+    // Migrated from lossy `Branch::find_branch` per docs/development/commands/branch.md.
     let master_commit_id = Branch::find_branch_result("main", None)
         .await
         .expect("failed to query main branch")
@@ -618,8 +975,13 @@ async fn switch_to_detach(branch_test: String) -> String {
     let args = SwitchArgs {
         branch: Some(branch_test),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: true,
         track: false,
+        force: false,
+        guess: false,
+        no_guess: false,
     };
     switch::execute(args).await;
     let head = Head::current().await;
@@ -635,8 +997,57 @@ async fn switch_to_branch(branch_test: String) {
     let args = SwitchArgs {
         branch: Some(branch_test),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
+        force: false,
+        guess: false,
+        no_guess: false,
     };
     switch::execute(args).await;
+}
+
+#[test]
+#[serial]
+fn test_switch_force_discards_local_changes() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    std::fs::write(p.join("tracked.txt"), "v1\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], p), "add v1");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "v1", "--no-verify"], p),
+        "commit v1",
+    );
+
+    // `other` advances tracked.txt to v2; main stays at v1.
+    assert_cli_success(&run_libra_command(&["branch", "other"], p), "branch other");
+    assert_cli_success(&run_libra_command(&["switch", "other"], p), "switch other");
+    std::fs::write(p.join("tracked.txt"), "v2\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], p), "add v2");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "v2", "--no-verify"], p),
+        "commit v2",
+    );
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+
+    // Dirty the tracked file on main.
+    std::fs::write(p.join("tracked.txt"), "dirty\n").unwrap();
+
+    // A plain switch is refused while dirty (would clobber local changes)...
+    let blocked = run_libra_command(&["switch", "other"], p);
+    assert!(
+        !blocked.status.success(),
+        "dirty switch should be refused without -f"
+    );
+
+    // ...but -f discards the local change and switches to the target.
+    let forced = run_libra_command(&["switch", "-f", "other"], p);
+    assert_cli_success(&forced, "switch -f other");
+    assert_eq!(
+        std::fs::read_to_string(p.join("tracked.txt")).unwrap(),
+        "v2\n",
+        "-f should restore the target branch's content"
+    );
 }

@@ -91,10 +91,19 @@ fn build_ollama_client(base_url: &str, api_key: Option<String>) -> Client {
 }
 
 fn api_key_for_base_url(base_url: &str) -> Option<String> {
-    is_ollama_cloud_base_url(base_url)
-        .then(|| std::env::var("OLLAMA_API_KEY").ok())
+    if !is_ollama_cloud_base_url(base_url) {
+        return None;
+    }
+    crate::internal::config::resolve_optional_env_sync("OLLAMA_API_KEY")
+        .map_err(|error| {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "failed to resolve OLLAMA_API_KEY from Vault or environment"
+            );
+            error
+        })
+        .ok()
         .flatten()
-        .filter(|key| !key.trim().is_empty())
 }
 
 fn is_ollama_cloud_base_url(base_url: &str) -> bool {
@@ -118,22 +127,39 @@ fn compact_tool_schema_from_env() -> bool {
 }
 
 impl Client {
-    /// Creates an Ollama client from environment variables.
+    /// Creates an Ollama client from Vault or environment variables.
     ///
-    /// Reads the optional `OLLAMA_BASE_URL` environment variable (defaults to
-    /// `http://127.0.0.1:11434/v1`). When the base URL points at
-    /// `https://ollama.com`, `OLLAMA_API_KEY` is used as a bearer token.
+    /// Reads optional `vault.env.OLLAMA_BASE_URL` / `OLLAMA_BASE_URL`
+    /// (defaults to `http://127.0.0.1:11434/v1`). When the base URL points at
+    /// `https://ollama.com`, `vault.env.OLLAMA_API_KEY` / `OLLAMA_API_KEY` is
+    /// used as a bearer token.
+    ///
+    /// New call sites should prefer [`Client::from_resolved_env`], which
+    /// performs the same lookup chain asynchronously and accepts an
+    /// explicit `LocalIdentityTarget<'_>` so vault values from a specific
+    /// repository are honored. `from_env` is retained for backward
+    /// compatibility and currently delegates to the same vault-aware
+    /// resolver.
     pub fn from_env() -> Self {
-        let base_url =
-            std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        let base_url = crate::internal::config::resolve_optional_env_sync("OLLAMA_BASE_URL")
+            .map_err(|error| {
+                tracing::warn!(
+                    error = %format!("{error:#}"),
+                    "failed to resolve OLLAMA_BASE_URL from Vault or environment"
+                );
+                error
+            })
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         build_ollama_client(&base_url, api_key_for_base_url(&base_url))
     }
 
     /// Vault-aware async constructor: resolves `OLLAMA_BASE_URL` and
     /// (when the base URL points at `https://ollama.com`) `OLLAMA_API_KEY`
-    /// through the libra-aware lookup chain: process env → local
-    /// `.libra/libra.db` (`vault.env.<name>`, when `local_target` selects
-    /// a repo) → global `~/.libra/config.db`.
+    /// through the libra-aware lookup chain: local `.libra/libra.db`
+    /// (`vault.env.<name>`, when `local_target` selects a repo) → global
+    /// `~/.libra/config.db` → process env.
     ///
     /// Differs from the other migrated providers in two ways:
     ///

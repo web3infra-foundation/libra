@@ -31,7 +31,7 @@ When the TUI exits and Libra can derive the canonical thread ID, `libra code` pr
 | Port | `-p` | `--port` | `3000` | Web server listen port. |
 | Host | | `--host` | `127.0.0.1` | Web server bind address. |
 | Working directory | | `--cwd` | current dir | Working directory for the session. |
-| Env file | | `--env-file <PATH>` | none | Load provider environment variables from a dotenv-style file; file values take precedence over the process environment. |
+| Env file | | `--env-file <PATH>` | none | Load provider environment variables from a dotenv-style file; explicit file values take precedence over Vault and the process environment. |
 | Control mode | | `--control <observe\|write>` | `observe` | Local automation control mode. `observe` preserves existing loopback read behavior; `write` enables local token discovery and process-level automation control auth. |
 | Control token file | | `--control-token-file <PATH>` | `.libra/code/control-token` | Path for the per-process local automation token. In `write` mode, Unix/macOS files must be regular files with `0600` permissions. |
 | Control info file | | `--control-info-file <PATH>` | `.libra/code/control.json` | Path for non-secret local endpoint discovery metadata. The file never contains token material. |
@@ -69,9 +69,11 @@ When the TUI exits and Libra can derive the canonical thread ID, `libra code` pr
 | `ollama` | Ollama (local models and direct Cloud API) | `OLLAMA_API_KEY` for direct Cloud API | `OLLAMA_BASE_URL`, `OLLAMA_THINK`, `OLLAMA_COMPACT_TOOLS`, `--api-base`, `--ollama-thinking`, or `--ollama-compact-tools` |
 | `codex` | Codex app-server | -- | `--codex-bin` / `--codex-port` |
 
+For Codex app-server linkage, model forwarding, credentials ownership, and persisted object storage details, see [Codex data storage integration](codex-data-storage.md).
+
 DeepSeek requests can opt into provider-specific fields with `--deepseek-thinking enabled --deepseek-reasoning-effort high --deepseek-stream true`; these flags are rejected for non-DeepSeek providers.
 Kimi requests default to the selected model's thinking behavior; use `--kimi-thinking disabled` for K2.6/K2.5 runs where lower latency or official web-search compatibility matters. Libra preserves Kimi `reasoning_content` across tool-call turns when the provider returns it.
-Use `--env-file .env.test` when testing with a local dotenv file so provider keys from that file override stale shell environment variables.
+For normal runs, store provider keys in `vault.env.<NAME>`; Libra checks repo-local Vault, then global Vault, then the process environment. Use `--env-file .env.test` for live tests that need an explicit dotenv override.
 
 Ollama requests stream `/api/chat` responses by default and add a per-request `request_id` to debug logs. They also default to `think:false` so reasoning-capable local models do not spend several minutes generating hidden reasoning before tool calls. Use `--ollama-thinking high` for a single run, or set `OLLAMA_THINK=true`, `low`, `medium`, `high`, or `auto` as the environment default. `auto` omits the `think` field and lets Ollama decide. Use `--ollama-compact-tools` or `OLLAMA_COMPACT_TOOLS=true` when a remote/cloud Ollama endpoint accepts simple tools but returns 503 for Libra's full tool schema payload.
 
@@ -99,10 +101,12 @@ Automation clients attach with `POST /api/code/controller/attach`, body `{ "clie
 
 Selecting `loopback` is rejected when `--host` is not a loopback address, and the flag conflicts with `--stdio`. The browser server-side endpoints are tagged in the `code_router()` audit matrix (`src/internal/ai/web/mod.rs`):
 
-- `/session`, `/events`, `/diagnostics`, `/threads`, `/repo`, `/repo/status` — loopback-only observe.
-- `/controller/attach` — loopback. `kind: "automation"` requests additionally require `X-Libra-Control-Token`. The handler **issues** the lease's `controllerToken` (it does not expect the caller to send one).
-- `/controller/detach`, `/messages`, `/interactions/{id}` — loopback + `X-Code-Controller-Token`; `Automation` leases additionally require `X-Libra-Control-Token`.
-- `/control/cancel` — loopback + `X-Code-Controller-Token`. `Automation` leases also require `X-Libra-Control-Token`; this is the only difference from the TUI `Esc` cancel path.
+- `GET /api/code/session`, `GET /api/code/events`, `GET /api/code/diagnostics`, `GET /api/code/threads`, `GET /api/code/goal/status` — loopback-only observe.
+- `POST /api/code/controller/attach` — loopback. `kind: "automation"` requests additionally require `X-Libra-Control-Token`. The handler **issues** the lease's `controllerToken` (it does not expect the caller to send one).
+- `POST /api/code/controller/detach`, `POST /api/code/messages`, `POST /api/code/interactions/{id}` — loopback + `X-Code-Controller-Token`; `Automation` leases additionally require `X-Libra-Control-Token`.
+- `POST /api/code/control/cancel` — loopback + `X-Code-Controller-Token`. `Automation` leases also require `X-Libra-Control-Token`; this is the only difference from the TUI `Esc` cancel path.
+- `POST /api/code/task/dispatch` — loopback + `X-Code-Controller-Token`; user-initiated sub-agent dispatch requires an automation lease.
+- `POST /api/code/goal/start`, `POST /api/code/goal/cancel` — loopback + `X-Code-Controller-Token`; goal mutation requires the active controller lease.
 
 Browser write requests share the same 256 KiB body limit and audit-sink wiring as automation control. The browser persists the lease only in memory; reloading the page drops the lease and the next write reattaches.
 
@@ -110,7 +114,7 @@ When the server is bound to a non-loopback host, non-loopback browsers receive a
 
 When `--browser-control loopback` is requested and the browser holds the active lease, the TUI initial controller is `LocalTui` (visible owner, can be reclaimed) instead of `Fixed { Tui }` (permanently blocking). If the TUI also wants to drive writes, `--control write` must be supplied alongside `--browser-control loopback`; the two writers serialize through the same `TuiControlCommand` channel.
 
-For `--web-only` non-Codex providers (`--provider ollama` is the canonical Phase 3 verification path), Libra builds a [`HeadlessCodeRuntime`](../../src/internal/ai/web/headless.rs) that runs the agent's tool loop directly so the browser can drive a real session — no terminal required. Headless mode currently advertises `messageInput`, `streamingText`, and `toolCalls` capabilities; `interactiveApprovals`, `planUpdates`, and `patchsets` light up once the corresponding workflow integrations land.
+For `--web-only` non-Codex providers (`--provider ollama` is the canonical Phase 3 verification path), Libra builds a [`HeadlessCodeRuntime`](../../src/internal/ai/web/headless.rs) that runs the agent's tool loop directly so the browser can drive a real session -- no terminal required. Headless mode advertises `messageInput`, `streamingText`, `toolCalls`, `planUpdates`, `patchsets`, `interactiveApprovals`, `structuredQuestions`, and `providerSessionResume`; `--resume <thread_id>` restores persisted transcript/history for the same working directory. `update_plan` projects into `plans[]`, and `apply_patch` metadata projects into `patchsets[]`.
 
 ### Code UI Wire Contract
 
@@ -143,20 +147,26 @@ Code UI API errors use `{ error: { code, message } }`:
 | `LOOPBACK_REQUIRED` | 403 | Non-loopback client attempted an API route. |
 | `PAYLOAD_TOO_LARGE` | 413 | Write request body exceeded 256 KiB. |
 | `CONTROL_DISABLED` | 403 | Automation control is not enabled for this process. |
-| `MISSING_CONTROL_TOKEN` / `INVALID_CONTROL_TOKEN` | 403 | Automation control token is absent or invalid. |
-| `MISSING_CONTROLLER_TOKEN` / `INVALID_CONTROLLER_TOKEN` | 403 | Lease token is absent or invalid for a write route. |
+| `MISSING_CONTROL_TOKEN` | 403 | Automation control token is absent. |
+| `INVALID_CONTROL_TOKEN` | 403 | Automation control token is invalid. |
+| `MISSING_CONTROLLER_TOKEN` | 403 | Lease token is absent for a write route. |
+| `INVALID_CONTROLLER_TOKEN` | 403 | Lease token is invalid or stale for a write route. |
 | `INVALID_CONTROLLER_KIND` | 400 | Controller attach requested an unsupported kind. |
 | `CONTROLLER_CONFLICT` | 409 | Another live controller owns the lease, or the session is busy. |
 | `BROWSER_CONTROL_DISABLED` | 403 | Browser write control is disabled. |
 | `AUTOMATION_CONTROLLER_REQUIRED` | 403 | An automation-only path was called with a non-automation lease. |
 | `CODE_UI_UNAVAILABLE` | 404 | No active `libra code` session is attached to the web server. |
 | `INVALID_QUERY_PARAM` | 400 | Query parsing failed, currently for `/threads` pagination. |
-| `STORAGE_PATH_INVALID` / `STATUS_UNAVAILABLE` / `THREAD_LIST_FAILED` / `DB_UNAVAILABLE` / `INTERNAL_ERROR` | 500 | Server-side storage, status, projection, database, or fallback internal failure. |
+| `STORAGE_PATH_INVALID` | 500 | Storage-root resolution failed. |
+| `STATUS_UNAVAILABLE` | 500 | Runtime status snapshot is unavailable. |
+| `THREAD_LIST_FAILED` | 500 | Thread projection enumeration failed. |
+| `DB_UNAVAILABLE` | 500 | Session database is offline. |
+| `INTERNAL_ERROR` | 500 | Fallback internal failure. |
 | `UNSUPPORTED_OPERATION` | 422 | Runtime rejected a requested operation that is not yet supported. |
 
 ### Web Search
 
-The `web_search` tool requires the session network policy to allow outbound access. If `BRAVE_SEARCH_API_KEY` is available from the process environment or `vault.env.BRAVE_SEARCH_API_KEY`, Libra tries the Brave Search API first and returns result titles, URLs, and snippets. If Brave is not configured or the request fails, Libra falls back to the zero-configuration DuckDuckGo HTML endpoint.
+The `web_search` tool requires the session network policy to allow outbound access. If `BRAVE_SEARCH_API_KEY` is available from `vault.env.BRAVE_SEARCH_API_KEY` or the process environment, Libra tries the Brave Search API first and returns result titles, URLs, and snippets. If Brave is not configured or the request fails, Libra falls back to the zero-configuration DuckDuckGo HTML endpoint.
 
 ### Approval Policies
 
@@ -187,6 +197,18 @@ libra code --provider anthropic --model claude-sonnet-4-20250514
 # Bind web-only on all interfaces; remote browsers see a loopback-only notice
 libra code --web-only --port 8080 --host 0.0.0.0
 
+# Browser-driven session against a local Ollama
+libra code --web-only --provider ollama --port 4400
+
+# Allow browser write control over loopback (Codex web-only is loopback by default)
+libra code --web-only --provider codex --browser-control loopback
+
+# Enable local automation write control (writes token + lease discovery files)
+libra code --control write
+
+# Load provider keys from a dotenv-style file (overrides stale shell env vars)
+libra code --env-file .env.test
+
 # Run MCP over stdio for Claude Desktop integration
 libra code --stdio
 
@@ -215,6 +237,9 @@ libra code --repo=/Volumes/Data/linked --provider ollama --model gemma4:31b
 
 # Resume a canonical Libra thread
 libra code --resume 11111111-1111-4111-8111-111111111111
+
+# Resume a browser-driven non-Codex headless session
+libra code --web-only --provider ollama --resume 11111111-1111-4111-8111-111111111111 --browser-control loopback
 
 # Inspect the same thread's version graph
 libra graph 11111111-1111-4111-8111-111111111111

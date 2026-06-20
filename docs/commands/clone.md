@@ -65,9 +65,9 @@ cloud.clone_domains.<domain>.d1_database_id
 cloud.clone_domains.<domain>.r2_bucket
 ```
 
-Cloud site resolution also requires `LIBRA_D1_API_TOKEN` from the environment or
-Libra vault config so the CLI can query the configured D1 database before
-starting restore.
+Cloud site resolution also requires `LIBRA_D1_API_TOKEN`; Libra reads
+`vault.env.LIBRA_D1_API_TOKEN` first, then the exported environment variable, so
+the CLI can query the configured D1 database before starting restore.
 
 ### `[LOCAL_PATH]`
 
@@ -122,6 +122,17 @@ because it must download the complete published object set.
 ```bash
 libra clone --depth 1 git@github.com:user/repo.git
 libra clone --depth 50 git@github.com:user/repo.git
+```
+
+### `--tags` / `--no-tags`
+
+`libra clone` fetches **all** tags by default (matching Git). `--no-tags` clones
+without any tags and records `remote.origin.tagOpt=--no-tags`, so subsequent
+`libra fetch` calls also skip tags. `--tags` is accepted for compatibility and to
+override an earlier `--no-tags` (last flag wins).
+
+```bash
+libra clone --no-tags git@github.com:user/repo.git
 ```
 
 ## Common Commands
@@ -283,14 +294,14 @@ implemented. Sparse cone/skip-worktree relies on Git-managed worktree configurat
 while Libra has migrated config / HEAD / refs to SQLite. The bridge is not free, and
 the audit-driven decision is to keep `--sparse` deferred until there is a concrete
 monorepo subtree-checkout requirement that cannot be met by tiered cloud storage.
-See [`docs/improvement/compatibility/declined.md`](../improvement/compatibility/declined.md)
+See [`docs/development/commands/_compatibility.md`](../development/commands/_compatibility.md)
 entry **D10** for the restart conditions.
 
 ### `--recurse-submodules` is intentionally unsupported
 
 Per the broader product boundary on submodules (no submodule subcommand surface),
 `clone --recurse-submodules` is also unsupported. See
-[`docs/improvement/compatibility/declined.md`](../improvement/compatibility/declined.md)
+[`docs/development/commands/_compatibility.md`](../development/commands/_compatibility.md)
 entries **D1** (submodule) and **D4** (clone --recurse-submodules) for restart
 conditions.
 

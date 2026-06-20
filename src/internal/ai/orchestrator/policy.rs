@@ -26,6 +26,7 @@ use crate::internal::ai::{
         apply_patch::{ApplyPatchArgs, parse_patch},
         utils::command_invokes_git_version_control,
     },
+    workspace_snapshot::is_cargo_cache_path,
 };
 
 #[derive(Clone, Debug)]
@@ -336,9 +337,8 @@ fn cargo_manifest_diff_adds_dependency(diff: &ToolDiffRecord) -> bool {
 }
 
 fn is_cargo_manifest_path(path: &str) -> bool {
-    Path::new(path)
-        .file_name()
-        .is_some_and(|name| name == "Cargo.toml")
+    let path = Path::new(path);
+    path.file_name().is_some_and(|name| name == "Cargo.toml") && !is_cargo_cache_path(path)
 }
 
 fn toml_table_header(line: &str) -> Option<&str> {
@@ -1422,6 +1422,28 @@ mod tests {
 
         assert_eq!(violation.code, "dependency-policy-no-new");
         assert_eq!(violation.path.as_deref(), Some("Cargo.toml"));
+    }
+
+    #[test]
+    fn test_dependency_policy_no_new_ignores_cargo_home_registry_manifests() {
+        let mut task = task();
+        task.scope_in = vec!["cargo-home/**".into()];
+        let output = ToolOutput::success("Exit code: 0").with_metadata(serde_json::json!({
+            "paths_written": ["cargo-home/registry/src/index/dep-1.0.0/Cargo.toml"],
+            "diffs": [{
+                "path": "cargo-home/registry/src/index/dep-1.0.0/Cargo.toml",
+                "type": "update",
+                "diff": "@@\n [dependencies]\n+clap = \"4\"\n"
+            }]
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "shell".into(),
+            action: "execute".into(),
+            arguments_json: Some(serde_json::json!({ "command": "cargo build" })),
+            ..ToolCallRecord::default()
+        };
+
+        evaluate_tool_result(&spec(), &task, "shell", &output, &mut record).unwrap();
     }
 
     #[test]

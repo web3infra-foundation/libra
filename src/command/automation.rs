@@ -22,7 +22,29 @@ use crate::{
     },
 };
 
+/// `--help` examples shown in `libra automation --help` output.
+///
+/// `automation` exposes three sub-commands (`list` / `run` / `history`)
+/// for inspecting and exercising the rule-based automation runtime. The
+/// banner pins the canonical invocation per sub-command plus a named
+/// rule run, a simulated-time run, the `--live` opt-in for actually
+/// spawning shell actions, and JSON variants for agents so users can
+/// map intent to invocation without reading the design doc.
+/// Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/development/commands/_general.md` item B.
+pub const AUTOMATION_EXAMPLES: &str = "\
+EXAMPLES:
+    libra automation list                                List configured automation rules
+    libra automation run                                 Run all due cron rules in dry-run mode
+    libra automation run --rule my-rule                  Run a single rule regardless of cron schedule
+    libra automation run --now 2026-05-23T12:00:00Z      Simulate the current time when evaluating cron triggers
+    libra automation run --live                          Actually spawn shell actions that pass safety preflight
+    libra automation history --limit 50                  Show the 50 most recent automation history rows
+    libra automation --json list                         Structured JSON output for agents
+    libra automation --json run                          Structured JSON output for a run (includes per-rule results[])";
+
 #[derive(Parser, Debug)]
+#[command(after_help = AUTOMATION_EXAMPLES)]
 pub struct AutomationArgs {
     #[command(subcommand)]
     pub command: AutomationSubcommand,
@@ -34,19 +56,20 @@ pub enum AutomationSubcommand {
     List,
     /// Run due cron rules, or one named rule.
     Run {
-        /// Run one rule regardless of whether its cron trigger is due.
-        #[arg(long)]
+        /// Run one rule by name regardless of whether its cron trigger is due
+        #[arg(long, value_name = "NAME")]
         rule: Option<String>,
-        /// Simulated current time as RFC3339. Defaults to now.
-        #[arg(long)]
+        /// Simulated current time as RFC3339 (default: actual now)
+        #[arg(long, value_name = "DATE")]
         now: Option<String>,
-        /// Actually spawn shell actions that pass safety preflight.
+        /// Actually spawn shell actions that pass safety preflight
         #[arg(long)]
         live: bool,
     },
     /// Show recent automation history rows.
     History {
-        #[arg(long, default_value_t = 20)]
+        /// Maximum number of history rows to return (default: 20)
+        #[arg(long, value_name = "N", default_value_t = 20)]
         limit: u64,
     },
 }

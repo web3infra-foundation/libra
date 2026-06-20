@@ -28,6 +28,36 @@ fn create_two_commit_repo_with_direct_tip_update(timestamp_offset: usize) -> tem
     repo
 }
 
+#[path = "rev_list_output_test.rs"]
+mod rev_list_output_test;
+
+#[path = "rev_list_parent_filter_test.rs"]
+mod rev_list_parent_filter_test;
+
+#[path = "rev_list_range_test.rs"]
+mod rev_list_range_test;
+
+#[path = "rev_list_date_filter_test.rs"]
+mod rev_list_date_filter_test;
+
+#[path = "rev_list_first_parent_test.rs"]
+mod rev_list_first_parent_test;
+
+#[path = "rev_list_author_filter_test.rs"]
+mod rev_list_author_filter_test;
+#[path = "rev_list_cherry_filter_test.rs"]
+mod rev_list_cherry_filter_test;
+#[path = "rev_list_cherry_shorthand_test.rs"]
+mod rev_list_cherry_shorthand_test;
+#[path = "rev_list_children_test.rs"]
+mod rev_list_children_test;
+#[path = "rev_list_committer_filter_test.rs"]
+mod rev_list_committer_filter_test;
+#[path = "rev_list_grep_filter_test.rs"]
+mod rev_list_grep_filter_test;
+#[path = "rev_list_path_filter_test.rs"]
+mod rev_list_path_filter_test;
+
 #[test]
 fn test_rev_list_defaults_to_head() {
     let repo = create_committed_repo_via_cli();
@@ -96,6 +126,64 @@ fn test_rev_list_supports_revision_navigation() {
 }
 
 #[test]
+fn test_rev_list_max_count_and_skip_limit_visible_output() {
+    let repo = create_two_commit_repo_with_direct_tip_update(1);
+
+    let full = run_libra_command(&["rev-list", "HEAD"], repo.path());
+    assert_cli_success(&full, "rev-list HEAD");
+    let full_stdout = String::from_utf8_lossy(&full.stdout);
+    let full_lines = full_stdout.lines().collect::<Vec<_>>();
+    assert_eq!(full_lines.len(), 2, "expected two commits: {full_stdout}");
+
+    let limited = run_libra_command(&["rev-list", "--max-count", "1", "HEAD"], repo.path());
+    assert_cli_success(&limited, "rev-list --max-count 1 HEAD");
+    let limited_stdout = String::from_utf8_lossy(&limited.stdout);
+    assert_eq!(
+        limited_stdout.lines().collect::<Vec<_>>(),
+        vec![full_lines[0]]
+    );
+
+    let short_limited = run_libra_command(&["rev-list", "-n", "1", "HEAD"], repo.path());
+    assert_cli_success(&short_limited, "rev-list -n 1 HEAD");
+    assert_eq!(short_limited.stdout, limited.stdout);
+
+    let skipped = run_libra_command(
+        &["rev-list", "--skip", "1", "--max-count", "1", "HEAD"],
+        repo.path(),
+    );
+    assert_cli_success(&skipped, "rev-list --skip 1 --max-count 1 HEAD");
+    let skipped_stdout = String::from_utf8_lossy(&skipped.stdout);
+    assert_eq!(
+        skipped_stdout.lines().collect::<Vec<_>>(),
+        vec![full_lines[1]]
+    );
+}
+
+#[test]
+fn test_rev_list_count_reports_filtered_commit_count() {
+    let repo = create_two_commit_repo_with_direct_tip_update(1);
+
+    let all = run_libra_command(&["rev-list", "--count", "HEAD"], repo.path());
+    assert_cli_success(&all, "rev-list --count HEAD");
+    assert_eq!(String::from_utf8_lossy(&all.stdout).trim(), "2");
+
+    let limited = run_libra_command(
+        &[
+            "rev-list",
+            "--count",
+            "--skip",
+            "1",
+            "--max-count",
+            "1",
+            "HEAD",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&limited, "rev-list --count --skip 1 --max-count 1 HEAD");
+    assert_eq!(String::from_utf8_lossy(&limited.stdout).trim(), "1");
+}
+
+#[test]
 fn test_rev_list_invalid_target_returns_cli_error_code() {
     let repo = create_committed_repo_via_cli();
 
@@ -151,53 +239,5 @@ async fn test_rev_list_accepts_fully_qualified_remote_tracking_ref() {
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim(),
         head.to_string()
-    );
-}
-
-#[test]
-fn test_rev_list_json_returns_envelope() {
-    let repo = create_two_commit_repo_with_direct_tip_update(1);
-
-    let output = run_libra_command(&["--json", "rev-list", "HEAD"], repo.path());
-    assert_cli_success(&output, "json rev-list HEAD");
-
-    let json = parse_json_stdout(&output);
-    assert_eq!(json["ok"], true);
-    assert_eq!(json["command"], "rev-list");
-    assert_eq!(json["data"]["input"], "HEAD");
-    assert_eq!(json["data"]["total"], 2);
-    assert_eq!(json["data"]["commits"].as_array().map(Vec::len), Some(2));
-}
-
-#[test]
-fn test_rev_list_machine_returns_single_json_line() {
-    let repo = create_committed_repo_via_cli();
-
-    let output = run_libra_command(&["--machine", "rev-list", "HEAD"], repo.path());
-    assert_cli_success(&output, "machine rev-list HEAD");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(
-        stdout.lines().count(),
-        1,
-        "expected one JSON line, got: {stdout}"
-    );
-
-    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("expected JSON");
-    assert_eq!(parsed["command"], "rev-list");
-    assert_eq!(parsed["data"]["input"], "HEAD");
-}
-
-#[test]
-fn test_rev_list_quiet_suppresses_stdout() {
-    let repo = create_committed_repo_via_cli();
-
-    let output = run_libra_command(&["--quiet", "rev-list", "HEAD"], repo.path());
-    assert_cli_success(&output, "quiet rev-list HEAD");
-
-    assert!(
-        output.stdout.is_empty(),
-        "unexpected stdout: {:?}",
-        output.stdout
     );
 }

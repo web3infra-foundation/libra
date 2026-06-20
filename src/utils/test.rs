@@ -36,7 +36,7 @@ struct CwdLockState {
     next_owner: u64,
 }
 
-struct CwdLockGuard {
+pub(crate) struct CwdLockGuard {
     lock: &'static CwdLock,
     owner: u64,
 }
@@ -67,6 +67,28 @@ impl CwdLock {
                         .unwrap_or_else(|err| err.into_inner());
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    fn try_acquire(&'static self) -> Option<CwdLockGuard> {
+        let current_owner = CWD_LOCK_OWNER.with(Cell::get);
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+
+        match state.owner {
+            None => {
+                let owner = state.next_owner;
+                state.next_owner = state.next_owner.wrapping_add(1).max(1);
+                state.owner = Some(owner);
+                state.depth = 1;
+                CWD_LOCK_OWNER.with(|current| current.set(Some(owner)));
+                Some(CwdLockGuard { lock: self, owner })
+            }
+            Some(owner) if Some(owner) == current_owner => {
+                state.depth += 1;
+                Some(CwdLockGuard { lock: self, owner })
+            }
+            Some(_) => None,
         }
     }
 
@@ -107,6 +129,30 @@ fn cwd_lock() -> CwdLockGuard {
             available: Condvar::new(),
         })
         .acquire()
+}
+
+#[cfg(test)]
+fn try_cwd_lock() -> Option<CwdLockGuard> {
+    CWD_LOCK
+        .get_or_init(|| CwdLock {
+            state: Mutex::new(CwdLockState {
+                owner: None,
+                depth: 0,
+                next_owner: 1,
+            }),
+            available: Condvar::new(),
+        })
+        .try_acquire()
+}
+
+#[cfg(test)]
+pub(crate) fn cwd_lock_guard() -> CwdLockGuard {
+    cwd_lock()
+}
+
+#[cfg(test)]
+pub(crate) fn try_cwd_lock_guard() -> Option<CwdLockGuard> {
+    try_cwd_lock()
 }
 
 pub struct ScopedEnvVar {

@@ -32,18 +32,23 @@ const ROOT_AFTER_HELP: &str = "\
 Command Groups:
   Repository Setup        init, clone, config
   Working Tree            status, add, rm, mv, restore, clean, stash, lfs, worktree
-  History Inspection      log, shortlog, show, show-ref, ls-remote, diff, grep, blame, describe
+  History Inspection      log, shortlog, show, show-ref, ls-remote, ls-tree, diff, grep, blame, describe, notes, archive
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing db, cat-file, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
+  Maintenance And Plumbing db, fsck, maintenance, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
 
 Output Examples:
-  libra --json status
-  libra --json branch
+  libra --json status                  Pretty JSON envelope on stdout
+  libra --json=ndjson log              One-line-per-event newline-delimited JSON
+  libra --machine status               Compact JSON; suppresses progress/decoration
+  libra --quiet --exit-code-on-warning Silent run; non-zero exit (9) if warnings occurred
+  libra --color=never log              Force-disable colors (also via NO_COLOR=1)
+
+For per-command flags, see `libra <cmd> --help`.
 ";
 
 const ERROR_CODES_HELP: &str = include_str!("../docs/error-codes.md");
@@ -299,7 +304,11 @@ enum Commands {
         after_help = command::stash::STASH_EXAMPLES
     )]
     Stash(Stash),
-    #[command(subcommand, about = "Large File Storage")]
+    #[command(
+        subcommand,
+        about = "Large File Storage",
+        after_help = command::lfs::LFS_EXAMPLES
+    )]
     Lfs(command::lfs::LfsCmds),
     #[command(
         about = "Manage multiple working trees attached to this repository",
@@ -310,14 +319,24 @@ enum Commands {
 
     #[command(about = "Show commit logs", alias = "hist", alias = "history")]
     Log(command::log::LogArgs),
-    #[command(about = "Summarize 'git log' output", alias = "slog")]
+    #[command(about = "Summarize commit history by author", alias = "slog")]
     Shortlog(command::shortlog::ShortlogArgs),
     #[command(about = "Show various types of objects")]
     Show(command::show::ShowArgs),
     #[command(about = "List references in a local repository")]
     ShowRef(command::show_ref::ShowRefArgs),
+    #[command(
+        about = "Iterate over refs in a local repository with formatting and filtering",
+        after_help = command::for_each_ref::FOR_EACH_REF_EXAMPLES
+    )]
+    ForEachRef(command::for_each_ref::ForEachRefArgs),
     #[command(about = "List references in a remote repository")]
     LsRemote(command::ls_remote::LsRemoteArgs),
+    #[command(
+        about = "List the contents of a tree object",
+        after_help = command::ls_tree::LS_TREE_EXAMPLES
+    )]
+    LsTree(command::ls_tree::LsTreeArgs),
     #[command(about = "Read or update the symbolic HEAD ref")]
     SymbolicRef(command::symbolic_ref::SymbolicRefArgs),
     #[command(about = "Parse and normalize revision names and repository paths")]
@@ -335,8 +354,18 @@ enum Commands {
         alias = "desc"
     )]
     Describe(command::describe::DescribeArgs),
+    #[command(
+        about = "Add, show, list, or remove notes attached to commits",
+        after_help = command::notes::NOTES_EXAMPLES
+    )]
+    Notes(command::notes::NotesArgs),
     #[command(about = "Provide content, type or size info for repository objects")]
     CatFile(command::cat_file::CatFileArgs),
+    #[command(
+        about = "Create an archive of files from a named tree",
+        after_help = command::archive::ARCHIVE_EXAMPLES
+    )]
+    Archive(command::archive::ArchiveArgs),
     #[command(about = "Compute Git-compatible object IDs")]
     HashObject(command::hash_object::HashObjectArgs),
     #[command(about = "Validate pack index files against pack archives")]
@@ -373,6 +402,11 @@ enum Commands {
     Pull(command::pull::PullArgs),
     #[command(about = "Verify the integrity of objects, refs, and index")]
     Fsck(command::fsck::FsckArgs),
+    #[command(
+        about = "Run tasks to optimize Git repository data",
+        after_help = command::maintenance::MAINTENANCE_EXAMPLES
+    )]
+    Maintenance(command::maintenance::MaintenanceArgs),
     #[command(about = "Revert some existing commits")]
     Revert(command::revert::RevertArgs),
     #[command(about = "Manage the log of reference changes (e.g., HEAD, branches)")]
@@ -386,7 +420,11 @@ enum Commands {
     )]
     Bisect(Bisect),
 
-    #[command(subcommand, about = "Manage set of tracked repositories")]
+    #[command(
+        subcommand,
+        about = "Manage set of tracked repositories",
+        after_help = command::remote::REMOTE_EXAMPLES
+    )]
     Remote(command::remote::RemoteCmds),
     #[command(about = "Open the repository in the browser")]
     Open(command::open::OpenArgs),
@@ -429,6 +467,23 @@ pub enum Stash {
     Push {
         #[arg(short, long, help = "The message to display for the stash")]
         message: Option<String>,
+        #[arg(
+            short = 'u',
+            long = "include-untracked",
+            help = "Include untracked files in the stash"
+        )]
+        include_untracked: bool,
+        #[arg(
+            short = 'a',
+            long = "all",
+            help = "Include untracked and ignored files in the stash"
+        )]
+        all: bool,
+        #[arg(
+            long = "keep-index",
+            help = "Keep staged changes in the index and working tree"
+        )]
+        keep_index: bool,
     },
     #[command(about = "Remove a single stashed state from the stash list")]
     Pop {
@@ -605,6 +660,48 @@ fn rewrite_log_short_number_args(args: Vec<String>) -> Vec<String> {
     out
 }
 
+fn rewrite_index_pack_progress_args(args: Vec<String>) -> Vec<String> {
+    let subcommand = find_subcommand_index(&args);
+    let Some((index_pack_index, from_double_dash)) = subcommand else {
+        return args;
+    };
+    if !matches!(args.get(index_pack_index), Some(name) if name == "index-pack") {
+        return args;
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    if from_double_dash {
+        for (idx, arg) in args.iter().enumerate().take(index_pack_index + 1) {
+            if idx + 1 == index_pack_index && arg == "--" {
+                continue;
+            }
+            out.push(arg.clone());
+        }
+    } else {
+        out.extend(args.iter().take(index_pack_index + 1).cloned());
+    }
+
+    let mut after_double_dash = false;
+    for arg in args.into_iter().skip(index_pack_index + 1) {
+        if after_double_dash {
+            out.push(arg);
+            continue;
+        }
+        if arg == "--" {
+            after_double_dash = true;
+            out.push(arg);
+            continue;
+        }
+        match arg.as_str() {
+            "--progress" => out.push("--progress=text".to_string()),
+            "--no-progress" => out.push("--progress=none".to_string()),
+            _ => out.push(arg),
+        }
+    }
+
+    out
+}
+
 /// Locate the first non-flag token in `args` and return its index plus whether it was
 /// produced by an explicit `--` separator.
 ///
@@ -626,6 +723,17 @@ fn find_subcommand_index(args: &[String]) -> Option<(usize, bool)> {
             } else {
                 None
             };
+        }
+        if matches!(arg.as_str(), "--color" | "--progress") {
+            i = (i + 2).min(args.len());
+            continue;
+        }
+        if arg.starts_with("--color=")
+            || arg.starts_with("--progress=")
+            || arg.starts_with("--json=")
+        {
+            i += 1;
+            continue;
         }
         if !arg.starts_with('-') {
             return Some((i, false));
@@ -866,6 +974,7 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
             )),
             Err(_) => Ok(CommandPreflight::sha1_without_repo()),
         },
+        Commands::Archive(args) if args.list => Ok(CommandPreflight::none()),
         #[cfg(unix)]
         Commands::Worktree(command::worktree::WorktreeArgs {
             command: command::worktree::WorktreeSubcommand::Umount { .. },
@@ -1043,6 +1152,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         None => env::args().collect::<Vec<_>>(),
     };
     let argv = rewrite_log_short_number_args(argv);
+    let argv = rewrite_index_pack_progress_args(argv);
     utils::output::reset_warning_tracker();
     if is_error_codes_help_topic(&argv) {
         return print_error_codes_help();
@@ -1113,6 +1223,8 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
 
             command::init::execute_safe(cmd_args, &output).await?;
             set_local_hash_kind_for_storage(&storage).await?;
+            #[cfg(test)]
+            let _cwd_lock = crate::utils::test::cwd_lock_guard();
             env::set_current_dir(&original_dir).map_err(|e| {
                 CliError::fatal(format!(
                     "failed to restore working directory '{}': {}",
@@ -1141,7 +1253,11 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Shortlog(cmd_args) => command::shortlog::execute_safe(cmd_args, &output).await?,
         Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
         Commands::ShowRef(cmd_args) => command::show_ref::execute_safe(cmd_args, &output).await?,
+        Commands::ForEachRef(cmd_args) => {
+            command::for_each_ref::execute_safe(cmd_args, &output).await?
+        }
         Commands::LsRemote(cmd_args) => command::ls_remote::execute_safe(cmd_args, &output).await?,
+        Commands::LsTree(cmd_args) => command::ls_tree::execute_safe(cmd_args, &output).await?,
         Commands::SymbolicRef(cmd_args) => {
             command::symbolic_ref::execute_safe(cmd_args, &output).await?
         }
@@ -1156,11 +1272,13 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::RevList(cmd_args) => command::rev_list::execute_safe(cmd_args, &output).await?,
         Commands::Mv(cmd_args) => command::mv::execute_safe(cmd_args, &output).await?,
         Commands::Describe(cmd_args) => command::describe::execute_safe(cmd_args, &output).await?,
+        Commands::Notes(cmd_args) => command::notes::execute_safe(cmd_args, &output, &argv).await?,
         Commands::CherryPick(cmd_args) => {
             command::cherry_pick::execute_safe(cmd_args, &output).await?
         }
         Commands::Push(cmd_args) => command::push::execute_safe(cmd_args, &output).await?,
         Commands::CatFile(cmd_args) => command::cat_file::execute_safe(cmd_args, &output).await?,
+        Commands::Archive(cmd_args) => command::archive::execute_safe(cmd_args, &output).await?,
         Commands::HashObject(cmd_args) => {
             command::hash_object::execute_safe(cmd_args, &output).await?
         }
@@ -1170,6 +1288,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::IndexPack(cmd_args) => command::index_pack::execute_safe(cmd_args, &output)?,
         Commands::Fetch(cmd_args) => command::fetch::execute_safe(cmd_args, &output).await?,
         Commands::Fsck(cmd_args) => command::fsck::execute_safe(cmd_args, &output).await?,
+        Commands::Maintenance(cmd_args) => {
+            command::maintenance::execute_safe(cmd_args, &output).await?
+        }
         Commands::Diff(cmd_args) => command::diff::execute_safe(cmd_args, &output).await?,
         Commands::Grep(cmd_args) => command::grep::execute_safe(cmd_args, &output).await?,
         Commands::Blame(cmd_args) => command::blame::execute_safe(cmd_args, &output).await?,
@@ -1277,6 +1398,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn index_pack_progress_rewrite_keeps_pack_positional() {
+        let rewritten = rewrite_index_pack_progress_args(vec![
+            "libra".to_string(),
+            "index-pack".to_string(),
+            "--progress".to_string(),
+            "fixture.pack".to_string(),
+        ]);
+
+        assert_eq!(
+            rewritten,
+            vec!["libra", "index-pack", "--progress=text", "fixture.pack"]
+        );
+    }
+
+    #[test]
+    fn index_pack_no_progress_rewrite_uses_global_none_mode() {
+        let rewritten = rewrite_index_pack_progress_args(vec![
+            "libra".to_string(),
+            "--progress".to_string(),
+            "none".to_string(),
+            "index-pack".to_string(),
+            "--no-progress".to_string(),
+            "fixture.pack".to_string(),
+        ]);
+
+        assert_eq!(
+            rewritten,
+            vec![
+                "libra",
+                "--progress",
+                "none",
+                "index-pack",
+                "--progress=none",
+                "fixture.pack"
+            ]
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn worktree_umount_preflight_does_not_require_repo() {
@@ -1300,6 +1460,42 @@ mod tests {
         assert!(preflight.storage.is_some());
         assert!(!preflight.check_schema);
         assert!(preflight.set_hash_kind);
+    }
+
+    /// Scenario: every visible command in [`Commands`] must appear in the
+    /// `Command Groups:` section of `ROOT_AFTER_HELP`. Hidden commands
+    /// (e.g. `index-pack`, `hooks`) are intentionally excluded. This
+    /// guards against new visible commands being added without an
+    /// accompanying group entry, which would make them invisible in
+    /// scenario-grouped `libra --help` output even though they remain
+    /// callable.
+    #[test]
+    fn root_after_help_lists_every_visible_command() {
+        use clap::CommandFactory;
+
+        // Curated allowlist of hidden commands (mirrors `hide = true`
+        // attributes on `Commands::*` variants in this file).
+        const HIDDEN_COMMANDS: &[&str] = &["index-pack", "hooks"];
+
+        let cli = Cli::command();
+        for subcommand in cli.get_subcommands() {
+            let name = subcommand.get_name();
+            if HIDDEN_COMMANDS.contains(&name) || subcommand.is_hide_set() {
+                continue;
+            }
+            // `--help` is registered as an alias; skip it.
+            if name == "help" {
+                continue;
+            }
+            assert!(
+                ROOT_AFTER_HELP.contains(name),
+                "ROOT_AFTER_HELP must list every visible command in some \
+                 'Command Groups:' row; missing: `{name}`. Either add it to \
+                 the appropriate group in src/cli.rs:ROOT_AFTER_HELP or, if \
+                 it should be hidden, mark it `hide = true` and add it to \
+                 HIDDEN_COMMANDS in this test."
+            );
+        }
     }
 
     /// Scenario: clap's built-in Levenshtein matcher should suggest `init` for the

@@ -56,6 +56,19 @@ pub enum ProgressMode {
     None,
 }
 
+/// Raw progress preference requested by the caller before auto-resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressPreference {
+    /// Resolve progress based on output mode and stderr TTY status.
+    Auto,
+    /// Request NDJSON progress events.
+    Json,
+    /// Request human-readable progress output.
+    Text,
+    /// Request no progress output.
+    None,
+}
+
 // ---------------------------------------------------------------------------
 // OutputConfig
 // ---------------------------------------------------------------------------
@@ -79,6 +92,8 @@ pub struct OutputConfig {
     pub exit_code_on_warning: bool,
     /// How to report progress for long-running operations.
     pub progress: ProgressMode,
+    /// Original progress preference before [`ProgressMode`] auto-resolution.
+    pub progress_preference: ProgressPreference,
 }
 
 fn write_json_command_envelope<W: Write, T: Serialize>(
@@ -110,6 +125,7 @@ impl Default for OutputConfig {
             quiet: false,
             exit_code_on_warning: false,
             progress: ProgressMode::Text,
+            progress_preference: ProgressPreference::Auto,
         }
     }
 }
@@ -165,6 +181,13 @@ impl OutputConfig {
         };
 
         // Progress: resolve "auto" based on context.
+        let progress_preference = match progress_raw {
+            "json" => ProgressPreference::Json,
+            "text" => ProgressPreference::Text,
+            "none" => ProgressPreference::None,
+            _ => ProgressPreference::Auto,
+        };
+
         let progress = if machine {
             ProgressMode::None
         } else {
@@ -194,6 +217,7 @@ impl OutputConfig {
             quiet,
             exit_code_on_warning,
             progress,
+            progress_preference,
         }
     }
 
@@ -297,6 +321,7 @@ impl OutputConfig {
                 json_format: None,
                 quiet: true,
                 progress: ProgressMode::None,
+                progress_preference: ProgressPreference::None,
                 ..self.clone()
             }
         } else {
@@ -582,6 +607,7 @@ mod tests {
         assert!(config.pager);
         assert!(!config.quiet);
         assert!(!config.exit_code_on_warning);
+        assert_eq!(config.progress_preference, ProgressPreference::Auto);
     }
 
     #[test]
@@ -599,6 +625,7 @@ mod tests {
         assert!(!config.pager);
         assert!(config.quiet);
         assert_eq!(config.progress, ProgressMode::None);
+        assert_eq!(config.progress_preference, ProgressPreference::Auto);
     }
 
     #[test]
@@ -665,12 +692,14 @@ mod tests {
     fn resolve_explicit_progress_json() {
         let config = OutputConfig::resolve(None, false, false, "auto", false, false, "json");
         assert_eq!(config.progress, ProgressMode::Json);
+        assert_eq!(config.progress_preference, ProgressPreference::Json);
     }
 
     #[test]
     fn resolve_explicit_progress_none() {
         let config = OutputConfig::resolve(None, false, false, "auto", false, false, "none");
         assert_eq!(config.progress, ProgressMode::None);
+        assert_eq!(config.progress_preference, ProgressPreference::None);
     }
 
     #[test]

@@ -88,3 +88,145 @@ impl CompletionRequest {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `CompletionRequest::default()` must produce a fully-empty
+    /// envelope: no preamble, empty chat history, no temperature, no
+    /// tools, no documents, no thinking/reasoning, no streaming. Pin
+    /// every field so provider adapters that branch on `is_none()` /
+    /// `is_empty()` don't inherit surprising state from new defaults.
+    #[test]
+    fn completion_request_default_is_fully_empty_envelope() {
+        let req = CompletionRequest::default();
+        assert!(req.preamble.is_none());
+        assert!(req.chat_history.is_empty());
+        assert!(req.temperature.is_none());
+        assert!(req.tools.is_empty());
+        assert!(req.documents.is_empty());
+        assert!(req.thinking.is_none());
+        assert!(req.reasoning_effort.is_none());
+        assert!(req.stream.is_none());
+        assert!(req.stream_events.is_none());
+    }
+
+    /// `CompletionRequest::new(messages)` must thread the messages into
+    /// `chat_history` and leave every other field at the default. This
+    /// is the canonical "single-shot from a fresh chat" entry point.
+    #[test]
+    fn completion_request_new_threads_history_and_keeps_other_fields_default() {
+        let messages = vec![Message::user("hi"), Message::assistant("hello")];
+        let req = CompletionRequest::new(messages.clone());
+
+        assert_eq!(req.chat_history, messages);
+        // Every other field must still be at the default.
+        assert!(req.preamble.is_none());
+        assert!(req.temperature.is_none());
+        assert!(req.tools.is_empty());
+        assert!(req.documents.is_empty());
+        assert!(req.thinking.is_none());
+        assert!(req.reasoning_effort.is_none());
+        assert!(req.stream.is_none());
+        assert!(req.stream_events.is_none());
+    }
+
+    /// `CompletionRequest::new(vec![])` must produce the same shape as
+    /// `default()` — the empty-history path is the only branch that
+    /// makes this trivially observable.
+    #[test]
+    fn completion_request_new_with_empty_history_matches_default() {
+        let req = CompletionRequest::new(vec![]);
+        let default = CompletionRequest::default();
+        // Compare every observable field (no PartialEq derived because
+        // `UnboundedSender` isn't comparable).
+        assert_eq!(req.preamble, default.preamble);
+        assert_eq!(req.chat_history, default.chat_history);
+        assert_eq!(req.temperature, default.temperature);
+        assert_eq!(req.tools.len(), default.tools.len());
+        assert_eq!(req.documents.len(), default.documents.len());
+        assert_eq!(req.thinking, default.thinking);
+        assert_eq!(req.reasoning_effort, default.reasoning_effort);
+        assert_eq!(req.stream, default.stream);
+        assert!(req.stream_events.is_none());
+        assert!(default.stream_events.is_none());
+    }
+
+    /// `CompletionThinking` is `Copy` + `Eq`: comparing two variants
+    /// must work without dereference, and all 6 variants must be
+    /// distinct.
+    #[test]
+    fn completion_thinking_variants_are_distinct_copy_values() {
+        let variants = [
+            CompletionThinking::Auto,
+            CompletionThinking::Disabled,
+            CompletionThinking::Enabled,
+            CompletionThinking::Low,
+            CompletionThinking::Medium,
+            CompletionThinking::High,
+        ];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                if i == j {
+                    assert_eq!(*a, *b);
+                } else {
+                    assert_ne!(*a, *b, "{a:?} must not equal {b:?}");
+                }
+            }
+        }
+    }
+
+    /// `CompletionReasoningEffort` is `Copy` + `Eq`: all 4 variants
+    /// distinct.
+    #[test]
+    fn completion_reasoning_effort_variants_are_distinct_copy_values() {
+        let variants = [
+            CompletionReasoningEffort::Low,
+            CompletionReasoningEffort::Medium,
+            CompletionReasoningEffort::High,
+            CompletionReasoningEffort::Max,
+        ];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                if i == j {
+                    assert_eq!(*a, *b);
+                } else {
+                    assert_ne!(*a, *b, "{a:?} must not equal {b:?}");
+                }
+            }
+        }
+    }
+
+    /// `CompletionStreamEvent` must derive `Clone` so observer code
+    /// can fan out events to multiple sinks without consuming the
+    /// original. Pin the three variants by constructing and cloning
+    /// each.
+    #[test]
+    fn completion_stream_event_clone_preserves_variant_shape() {
+        let text = CompletionStreamEvent::TextDelta {
+            request_id: Some("req-1".to_string()),
+            delta: "hi".to_string(),
+        };
+        let thinking = CompletionStreamEvent::ThinkingDelta {
+            request_id: None,
+            delta: "...".to_string(),
+        };
+        let tool = CompletionStreamEvent::ToolCallPreview {
+            request_id: Some("req-2".to_string()),
+            call_id: "call-1".to_string(),
+            tool_name: "shell".to_string(),
+            arguments: serde_json::json!({"cmd": "ls"}),
+        };
+
+        let _ = text.clone();
+        let _ = thinking.clone();
+        let _ = tool.clone();
+
+        // Variant shape pin: a Debug snapshot must contain the variant
+        // discriminator so audit log emission can grep on it.
+        assert!(format!("{text:?}").contains("TextDelta"));
+        assert!(format!("{thinking:?}").contains("ThinkingDelta"));
+        assert!(format!("{tool:?}").contains("ToolCallPreview"));
+    }
+}

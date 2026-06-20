@@ -15,7 +15,10 @@ use libra::{
         reset::{self, ResetArgs},
         status::{changes_to_be_committed, changes_to_be_staged},
     },
-    internal::{branch::Branch as InternalBranch, config::ConfigKv},
+    internal::{
+        branch::{AGENT_TRACES_BRANCH, Branch as InternalBranch},
+        config::ConfigKv,
+    },
     utils::test::setup_with_new_libra_in,
 };
 
@@ -180,7 +183,7 @@ fn test_reset_hard_with_pathspec_returns_usage_error() {
 
 #[test]
 fn test_reset_soft_with_pathspec_returns_usage_error() {
-    // PathspecWithSoft is documented in docs/improvement/reset.md and mapped
+    // PathspecWithSoft is documented in docs/development/commands/reset.md and mapped
     // to CliInvalidArguments (LBR-CLI-002, exit 129). The --hard variant
     // already has coverage above; this pins the --soft side too.
     let repo = create_committed_repo_via_cli();
@@ -220,6 +223,65 @@ fn test_reset_onto_locked_branch_rejects_intent() {
     assert!(
         stderr.contains("intent"),
         "expected the locked branch name in the message, got: {stderr}"
+    );
+}
+
+/// opencode.md OC-Phase 3 acceptance criterion 5 requires that
+/// `reset` refuse to land user work on `agent-traces`, the same way
+/// the existing `intent` guard does. Functionally
+/// `is_locked_revision` already covers both branches, but missing
+/// integration coverage means a regression that pulled
+/// `AGENT_TRACES_BRANCH` out of `is_locked_branch` would ship
+/// silently. This test pins the contract end-to-end.
+#[test]
+fn test_reset_onto_locked_branch_rejects_agent_traces() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["reset", "agent-traces"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        stderr.contains("agent-traces"),
+        "expected the agent-traces branch name in the message, got: {stderr}"
+    );
+}
+
+/// Revision suffixes (`agent-traces~1`, `agent-traces^`) must also
+/// be refused. `is_locked_revision` strips revision modifiers
+/// before checking the locked list; without this regression a
+/// user-typed `reset agent-traces~2` would escape the guard.
+#[test]
+fn test_reset_onto_locked_branch_rejects_agent_traces_suffix() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["reset", "agent-traces~1"], repo.path());
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_reset_refuses_ai_managed_current_branch() {
+    let repo = create_committed_repo_via_cli();
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        Head::update_result(Head::Branch(AGENT_TRACES_BRANCH.to_string()), None)
+            .await
+            .expect("point HEAD at agent-traces");
+    }
+
+    let output = run_libra_command(&["reset", "--hard", "HEAD"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
+    assert!(
+        stderr.contains("refusing to reset locked current branch 'agent-traces'"),
+        "unexpected stderr: {stderr}"
     );
 }
 
@@ -297,7 +359,7 @@ async fn test_reset_corrupt_head_reference_returns_repo_corrupt() {
     let repo = create_committed_repo_via_cli();
     let target_commit = {
         let _guard = ChangeDirGuard::new(repo.path());
-        // Migrated from lossy `InternalBranch::find_branch` per docs/improvement/branch.md —
+        // Migrated from lossy `InternalBranch::find_branch` per docs/development/commands/branch.md —
         // storage errors no longer collapse into "main branch should exist".
         InternalBranch::find_branch_result("main", None)
             .await
@@ -388,7 +450,7 @@ async fn test_reset_pathspec_surfaces_subtree_corruption_as_repo_corrupt() {
 
     {
         let _guard = ChangeDirGuard::new(repo.path());
-        // Migrated from lossy `InternalBranch::find_branch` per docs/improvement/branch.md.
+        // Migrated from lossy `InternalBranch::find_branch` per docs/development/commands/branch.md.
         let head = InternalBranch::find_branch_result("main", None)
             .await
             .expect("failed to query main branch")
@@ -441,6 +503,9 @@ async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -455,6 +520,7 @@ async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -468,6 +534,9 @@ async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -482,6 +551,7 @@ async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -496,6 +566,9 @@ async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
             mixed: false,
             hard: true,
             pathspecs: vec![],
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
+            no_refresh: false,
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -539,6 +612,9 @@ async fn setup_standard_repo(
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -553,6 +629,7 @@ async fn setup_standard_repo(
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
     let commit1 = Head::current_commit().await.unwrap();
@@ -563,12 +640,15 @@ async fn setup_standard_repo(
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 
@@ -582,6 +662,9 @@ async fn setup_standard_repo(
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -596,6 +679,7 @@ async fn setup_standard_repo(
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
     let commit2 = Head::current_commit().await.unwrap();
@@ -606,12 +690,15 @@ async fn setup_standard_repo(
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 
@@ -625,6 +712,9 @@ async fn setup_standard_repo(
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -639,6 +729,7 @@ async fn setup_standard_repo(
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
     let commit3 = Head::current_commit().await.unwrap();
@@ -649,12 +740,15 @@ async fn setup_standard_repo(
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 
@@ -668,6 +762,9 @@ async fn setup_standard_repo(
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -682,6 +779,7 @@ async fn setup_standard_repo(
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
     let commit4 = Head::current_commit().await.unwrap();
@@ -692,12 +790,15 @@ async fn setup_standard_repo(
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 
@@ -720,6 +821,9 @@ async fn setup_test_state() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 }
@@ -741,6 +845,9 @@ async fn test_reset_soft() {
         mixed: false,
         hard: false,
         pathspecs: vec![],
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+        no_refresh: false,
     })
     .await;
 
@@ -785,6 +892,9 @@ async fn test_reset_mixed() {
         mixed: false, // false means default (mixed)
         hard: false,
         pathspecs: vec![],
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+        no_refresh: false,
     })
     .await;
 
@@ -833,6 +943,9 @@ async fn test_reset_hard() {
         mixed: false,
         hard: true,
         pathspecs: vec![],
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+        no_refresh: false,
     })
     .await;
 
@@ -900,6 +1013,9 @@ async fn test_reset_mixed_same_target_resets_index_without_moving_head() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -914,6 +1030,7 @@ async fn test_reset_mixed_same_target_resets_index_without_moving_head() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
     let head_before = Head::current_commit().await.unwrap();
@@ -928,6 +1045,9 @@ async fn test_reset_mixed_same_target_resets_index_without_moving_head() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -938,6 +1058,9 @@ async fn test_reset_mixed_same_target_resets_index_without_moving_head() {
             mixed: true,
             hard: false,
             pathspecs: vec![],
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
+            no_refresh: false,
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -977,6 +1100,9 @@ async fn test_reset_hard_same_target_restores_worktree_and_removes_staged_additi
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -991,6 +1117,7 @@ async fn test_reset_hard_same_target_restores_worktree_and_removes_staged_additi
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1005,6 +1132,9 @@ async fn test_reset_hard_same_target_restores_worktree_and_removes_staged_additi
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1015,6 +1145,9 @@ async fn test_reset_hard_same_target_restores_worktree_and_removes_staged_additi
             mixed: false,
             hard: true,
             pathspecs: vec![],
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
+            no_refresh: false,
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -1059,6 +1192,9 @@ async fn test_reset_hard_removes_paths_tracked_only_by_head_tree() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1073,6 +1209,7 @@ async fn test_reset_hard_removes_paths_tracked_only_by_head_tree() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1086,6 +1223,9 @@ async fn test_reset_hard_removes_paths_tracked_only_by_head_tree() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1100,6 +1240,7 @@ async fn test_reset_hard_removes_paths_tracked_only_by_head_tree() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1123,6 +1264,9 @@ async fn test_reset_hard_removes_paths_tracked_only_by_head_tree() {
             mixed: false,
             hard: true,
             pathspecs: vec![],
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
+            no_refresh: false,
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -1161,6 +1305,9 @@ async fn test_reset_with_head_reference() {
         mixed: true,
         hard: false,
         pathspecs: vec![],
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+        no_refresh: false,
     })
     .await;
 
@@ -1204,6 +1351,9 @@ async fn test_reset_on_branch() {
                 mixed: false,
                 hard: false,
                 pathspecs: vec![],
+                pathspec_from_file: None,
+                pathspec_file_nul: false,
+                no_refresh: false,
             })
             .await;
 
@@ -1226,4 +1376,383 @@ async fn test_reset_on_branch() {
             panic!("Should be on a branch initially");
         }
     }
+}
+
+#[tokio::test]
+#[serial]
+/// Tests reset --hard skips and preserves ignored directories and their contents
+async fn test_reset_hard_skips_ignored_directories() {
+    let temp_path = tempdir().unwrap();
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    setup_with_new_libra_in(temp_path.path()).await;
+    setup_reset_user_identity().await;
+
+    fs::write("file1.txt", "initial content\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["file1.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("first commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+        ..Default::default()
+    })
+    .await;
+
+    // Create .libraignore ignoring a directory
+    fs::write(".libraignore", "ignored_dir/\n").unwrap();
+
+    // Create the ignored directory and a file in it
+    let ignored_dir = temp_path.path().join("ignored_dir");
+    fs::create_dir_all(&ignored_dir).unwrap();
+    let ignored_file = ignored_dir.join("file2.txt");
+    fs::write(&ignored_file, "ignored file content\n").unwrap();
+
+    // Modify the tracked file
+    fs::write("file1.txt", "modified content\n").unwrap();
+
+    // Perform hard reset
+    reset::execute(ResetArgs {
+        target: "HEAD".to_string(),
+        soft: false,
+        mixed: false,
+        hard: true,
+        pathspecs: vec![],
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+        no_refresh: false,
+    })
+    .await;
+
+    // Verify tracked file is restored
+    assert_eq!(
+        fs::read_to_string("file1.txt").unwrap(),
+        "initial content\n"
+    );
+
+    // Verify ignored directory and file are preserved and not deleted
+    assert!(ignored_dir.exists());
+    assert!(ignored_file.exists());
+    assert_eq!(
+        fs::read_to_string(&ignored_file).unwrap(),
+        "ignored file content\n"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `--pathspec-from-file` / `--pathspec-file-nul` / `--no-refresh` (Git-compat
+// bulk pathspec input). These exercise the black-box CLI surface end to end.
+// ---------------------------------------------------------------------------
+
+/// Build a committed repo, then create and stage `a.txt` and `b.txt` (neither
+/// present in HEAD), so a pathspec reset can selectively unstage them.
+fn repo_with_two_staged_files() -> tempfile::TempDir {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("a.txt"), "a\n").unwrap();
+    fs::write(repo.path().join("b.txt"), "b\n").unwrap();
+    let out = run_libra_command(&["add", "a.txt", "b.txt"], repo.path());
+    assert_cli_success(&out, "failed to stage a.txt/b.txt");
+    repo
+}
+
+#[test]
+fn reset_pathspec_from_file_resets_listed_paths() {
+    let repo = repo_with_two_staged_files();
+    fs::write(repo.path().join("paths.txt"), "a.txt\n").unwrap();
+    let out = run_libra_command(
+        &["--json", "reset", "--pathspec-from-file=paths.txt"],
+        repo.path(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["data"]["mode"], "mixed");
+    let pathspecs = json["data"]["pathspecs"]
+        .as_array()
+        .expect("pathspecs array");
+    assert_eq!(pathspecs.len(), 1, "only the listed path is unstaged");
+    assert_eq!(pathspecs[0], "a.txt");
+    assert_eq!(json["data"]["files_unstaged"], 1);
+    // Pathspec resets never move HEAD, so the schema promises a null previous.
+    assert!(json["data"]["previous_commit"].is_null());
+}
+
+#[test]
+fn reset_pathspec_from_file_missing_path_errors() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("paths.txt"), "nonexistent.txt\n").unwrap();
+    let out = run_libra_command(
+        &["--json", "reset", "--pathspec-from-file=paths.txt"],
+        repo.path(),
+    );
+    assert_eq!(out.status.code(), Some(129));
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stderr).expect("expected stderr JSON in --json mode");
+    assert_eq!(report["error_code"], "LBR-CLI-003");
+}
+
+#[test]
+fn reset_pathspec_from_stdin_dash() {
+    let repo = repo_with_two_staged_files();
+    let out = run_libra_command_with_stdin(
+        &["--json", "reset", "--pathspec-from-file=-"],
+        repo.path(),
+        "a.txt\n",
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("expected JSON stdout");
+    assert_eq!(json["data"]["files_unstaged"], 1);
+    assert_eq!(json["data"]["pathspecs"][0], "a.txt");
+}
+
+#[test]
+fn reset_pathspec_file_nul_uses_nul_separator() {
+    let repo = repo_with_two_staged_files();
+    // NUL-separated, no trailing separator.
+    fs::write(repo.path().join("paths.txt"), "a.txt\0b.txt").unwrap();
+    let out = run_libra_command(
+        &[
+            "--json",
+            "reset",
+            "--pathspec-from-file=paths.txt",
+            "--pathspec-file-nul",
+        ],
+        repo.path(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["data"]["files_unstaged"], 2);
+}
+
+#[test]
+fn reset_pathspec_file_newline_default() {
+    let repo = repo_with_two_staged_files();
+    // CRLF line endings and a blank line: `\r` stripped, empty item dropped.
+    fs::write(repo.path().join("paths.txt"), "a.txt\r\nb.txt\n\n").unwrap();
+    let out = run_libra_command(
+        &["--json", "reset", "--pathspec-from-file=paths.txt"],
+        repo.path(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["data"]["files_unstaged"], 2);
+}
+
+#[test]
+fn reset_pathspec_from_file_treats_quotes_literally() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nmore\n").unwrap();
+    let out = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert_cli_success(&out, "failed to stage tracked.txt");
+    // A double-quoted line is taken literally (no Git C-style decoding), so it
+    // does NOT resolve to `tracked.txt`; the literal path is unmatched.
+    fs::write(repo.path().join("paths.txt"), "\"tracked.txt\"\n").unwrap();
+    let out = run_libra_command(
+        &["--json", "reset", "--pathspec-from-file=paths.txt"],
+        repo.path(),
+    );
+    assert_eq!(out.status.code(), Some(129));
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stderr).expect("expected stderr JSON in --json mode");
+    assert_eq!(report["error_code"], "LBR-CLI-003");
+    assert!(
+        report["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("\"tracked.txt\""),
+        "literal quotes should appear in the unmatched path: {}",
+        report["message"]
+    );
+}
+
+#[test]
+fn reset_pathspec_from_file_conflicts_with_cli_pathspec() {
+    let repo = repo_with_two_staged_files();
+    fs::write(repo.path().join("paths.txt"), "a.txt\n").unwrap();
+    // Explicit `HEAD` target so the trailing `b.txt` is parsed as a pathspec
+    // (otherwise clap binds the first positional to <target>).
+    let out = run_libra_command(
+        &[
+            "--json",
+            "reset",
+            "HEAD",
+            "--pathspec-from-file=paths.txt",
+            "--",
+            "b.txt",
+        ],
+        repo.path(),
+    );
+    assert_eq!(out.status.code(), Some(129));
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stderr).expect("expected stderr JSON in --json mode");
+    assert_eq!(report["error_code"], "LBR-CLI-002");
+    assert!(
+        report["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("pathspec-from-file"),
+        "unexpected message: {}",
+        report["message"]
+    );
+}
+
+#[test]
+fn reset_pathspec_from_file_large_set() {
+    let repo = create_committed_repo_via_cli();
+    // A representative bulk set proving streaming parse + batch processing
+    // (the plan's 10k figure is a soft perf target, not a hard assertion).
+    const N: usize = 1500;
+    let mut listing = String::new();
+    for i in 0..N {
+        let name = format!("bulk_{i}.txt");
+        fs::write(repo.path().join(&name), "x\n").unwrap();
+        listing.push_str(&name);
+        listing.push('\n');
+    }
+    let out = run_libra_command(&["add", "."], repo.path());
+    assert_cli_success(&out, "failed to stage bulk files");
+    // Write the listing AFTER staging so paths.txt itself stays untracked.
+    fs::write(repo.path().join("paths.txt"), &listing).unwrap();
+    let out = run_libra_command(
+        &["--json", "reset", "--pathspec-from-file=paths.txt"],
+        repo.path(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["data"]["files_unstaged"].as_u64(), Some(N as u64));
+}
+
+#[test]
+fn reset_pathspec_from_file_invalid_utf8_path() {
+    let repo = create_committed_repo_via_cli();
+    // Raw invalid UTF-8 bytes as a single NUL-delimited pathspec.
+    fs::write(repo.path().join("paths.bin"), [0xff, 0xfe, 0x00]).unwrap();
+    let out = run_libra_command(
+        &[
+            "--json",
+            "reset",
+            "--pathspec-from-file=paths.bin",
+            "--pathspec-file-nul",
+        ],
+        repo.path(),
+    );
+    assert_eq!(out.status.code(), Some(129));
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stderr).expect("expected stderr JSON in --json mode");
+    assert_eq!(report["error_code"], "LBR-CLI-002");
+}
+
+#[test]
+fn reset_no_refresh_is_noop() {
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["--json", "reset", "--no-refresh", "HEAD"], repo.path());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["data"]["mode"], "mixed");
+}
+
+#[test]
+fn reset_pathspec_file_nul_alone_is_noop() {
+    let repo = create_committed_repo_via_cli();
+    // `--pathspec-file-nul` without `--pathspec-from-file` only switches the
+    // separator; with no pathspec source it is an inert no-op (full reset).
+    let out = run_libra_command(
+        &["--json", "reset", "--pathspec-file-nul", "HEAD"],
+        repo.path(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["data"]["mode"], "mixed");
+    assert!(
+        json["data"]["pathspecs"]
+            .as_array()
+            .expect("pathspecs array")
+            .is_empty()
+    );
+}
+
+#[test]
+fn reset_json_with_quiet_still_emits_json() {
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(
+        &["--json", "--quiet", "reset", "--hard", "HEAD"],
+        repo.path(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["command"], "reset");
+    assert_eq!(json["data"]["mode"], "hard");
+}
+
+#[test]
+fn reset_pathspec_from_file_rejects_escape() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("paths.txt"), "../escape.txt\n").unwrap();
+    let out = run_libra_command(
+        &["--json", "reset", "--pathspec-from-file=paths.txt"],
+        repo.path(),
+    );
+    assert_eq!(out.status.code(), Some(129));
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stderr).expect("expected stderr JSON in --json mode");
+    assert_eq!(report["error_code"], "LBR-CLI-002");
+    assert!(
+        report["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("outside the repository"),
+        "unexpected message: {}",
+        report["message"]
+    );
 }

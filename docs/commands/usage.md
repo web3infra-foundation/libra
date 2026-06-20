@@ -1,6 +1,6 @@
 # `libra usage`
 
-Report and prune AI provider/model usage aggregates for the current repository.
+Report and prune AI provider/model and agent usage aggregates for the current repository.
 
 ## Synopsis
 
@@ -12,8 +12,9 @@ libra usage prune [--retention-days <days>]
 ## Description
 
 `libra usage` reads usage rows recorded by Libra's AI provider runtime and
-aggregates them by provider/model. Reports can be filtered by time range,
-session id, thread id, and whether failed provider requests should be included.
+aggregates them by provider/model, agent, or agent/provider/model. Reports can
+be filtered by time range, session id, thread id, and whether failed provider
+requests should be included.
 When a provider reports an exact `cost_usd`, Libra stores and displays that
 value. Otherwise it estimates `cost_estimate_micro_dollars` from the built-in
 model capability pricing table or a repository override in `.libra/config.toml`.
@@ -22,14 +23,16 @@ model capability pricing table or a repository override in `.libra/config.toml`.
 
 | Subcommand | Description |
 |------------|-------------|
-| `report` | Aggregate usage rows; currently supports `--by model` |
+| `report` | Aggregate usage rows by model, agent, or agent/provider/model |
 | `prune` | Delete usage rows older than the configured retention window |
 
 ## Report Options
 
 | Flag | Description |
 |------|-------------|
-| `--by model` | Aggregation dimension; `model` is the current supported value |
+| `--by model` | Aggregate by provider/model; this is the default and preserves the original output shape |
+| `--by agent` | Aggregate by declarative agent name only |
+| `--by agent-provider-model` | Aggregate by agent name, provider, and model |
 | `--since <time>` | Start filter; accepts RFC3339, `YYYY-MM-DD`, or relative values like `24h` / `7d` |
 | `--until <time>` | End filter; accepts RFC3339, `YYYY-MM-DD`, or relative values like `1h` |
 | `--session <id>` | Restrict to one provider session id |
@@ -45,15 +48,30 @@ model capability pricing table or a repository override in `.libra/config.toml`.
 
 ## Human Output
 
-Human reports print one tab-separated row per provider/model:
+Human reports print one tab-separated row per selected grouping.
+
+Default provider/model grouping:
 
 ```text
 <provider>	<model>	requests=<n>	failed=<n>	tokens=<n>	cached=<n>	reasoning=<n>	tool_calls=<n>	wall_ms=<n> [ $<actual>| ~$<estimate>]
 ```
 
+Agent grouping:
+
+```text
+<agent_name>	requests=<n>	failed=<n>	tokens=<n>	cached=<n>	reasoning=<n>	tool_calls=<n>	wall_ms=<n> [ $<actual>| ~$<estimate>]
+```
+
+Agent/provider/model grouping:
+
+```text
+<agent_name>	<provider>	<model>	requests=<n>	failed=<n>	tokens=<n>	cached=<n>	reasoning=<n>	tool_calls=<n>	wall_ms=<n> [ $<actual>| ~$<estimate>]
+```
+
 CSV mode prints a header row followed by comma-separated rows suitable for
-spreadsheet import. The CSV columns include both `cost_usd` and
-`cost_estimate_micro_dollars`; estimated human output is prefixed with `~$`.
+spreadsheet import. The CSV leading columns match the selected grouping, and
+the metric columns include both `cost_usd` and `cost_estimate_micro_dollars`;
+estimated human output is prefixed with `~$`.
 
 ## Pricing Overrides
 
@@ -102,6 +120,47 @@ passed. The flag always wins over the project config.
 
 `prune` uses `usage.prune` and reports the retention window, cutoff timestamp,
 and deleted row count.
+
+## Examples
+
+```bash
+# Per-model totals across all recorded rows
+libra usage report
+
+# Per-model totals for the last 24 hours
+libra usage report --since 24h
+
+# Per-agent totals
+libra usage report --by agent
+
+# Per-agent provider/model breakdown
+libra usage report --by agent-provider-model
+
+# Include failed requests in counts and wall-clock totals
+libra usage report --since 7d --include-failed
+
+# Restrict the report to a single session
+libra usage report --session <session-id>
+
+# Restrict the report to a single canonical thread
+libra usage report --thread <thread-uuid>
+
+# CSV table for downstream tooling (spreadsheets, BI dashboards)
+libra usage report --format csv
+
+# Structured JSON envelope for agents
+libra usage --json report --since 7d
+
+# Use the configured retention window (.libra/libra.db config `[usage].retention_days`)
+libra usage prune
+
+# Delete rows older than 30 days
+libra usage prune --retention-days 30
+```
+
+The same banner is rendered by `libra usage --help` so the doc and the
+CLI surface stay in sync (cross-cutting `--help` EXAMPLES rollout, see
+`docs/development/commands/_general.md` item B).
 
 ## Notes
 

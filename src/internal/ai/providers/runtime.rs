@@ -1,7 +1,7 @@
 //! Provider runtime adapter — `AnyCompletionModel` and `AnyCompletionRawResponse`.
 //!
 //! This module is the OC-Phase 1 P1.1 deliverable from
-//! `docs/improvement/opencode.md`. It lets the runtime carry **any** provider's
+//! `docs/development/commands/_general.md`. It lets the runtime carry **any** provider's
 //! completion model through the same generic call sites without resorting to
 //! `Box<dyn CompletionModel>` — the trait is **not** object-safe (returns
 //! position `impl Future`, has a `Clone` bound) so a trait object simply does
