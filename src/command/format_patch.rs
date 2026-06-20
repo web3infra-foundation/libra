@@ -17,7 +17,7 @@ use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
 use serde::Serialize;
 
 use crate::{
-    command::{load_object, log},
+    command::log,
     common_utils::parse_commit_msg,
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -327,29 +327,28 @@ async fn resolve_range_commits(args: &FormatPatchArgs) -> Result<Vec<Commit>, Cl
         HashSet::new()
     };
 
-    // Walk from the included tip
+    // Walk from the included tip.  get_reachable_commits performs a BFS
+    // traversal, returning commits in newest-first order (tip, then
+    // parents, then grandparents, …).
     let all_reachable = log::get_reachable_commits(include_tip.to_string(), None)
         .await
         .map_err(|e| {
             FormatPatchError::InvalidTarget(format!("failed to walk commits from '{spec}': {e}"))
         })?;
 
-    // Include the tip itself (get_reachable_commits includes the start)
-    let mut commits: Vec<Commit> =
-        std::iter::once(load_object::<Commit>(&include_tip).map_err(|e| {
-            FormatPatchError::InvalidTarget(format!("failed to load commit '{include_tip}': {e}"))
-        })?)
-        .chain(all_reachable)
+    // Filter, deduplicate, then reverse so patches are numbered oldest-first.
+    let mut commits: Vec<Commit> = all_reachable
+        .into_iter()
         .filter(|c| !excluded.contains(&c.id))
         .filter(|c| c.parent_commit_ids.len() <= 1) // skip merge commits
         .collect();
 
-    // Deduplicate (reachable set may overlap)
+    // Deduplicate (reachable set may already include the tip).
     let mut seen = HashSet::new();
     commits.retain(|c| seen.insert(c.id));
 
-    // Oldest first (ascending committer timestamp)
-    commits.sort_by_key(|c| c.committer.timestamp);
+    // BFS returns newest-first; reverse gives oldest-first for linear history.
+    commits.reverse();
 
     Ok(commits)
 }
@@ -540,12 +539,17 @@ fn format_cover_letter(args: &FormatPatchArgs, commits: &[Commit]) -> Result<Str
         now.format("%a %b %e %H:%M:%S %Y")
     ));
 
+    let version = args
+        .reroll_count
+        .map(|v| format!(" v{v}"))
+        .unwrap_or_default();
+    let prefix = format!("{}{}", args.subject_prefix, version);
+
     out.push_str("From: \n");
     out.push_str(&format!("Date: {}\n", now.to_rfc2822()));
     out.push_str(&format!(
-        "Subject: [{} 0/{}] *** SUBJECT HERE ***\n",
-        args.subject_prefix,
-        commits.len()
+        "Subject: [{prefix} 0/{total}] *** SUBJECT HERE ***\n",
+        total = commits.len()
     ));
     out.push_str("MIME-Version: 1.0\n");
     out.push_str("Content-Type: text/plain; charset=UTF-8\n");
