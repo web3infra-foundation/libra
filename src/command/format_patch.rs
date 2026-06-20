@@ -299,12 +299,15 @@ async fn resolve_range_commits(args: &FormatPatchArgs) -> Result<Vec<Commit>, Cl
 
     // Parse A..B notation
     let (exclude_tip_opt, include_tip) = if let Some((left, right)) = spec.split_once("..") {
-        let left_spec = if left.is_empty() { "HEAD" } else { left };
+        // Empty left side (..B) means "no exclusion" — include all commits
+        // reachable from B.  Empty right side (A..) defaults to HEAD.
+        let exclude_tip_opt = if left.is_empty() {
+            None
+        } else {
+            Some(resolve_single_rev(left).await?)
+        };
         let right_spec = if right.is_empty() { "HEAD" } else { right };
-        (
-            Some(resolve_single_rev(left_spec).await?),
-            resolve_single_rev(right_spec).await?,
-        )
+        (exclude_tip_opt, resolve_single_rev(right_spec).await?)
     } else {
         // Single revision: range is <spec>..HEAD
         let head = resolve_current_head().await?;
@@ -693,6 +696,7 @@ fn truncate_slug(slug: &str) -> String {
 }
 
 /// Build the output file path for a single patch.
+/// When `slug` is empty the file is treated as the cover letter.
 fn patch_filename(
     numbered: bool,
     patch_num: usize,
@@ -700,8 +704,8 @@ fn patch_filename(
     start_num: usize,
     slug: &str,
 ) -> String {
-    if patch_num == 0 {
-        // Cover letter
+    if slug.is_empty() {
+        // Cover letter (only the cover-letter code path passes an empty slug)
         "0000-cover-letter.patch".to_string()
     } else if numbered {
         let width = number_width(total + start_num - 1);
