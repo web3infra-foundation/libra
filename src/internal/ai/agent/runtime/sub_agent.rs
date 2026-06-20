@@ -1,7 +1,7 @@
 //! Sub-agent dispatcher contract — types and trait definitions only.
 //!
 //! This module started as the OC-Phase 3 P3.2 vocabulary from
-//! `docs/improvement/opencode.md` and now also carries the shared
+//! `docs/development/commands/_general.md` and now also carries the shared
 //! runtime collaborators used by the shipped dispatcher tail:
 //! [`SubAgentDispatcher`], [`DispatchContext`], the task
 //! invocation/result/failure shapes, permission asking, context-frame
@@ -477,7 +477,7 @@ impl ContextFrameLoader {
 
 /// The shape the model emits when it calls the `task` tool.
 ///
-/// Mirrors `TaskInvocation` from `docs/improvement/opencode.md` and the
+/// Mirrors `TaskInvocation` from `docs/development/commands/_general.md` and the
 /// JSON schema returned by `ToolSpec::task()` (OC-Phase 3 P3.1).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

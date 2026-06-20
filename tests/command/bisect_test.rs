@@ -98,6 +98,8 @@ async fn create_linear_commits(count: usize) -> Vec<String> {
             verbose: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         })
         .await;
         commit::execute(commit::CommitArgs {
@@ -112,6 +114,7 @@ async fn create_linear_commits(count: usize) -> Vec<String> {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         })
         .await;
 

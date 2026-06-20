@@ -56,8 +56,10 @@ use crate::{
 
 const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
 
-/// Connection/idle timeout for push network operations (discovery, send-pack, receive-pack).
-const PUSH_TIMEOUT: Duration = Duration::from_secs(60);
+/// Total timeout for push reference discovery and initial connection setup.
+const PUSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Idle timeout for push send-pack / receive-pack operations.
+const PUSH_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Push local refs and objects to a remote repository.
 ///
@@ -68,7 +70,7 @@ const PUSH_TIMEOUT: Duration = Duration::from_secs(60);
 /// remote/branch push, `-u` upstream setup, forced overwrite, dry-run,
 /// JSON for agents) so a user does not need to read the design doc to
 /// remember the canonical flags. Cross-cutting `--help` EXAMPLES rollout
-/// per `docs/improvement/README.md` item B.
+/// per `docs/development/commands/_general.md` item B.
 pub const PUSH_EXAMPLES: &str = "\
 EXAMPLES:
     libra push                          Push current branch to tracking remote
@@ -81,6 +83,9 @@ EXAMPLES:
                                         Preview a mirror sync without writing
     libra push -u origin feature-x      Push and set upstream tracking
     libra push --force origin main      Force push (overwrites remote history)
+    libra push --force-with-lease origin main
+                                        Force push only if the remote still matches your tracking ref
+    libra push --porcelain origin main  Machine-readable per-ref status lines
     libra push --dry-run                Preview what would be pushed without sending
     libra push --json                   Structured JSON output for agents";
 
@@ -100,6 +105,49 @@ pub struct PushArgs {
     /// force push to remote repository
     #[clap(long, short = 'f')]
     pub force: bool,
+
+    /// Force the update only if the remote ref still matches the expected (lease) OID.
+    /// Forms: bare `--force-with-lease`, `=<refname>`, or `=<refname>:<expect>`
+    #[clap(long, num_args = 0..=1, require_equals = true, conflicts_with = "force")]
+    pub force_with_lease: Option<Option<String>>,
+
+    /// Accepted for `git push` compatibility; currently a no-op (the lease check
+    /// uses the remote-tracking ref OID only)
+    #[clap(long)]
+    pub force_if_includes: bool,
+
+    /// Accepted for compatibility; thin-pack encoding is not implemented (no-op)
+    #[clap(long, conflicts_with = "no_thin")]
+    pub thin: bool,
+
+    /// Accepted for compatibility; thin-pack encoding is not implemented (no-op)
+    #[clap(long = "no-thin", conflicts_with = "thin")]
+    pub no_thin: bool,
+
+    /// Request an atomic push: the remote applies all ref updates together or
+    /// none at all. Errors if the remote does not advertise the `atomic`
+    /// capability.
+    #[clap(long)]
+    pub atomic: bool,
+
+    /// Transmit a server-side option (repeatable). Errors if the remote does not
+    /// advertise the `push-options` capability.
+    #[clap(long = "push-option", short = 'o', value_name = "OPTION")]
+    pub push_option: Vec<String>,
+
+    /// Also push annotated tags that point at commits being pushed and are
+    /// missing on the remote.
+    #[clap(long)]
+    pub follow_tags: bool,
+
+    /// GPG-sign the push with a push certificate. Errors if the remote does not
+    /// advertise the `push-cert` capability or no signing key is configured.
+    #[clap(long)]
+    pub signed: bool,
+
+    /// Machine-readable single-line-per-ref output; conflicts with `--json`/`--machine`
+    #[clap(long)]
+    pub porcelain: bool,
 
     /// Do everything except actually send the updates
     #[clap(long, short = 'n')]
@@ -123,6 +171,15 @@ impl PushArgs {
             refspecs,
             set_upstream: false,
             force: false,
+            force_with_lease: None,
+            force_if_includes: false,
+            thin: false,
+            no_thin: false,
+            atomic: false,
+            push_option: Vec::new(),
+            follow_tags: false,
+            signed: false,
+            porcelain: false,
             dry_run: false,
             tags: false,
             mirror: false,
@@ -208,6 +265,21 @@ pub enum PushError {
 
     #[error("failed to read repository state: {0}")]
     RepoState(String),
+
+    #[error("the receiving end does not support --atomic push")]
+    AtomicUnsupported,
+
+    #[error("the receiving end does not support push options")]
+    PushOptionsUnsupported,
+
+    #[error("the receiving end does not support signed push")]
+    PushSignUnsupported,
+
+    #[error("--signed requires a configured signing key, but none was found")]
+    PushSignNoKey,
+
+    #[error("failed to create push certificate signature: {0}")]
+    PushSignFailed(String),
 }
 
 impl From<PushError> for CliError {
@@ -295,8 +367,126 @@ impl From<PushError> for CliError {
             PushError::RepoState(..) => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::RepoCorrupt)
                 .with_hint("try 'libra status' to verify repository state"),
+            PushError::AtomicUnsupported => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_hint("retry without --atomic, or push to a remote that supports atomic updates"),
+            PushError::PushOptionsUnsupported => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_hint("retry without -o/--push-option, or push to a remote that supports push options"),
+            PushError::PushSignUnsupported => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_hint("retry without --signed, or push to a remote that supports signed push"),
+            PushError::PushSignNoKey => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::AuthMissingCredentials)
+                .with_hint("configure a signing key (see 'libra config user.signingkey' / vault setup)"),
+            PushError::PushSignFailed(_) => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::InternalInvariant),
         }
     }
+}
+
+/// Decide whether to advertise the `atomic` capability. With `--atomic`, the
+/// remote must have advertised `atomic` during reference discovery; otherwise
+/// the push is refused up-front (matching Git's client behaviour).
+fn resolve_atomic_capability(
+    atomic_requested: bool,
+    server_capabilities: &[String],
+) -> Result<bool, PushError> {
+    if !atomic_requested {
+        return Ok(false);
+    }
+    if server_capabilities.iter().any(|cap| cap == "atomic") {
+        Ok(true)
+    } else {
+        Err(PushError::AtomicUnsupported)
+    }
+}
+
+/// Decide whether to send a push-options section. When options are supplied the
+/// remote must have advertised the `push-options` capability during discovery;
+/// otherwise the push is refused up-front (matching Git).
+fn resolve_push_options_capability(
+    options: &[String],
+    server_capabilities: &[String],
+) -> Result<bool, PushError> {
+    if options.is_empty() {
+        return Ok(false);
+    }
+    if server_capabilities.iter().any(|cap| cap == "push-options") {
+        Ok(true)
+    } else {
+        Err(PushError::PushOptionsUnsupported)
+    }
+}
+
+/// Encode the push-options protocol section: one pkt-line per option followed by
+/// a flush-pkt, appended after the ref-update command flush and before the pack.
+fn encode_push_options(options: &[String], data: &mut BytesMut) {
+    for option in options {
+        add_pkt_line_string(data, option.clone());
+    }
+    data.extend_from_slice(b"0000");
+}
+
+/// Resolve the push-certificate nonce for `--signed`. The remote must advertise
+/// `push-cert[=<nonce>]` during discovery; otherwise the push is refused.
+fn resolve_push_cert_nonce(
+    signed: bool,
+    server_capabilities: &[String],
+) -> Result<Option<String>, PushError> {
+    if !signed {
+        return Ok(None);
+    }
+    for cap in server_capabilities {
+        if let Some(nonce) = cap.strip_prefix("push-cert=") {
+            return Ok(Some(nonce.to_string()));
+        }
+        if cap == "push-cert" {
+            return Ok(Some(String::new()));
+        }
+    }
+    Err(PushError::PushSignUnsupported)
+}
+
+/// Build the signed payload of a push certificate (Git's `certificate
+/// version 0.1` text): a header block, a blank line, then one `<old> <new>
+/// <ref>` command per line. This exact text is what gets GPG-signed.
+fn build_push_certificate(
+    pusher: &str,
+    pushee: &str,
+    nonce: &str,
+    commands: &[(String, String, String)],
+) -> String {
+    let mut cert = String::new();
+    cert.push_str("certificate version 0.1\n");
+    cert.push_str(&format!("pusher {pusher}\n"));
+    cert.push_str(&format!("pushee {pushee}\n"));
+    cert.push_str(&format!("nonce {nonce}\n"));
+    cert.push('\n');
+    for (old, new, refname) in commands {
+        cert.push_str(&format!("{old} {new} {refname}\n"));
+    }
+    cert
+}
+
+/// Frame a signed push certificate into the send-pack stream: the `push-cert`
+/// announcement (carrying the capability list), the signed certificate body,
+/// the armored signature, and the `push-cert-end` terminator, then a flush.
+fn encode_push_cert_section(
+    capability: &str,
+    certificate: &str,
+    armored_signature: &str,
+    data: &mut BytesMut,
+) {
+    add_pkt_line_string(data, format!("push-cert\0{capability}\n"));
+    for line in certificate.lines() {
+        add_pkt_line_string(data, format!("{line}\n"));
+    }
+    for line in armored_signature.lines() {
+        add_pkt_line_string(data, format!("{line}\n"));
+    }
+    add_pkt_line_string(data, "push-cert-end\n".to_string());
+    data.extend_from_slice(b"0000");
 }
 
 // ---------------------------------------------------------------------------
@@ -445,8 +635,21 @@ pub async fn execute(args: PushArgs) {
 pub async fn execute_safe(args: PushArgs, output: &OutputConfig) -> CliResult<()> {
     validate_push_args(&args).map_err(CliError::from)?;
 
+    // `--porcelain` is mutually exclusive with any JSON mode. The global
+    // `--json`/`--machine` flags live on `Cli`, not `PushArgs`, so clap cannot
+    // express this — enforce it here (`is_json()` covers both, since `--machine`
+    // implies `--json=ndjson`).
+    if args.porcelain && output.is_json() {
+        return Err(CliError::command_usage(
+            "--porcelain cannot be combined with --json or --machine",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+        .with_hint("choose one machine-readable format: --porcelain or --json/--machine"));
+    }
+
+    let porcelain = args.porcelain;
     let result = run_push(args, output).await.map_err(CliError::from)?;
-    render_push_output(&result, output)?;
+    render_push_output(&result, output, porcelain)?;
     if !result.dry_run && !result.up_to_date && !result.updates.is_empty() {
         dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_PUSH).await;
     }
@@ -473,6 +676,30 @@ fn validate_push_args(args: &PushArgs) -> Result<(), PushError> {
         return Err(PushError::InvalidArguments(
             "--mirror cannot be combined with refspecs, --tags, or --set-upstream".to_string(),
         ));
+    }
+
+    Ok(())
+}
+
+async fn validate_local_refspecs(args: &PushArgs, current_branch: &str) -> Result<(), PushError> {
+    if args.mirror {
+        return Ok(());
+    }
+
+    if args.refspecs.is_empty() && !args.tags {
+        resolve_local_ref(current_branch).await?;
+    }
+
+    for refspec in &args.refspecs {
+        match parse_refspec(refspec)? {
+            ParsedRefspec::Update { src, dst } => {
+                let local_ref = resolve_local_ref(&src).await?;
+                normalize_destination_ref(&dst, local_ref.kind)?;
+            }
+            ParsedRefspec::Delete { dst } => {
+                normalize_delete_ref(&dst)?;
+            }
+        }
     }
 
     Ok(())
@@ -519,6 +746,8 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         return Err(PushError::UnsupportedLocalFileRemote);
     }
 
+    validate_local_refspecs(&args, &current_branch).await?;
+
     // Determine transport: SSH or HTTPS
     let is_ssh = is_ssh_spec(&repo_url);
 
@@ -529,37 +758,42 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
                 detail: e.to_string(),
             }
         })?;
+    let remote_client = remote_client
+        .with_network_timeouts(PUSH_CONNECT_TIMEOUT, PUSH_IDLE_TIMEOUT)
+        .map_err(|e| PushError::Network(format!("failed to configure remote transport: {e}")))?;
 
-    let discovery =
-        tokio::time::timeout(PUSH_TIMEOUT, remote_client.discovery_reference(ReceivePack))
-            .await
-            .map_err(|_| PushError::Timeout {
-                phase: "discovery".to_string(),
-                seconds: PUSH_TIMEOUT.as_secs(),
-            })?
-            .map_err(|e| match e {
-                GitError::UnAuthorized(_) => PushError::AuthenticationFailed {
-                    url: repo_url.clone(),
-                },
-                GitError::NetworkError(detail) => {
-                    let lower = detail.to_lowercase();
-                    if lower.contains("timeout") || lower.contains("timed out") {
-                        PushError::Timeout {
-                            phase: "discovery".to_string(),
-                            seconds: PUSH_TIMEOUT.as_secs(),
-                        }
-                    } else {
-                        PushError::DiscoveryFailed {
-                            url: repo_url.clone(),
-                            detail,
-                        }
-                    }
+    let discovery = tokio::time::timeout(
+        PUSH_CONNECT_TIMEOUT,
+        remote_client.discovery_reference(ReceivePack),
+    )
+    .await
+    .map_err(|_| PushError::Timeout {
+        phase: "discovery".to_string(),
+        seconds: PUSH_CONNECT_TIMEOUT.as_secs(),
+    })?
+    .map_err(|e| match e {
+        GitError::UnAuthorized(_) => PushError::AuthenticationFailed {
+            url: repo_url.clone(),
+        },
+        GitError::NetworkError(detail) => {
+            let lower = detail.to_lowercase();
+            if lower.contains("timeout") || lower.contains("timed out") {
+                PushError::Timeout {
+                    phase: "discovery".to_string(),
+                    seconds: PUSH_CONNECT_TIMEOUT.as_secs(),
                 }
-                other => PushError::DiscoveryFailed {
+            } else {
+                PushError::DiscoveryFailed {
                     url: repo_url.clone(),
-                    detail: other.to_string(),
-                },
-            })?;
+                    detail,
+                }
+            }
+        }
+        other => PushError::DiscoveryFailed {
+            url: repo_url.clone(),
+            detail: other.to_string(),
+        },
+    })?;
 
     let local_kind = get_hash_kind();
     if discovery.hash_kind != local_kind {
@@ -572,6 +806,10 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     let remote_refs = remote_ref_map(&discovery.refs);
 
     let mut warnings = Vec::new();
+    // `--force-with-lease` permits a non-fast-forward update into the plan; the
+    // lease check below is the real gate (so the plain non-ff rejection in
+    // `add_update_ref_plan` does not pre-empt it).
+    let effective_force = args.force || args.force_with_lease.is_some();
     let mut plans = if args.mirror {
         build_mirror_update_plan(&remote_refs, &mut warnings).await?
     } else {
@@ -589,7 +827,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
                 resolve_local_ref(&current_branch).await?,
                 tracked_ref,
                 &remote_refs,
-                args.force,
+                effective_force,
                 &mut warnings,
                 &mut seen_remote_refs,
                 &mut plans,
@@ -605,7 +843,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
                         local_ref,
                         remote_ref,
                         &remote_refs,
-                        args.force,
+                        effective_force,
                         &mut warnings,
                         &mut seen_remote_refs,
                         &mut plans,
@@ -626,12 +864,33 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         if args.tags {
             add_all_tag_update_plans(
                 &remote_refs,
-                args.force,
+                effective_force,
                 &mut warnings,
                 &mut seen_remote_refs,
                 &mut plans,
             )
             .await?;
+        }
+
+        if args.follow_tags {
+            // Tips of the refs already scheduled for update drive reachability.
+            let pushed_tips: Vec<ObjectHash> = plans
+                .iter()
+                .filter(|plan| plan.update.kind == PushRefUpdateKind::Update)
+                .filter_map(|plan| ObjectHash::from_str(&plan.update.new_oid).ok())
+                .collect();
+            for tag_ref in collect_follow_tag_refs(&pushed_tips, &remote_refs).await? {
+                let remote_ref = tag_ref.full_ref.clone();
+                add_update_ref_plan(
+                    tag_ref,
+                    remote_ref,
+                    &remote_refs,
+                    effective_force,
+                    &mut warnings,
+                    &mut seen_remote_refs,
+                    &mut plans,
+                )?;
+            }
         }
 
         plans
@@ -666,6 +925,17 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         });
     }
 
+    // `--force-with-lease`: validate the lease against the server's advertised
+    // OIDs (from discovery) before collecting objects, encoding a pack, uploading
+    // LFS, or sending anything. A failed lease aborts with no remote/local change.
+    if let Some(lease) = parse_force_with_lease(&args.force_with_lease) {
+        if args.force_if_includes {
+            warnings.push(FORCE_IF_INCLUDES_NOOP_WARNING.to_string());
+        }
+        let tracking = collect_lease_tracking_oids(&repository, &plans).await;
+        validate_force_with_lease(&lease, &plans, &tracking)?;
+    }
+
     let obj_result = collect_push_objects(&plans).await?;
     let objs = obj_result.objs;
     warnings.extend(obj_result.warnings);
@@ -688,35 +958,91 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         });
     }
 
+    // `--atomic` / `-o` / `--signed`: only advertise these capabilities if the
+    // remote supports them, otherwise refuse before sending anything (Git).
+    let use_atomic = resolve_atomic_capability(args.atomic, &discovery.capabilities)?;
+    let use_push_options =
+        resolve_push_options_capability(&args.push_option, &discovery.capabilities)?;
+    let push_cert_nonce = resolve_push_cert_nonce(args.signed, &discovery.capabilities)?;
+
     let mut data = BytesMut::new();
     let mut capabilities = vec!["report-status"];
     if get_wire_hash_kind() == HashKind::Sha256 {
         capabilities.push("object-format=sha256");
     }
+    if use_atomic {
+        capabilities.push("atomic");
+    }
+    if use_push_options {
+        capabilities.push("push-options");
+    }
+    if push_cert_nonce.is_some() {
+        capabilities.push("push-cert");
+    }
     let capability = capabilities.join(" ");
     let zero_oid = ObjectHash::zero_str(get_hash_kind());
-    for (index, plan) in plans.iter().enumerate() {
-        let old_oid = plan
-            .update
-            .old_oid
-            .as_deref()
-            .unwrap_or(&zero_oid)
-            .to_string();
-        let new_oid = match plan.update.kind {
-            PushRefUpdateKind::Update => plan.update.new_oid.clone(),
-            PushRefUpdateKind::Delete => zero_oid.clone(),
-        };
-        let suffix = if index == 0 {
-            format!("\0{capability}")
-        } else {
-            String::new()
-        };
-        add_pkt_line_string(
-            &mut data,
-            format!("{old_oid} {new_oid} {}{suffix}\n", plan.update.remote_ref),
+
+    // Build the `<old> <new> <ref>` command tuples shared by both wire forms.
+    let commands: Vec<(String, String, String)> = plans
+        .iter()
+        .map(|plan| {
+            let old_oid = plan
+                .update
+                .old_oid
+                .as_deref()
+                .unwrap_or(&zero_oid)
+                .to_string();
+            let new_oid = match plan.update.kind {
+                PushRefUpdateKind::Update => plan.update.new_oid.clone(),
+                PushRefUpdateKind::Delete => zero_oid.clone(),
+            };
+            (old_oid, new_oid, plan.update.remote_ref.clone())
+        })
+        .collect();
+
+    if let Some(nonce) = push_cert_nonce {
+        // Signed push: build, GPG-sign, and frame a push certificate.
+        let identity = crate::command::commit::resolve_committer_identity()
+            .await
+            .map_err(|e| PushError::PushSignFailed(e.to_string()))?;
+        let pusher = format!(
+            "{} <{}> {} +0000",
+            identity.name,
+            identity.email,
+            chrono::Utc::now().timestamp()
         );
+        let certificate = build_push_certificate(&pusher, &repo_url, &nonce, &commands);
+        let unseal_key = crate::internal::vault::load_unseal_key()
+            .await
+            .ok_or(PushError::PushSignNoKey)?;
+        let sig_hex = crate::internal::vault::pgp_sign(
+            &crate::utils::util::storage_path(),
+            &unseal_key,
+            certificate.as_bytes(),
+        )
+        .await
+        .map_err(|e| PushError::PushSignFailed(e.to_string()))?;
+        let armored = crate::internal::vault::signature_to_armored(&sig_hex)
+            .map_err(|e| PushError::PushSignFailed(e.to_string()))?;
+        encode_push_cert_section(&capability, &certificate, &armored, &mut data);
+    } else {
+        for (index, (old_oid, new_oid, remote_ref)) in commands.iter().enumerate() {
+            let suffix = if index == 0 {
+                format!("\0{capability}")
+            } else {
+                String::new()
+            };
+            add_pkt_line_string(
+                &mut data,
+                format!("{old_oid} {new_oid} {remote_ref}{suffix}\n"),
+            );
+        }
+        data.extend_from_slice(b"0000");
+        // Push-options section follows the command flush, before the pack.
+        if use_push_options {
+            encode_push_options(&args.push_option, &mut data);
+        }
     }
-    data.extend_from_slice(b"0000");
     tracing::debug!("{:?}", data);
 
     // Upload LFS files (only for HTTP remotes)
@@ -781,9 +1107,9 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     let bytes_pushed = pack_data.len() as u64;
     data.extend_from_slice(&pack_data);
 
-    // Send pack via the appropriate transport.
-    // Idle timeouts (60s) are enforced at the transport layer: SSH wraps each
-    // read/write/wait call, HTTPS uses reqwest connect_timeout + read_timeout.
+    // Send pack via the appropriate transport. SSH wraps each read/write/wait
+    // operation with the push idle timeout, and HTTPS uses reqwest's
+    // connect_timeout + read_timeout.
     match &remote_client {
         RemoteClient::Ssh(ssh_client) => {
             let response_bytes = ssh_client
@@ -1041,6 +1367,118 @@ async fn resolve_tag_ref(short_name: &str, original: &str) -> Result<ResolvedLoc
     })
 }
 
+/// One-time warning emitted when `--force-if-includes` is paired with
+/// `--force-with-lease` (the flag is accepted but not yet implemented).
+const FORCE_IF_INCLUDES_NOOP_WARNING: &str =
+    "--force-if-includes is accepted but currently a no-op; lease check uses tracking-ref OID only";
+
+/// Parsed `--force-with-lease[=<refname>[:<expect>]]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ForceWithLease {
+    /// Bare `--force-with-lease`: every pushed ref must still match its tracking ref.
+    All,
+    /// `--force-with-lease=<refname>`: only this ref must match its tracking ref.
+    Ref(String),
+    /// `--force-with-lease=<refname>:<expect>`: this ref must match an explicit OID.
+    Exact { refname: String, expect: String },
+}
+
+/// Decode the raw clap value into a [`ForceWithLease`] (None when the flag is absent).
+fn parse_force_with_lease(raw: &Option<Option<String>>) -> Option<ForceWithLease> {
+    match raw {
+        None => None,
+        Some(None) => Some(ForceWithLease::All),
+        Some(Some(spec)) => match spec.split_once(':') {
+            Some((refname, expect)) => Some(ForceWithLease::Exact {
+                refname: refname.to_string(),
+                expect: expect.to_string(),
+            }),
+            None => Some(ForceWithLease::Ref(spec.clone())),
+        },
+    }
+}
+
+/// Whether a full remote ref (`refs/heads/main`) is named by a lease `<refname>`
+/// (which may be short `main` or fully qualified `refs/heads/main`).
+fn lease_ref_matches(remote_ref: &str, name: &str) -> bool {
+    remote_ref == name
+        || remote_ref.strip_prefix("refs/heads/") == Some(name)
+        || remote_ref.strip_prefix("refs/tags/") == Some(name)
+}
+
+/// Lease OID equality, tolerant of an abbreviated `<expect>` value (git allows a
+/// short hash). `None` means the ref is absent on that side.
+fn lease_oid_matches(expected: Option<&str>, server: Option<&str>) -> bool {
+    match (expected, server) {
+        (None, None) => true,
+        (Some(expected), Some(server)) => {
+            server == expected || server.starts_with(expected) || expected.starts_with(server)
+        }
+        _ => false,
+    }
+}
+
+/// Validate the lease against the build plans: the server's currently-advertised
+/// OID (`plan.update.old_oid`) must equal the expected OID (the local tracking
+/// ref OID for `All`/`Ref`, or the explicit OID for `Exact`). A mismatch means
+/// the remote moved since we last saw it — reject before sending any pack.
+///
+/// `tracking` maps each plan's remote ref to its local tracking OID (or `None`).
+fn validate_force_with_lease(
+    lease: &ForceWithLease,
+    plans: &[RefUpdatePlan],
+    tracking: &HashMap<String, Option<String>>,
+) -> Result<(), PushError> {
+    for plan in plans {
+        let remote_ref = &plan.update.remote_ref;
+        let expected: Option<String> = match lease {
+            ForceWithLease::All => tracking.get(remote_ref).cloned().flatten(),
+            ForceWithLease::Ref(name) => {
+                if !lease_ref_matches(remote_ref, name) {
+                    continue;
+                }
+                tracking.get(remote_ref).cloned().flatten()
+            }
+            ForceWithLease::Exact { refname, expect } => {
+                if !lease_ref_matches(remote_ref, refname) {
+                    continue;
+                }
+                Some(expect.clone())
+            }
+        };
+        if !lease_oid_matches(expected.as_deref(), plan.update.old_oid.as_deref()) {
+            return Err(PushError::NonFastForward {
+                local_ref: plan.update.local_ref.clone(),
+                remote_ref: remote_ref.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Read each plan's local remote-tracking ref OID (`refs/remotes/<remote>/<branch>`),
+/// used as the expected value for `--force-with-lease` forms ① and ②.
+async fn collect_lease_tracking_oids(
+    repository: &str,
+    plans: &[RefUpdatePlan],
+) -> HashMap<String, Option<String>> {
+    let mut map = HashMap::new();
+    for plan in plans {
+        let tracking_oid = if let Some(branch) = plan.update.remote_ref.strip_prefix("refs/heads/")
+        {
+            Branch::find_branch_result(branch, Some(repository))
+                .await
+                .ok()
+                .flatten()
+                .map(|b| b.commit.to_string())
+        } else {
+            None
+        };
+        map.insert(plan.update.remote_ref.clone(), tracking_oid);
+    }
+    map
+}
+
 fn add_update_ref_plan(
     local_ref: ResolvedLocalRef,
     remote_ref: String,
@@ -1159,6 +1597,47 @@ async fn add_all_tag_update_plans(
         )?;
     }
     Ok(())
+}
+
+/// Decide whether `--follow-tags` should push a given tag: only annotated tags
+/// whose target is reachable from a ref being pushed and which the remote does
+/// not already have.
+fn follow_tag_should_push(
+    is_annotated: bool,
+    target_reachable: bool,
+    full_ref: &str,
+    remote_refs: &HashMap<String, String>,
+) -> bool {
+    is_annotated && target_reachable && !remote_refs.contains_key(full_ref)
+}
+
+/// Collect the annotated tags that `--follow-tags` should add to the push: those
+/// whose target commit is reachable from one of `pushed_tips` and that are
+/// missing on the remote.
+async fn collect_follow_tag_refs(
+    pushed_tips: &[ObjectHash],
+    remote_refs: &HashMap<String, String>,
+) -> Result<Vec<ResolvedLocalRef>, PushError> {
+    let tags = tag::list()
+        .await
+        .map_err(|error| PushError::RepoState(error.to_string()))?;
+    let mut selected = Vec::new();
+    for local_tag in tags {
+        let (is_annotated, target) = match &local_tag.object {
+            tag::TagObject::Tag(tag_object) => (true, tag_object.object_hash),
+            other => (false, tag_object_hash(other)),
+        };
+        let target_reachable = pushed_tips.iter().any(|tip| is_ancestor(&target, tip));
+        let full_ref = normalize_tag_ref(&local_tag.name)?;
+        if follow_tag_should_push(is_annotated, target_reachable, &full_ref, remote_refs) {
+            selected.push(ResolvedLocalRef {
+                full_ref,
+                oid: tag_object_hash(&local_tag.object),
+                kind: LocalRefKind::Tag,
+            });
+        }
+    }
+    Ok(selected)
 }
 
 async fn build_mirror_update_plan(
@@ -1425,9 +1904,17 @@ async fn update_remote_tracking_refs(
 // ---------------------------------------------------------------------------
 
 /// Render push output according to OutputConfig (human / JSON / machine).
-fn render_push_output(result: &PushOutput, output: &OutputConfig) -> CliResult<()> {
+fn render_push_output(
+    result: &PushOutput,
+    output: &OutputConfig,
+    porcelain: bool,
+) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("push", result, output);
+    }
+
+    if porcelain {
+        return render_push_porcelain(result);
     }
 
     if result.up_to_date {
@@ -1570,6 +2057,64 @@ fn render_push_output(result: &PushOutput, output: &OutputConfig) -> CliResult<(
     Ok(())
 }
 
+/// Render `git push --porcelain`-style output: a `To <url>` header (credential
+/// redacted) followed by one tab-separated line per ref
+/// (`<flag>\t<from>:<to>\t<summary>`). On the success path every ref was
+/// accepted, so rejected (`!`) lines never appear here — failures are reported
+/// on stderr via the typed error path.
+fn render_push_porcelain(result: &PushOutput) -> CliResult<()> {
+    let stdout = std::io::stdout();
+    let mut w = stdout.lock();
+    let url = crate::command::fetch::redact_url_credentials(&result.url);
+    writeln!(w, "To {url}")
+        .map_err(|e| CliError::io(format!("failed to write push output: {e}")))?;
+
+    for update in &result.updates {
+        let (flag, summary) = porcelain_ref_fields(update);
+        let from = if update.kind == PushRefUpdateKind::Delete {
+            ""
+        } else {
+            update.local_ref.as_str()
+        };
+        writeln!(w, "{flag}\t{from}:{}\t{summary}", update.remote_ref)
+            .map_err(|e| CliError::io(format!("failed to write push output: {e}")))?;
+    }
+
+    if result.updates.is_empty() {
+        writeln!(w, "Done")
+            .map_err(|e| CliError::io(format!("failed to write push output: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Compute the porcelain `(flag, summary)` for one ref update. Flags follow
+/// `git push --porcelain`: ` ` ok, `+` forced, `-` deleted, `*` new ref,
+/// `=` up-to-date.
+fn porcelain_ref_fields(update: &PushRefUpdate) -> (char, String) {
+    if update.kind == PushRefUpdateKind::Delete {
+        return ('-', "[deleted]".to_string());
+    }
+    match &update.old_oid {
+        None => {
+            let label = if update.remote_ref.starts_with("refs/tags/") {
+                "[new tag]"
+            } else {
+                "[new branch]"
+            };
+            ('*', label.to_string())
+        }
+        Some(old_oid) => {
+            let old_short = &old_oid[..7.min(old_oid.len())];
+            let new_short = &update.new_oid[..7.min(update.new_oid.len())];
+            if update.forced {
+                ('+', format!("{old_short}...{new_short} (forced update)"))
+            } else {
+                (' ', format!("{old_short}..{new_short}"))
+            }
+        }
+    }
+}
+
 /// Classify a transport-layer I/O error into a typed `PushError`.
 ///
 /// Transport errors that mention "timed out" (from SSH idle timeout or reqwest
@@ -1581,7 +2126,7 @@ fn classify_transport_error(phase: &str, e: std::io::Error) -> PushError {
     if lower.contains("timed out") || lower.contains("timeout") {
         PushError::Timeout {
             phase: phase.to_string(),
-            seconds: PUSH_TIMEOUT.as_secs(),
+            seconds: PUSH_IDLE_TIMEOUT.as_secs(),
         }
     } else {
         PushError::Network(format!("{phase} failed: {detail}"))
@@ -2065,6 +2610,159 @@ mod test {
         }
     }
 
+    /// A plan whose server-advertised OID (`update.old_oid`) is controllable, for
+    /// force-with-lease unit tests.
+    fn lease_plan(remote_ref: &str, server_oid: Option<&str>) -> RefUpdatePlan {
+        let placeholder = ObjectHash::from_str("3333333333333333333333333333333333333333")
+            .expect("placeholder oid should parse");
+        RefUpdatePlan {
+            update: PushRefUpdate {
+                kind: PushRefUpdateKind::Update,
+                local_ref: remote_ref.to_string(),
+                remote_ref: remote_ref.to_string(),
+                old_oid: server_oid.map(str::to_string),
+                new_oid: "4444444444444444444444444444444444444444".to_string(),
+                forced: true,
+            },
+            old_oid: placeholder,
+            new_oid: None,
+            local_kind: Some(LocalRefKind::Branch),
+        }
+    }
+
+    #[test]
+    fn force_with_lease_parses_bare_ref_and_exact() {
+        assert_eq!(parse_force_with_lease(&None), None);
+        assert_eq!(
+            parse_force_with_lease(&Some(None)),
+            Some(ForceWithLease::All)
+        );
+        assert_eq!(
+            parse_force_with_lease(&Some(Some("main".to_string()))),
+            Some(ForceWithLease::Ref("main".to_string()))
+        );
+        assert_eq!(
+            parse_force_with_lease(&Some(Some("main:a1b2c3d".to_string()))),
+            Some(ForceWithLease::Exact {
+                refname: "main".to_string(),
+                expect: "a1b2c3d".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn force_with_lease_conflicts_with_force() {
+        use clap::Parser as _;
+        assert!(
+            PushArgs::try_parse_from(["push", "--force", "--force-with-lease", "origin", "main"])
+                .is_err(),
+            "--force and --force-with-lease must conflict at the clap layer"
+        );
+    }
+
+    #[test]
+    fn force_with_lease_does_not_swallow_positionals() {
+        use clap::Parser as _;
+        let args = PushArgs::try_parse_from(["push", "--force-with-lease", "origin", "main"])
+            .expect("bare --force-with-lease origin main should parse");
+        assert!(!args.force);
+        assert_eq!(args.force_with_lease, Some(None));
+        assert_eq!(args.repository.as_deref(), Some("origin"));
+        assert_eq!(args.refspecs, vec!["main".to_string()]);
+
+        let exact = PushArgs::try_parse_from(["push", "--force-with-lease=main:abc", "origin"])
+            .expect("--force-with-lease=main:abc origin should parse");
+        assert_eq!(exact.force_with_lease, Some(Some("main:abc".to_string())));
+        assert_eq!(exact.repository.as_deref(), Some("origin"));
+    }
+
+    #[test]
+    fn force_with_lease_all_matches_and_rejects() {
+        let mut tracking = HashMap::new();
+        tracking.insert("refs/heads/main".to_string(), Some("aaaa".to_string()));
+
+        // server still at the OID we last tracked → ok
+        let ok = vec![lease_plan("refs/heads/main", Some("aaaa"))];
+        assert!(validate_force_with_lease(&ForceWithLease::All, &ok, &tracking).is_ok());
+
+        // server moved on → reject
+        let moved = vec![lease_plan("refs/heads/main", Some("bbbb"))];
+        assert!(matches!(
+            validate_force_with_lease(&ForceWithLease::All, &moved, &tracking),
+            Err(PushError::NonFastForward { .. })
+        ));
+    }
+
+    #[test]
+    fn force_with_lease_exact_uses_expect_oid() {
+        let full = "abcdef1234567890abcdef1234567890abcdef12";
+        let plans = vec![lease_plan("refs/heads/main", Some(full))];
+        let tracking = HashMap::new(); // ignored for Exact
+
+        let good = ForceWithLease::Exact {
+            refname: "main".to_string(),
+            expect: "abcdef1".to_string(), // abbreviated, matches by prefix
+        };
+        assert!(validate_force_with_lease(&good, &plans, &tracking).is_ok());
+
+        let bad = ForceWithLease::Exact {
+            refname: "main".to_string(),
+            expect: "9999999".to_string(),
+        };
+        assert!(validate_force_with_lease(&bad, &plans, &tracking).is_err());
+    }
+
+    #[test]
+    fn force_with_lease_ref_only_checks_named_ref() {
+        // `main` would mismatch but is not named; only `dev` is checked.
+        let plans = vec![
+            lease_plan("refs/heads/main", Some("bbbb")),
+            lease_plan("refs/heads/dev", Some("dddd")),
+        ];
+        let mut tracking = HashMap::new();
+        tracking.insert("refs/heads/main".to_string(), Some("aaaa".to_string()));
+        tracking.insert("refs/heads/dev".to_string(), Some("dddd".to_string()));
+        assert!(
+            validate_force_with_lease(&ForceWithLease::Ref("dev".to_string()), &plans, &tracking)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn porcelain_ref_fields_flags() {
+        let new_branch = PushRefUpdate {
+            kind: PushRefUpdateKind::Update,
+            local_ref: "refs/heads/main".to_string(),
+            remote_ref: "refs/heads/main".to_string(),
+            old_oid: None,
+            new_oid: "2222222222222222222222222222222222222222".to_string(),
+            forced: false,
+        };
+        assert_eq!(porcelain_ref_fields(&new_branch).0, '*');
+
+        let forced = PushRefUpdate {
+            old_oid: Some("1111111111111111111111111111111111111111".to_string()),
+            forced: true,
+            ..new_branch.clone()
+        };
+        let (flag, summary) = porcelain_ref_fields(&forced);
+        assert_eq!(flag, '+');
+        assert!(summary.contains("forced update"));
+
+        let fast_forward = PushRefUpdate {
+            old_oid: Some("1111111111111111111111111111111111111111".to_string()),
+            forced: false,
+            ..new_branch.clone()
+        };
+        assert_eq!(porcelain_ref_fields(&fast_forward).0, ' ');
+
+        let deleted = PushRefUpdate {
+            kind: PushRefUpdateKind::Delete,
+            ..new_branch
+        };
+        assert_eq!(porcelain_ref_fields(&deleted).0, '-');
+    }
+
     fn receive_pack_response(lines: &[&str]) -> Bytes {
         let mut bytes = BytesMut::new();
         for line in lines {
@@ -2483,6 +3181,15 @@ mod test {
             refspecs: vec!["main".to_string()],
             set_upstream: false,
             force: false,
+            force_with_lease: None,
+            force_if_includes: false,
+            thin: false,
+            no_thin: false,
+            atomic: false,
+            push_option: Vec::new(),
+            follow_tags: false,
+            signed: false,
+            porcelain: false,
             dry_run: false,
             tags: false,
             mirror: false,
@@ -2492,6 +3199,161 @@ mod test {
             Err(PushError::InvalidArguments(message))
                 if message == "repository is required when specifying refspecs, --tags, or --mirror"
         ));
+    }
+
+    #[test]
+    fn atomic_capability_resolution() {
+        // Not requested: never advertised, regardless of server support.
+        assert!(!resolve_atomic_capability(false, &[]).unwrap());
+        assert!(!resolve_atomic_capability(false, &["atomic".to_string()]).unwrap());
+        // Requested and advertised by the server: include the capability.
+        assert!(
+            resolve_atomic_capability(true, &["report-status".to_string(), "atomic".to_string()])
+                .unwrap()
+        );
+        // Requested but unsupported: refuse up-front.
+        assert!(matches!(
+            resolve_atomic_capability(true, &["report-status".to_string()]),
+            Err(PushError::AtomicUnsupported)
+        ));
+    }
+
+    #[test]
+    fn push_options_capability_resolution() {
+        // No options: never advertised.
+        assert!(!resolve_push_options_capability(&[], &["push-options".to_string()]).unwrap());
+        // Options + server support: advertise.
+        assert!(
+            resolve_push_options_capability(
+                &["ci.skip".to_string()],
+                &["report-status".to_string(), "push-options".to_string()]
+            )
+            .unwrap()
+        );
+        // Options + no support: refuse up-front.
+        assert!(matches!(
+            resolve_push_options_capability(
+                &["ci.skip".to_string()],
+                &["report-status".to_string()]
+            ),
+            Err(PushError::PushOptionsUnsupported)
+        ));
+    }
+
+    #[test]
+    fn push_options_section_encoding() {
+        let mut data = BytesMut::new();
+        encode_push_options(
+            &["ci.skip".to_string(), "notify=false".to_string()],
+            &mut data,
+        );
+        let bytes = &data[..];
+        assert!(
+            bytes.ends_with(b"0000"),
+            "push-options section ends with a flush-pkt"
+        );
+        assert!(
+            bytes.windows(7).any(|w| w == b"ci.skip"),
+            "first option is present in the encoded section"
+        );
+        assert!(
+            bytes.windows(12).any(|w| w == b"notify=false"),
+            "second option is present in the encoded section"
+        );
+    }
+
+    #[test]
+    fn follow_tags_selection_predicate() {
+        let mut remote = HashMap::new();
+        remote.insert("refs/tags/v1".to_string(), "abc".to_string());
+        // Annotated, reachable, and absent on the remote: push it.
+        assert!(follow_tag_should_push(true, true, "refs/tags/v2", &remote));
+        // Lightweight tags are never followed.
+        assert!(!follow_tag_should_push(
+            false,
+            true,
+            "refs/tags/v2",
+            &remote
+        ));
+        // Target not reachable from a pushed ref: skip.
+        assert!(!follow_tag_should_push(
+            true,
+            false,
+            "refs/tags/v2",
+            &remote
+        ));
+        // Already present on the remote: skip.
+        assert!(!follow_tag_should_push(true, true, "refs/tags/v1", &remote));
+    }
+
+    #[test]
+    fn push_cert_nonce_resolution() {
+        // Not signing: never resolves a nonce.
+        assert_eq!(
+            resolve_push_cert_nonce(false, &["push-cert=abc".to_string()]).unwrap(),
+            None
+        );
+        // Signing + server nonce: extract it.
+        assert_eq!(
+            resolve_push_cert_nonce(true, &["push-cert=abc123".to_string()]).unwrap(),
+            Some("abc123".to_string())
+        );
+        // Signing + bare push-cert: empty (stateless) nonce.
+        assert_eq!(
+            resolve_push_cert_nonce(true, &["push-cert".to_string()]).unwrap(),
+            Some(String::new())
+        );
+        // Signing + no support: refuse up-front.
+        assert!(matches!(
+            resolve_push_cert_nonce(true, &["report-status".to_string()]),
+            Err(PushError::PushSignUnsupported)
+        ));
+    }
+
+    #[test]
+    fn push_certificate_payload_and_framing() {
+        let commands = vec![(
+            "old1".to_string(),
+            "new1".to_string(),
+            "refs/heads/main".to_string(),
+        )];
+        let cert = build_push_certificate(
+            "A U Thor <a@e> 1000000000 +0000",
+            "https://example.com/r.git",
+            "nonceXYZ",
+            &commands,
+        );
+        assert_eq!(
+            cert,
+            "certificate version 0.1\n\
+pusher A U Thor <a@e> 1000000000 +0000\n\
+pushee https://example.com/r.git\n\
+nonce nonceXYZ\n\
+\n\
+old1 new1 refs/heads/main\n"
+        );
+
+        let mut data = BytesMut::new();
+        encode_push_cert_section(
+            "report-status push-cert",
+            &cert,
+            "-----BEGIN PGP SIGNATURE-----\nSIGDATA\n-----END PGP SIGNATURE-----",
+            &mut data,
+        );
+        let bytes = &data[..];
+        assert!(
+            bytes.windows(9).any(|w| w == b"push-cert"),
+            "section announces push-cert"
+        );
+        assert!(
+            bytes.windows(13).any(|w| w == b"push-cert-end"),
+            "section ends with push-cert-end"
+        );
+        assert!(
+            bytes.windows(7).any(|w| w == b"SIGDATA"),
+            "armored signature is embedded"
+        );
+        assert!(bytes.ends_with(b"0000"), "section flushed before the pack");
     }
 
     #[test]
@@ -2621,10 +3483,23 @@ mod test {
     fn test_push_error_to_cli_error_timeout() {
         let err: CliError = PushError::Timeout {
             phase: "discovery".to_string(),
-            seconds: PUSH_TIMEOUT.as_secs(),
+            seconds: PUSH_CONNECT_TIMEOUT.as_secs(),
         }
         .into();
         assert_eq!(err.stable_code(), StableErrorCode::NetworkUnavailable);
+    }
+
+    #[test]
+    fn transport_timeout_uses_push_idle_timeout() {
+        let err = classify_transport_error(
+            "send-pack",
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out"),
+        );
+        assert!(matches!(
+            err,
+            PushError::Timeout { phase, seconds }
+                if phase == "send-pack" && seconds == PUSH_IDLE_TIMEOUT.as_secs()
+        ));
     }
 
     #[test]

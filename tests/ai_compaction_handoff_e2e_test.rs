@@ -1,7 +1,7 @@
 //! S5 acceptance scenario — integrated prune→compact→handoff
 //! sequence (OC-Phase 4 P4.6).
 //!
-//! Per `docs/improvement/opencode.md` S5:
+//! Per `docs/development/commands/_general.md` S5:
 //!
 //! > 输入：parent session token 用量 > `usable * 0.5`，触发 prune；
 //! >       之后超 `usable`，触发 compact。

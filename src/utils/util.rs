@@ -1384,6 +1384,8 @@ mod test {
             force: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         })
         .await;
         commit::execute(CommitArgs {
@@ -1453,6 +1455,8 @@ mod test {
             force: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         })
         .await;
         commit::execute(CommitArgs {
@@ -1466,7 +1470,7 @@ mod test {
         let head_commit = Head::current_commit()
             .await
             .expect("expected committed HEAD");
-        let created = internal_tag::create("v1.0.0", Some("release".into()), false)
+        let created = internal_tag::create("v1.0.0", Some("release".into()), false, false)
             .await
             .expect("failed to create annotated tag");
 
@@ -1493,6 +1497,8 @@ mod test {
             force: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         })
         .await;
         commit::execute(CommitArgs {
@@ -1506,7 +1512,7 @@ mod test {
         let head_commit = Head::current_commit()
             .await
             .expect("expected committed HEAD");
-        let inner = internal_tag::create("inner", Some("inner tag".into()), false)
+        let inner = internal_tag::create("inner", Some("inner tag".into()), false, false)
             .await
             .expect("failed to create inner tag");
         let outer = test_tag_object(inner.target, ObjectType::Tag, "outer");
@@ -1536,6 +1542,8 @@ mod test {
             force: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         })
         .await;
         commit::execute(CommitArgs {

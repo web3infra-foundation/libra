@@ -138,7 +138,7 @@ async fn show(args: CheckpointShowArgs, output: &OutputConfig) -> CliResult<()> 
 /// worktree. `--apply` actually runs the worktree restore (delegating to the
 /// existing `restore --source <parent_commit>` path), truncates supported
 /// agent transcripts when possible, and leaves HEAD plus `refs/heads/*`
-/// untouched per `docs/improvement/entire.md` §7.3.
+/// untouched per `docs/development/commands/_general.md` §7.3.
 async fn rewind(args: CheckpointRewindArgs, output: &OutputConfig) -> CliResult<()> {
     let conn = get_db_conn_instance().await;
     if !table_exists(&conn, "agent_checkpoint").await? {
@@ -256,6 +256,8 @@ async fn rewind(args: CheckpointRewindArgs, output: &OutputConfig) -> CliResult<
         source: Some(parent_commit.clone()),
         worktree: true,
         staged: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     };
     execute_checked_typed(restore_args)
         .await

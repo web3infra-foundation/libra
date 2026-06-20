@@ -73,7 +73,7 @@ libra ls-remote --heads origin main
 libra --json ls-remote --tags origin
 ```
 
-`libra ls-remote --help` 会渲染同一横幅，因此文档和 CLI 表面保持同步（跨命令 `--help` EXAMPLES 推出，见 `docs/improvement/README.md` 条目 B）。
+`libra ls-remote --help` 会渲染同一横幅，因此文档和 CLI 表面保持同步（跨命令 `--help` EXAMPLES 推出，见 `docs/development/commands/_general.md` 条目 B）。
 
 ## 说明
 

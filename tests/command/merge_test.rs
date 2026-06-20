@@ -388,6 +388,140 @@ async fn test_merge_diverged_branch_creates_two_parent_commit() {
     );
 }
 
+#[test]
+fn test_merge_custom_message_via_dash_m() {
+    let temp_repo = create_committed_repo_via_cli();
+    let p = temp_repo.path();
+
+    assert!(
+        run_libra_command(&["checkout", "-b", "feat"], p)
+            .status
+            .success(),
+        "create+checkout feat"
+    );
+    commit_file(p, "feat.txt", "feat content", "feat commit");
+    assert!(
+        run_libra_command(&["checkout", "main"], p).status.success(),
+        "checkout main"
+    );
+    commit_file(p, "main.txt", "main content", "main commit");
+
+    let merge = run_libra_command(&["merge", "-m", "MY CUSTOM MERGE MSG", "feat"], p);
+    assert_cli_success(&merge, "merge -m custom feat");
+
+    // The merge commit (HEAD) should carry the custom subject.
+    let log = run_libra_command(&["log", "-n", "1", "--pretty=%s"], p);
+    assert_cli_success(&log, "log -n 1 --pretty=%s");
+    let subject = String::from_utf8_lossy(&log.stdout);
+    assert!(
+        subject.contains("MY CUSTOM MERGE MSG"),
+        "merge commit subject should be the -m message, got: {subject}"
+    );
+}
+
+#[test]
+fn test_merge_squash_stages_without_committing() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    assert!(
+        run_libra_command(&["checkout", "-b", "feat"], p)
+            .status
+            .success(),
+        "checkout -b feat"
+    );
+    commit_file(p, "feat.txt", "feat content", "feat commit");
+    assert!(
+        run_libra_command(&["checkout", "main"], p).status.success(),
+        "checkout main"
+    );
+    commit_file(p, "main.txt", "main content", "main commit");
+
+    let before = run_libra_command(&["rev-parse", "HEAD"], p);
+    let before_head = String::from_utf8_lossy(&before.stdout).trim().to_string();
+
+    let merge = run_libra_command(&["merge", "--squash", "feat"], p);
+    assert_cli_success(&merge, "merge --squash feat");
+    let merge_out = String::from_utf8_lossy(&merge.stdout);
+    assert!(
+        merge_out.contains("Squash commit"),
+        "expected squash message, got: {merge_out}"
+    );
+
+    // --squash must NOT move HEAD, but the merged file must be in the worktree.
+    let after = run_libra_command(&["rev-parse", "HEAD"], p);
+    assert_eq!(
+        String::from_utf8_lossy(&after.stdout).trim(),
+        before_head,
+        "--squash must not move HEAD"
+    );
+    assert!(
+        p.join("feat.txt").exists(),
+        "merged file should be staged into the worktree"
+    );
+
+    // The staged result is finalized with a normal commit, which advances HEAD.
+    let commit = run_libra_command(&["commit", "-m", "squashed merge", "--no-verify"], p);
+    assert_cli_success(&commit, "commit after squash");
+    let final_head = run_libra_command(&["rev-parse", "HEAD"], p);
+    assert_ne!(
+        String::from_utf8_lossy(&final_head.stdout).trim(),
+        before_head,
+        "HEAD should advance after committing the squashed result"
+    );
+}
+
+#[test]
+fn test_merge_no_commit_then_continue() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    assert!(
+        run_libra_command(&["checkout", "-b", "feat"], p)
+            .status
+            .success(),
+        "checkout -b feat"
+    );
+    commit_file(p, "feat.txt", "feat content", "feat commit");
+    assert!(
+        run_libra_command(&["checkout", "main"], p).status.success(),
+        "checkout main"
+    );
+    commit_file(p, "main.txt", "main content", "main commit");
+
+    let before = run_libra_command(&["rev-parse", "HEAD"], p);
+    let before_head = String::from_utf8_lossy(&before.stdout).trim().to_string();
+
+    // --no-commit stages the merge but does not move HEAD.
+    let merge = run_libra_command(&["merge", "--no-commit", "feat"], p);
+    assert_cli_success(&merge, "merge --no-commit feat");
+    assert!(
+        String::from_utf8_lossy(&merge.stdout).contains("stopped before committing"),
+        "expected the no-commit message, got: {}",
+        String::from_utf8_lossy(&merge.stdout)
+    );
+    let mid = run_libra_command(&["rev-parse", "HEAD"], p);
+    assert_eq!(
+        String::from_utf8_lossy(&mid.stdout).trim(),
+        before_head,
+        "--no-commit must not move HEAD"
+    );
+    assert!(
+        p.join("feat.txt").exists(),
+        "merged file should be staged into the worktree"
+    );
+
+    // merge --continue finalizes the two-parent commit and advances HEAD.
+    let cont = run_libra_command(&["merge", "--continue"], p);
+    assert_cli_success(&cont, "merge --continue");
+    let after = run_libra_command(&["rev-parse", "HEAD"], p);
+    assert_ne!(
+        String::from_utf8_lossy(&after.stdout).trim(),
+        before_head,
+        "HEAD should advance after merge --continue"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_merge_same_file_non_overlapping_edits_merges_without_conflict() {
@@ -803,7 +937,7 @@ fn test_merge_untracked_overwrite_refuses_before_head_update() {
 /// `libra merge --help` surfaces the EXAMPLES banner so users see the
 /// supported fast-forward / remote-ref / JSON forms before hitting the
 /// `MergeNonFastForward` runtime error. Cross-cutting `--help` EXAMPLES
-/// rollout per `docs/improvement/README.md` item B.
+/// rollout per `docs/development/commands/_general.md` item B.
 #[test]
 fn test_merge_help_lists_examples_banner() {
     let repo = tempfile::tempdir().expect("tempdir for merge --help");

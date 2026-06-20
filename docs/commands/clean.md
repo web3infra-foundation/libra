@@ -175,7 +175,7 @@ execute.
 ### Why ship `-d` / `-x` / `-X` after originally declining them?
 
 The original `clean` design intentionally declined the directory and
-ignore-override flags out of safety concerns (`docs/improvement/clean.md`
+ignore-override flags out of safety concerns (`docs/development/commands/clean.md`
 listed them as non-goals). Subsequent user feedback showed that build
 workflows in agent-driven environments routinely need to clear ignored
 artifacts, and the missing flags forced users to fall back on raw `rm

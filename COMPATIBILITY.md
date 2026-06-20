@@ -16,15 +16,15 @@ what level. The four tiers have the following user-facing semantics:
 The tier here describes **Git surface** compatibility only. It does not
 describe whether a command has been modernized for CLIG (`--json` / `--machine`
 / stable error codes / `run_<cmd>()` split); that work is tracked in
-[`docs/improvement/README.md`](docs/improvement/README.md) and in each command
+[`docs/development/commands/_general.md`](docs/development/commands/_general.md) and in each command
 batch document.
 
 ## Top-level commands (from `src/cli.rs`)
 
 | Command | Tier | Notes |
 |---------|------|-------|
-| init | supported | |
-| clone | partial | `--depth` and `--single-branch` supported; `--sparse` unsupported (see [docs/improvement/compatibility/declined.md#d10-clone---sparse-与顶层-sparse-checkout-命令](docs/improvement/compatibility/declined.md#d10-clone---sparse-与顶层-sparse-checkout-命令)); `--recurse-submodules` unsupported (see [docs/improvement/compatibility/declined.md#d4-clone---recurse-submodules](docs/improvement/compatibility/declined.md#d4-clone---recurse-submodules)) |
+| init | partial | common initialization is supported; safe re-initialization/top-up of an existing Libra repo is not implemented |
+| clone | partial | `--depth`, `--single-branch`, and `--tags`/`--no-tags` supported (clone fetches all tags by default like Git; `--no-tags` skips them and records `remote.origin.tagOpt=--no-tags`); `--sparse` unsupported (see [docs/development/commands/_compatibility.md#d10-clone---sparse-与顶层-sparse-checkout-命令](docs/development/commands/_compatibility.md#d10-clone---sparse-与顶层-sparse-checkout-命令)); `--recurse-submodules` unsupported (see [docs/development/commands/_compatibility.md#d4-clone---recurse-submodules](docs/development/commands/_compatibility.md#d4-clone---recurse-submodules)) |
 | code | intentionally-different | Libra AI extension, not a Git command |
 | code-control | intentionally-different | Libra AI automation extension, not a Git command |
 | automation | intentionally-different | Libra AI automation rules/history extension, not a Git command |
@@ -33,66 +33,70 @@ batch document.
 | sandbox | intentionally-different | Libra AI sandbox diagnostics extension, not a Git command |
 | add | partial | sparse-checkout flag unsupported |
 | rm | partial | `--force` / `--dry-run` / `--cached` / `--recursive` / `--ignore-unmatch` / `--pathspec-from-file` / `--pathspec-file-nul` supported; sparse-checkout flag unsupported; per-command `--quiet` not exposed (use global `--quiet`) |
-| mv | partial | sparse-checkout flag unsupported; `--skip-errors` not exposed |
-| restore | supported | |
-| status | supported | |
-| clean | supported | |
-| stash | partial | `push` / `pop` / `list` / `apply` / `drop` / `show` / `branch` / `clear` supported; `create` / `store` deferred (see [docs/improvement/compatibility/declined.md#d8-stash-create](docs/improvement/compatibility/declined.md#d8-stash-create) and [#d9-stash-store](docs/improvement/compatibility/declined.md#d9-stash-store)) |
-| lfs | partial | built-in Libra LFS command; uses `.libra_attributes`, not Git LFS filters/hooks (see [docs/improvement/compatibility/declined.md#d5-git-lfs-gitattributes-filter--hooks-bridge](docs/improvement/compatibility/declined.md#d5-git-lfs-gitattributes-filter--hooks-bridge)) |
-| log | supported | |
-| shortlog | supported | |
-| show | supported | |
-| show-ref | supported | |
-| ls-remote | supported | |
+| mv | partial | `-k` / `--skip-errors` supported; `--sparse` accepted as a no-op because Libra does not maintain sparse-checkout state |
+| restore | partial | `--source`, `--staged`, `--worktree`, and path restore are supported; overlay/conflict/progress variants are not exposed |
+| status | supported | common Git status surface plus `--porcelain` v1/v2, `--short`, `--branch`, `-z` NUL-terminated output, `--find-renames`, `--column`, and `--ahead-behind`/`--no-ahead-behind` supported |
+| clean | partial | `-n`, `-f`, `-d`, `-x`, `-X`, `--exclude`, and `<pathspec>...` positional filtering are supported; `-i` is intentionally different/not exposed |
+| stash | partial | `push` / `pop` / `list` / `apply` / `drop` / `show` / `branch` / `clear` supported. `stash push` supports `-m`, `-u` / `--include-untracked`, `-a` / `--all`, and `--keep-index`; included untracked/ignored files are stored in a third stash parent and restored by `apply` / `pop`. Deferred: `push -- <pathspec>`, `pop/apply --index`, `create`, and `store` (see [docs/development/commands/_compatibility.md#d8-stash-create](docs/development/commands/_compatibility.md#d8-stash-create) and [#d9-stash-store](docs/development/commands/_compatibility.md#d9-stash-store)) |
+| lfs | partial | built-in Libra LFS command; uses `.libra_attributes`, not Git LFS filters/hooks (see [docs/development/commands/_compatibility.md#d5-git-lfs-gitattributes-filter--hooks-bridge](docs/development/commands/_compatibility.md#d5-git-lfs-gitattributes-filter--hooks-bridge)) |
+| log | partial | common Git log surface plus `--range` revision expressions, `--all`, `--reverse`, `--follow`, and `-L` supported; positional revision range syntax and exact function-range tracking remain partial |
+| shortlog | partial | basic author summary, email, count sorting, time filters, single revision, `-c`/`--committer` grouping, `--no-merges`, `--top`/`--min-count`/`--reverse`, and `--author` filtering supported; custom `--format`, stdin input, trailer grouping, and `-w` wrapping are not exposed |
+| show | partial | object/commit display, `--name-only`, `--name-status`, `--stat`, `--oneline`, and path filters supported; extended pretty/raw formats are not exposed |
+| show-ref | supported | branch/tag/HEAD listing, `--heads` / `--branches`, `--hash[=<n>]` / `--no-hash`, `--abbrev[=<n>]` / `--no-abbrev`, `--dereference` / `--no-dereference`, `--verify` / `--no-verify`, `--exists` / `--no-exists`, `--head` / `--no-head`, and `--exclude-existing[=<pattern>]` supported |
+| for-each-ref | partial | `--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort` / `--count` / `--points-at` / `--contains` / `--no-contains` / `<pattern>` supported; full Git atom language, `--merged` / `--no-merged` filters and shell quoting modes are not exposed |
+| ls-remote | partial | heads/tags/refs filtering, patterns, `--get-url`, `--sort=refname`/`version:refname`, and `--exit-code` supported; `--symref` is not exposed |
+| ls-tree | partial | Commit/tree listing, recursive listing, current-directory-relative path prefix filters, `--full-name`, `--full-tree`, JSON, common output flags, and partial `--format` atom support are supported; `REV:path` syntax is not exposed |
 | symbolic-ref | partial | Supports local `HEAD` only; other symbolic refs are rejected because Libra stores refs in SQLite |
-| branch | supported | |
-| tag | supported | |
-| commit | supported | |
-| switch | supported | |
-| rebase | partial | `--autosquash` / `--reapply-cherry-picks` not supported |
-| merge | partial | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |
-| reset | supported | |
-| rev-parse | supported | |
-| rev-list | supported | |
-| describe | supported | |
-| cherry-pick | supported | |
-| push | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected — intentional (see [docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push](docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push)) |
-| fetch | supported | `--depth` public flag |
-| pull | partial | fetch + fast-forward/three-way merge supported; no `--ff-only` / `--rebase` / `--squash` strategy flags exposed |
-| diff | supported | |
-| grep | supported | |
-| blame | supported | |
-| revert | supported | |
-| remote | supported | |
-| hash-object | partial | Blob hashing for files and `--stdin`; `-w` writes blob objects. Other object types and advanced Git hash-object flags are unsupported |
+| branch | partial | create/list/delete/rename/upstream set+unset/current/contains filters, `--points-at`, and `--ignore-case` list sorting supported; copy, description, merged/no-merged, sort, and format are not exposed |
+| tag | partial | lightweight tags, message-based annotated tags, `-a`/`--annotate`, force, delete, list, `-n`, `--points-at <object>`, `--contains`/`--no-contains`, `--merged`/`--no-merged`, `--sort`, and vault-PGP `-s`/`--sign` plus `-v`/`--verify` supported; `-u`, `-F`/`-e` message entry, `--column`, and Git GPG interoperability are not exposed |
+| commit | partial | common Git commit surface plus `--cleanup`, `--dry-run`, `--fixup`, `--squash`, `-C/-c`, `--trailer`, `--reset-author`, `-e/--edit` (open the editor even with `-m/-F/-C`; bare `commit` opens it too), and `-v/--verbose` (staged diff in the editor template, stripped at the scissors line so it never enters the message) supported; `--porcelain`, `--status`/`--no-status`, `-t/--template`, the `commit.cleanup`/`commit.verbose` config keys, and `--allow-empty-message` not yet exposed |
+| switch | partial | `-C/--force-create`, `--orphan`, `--detach`, `--track`, and `--guess`/`--no-guess` (DWIM remote-tracking guess; default-on via `checkout.guess`, `checkout.defaultRemote` tie-break) supported; `-f/--discard-changes`, merge/conflict/submodule flags not exposed |
+| rebase | partial | `--onto <newbase> [<upstream>] [<branch>]` supported (replays the `<upstream>..HEAD` range onto `<newbase>`; the third positional checks out `<branch>` first); `--autosquash` / `--reapply-cherry-picks` not supported |
+| merge | partial | fast-forward and single-head three-way merge supported; `-m <msg>`, `--ff-only`, `--no-ff`, `--squash`, and `--no-commit` supported; octopus/custom strategies and `--verify-signatures` deferred |
+| reset | partial | `--soft`/`--mixed`/`--hard` and pathspec un-staging supported, with index-rollback on failure. `--pathspec-from-file`/`--pathspec-file-nul` supported for bulk/stdin pathspec input, but paths are taken literally — Git's default-mode C-style quoted-path decoding is intentionally not performed (use `--pathspec-file-nul` for special characters). `--no-refresh` is accepted as a no-op (Libra's reset never refreshes the index, so there is no refresh to skip; no `--refresh`). `--merge`/`--keep` remain unsupported (see [docs/commands/reset.md](docs/commands/reset.md) "Why no --merge/--keep?") |
+| rev-parse | partial | basic revision parsing, `--verify`, `--short[=<n>]`, `--abbrev-ref`, `--show-toplevel`, `--show-prefix`, `--show-cdup`, `--is-inside-work-tree`, `--is-bare-repository`, and `--git-dir` supported; default/output-filter/parseopt modes remain incomplete |
+| rev-list | partial | multi-revision reachability, `^` exclusions, `A..B`/`A...B` ranges, `--count`, `-n`/`--max-count`, `--skip`, `--since`/`--after`, `--until`/`--before`, parent-count filters and reset aliases, `--first-parent`, `--author`, `--committer`, `--grep`, path limitation after `--`, symmetric side filters (`--left-right`, `--left-only`, `--right-only`), cherry filters (`--cherry`, `--cherry-pick`, `--cherry-mark`), `--parents`, `--children`, and `--timestamp` supported; object/boundary traversal output remains incomplete |
+| describe | partial | basic describe, `--tags`, `--always`, `--abbrev`, `--exact-match`, `--long`, `--dirty[=<mark>]`, `--first-parent`, and `--match`/`--exclude` (wax globs, ≤256 chars; exclude wins over match) supported; contains/candidates/all are not exposed |
+| notes | partial | `add` / `show` / `list` / `remove` supported; `--ref` supported; append/edit/copy/merge/prune and editor support not implemented |
+| cherry-pick | partial | one-or-more commit replay, `-n/--no-commit` (now also for multi-commit), `-x`, `-s/--signoff`, `-e/--edit`, `-m/--mainline`, `--ff`, `-S/--gpg-sign`, `--allow-empty`, `--allow-empty-message`, `--keep-redundant-commits`, and the SQLite conflict sequencer (`--continue`/`--skip`/`--abort`/`--quit` with path-level three-way conflict markers and a merge/rebase mutex) supported; unsupported Git options (`--strategy`, `-X/--strategy-option`, `--empty`, `--cleanup`, `--rerere-autoupdate`) are explicitly rejected; custom merge strategies and line-level conflict hunks remain unimplemented |
+| push | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; `--force-with-lease[=<ref>[:<expect>]]` (validates the remote still matches the tracking-ref/expected OID before sending; conflicts with `--force`) and `--porcelain` (machine-readable per-ref lines; conflicts with `--json`/`--machine`) supported; `--atomic` supported (advertises the `atomic` capability so the remote applies all ref updates together; refused up-front if the remote does not advertise `atomic`); `--push-option`/`-o <opt>` supported (sends a push-options section gated on the remote's `push-options` capability); `--follow-tags` supported (also pushes annotated tags reachable from a pushed ref and missing on the remote); `--signed` supported (builds a GPG-signed push certificate via the vault signer, gated on the remote's `push-cert` capability/nonce); `--force-if-includes` and `--thin`/`--no-thin` accepted as **no-ops** (lease uses tracking-ref OID only; the pack encoder is always self-contained). local file remote rejected — intentional (see [docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push](docs/development/commands/_compatibility.md#d2-本地-file-remote-的-push)) |
+| fetch | partial | repository/refspec, `--all`, `--depth`, `--dry-run` (ref-update preview, no download/writes), `-v`/`--verbose`, `--porcelain` (rejects `--json`), tag handling (default auto-follow of tags reachable from fetched commits via `include-tag`; `--tags` fetches all, `--no-tags` none; per-remote `remote.<name>.tagOpt`), `-f`/`--force` (allows non-fast-forward / clobbers a conflicting local tag, `+` forced marker), and `FETCH_HEAD` writing with `--append` supported; `--refmap`, `--atomic`, prune, and shallow-expansion flags (`--shallow-since`/`--shallow-exclude`/`--update-shallow`) are not exposed (deferred). Libra-native (libra→libra) `--tags` of annotated tags is served too (requires git-internal ≥ 0.7.6, which makes a tag's id the canonical hash of its serialized form) |
+| pull | partial | fetch + fast-forward/three-way merge supported; `--ff-only`, `--rebase`, `--ff`, `--no-ff` (forces a merge commit), fetch `--depth` (shallow pull), `--squash`, and `--no-commit` exposed; `--commit` / `--autostash` not exposed (deferred — depend on merge-engine capabilities absent from the current build) |
+| diff | partial | staged/old-new/pathspec/name/stat/numstat/output/algorithm supported; positional revspec, summary, word/binary diff, whitespace, and external diff are not exposed |
+| grep | partial | tracked/index/tree search with common match/count/list/line flags, `-A`/`-B`/`-C` context, `-E`/`-G` regex aliases, explicit `-P` rejection, and `-a`/`-I` binary controls supported; untracked/no-index, heading/break, NUL output, function display, and max-depth are not exposed |
+| blame | partial | file blame with numeric `-L` ranges, ignore-rev inputs, `--porcelain`, and `--line-porcelain` supported; reverse, email, whitespace, incremental, complete porcelain boundary/previous metadata, and copy/move detection are not exposed |
+| revert | partial | single/multi-commit revert, `-n/--no-commit`, `-m/--mainline` merge-commit revert, `-s/--signoff`, and conflict `--continue`/`--abort` supported; `--skip`, multi-commit conflict todo continuation, edit, and strategy surface remain incomplete |
+| remote | partial | `add`/`remove`/`rename`/`-v`/`show`/`get-url`/`set-url`/`prune` plus `set-branches [--add]` (rewrites `remote.<name>.fetch`), `set-head <branch>`/`-d`/`--delete`/`--auto` (writes/deletes `refs/remotes/<name>/HEAD`; `--auto` queries the remote for its HEAD), and detailed `remote show <name>` supported. By default `remote show <name>` queries the remote (live HEAD; branches classified `tracked`/`new`/`stale`; `queried = true`); `--no-query` reports the cached HEAD and cached tracking branches offline (status `cached`, `queried = false`). **Not yet covered:** `remote update` (multi-remote fetch) and Git's cold flags (`add -t/-m/--mirror/-f/--tags`, `set-url --push --add` combinations, `update -p`, `remotes.<group>` groups) |
+| hash-object | partial | Blob hashing for files and `--stdin`; `-w` writes blob objects; `--path` and `--no-filters` are accepted for raw-byte hashing. Other object types and advanced Git hash-object flags are unsupported |
 | open | supported | |
-| config | supported | vault-backed |
+| config | partial | vault-backed local/global config is supported; system scope, editor round-trip, typed conversion, NUL output, section rename/remove, and includeIf are incomplete |
 | db | intentionally-different | Libra repository database schema inspection/upgrade extension, not a Git command |
-| reflog | supported | |
+| reflog | supported | `show`/`delete`/`exists`/`expire` subcommands. `expire` prunes by time + reachability + `--stale-fix` (`--all`/`--expire`/`--expire-unreachable`/`--rewrite`/`--updateref`/`-n`/`-v`), reads `gc.reflogExpire`/`gc.reflogExpireUnreachable` (90/30-day defaults, never written). Intentional differences: no-ref expire is an explicit error (exit 128) vs Git's silent no-op; `--stale-fix` checks only that the new value loads as a commit (no transitive object walk); `--updateref` skips symbolic `HEAD` / remote-tracking refs |
 | worktree | intentionally-different | `remove` keeps disk dir by default (no implicit data loss). Use `--delete-dir` for Git-style behavior; the flag refuses on a dirty worktree |
 | cloud | intentionally-different | Libra cloud backup/restore extension, not a Git command |
 | publish | intentionally-different | Libra Cloudflare publish extension, not a Git command |
 | agent | intentionally-different | Libra external-agent capture extension, not a Git command |
+| maintenance | partial | `run` / `register` / `unregister` / `status` / `start` / `stop` exposed; `start`/`stop` install/remove an OS scheduler entry (launchd LaunchAgents plist on macOS, cron fragment elsewhere; dir overridable via `LIBRA_MAINTENANCE_AGENT_DIR`); the `commit-graph` task writes a Git-compatible v1 commit-graph file (OIDF/OIDL/CDAT chunks + topological generation numbers; octopus merges and SHA-256 repos are skipped); the `prefetch` task fetches all configured remotes via the normal fetch path (refreshing standard remote-tracking refs rather than Git's `refs/prefetch/` namespace — intentionally different; skipped when no remotes are configured) |
 | hooks | intentionally-different | Hidden compatibility entry for hook configs installed by `libra agent enable` |
-| cat-file | supported | `-e` does not support JSON |
-| fsck | supported | |
-| maintenance | partial | `run` / `register` / `unregister` / `status` supported; `gc` / `loose-objects` / `pack-refs` / `incremental-repack` work locally; `commit-graph` / `prefetch` not yet implemented |
-| verify-pack | partial | validates one `.idx` file against a matching `.pack`; Git's multi-index form and `-s` / `--stat-only` are not exposed |
-| index-pack | supported | hidden plumbing command |
-| checkout | partial | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore`; detached HEAD and patch modes still partial |
-| bisect | partial | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` supported; `replay` (see [docs/improvement/compatibility/declined.md#d6-bisect-replay](docs/improvement/compatibility/declined.md#d6-bisect-replay)) / `terms` (see [docs/improvement/compatibility/declined.md#d7-bisect-terms](docs/improvement/compatibility/declined.md#d7-bisect-terms)) deferred |
+| archive | partial | Creates tar/tar.gz/tar.bz2/zip archives from a committed tree; `--format`, `--output`, `--prefix`, `--list`, and `TREEISH <path>...` pathspec limiting supported |
+| cat-file | partial | `-t`, `-s`, `-p`, `-e`, AI object modes, and default `--batch-check` / `--batch` stdin modes (with optional `=<format>` atom expansion for `%(objectname)`/`%(objecttype)`/`%(objectsize)`) supported; `--batch-command`, `--batch-all-objects`, and JSON/machine output for `-e` are not exposed |
+| fsck | partial | object/ref/index/reflog/connectivity checks supported with JSON/machine output via `--json`/`--machine`; `--strict` adds commit email/timezone, commit tree/parent existence+type, and tree entry existence/type/sort-order checks (intentionally narrower than Git: `.gitmodules`/pathname-charset checks and `fsck.<msg-id>` severity config are not implemented); pack verification surface (`--full`/`--no-full`) remains incomplete |
+| verify-pack | partial | validates one or more `.idx` files against matching `.pack` siblings; `-s` / `--stat-only` supported; `--pack` is available for a single explicit pack path |
+| index-pack | partial | hidden plumbing command for pack file indexing; `--stdin`, `--keep[=<msg>]`, and Git-style `--progress` / `--no-progress` compatibility flags are accepted; `--fix-thin` is not exposed |
+| checkout | partial | visible branch compatibility surface plus `checkout <commit>` detached HEAD, `-b`/`-B` branch creation, and explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` for new code; patch modes still partial |
+| bisect | partial | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` supported; `replay` (see [docs/development/commands/_compatibility.md#d6-bisect-replay](docs/development/commands/_compatibility.md#d6-bisect-replay)) / `terms` (see [docs/development/commands/_compatibility.md#d7-bisect-terms](docs/development/commands/_compatibility.md#d7-bisect-terms)) deferred |
 
 ## Git commands intentionally absent from `src/cli.rs`
 
 | Command | Tier | Notes |
 |---------|------|-------|
-| submodule | unsupported | intentional product boundary (see [docs/improvement/compatibility/declined.md#d1-submodule-子命令族](docs/improvement/compatibility/declined.md#d1-submodule-子命令族)) |
-| sparse-checkout | unsupported | no public sparse checkout command (see [docs/improvement/compatibility/declined.md#d10-clone---sparse-与顶层-sparse-checkout-命令](docs/improvement/compatibility/declined.md#d10-clone---sparse-与顶层-sparse-checkout-命令)) |
+| submodule | unsupported | intentional product boundary (see [docs/development/commands/_compatibility.md#d1-submodule-子命令族](docs/development/commands/_compatibility.md#d1-submodule-子命令族)) |
+| sparse-checkout | unsupported | no public sparse checkout command (see [docs/development/commands/_compatibility.md#d10-clone---sparse-与顶层-sparse-checkout-命令](docs/development/commands/_compatibility.md#d10-clone---sparse-与顶层-sparse-checkout-命令)) |
 
 ## Hooks
 
-- Stock Git hooks at `.git/hooks` / `core.hooksPath`: `unsupported` (see [docs/improvement/compatibility/declined.md#d3-git-hooks-bridge-作为核心特性](docs/improvement/compatibility/declined.md#d3-git-hooks-bridge-作为核心特性))
-- AI provider hooks: `intentionally-different` (see [docs/improvement/agent.md](docs/improvement/agent.md))
+- Stock Git hooks at `.git/hooks` / `core.hooksPath`: `unsupported` (see [docs/development/commands/_compatibility.md#d3-git-hooks-bridge-作为核心特性](docs/development/commands/_compatibility.md#d3-git-hooks-bridge-作为核心特性))
+- AI provider hooks: `intentionally-different` (see [docs/development/commands/agent.md](docs/development/commands/agent.md))
 
 ## LFS compatibility notes
 
@@ -100,7 +104,7 @@ batch document.
   lock management and `.libra_attributes`.
 - Git LFS filter bridge (`.gitattributes` smudge/clean filters + `git-lfs` hook
   install): `intentionally-different` (see
-  [docs/improvement/compatibility/declined.md#d5-git-lfs-gitattributes-filter--hooks-bridge](docs/improvement/compatibility/declined.md#d5-git-lfs-gitattributes-filter--hooks-bridge)).
+  [docs/development/commands/_compatibility.md#d5-git-lfs-gitattributes-filter--hooks-bridge](docs/development/commands/_compatibility.md#d5-git-lfs-gitattributes-filter--hooks-bridge)).
 - Repository asset storage policy: current committed binaries remain inline.
   Optional future Git LFS rules in `.gitattributes` are tracked as a repository
   governance decision, **not** as the `libra lfs` command status.

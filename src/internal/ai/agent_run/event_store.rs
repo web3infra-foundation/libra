@@ -7,7 +7,7 @@
 //! session JSONL. Keeping run events in their own file is what lets the
 //! main session stay byte-equivalent to the CEX-00 / CP-S2-2 baseline
 //! while sub-agent runs accumulate their own append-only history
-//! (`docs/improvement/agent.md` CEX-S2-11 (3), and the `AgentRun`
+//! (`docs/development/commands/agent.md` CEX-S2-11 (3), and the `AgentRun`
 //! `transcript_path` contract at [`super::run::AgentRun`]).
 //!
 //! This module owns only the path resolution and the append / read I/O.
@@ -25,7 +25,8 @@ use uuid::Uuid;
 
 use super::{
     AgentRunId,
-    event::{AgentRunEvent, AgentRunEventEnvelope},
+    event::{AgentRunEvent, AgentRunEventEnvelope, RunUsage},
+    run::AgentRun,
 };
 
 /// Append-only store for per-run agent event transcripts, rooted at a
@@ -133,6 +134,111 @@ impl AgentRunEventStore {
             events.push(envelope);
         }
         Ok(events)
+    }
+
+    /// Resolve the per-run snapshot path
+    /// `.libra/sessions/{thread_id}/agents/{run_id}.snapshot.json`.
+    ///
+    /// The snapshot is the latest materialized [`AgentRun`] record (the
+    /// projection of the run's append-only event stream), stored beside
+    /// the run's `{run_id}.jsonl` transcript so the `/agents` TUI pane can
+    /// rebuild itself from disk alone after a cache wipe or restart
+    /// (CEX-S2-16 验收 (5)).
+    fn snapshot_path(&self, thread_id: Uuid, run_id: AgentRunId) -> PathBuf {
+        self.sessions_root
+            .join(thread_id.to_string())
+            .join("agents")
+            .join(format!("{}.snapshot.json", run_id.0))
+    }
+
+    /// Resolve the per-run usage path
+    /// `.libra/sessions/{thread_id}/agents/{run_id}.usage.json`.
+    fn usage_path(&self, thread_id: Uuid, run_id: AgentRunId) -> PathBuf {
+        self.sessions_root
+            .join(thread_id.to_string())
+            .join("agents")
+            .join(format!("{}.usage.json", run_id.0))
+    }
+
+    /// Persist (create or overwrite) a run's [`AgentRun`] snapshot,
+    /// creating the `{thread_id}/agents/` parent directories on first
+    /// write. The whole-file overwrite is the projection contract: the
+    /// snapshot always reflects the run's current state, so a later write
+    /// supersedes an earlier one.
+    pub fn write_snapshot(&self, thread_id: Uuid, run: &AgentRun) -> io::Result<()> {
+        let path = self.snapshot_path(thread_id, run.id);
+        ensure_parent_dir(&path)?;
+        let json = serde_json::to_vec_pretty(run).map_err(io::Error::other)?;
+        fs::write(&path, json)
+    }
+
+    /// Persist (create or overwrite) a run's terminal [`RunUsage`] record.
+    pub fn write_run_usage(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+        usage: &RunUsage,
+    ) -> io::Result<()> {
+        let path = self.usage_path(thread_id, run_id);
+        ensure_parent_dir(&path)?;
+        let json = serde_json::to_vec_pretty(usage).map_err(io::Error::other)?;
+        fs::write(&path, json)
+    }
+
+    /// Read a run's persisted [`RunUsage`], or `None` when the run never
+    /// recorded usage (a missing file is not an error — an in-flight run
+    /// that has not closed a provider call yet simply has no usage).
+    pub fn read_run_usage(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+    ) -> io::Result<Option<RunUsage>> {
+        let path = self.usage_path(thread_id, run_id);
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let usage = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                Ok(Some(usage))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Read every persisted [`AgentRun`] snapshot across all threads under
+    /// this store's `sessions_root`, in unspecified order (consumers that
+    /// need a stable display order sort the result themselves).
+    ///
+    /// A missing `sessions_root` (or a thread dir without an `agents/`
+    /// subdirectory) is not an error — it yields no runs. This is the read
+    /// path the `/agents` pane rebuilds from, so it tolerates a partially
+    /// populated tree rather than failing the whole render.
+    pub fn list_all_snapshots(&self) -> io::Result<Vec<AgentRun>> {
+        let mut runs = Vec::new();
+        let threads = match fs::read_dir(&self.sessions_root) {
+            Ok(read_dir) => read_dir,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        for thread in threads {
+            let agents_dir = thread?.path().join("agents");
+            if !agents_dir.is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(&agents_dir)? {
+                let path = entry?.path();
+                let is_snapshot = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".snapshot.json"));
+                if !is_snapshot {
+                    continue;
+                }
+                let bytes = fs::read(&path)?;
+                let run: AgentRun = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                runs.push(run);
+            }
+        }
+        Ok(runs)
     }
 }
 

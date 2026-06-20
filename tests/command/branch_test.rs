@@ -196,6 +196,78 @@ fn test_branch_set_upstream_rejects_unknown_remote() {
     );
 }
 
+#[test]
+fn test_branch_unset_upstream_clears_current_branch_tracking() {
+    let repo = create_committed_repo_via_cli();
+    let remote_add = run_libra_command(
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/repo.git",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&remote_add, "remote add origin");
+    let set = run_libra_command(&["branch", "--set-upstream-to", "origin/main"], repo.path());
+    assert_cli_success(&set, "branch --set-upstream-to origin/main");
+
+    let unset = run_libra_command(&["branch", "--unset-upstream"], repo.path());
+    assert_cli_success(&unset, "branch --unset-upstream");
+
+    let remote = run_libra_command(&["config", "get", "branch.main.remote"], repo.path());
+    assert!(
+        !remote.status.success(),
+        "branch.main.remote should be unset: {}",
+        String::from_utf8_lossy(&remote.stdout)
+    );
+    let merge = run_libra_command(&["config", "get", "branch.main.merge"], repo.path());
+    assert!(
+        !merge.status.success(),
+        "branch.main.merge should be unset: {}",
+        String::from_utf8_lossy(&merge.stdout)
+    );
+}
+
+#[test]
+fn test_branch_points_at_filters_exact_tip() {
+    let repo = create_committed_repo_via_cli();
+    let head = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert_cli_success(&head, "rev-parse HEAD");
+    let head_oid = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    let create = run_libra_command(&["branch", "feature"], repo.path());
+    assert_cli_success(&create, "branch feature");
+
+    let output = run_libra_command(&["branch", "--points-at", &head_oid], repo.path());
+    assert_cli_success(&output, "branch --points-at HEAD");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("main"), "expected main in output: {stdout}");
+    assert!(
+        stdout.contains("feature"),
+        "expected feature in output: {stdout}"
+    );
+}
+
+#[test]
+fn test_branch_ignore_case_sorts_case_insensitively() {
+    let repo = create_committed_repo_via_cli();
+    let alpha = run_libra_command(&["branch", "alpha"], repo.path());
+    assert_cli_success(&alpha, "branch alpha");
+    let beta = run_libra_command(&["branch", "Beta"], repo.path());
+    assert_cli_success(&beta, "branch Beta");
+
+    let output = run_libra_command(&["branch", "--ignore-case"], repo.path());
+    assert_cli_success(&output, "branch --ignore-case");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let alpha_pos = stdout.find("alpha").expect("alpha should be listed");
+    let beta_pos = stdout.find("Beta").expect("Beta should be listed");
+    assert!(
+        alpha_pos < beta_pos,
+        "ignore-case sorting should place alpha before Beta: {stdout}"
+    );
+}
+
 /// Scenario (Unix only): if SQLite write permission is revoked
 /// (`chmod 0o444`), `branch --set-upstream-to` must surface an
 /// `LBR-IO-002` error mentioning the failing config key. The original
@@ -343,6 +415,7 @@ async fn test_branch() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(commit_args).await;
     let first_commit_id = Branch::find_branch_result("main", None)
@@ -363,6 +436,7 @@ async fn test_branch() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(commit_args).await;
     let second_commit_id = Branch::find_branch_result("main", None)
@@ -381,12 +455,15 @@ async fn test_branch() {
             delete: None,
             delete_safe: None,
             set_upstream_to: None,
+            unset_upstream: None,
             show_current: false,
             rename: vec![],
             remotes: false,
             all: false,
             contains: vec![],
             no_contains: vec![],
+            points_at: None,
+            ignore_case: false,
         };
         execute(args).await;
 
@@ -416,12 +493,15 @@ async fn test_branch() {
             delete: None,
             delete_safe: None,
             set_upstream_to: None,
+            unset_upstream: None,
             show_current: false,
             rename: vec![],
             remotes: false,
             all: false,
             contains: vec![],
             no_contains: vec![],
+            points_at: None,
+            ignore_case: false,
         };
         execute(args).await;
         let second_branch = Branch::find_branch_result(&second_branch_name, None)
@@ -441,12 +521,15 @@ async fn test_branch() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: true,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await;
 
@@ -478,6 +561,7 @@ async fn test_create_branch_from_remote() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(args).await;
     let hash = Head::current_commit().await.unwrap();
@@ -493,12 +577,15 @@ async fn test_create_branch_from_remote() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await;
 
@@ -547,12 +634,15 @@ async fn test_create_branch_from_remote_tracking_ref() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 
@@ -706,6 +796,7 @@ async fn test_invalid_branch_name() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(args).await;
 
@@ -743,6 +834,7 @@ async fn test_branch_rename() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(args).await;
     let commit_id_1 = Head::current_commit().await.unwrap();
@@ -755,12 +847,15 @@ async fn test_branch_rename() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await;
 
@@ -779,12 +874,15 @@ async fn test_branch_rename() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec!["old_name".to_string(), "new_name".to_string()],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await;
 
@@ -830,6 +928,7 @@ async fn test_rename_current_branch() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(args).await;
     let commit_id = Head::current_commit().await.unwrap();
@@ -845,8 +944,13 @@ async fn test_rename_current_branch() {
     switch::execute(SwitchArgs {
         branch: None,
         create: Some(feature_branch.clone()),
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
+        force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -865,12 +969,15 @@ async fn test_rename_current_branch() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![feature_new.clone()],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await;
 
@@ -921,6 +1028,7 @@ async fn test_rename_to_existing_branch() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(args).await;
 
@@ -932,12 +1040,15 @@ async fn test_rename_to_existing_branch() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await;
 
@@ -948,12 +1059,15 @@ async fn test_rename_to_existing_branch() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await;
 
@@ -965,12 +1079,15 @@ async fn test_rename_to_existing_branch() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec!["branch1".to_string(), "branch2".to_string()],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await;
 
@@ -1014,6 +1131,7 @@ async fn test_list_all_branches() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(args).await;
 
@@ -1025,12 +1143,15 @@ async fn test_list_all_branches() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await;
 
@@ -1052,12 +1173,15 @@ async fn test_list_all_branches() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: true,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     };
     execute(args).await; // This will print to stdout, which is fine for tests
 
@@ -1106,6 +1230,7 @@ async fn test_branch_delete_safe() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(commit_args).await;
 
@@ -1117,12 +1242,15 @@ async fn test_branch_delete_safe() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 
@@ -1130,8 +1258,13 @@ async fn test_branch_delete_safe() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
+        force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -1147,6 +1280,7 @@ async fn test_branch_delete_safe() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute(commit_args).await;
 
@@ -1154,8 +1288,13 @@ async fn test_branch_delete_safe() {
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
+        force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -1167,12 +1306,15 @@ async fn test_branch_delete_safe() {
         delete: None,
         delete_safe: Some("feature".to_string()),
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 
@@ -1188,16 +1330,26 @@ async fn test_branch_delete_safe() {
     switch::execute(SwitchArgs {
         branch: Some("feature".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
+        force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
     switch::execute(SwitchArgs {
         branch: Some("main".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
+        force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -1219,12 +1371,15 @@ async fn test_branch_delete_safe() {
         delete: None,
         delete_safe: Some("feature".to_string()),
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 
@@ -1285,6 +1440,7 @@ async fn test_branch_contains_commit_filter() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
 
     // ================================================================
@@ -1303,20 +1459,28 @@ async fn test_branch_contains_commit_filter() {
         delete: None,
         delete_safe: None,
         set_upstream_to: None,
+        unset_upstream: None,
         show_current: false,
         rename: vec![],
         remotes: false,
         all: false,
         contains: vec![],
         no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
     })
     .await;
 
     switch::execute(SwitchArgs {
         branch: Some("dev".to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
+        force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -1330,8 +1494,13 @@ async fn test_branch_contains_commit_filter() {
     switch::execute(SwitchArgs {
         branch: Some(main_branch.clone()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: false,
         track: false,
+        force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 

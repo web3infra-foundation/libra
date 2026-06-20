@@ -63,6 +63,10 @@ pub mod automation;
 // `agent/runtime/sub_agent.rs` and `session/jsonl.rs`, so the module
 // is unconditionally available.
 pub mod agent_run;
+// Capability packages (CEX-S2-17): auditable, checksum-verified bundles of
+// skills / commands / sources / sub-agent definitions plus the per-repo
+// installed-package store the session bootstrap reads.
+pub mod capability_package;
 // Generic LLM client helpers shared across providers.
 pub mod client;
 // Adapter for the managed Codex provider runtime.

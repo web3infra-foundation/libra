@@ -66,6 +66,40 @@ fn test_restore_missing_pathspec_returns_cli_invalid_target() {
     assert_eq!(report.exit_code, 129);
 }
 
+#[test]
+#[serial]
+fn test_restore_pathspec_from_file_restores_listed_paths() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    std::fs::write(p.join("a.txt"), "committed-a\n").unwrap();
+    std::fs::write(p.join("b.txt"), "committed-b\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "a.txt", "b.txt"], p), "add a/b");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "add a/b", "--no-verify"], p),
+        "commit a/b",
+    );
+
+    // Dirty both files, then list them in a pathspec file.
+    std::fs::write(p.join("a.txt"), "dirty-a\n").unwrap();
+    std::fs::write(p.join("b.txt"), "dirty-b\n").unwrap();
+    std::fs::write(p.join("specs.txt"), "a.txt\nb.txt\n").unwrap();
+
+    let output = run_libra_command(&["restore", "--pathspec-from-file", "specs.txt"], p);
+    assert_cli_success(&output, "restore --pathspec-from-file");
+
+    assert_eq!(
+        std::fs::read_to_string(p.join("a.txt")).unwrap(),
+        "committed-a\n",
+        "a.txt should be restored from the pathspec file"
+    );
+    assert_eq!(
+        std::fs::read_to_string(p.join("b.txt")).unwrap(),
+        "committed-b\n",
+        "b.txt should be restored from the pathspec file"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_restore_source_does_not_fall_back_from_unborn_branch_to_hash_prefix() {

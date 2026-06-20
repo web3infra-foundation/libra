@@ -9,6 +9,10 @@ Create a new commit from staged changes.
 ```
 libra commit [OPTIONS] -m <MESSAGE>
 libra commit [OPTIONS] -F <FILE>
+libra commit [OPTIONS] -C <COMMIT>
+libra commit [OPTIONS] -c <COMMIT>
+libra commit [OPTIONS] --fixup <COMMIT>
+libra commit [OPTIONS] --squash <COMMIT>
 libra commit --amend [--no-edit]
 ```
 
@@ -28,11 +32,39 @@ bypassed with `--no-verify`.
 
 ### `-m, --message <MESSAGE>`
 
-Use the given message as the commit message. Required unless `--no-edit` (with `--amend`) or
-`-F` is provided.
+Use the given message as the commit message. When omitted (and no `-F`/`-C`/`--no-edit`
+source is given), the editor is opened to compose the message.
 
 ```bash
 libra commit -m "Add new feature"
+```
+
+### `-e, --edit`
+
+Open the editor to edit the final message even when `-m`/`-F`/`-C` is given (the supplied
+message is the initial buffer). Conflicts with `--no-edit`.
+
+```bash
+libra commit -e -m "Draft message"
+```
+
+### `-v, --verbose`
+
+Show the staged diff in the editor template (below a scissors line, stripped on save) or, when
+no editor is opened, on stderr. The diff never enters the commit message.
+
+```bash
+libra commit -v
+```
+
+### `--no-edit`
+
+Reuse the existing message (the `--amend` parent's, or the one from `-m`/`-F`) without opening
+the editor. Conflicts with `--edit`.
+
+```bash
+libra commit --amend --no-edit
+libra commit --no-edit -m "msg"
 ```
 
 ### `-F, --file <FILE>`
@@ -126,6 +158,74 @@ Override the commit author. Must use the standard `A U Thor <author@example.com>
 libra commit --author "Jane Doe <jane@example.com>" -m "Patch"
 ```
 
+### `--cleanup <MODE>`
+
+Clean up the commit message before committing. Accepted values: `strip` (default, removes
+commentary lines and trims whitespace), `whitespace` (only trims whitespace), `verbatim` (no
+cleanup), `scissors` (stops at scissors line), `default`.
+
+```bash
+libra commit --cleanup=strip -m "feat: add login"
+```
+
+### `--dry-run`
+
+Do not actually create the commit. Show the commit summary that would be produced.
+
+```bash
+libra commit --dry-run -m "Draft commit"
+```
+
+### `--fixup <COMMIT>`
+
+Create a fixup commit whose message is `fixup! <target subject>`.
+
+```bash
+libra commit --fixup HEAD~1
+```
+
+### `--squash <COMMIT>`
+
+Create a squash commit whose message is `squash! <target subject>`.
+
+```bash
+libra commit --squash abc1234
+```
+
+### `-C <COMMIT>`, `--reuse-message <COMMIT>`
+
+Reuse the commit message from the specified commit.
+
+```bash
+libra commit -C HEAD~1
+```
+
+### `-c <COMMIT>`, `--reedit-message <COMMIT>`
+
+Reuse the commit message from the specified commit. In Git this opens an editor; Libra
+reuses the message directly when no editor is available.
+
+```bash
+libra commit -c HEAD~1
+```
+
+### `--trailer <TRAILER>`
+
+Add a trailer line to the commit message. Can be specified multiple times.
+
+```bash
+libra commit -m "Add feature" --trailer "Reviewed-by: Jane Doe"
+```
+
+### `--reset-author`
+
+Reset the author of the commit to the current user identity. This is the default for new
+commits; the flag is accepted for Git compatibility.
+
+```bash
+libra commit --amend --reset-author --no-edit
+```
+
 ## Common Commands
 
 ```bash
@@ -137,6 +237,10 @@ libra commit -a -m "Fix typo"
 libra commit -F message.txt
 libra commit -s -m "Add feature"
 libra commit --allow-empty -m "Trigger CI"
+libra commit --dry-run -m "Draft commit"
+libra commit --fixup HEAD~1
+libra commit -C HEAD~1
+libra commit -m "Add feature" --trailer "Reviewed-by: Jane Doe"
 libra commit --json -m "Add feature"
 ```
 
@@ -312,13 +416,13 @@ switching from Git do not need to learn a new flag name.
 | Conventional check | External tool (commitlint) | N/A | `libra commit --conventional` |
 | Skip pre-commit only | N/A | N/A | `libra commit --disable-pre` |
 | Skip all hooks | `git commit --no-verify` | N/A | `libra commit --no-verify` |
-| Fixup commit | `git commit --fixup=<commit>` | N/A | N/A |
-| Squash commit | `git commit --squash=<commit>` | `jj squash` | N/A |
-| Interactive message | `git commit` (opens editor) | `jj commit` (opens editor) | N/A (message required via -m or -F) |
-| Verbose diff in editor | `git commit -v` | N/A | N/A |
-| Reset author date | `git commit --reset-author` | N/A | N/A |
-| Cleanup mode | `git commit --cleanup=<mode>` | N/A | N/A |
-| Trailer | `git commit --trailer="..."` | N/A | N/A |
+| Fixup commit | `git commit --fixup=<commit>` | N/A | `libra commit --fixup=<commit>` |
+| Squash commit | `git commit --squash=<commit>` | `jj squash` | `libra commit --squash=<commit>` |
+| Interactive message | `git commit` (opens editor) | `jj commit` (opens editor) | `libra commit` / `libra commit -e` (opens editor) |
+| Verbose diff in editor | `git commit -v` | N/A | `libra commit -v` |
+| Reset author date | `git commit --reset-author` | N/A | `libra commit --reset-author` |
+| Cleanup mode | `git commit --cleanup=<mode>` | N/A | `libra commit --cleanup=<mode>` |
+| Trailer | `git commit --trailer="..."` | N/A | `libra commit --trailer="..."` |
 | Structured JSON output | N/A | N/A | `--json` / `--machine` |
 | Error hints | Minimal | Minimal | Every error type has an actionable hint |
 
@@ -350,8 +454,8 @@ Every `CommitError` variant maps to an explicit `StableErrorCode`.
 
 ## Compatibility Notes
 
-- Libra does not open an editor for interactive message composition; `-m` or `-F` is always required (except with `--amend --no-edit`)
+- `libra commit` opens the editor to compose the message when no `-m`/`-F`/`-C` source is given (and `--no-edit` is absent), and `-e`/`--edit` always opens it. The editor is resolved as `$GIT_EDITOR` → `core.editor` → `$VISUAL` → `$EDITOR` → `vi`. An explicitly configured editor runs even without a TTY; the `vi` fallback requires an interactive terminal. Without a TTY and without a configured editor, a commit needing a message aborts (it never hangs).
+- `-v`/`--verbose` appends the staged diff to the editor template (below a `# ----- >8 -----` scissors line); the diff is stripped on save and never enters the commit message. When no editor is opened, `-v` prints the staged diff to stderr.
 - jj does not have a traditional `commit` command with staging; `jj commit` finalizes the working copy commit
-- `--fixup` and `--squash` are not supported; use `libra rebase -i` for commit restructuring
+- `--fixup` and `--squash` are supported (autosquash markers); `--cleanup=<mode>` controls comment/scissors stripping
 - Vault signing replaces Git's `commit.gpgsign` and `user.signingkey` configuration
-- `--cleanup` mode for comment stripping is not supported; messages are used as-is

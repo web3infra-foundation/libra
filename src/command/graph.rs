@@ -120,7 +120,7 @@ fn status_for_event_kind(event_kind: &str) -> Option<StatusInfo> {
 /// for running outside the current repository, and a JSON variant for
 /// agents so users see all supported forms without reading the design
 /// doc. Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
+/// `docs/development/commands/_general.md` item B.
 pub const GRAPH_EXAMPLES: &str = "\
 EXAMPLES:
     libra graph <thread-uuid>                          Render the version-graph for a thread ID

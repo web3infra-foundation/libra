@@ -2,12 +2,13 @@
 //! pruning stale remote-tracking branches.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io::{self, Write},
 };
 
 use clap::Subcommand;
 use git_internal::hash::get_hash_kind;
+use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter, TransactionTrait};
 use serde::Serialize;
 
 use crate::{
@@ -15,7 +16,10 @@ use crate::{
     internal::{
         branch::{Branch, BranchStoreError},
         config::ConfigKv,
-        protocol::set_wire_hash_kind,
+        db::get_db_conn_instance,
+        head::Head,
+        model::reference,
+        protocol::{DiscRef, set_wire_hash_kind},
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -67,7 +71,7 @@ impl std::fmt::Display for SetUrlMode {
 /// the most common invocation per sub-command (where it carries enough
 /// signal beyond the sub-command name) plus a JSON variant so users can
 /// map intent to invocation without reading the design doc. Cross-cutting
-/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
+/// `--help` EXAMPLES rollout per `docs/development/commands/_general.md` item B.
 pub const REMOTE_EXAMPLES: &str = "\
 EXAMPLES:
     libra remote -v                                List remotes with fetch/push URLs
@@ -79,6 +83,11 @@ EXAMPLES:
     libra remote set-url --push origin https://example.com/org/repo.git
                                                    Replace the push URL only
     libra remote prune --dry-run origin            Preview which tracking refs would be removed
+    libra remote set-branches origin main          Track only the named branch(es)
+    libra remote set-head origin main              Point the remote's default branch at main
+    libra remote set-head origin --auto            Query the remote and set HEAD automatically
+    libra remote show origin                       Query the remote and show tracked/new/stale branches
+    libra remote show --no-query origin            Show cached remote-tracking data without contacting the remote
     libra remote --json -v                         Structured JSON output for agents";
 
 #[derive(Subcommand, Debug)]
@@ -105,8 +114,19 @@ pub enum RemoteCmds {
     /// List remotes verbosely
     #[command(name = "-v")]
     List,
-    /// List configured remote names
-    Show,
+    /// List configured remote names, or show details for one remote.
+    Show {
+        /// Remote name to inspect. Omit to list configured remote names.
+        name: Option<String>,
+        /// Do not contact the remote; show cached remote-tracking refs only
+        /// (status `cached`). By default `show` queries the remote and classifies
+        /// branches as tracked / new / stale.
+        #[arg(short = 'n', long = "no-query")]
+        no_query: bool,
+        /// Include additional detail where available
+        #[arg(short, long)]
+        verbose: bool,
+    },
     /// Print URLs for the given remote.
     ///
     /// Examples:{n}{n}  libra remote get-url origin              # print the fetch URL (first){n}  libra remote get-url --push origin       # print push URLs{n}  libra remote get-url --all origin        # print all configured URLs
@@ -152,6 +172,35 @@ pub enum RemoteCmds {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Set the branches tracked by a remote (rewrites `remote.<name>.fetch`).
+    ///
+    /// Examples:{n}{n}  libra remote set-branches origin main          # track only main{n}  libra remote set-branches --add origin dev     # also track dev
+    SetBranches {
+        /// Add to the tracked branches instead of replacing them
+        #[arg(long)]
+        add: bool,
+        /// Remote name
+        name: String,
+        /// Branch name(s) to track
+        #[arg(required = true, num_args = 1..)]
+        branches: Vec<String>,
+    },
+    /// Set or delete the default branch for a remote (`refs/remotes/<name>/HEAD`).
+    ///
+    /// Examples:{n}{n}  libra remote set-head origin main   # point remote HEAD at main{n}  libra remote set-head origin --auto # query the remote and set HEAD automatically{n}  libra remote set-head origin -d    # delete the remote HEAD ref
+    SetHead {
+        /// Query the remote and set its HEAD to the branch the remote points at
+        #[arg(short = 'a', long = "auto", conflicts_with_all = ["delete", "branch"])]
+        auto: bool,
+        /// Delete the remote HEAD ref
+        #[arg(short = 'd', long = "delete", conflicts_with = "auto")]
+        delete: bool,
+        /// Remote name
+        name: String,
+        /// Branch to set as the remote HEAD
+        #[arg(conflicts_with_all = ["auto", "delete"])]
+        branch: Option<String>,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -192,6 +241,15 @@ enum RemoteError {
 
     #[error("remote object format '{remote}' does not match local '{local}'")]
     ObjectFormatMismatch { remote: String, local: String },
+
+    #[error("no such remote-tracking branch '{remote}/{branch}'")]
+    RemoteTrackingBranchNotFound { remote: String, branch: String },
+
+    #[error("failed to query remote '{remote}': {detail}")]
+    Discovery { remote: String, detail: String },
+
+    #[error("could not determine the default branch for remote '{remote}'")]
+    NoRemoteHead { remote: String },
 
     #[error(transparent)]
     Fetch(#[from] fetch::FetchError),
@@ -253,6 +311,25 @@ impl From<RemoteError> for CliError {
                 "remote object format '{remote}' does not match local '{local}'"
             ))
             .with_stable_code(StableErrorCode::RepoStateInvalid),
+            RemoteError::RemoteTrackingBranchNotFound { remote, branch } => {
+                CliError::fatal(format!("no such remote-tracking branch '{remote}/{branch}'"))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+                    .with_hint("fetch the remote first, or run 'libra remote -v' to inspect remotes")
+            }
+            RemoteError::Discovery { remote, detail } => {
+                CliError::fatal(format!("failed to query remote '{remote}': {detail}"))
+                    .with_stable_code(StableErrorCode::NetworkUnavailable)
+                    .with_hint(format!(
+                        "ensure the remote is reachable, or run 'libra remote show --no-query {remote}' to show cached data"
+                    ))
+            }
+            RemoteError::NoRemoteHead { remote } => {
+                CliError::fatal(format!(
+                    "could not determine the default branch for remote '{remote}'"
+                ))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("the remote advertised no branches; specify a branch explicitly with 'libra remote set-head <name> <branch>'")
+            }
             RemoteError::Fetch(source) => CliError::from(source),
         }
     }
@@ -269,6 +346,27 @@ pub struct RemoteListEntry {
 pub struct RemotePruneEntry {
     pub remote_ref: String,
     pub branch: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RemoteBranchStatus {
+    pub branch: String,
+    pub status: String,
+    pub local_oid: Option<String>,
+    pub remote_oid: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RemotePullConfig {
+    pub local_branch: String,
+    pub remote_branch: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SetHeadMode {
+    Set,
+    Delete,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -307,6 +405,26 @@ pub enum RemoteOutput {
         dry_run: bool,
         stale_branches: Vec<RemotePruneEntry>,
     },
+    Show {
+        name: String,
+        fetch_urls: Vec<String>,
+        push_urls: Vec<String>,
+        head_branch: Option<String>,
+        remote_branches: Vec<RemoteBranchStatus>,
+        pull_config: Vec<RemotePullConfig>,
+        push_config: Vec<String>,
+        queried: bool,
+    },
+    SetBranches {
+        name: String,
+        added: bool,
+        fetch_refspecs: Vec<String>,
+    },
+    SetHead {
+        name: String,
+        mode: SetHeadMode,
+        target: Option<String>,
+    },
 }
 
 pub async fn execute(command: RemoteCmds) {
@@ -318,8 +436,51 @@ pub async fn execute(command: RemoteCmds) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting.
 pub async fn execute_safe(command: RemoteCmds, output: &OutputConfig) -> CliResult<()> {
+    // Runtime usage validation for the new subcommands (parameter errors map to
+    // `command_usage` / 129, not a `RemoteError`).
+    validate_remote_usage(&command)?;
     let result = run_remote(command).await.map_err(CliError::from)?;
     render_remote_output(&result, output)
+}
+
+/// Reject usage errors (e.g. invalid tracking-branch names) before any work
+/// runs, mapping them to `command_usage` (exit 129).
+fn validate_remote_usage(command: &RemoteCmds) -> CliResult<()> {
+    match command {
+        RemoteCmds::SetBranches { branches, .. } => {
+            for branch in branches {
+                validate_tracking_branch_name(branch)?;
+            }
+        }
+        RemoteCmds::SetHead {
+            branch: Some(branch),
+            ..
+        } => {
+            validate_tracking_branch_name(branch)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Validate a user-supplied short branch name before it is interpolated into a
+/// refspec or a `refs/remotes/<name>/<branch>` ref.
+fn validate_tracking_branch_name(name: &str) -> CliResult<()> {
+    let invalid = name.is_empty()
+        || name.len() > 255
+        || name.starts_with('/')
+        || name.ends_with('/')
+        || name.starts_with("refs/")
+        || name.contains("..")
+        || name.contains("//")
+        || name.chars().any(|c| c.is_control() || c == ' ');
+    if invalid {
+        return Err(
+            CliError::command_usage(format!("invalid branch name '{name}'"))
+                .with_hint("use a plain branch name such as 'main'"),
+        );
+    }
+    Ok(())
 }
 
 async fn run_remote(command: RemoteCmds) -> Result<RemoteOutput, RemoteError> {
@@ -328,7 +489,14 @@ async fn run_remote(command: RemoteCmds) -> Result<RemoteOutput, RemoteError> {
         RemoteCmds::Remove { name } => run_remove_remote(name).await,
         RemoteCmds::Rename { old, new } => run_rename_remote(old, new).await,
         RemoteCmds::List => run_list_remotes(true).await,
-        RemoteCmds::Show => run_list_remotes(false).await,
+        RemoteCmds::Show {
+            name,
+            no_query,
+            verbose: _,
+        } => match name {
+            Some(name) => run_show_remote(name, no_query).await,
+            None => run_list_remotes(false).await,
+        },
         RemoteCmds::GetUrl { push, all, name } => run_get_url(name, push, all).await,
         RemoteCmds::SetUrl {
             add,
@@ -339,6 +507,17 @@ async fn run_remote(command: RemoteCmds) -> Result<RemoteOutput, RemoteError> {
             value,
         } => run_set_url(name, value, push, add, delete, all).await,
         RemoteCmds::Prune { name, dry_run } => run_prune_remote(name, dry_run).await,
+        RemoteCmds::SetBranches {
+            add,
+            name,
+            branches,
+        } => run_set_branches(name, branches, add).await,
+        RemoteCmds::SetHead {
+            auto,
+            delete,
+            name,
+            branch,
+        } => run_set_head(name, auto, delete, branch).await,
     }
 }
 
@@ -728,9 +907,456 @@ fn effective_push_urls(fetch_urls: &[String], push_urls: &[String]) -> Vec<Strin
     }
 }
 
+/// Contact the remote and return its advertised branch heads, capability
+/// strings, and HEAD ref — the inputs to `fetch::resolve_remote_default_branch`
+/// and to online `remote show` classification.
+async fn discover_remote_refs(
+    name: &str,
+) -> Result<(Vec<DiscRef>, Vec<String>, Option<DiscRef>), RemoteError> {
+    let entry = load_remote_entry(name).await?;
+    let url = entry
+        .fetch_urls
+        .first()
+        .ok_or_else(|| RemoteError::NoUrlConfigured {
+            name: name.to_string(),
+        })?;
+    let (_, discovery) = fetch::discover_remote_with_name(url, Some(name))
+        .await
+        .map_err(|error| RemoteError::Discovery {
+            remote: name.to_string(),
+            detail: error.to_string(),
+        })?;
+    let ref_heads = discovery
+        .refs
+        .iter()
+        .filter(|reference| reference._ref.starts_with("refs/heads/"))
+        .cloned()
+        .collect();
+    let remote_head = discovery
+        .refs
+        .iter()
+        .find(|reference| reference._ref == "HEAD")
+        .cloned();
+    Ok((ref_heads, discovery.capabilities, remote_head))
+}
+
+/// Detailed `remote show <name>`. By default it contacts the remote (like
+/// `git remote show`) to report the live remote HEAD and classify branches as
+/// `tracked` / `new` / `stale` against the local remote-tracking refs. With
+/// `--no-query` it stays fully offline: the cached remote HEAD
+/// (`refs/remotes/<name>/HEAD`) and the cached tracking branches (status
+/// `cached`). Both modes also report the configured fetch/push URLs and the
+/// local `branch.<b>.remote`/`.merge` pull configuration.
+async fn run_show_remote(name: String, no_query: bool) -> Result<RemoteOutput, RemoteError> {
+    ensure_remote_exists(&name).await?;
+    let entry = load_remote_entry(&name).await?;
+    let local_tracking = load_local_tracking_refs(&name).await?;
+    let pull_config = load_pull_config(&name).await?;
+    let push_config = load_config_urls(&name, "pushurl").await?;
+
+    let (head_branch, remote_branches, queried) = if no_query {
+        (
+            load_cached_remote_head(&name).await?,
+            classify_cached_remote_branches(&local_tracking),
+            false,
+        )
+    } else {
+        let (ref_heads, capabilities, remote_head) = discover_remote_refs(&name).await?;
+        let head_branch =
+            fetch::resolve_remote_default_branch(&capabilities, &ref_heads, remote_head.as_ref());
+        let remote_branches = classify_remote_branches_online(&ref_heads, &local_tracking);
+        (head_branch, remote_branches, true)
+    };
+
+    Ok(RemoteOutput::Show {
+        name,
+        fetch_urls: entry.fetch_urls,
+        push_urls: entry.push_urls,
+        head_branch,
+        remote_branches,
+        pull_config,
+        push_config,
+        queried,
+    })
+}
+
+/// Read the cached remote HEAD branch from `refs/remotes/<name>/HEAD` (a `Head`
+/// row). A detached or absent remote HEAD yields `None`.
+async fn load_cached_remote_head(name: &str) -> Result<Option<String>, RemoteError> {
+    let db = get_db_conn_instance().await;
+    Head::remote_current_result_with_conn(&db, name)
+        .await
+        .map_err(|error| RemoteError::BranchList {
+            detail: error.to_string(),
+        })
+        .map(|head| match head {
+            Some(Head::Branch(branch)) => Some(branch),
+            Some(Head::Detached(_)) | None => None,
+        })
+}
+
+/// Collect the cached remote-tracking branch OIDs for `<name>` as
+/// `short branch name -> commit OID`, skipping the synthetic `HEAD` ref.
+async fn load_local_tracking_refs(name: &str) -> Result<HashMap<String, String>, RemoteError> {
+    let prefix = format!("refs/remotes/{name}/");
+    let head_ref = format!("{prefix}HEAD");
+    let branches = Branch::list_branches_result(Some(name))
+        .await
+        .map_err(|error| RemoteError::BranchList {
+            detail: error.to_string(),
+        })?;
+    let mut refs = HashMap::new();
+    for branch in branches {
+        if branch.name == head_ref {
+            continue;
+        }
+        if let Some(short) = branch.name.strip_prefix(&prefix) {
+            refs.insert(short.to_string(), branch.commit.to_string());
+        }
+    }
+    Ok(refs)
+}
+
+/// Classify branches online by comparing the remote's advertised heads against
+/// the local remote-tracking refs:
+/// - `tracked`: advertised by the remote and already tracked locally (carries
+///   both the remote and local OIDs),
+/// - `new`: advertised by the remote but not yet tracked locally (a later
+///   `fetch` will create it) — remote OID only,
+/// - `stale`: tracked locally but no longer advertised by the remote (a `remote
+///   prune` would drop it) — local OID only.
+///
+/// Output is sorted by branch name for deterministic rendering.
+fn classify_remote_branches_online(
+    ref_heads: &[DiscRef],
+    local_tracking: &HashMap<String, String>,
+) -> Vec<RemoteBranchStatus> {
+    let mut out = Vec::new();
+    let mut remote_names = HashSet::new();
+    for reference in ref_heads {
+        let Some(branch) = reference._ref.strip_prefix("refs/heads/") else {
+            continue;
+        };
+        remote_names.insert(branch.to_string());
+        let local_oid = local_tracking.get(branch).cloned();
+        let status = if local_oid.is_some() {
+            "tracked"
+        } else {
+            "new"
+        };
+        out.push(RemoteBranchStatus {
+            branch: branch.to_string(),
+            status: status.to_string(),
+            local_oid,
+            remote_oid: Some(reference._hash.clone()),
+        });
+    }
+    for (branch, local_oid) in local_tracking {
+        if !remote_names.contains(branch) {
+            out.push(RemoteBranchStatus {
+                branch: branch.clone(),
+                status: "stale".to_string(),
+                local_oid: Some(local_oid.clone()),
+                remote_oid: None,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.branch.cmp(&b.branch));
+    out
+}
+
+/// Classify cached remote-tracking branches (offline). Every cached branch is
+/// reported with the `cached` status and its local OID.
+fn classify_cached_remote_branches(
+    local_tracking: &HashMap<String, String>,
+) -> Vec<RemoteBranchStatus> {
+    let mut names = local_tracking.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+    names
+        .into_iter()
+        .map(|branch| {
+            let local_oid = local_tracking.get(&branch).cloned();
+            RemoteBranchStatus {
+                branch,
+                status: "cached".to_string(),
+                local_oid,
+                remote_oid: None,
+            }
+        })
+        .collect()
+}
+
+/// Read the `branch.<b>.remote` / `branch.<b>.merge` pull configuration that
+/// points at this remote, in a single config scan (avoids N+1 queries).
+async fn load_pull_config(name: &str) -> Result<Vec<RemotePullConfig>, RemoteError> {
+    let entries =
+        ConfigKv::get_by_prefix("branch.")
+            .await
+            .map_err(|error| RemoteError::ConfigRead {
+                detail: error.to_string(),
+            })?;
+    let mut branch_remotes = HashMap::new();
+    let mut branch_merges = HashMap::new();
+    for entry in entries {
+        let Some(rest) = entry.key.strip_prefix("branch.") else {
+            continue;
+        };
+        let Some((branch, suffix)) = rest.rsplit_once('.') else {
+            continue;
+        };
+        match suffix {
+            "remote" => {
+                branch_remotes.insert(branch.to_string(), entry.value);
+            }
+            "merge" => {
+                branch_merges.insert(
+                    branch.to_string(),
+                    entry
+                        .value
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(&entry.value)
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+    }
+    let mut configs = branch_remotes
+        .into_iter()
+        .filter_map(|(local_branch, remote)| {
+            if remote != name {
+                return None;
+            }
+            branch_merges
+                .get(&local_branch)
+                .map(|remote_branch| RemotePullConfig {
+                    local_branch,
+                    remote_branch: remote_branch.clone(),
+                })
+        })
+        .collect::<Vec<_>>();
+    configs.sort_by(|left, right| left.local_branch.cmp(&right.local_branch));
+    Ok(configs)
+}
+
+/// `remote set-branches [--add] <name> <branch>...` — rewrite (or append to)
+/// `remote.<name>.fetch` as `+refs/heads/<b>:refs/remotes/<name>/<b>` in a single
+/// `ConfigKv` transaction.
+async fn run_set_branches(
+    name: String,
+    branches: Vec<String>,
+    add: bool,
+) -> Result<RemoteOutput, RemoteError> {
+    ensure_remote_exists(&name).await?;
+
+    let refspecs: Vec<String> = branches
+        .iter()
+        .map(|branch| format!("+refs/heads/{branch}:refs/remotes/{name}/{branch}"))
+        .collect();
+
+    let key = format!("remote.{name}.fetch");
+    let db = get_db_conn_instance().await;
+    let txn_key = key.clone();
+    let txn_refspecs = refspecs.clone();
+    db.transaction::<_, (), DbErr>(move |txn| {
+        Box::pin(async move {
+            if !add {
+                ConfigKv::unset_all_with_conn(txn, &txn_key)
+                    .await
+                    .map_err(|e| DbErr::Custom(e.to_string()))?;
+            }
+            for spec in &txn_refspecs {
+                ConfigKv::add_with_conn(txn, &txn_key, spec, false)
+                    .await
+                    .map_err(|e| DbErr::Custom(e.to_string()))?;
+            }
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| RemoteError::ConfigWrite {
+        detail: e.to_string(),
+    })?;
+
+    Ok(RemoteOutput::SetBranches {
+        name,
+        added: add,
+        fetch_refspecs: refspecs,
+    })
+}
+
+/// `remote set-head <name> (<branch> | -d/--delete)` — write or delete the remote
+/// HEAD ref `refs/remotes/<name>/HEAD` (a `Head` row, not a `Branch` row). The
+/// explicit-branch mode requires the tracking branch to already exist. `--auto`
+/// is rejected earlier in `validate_remote_usage`.
+async fn run_set_head(
+    name: String,
+    auto: bool,
+    delete: bool,
+    branch: Option<String>,
+) -> Result<RemoteOutput, RemoteError> {
+    ensure_remote_exists(&name).await?;
+    let db = get_db_conn_instance().await;
+
+    if delete {
+        let txn_name = name.clone();
+        db.transaction::<_, (), DbErr>(move |txn| {
+            Box::pin(async move {
+                // Remote HEAD is a `Head` row (refs/remotes/<name>/HEAD), not a
+                // `Branch` row — delete it directly. Absent row is a no-op.
+                reference::Entity::delete_many()
+                    .filter(reference::Column::Kind.eq(reference::ConfigKind::Head))
+                    .filter(reference::Column::Remote.eq(txn_name))
+                    .exec(txn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .await
+        .map_err(|e| RemoteError::ConfigWrite {
+            detail: e.to_string(),
+        })?;
+        return Ok(RemoteOutput::SetHead {
+            name,
+            mode: SetHeadMode::Delete,
+            target: None,
+        });
+    }
+
+    // Resolve the target branch: `--auto` queries the remote for its HEAD
+    // (symref capability, else OID match, else main/master/first); otherwise the
+    // explicit `<branch>` argument is required.
+    let branch = if auto {
+        let (ref_heads, capabilities, remote_head) = discover_remote_refs(&name).await?;
+        fetch::resolve_remote_default_branch(&capabilities, &ref_heads, remote_head.as_ref())
+            .ok_or_else(|| RemoteError::NoRemoteHead {
+                remote: name.clone(),
+            })?
+    } else {
+        branch.ok_or_else(|| RemoteError::RemoteTrackingBranchNotFound {
+            remote: name.clone(),
+            branch: String::new(),
+        })?
+    };
+
+    // The tracking branch must already exist locally. It is stored under the
+    // full ref `refs/remotes/<name>/<branch>` with the `remote` column = name.
+    let full_ref = format!("refs/remotes/{name}/{branch}");
+    let exists = Branch::find_branch_result(&full_ref, Some(&name))
+        .await
+        .map_err(|e| RemoteError::BranchList {
+            detail: e.to_string(),
+        })?
+        .is_some();
+    if !exists {
+        return Err(RemoteError::RemoteTrackingBranchNotFound {
+            remote: name,
+            branch,
+        });
+    }
+
+    let txn_name = name.clone();
+    let txn_branch = branch.clone();
+    db.transaction::<_, (), DbErr>(move |txn| {
+        Box::pin(async move {
+            Head::update_result_with_conn(txn, Head::Branch(txn_branch), Some(&txn_name))
+                .await
+                .map_err(|e| DbErr::Custom(e.to_string()))?;
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| RemoteError::ConfigWrite {
+        detail: e.to_string(),
+    })?;
+
+    Ok(RemoteOutput::SetHead {
+        name,
+        mode: SetHeadMode::Set,
+        target: Some(branch),
+    })
+}
+
+fn redact_url_list(urls: &[String]) -> Vec<String> {
+    urls.iter()
+        .map(|url| fetch::redact_url_credentials(url))
+        .collect()
+}
+
+/// Return a copy of the output with every URL credential redacted, so the JSON
+/// envelope never leaks userinfo. Variants without URLs are cloned unchanged.
+fn redacted_remote_output(result: &RemoteOutput) -> RemoteOutput {
+    match result {
+        RemoteOutput::Add { name, url } => RemoteOutput::Add {
+            name: name.clone(),
+            url: fetch::redact_url_credentials(url),
+        },
+        RemoteOutput::List { verbose, remotes } => RemoteOutput::List {
+            verbose: *verbose,
+            remotes: remotes
+                .iter()
+                .map(|remote| RemoteListEntry {
+                    name: remote.name.clone(),
+                    fetch_urls: redact_url_list(&remote.fetch_urls),
+                    push_urls: redact_url_list(&remote.push_urls),
+                })
+                .collect(),
+        },
+        RemoteOutput::Urls {
+            name,
+            push,
+            all,
+            urls,
+        } => RemoteOutput::Urls {
+            name: name.clone(),
+            push: *push,
+            all: *all,
+            urls: redact_url_list(urls),
+        },
+        RemoteOutput::SetUrl {
+            name,
+            role,
+            mode,
+            urls,
+            removed,
+        } => RemoteOutput::SetUrl {
+            name: name.clone(),
+            role: *role,
+            mode: *mode,
+            urls: redact_url_list(urls),
+            removed: *removed,
+        },
+        RemoteOutput::Show {
+            name,
+            fetch_urls,
+            push_urls,
+            head_branch,
+            remote_branches,
+            pull_config,
+            push_config,
+            queried,
+        } => RemoteOutput::Show {
+            name: name.clone(),
+            fetch_urls: redact_url_list(fetch_urls),
+            push_urls: redact_url_list(push_urls),
+            head_branch: head_branch.clone(),
+            remote_branches: remote_branches.clone(),
+            pull_config: pull_config.clone(),
+            push_config: redact_url_list(push_config),
+            queried: *queried,
+        },
+        RemoteOutput::Remove { .. }
+        | RemoteOutput::Rename { .. }
+        | RemoteOutput::Prune { .. }
+        | RemoteOutput::SetBranches { .. }
+        | RemoteOutput::SetHead { .. } => result.clone(),
+    }
+}
+
 fn render_remote_output(result: &RemoteOutput, output: &OutputConfig) -> CliResult<()> {
     if output.is_json() {
-        return emit_json_data("remote", result, output);
+        let redacted = redacted_remote_output(result);
+        return emit_json_data("remote", &redacted, output);
     }
 
     if output.quiet {
@@ -847,6 +1473,108 @@ fn render_remote_output(result: &RemoteOutput, output: &OutputConfig) -> CliResu
             }
             Ok(())
         }
+        RemoteOutput::Show {
+            name,
+            fetch_urls,
+            push_urls,
+            head_branch,
+            remote_branches,
+            pull_config,
+            push_config,
+            queried,
+        } => {
+            writeln!(writer, "* remote {name}").map_err(write_err)?;
+            for url in fetch_urls {
+                writeln!(
+                    writer,
+                    "  Fetch URL: {}",
+                    fetch::redact_url_credentials(url)
+                )
+                .map_err(write_err)?;
+            }
+            for url in push_urls {
+                writeln!(writer, "  Push URL: {}", fetch::redact_url_credentials(url))
+                    .map_err(write_err)?;
+            }
+            writeln!(
+                writer,
+                "  HEAD branch: {}",
+                head_branch.as_deref().unwrap_or("(unknown)")
+            )
+            .map_err(write_err)?;
+            if !queried {
+                writeln!(writer, "  Remote branch data: cached").map_err(write_err)?;
+            }
+            writeln!(writer, "  Remote branches:").map_err(write_err)?;
+            if remote_branches.is_empty() {
+                writeln!(writer, "    (none)").map_err(write_err)?;
+            } else {
+                for branch in remote_branches {
+                    let suffix = match branch.status.as_str() {
+                        "new" => {
+                            format!(" (next fetch will store in remotes/{name})")
+                        }
+                        "stale" => " (use 'libra remote prune' to remove)".to_string(),
+                        _ => String::new(),
+                    };
+                    writeln!(writer, "    {} {}{}", branch.branch, branch.status, suffix)
+                        .map_err(write_err)?;
+                }
+            }
+            writeln!(writer, "  Local branches configured for 'git pull':").map_err(write_err)?;
+            if pull_config.is_empty() {
+                writeln!(writer, "    (none)").map_err(write_err)?;
+            } else {
+                for config in pull_config {
+                    writeln!(
+                        writer,
+                        "    {} merges with remote {}",
+                        config.local_branch, config.remote_branch
+                    )
+                    .map_err(write_err)?;
+                }
+            }
+            writeln!(writer, "  Local refs configured for 'git push':").map_err(write_err)?;
+            if push_config.is_empty() {
+                writeln!(writer, "    (none)").map_err(write_err)?;
+            } else {
+                for refspec in push_config {
+                    writeln!(writer, "    {}", fetch::redact_url_credentials(refspec))
+                        .map_err(write_err)?;
+                }
+            }
+            Ok(())
+        }
+        RemoteOutput::SetBranches {
+            name,
+            added,
+            fetch_refspecs,
+        } => {
+            let verb = if *added {
+                "Now tracking"
+            } else {
+                "Set to track"
+            };
+            writeln!(
+                writer,
+                "{verb} {} branch(es) for remote '{name}'.",
+                fetch_refspecs.len()
+            )
+            .map_err(write_err)?;
+            Ok(())
+        }
+        RemoteOutput::SetHead { name, mode, target } => {
+            match (mode, target) {
+                (SetHeadMode::Delete, _) => {
+                    writeln!(writer, "Deleted remote HEAD for '{name}'.").map_err(write_err)?;
+                }
+                (SetHeadMode::Set, Some(branch)) => {
+                    writeln!(writer, "{name}/HEAD set to {branch}.").map_err(write_err)?;
+                }
+                (SetHeadMode::Set, None) => {}
+            }
+            Ok(())
+        }
     }
 }
 
@@ -946,6 +1674,14 @@ mod tests {
             }
             .to_string(),
             "remote object format 'sha1' does not match local 'sha256'",
+        );
+        assert_eq!(
+            RemoteError::RemoteTrackingBranchNotFound {
+                remote: "origin".to_string(),
+                branch: "dev".to_string(),
+            }
+            .to_string(),
+            "no such remote-tracking branch 'origin/dev'",
         );
     }
 }

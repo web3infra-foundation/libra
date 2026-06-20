@@ -8,7 +8,7 @@
 //! full copy) lands in a later CEX-S2-11 slice that wires
 //! `orchestrator/workspace.rs` into the sub-agent dispatcher.
 //!
-//! The thresholds come from `docs/improvement/agent.md` (Step 2 workspace
+//! The thresholds come from `docs/development/commands/agent.md` (Step 2 workspace
 //! materialization table):
 //!
 //! | condition                                   | strategy   |

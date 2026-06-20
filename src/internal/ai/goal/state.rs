@@ -1,6 +1,6 @@
 //! Goal state — replayable projection of the event stream.
 //!
-//! Per `docs/improvement/opencode.md` lines 567-576, [`GoalState`] is the
+//! Per `docs/development/commands/_general.md` lines 567-576, [`GoalState`] is the
 //! supervisor's view of an active Goal: spec, status, plan, completed
 //! criteria, evidence refs, blockers, and the most recent assistant
 //! summary. The state is **derived purely from the event stream** —
@@ -17,7 +17,7 @@
 //! semver gap (the user runs `--resume` and sees "Goal still active"
 //! despite the new client having moved on).
 //!
-//! # Status semantics (from `docs/improvement/opencode.md` 557-564)
+//! # Status semantics (from `docs/development/commands/_general.md` 557-564)
 //!
 //! | Status               | Meaning                                                |
 //! |----------------------|--------------------------------------------------------|
@@ -158,7 +158,7 @@ pub struct GoalEvidenceRef {
 }
 
 /// What the verifier ran (or what the user attests to) to confirm a
-/// criterion. Mirrors `docs/improvement/opencode.md` line 617's
+/// criterion. Mirrors `docs/development/commands/_general.md` line 617's
 /// `GoalVerificationRecord`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GoalVerificationRecord {
@@ -180,7 +180,7 @@ pub struct GoalBlocker {
     pub reason: GoalBlockReason,
     pub recorded_at: DateTime<Utc>,
     /// Optional concrete question shown to the user — single-question
-    /// rule from `docs/improvement/opencode.md` line 597.
+    /// rule from `docs/development/commands/_general.md` line 597.
     #[serde(default)]
     pub requested_input: Option<String>,
 }
@@ -263,7 +263,7 @@ impl GoalState {
 
 /// Schema-layer reasons [`apply`] refused to fold an envelope into
 /// `state`. Pinned by the doc's "terminal boundary" / "cross-goal
-/// guard" / "shape gate" rules (`docs/improvement/opencode.md` lines
+/// guard" / "shape gate" rules (`docs/development/commands/_general.md` lines
 /// 658-665, 1463-1467).
 ///
 /// The supervisor's replay loop (P6.3) and the verifier (P6.2) consume

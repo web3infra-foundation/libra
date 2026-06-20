@@ -1,6 +1,6 @@
 -- Libra Publish — D1 schema source of truth.
 --
--- Per docs/improvement/publish.md, this file is the single source for the
+-- Per docs/development/commands/publish.md, this file is the single source for the
 -- D1 schema. The Worker copy at worker/migrations/0001_publish.sql MUST be
 -- byte-for-byte identical; the publish_schema_contract test enforces the
 -- equality. The schema is read by:

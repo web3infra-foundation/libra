@@ -1,7 +1,7 @@
 //! Claude Code [`ObservedAgent`] adapter, paired with a
 //! [`TranscriptTruncator`] capability so `libra agent checkpoint rewind
 //! --apply` can rewrite the on-disk transcript JSONL — phase-4 item 1
-//! per `docs/improvement/entire.md` §14.4.
+//! per `docs/development/commands/_general.md` §14.4.
 //!
 //! Claude Code stores its session as line-delimited JSON. Each line has
 //! a top-level `timestamp` field (ISO-8601 / RFC-3339). The truncator

@@ -1,6 +1,6 @@
 //! Wave 2 / PR 2 — `libra code` CLI dispatch L1 tests.
 //!
-//! Per `docs/improvement/test.md` §5.1, Wave 2's CLI surface must
+//! Per `docs/development/commands/_general.md` §5.1, Wave 2's CLI surface must
 //! cover mode selection, mutual exclusion, and parser smoke without
 //! ever spawning the binary. We assert directly against
 //! `clap::Parser::try_parse_from` so a bad flag combination fails
@@ -132,7 +132,7 @@ fn browser_control_loopback_conflicts_with_stdio() {
 fn defaults_are_observe_control_and_deny_network() {
     let bare = parse(&[]).expect("CodeArgs has no required args");
     // Spot-check that the documented defaults from publish.md /
-    // docs/automation/local-tui-control.md actually flow through.
+    // docs/commands/code.md actually flow through.
     // ControlMode::Observe is the safe default (no automation
     // writes); CodeNetworkAccess::Deny is the safe default for
     // shell tools.

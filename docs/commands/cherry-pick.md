@@ -7,16 +7,22 @@ Apply the changes introduced by some existing commits.
 ## Synopsis
 
 ```
-libra cherry-pick [-n | --no-commit] [--json] [--quiet] <commit>...
+libra cherry-pick [-n|--no-commit] [-x] [-s|--signoff] [-e|--edit]
+                  [-m <n>|--mainline <n>] [--ff] [-S|--gpg-sign]
+                  [--allow-empty] [--allow-empty-message] [--keep-redundant-commits]
+                  [--json] [--quiet] <commit>...
+libra cherry-pick (--continue | --skip | --abort | --quit)
 ```
 
 ## Description
 
-`libra cherry-pick` applies the changes introduced by the specified commits onto the current branch. For each named commit, Libra computes the diff between that commit and its parent, applies the resulting changeset to the current index and working tree, and (unless `--no-commit` is given) records a new commit whose message references the original.
+`libra cherry-pick` applies the changes introduced by the specified commits onto the current branch. For each named commit, Libra computes the diff between that commit and its parent, applies the resulting changeset to the current index and working tree, and (unless `--no-commit` is given) records a new commit.
 
 This is useful for selectively applying commits from one branch to another without merging. When multiple commits are supplied they are applied in the order given, each one becoming a new commit on the current branch before the next is processed.
 
-The command requires an active branch (not detached HEAD) and refuses merge commits entirely.
+The command requires an active branch (not detached HEAD). Non-merge commits are applied directly; merge commits require `-m <parent-number>` to choose which parent to diff against.
+
+When a commit cannot be applied cleanly, Libra performs a three-way apply (base = parent tree, ours = current index, theirs = picked tree) and writes any divergent path to the index (stages 1/2/3) and the working tree (whole-file conflict markers). The in-progress sequence is persisted in the SQLite `cherry_pick_state` table, so you can resolve the conflict and continue with `--continue`, drop the conflicted commit with `--skip`, or undo the whole sequence with `--abort`/`--quit`. While a cherry-pick sequence is in progress, `merge` and `rebase` are blocked (`LBR-CONFLICT-002`).
 
 ## Options
 
@@ -24,7 +30,7 @@ The command requires an active branch (not detached HEAD) and refuses merge comm
 
 Apply the changes from the source commit to the index and working tree but do **not** create a new commit. This lets you inspect or combine the changes before committing manually with `libra commit`.
 
-**Restriction:** Only a single commit may be specified when `--no-commit` is used. Attempting to pass multiple commits with this flag produces error `LBR-CLI-002`.
+Multiple commits may be supplied; their changes accumulate in the index. Note that `--no-commit` cannot be combined with the conflict sequencer — a conflict during a multi-commit `--no-commit` pick is terminal (clean up with `libra reset --hard`/`libra restore`), since there are no intermediate commits to resume from.
 
 ```bash
 # Stage changes from abc1234 without committing
@@ -33,6 +39,86 @@ libra cherry-pick -n abc1234
 # Inspect staged changes, then commit manually
 libra status
 libra commit -m "cherry-picked and adjusted abc1234"
+```
+
+### `-x`
+
+Append `(cherry picked from commit <hash>)` to the new commit message. Without `-x`, Libra keeps the source commit message without adding the provenance line, matching Git's default behavior.
+
+```bash
+# Record the original commit hash in the new commit message
+libra cherry-pick -x abc1234
+```
+
+### `-s`, `--signoff`
+
+Add a `Signed-off-by: <name> <email>` trailer (from the configured `user.name`/`user.email`) to the new commit message. When combined with `-x`, the `(cherry picked from commit ...)` line is emitted first and `Signed-off-by` last, matching Git's trailer ordering.
+
+### `-e`, `--edit`
+
+Open an editor on the assembled commit message before committing. The editor is resolved from `core.editor`, then `$VISUAL`, then `$EDITOR`. In machine/JSON mode or without an interactive TTY, `-e` degrades to the assembled message without launching an editor (so it never blocks automation).
+
+### `-m <n>`, `--mainline <n>`
+
+Cherry-pick a merge commit, using parent number `<n>` (1-based) as the diff base. Required for merge commits — a merge commit without `-m` is rejected. `-m` on a non-merge commit, or an out-of-range parent number, is also rejected (`LBR-CLI-002`).
+
+```bash
+# Cherry-pick a merge commit along its first parent
+libra cherry-pick -m 1 <merge-commit>
+```
+
+### `--ff`
+
+When the picked commit is a single-parent direct child of HEAD and no commit-rewriting modifier is set, fast-forward HEAD to that commit without replaying or rewriting it (no hash drift).
+
+### `-S`, `--gpg-sign`
+
+GPG-sign the cherry-picked commit using the libra vault signing key. Signing happens on explicit request regardless of the `vault.signing` config default. If the vault has no signing key available the pick fails rather than producing an unsigned commit.
+
+### `--allow-empty`
+
+Cherry-pick a commit even if its own change set is empty (its tree equals its parent's). By default such commits are rejected (`LBR-CLI-002`).
+
+### `--allow-empty-message`
+
+Allow the new commit to be created with an empty message. By default an empty message is rejected (`LBR-CLI-002`).
+
+### `--keep-redundant-commits`
+
+Keep a commit that becomes redundant after being replayed (its resulting tree is identical to the current HEAD). By default such redundant commits are rejected (`LBR-CLI-002`).
+
+## Conflict Sequencer
+
+When a pick conflicts, resolve the affected files, stage them with `libra add`, then continue or cancel:
+
+### `--continue`
+
+Resume the in-progress cherry-pick after resolving conflicts. The index must have no unresolved conflict stages, or `--continue` is refused (`LBR-CONFLICT-001`). Finalizes the conflicted commit and applies any remaining commits in the sequence.
+
+### `--skip`
+
+Drop the current conflicted commit (restoring the worktree to the last successful tip) and continue with the rest of the sequence.
+
+### `--abort`
+
+Cancel the in-progress cherry-pick and reset HEAD/worktree back to the state before the sequence began.
+
+### `--quit`
+
+Forget the in-progress cherry-pick without changing the index or working tree (the conflict markers are left in place).
+
+```bash
+# A pick conflicts; resolve, stage, and continue:
+libra cherry-pick abc1234 def5678
+# ... edit conflicted files ...
+libra add <resolved-files>
+libra cherry-pick --continue
+
+# Or drop just the conflicted commit:
+libra cherry-pick --skip
+
+# Or undo the whole sequence:
+libra cherry-pick --abort
 ```
 
 ### `<commit>...` (positional, required)
@@ -66,6 +152,15 @@ libra cherry-pick abc1234 def5678
 
 # Cherry-pick without committing, to edit or combine changes
 libra cherry-pick -n abc1234
+
+# Cherry-pick and record the original commit hash in the new message
+libra cherry-pick -x abc1234
+
+# Cherry-pick a merge commit along its first parent, signed off
+libra cherry-pick -m 1 -s <merge-commit>
+
+# Resume after resolving a conflict
+libra add <resolved-files> && libra cherry-pick --continue
 
 # Cherry-pick with JSON output for AI agents or scripts
 libra cherry-pick --json abc1234
@@ -125,51 +220,40 @@ When `--no-commit` is used, `new_commit` and `short_new` are `null`:
 
 ## Design Rationale (Why different from Git/jj)
 
-### Why no `--edit` flag?
+### Sequencer state lives in SQLite, not dotfiles
 
-Git's `--edit` opens an editor so the user can modify the commit message before recording. Libra omits this for two reasons:
+Git maintains `.git/CHERRY_PICK_HEAD` and sequencer state files. Libra persists the in-progress sequence in the SQLite `cherry_pick_state` table instead, matching the repository's metadata-in-SQLite convention: the `DELETE`+`INSERT` save runs in a single transaction so a sequencer write is never left half-applied, and there is no loose dotfile that can drift from the refs. The AI-agent protocol is the same as Git's: detect the conflict code (`LBR-CONFLICT-001`), resolve, `libra add`, then `--continue` (or `--skip`/`--abort`/`--quit`).
 
-1. **Agent-first workflow.** Libra is designed for AI-agent-driven development where interactive editor prompts block automation pipelines. The default message format (`<original message>\n\n(cherry picked from commit <hash>)`) is deterministic and machine-parseable, which is exactly what agents need.
-2. **Compose with `--no-commit`.** Users who want to customize the message can use `-n` to stage changes without committing, then run `libra commit -m "custom message"`. This two-step approach is explicit, scriptable, and avoids the complexity of spawning an editor subprocess.
+### Whole-file conflict markers, not line-level hunks
 
-### Why no `--mainline` for merge commits?
+A divergent path is surfaced as a single whole-file conflict — ours between `<<<<<<< HEAD` and `=======`, theirs up to `>>>>>>> <short-source>` — rather than Git's line-level hunk merge. This is an intentional simplification: the user resolves the path by hand and stages it. Line-level hunk merging is not yet implemented.
 
-Git's `--mainline <parent-number>` allows cherry-picking merge commits by specifying which parent to diff against. Libra rejects merge commits outright because:
+### Unsupported Git options are rejected, not silently ignored
 
-1. **Ambiguity is dangerous.** Choosing the wrong parent silently produces a completely different changeset. In a trunk-based monorepo workflow, merge commits are ephemeral integration points, not units of work. The meaningful changes live in the individual commits that were merged.
-2. **Simplicity over edge cases.** Supporting `--mainline` adds significant complexity (parent selection, conflict resolution against an arbitrary base) for a use case that rarely arises in trunk-based development. Users can cherry-pick the individual non-merge commits instead.
-
-### Why is `--no-commit` limited to a single commit?
-
-When multiple commits are cherry-picked, each one builds on the result of the previous. Without intermediate commits, the index represents only the cumulative effect of all changes, losing the per-commit attribution. Allowing this would:
-
-1. **Destroy provenance.** The `(cherry picked from commit ...)` trailer would be meaningless since the staged state is a blend of multiple source commits.
-2. **Complicate recovery.** If a conflict arises on the third of five commits, there are no intermediate commits to roll back to. Git handles this with `--continue`/`--abort` state files, which Libra intentionally avoids (see below).
-
-### Why no `--continue`, `--abort`, or `--skip`?
-
-Git maintains `.git/CHERRY_PICK_HEAD` and sequencer state files to support multi-step conflict resolution. Libra omits this machinery because:
-
-1. **Stateless by design.** Libra avoids hidden state files that can become stale or corrupt. Each cherry-pick invocation is atomic: it either succeeds completely or fails without partial state.
-2. **Explicit conflict resolution.** When a conflict occurs, Libra stages whatever it can and tells the user to resolve conflicts manually, then run `libra commit`. This is the same end result as `git cherry-pick --continue` but without hidden sequencer state.
-3. **Agent compatibility.** AI agents can detect the conflict error code (`LBR-CONFLICT-001`), resolve the conflict programmatically, and run `libra commit` -- a simpler protocol than managing `--continue`/`--abort`/`--skip` state transitions.
+`--strategy`, `-X/--strategy-option`, `--empty`, `--cleanup`, and `--rerere-autoupdate` are explicitly rejected with `LBR-UNSUPPORTED-001` (exit 128) rather than silently ignored, so a script never assumes an unimplemented behavior took effect. Libra uses a single built-in three-way merge; custom merge strategies are out of scope.
 
 ## Parameter Comparison: Libra vs Git vs jj
 
 | Parameter | Git | jj | Libra |
 |-----------|-----|-----|-------|
 | Positional commits | `git cherry-pick <commit>...` | N/A (uses `jj rebase`) | `libra cherry-pick <commit>...` |
-| No-commit mode | `--no-commit` / `-n` | N/A | `--no-commit` / `-n` |
-| Edit message | `--edit` / `-e` | N/A | Not supported (use `-n` then `commit -m`) |
-| Mainline parent | `--mainline <n>` / `-m <n>` | N/A | Not supported (merge commits rejected) |
-| Continue after conflict | `--continue` | N/A | Not supported (resolve then `commit`) |
-| Abort in-progress | `--abort` | N/A | Not supported (no sequencer state) |
-| Skip current commit | `--skip` | N/A | Not supported |
-| Strategy | `--strategy <s>` | N/A | Not supported (single merge strategy) |
-| Strategy option | `-X <option>` | N/A | Not supported |
-| GPG sign | `--gpg-sign` / `-S` | N/A | Not supported (planned) |
-| Allow empty | `--allow-empty` | N/A | Not supported |
-| Keep redundant | `--keep-redundant-commits` | N/A | Not supported |
+| No-commit mode | `--no-commit` / `-n` | N/A | `--no-commit` / `-n` (also multi-commit) |
+| Record source | `-x` | N/A | `-x` |
+| Edit message | `--edit` / `-e` | N/A | `--edit` / `-e` (degrades in machine mode) |
+| Sign-off | `--signoff` / `-s` | N/A | `--signoff` / `-s` |
+| Mainline parent | `--mainline <n>` / `-m <n>` | N/A | `--mainline <n>` / `-m <n>` |
+| Fast-forward | `--ff` | N/A | `--ff` |
+| Continue after conflict | `--continue` | N/A | `--continue` |
+| Abort in-progress | `--abort` | N/A | `--abort` |
+| Skip current commit | `--skip` | N/A | `--skip` |
+| Quit sequencer | `--quit` | N/A | `--quit` |
+| GPG sign | `--gpg-sign` / `-S` | N/A | `--gpg-sign` / `-S` (via libra vault) |
+| Allow empty | `--allow-empty` | N/A | `--allow-empty` |
+| Allow empty message | `--allow-empty-message` | N/A | `--allow-empty-message` |
+| Keep redundant | `--keep-redundant-commits` | N/A | `--keep-redundant-commits` |
+| Strategy | `--strategy <s>` | N/A | Rejected (`LBR-UNSUPPORTED-001`) |
+| Strategy option | `-X <option>` | N/A | Rejected (`LBR-UNSUPPORTED-001`) |
+| Empty mode | `--empty=<how>` | N/A | Rejected (use `--allow-empty` / `--keep-redundant-commits`) |
 | JSON output | N/A | N/A | `--json` |
 | Quiet mode | `--quiet` | `--quiet` | `--quiet` |
 
@@ -180,9 +264,11 @@ Git maintains `.git/CHERRY_PICK_HEAD` and sequencer state files to support multi
 | Code | Condition | Hint |
 |------|-----------|------|
 | `LBR-REPO-001` | Not inside a libra repository | Initialize with `libra init` or navigate to a repo |
-| `LBR-REPO-003` | HEAD is detached (not on a branch) | Switch to a branch with `libra switch <branch>` |
+| `LBR-REPO-003` | HEAD detached, no cherry-pick in progress for `--continue`/`--skip`/`--abort`/`--quit`, or `--continue` on the wrong branch | Switch to a branch / start a pick first / switch back to the sequence branch |
 | `LBR-CLI-003` | Cannot resolve a commit reference | Use `libra log` to find valid commit references |
-| `LBR-CLI-002` | Multiple commits with `--no-commit`, or merge commit encountered | Use single commit with `-n`; choose non-merge commits |
-| `LBR-CONFLICT-001` | Conflict during cherry-pick (e.g. untracked file would be overwritten) | Resolve conflicts manually, then use `libra commit` |
-| `LBR-IO-001` | Failed to load an object (commit, tree, index) | Check repository integrity and retry |
-| `LBR-IO-002` | Failed to save object, index, or update branch ref | Check filesystem permissions and repository writability |
+| `LBR-CLI-002` | Merge commit without `-m`, invalid/out-of-range `-m`, empty commit without `--allow-empty`, redundant commit without `--keep-redundant-commits`, or empty message without `--allow-empty-message` | Use the flag named in the hint |
+| `LBR-UNSUPPORTED-001` | An unsupported Git option (`--strategy`, `-X`, `--empty`, `--cleanup`, `--rerere-autoupdate`) was passed | Drop the option; it is not supported by libra cherry-pick |
+| `LBR-CONFLICT-001` | Conflict during cherry-pick (three-way conflict, or untracked file would be overwritten) | Resolve and `libra add`, then `libra cherry-pick --continue` (or `--skip`/`--abort`/`--quit`) |
+| `LBR-CONFLICT-002` | `merge`/`rebase` started while a cherry-pick is in progress, or a new pick started over an in-progress sequence | Finish or cancel the cherry-pick first |
+| `LBR-IO-001` | Failed to load an object or cherry-pick state | Check repository integrity and retry |
+| `LBR-IO-002` | Failed to save object, index, or update branch ref/state | Check filesystem permissions and repository writability |

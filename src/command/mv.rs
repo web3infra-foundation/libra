@@ -20,11 +20,12 @@ use crate::{
 /// `--help` examples shown in `libra mv --help` output.
 ///
 /// `mv` accepts `<source>... <destination>` with optional `--dry-run`,
-/// `--force`, and `--verbose`. The banner covers the rename, move-into-dir,
-/// multi-source, dry-run, force-overwrite, and JSON-for-agents forms so
-/// users can map intent to invocation without reading the design doc.
+/// `--force`, `--verbose`, `--skip-errors`, and `--sparse`. The banner
+/// covers the rename, move-into-dir, multi-source, dry-run, force-overwrite,
+/// skip-errors, sparse no-op, and JSON-for-agents forms so users can map
+/// intent to invocation without reading the design doc.
 /// Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
+/// `docs/development/commands/_general.md` item B.
 pub const MV_EXAMPLES: &str = "\
 EXAMPLES:
     libra mv old.txt new.txt              Rename a single tracked file
@@ -32,6 +33,8 @@ EXAMPLES:
     libra mv a.txt b.txt subdir/          Move multiple files into a directory
     libra mv -n old.txt new.txt           Dry-run: preview the rename without touching the index
     libra mv -f stale.txt fresh.txt       Overwrite the destination if it already exists
+    libra mv -k missing.txt tracked.txt dest/    Skip invalid sources and move the valid ones
+    libra mv --sparse old.txt new.txt     Accept Git's sparse-checkout flag as a no-op
     libra mv -v old.txt new.txt           Verbose: print each move as it happens
     libra mv --json src/foo.rs src/bar.rs    Structured JSON output for agents";
 
@@ -52,6 +55,14 @@ pub struct MvArgs {
     /// Force move/rename even if the destination already exists (overwriting it)
     #[clap(short = 'f', long)]
     pub force: bool,
+
+    /// Skip invalid sources and continue with the remaining valid moves.
+    #[clap(short = 'k', long = "skip-errors")]
+    pub skip_errors: bool,
+
+    /// Accept Git's sparse-checkout flag. Libra has no sparse-checkout state, so this is a no-op.
+    #[clap(long)]
+    pub sparse: bool,
 }
 
 #[derive(Default)]
@@ -106,7 +117,7 @@ async fn execute_inner(args: MvArgs, output: &OutputConfig) -> Result<MvOutput, 
     // If the user just types `git mv` without enough arguments, print usage information instead of an error message.
     if args.paths.len() < 2 {
         return Err(
-            "usage: libra mv [<options>] <source>... <destination>\n\n-v, --verbose    be verbose\n-n, --dry-run    dry run\n-f, --force      force move/rename even if target exists"
+            "usage: libra mv [<options>] <source>... <destination>\n\n-v, --verbose         be verbose\n-n, --dry-run         dry run\n-f, --force           force move/rename even if target exists\n-k, --skip-errors     skip invalid sources\n    --sparse          accept Git sparse-checkout flag as no-op"
                 .to_string(),
         );
     }
@@ -150,7 +161,16 @@ async fn execute_inner(args: MvArgs, output: &OutputConfig) -> Result<MvOutput, 
             &index,
             args.force,
         ) {
-            Ok(plan) => move_plan.extend(plan),
+            Ok(plan) => {
+                if args.skip_errors && plan_targets_existing_planned_destination(&move_plan, &plan)
+                {
+                    continue;
+                }
+                move_plan.extend(plan);
+            }
+            Err(_) if args.skip_errors => {
+                continue;
+            }
             Err(err) => {
                 return Err(err);
             }
@@ -396,6 +416,15 @@ fn has_duplicate_target(moves: &[(PathBuf, PathBuf)]) -> bool {
         }
     }
     false
+}
+
+fn plan_targets_existing_planned_destination(existing: &MovePlan, candidate: &MovePlan) -> bool {
+    candidate.fs_moves.iter().any(|(_, candidate_target)| {
+        existing
+            .fs_moves
+            .iter()
+            .any(|(_, existing_target)| existing_target == candidate_target)
+    })
 }
 
 fn remove_index_entry_all_stages(index: &mut Index, path: &str) {

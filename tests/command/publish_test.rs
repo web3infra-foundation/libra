@@ -270,7 +270,7 @@ fn publish_sync_dry_run_warns_for_librapublishignore_paths() {
 /// `status` / `deploy` / `unpublish`) plus a dry-run sync, a
 /// sensitive-path allowance, a site-scoped status, and a JSON variant
 /// for agents without reading the design doc. Cross-cutting `--help`
-/// EXAMPLES rollout per `docs/improvement/README.md` item B.
+/// EXAMPLES rollout per `docs/development/commands/_general.md` item B.
 #[test]
 fn test_publish_help_lists_examples_banner() {
     let repo = tempfile::tempdir().expect("tempdir for publish --help");

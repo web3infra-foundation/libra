@@ -1,6 +1,6 @@
 //! OC-Phase 6 P6.7 — completion gate scenarios.
 //!
-//! Spec: `docs/improvement/opencode.md` lines 670-681 + 1722.
+//! Spec: `docs/development/commands/_general.md` lines 670-681 + 1722.
 //!
 //! S6 names two test files: `tests/ai_goal_supervisor_test.rs`
 //! drives the supervisor's three-turn happy path; this file pins

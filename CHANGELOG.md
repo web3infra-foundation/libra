@@ -18,7 +18,7 @@
   rebase, reflog, remote, mv, rm, cloud, lfs, usage, publish, grep,
   sandbox, graph, rev-parse, rev-list, symbolic-ref, db, automation,
   code, code-control, hooks, show-ref, agent. Closes
-  `docs/improvement/README.md` cross-cutting item B.
+  `docs/development/commands/_general.md` cross-cutting item B.
 - **`compat_help_examples_banner` regression guard (v0.17.841)**: spawns
   the libra binary, runs `<cmd> --help` for every visible command,
   and asserts the output contains an `EXAMPLES:` or `Examples:`
@@ -75,7 +75,7 @@
   Command Groups section. Both commands were callable and documented
   but absent from the scenario-grouped index.
 - **Stale src/ file-count claim refreshed (v0.17.843)**: bumped
-  410 → 427 in `docs/improvement/README.md`'s
+  410 → 427 in `docs/development/commands/_general.md`'s
   `compat_all_production_unwrap_guard` description.
 
 ## [0.1.6]

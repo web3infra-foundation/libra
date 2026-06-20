@@ -30,6 +30,8 @@ async fn setup_repo_with_commit(temp: &tempfile::TempDir) -> ChangeDirGuard {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -115,6 +117,106 @@ async fn test_show_ref_json_lists_refs() {
             .any(|entry| entry["refname"] == "refs/heads/main"),
         "expected branch entry in JSON output"
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_show_ref_verify_exact_ref_outputs_matching_ref() {
+    let temp = tempdir().unwrap();
+    let _guard = setup_repo_with_commit(&temp).await;
+    let head_hash = Head::current_commit().await.unwrap().to_string();
+
+    let output = run_libra_command(&["show-ref", "--verify", "refs/heads/main"], temp.path());
+    assert_cli_success(&output, "show-ref --verify refs/heads/main");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("{head_hash} refs/heads/main")),
+        "verify should print the exact ref entry: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_show_ref_verify_head_accepts_head_refname() {
+    let temp = tempdir().unwrap();
+    let _guard = setup_repo_with_commit(&temp).await;
+    let head_hash = Head::current_commit().await.unwrap().to_string();
+
+    let output = run_libra_command(&["show-ref", "--verify", "HEAD"], temp.path());
+    assert_cli_success(&output, "show-ref --verify HEAD");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("{head_hash} HEAD")),
+        "verify should print the HEAD entry: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_show_ref_verify_short_name_is_not_exact_ref() {
+    let temp = tempdir().unwrap();
+    let _guard = setup_repo_with_commit(&temp).await;
+
+    let output = run_libra_command(&["show-ref", "--verify", "main"], temp.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert_eq!(report.exit_code, 128);
+    assert!(
+        stderr.contains("'main' - not a valid ref"),
+        "verify should reject non-exact refnames: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_show_ref_exists_success_is_silent_in_human_mode() {
+    let temp = tempdir().unwrap();
+    let _guard = setup_repo_with_commit(&temp).await;
+
+    let output = run_libra_command(&["show-ref", "--exists", "refs/heads/main"], temp.path());
+    assert_cli_success(&output, "show-ref --exists refs/heads/main");
+    assert!(
+        output.stdout.is_empty(),
+        "exists should not print success output"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_show_ref_exists_missing_ref_uses_git_exit_code_two() {
+    let temp = tempdir().unwrap();
+    let _guard = setup_repo_with_commit(&temp).await;
+
+    let output = run_libra_command(&["show-ref", "--exists", "refs/heads/missing"], temp.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert_eq!(report.exit_code, 2);
+    assert!(
+        stderr.contains("reference does not exist: refs/heads/missing"),
+        "exists should report missing ref: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_show_ref_exists_json_reports_checked_ref() {
+    let temp = tempdir().unwrap();
+    let _guard = setup_repo_with_commit(&temp).await;
+
+    let output = run_libra_command(
+        &["--json", "show-ref", "--exists", "refs/heads/main"],
+        temp.path(),
+    );
+    assert_cli_success(&output, "show-ref --exists --json");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "show-ref");
+    assert_eq!(json["data"]["exists"], true);
+    assert_eq!(json["data"]["refname"], "refs/heads/main");
 }
 
 #[tokio::test]
@@ -217,7 +319,7 @@ async fn test_show_ref_lists_tag() {
     let _guard = setup_repo_with_commit(&temp).await;
 
     // Create a lightweight tag via the internal API (same pattern as tag_test.rs)
-    libra::internal::tag::create("v1.0", None, false)
+    libra::internal::tag::create("v1.0", None, false, false)
         .await
         .unwrap();
 
@@ -387,7 +489,7 @@ async fn test_show_ref_default_shows_both() {
     let temp = tempdir().unwrap();
     let _guard = setup_repo_with_commit(&temp).await;
 
-    libra::internal::tag::create("v2.0", None, false)
+    libra::internal::tag::create("v2.0", None, false, false)
         .await
         .unwrap();
 
@@ -431,11 +533,6 @@ async fn test_show_ref_head_exempt_from_pattern_filter() {
     );
 }
 
-/// `libra show-ref --help` surfaces the EXAMPLES banner so users see
-/// the all-refs default, --heads / --tags scope filters, --head opt-in,
-/// -s hash-only form, pattern filter, and the JSON variant without
-/// reading the design doc. Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
 #[test]
 fn test_show_ref_help_lists_examples_banner() {
     let repo = tempdir().expect("tempdir for show-ref --help");
@@ -456,6 +553,7 @@ fn test_show_ref_help_lists_examples_banner() {
         "libra show-ref --tags",
         "libra show-ref --head",
         "libra show-ref -s",
+        "libra show-ref -d",
         "libra show-ref main",
         "libra show-ref --json",
     ] {

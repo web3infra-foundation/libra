@@ -178,6 +178,24 @@ async fn got_remote_branch_suggests_track() {
 }
 
 #[test]
+fn ambiguous_guess_remote_maps_to_conflict_with_disambiguation_hints() {
+    assert_mapped_contract(
+        SwitchError::AmbiguousGuessRemote {
+            branch: "feature".to_string(),
+            remotes: vec!["origin".to_string(), "upstream".to_string()],
+        },
+        StableErrorCode::ConflictOperationBlocked,
+        128,
+        "'feature' matched multiple remote-tracking branches",
+        &[
+            "it exists on remotes: origin, upstream.",
+            "libra switch --track <remote>/feature",
+            "checkout.defaultRemote",
+        ],
+    );
+}
+
+#[test]
 fn dirty_unstaged_returns_exit_128_with_repo_state_error() {
     let repo = create_committed_repo_via_cli();
     let _ = run_libra_command(&["switch", "-c", "other"], repo.path());

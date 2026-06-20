@@ -2,7 +2,7 @@
 
 Libra's Linux sandbox supports seccomp-bpf filtering via the bwrap
 `--seccomp <fd>` argument. The wiring landed in v0.17.725 (see
-`docs/improvement/sandbox.md` G6 row), and an environment-variable
+`docs/development/commands/sandbox.md` G6 row), and an environment-variable
 convenience landed in v0.17.729 so users can opt in without
 editing `SandboxRuntimeConfig` in-process.
 

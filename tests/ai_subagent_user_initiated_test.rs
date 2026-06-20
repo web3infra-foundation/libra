@@ -1,6 +1,6 @@
 //! OC-Phase 3 UserInitiated sub-agent dispatch E2E (fake-provider).
 //!
-//! `docs/improvement/opencode.md` line 932 names this file explicitly:
+//! `docs/development/commands/_general.md` line 932 names this file explicitly:
 //! the second of the two fake-provider end-to-end acceptance gates.
 //! The other (`ai_subagent_llm_initiated_test`) covers
 //! `TaskEntryKind::LlmInitiated`; this one pins

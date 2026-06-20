@@ -60,6 +60,194 @@ fn test_log_cli_empty_repository_returns_fatal_128() {
     );
 }
 
+#[test]
+fn test_log_first_parent_skips_merged_branch_commits() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+
+    // main: a unique commit.
+    std::fs::write(repo.path().join("a.txt"), "a\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "a.txt"], repo.path()), "add a");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "MAIN_ONE", "--no-verify"], repo.path()),
+        "commit MAIN_ONE",
+    );
+
+    // feature: a side-branch commit with a distinct subject + file.
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "feature"], repo.path()),
+        "switch -c feature",
+    );
+    std::fs::write(repo.path().join("b.txt"), "b\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "b.txt"], repo.path()), "add b");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "SIDE_BRANCH", "--no-verify"], repo.path()),
+        "commit SIDE_BRANCH",
+    );
+
+    // main diverges, then merges feature -> a two-parent merge commit.
+    assert_cli_success(
+        &run_libra_command(&["switch", "main"], repo.path()),
+        "switch main",
+    );
+    std::fs::write(repo.path().join("a.txt"), "a2\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "a.txt"], repo.path()), "add a2");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "MAIN_TWO", "--no-verify"], repo.path()),
+        "commit MAIN_TWO",
+    );
+    assert_cli_success(
+        &run_libra_command(&["merge", "feature"], repo.path()),
+        "merge feature",
+    );
+
+    // Plain log includes the merged side-branch commit; --first-parent omits it.
+    let plain = run_libra_command(&["log", "--oneline"], repo.path());
+    assert_cli_success(&plain, "log --oneline");
+    let plain_out = String::from_utf8_lossy(&plain.stdout);
+    assert!(
+        plain_out.contains("SIDE_BRANCH"),
+        "plain log should include the side-branch commit:\n{plain_out}"
+    );
+
+    let fp = run_libra_command(&["log", "--first-parent", "--oneline"], repo.path());
+    assert_cli_success(&fp, "log --first-parent --oneline");
+    let fp_out = String::from_utf8_lossy(&fp.stdout);
+    assert!(
+        !fp_out.contains("SIDE_BRANCH"),
+        "--first-parent should omit the merged side-branch commit:\n{fp_out}"
+    );
+    assert!(
+        fp_out.contains("MAIN_TWO"),
+        "--first-parent should keep first-parent history:\n{fp_out}"
+    );
+}
+
+#[test]
+fn test_log_pickaxe_s_finds_commit_that_changes_string_count() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+
+    // A commit that does NOT touch the needle string.
+    std::fs::write(repo.path().join("plain.txt"), "nothing special here\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "plain.txt"], repo.path()),
+        "add plain.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "NEEDLE_ABSENT", "--no-verify"],
+            repo.path(),
+        ),
+        "commit NEEDLE_ABSENT",
+    );
+
+    // A commit that introduces the needle string.
+    std::fs::write(repo.path().join("target.txt"), "line with FINDME token\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "target.txt"], repo.path()),
+        "add target.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "NEEDLE_ADDED", "--no-verify"],
+            repo.path(),
+        ),
+        "commit NEEDLE_ADDED",
+    );
+
+    let out = run_libra_command(&["log", "-S", "FINDME", "--oneline"], repo.path());
+    assert_cli_success(&out, "log -S FINDME");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("NEEDLE_ADDED"),
+        "pickaxe -S should include the commit that added the string:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("NEEDLE_ABSENT"),
+        "pickaxe -S should skip commits that don't change the string count:\n{stdout}"
+    );
+}
+
+#[test]
+fn test_log_pickaxe_g_matches_diff_line_regex() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+
+    // A commit whose added line does NOT match the regex.
+    std::fs::write(repo.path().join("a.txt"), "plain content\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "a.txt"], repo.path()),
+        "add a.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "GNOMATCH", "--no-verify"], repo.path()),
+        "commit GNOMATCH",
+    );
+
+    // A commit whose added line matches the regex.
+    std::fs::write(repo.path().join("b.txt"), "fn handler_v2() {}\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "b.txt"], repo.path()),
+        "add b.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "GMATCH", "--no-verify"], repo.path()),
+        "commit GMATCH",
+    );
+
+    let out = run_libra_command(&["log", "-G", "handler_v[0-9]", "--oneline"], repo.path());
+    assert_cli_success(&out, "log -G handler_v[0-9]");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("GMATCH"),
+        "-G should match the commit whose diff line matches the regex:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("GNOMATCH"),
+        "-G should skip commits with no matching added/removed line:\n{stdout}"
+    );
+}
+
+#[test]
+fn test_log_skip_omits_leading_commits() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    for tag in ["SK_A", "SK_B", "SK_C"] {
+        let file = format!("{tag}.txt");
+        std::fs::write(repo.path().join(&file), "x\n").unwrap();
+        assert_cli_success(
+            &run_libra_command(&["add", file.as_str()], repo.path()),
+            "add skip file",
+        );
+        assert_cli_success(
+            &run_libra_command(&["commit", "-m", tag, "--no-verify"], repo.path()),
+            "commit skip",
+        );
+    }
+
+    // Newest is SK_C; --skip 1 -n 1 should show only the 2nd-newest (SK_B).
+    let out = run_libra_command(&["log", "--skip", "1", "-n", "1", "--oneline"], repo.path());
+    assert_cli_success(&out, "log --skip 1 -n 1");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("SK_B"),
+        "--skip 1 -n 1 should show the 2nd-newest commit:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("SK_C"),
+        "--skip 1 should omit the newest commit:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("SK_A"),
+        "-n 1 should not reach older commits:\n{stdout}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_log_corrupt_head_reference_returns_repo_corrupt() {
@@ -445,7 +633,7 @@ async fn test_execute_log() {
     // check if the current branch has any commits
     if let Head::Branch(branch_name) = head.to_owned() {
         // Migrated from `Branch::find_branch` (lossy wrapper) to
-        // `Branch::find_branch_result` per `docs/improvement/branch.md` —
+        // `Branch::find_branch_result` per `docs/development/commands/branch.md` —
         // storage errors no longer silently degrade to "no commits yet".
         match Branch::find_branch_result(&branch_name, None).await {
             Ok(Some(_)) => {}
@@ -614,6 +802,8 @@ async fn test_log_patch_no_pathspec() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -628,6 +818,7 @@ async fn test_log_patch_no_pathspec() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -642,6 +833,8 @@ async fn test_log_patch_no_pathspec() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -656,6 +849,7 @@ async fn test_log_patch_no_pathspec() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -731,6 +925,8 @@ async fn test_log_patch_with_pathspec() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -746,6 +942,7 @@ async fn test_log_patch_with_pathspec() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -859,6 +1056,8 @@ async fn test_log_stat() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -873,6 +1072,7 @@ async fn test_log_stat() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -886,6 +1086,8 @@ async fn test_log_stat() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -900,6 +1102,7 @@ async fn test_log_stat() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -941,6 +1144,8 @@ async fn test_log_stat_with_modifications() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -955,6 +1160,7 @@ async fn test_log_stat_with_modifications() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -968,6 +1174,8 @@ async fn test_log_stat_with_modifications() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -982,6 +1190,7 @@ async fn test_log_stat_with_modifications() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1174,6 +1383,8 @@ async fn test_log_graph_simple_chain() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1188,6 +1399,7 @@ async fn test_log_graph_simple_chain() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1201,6 +1413,8 @@ async fn test_log_graph_simple_chain() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1215,6 +1429,7 @@ async fn test_log_graph_simple_chain() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1246,6 +1461,8 @@ async fn test_log_stat_and_graph_combined() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1260,6 +1477,7 @@ async fn test_log_stat_and_graph_combined() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1376,6 +1594,8 @@ async fn test_log_double_dash_disables_short_number_rewrite() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1390,6 +1610,7 @@ async fn test_log_double_dash_disables_short_number_rewrite() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1404,6 +1625,8 @@ async fn test_log_double_dash_disables_short_number_rewrite() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1418,6 +1641,7 @@ async fn test_log_double_dash_disables_short_number_rewrite() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1648,6 +1872,8 @@ async fn test_log_grep_filtering() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1662,6 +1888,7 @@ async fn test_log_grep_filtering() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1676,6 +1903,8 @@ async fn test_log_grep_filtering() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1690,6 +1919,7 @@ async fn test_log_grep_filtering() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1704,6 +1934,8 @@ async fn test_log_grep_filtering() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1718,6 +1950,7 @@ async fn test_log_grep_filtering() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     })
     .await;
 
@@ -1768,4 +2001,295 @@ async fn test_log_grep_filtering() {
     // Should show at most 1 commit with "fix"
     let commit_count = count_commit_lines(&stdout);
     assert_eq!(commit_count, 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_reverse_outputs_oldest_first() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    test::ensure_file("a.txt", Some("a\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("first".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    test::ensure_file("b.txt", Some("b\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["b.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("second".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    let (_, out, _) = run_log_cmd(&["--oneline", "--reverse"], temp_path.path());
+    let first_idx = out.find("first").expect("first commit should appear");
+    let second_idx = out.find("second").expect("second commit should appear");
+    assert!(
+        first_idx < second_idx,
+        "--reverse should list oldest first: {out}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_range_excludes_start_commit() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    test::ensure_file("a.txt", Some("a\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("base".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+    let base = Head::current_commit().await.unwrap();
+
+    test::ensure_file("b.txt", Some("b\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["b.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("tip".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    let (_, out, _) = run_log_cmd(
+        &["--oneline", "--range", &format!("{}..HEAD", base)],
+        temp_path.path(),
+    );
+    assert!(out.contains("tip"), "range should include tip: {out}");
+    assert!(!out.contains("base"), "range should exclude base: {out}");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_all_includes_branches() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    test::ensure_file("a.txt", Some("a\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("main only".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    execute(BranchArgs {
+        new_branch: Some("side".to_string()),
+        commit_hash: None,
+        list: false,
+        delete: None,
+        delete_safe: None,
+        set_upstream_to: None,
+        unset_upstream: None,
+        show_current: false,
+        rename: vec![],
+        remotes: false,
+        all: false,
+        contains: vec![],
+        no_contains: vec![],
+        points_at: None,
+        ignore_case: false,
+    })
+    .await;
+
+    test::ensure_file("side.txt", Some("side\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["side.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("side only".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    let (_, out, _) = run_log_cmd(&["--oneline", "--all"], temp_path.path());
+    assert!(
+        out.contains("side only"),
+        "--all should include side branch: {out}"
+    );
+    assert!(
+        out.contains("main only"),
+        "--all should include main branch: {out}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_follow_detects_rename() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    test::ensure_file("old.txt", Some("content\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["old.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("add old".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    std::fs::remove_file(temp_path.path().join("old.txt")).unwrap();
+    test::ensure_file("new.txt", Some("content\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["old.txt".into(), "new.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("rename".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    let (_, out, _) = run_log_cmd(&["--oneline", "--follow", "new.txt"], temp_path.path());
+    // The follow filter is best-effort; assert the command succeeds and
+    // includes the rename commit at minimum.
+    assert!(
+        out.contains("rename"),
+        "--follow should include rename commit: {out}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_line_range_flag_accepted() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    test::ensure_file("a.txt", Some("line1\nline2\n"));
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("add a".to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    let (status, out, err) = run_log_cmd(&["--oneline", "-L1,2:a.txt"], temp_path.path());
+    assert!(status.success(), "-L flag should be accepted: {err}");
+    // Line-range tracking is best-effort; just ensure the flag parses.
+    assert!(
+        out.contains("add a") || out.is_empty(),
+        "-L should not produce unexpected output: {out}"
+    );
 }

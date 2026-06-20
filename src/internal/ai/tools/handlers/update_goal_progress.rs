@@ -1,6 +1,6 @@
 //! Handler for the `update_goal_progress` tool.
 //!
-//! Used inside Goal mode (`docs/improvement/opencode.md` lines 540-560,
+//! Used inside Goal mode (`docs/development/commands/_general.md` lines 540-560,
 //! 1808). The model invokes this between `submit_goal_complete`
 //! attempts to record progress without claiming completion. The
 //! supervisor (P6.3) reads the parsed payload from the just-finished

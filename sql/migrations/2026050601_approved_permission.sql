@@ -1,7 +1,7 @@
 -- 2026050601_approved_permission
 --
 -- OC-Phase 2 P2.5: persistent storage for the `Always` reply of the
--- three-state Permission protocol (see docs/improvement/opencode.md
+-- three-state Permission protocol (see docs/development/commands/_general.md
 -- "Permission Ruleset 与 Approval 反馈协议").
 --
 -- When a user replies "Always" to a permission prompt, the runtime appends

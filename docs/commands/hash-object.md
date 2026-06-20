@@ -9,7 +9,9 @@ libra hash-object --stdin [OPTIONS]
 
 This initial implementation supports blob objects. It hashes the raw bytes as a
 Git blob using the current repository object format. It does not apply clean
-filters, attributes, or LFS pointer conversion.
+filters, attributes, or LFS pointer conversion. `--path` is accepted as a Git
+compatibility path context and stdin JSON source label; it does not change the
+hashed bytes until path-based filters are implemented.
 
 Read-only hashing does not require a Libra repository and defaults to SHA-1
 when no repository object format is available. `-w` / `--write` requires a
@@ -23,6 +25,8 @@ repository because it stores the object in the repository object database.
 | `--stdin` | | Read bytes from standard input instead of file paths |
 | `--write` | `-w` | Store the computed blob in the repository object database |
 | `--type <TYPE>` | `-t` | Object type to hash. Only `blob` is currently supported |
+| `--path <PATH>` | | Path context label for compatibility with Git hash-object |
+| `--no-filters` | | Explicitly hash raw bytes without path-based filters |
 | `--json` | | Emit a structured JSON envelope |
 | `--machine` | | Emit the same envelope as one compact JSON line |
 
@@ -44,6 +48,12 @@ Hash bytes from standard input:
 
 ```bash
 printf 'hello' | libra hash-object --stdin
+```
+
+Hash stdin with a Git-compatible path context label:
+
+```bash
+printf 'hello' | libra hash-object --stdin --path README.md
 ```
 
 ## Output
@@ -83,7 +93,9 @@ Structured output:
 | Read from stdin | `--stdin` | `--stdin` | N/A |
 | Write object | `-w` / `--write` | `-w` | N/A |
 | Select object type | Only `blob` | `-t <type>` | N/A |
-| Path filters / attributes | Not supported | `--path`, filters | N/A |
+| Path context | `--path <path>` accepted, no filters applied | `--path <path>` | N/A |
+| Disable filters | `--no-filters` accepted | `--no-filters` | N/A |
+| Path filters / attributes | Not supported | filters / attributes | N/A |
 | Hash literally invalid objects | Not supported | `--literally` | N/A |
 
 ## Errors

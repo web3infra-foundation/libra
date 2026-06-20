@@ -1,6 +1,6 @@
 //! OC-Phase 6 P6.7 — Goal mode flag-off regression tests.
 //!
-//! Spec: `docs/improvement/opencode.md` lines 1500, 1573, 1811.
+//! Spec: `docs/development/commands/_general.md` lines 1500, 1573, 1811.
 //!
 //! Goal mode is opt-in: a session that never invokes `--goal`,
 //! `/goal start`, or `goal.start` over Code Control NDJSON must

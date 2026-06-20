@@ -39,7 +39,7 @@ use crate::{
 /// `lock`, `unlock`). The banner pins the canonical invocation per
 /// sub-command plus a JSON variant so users can map intent to invocation
 /// without reading the design doc. Cross-cutting `--help` EXAMPLES
-/// rollout per `docs/improvement/README.md` item B.
+/// rollout per `docs/development/commands/_general.md` item B.
 pub const LFS_EXAMPLES: &str = "\
 EXAMPLES:
     libra lfs track                       List currently tracked LFS attribute patterns

@@ -5,7 +5,7 @@
 //! session, subscribing to `/api/code/events` through the new
 //! `tests/harness/event_stream.rs` blocking client.
 //!
-//! Wave 1's exit criteria from `docs/improvement/test.md` is to prove
+//! Wave 1's exit criteria from `docs/development/commands/_general.md` is to prove
 //! one SSE case end-to-end so the harness, matrix step variants, and
 //! event-stream client are all wired correctly. Subsequent Waves
 //! (PR 4) flesh out the remaining six cases without changing this

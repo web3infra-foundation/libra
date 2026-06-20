@@ -1,5 +1,5 @@
-//! Static guard for Phase 2 Task 2.7 of `docs/improvement/agent.md` Part B
-//! (merged from the original `docs/improvement/tui.md` per the 2026-05-02
+//! Static guard for Phase 2 Task 2.7 of `docs/development/commands/agent.md` Part B
+//! (merged from the original TUI improvement plan per the 2026-05-02
 //! agent.md consolidation).
 //!
 //! `libra code --provider codex` must always route through the default Libra TUI

@@ -98,4 +98,4 @@ libra sandbox --json status
 libra sandbox --machine status
 ```
 
-`libra sandbox --help` 会渲染同一横幅，因此文档和 CLI 表面保持同步（跨命令 `--help` EXAMPLES 推出，见 `docs/improvement/README.md` 条目 B）。
+`libra sandbox --help` 会渲染同一横幅，因此文档和 CLI 表面保持同步（跨命令 `--help` EXAMPLES 推出，见 `docs/development/commands/_general.md` 条目 B）。

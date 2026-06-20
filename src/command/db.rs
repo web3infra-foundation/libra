@@ -20,7 +20,7 @@ use crate::{
 /// canonical invocation per sub-command plus a JSON variant for agents
 /// so users see all supported forms without reading the design doc.
 /// Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
+/// `docs/development/commands/_general.md` item B.
 pub const DB_EXAMPLES: &str = "\
 EXAMPLES:
     libra db status                 Show the repository schema version (no writes)

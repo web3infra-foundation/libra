@@ -1,0 +1,51 @@
+use serde::Serialize;
+
+use crate::utils::util::CommitBaseError;
+
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct DescribeOutput {
+    pub(super) input: String,
+    pub(super) resolved_commit: String,
+    pub(super) result: String,
+    pub(super) tag: Option<String>,
+    pub(super) distance: Option<usize>,
+    pub(super) abbreviated_commit: Option<String>,
+    pub(super) exact_match: bool,
+    pub(super) used_always: bool,
+    pub(super) long_format: bool,
+    pub(super) dirty: bool,
+    pub(super) dirty_mark: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum DescribeError {
+    #[error("HEAD does not point to a commit")]
+    HeadUnborn,
+    #[error("{0}")]
+    InvalidReference(String),
+    #[error("{0}")]
+    ReadFailure(String),
+    #[error("{0}")]
+    CorruptReference(String),
+    #[error("failed to load commit '{commit_id}': {detail}")]
+    LoadCommit { commit_id: String, detail: String },
+    #[error("no names found, cannot describe anything")]
+    NoNamesFound,
+    #[error("no tag exactly matches '{commit_id}'")]
+    NoExactMatch { commit_id: String },
+    #[error("options '--long' and '--abbrev=0' cannot be used together")]
+    LongWithAbbrevZero,
+    #[error("{0}")]
+    InvalidArgument(String),
+}
+
+impl From<CommitBaseError> for DescribeError {
+    fn from(error: CommitBaseError) -> Self {
+        match error {
+            CommitBaseError::HeadUnborn => Self::HeadUnborn,
+            CommitBaseError::InvalidReference(message) => Self::InvalidReference(message),
+            CommitBaseError::ReadFailure(message) => Self::ReadFailure(message),
+            CommitBaseError::CorruptReference(message) => Self::CorruptReference(message),
+        }
+    }
+}

@@ -1,7 +1,7 @@
 //! Default `SubAgentDispatcher` implementation — gates 1–4, 6–8.
 //!
 //! This module ships the dispatcher across OC-Phase 3 P3.3 and P3.4 from
-//! `docs/improvement/opencode.md`. It implements the **gate + ask** half
+//! `docs/development/commands/_general.md`. It implements the **gate + ask** half
 //! of the 14-step dispatcher main flow:
 //!
 //! 1. validate feature flag (`code.multi_agent.enabled`) — P3.3 implemented

@@ -244,7 +244,6 @@ const SUBCOMMANDS: &[&[&str]] = &[
     &["agent", "clean"],
     &["agent", "doctor"],
     &["agent", "push"],
-    // automation — docs/automation/local-tui-control.md
     &["automation", "list"],
     &["automation", "run"],
     &["automation", "history"],

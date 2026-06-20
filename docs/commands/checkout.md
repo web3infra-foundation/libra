@@ -8,12 +8,13 @@ Compatible with `git checkout` for common branch operations and explicit path re
 ```
 libra checkout [<branch>]
 libra checkout -b <name>
+libra checkout -B <name>
 libra checkout [<tree-ish>] -- <pathspec>...
 ```
 
 ## Description
 
-`libra checkout` is a Git-compatibility surface that delegates to `switch` and `restore` internally. It supports the most common `git checkout` patterns: showing the current branch, switching to an existing branch, creating a new branch with `-b`, auto-tracking remote branches, and restoring paths when an explicit `--` separator is present.
+`libra checkout` is a Git-compatibility surface that delegates to `switch` and `restore` internally. It supports the most common `git checkout` patterns: showing the current branch, switching to an existing branch, creating a new branch with `-b`, force-creating or resetting a branch with `-B`, checking out a commit to enter detached HEAD, auto-tracking remote branches, and restoring paths when an explicit `--` separator is present.
 
 This command exists so that developers migrating from Git can use familiar muscle memory. For new workflows, prefer `libra switch` (for branch operations) and `libra restore` (for file operations), which provide richer error messages, structured JSON output, and clearer semantics.
 
@@ -27,6 +28,7 @@ Path restoration is only enabled by an explicit `--` separator. Without `--`, `l
 |------|------|-------|-------------|
 | | `<branch>` | positional (optional) | Target branch to switch to. Omit to show current branch. |
 | `-b` | | `<name>` | Create a new branch from the current HEAD and switch to it |
+| `-B` | | `<name>` | Force-create a branch from the current HEAD and switch to it; resets an existing branch to the current HEAD |
 | | `[<tree-ish>] -- <pathspec>...` | positional | Restore paths. Without `<tree-ish>`, restores the worktree from the index. With `<tree-ish>`, restores both index and worktree from that source. |
 
 ### Flag examples
@@ -40,6 +42,9 @@ libra checkout main
 
 # Create and switch to a new branch
 libra checkout -b feature-x
+
+# Force-create (or reset) and switch to a branch at the current HEAD
+libra checkout -B feature-x
 
 # Auto-track a remote branch (creates local, sets upstream, pulls)
 libra checkout feature
@@ -58,6 +63,7 @@ libra checkout                         # Show the current branch
 libra checkout main                    # Switch to an existing local branch
 libra checkout feature-x               # Switch to another branch
 libra checkout -b feature-x            # Create and switch to a new branch
+libra checkout -B feature-x            # Force-create or reset and switch to a branch
 libra checkout -- file.txt             # Restore file from index to worktree
 libra checkout HEAD -- file.txt        # Restore file from HEAD to index + worktree
 libra --json checkout main             # Structured compatibility output

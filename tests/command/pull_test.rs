@@ -271,6 +271,179 @@ async fn test_pull_diverged_remote_creates_three_way_merge() {
     assert!(local_repo.path().join("local.txt").exists());
 }
 
+/// `pull --squash` integrates the diverged upstream into the index/worktree but
+/// does not commit, move HEAD, or record merge state; the staged result then
+/// finalizes as an ordinary single-parent commit.
+#[tokio::test]
+#[serial]
+async fn test_pull_squash_stages_merge_without_committing() {
+    let (_temp_root, remote_dir, work_dir, branch) = create_remote_fixture();
+
+    let local_repo = tempdir().expect("failed to create local repo");
+    init_repo_via_cli(local_repo.path());
+    configure_identity_via_cli(local_repo.path());
+    configure_pull_tracking(local_repo.path(), &remote_dir, &branch);
+
+    assert_cli_success(
+        &run_libra_command(&["pull"], local_repo.path()),
+        "initial pull",
+    );
+    push_remote_commit(
+        &work_dir,
+        &branch,
+        "remote.txt",
+        "remote change\n",
+        "remote update",
+    );
+
+    fs::write(local_repo.path().join("local.txt"), "local change\n").expect("write local change");
+    assert_cli_success(
+        &run_libra_command(&["add", "local.txt"], local_repo.path()),
+        "stage local change",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "local update", "--no-verify"],
+            local_repo.path(),
+        ),
+        "commit local change",
+    );
+
+    let local_head = {
+        let _guard = ChangeDirGuard::new(local_repo.path());
+        Head::current_commit()
+            .await
+            .expect("local commit should leave HEAD")
+    };
+
+    let output = run_libra_command(&["pull", "--squash"], local_repo.path());
+    assert_cli_success(&output, "pull --squash");
+
+    {
+        let _guard = ChangeDirGuard::new(local_repo.path());
+        let head_after = Head::current_commit().await.expect("HEAD after squash");
+        assert_eq!(head_after, local_head, "pull --squash must not move HEAD");
+    }
+    assert!(
+        local_repo.path().join("remote.txt").exists(),
+        "squash should apply the merged worktree"
+    );
+    assert!(
+        !local_repo
+            .path()
+            .join(".libra")
+            .join("merge-state.json")
+            .exists(),
+        "pull --squash must not record merge state"
+    );
+
+    // The staged merge result finalizes as a normal single-parent commit.
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "squashed merge", "--no-verify"],
+            local_repo.path(),
+        ),
+        "commit squashed result",
+    );
+    {
+        let _guard = ChangeDirGuard::new(local_repo.path());
+        let squashed = Head::current_commit().await.expect("squashed HEAD");
+        let commit: Commit = load_object(&squashed).expect("load squashed commit");
+        assert_eq!(
+            commit.parent_commit_ids.len(),
+            1,
+            "a squashed pull commits a single-parent commit, not a merge"
+        );
+    }
+}
+
+/// `pull --no-commit` performs the merge and stages it but stops before
+/// committing, recording merge state so `merge --continue` finalizes the
+/// two-parent merge commit.
+#[tokio::test]
+#[serial]
+async fn test_pull_no_commit_stops_before_commit_and_records_merge_state() {
+    let (_temp_root, remote_dir, work_dir, branch) = create_remote_fixture();
+
+    let local_repo = tempdir().expect("failed to create local repo");
+    init_repo_via_cli(local_repo.path());
+    configure_identity_via_cli(local_repo.path());
+    configure_pull_tracking(local_repo.path(), &remote_dir, &branch);
+
+    assert_cli_success(
+        &run_libra_command(&["pull"], local_repo.path()),
+        "initial pull",
+    );
+    push_remote_commit(
+        &work_dir,
+        &branch,
+        "remote.txt",
+        "remote change\n",
+        "remote update",
+    );
+
+    fs::write(local_repo.path().join("local.txt"), "local change\n").expect("write local change");
+    assert_cli_success(
+        &run_libra_command(&["add", "local.txt"], local_repo.path()),
+        "stage local change",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "local update", "--no-verify"],
+            local_repo.path(),
+        ),
+        "commit local change",
+    );
+
+    let local_head = {
+        let _guard = ChangeDirGuard::new(local_repo.path());
+        Head::current_commit()
+            .await
+            .expect("local commit should leave HEAD")
+    };
+
+    let output = run_libra_command(&["pull", "--no-commit"], local_repo.path());
+    assert_cli_success(&output, "pull --no-commit");
+
+    {
+        let _guard = ChangeDirGuard::new(local_repo.path());
+        let head_after = Head::current_commit().await.expect("HEAD after no-commit");
+        assert_eq!(
+            head_after, local_head,
+            "pull --no-commit must not move HEAD"
+        );
+    }
+    assert!(
+        local_repo.path().join("remote.txt").exists(),
+        "no-commit should apply the merged worktree"
+    );
+    assert!(
+        local_repo
+            .path()
+            .join(".libra")
+            .join("merge-state.json")
+            .exists(),
+        "pull --no-commit must record merge state for `merge --continue`"
+    );
+
+    // `merge --continue` finalizes the two-parent merge commit.
+    assert_cli_success(
+        &run_libra_command(&["merge", "--continue"], local_repo.path()),
+        "merge --continue after pull --no-commit",
+    );
+    {
+        let _guard = ChangeDirGuard::new(local_repo.path());
+        let merged = Head::current_commit().await.expect("merged HEAD");
+        assert_ne!(merged, local_head, "merge --continue should advance HEAD");
+        let commit: Commit = load_object(&merged).expect("load merge commit");
+        assert_eq!(
+            commit.parent_commit_ids.len(),
+            2,
+            "finalized no-commit merge must have two parents"
+        );
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn test_pull_ff_only_diverged_remote_rejects_without_changing_head_or_worktree() {
@@ -661,5 +834,97 @@ async fn test_pull_rebase_already_up_to_date_reports_noop() {
     assert_eq!(
         old, new_commit,
         "HEAD must not move when there is nothing to rebase"
+    );
+}
+
+#[test]
+fn test_pull_ff_conflicts_with_no_ff_at_parse_time() {
+    // `--ff` and `--no-ff` are clap-conflicting and must be rejected before any
+    // repository / network work happens.
+    let repo = tempdir().expect("failed to create local repo");
+    let output = run_libra_command(&["pull", "--ff", "--no-ff"], repo.path());
+    let (stderr, _report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(129));
+    assert!(
+        stderr.contains("cannot be used with")
+            && stderr.contains("--ff")
+            && stderr.contains("--no-ff"),
+        "pull should reject --ff with --no-ff before preflight: {stderr}"
+    );
+}
+
+#[test]
+fn test_pull_no_ff_conflicts_with_ff_only_at_parse_time() {
+    let repo = tempdir().expect("failed to create local repo");
+    let output = run_libra_command(&["pull", "--no-ff", "--ff-only"], repo.path());
+    let (stderr, _report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(129));
+    assert!(
+        stderr.contains("cannot be used with"),
+        "pull should reject --no-ff with --ff-only before preflight: {stderr}"
+    );
+}
+
+/// `libra pull --no-ff` against a fast-forwardable upstream records a real
+/// two-parent merge commit instead of fast-forwarding HEAD to the remote tip.
+#[tokio::test]
+#[serial]
+async fn test_pull_no_ff_forces_merge_commit_on_fast_forwardable_history() {
+    let (_temp_root, remote_dir, work_dir, branch) = create_remote_fixture();
+
+    let local_repo = tempdir().expect("failed to create local repo");
+    init_repo_via_cli(local_repo.path());
+    configure_identity_via_cli(local_repo.path());
+    configure_pull_tracking(local_repo.path(), &remote_dir, &branch);
+
+    let first_pull = run_libra_command(&["pull"], local_repo.path());
+    assert_cli_success(&first_pull, "initial pull");
+    let new_head = push_remote_commit(
+        &work_dir,
+        &branch,
+        "remote.txt",
+        "remote change\n",
+        "remote update",
+    );
+
+    let output = run_libra_command(&["--json", "pull", "--no-ff"], local_repo.path());
+    assert_cli_success(&output, "pull --no-ff");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stdout, got: {stdout}\nerror: {e}"));
+    let data = &parsed["data"];
+
+    assert_eq!(
+        data["merge"]["strategy"], "three-way",
+        "--no-ff must force a merge commit even when fast-forward is possible"
+    );
+    let parents = data["merge"]["parents"]
+        .as_array()
+        .expect("merge parents array");
+    assert_eq!(
+        parents.len(),
+        2,
+        "--no-ff merge commit must have two parents"
+    );
+    assert!(
+        parents
+            .iter()
+            .any(|p| p.as_str() == Some(new_head.as_str())),
+        "the fetched upstream tip must be one of the merge parents"
+    );
+
+    let _guard = ChangeDirGuard::new(local_repo.path());
+    let head = Head::current_commit()
+        .await
+        .expect("pull --no-ff should record a merge commit at HEAD");
+    assert_ne!(
+        head.to_string(),
+        new_head,
+        "--no-ff must not fast-forward HEAD to the remote tip"
+    );
+    assert!(
+        local_repo.path().join("remote.txt").exists(),
+        "pull --no-ff should still bring in the fetched content"
     );
 }

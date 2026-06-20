@@ -1,11 +1,11 @@
-//! Guard `docs/improvement/agent.md` against stale implementation claims.
+//! Guard `docs/development/commands/agent.md` against stale implementation claims.
 //!
 //! The Agent plan is an active backlog document. Several sections are historical
 //! by design, but the current-risk table must not claim removed provider
 //! surfaces still exist after the source and CLI migration tests have closed
 //! them.
 
-const AGENT_DOC: &str = include_str!("../../docs/improvement/agent.md");
+const AGENT_DOC: &str = include_str!("../../docs/development/commands/agent.md");
 const CODE_COMMAND: &str = include_str!("../../src/command/code.rs");
 
 #[test]
@@ -21,7 +21,7 @@ fn agent_doc_keeps_claudecode_marked_removed_not_active() {
     ] {
         assert!(
             !AGENT_DOC.contains(forbidden),
-            "docs/improvement/agent.md must not keep stale claudecode-active claim: {forbidden}",
+            "docs/development/commands/agent.md must not keep stale claudecode-active claim: {forbidden}",
         );
     }
 

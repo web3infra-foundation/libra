@@ -1,6 +1,6 @@
 //! Goal verifier — deterministic completion gate.
 //!
-//! Per `docs/improvement/opencode.md` lines 670-681, the first-version
+//! Per `docs/development/commands/_general.md` lines 670-681, the first-version
 //! verifier is **deterministic + evidence-based**: it does not call a
 //! model to make the final accept/reject decision. The supervisor
 //! (P6.3) calls [`GoalVerifier::verify`] every time the model emits

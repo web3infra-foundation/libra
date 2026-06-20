@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.1172"
+version = "0.17.1513"
 edition = "2024"
 license = "MIT"
 description = "AI agent-native version control system with Git on-disk compatibility, SQLite-backed metadata, and tiered cloud storage"
@@ -18,11 +18,11 @@ test-network   = []   # L2: tests requiring outbound network but no secrets
 test-live-ai   = []   # L3: tests calling real LLM APIs
 test-live-cloud = []  # L3: tests hitting real D1/R2 endpoints
 test-provider  = []   # deterministic hidden provider for local TUI automation tests
-subagent-scaffold = []  # CEX-S2-10 schema-only scaffold (Step 2 sub-agent contracts; gated on CP-4 in production — see docs/improvement/agent.md "Step 2 audit closure")
+subagent-scaffold = []  # CEX-S2-10 schema-only scaffold (Step 2 sub-agent contracts; gated on CP-4 in production — see docs/development/commands/agent.md "Step 2 audit closure")
 
 [dependencies]
 uuid = { version = "1.23.1", features = ["v4", "v5", "v7"] }
-git-internal = "0.7.4"
+git-internal = "0.7.6"
 anyhow = "1.0.102"
 byte-unit = "5.2.0"
 byteorder = "1.5.0"
@@ -33,6 +33,9 @@ chrono = { version = "0.4.44", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive"] }
 colored = "3.1.1"
 flate2 = "1.1.9"  # add features = ["zlib"] if slow
+tar = "0.4"
+zip = "0.6"
+bzip2 = "0.6"
 futures = "0.3.32"
 futures-util = "0.3.32"
 hex = "0.4.3"
@@ -161,6 +164,10 @@ portable-pty = "0.9.0"
 [[test]]
 name = "compat_stash_subcommand_surface"
 path = "tests/compat/stash_subcommand_surface.rs"
+
+[[test]]
+name = "compat_pull_strategy_flags_surface"
+path = "tests/compat/pull_strategy_flags_surface.rs"
 
 [[test]]
 name = "compat_bisect_subcommand_surface"

@@ -128,6 +128,25 @@ Still detects missing objects referenced by commits, trees, or refs.
 libra fsck --connectivity-only
 ```
 
+### `--strict`
+
+Apply additional format and graph checks (these are reported as errors, so they
+cause a non-zero exit):
+
+- commit author/committer emails must contain `@`, and their timezones must be a
+  well-formed `±HHMM` offset within ±1400;
+- a commit's tree and parents must exist with the expected object types;
+- a tree's entries must exist with object types matching their mode, and be in
+  Git's canonical sort order.
+
+```bash
+libra fsck --strict
+```
+
+Note: this is an intentionally narrowed subset of `git fsck --strict`. The
+`.gitmodules`/HFS+/NTFS pathname checks and per-message `fsck.<msg-id>` severity
+configuration are not implemented.
+
 ## Examples
 
 ```bash
@@ -151,6 +170,9 @@ libra fsck --tags
 
 # Fast connectivity check
 libra fsck --connectivity-only
+
+# Stricter commit/tree format and graph checks
+libra fsck --strict
 
 # Check single object
 libra fsck abc123def456...

@@ -6,6 +6,7 @@ use std::{
     future::Future,
     io::Error as IoError,
     path::{Path, PathBuf},
+    str::FromStr,
     sync::OnceLock,
 };
 
@@ -70,16 +71,22 @@ struct RepoCurrentDirGuard {
     original_dir: PathBuf,
     restored: bool,
     restore_failure_logged: bool,
+    #[cfg(test)]
+    _cwd_lock: crate::utils::test::CwdLockGuard,
 }
 
 impl RepoCurrentDirGuard {
     fn change_to(new_dir: &Path) -> Result<Self, IoError> {
+        #[cfg(test)]
+        let cwd_lock = crate::utils::test::cwd_lock_guard();
         let original_dir = env::current_dir()?;
         env::set_current_dir(new_dir)?;
         Ok(Self {
             original_dir,
             restored: false,
             restore_failure_logged: false,
+            #[cfg(test)]
+            _cwd_lock: cwd_lock,
         })
     }
 
@@ -404,8 +411,46 @@ impl LocalClient {
                         seen.insert(hash.clone());
                     });
 
+                    // Classify each want. An annotated-tag object contributes the
+                    // tag object(s) to the pack and resolves to a target commit;
+                    // every other want is treated as a commit (lightweight tags
+                    // and branch tips already point at commits). This lets a
+                    // libra-native server honour `fetch --tags` of annotated tags.
+                    // Requires git-internal >= 0.7.6 so a tag's id is the canonical
+                    // hash of its `to_data()` (otherwise the receiver re-hashes to a
+                    // different OID and the fetched `refs/tags/*` dangles).
+                    let mut tag_entries: Vec<Entry> = Vec::new();
+                    let mut commit_targets: Vec<String> = Vec::new();
+                    for want_hash in want {
+                        let Ok(oid) = git_internal::hash::ObjectHash::from_str(want_hash) else {
+                            commit_targets.push(want_hash.clone());
+                            continue;
+                        };
+                        match tag::load_object_trait(&oid).await {
+                            Ok(tag::TagObject::Tag(tag_obj)) => {
+                                let mut current = tag_obj;
+                                for _ in 0..32 {
+                                    let target = current.object_hash;
+                                    if seen.insert(current.id.to_string()) {
+                                        tag_entries.push(Entry::from(current));
+                                    }
+                                    match tag::load_object_trait(&target).await {
+                                        Ok(tag::TagObject::Tag(inner)) => current = inner,
+                                        Ok(tag::TagObject::Commit(commit)) => {
+                                            commit_targets.push(commit.id.to_string());
+                                            break;
+                                        }
+                                        // Tag of a tree/blob, or a missing target.
+                                        _ => break,
+                                    }
+                                }
+                            }
+                            _ => commit_targets.push(want_hash.clone()),
+                        }
+                    }
+
                     let mut reachable_commits = Vec::new();
-                    for branch_hash in want {
+                    for branch_hash in &commit_targets {
                         let commits = get_reachable_commits(branch_hash.to_string(), depth)
                             .await
                             .map_err(|error| {
@@ -468,6 +513,7 @@ impl LocalClient {
                     all_entries.extend(commit_entries);
                     all_entries.extend(tree_entries);
                     all_entries.extend(blob_entries);
+                    all_entries.extend(tag_entries);
 
                     let (entry_tx, entry_rx) =
                         tokio::sync::mpsc::channel::<MetaAttached<Entry, EntryMeta>>(1_000);
@@ -761,7 +807,8 @@ mod tests {
         assert!(buf.windows(4).any(|w| w == b"PACK"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
     async fn fetch_objects_propagates_reachable_commit_walk_errors() {
         let repo_dir = tempdir().unwrap();
         setup_with_new_libra_in(repo_dir.path()).await;
@@ -780,7 +827,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn with_repo_current_dir_restores_current_dir_when_task_is_cancelled() {
         let caller_dir = tempdir().unwrap();
@@ -823,7 +870,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn with_repo_current_dir_serializes_concurrent_operations() {
         let caller_dir = tempdir().unwrap();

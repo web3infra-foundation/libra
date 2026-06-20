@@ -860,7 +860,7 @@ async fn test_lfs_unlock_with_id_skips_path_existence_check() {
 /// canonical invocation per sub-command (`track`, `untrack`, `ls-files`,
 /// `locks`, `lock`, `unlock`) plus a JSON variant without reading the
 /// design doc. Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
+/// `docs/development/commands/_general.md` item B.
 #[test]
 fn test_lfs_help_lists_examples_banner() {
     let repo = tempfile::tempdir().expect("tempdir for lfs --help");

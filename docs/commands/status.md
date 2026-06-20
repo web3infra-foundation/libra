@@ -19,7 +19,9 @@ reports the current branch, detached HEAD state, and upstream tracking informati
 The command computes the diff between HEAD, the index, and the working tree to classify files
 into staged, unstaged, and untracked categories. It supports multiple output formats: a
 human-readable long format (default), a short format (`--short`), a machine-readable porcelain
-format, and structured JSON for agent consumption.
+format, structured JSON for agent consumption, and `-z` NUL-terminated machine output. It can
+also detect renames (`--find-renames`), align output into columns (`--column`), and control
+whether upstream ahead/behind counts are shown (`--ahead-behind` / `--no-ahead-behind`).
 
 ## Options
 
@@ -55,7 +57,49 @@ libra status --short --branch
 libra status --porcelain --branch
 ```
 
-### `--show-stash`
+### `--ahead-behind` / `--no-ahead-behind`
+
+Control whether ahead/behind counts are shown in the branch tracking line. `--no-ahead-behind`
+suppresses the counts while still showing the upstream branch name. The default is to show the
+counts when an upstream is configured.
+
+```bash
+libra status --short --branch --no-ahead-behind
+libra status --porcelain --branch --no-ahead-behind
+```
+
+### `-z`
+
+Terminate each machine-readable status entry with a NUL (`\0`) byte instead of a newline. This
+is intended for use with `--porcelain` or `--short` so that paths containing spaces or newlines
+can be parsed reliably.
+
+```bash
+libra status --porcelain -z
+libra status -s -z
+```
+
+### `--column`
+
+Align human-readable status entries into columns. In staged/unstaged sections, status labels
+(`modified:`, `deleted:`, `new file:`, `renamed:`) are padded to the same width. In untracked
+and ignored sections, file names are laid out in multiple columns.
+
+```bash
+libra status --column
+```
+
+### `--find-renames [PERCENT]`
+
+Detect renames among staged and unstaged changes. When a deleted file and a new file have the
+same blob hash, or their file names are sufficiently similar, they are reported as a rename
+pair (`old -> new`) instead of separate delete/add entries. The optional value is the minimum
+similarity percentage (0-100); the default is 50.
+
+```bash
+libra status --find-renames
+libra status --find-renames=75
+```
 
 Show the number of stash entries. Only effective in standard (long) output mode.
 
@@ -97,6 +141,9 @@ libra status --quiet --exit-code   # silent dirty check
 ```bash
 libra status
 libra status --short
+libra status --porcelain -z
+libra status --column
+libra status --find-renames
 libra status --json
 libra status --exit-code
 ```

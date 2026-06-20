@@ -531,6 +531,8 @@ async fn add_fuse_worktree(
             source: Some(checkout_branch.clone()),
             worktree: true,
             staged: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         })
         .await
     {

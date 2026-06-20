@@ -2,7 +2,7 @@
 --
 -- Backs `libra agent` (external-agent capture). The Git side of the world owns
 -- the transcript / event-stream blobs: this schema only tracks the lightweight
--- summaries that are cheap to query and join. See docs/improvement/entire.md
+-- summaries that are cheap to query and join. See docs/development/commands/_general.md
 -- (sections 3.4 and 4.1) for the full rationale.
 --
 -- Idempotency: every DDL statement uses `IF NOT EXISTS`, so the migration is

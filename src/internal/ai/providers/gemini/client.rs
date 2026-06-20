@@ -64,7 +64,7 @@ impl Client {
     /// Creates a Gemini Client from environment variables or Vault.
     ///
     /// Functional scope: priority chain (12-Factor, see
-    /// `docs/improvement/config.md`):
+    /// `docs/development/commands/config.md`):
     /// 1. Process env `GEMINI_API_KEY`
     /// 2. Local repo config (`vault.env.GEMINI_API_KEY`)
     /// 3. Global config (`vault.env.GEMINI_API_KEY`)

@@ -205,7 +205,7 @@ fn code_rejects_deepseek_flags_for_other_providers() {
 /// most common invocations across the three modes (TUI / --web / --stdio)
 /// plus --browser-control loopback, --control write, --resume,
 /// --plan-mode, and --env-file without reading the design doc. Cross-cutting
-/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
+/// `--help` EXAMPLES rollout per `docs/development/commands/_general.md` item B.
 #[test]
 fn test_code_help_lists_examples_banner() {
     let repo = tempdir().expect("tempdir for code --help");

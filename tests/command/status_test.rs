@@ -28,7 +28,7 @@ fn output_porcelain(
     unstaged: &libra::command::status::Changes,
     writer: &mut impl Write,
 ) {
-    output_porcelain_inner(staged, unstaged, writer)
+    output_porcelain_inner(staged, unstaged, false, writer)
         .expect("porcelain output should succeed in test");
 }
 
@@ -223,6 +223,9 @@ async fn test_changes_to_be_staged() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -302,12 +305,14 @@ fn test_output_porcelain_format() {
         new: vec![PathBuf::from("new_file.txt")],
         modified: vec![PathBuf::from("modified_file.txt")],
         deleted: vec![PathBuf::from("deleted_file.txt")],
+        renamed: vec![],
     };
 
     let unstaged = Changes {
         new: vec![PathBuf::from("untracked_file.txt")],
         modified: vec![PathBuf::from("unstaged_modified.txt")],
         deleted: vec![PathBuf::from("unstaged_deleted.txt")],
+        renamed: vec![],
     };
 
     // Create a buffer to capture the output
@@ -356,6 +361,9 @@ async fn test_status_porcelain() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -369,6 +377,9 @@ async fn test_status_porcelain() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     file2.write_all(b"modified content").unwrap();
@@ -433,12 +444,14 @@ fn test_output_short_format() {
         new: vec![PathBuf::from("new_file.txt")],
         modified: vec![PathBuf::from("modified_file.txt")],
         deleted: vec![PathBuf::from("deleted_file.txt")],
+        renamed: vec![],
     };
 
     let unstaged = Changes {
         new: vec![PathBuf::from("untracked_file.txt")],
         modified: vec![PathBuf::from("unstaged_modified.txt")],
         deleted: vec![PathBuf::from("unstaged_deleted.txt")],
+        renamed: vec![],
     };
 
     // Create a buffer to capture the output
@@ -504,6 +517,9 @@ async fn test_status_short_format() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -517,6 +533,9 @@ async fn test_status_short_format() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -611,6 +630,9 @@ async fn test_status_porcelain_v2_basic() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     file1.write_all(b" more").unwrap(); // unstaged modification
@@ -688,6 +710,9 @@ async fn test_status_porcelain_v2_branch_metadata_includes_upstream_counts() {
             ignore_errors: false,
             refresh: false,
             force: false,
+
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -758,6 +783,9 @@ async fn test_status_porcelain_v2_untracked_files_no() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -815,6 +843,9 @@ async fn test_status_porcelain_v2_untracked_files_all() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -864,6 +895,9 @@ async fn test_status_untracked_files_no() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -921,6 +955,9 @@ async fn test_status_untracked_files_all() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1004,6 +1041,9 @@ async fn test_status_mixed_changes() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1067,6 +1107,9 @@ async fn test_status_deleted_files() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1135,6 +1178,9 @@ async fn test_status_with_subdirectories() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1220,6 +1266,9 @@ async fn test_status_verbose_output() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1273,6 +1322,9 @@ async fn test_status_short_format_with_branch() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1297,6 +1349,7 @@ async fn test_status_short_format_with_branch() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            ..Default::default()
         },
         &mut output,
     )
@@ -1335,6 +1388,9 @@ async fn test_status_porcelain_format_with_branch() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1359,6 +1415,7 @@ async fn test_status_porcelain_format_with_branch() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            ..Default::default()
         },
         &mut output,
     )
@@ -1397,6 +1454,9 @@ async fn test_status_show_stash_with_existing_stash() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1419,11 +1479,16 @@ async fn test_status_show_stash_with_existing_stash() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
     stash::execute(Stash::Push {
         message: Some("test stash".to_string()),
+        include_untracked: false,
+        all: false,
+        keep_index: false,
     })
     .await;
 
@@ -1438,6 +1503,7 @@ async fn test_status_show_stash_with_existing_stash() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            ..Default::default()
         },
         &mut output,
     )
@@ -1465,6 +1531,7 @@ async fn test_status_show_stash_with_existing_stash() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            ..Default::default()
         },
         &mut output,
     )
@@ -1492,6 +1559,7 @@ async fn test_status_show_stash_with_existing_stash() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            ..Default::default()
         },
         &mut output,
     )
@@ -1530,6 +1598,9 @@ async fn test_status_show_stash_without_stash() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1546,6 +1617,7 @@ async fn test_status_show_stash_without_stash() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            ..Default::default()
         },
         &mut output,
     )
@@ -1583,6 +1655,9 @@ async fn test_status_branch_detached_head() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1604,6 +1679,9 @@ async fn test_status_branch_detached_head() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1613,8 +1691,13 @@ async fn test_status_branch_detached_head() {
     switch::execute(SwitchArgs {
         branch: Some(current_commit.to_string()),
         create: None,
+        force_create: None,
+        orphan: None,
         detach: true,
         track: false,
+        force: false,
+        guess: false,
+        no_guess: false,
     })
     .await;
 
@@ -1629,6 +1712,7 @@ async fn test_status_branch_detached_head() {
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
             exit_code: false,
+            ..Default::default()
         },
         &mut output,
     )
@@ -1666,6 +1750,9 @@ async fn test_status_porcelain_v2_file_modes_and_hashes() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(create_commit_args("Initial commit")).await;
@@ -1681,6 +1768,9 @@ async fn test_status_porcelain_v2_file_modes_and_hashes() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1695,6 +1785,9 @@ async fn test_status_porcelain_v2_file_modes_and_hashes() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1817,6 +1910,9 @@ async fn test_status_porcelain_v2_executable_file() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -1880,6 +1976,9 @@ async fn test_status_porcelain_v2_deleted_file() {
         ignore_errors: false,
         refresh: false,
         force: false,
+
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
     commit::execute(create_commit_args("Initial commit")).await;
@@ -1965,6 +2064,8 @@ async fn test_status_after_add() {
         verbose: false,
         dry_run: false,
         ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await;
 
@@ -2131,5 +2232,203 @@ fn test_add_dry_run_output() {
     assert!(
         !status_stdout.contains("A  file.txt"),
         "dry run should not stage: {status_stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_status_porcelain_z_uses_null_terminator() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let output = run_libra_command(&["init"], &repo);
+    assert!(output.status.success());
+
+    std::fs::write(repo.join("file.txt"), "content").unwrap();
+
+    let output = run_libra_command(&["status", "--porcelain", "-z"], &repo);
+    assert!(output.status.success());
+
+    // NUL terminator means no newline byte in stdout.
+    assert!(
+        !output.stdout.contains(&b'\n'),
+        "-z should not emit newlines, got: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        output.stdout.contains(&b'\0'),
+        "-z should emit NUL terminators"
+    );
+}
+
+#[test]
+#[serial]
+fn test_status_short_z_uses_null_terminator() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let output = run_libra_command(&["init"], &repo);
+    assert!(output.status.success());
+
+    std::fs::write(repo.join("file.txt"), "content").unwrap();
+
+    let output = run_libra_command(&["status", "-s", "-z"], &repo);
+    assert!(output.status.success());
+
+    assert!(
+        !output.stdout.contains(&b'\n'),
+        "-s -z should not emit newlines, got: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+#[serial]
+fn test_status_branch_no_ahead_behind_suppresses_counts() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let output = run_libra_command(&["init"], &repo);
+    assert!(output.status.success());
+
+    let output = run_libra_command(&["config", "set", "user.name", "Test"], &repo);
+    assert!(output.status.success());
+    let output = run_libra_command(&["config", "set", "user.email", "test@example.com"], &repo);
+    assert!(output.status.success());
+
+    std::fs::write(repo.join("file.txt"), "content").unwrap();
+    let output = run_libra_command(&["add", "file.txt"], &repo);
+    assert!(output.status.success());
+    let output = run_libra_command(&["commit", "-m", "first", "--no-verify"], &repo);
+    assert!(output.status.success());
+
+    let output = run_libra_command(
+        &["status", "--short", "--branch", "--no-ahead-behind"],
+        &repo,
+    );
+    assert!(
+        output.status.success(),
+        "--no-ahead-behind should be accepted"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("## main"),
+        "branch info should be shown: {stdout}"
+    );
+
+    let output = run_libra_command(&["status", "--short", "--branch", "--ahead-behind"], &repo);
+    assert!(output.status.success(), "--ahead-behind should be accepted");
+}
+
+#[test]
+#[serial]
+fn test_status_column_aligns_labels() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let output = run_libra_command(&["init"], &repo);
+    assert!(output.status.success());
+
+    let output = run_libra_command(&["config", "set", "user.name", "Test"], &repo);
+    assert!(output.status.success());
+    let output = run_libra_command(&["config", "set", "user.email", "test@example.com"], &repo);
+    assert!(output.status.success());
+
+    std::fs::write(repo.join("mod.txt"), "mod").unwrap();
+    std::fs::write(repo.join("keep.txt"), "keep").unwrap();
+    let output = run_libra_command(&["add", "mod.txt", "keep.txt"], &repo);
+    assert!(output.status.success());
+    let output = run_libra_command(&["commit", "-m", "base", "--no-verify"], &repo);
+    assert!(output.status.success());
+
+    std::fs::remove_file(repo.join("mod.txt")).unwrap();
+    let output = run_libra_command(&["add", "mod.txt"], &repo);
+    assert!(output.status.success());
+    std::fs::write(repo.join("new.txt"), "new").unwrap();
+    let output = run_libra_command(&["add", "new.txt"], &repo);
+    assert!(output.status.success());
+
+    let output = run_libra_command(&["status", "--column"], &repo);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("deleted:  mod.txt"),
+        "--column should align labels: {stdout}"
+    );
+    assert!(
+        stdout.contains("new file: new.txt"),
+        "--column should align labels: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_status_find_renames_detects_content_rename() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let output = run_libra_command(&["init"], &repo);
+    assert!(output.status.success());
+
+    let output = run_libra_command(&["config", "set", "user.name", "Test"], &repo);
+    assert!(output.status.success());
+    let output = run_libra_command(&["config", "set", "user.email", "test@example.com"], &repo);
+    assert!(output.status.success());
+
+    std::fs::write(repo.join("old.txt"), "content").unwrap();
+    let output = run_libra_command(&["add", "old.txt"], &repo);
+    assert!(output.status.success());
+    let output = run_libra_command(&["commit", "-m", "base", "--no-verify"], &repo);
+    assert!(output.status.success());
+
+    std::fs::remove_file(repo.join("old.txt")).unwrap();
+    std::fs::write(repo.join("new.txt"), "content").unwrap();
+
+    let output = run_libra_command(&["status", "--find-renames", "--short"], &repo);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains('R'),
+        "--find-renames should report rename status, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("D  old.txt"),
+        "old path should not remain as delete: {stdout}"
+    );
+    assert!(
+        !stdout.contains("?? new.txt"),
+        "new path should not remain as untracked: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_status_find_renames_honors_threshold() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let output = run_libra_command(&["init"], &repo);
+    assert!(output.status.success());
+
+    let output = run_libra_command(&["config", "set", "user.name", "Test"], &repo);
+    assert!(output.status.success());
+    let output = run_libra_command(&["config", "set", "user.email", "test@example.com"], &repo);
+    assert!(output.status.success());
+
+    std::fs::write(repo.join("aaaa.txt"), "content-a").unwrap();
+    let output = run_libra_command(&["add", "aaaa.txt"], &repo);
+    assert!(output.status.success());
+    let output = run_libra_command(&["commit", "-m", "base", "--no-verify"], &repo);
+    assert!(output.status.success());
+
+    std::fs::remove_file(repo.join("aaaa.txt")).unwrap();
+    std::fs::write(repo.join("zzzz.txt"), "content-b").unwrap();
+
+    let output = run_libra_command(&["status", "--find-renames=100", "--short"], &repo);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains('R'),
+        "100% threshold should not match different names/content: {stdout}"
     );
 }

@@ -147,7 +147,177 @@ async fn test_cat_file_size_commit() {
     assert!(size > 0, "Commit object size should be > 0, got {}", size);
 }
 
-/// Scenario: `cat-file -t --json HEAD` must emit
+/// Scenario: `cat-file --batch-check` reads object names from stdin and prints
+/// `<sha> <type> <size>` per resolvable line and `<input> missing` otherwise.
+#[tokio::test]
+async fn test_cat_file_batch_check_reports_type_size_and_missing() {
+    use std::process::Stdio;
+
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    configure_user_identity(temp_path);
+    create_commit(temp_path, "hello.txt", "hello world\n", "first commit");
+
+    let head = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("Failed to resolve HEAD");
+    let head_hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "--batch-check"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn cat-file --batch-check");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(b"HEAD\nnot-a-real-ref\n")
+        .expect("Failed to write batch-check input");
+    let output = child
+        .wait_with_output()
+        .expect("Failed to wait on cat-file");
+    assert!(
+        output.status.success(),
+        "cat-file --batch-check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "expected two output lines, got: {stdout}");
+    assert!(
+        lines[0].starts_with(&format!("{head_hash} commit ")),
+        "first line should be '<hash> commit <size>', got: {}",
+        lines[0]
+    );
+    let size_token = lines[0].rsplit(' ').next().unwrap_or("");
+    assert!(
+        size_token.parse::<usize>().is_ok(),
+        "size should be numeric, got: {}",
+        lines[0]
+    );
+    assert_eq!(lines[1], "not-a-real-ref missing");
+}
+
+/// Scenario: `cat-file --batch` prints the `<sha> <type> <size>` header AND the
+/// raw object contents for each resolvable line, and `<input> missing` otherwise.
+#[tokio::test]
+async fn test_cat_file_batch_reports_header_and_contents() {
+    use std::process::Stdio;
+
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    configure_user_identity(temp_path);
+    create_commit(temp_path, "hello.txt", "hello world\n", "first commit");
+
+    let head = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("Failed to resolve HEAD");
+    let head_hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "--batch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn cat-file --batch");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(b"HEAD\nnot-a-real-ref\n")
+        .expect("Failed to write batch input");
+    let output = child
+        .wait_with_output()
+        .expect("Failed to wait on cat-file");
+    assert!(
+        output.status.success(),
+        "cat-file --batch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("{head_hash} commit ")),
+        "expected '<hash> commit <size>' header, got: {stdout}"
+    );
+    // The commit contents follow the header line.
+    assert!(
+        stdout.contains("first commit"),
+        "expected the commit message in the contents, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("tree "),
+        "expected the commit tree line in the contents, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("not-a-real-ref missing"),
+        "expected the missing line, got: {stdout}"
+    );
+}
+
+/// Scenario: `cat-file --batch-check="%(objecttype) %(objectsize)"` must
+/// expand the format atoms instead of the default `<sha> <type> <size>` line.
+#[tokio::test]
+async fn test_cat_file_batch_check_custom_format_expands_atoms() {
+    use std::process::Stdio;
+
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    configure_user_identity(temp_path);
+    create_commit(temp_path, "hello.txt", "hello world\n", "first commit");
+
+    let head = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("Failed to resolve HEAD");
+    let head_hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "--batch-check=%(objecttype) %(objectsize)"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn cat-file --batch-check with format");
+
+    {
+        let mut stdin = child.stdin.take().expect("Failed to open stdin");
+        stdin
+            .write_all(format!("{head_hash}\n").as_bytes())
+            .expect("Failed to write batch-check input");
+    }
+
+    let output = child
+        .wait_with_output()
+        .expect("Failed to wait for cat-file --batch-check with format");
+
+    assert!(
+        output.status.success(),
+        "cat-file --batch-check with format failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.starts_with("commit "),
+        "expected format-expanded line starting with 'commit', got: {stdout}"
+    );
+}
+
 /// `command="cat-file"`, `data.mode="type"`, `data.object="HEAD"` and
 /// `data.object_type="commit"`. Schema pin for the type-mode envelope.
 #[tokio::test]

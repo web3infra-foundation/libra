@@ -75,7 +75,7 @@ libra db --json upgrade
 
 The same banner is rendered by `libra db --help` so the doc and the
 CLI surface stay in sync (cross-cutting `--help` EXAMPLES rollout, see
-`docs/improvement/README.md` item B).
+`docs/development/commands/_general.md` item B).
 
 ## Safety
 

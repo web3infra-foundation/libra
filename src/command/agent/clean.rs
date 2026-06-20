@@ -1,5 +1,5 @@
 //! `libra agent clean [--all]` — drop temporary checkpoints from stopped
-//! sessions per `docs/improvement/entire.md` §7.4.
+//! sessions per `docs/development/commands/_general.md` §7.4.
 //!
 //! The default form scopes cleanup to the most recently stopped session;
 //! `--all` widens that to every stopped session. Active sessions are never

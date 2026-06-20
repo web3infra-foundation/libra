@@ -434,19 +434,7 @@ where
                         TaskRuntimeEvent::AssistantMessage(turn.final_text.clone()),
                     );
                 }
-                if let Some(reason) =
-                    submit_task_complete_evidence_mismatch(&accumulated_tool_calls)
-                {
-                    (
-                        Some(reason.clone()),
-                        tool_calls,
-                        policy_violations,
-                        reason,
-                        None,
-                    )
-                } else if let Some(reason) =
-                    submit_task_complete_fail_reason(&accumulated_tool_calls)
-                {
+                if let Some(reason) = submit_task_complete_fail_reason(&accumulated_tool_calls) {
                     (
                         Some(reason.clone()),
                         tool_calls,
@@ -522,6 +510,16 @@ where
                             policy_violations,
                             reason,
                             Some(review.clone()),
+                        )
+                    } else if let Some(reason) =
+                        submit_task_complete_evidence_mismatch(&accumulated_tool_calls)
+                    {
+                        (
+                            Some(reason.clone()),
+                            tool_calls,
+                            policy_violations,
+                            reason,
+                            review,
                         )
                     } else if let Some(violation_message) = workspace_contract_failure(task, config)
                     {

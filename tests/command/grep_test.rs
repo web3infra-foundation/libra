@@ -27,6 +27,8 @@ async fn add_and_commit(message: &str, pathspec: Vec<String>) {
             force: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         },
         &OutputConfig::default(),
     )
@@ -46,6 +48,7 @@ async fn add_and_commit(message: &str, pathspec: Vec<String>) {
             no_verify: true,
             author: None,
             file: None,
+            ..Default::default()
         },
         &OutputConfig::default(),
     )
@@ -87,6 +90,58 @@ async fn test_grep_working_tree_searches_only_tracked_files() {
             .any(|entry| entry["line"] == "updated needle")
     );
     assert!(!paths.contains(&"untracked.txt"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_grep_after_context_marks_context_lines() {
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("f.txt", "alpha\nNEEDLE\nbeta\ngamma\n").expect("failed to write file");
+    add_and_commit("add f", vec!["f.txt".to_string()]).await;
+
+    let output = run_libra_command(
+        &["--json=compact", "grep", "-A", "1", "NEEDLE"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "grep -A 1 should succeed");
+
+    let json = parse_json_stdout(&output);
+    let matches = json["data"]["matches"]
+        .as_array()
+        .expect("expected grep matches array");
+    // The match line plus one trailing context line.
+    assert_eq!(matches.len(), 2);
+    assert_eq!(matches[0]["line"], "NEEDLE");
+    assert_eq!(matches[0]["line_number"], 2);
+    // Real match lines omit the is_context field (serde skip when false).
+    assert!(matches[0].get("is_context").is_none_or(|v| v == false));
+    assert_eq!(matches[1]["line"], "beta");
+    assert_eq!(matches[1]["line_number"], 3);
+    assert_eq!(matches[1]["is_context"], true);
+    // total_matches counts only real matches, not context lines.
+    assert_eq!(json["data"]["total_matches"], 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_grep_perl_regexp_is_rejected() {
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("f.txt", "needle\n").expect("failed to write file");
+    add_and_commit("add f", vec!["f.txt".to_string()]).await;
+
+    let output = run_libra_command(&["grep", "-P", "needle"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("perl-regexp is not supported"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 #[tokio::test]
@@ -142,12 +197,15 @@ async fn test_grep_tree_accepts_branch_revisions() {
             delete: None,
             delete_safe: None,
             set_upstream_to: None,
+            unset_upstream: None,
             show_current: false,
             rename: Vec::new(),
             remotes: false,
             all: false,
             contains: Vec::new(),
             no_contains: Vec::new(),
+            points_at: None,
+            ignore_case: false,
         },
         &OutputConfig::default(),
     )
@@ -590,7 +648,7 @@ async fn test_grep_all_match_is_based_on_positive_pattern_presence_even_with_inv
 /// canonical invocations (regex vs literal, multi-pattern, --cached,
 /// --tree REV, count, filename listing, --json) without reading the
 /// design doc. Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
+/// `docs/development/commands/_general.md` item B.
 #[test]
 fn test_grep_help_lists_examples_banner() {
     let repo = tempdir().expect("tempdir for grep --help");

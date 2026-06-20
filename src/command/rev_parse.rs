@@ -27,7 +27,7 @@ use crate::{
 /// repository top-level. The banner pins the four mutually-exclusive
 /// modes plus a JSON variant for agents so users see all supported
 /// forms without reading the design doc. Cross-cutting `--help`
-/// EXAMPLES rollout per `docs/improvement/README.md` item B.
+/// EXAMPLES rollout per `docs/development/commands/_general.md` item B.
 pub const REV_PARSE_EXAMPLES: &str = "\
 EXAMPLES:
     libra rev-parse HEAD                Print the full 40-char hash for HEAD
@@ -35,14 +35,17 @@ EXAMPLES:
     libra rev-parse --short HEAD        Print a non-ambiguous short hash
     libra rev-parse --abbrev-ref HEAD   Print the branch name (or HEAD when detached)
     libra rev-parse --show-toplevel     Print the absolute path of the repository root
+    libra rev-parse --verify HEAD       Assert HEAD resolves to one object (exit 128 if not)
+    libra rev-parse --is-inside-work-tree  Print true/false for working-tree context
     libra rev-parse --json HEAD         Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
 #[command(after_help = REV_PARSE_EXAMPLES)]
 pub struct RevParseArgs {
-    /// Show a non-ambiguous short object name.
-    #[clap(long, conflicts_with_all = ["abbrev_ref", "show_toplevel"])]
-    pub short: bool,
+    /// Show a non-ambiguous short object name. Accepts an optional length
+    /// (e.g. `--short=8`) to request a specific abbreviation.
+    #[clap(long, num_args = 0..=1, require_equals = true, default_missing_value = "7", conflicts_with_all = ["abbrev_ref", "show_toplevel"])]
+    pub short: Option<String>,
 
     /// Show the branch name instead of the commit hash.
     #[clap(long = "abbrev-ref", conflicts_with_all = ["show_toplevel", "short"])]
@@ -51,6 +54,35 @@ pub struct RevParseArgs {
     /// Show the absolute path of the top-level working tree.
     #[clap(long = "show-toplevel", conflicts_with_all = ["abbrev_ref", "short", "spec"])]
     pub show_toplevel: bool,
+
+    /// Verify that the revision resolves to exactly one object; fail (exit 128) otherwise.
+    /// With the global `-q`/`--quiet`, failure is silent with exit code 1.
+    #[clap(long, conflicts_with_all = ["show_toplevel", "abbrev_ref", "is_inside_work_tree", "is_bare_repository", "git_dir"])]
+    pub verify: bool,
+
+    /// Use this revision when no SPEC is given (Git's `--default <arg>`).
+    #[clap(long, value_name = "ARG", conflicts_with_all = ["show_toplevel", "is_inside_work_tree", "is_bare_repository", "git_dir"])]
+    pub default: Option<String>,
+
+    /// Print "true" when run inside a working tree, "false" otherwise.
+    #[clap(long = "is-inside-work-tree", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec", "is_bare_repository", "git_dir"])]
+    pub is_inside_work_tree: bool,
+
+    /// Print "true" when the repository is bare, "false" otherwise.
+    #[clap(long = "is-bare-repository", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec", "git_dir"])]
+    pub is_bare_repository: bool,
+
+    /// Print the path to the `.libra` directory.
+    #[clap(long = "git-dir", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec"])]
+    pub git_dir: bool,
+
+    /// Print the path relative from the current directory to the repository root.
+    #[clap(long = "show-cdup", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec"])]
+    pub show_cdup: bool,
+
+    /// Print the path of the current directory relative to the repository root.
+    #[clap(long = "show-prefix", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec"])]
+    pub show_prefix: bool,
 
     /// Revision to parse. Defaults to HEAD when omitted.
     #[clap(value_name = "SPEC")]
@@ -74,7 +106,29 @@ pub async fn execute_safe(args: RevParseArgs, output: &OutputConfig) -> CliResul
     if !args.show_toplevel {
         util::require_repo().map_err(|_| CliError::repo_not_found())?;
     }
-    let result = resolve_rev_parse(&args).await?;
+    let result = match resolve_rev_parse(&args).await {
+        Ok(result) => result,
+        Err(error) => {
+            // Git's `rev-parse --verify` fails with exit 128 when the argument does
+            // not name exactly one object; with the global `-q`/`--quiet` it fails
+            // silently with exit code 1 instead of printing a diagnostic.
+            if args.verify {
+                if output.quiet {
+                    return Err(CliError::silent_exit(1));
+                }
+                let spec = args
+                    .spec
+                    .as_deref()
+                    .or(args.default.as_deref())
+                    .unwrap_or("HEAD");
+                return Err(CliError::fatal(format!(
+                    "Needed a single revision (could not resolve '{spec}')"
+                ))
+                .with_exit_code(128));
+            }
+            return Err(error);
+        }
+    };
 
     if output.is_json() {
         emit_json_data("rev-parse", &result, output)
@@ -108,7 +162,75 @@ async fn resolve_rev_parse(args: &RevParseArgs) -> CliResult<RevParseOutput> {
         });
     }
 
-    let spec = args.spec.as_deref().unwrap_or("HEAD");
+    if args.is_inside_work_tree {
+        // A non-bare Libra repository always has a working tree we operate inside.
+        let inside = !is_bare_repository().await?;
+        return Ok(RevParseOutput {
+            mode: "is_inside_work_tree",
+            input: None,
+            value: inside.to_string(),
+        });
+    }
+
+    if args.is_bare_repository {
+        return Ok(RevParseOutput {
+            mode: "is_bare_repository",
+            input: None,
+            value: is_bare_repository().await?.to_string(),
+        });
+    }
+
+    if args.git_dir {
+        let dir = util::try_get_storage_path(None).map_err(map_repo_path_error)?;
+        return Ok(RevParseOutput {
+            mode: "git_dir",
+            input: None,
+            value: util::path_to_string(&dir),
+        });
+    }
+
+    if args.show_prefix {
+        let storage = util::try_get_storage_path(None).map_err(map_repo_path_error)?;
+        let cwd = util::cur_dir();
+        let prefix = cwd
+            .strip_prefix(storage.parent().unwrap_or(&storage))
+            .unwrap_or(&cwd);
+        let value = if prefix.as_os_str().is_empty() {
+            String::new()
+        } else {
+            format!("{}/", prefix.display())
+        };
+        return Ok(RevParseOutput {
+            mode: "show_prefix",
+            input: None,
+            value,
+        });
+    }
+
+    if args.show_cdup {
+        let storage = util::try_get_storage_path(None).map_err(map_repo_path_error)?;
+        let worktree_root = storage.parent().unwrap_or(&storage);
+        let cwd = util::cur_dir();
+        let value = if cwd == *worktree_root {
+            String::new()
+        } else {
+            let rel = cwd.strip_prefix(worktree_root).unwrap_or(&cwd);
+            let depth = rel.components().count();
+            "../".repeat(depth)
+        };
+        return Ok(RevParseOutput {
+            mode: "show_cdup",
+            input: None,
+            value,
+        });
+    }
+
+    // `--default <arg>` supplies the revision when no positional SPEC is given.
+    let spec = args
+        .spec
+        .as_deref()
+        .or(args.default.as_deref())
+        .unwrap_or("HEAD");
 
     if args.abbrev_ref {
         let value = resolve_abbrev_ref(spec).await?;
@@ -122,14 +244,22 @@ async fn resolve_rev_parse(args: &RevParseArgs) -> CliResult<RevParseOutput> {
     let commit = util::get_commit_base_typed(spec)
         .await
         .map_err(|err| rev_parse_target_error(spec, err))?;
-    let value = if args.short {
-        resolve_short_commit(&commit).await?
+    let value = if let Some(short_len) = &args.short {
+        let requested_len: usize = short_len.parse().map_err(|_| {
+            CliError::command_usage(format!("invalid --short length: '{short_len}'"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?;
+        resolve_short_commit(&commit, Some(requested_len)).await?
     } else {
         commit.to_string()
     };
 
     Ok(RevParseOutput {
-        mode: if args.short { "short" } else { "resolve" },
+        mode: if args.short.is_some() {
+            "short"
+        } else {
+            "resolve"
+        },
         input: Some(spec.to_string()),
         value,
     })
@@ -198,11 +328,16 @@ async fn resolve_remote_tracking_ref(spec: &str, short_name: &str) -> CliResult<
     Ok(false)
 }
 
-async fn resolve_short_commit(commit: &ObjectHash) -> CliResult<String> {
+async fn resolve_short_commit(
+    commit: &ObjectHash,
+    requested_len: Option<usize>,
+) -> CliResult<String> {
     let full = commit.to_string();
     let storage = util::objects_storage();
 
-    for len in SHORT_HASH_LEN..=full.len() {
+    let min_len = requested_len.unwrap_or(SHORT_HASH_LEN).max(1);
+
+    for len in min_len..=full.len() {
         let prefix = &full[..len];
         let matches = storage.search_result(prefix).await.map_err(|error| {
             CliError::fatal(format!(
@@ -356,7 +491,7 @@ mod tests {
     #[test]
     fn test_rev_parse_args_default() {
         let args = RevParseArgs::try_parse_from(["rev-parse"]).unwrap();
-        assert!(!args.short);
+        assert!(args.short.is_none());
         assert!(!args.abbrev_ref);
         assert!(!args.show_toplevel);
         assert!(args.spec.is_none());
@@ -365,7 +500,9 @@ mod tests {
     #[test]
     fn test_rev_parse_args_short_head() {
         let args = RevParseArgs::try_parse_from(["rev-parse", "--short", "HEAD"]).unwrap();
-        assert!(args.short);
+        // `--short` without `=<n>` takes its default_missing_value ("7"); "HEAD"
+        // is consumed as the positional spec.
+        assert_eq!(args.short.as_deref(), Some("7"));
         assert_eq!(args.spec.as_deref(), Some("HEAD"));
     }
 
@@ -380,6 +517,45 @@ mod tests {
     fn test_rev_parse_args_show_toplevel() {
         let args = RevParseArgs::try_parse_from(["rev-parse", "--show-toplevel"]).unwrap();
         assert!(args.show_toplevel);
+    }
+
+    #[test]
+    fn test_rev_parse_args_verify() {
+        let args = RevParseArgs::try_parse_from(["rev-parse", "--verify", "HEAD"]).unwrap();
+        assert!(args.verify);
+        assert_eq!(args.spec.as_deref(), Some("HEAD"));
+    }
+
+    #[test]
+    fn test_rev_parse_args_default_revision() {
+        let args = RevParseArgs::try_parse_from(["rev-parse", "--default", "main"]).unwrap();
+        assert_eq!(args.default.as_deref(), Some("main"));
+        assert!(args.spec.is_none());
+    }
+
+    #[test]
+    fn test_rev_parse_args_is_inside_work_tree() {
+        let args = RevParseArgs::try_parse_from(["rev-parse", "--is-inside-work-tree"]).unwrap();
+        assert!(args.is_inside_work_tree);
+    }
+
+    #[test]
+    fn test_rev_parse_args_repo_query_modes() {
+        let bare = RevParseArgs::try_parse_from(["rev-parse", "--is-bare-repository"]).unwrap();
+        assert!(bare.is_bare_repository);
+        let git_dir = RevParseArgs::try_parse_from(["rev-parse", "--git-dir"]).unwrap();
+        assert!(git_dir.git_dir);
+    }
+
+    #[test]
+    fn test_rev_parse_args_is_inside_work_tree_conflicts_with_spec() {
+        let err = RevParseArgs::try_parse_from(["rev-parse", "--is-inside-work-tree", "HEAD"])
+            .expect_err("--is-inside-work-tree should reject SPEC");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("cannot be used with") || rendered.contains("unexpected argument"),
+            "unexpected clap error: {rendered}"
+        );
     }
 
     #[test]

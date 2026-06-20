@@ -178,6 +178,12 @@ async fn json_switch_track_has_tracking_fields() {
     let _guard = ChangeDirGuard::new(repo.path());
 
     let head = Head::current_commit().await.unwrap();
+    let output = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "add origin remote for track test");
+
     Branch::update_branch(
         "refs/remotes/origin/feature",
         &head.to_string(),
@@ -209,6 +215,51 @@ async fn json_switch_track_has_tracking_fields() {
     assert_eq!(json["data"]["already_on"], false);
     assert_eq!(json["data"]["tracking"]["remote"], "origin");
     assert_eq!(json["data"]["tracking"]["remote_branch"], "feature");
+}
+
+#[tokio::test]
+#[serial]
+async fn json_switch_guess_has_tracking_fields_and_clean_stderr() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    let head = Head::current_commit().await.unwrap();
+    let output = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "add origin remote for guess json test");
+
+    Branch::update_branch(
+        "refs/remotes/origin/guessed",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
+
+    // No --track / --guess: DWIM guess is on by default and produces the same
+    // tracking envelope as --track.
+    let output = run_libra_command(&["--json", "switch", "guessed"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "json success should keep stderr clean, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["data"]["branch"], "guessed");
+    assert_eq!(json["data"]["created"], true);
+    assert_eq!(json["data"]["detached"], false);
+    assert_eq!(json["data"]["already_on"], false);
+    assert_eq!(json["data"]["tracking"]["remote"], "origin");
+    assert_eq!(json["data"]["tracking"]["remote_branch"], "guessed");
 }
 
 #[test]

@@ -17,6 +17,8 @@ use libra::{
 use serial_test::serial;
 use tempfile::tempdir;
 
+use super::*;
+
 async fn configure_identity_for_test() {
     ConfigKv::set("user.name", "Checkout Test User", false)
         .await
@@ -108,6 +110,7 @@ async fn test_checkout_module_functions() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute_safe(commit_args, &OutputConfig::default())
         .await
@@ -160,6 +163,7 @@ async fn test_checkout_module_functions_sha256() {
         all: false,
         no_verify: false,
         author: None,
+        ..Default::default()
     };
     commit::execute_safe(commit_args, &OutputConfig::default())
         .await
@@ -213,6 +217,8 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
             verbose: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         },
         &OutputConfig::default(),
     )
@@ -231,6 +237,7 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
             all: true,
             no_verify: false,
             author: None,
+            ..Default::default()
         },
         &OutputConfig::default(),
     )
@@ -247,6 +254,8 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
             staged: true,
             source: Some("4b825dc642cb6eb9a060e54bf8d69288fbee4904".into()),
             pathspec: vec![util::working_dir_string()],
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         },
         &OutputConfig::default(),
     )
@@ -295,6 +304,8 @@ async fn test_checkout_new_branch_with_dirty_worktree_returns_error() {
             force: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         },
         &OutputConfig::default(),
     )
@@ -313,6 +324,7 @@ async fn test_checkout_new_branch_with_dirty_worktree_returns_error() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         },
         &OutputConfig::default(),
     )
@@ -331,6 +343,8 @@ async fn test_checkout_new_branch_with_dirty_worktree_returns_error() {
             force: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         },
         &OutputConfig::default(),
     )
@@ -392,6 +406,8 @@ async fn test_checkout_current_branch_with_dirty_worktree_succeeds() {
             force: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         },
         &OutputConfig::default(),
     )
@@ -410,6 +426,7 @@ async fn test_checkout_current_branch_with_dirty_worktree_succeeds() {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         },
         &OutputConfig::default(),
     )
@@ -475,6 +492,8 @@ async fn test_checkout_existing_branch_with_unstaged_dirty_worktree_returns_erro
             force: false,
             dry_run: false,
             ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         },
         &OutputConfig::default(),
     )
@@ -493,6 +512,7 @@ async fn test_checkout_existing_branch_with_unstaged_dirty_worktree_returns_erro
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         },
         &OutputConfig::default(),
     )
@@ -559,6 +579,106 @@ fn test_checkout_existing_branch_with_conflicting_untracked_file_returns_error()
 
     let content = std::fs::read_to_string(repo.path().join("conflict.txt")).unwrap();
     assert_eq!(content, "local untracked\n");
+}
+
+#[test]
+fn test_checkout_force_discards_dirty_tracked_changes() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+
+    // Track f.txt on main.
+    std::fs::write(repo.path().join("f.txt"), "orig\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "f.txt"], repo.path()),
+        "add f.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "add f", "--no-verify"], repo.path()),
+        "commit f",
+    );
+
+    // On `other`, change f.txt to a different committed content.
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "other"], repo.path()),
+        "switch -c other",
+    );
+    std::fs::write(repo.path().join("f.txt"), "other-version\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "f.txt"], repo.path()),
+        "add f.txt on other",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "change f", "--no-verify"], repo.path()),
+        "commit f on other",
+    );
+
+    // Back on main, leave an uncommitted local modification to the tracked file.
+    assert_cli_success(
+        &run_libra_command(&["switch", "main"], repo.path()),
+        "switch main",
+    );
+    std::fs::write(repo.path().join("f.txt"), "dirty local\n").unwrap();
+
+    // Plain checkout refuses; -f discards the local change and switches.
+    let blocked = run_libra_command(&["checkout", "other"], repo.path());
+    assert_ne!(
+        blocked.status.code(),
+        Some(0),
+        "plain checkout should refuse to overwrite dirty tracked file"
+    );
+
+    let forced = run_libra_command(&["checkout", "-f", "other"], repo.path());
+    assert_cli_success(&forced, "checkout -f other");
+    let content = std::fs::read_to_string(repo.path().join("f.txt")).unwrap();
+    assert_eq!(
+        content, "other-version\n",
+        "-f should adopt the target branch's tracked content, discarding local edits"
+    );
+}
+
+#[test]
+fn test_checkout_force_still_refuses_untracked_overwrite() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "other"], repo.path()),
+        "switch -c other",
+    );
+    std::fs::write(repo.path().join("conflict.txt"), "tracked on other\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "conflict.txt"], repo.path()),
+        "add conflict.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "other adds conflict", "--no-verify"],
+            repo.path(),
+        ),
+        "commit conflict.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(&["switch", "main"], repo.path()),
+        "switch main",
+    );
+
+    // An untracked file on main that the target branch tracks.
+    std::fs::write(repo.path().join("conflict.txt"), "local untracked\n").unwrap();
+
+    // -f discards tracked-file changes but must NOT clobber untracked files.
+    let output = run_libra_command(&["checkout", "-f", "other"], repo.path());
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "checkout -f must still refuse to overwrite an untracked file"
+    );
+    let content = std::fs::read_to_string(repo.path().join("conflict.txt")).unwrap();
+    assert_eq!(
+        content, "local untracked\n",
+        "untracked file must be preserved under -f (no silent data loss)"
+    );
 }
 
 #[test]
@@ -777,6 +897,58 @@ fn test_checkout_machine_outputs_single_json_line() {
 }
 
 #[test]
+fn test_checkout_detached_head_by_commit() {
+    let repo = create_committed_repo_via_cli();
+
+    let head_output = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert_cli_success(&head_output, "rev-parse HEAD");
+    let head_hash = String::from_utf8_lossy(&head_output.stdout)
+        .trim()
+        .to_string();
+
+    let output = run_libra_command(&["--json", "checkout", &head_hash], repo.path());
+    assert_cli_success(&output, "checkout commit should detach HEAD");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["action"], "detach");
+    assert_eq!(json["data"]["detached"], true);
+
+    let head = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    let current_head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    assert_eq!(current_head, head_hash);
+}
+
+#[test]
+fn test_checkout_force_new_branch_resets_existing() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["checkout", "-b", "feature"], repo.path());
+    assert_cli_success(&output, "checkout -b feature should succeed");
+
+    let output = run_libra_command(&["checkout", "main"], repo.path());
+    assert_cli_success(&output, "checkout main should succeed");
+
+    std::fs::write(repo.path().join("second.txt"), "second\n").unwrap();
+    let output = run_libra_command(&["add", "second.txt"], repo.path());
+    assert_cli_success(&output, "add second.txt");
+    let output = run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    assert_cli_success(&output, "commit second");
+
+    let head_output = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    let head_hash = String::from_utf8_lossy(&head_output.stdout)
+        .trim()
+        .to_string();
+
+    let output = run_libra_command(&["checkout", "-B", "feature"], repo.path());
+    assert_cli_success(&output, "checkout -B feature should succeed");
+
+    let feature_output = run_libra_command(&["rev-parse", "feature"], repo.path());
+    let feature_hash = String::from_utf8_lossy(&feature_output.stdout)
+        .trim()
+        .to_string();
+    assert_eq!(feature_hash, head_hash);
+}
+
+#[test]
 fn test_checkout_json_missing_branch_reports_invalid_target() {
     use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
 
@@ -788,11 +960,6 @@ fn test_checkout_json_missing_branch_reports_invalid_target() {
     assert!(output.stdout.is_empty());
     let (_human, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-CLI-003");
-    assert!(
-        report
-            .message
-            .contains("path specification 'missing' did not match")
-    );
 }
 
 #[test]

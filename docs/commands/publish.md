@@ -44,7 +44,7 @@ Current implementation status:
   Git objects, refs metadata, and publish AI index/graph/bundle/object
   envelopes from D1/R2 into a local Libra repository.
 - The remaining live-only publish gate is tracked in
-  `docs/improvement/publish.md`; it requires a real all-refs sync,
+  `docs/development/commands/publish.md`; it requires a real all-refs sync,
   cloud clone restore, deployed Worker refs/tree/file API smoke, and
   Cloudflare credentials with deploy permissions.
 
@@ -401,7 +401,7 @@ libra publish --json sync --dry-run
 
 The same banner is rendered by `libra publish --help` so the doc and the
 CLI surface stay in sync (cross-cutting `--help` EXAMPLES rollout, see
-`docs/improvement/README.md` item B).
+`docs/development/commands/_general.md` item B).
 
 ## See also
 
@@ -409,6 +409,6 @@ CLI surface stay in sync (cross-cutting `--help` EXAMPLES rollout, see
   the `libra+cloud://<clone-domain>/<slug>` source scheme.
 - `libra cloud` — private Cloudflare backup that `publish` builds on
   top of.
-- `docs/improvement/publish.md` — internal design + phased rollout.
+- `docs/development/commands/publish.md` — internal design + phased rollout.
 - `docs/agent/ai-object-model-reference.md` — the AI object model
   contract `publish` exports.

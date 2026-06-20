@@ -15,7 +15,7 @@
 - Worker `build` 脚本运行 `cf-typegen` 和 OpenNext；OpenNext 配置为内部调用 `pnpm next:build`，所以 `pnpm build` 不会递归调用自身。
 - Worker e2e runner 在 `BASE_URL` 未设置时用本地 fixture D1/R2 bindings 启动 `next dev`，并对发布 landing page、代码浏览器、文件查看器、AI model page、refs、status，以及 empty/non-text 状态运行桌面和移动 Chromium 断言。
 - `libra clone libra+cloud://<clone-domain>/<slug>` 会把已发布的 Git 对象、refs 元数据以及 publish AI index/graph/bundle/object 信封从 D1/R2 恢复到本地 Libra 仓库。
-- 剩余 live-only publish gate 记录在 `docs/improvement/publish.md`；它要求真实 all-refs sync、cloud clone restore、已部署 Worker refs/tree/file API smoke，以及具有部署权限的 Cloudflare 凭据。
+- 剩余 live-only publish gate 记录在 `docs/development/commands/publish.md`；它要求真实 all-refs sync、cloud clone restore、已部署 Worker refs/tree/file API smoke，以及具有部署权限的 Cloudflare 凭据。
 
 ## 概要
 
@@ -233,11 +233,11 @@ libra publish unpublish --site-id <uuid> --yes
 libra publish --json sync --dry-run
 ```
 
-同一 banner 由 `libra publish --help` 渲染，因此文档和 CLI 表面保持同步（跨命令 `--help` EXAMPLES rollout，见 `docs/improvement/README.md` 条目 B）。
+同一 banner 由 `libra publish --help` 渲染，因此文档和 CLI 表面保持同步（跨命令 `--help` EXAMPLES rollout，见 `docs/development/commands/_general.md` 条目 B）。
 
 ## 另见
 
 - `libra clone` — 通过 `libra+cloud://<clone-domain>/<slug>` 源 scheme 恢复 Cloudflare D1 / R2 发布快照。
 - `libra cloud` — `publish` 构建于其上的私有 Cloudflare 备份。
-- `docs/improvement/publish.md` — 内部设计 + 分阶段 rollout。
+- `docs/development/commands/publish.md` — 内部设计 + 分阶段 rollout。
 - `docs/agent/ai-object-model-reference.md` — `publish` 导出的 AI 对象模型契约。

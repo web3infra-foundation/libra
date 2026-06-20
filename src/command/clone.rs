@@ -111,6 +111,16 @@ pub struct CloneArgs {
     /// Create a shallow clone with history truncated to N commits (must be > 0)
     #[clap(long, value_name = "N", value_parser = validate_depth)]
     pub depth: Option<usize>,
+
+    /// Fetch all tags (the default). Accepted for Git compatibility and to
+    /// override an earlier `--no-tags`.
+    #[clap(long, overrides_with = "no_tags")]
+    pub tags: bool,
+
+    /// Do not clone any tags, and set `remote.origin.tagOpt=--no-tags` so future
+    /// fetches also skip tags (matches `git clone --no-tags`).
+    #[clap(long = "no-tags", overrides_with = "tags")]
+    pub no_tags: bool,
 }
 
 const REPO_MARKERS: &[&str] = &["description", "libra.db", "info/exclude", "objects"];
@@ -854,6 +864,12 @@ fn map_checkout_error(source: RestoreError) -> CliError {
             "internal error: clone checkout attempted to write worktree while on locked branch '{name}'"
         ))
         .with_stable_code(StableErrorCode::RepoStateInvalid),
+        // `clone` builds its own RestoreArgs and never sets --pathspec-from-file,
+        // so this is unreachable; surface it rather than panicking.
+        RestoreError::PathspecFileRead(detail) => CliError::fatal(format!(
+            "internal error: clone checkout reported a pathspec-file read failure: {detail}"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid),
     }
 }
 
@@ -990,6 +1006,8 @@ pub async fn execute_safe(args: CloneArgs, output: &OutputConfig) -> CliResult<(
 
     // Always restore the working directory.
     if env::current_dir().ok().as_ref() != Some(&original_dir) {
+        #[cfg(test)]
+        let _cwd_lock = crate::utils::test::cwd_lock_guard();
         env::set_current_dir(&original_dir).map_err(|source| {
             CliError::from(CloneError::RestoreDirectory {
                 path: original_dir.clone(),
@@ -1091,6 +1109,7 @@ async fn execute_clone(
 
 /// Inner implementation that returns an error tuple containing the clone error
 /// and an optional cleanup warning.
+#[allow(clippy::result_large_err)]
 async fn execute_clone_inner(
     args: &CloneArgs,
     original_dir: &Path,
@@ -1220,6 +1239,8 @@ async fn execute_clone_inner(
     .await
     .map_err(|error| {
         if env::current_dir().ok().as_deref() != Some(original_dir) {
+            #[cfg(test)]
+            let _cwd_lock = crate::utils::test::cwd_lock_guard();
             let _ = env::set_current_dir(original_dir);
         }
         let cleanup_warning = cleanup_failed_clone(&local_path, created_by_clone);
@@ -1227,6 +1248,7 @@ async fn execute_clone_inner(
     })
 }
 
+#[allow(clippy::result_large_err)]
 async fn execute_cloud_publish_clone(
     args: &CloneArgs,
     source: &CloudPublishSource,
@@ -1282,6 +1304,8 @@ async fn execute_cloud_publish_clone(
     .await
     .map_err(|error| {
         if env::current_dir().ok().as_deref() != Some(original_dir) {
+            #[cfg(test)]
+            let _cwd_lock = crate::utils::test::cwd_lock_guard();
             let _ = env::set_current_dir(original_dir);
         }
         let cleanup_warning = cleanup_failed_clone(&local_path, created_by_clone);
@@ -1315,6 +1339,8 @@ async fn clone_cloud_publish_into_destination(
     original_dir: &Path,
     output: &OutputConfig,
 ) -> Result<CloneOutput, CloneError> {
+    #[cfg(test)]
+    let _cwd_lock = crate::utils::test::cwd_lock_guard();
     env::set_current_dir(local_path).map_err(|source| CloneError::ChangeDirectory {
         path: local_path.to_path_buf(),
         source,
@@ -1387,6 +1413,8 @@ async fn clone_cloud_publish_into_destination(
         staged: true,
         source: None,
         pathspec: vec![util::working_dir_string()],
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     })
     .await
     .map_err(|source| CloneError::CheckoutFailed { source })?;
@@ -2750,6 +2778,8 @@ async fn clone_into_destination(
     original_dir: &Path,
     output: &OutputConfig,
 ) -> Result<CloneOutput, CloneError> {
+    #[cfg(test)]
+    let _cwd_lock = crate::utils::test::cwd_lock_guard();
     env::set_current_dir(local_path).map_err(|source| CloneError::ChangeDirectory {
         path: local_path.to_path_buf(),
         source,
@@ -2790,11 +2820,20 @@ async fn clone_into_destination(
         name: "origin".to_string(),
         url: remote_url.to_string(),
     };
+    // `git clone` fetches ALL tags by default; `--no-tags` skips them and records
+    // `remote.origin.tagOpt=--no-tags` so later fetches also skip tags.
+    let clone_tag_mode = if args.no_tags {
+        let _ = ConfigKv::set("remote.origin.tagOpt", "--no-tags", false).await;
+        fetch::TagFetchMode::NoTags
+    } else {
+        fetch::TagFetchMode::All
+    };
     fetch::fetch_repository_safe(
         remote_config.clone(),
         args.branch.clone(),
         args.single_branch,
         args.depth,
+        Some(clone_tag_mode),
         &child_output,
     )
     .await
@@ -2959,6 +2998,8 @@ pub(crate) async fn setup_repository(
                 staged: true,
                 source: None,
                 pathspec: vec![util::working_dir_string()],
+                pathspec_from_file: None,
+                pathspec_file_nul: false,
             })
             .await
             .map_err(|source| CloneError::CheckoutFailed { source })?;
@@ -3333,10 +3374,12 @@ mod tests {
             single_branch: false,
             bare: false,
             depth: None,
+            tags: false,
+            no_tags: false,
         }
     }
 
-    /// Regression for [`docs/improvement/clone.md`] §"第一批 Cloudflare clone
+    /// Regression for [`docs/development/commands/clone.md`] §"第一批 Cloudflare clone
     /// 只保证完整 non-bare clone" — every Cloudflare-incompatible flag must
     /// surface `CloneError::UnsupportedCloudCloneOption` whose `option` field
     /// names the rejected flag, never silently fall back to a vanilla clone.
@@ -3540,6 +3583,8 @@ mod tests {
             single_branch: false,
             bare: false,
             depth: None,
+            tags: false,
+            no_tags: false,
         };
         let output = OutputConfig {
             quiet: true,
@@ -3635,6 +3680,8 @@ mod tests {
             single_branch: false,
             bare: false,
             depth: None,
+            tags: false,
+            no_tags: false,
         };
         let output = OutputConfig {
             quiet: true,
@@ -3697,6 +3744,8 @@ mod tests {
             single_branch: false,
             bare: false,
             depth: None,
+            tags: false,
+            no_tags: false,
         };
         let output = OutputConfig {
             quiet: true,
@@ -3757,6 +3806,8 @@ mod tests {
             single_branch: false,
             bare: false,
             depth: None,
+            tags: false,
+            no_tags: false,
         };
         let output = OutputConfig {
             quiet: true,
@@ -4251,7 +4302,7 @@ mod tests {
     }
 
     /// Pins the `--json` `CloneOutput` wire contract (documented in
-    /// docs/improvement/clone.md). The ordinary-Git case must carry every
+    /// docs/development/commands/clone.md). The ordinary-Git case must carry every
     /// always-present field — including `gitignore_converted` (the
     /// `.gitignore` → `.libraignore` conversion report) — and must OMIT
     /// the optional `source_kind` / `cloud_site` (their

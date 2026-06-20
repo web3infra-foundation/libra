@@ -9,7 +9,7 @@
 //!
 //! # CP-4 gate violation
 //!
-//! Per `docs/improvement/agent.md` "Step 2 audit closure (CEX-S2-00 / 01 / 02)",
+//! Per `docs/development/commands/agent.md` "Step 2 audit closure (CEX-S2-00 / 01 / 02)",
 //! all CEX-S2-10..18 Runtime task cards are gated on **CP-4** (Step 1 single-
 //! agent gate). Step 1 is currently incomplete (multiple `未开始` cards in the
 //! milestone index). This file ships the schema scaffold ahead of CP-4 by
@@ -62,6 +62,7 @@ pub mod event;
 pub mod event_store;
 pub mod evidence;
 pub mod evidence_query;
+pub mod parallel;
 pub mod patchset;
 pub mod permission;
 pub mod run;
@@ -253,6 +254,10 @@ pub use event::{
 pub use evidence::{AgentEvidence, AgentType};
 pub use evidence_query::{
     EvidenceFilter, evidence_query_by_scope, evidence_stream, merge_decision_distillable_evidence,
+};
+pub use parallel::{
+    ParallelAdmissionConfig, ParallelAdmissionDecision, ParallelQueueReason, ParallelRunState,
+    ParallelSchedulerState, ParallelTaskRequest,
 };
 pub use patchset::AgentPatchSet;
 pub use permission::AgentPermissionProfile;

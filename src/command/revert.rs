@@ -4,6 +4,7 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 use clap::Parser;
@@ -12,12 +13,13 @@ use git_internal::{
     internal::{
         index::{Index, IndexEntry},
         object::{
+            blob::Blob,
             commit::Commit,
             tree::{Tree, TreeItemMode},
         },
     },
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     command::{load_object, save_object},
@@ -38,6 +40,7 @@ EXAMPLES:
     libra revert HEAD                     Revert the most recent commit
     libra revert abc1234                  Revert a specific commit
     libra revert -n HEAD                  Revert without auto-committing
+    libra revert -m 1 <merge>             Revert a merge commit relative to parent 1
     libra revert --json HEAD              Structured JSON output for agents";
 
 // ── Typed error ──────────────────────────────────────────────────────
@@ -53,11 +56,35 @@ enum RevertError {
     #[error("failed to resolve commit reference '{0}'")]
     InvalidCommit(String),
 
-    #[error("reverting merge commits is not yet supported")]
-    MergeCommitUnsupported,
+    #[error("commit {0} is a merge but no -m option was given")]
+    MainlineRequired(String),
 
-    #[error("conflict: file '{path}' was modified in a later commit")]
-    Conflict { path: String },
+    #[error("mainline was specified but commit {0} is not a merge")]
+    MainlineForNonMerge(String),
+
+    #[error("commit {commit} does not have a parent number {mainline} (it has {parents})")]
+    InvalidMainline {
+        commit: String,
+        mainline: usize,
+        parents: usize,
+    },
+
+    #[error("revert produced conflicts in: {paths}")]
+    Conflicts { paths: String },
+
+    #[error(
+        "a revert is already in progress; resolve it with 'libra revert --continue' or cancel with '--abort'"
+    )]
+    RevertInProgress,
+
+    #[error("no revert in progress")]
+    NoRevertInProgress,
+
+    #[error("unresolved conflict markers remain in '{0}'")]
+    UnresolvedConflicts(String),
+
+    #[error("failed to access revert state: {0}")]
+    StateIo(String),
 
     #[error("failed to load object: {0}")]
     LoadObject(String),
@@ -73,6 +100,28 @@ enum RevertError {
 
     #[error("failed to update HEAD: {0}")]
     UpdateHead(String),
+
+    #[error("failed to resolve committer identity for --signoff: {0}")]
+    Signoff(String),
+
+    #[error("{0}")]
+    MultiCommitUnsupported(String),
+}
+
+/// Build the `Signed-off-by` trailer (prefixed with a blank line) for
+/// `revert --signoff`, using the canonical committer identity. Returns an empty
+/// string when `signoff` is false.
+async fn signoff_trailer(signoff: bool) -> Result<String, RevertError> {
+    if !signoff {
+        return Ok(String::new());
+    }
+    let identity = crate::command::commit::resolve_committer_identity()
+        .await
+        .map_err(|e| RevertError::Signoff(e.to_string()))?;
+    Ok(format!(
+        "\n\nSigned-off-by: {} <{}>",
+        identity.name, identity.email
+    ))
 }
 
 impl RevertError {
@@ -81,13 +130,21 @@ impl RevertError {
             Self::NotInRepo => StableErrorCode::RepoNotFound,
             Self::DetachedHead => StableErrorCode::RepoStateInvalid,
             Self::InvalidCommit(_) => StableErrorCode::CliInvalidTarget,
-            Self::MergeCommitUnsupported => StableErrorCode::CliInvalidArguments,
-            Self::Conflict { .. } => StableErrorCode::ConflictUnresolved,
+            Self::MainlineRequired(_)
+            | Self::MainlineForNonMerge(_)
+            | Self::InvalidMainline { .. } => StableErrorCode::CliInvalidArguments,
             Self::LoadObject(_) => StableErrorCode::IoReadFailed,
             Self::SaveObject(_) => StableErrorCode::IoWriteFailed,
             Self::WriteWorktree(_) => StableErrorCode::IoWriteFailed,
             Self::IndexSave(_) => StableErrorCode::IoWriteFailed,
             Self::UpdateHead(_) => StableErrorCode::IoWriteFailed,
+            Self::Signoff(_) => StableErrorCode::CliInvalidArguments,
+            Self::MultiCommitUnsupported(_) => StableErrorCode::CliInvalidArguments,
+            Self::Conflicts { .. } | Self::UnresolvedConflicts(_) => {
+                StableErrorCode::ConflictUnresolved
+            }
+            Self::RevertInProgress | Self::NoRevertInProgress => StableErrorCode::RepoStateInvalid,
+            Self::StateIo(_) => StableErrorCode::IoWriteFailed,
         }
     }
 }
@@ -104,12 +161,24 @@ impl From<RevertError> for CliError {
             RevertError::InvalidCommit(_) => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("use 'libra log' to find valid commit references"),
-            RevertError::MergeCommitUnsupported => CliError::fatal(message)
+            // Mainline usage errors mirror Git's exit 128 (the Cli category
+            // would otherwise default to 129), so override explicitly.
+            RevertError::MainlineRequired(_) => CliError::fatal(message)
                 .with_stable_code(stable_code)
-                .with_hint("merge commit revert support is planned for a future release"),
-            RevertError::Conflict { .. } => CliError::failure(message)
+                .with_exit_code(128)
+                .with_hint("pass '-m <parent-number>' (e.g. '-m 1') to revert a merge commit"),
+            RevertError::MainlineForNonMerge(_) => CliError::fatal(message)
                 .with_stable_code(stable_code)
-                .with_hint("resolve conflicts manually, then use 'libra commit'"),
+                .with_exit_code(128)
+                .with_hint("'-m' is only valid when reverting a merge commit"),
+            RevertError::InvalidMainline { .. } => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_exit_code(128)
+                .with_hint("choose a parent number within the merge commit's parent count"),
+            RevertError::Conflicts { .. } => CliError::failure(message)
+                .with_stable_code(stable_code)
+                .with_hint("resolve the conflicts, then run 'libra revert --continue'")
+                .with_hint("or cancel with 'libra revert --abort'"),
             _ => CliError::fatal(message).with_stable_code(stable_code),
         }
     }
@@ -135,13 +204,32 @@ pub struct RevertOutput {
 #[command(about = "Revert some existing commits")]
 #[command(after_help = REVERT_EXAMPLES)]
 pub struct RevertArgs {
-    /// Commit to revert (can be commit hash, branch name, or HEAD)
-    #[clap(required = true)]
-    pub commit: String,
+    /// Commits to revert, in order (commit hash, branch name, or HEAD). Multiple
+    /// commits are reverted sequentially, each as its own revert commit.
+    #[clap(required_unless_present_any = ["continue_revert", "abort"], num_args = 0..)]
+    pub commit: Vec<String>,
+
+    /// Continue an in-progress revert after resolving conflicts.
+    #[clap(long = "continue", conflicts_with_all = ["abort", "no_commit", "mainline"])]
+    pub continue_revert: bool,
+
+    /// Abort an in-progress revert and restore the pre-revert state.
+    #[clap(long, conflicts_with_all = ["continue_revert", "no_commit", "mainline"])]
+    pub abort: bool,
 
     /// Don't automatically commit the revert, just stage the changes
     #[clap(short = 'n', long)]
     pub no_commit: bool,
+
+    /// Parent number (1-based) to treat as the mainline when reverting a merge
+    /// commit. Required for merge commits; rejected for non-merge commits.
+    #[clap(short = 'm', long, value_name = "parent-number")]
+    pub mainline: Option<usize>,
+
+    /// Add a `Signed-off-by` trailer (using the committer identity) to the
+    /// revert commit message.
+    #[clap(short = 's', long)]
+    pub signoff: bool,
 }
 
 pub async fn execute(args: RevertArgs) {
@@ -163,17 +251,77 @@ pub async fn execute_safe(args: RevertArgs, output: &OutputConfig) -> CliResult<
 async fn run_revert(args: RevertArgs) -> Result<RevertOutput, RevertError> {
     util::require_repo().map_err(|_| RevertError::NotInRepo)?;
 
+    // Sequencer control verbs short-circuit the normal revert path.
+    if args.abort {
+        return run_revert_abort().await;
+    }
+    if args.continue_revert {
+        return run_revert_continue().await;
+    }
+
+    // A conflicted revert must be resolved (`--continue`) or unwound (`--abort`)
+    // before a new revert can start.
+    if RevertState::load_optional()?.is_some() {
+        return Err(RevertError::RevertInProgress);
+    }
+
     if let Head::Detached(_) = Head::current().await {
         return Err(RevertError::DetachedHead);
     }
 
-    let commit_id = resolve_commit(&args.commit)
-        .await
-        .map_err(|_| RevertError::InvalidCommit(args.commit.clone()))?;
+    // `--no-commit` and `-m` operate on a single revert; combining them with
+    // multiple commits would need a full multi-commit sequencer, so reject the
+    // combination rather than silently misbehave.
+    if args.commit.len() > 1 {
+        if args.no_commit {
+            return Err(RevertError::MultiCommitUnsupported(
+                "--no-commit cannot be combined with multiple commits".to_string(),
+            ));
+        }
+        if args.mainline.is_some() {
+            return Err(RevertError::MultiCommitUnsupported(
+                "-m/--mainline cannot be combined with multiple commits".to_string(),
+            ));
+        }
+    }
 
-    let (revert_commit_id, files_changed) = revert_single_commit(&commit_id, &args).await?;
+    // Revert each commit in order; each revert is applied relative to (and
+    // committed onto) the HEAD produced by the previous one. A conflict stops the
+    // sequence and records state for `--continue`/`--abort`.
+    let mut last: Option<(String, Option<ObjectHash>)> = None;
+    let mut total_files_changed = 0usize;
+    for spec in &args.commit {
+        let commit_id = resolve_commit(spec)
+            .await
+            .map_err(|_| RevertError::InvalidCommit(spec.clone()))?;
+        let orig_head = Head::current_commit().await.map(|h| h.to_string());
+        match revert_single_commit(&commit_id, &args).await? {
+            SingleRevertOutcome::Committed {
+                revert_commit_id,
+                files_changed,
+            } => {
+                total_files_changed += files_changed;
+                last = Some((commit_id.to_string(), revert_commit_id));
+            }
+            SingleRevertOutcome::Conflicted { conflicted_paths } => {
+                if let Some(orig_head) = orig_head {
+                    RevertState {
+                        orig_head,
+                        reverted_commit: commit_id.to_string(),
+                        signoff: args.signoff,
+                        conflicted_paths: conflicted_paths.clone(),
+                    }
+                    .save()?;
+                }
+                return Err(RevertError::Conflicts {
+                    paths: conflicted_paths.join(", "),
+                });
+            }
+        }
+    }
 
-    let commit_str = commit_id.to_string();
+    let (commit_str, revert_commit_id) =
+        last.expect("clap guarantees at least one commit argument");
     Ok(RevertOutput {
         reverted_commit: commit_str.clone(),
         short_reverted: short_display_hash(&commit_str).to_string(),
@@ -182,7 +330,88 @@ async fn run_revert(args: RevertArgs) -> Result<RevertOutput, RevertError> {
             .as_ref()
             .map(|id| short_display_hash(&id.to_string()).to_string()),
         no_commit: args.no_commit,
+        files_changed: total_files_changed,
+    })
+}
+
+/// `revert --continue`: require every conflict resolved (no markers staged),
+/// then create the revert commit from the resolved index and clear the state.
+async fn run_revert_continue() -> Result<RevertOutput, RevertError> {
+    let state = RevertState::load_optional()?.ok_or(RevertError::NoRevertInProgress)?;
+
+    // Refuse to finish while conflict markers remain in any *staged* file (the
+    // index is what gets committed, so the user must resolve and re-`add`).
+    let index = Index::load(path::index()).map_err(|e| RevertError::IndexSave(e.to_string()))?;
+    for path in index.tracked_files() {
+        let Some(key) = path.to_str() else { continue };
+        if let Some(hash) = index.get_hash(key, 0)
+            && let Ok(blob) = load_object::<Blob>(&hash)
+            && String::from_utf8_lossy(&blob.data).contains(CONFLICT_MARKER)
+        {
+            return Err(RevertError::UnresolvedConflicts(path.display().to_string()));
+        }
+    }
+
+    let orig_head = ObjectHash::from_str(&state.orig_head)
+        .map_err(|e| RevertError::LoadObject(e.to_string()))?;
+    let reverted_commit_id = ObjectHash::from_str(&state.reverted_commit)
+        .map_err(|e| RevertError::LoadObject(e.to_string()))?;
+
+    // Build the revert commit from the (resolved) index tree.
+    let tree_items: std::collections::HashMap<PathBuf, ObjectHash> = index
+        .tracked_files()
+        .into_iter()
+        .filter_map(|p| {
+            let key = p.to_str()?;
+            index.get_hash(key, 0).map(|h| (p.clone(), h))
+        })
+        .collect();
+    let files_changed = tree_items.len();
+    let tree_id = build_tree_from_map(tree_items).await?;
+    let revert_commit_id =
+        create_revert_commit(&reverted_commit_id, &orig_head, &tree_id, state.signoff).await?;
+    RevertState::cleanup()?;
+
+    let commit_str = reverted_commit_id.to_string();
+    Ok(RevertOutput {
+        reverted_commit: commit_str.clone(),
+        short_reverted: short_display_hash(&commit_str).to_string(),
+        new_commit: Some(revert_commit_id.to_string()),
+        short_new: Some(short_display_hash(&revert_commit_id.to_string()).to_string()),
+        no_commit: false,
         files_changed,
+    })
+}
+
+/// `revert --abort`: reset HEAD/index/worktree to the pre-revert commit and clear
+/// the state.
+async fn run_revert_abort() -> Result<RevertOutput, RevertError> {
+    let state = RevertState::load_optional()?.ok_or(RevertError::NoRevertInProgress)?;
+    let orig_head = ObjectHash::from_str(&state.orig_head)
+        .map_err(|e| RevertError::LoadObject(e.to_string()))?;
+
+    let commit: Commit =
+        load_object(&orig_head).map_err(|e| RevertError::LoadObject(e.to_string()))?;
+    let tree: Tree =
+        load_object(&commit.tree_id).map_err(|e| RevertError::LoadObject(e.to_string()))?;
+    let mut new_index = Index::new();
+    rebuild_index_from_tree(&tree, &mut new_index, "")?;
+    let current_index = Index::load(path::index()).unwrap_or_else(|_| Index::new());
+    reset_workdir_safely(&current_index, &new_index)?;
+    new_index
+        .save(path::index())
+        .map_err(|e| RevertError::IndexSave(e.to_string()))?;
+    update_head(&state.orig_head).await?;
+    RevertState::cleanup()?;
+
+    let commit_str = state.reverted_commit.clone();
+    Ok(RevertOutput {
+        reverted_commit: commit_str.clone(),
+        short_reverted: short_display_hash(&commit_str).to_string(),
+        new_commit: None,
+        short_new: None,
+        no_commit: false,
+        files_changed: 0,
     })
 }
 
@@ -205,23 +434,134 @@ fn render_revert_output(result: &RevertOutput, output: &OutputConfig) -> CliResu
     Ok(())
 }
 
-// ── Internal logic (unchanged algorithm) ─────────────────────────────
+// ── Conflict-sequencer state ─────────────────────────────────────────
+
+/// Conflict marker that introduces the "ours" side of a 3-way conflict.
+const CONFLICT_MARKER: &str = "<<<<<<<";
+
+/// Persisted state for an in-progress conflicted revert (`.libra/revert-state.json`),
+/// mirroring merge's file-based state so `revert --continue`/`--abort` can finish
+/// or unwind the revert.
+#[derive(Debug, Serialize, Deserialize)]
+struct RevertState {
+    /// HEAD at the time the revert started — the `--abort` reset target and the
+    /// parent of the eventual revert commit.
+    orig_head: String,
+    /// The commit being reverted (for the `--continue` revert message).
+    reverted_commit: String,
+    /// Whether `--signoff` was requested, so `--continue` reproduces the trailer.
+    signoff: bool,
+    /// Paths left with conflict markers for the user to resolve.
+    conflicted_paths: Vec<String>,
+}
+
+impl RevertState {
+    fn path() -> PathBuf {
+        util::storage_path().join("revert-state.json")
+    }
+
+    fn load_optional() -> Result<Option<Self>, RevertError> {
+        let path = Self::path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let data = fs::read_to_string(&path).map_err(|e| RevertError::StateIo(e.to_string()))?;
+        serde_json::from_str(&data)
+            .map(Some)
+            .map_err(|e| RevertError::StateIo(e.to_string()))
+    }
+
+    fn save(&self) -> Result<(), RevertError> {
+        let path = Self::path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| RevertError::StateIo(e.to_string()))?;
+        }
+        let data =
+            serde_json::to_vec_pretty(self).map_err(|e| RevertError::StateIo(e.to_string()))?;
+        fs::write(&path, data).map_err(|e| RevertError::StateIo(e.to_string()))
+    }
+
+    fn cleanup() -> Result<(), RevertError> {
+        let path = Self::path();
+        if path.exists() {
+            fs::remove_file(&path).map_err(|e| RevertError::StateIo(e.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+/// Result of reverting one commit against the current worktree.
+enum SingleRevertOutcome {
+    Committed {
+        revert_commit_id: Option<ObjectHash>,
+        files_changed: usize,
+    },
+    Conflicted {
+        conflicted_paths: Vec<String>,
+    },
+}
+
+/// Content-level 3-way merge for a path that diverged since the reverted commit:
+/// base = the reverted commit's blob, ours = the current blob, theirs = the
+/// parent's blob (the revert target). Returns the resulting blob hash and whether
+/// it carries conflict markers.
+fn three_way_revert_blob(
+    reverted_hash: ObjectHash,
+    current_hash: ObjectHash,
+    parent_hash: Option<ObjectHash>,
+) -> Result<(ObjectHash, bool), RevertError> {
+    let reverted: Blob =
+        load_object(&reverted_hash).map_err(|e| RevertError::LoadObject(e.to_string()))?;
+    let current: Blob =
+        load_object(&current_hash).map_err(|e| RevertError::LoadObject(e.to_string()))?;
+    let parent_data = match parent_hash {
+        Some(h) => {
+            load_object::<Blob>(&h)
+                .map_err(|e| RevertError::LoadObject(e.to_string()))?
+                .data
+        }
+        None => Vec::new(),
+    };
+    let (bytes, conflicted) = match diffy::merge_bytes(&reverted.data, &current.data, &parent_data)
+    {
+        Ok(merged) => (merged, false),
+        Err(conflicted) => (conflicted, true),
+    };
+    let blob = Blob::from_content_bytes(bytes);
+    save_object(&blob, &blob.id).map_err(|e| RevertError::SaveObject(e.to_string()))?;
+    Ok((blob.id, conflicted))
+}
+
+// ── Internal logic ───────────────────────────────────────────────────
 
 async fn revert_single_commit(
     commit_id: &ObjectHash,
     args: &RevertArgs,
-) -> Result<(Option<ObjectHash>, usize), RevertError> {
+) -> Result<SingleRevertOutcome, RevertError> {
     let reverted_commit: Commit =
         load_object(commit_id).map_err(|e| RevertError::LoadObject(e.to_string()))?;
 
-    if reverted_commit.parent_commit_ids.len() > 1 {
-        return Err(RevertError::MergeCommitUnsupported);
-    }
-
-    let parent_commit_id = if let Some(id) = reverted_commit.parent_commit_ids.first() {
-        *id
-    } else {
-        return revert_root_commit(args).await;
+    // Select the baseline parent to diff against. A merge commit (>1 parent)
+    // requires `-m <n>` to pick the mainline; a non-merge commit rejects `-m`.
+    // The generated revert still records a single parent (the current HEAD).
+    let parents = &reverted_commit.parent_commit_ids;
+    let parent_commit_id = match (parents.len(), args.mainline) {
+        (0, None) => return revert_root_commit(args).await,
+        (0, Some(_)) | (1, Some(_)) => {
+            return Err(RevertError::MainlineForNonMerge(commit_id.to_string()));
+        }
+        (1, None) => parents[0],
+        (_, None) => return Err(RevertError::MainlineRequired(commit_id.to_string())),
+        (count, Some(mainline)) => {
+            if mainline < 1 || mainline > count {
+                return Err(RevertError::InvalidMainline {
+                    commit: commit_id.to_string(),
+                    mainline,
+                    parents: count,
+                });
+            }
+            parents[mainline - 1]
+        }
     };
 
     let parent_commit: Commit =
@@ -248,6 +588,7 @@ async fn revert_single_commit(
         parent_tree.get_plain_items().into_iter().collect();
 
     let mut files_changed: usize = 0;
+    let mut conflicted_paths: Vec<String> = Vec::new();
 
     for (path, &reverted_hash) in &reverted_files {
         let parent_hash = parent_files.get(path);
@@ -256,12 +597,20 @@ async fn revert_single_commit(
             continue;
         }
 
-        // Only revert paths that still match the commit being reverted; later
-        // edits would be clobbered otherwise, so surface them as conflicts.
+        // A path that no longer matches the reverted commit diverged since: do a
+        // content 3-way merge (base = reverted, ours = current, theirs = parent)
+        // and record a conflict (with markers in the worktree) when both sides
+        // touched overlapping regions.
         if current_files.get(path) != Some(&reverted_hash) && current_files.contains_key(path) {
-            return Err(RevertError::Conflict {
-                path: path.display().to_string(),
-            });
+            let current_hash = current_files[path];
+            let (merged_hash, conflicted) =
+                three_way_revert_blob(reverted_hash, current_hash, parent_hash.copied())?;
+            current_files.insert(path.clone(), merged_hash);
+            files_changed += 1;
+            if conflicted {
+                conflicted_paths.push(path.display().to_string());
+            }
+            continue;
         }
 
         if let Some(parent_hash) = parent_hash {
@@ -293,13 +642,29 @@ async fn revert_single_commit(
         .save(path::index())
         .map_err(|e| RevertError::IndexSave(e.to_string()))?;
 
-    if args.no_commit {
-        Ok((None, files_changed))
-    } else {
-        let revert_commit_id =
-            create_revert_commit(commit_id, &current_head_commit_id, &final_tree_id).await?;
-        Ok((Some(revert_commit_id), files_changed))
+    // Conflicts: the index/worktree now hold the partially-reverted tree with
+    // markers; stop before committing so the user can resolve and `--continue`.
+    if !conflicted_paths.is_empty() {
+        return Ok(SingleRevertOutcome::Conflicted { conflicted_paths });
     }
+
+    let revert_commit_id = if args.no_commit {
+        None
+    } else {
+        Some(
+            create_revert_commit(
+                commit_id,
+                &current_head_commit_id,
+                &final_tree_id,
+                args.signoff,
+            )
+            .await?,
+        )
+    };
+    Ok(SingleRevertOutcome::Committed {
+        revert_commit_id,
+        files_changed,
+    })
 }
 
 async fn build_tree_from_map(
@@ -352,7 +717,7 @@ async fn build_tree_from_map(
     Ok(root_tree.id)
 }
 
-async fn revert_root_commit(args: &RevertArgs) -> Result<(Option<ObjectHash>, usize), RevertError> {
+async fn revert_root_commit(args: &RevertArgs) -> Result<SingleRevertOutcome, RevertError> {
     let new_index = Index::new();
     let current_index = Index::load(path::index()).unwrap_or_else(|_| Index::new());
     let files_changed = current_index.tracked_files().len();
@@ -362,15 +727,20 @@ async fn revert_root_commit(args: &RevertArgs) -> Result<(Option<ObjectHash>, us
         .save(path::index())
         .map_err(|e| RevertError::IndexSave(e.to_string()))?;
 
-    if args.no_commit {
-        Ok((None, files_changed))
+    // Reverting the root commit clears the tree entirely; there is no parent to
+    // conflict against, so it always completes cleanly.
+    let revert_commit_id = if args.no_commit {
+        None
     } else {
         let current_head = Head::current_commit()
             .await
             .ok_or_else(|| RevertError::LoadObject("failed to resolve current HEAD".into()))?;
-        let revert_commit_id = create_empty_revert_commit(&current_head).await?;
-        Ok((Some(revert_commit_id), files_changed))
-    }
+        Some(create_empty_revert_commit(&current_head, args.signoff).await?)
+    };
+    Ok(SingleRevertOutcome::Committed {
+        revert_commit_id,
+        files_changed,
+    })
 }
 
 fn rebuild_index_from_tree(
@@ -474,14 +844,16 @@ async fn create_revert_commit(
     reverted_commit_id: &ObjectHash,
     parent_id: &ObjectHash,
     tree_id: &ObjectHash,
+    signoff: bool,
 ) -> Result<ObjectHash, RevertError> {
     let reverted_commit: Commit =
         load_object(reverted_commit_id).map_err(|e| RevertError::LoadObject(e.to_string()))?;
 
     let revert_message = format!(
-        "Revert \"{}\"\n\nThis reverts commit {}.",
+        "Revert \"{}\"\n\nThis reverts commit {}.{}",
         reverted_commit.message.lines().next().unwrap_or(""),
-        reverted_commit_id
+        reverted_commit_id,
+        signoff_trailer(signoff).await?
     );
 
     let commit = Commit::from_tree_id(
@@ -495,16 +867,22 @@ async fn create_revert_commit(
     Ok(commit.id)
 }
 
-async fn create_empty_revert_commit(parent_id: &ObjectHash) -> Result<ObjectHash, RevertError> {
+async fn create_empty_revert_commit(
+    parent_id: &ObjectHash,
+    signoff: bool,
+) -> Result<ObjectHash, RevertError> {
     let empty_tree =
         Tree::from_tree_items(Vec::new()).map_err(|e| RevertError::SaveObject(e.to_string()))?;
     save_object(&empty_tree, &empty_tree.id).map_err(|e| RevertError::SaveObject(e.to_string()))?;
 
-    let revert_message = "Revert root commit\n\nThis reverts the initial commit.";
+    let revert_message = format!(
+        "Revert root commit\n\nThis reverts the initial commit.{}",
+        signoff_trailer(signoff).await?
+    );
     let commit = Commit::from_tree_id(
         empty_tree.id,
         vec![*parent_id],
-        &format_commit_msg(revert_message, None),
+        &format_commit_msg(&revert_message, None),
     );
 
     save_object(&commit, &commit.id).map_err(|e| RevertError::SaveObject(e.to_string()))?;
@@ -548,15 +926,28 @@ mod tests {
             "failed to resolve commit reference 'deadbeef'",
         );
         assert_eq!(
-            RevertError::MergeCommitUnsupported.to_string(),
-            "reverting merge commits is not yet supported",
+            RevertError::MainlineRequired("deadbeef".to_string()).to_string(),
+            "commit deadbeef is a merge but no -m option was given",
         );
         assert_eq!(
-            RevertError::Conflict {
-                path: "src/main.rs".to_string(),
+            RevertError::MainlineForNonMerge("deadbeef".to_string()).to_string(),
+            "mainline was specified but commit deadbeef is not a merge",
+        );
+        assert_eq!(
+            RevertError::InvalidMainline {
+                commit: "deadbeef".to_string(),
+                mainline: 3,
+                parents: 2,
             }
             .to_string(),
-            "conflict: file 'src/main.rs' was modified in a later commit",
+            "commit deadbeef does not have a parent number 3 (it has 2)",
+        );
+        assert_eq!(
+            RevertError::Conflicts {
+                paths: "src/main.rs".to_string(),
+            }
+            .to_string(),
+            "revert produced conflicts in: src/main.rs",
         );
         assert_eq!(
             RevertError::LoadObject("ignored".to_string()).to_string(),
@@ -603,12 +994,25 @@ mod tests {
             StableErrorCode::CliInvalidTarget,
         );
         assert_eq!(
-            RevertError::MergeCommitUnsupported.stable_code(),
+            RevertError::MainlineRequired("x".to_string()).stable_code(),
             StableErrorCode::CliInvalidArguments,
         );
         assert_eq!(
-            RevertError::Conflict {
-                path: "ignored".to_string(),
+            RevertError::MainlineForNonMerge("x".to_string()).stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            RevertError::InvalidMainline {
+                commit: "x".to_string(),
+                mainline: 3,
+                parents: 2,
+            }
+            .stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            RevertError::Conflicts {
+                paths: "ignored".to_string(),
             }
             .stable_code(),
             StableErrorCode::ConflictUnresolved,

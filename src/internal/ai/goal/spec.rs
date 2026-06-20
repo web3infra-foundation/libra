@@ -1,6 +1,6 @@
 //! Goal specification — the immutable "what" the user asked for.
 //!
-//! Per `docs/improvement/opencode.md` lines 537-555, a [`GoalSpec`] is the
+//! Per `docs/development/commands/_general.md` lines 537-555, a [`GoalSpec`] is the
 //! immutable seed of an active Goal: objective, acceptance criteria,
 //! constraints, evidence policy, budget, and provenance. It pins down what
 //! the supervisor must drive toward and what the deterministic verifier
@@ -26,12 +26,12 @@ pub const MAX_OBJECTIVE_LEN: usize = 16 * 1024;
 
 /// Who created or acted on this Goal.
 ///
-/// Goals must be created by an explicit actor — `docs/improvement/opencode.md`
+/// Goals must be created by an explicit actor — `docs/development/commands/_general.md`
 /// line 594 forbids inferring a Goal from a casual user message. The
 /// supervisor, the deterministic verifier, the cancel path, and the audit
 /// log all consume this enum to attribute actions.
 ///
-/// `Automation` is gated by `docs/improvement/opencode.md` line 596 to
+/// `Automation` is gated by `docs/development/commands/_general.md` line 596 to
 /// callers that hold the current controller lease + explicitly declare
 /// `goal = true`; the gate itself lives in the Code Control surface
 /// (P6.6), not here.
@@ -47,7 +47,7 @@ pub enum GoalActor {
 }
 
 /// One acceptance criterion the verifier (P6.2) checks before allowing
-/// `Completed`. Mirrors `docs/improvement/opencode.md` lines 550-555.
+/// `Completed`. Mirrors `docs/development/commands/_general.md` lines 550-555.
 ///
 /// `required = true` criteria all need to appear in
 /// `GoalState.completed_criteria` AND each one needs at least one
@@ -92,7 +92,7 @@ pub struct GoalCriterion {
 /// Some Goals (e.g. "draft a release note") have no executable artefact
 /// and must rely on human-written explanations; others (e.g.
 /// "add a unit test") fail completion if no `git status` shows changes.
-/// Per `docs/improvement/opencode.md` line 677-680 the verifier consults
+/// Per `docs/development/commands/_general.md` line 677-680 the verifier consults
 /// this policy to decide which gates to apply.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -113,7 +113,7 @@ pub enum GoalEvidencePolicy {
 
 /// Budget envelope the supervisor enforces over the Goal's lifetime.
 ///
-/// Per `docs/improvement/opencode.md` lines 660-661, hitting `hard_cap`
+/// Per `docs/development/commands/_general.md` lines 660-661, hitting `hard_cap`
 /// puts the Goal into `Blocked { reason: BudgetApprovalRequired }`,
 /// **never** `Completed` or `Cancelled`. `warn_threshold` is purely
 /// informative: the supervisor surfaces a TUI hint without changing
@@ -138,7 +138,7 @@ pub struct GoalBudget {
     pub wall_clock_seconds: u64,
     /// Maximum number of supervisor continuation loops before the Goal
     /// stops auto-progressing and waits for the user. Per
-    /// `docs/improvement/opencode.md` line 667 this surfaces as
+    /// `docs/development/commands/_general.md` line 667 this surfaces as
     /// `Blocked { reason: LoopLimitNeedsUser }`, never `Completed`.
     pub max_continuation_loops: u32,
 }

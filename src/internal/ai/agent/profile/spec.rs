@@ -1,6 +1,6 @@
 //! `AgentExecutionSpec` and friends — the executable agent contract.
 //!
-//! This module is the OC-Phase 0 deliverable from `docs/improvement/opencode.md`.
+//! This module is the OC-Phase 0 deliverable from `docs/development/commands/_general.md`.
 //! It defines the **schema** an agent profile gets lifted to once we move past the
 //! "system prompt + tool name list" representation in [`super::parser::AgentProfile`].
 //!

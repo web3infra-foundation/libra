@@ -4,7 +4,11 @@
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::{fs, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use libra::{
     command::{
@@ -1432,7 +1436,7 @@ async fn test_remote_remove_works_after_deleting_last_url() {
 /// most common invocation per sub-command (`add`, `remove`, `rename`,
 /// `-v`, `get-url --all`, `set-url --push`, `prune --dry-run`, `--json`)
 /// without reading the design doc. Cross-cutting `--help` EXAMPLES
-/// rollout per `docs/improvement/README.md` item B.
+/// rollout per `docs/development/commands/_general.md` item B.
 #[test]
 fn test_remote_help_lists_examples_banner() {
     let repo = tempdir().expect("tempdir for remote --help");
@@ -1462,4 +1466,649 @@ fn test_remote_help_lists_examples_banner() {
             "remote --help should include `{invocation}`, stdout: {stdout}"
         );
     }
+}
+
+// ── show <name> (detailed, offline) ───────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn test_remote_show_no_args_lists_remotes() {
+    let repo = tempdir().expect("failed to create repo");
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["remote", "show"], repo.path());
+    assert_cli_success(&output, "remote show (empty repo)");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "expected empty output when no remotes: got '{stdout}'"
+    );
+
+    let add = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&add, "remote add origin");
+
+    let output = run_libra_command(&["remote", "show"], repo.path());
+    assert_cli_success(&output, "remote show (with origin)");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim() == "origin",
+        "expected 'origin', got '{stdout}'"
+    );
+
+    let add2 = run_libra_command(
+        &[
+            "remote",
+            "add",
+            "upstream",
+            "https://upstream.example/repo.git",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&add2, "remote add upstream");
+
+    let output = run_libra_command(&["remote", "show"], repo.path());
+    assert_cli_success(&output, "remote show (two remotes)");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines.len(), 2, "expected 2 remotes, got: {lines:?}");
+    assert!(
+        lines.contains(&"origin"),
+        "expected 'origin' in output: {lines:?}"
+    );
+    assert!(
+        lines.contains(&"upstream"),
+        "expected 'upstream' in output: {lines:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_show_detail_json_output_is_structured() {
+    let repo = tempdir().expect("failed to create repo");
+    init_repo_via_cli(repo.path());
+
+    let add = run_libra_command(
+        &["remote", "add", "origin", "https://one.example/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&add, "remote add origin");
+
+    let add_push = run_libra_command(
+        &[
+            "remote",
+            "set-url",
+            "--push",
+            "origin",
+            "ssh://git@example.com/repo.git",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&add_push, "remote set-url --push origin");
+
+    let output = run_libra_command(
+        &["--json", "remote", "show", "--no-query", "origin"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "remote show --no-query origin --json");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "remote");
+    assert_eq!(json["data"]["action"], "show");
+    assert_eq!(json["data"]["name"], "origin");
+    assert_eq!(
+        json["data"]["fetch_urls"],
+        serde_json::json!(["https://one.example/repo.git"])
+    );
+    assert_eq!(
+        json["data"]["push_urls"],
+        serde_json::json!(["ssh://git@example.com/repo.git"])
+    );
+    assert!(json["data"]["head_branch"].is_null());
+    assert!(json["data"]["remote_branches"].is_array());
+    assert!(json["data"]["pull_config"].is_array());
+    assert!(json["data"]["push_config"].is_array());
+    assert_eq!(json["data"]["queried"], false);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_show_detail_human_output() {
+    let repo = tempdir().expect("failed to create repo");
+    init_repo_via_cli(repo.path());
+
+    run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+
+    let output = run_libra_command(&["remote", "show", "--no-query", "origin"], repo.path());
+    assert_cli_success(&output, "remote show --no-query origin");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("* remote origin"),
+        "expected '* remote origin' header: {stdout}"
+    );
+    assert!(
+        stdout.contains("Fetch URL:"),
+        "expected Fetch URL line: {stdout}"
+    );
+    assert!(
+        stdout.contains("https://example.com/repo.git"),
+        "expected URL in output: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_show_nonexistent_remote_returns_error() {
+    let repo = tempdir().expect("failed to create repo");
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["remote", "show", "nonexistent"], repo.path());
+    assert!(
+        !output.status.success(),
+        "expected failure for nonexistent remote"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("nonexistent"),
+        "expected error mentioning remote name: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_show_detail_json_with_pushurl_fallback() {
+    let repo = tempdir().expect("failed to create repo");
+    init_repo_via_cli(repo.path());
+
+    run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+
+    let output = run_libra_command(
+        &["--json", "remote", "show", "--no-query", "origin"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "remote show --no-query origin --json");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["action"], "show");
+    assert_eq!(json["data"]["push_urls"], json["data"]["fetch_urls"]);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_show_detail_redacts_credentials() {
+    let repo = tempdir().expect("failed to create repo");
+    init_repo_via_cli(repo.path());
+
+    run_libra_command(
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://user:pass@example.com/repo.git",
+        ],
+        repo.path(),
+    );
+
+    let output = run_libra_command(&["remote", "show", "--no-query", "origin"], repo.path());
+    assert_cli_success(&output, "remote show --no-query origin");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("user:pass"),
+        "human output leaked credentials: {stdout}"
+    );
+    assert!(
+        !stdout.contains("@example.com"),
+        "human output should have redacted userinfo from URL: {stdout}"
+    );
+
+    let json_output = run_libra_command(
+        &["--json", "remote", "show", "--no-query", "origin"],
+        repo.path(),
+    );
+    assert_cli_success(&json_output, "remote show --no-query origin --json");
+    let json = parse_json_stdout(&json_output);
+    let fetch_url = json["data"]["fetch_urls"][0].as_str().unwrap();
+    assert!(
+        !fetch_url.contains("user:pass"),
+        "JSON output leaked credentials: {fetch_url}"
+    );
+    assert!(
+        !fetch_url.contains('@'),
+        "JSON output should strip userinfo entirely: {fetch_url}"
+    );
+}
+
+// ── set-branches / set-head ───────────────────────────────────────────────
+
+async fn add_origin() {
+    remote::execute(RemoteCmds::Add {
+        name: "origin".into(),
+        url: "https://example.com/repo.git".into(),
+    })
+    .await;
+}
+
+async fn fetch_refspecs() -> Vec<String> {
+    ConfigKv::get_all("remote.origin.fetch")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.value)
+        .collect()
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_set_branches_overwrites() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    add_origin().await;
+
+    remote::execute_safe(
+        RemoteCmds::SetBranches {
+            add: false,
+            name: "origin".into(),
+            branches: vec!["main".into()],
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .expect("set-branches main");
+
+    assert_eq!(
+        fetch_refspecs().await,
+        vec!["+refs/heads/main:refs/remotes/origin/main".to_string()]
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_set_branches_add_appends() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    add_origin().await;
+
+    let out = OutputConfig::default();
+    remote::execute_safe(
+        RemoteCmds::SetBranches {
+            add: false,
+            name: "origin".into(),
+            branches: vec!["main".into()],
+        },
+        &out,
+    )
+    .await
+    .expect("set-branches main");
+    remote::execute_safe(
+        RemoteCmds::SetBranches {
+            add: true,
+            name: "origin".into(),
+            branches: vec!["dev".into()],
+        },
+        &out,
+    )
+    .await
+    .expect("set-branches --add dev");
+
+    let specs = fetch_refspecs().await;
+    assert_eq!(specs.len(), 2, "specs: {specs:?}");
+    assert!(specs.contains(&"+refs/heads/main:refs/remotes/origin/main".to_string()));
+    assert!(specs.contains(&"+refs/heads/dev:refs/remotes/origin/dev".to_string()));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_set_branches_unknown_remote_errors() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    let error = remote::execute_safe(
+        RemoteCmds::SetBranches {
+            add: false,
+            name: "ghost".into(),
+            branches: vec!["main".into()],
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .expect_err("unknown remote should error");
+    assert_eq!(error.stable_code(), StableErrorCode::CliInvalidTarget);
+    assert_eq!(error.exit_code(), 129);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_set_branches_invalid_branch_rejected() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    add_origin().await;
+
+    let error = remote::execute_safe(
+        RemoteCmds::SetBranches {
+            add: false,
+            name: "origin".into(),
+            branches: vec!["a..b".into()],
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .expect_err("invalid branch name should error");
+    assert_eq!(error.exit_code(), 129);
+    assert!(error.message().contains("invalid branch name"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_set_head_delete_idempotent() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    add_origin().await;
+
+    // Deleting a non-existent remote HEAD is a successful no-op, twice.
+    for _ in 0..2 {
+        remote::execute_safe(
+            RemoteCmds::SetHead {
+                auto: false,
+                delete: true,
+                name: "origin".into(),
+                branch: None,
+            },
+            &OutputConfig::default(),
+        )
+        .await
+        .expect("set-head -d should be idempotent");
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_set_head_missing_branch_errors() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    add_origin().await;
+
+    let error = remote::execute_safe(
+        RemoteCmds::SetHead {
+            auto: false,
+            delete: false,
+            name: "origin".into(),
+            branch: Some("nope".into()),
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .expect_err("missing tracking branch should error");
+    assert_eq!(error.stable_code(), StableErrorCode::CliInvalidTarget);
+    assert_eq!(error.exit_code(), 129);
+    assert!(error.message().contains("no such remote-tracking branch"));
+}
+
+/// Run `git` with `args` in `dir`, panicking on failure.
+fn git_in(dir: &Path, args: &[&str]) {
+    assert!(
+        Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .status()
+            .unwrap_or_else(|e| panic!("git {args:?} failed to spawn: {e}"))
+            .success(),
+        "git {args:?} failed in {}",
+        dir.display()
+    );
+}
+
+/// Build a bare git remote at `<root>/remote.git` seeded with a `main` branch
+/// (its own commit) plus each name in `extra_branches` (each on a *distinct*
+/// commit so HEAD's OID is unique to `main`). The remote HEAD symref is pinned
+/// to `main`. Returns the bare remote path. Reused by the online `remote show`
+/// and `set-head --auto` tests.
+fn setup_bare_git_remote(root: &Path, extra_branches: &[&str]) -> PathBuf {
+    let remote_dir = root.join("remote.git");
+    let work_dir = root.join("workdir");
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("init bare remote")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["init", work_dir.to_str().unwrap()])
+            .status()
+            .expect("init workdir")
+            .success()
+    );
+    git_in(&work_dir, &["config", "user.name", "Libra Tester"]);
+    git_in(&work_dir, &["config", "user.email", "tester@example.com"]);
+    fs::write(work_dir.join("README.md"), "hello libra").expect("write README");
+    git_in(&work_dir, &["add", "README.md"]);
+    git_in(&work_dir, &["commit", "-m", "initial commit"]);
+    // Normalise the default branch to `main` regardless of git's init default.
+    git_in(&work_dir, &["branch", "-M", "main"]);
+    git_in(
+        &work_dir,
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+    );
+    git_in(&work_dir, &["push", "origin", "main"]);
+    for branch in extra_branches {
+        git_in(&work_dir, &["checkout", "main"]);
+        git_in(&work_dir, &["checkout", "-b", branch]);
+        fs::write(work_dir.join(format!("{branch}.txt")), *branch).expect("write branch file");
+        git_in(&work_dir, &["add", "."]);
+        git_in(&work_dir, &["commit", "-m", branch]);
+        git_in(&work_dir, &["push", "origin", branch]);
+    }
+    // Pin the remote HEAD to main so discovery resolves the default branch.
+    git_in(&remote_dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    remote_dir
+}
+
+/// Online `remote show` (default) contacts the remote and classifies branches:
+/// `tracked` (on both), `new` (remote-only, not yet fetched), `stale`
+/// (locally tracked, gone from the remote). It also reports the live HEAD.
+#[tokio::test]
+#[serial]
+async fn test_remote_show_online_classifies_tracked_new_stale() {
+    let temp_root = tempdir().unwrap();
+    let remote_dir = setup_bare_git_remote(temp_root.path(), &["feature1"]);
+
+    let repo = temp_root.path().join("libra_repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_via_cli(&repo);
+    assert_cli_success(
+        &run_libra_command(
+            &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+            &repo,
+        ),
+        "remote add origin",
+    );
+    assert_cli_success(
+        &run_libra_command(&["fetch", "origin"], &repo),
+        "fetch origin",
+    );
+
+    // Mutate the remote so the three classes are all exercised:
+    //  - feature2 is created remote-only (from feature1's commit) -> `new`,
+    //  - feature1 is deleted from the remote -> `stale` locally,
+    //  - main stays on both -> `tracked`.
+    git_in(&remote_dir, &["branch", "feature2", "feature1"]);
+    git_in(&remote_dir, &["update-ref", "-d", "refs/heads/feature1"]);
+
+    let output = run_libra_command(&["--json", "remote", "show", "origin"], &repo);
+    assert_cli_success(&output, "remote show origin (online)");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["queried"], true);
+    assert_eq!(json["data"]["head_branch"], "main");
+
+    let mut status = std::collections::HashMap::new();
+    for branch in json["data"]["remote_branches"].as_array().unwrap() {
+        status.insert(
+            branch["branch"].as_str().unwrap().to_string(),
+            branch["status"].as_str().unwrap().to_string(),
+        );
+    }
+    assert_eq!(status.get("main").map(String::as_str), Some("tracked"));
+    assert_eq!(status.get("feature2").map(String::as_str), Some("new"));
+    assert_eq!(status.get("feature1").map(String::as_str), Some("stale"));
+}
+
+/// `--no-query` keeps `remote show` fully offline: no network contact, branches
+/// reported with the `cached` status and `queried = false`. (Pins the offline
+/// path against the new online default.)
+#[tokio::test]
+#[serial]
+async fn test_remote_show_no_query_stays_offline() {
+    let temp_root = tempdir().unwrap();
+    let remote_dir = setup_bare_git_remote(temp_root.path(), &["feature1"]);
+
+    let repo = temp_root.path().join("libra_repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_via_cli(&repo);
+    run_libra_command(
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+        &repo,
+    );
+    assert_cli_success(
+        &run_libra_command(&["fetch", "origin"], &repo),
+        "fetch origin",
+    );
+
+    // Delete a branch from the remote; --no-query must NOT notice (still cached).
+    git_in(&remote_dir, &["update-ref", "-d", "refs/heads/feature1"]);
+
+    let output = run_libra_command(&["--json", "remote", "show", "--no-query", "origin"], &repo);
+    assert_cli_success(&output, "remote show --no-query origin");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["queried"], false);
+    for branch in json["data"]["remote_branches"].as_array().unwrap() {
+        assert_eq!(branch["status"], "cached");
+    }
+}
+
+/// Online `remote show` against an unreachable remote fails with a hint to use
+/// `--no-query`.
+#[tokio::test]
+#[serial]
+async fn test_remote_show_online_unreachable_hints_no_query() {
+    let temp_root = tempdir().unwrap();
+    let repo = temp_root.path().join("libra_repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_via_cli(&repo);
+    let missing = temp_root.path().join("nonexistent.git");
+    run_libra_command(
+        &["remote", "add", "origin", missing.to_str().unwrap()],
+        &repo,
+    );
+
+    let output = run_libra_command(&["remote", "show", "origin"], &repo);
+    assert!(
+        !output.status.success(),
+        "online show against an unreachable remote must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--no-query"),
+        "error should hint at --no-query: {stderr}"
+    );
+}
+
+/// `remote set-head --auto` queries the remote, resolves its HEAD branch, and
+/// writes the cached remote HEAD (provided that branch has been fetched).
+#[tokio::test]
+#[serial]
+async fn test_remote_set_head_auto_resolves_from_remote() {
+    let temp_root = tempdir().unwrap();
+    let remote_dir = setup_bare_git_remote(temp_root.path(), &[]);
+
+    let repo = temp_root.path().join("libra_repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_via_cli(&repo);
+    run_libra_command(
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+        &repo,
+    );
+    assert_cli_success(
+        &run_libra_command(&["fetch", "origin"], &repo),
+        "fetch origin",
+    );
+
+    let output = run_libra_command(&["--json", "remote", "set-head", "origin", "--auto"], &repo);
+    assert_cli_success(&output, "remote set-head origin --auto");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["action"], "set-head");
+    assert_eq!(json["data"]["mode"], "set");
+    assert_eq!(json["data"]["target"], "main");
+
+    // The cached remote HEAD now resolves to main.
+    let show = run_libra_command(&["--json", "remote", "show", "--no-query", "origin"], &repo);
+    assert_cli_success(&show, "remote show --no-query origin");
+    let show_json = parse_json_stdout(&show);
+    assert_eq!(show_json["data"]["head_branch"], "main");
+}
+
+/// `set-head --auto` resolves the remote HEAD but fails if that branch has not
+/// been fetched (no remote-tracking ref yet) — with the "fetch first" hint.
+#[tokio::test]
+#[serial]
+async fn test_remote_set_head_auto_requires_fetched_branch() {
+    let temp_root = tempdir().unwrap();
+    let remote_dir = setup_bare_git_remote(temp_root.path(), &[]);
+
+    let repo = temp_root.path().join("libra_repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_via_cli(&repo);
+    run_libra_command(
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+        &repo,
+    );
+    // Intentionally NOT fetching.
+
+    let output = run_libra_command(&["remote", "set-head", "origin", "--auto"], &repo);
+    assert!(
+        !output.status.success(),
+        "set-head --auto without a fetched branch must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no such remote-tracking branch"),
+        "expected a tracking-branch error: {stderr}"
+    );
+}
+
+#[test]
+fn test_remote_set_branches_json_schema() {
+    let repo = create_committed_repo_via_cli();
+    let add = run_libra_command(
+        &["remote", "add", "origin", "git@github.com:o/r.git"],
+        repo.path(),
+    );
+    assert_cli_success(&add, "remote add origin");
+
+    let output = run_libra_command(
+        &["--json", "remote", "set-branches", "origin", "main"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "json set-branches");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "remote");
+    assert_eq!(json["data"]["action"], "set-branches");
+    assert_eq!(json["data"]["added"], false);
+    let specs = json["data"]["fetch_refspecs"].as_array().expect("refspecs");
+    assert_eq!(specs.len(), 1);
 }

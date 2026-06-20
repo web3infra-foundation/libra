@@ -77,6 +77,8 @@ pub enum RestoreError {
     /// Libra-managed AI branch.
     #[error("refusing to restore worktree while on locked branch '{0}'")]
     LockedCurrentBranch(String),
+    #[error("failed to read pathspec file: {0}")]
+    PathspecFileRead(String),
 }
 
 impl RestoreError {
@@ -93,6 +95,7 @@ impl RestoreError {
             Self::LfsDownload => StableErrorCode::NetworkUnavailable,
             Self::LockedSource(_) => StableErrorCode::CliInvalidTarget,
             Self::LockedCurrentBranch(_) => StableErrorCode::ConflictOperationBlocked,
+            Self::PathspecFileRead(_) => StableErrorCode::IoReadFailed,
         }
     }
 }
@@ -150,7 +153,7 @@ pub struct RestoreOutput {
 #[command(after_help = RESTORE_EXAMPLES)]
 pub struct RestoreArgs {
     /// files or dir to restore
-    #[clap(required = true)]
+    #[clap(required_unless_present = "pathspec_from_file")]
     pub pathspec: Vec<String>,
     /// source
     #[clap(long, short)]
@@ -161,6 +164,12 @@ pub struct RestoreArgs {
     /// staged
     #[clap(long, short = 'S')]
     pub staged: bool,
+    /// Read pathspecs from the given file, one per line (`-` reads stdin).
+    #[clap(long = "pathspec-from-file", value_name = "FILE")]
+    pub pathspec_from_file: Option<String>,
+    /// Pathspecs read via --pathspec-from-file are separated by NUL, not newlines.
+    #[clap(long = "pathspec-file-nul", requires = "pathspec_from_file")]
+    pub pathspec_file_nul: bool,
 }
 
 pub async fn execute(args: RestoreArgs) {
@@ -195,7 +204,43 @@ pub(crate) async fn execute_to_output(args: RestoreArgs) -> CliResult<RestoreOut
 
 // ── Core execution ───────────────────────────────────────────────────
 
-async fn run_restore(args: RestoreArgs) -> Result<RestoreOutput, RestoreError> {
+/// Read pathspecs from a file for `--pathspec-from-file`. Entries are separated
+/// by newlines, or by NUL when `--pathspec-file-nul` is set; `-` reads stdin.
+/// Empty entries are dropped (and a trailing `\r` is stripped in newline mode).
+fn read_restore_pathspec_file(path: &str, nul: bool) -> Result<Vec<String>, RestoreError> {
+    let raw = if path == "-" {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|error| RestoreError::PathspecFileRead(error.to_string()))?;
+        buf
+    } else {
+        std::fs::read_to_string(path)
+            .map_err(|error| RestoreError::PathspecFileRead(format!("{path}: {error}")))?
+    };
+
+    let separator = if nul { '\0' } else { '\n' };
+    Ok(raw
+        .split(separator)
+        .map(|entry| {
+            if nul {
+                entry
+            } else {
+                entry.strip_suffix('\r').unwrap_or(entry)
+            }
+        })
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+async fn run_restore(mut args: RestoreArgs) -> Result<RestoreOutput, RestoreError> {
+    // `--pathspec-from-file` populates the pathspec list from a file (or stdin
+    // for `-`) before the normal restore logic runs.
+    if let Some(file) = args.pathspec_from_file.take() {
+        args.pathspec = read_restore_pathspec_file(&file, args.pathspec_file_nul)?;
+    }
     let staged = args.staged;
     let mut worktree = args.worktree;
     if !staged {

@@ -160,7 +160,7 @@ fn symbolic_ref_outside_repo_reports_repo_not_found() {
 /// `libra symbolic-ref --help` surfaces the EXAMPLES banner so users
 /// see the read, short-read, set, quiet, and JSON forms without
 /// reading the design doc. Cross-cutting `--help` EXAMPLES rollout
-/// per `docs/improvement/README.md` item B.
+/// per `docs/development/commands/_general.md` item B.
 #[test]
 fn test_symbolic_ref_help_lists_examples_banner() {
     let repo = tempdir().expect("tempdir for symbolic-ref --help");

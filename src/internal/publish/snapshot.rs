@@ -1,4 +1,4 @@
-//! Publish snapshot builder — Phase 3 of `docs/improvement/publish.md`.
+//! Publish snapshot builder — Phase 3 of `docs/development/commands/publish.md`.
 //!
 //! The snapshot builder takes a list of refs (`refs/heads/*` and
 //! `refs/tags/*`), resolves each to a commit oid, dedupes by

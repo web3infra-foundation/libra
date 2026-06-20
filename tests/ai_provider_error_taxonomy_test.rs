@@ -1,6 +1,6 @@
 //! Integration fixtures for the OC-Phase 4 provider error taxonomy.
 //!
-//! Spec: `docs/improvement/opencode.md` → "Provider Error Taxonomy & Retry
+//! Spec: `docs/development/commands/_general.md` → "Provider Error Taxonomy & Retry
 //! Policy" — every documented opencode error code must round-trip through
 //! [`parse_stream_error_kind`] / [`parse_api_error`] / [`ProviderError`]
 //! exactly as the doc table prescribes. The fixtures live in their own
@@ -25,7 +25,7 @@ use libra::internal::ai::providers::{
 /// [`StreamErrorKind`] it must classify as, and whether the runtime
 /// retries on it.
 ///
-/// The order matches `docs/improvement/opencode.md` so a doc rewrite
+/// The order matches `docs/development/commands/_general.md` so a doc rewrite
 /// that adds / reorders codes triggers a localised test diff.
 const DOC_MAPPING: &[(&str, StreamErrorKind, bool)] = &[
     (

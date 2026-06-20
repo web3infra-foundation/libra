@@ -67,7 +67,7 @@ impl Client {
     /// Creates an OpenAI client from environment variables or Vault.
     ///
     /// Priority chain for `OPENAI_API_KEY` (12-Factor, see
-    /// `docs/improvement/config.md`):
+    /// `docs/development/commands/config.md`):
     /// 1. Process env `OPENAI_API_KEY`
     /// 2. Local repo config (`vault.env.OPENAI_API_KEY`)
     /// 3. Global config (`vault.env.OPENAI_API_KEY`)

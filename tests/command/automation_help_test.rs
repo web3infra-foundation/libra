@@ -2,7 +2,7 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies. Covers
 //! the cross-cutting `--help` EXAMPLES rollout from
-//! `docs/improvement/README.md` item B for the rule-based automation
+//! `docs/development/commands/_general.md` item B for the rule-based automation
 //! runtime command.
 
 use super::*;

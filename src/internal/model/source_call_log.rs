@@ -10,7 +10,7 @@
 //! v0.17.800 adds the on-disk shape so a session crash no longer
 //! drops the audit trail.
 
-use sea_orm::entity::prelude::*;
+use sea_orm::{DbErr, entity::prelude::*};
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
 #[sea_orm(table_name = "source_call_log")]
@@ -58,9 +58,41 @@ pub struct Model {
     pub success: i64,
     /// RFC3339 timestamp at row creation.
     pub created_at: String,
+    /// `AgentRunId` (UUID string) of the sub-agent run whose tool loop
+    /// issued this call, completing the
+    /// `thread → agent_run_id → tool_call_id → source_call` trace chain
+    /// (migration `2026060201`). `None` is the equivalence class for a
+    /// main-session (non sub-agent) source call.
+    pub agent_run_id: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
+
+/// Count source calls grouped by their attributed `agent_run_id`.
+///
+/// Rows with a `NULL` `agent_run_id` — main-session (non sub-agent)
+/// calls — are excluded, so the returned map keys are exactly the run
+/// ids that issued at least one source call, each mapped to its call
+/// count. Consumed by the `/agents` TUI pane to render the per-run
+/// `src` column (CEX-S2-16 验收 (1)).
+pub async fn count_by_agent_run<C>(
+    conn: &C,
+) -> Result<std::collections::HashMap<String, i64>, DbErr>
+where
+    C: ConnectionTrait,
+{
+    let rows = Entity::find()
+        .filter(Column::AgentRunId.is_not_null())
+        .all(conn)
+        .await?;
+    let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for row in rows {
+        if let Some(agent_run_id) = row.agent_run_id {
+            *counts.entry(agent_run_id).or_insert(0) += 1;
+        }
+    }
+    Ok(counts)
+}

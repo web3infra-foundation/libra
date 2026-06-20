@@ -8,15 +8,17 @@ use git_internal::{
 use serde::Serialize;
 
 use super::{
-    reset,
+    branch, reset,
     restore::{self, RestoreArgs},
     status,
 };
 use crate::{
-    command::{branch, load_object, status::StatusArgs},
+    command::{load_object, save_object, status::StatusArgs},
+    common_utils::format_commit_msg,
     internal::{
         ai::automation::{VCS_EVENT_POST_SWITCH, dispatch_current_repo_vcs_event_to_history},
         branch::{self as repo_branch, Branch},
+        config::ConfigKv,
         db::get_db_conn_instance,
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
@@ -43,6 +45,8 @@ EXAMPLES:
     libra switch -c fix-123 abc1234        Create branch from specific commit
     libra switch --detach v1.0             Detach HEAD at a tag
     libra switch --track origin/main       Track and switch to remote branch
+    libra switch feature                   Auto-create a tracking branch from a unique remote (guess)
+    libra switch --no-guess feature        Disable remote-tracking guessing
     libra switch --json main               Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -55,16 +59,42 @@ pub struct SwitchArgs {
     #[clap(long, short, group = "sub")]
     pub create: Option<String>,
 
+    /// Create a new branch even if it already exists, and switch to it
+    #[clap(long, short = 'C', group = "sub")]
+    pub force_create: Option<String>,
+
+    /// Create a new orphan branch with no parents and an empty tree, and switch to it
+    #[clap(long, group = "sub")]
+    pub orphan: Option<String>,
+
     /// Switch to a commit
     #[clap(long, short, action, default_value = "false", group = "sub")]
     pub detach: bool,
 
     #[clap(
+        short = 't',
         long,
         conflicts_with_all = ["create", "detach"],
         help = "Set upstream tracking when switching to remote branch"
     )]
     pub track: bool,
+
+    /// Proceed even with local changes, discarding them when switching to a
+    /// different commit (untracked files that would be overwritten are still
+    /// guarded).
+    #[clap(short = 'f', long = "force", visible_alias = "discard-changes")]
+    pub force: bool,
+
+    /// When <branch> is not a local branch but matches exactly one
+    /// remote-tracking branch, create a local branch tracking it and switch
+    /// (Git's DWIM). Enabled by default; overrides `checkout.guess`.
+    #[clap(long, overrides_with = "no_guess")]
+    pub guess: bool,
+
+    /// Disable the remote-tracking guess; require an existing local branch or
+    /// an explicit `--track <remote>/<branch>`. Overrides `checkout.guess`.
+    #[clap(long = "no-guess", overrides_with = "guess")]
+    pub no_guess: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -113,8 +143,20 @@ pub enum SwitchError {
     #[error("invalid remote branch '{0}'")]
     InvalidRemoteBranch(String),
 
+    #[error("'{branch}' matched multiple remote-tracking branches")]
+    AmbiguousGuessRemote {
+        branch: String,
+        remotes: Vec<String>,
+    },
+
     #[error("a branch named '{0}' already exists")]
     BranchAlreadyExists(String),
+
+    #[error("failed to delete existing branch '{branch}': {detail}")]
+    BranchDelete { branch: String, detail: String },
+
+    #[error("failed to create orphan root commit for branch '{0}'")]
+    OrphanCommitCreate(String),
 
     #[error("'{0}' is a reserved branch name")]
     InternalBranchBlocked(String),
@@ -185,12 +227,27 @@ impl From<SwitchError> for CliError {
             SwitchError::InvalidRemoteBranch(..) => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::CliInvalidTarget)
                 .with_hint("expected format: 'remote/branch'."),
+            SwitchError::AmbiguousGuessRemote {
+                ref branch,
+                ref remotes,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                .with_hint(format!("it exists on remotes: {}.", remotes.join(", ")))
+                .with_hint(format!(
+                    "use 'libra switch --track <remote>/{branch}' to pick one, or set checkout.defaultRemote."
+                )),
             SwitchError::BranchAlreadyExists(ref name) => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::ConflictOperationBlocked)
                 .with_hint(format!(
-                    "use 'libra switch {}' if you meant the existing local branch.",
+                    "use 'libra switch {}' if you meant the existing local branch, or 'libra switch -C {0}' to reset it.",
                     name
                 )),
+            SwitchError::BranchDelete { ref branch, ref detail } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::IoWriteFailed)
+                .with_hint(format!("branch '{branch}' could not be deleted before force-create: {detail}")),
+            SwitchError::OrphanCommitCreate(ref name) => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::IoWriteFailed)
+                .with_hint(format!("failed to create orphan root commit for branch '{name}'")),
             SwitchError::InternalBranchBlocked(..) => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::CliInvalidTarget),
             SwitchError::DirtyUnstaged => CliError::fatal(error.to_string())
@@ -257,6 +314,7 @@ fn invalid_branch_base_error(target: &str) -> CliError {
 async fn validate_new_branch_request(
     new_branch_name: &str,
     branch_or_commit: Option<&str>,
+    allow_existing: bool,
 ) -> Result<(), SwitchError> {
     if !branch::is_valid_git_branch_name(new_branch_name) {
         return Err(SwitchError::DelegatedCli(invalid_branch_name_error(
@@ -268,10 +326,11 @@ async fn validate_new_branch_request(
             new_branch_name.to_string(),
         ));
     }
-    if Branch::find_branch_result(new_branch_name, None)
-        .await
-        .map_err(map_branch_store_error)?
-        .is_some()
+    if !allow_existing
+        && Branch::find_branch_result(new_branch_name, None)
+            .await
+            .map_err(map_branch_store_error)?
+            .is_some()
     {
         return Err(SwitchError::DelegatedCli(existing_branch_conflict_error(
             new_branch_name,
@@ -296,6 +355,16 @@ struct ResolvedTrackedRemoteTarget {
     remote: String,
     remote_branch: String,
     commit: ObjectHash,
+}
+
+/// Outcome of resolving a plain `libra switch <branch>` argument.
+#[derive(Debug, Clone)]
+enum SwitchTarget {
+    /// An existing local branch to switch to.
+    Local(ResolvedSwitchBranch),
+    /// No local branch existed, but the name uniquely matched one
+    /// remote-tracking branch (Git's DWIM guess); create a tracking branch.
+    GuessTracked(ResolvedTrackedRemoteTarget),
 }
 
 fn find_similar_branch_names(branch_name: &str, branches: &[Branch]) -> Vec<String> {
@@ -330,7 +399,9 @@ fn find_similar_branch_names(branch_name: &str, branches: &[Branch]) -> Vec<Stri
 
 async fn resolve_switch_branch_target(
     branch_name: &str,
-) -> Result<ResolvedSwitchBranch, SwitchError> {
+    guess: bool,
+    no_guess: bool,
+) -> Result<SwitchTarget, SwitchError> {
     if is_internal_switch_target(branch_name) {
         return Err(SwitchError::InternalBranchBlocked(branch_name.to_string()));
     }
@@ -338,17 +409,30 @@ async fn resolve_switch_branch_target(
         .await
         .map_err(map_branch_store_error)?
     {
-        return Ok(ResolvedSwitchBranch {
+        return Ok(SwitchTarget::Local(ResolvedSwitchBranch {
             name: branch.name,
             commit: branch.commit,
-        });
+        }));
     }
+    // An explicit `remote/branch` (or `refs/remotes/...`) form resolves here.
+    // Git's `switch` rejects that form with a hint to use `--track`, regardless
+    // of the guess setting, so it stays an error even when guessing is enabled.
     if !Branch::search_branch_result(branch_name)
         .await
         .map_err(map_branch_store_error)?
         .is_empty()
     {
         return Err(SwitchError::GotRemoteBranch(branch_name.to_string()));
+    }
+
+    // DWIM: a bare name matching exactly one remote-tracking branch becomes a
+    // new local tracking branch. The guess setting is resolved lazily here so a
+    // malformed `checkout.guess` value never blocks switching to a branch that
+    // already exists locally.
+    if resolve_guess_enabled(guess, no_guess).await?
+        && let Some(tracked) = find_guess_target(branch_name).await?
+    {
+        return Ok(SwitchTarget::GuessTracked(tracked));
     }
 
     let all_branches = Branch::list_branches_result(None)
@@ -358,6 +442,98 @@ async fn resolve_switch_branch_target(
     Err(SwitchError::BranchNotFound {
         name: branch_name.to_string(),
         similar,
+    })
+}
+
+/// Resolve whether DWIM guessing is enabled for this invocation.
+///
+/// `--guess`/`--no-guess` form a single last-on-CLI-wins toggle (clap
+/// `overrides_with`), so at most one of the two booleans is ever set — which
+/// matches Git, where the later flag wins. When neither flag is given, fall back
+/// to `checkout.guess`, defaulting to `true`.
+async fn resolve_guess_enabled(guess: bool, no_guess: bool) -> Result<bool, SwitchError> {
+    if no_guess {
+        return Ok(false);
+    }
+    if guess {
+        return Ok(true);
+    }
+    let db = get_db_conn_instance().await;
+    match ConfigKv::get_bool_with_conn(&db, "checkout.guess").await {
+        Ok(value) => Ok(value.unwrap_or(true)),
+        Err(err) => Err(SwitchError::DelegatedCli(
+            CliError::fatal(format!("invalid checkout.guess configuration: {err}"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("set checkout.guess to a boolean (true/false)."),
+        )),
+    }
+}
+
+/// Read `checkout.defaultRemote`, used to break ties when several remotes carry
+/// a branch with the guessed name.
+async fn read_checkout_default_remote() -> Result<Option<String>, SwitchError> {
+    match ConfigKv::get("checkout.defaultRemote").await {
+        Ok(entry) => Ok(entry.map(|e| e.value)),
+        Err(err) => Err(SwitchError::DelegatedCli(
+            CliError::fatal(format!("failed to read checkout.defaultRemote: {err}"))
+                .with_stable_code(StableErrorCode::IoReadFailed),
+        )),
+    }
+}
+
+/// Find the unique remote-tracking branch that a bare `branch_name` should DWIM
+/// into. Returns `Ok(None)` when no remote carries the name, the matching target
+/// when exactly one does (or `checkout.defaultRemote` resolves a tie), and
+/// [`SwitchError::AmbiguousGuessRemote`] when multiple remotes match with no
+/// disambiguating default.
+async fn find_guess_target(
+    branch_name: &str,
+) -> Result<Option<ResolvedTrackedRemoteTarget>, SwitchError> {
+    let remotes = ConfigKv::all_remote_configs().await.map_err(|err| {
+        SwitchError::DelegatedCli(
+            CliError::fatal(format!("failed to read remote configuration: {err}"))
+                .with_stable_code(StableErrorCode::IoReadFailed),
+        )
+    })?;
+
+    let mut matches: Vec<(String, ObjectHash)> = Vec::new();
+    for remote in &remotes {
+        if let Some(commit) = find_remote_tracking_commit(&remote.name, branch_name).await? {
+            matches.push((remote.name.clone(), commit));
+        }
+    }
+
+    if matches.is_empty() {
+        return Ok(None);
+    }
+    if matches.len() == 1 {
+        let (remote, commit) = matches.swap_remove(0);
+        return Ok(Some(ResolvedTrackedRemoteTarget {
+            remote,
+            remote_branch: branch_name.to_string(),
+            commit,
+        }));
+    }
+
+    // More than one remote carries the name: honour `checkout.defaultRemote`.
+    if let Some(default_remote) = read_checkout_default_remote().await?
+        && let Some(position) = matches
+            .iter()
+            .position(|(remote, _)| remote == &default_remote)
+    {
+        let (remote, commit) = matches.swap_remove(position);
+        return Ok(Some(ResolvedTrackedRemoteTarget {
+            remote,
+            remote_branch: branch_name.to_string(),
+            commit,
+        }));
+    }
+
+    let mut remotes: Vec<String> = matches.into_iter().map(|(remote, _)| remote).collect();
+    remotes.sort();
+    Err(SwitchError::AmbiguousGuessRemote {
+        branch: branch_name.to_string(),
+        remotes,
     })
 }
 
@@ -385,27 +561,12 @@ async fn resolve_tracked_remote_target(
         return Err(SwitchError::InternalBranchBlocked(remote_branch_name));
     }
 
-    let remote_tracking_ref = format!("refs/remotes/{remote_name}/{remote_branch_name}");
-    let remote_tracking_branch = if let Some(branch) =
-        Branch::find_branch_result(&remote_tracking_ref, Some(&remote_name))
-            .await
-            .map_err(map_branch_store_error)?
-    {
-        Some(branch)
-    } else if let Some(branch) = Branch::find_branch_result(&remote_tracking_ref, None)
-        .await
-        .map_err(map_branch_store_error)?
-    {
-        Some(branch)
-    } else {
-        Branch::find_branch_result(&remote_branch_name, Some(&remote_name))
-            .await
-            .map_err(map_branch_store_error)?
-    }
-    .ok_or_else(|| SwitchError::RemoteBranchNotFound {
-        remote: remote_name.clone(),
-        branch: remote_branch_name.clone(),
-    })?;
+    let commit = find_remote_tracking_commit(&remote_name, &remote_branch_name)
+        .await?
+        .ok_or_else(|| SwitchError::RemoteBranchNotFound {
+            remote: remote_name.clone(),
+            branch: remote_branch_name.clone(),
+        })?;
     if Branch::find_branch_result(&remote_branch_name, None)
         .await
         .map_err(map_branch_store_error)?
@@ -416,8 +577,38 @@ async fn resolve_tracked_remote_target(
     Ok(ResolvedTrackedRemoteTarget {
         remote: remote_name,
         remote_branch: remote_branch_name,
-        commit: remote_tracking_branch.commit,
+        commit,
     })
+}
+
+/// Resolve the commit a `<remote>/<branch>` remote-tracking ref points at,
+/// trying the stored `refs/remotes/<remote>/<branch>` name (with and without a
+/// remote scope) and the bare short name under the remote. Returns `Ok(None)`
+/// when the remote has no such tracking branch.
+async fn find_remote_tracking_commit(
+    remote_name: &str,
+    remote_branch_name: &str,
+) -> Result<Option<ObjectHash>, SwitchError> {
+    let remote_tracking_ref = format!("refs/remotes/{remote_name}/{remote_branch_name}");
+    if let Some(branch) = Branch::find_branch_result(&remote_tracking_ref, Some(remote_name))
+        .await
+        .map_err(map_branch_store_error)?
+    {
+        return Ok(Some(branch.commit));
+    }
+    if let Some(branch) = Branch::find_branch_result(&remote_tracking_ref, None)
+        .await
+        .map_err(map_branch_store_error)?
+    {
+        return Ok(Some(branch.commit));
+    }
+    if let Some(branch) = Branch::find_branch_result(remote_branch_name, Some(remote_name))
+        .await
+        .map_err(map_branch_store_error)?
+    {
+        return Ok(Some(branch.commit));
+    }
+    Ok(None)
 }
 
 fn internal_switch_invariant(message: impl Into<String>) -> SwitchError {
@@ -483,7 +674,23 @@ fn target_index_for_commit(commit_id: &ObjectHash) -> Result<Index, SwitchError>
     Ok(index)
 }
 
-fn ensure_no_untracked_overwrite(target_commit: ObjectHash) -> Result<(), SwitchError> {
+/// Working-tree precondition before switching to `target_commit`. Without
+/// `--force` the worktree must be clean relative to the target; with `--force`
+/// local (tracked) changes are allowed to be discarded and only untracked files
+/// that the target would overwrite are guarded.
+async fn ensure_switch_clean_or_force(
+    force: bool,
+    target_commit: ObjectHash,
+    output: &OutputConfig,
+) -> Result<(), SwitchError> {
+    if force {
+        ensure_no_untracked_overwrite(target_commit)
+    } else {
+        ensure_clean_status_for_commit(target_commit, output).await
+    }
+}
+
+pub(crate) fn ensure_no_untracked_overwrite(target_commit: ObjectHash) -> Result<(), SwitchError> {
     let current_index =
         Index::load(path::index()).map_err(|err| SwitchError::StatusCheck(err.to_string()))?;
     let untracked_paths =
@@ -522,15 +729,20 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
     let SwitchArgs {
         branch,
         create,
+        force_create,
+        orphan,
         detach,
         track,
+        force,
+        guess,
+        no_guess,
     } = args;
     let (previous_branch, previous_commit) = current_switch_state().await;
 
     if track {
         let target = branch.ok_or(SwitchError::MissingTrackTarget)?;
         let tracked_target = resolve_tracked_remote_target(&target).await?;
-        ensure_clean_status_for_commit(tracked_target.commit, output).await?;
+        ensure_switch_clean_or_force(force, tracked_target.commit, output).await?;
 
         let tracked = switch_to_tracked_remote_branch(tracked_target, output).await?;
         return Ok(SwitchOutput {
@@ -549,13 +761,109 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
     }
 
     if let Some(new_branch_name) = create {
-        validate_new_branch_request(&new_branch_name, branch.as_deref()).await?;
+        validate_new_branch_request(&new_branch_name, branch.as_deref(), false).await?;
         match resolve_create_switch_target(branch.as_deref()).await? {
-            Some(target_commit) => ensure_clean_status_for_commit(target_commit, output).await?,
+            Some(target_commit) => {
+                ensure_switch_clean_or_force(force, target_commit, output).await?
+            }
             None => ensure_clean_status(output).await?,
         }
 
         branch::create_branch_safe(new_branch_name.clone(), branch).await?;
+        let created_branch = resolve_created_branch(&new_branch_name).await?;
+        let commit = switch_to_resolved_branch(created_branch, output).await?;
+        return Ok(SwitchOutput {
+            previous_branch,
+            previous_commit,
+            branch: Some(new_branch_name),
+            commit: commit.to_string(),
+            created: true,
+            detached: false,
+            already_on: false,
+            tracking: None,
+        });
+    }
+
+    if let Some(new_branch_name) = force_create {
+        validate_new_branch_request(&new_branch_name, branch.as_deref(), true).await?;
+        if let Some(existing) = Branch::find_branch_result(&new_branch_name, None)
+            .await
+            .map_err(map_branch_store_error)?
+        {
+            if Some(existing.name.as_str()) == previous_branch.as_deref() {
+                return Err(SwitchError::DelegatedCli(
+                    CliError::fatal(format!(
+                        "cannot force-create the currently checked-out branch '{}'",
+                        new_branch_name
+                    ))
+                    .with_stable_code(StableErrorCode::ConflictOperationBlocked),
+                ));
+            }
+            Branch::delete_branch_result(&new_branch_name, None)
+                .await
+                .map_err(|e| SwitchError::BranchDelete {
+                    branch: new_branch_name.clone(),
+                    detail: e.to_string(),
+                })?;
+        }
+        match resolve_create_switch_target(branch.as_deref()).await? {
+            Some(target_commit) => {
+                ensure_switch_clean_or_force(force, target_commit, output).await?
+            }
+            None => ensure_clean_status(output).await?,
+        }
+        branch::create_branch_safe(new_branch_name.clone(), branch).await?;
+        let created_branch = resolve_created_branch(&new_branch_name).await?;
+        let commit = switch_to_resolved_branch(created_branch, output).await?;
+        return Ok(SwitchOutput {
+            previous_branch,
+            previous_commit,
+            branch: Some(new_branch_name),
+            commit: commit.to_string(),
+            created: true,
+            detached: false,
+            already_on: false,
+            tracking: None,
+        });
+    }
+
+    if let Some(new_branch_name) = orphan {
+        validate_new_branch_request(&new_branch_name, None, true).await?;
+        if let Some(existing) = Branch::find_branch_result(&new_branch_name, None)
+            .await
+            .map_err(map_branch_store_error)?
+        {
+            if Some(existing.name.as_str()) == previous_branch.as_deref() {
+                return Err(SwitchError::DelegatedCli(
+                    CliError::fatal(format!(
+                        "cannot create orphan from the currently checked-out branch '{}'",
+                        new_branch_name
+                    ))
+                    .with_stable_code(StableErrorCode::ConflictOperationBlocked),
+                ));
+            }
+            Branch::delete_branch_result(&new_branch_name, None)
+                .await
+                .map_err(|e| SwitchError::BranchDelete {
+                    branch: new_branch_name.clone(),
+                    detail: e.to_string(),
+                })?;
+        }
+        ensure_clean_status(output).await?;
+        let orphan_commit = create_orphan_root_commit().await.map_err(|e| {
+            SwitchError::DelegatedCli(
+                CliError::fatal(format!(
+                    "failed to create orphan root commit for branch '{new_branch_name}': {e}"
+                ))
+                .with_stable_code(StableErrorCode::IoWriteFailed),
+            )
+        })?;
+        Branch::update_branch(&new_branch_name, &orphan_commit.to_string(), None)
+            .await
+            .map_err(|e| SwitchError::BranchCreate {
+                branch: new_branch_name.clone(),
+                detail: e.to_string(),
+            })?;
         let created_branch = resolve_created_branch(&new_branch_name).await?;
         let commit = switch_to_resolved_branch(created_branch, output).await?;
         return Ok(SwitchOutput {
@@ -575,7 +883,7 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
         let commit_base = get_commit_base(&target)
             .await
             .map_err(|e| SwitchError::CommitResolve(e.to_string()))?;
-        ensure_clean_status_for_commit(commit_base, output).await?;
+        ensure_switch_clean_or_force(force, commit_base, output).await?;
 
         let commit = switch_to_commit(commit_base, output).await?;
         return Ok(SwitchOutput {
@@ -591,33 +899,53 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
     }
 
     let branch = branch.ok_or(SwitchError::MissingBranchName)?;
-    let target_branch = resolve_switch_branch_target(&branch).await?;
-    if previous_branch.as_deref() == Some(&branch) {
-        return Ok(SwitchOutput {
-            previous_branch,
-            previous_commit: previous_commit.clone(),
-            branch: Some(branch),
-            commit: target_branch.commit.to_string(),
-            created: false,
-            detached: false,
-            already_on: true,
-            tracking: None,
-        });
+    match resolve_switch_branch_target(&branch, guess, no_guess).await? {
+        SwitchTarget::Local(target_branch) => {
+            if previous_branch.as_deref() == Some(&branch) {
+                return Ok(SwitchOutput {
+                    previous_branch,
+                    previous_commit: previous_commit.clone(),
+                    branch: Some(branch),
+                    commit: target_branch.commit.to_string(),
+                    created: false,
+                    detached: false,
+                    already_on: true,
+                    tracking: None,
+                });
+            }
+
+            ensure_switch_clean_or_force(force, target_branch.commit, output).await?;
+
+            let commit = switch_to_resolved_branch(target_branch, output).await?;
+            Ok(SwitchOutput {
+                previous_branch,
+                previous_commit,
+                branch: Some(branch),
+                commit: commit.to_string(),
+                created: false,
+                detached: false,
+                already_on: false,
+                tracking: None,
+            })
+        }
+        SwitchTarget::GuessTracked(tracked_target) => {
+            ensure_switch_clean_or_force(force, tracked_target.commit, output).await?;
+            let tracked = switch_to_tracked_remote_branch(tracked_target, output).await?;
+            Ok(SwitchOutput {
+                previous_branch,
+                previous_commit,
+                branch: Some(tracked.local_branch),
+                commit: tracked.commit.to_string(),
+                created: true,
+                detached: false,
+                already_on: false,
+                tracking: Some(SwitchTrackingInfo {
+                    remote: tracked.remote,
+                    remote_branch: tracked.remote_branch,
+                }),
+            })
+        }
     }
-
-    ensure_clean_status_for_commit(target_branch.commit, output).await?;
-
-    let commit = switch_to_resolved_branch(target_branch, output).await?;
-    Ok(SwitchOutput {
-        previous_branch,
-        previous_commit,
-        branch: Some(branch),
-        commit: commit.to_string(),
-        created: false,
-        detached: false,
-        already_on: false,
-        tracking: None,
-    })
 }
 
 /// Check status before changing branches and return a typed error on failure.
@@ -837,6 +1165,8 @@ async fn restore_to_commit(
         staged: true,
         source: Some(commit_id.to_string()),
         pathspec: vec![util::working_dir_string()],
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     };
     restore::execute_safe(restore_args, &output.child_output_config()).await?;
     Ok(())
@@ -867,6 +1197,71 @@ fn render_switch_output(result: &SwitchOutput, output: &OutputConfig) -> CliResu
     }
 
     Ok(())
+}
+
+async fn create_orphan_root_commit() -> Result<ObjectHash, CliError> {
+    use git_internal::internal::object::{
+        blob::Blob,
+        commit::Commit,
+        signature::{Signature, SignatureType},
+        tree::{Tree, TreeItem, TreeItemMode},
+    };
+
+    let name = ConfigKv::get("user.name")
+        .await
+        .ok()
+        .flatten()
+        .map(|v| v.value)
+        .unwrap_or_else(|| "Libra Orphan".to_string());
+    let email = ConfigKv::get("user.email")
+        .await
+        .ok()
+        .flatten()
+        .map(|v| v.value)
+        .unwrap_or_else(|| "orphan@libra".to_string());
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as usize)
+        .unwrap_or(0);
+    let author = Signature {
+        signature_type: SignatureType::Author,
+        name: name.clone(),
+        email: email.clone(),
+        timestamp,
+        timezone: "+0000".to_string(),
+    };
+    let committer = Signature {
+        signature_type: SignatureType::Committer,
+        name,
+        email,
+        timestamp,
+        timezone: "+0000".to_string(),
+    };
+    let blob = Blob::from_content("");
+    save_object(&blob, &blob.id).map_err(|e| {
+        CliError::fatal(format!("failed to save orphan blob object: {e}"))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+    })?;
+    let tree_item = TreeItem {
+        mode: TreeItemMode::Blob,
+        name: ".librakeep".to_string(),
+        id: blob.id,
+    };
+    let tree = Tree::from_tree_items(vec![tree_item]).map_err(|e| {
+        CliError::fatal(format!("failed to create orphan tree object: {e}"))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+    })?;
+    save_object(&tree, &tree.id).map_err(|e| {
+        CliError::fatal(format!("failed to save orphan tree object: {e}"))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+    })?;
+    let message = format_commit_msg("orphan branch root commit", None);
+    let commit = Commit::new(author, committer, tree.id, Vec::new(), &message);
+    save_object(&commit, &commit.id).map_err(|e| {
+        CliError::fatal(format!("failed to save orphan commit object: {e}"))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+    })?;
+    Ok(commit.id)
 }
 
 async fn current_switch_state() -> (Option<String>, Option<String>) {
@@ -937,6 +1332,14 @@ mod tests {
         assert_eq!(
             SwitchError::InvalidRemoteBranch("garbage".to_string()).to_string(),
             "invalid remote branch 'garbage'",
+        );
+        assert_eq!(
+            SwitchError::AmbiguousGuessRemote {
+                branch: "feature".to_string(),
+                remotes: vec!["origin".to_string(), "upstream".to_string()],
+            }
+            .to_string(),
+            "'feature' matched multiple remote-tracking branches",
         );
         assert_eq!(
             SwitchError::BranchAlreadyExists("main".to_string()).to_string(),

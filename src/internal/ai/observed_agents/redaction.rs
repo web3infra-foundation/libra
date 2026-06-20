@@ -19,7 +19,7 @@
 //! high-confidence formats (AWS / GCP / GitHub / Slack / generic JWT, plus
 //! a `postgres://user:pass@…` URI rule). The full `gitleaks`-style rule
 //! matrix and PII detection are Phase 3 work — see
-//! `docs/improvement/entire.md` section 8.
+//! `docs/development/commands/_general.md` section 8.
 
 use std::sync::Arc;
 

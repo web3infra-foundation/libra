@@ -1,7 +1,7 @@
 //! Permission ruleset machinery (OC-Phase 2 P2.3).
 //!
 //! This module is the in-memory half of the [Permission Ruleset & Approval
-//! Feedback Protocol] from `docs/improvement/opencode.md`. It defines the
+//! Feedback Protocol] from `docs/development/commands/_general.md`. It defines the
 //! data shapes and the two pure algorithms (`evaluate`, `disabled`) that
 //! the tool registry uses to decide which tools a given agent + ruleset
 //! pair can see.
@@ -28,7 +28,7 @@
 //! - `ToolRegistry::available_for` is on the registry itself; this module
 //!   only exports the algorithm it consumes.
 //!
-//! [Permission Ruleset & Approval Feedback Protocol]: https://github.com/genedna/libra/blob/main/docs/improvement/opencode.md
+//! [Permission Ruleset & Approval Feedback Protocol]: https://github.com/genedna/libra/blob/main/docs/development/commands/_general.md
 
 pub mod approved;
 pub mod evaluate;

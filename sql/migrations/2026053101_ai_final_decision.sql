@@ -1,7 +1,7 @@
 -- Phase 4 completion: the formal final `Decision` artifact.
 --
 -- Closes the ValidationReport -> RiskScoreBreakdown -> DecisionProposal ->
--- **Decision** chain described in docs/improvement/agent.md (Implementation
+-- **Decision** chain described in docs/development/commands/agent.md (Implementation
 -- Phase 4). A DecisionProposal carries a `proposed_verdict` plus a routing
 -- decision; when that route is auto-accept (no human gate required) the
 -- runtime finalises it into a `Decision` row recording the resolved verdict.

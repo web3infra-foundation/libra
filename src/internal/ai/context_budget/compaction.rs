@@ -2,7 +2,7 @@
 //!
 //! Carries the [`CompactionEvent`] schema, OC-Phase 4 P4.5
 //! `tail_start_id` field, and the canonical prune / preserve-recent
-//! constants the doc requires (`docs/improvement/opencode.md`
+//! constants the doc requires (`docs/development/commands/_general.md`
 //! "Libra Compaction 默认常量"). The constants are exported so the
 //! prune projection in [`super::projection`] and the budget
 //! calculator in [`super::budget`] read the same values; OC-Phase 5

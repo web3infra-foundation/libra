@@ -13,7 +13,7 @@ The worker reads `LIBRA_PUBLISH_DB` (D1) and `LIBRA_PUBLISH_BUCKET`
 | `src/internal/publish/` | Rust side: builds publish snapshots and uploads them to D1/R2 |
 | `src/command/publish.rs` | CLI entry: `libra publish init / sync / deploy / status / unpublish` |
 | `sql/publish/` | D1 schema migrations consumed by the worker |
-| `docs/improvement/publish.md` | Design / phased rollout for the publish surface, including the Phase 7 Worker-surface handoff |
+| `docs/development/commands/publish.md` | Design / phased rollout for the publish surface, including the Phase 7 Worker-surface handoff |
 
 ## Scripts
 

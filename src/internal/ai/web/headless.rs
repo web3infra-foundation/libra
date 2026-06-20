@@ -28,7 +28,7 @@
 //!   snapshot.
 //!
 //! These follow-ups are explicitly called out in
-//! `docs/improvement/web.md` and will land in subsequent phases.
+//! `docs/development/commands/_general.md` and will land in subsequent phases.
 
 use std::{
     collections::HashMap,

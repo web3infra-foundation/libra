@@ -32,11 +32,11 @@ const ROOT_AFTER_HELP: &str = "\
 Command Groups:
   Repository Setup        init, clone, config
   Working Tree            status, add, rm, mv, restore, clean, stash, lfs, worktree
-  History Inspection      log, shortlog, show, show-ref, ls-remote, diff, grep, blame, describe
+  History Inspection      log, shortlog, show, show-ref, ls-remote, ls-tree, diff, grep, blame, describe, notes, archive
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing maintenance, db, fsck, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
+  Maintenance And Plumbing db, fsck, maintenance, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -325,8 +325,18 @@ enum Commands {
     Show(command::show::ShowArgs),
     #[command(about = "List references in a local repository")]
     ShowRef(command::show_ref::ShowRefArgs),
+    #[command(
+        about = "Iterate over refs in a local repository with formatting and filtering",
+        after_help = command::for_each_ref::FOR_EACH_REF_EXAMPLES
+    )]
+    ForEachRef(command::for_each_ref::ForEachRefArgs),
     #[command(about = "List references in a remote repository")]
     LsRemote(command::ls_remote::LsRemoteArgs),
+    #[command(
+        about = "List the contents of a tree object",
+        after_help = command::ls_tree::LS_TREE_EXAMPLES
+    )]
+    LsTree(command::ls_tree::LsTreeArgs),
     #[command(about = "Read or update the symbolic HEAD ref")]
     SymbolicRef(command::symbolic_ref::SymbolicRefArgs),
     #[command(about = "Parse and normalize revision names and repository paths")]
@@ -344,8 +354,18 @@ enum Commands {
         alias = "desc"
     )]
     Describe(command::describe::DescribeArgs),
+    #[command(
+        about = "Add, show, list, or remove notes attached to commits",
+        after_help = command::notes::NOTES_EXAMPLES
+    )]
+    Notes(command::notes::NotesArgs),
     #[command(about = "Provide content, type or size info for repository objects")]
     CatFile(command::cat_file::CatFileArgs),
+    #[command(
+        about = "Create an archive of files from a named tree",
+        after_help = command::archive::ARCHIVE_EXAMPLES
+    )]
+    Archive(command::archive::ArchiveArgs),
     #[command(about = "Compute Git-compatible object IDs")]
     HashObject(command::hash_object::HashObjectArgs),
     #[command(about = "Validate pack index files against pack archives")]
@@ -445,6 +465,23 @@ pub enum Stash {
     Push {
         #[arg(short, long, help = "The message to display for the stash")]
         message: Option<String>,
+        #[arg(
+            short = 'u',
+            long = "include-untracked",
+            help = "Include untracked files in the stash"
+        )]
+        include_untracked: bool,
+        #[arg(
+            short = 'a',
+            long = "all",
+            help = "Include untracked and ignored files in the stash"
+        )]
+        all: bool,
+        #[arg(
+            long = "keep-index",
+            help = "Keep staged changes in the index and working tree"
+        )]
+        keep_index: bool,
     },
     #[command(about = "Remove a single stashed state from the stash list")]
     Pop {
@@ -621,6 +658,48 @@ fn rewrite_log_short_number_args(args: Vec<String>) -> Vec<String> {
     out
 }
 
+fn rewrite_index_pack_progress_args(args: Vec<String>) -> Vec<String> {
+    let subcommand = find_subcommand_index(&args);
+    let Some((index_pack_index, from_double_dash)) = subcommand else {
+        return args;
+    };
+    if !matches!(args.get(index_pack_index), Some(name) if name == "index-pack") {
+        return args;
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    if from_double_dash {
+        for (idx, arg) in args.iter().enumerate().take(index_pack_index + 1) {
+            if idx + 1 == index_pack_index && arg == "--" {
+                continue;
+            }
+            out.push(arg.clone());
+        }
+    } else {
+        out.extend(args.iter().take(index_pack_index + 1).cloned());
+    }
+
+    let mut after_double_dash = false;
+    for arg in args.into_iter().skip(index_pack_index + 1) {
+        if after_double_dash {
+            out.push(arg);
+            continue;
+        }
+        if arg == "--" {
+            after_double_dash = true;
+            out.push(arg);
+            continue;
+        }
+        match arg.as_str() {
+            "--progress" => out.push("--progress=text".to_string()),
+            "--no-progress" => out.push("--progress=none".to_string()),
+            _ => out.push(arg),
+        }
+    }
+
+    out
+}
+
 /// Locate the first non-flag token in `args` and return its index plus whether it was
 /// produced by an explicit `--` separator.
 ///
@@ -642,6 +721,17 @@ fn find_subcommand_index(args: &[String]) -> Option<(usize, bool)> {
             } else {
                 None
             };
+        }
+        if matches!(arg.as_str(), "--color" | "--progress") {
+            i = (i + 2).min(args.len());
+            continue;
+        }
+        if arg.starts_with("--color=")
+            || arg.starts_with("--progress=")
+            || arg.starts_with("--json=")
+        {
+            i += 1;
+            continue;
         }
         if !arg.starts_with('-') {
             return Some((i, false));
@@ -882,6 +972,7 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
             )),
             Err(_) => Ok(CommandPreflight::sha1_without_repo()),
         },
+        Commands::Archive(args) if args.list => Ok(CommandPreflight::none()),
         #[cfg(unix)]
         Commands::Worktree(command::worktree::WorktreeArgs {
             command: command::worktree::WorktreeSubcommand::Umount { .. },
@@ -1059,6 +1150,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         None => env::args().collect::<Vec<_>>(),
     };
     let argv = rewrite_log_short_number_args(argv);
+    let argv = rewrite_index_pack_progress_args(argv);
     utils::output::reset_warning_tracker();
     if is_error_codes_help_topic(&argv) {
         return print_error_codes_help();
@@ -1129,6 +1221,8 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
 
             command::init::execute_safe(cmd_args, &output).await?;
             set_local_hash_kind_for_storage(&storage).await?;
+            #[cfg(test)]
+            let _cwd_lock = crate::utils::test::cwd_lock_guard();
             env::set_current_dir(&original_dir).map_err(|e| {
                 CliError::fatal(format!(
                     "failed to restore working directory '{}': {}",
@@ -1157,7 +1251,11 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Shortlog(cmd_args) => command::shortlog::execute_safe(cmd_args, &output).await?,
         Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
         Commands::ShowRef(cmd_args) => command::show_ref::execute_safe(cmd_args, &output).await?,
+        Commands::ForEachRef(cmd_args) => {
+            command::for_each_ref::execute_safe(cmd_args, &output).await?
+        }
         Commands::LsRemote(cmd_args) => command::ls_remote::execute_safe(cmd_args, &output).await?,
+        Commands::LsTree(cmd_args) => command::ls_tree::execute_safe(cmd_args, &output).await?,
         Commands::SymbolicRef(cmd_args) => {
             command::symbolic_ref::execute_safe(cmd_args, &output).await?
         }
@@ -1172,11 +1270,13 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::RevList(cmd_args) => command::rev_list::execute_safe(cmd_args, &output).await?,
         Commands::Mv(cmd_args) => command::mv::execute_safe(cmd_args, &output).await?,
         Commands::Describe(cmd_args) => command::describe::execute_safe(cmd_args, &output).await?,
+        Commands::Notes(cmd_args) => command::notes::execute_safe(cmd_args, &output, &argv).await?,
         Commands::CherryPick(cmd_args) => {
             command::cherry_pick::execute_safe(cmd_args, &output).await?
         }
         Commands::Push(cmd_args) => command::push::execute_safe(cmd_args, &output).await?,
         Commands::CatFile(cmd_args) => command::cat_file::execute_safe(cmd_args, &output).await?,
+        Commands::Archive(cmd_args) => command::archive::execute_safe(cmd_args, &output).await?,
         Commands::HashObject(cmd_args) => {
             command::hash_object::execute_safe(cmd_args, &output).await?
         }
@@ -1292,6 +1392,45 @@ mod tests {
         assert!(
             matches!(cli.command, Commands::Config(_)),
             "`cfg` should parse as the config subcommand"
+        );
+    }
+
+    #[test]
+    fn index_pack_progress_rewrite_keeps_pack_positional() {
+        let rewritten = rewrite_index_pack_progress_args(vec![
+            "libra".to_string(),
+            "index-pack".to_string(),
+            "--progress".to_string(),
+            "fixture.pack".to_string(),
+        ]);
+
+        assert_eq!(
+            rewritten,
+            vec!["libra", "index-pack", "--progress=text", "fixture.pack"]
+        );
+    }
+
+    #[test]
+    fn index_pack_no_progress_rewrite_uses_global_none_mode() {
+        let rewritten = rewrite_index_pack_progress_args(vec![
+            "libra".to_string(),
+            "--progress".to_string(),
+            "none".to_string(),
+            "index-pack".to_string(),
+            "--no-progress".to_string(),
+            "fixture.pack".to_string(),
+        ]);
+
+        assert_eq!(
+            rewritten,
+            vec![
+                "libra",
+                "--progress",
+                "none",
+                "index-pack",
+                "--progress=none",
+                "fixture.pack"
+            ]
         );
     }
 

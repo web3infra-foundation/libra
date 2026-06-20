@@ -4,7 +4,7 @@
 //! stub handlers for the rest of the CLI surface so users can discover the
 //! shape via `libra agent --help`. Subsequent phases fill in checkpoint /
 //! session / hook routing on top of this scaffold; see
-//! `docs/improvement/entire.md` section 9.
+//! `docs/development/commands/_general.md` section 9.
 
 use clap::{Args, Subcommand};
 
@@ -41,7 +41,7 @@ mod status;
 /// `--all` clean form, a named `--remote` push, and a JSON variant
 /// for agents so users see all supported forms without reading the
 /// design doc. Cross-cutting `--help` EXAMPLES rollout per
-/// `docs/improvement/README.md` item B.
+/// `docs/development/commands/_general.md` item B.
 pub const AGENT_EXAMPLES: &str = "\
 EXAMPLES:
     libra agent status                              Show captured-session counts and recent checkpoint summary

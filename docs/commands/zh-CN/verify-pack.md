@@ -5,7 +5,7 @@
 ## 概要
 
 ```bash
-libra verify-pack [OPTIONS] <IDX_FILE>
+libra verify-pack [OPTIONS] <IDX_FILE>...
 ```
 
 ## 说明
@@ -19,17 +19,18 @@ libra verify-pack [OPTIONS] <IDX_FILE>
 - 对象数量、对象 ID 和偏移量
 - version 2 索引的 CRC32 值
 
-默认情况下，pack 路径通过将索引文件扩展名替换为 `.pack` 得出。当 pack 归档位于其他位置时，使用 `--pack <PACK_FILE>`。该命令不需要 Libra 仓库。在仓库内运行时，它使用该仓库的对象格式。在仓库外运行时，version 2 索引文件会从索引布局推断 SHA-1 或 SHA-256；version 1 索引仅支持 SHA-1。
+默认情况下，pack 路径通过将每个索引文件扩展名替换为 `.pack` 得出。当 pack 归档位于其他位置时，对单个 `<IDX_FILE>` 使用 `--pack <PACK_FILE>`。该命令不需要 Libra 仓库。在仓库内运行时，它使用该仓库的对象格式。在仓库外运行时，version 2 索引文件会从索引布局推断 SHA-1 或 SHA-256；version 1 索引仅支持 SHA-1。
 
-兼容性说明：此命令目前每次调用接受一个 `<IDX_FILE>`，并且不暴露 Git 的 `-s` / `--stat-only` 形式。
+兼容性说明：多个 `<IDX_FILE>` 会按输入顺序逐个验证。`--pack` 不能和多个索引同时使用，因为 Git 的 pack/index 命名模型无法为每个索引提供无歧义的显式 pack。
 
 ## 选项
 
 | 标志 | 短选项 | 说明 | 默认值 |
 |------|-------|-------------|---------|
-| `<IDX_FILE>` | | 要验证的 pack 索引文件 | 必需 |
-| `--pack <PATH>` | | 要对照验证的 pack 归档 | 扩展名替换为 `.pack` 的 `<IDX_FILE>` |
+| `<IDX_FILE>...` | | 要验证的 pack 索引文件 | 必需 |
+| `--pack <PATH>` | | 对照单个索引验证的 pack 归档 | 扩展名替换为 `.pack` 的 `<IDX_FILE>` |
 | `--verbose` | `-v` | 使用 Git 兼容的 verbose 字段打印每个索引对象 | 关闭 |
+| `--stat-only` | `-s` | 只打印 Git 风格的 non-delta 和 delta 链统计 | 关闭 |
 | `--json` | | 输出结构化 JSON 信封 | 关闭 |
 | `--machine` | | 以一行紧凑 JSON 输出同一信封 | 关闭 |
 
@@ -37,17 +38,20 @@ libra verify-pack [OPTIONS] <IDX_FILE>
 
 ```bash
 libra verify-pack objects/pack/pack-abc123.idx
+libra verify-pack pack-a.idx pack-b.idx
 libra verify-pack --pack /tmp/pack-abc123.pack /tmp/pack-abc123.idx
 libra verify-pack -v pack-abc123.idx
+libra verify-pack -s pack-abc123.idx
 libra verify-pack pack-abc123.idx --json
 ```
 
 ## 人类可读输出
 
-成功的非 verbose 验证会打印一行摘要：
+成功的非 verbose 验证会为每个索引打印一行摘要：
 
 ```text
 objects/pack/pack-abc123.idx: ok
+objects/pack/pack-def456.idx: ok
 ```
 
 Verbose 模式会先使用 Git 的基础字段布局打印索引对象，然后打印摘要行：
@@ -58,6 +62,13 @@ objects/pack/pack-abc123.idx: ok
 ```
 
 字段为 `<oid> <type> <size> <size-in-pack> <offset>`。version 2 索引的 CRC32 值会被验证，并且仍可在结构化输出中使用，但不会在人类可读 verbose 模式下打印。
+
+Stat-only 模式打印 Git 风格的汇总统计，并且不打印末尾的 `: ok` 行：
+
+```text
+non delta: 42 objects
+chain length = 1: 3 objects
+```
 
 ## 结构化输出
 
@@ -78,14 +89,48 @@ objects/pack/pack-abc123.idx: ok
 ```
 
 当 `--verbose` 与 `--json` 组合使用时，`data.objects[]` 包含 `oid`、`object_type`、`size`、`size_in_pack`、`offset` 和可选的 `crc32`。
+当 `--stat-only` 与 `--json` 组合使用时，`data.stats` 包含 `non_delta` 和可能存在的 `chain_lengths`。
+
+多个索引的结构化输出会包装每个索引结果：
+
+```json
+{
+  "ok": true,
+  "command": "verify-pack",
+  "data": {
+    "verified": true,
+    "count": 2,
+    "results": [
+      {
+        "idx_file": "pack-a.idx",
+        "pack_file": "pack-a.pack",
+        "index_version": 1,
+        "object_count": 42,
+        "pack_hash": "0123456789abcdef0123456789abcdef01234567",
+        "index_hash": "89abcdef0123456789abcdef0123456789abcdef",
+        "verified": true
+      },
+      {
+        "idx_file": "pack-b.idx",
+        "pack_file": "pack-b.pack",
+        "index_version": 1,
+        "object_count": 42,
+        "pack_hash": "fedcba9876543210fedcba9876543210fedcba98",
+        "index_hash": "76543210fedcba9876543210fedcba9876543210",
+        "verified": true
+      }
+    ]
+  }
+}
+```
 
 ## 兼容性
 
 | 功能 | Libra | Git | jj |
 |---------|-------|-----|----|
-| 验证 pack 索引 | `libra verify-pack <idx>` | `git verify-pack <idx>...` | N/A |
+| 验证 pack 索引 | `libra verify-pack <idx>...` | `git verify-pack <idx>...` | N/A |
 | Verbose 对象 | `-v` / `--verbose` | `-v` | N/A |
-| Stat-only 模式 | 不支持 | `-s` / `--stat-only` | N/A |
+| Stat-only 模式 | `-s` / `--stat-only` | `-s` / `--stat-only` | N/A |
 | 显式 pack 路径 | `--pack <path>` | N/A | N/A |
 | JSON 输出 | `--json` / `--machine` | N/A | N/A |
 | Version 1 索引 | SHA-1 仓库支持 | 支持 | N/A |
@@ -100,3 +145,4 @@ objects/pack/pack-abc123.idx: ok
 | 索引格式错误 | `LBR-REPO-002` | 128 |
 | Pack 格式错误 | `LBR-REPO-002` | 128 |
 | 索引和 pack 不一致 | `LBR-REPO-002` | 128 |
+| `--pack` 和多个索引同时使用 | `LBR-CLI-002` | 129 |

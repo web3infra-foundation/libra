@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashSet,
-    io::Write,
+    io::{IsTerminal, Write},
     path::PathBuf,
     process::{Command, Stdio},
     str::FromStr,
@@ -27,7 +27,7 @@ use sea_orm::ConnectionTrait;
 use serde::Serialize;
 
 use crate::{
-    command::{load_object, save_object_to_storage, status},
+    command::{diff, editor, load_object, save_object_to_storage, status},
     common_utils::{check_conventional_commits_message, format_commit_msg},
     internal::{
         ai::automation::{VCS_EVENT_POST_COMMIT, dispatch_current_repo_vcs_event_to_history},
@@ -57,7 +57,7 @@ const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
 
 /// `--help` examples shown in `libra commit --help` output.
 ///
-/// Per `docs/improvement/commit.md`, the commit command exposes nine
+/// Per `docs/development/commands/commit.md`, the commit command exposes nine
 /// representative scenarios so users see the most common invocations
 /// without having to read the doc. Keep this list and the rustdoc
 /// snippet in `commit.md` in sync.
@@ -70,18 +70,21 @@ EXAMPLES:
     libra commit -a -m 'Fix typo'                    Auto-stage tracked changes and commit
     libra commit -F message.txt                      Read commit message from file
     libra commit -s -m 'Add feature'                 Add Signed-off-by trailer
+    libra commit -e -m 'Draft'                       Edit the message in $EDITOR before committing
+    libra commit -v                                  Show the staged diff in the editor template
     libra commit --allow-empty -m 'Trigger CI'       Create an empty commit
     libra commit --json -m 'Add feature'             Structured JSON output for agents";
 
 #[derive(Parser, Debug, Default)]
 #[command(after_help = COMMIT_EXAMPLES)]
 pub struct CommitArgs {
-    /// Commit message body (required unless --file or --no-edit is given)
-    #[arg(short, long, required_unless_present_any(["file", "no_edit"]))]
+    /// Commit message body. When omitted (and no other source), the editor is
+    /// opened on an interactive terminal; otherwise the commit aborts.
+    #[arg(short, long)]
     pub message: Option<String>,
 
     /// read message from file
-    #[arg(short = 'F', long, required_unless_present_any(["message", "no_edit"]))]
+    #[arg(short = 'F', long)]
     pub file: Option<String>,
 
     /// allow commit with empty index
@@ -96,8 +99,9 @@ pub struct CommitArgs {
     #[arg(long)]
     pub amend: bool,
 
-    /// use the message from the original commit when amending
-    #[arg(long, requires = "amend",conflicts_with_all(["message", "file"]))]
+    /// Reuse the existing message (the amend parent's, or the one from -m/-F)
+    /// without opening the editor.
+    #[arg(long, conflicts_with = "edit")]
     pub no_edit: bool,
     /// add signed-off-by line at the end of the commit message
     #[arg(short = 's', long)]
@@ -118,6 +122,61 @@ pub struct CommitArgs {
     /// Override the commit author. Specify an explicit author using the standard A U Thor <author@example.com> format.
     #[arg(long)]
     pub author: Option<String>,
+
+    /// Create a fixup commit targeting the specified commit. The message becomes "fixup! <subject>".
+    #[arg(long, value_name = "COMMIT", conflicts_with_all = ["message", "file", "squash", "reuse_message", "reedit_message"])]
+    pub fixup: Option<String>,
+
+    /// Create a squash commit targeting the specified commit. The message becomes "squash! <subject>".
+    #[arg(long, value_name = "COMMIT", conflicts_with_all = ["message", "file", "fixup", "reuse_message", "reedit_message"])]
+    pub squash: Option<String>,
+
+    /// Clean up the commit message according to the given mode: strip (default), whitespace, verbatim, scissors, or default.
+    #[arg(long, value_name = "MODE")]
+    pub cleanup: Option<CleanupMode>,
+
+    /// Do not actually create the commit; show what would be committed.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Add a trailer line to the commit message. Can be given multiple times.
+    #[arg(long = "trailer", value_name = "TRAILER")]
+    pub trailers: Vec<String>,
+
+    /// Reuse the message from the specified commit.
+    #[arg(short = 'C', long = "reuse-message", value_name = "COMMIT", conflicts_with_all = ["message", "file", "fixup", "squash"])]
+    pub reuse_message: Option<String>,
+
+    /// Reuse and edit the message from the specified commit.
+    #[arg(short = 'c', long = "reedit-message", value_name = "COMMIT", conflicts_with_all = ["message", "file", "fixup", "squash"])]
+    pub reedit_message: Option<String>,
+
+    /// Reset the author of the commit to the current user identity.
+    #[arg(long)]
+    pub reset_author: bool,
+
+    /// Open the editor to edit the commit message even when -m/-F/-C is given.
+    #[arg(short = 'e', long = "edit")]
+    pub edit: bool,
+
+    /// Show a diff of staged changes in the editor template or on stderr.
+    #[arg(short = 'v', long = "verbose")]
+    pub verbose: bool,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum CleanupMode {
+    /// Strip leading/trailing empty lines and trailing whitespace from every line, then strip commentary lines.
+    #[default]
+    Strip,
+    /// Same as strip but leave consecutive empty lines.
+    Whitespace,
+    /// Do not change the message at all.
+    Verbatim,
+    /// Same as strip but truncate the message at the scissors line.
+    Scissors,
+    /// Same as strip if the message is to be edited, otherwise whitespace.
+    Default,
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +241,9 @@ pub enum CommitError {
 
     #[error("failed to calculate staged changes: {0}")]
     StagedChanges(String),
+
+    #[error("{0}")]
+    EditorFailed(String),
 }
 
 impl From<CommitError> for CliError {
@@ -219,6 +281,9 @@ impl From<CommitError> for CliError {
             CommitError::EmptyMessage => CliError::failure(error.to_string())
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("use -m to provide a commit message"),
+            CommitError::EditorFailed(..) => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::IoReadFailed)
+                .with_hint("set $EDITOR/core.editor, or pass -m to provide the message directly"),
             CommitError::TreeCreation(..) => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::InternalInvariant)
                 .with_hint(format!("this is a bug; please report it at {ISSUE_URL}")),
@@ -315,9 +380,9 @@ fn parse_author(author: &str) -> Result<(String, String), CommitError> {
 
 /// A user's name + email pair used for commit authoring and committing.
 #[derive(Clone, Debug)]
-struct UserIdentity {
-    name: String,
-    email: String,
+pub(crate) struct UserIdentity {
+    pub(crate) name: String,
+    pub(crate) email: String,
 }
 
 async fn get_user_config_value(key: &str) -> Option<String> {
@@ -337,7 +402,7 @@ fn missing_identity_error(name_missing: bool, email_missing: bool) -> CommitErro
     CommitError::IdentityMissing(detail.to_string())
 }
 
-async fn resolve_committer_identity() -> Result<UserIdentity, CommitError> {
+pub(crate) async fn resolve_committer_identity() -> Result<UserIdentity, CommitError> {
     let identity_sources = resolve_user_identity_sources(LocalIdentityTarget::CurrentRepo)
         .await
         .map_err(|error| CommitError::IdentityMissing(error.to_string()))?;
@@ -454,29 +519,15 @@ pub async fn run_commit(
         run_pre_commit_hook(output)?;
     }
 
-    // Resolve commit message
-    let message = match (args.message, args.file) {
-        (Some(msg), _) => msg,
-        (None, Some(file_path)) => tokio::fs::read_to_string(&file_path).await.map_err(|e| {
-            CommitError::MessageFileRead {
-                path: file_path,
-                detail: e.to_string(),
-            }
-        })?,
-        (None, None) => {
-            if !args.no_edit {
-                return Err(CommitError::EmptyMessage);
-            }
-            // --no-edit with --amend: message comes from parent commit below
-            String::new()
-        }
-    };
+    // Resolve parent commits (needed to seed the editor with the amend parent's
+    // message).
+    let parents_commit_ids = get_parents_ids().await;
+
+    // Resolve the commit message (may open the editor for -e/-v or a bare commit).
+    let message = resolve_final_message(&args, output, &parents_commit_ids).await?;
 
     // Create tree
     let tree = create_tree(&index, &storage, "".into()).await?;
-
-    // Resolve parent commits
-    let parents_commit_ids = get_parents_ids().await;
 
     // Create author and committer signatures
     let (author, committer, committer_identity) =
@@ -508,6 +559,17 @@ pub async fn run_commit(
         })?;
         let grandpa_commit_id = parent_commit.parent_commit_ids;
 
+        // Git-compatible amend authorship: preserve the original commit's author
+        // (name, email, and authored date) unless the user explicitly resets it
+        // with `--reset-author` or supplies a new one with `--author`. Without this
+        // the amended commit would silently adopt the current committer identity,
+        // which makes `--reset-author` a no-op and diverges from Git.
+        let author = if args.reset_author || args.author.is_some() {
+            author
+        } else {
+            parent_commit.author.clone()
+        };
+
         let final_message = if args.no_edit {
             parent_commit.message.clone()
         } else {
@@ -529,12 +591,37 @@ pub async fn run_commit(
             ));
         }
 
+        if args.dry_run {
+            let commit = Commit::new(
+                author,
+                committer,
+                tree.id,
+                grandpa_commit_id,
+                &format_commit_msg(&commit_message, None),
+            );
+            return Ok(build_commit_output(
+                &commit,
+                &commit_message,
+                &staged_changes,
+                true,
+                is_signoff,
+                if is_conventional && !skip_conventional_check {
+                    Some(true)
+                } else {
+                    None
+                },
+                false,
+            )
+            .await);
+        }
+
         let gpg_sig = vault_sign_commit(
             &tree.id,
             &grandpa_commit_id,
             &author,
             &committer,
             &commit_message,
+            false,
         )
         .await?;
 
@@ -584,12 +671,37 @@ pub async fn run_commit(
         ));
     }
 
+    if args.dry_run {
+        let commit = Commit::new(
+            author,
+            committer,
+            tree.id,
+            parents_commit_ids,
+            &format_commit_msg(&commit_message, None),
+        );
+        return Ok(build_commit_output(
+            &commit,
+            &commit_message,
+            &staged_changes,
+            false,
+            is_signoff,
+            if is_conventional && !skip_conventional_check {
+                Some(true)
+            } else {
+                None
+            },
+            false,
+        )
+        .await);
+    }
+
     let gpg_sig = vault_sign_commit(
         &tree.id,
         &parents_commit_ids,
         &author,
         &committer,
         &commit_message,
+        false,
     )
     .await?;
 
@@ -621,6 +733,239 @@ pub async fn run_commit(
         gpg_sig.is_some(),
     )
     .await)
+}
+
+/// Resolve the final commit message from CLI arguments.
+/// Resolve the final commit message, opening the editor when needed and
+/// possible.
+///
+/// Message sources are tried in order (fixup → squash → -C/-c → -m → -F). The
+/// editor is opened when `-e`/`-c` is given, or when no source is supplied and
+/// `--no-edit` is absent — provided an editor is available (an explicitly
+/// configured `$GIT_EDITOR`/`core.editor`/`$VISUAL`/`$EDITOR` runs even without
+/// a TTY; the implicit `vi` fallback requires an interactive terminal). With
+/// `-v` the staged diff is appended to the template and stripped at the scissors
+/// marker so it never enters the message. An empty final message aborts.
+async fn resolve_final_message(
+    args: &CommitArgs,
+    output: &OutputConfig,
+    parent_ids: &[ObjectHash],
+) -> Result<String, CommitError> {
+    let base: Option<String> = if let Some(spec) = &args.fixup {
+        Some(format!(
+            "fixup! {}",
+            commit_subject(&load_commit_message(spec).await?)
+        ))
+    } else if let Some(spec) = &args.squash {
+        Some(format!(
+            "squash! {}",
+            commit_subject(&load_commit_message(spec).await?)
+        ))
+    } else if let Some(spec) = args.reuse_message.as_ref().or(args.reedit_message.as_ref()) {
+        Some(load_commit_message(spec).await?)
+    } else if let Some(msg) = &args.message {
+        Some(msg.clone())
+    } else if let Some(file_path) = &args.file {
+        Some(tokio::fs::read_to_string(file_path).await.map_err(|e| {
+            CommitError::MessageFileRead {
+                path: file_path.clone(),
+                detail: e.to_string(),
+            }
+        })?)
+    } else {
+        None
+    };
+
+    // `-e`/`-c` always edit; otherwise an editor is needed only to author a
+    // message when no source was supplied and `--no-edit` was not given.
+    let needs_editor =
+        args.edit || args.reedit_message.is_some() || (base.is_none() && !args.no_edit);
+
+    // Initial editor buffer / non-editor fallback: the explicit source, else the
+    // amend parent's message, else empty.
+    let initial = match &base {
+        Some(text) => text.clone(),
+        None if args.amend && !parent_ids.is_empty() => load_object::<Commit>(&parent_ids[0])
+            .map(|commit| commit.message.trim_start_matches('\n').to_string())
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+
+    let mode = args.cleanup.unwrap_or(CleanupMode::Strip);
+
+    // Pick the editor: an explicitly configured one runs regardless of TTY; the
+    // `vi` fallback only applies on an interactive terminal.
+    let editor_cmd = if needs_editor && !output.is_json() {
+        match editor::resolve_editor().await {
+            Some(cmd) => Some(cmd),
+            None if std::io::stdin().is_terminal() => Some("vi".to_string()),
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let resolved = if let Some(editor_cmd) = editor_cmd {
+        let buffer = if args.verbose {
+            build_verbose_template(&initial).await?
+        } else {
+            initial.clone()
+        };
+        let path = util::storage_path().join("COMMIT_EDITMSG");
+        let raw = editor::edit_message(&path, &buffer, &editor_cmd, true)
+            .await
+            .map_err(|e| CommitError::EditorFailed(e.to_string()))?;
+        // `-v` always strips at the scissors marker; otherwise honor --cleanup.
+        let effective_mode = if args.verbose {
+            CleanupMode::Scissors
+        } else {
+            mode
+        };
+        cleanup_commit_message(&raw, effective_mode)
+    } else {
+        // No editor was opened. `-v` here just prints the staged diff to stderr
+        // (it never enters the message).
+        if args.verbose
+            && !output.is_json()
+            && !output.quiet
+            && let Ok(diff) = diff::staged_diff_text().await
+            && !diff.trim().is_empty()
+        {
+            eprintln!("{diff}");
+        }
+        cleanup_commit_message(&initial, mode)
+    };
+
+    if resolved.trim().is_empty() {
+        return Err(CommitError::EmptyMessage);
+    }
+
+    if args.trailers.is_empty() {
+        Ok(resolved)
+    } else {
+        Ok(append_trailers(&resolved, &args.trailers))
+    }
+}
+
+/// Build the `commit -v` editor template: the initial message, a commented
+/// help/status header, the Git-standard scissors marker, and the staged diff.
+/// Everything from the scissors line down is stripped by `Scissors` cleanup.
+async fn build_verbose_template(initial: &str) -> Result<String, CommitError> {
+    let diff = diff::staged_diff_text()
+        .await
+        .map_err(|e| CommitError::StagedChanges(e.to_string()))?;
+    let mut buffer = String::new();
+    buffer.push_str(initial);
+    if !initial.is_empty() && !initial.ends_with('\n') {
+        buffer.push('\n');
+    }
+    buffer.push('\n');
+    buffer.push_str("# Please enter the commit message for your changes. Lines starting\n");
+    buffer.push_str("# with '#' will be ignored, and an empty message aborts the commit.\n");
+    buffer.push_str("#\n");
+    buffer.push_str("# ------------------------ >8 ------------------------\n");
+    buffer.push_str("# Do not modify or remove the line above.\n");
+    buffer.push_str("# Everything below it will be ignored.\n");
+    buffer.push_str(&diff);
+    if !diff.is_empty() && !diff.ends_with('\n') {
+        buffer.push('\n');
+    }
+    Ok(buffer)
+}
+
+/// Load the commit message of the given commit-ish.
+async fn load_commit_message(spec: &str) -> Result<String, CommitError> {
+    let hash =
+        util::get_commit_base_typed(spec)
+            .await
+            .map_err(|e| CommitError::ParentCommitLoad {
+                commit_id: spec.to_string(),
+                detail: e.to_string(),
+            })?;
+    let commit = load_object::<Commit>(&hash).map_err(|e| CommitError::ParentCommitLoad {
+        commit_id: spec.to_string(),
+        detail: e.to_string(),
+    })?;
+    Ok(commit.message.trim_start_matches('\n').to_string())
+}
+
+/// Extract the subject (first line) of a commit message.
+fn commit_subject(message: &str) -> &str {
+    message.lines().next().unwrap_or(message).trim()
+}
+
+/// Apply Git-style cleanup to a commit message.
+fn cleanup_commit_message(message: &str, mode: CleanupMode) -> String {
+    match mode {
+        CleanupMode::Verbatim => message.to_string(),
+        CleanupMode::Scissors => {
+            // Truncate at the scissors marker. Accept both a bare marker and
+            // Git's comment-prefixed form (`# ------------------------ >8 ...`),
+            // so the `commit -v` template (which uses the Git-standard `#` form)
+            // is stripped along with the staged diff below it.
+            let trimmed = message
+                .lines()
+                .take_while(|line| {
+                    !line
+                        .trim()
+                        .trim_start_matches('#')
+                        .trim_start()
+                        .starts_with("------------------------ >8 ")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            cleanup_commit_message(&trimmed, CleanupMode::Strip)
+        }
+        CleanupMode::Whitespace => {
+            let lines: Vec<String> = message
+                .lines()
+                .map(|line| line.trim_end().to_string())
+                .collect();
+            let trimmed = trim_empty_lines(&lines);
+            trimmed.join("\n")
+        }
+        CleanupMode::Strip | CleanupMode::Default => {
+            let lines: Vec<String> = message
+                .lines()
+                .map(|line| {
+                    let trimmed = line.trim_end();
+                    if trimmed.starts_with('#') {
+                        String::new()
+                    } else {
+                        trimmed.to_string()
+                    }
+                })
+                .collect();
+            let mut result = trim_empty_lines(&lines);
+            result.retain(|line| !line.is_empty());
+            result.join("\n")
+        }
+    }
+}
+
+fn trim_empty_lines(lines: &[String]) -> Vec<String> {
+    let start = lines
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(lines.len());
+    let end = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map(|i| i + 1)
+        .unwrap_or(lines.len());
+    lines[start..end].to_vec()
+}
+
+/// Append trailer lines to a commit message, inserting a blank line if needed.
+fn append_trailers(message: &str, trailers: &[String]) -> String {
+    let trailers_block = trailers.join("\n");
+    if message.is_empty() {
+        trailers_block
+    } else if message.ends_with('\n') {
+        format!("{}\n{}", message.trim_end(), trailers_block)
+    } else {
+        format!("{}\n\n{}", message, trailers_block)
+    }
 }
 
 /// Run the pre-commit hook, respecting OutputConfig for I/O isolation.
@@ -808,23 +1153,34 @@ pub async fn execute_safe(args: CommitArgs, output: &OutputConfig) -> CliResult<
 
 /// If vault signing is enabled, sign the commit content and return the
 /// formatted `gpgsig` header string. Returns `None` if vault is not configured.
-async fn vault_sign_commit(
+/// Sign a commit using the libra vault PGP key.
+///
+/// When `force` is `false` the signature is only produced if `vault.signing`
+/// is enabled in config (the default `libra commit` behavior). When `force`
+/// is `true` the commit is signed regardless of `vault.signing` — used by
+/// `cherry-pick -S`/`--gpg-sign`, which signs on explicit request. Returns
+/// `Ok(None)` only when signing is not requested (or disabled and not forced).
+pub(crate) async fn vault_sign_commit(
     tree_id: &ObjectHash,
     parent_ids: &[ObjectHash],
     author: &Signature,
     committer: &Signature,
     message: &str,
+    force: bool,
 ) -> Result<Option<String>, CommitError> {
     use crate::internal::{config::ConfigKv, vault};
 
-    // Check if vault signing is enabled
-    let signing_enabled = ConfigKv::get("vault.signing")
-        .await
-        .ok()
-        .flatten()
-        .map(|e| e.value);
-    if signing_enabled.as_deref() != Some("true") {
-        return Ok(None);
+    // Check if vault signing is enabled (unless an explicit `--gpg-sign`
+    // request forces it on).
+    if !force {
+        let signing_enabled = ConfigKv::get("vault.signing")
+            .await
+            .ok()
+            .flatten()
+            .map(|e| e.value);
+        if signing_enabled.as_deref() != Some("true") {
+            return Ok(None);
+        }
     }
 
     // Load unseal key
@@ -1308,19 +1664,26 @@ mod test {
         let args = CommitArgs::try_parse_from(["commit", "--conventional", "-m", "init"]);
         assert!(args.is_ok());
 
+        // Since PR-15, no message source is required at parse time: the editor is
+        // opened at runtime (or the commit aborts when no editor is available).
         let args = CommitArgs::try_parse_from(["commit", "--conventional"]);
-        assert!(args.is_err(), "conventional should require message");
+        assert!(args.is_ok(), "message is now optional (editor authoring)");
 
         let args = CommitArgs::try_parse_from(["commit"]);
-        assert!(args.is_err(), "message is required");
+        assert!(args.is_ok(), "bare commit parses (opens the editor)");
 
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend"]);
         assert!(args.is_ok());
-        //failed
         let args = CommitArgs::try_parse_from(["commit", "--amend", "--no-edit"]);
         assert!(args.is_ok());
+        // --no-edit no longer requires --amend and may carry -m.
         let args = CommitArgs::try_parse_from(["commit", "--no-edit"]);
-        assert!(args.is_err(), "--no-edit requires --amend");
+        assert!(args.is_ok(), "--no-edit no longer requires --amend");
+        let args = CommitArgs::try_parse_from(["commit", "--no-edit", "-m", "init"]);
+        assert!(args.is_ok(), "--no-edit may coexist with -m");
+        // -e and --no-edit are mutually exclusive.
+        let args = CommitArgs::try_parse_from(["commit", "-e", "--no-edit", "-m", "x"]);
+        assert!(args.is_err(), "--edit conflicts with --no-edit");
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--allow-empty", "--amend"]);
         assert!(args.is_ok());
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "-s"]);
@@ -1339,16 +1702,12 @@ mod test {
         assert!(args.is_ok());
         assert!(args.unwrap().all);
 
+        // Since PR-15, --no-edit may coexist with --message/--file (it just
+        // suppresses the editor; the supplied message is used directly).
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend", "--no-edit"]);
-        assert!(
-            args.is_err(),
-            "--no-edit conflicts with --message and --file"
-        );
+        assert!(args.is_ok(), "--no-edit may coexist with --message");
         let args = CommitArgs::try_parse_from(["commit", "-F", "init", "--amend", "--no-edit"]);
-        assert!(
-            args.is_err(),
-            "--no-edit conflicts with --message and --file"
-        );
+        assert!(args.is_ok(), "--no-edit may coexist with --file");
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend", "--signoff"]);
         assert!(args.is_ok());
         let args = args.unwrap();
@@ -1442,6 +1801,7 @@ mod test {
             all: false,
             no_verify: false,
             author: None,
+            ..Default::default()
         };
         fn message_and_file_are_none(args: &CommitArgs) -> Option<String> {
             match (&args.message, &args.file) {
@@ -1597,6 +1957,7 @@ mod test {
             disable_pre: false,
             all: false,
             author: None,
+            ..Default::default()
         };
 
         let commit_message_with_verify = if args_with_verify.signoff {

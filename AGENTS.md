@@ -91,7 +91,7 @@ Do not dismiss an issue only because:
 - `src/utils/` covers shared utilities: `client_storage.rs` (tiered local + S3/R2 + LRU), `d1_client.rs`, path/object/tree helpers, `ignore.rs`, `lfs.rs`, `fuse.rs`, `convert.rs`, `error.rs`, `output.rs`, `pager.rs`, `text.rs`, `worktree.rs`, `storage/`, `storage_ext.rs`, and `test.rs` (`ChangeDirGuard`, `setup_with_new_libra_in`).
 - `tests/` holds integration targets at the top level plus `tests/command/` for per-subcommand suites. `tests/INDEX.md` is the authoritative one-line index of every cargo `--test` target, grouped by Wave (1 command/compat, 2 Code UI & local automation, 3 network, 4 live AI, 5 live cloud, 6 perf smoke); keep it in sync when adding/renaming a test target. Shared helpers live in `tests/command/mod.rs`, `tests/helpers/`, and `tests/harness/`; fixtures live in `tests/data/` and `tests/fixtures/`; `tests/objects/` covers object-level tests; `tests/compat/` covers cross-command compatibility guards.
 - `web/` is the Next.js static export embedded into `WebAssets` by `build.rs` and skipped when `LIBRA_SKIP_WEB_BUILD=1` is set. `worker/` holds the Cloudflare Worker (D1 + R2) backing `libra publish` and cloud backup.
-- Community docs live in `docs/` (including `docs/development/integration-test-plan.md` and `docs/improvement/*.md`); SQLite bootstrap lives in `sql/sqlite_20260309_init.sql` plus `sql/sqlite_20260415_ai_runtime_contract.sql`; runtime migrations live in `sql/migrations/`; publish-pipeline schema lives in `sql/publish/`; hooks/templates live in `template/`; release/install assets live in `install.sh` and `scripts/`.
+- Community docs live in `docs/` (including `docs/development/integration-test-plan.md` and the command development notes under `docs/development/commands/`); SQLite bootstrap lives in `sql/sqlite_20260309_init.sql` plus `sql/sqlite_20260415_ai_runtime_contract.sql`; runtime migrations live in `sql/migrations/`; publish-pipeline schema lives in `sql/publish/`; hooks/templates live in `template/`; release/install assets live in `install.sh`.
 
 ## Build, Test, and Development Commands
 - `cargo +nightly fmt --all` then `cargo clippy --all-targets --all-features -- -D warnings` keep formatting and linting aligned (`rustfmt.toml` sets `group_imports = "StdExternalCrate"` and `imports_granularity = "Crate"`). **CI enforces `-D warnings`; all clippy warnings must be resolved before committing.**
@@ -103,7 +103,7 @@ Do not dismiss an issue only because:
   - `--features test-live-cloud` for Wave 5 (real D1/R2; needs `LIBRA_D1_*`/`LIBRA_STORAGE_*`).
   - `--features test-provider` plus `LIBRA_ENABLE_TEST_PROVIDER=1` to activate the deterministic provider used by `code_ui_scenarios`, `harness_self_test`, `code_codex_default_tui_test`, `code_ui_remote_lease_matrix`, and `code_ui_remote_sse_matrix` (run with `--test-threads=1`).
   - `--features worktree-fuse` for Unix FUSE-backed worktree commands.
-  - `--features subagent-scaffold` for the gated CEX-S2-10 schema scaffold (see `docs/improvement/agent.md`).
+  - `--features subagent-scaffold` for the gated CEX-S2-10 schema scaffold (see `docs/development/commands/agent.md`).
 
 ## Coding Style & Naming Conventions
 - Rust 2024; 4-space indent; snake_case for modules/functions, PascalCase for types, SCREAMING_SNAKE for consts.

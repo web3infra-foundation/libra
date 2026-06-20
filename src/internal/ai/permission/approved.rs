@@ -1,7 +1,7 @@
 //! `ApprovedRuleset` projection over the `approved_permission` table.
 //!
 //! This module is the second half of OC-Phase 2 P2.5 from
-//! `docs/improvement/opencode.md` (the first half is the migration that
+//! `docs/development/commands/_general.md` (the first half is the migration that
 //! introduces the table — `sql/migrations/2026050601_approved_permission.sql`).
 //!
 //! Lifecycle:

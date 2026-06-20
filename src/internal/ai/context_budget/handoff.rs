@@ -1,7 +1,7 @@
 //! Context handoff types + 8-section SUMMARY parser.
 //!
 //! This module is the OC-Phase 4 P4.3 deliverable from
-//! `docs/improvement/opencode.md`. The dispatcher (OC-Phase 3) and the
+//! `docs/development/commands/_general.md`. The dispatcher (OC-Phase 3) and the
 //! compaction agent (OC-Phase 4 P4.4) both need a way to describe a
 //! point-in-time **handoff** of session context — what the model has
 //! done, what is still in flight, what the caller should pick up
@@ -32,7 +32,7 @@
 //!   that signal; this module only validates the produced summary.
 //!
 //! [literal 8-section SUMMARY template]:
-//! https://github.com/genedna/libra/blob/main/docs/improvement/opencode.md#literal-summary-template
+//! https://github.com/genedna/libra/blob/main/docs/development/commands/_general.md#literal-summary-template
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,7 @@ use super::frame::{ContextAttachmentRef, ContextFrameSegment};
 /// history.
 ///
 /// Field semantics (verbatim from
-/// `docs/improvement/opencode.md`):
+/// `docs/development/commands/_general.md`):
 ///
 /// - `summary` — the 8-section markdown produced by the compaction
 ///   agent. Validated by [`parse_handoff_template`] before this struct
@@ -153,7 +153,7 @@ impl ContextHandoff {
 ///    that hard-coded one would force the other to bypass it.
 ///
 /// Field semantics match the verbatim doc table at line 1062 of
-/// `docs/improvement/opencode.md`.
+/// `docs/development/commands/_general.md`.
 #[derive(Debug)]
 pub struct ContextHandoffBuilder<'a> {
     parent_frame: &'a super::frame::ContextFrameEvent,

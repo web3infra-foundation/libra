@@ -32,7 +32,7 @@ const MACOS_SEATBELT_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
 /// the effective sandbox diagnostics for AI tool execution. The banner
 /// pins the human, JSON, and machine-mode forms so users see the three
 /// supported invocations without reading the design doc. Cross-cutting
-/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
+/// `--help` EXAMPLES rollout per `docs/development/commands/_general.md` item B.
 pub const SANDBOX_EXAMPLES: &str = "\
 EXAMPLES:
     libra sandbox status            Show effective sandbox diagnostics for AI tool execution
@@ -276,7 +276,7 @@ fn format_status_human(report: &SandboxStatusOutput) -> String {
         // which services the proxy will actually route — otherwise
         // they have to switch to `--json` to learn what `allowlist`
         // means for this invocation, which contradicts
-        // `docs/improvement/sandbox.md` §7.4 line 350 (`libra sandbox
+        // `docs/development/commands/sandbox.md` §7.4 line 350 (`libra sandbox
         // status` must output `network.allowlist`).
         let _ = writeln!(buffer, "  network_allowlist:");
         for entry in &report.network.allowlist {
@@ -594,7 +594,7 @@ mod tests {
 
     /// `format_status_human` must emit a `network_allowlist:` block
     /// listing every entry in `network.allowlist` when the list is
-    /// non-empty. Pin against `docs/improvement/sandbox.md` §7.4
+    /// non-empty. Pin against `docs/development/commands/sandbox.md` §7.4
     /// line 350 ("`libra sandbox status` 输出 ... `network.allowlist`")
     /// and `docs/commands/sandbox.md`'s field table — without this,
     /// the JSON form exposes the allowlist but the human form

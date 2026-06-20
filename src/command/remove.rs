@@ -27,7 +27,7 @@ use crate::{
 /// untrack", `--force` for overriding the conflicting-state safety
 /// rules, `--dry-run` for previewing, pathspec-from-file for scripts,
 /// and a JSON variant for agents. Cross-cutting `--help` EXAMPLES
-/// rollout per `docs/improvement/README.md` item B.
+/// rollout per `docs/development/commands/_general.md` item B.
 pub const REMOVE_EXAMPLES: &str = "\
 EXAMPLES:
     libra rm stale.txt                      Remove a single tracked file from index and working tree

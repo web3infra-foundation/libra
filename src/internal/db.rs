@@ -584,7 +584,7 @@ pub async fn create_database(db_path: &str) -> io::Result<DatabaseConnection> {
             // `libra init` would create a DB whose schema diverges from a
             // reconnected DB until the first `establish_connection` ran
             // the migrations belatedly. The acceptance criterion in
-            // `docs/improvement/agent.md` line 313 requires fresh and
+            // `docs/development/commands/agent.md` line 313 requires fresh and
             // existing repos to converge to the same schema after init.
             apply_database_schema_upgrades(&conn).await.map_err(|err| {
                 IOError::other(format!(

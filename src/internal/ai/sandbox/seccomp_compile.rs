@@ -1,7 +1,7 @@
 //! On-the-fly seccomp BPF compilation from the bundled
 //! `template/seccomp-default.json` policy.
 //!
-//! `docs/improvement/sandbox.md` §G6 commits Libra to a default
+//! `docs/development/commands/sandbox.md` §G6 commits Libra to a default
 //! seccomp posture: when `LIBRA_SECCOMP_POLICY` is unset and
 //! `~/.libra/seccomp.bpf` is absent, the runtime should be able to
 //! materialise the bundled JSON policy into BPF bytes without the

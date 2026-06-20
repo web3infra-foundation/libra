@@ -1,6 +1,6 @@
 //! Compaction-aware transcript projection + tool-output prune.
 //!
-//! OC-Phase 4 P4.5 deliverable from `docs/improvement/opencode.md`.
+//! OC-Phase 4 P4.5 deliverable from `docs/development/commands/_general.md`.
 //! This module owns two transformations that the dispatcher applies
 //! to a chronological transcript before it ships to the model:
 //!

@@ -18,10 +18,15 @@ use serde::Serialize;
 use crate::{
     command::{
         load_object,
-        log::{ChangeType, generate_diff, get_changed_files_for_commit},
+        log::{ChangeType, generate_diff, get_changed_files_for_commit, parse_pretty_format},
     },
     common_utils::parse_commit_msg,
-    internal::{branch::Branch, head::Head, tag},
+    internal::{
+        branch::Branch,
+        head::Head,
+        log::formatter::{CommitFormatter, FormatContext},
+        tag,
+    },
     utils::{
         client_storage::ClientStorage,
         error::{CliError, CliResult, StableErrorCode},
@@ -38,6 +43,7 @@ EXAMPLES:
     libra show --no-patch v1.0.0            Show tag or commit metadata only
     libra show HEAD:src/main.rs             Show a file from a specific revision
     libra show --stat HEAD~1                Show only diff statistics
+    libra show --name-status HEAD           Show changed files with A/M/D status
     libra --json show HEAD                  Structured JSON output for agents";
 
 /// Shows commits, tags, trees, or blobs.
@@ -56,9 +62,18 @@ pub struct ShowArgs {
     #[clap(long)]
     pub oneline: bool,
 
+    /// Format the commit header with a pretty format
+    /// (`oneline` / `format:<tmpl>` / `tformat:<tmpl>` / custom template).
+    #[clap(long, value_name = "FORMAT")]
+    pub pretty: Option<String>,
+
     /// Show only changed file names.
     #[clap(long)]
     pub name_only: bool,
+
+    /// Show only names and status (A/M/D) of changed files.
+    #[clap(long = "name-status")]
+    pub name_status: bool,
 
     /// Show diff statistics.
     #[clap(long)]
@@ -343,6 +358,21 @@ async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<Str
             if !diffstat.is_empty() {
                 output.push_str(&diffstat);
             }
+        } else if args.name_status {
+            // Show changed file names prefixed by their status letter (A/M/D),
+            // tab-separated, matching `git show --name-status`.
+            let changed_files = get_changed_files_for_commit(&commit, &paths).await?;
+            if !changed_files.is_empty() {
+                output.push('\n');
+                for file in changed_files {
+                    let status = match file.status {
+                        ChangeType::Added => "A",
+                        ChangeType::Modified => "M",
+                        ChangeType::Deleted => "D",
+                    };
+                    output.push_str(&format!("{}\t{}\n", status, file.path.display()));
+                }
+            }
         } else if args.name_only {
             // Show only changed file names.
             let changed_files = get_changed_files_for_commit(&commit, &paths).await?;
@@ -373,8 +403,8 @@ async fn validate_commit_output(commit_hash: &ObjectHash, args: &ShowArgs) -> Cl
     }
 
     let paths: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
-    if args.stat || args.name_only {
-        // --stat and --name-only human paths only need tree-level file lists,
+    if args.stat || args.name_only || args.name_status {
+        // --stat / --name-only / --name-status human paths only need tree-level file lists,
         // not blob contents.  Use the same function so quiet mode has the same
         // success/failure semantics as the visible rendering path.
         let _ = get_changed_files_for_commit(&commit, &paths).await?;
@@ -516,6 +546,19 @@ async fn validate_commit_file(rev: &str, file_path: &str) -> CliResult<()> {
 
 /// Renders the commit header using the selected format.
 fn display_commit_info(output: &mut String, commit: &Commit, args: &ShowArgs) {
+    if let Some(pretty) = &args.pretty {
+        // `--pretty=<fmt>` renders the commit header through the shared log
+        // formatter (oneline / format:<tmpl> / tformat:<tmpl> / custom template).
+        let formatter = CommitFormatter::new(parse_pretty_format(pretty.clone()));
+        let ctx = FormatContext {
+            graph_prefix: "",
+            decoration: "",
+            abbrev_len: 7,
+        };
+        output.push_str(&formatter.format(commit, &ctx));
+        output.push('\n');
+        return;
+    }
     if args.oneline {
         // Oneline format prints the short hash and the first subject line.
         let short_hash = &commit.id.to_string()[..7];

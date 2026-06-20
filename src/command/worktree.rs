@@ -308,13 +308,21 @@ impl std::error::Error for WorktreeError {}
 /// the original directory, even if the inner operation panics or early-returns.
 struct DirGuard {
     old_dir: PathBuf,
+    #[cfg(test)]
+    _cwd_lock: crate::utils::test::CwdLockGuard,
 }
 
 impl DirGuard {
     fn change_to(new_dir: &Path) -> io::Result<Self> {
+        #[cfg(test)]
+        let cwd_lock = crate::utils::test::cwd_lock_guard();
         let old_dir = env::current_dir()?;
         env::set_current_dir(new_dir)?;
-        Ok(Self { old_dir })
+        Ok(Self {
+            old_dir,
+            #[cfg(test)]
+            _cwd_lock: cwd_lock,
+        })
     }
 }
 
@@ -786,6 +794,8 @@ async fn add_worktree(path: String) -> WorktreeResult<WorktreeAddOutput> {
             source: Some("HEAD".to_string()),
             worktree: true,
             staged: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         })
         .await
         {

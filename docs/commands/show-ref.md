@@ -12,13 +12,40 @@ libra show-ref [OPTIONS] [PATTERN]...
 
 `libra show-ref` enumerates references stored in the repository (branches, tags,
 and optionally `HEAD`) along with the object hash each ref points to. By default
-both branches and tags are shown. Use `--heads` or `--tags` to restrict output
-to one category.
+both branches and tags are shown. Use `--heads` / `--branches` or `--tags` to
+restrict output to one category.
 
-Positional `<PATTERN>` arguments act as substring filters on the fully-qualified
-ref name (e.g., `refs/heads/main`). Only refs whose name contains at least one
-of the given patterns are included. `HEAD` is never filtered out by patterns
-when `--head` is specified.
+Git-compatible reset aliases are accepted for scripts that compose flags:
+`--no-branches`, `--no-tags`, `--no-head`, `--no-dereference`,
+`--no-abbrev`, `--no-verify`, and `--no-exists` reset their corresponding
+positive flag when they appear later on the command line. Git also accepts
+`--no-hash` as a hash-only spelling; Libra follows that behavior.
+
+Positional `<PATTERN>` arguments match complete path segments from the end of
+the fully-qualified ref name, following Git's `show-ref` behavior. For example,
+`main` matches `refs/heads/main` and `refs/remotes/origin/main`, but does not
+match `refs/heads/main-2`. `HEAD` is never filtered out by patterns when
+`--head` is specified.
+
+Use `-d` / `--dereference` to peel annotated tags. Annotated tags are printed
+twice: once for the tag object itself and once as `refs/tags/<name>^{}` pointing
+at the peeled target. Lightweight tags remain single-line entries.
+
+Use `--abbrev[=<n>]` to shorten displayed object IDs, defaulting to 7 hex
+digits when the value is omitted. `--abbrev=0` keeps full hashes. `--hash=<n>`
+combines hash-only output with the same width control; `--hash` without a value
+keeps the full hash unless `--abbrev` is also supplied.
+
+Use `--verify <ref>` when a script needs an exact refname such as `HEAD` or
+`refs/heads/main`; short names like `main` are rejected. Use `--exists <ref>` to
+check whether exactly one ref exists without printing a success line.
+
+Use `--exclude-existing[=<pattern>]` as a Git-compatible stdin filter. Each
+input line is parsed for the final whitespace-separated refname, a trailing
+`^{}` peel suffix is ignored for the existence check, refs already present in
+the local repository are dropped, and missing refs are printed back exactly as
+they appeared on stdin. When `<pattern>` is supplied, only refnames with that
+prefix are considered.
 
 Libra stores refs in SQLite rather than loose files or packed-refs, so
 `show-ref` queries the database directly. This makes enumeration O(rows) with
@@ -29,10 +56,24 @@ no filesystem scanning.
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--heads` | | Show only branches (`refs/heads/`). |
+| `--branches` | | Git-compatible alias for `--heads`. |
+| `--no-branches` | | Reset `--heads` / `--branches` scope filtering. |
 | `--tags` | | Show only tags (`refs/tags/`). |
+| `--no-tags` | | Reset `--tags` scope filtering. |
 | `--head` | | Include `HEAD` in the output. |
-| `--hash` | `-s` | Only show the object hash, not the reference name. |
-| `<PATTERN>...` | | Filter refs by substring match on the ref name. Multiple patterns are OR-ed. |
+| `--no-head` | | Reset `--head` so `HEAD` is omitted. |
+| `--hash[=<n>]` | `-s[<n>]` | Only show the object hash, optionally shortened to `n` hex digits. |
+| `--no-hash` | | Git-compatible hash-only alias. |
+| `--abbrev[=<n>]` | | Abbreviate object IDs to `n` hex digits, or 7 when `n` is omitted. |
+| `--no-abbrev` | | Reset `--abbrev` and display full object IDs. |
+| `--dereference` | `-d` | Dereference annotated tags and include peeled `^{}` entries. |
+| `--no-dereference` | | Reset `--dereference` and suppress peeled tag entries. |
+| `--verify` | | Verify exact refnames instead of pattern filtering. |
+| `--no-verify` | | Reset `--verify` and return to pattern filtering. |
+| `--exists` | | Check whether exactly one ref exists without printing it. |
+| `--no-exists` | | Reset `--exists` and return to normal ref listing. |
+| `--exclude-existing[=<pattern>]` | | Filter stdin to refs that do not already exist locally. |
+| `<PATTERN>...` | | Filter refs by path-segment suffix match on the ref name. Multiple patterns are OR-ed. |
 
 ### Examples
 
@@ -43,13 +84,40 @@ libra show-ref
 # Show only branches
 libra show-ref --heads
 
+# Same branch filter using Git's alias
+libra show-ref --branches
+
+# Reset a composed branch-only filter back to default branch+tag listing
+libra show-ref --branches --no-branches
+
 # Show only tags
 libra show-ref --tags
+
+# Reset an abbreviated display back to full object IDs
+libra show-ref --abbrev=12 --no-abbrev --heads
+
+# Peel annotated tags
+libra show-ref --dereference --tags v1.0
 
 # Include HEAD and show hashes only
 libra show-ref --head --hash
 
-# Filter to refs containing "release"
+# Abbreviate refs to 12 hex digits
+libra show-ref --abbrev=12 --heads
+
+# Print only 12 hex digits per matching hash
+libra show-ref --hash=12 --heads
+
+# Verify an exact ref
+libra show-ref --verify refs/heads/main
+
+# Check existence without success output
+libra show-ref --exists refs/heads/main
+
+# Keep only refs from stdin that are missing locally
+printf '%s\n' 'abc123 refs/heads/new' | libra show-ref --exclude-existing
+
+# Filter to refs ending in the path segment "release"
 libra show-ref release
 
 # Combine filters: only branches matching "feat"
@@ -61,8 +129,21 @@ libra show-ref --heads feat
 ```bash
 libra show-ref
 libra show-ref --heads
+libra show-ref --branches
+libra show-ref --branches --no-branches
 libra show-ref --tags
+libra show-ref --dereference --tags v1.0
+libra show-ref --dereference --no-dereference --tags v1.0
 libra show-ref --head --hash
+libra show-ref --abbrev=12 --heads
+libra show-ref --abbrev=12 --no-abbrev --heads
+libra show-ref --hash=12 --heads
+libra show-ref --no-hash --heads
+libra show-ref --verify refs/heads/main
+libra show-ref --verify --no-verify main
+libra show-ref --exists refs/heads/main
+libra show-ref --exists --no-exists refs/heads/main
+libra show-ref --exclude-existing
 libra show-ref --json --head --heads
 libra show-ref main
 ```
@@ -83,6 +164,25 @@ abc1234def5678901234567890abcdef12345678
 def5678901234567890abcdef12345678abc1234
 ```
 
+With `--dereference`, annotated tags include an additional peeled entry:
+
+```text
+def5678901234567890abcdef12345678abc1234 refs/tags/v1.0.0
+abc1234def5678901234567890abcdef12345678 refs/tags/v1.0.0^{}
+```
+
+With `--abbrev=12`, hashes are shortened while refnames remain visible:
+
+```text
+abc1234def56 refs/heads/main
+```
+
+With `--hash=12`, only the shortened hash is printed:
+
+```text
+abc1234def56
+```
+
 ## Structured Output (JSON examples)
 
 ```json
@@ -91,6 +191,7 @@ def5678901234567890abcdef12345678abc1234
   "command": "show-ref",
   "data": {
     "hash_only": false,
+    "abbrev": null,
     "entries": [
       {
         "hash": "abc1234def5678901234567890abcdef12345678",
@@ -109,21 +210,54 @@ def5678901234567890abcdef12345678abc1234
 }
 ```
 
-When `--hash` is active, `hash_only` is `true`. The `entries` array is always
-present regardless of the flag so that JSON consumers have a uniform schema.
+When `--hash` is active, `hash_only` is `true`. When `--abbrev` or a hash width
+is active, `abbrev` records the width and `entries[].hash` contains the displayed
+abbreviated value. The `entries` array is always present regardless of the flag
+so that JSON consumers have a uniform schema.
+
+With `--exists`, human output is silent on success. JSON output reports the
+checked ref:
+
+```json
+{
+  "ok": true,
+  "command": "show-ref",
+  "data": {
+    "exists": true,
+    "refname": "refs/heads/main"
+  }
+}
+```
+
+With `--exclude-existing`, human output preserves each missing input line. JSON
+output reports the parsed refname alongside the preserved line:
+
+```json
+{
+  "ok": true,
+  "command": "show-ref",
+  "data": {
+    "exclude_existing": true,
+    "pattern": "refs/heads",
+    "entries": [
+      {
+        "line": "abc123 refs/heads/new",
+        "refname": "refs/heads/new"
+      }
+    ]
+  }
+}
+```
 
 ## Design Rationale
 
-### Why substring match instead of glob?
+### Why path-segment suffix matching?
 
-Git's `show-ref` uses prefix matching against fully-qualified ref names, but
-in practice users most often want to ask "show me anything related to
-`release`" or "anything with `main` in its name." Substring matching is
-simpler to implement, simpler to explain, and covers the common case. It
-avoids the cognitive overhead of remembering whether you need `refs/heads/main*`
-or `main*`. For the rare case where you need precise control, the JSON output
-gives you the full ref name array and you can filter client-side. Glob support
-may be added later as a superset.
+Git's `show-ref` pattern matching treats patterns as complete refname path
+segments matched from the end of the fully-qualified ref name. Libra follows
+that behavior so scripts can pass `main` without accidentally matching
+`main-2`, while still matching both `refs/heads/main` and
+`refs/remotes/origin/main`.
 
 ### Why SQLite-backed refs?
 
@@ -148,13 +282,17 @@ and which commit it resolves to.
 | Feature | Libra | Git | jj |
 |---------|-------|-----|----|
 | List all refs | `libra show-ref` | `git show-ref` | `jj bookmark list` + `jj tag list` |
-| Filter to branches | `--heads` | `--heads` | `jj bookmark list` |
+| Filter to branches | `--heads` / `--branches` | `--heads` / `--branches` | `jj bookmark list` |
 | Filter to tags | `--tags` | `--tags` | `jj tag list` |
+| Reset composed filters | `--no-branches`, `--no-tags`, `--no-head`, `--no-dereference`, `--no-abbrev`, `--no-verify`, `--no-exists` | Same | N/A |
 | Include HEAD | `--head` | `--head` | N/A (no HEAD concept) |
-| Hash-only output | `-s` / `--hash` | `-s` / `--hash` | N/A |
-| Pattern matching | Substring match | Prefix/glob match | Regex via revset |
-| `--verify` (check single ref) | Not yet implemented | Yes | N/A |
-| `-d` / `--dereference` | Not yet implemented | Yes | N/A |
+| Hash-only output | `-s[<n>]` / `--hash[=<n>]` / `--no-hash` | `-s[<n>]` / `--hash[=<n>]` / `--no-hash` | N/A |
+| Abbreviate object IDs | `--abbrev[=<n>]` | `--abbrev[=<n>]` | N/A |
+| Dereference annotated tags | `-d` / `--dereference` | `-d` / `--dereference` | N/A |
+| Pattern matching | Path-segment suffix match | Path-segment suffix match | Regex via revset |
+| `--verify` (check exact ref) | `--verify <ref>` | Yes | N/A |
+| `--exists` (existence check) | `--exists <ref>` | Yes | N/A |
+| `--exclude-existing` stdin filter | `--exclude-existing[=<pattern>]` | Yes | N/A |
 | JSON output | `--json` | No | No |
 | Ref storage | SQLite `reference` table | Loose files + packed-refs | Operation log |
 | Remote-tracking refs | Yes (`refs/remotes/`) | Yes (`refs/remotes/`) | Via `jj git fetch` |
@@ -164,5 +302,8 @@ and which commit it resolves to.
 | Scenario | StableErrorCode | Exit |
 |----------|-----------------|------|
 | No matching refs | `LBR-CLI-003` | 129 |
+| `--verify` target is not an exact existing ref | `LBR-CLI-003` | 128, or 1 with global `--quiet` |
+| `--exists` target is missing | `LBR-CLI-003` | 2 |
+| `--exclude-existing` combined with `--verify` / `--exists` | `LBR-CLI-002` | 129 |
 | Failed to read refs | `LBR-IO-001` | 128 |
 | Corrupt stored branch/tag data | `LBR-REPO-002` | 128 |

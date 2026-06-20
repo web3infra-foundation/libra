@@ -1,6 +1,6 @@
 //! HTTPS smart protocol client that discovers refs, negotiates upload-pack/receive-pack, streams pack data, and supports basic authentication.
 
-use std::{io::Error as IoError, ops::Deref, sync::Mutex};
+use std::{io::Error as IoError, ops::Deref, sync::Mutex, time::Duration};
 
 use futures_util::{StreamExt, TryStreamExt};
 use git_internal::errors::GitError;
@@ -21,31 +21,20 @@ pub struct HttpsClient {
 }
 
 /// Default connection timeout for initial TCP+TLS handshake.
-const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Default idle (read) timeout — triggers when no bytes arrive for this duration.
 /// This acts as an "idle timeout" rather than a total-request timeout: as long as
 /// the server keeps sending data the timer resets, but if the connection stalls for
 /// longer than this the request is aborted.
-const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl ProtocolClient for HttpsClient {
     fn from_url(url: &Url) -> Self {
-        // TODO check repo url
-        let url = if url.path().ends_with('/') {
-            url.clone()
-        } else {
-            let mut url = url.clone();
-            url.set_path(&format!("{}/", url.path()));
-            url
-        };
-        let client = reqwest::Client::builder()
-            .http1_only()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .read_timeout(READ_TIMEOUT)
-            .build()
-            .expect("reqwest client builder failed (likely missing TLS backend)");
-        Self { url, client }
+        // INVARIANT: the default timeout constants are valid reqwest durations;
+        // if construction fails, the process lacks a usable TLS/backend setup.
+        Self::from_url_with_timeouts(url, CONNECT_TIMEOUT, READ_TIMEOUT)
+            .expect("reqwest client builder failed (likely missing TLS backend)")
     }
 }
 
@@ -105,6 +94,25 @@ impl BasicAuth {
 // protocol details: https://www.git-scm.com/docs/http-protocol
 // capability declarations: https://www.git-scm.com/docs/protocol-capabilities
 impl HttpsClient {
+    pub fn from_url_with_timeouts(
+        url: &Url,
+        connect_timeout: Duration,
+        read_timeout: Duration,
+    ) -> Result<Self, String> {
+        let url = normalize_url(url);
+        let client = build_client(connect_timeout, read_timeout)?;
+        Ok(Self { url, client })
+    }
+
+    pub fn with_timeouts(
+        mut self,
+        connect_timeout: Duration,
+        read_timeout: Duration,
+    ) -> Result<Self, String> {
+        self.client = build_client(connect_timeout, read_timeout)?;
+        Ok(self)
+    }
+
     /// GET $GIT_URL/info/refs?service=git-upload-pack HTTP/1.0<br>
     /// Discover the references of the remote repository before fetching the objects.
     /// the first ref named HEAD as default ref.
@@ -228,4 +236,26 @@ impl HttpsClient {
         })
         .await
     }
+}
+
+fn normalize_url(url: &Url) -> Url {
+    if url.path().ends_with('/') {
+        url.clone()
+    } else {
+        let mut url = url.clone();
+        url.set_path(&format!("{}/", url.path()));
+        url
+    }
+}
+
+fn build_client(
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .http1_only()
+        .connect_timeout(connect_timeout)
+        .read_timeout(read_timeout)
+        .build()
+        .map_err(|e| format!("failed to build HTTPS client: {e}"))
 }

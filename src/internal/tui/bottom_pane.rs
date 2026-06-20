@@ -113,7 +113,7 @@ pub struct BottomPane {
     /// Optional one-line Goal status indicator. When `Some`, the
     /// pane prepends the line above the input border so the user
     /// always sees the active Goal's id-short-code + status without
-    /// running `/goal status`. Per `docs/improvement/opencode.md`
+    /// running `/goal status`. Per `docs/development/commands/_general.md`
     /// line 723: "active Goal 的底栏至少显示：goal id 短码、status、
     /// 当前 step、tokens/cost、blocker 或 next action". This field
     /// owns the rendered string so the App can update it after
