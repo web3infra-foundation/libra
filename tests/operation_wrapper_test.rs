@@ -2,12 +2,10 @@
 
 use std::collections::HashSet;
 
-use libra::internal::operation::{
-    OperationRecord, OperationService, OperationStatus,
-};
+use libra::internal::operation::{OperationRecord, OperationService, OperationStatus};
 use libra::internal::operation_wrapper::{
-    with_operation_log_with_conn, OperationError, OperationMeta, OperationParentPolicy,
-    OperationScope, ParentSelectionMode, resolve_parent_selection_with_conn,
+    OperationError, OperationMeta, OperationParentPolicy, OperationScope, ParentSelectionMode,
+    resolve_parent_selection_with_conn, with_operation_log_with_conn,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, DbErr, Statement};
 use uuid::Uuid;
@@ -85,7 +83,8 @@ async fn create_reference_table_with_head(db: &DatabaseConnection) {
     .unwrap();
     db.execute(Statement::from_string(
         DbBackend::Sqlite,
-        "INSERT INTO reference(name, kind, \"commit\", remote) VALUES('main', 'Head', NULL, NULL)".to_string(),
+        "INSERT INTO reference(name, kind, \"commit\", remote) VALUES('main', 'Head', NULL, NULL)"
+            .to_string(),
     ))
     .await
     .unwrap();
@@ -142,13 +141,10 @@ async fn resolve_parent_selection_returns_mode_and_scan_stats() {
     .await
     .unwrap();
 
-    let result = resolve_parent_selection_with_conn(
-        &db,
-        "repo_1",
-        ParentSelectionMode::SingleLatestSuccess,
-    )
-    .await
-    .unwrap();
+    let result =
+        resolve_parent_selection_with_conn(&db, "repo_1", ParentSelectionMode::SingleLatestSuccess)
+            .await
+            .unwrap();
 
     assert_eq!(result.mode, ParentSelectionMode::SingleLatestSuccess);
     assert_eq!(result.selected, vec!["op_latest_success".to_string()]);
@@ -177,16 +173,17 @@ async fn success_path_exposes_parent_selection_metrics() {
     .await
     .unwrap();
 
-    let result = with_operation_log_with_conn(
-        &db,
-        valid_meta(),
-        OperationScope::default(),
-        |_txn| Box::pin(async move { Ok::<_, DbErr>("ok".to_string()) }),
-    )
-    .await
-    .unwrap();
+    let result =
+        with_operation_log_with_conn(&db, valid_meta(), OperationScope::default(), |_txn| {
+            Box::pin(async move { Ok::<_, DbErr>("ok".to_string()) })
+        })
+        .await
+        .unwrap();
 
-    assert_eq!(result.parent_metrics.resolver_mode, ParentSelectionMode::SingleLatestSuccess);
+    assert_eq!(
+        result.parent_metrics.resolver_mode,
+        ParentSelectionMode::SingleLatestSuccess
+    );
     assert_eq!(result.parent_metrics.scanned_pages, 1);
     assert_eq!(result.parent_metrics.scanned_items, 2);
     assert_eq!(result.parent_metrics.success_candidates, 1);
@@ -208,12 +205,9 @@ async fn invalid_parent_policy_is_rejected() {
         ..OperationScope::default()
     };
 
-    let error = with_operation_log_with_conn(
-        &db,
-        valid_meta(),
-        scope,
-        |_txn| Box::pin(async move { Ok::<_, DbErr>("ok".to_string()) }),
-    )
+    let error = with_operation_log_with_conn(&db, valid_meta(), scope, |_txn| {
+        Box::pin(async move { Ok::<_, DbErr>("ok".to_string()) })
+    })
     .await
     .unwrap_err();
 
@@ -242,12 +236,9 @@ async fn success_path_still_persists_single_parent_when_multi_parent_reserved() 
         ..OperationScope::default()
     };
 
-    let result = with_operation_log_with_conn(
-        &db,
-        valid_meta(),
-        scope,
-        |_txn| Box::pin(async move { Ok::<_, DbErr>("ok".to_string()) }),
-    )
+    let result = with_operation_log_with_conn(&db, valid_meta(), scope, |_txn| {
+        Box::pin(async move { Ok::<_, DbErr>("ok".to_string()) })
+    })
     .await
     .unwrap();
 
@@ -273,14 +264,12 @@ async fn success_path_persists_operation_view_and_parent() {
     .await
     .unwrap();
 
-    let result = with_operation_log_with_conn(
-        &db,
-        valid_meta(),
-        OperationScope::default(),
-        |_txn| Box::pin(async move { Ok::<_, DbErr>("ok".to_string()) }),
-    )
-    .await
-    .unwrap();
+    let result =
+        with_operation_log_with_conn(&db, valid_meta(), OperationScope::default(), |_txn| {
+            Box::pin(async move { Ok::<_, DbErr>("ok".to_string()) })
+        })
+        .await
+        .unwrap();
 
     let graph = OperationService::load_restore_view_by_operation_with_conn(&db, &result.op_id)
         .await
@@ -301,21 +290,16 @@ async fn business_failure_rolls_back_all_writes() {
     create_reference_table_with_head(&db).await;
     create_tx_probe_table(&db).await;
 
-    let error = with_operation_log_with_conn(
-        &db,
-        valid_meta(),
-        OperationScope::default(),
-        |txn| {
-            Box::pin(async move {
-                txn.execute(Statement::from_string(
-                    DbBackend::Sqlite,
-                    "INSERT INTO tx_probe(id) VALUES(1)".to_string(),
-                ))
-                .await?;
-                Err::<(), DbErr>(DbErr::Custom("boom".to_string()))
-            })
-        },
-    )
+    let error = with_operation_log_with_conn(&db, valid_meta(), OperationScope::default(), |txn| {
+        Box::pin(async move {
+            txn.execute(Statement::from_string(
+                DbBackend::Sqlite,
+                "INSERT INTO tx_probe(id) VALUES(1)".to_string(),
+            ))
+            .await?;
+            Err::<(), DbErr>(DbErr::Custom("boom".to_string()))
+        })
+    })
     .await
     .unwrap_err();
 
@@ -353,21 +337,16 @@ async fn snapshot_failure_rolls_back_and_persists_nothing() {
     create_reference_table_without_head(&db).await;
     create_tx_probe_table(&db).await;
 
-    let error = with_operation_log_with_conn(
-        &db,
-        valid_meta(),
-        OperationScope::default(),
-        |txn| {
-            Box::pin(async move {
-                txn.execute(Statement::from_string(
-                    DbBackend::Sqlite,
-                    "INSERT INTO tx_probe(id) VALUES(3)".to_string(),
-                ))
-                .await?;
-                Ok::<_, DbErr>(())
-            })
-        },
-    )
+    let error = with_operation_log_with_conn(&db, valid_meta(), OperationScope::default(), |txn| {
+        Box::pin(async move {
+            txn.execute(Statement::from_string(
+                DbBackend::Sqlite,
+                "INSERT INTO tx_probe(id) VALUES(3)".to_string(),
+            ))
+            .await?;
+            Ok::<_, DbErr>(())
+        })
+    })
     .await
     .unwrap_err();
 
@@ -405,25 +384,23 @@ async fn persist_failure_rolls_back_business_writes() {
     create_reference_table_with_head(&db).await;
     create_tx_probe_table(&db).await;
 
-    let error = with_operation_log_with_conn(
-        &db,
-        valid_meta(),
-        OperationScope::default(),
-        |txn| {
-            Box::pin(async move {
-                txn.execute(Statement::from_string(
-                    DbBackend::Sqlite,
-                    "INSERT INTO tx_probe(id) VALUES(2)".to_string(),
-                ))
-                .await?;
-                Ok::<_, DbErr>(())
-            })
-        },
-    )
+    let error = with_operation_log_with_conn(&db, valid_meta(), OperationScope::default(), |txn| {
+        Box::pin(async move {
+            txn.execute(Statement::from_string(
+                DbBackend::Sqlite,
+                "INSERT INTO tx_probe(id) VALUES(2)".to_string(),
+            ))
+            .await?;
+            Ok::<_, DbErr>(())
+        })
+    })
     .await
     .unwrap_err();
 
-    assert!(matches!(error, OperationError::Persist(_) | OperationError::Rollback(_)));
+    assert!(matches!(
+        error,
+        OperationError::Persist(_) | OperationError::Rollback(_)
+    ));
 
     let tx_count = db
         .query_one(Statement::from_string(
@@ -457,21 +434,16 @@ async fn serial_duplicate_submission_is_rejected_within_window() {
     create_reference_table_with_head(&db).await;
 
     let meta = valid_meta_with_digest("sha256:dedup-serial");
-    let first = with_operation_log_with_conn(
-        &db,
-        meta.clone(),
-        OperationScope::default(),
-        |_txn| Box::pin(async move { Ok::<_, DbErr>("first".to_string()) }),
-    )
-    .await
-    .unwrap();
+    let first =
+        with_operation_log_with_conn(&db, meta.clone(), OperationScope::default(), |_txn| {
+            Box::pin(async move { Ok::<_, DbErr>("first".to_string()) })
+        })
+        .await
+        .unwrap();
 
-    let second = with_operation_log_with_conn(
-        &db,
-        meta,
-        OperationScope::default(),
-        |_txn| Box::pin(async move { Ok::<_, DbErr>("second".to_string()) }),
-    )
+    let second = with_operation_log_with_conn(&db, meta, OperationScope::default(), |_txn| {
+        Box::pin(async move { Ok::<_, DbErr>("second".to_string()) })
+    })
     .await;
 
     assert!(matches!(second, Err(OperationError::Business(_))));
@@ -561,10 +533,11 @@ async fn concurrent_writes_keep_parent_links_non_orphaned() {
             .unwrap();
         assert!(graph.parents.len() <= 1);
         if let Some(parent) = graph.parents.first() {
-            let parent_exists = OperationService::find_operation_by_id_with_conn(&db, &parent.parent_op_id)
-                .await
-                .unwrap()
-                .is_some();
+            let parent_exists =
+                OperationService::find_operation_by_id_with_conn(&db, &parent.parent_op_id)
+                    .await
+                    .unwrap()
+                    .is_some();
             assert!(parent_exists);
         }
     }
@@ -577,32 +550,29 @@ async fn parent_chain_restore_view_consistency() {
     create_operation_schema(&db).await;
     create_reference_table_with_head(&db).await;
 
-    let first = with_operation_log_with_conn(
-        &db,
-        valid_meta(),
-        OperationScope::default(),
-        |_txn| Box::pin(async move { Ok::<_, DbErr>("first".to_string()) }),
-    )
-    .await
-    .unwrap();
+    let first =
+        with_operation_log_with_conn(&db, valid_meta(), OperationScope::default(), |_txn| {
+            Box::pin(async move { Ok::<_, DbErr>("first".to_string()) })
+        })
+        .await
+        .unwrap();
 
-    let second = with_operation_log_with_conn(
-        &db,
-        valid_meta(),
-        OperationScope::default(),
-        |_txn| Box::pin(async move { Ok::<_, DbErr>("second".to_string()) }),
-    )
-    .await
-    .unwrap();
+    let second =
+        with_operation_log_with_conn(&db, valid_meta(), OperationScope::default(), |_txn| {
+            Box::pin(async move { Ok::<_, DbErr>("second".to_string()) })
+        })
+        .await
+        .unwrap();
 
     let first_graph = OperationService::load_restore_view_by_operation_with_conn(&db, &first.op_id)
         .await
         .unwrap()
         .unwrap();
-    let second_graph = OperationService::load_restore_view_by_operation_with_conn(&db, &second.op_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let second_graph =
+        OperationService::load_restore_view_by_operation_with_conn(&db, &second.op_id)
+            .await
+            .unwrap()
+            .unwrap();
 
     assert_eq!(first_graph.parents.len(), 0);
     assert_eq!(second_graph.parents.len(), 1);

@@ -455,7 +455,10 @@ async fn paginated_log_query_is_deterministic_when_timestamps_tie() {
     let page = OperationService::list_operations_by_repo_paginated_with_conn(
         &db,
         "repo_tie",
-        OperationQueryPage { page: 1, per_page: 10 },
+        OperationQueryPage {
+            page: 1,
+            per_page: 10,
+        },
     )
     .await
     .unwrap();
@@ -525,7 +528,10 @@ async fn graph_roundtrip_and_duplicate_constraint_failure() {
     let duplicate_op_error = OperationService::insert_operation_with_conn(&db, &graph.operation)
         .await
         .unwrap_err();
-    assert!(matches!(duplicate_op_error, OperationServiceError::Storage(_)));
+    assert!(matches!(
+        duplicate_op_error,
+        OperationServiceError::Storage(_)
+    ));
 
     let duplicate_view_record = OperationRecord {
         op_id: "op_graph_2".to_string(),
@@ -543,5 +549,8 @@ async fn graph_roundtrip_and_duplicate_constraint_failure() {
         OperationService::insert_operation_with_conn(&db, &duplicate_view_record)
             .await
             .unwrap_err();
-    assert!(matches!(duplicate_view_error, OperationServiceError::Storage(_)));
+    assert!(matches!(
+        duplicate_view_error,
+        OperationServiceError::Storage(_)
+    ));
 }

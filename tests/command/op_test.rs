@@ -76,14 +76,18 @@ fn test_op_log_json_lists_latest_operations_newest_first() {
     assert_eq!(operations.len(), 2);
     assert_eq!(operations[0]["command_name"], "branch");
     assert_eq!(operations[0]["status"], "succeeded");
-    assert!(operations[0]["description"]
-        .as_str()
-        .expect("expected description")
-        .contains("create branch topic"));
-    assert!(operations[1]["description"]
-        .as_str()
-        .expect("expected description")
-        .contains("create branch feature"));
+    assert!(
+        operations[0]["description"]
+            .as_str()
+            .expect("expected description")
+            .contains("create branch topic")
+    );
+    assert!(
+        operations[1]["description"]
+            .as_str()
+            .expect("expected description")
+            .contains("create branch feature")
+    );
 }
 
 #[test]
@@ -98,13 +102,22 @@ fn test_op_log_verbose_includes_core_fields() {
     assert_cli_success(&output, "op log --verbose");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("command: branch"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("command: branch"),
+        "unexpected stdout: {stdout}"
+    );
     assert!(
         stdout.contains("description: create branch feature"),
         "unexpected stdout: {stdout}"
     );
-    assert!(stdout.contains("actor: Test User"), "unexpected stdout: {stdout}");
-    assert!(stdout.contains("status: succeeded"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("actor: Test User"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("status: succeeded"),
+        "unexpected stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -130,14 +143,18 @@ fn test_op_log_json_page_two_returns_older_operation() {
     let first = &page_one["data"]["operations"][0];
     let second = &page_two["data"]["operations"][0];
     assert_ne!(first["op_id"], second["op_id"]);
-    assert!(first["description"]
-        .as_str()
-        .expect("expected description")
-        .contains("create branch release"));
-    assert!(second["description"]
-        .as_str()
-        .expect("expected description")
-        .contains("create branch topic"));
+    assert!(
+        first["description"]
+            .as_str()
+            .expect("expected description")
+            .contains("create branch release")
+    );
+    assert!(
+        second["description"]
+            .as_str()
+            .expect("expected description")
+            .contains("create branch topic")
+    );
 }
 
 #[test]
@@ -171,32 +188,44 @@ fn test_op_log_json_command_filter_preserves_filtered_total_across_pages() {
     assert_eq!(page_one["data"]["page"], Value::from(1));
     assert_eq!(page_one["data"]["per_page"], Value::from(2));
     assert_eq!(
-        page_one["data"]["operations"].as_array().expect("operations").len(),
+        page_one["data"]["operations"]
+            .as_array()
+            .expect("operations")
+            .len(),
         2
     );
     assert_eq!(page_one["data"]["operations"][0]["command_name"], "branch");
     assert_eq!(page_one["data"]["operations"][1]["command_name"], "branch");
-    assert!(page_one["data"]["operations"][0]["description"]
-        .as_str()
-        .expect("expected description")
-        .contains("create branch release"));
-    assert!(page_one["data"]["operations"][1]["description"]
-        .as_str()
-        .expect("expected description")
-        .contains("create branch topic"));
+    assert!(
+        page_one["data"]["operations"][0]["description"]
+            .as_str()
+            .expect("expected description")
+            .contains("create branch release")
+    );
+    assert!(
+        page_one["data"]["operations"][1]["description"]
+            .as_str()
+            .expect("expected description")
+            .contains("create branch topic")
+    );
 
     assert_eq!(page_two["data"]["total"], Value::from(3));
     assert_eq!(page_two["data"]["page"], Value::from(2));
     assert_eq!(page_two["data"]["per_page"], Value::from(2));
     assert_eq!(
-        page_two["data"]["operations"].as_array().expect("operations").len(),
+        page_two["data"]["operations"]
+            .as_array()
+            .expect("operations")
+            .len(),
         1
     );
     assert_eq!(page_two["data"]["operations"][0]["command_name"], "branch");
-    assert!(page_two["data"]["operations"][0]["description"]
-        .as_str()
-        .expect("expected description")
-        .contains("create branch feature"));
+    assert!(
+        page_two["data"]["operations"][0]["description"]
+            .as_str()
+            .expect("expected description")
+            .contains("create branch feature")
+    );
 
     assert_eq!(restore_only["data"]["total"], Value::from(1));
     assert_eq!(
@@ -223,8 +252,14 @@ fn test_op_log_human_page_two_uses_filtered_global_index() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("shown 1"), "unexpected stdout: {stdout}");
-    assert!(stdout.contains("@{1} branch"), "unexpected stdout: {stdout}");
-    assert!(stdout.contains("create branch topic"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("@{1} branch"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("create branch topic"),
+        "unexpected stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -285,10 +320,12 @@ fn test_op_show_json_latest_index_resolves_to_branch_operation() {
     assert_eq!(data["command_name"], "branch");
     assert_eq!(data["actor"], "Test User");
     assert_eq!(data["status"], "succeeded");
-    assert!(data["description"]
-        .as_str()
-        .expect("expected description")
-        .contains("create branch feature"));
+    assert!(
+        data["description"]
+            .as_str()
+            .expect("expected description")
+            .contains("create branch feature")
+    );
     assert!(data["op_id"].as_str().expect("expected op id").len() > 8);
     assert!(data["view_id"].as_str().expect("expected view id").len() > 8);
 }
@@ -305,7 +342,10 @@ fn test_op_show_view_human_includes_snapshot_refs() {
     assert_cli_success(&output, "op show --view");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("View Snapshot:"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("View Snapshot:"),
+        "unexpected stdout: {stdout}"
+    );
     assert!(
         stdout.contains("HEAD: main (branch)"),
         "unexpected stdout: {stdout}"
@@ -326,7 +366,10 @@ fn test_op_show_out_of_range_index_reports_invalid_target() {
     let (_human, report) = parse_cli_error_stderr(&output.stderr);
 
     assert_invalid_target_error(&output, "fatal: operation index 99 out of range");
-    assert_eq!(report.hints, vec!["use 'libra op log' to see available operations"]);
+    assert_eq!(
+        report.hints,
+        vec!["use 'libra op log' to see available operations"]
+    );
 }
 
 #[test]
@@ -363,8 +406,14 @@ fn test_op_show_unknown_operation_id_reports_invalid_target() {
     let output = run_libra_command(&["op", "show", missing_id], repo.path());
     let (_human, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_invalid_target_error(&output, "fatal: operation '00000000-0000-0000-0000-000000000000' not found");
-    assert_eq!(report.hints, vec!["use 'libra op log' to list available operations"]);
+    assert_invalid_target_error(
+        &output,
+        "fatal: operation '00000000-0000-0000-0000-000000000000' not found",
+    );
+    assert_eq!(
+        report.hints,
+        vec!["use 'libra op log' to list available operations"]
+    );
 }
 
 #[test]
@@ -402,7 +451,10 @@ fn test_op_restore_out_of_range_index_reports_invalid_target() {
     let (_human, report) = parse_cli_error_stderr(&output.stderr);
 
     assert_invalid_target_error(&output, "fatal: operation index 99 out of range");
-    assert_eq!(report.hints, vec!["use 'libra op log' to see available operations"]);
+    assert_eq!(
+        report.hints,
+        vec!["use 'libra op log' to see available operations"]
+    );
     assert_eq!(listed_operation_count(repo.path()), before);
 }
 
@@ -435,7 +487,10 @@ fn test_op_restore_dirty_worktree_is_rejected_without_recording_new_operation() 
     );
 
     let after = listed_operation_count(repo.path());
-    assert_eq!(after, before, "rejected restore must not record a new operation");
+    assert_eq!(
+        after, before,
+        "rejected restore must not record a new operation"
+    );
 }
 
 #[tokio::test]
@@ -461,8 +516,10 @@ async fn test_op_restore_force_allows_dirty_worktree_and_emits_confirmation() {
         .expect("failed to update tracked file");
     let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
     assert_cli_success(&add_output, "add tracked.txt");
-    let commit_output =
-        run_libra_command(&["commit", "-m", "feature update", "--no-verify"], repo.path());
+    let commit_output = run_libra_command(
+        &["commit", "-m", "feature update", "--no-verify"],
+        repo.path(),
+    );
     assert_cli_success(&commit_output, "commit feature update");
 
     std::fs::write(
@@ -476,8 +533,14 @@ async fn test_op_restore_force_allows_dirty_worktree_and_emits_confirmation() {
     assert_cli_success(&output, "op restore --force");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Restored to operation"), "unexpected stdout: {stdout}");
-    assert!(stdout.contains("New operation recorded:"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("Restored to operation"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("New operation recorded:"),
+        "unexpected stdout: {stdout}"
+    );
     assert_eq!(listed_operation_count(repo.path()), before + 1);
 
     match Head::current().await {
@@ -503,17 +566,26 @@ fn test_op_command_smoke_flow_covers_first_batch_chain() {
     let log_output = run_libra_command(&["op", "log", "-n", "10"], repo.path());
     assert_cli_success(&log_output, "op log");
     let log_stdout = String::from_utf8_lossy(&log_output.stdout);
-    assert!(log_stdout.contains("branch"), "unexpected stdout: {log_stdout}");
+    assert!(
+        log_stdout.contains("branch"),
+        "unexpected stdout: {log_stdout}"
+    );
 
     let show_output = run_libra_command(&["op", "show", "@{0}"], repo.path());
     assert_cli_success(&show_output, "op show @{0}");
     let show_stdout = String::from_utf8_lossy(&show_output.stdout);
-    assert!(show_stdout.contains("Command: branch"), "unexpected stdout: {show_stdout}");
+    assert!(
+        show_stdout.contains("Command: branch"),
+        "unexpected stdout: {show_stdout}"
+    );
 
     let restore_output = run_libra_command(&["op", "restore", "@{0}", "--dry-run"], repo.path());
     assert_cli_success(&restore_output, "op restore --dry-run");
     let restore_stdout = String::from_utf8_lossy(&restore_output.stdout);
-    assert!(restore_stdout.contains("Would restore to operation"), "unexpected stdout: {restore_stdout}");
+    assert!(
+        restore_stdout.contains("Would restore to operation"),
+        "unexpected stdout: {restore_stdout}"
+    );
 }
 
 #[tokio::test]
@@ -541,8 +613,10 @@ async fn test_op_restore_json_records_new_operation_and_restores_head_and_branch
     let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
     assert_cli_success(&add_output, "add tracked.txt");
 
-    let commit_output =
-        run_libra_command(&["commit", "-m", "feature update", "--no-verify"], repo.path());
+    let commit_output = run_libra_command(
+        &["commit", "-m", "feature update", "--no-verify"],
+        repo.path(),
+    );
     assert_cli_success(&commit_output, "commit feature update");
 
     let feature_tip_before_restore = Head::current_commit()
@@ -553,14 +627,20 @@ async fn test_op_restore_json_records_new_operation_and_restores_head_and_branch
 
     let restore_json = run_json_op(repo.path(), &["restore", &target_op_id]);
     assert_eq!(restore_json["command"], Value::String("op".to_string()));
-    assert_eq!(restore_json["data"]["action"], Value::String("restore".to_string()));
+    assert_eq!(
+        restore_json["data"]["action"],
+        Value::String("restore".to_string())
+    );
     assert_eq!(restore_json["data"]["target_op_id"], target_op_id);
 
     let new_op_id = restore_json["data"]["new_op_id"]
         .as_str()
         .expect("expected new operation id")
         .to_string();
-    assert_ne!(new_op_id, target_op_id, "restore must record a new operation");
+    assert_ne!(
+        new_op_id, target_op_id,
+        "restore must record a new operation"
+    );
 
     match Head::current().await {
         Head::Branch(branch_name) => assert_eq!(branch_name, "main"),
@@ -581,5 +661,8 @@ async fn test_op_restore_json_records_new_operation_and_restores_head_and_branch
 
     let latest_log = run_json_op(repo.path(), &["log", "-n", "1"]);
     assert_eq!(latest_log["data"]["operations"][0]["op_id"], new_op_id);
-    assert_eq!(latest_log["data"]["operations"][0]["command_name"], "op restore");
+    assert_eq!(
+        latest_log["data"]["operations"][0]["command_name"],
+        "op restore"
+    );
 }

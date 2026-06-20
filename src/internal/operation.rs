@@ -5,8 +5,8 @@
 //! callers through `*_with_conn` signatures.
 
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Select,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, Select,
 };
 use thiserror::Error;
 
@@ -179,9 +179,7 @@ pub enum OperationServiceError {
 pub struct OperationService;
 
 impl OperationService {
-    fn apply_repo_operation_order(
-        query: Select<operation::Entity>,
-    ) -> Select<operation::Entity> {
+    fn apply_repo_operation_order(query: Select<operation::Entity>) -> Select<operation::Entity> {
         query
             .order_by_desc(operation::Column::EndTs)
             .order_by_desc(operation::Column::StartTs)
@@ -202,7 +200,9 @@ impl OperationService {
         })
     }
 
-    fn record_from_model(model: operation::Model) -> Result<OperationRecord, OperationServiceError> {
+    fn record_from_model(
+        model: operation::Model,
+    ) -> Result<OperationRecord, OperationServiceError> {
         let status = OperationStatus::from_db_value(&model.status)?;
         Ok(OperationRecord {
             op_id: model.op_id,
@@ -292,15 +292,15 @@ impl OperationService {
         let models = Self::apply_repo_operation_order(
             operation::Entity::find().filter(operation::Column::RepoId.eq(repo_id)),
         )
-            .limit(limit)
-            .all(db)
-            .await
-            .map_err(|err| {
-                OperationServiceError::Storage(format!(
-                    "failed to list operations for repository '{}': {err}",
-                    repo_id
-                ))
-            })?;
+        .limit(limit)
+        .all(db)
+        .await
+        .map_err(|err| {
+            OperationServiceError::Storage(format!(
+                "failed to list operations for repository '{}': {err}",
+                repo_id
+            ))
+        })?;
 
         models
             .into_iter()
@@ -335,16 +335,16 @@ impl OperationService {
         let models = Self::apply_repo_operation_order(
             operation::Entity::find().filter(operation::Column::RepoId.eq(repo_id)),
         )
-            .offset(query.offset())
-            .limit(query.per_page)
-            .all(db)
-            .await
-            .map_err(|err| {
-                OperationServiceError::Storage(format!(
-                    "failed to list operation logs for repository '{}': {err}",
-                    repo_id
-                ))
-            })?;
+        .offset(query.offset())
+        .limit(query.per_page)
+        .all(db)
+        .await
+        .map_err(|err| {
+            OperationServiceError::Storage(format!(
+                "failed to list operation logs for repository '{}': {err}",
+                repo_id
+            ))
+        })?;
 
         let items = models
             .into_iter()
@@ -437,7 +437,9 @@ impl OperationService {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    fn view_from_model(model: operation_view::Model) -> Result<OperationViewRecord, OperationServiceError> {
+    fn view_from_model(
+        model: operation_view::Model,
+    ) -> Result<OperationViewRecord, OperationServiceError> {
         let view = OperationViewRecord {
             view_id: model.view_id,
             repo_id: model.repo_id,
@@ -917,11 +919,7 @@ impl OperationService {
         query.normalized()
     }
 
-    pub fn new_page<T>(
-        items: Vec<T>,
-        query: OperationQueryPage,
-        total: u64,
-    ) -> OperationPage<T> {
+    pub fn new_page<T>(items: Vec<T>, query: OperationQueryPage, total: u64) -> OperationPage<T> {
         let normalized = query.normalized();
         OperationPage {
             items,

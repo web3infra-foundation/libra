@@ -69,9 +69,7 @@ impl OperationMeta {
     /// Validate required fields before entering transaction orchestration.
     pub fn validate(&self) -> Result<(), OperationError> {
         if self.command_name.trim().is_empty() {
-            return Err(OperationError::validation(
-                "command_name must not be empty",
-            ));
+            return Err(OperationError::validation("command_name must not be empty"));
         }
         if self.description.trim().is_empty() {
             return Err(OperationError::validation("description must not be empty"));
@@ -255,7 +253,12 @@ async fn ensure_not_recent_duplicate_with_conn<C: sea_orm::ConnectionTrait>(
     meta: &OperationMeta,
     now_ts: i64,
 ) -> Result<(), OperationError> {
-    let Some(digest) = meta.args_digest.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()) else {
+    let Some(digest) = meta
+        .args_digest
+        .as_ref()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    else {
         return Ok(());
     };
 
@@ -290,7 +293,9 @@ async fn ensure_not_recent_duplicate_with_conn<C: sea_orm::ConnectionTrait>(
 
 fn validate_parent_policy(policy: OperationParentPolicy) -> Result<(), OperationError> {
     if policy.max_parents == 0 {
-        return Err(OperationError::validation("parent_policy.max_parents must be greater than 0"));
+        return Err(OperationError::validation(
+            "parent_policy.max_parents must be greater than 0",
+        ));
     }
     if !policy.allow_multi_parent && policy.max_parents > 1 {
         return Err(OperationError::validation(
@@ -364,7 +369,9 @@ where
 
         let opened = match opened {
             Ok(v) => v,
-            Err(err) if is_sqlite_busy_operation_error(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+            Err(err)
+                if is_sqlite_busy_operation_error(&err) && attempt < SQLITE_BUSY_MAX_RETRIES =>
+            {
                 sleep(Duration::from_millis(
                     SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
                 ))
@@ -384,11 +391,14 @@ where
 
         match selected {
             Ok(result) => {
-                parent_selection = Some((result, selection_started_at.elapsed().as_micros() as u64));
+                parent_selection =
+                    Some((result, selection_started_at.elapsed().as_micros() as u64));
                 txn = Some(opened);
                 break;
             }
-            Err(err) if is_sqlite_busy_operation_error(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+            Err(err)
+                if is_sqlite_busy_operation_error(&err) && attempt < SQLITE_BUSY_MAX_RETRIES =>
+            {
                 let _ = opened.rollback().await;
                 sleep(Duration::from_millis(
                     SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
@@ -402,7 +412,9 @@ where
         }
     }
 
-    let txn = txn.ok_or_else(|| OperationError::begin("failed to initialize operation transaction after retries"))?;
+    let txn = txn.ok_or_else(|| {
+        OperationError::begin("failed to initialize operation transaction after retries")
+    })?;
     let (parent_selection, selection_latency_us) = parent_selection
         .ok_or_else(|| OperationError::begin("failed to resolve parent selection after retries"))?;
     let selected_parents = parent_selection
