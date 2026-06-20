@@ -59,6 +59,12 @@ const MAINTENANCE_LAST_RUN_KEY: &str = "maintenance.last-run";
 const DEFAULT_LOOSE_OBJECT_THRESHOLD: usize = 100;
 const DEFAULT_PACK_COUNT_THRESHOLD: usize = 5;
 const LOOSE_OBJECT_AGE_SECONDS: u64 = 14 * 24 * 60 * 60; // 2 weeks
+/// Grace period before an unreachable loose object may be deleted by `gc`.
+///
+/// This protects concurrent commands (add/commit/fetch/hash-object) that have
+/// just written objects but not yet updated refs/reflogs/index. Objects newer
+/// than this grace period are left in place even when unreachable.
+const GC_PRUNE_GRACE_SECONDS: u64 = 60 * 60; // 1 hour
 
 /// `--help` examples shown in `libra maintenance --help` output.
 pub const MAINTENANCE_EXAMPLES: &str = "\

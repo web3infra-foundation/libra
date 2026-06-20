@@ -340,7 +340,11 @@ async fn run_push(options: StashPushOptions) -> Result<StashOutput, StashError> 
 
     let index_tree =
         tree::create_tree_from_index(&index).map_err(|e| StashError::WriteObject(e.to_string()))?;
-    let index_tree_hash = index_tree.id;
+    let index_tree_data = index_tree
+        .to_data()
+        .map_err(|e| StashError::WriteObject(e.to_string()))?;
+    let index_tree_hash = object::write_git_object(&git_dir, "tree", &index_tree_data)
+        .map_err(|e| StashError::WriteObject(e.to_string()))?;
 
     let (author, committer) = util::create_signatures().await;
     let (current_branch_name, head_commit_summary) = match Head::current().await {
