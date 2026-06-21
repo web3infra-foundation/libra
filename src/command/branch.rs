@@ -23,6 +23,7 @@ use colored::Colorize;
 use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
 use sea_orm::{ConnectionTrait, DbErr};
 use serde::Serialize;
+use uuid::Uuid;
 
 use crate::{
     command::{get_target_commit, load_object, log::get_reachable_commits},
@@ -553,20 +554,26 @@ async fn operation_actor() -> String {
 }
 
 async fn current_repo_id_for_operation() -> Result<String, BranchError> {
-    ConfigKv::get("libra.repoid")
+    if let Some(entry) = ConfigKv::get("libra.repoid").await.map_err(|error| {
+        BranchError::OperationLogFailed(format!(
+            "failed to read repository id from config: {error}"
+        ))
+    })? {
+        let repo_id = entry.value;
+        if !repo_id.trim().is_empty() && repo_id != "unknown-repo" {
+            return Ok(repo_id);
+        }
+    }
+
+    let repo_id = Uuid::new_v4().to_string();
+    ConfigKv::set("libra.repoid", &repo_id, false)
         .await
         .map_err(|error| {
             BranchError::OperationLogFailed(format!(
-                "failed to read repository id from config: {error}"
+                "failed to write generated repository id to config: {error}"
             ))
-        })?
-        .map(|entry| entry.value)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            BranchError::OperationLogFailed(
-                "repository id is missing; run 'libra init' to initialize metadata".to_string(),
-            )
-        })
+        })?;
+    Ok(repo_id)
 }
 
 fn branch_operation_args_digest(action: &str, branch: &str, commit: &str) -> String {
@@ -693,6 +700,7 @@ async fn load_remote_branches() -> Result<Vec<Branch>, BranchError> {
 async fn create_branch_impl(
     new_branch: String,
     branch_or_commit: Option<String>,
+    record_operation: bool,
 ) -> Result<BranchOutput, BranchError> {
     tracing::debug!("create branch: {} from {:?}", new_branch, branch_or_commit);
 
@@ -742,46 +750,55 @@ async fn create_branch_impl(
         )
     })?;
 
-    let meta = OperationMeta {
-        command_name: "branch".to_string(),
-        description: format!("create branch {new_branch}"),
-        actor: operation_actor().await,
-        repo_id: current_repo_id_for_operation().await?,
-        args_digest: Some(branch_operation_args_digest(
-            "create",
-            &new_branch,
-            &commit_id_display,
-        )),
-    };
+    if record_operation {
+        let meta = OperationMeta {
+            command_name: "branch".to_string(),
+            description: format!("create branch {new_branch}"),
+            actor: operation_actor().await,
+            repo_id: current_repo_id_for_operation().await?,
+            args_digest: Some(branch_operation_args_digest(
+                "create",
+                &new_branch,
+                &commit_id_display,
+            )),
+        };
 
-    let branch_for_operation = new_branch.clone();
-    let commit_for_operation = commit_id_display.clone();
-    with_operation_log(meta, OperationScope::default(), move |txn| {
-        Box::pin(async move {
-            let exists = Branch::exists_result_with_conn(txn, &branch_for_operation, None)
-                .await
-                .map_err(|error| DbErr::Custom(error.to_string()))?;
-            if exists {
-                return Err(DbErr::Custom(format!(
-                    "a branch named '{}' already exists",
-                    branch_for_operation
-                )));
-            }
-            Branch::update_branch_with_conn(
-                txn,
-                &branch_for_operation,
-                &commit_for_operation,
-                None,
-            )
-            .await?;
-            Ok::<(), DbErr>(())
+        let branch_for_operation = new_branch.clone();
+        let commit_for_operation = commit_id_display.clone();
+        with_operation_log(meta, OperationScope::default(), move |txn| {
+            Box::pin(async move {
+                let exists = Branch::exists_result_with_conn(txn, &branch_for_operation, None)
+                    .await
+                    .map_err(|error| DbErr::Custom(error.to_string()))?;
+                if exists {
+                    return Err(DbErr::Custom(format!(
+                        "a branch named '{}' already exists",
+                        branch_for_operation
+                    )));
+                }
+                Branch::update_branch_with_conn(
+                    txn,
+                    &branch_for_operation,
+                    &commit_for_operation,
+                    None,
+                )
+                .await?;
+                Ok::<(), DbErr>(())
+            })
         })
-    })
-    .await
-    .map_err(|error| BranchError::CreateFailed {
-        branch: new_branch.clone(),
-        detail: error.to_string(),
-    })?;
+        .await
+        .map_err(|error| BranchError::CreateFailed {
+            branch: new_branch.clone(),
+            detail: error.to_string(),
+        })?;
+    } else {
+        Branch::update_branch(&new_branch, &commit_id_display, None)
+            .await
+            .map_err(|error| BranchError::CreateFailed {
+                branch: new_branch.clone(),
+                detail: error.to_string(),
+            })?;
+    }
 
     Ok(BranchOutput::Create {
         name: new_branch,
@@ -1014,7 +1031,7 @@ async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
     require_repo().map_err(|_| BranchError::NotInRepo)?;
 
     if let Some(new_branch) = args.new_branch.clone() {
-        create_branch_impl(new_branch, args.commit_hash.clone()).await
+        create_branch_impl(new_branch, args.commit_hash.clone(), true).await
     } else if let Some(branch_to_delete) = args.delete.clone() {
         delete_branch_impl(branch_to_delete, true).await
     } else if let Some(branch_to_delete) = args.delete_safe.clone() {
@@ -1209,7 +1226,7 @@ pub async fn create_branch_safe(
     new_branch: String,
     branch_or_commit: Option<String>,
 ) -> CliResult<()> {
-    create_branch_impl(new_branch, branch_or_commit)
+    create_branch_impl(new_branch, branch_or_commit, false)
         .await
         .map(|_| ())
         .map_err(CliError::from)?;
@@ -1429,10 +1446,12 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     struct CurrentDirGuard {
         original: PathBuf,
     }
 
+    #[allow(dead_code)]
     impl CurrentDirGuard {
         fn change_to(path: &std::path::Path) -> Self {
             let original = std::env::current_dir().expect("failed to read current dir");
