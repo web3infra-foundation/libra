@@ -684,20 +684,26 @@ fn patch_slug(commit: &Commit, _args: &FormatPatchArgs) -> String {
     truncate_slug(&slug)
 }
 
-/// Truncate a slug to at most ~52 characters without splitting a word segment.
+/// Truncate a slug to at most `MAX_CHARS` characters without splitting a
+/// word segment.  Uses [`char`] iteration to stay on UTF-8 boundaries so
+/// non-ASCII subjects never panic on a mid-codepoint slice.
 fn truncate_slug(slug: &str) -> String {
-    const MAX: usize = 52;
-    if slug.len() <= MAX {
+    const MAX_CHARS: usize = 52;
+    let prefix: String = slug.chars().take(MAX_CHARS).collect();
+    if prefix.len() == slug.len() {
         return slug.to_string();
     }
-    let end = slug[..MAX].rfind('-').unwrap_or(MAX);
-    slug[..end].to_string()
+    // Walk back from the end of `prefix` to the last `-`.
+    let end = prefix.rfind('-').unwrap_or(prefix.len());
+    prefix[..end].to_string()
 }
 
 /// Build the output file path for a single patch.
 /// When `slug` is empty the file is treated as the cover letter.
+/// The sequence number is always included so that commits with identical
+/// subjects never overwrite each other (matching Git's default behaviour).
 fn patch_filename(
-    numbered: bool,
+    _numbered: bool,
     patch_num: usize,
     total: usize,
     start_num: usize,
@@ -706,11 +712,9 @@ fn patch_filename(
     if slug.is_empty() {
         // Cover letter (only the cover-letter code path passes an empty slug)
         "0000-cover-letter.patch".to_string()
-    } else if numbered {
+    } else {
         let width = number_width(total + start_num - 1);
         format!("{:0width$}-{}.patch", patch_num, slug)
-    } else {
-        format!("{}.patch", slug)
     }
 }
 
