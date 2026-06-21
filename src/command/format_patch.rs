@@ -19,6 +19,7 @@ use serde::Serialize;
 use crate::{
     command::log,
     common_utils::parse_commit_msg,
+    internal::config::ConfigKv,
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::OutputConfig,
@@ -137,6 +138,9 @@ enum FormatPatchError {
     #[error("{0}")]
     InvalidTarget(String),
 
+    #[error("identity unknown: {0}")]
+    IdentityMissing(String),
+
     #[error("failed to write patch file '{}': {detail}", .path.display())]
     OutputWrite { path: PathBuf, detail: String },
 
@@ -150,6 +154,12 @@ impl From<FormatPatchError> for CliError {
             FormatPatchError::NotInRepo => CliError::repo_not_found(),
             FormatPatchError::InvalidTarget(_) => CliError::failure(err.to_string())
                 .with_stable_code(StableErrorCode::CliInvalidTarget),
+            FormatPatchError::IdentityMissing(_) => CliError::fatal(err.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint(
+                    "run 'libra config user.name \"Your Name\"' and \
+                         'libra config user.email \"you@example.com\"'",
+                ),
             FormatPatchError::OutputWrite { .. } => {
                 CliError::fatal(err.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
             }
@@ -452,7 +462,7 @@ async fn format_patch_body(
 
     // ---- Signed-off-by ----
     if args.signoff {
-        let (name, email) = resolve_signoff_identity().await;
+        let (name, email) = resolve_signoff_identity().await?;
         out.push_str(&format!("Signed-off-by: {name} <{email}>\n"));
     }
 
@@ -799,7 +809,25 @@ fn timestamp_from_commit(commit: &Commit) -> DateTime<Utc> {
 }
 
 /// Resolve the Signed-off-by identity from `user.name` / `user.email` config.
-async fn resolve_signoff_identity() -> (String, String) {
-    let (_, committer) = util::create_signatures().await;
-    (committer.name, committer.email)
+/// Returns an error when either key is missing so that `--signoff` never
+/// silently writes a false DCO trailer with a fallback identity.
+async fn resolve_signoff_identity() -> Result<(String, String), FormatPatchError> {
+    let name = ConfigKv::get("user.name")
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.value);
+    let email = ConfigKv::get("user.email")
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.value);
+
+    let detail = match (name.is_some(), email.is_some()) {
+        (true, true) => return Ok((name.unwrap(), email.unwrap())),
+        (false, true) => "user.name is not configured".to_string(),
+        (true, false) => "user.email is not configured".to_string(),
+        (false, false) => "user.name and user.email are not configured".to_string(),
+    };
+    Err(FormatPatchError::IdentityMissing(detail))
 }
