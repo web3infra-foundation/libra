@@ -997,7 +997,9 @@ async fn resolve_env_for_storage_init(name: &str) -> Result<Option<String>, Stri
 }
 
 fn is_schema_outdated_error(error: &str) -> bool {
-    error.contains("Repository database schema is out of date")
+    error
+        .to_ascii_lowercase()
+        .contains("repository database schema is out of date")
 }
 
 /// Read a single `vault.env.*` entry from a config database, decrypting if needed.

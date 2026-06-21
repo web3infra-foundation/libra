@@ -600,6 +600,10 @@ async fn test_cat_file_exist_check() {
     // HEAD exists
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
+        .env(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            temp_path.join(".libra-test-global-config.db"),
+        )
         .args(["cat-file", "-e", "HEAD"])
         .output()
         .expect("Failed to execute cat-file -e");
@@ -616,6 +620,10 @@ async fn test_cat_file_exist_check() {
     // Non-existent hash
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
+        .env(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            temp_path.join(".libra-test-global-config.db"),
+        )
         .args(["cat-file", "-e", "0000000000000000000000000000000000000000"])
         .output()
         .expect("Failed to execute cat-file -e");

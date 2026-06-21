@@ -2134,7 +2134,10 @@ async fn get_all_cascaded(key: &str) -> Result<Vec<(ConfigKvEntry, ConfigScope)>
 }
 
 fn should_skip_config_scope_read_error(scope: ConfigScope, error: &str) -> bool {
-    scope == ConfigScope::Global && error.contains("Repository database schema is out of date")
+    scope == ConfigScope::Global
+        && error
+            .to_ascii_lowercase()
+            .contains("repository database schema is out of date")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
