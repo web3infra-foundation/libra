@@ -974,7 +974,7 @@ async fn fresh_create_database_runs_migrations_just_like_reopen() {
 }
 
 #[tokio::test]
-async fn establish_connection_refuses_stale_schema_without_upgrading() {
+async fn establish_connection_auto_upgrades_stale_schema() {
     use libra::internal::db::{create_database, establish_connection};
 
     let dir = tempfile::tempdir().unwrap();
@@ -989,25 +989,28 @@ async fn establish_connection_refuses_stale_schema_without_upgrading() {
         .expect("roll back latest migration");
     conn.close().await.unwrap();
 
-    let err = establish_connection(path_str)
+    // Opening the connection now applies any pending migrations automatically,
+    // so an out-of-date repository is upgraded in place simply by being opened.
+    establish_connection(path_str)
         .await
-        .expect_err("ordinary connect must refuse stale schema");
-    let message = err.to_string();
-    assert!(
-        message.contains("libra db upgrade"),
-        "error should direct users to explicit upgrade, got: {message}"
-    );
+        .expect("ordinary connect should auto-upgrade a stale schema");
 
     let raw = connect(&format!("sqlite://{}", path.display())).await;
+    let latest = builtin_runner()
+        .expect("builtin runner builds clean")
+        .max_registered_version();
     let current = builtin_runner()
         .expect("builtin runner builds clean")
         .current_version_readonly(&raw)
         .await
         .expect("read current version");
-    assert_eq!(current, Some(2026050601));
+    assert_eq!(
+        current, latest,
+        "connecting should migrate the schema up to the latest registered version"
+    );
     assert!(
-        !column_exists(&raw, "agent_usage_stats", "agent_name").await,
-        "ordinary connect must not apply the pending agent_name migration"
+        column_exists(&raw, "agent_usage_stats", "agent_name").await,
+        "ordinary connect should apply the pending agent_name migration"
     );
 }
 

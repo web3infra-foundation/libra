@@ -71,7 +71,6 @@ batch document.
 | hash-object | partial | Blob hashing for files and `--stdin`; `-w` writes blob objects; `--path` and `--no-filters` are accepted for raw-byte hashing. Other object types and advanced Git hash-object flags are unsupported |
 | open | supported | |
 | config | partial | vault-backed local/global config is supported; system scope, editor round-trip, typed conversion, NUL output, section rename/remove, and includeIf are incomplete |
-| db | intentionally-different | Libra repository database schema inspection/upgrade extension, not a Git command |
 | reflog | supported | `show`/`delete`/`exists`/`expire` subcommands. `expire` prunes by time + reachability + `--stale-fix` (`--all`/`--expire`/`--expire-unreachable`/`--rewrite`/`--updateref`/`-n`/`-v`), reads `gc.reflogExpire`/`gc.reflogExpireUnreachable` (90/30-day defaults, never written). Intentional differences: no-ref expire is an explicit error (exit 128) vs Git's silent no-op; `--stale-fix` checks only that the new value loads as a commit (no transitive object walk); `--updateref` skips symbolic `HEAD` / remote-tracking refs |
 | worktree | intentionally-different | `remove` keeps disk dir by default (no implicit data loss). Use `--delete-dir` for Git-style behavior; the flag refuses on a dirty worktree |
 | cloud | intentionally-different | Libra cloud backup/restore extension, not a Git command |

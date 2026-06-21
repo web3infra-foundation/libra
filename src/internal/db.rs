@@ -88,14 +88,15 @@ fn normalize_path_for_sqlite(db_path: &str) -> String {
 
 /// Establish a connection to the database with the default 30-second busy timeout.
 ///
-/// Functional scope: opens the file and verifies its recorded schema version is
-/// compatible with this Libra build. This function does not apply migrations;
-/// callers must use [`upgrade_database_schema`] for explicit upgrades.
+/// Functional scope: opens the file and brings its schema up to date,
+/// automatically applying any pending built-in migrations (see
+/// [`ensure_database_schema_is_current`]). Opening the database is therefore
+/// sufficient to upgrade it — there is no separate explicit upgrade step.
 ///
 /// Boundary conditions:
 /// - Returns `IOError(NotFound)` if the database file does not exist on disk.
-/// - Stale or future schema versions are surfaced as `IOError::other` with an
-///   actionable upgrade/newer-binary hint.
+/// - A schema *newer* than this binary supports is surfaced as `IOError::other`
+///   with an "install a newer Libra binary" hint (it cannot be migrated down).
 #[allow(dead_code)]
 pub async fn establish_connection(db_path: &str) -> Result<DatabaseConnection, IOError> {
     establish_connection_with_busy_timeout(db_path, Duration::from_secs(30)).await
@@ -105,8 +106,8 @@ pub async fn establish_connection(db_path: &str) -> Result<DatabaseConnection, I
 ///
 /// This is useful for best-effort/background jobs that should fail fast on lock
 /// contention instead of waiting for long periods. Like
-/// [`establish_connection`], it verifies compatibility but does not apply
-/// migrations.
+/// [`establish_connection`], it brings the schema up to date by applying any
+/// pending migrations on open.
 #[allow(dead_code)]
 pub async fn establish_connection_with_busy_timeout(
     db_path: &str,
@@ -126,7 +127,7 @@ pub async fn establish_connection_with_busy_timeout(
     let conn = Database::connect(option)
         .await
         .map_err(|err| IOError::other(format!("Database connection error: {err:?}")))?;
-    ensure_database_schema_is_compatible(&conn).await?;
+    ensure_database_schema_is_current(&conn).await?;
     Ok(conn)
 }
 // #[cfg(not(test))]
@@ -166,9 +167,10 @@ static TEST_DB_CONNECTIONS: Lazy<Mutex<HashMap<PathBuf, DbConn>>> =
 /// - Verifies the file exists; missing files evict any stale cache entry and
 ///   return `IOError(NotFound)`.
 /// - Returns a clone of the cached `DbConn` on hit.
-/// - On miss, opens a new compatible connection without applying migrations and
-///   re-acquires the lock to publish it. The double-check pattern is used to
-///   avoid two threads racing to install the same connection.
+/// - On miss, opens a new connection — automatically upgrading the schema to
+///   this build via [`establish_connection`] — and re-acquires the lock to
+///   publish it. The double-check pattern is used to avoid two threads racing
+///   to install the same connection.
 async fn get_or_init_db_conn_instance(db_path: PathBuf) -> io::Result<DbConn> {
     let mut connections = TEST_DB_CONNECTIONS.lock().await;
 
@@ -256,9 +258,10 @@ async fn get_db_conn_for_path(db_path: &Path) -> io::Result<DatabaseConnection> 
 
 /// Open an existing SQLite database without applying any schema changes.
 ///
-/// Normal command preflight uses this to inspect `schema_versions` without
-/// accidentally upgrading an older repository before the user has explicitly run
-/// `libra db upgrade`.
+/// Used by read-only inspection paths (e.g. schema-version queries and the
+/// read-only `hash-object` hash-kind preflight) that must observe the schema
+/// exactly as stored, without triggering the automatic upgrade that
+/// [`establish_connection`] performs.
 pub async fn open_database_without_migrations(db_path: &Path) -> io::Result<DatabaseConnection> {
     if !db_path.exists() {
         return Err(IOError::new(
@@ -322,16 +325,30 @@ async fn inspect_database_schema_for_connection(
     }
 }
 
-async fn ensure_database_schema_is_compatible(conn: &DatabaseConnection) -> io::Result<()> {
+/// Bring the connected database's schema up to date, applying any pending
+/// built-in migrations automatically.
+///
+/// This is the single point where an older repository is migrated forward:
+/// every pooled connection passes through here, so simply opening the database
+/// for any command upgrades it in place (there is no separate `libra db
+/// upgrade` step). A schema that is *newer* than this binary understands cannot
+/// be migrated down and remains a hard error directing the user to install a
+/// newer Libra.
+async fn ensure_database_schema_is_current(conn: &DatabaseConnection) -> io::Result<()> {
     match inspect_database_schema_for_connection(conn).await? {
         SchemaCompatibility::Compatible { .. } => Ok(()),
         SchemaCompatibility::UpgradeRequired {
             current_version,
             latest_version,
-        } => Err(IOError::other(format!(
-            "Repository database schema is out of date (current: {}, required: {latest_version}). Run 'libra db upgrade' in this repository.",
-            format_schema_version(current_version)
-        ))),
+        } => {
+            tracing::info!(
+                current = ?current_version,
+                latest = latest_version,
+                "repository database schema is out of date; applying pending migrations"
+            );
+            apply_database_schema_upgrades(conn).await?;
+            Ok(())
+        }
         SchemaCompatibility::UnsupportedFuture {
             current_version,
             latest_version,

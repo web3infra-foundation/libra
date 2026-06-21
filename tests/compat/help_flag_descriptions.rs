@@ -87,7 +87,6 @@ const COMMANDS: &[&str] = &[
     "open",
     "graph",
     "sandbox",
-    "db",
     "usage",
 ];
 
@@ -283,9 +282,6 @@ const SUBCOMMANDS: &[&[&str]] = &[
     &["worktree", "prune"],
     &["worktree", "remove"],
     &["worktree", "repair"],
-    // db
-    &["db", "upgrade"],
-    &["db", "status"],
     // agent sub-subcommands (2 levels deep) — added v0.17.902 after
     // checkpoint/rewind / session/* were found to ship empty positional
     // arg descriptions despite the parent-level guard passing.

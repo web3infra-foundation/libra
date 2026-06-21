@@ -38,7 +38,6 @@
 | [`code-control`](code-control.md) | `intentionally-different` | Libra AI automation extension, not a Git command |
 | [`commit`](commit.md) | `partial` | common commit flags plus cleanup/fixup/squash/trailer and `-e/--edit` + `-v/--verbose` (editor) supported; `--porcelain`/`--status`/`-t/--template` not exposed |
 | [`config`](config.md) | `partial` | vault-backed local/global config; system scope, editor round-trip, typed conversion, NUL output and section operations incomplete |
-| [`db`](db.md) | `intentionally-different` | Libra repository database schema inspection/upgrade extension, not a Git command |
 | [`describe`](describe.md) | `partial` | basic describe, `--tags`, `--always`, `--abbrev`, `--exact-match`, `--long`, `--dirty[=<mark>]`, `--first-parent`, `--match`, and `--exclude` supported; contains/candidates/all not exposed |
 | [`diff`](diff.md) | `partial` | staged/old-new/pathspec/name/stat output supported; positional revspec, summary/word/binary/whitespace/ext-diff incomplete |
 | [`fetch`](fetch.md) | `partial` | repository/refspec, `--all`, `--depth`, `--dry-run`, `-v`, `--porcelain`, tag auto-follow (default; `--tags`/`--no-tags`, `remote.<name>.tagOpt`), `-f`/`--force`, `FETCH_HEAD`, and `--append` supported; refmap/atomic/prune and shallow expansion flags not exposed |

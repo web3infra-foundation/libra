@@ -330,10 +330,10 @@ scenarios:
   - id: cli.schema-upgrade-observable
     wave: 2
     group: schema
-    purpose: "Verify db status / db --json status / db upgrade on fresh and current-schema repos; non-repo must fail cleanly."
+    purpose: "Verify a fresh repo's schema is usable via normal commands and that an out-of-date schema is auto-upgraded on database-connection open; non-repo must fail cleanly."
     gh_required: false
     requires_git: false
-    key_assertion_categories: [json_envelope, fsck, negative_exit]
+    key_assertion_categories: [fsck, negative_exit]
     doc_section: "cli.schema-upgrade-observable"
 
   - id: cli.clone-fetch-pull-local
