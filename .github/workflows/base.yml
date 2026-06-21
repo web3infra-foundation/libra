@@ -245,3 +245,38 @@ jobs:
           path: target/code-ui-scenarios/**
           if-no-files-found: ignore
           retention-days: 7
+
+  network-remotes:
+    name: compat-network-remotes
+    runs-on: [self-hosted]
+
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTUP_TOOLCHAIN: stable
+      LIBRA_SKIP_WEB_BUILD: "1"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_BUILD_JOBS: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.1.0 --activate
+
+      # Network-only test layer (`test-network` feature gate). Tests requiring outbound
+      # network but no secrets are surfaced through this job; tests requiring real
+      # credentials live behind `test-live-ai` / `test-live-cloud` and run only in
+      # the `compat-live-*` (workflow_dispatch) jobs, which are intentionally not
+      # GitHub required-checks.
+      - name: Run network-remote tests
+        run: cargo test --features test-network --test network_remotes_test -- --test-threads=1
