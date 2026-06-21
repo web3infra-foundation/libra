@@ -433,6 +433,57 @@ async fn paginated_log_query_order_and_boundary() {
 }
 
 #[tokio::test]
+/// Verifies command-filtered pagination is applied by the storage query.
+async fn paginated_log_query_filters_command_before_paging() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    create_operation_schema(&db).await;
+
+    let mut branch_old = sample_operation("op_branch_old", "repo_filter", "view_branch_old", 100);
+    branch_old.command_name = "branch".to_string();
+    let mut commit_new = sample_operation("op_commit_new", "repo_filter", "view_commit_new", 500);
+    commit_new.command_name = "commit".to_string();
+    let mut branch_mid = sample_operation("op_branch_mid", "repo_filter", "view_branch_mid", 300);
+    branch_mid.command_name = "branch".to_string();
+    let mut branch_new = sample_operation("op_branch_new", "repo_filter", "view_branch_new", 700);
+    branch_new.command_name = "branch".to_string();
+
+    for record in [branch_old, commit_new, branch_mid, branch_new] {
+        OperationService::insert_operation_with_conn(&db, &record)
+            .await
+            .unwrap();
+    }
+
+    let page = OperationService::list_operations_by_repo_and_command_paginated_with_conn(
+        &db,
+        "repo_filter",
+        Some("branch"),
+        OperationQueryPage {
+            page: 2,
+            per_page: 1,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(page.total, 3);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].op_id, "op_branch_mid");
+
+    let unfiltered = OperationService::list_operations_by_repo_and_command_paginated_with_conn(
+        &db,
+        "repo_filter",
+        Some(" "),
+        OperationQueryPage {
+            page: 1,
+            per_page: 10,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(unfiltered.total, 4);
+}
+
+#[tokio::test]
 /// Verifies stable ordering when multiple operations share identical timestamps.
 async fn paginated_log_query_is_deterministic_when_timestamps_tie() {
     let db = Database::connect("sqlite::memory:").await.unwrap();

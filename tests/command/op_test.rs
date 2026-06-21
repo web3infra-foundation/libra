@@ -263,6 +263,25 @@ fn test_op_log_human_page_two_uses_filtered_global_index() {
 }
 
 #[test]
+/// Verifies `switch -c` does not record a branch-only intermediate snapshot.
+fn test_switch_create_branch_does_not_record_branch_operation() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["switch", "-c", "feature"], repo.path());
+    assert_cli_success(&output, "switch -c feature");
+
+    let json = run_json_op(repo.path(), &["log", "-n", "10", "--command", "branch"]);
+    assert_eq!(json["data"]["total"], Value::from(0));
+    assert_eq!(
+        json["data"]["operations"]
+            .as_array()
+            .expect("operations array")
+            .len(),
+        0
+    );
+}
+
+#[test]
 /// Verifies that a command filter with no matches returns an empty JSON page.
 fn test_op_log_json_no_match_filter_returns_empty_page() {
     let repo = create_committed_repo_via_cli();

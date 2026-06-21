@@ -117,6 +117,43 @@ async fn test_branch_create_records_operation_log() {
     );
 }
 
+#[tokio::test]
+#[serial]
+async fn test_branch_create_mints_missing_repo_id_before_operation_log() {
+    let repo = create_committed_repo_via_cli();
+
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        ConfigKv::unset_all("libra.repoid").await.unwrap();
+    }
+
+    let output = run_libra_command(&["branch", "legacy-feature"], repo.path());
+    assert_cli_success(&output, "branch legacy-feature without repo id");
+
+    let _guard = ChangeDirGuard::new(repo.path());
+    let repo_id = ConfigKv::get("libra.repoid")
+        .await
+        .unwrap()
+        .expect("branch create should mint repo id")
+        .value;
+    uuid::Uuid::parse_str(&repo_id).expect("minted repo id should be a UUID");
+
+    let db = get_db_conn_instance().await;
+    let page = OperationService::list_operations_by_repo_paginated_with_conn(
+        &db,
+        &repo_id,
+        OperationQueryPage {
+            page: 1,
+            per_page: 10,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(page.items.iter().any(|item| {
+        item.command_name == "branch" && item.description.contains("legacy-feature")
+    }));
+}
+
 /// Scenario: human-readable branch creation must print "Created branch
 /// 'feature' at <hash>" on stdout. Pins the confirmation message format.
 #[test]
