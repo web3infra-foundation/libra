@@ -2839,6 +2839,51 @@ mod tests {
         utils::test,
     };
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: callers are serialized with `#[serial(sandbox_env)]`.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: callers are serialized with `#[serial(sandbox_env)]`.
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: callers are serialized with `#[serial(sandbox_env)]`.
+            unsafe {
+                if let Some(previous) = &self.previous {
+                    std::env::set_var(self.key, previous);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    fn force_no_ambient_bwrap() -> (EnvVarGuard, EnvVarGuard) {
+        (
+            EnvVarGuard::unset("LIBRA_LINUX_SANDBOX_EXE"),
+            EnvVarGuard::set("LIBRA_BWRAP_BINARY", "/tmp/libra-never-exists"),
+        )
+    }
+
     #[derive(Clone)]
     struct MockModel {
         final_text: String,
@@ -3961,7 +4006,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(sandbox_env)]
     async fn test_execute_gate_task() {
+        let (_helper_guard, _bwrap_guard) = force_no_ambient_bwrap();
         let task = TaskSpec {
             kind: TaskKind::Gate,
             gate_stage: Some(super::super::types::GateStage::Fast),
@@ -3983,7 +4030,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(sandbox_env)]
     async fn execute_gate_task_reports_failed_check_details() {
+        let (_helper_guard, _bwrap_guard) = force_no_ambient_bwrap();
         let task = TaskSpec {
             kind: TaskKind::Gate,
             gate_stage: Some(super::super::types::GateStage::Fast),
@@ -4010,7 +4059,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(sandbox_env)]
     async fn execute_gate_task_runs_cargo_checks_in_manifest_touch_scope() {
+        let (_helper_guard, _bwrap_guard) = force_no_ambient_bwrap();
         let dir = tempfile::tempdir().unwrap();
         let linked = dir.path().join("linked");
         std::fs::create_dir_all(linked.join("src")).unwrap();
@@ -4057,7 +4108,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(sandbox_env)]
     async fn test_execute_gate_task_emits_check_progress_events() {
+        let (_helper_guard, _bwrap_guard) = force_no_ambient_bwrap();
         let task = TaskSpec {
             kind: TaskKind::Gate,
             gate_stage: Some(super::super::types::GateStage::Fast),
@@ -4091,7 +4144,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(sandbox_env)]
     async fn test_execute_gate_task_with_default_security() {
+        let (_helper_guard, _bwrap_guard) = force_no_ambient_bwrap();
         let task = TaskSpec {
             kind: TaskKind::Gate,
             gate_stage: Some(super::super::types::GateStage::Fast),
@@ -4117,8 +4172,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(sandbox_env)]
     async fn execute_task_runs_gate_checks_in_isolated_worktree() {
+        let (_helper_guard, _bwrap_guard) = force_no_ambient_bwrap();
         let repo = tempfile::tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         std::fs::write(repo.path().join("tracked.txt"), "base\n").unwrap();
@@ -4828,8 +4884,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(sandbox_env)]
     async fn execute_dag_syncs_cargo_project_without_treating_lockfile_or_target_as_scope_creep() {
+        let (_helper_guard, _bwrap_guard) = force_no_ambient_bwrap();
         let repo = tempfile::tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
 

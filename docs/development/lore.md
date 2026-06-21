@@ -585,7 +585,7 @@ FastCDC 开工前必须满足（每条前置改为引用对应项的验收门禁
 
 ### 7.1 `dirty-set` 与 `status`/`stage` 数据流
 
-建议把 dirty 系统定义为四段式状态流：`worktree 变更 -> 显式 dirty 标记或扫描检测 -> working_dirty 落盘 -> index/stage reconcile`。  
+建议把 dirty 系统定义为四段式状态流：`worktree 变更 -> 显式 dirty 标记或扫描检测 -> working_dirty 落盘 -> index/stage reconcile`。
 Libra 与 Lore 的关键差异是默认语义：Lore 默认 `status` 读 dirty flags；Libra 为保持 Git 兼容，默认 `status` 应继续返回全量准确结果，缓存化路径必须显式启用。
 
 控制流要求：
@@ -654,8 +654,8 @@ Libra 与 Lore 的关键差异是默认语义：Lore 默认 `status` 读 dirty f
 
 FastCDC 的控制流固定三阶段：
 
-1. 能力协商：协商失败或不匹配时强制标准 LFS fallback；不发生半写入。  
-2. 上传：扫描 -> 查询缺失 chunk -> 上传缺失 chunk -> manifest -> finalize 原子提交。  
+1. 能力协商：协商失败或不匹配时强制标准 LFS fallback；不发生半写入。
+2. 上传：扫描 -> 查询缺失 chunk -> 上传缺失 chunk -> manifest -> finalize 原子提交。
 3. 下载：manifest 查询 -> 按需 chunk 拉取 -> `media_oid` 统一验签。
 
 ### 7.5 阶段验收与接口兼容清单

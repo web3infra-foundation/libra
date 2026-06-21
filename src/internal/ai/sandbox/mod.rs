@@ -3258,6 +3258,7 @@ mod tests {
     /// available so the same inputs select `MacosSeatbelt` instead.
     #[cfg(target_os = "linux")]
     #[test]
+    #[serial(sandbox_env)]
     fn build_command_from_spec_records_evidence_on_enforcement_failed() {
         use std::sync::Arc;
 
@@ -3266,18 +3267,10 @@ mod tests {
             policy::SandboxPolicy,
         };
 
-        // Clear any ambient `LIBRA_LINUX_SANDBOX_EXE` so the
-        // missing-helper branch fires deterministically. Use a
-        // serial guard if other tests touch the same env in this
-        // suite.
-        // SAFETY: tests run with `--test-threads=1` under CI for
-        // the offline-core matrix; for the dev-local run we
-        // accept best-effort isolation.
-        let _ambient = std::env::var_os("LIBRA_LINUX_SANDBOX_EXE");
-        // SAFETY: setting an env var in tests; restored below.
-        unsafe {
-            std::env::remove_var("LIBRA_LINUX_SANDBOX_EXE");
-        }
+        // Clear any ambient Linux sandbox helper and bwrap fallback
+        // so the missing-helper branch fires deterministically.
+        let _helper_guard = EnvVarGuard::unset("LIBRA_LINUX_SANDBOX_EXE");
+        let _bwrap_guard = EnvVarGuard::set("LIBRA_BWRAP_BINARY", "/tmp/libra-never-exists");
 
         let sink = Arc::new(InMemorySandboxEvidenceSink::new());
         let sandbox_runtime = SandboxRuntimeConfig {
@@ -3311,13 +3304,6 @@ mod tests {
             None,
             None,
         );
-
-        // SAFETY: restore the ambient env var.
-        unsafe {
-            if let Some(value) = _ambient {
-                std::env::set_var("LIBRA_LINUX_SANDBOX_EXE", value);
-            }
-        }
 
         assert!(
             result.is_err(),

@@ -984,13 +984,20 @@ async fn resolve_env_for_storage_init(name: &str) -> Result<Option<String>, Stri
 
     if let Some(global_db_path) = storage_global_config_path()
         && global_db_path.exists()
-        && let Some(value) =
-            read_config_env_value(name, &vault_key, &global_db_path, "global").await?
     {
-        return Ok(Some(value));
+        match read_config_env_value(name, &vault_key, &global_db_path, "global").await {
+            Ok(Some(value)) => return Ok(Some(value)),
+            Ok(None) => {}
+            Err(err) if is_schema_outdated_error(&err) => {}
+            Err(err) => return Err(err),
+        }
     }
 
     Ok(None)
+}
+
+fn is_schema_outdated_error(error: &str) -> bool {
+    error.contains("Repository database schema is out of date")
 }
 
 /// Read a single `vault.env.*` entry from a config database, decrypting if needed.
