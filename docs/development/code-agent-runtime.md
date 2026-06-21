@@ -3,6 +3,7 @@
 > Status: agent-executable（可交给 Agent 按卡执行；本文档已包含自举清单、执行协议、代码漂移防护、测试骨架、接口契约与常见陷阱，具备直接开发条件）
 > Scope: 先设计并落地独立 Agent framework，再迁移 TUI-owned 行为，最后移除 Code TUI 并让 Web Code UI 成为唯一交互面；新增 entireio/cli 对齐轨道只扩展外部 Agent 能力、checkpoint/export 与 review/investigate 工作流，不改变 MCP 与内部 AgentRuntime 的边界。
 > Companion docs: Web/runtime 现状见 [`docs/development/commands/_general.md`](commands/_general.md)；控制面契约见 [`docs/commands/code-control.md`](../commands/code-control.md)；`libra agent` 外部捕获公共 CLI/API、E1-E9 wire 契约、AG-16~AG-24 任务卡与验收命令见 [`docs/development/commands/agent.md`](commands/agent.md)；MCP stdio 独立命令拆分见 [`mcp.md`](mcp.md)。
+> Supersedes: 旧 `docs/development/web-only.md` 草案已并入本文并删除；旧 `docs/development/agent.md` 也已由本文取代。后续内部 AgentRuntime / Web-only 迁移只维护本文件，不得重新创建或链接旧文档。
 > Control-plane correction (2026-06-04): 停止把 TUI/MCP 作为 Agent 操作入口；`libra code` 只保留 Web Code UI，外部调度参考 Codex 通过 WebSocket 进入 AgentRuntime。
 > 术语消歧（跨文档）：本文的"外部 Agent / 外部调度"指经 WebSocket/Web API **驱动 Libra 内部 runtime** 的外部调用方；[`docs/development/commands/_general.md`](commands/_general.md) 的"外部 Agent"则指**被观测捕获的第三方编码 Agent**（第一批为 Claude Code/Codex/OpenCode），二者同词反义。本文的"session/checkpoint"指内部 runtime 的 session 与 orchestrator/dagrs 执行 checkpoint；entire.md 的"`agent_session`/`agent_checkpoint`"指外部会话表与 `refs/libra/agent-traces` 上的 transcript 检查点。两者的表 / 类型 / ref / 命令命名空间均不重叠。
 
@@ -21,6 +22,7 @@
 11. 2026-06-17 review-analysis: 对全文进行 11 维度评审（方案合理性、可行性、完整性、安全性、功能正确性与接口兼容性、数据流与控制流正确性、性能与效率、可靠性与容错性、兼容性与互操作性、可扩展性与可维护性、合规性与标准符合性）。发现并修复 P0 级 `dispatch_batch` API 虚构（该 trait 方法当前不存在，全文误标为"既有"）、P1 级 dagrs 使用范围高估（实际仅 2 文件而非 9 文件）、锚点行号漂移超阈值（SubAgentDispatcher 偏移 109 行、execute_stdio/validate_mode_args 偏移 129 行）等问题；补充 worker crash recovery、SSE backpressure、rate limiting、event log 损坏恢复等缺失考量。
 12. 2026-06-17 guard-template-hardening: 复核 §3.1–3.3 失效模式守卫示例，发现“可编译断言规范”表述仍过强：`ToolLoopTurn` 真实字段为 `final_text: String` + `history: Vec<Message>`，无 `Default` / `has_completed_claim` / `system_evidence`；`GoalSupervisor::step` 是实例方法且接收 `GoalTurnOutcome` / `GoalVerifierContext` / `GoalEventClock`，不是静态方法；`GoalEventEnvelope` 无 `Compaction` variant。已把 §3.1–3.3 改为“真实 API 对齐模板”，明确哪些 helper/fixture 需 AG-14 抽取，避免 Agent 直接复制失败。
 13. 2026-06-17 anchor-drift-resync: 对「已核对锚点表」与全文内联锚点做一次 ground-truth `rg` 复核并归零行号漂移。修正：`internal/tui/app.rs` plan-workflow 6 锚点（`pending_intent_review` 527→523、`pending_plan_revision` 529→525、`handle_intent_review_choice` 6015→5884、`handle_post_plan_choice` 6508→6377、`start_plan_workflow` 7126→6995、`begin_plan_workflow` 7179→7048；后四者偏移 131 行，超「>50 行＝模块近期大改」阈值，且内联引用同步更正）；`AgentExecutionSpec` `spec.rs:354→324`（2 处）；`CompletionUsageSummary` `mod.rs:57→55`（2 处，消除文档内 :55/:57 自相矛盾）；6 处 2 行级漂移——`TaskFailure::FeatureDisabled` sub_agent.rs 623→619、`CodexTaskExecutor` 65→63、`CompletionTaskExecutor` 286→284、`AuditSink` hardening.rs 453→451、`ToolRuntimeContext` sandbox/mod.rs 66→64、`ContextFrameEvent` frame.rs 144→142、`ToolCallRecord` types.rs 377→375。复核确认无漂移：`AI_REF`（history.rs:72）、codex `ContextFrameEvent`（model.rs:237）、`GoalSupervisor`（supervisor.rs:198，注意 `GoalSupervisorStep` 在 :189）、表内其余符号存在性全部维持。
+14. 2026-06-21 web-only-merge: 将旧 `docs/development/web-only.md` 的目标、非目标、TUI-owned inventory、W1~W12 任务卡、phase gate、风险与完成定义并入本文；补充旧任务卡到 AG 卡的可执行映射、旧文档删除验收、compat 文档入口修正，并删除旧文档，避免两个 Web-only 事实源继续漂移。
 
 
 ## 评审分析（2026-06-17，11 维度全量评审）
@@ -141,6 +143,28 @@
 5. **sub-agent 回写与 cancel 需要显式矩阵。** 并发只在 sub-agent dispatcher 内发生，但「子 agent 事件如何并回主序列投影」「父 turn cancel 时在途子 agent / 待审批 / 待用户输入各自如何收尾」必须写成不变量与测试矩阵，不能留给实现临时决定。
 
 `pie` 的 `coding-agent` 已用**单一 `agent_session.rs` 同时驱动终端 `ui/mod.rs` 和 Web `ui/web.rs`**，是本计划「共享 session driver + 薄 UI」目标的现成存在性证明；本计划应镜像这一 seam，而非自证可行性。
+
+## 旧 Web-only 草案合并闭环
+
+旧草案的核心结论仍然成立，但其“先切默认 Web、再逐步补 runtime”的顺序已经被本文后续评审否定。合并后的可执行顺序以 AG 卡为准：先冻结 TUI-owned 行为，再落地 UI-neutral AgentRuntime，最后切默认 Web、迁出 stdio、删除 Code TUI/PTY/graph TUI。
+
+| 旧草案任务 | 合并后的执行位置 | 执行要求 |
+|---|---|---|
+| W0 校准迁移清单 | AG-00 / Phase 0 | 继续作为第一张卡；但目标文件改为本文，且必须刷新当前 `file:line`、目标模块和最小测试。 |
+| W1 提供 MCP stdio 替代入口 | AG-06 + [`mcp.md`](mcp.md) | 在 `libra code --stdio` 拒绝前，独立 MCP 命令必须有 CLI、docs、tests；MCP 仍只承载 tools/resources，不承担 Agent turn 控制。 |
+| W2 将默认入口改为 Web | AG-07 | 不能早于 AG-01~AG-05 的 runtime/Web adapter parity；默认 Web 切换时旧 `--web` / `--web-only` 按本文拒绝策略收口，不再作为长期 no-op alias。 |
+| W3 从 `libra code` 拒绝 stdio | AG-08 | 依赖 AG-06；错误必须指向独立 MCP 命令，不能把 stdio 迁回 `code`。 |
+| W4 Web browser-control 默认可写 | AG-05 | loopback + controller token + audit + body limit 仍是硬约束；非 loopback fail closed。 |
+| W5 抽 Web session bootstrap parity | AG-02 | `CodeAgentServices` 必须由 runtime worker 持有；禁止 Web/headless 私自拼装 skills/hooks/profiles/SourcePool。 |
+| W6 迁移 plan workflow | AG-03 | Intent/Plan/Repair 进入 serialized typed interaction state；未确认前 mutating tools 不执行。 |
+| W7 Web 化 goal/usage/skill/task | AG-04 | 统一 command service；automation、trigger、cron、source 只能入 serialized queue。 |
+| W8 移除 TUI bridge/reclaim | AG-05 + AG-11 | Web submit/respond/cancel/snapshot/SSE 直接驱动 AgentRuntime；controller 不再回到 `tui`。 |
+| W9 删除 `libra code` TUI startup | AG-11 | 只在 AgentRuntime 等价、Web adapter parity、Web harness 可用后删除；非 UI helper 先迁出或保留。 |
+| W10 替换 PTY harness | AG-10 | 用 Web process + HTTP/SSE harness 覆盖跨进程行为；不得降低 approval/cancel/controller 矩阵。 |
+| W11 文档/help 收口 | AG-12 | 用户文档不再推荐 TUI、stdio、`--web-only` 或 `libra graph`；compat guard 必须跟随。 |
+| W12 最终删除检查 | AG-12 + 完成定义 | 旧文档删除、旧 Markdown 链接清零、Code TUI/graph/PTY 相关生产路径清零，一并作为 release gate。 |
+
+旧草案中的风险表已合并到本文“风险和缓解”；旧“完成定义”已合并到本文“完成定义”。旧文档不再是任务入口，也不作为验收证据；执行者需要引用历史上下文时，只引用本节映射和对应 AG 卡。
 
 ## 目标
 
@@ -929,7 +953,7 @@ find /Volumes/Data/entireio/cli-checkpoints -name 'full.jsonl' -o -name 'metadat
 # 3. Libra 当前锚点复核（必须与上文“当前基线”表一致）
 rg -n 'AgentKind|ObservedAgentHooks|Transcript(Truncator|Chunker)|LifecycleEventKind|STABLE_AGENT_SLUGS|append_checkpoint_commit' src/internal/ai/observed_agents src/internal/ai/hooks src/internal/ai/history.rs src/command/agent/mod.rs
 # 4. 两份文档一致性
-rg -n "AG-1[6-9]|AG-2[0-4]|claudecode|SubagentStart|content_hash|DeclaredCaps|libra-agent-.*info" docs/development/agent.md docs/development/commands/agent.md | sort | uniq -c | awk '$1!=2{print "DRIFT:",$0}'
+rg -n "AG-1[6-9]|AG-2[0-4]|claudecode|SubagentStart|content_hash|DeclaredCaps|libra-agent-.*info" docs/development/code-agent-runtime.md docs/development/commands/agent.md | sort | uniq -c | awk '$1!=2{print "DRIFT:",$0}'
 ```
 任何刷新后发现 E 契约或归档形态变化，必须先在 `commands/agent.md` 的“已验证 wire 契约”打补丁，再同步本节摘要与 Gate 8 追踪，再开工 AG 卡。
 
@@ -1392,7 +1416,7 @@ rg -n "fn dispatch_batch|fn dispatch_parallel|materialize_isolated_workspace" sr
 
 ```text
 目标：
-  执行 docs/development/agent.md 中的 AG-xx。
+  执行 docs/development/code-agent-runtime.md 中的 AG-xx。
 
 当前状态刷新：
   先运行 libra status --short，并用任务卡指定的 rg 命令刷新 source anchors。
@@ -1608,7 +1632,7 @@ fn web_build_required_test() {
 
 | 卡 | 依赖 / 可并行性 | 主范围 | 必须交付的证据 | 禁止 |
 |---|---|---|---|---|
-| AG-00 | 无；第一张卡 | `docs/development/agent.md` | living parity 矩阵含当前 `file:line`、目标模块、最小测试；本卡不改 Rust | 不实现 runtime；不切默认 Web |
+| AG-00 | 无；第一张卡 | `docs/development/code-agent-runtime.md` | living parity 矩阵含当前 `file:line`、目标模块、最小测试；本卡不改 Rust | 不实现 runtime；不切默认 Web |
 | AG-01 | AG-00 + Gate 0 | `src/internal/ai/agent/runtime/`、`ai/runtime/`、`ai/intentspec/`、`ai/goal/`、session/projection 薄 facade | DTO/event envelope、serialized turn queue、typed interaction state、event cursor、fake/replay 合同测试 | 不删除 TUI；不把交互 gate 塞进 dagrs；不替换执行 DAG 的 dagrs |
 | AG-02 | AG-01 合同稳定 | bootstrap / provider / skills / hooks / SourcePool / usage / permission 装配 | `CodeAgentServices` 是 runtime worker 持有的单一结构；TUI/Web bootstrap 等价测试 | 不让 Web/headless 私拼 system prompt 或上下文预算 |
 | AG-03 | AG-01、AG-02 | `intentspec/`、runtime worker、TUI plan workflow 迁移源 | Intent/Plan/Repair transition 写 SessionEvent；未确认前 mutating tools 不执行 | 不让 adapter 私有推进 workflow；不新增 statechart 依赖 |
@@ -2057,7 +2081,7 @@ cargo test --test compat_matrix_alignment
 
 ### Phase 17: entireio/cli 对齐 - docs、compat、release closeout
 
-目标：把 Gate 8 的 public behavior、JSON schema、fixtures 和用户文档收敛，避免 `docs/development/agent.md`、`docs/development/commands/agent.md`、`docs/commands/agent.md` 三处继续漂移。
+目标：把 Gate 8 的 public behavior、JSON schema、fixtures 和用户文档收敛，避免 `docs/development/code-agent-runtime.md`、`docs/development/commands/agent.md`、`docs/commands/agent.md` 三处继续漂移。
 
 依赖：AG-16~AG-23。
 
@@ -2072,7 +2096,7 @@ cargo test --test compat_matrix_alignment
 验收：
 
 - `rg -n "entireio|d0a714887c9f2fbe0e0df51057c0952a7867f174|claudecode|list/add/remove|libra-agent-" docs/development docs/commands COMPATIBILITY.md tests/INDEX.md` 输出可解释，无旧 provider 复活。
-- `docs/development/agent.md` 与 `docs/development/commands/agent.md` 的边界说明一致：前者是内部 AgentRuntime + Web-only 迁移 + Gate 8 总览追踪，后者是 `libra agent` public CLI/API/source-of-truth（含 E1-E9、AG-16~AG-24、checkpoint/export、review/investigate、验收命令和“还未实现”表）。**任何一处修改 AG 卡、E 契约、已知差距或有意差异，必须同一 PR 内双向同步**（见 AG-24 强制同步规则）。
+- `docs/development/code-agent-runtime.md` 与 `docs/development/commands/agent.md` 的边界说明一致：前者是内部 AgentRuntime + Web-only 迁移 + Gate 8 总览追踪，后者是 `libra agent` public CLI/API/source-of-truth（含 E1-E9、AG-16~AG-24、checkpoint/export、review/investigate、验收命令和“还未实现”表）。**任何一处修改 AG 卡、E 契约、已知差距或有意差异，必须同一 PR 内双向同步**（见 AG-24 强制同步规则）。
 - 旧 d0a714 分析版已并入本节（见上文“与被覆盖分析版...”段落）；d0a714 提出的所有 10 节结论均已映射到 AG-16~AG-24 或标记因架构变化废弃（claudecode、存储路径照搬等）。
 - 所有新增 public JSON schema 都有 Display/schema pin test 或 snapshot test；用户可见错误包含原因、资源、下一步。
 
@@ -2135,7 +2159,7 @@ cargo +nightly fmt --all --check  # 虽然不改 Rust，确认基线能通过
 
 - 每个 must-migrate 行为都有目标 Agent framework 模块，精确到 `src/internal/ai/<module>/<file.rs>` 级别。
 - 每个 must-migrate 行为都有可命名的最小测试锚点（具体到测试文件或函数名）。
-- 本卡不改 Rust；交付证据用 `libra diff -- docs/development/agent.md` 说明本卡新增 diff 范围，若 `libra status --short` 还有其它预存变更，逐项标注为非本卡改动。
+- 本卡不改 Rust；交付证据用 `libra diff -- docs/development/code-agent-runtime.md` 说明本卡新增 diff 范围，若 `libra status --short` 还有其它预存变更，逐项标注为非本卡改动。
 - 新增遗漏行为 ≤ 10 项；若超过，在交付证据中解释为何种子清单遗漏如此之多（可能是近期大改未同步到文档）。
 - 交付证据包含：Step 2 的 rg 输出摘要、种子清单中变更项列表、新增遗漏项列表。
 
@@ -2645,11 +2669,11 @@ AG-24 交付时必须把上表逐行核对：没有 target、没有具体 test f
 
 #### 两个开发文档的强制同步规则
 - `docs/development/commands/agent.md`（公共 CLI/API/行为 source-of-truth + E1-E9 + AG-16~AG-24 + 差距表 + “还未实现的功能”表）是 `libra agent` 外部捕获 public contract 的事实来源。
-- `docs/development/agent.md`（本文件，内部 runtime + Web-only 迁移 + Gate 8 总览追踪）必须与 `commands/agent.md` 双向同步：任一处更新 AG-16~AG-24 描述、E 契约、已知差距或有意差异，必须在同一 commit 刷新另一处，并更新 `docs/commands/agent.md` 用户文档 + `COMPATIBILITY.md` + `tests/INDEX.md`。
-- 验收时跑 `rg -n "AG-1[6-9]|AG-2[0-4]|DeclaredAgentCaps|libra-agent-.*info|SubagentStart|CheckpointSummary|content_hash" docs/development/agent.md docs/development/commands/agent.md` 确保一致；任何漂移视为 AG-24 未完成。
+- `docs/development/code-agent-runtime.md`（本文件，内部 runtime + Web-only 迁移 + Gate 8 总览追踪）必须与 `commands/agent.md` 双向同步：任一处更新 AG-16~AG-24 描述、E 契约、已知差距或有意差异，必须在同一 commit 刷新另一处，并更新 `docs/commands/agent.md` 用户文档 + `COMPATIBILITY.md` + `tests/INDEX.md`。
+- 验收时跑 `rg -n "AG-1[6-9]|AG-2[0-4]|DeclaredAgentCaps|libra-agent-.*info|SubagentStart|CheckpointSummary|content_hash" docs/development/code-agent-runtime.md docs/development/commands/agent.md` 确保一致；任何漂移视为 AG-24 未完成。
 
 ##### 1. 涉及文件
-* 本文件: [`docs/development/agent.md`](agent.md)
+* 本文件: [`docs/development/code-agent-runtime.md`](code-agent-runtime.md)
 * Public agent plan: [`docs/development/commands/agent.md`](commands/agent.md)
 * Command docs: `docs/commands/agent.md`（及 zh-CN 如存在）
 * Compatibility/docs index: `COMPATIBILITY.md`、`docs/commands/README.md`、`tests/INDEX.md`
@@ -2670,6 +2694,8 @@ AG-24 交付时必须把上表逐行核对：没有 target、没有具体 test f
 基础文档/契约检查：
 
 ```bash
+test ! -e docs/development/web-only.md
+! rg -n "\\]\\([^)]*(\\.\\./agent\\.md|\\.\\./web-only\\.md|docs/development/agent\\.md|docs/development/web-only\\.md)" docs/development docs/commands README.md COMPATIBILITY.md tests
 rg -n "execute_tui|run_tui_with_model|TuiLaunchConfig|TuiCodeUiAdapter|TuiControlCommand|tui_init\\(|tui_restore\\(" src/command/code.rs
 rg -n "libra code --web|libra code --web-only|libra code --stdio|--mcp-stdio|libra graph|GraphArgs|GRAPH_EXAMPLES|Launch the default TUI session" README.md docs/commands docs/development/commands tests src/command/code.rs
 rg -n "default_tui_runtime_context" src/internal/ai/web src/command/code.rs
@@ -2773,7 +2799,7 @@ rg -n "claudecode|claude-code|libra-agent-|agent list|agent add|agent remove|Lif
 - 未完成 AG-01/AG-02/AG-03/AG-04，不要执行 AG-07、AG-05 的 TUI bridge 删除、AG-11。
 - 未完成 AG-06，不要执行 AG-08。
 - 未完成 AG-09 的 Web Graph API/UI，不要删除 `src/command/graph.rs` 的 loader。
-- 未完成 AG-10，不要删除所有 PTY fixtures（但 Code UI 场景的 harness 替换必须在 AG-10 完成时切换到 --web-only 启动，不再依赖 PTY）。
+- 未完成 AG-10，不要删除所有 PTY fixtures（但 Code UI 场景的 harness 替换必须在 AG-10 完成时切换到默认 Web 启动，不再依赖 PTY）。
 - 不要把 `--web` / `--web-only` 留作旧脚本兼容入口。
 - 不要让 Web adapter 拥有只属于 Web 的 plan/goal/usage/skill/session 状态机。
 - 不要用 ad-hoc enum loop、async select 分支或 adapter-local queue 替换**执行 DAG 的 `dagrs 0.8.1`**；serialized queue 只负责 producer 排队，不负责表达执行 DAG。
@@ -2935,6 +2961,7 @@ rg -n "claudecode|claude-code|libra-agent-|agent list|agent add|agent remove|Lif
 - PTY/TUI harness 已被 Web process + HTTP/SSE harness 替换。
 - `src/command/code.rs` 不引用 TUI runtime（仅保留为历史迁移说明）。
 - 用户文档不再描述 `libra code` 支持 TUI，也不推荐 `--web-only` 或 `libra graph`。
+- `docs/development/web-only.md` 不存在；仓库内不得再出现指向旧 `docs/development/web-only.md` 或旧 `docs/development/agent.md` 的 Markdown 链接。
 - TUI `App` 在 Gate 6 后不应存在于任何生产路径；若测试仍需最小 TUI 桩（仅用于验证 AgentRuntime 的 backward compatibility），必须显式标注为 `#[cfg(test)]` 且仅做渲染/输入委托，不拥有 plan/goal/workflow 状态机。
 - 所有 must-migrate 行为在种子清单中都有对应的中立实现与回归测试。
 - Dynamic Workflows 设计已落地为执行侧可复用原语：六 workflow pattern（`WorkflowPattern` 层，复用 `dagrs`，`dispatch_batch` 由 AG-13 新建到 `SubAgentDispatcher` trait，不进交互 gate）、三失效模式守卫（agentic-laziness / self-preferential-bias / goal-drift 命名测试）、per-workflow token 预算、skill/automation 模板化。

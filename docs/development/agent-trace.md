@@ -531,6 +531,6 @@ Agent Trace 联盟成员（README 致谢）大致分两类采集/存储形态，
 ## 8. 参考
 
 - Agent Trace 规范与参考实现（Cursor）：`/Volumes/Data/cursor/agent-trace`（`README.md`、`schemas.ts`、`reference/{trace-store,trace-hook}.ts`、`index.ts` 用于构建 JSON Schema 与站点）。
-- Libra AI 对象模型：[`docs/agent/ai-object-model-reference.md`](../agent/ai-object-model-reference.md)、[`docs/development/agent.md`](agent.md)。
+- Libra AI 对象模型：[`docs/agent/ai-object-model-reference.md`](../agent/ai-object-model-reference.md)、[`docs/development/code-agent-runtime.md`](code-agent-runtime.md)。
 - 兼容性矩阵：[`COMPATIBILITY.md`](../../COMPATIBILITY.md)。
 - 关键实现锚点：`src/internal/ai/tools/apply_patch/core.rs:285`（compute_replacements）、`src/internal/ai/tools/handlers/apply_patch.rs:145`（仅产 TUI metadata）、`src/internal/ai/hooks/runtime.rs:1100`（append_normalized_event 塌陷）、`src/internal/ai/observed_agents/`（外部采集 + redaction + agent-traces orphan ref）、`src/internal/publish/ai_export.rs`（对象级导出）。
