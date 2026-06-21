@@ -58,6 +58,7 @@ const COMMANDS: &[&str] = &[
     "show",
     "show-ref",
     "ls-remote",
+    "ls-files",
     "symbolic-ref",
     "rev-parse",
     "rev-list",

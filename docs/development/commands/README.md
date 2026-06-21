@@ -52,6 +52,7 @@
 | [`init`](init.md) | `partial` | fresh repository initialization supported; safe re-initialization/top-up of existing repos not implemented |
 | [`lfs`](lfs.md) | `partial` | built-in Libra LFS command; uses `.libra_attributes`, not Git LFS filters/hooks (see [docs/development/commands/_comp... |
 | [`log`](log.md) | `partial` | common log surface plus `--range`/`--all`/`--reverse`/`--follow`/`-L`; positional ranges and exact line history remain partial |
+| [`ls-files`](ls-files.md) | `partial` | default cached listing plus modified/deleted/stage/untracked filters, `.libraignore`-aware `--others --exclude-standard`, pathspecs, `--error-unmatch`, `-z`, and JSON/machine output supported |
 | [`ls-remote`](ls-remote.md) | `partial` | heads/tags/refs filtering, patterns, get-url, sort, and exit-code supported; symref not exposed |
 | [`ls-tree`](ls-tree.md) | `partial` | Commit/tree listing, recursive listing, current-directory-relative path prefix filters, `--full-name`, `--full-tree`, JSON, common output flags, and partial `--format` atom support exposed; `REV:path` syntax is not exposed |
 | [`maintenance`](maintenance.md) | `partial` | `run` / `register` / `unregister` / `status` / `start` / `stop` exposed; commit-graph and prefetch tasks implemented with documented Git semantic differences |
@@ -89,7 +90,6 @@
 以下命令曾有开发设计资料，但已明确决定不接入公开 CLI；它们降级为内部历史资料，不承诺用户可见兼容面：
 
 - `gc`：功能由 `libra maintenance run --task gc` 覆盖（见 `docs/development/internal/gc.md`）
-- `ls-files`：内部设计资料保留（见 `docs/development/internal/ls-files.md`）
 - `package`：内部设计资料保留（见 `docs/development/internal/package.md`）
 - `prune`：内部设计资料保留（见 `docs/development/internal/prune.md`）
 - `stats`：内部设计资料保留（见 `docs/development/internal/stats.md`）

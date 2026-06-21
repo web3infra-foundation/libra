@@ -1331,9 +1331,8 @@ pub struct ListRunUsagesParams {
 
 #[derive(Debug, schemars::JsonSchema)]
 pub struct RunLibraVcsParams {
-    /// Allowlisted Libra subcommand: status, diff, branch, log, show, show-ref, add, commit,
-    /// or switch. Pass Git-like flags in args only when they map cleanly to Libra; do not use
-    /// Git-only commands such as ls-files.
+    /// Allowlisted Libra subcommand: status, diff, branch, log, show, show-ref, ls-files, add,
+    /// commit, or switch. Pass Git-like flags in args only when they map cleanly to Libra.
     pub command: String,
     /// Command arguments as argv entries. Shell syntax is not evaluated. Prefer
     /// `status --json` or `status --porcelain v2 --untracked-files=all` for repository state.
@@ -1354,7 +1353,7 @@ impl<'de> Deserialize<'de> for RunLibraVcsParams {
 #[tool_router]
 impl LibraMcpServer {
     #[tool(
-        description = "Run an allowlisted Libra version-control command without invoking git. Allowed commands: status, diff, branch, log, show, show-ref, add, commit, switch. Pass flags in args. Use workspace file tools instead of ls-files."
+        description = "Run an allowlisted Libra version-control command without invoking git. Allowed commands: status, diff, branch, log, show, show-ref, ls-files, add, commit, switch. Pass flags in args. Use ls-files for tracked/untracked repository path inspection."
     )]
     pub async fn run_libra_vcs(
         &self,

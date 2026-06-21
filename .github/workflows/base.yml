@@ -123,6 +123,11 @@ jobs:
 
       - name: Run redundancy check
         run: |
+          if [ ! -d third-party/rust/crates ]; then
+            echo "✅ No third-party/rust/crates directory to check"
+            exit 0
+          fi
+
           x=$(find third-party/rust/crates -mindepth 2 -maxdepth 2 -type d -exec bash -c '
             n=$(find "$1" -maxdepth 1 -type f | wc -l)
             [ $n -gt 1 ]

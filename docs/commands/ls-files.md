@@ -1,49 +1,125 @@
-# libra ls-files
+# `libra ls-files`
 
-Historical design for listing index entries.
-
-> Status: unpublished. Top-level `libra ls-files` is not registered in the
-> public CLI in the current release. Running it returns the standard
-> unknown-command error (`LBR-CLI-001`). This page describes preserved design
-> material for a future top-level command. The published LFS command remains
-> `libra lfs ls-files`.
+List tracked index entries and untracked working-tree paths.
 
 ## Synopsis
 
-```sh
-libra ls-files [--cached] [--deleted] [--modified] [--stage|-s] [--others] [--exclude-standard]
+```bash
+libra ls-files [OPTIONS] [pathspec]...
 ```
 
 ## Description
 
-The unpublished design lists paths known to Libra's index, with basic filters for cached, deleted, modified, conflict-stage, and untracked files. It reads Libra's `.libra/index` and working tree; it does not use a `.git/index` layout.
+`libra ls-files` reads Libra's index and working tree and prints repository
+paths without mutating refs, the index, the worktree, or object storage.
+With no state filter it defaults to the cached index view, so tracked paths
+remain listed even when the working tree copy is modified or deleted.
+
+This public compatibility slice supports cached listing, modified/deleted
+filters, stage-style output, untracked listing, `.libraignore`-aware filtering
+via `--others --exclude-standard`, repository-local pathspec filtering,
+`--error-unmatch`, and NUL-delimited text output via `-z`.
+
+Pathspecs are resolved from the caller's current working directory, not forced
+to the repository root. Exact-file and directory-prefix filtering are both
+supported; pathspecs that resolve outside the repository are rejected.
+Ignored-only / explicit exclude-source modes, resolve-undo, and sparse-checkout
+integration remain deferred.
 
 ## Options
 
 | Option | Description |
-|---|---|
+|--------|-------------|
 | `--cached` | Show cached index entries. This is the default when no state filter is provided. |
 | `--deleted` | Show tracked paths whose working-tree file is missing. |
 | `--modified` | Show tracked paths whose working-tree content hash differs from the index. |
-| `--stage` | Include stage information, including conflict stages when present. |
-| `-s` | Short stage-style output: `<mode> <object> <stage>\t<path>`. |
+| `--stage` | Print stage-style records, including conflict stages when present. |
+| `-s` | Short alias for stage-style output: `<mode> <object> <stage>\t<path>`. |
 | `--others` | Show untracked working-tree files. |
 | `--exclude-standard` | With `--others`, honor `.libraignore` rules. |
+| `--error-unmatch` | Exit with `LBR-CLI-003` if any explicit pathspec matches no files in the selected result set. |
+| `-z` | Emit NUL-delimited text records instead of newline-delimited output. Text mode only; rejects `--json` / `--machine`. |
+| `<pathspec>...` | Limit output to an exact file or directory prefix. Pathspecs resolve from the current working directory. |
+| `--json` | Emit the standard Libra JSON envelope. |
+| `--machine` | Emit the same envelope as one compact JSON line. |
 
 ## Examples
 
-```sh
+```bash
 libra ls-files
 libra ls-files --modified
 libra ls-files --deleted
+libra ls-files --others
 libra ls-files --others --exclude-standard
-libra --json ls-files --stage
+libra ls-files tracked-dir
+libra ls-files --others --exclude-standard others-dir
+libra ls-files --error-unmatch src/lib.rs
+libra ls-files -z tracked-dir
+libra ls-files --stage
+libra --json ls-files --modified
 ```
 
-## Compatibility
+## Human Output
 
-If this command is published in a future release, its intended compatibility tier is `partial`. Deferred Git flags include pathspecs, `-z`, `--error-unmatch`, ignored-mode variants, explicit exclude sources, `--eol`, resolve-undo, killed/debug output, and sparse-checkout integration.
+Default output prints one repository path per line:
+
+```text
+.libraignore
+tracked.txt
+```
+
+`--stage` and `-s` print Git-style stage records:
+
+```text
+100644 4f3c2d1a7b8c9d0e1234567890abcdef12345678 0	tracked.txt
+```
+
+`-z` keeps the same record shape but terminates each record with NUL instead of
+newline, which is useful for shell-safe scripting:
+
+```text
+tracked-dir/alpha.txt\0tracked-dir/bravo.txt\0
+```
 
 ## Structured Output
 
-If this command is published in a future release, `--json` and `--machine` should return the standard Libra envelope. `data` is expected to be an array of entries with `path`, `hash`, `mode`, `stage`, and `status` fields. Fields that do not apply to untracked files are `null`.
+`--json` and `--machine` use the standard Libra command envelope. Each entry in
+`data` includes `path`, `hash`, `mode`, `stage`, and `status`. Untracked
+entries use `null` for fields that do not apply:
+
+```json
+{
+  "ok": true,
+  "command": "ls-files",
+  "data": [
+    {
+      "path": "tracked.txt",
+      "hash": "4f3c2d1a7b8c9d0e1234567890abcdef12345678",
+      "mode": "100644",
+      "stage": 0,
+      "status": "modified"
+    },
+    {
+      "path": "untracked.txt",
+      "hash": null,
+      "mode": null,
+      "stage": null,
+      "status": "other"
+    }
+  ]
+}
+```
+
+## Parameter Comparison: Libra vs Git vs Jujutsu
+
+| Feature | Libra | Git | Jujutsu |
+|---------|-------|-----|---------|
+| Cached index listing | Default / `--cached` | Default / `--cached` | Use status/file commands |
+| Modified tracked files | `--modified` | `--modified` | Use status/diff commands |
+| Deleted tracked files | `--deleted` | `--deleted` | Use status commands |
+| Stage-style output | `--stage` / `-s` | `--stage` / `-s` | Different model |
+| Untracked files | `--others` | `--others` | Use status/file commands |
+| Ignore-aware untracked | `--others --exclude-standard` | Same | Different model |
+| Pathspec filters | `<pathspec>...` | Supported | Different model |
+| Unmatched pathspec failure | `--error-unmatch` | `--error-unmatch` | Different model |
+| NUL output | `-z` (text mode only) | `-z` | Different model |

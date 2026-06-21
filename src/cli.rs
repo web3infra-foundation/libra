@@ -31,7 +31,7 @@ use crate::{
 const ROOT_AFTER_HELP: &str = "\
 Command Groups:
   Repository Setup        init, clone, config
-  Working Tree            status, add, rm, mv, restore, clean, stash, lfs, worktree
+  Working Tree            status, add, rm, mv, restore, clean, stash, lfs, ls-files, worktree
   History Inspection      log, shortlog, show, show-ref, ls-remote, ls-tree, diff, grep, blame, describe, notes, archive
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
@@ -310,6 +310,11 @@ enum Commands {
         after_help = command::lfs::LFS_EXAMPLES
     )]
     Lfs(command::lfs::LfsCmds),
+    #[command(
+        about = "Show information about tracked and untracked files",
+        after_help = command::ls_files::LS_FILES_EXAMPLES
+    )]
+    LsFiles(command::ls_files::LsFilesArgs),
     #[command(
         about = "Manage multiple working trees attached to this repository",
         alias = "wt",
@@ -1247,6 +1252,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Clean(cmd_args) => command::clean::execute_safe(cmd_args, &output).await?,
         Commands::Stash(cmd) => command::stash::execute_safe(cmd, &output).await?,
         Commands::Lfs(cmd) => command::lfs::execute_safe(cmd, &output).await?,
+        Commands::LsFiles(cmd_args) => command::ls_files::execute_safe(cmd_args, &output).await?,
         Commands::Log(cmd_args) => command::log::execute_safe(cmd_args, &output).await?,
         Commands::Shortlog(cmd_args) => command::shortlog::execute_safe(cmd_args, &output).await?,
         Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
