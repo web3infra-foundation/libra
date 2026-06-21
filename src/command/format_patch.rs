@@ -299,15 +299,14 @@ async fn resolve_range_commits(args: &FormatPatchArgs) -> Result<Vec<Commit>, Cl
 
     // Parse A..B notation
     let (exclude_tip_opt, include_tip) = if let Some((left, right)) = spec.split_once("..") {
-        // Empty left side (..B) means "no exclusion" — include all commits
-        // reachable from B.  Empty right side (A..) defaults to HEAD.
-        let exclude_tip_opt = if left.is_empty() {
-            None
-        } else {
-            Some(resolve_single_rev(left).await?)
-        };
+        // Both empty sides default to HEAD (Git-compatible: ..HEAD equals
+        // HEAD..HEAD producing zero patches).
+        let left_spec = if left.is_empty() { "HEAD" } else { left };
         let right_spec = if right.is_empty() { "HEAD" } else { right };
-        (exclude_tip_opt, resolve_single_rev(right_spec).await?)
+        (
+            Some(resolve_single_rev(left_spec).await?),
+            resolve_single_rev(right_spec).await?,
+        )
     } else {
         // Single revision: range is <spec>..HEAD
         let head = resolve_current_head().await?;
