@@ -1452,3 +1452,50 @@ async fn resolve_env_sync_returns_none_when_no_layer_supplies_value() {
         "expected None for an unset key, got {value:?}"
     );
 }
+
+/// Regression: `ConfigKv::get_best_effort` must surface a database-open failure
+/// as an `Err` rather than panicking. The plain `ConfigKv::get` resolves its
+/// connection through `get_db_conn_instance`, which panics when the repository
+/// database cannot be opened (missing file or out-of-date schema). During
+/// `clone`/`fetch` the SSH transport setup reads config best-effort and may
+/// walk up into an *enclosing* repo whose schema this binary no longer
+/// supports — that previously dumped a panic to stderr. `get_best_effort` must
+/// degrade gracefully instead.
+#[tokio::test]
+#[serial]
+async fn get_best_effort_returns_err_outside_repository() {
+    use libra::internal::config::ConfigKv;
+
+    // An empty temp dir with no `.libra/` anywhere up the tree: the database
+    // cannot be located/opened, so the call must return Err — never panic.
+    let temp_path = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let result = ConfigKv::get_best_effort("ssh.strictHostKeyChecking").await;
+    assert!(
+        result.is_err(),
+        "expected an Err (not a panic) outside a repository, got {result:?}"
+    );
+}
+
+/// Happy path: inside a valid repository `get_best_effort` reads the stored
+/// value just like `get`, confirming the non-panicking wrapper still resolves
+/// the per-repo database correctly.
+#[tokio::test]
+#[serial]
+async fn get_best_effort_reads_value_inside_repository() {
+    use libra::internal::config::ConfigKv;
+
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    ConfigKv::set("ssh.strictHostKeyChecking", "yes", false)
+        .await
+        .unwrap();
+
+    let entry = ConfigKv::get_best_effort("ssh.strictHostKeyChecking")
+        .await
+        .unwrap();
+    assert_eq!(entry.map(|e| e.value).as_deref(), Some("yes"));
+}

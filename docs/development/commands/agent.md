@@ -1,8 +1,8 @@
 # `libra agent` 开发设计
 
-> 本文件是 `libra agent`（外部 Agent 捕获子系统）的**公共 CLI/行为事实源**，已从 [`docs/development/agent.md`](../agent.md) 拆入 external-agent 捕获需要的 entireio/cli 对齐契约、AG-16~AG-24 任务卡、E1–E9 wire contract、checkpoint/export、review/investigate 与验收命令。`docs/development/agent.md` 继续负责内部 AgentRuntime、Web-only 迁移、MCP/control-plane 边界和 Gate 8 的总览追踪；两份文档任一处修改 public surface、E 契约、AG-16~AG-24 或有意差异时，必须同一 PR 同步。
+> 本文件是 `libra agent`（外部 Agent 捕获子系统）的**公共 CLI/行为事实源**，已从 [`docs/development/code-agent-runtime.md`](../code-agent-runtime.md) 拆入 external-agent 捕获需要的 entireio/cli 对齐契约、AG-16~AG-24 任务卡、E1–E9 wire contract、checkpoint/export、review/investigate 与验收命令。`docs/development/code-agent-runtime.md` 继续负责内部 AgentRuntime、Web-only 迁移、MCP/control-plane 边界和 Gate 8 的总览追踪；两份文档任一处修改 public surface、E 契约、AG-16~AG-24 或有意差异时，必须同一 PR 同步。
 
-> **术语与特性边界澄清**：本文档中的 "SubagentStart / SubagentEnd" 与 checkpoint `scope = 'subagent'` 专指**被观测的外部 Agent**（Claude Code 等）在其 transcript 中产生的子代理事件，由 `libra agent` 捕获。**与此正交**的是 Cargo feature `subagent-scaffold`（CEX-S2-10，Step 2 子代理契约 schema-only 脚手架），它用于 `src/internal/ai/agent/`、`goal/` 等内部 AgentRuntime 的子代理合约定义，当前受 CP-4 gate 保护。Cargo.toml 中的注释引用本文档 "Step 2 audit closure" 应理解为外部捕获计划为整体子代理事件面提供上下文；内部 scaffold 的实际实现与审计位于内部 AI 模块与 `docs/development/agent.md`。新增/修改任一 "subagent" 语义时，必须同步更新 Cargo 注释与两份文档。
+> **术语与特性边界澄清**：本文档中的 "SubagentStart / SubagentEnd" 与 checkpoint `scope = 'subagent'` 专指**被观测的外部 Agent**（Claude Code 等）在其 transcript 中产生的子代理事件，由 `libra agent` 捕获。**与此正交**的是 Cargo feature `subagent-scaffold`（CEX-S2-10，Step 2 子代理契约 schema-only 脚手架），它用于 `src/internal/ai/agent/`、`goal/` 等内部 AgentRuntime 的子代理合约定义，当前受 CP-4 gate 保护。Cargo.toml 中的注释引用本文档 "Step 2 audit closure" 应理解为外部捕获计划为整体子代理事件面提供上下文；内部 scaffold 的实际实现与审计位于内部 AI 模块与 `docs/development/code-agent-runtime.md`。新增/修改任一 "subagent" 语义时，必须同步更新 Cargo 注释与两份文档。
 
 ## Agent 命令实现功能边界
 
@@ -382,7 +382,7 @@ OpenCode 是第一批 supported agent；执行本文档时必须补齐 OpenCode 
 
 明确不属于 `libra agent` 改进方案的范围：
 
-- 不实现或迁移内部 `libra code` 的 turn state、runtime replay truth、WebSocket/Web API control plane、MCP stdio command；这些由 `docs/development/agent.md` 与 `docs/development/mcp.md` 承接。
+- 不实现或迁移内部 `libra code` 的 turn state、runtime replay truth、WebSocket/Web API control plane、MCP stdio command；这些由 `docs/development/code-agent-runtime.md` 与 `docs/development/mcp.md` 承接。
 - 不把 `libra agent` 设计成 Git 兼容命令，也不要求与 entire 的 subcommand+stdio 传输 wire-compatible；只对齐能力语义、schema、checkpoint/export 形状和安全边界。
 - 不复活 `claudecode` provider；第一批 observed external-agent slug / hook provider 只允许 `claude-code`、`codex`、`opencode`。
 - 不允许 unknown / preview / external agent kind 直接写入 `agent_session.agent_kind` CHECK enum；未知类型进入 quarantine/unsupported。
@@ -405,8 +405,8 @@ OpenCode 是第一批 supported agent；执行本文档时必须补齐 OpenCode 
 | 维度 | 评级 | 解释 | 唯一结论 | 必须落到实施的门禁 / 证据 |
 |---|---|---|---|---|
 | 合理性 | ✅ 合理 | 目标与现有命令分工一致：外部 Agent 捕获、hook、transcript 和 checkpoint 归 `libra agent`；受控执行、approval、sandbox 和 workspace mutation 归 `libra code`。因此方向成立，风险主要是实现时把 observed external agent 边界外扩。 | `libra agent` 继续做外部 Agent 捕获，`libra code` 继续做内部受控 AgentRuntime，边界符合当前源码和 Gate 8 方向；observed external agent 只能提供 transcript、hook event、findings、provenance。 | Gate 8 任何任务不得把 observed external agent 变成 mutating executor；fix、workspace mutation、tool approval、sandbox 执行只能桥接内部 AgentRuntime。 |
-| 可行性 | ⚠️ 部分有条件可行 | 已有基础设施，所以不是从零开始；但关键安全、修复、并发和 workflow 能力仍是净新建。尤其 AG-22 / AG-23 依赖 AG-13 的 batch dispatch、workspace isolation 复用边界和内部 fix bridge，必须先满足前置条件。 | 已有 `AgentKind`、`ObservedAgent`、hook dispatcher、RPC v1、checkpoint writer；但 settings gate、stderr 捕获、doctor repair、prune 并发保护、review / investigate 命令层都是净新建。AG-22 / AG-23 依赖的 AG-13 workflow seam 仍有风险：`dispatch_batch` / `dispatch_parallel` 不存在；per-run workspace isolation helper 已在 `DefaultSubAgentDispatcher::dispatch` 路径中存在，但 review/investigate 复用方式仍需源码锚点确认。 | 分阶段落地：AG-16 / AG-18 先冻结 capability 与安全 contract，AG-19 / AG-20 再接 writer。AG-22 / AG-23 的前置必须是 AG-13 已交付 `dispatch_batch`，并明确复用或抽取现有 `materialize_isolated_workspace` 隔离 helper，且内部 serialized fix 入口有源码锚点。 |
-| 完整性 | ⚠️ 主路径完整，门禁待补 | 主流程覆盖面已经足够支撑方案拆分，但跨阶段的版本、迁移、崩溃恢复、分页、资源预算和超时重试还没有统一冻结。也就是说功能轮廓完整，交付闭环还缺可执行门禁。 | 主路径覆盖 capability contract、CLI、RPC、lifecycle、checkpoint/export、review/investigate；缺 public schema version、migration/backfill/rollback、crash recovery、分页、资源预算、超时重试和索引门禁的统一冻结。 | 保留已补的 `AgentKind` 命名映射、资源预算、超时重试、分页复合索引要求；AG-20 必须有 crash recovery 矩阵、分页契约、migration/backfill/rollback 证据。 |
+| 可行性 | ⚠️ 部分有条件可行 | 已有基础设施，所以不是从零开始；但关键安全、修复、并发和 workflow 能力仍是净新建。执行 `libra agent` 外部捕获计划不要求先完成完整内部 AgentRuntime / Web-only 迁移；真正的硬前置只出现在 AG-22 / AG-23 的 mutating fix/action 路径。 | 已有 `AgentKind`、`ObservedAgent`、hook dispatcher、RPC v1、checkpoint writer；但 settings gate、stderr 捕获、doctor repair、prune 并发保护、review / investigate 命令层都是净新建。AG-22 / AG-23 必须拆成 read-only workflow 与 mutating fix bridge 两层：read-only review/investigate 启动的是**外部 agent 进程**（Claude Code/Codex/OpenCode），其并发 fan-out 依赖 AG-18 external RPC spawn 能力 + workspace 隔离，**不是**内部 `SubAgentDispatcher::dispatch_batch`（后者服务内部 sub-agent，与外部 agent 并发启动是不同机制）；`materialize_isolated_workspace`（`sub_agent_dispatcher.rs:738`）可作为 workspace 隔离 helper 复用候选，但须在 AG-22/AG-23 中明确抽取边界。fix/action 必须等待内部 serialized fix 入口经源码确认。 | 分阶段落地：AG-16 / AG-18 先冻结 capability 与安全 contract，AG-19 / AG-20 再接 writer。AG-22 / AG-23 若 fix bridge 未就绪，只能发布 read-only findings/provenance/manual attach；不得暗示 `--fix` 可用。完整 `docs/development/code-agent-runtime.md` 内部迁移计划不是本文整体前置，只在 mutating fix/action 桥接时成为硬前置。 |
+| 完整性 | ⚠️ 主路径完整，门禁已冻结但实现待落地 | 主流程覆盖面已经足够支撑方案拆分；本文已把版本、迁移、崩溃恢复、分页、资源预算、超时重试、合规与测试 target 固化为强制门禁，但这些门禁多数仍是待实现工作，不等于当前代码已经满足。 | 主路径覆盖 capability contract、CLI、RPC、lifecycle、checkpoint/export、review/investigate；schema versioning、migration/backfill/rollback、crash recovery、分页、资源预算、超时重试和索引门禁均已在本文冻结为 AG-18/AG-20/AG-24 输入。D1/R2 cloud mirror 与删除传播仍是 cloud-enabled 路径的待建能力，不能作为当前实现事实解读。 | 保留已补的 `AgentKind` 命名映射、资源预算、超时重试、分页复合索引要求；AG-20 必须有 crash recovery 矩阵、分页契约、migration/backfill/rollback 证据；AG-24 必须逐项证明本文门禁已有测试/文档/延后说明。 |
 | 安全性 | ⚠️ 当前态即为攻击面 | 当前外部 binary 发现和 spawn 路径默认信任 PATH，且仍会继承环境和 stderr；在补齐 fail-closed gate 前，任何外部 agent 都可能成为 secret 泄露、仿冒或未脱敏落盘入口。 | `discover_rpc_agents` 对 PATH 上任意 `libra-agent-*` 零 gate 自动注册；spawn 无 `env_clear` 且继承 stderr；无 provenance、受信目录 allowlist、内置 slug 仿冒防护；`RedactedSink` 仍为 placeholder。 | env 默认 fail-closed：`env_clear` + allowlist；stderr 捕获、截断、redaction；provenance 使用受信目录或 sha256 登记并缓解 TOCTOU；内置 slug skip-and-log；raw hook input 不得落盘；`RedactedSink` 必须类型级接入 checkpoint writer / cloud uploader。exec-bit 已实现，勿重做。 |
 | 功能正确性与接口兼容性 | ⚠️ 有已知事实错误与接口风险 | 文档和实现之间存在容易误用的命名与字段差异：返回字段、DB 列、RPC v1/v2 capability 形状、CLI slug 和 SQL enum 并不完全同名。若不加 schema pin 和 round-trip 测试，后续 alias 或 JSON 输出很容易漂移。 | `append_checkpoint_commit` 返回字段是 `commit_hash`，写 DB 列时才对应 `traces_commit`；RPC v1 `capabilities` method 与 v2 `info.capabilities` 同名异构；SQL `agent_kind` 用 snake_case，CLI slug 用 kebab-case，转换由 `AgentKind` 四个 match 函数负责。 | `list` / `add` / `remove` 只是 `status` / `enable` / `disable` alias，必须同语义、同退出码、同 JSON；RPC v1/v2 协商和错误语义见版本兼容矩阵；所有 `--json` 字段加 schema pin test；命名映射必须满足 CLI、DB、JSON、docs、测试 round-trip。 |
 | 数据流与控制流正确性 | ⚠️ 大方向正确，写序需固化 | parser 到 writer 的分层方向正确，但真实持久化不是一个原子动作；ref CAS 已完成而 DB catalog 未写入时会留下可见不一致。该风险需要用 crash-window 矩阵、幂等重试和 doctor repair 固化。 | 正确方向是 parser -> normalized event -> validation/redaction -> writer；真实 checkpoint 写序是 blob/tree -> `object_index` enqueue -> ref CAS -> `agent_checkpoint` INSERT -> 用户输出，其中 ref 已提升但 DB 行未 INSERT 是高风险窗口。 | 固化 5 阶段 crash window；doctor repair 覆盖 DB 行缺对象、ref 可达无 catalog、`object_index` 缺索引三类；ref CAS 冲突必须可重试；prune 并发保护区分 loose-object 窗口和 catalog-vs-ref 窗口；redaction 失败必须 fail-closed。 |
@@ -414,11 +414,19 @@ OpenCode 是第一批 supported agent；执行本文档时必须补齐 OpenCode 
 | 可靠性与容错性 | ⚠️ 部分 fail-open/fail-closed 未分类 | 有些 extractor 失败可以降级为 partial，但写入、安装、停用、rewind、外部启动和 fix 不能降级成功。当前 doctor 不修复、DB INSERT 不幂等，崩溃重放和超时取消都需要明确 terminal state。 | extractor 可 fail-open 并标 partial；写入、rewind、hook install/uninstall、external launch/fix 必须 fail-closed。当前 doctor 只读且仅查一类 orphan；`agent_checkpoint` INSERT 无 `ON CONFLICT`，崩溃重放会主键冲突。 | 冻结 external RPC、hook ingest、checkpoint write、review/investigate terminal-state 枚举；object 写已幂等，DB INSERT 必须探测或 UPSERT；timeout/cancel 必须释放进程、reader、lock、lease、pending turn；redaction 失败列入 fail-closed；doctor repair 是净新建交付。 |
 | 兼容性与互操作性 | ⚠️ 需显式治理 | Libra 与 entire 对齐的是能力语义和数据契约，不是传输协议完全一致。若不把 wire-compatible 与 parity-compatible 明确区分，后续实现可能把有意差异误判成缺陷，或把旧 reader/writer 形态长期保留下来。 | Libra 保留 JSON-RPC 传输，不照搬 entire subcommand+stdio，是设计差异；兼容目标是 capability/schema/checkpoint 语义 parity，不是 wire-compatible。legacy reader/writer 方向必须逐项写死，避免「有意差异」退化为「过时」。 | 用户输出和文档必须说明 capability parity, transport differs；E4 legacy content_hash/model/session_id/.zst 仅按方向兼容，writer 不输出 legacy 形态；第一批 supported roster 固定为 `claude-code`/`codex`/`opencode`，Gemini/Cursor/Copilot/FactoryAI 不得作为 supported 暴露；E9 parity 复跑须记录日期和基线。 |
 | 可扩展性与可维护性 | ⚠️ 架构守卫不足 | closed enum 和 SQL CHECK 能保护核心数据形状，但也意味着新增 agent 时必须同步多个表面。没有单一 registry 和守卫断言，新增 provider 容易只改 CLI 或只改 DB，造成状态不一致。 | closed enum + SQL CHECK 有利于稳定，但新增 agent 需要同步 enum、DB CHECK、docs、schema tests、capability registry；registry 单一入口和守卫断言必须明确。 | 以 `AgentKind` 为 key 定义静态 capability registry；新增 AgentKind 必须同步 SQL CHECK、docs、schema tests、architecture guard；守卫断言 `AgentKind` 变体集合、`agent_session.agent_kind` CHECK 列表、本文 roster 三者一致。 |
-| 合规性与标准符合性 | ⚠️ 缺少可执行门禁 | redaction 只是合规基础，还不足以覆盖保留期、删除权、raw export 授权和 cloud restore/delete 一致性。没有 audit 与 retention 门禁时，捕获数据会变成无限期、难删除、难解释的隐私风险。 | 已有 redaction 方向，但缺 transcript retention、删除权、cloud restore/delete 一致性、raw export 授权、audit log 不可变性和 redaction report 的可执行规则。 | 落地 retention / GC、删除一致性矩阵、redaction report、raw `--allow-raw` 显式授权；audit log 必须 append-only，字段包含 actor、scope、raw/detail 标志、redaction summary、object ids、reason；cloud restore 不得复活已删除对象。 |
+| 合规性与标准符合性 | ⚠️ 门禁已定义，实现待验证 | redaction 只是合规基础，还不足以覆盖保留期、删除权、raw export 授权和 cloud restore/delete 一致性。本文已补 retention、erasure、audit、redaction report 规格，但这些必须在实现与用户/运维文档中闭环。 | transcript retention、删除权、raw export 授权、audit log 不可变性和 redaction report 已在本文固化；cloud restore/delete 一致性分为两层：本地 `refs/libra/agent-traces` / object / DB 必须立即一致，D1/R2 删除传播只在 AG-19/AG-20 引入 cloud mirror 后成为强制实现面。 | 落地 retention / GC、删除一致性矩阵、redaction report、raw `--allow-raw` 显式授权；audit log 必须 append-only，字段包含 actor、scope、raw/detail 标志、redaction summary、object ids、reason；cloud-enabled restore 不得复活已删除对象，未启用 cloud mirror 时不得在文档中声称 D1/R2 已覆盖。 |
 
 **总体结论**：文档方向合理、基线清晰，但当前实现的安全边界与部分净新建能力尚未落地。改进重点是：把风险说明转化为实施门禁（schema 版本、env fail-closed、provenance、crash recovery、分页、合规），并通过测试与文档守卫防止「有意差异」退化为「过时」。
 
 > **维护规则**：本节是唯一 11 维度结论表。下文「实现基线」「独立核对备注」「强制补强项」「Gate 8 阶段」只能提供证据、任务和测试要求，不得再新增或维护第二张 11 维度结论表。
+
+**本轮补强决策（2026-06-21）：**
+
+1. `docs/development/code-agent-runtime.md` 是内部 `libra code` AgentRuntime / Web-only 迁移事实源，**不是**执行本文 AG-16~AG-24 外部捕获面的整体前置。`libra agent` 的 capability、hook、checkpoint/export、doctor、pagination、redaction、retention、read-only review/investigate 可独立推进；只有 mutating fix/action 需要该文档提供 serialized fix bridge 源码锚点。
+2. AG-22 / AG-23 必须拆分发布能力：read-only review/investigate（findings/provenance/manual attach）可以先落地；`--fix`、workspace mutation、tool execution、sandbox/approval 只能在 `docs/development/code-agent-runtime.md` 给出并实现 serialized fix bridge 后启用。
+3. D1/R2 相关删除传播只适用于 cloud mirror 已引入并启用后的路径；当前 `agent_session` / `agent_checkpoint` / `agent_usage_stats` 尚无 D1 mirror，本文所有 cloud 合规要求不得被误读为现状。
+4. 外部 binary provenance 的 TOCTOU 缓解必须按平台能力分层实现：支持 `fexecve` / `O_EXEC` 的平台优先使用同一文件句柄派生；不支持的平台必须用受信目录、canonical path、父目录权限校验、hash + device/inode revalidation、absolute-path spawn 和 quarantine 降低竞态，不能声称完全消除 TOCTOU。
+5. 2026-06-21 复核确认：`docs/development/agent.md` 已不在工作区，内部计划当前路径为 `docs/development/code-agent-runtime.md`；本文不得再引用 `docs/development/web-only.md` 或 `../agent.md` 作为可点击事实源。
 
 ## 设计方案
 
@@ -476,8 +484,8 @@ flowchart TD
 | schema 版本 | `agent_session`/`agent_checkpoint` 已有 `schema_version INTEGER NOT NULL DEFAULT 1`（`2026050303:34`），`agent_usage_stats` 同（`2026050302:26`） | DB 行版本＝**已有**；external-JSON 与 RPC `protocol_version` 两个版本轴＝净新建 |
 | prune / rewind | `libra agent clean [--all]` → `prune_checkpoint_commits`（`history.rs:1066`）按 catalog 重建 `refs/libra/agent-traces`＝**cleanup/prune 已实现**；`checkpoint rewind --dry-run/--apply`（`checkpoint.rs:142`）是 worktree restore（委派 `restore --source <parent_commit>`），**与 prune 无关** | preview/condensation/shadow-branch＝净新建；prune 并发保护＝净新建 |
 | lifecycle 解耦 | hook provider parser（当前代码 `providers/{claude,gemini}`）只产 `LifecycleEvent`，**不直接写 checkpoint**；写入集中在 `runtime.rs` | 「parser↔writer 解耦」对现有内置 provider＝**已成立**；AG-19 真实 delta＝owner filtering + `SubagentStart/End` + Codex/OpenCode HookProvider + 约束未来 external-binary parser 维持同边界；Gemini 不进入第一批 supported roster |
-| review / investigate | 命令层**不存在**（无 `libra review` / `libra investigate`）；fix 依赖的内部 AgentRuntime serialized fix 入口当前**无源码锚点** | 整个 workflow + fix bridge＝**净新建 / 0→1**；AG-22/AG-23 前置须先确认 fix 入口存在 |
-| AG-13 workflow seam | `SubAgentDispatcher` 仅 `dispatch`（`src/internal/ai/agent/runtime/sub_agent.rs:1481`）；`dispatch_batch` / `dispatch_parallel` **不存在**。`materialize_isolated_workspace` 已存在于 `src/internal/ai/agent/runtime/sub_agent_dispatcher.rs:738`，并有 `materialize_isolated_workspace_reroots_registry_and_rebases_sandbox` 测试，但它当前服务单次 dispatch 路径，尚未形成 batch/review/investigate 可直接复用的公开 seam。 | AG-22/AG-23 依赖的 batch dispatch＝**净新建**；workspace 隔离＝已有 helper，但须在 AG-13 中明确抽取/复用边界，**不得继续声称完全不存在** |
+| review / investigate | 命令层**不存在**（无 `libra review` / `libra investigate`）；reviewer 并发启动外部 agent 进程的机制**不存在**（须基于 AG-18 external RPC spawn 新建，不依赖内部 `SubAgentDispatcher`）；fix 依赖的内部 AgentRuntime serialized fix 入口当前**无源码锚点** | 整个 workflow + external reviewer launch + fix bridge＝**净新建 / 0→1**；AG-22/AG-23 read-only 前置须先确认 AG-18 external RPC spawn 就绪；fix 前置须先确认 fix 入口存在 |
+| AG-13 workflow seam | `SubAgentDispatcher` 仅 `dispatch`（`src/internal/ai/agent/runtime/sub_agent.rs:1481`）；`dispatch_batch` / `dispatch_parallel` **不存在**。`materialize_isolated_workspace` 已存在于 `src/internal/ai/agent/runtime/sub_agent_dispatcher.rs:738`，并有 `materialize_isolated_workspace_reroots_registry_and_rebases_sandbox` 测试，但它当前服务单次内部 sub-agent dispatch 路径。**澄清**：AG-22/AG-23 的 reviewer 是外部 agent 进程，fan-out 机制是 external RPC 并发 spawn，**不依赖** `dispatch_batch`；`materialize_isolated_workspace` 可作为 reviewer worktree 隔离 helper 复用候选，须显式抽取为 public seam。 | `dispatch_batch`（内部 sub-agent 用）＝**净新建，但 AG-22/AG-23 review/investigate 不依赖它**；reviewer workspace 隔离＝已有 helper 可复用，须抽取边界 |
 
 ## 独立核对备注（2026-06-17，代码锚点复核）
 
@@ -490,7 +498,7 @@ flowchart TD
 2. `rpc.rs:166` 实际是 `Stdio::inherit()` 调用行，`RpcAgent::spawn` 函数定义在 `:162`（行为锚点正确，函数锚点微偏）
 3. SQL `agent_kind` CHECK 约束使用 snake_case（`claude_code`），CLI slug 使用 kebab（`claude-code`），转换由 4 个 match 函数（`AgentKind::as_db_str`/`as_cli_slug`/`from_db_str`/`from_cli_slug`，`adapter.rs:40/66/81/96`）实现，`from_cli_slug` 额外接受 short-form aliases（`"claude"`/`"factory"` 等），`from_db_str` 严格只接受 snake_case——文档之前未明确该命名映射规则
 4. env allowlist 缺 `HOME`/`USER`/`SHELL`/`TZ`/`LANG`/`LC_ALL`/`TERM` 等外部 CLI 常见依赖变量
-5. provenance 缺少 TOCTOU 竞争条件缓解（校验后须同一文件句柄派生，不允许校验→重新 open 窗口）
+5. provenance 缺少 TOCTOU 竞争条件缓解；理想路径是校验后通过同一文件句柄派生，平台不支持时必须记录 best-effort 降级策略（受信目录、权限、hash、device/inode revalidation、quarantine），不得声称完全消除竞态
 6. 分页 keyset cursor 依赖复合索引（`agent_session(started_at DESC, id DESC)`），文档未要求创建
 
 **二轮复核发现**（首轮新增的 `AgentKind` 命名映射表中存在事实错误）：
@@ -520,7 +528,7 @@ flowchart TD
      - `TERM` — 终端类型（部分 agent 检测颜色支持）
      - `LIBRA_AGENT_PROTOCOL_DEBUG` — 仅当显式启用时注入，默认清除
      - 以上未列出的任何变量一律清除，不做通配保留
-   - **provenance（exec-bit ≠ provenance）**：定义为至少其一——(a) 二进制路径必须落在受信目录 allowlist（如 `~/.libra/agents/` 或 settings 登记目录），拒绝任意用户可写 PATH 项；(b) settings 按 slug 登记已批准二进制的绝对路径 + sha256，运行前校验未变更。**TOCTOU 缓解**：provenance 校验与 spawn 之间不得存在窗口——sha256 校验后必须通过同一文件句柄（`File` 已打开 + `fexecve`/`Command::arg0`）或 `O_RDONLY | O_EXEC` 原子路径派生，不允许校验后重新 `stat`/`open` 路径字符串。首次发现的新二进制默认 quarantine，须 `libra agent enable --agent <slug>` 显式批准后方可 invoke。
+   - **provenance（exec-bit ≠ provenance）**：定义为至少其一——(a) 二进制路径必须落在受信目录 allowlist（如 `~/.libra/agents/` 或 settings 登记目录），拒绝任意用户可写 PATH 项；(b) settings 按 slug 登记已批准二进制的绝对路径 + sha256，运行前校验未变更。**TOCTOU 缓解**：按平台能力分层。Unix/Linux 支持同一文件句柄执行时，sha256 校验后必须通过同一 `File`/fd 派生（如 `fexecve`/`execveat` 或等价封装），避免校验后重新按路径 open；macOS/Windows 若当前 Rust `Command` 无法从 fd spawn，则必须退化为受信目录 + canonical path + 父目录非 world-writable 校验 + sha256 + device/inode/mtime revalidation + absolute-path spawn，并在代码注释和测试中标为“best-effort TOCTOU mitigation”，不得声称完全消除竞态。首次发现的新二进制默认 quarantine，须 `libra agent enable --agent <slug>` 显式批准后方可 invoke。
    - **内置 slug 仿冒防护**：discovery 对 slug ∈ `STABLE_AGENT_SLUGS`（含任何 built-in `AgentKind`）的外部 `libra-agent-*` 二进制 skip-and-log，绝不允许外部冒用内置身份；JSON/CLI 对 external agent 必须带 `external_binary:true` 与解析出的绝对路径。
    - **stderr**：不得长期继承到用户终端，必须捕获、cap、redact 后按 error/debug 输出。
 3. **Checkpoint 原子性与恢复**：按真实写序固化 crash window 表（5 阶段，注意 DB INSERT 在 ref CAS **之后**且在 `append_checkpoint_commit` **之外**）——(a) blob/tree 已写；(b) `object_index` 已 enqueue（`history.rs:914`）；(c) ref CAS 已提升（`history.rs:307/749`）；(d) `agent_checkpoint` INSERT（`runtime.rs:900`，`commit_hash`→`traces_commit` 列）；(e) 用户输出。重点标注 (c)→(d) 之间崩溃会留下「ref 指向合法 commit 但 catalog 无行」的状态，且对依赖 catalog 的 prune/clean/doctor 不可见。baseline：`doctor` 当前只读、仅检一类 FK-orphan（`doctor.rs:66`），**无 repair**。AG-20 必须把 doctor 从单一只读检测扩展为覆盖 (i) DB 行指向缺失 commit/tree/blob 对象、(ii) ref 可达 checkpoint commit 但无 catalog 行（insert-pending 残留）、(iii) `object_index` 缺该对象索引 三类检测，并给出 repair 或可操作的人工处理建议（区分幂等重建与需人工）。
@@ -529,13 +537,13 @@ flowchart TD
 6. **Fail-open / fail-closed 分类**：可 fail-open（warning + partial metadata）——extractor、model/token/skill 解析、optional context/prompt 缺失。必须 fail-closed——hook install/uninstall、RPC protocol mismatch、unknown mutating method、rewind apply、fix/mutation、DB/ref/object 写失败，**外加**：(a) **redaction 执行失败 / size-cap 命中后无法安全截断 / transcript 路径校验（symlink canonicalize 后须落在 adapter home-relative roots）失败 / UTF-8·JSON envelope 解码失败**——一律 fail-closed，绝不退化为写入未脱敏 raw bytes（redaction 失败＝写失败）；(b) **untrusted seed**（issue-link / seed prompt 间接 prompt-injection）进入任何 mutating / 高权限 workflow（fix、tool 调用、AgentRuntime turn）默认拒绝，非交互须显式 flag/approval，且 seed 文本进入 prompt 前须 redaction 并标 `provenance=untrusted`。关键区分：metadata 字段缺失→fail-open 标 partial；内容脱敏/路径安全失败→fail-closed。
 7. **合规与保留策略（可执行门禁，非口号）**：外部 transcript、prompt、context、stderr、review findings 都按潜在 PII 处理。AG-24 必须落地：
    - **保留期**：给出 transcript/prompt/context 的默认 retention（如 stopped-session checkpoint 默认保留 N 天，可由 settings 覆盖），到期由 GC 清理。
-   - **删除一致性矩阵**：`refs/libra/agent-traces` 是 GC root（`history.rs`），单删对象不可达；删除/被遗忘权（erasure）必须**重写 agent-traces ref**（catalog 重建剔除目标 checkpoint）+ 删 `agent_checkpoint`/`agent_session` 行 + 删 `object_index` + **传播为 cloud delete**（D1/R2 与本地一致），否则 cloud restore 会复活已删数据。
+   - **删除一致性矩阵**：`refs/libra/agent-traces` 是 GC root（`history.rs`），单删对象不可达；删除/被遗忘权（erasure）必须**重写 agent-traces ref**（catalog 重建剔除目标 checkpoint）+ 删 `agent_checkpoint`/`agent_session` 行 + 删 `object_index`。cloud delete 只在 AG-19/AG-20 引入并启用 D1/R2 mirror 后成为强制传播面；在当前无 D1 mirror 的实现中，文档只能声明本地对象/SQLite/ref 删除一致性，不得声称 D1/R2 已覆盖。
    - **redaction report**：schema 化、带版本、可审计（命中规则计数、是否触发 size-cap、是否 fail-closed），不含原文。
    - **raw 显式授权**：读取/导出未脱敏原文仅经显式 `--allow-raw`（或等价 approval），且每次写一条 audit 记录（who/when/which checkpoint/scope）。**审计日志不可变性**：audit 记录必须是 append-only（写入后不可修改或删除），存储在单独 SQLite 表或 append-only 日志文件；1 年保留期（见合规保留期表），到期前不得 truncate 或 single-row delete ——删除整表或整文件须走合规审批流程，非常规 GC。
    - **前置**：`RedactedSink` 类型级 wiring（强制补强项见 #2/持久化第 5 条）未完成前，不得宣称 raw-input-never-persisted。
 8. **稳定错误码目录（E10）**：E2/E8 反复出现 fail-closed 但全文无统一 `StableErrorCode` 目录。AG-18 起每个 fail-closed 失败模式（protocol mismatch、undeclared method、timeout、oversize、PATH/slug 冲突、provenance 拒绝、path traversal、unknown agent kind、redaction 失败、ref/DB/object 写失败）须分配稳定错误码，错误消息含 binary path/slug/method 与可操作下一步，并按 CLAUDE.md 要求同步 `docs/error-codes.md`（`compat_error_codes_doc_sync` 守卫）。
 9. **可观测性**：长生命周期路径（hook ingest、checkpoint write、RPC invoke、prune、review/investigate run）须有 tracing span 与计数器（捕获事件数、redaction 命中数、checkpoint 写入/失败数、prune 删除数、RPC timeout/oversize 数），便于诊断与压测断言「无 unbounded growth」。
-10. **隐藏 `hooks` 子命令契约**：`AgentSubcommand::Hooks`（`mod.rs`，`hide=true`）供已安装 provider hook 内部调用，是不可信外部输入入口，须明确：stdin size cap + UTF-8/JSON + `SessionHookEnvelope` + expected `LifecycleEventKind` 校验顺序、未知 verb/事件的退出码、校验失败 fail-closed 且不 panic、不回显 raw stdin。
+10. **隐藏 `hooks` 子命令契约**：`AgentSubcommand::Hooks`（`mod.rs`，`hide=true`）供已安装 provider hook 内部调用，是不可信外部输入入口，须明确：stdin size cap + UTF-8/JSON + `SessionHookEnvelope` + expected `LifecycleEventKind` 校验顺序、未知 verb/事件的退出码、校验失败 fail-closed 且不 panic、不回显 raw stdin。**hook 命令崩溃行为**：`libra hooks <provider> <verb>` 由外部 agent（Claude Code 等）同步调用；若 Libra hook handler 进程崩溃（OOM、panic、signal），必须保证：(a) 不写半截 checkpoint/DB 行（写入操作须在进程退出前 commit 或完全 abort）；(b) 退出码非零，使外部 agent 能检测到 hook 失败；(c) 不在 stderr 泄露 raw stdin 内容；(d) 外部 agent 对 hook 失败的预期行为由 provider install 文档固定（Claude Code：继续运行但标记 hook 失败；Codex/OpenCode：按 provider 自身 retry/skip 策略）。hook 命令崩溃回归测试须覆盖 panic 路径和 OOM kill 路径，断言无部分写入。
 11. **超时/重试策略（逐操作固化，不留歧义）**：
     | 操作 | 超时 | 重试策略 | 失败模式 |
     |---|---|---|---|
@@ -558,6 +566,9 @@ flowchart TD
     | 并发 prune | 1 路 | 否 | 返回"清理进行中"提示 |
     | 并发 doctor | 1 路 | 否 | 返回"诊断进行中"提示 |
     | 并发 review/investigate run | settings `max_concurrent_runs`（默认 2） | 是 | 排队，队列上限 10，超限返回 actionable error |
+    | 单次 review run 内并发 reviewer | settings `max_reviewers_per_run`（默认 4） | 是 | 超限 reviewer 排队，不影响已启动 reviewer |
+    | 单次 investigate run 内并发 agent turn | 1（strict round-robin） | 否 | 排队等待当前 agent turn 完成 |
+    | reviewer 进程树深度 | 1（reviewer 本身可 spawn 子进程，但不允许子进程再 spawn reviewer） | 否 | fail-closed，终止 reviewer 并标 terminal error |
     | review sink 内存缓冲区 | 64 KiB | 否 | 阻塞 reviewer 直到 sink 消费（反压） |
     | stderr 捕获缓冲区（per RPC） | 64 KiB | 否 | 截断 + redaction，标 `stderr_truncated:true` |
     | hook event 处理队列 | 128 个事件 | 否 | 拒绝新事件，返回退避建议 |
@@ -576,6 +587,8 @@ flowchart TD
 | T6 | Untrusted seed（issue-link / prompt）进入 mutating workflow | review `--fix` / investigate fix | 命令层不存在，无 gate | 默认拒绝；显式 flag/approval；seed redaction + `provenance=untrusted` | fail-closed，提示需显式授权 |
 | T7 | Path traversal 或 symlink 逃逸导致读取/写入仓库外文件 | transcript path、context.md、prompt.txt | 依赖 adapter home-relative roots 校验 | canonicalize 后校验前缀；失败 fail-closed | 拒绝事件，不写入 checkpoint |
 | T8 | 未知 agent kind 直接写入 `agent_session.agent_kind` CHECK enum | discovery / hook | 当前 `AgentKind` 7 类；外部未知需 quarantine | unknown/quarantine policy；不强插 DB enum | 拒绝写入，标 unsupported/quarantine |
+| T9 | provenance 校验后 binary 被替换（TOCTOU） | external `libra-agent-*` spawn | 当前无 provenance | 平台分层：fd-based exec 优先；不支持时受信目录 + canonical path + 权限 + hash + device/inode revalidation + quarantine | 拒绝 spawn 或标 best-effort mitigation，不声称完全消除竞态 |
+| T10 | 已删除 transcript/checkpoint 被 cloud restore 复活 | local GC / cloud sync / restore | 当前 agent 表无 D1 mirror；对象 ref 是本地 GC root | 本地 erasure 重写 ref + DB/object_index 删除；cloud mirror 启用后传播 D1/R2 delete tombstone | cloud 未启用时不声明覆盖；启用后 restore 必须尊重 tombstone |
 
 **关键原则**：对外部不可信输入（binary、stdin、stderr、seed、path）默认 fail-closed；对内部 extractor 可选字段缺失可 fail-open 但须标 `partial`。
 
@@ -586,6 +599,23 @@ flowchart TD
 - `libra agent` 可以复用 `SessionStore` 原语、Web 展示和内部 AgentRuntime 的 review/fix bridge，但不得与内部 `libra code` 的 turn state、checkpoint 类型、DB 表语义或 MCP 控制面混同。
 - `claudecode` provider 已硬删除；本文第一批只允许 `claude-code`、`codex`、`opencode` 作为 observed external-agent slug/hook provider。`src/internal/ai/claudecode/` 不存在，`src/cli.rs` 对 `--provider claudecode` 返回移除错误，`diagnostics_redaction_test` 仍是 diagnostics 字段脱敏回归测试。
 - Gate 8 的执行顺序：AG-16 先冻结 capability contract；AG-17/AG-18 扩 CLI alias 与 `libra-agent-*` RPC；AG-19/AG-20 扩 lifecycle dispatcher 与 checkpoint/export；AG-21 补 transcript intelligence/skill events；AG-22/AG-23 补 review/investigate workflow；AG-24 收敛 docs/tests/compat。
+
+### 前置依赖决策矩阵（Web-only / AgentRuntime / cloud）
+
+| 工作项 | 是否需要先完成完整内部 AgentRuntime / Web-only 迁移 | 是否需要 `code-agent-runtime.md` fix bridge 前置 | 可先交付的降级形态 |
+|---|---|---|---|
+| AG-16 capability matrix / roster / quarantine | 否 | 否 | 无降级；直接按本文执行 |
+| AG-17 `list/add/remove` alias | 否 | 否 | 无降级；只管理外部捕获能力 |
+| AG-18 external RPC v2 security | 否 | 否 | 无降级；不得通过 MCP 或 Code UI 替代 |
+| AG-19 lifecycle dispatcher / hook ingest | 否 | 否 | 无降级；只写 observed-agent capture artifacts |
+| AG-20 checkpoint/export/doctor/pagination | 否 | 否 | 本地对象/SQLite/ref 一致性先落地；cloud mirror 另按 AG-19/AG-20 扩展 |
+| AG-21 transcript intelligence / skill events | 否 | 否 | extractor 缺失按 `partial` fail-open |
+| AG-22 review workflow read-only | 否 | 否（依赖 AG-18 external RPC spawn，不依赖 AG-13 `dispatch_batch`） | findings manifest + provenance + manual attach |
+| AG-23 investigate workflow read-only | 否 | 否（同 AG-22，依赖 AG-18 external RPC spawn） | state.json + findings_doc + manual attach |
+| AG-22/AG-23 `--fix` / mutating action | 不要求完整内部迁移 | **是**：需要 serialized fix bridge、approval/sandbox/tool gate 源码锚点并已实现 | 未就绪时隐藏/拒绝 `--fix`，错误提示 read-only 可用与重启条件 |
+| AG-24 docs/tests/compat closeout | 否 | 仅在发布 fix/action 时需要同步 code-agent-runtime 状态 | release notes 明确哪些能力 read-only、哪些延后 |
+
+结论：本文的外部捕获面不等待完整内部 AgentRuntime / Web-only 迁移；只有会修改工作区或调用内部工具的路径才依赖内部 AgentRuntime fix bridge。任何实现 PR 若无法证明 fix bridge 已存在，必须把 review/investigate 标为 read-only 并阻止 `--fix` 成功执行。
 
 ## 持久化与对象边界
 
@@ -599,7 +629,7 @@ flowchart TD
 
 1. hook/RPC 输入先做 stdin size、UTF-8、JSON、`SessionHookEnvelope`、expected `LifecycleEventKind` 校验；provider parser 只产 `LifecycleEvent`，不得直接写 checkpoint。
 2. `HookTarget::AgentTraces` 使用 `SessionStore::from_storage_path_with_subdir(storage_path, "agent")`，外部捕获日志与内部 `libra code` session lock 隔离。
-3. `agent_session` / `agent_checkpoint` / `agent_usage_stats` 无 SeaORM entity；**注意**：这三表当前**没有** D1 mirror（`sql/publish/` 只含 publish_* 表）——D1 mirror 是 AG-19/AG-20 扩字段时的**待建**要求，不是现状。扩字段时同步写 raw SQL migration、D1 mirror、测试和本文表格。
+3. `agent_session` / `agent_checkpoint` / `agent_usage_stats` 无 SeaORM entity；**注意**：这三表当前**没有** D1 mirror（`sql/publish/` 只含 publish_* 表）——D1 mirror 是 AG-19/AG-20 扩字段时的**待建**要求，不是现状。扩字段时同步写 raw SQL migration、D1 mirror、测试和本文表格；若实现 PR 不引入 cloud mirror，则验收只要求本地 SQLite/ref/object/object_index 一致，并必须在 release notes 中写明 D1/R2 deletion propagation 不适用。
 4. `HistoryManager::append_checkpoint_commit`（`history.rs:880`）是 checkpoint 对象写入唯一封装：依次写 redacted transcript / metadata / events blob、build tree、`enqueue_agent_blob_object_index_update` 写 `object_index`（**关键**：无此步则 cloud restore 看不到 transcript blob）、再做 `refs/libra/agent-traces` 的 CAS 提升（`update_ref_if_matches`），返回 `CheckpointCommit { commit_hash, tree_oid, metadata_blob_oid }`（`history.rs:1560`）。**注意**：返回结构体字段名是 `commit_hash`，**不是** `traces_commit`；`agent_checkpoint` 行的 INSERT **不在本函数内**，由调用方 `hooks/runtime.rs`（`runtime.rs:900`）在函数成功返回、ref 已提升之后执行，并把 `commit_hash` 写入 `agent_checkpoint.traces_commit` **列**。全文 `traces_commit` 一律指该 DB 列名，与返回字段 `commit_hash` 不得混用。**现状 INSERT 为普通 INSERT（无 ON CONFLICT/UPSERT）**，同一 checkpoint_id 重放或崩溃重试会触发主键冲突（见可靠性与 AG-20）。
 5. 现状：redaction 仅在 `hooks/runtime.rs` 手工调用 `Redactor::redact`，类型级 `RedactedSink`（`redaction.rs:219`）仍是 Phase-1 placeholder，**未对 checkpoint writer / cloud uploader 生效**——任何新增持久化路径都可能绕过 redaction。目标（AG-19/AG-20 必做）：把 `append_checkpoint_commit` 与 cloud-sync uploader 改为只接受 `RedactedBytes`（impl `RedactedSink`），使 `&[u8]` 在类型层面无法进入持久化 sink；redaction 失败＝写失败（fail-closed），不得 fall back 到写 raw transcript。校验和 redaction 必须在任何持久化之前完成；不得走“先 insert DB 再补对象”的新路径，否则会产生 DB 指向不存在对象、cloud restore 缺 blob 或 prune 删除未挂 ref 对象的窗口。
 
@@ -622,6 +652,13 @@ flowchart TD
 - **窗口 B（catalog-vs-ref）**：(c)→(d) 之间，ref 已指向合法 commit，但 `agent_checkpoint` 行未写入。`prune_checkpoint_commits` 是 catalog-driven rebuild，会重写 ref 并**丢弃**该合法 checkpoint。
   - 治疗：保护 ref / in-progress marker 必须覆盖到 (d) 完成；或 prune 重建前对比「ref 可达 commit 集」与「catalog 行集」，ref 多于 catalog 时 fail-closed 拒绝重建。
 
+**`agent_session` 与 `agent_checkpoint` 创建顺序与 orphan 判定**：
+
+- `agent_session` 行由 `SessionStart` lifecycle event 创建（`runtime.rs`），在首个 checkpoint 之前。`agent_checkpoint` 行由 `Stop`/`TurnEnd` event 触发写入（`runtime.rs:900`）。
+- **session-without-checkpoint 是合法中间态**：active session 在产生第一个 `TurnEnd` 之前只有 `agent_session` 行、无 `agent_checkpoint` 行。`doctor` **不得**将无 checkpoint 的 session 标为 orphan。
+- **checkpoint-without-session 是非法态**：`agent_checkpoint.session_id` 应 FK-cascade 到 `agent_session.id`；若 session 行缺失，doctor 当前已检测此 orphan（`doctor.rs:66`）。repair 策略：若 session 可从 ref/transcript 重建则补行；否则标 `missing_session` 需人工。
+- **GC 不得清理 active session**：`agent_session` 行的 `ended_at` 为 NULL 时表示 session 仍在进行，GC/retention 不得删除其 checkpoints 或 transcript 对象。
+
 **doctor repair 矩阵（AG-20 净新建）**：
 
 | 不一致类型 | 检测方法 | 修复动作 | 是否自动 |
@@ -632,7 +669,7 @@ flowchart TD
 
 ## 已验证 wire 契约（E1-E9）
 
-> 本块是 AG-16~AG-24 的冻结引用，来自 2026-06-16 对 `/Volumes/Data/entireio/cli` 源码和 `/Volumes/Data/entireio/cli-checkpoints` 归档的逐项核对。当前归档统计：根 `metadata.json` 4,377 个、per-session `metadata.json` 5,949 个、最大单 checkpoint 61 session、最大 `full.jsonl` 48,774,003 bytes（46.51 MiB）、唯一 `.zst` 路径 `e6/5d9bec561a/0/full.jsonl.zst`。未来复跑若数字变化，先更新本节，再同步 `docs/development/agent.md` 的 Gate 8 总览。
+> 本块是 AG-16~AG-24 的冻结引用，来自 2026-06-16 对 `/Volumes/Data/entireio/cli` 源码和 `/Volumes/Data/entireio/cli-checkpoints` 归档的逐项核对。当前归档统计：根 `metadata.json` 4,377 个、per-session `metadata.json` 5,949 个、最大单 checkpoint 61 session、最大 `full.jsonl` 48,774,003 bytes（46.51 MiB）、唯一 `.zst` 路径 `e6/5d9bec561a/0/full.jsonl.zst`。未来复跑若数字变化，先更新本节，再同步 `docs/development/code-agent-runtime.md` 的 Gate 8 总览。
 
 > **Parity 治理（防止「有意差异」退化为「过时」）**：entire 是活跃演进的外部项目，其 roster/能力/wire key 会变化。规则：(1) E1 `DeclaredCaps` 8 key、E2 `info` 字段、E6/E7 wire key 的任何变更由 compat schema pin test 锁定 **Libra 侧**契约，entire 上游变化不自动跟进；(2) 每次复跑核对须在本节记录核对日期与 entire commit/版本（当前基线 2026-06-16）；(3) 有意差异（保留 JSON-RPC 传输、首批 supported roster 只取 `claude-code`/`codex`/`opencode`、不导入 `pi`/`vogon`、不把 Gemini/Cursor/Copilot/FactoryAI 暴露为 supported）一律标注为 **Libra 设计选择**而非待补差距，AG-24 复核时逐条确认其仍是「有意」而非「漏跟」。
 
@@ -658,6 +695,7 @@ flowchart TD
 - Libra 已有 `LifecycleEventKind` 11 变体和 dispatcher 原语；AG-19 的真实 delta 是补 `SubagentStart`/`SubagentEnd`、first-writer-wins owner filtering、Codex trust-gap，以及 provider parser 与 checkpoint writer 解耦。
 - owner filtering：`SessionStart`/`TurnStart` 豁免，其余事件若 recorded owner agent kind 不匹配则 skip，防多 provider 转发重复 checkpoint；第一批测试只要求覆盖 Claude Code/Codex/OpenCode。
 - Codex trust-gap：结构性比较 repo hook 声明与本地已批准状态，只在 Codex `SessionStart` banner 提示待批准 hook 数。
+- **未知 event type 处理**：当外部 agent 新版本发出 Libra 尚不识别的 lifecycle event type 时，dispatcher 必须 skip-and-log（标 `unknown_event_type` warning），不得 panic、不得写入 checkpoint、不得阻断后续已知事件处理。这允许外部 agent 升级后 Libra 旧版本仍能捕获已知事件，只丢弃未知事件。`LifecycleEventKind` 须用 `#[non_exhaustive]` 标注（或在 match 中保留 `_ =>` 兜底分支），防止新增变体时遗漏处理。
 
 ### E4：Checkpoint/export payload
 
@@ -694,7 +732,7 @@ JSON key 冻结为 `input_tokens`、`cache_creation_tokens`、`cache_read_tokens
 - review：多 reviewer 并发、fan-in channel、串行 sink dispatch；findings 是 agent stdout 自由文本，`--fix` 才启发式解析 severity/ID/title/body。Libra 可以增强结构化 manifest，但必须标注这是 Libra 增强，不是 entire parity。
 - investigate：strict round-robin，`RunState` 持久化 `run_id/topic/agents/max_turns/quorum/completed_rounds/turn/next_agent_idx/stances/findings_doc/starting_sha/started_at/updated_at/pending_turn`；单线程写 `findings.md`；issue-link/untrusted seed 默认只读，非交互必须显式允许。
 - launch/fix：剥离 review/investigate provenance env 后进入普通 session。Libra 的 mutating fix 必须桥接回内部 AgentRuntime serialized queue、approval/sandbox/tool gate；observed external agent 只能提供 transcript、hook event、findings、manual attach/provenance。
-- ⚠️ **fix-bridge 前置（可行性支点，不得假设已存在）**：上述「内部 AgentRuntime serialized fix 入口」当前**无源码锚点**（review/investigate 命令层本身也是 0→1）。AG-22 启动前，必须由 `docs/development/agent.md` 给出该 serialized fix 入口（+ approval/sandbox/tool gate）的源码锚点并确认存在；若该入口尚未抽出（属 Gate 1~Gate 7 / AG-13 范围），AG-22/AG-23 **只能交付 read-only review/investigate**（findings manifest + manual attach），fix 路径延后到 bridge 就绪，并在 release notes 写明延后原因与重启条件。
+- ⚠️ **fix-bridge 前置（可行性支点，不得假设已存在）**：上述「内部 AgentRuntime serialized fix 入口」当前**无源码锚点**（review/investigate 命令层本身也是 0→1）。AG-22 启动前，必须由 `docs/development/code-agent-runtime.md` 给出该 serialized fix 入口（+ approval/sandbox/tool gate）的源码锚点并确认存在；若该入口尚未抽出（属 Gate 1~Gate 7 / AG-13 范围），AG-22/AG-23 **只能交付 read-only review/investigate**（findings manifest + manual attach），fix 路径延后到 bridge 就绪，并在 release notes 写明延后原因与重启条件。
 
 ### E9：Agent roster
 
@@ -947,8 +985,8 @@ libra 当前 `agent_checkpoint` 表关注 `parent_commit`、`tree_oid`、`metada
 
 - 在 observed agent adapter 层补 `TranscriptAnalyzer`、`PromptExtractor`、`TranscriptPreparer`、`TokenCalculator`、`ModelExtractor`、`TextGenerator`、`TranscriptCompactor`、`HookResponseWriter`、`SubagentAwareExtractor`、`SkillEventExtractor`。
 - extractor 默认 fail-open：checkpoint 仍可保存，但 metadata 标 `unknown` 或 `partial` 并记录 warning。`rewind --apply`、hook install/uninstall、external binary launch/fix 等 mutating path 必须 fail closed。
-- 实现 `AgentReviewWorkflow`：多 reviewer 并发，事件 fan-in 到单一 dispatcher；sink serial dispatch 且不得阻塞；findings manifest 带 source/checkpoint/context/provenance；fix 进入正常 AgentRuntime turn。
-- 实现 `AgentInvestigateWorkflow`：strict round-robin，不并发写 findings；`state.json` 持久化 run id/topic/agents/quorum/max_turns/next_agent_idx/pending_turn/stances/findings_doc/starting_sha；支持 continue/show/clean/fix。
+- 实现 `AgentReviewWorkflow`：多 reviewer 并发，事件 fan-in 到单一 dispatcher；sink serial dispatch 且不得阻塞；findings manifest 带 source/checkpoint/context/provenance。read-only review 是 AG-22 的最低可交付形态；`--fix` 只有在内部 AgentRuntime serialized fix bridge 已有源码锚点且 approval/sandbox/tool gate 测试通过后才可启用。
+- 实现 `AgentInvestigateWorkflow`：strict round-robin，不并发写 findings；`state.json` 持久化 run id/topic/agents/quorum/max_turns/next_agent_idx/pending_turn/stances/findings_doc/starting_sha；支持 continue/show/clean。read-only investigate 是 AG-23 的最低可交付形态；fix 子路径与 AG-22 同一前置，未满足时必须隐藏或返回稳定错误。
 - issue link / seed prompt 属于 untrusted seed：默认只读，必须显式 flag 或 UI approval 才可进入高权限 workflow。
 - review/investigate launchability 与 observed-agent capability 分开；registered/readable 不等于 launchable reviewer。
 - 所有 review/investigate run 都必须有 terminal state（success/error/cancel/timeout/partial），取消和超时必须释放外部进程、reader thread、locks、workspace lease 和 pending turn。
@@ -958,20 +996,20 @@ libra 当前 `agent_checkpoint` 表关注 `parent_commit`、`tree_oid`、`metada
 
 - Claude/Codex/OpenCode launchable fake fixture 覆盖 review fan-in；Gemini/Cursor/Copilot/FactoryAI fixture 必须证明非首批 agent 走 unsupported/manual attach fallback，不能进入 launchable path。
 - review sinks 压力测试：单个 reviewer 高频输出不会阻塞其它 reviewer；cancel 后 task 收敛并写 terminal state。
-- investigate 测试覆盖 max-turns、quorum reached、no-new-findings stalled、agent failure pause、continue resume、fix bridge。
-- `review --fix` / investigate fix 的 mutating tool 调用必须经过 AgentRuntime serialized queue、approval/sandbox/tool gate。
+- investigate 测试覆盖 max-turns、quorum reached、no-new-findings stalled、agent failure pause、continue resume；fix bridge 就绪时覆盖 mutating fix，未就绪时覆盖 stable unsupported。
+- read-only review/investigate 不依赖完整内部 AgentRuntime / Web-only 迁移；`review --fix` / investigate fix 的 mutating tool 调用必须经过 AgentRuntime serialized queue、approval/sandbox/tool gate。若 fix bridge 未就绪，测试必须断言 `--fix` 返回 actionable unsupported，而不是跳过或假成功。
 - 压力测试覆盖大量 findings、慢 reviewer、外部进程 stderr flood、cancel during pending turn，并断言无 unbounded memory growth 或卡死。
 
 ### Phase 17：docs、compat、release closeout
 
-目标：把 Gate 8 public behavior、JSON schema、fixtures 和用户文档收敛，避免 `docs/development/agent.md`、本文、`docs/commands/agent.md` 继续漂移。
+目标：把 Gate 8 public behavior、JSON schema、fixtures 和用户文档收敛，避免 `docs/development/code-agent-runtime.md`、本文、`docs/commands/agent.md` 继续漂移。
 
 - 本文包含 capability matrix、list/add/remove alias、RPC protocol、lifecycle event、checkpoint/export shape、review/investigate 用户流。
 - 更新 `docs/commands/agent.md` / zh-CN 文档（若存在）与 `COMPATIBILITY.md`，把 `libra agent` 标记为 Libra-only extension，并列出 JSON output compatibility guarantees。
 - 更新 `tests/INDEX.md`：新增/重命名的 `agent_*`、`observed_agents_*`、`agent_review_*`、`agent_investigate_*` 测试 target 必须有 wave、purpose、source mapping。
 - 旧 d0a714 分析关闭表必须保留：每个旧 phase 映射到 AG-16~AG-24 或说明因当前架构变化废弃（例如 `claudecode` provider）。
 - release notes / migration notes 明确 `enable/disable` 仍可用，`list/add/remove` 是 alias；external binary protocol version bump 的兼容窗口和错误提示要写清。
-- 补合规 closeout：transcript/prompt/context/stderr/review findings 的 retention、GC、cloud restore/delete 一致性、raw export 显式授权、redaction report 可审计字段必须进入用户文档或运维文档。
+- 补合规 closeout：transcript/prompt/context/stderr/review findings 的 retention、GC、本地删除一致性、raw export 显式授权、redaction report 可审计字段必须进入用户文档或运维文档；只有在 AG-19/AG-20 引入并启用 D1/R2 mirror 后，才把 cloud restore/delete tombstone 作为发布门禁。
 - 交付前复核上文“独立分析结论（11 维度）”唯一表，所有“必须落到实施的门禁 / 证据”要么有测试和文档证据，要么在 release notes 中明确延后原因和重启条件。
 
 ## 任务卡（AG-16~AG-24）
@@ -984,20 +1022,22 @@ libra 当前 `agent_checkpoint` 表关注 `parent_commit`、`tree_oid`、`metada
 | AG-19 Normalized observed-agent lifecycle dispatcher | AG-16；AG-18 可并行 | hooks runtime、lifecycle dispatcher、SessionStore/SQLite 写入边界 | `LifecycleEvent` 扩展、central validation、owner filtering、redaction-before-persist、tool/subagent/model/skill event tests | 不让 provider hook 直接写 checkpoint；不让 invalid session/tool id fail-open |
 | AG-20 Entire-style checkpoint export and lazy transcript IO | AG-16、AG-19 writer contract | `history.rs`、`command/agent/checkpoint.rs`、objects/DB/Web detail | root/session payload、content_hash、chunking/zstd、metadata-first list/show（`--limit 50`/cap 500/keyset cursor）、大 transcript fixture、按真实写序的 crash recovery matrix、doctor 三类检测+repair（净新建）、prune 窗口 A/B 并发测试、`agent_checkpoint` INSERT 幂等 | 默认路径不读完整 transcript；不把大 payload 存 SQLite；不留下 ref/DB/object_index 不一致却返回成功；不把 `commit_hash`（返回字段）与 `traces_commit`（DB 列）混用 |
 | AG-21 Transcript intelligence and skill-event extraction | AG-16、AG-18、AG-20 | transcript analyzer/preparer/token/model/subagent/skill traits | optional extractor traits、fallback semantics、Claude/Codex/OpenCode fixture、missing optional file tests | 不让 extractor error 阻断 checkpoint；mutating path 不允许 silent fallback |
-| AG-22 Agent review workflow parity | AG-13（须先交付 `dispatch_batch`+workspace 隔离 helper，**净新建**）、AG-16、AG-21；fix 路径另需 AgentRuntime serialized fix 入口**经源码确认存在** | review workflow、findings manifest、AgentRuntime fix bridge | multi-agent review fan-in、bounded sinks、findings schema、terminal states({success,error,cancelled,timeout,partial})、`review --fix` 等价路径进入 AgentRuntime | 不把 reviewer stdout 当 canonical result；不绕过 approval/sandbox 执行 fix；不让 cancel/timeout 泄漏进程或锁；**fix 入口未经源码确认存在时不得声称 `review --fix` 可用**（先交付 read-only） |
-| AG-23 Agent investigate workflow parity | AG-13（同上，净新建）、AG-16、AG-21；fix 路径同 AG-22 前置 | investigate workflow、run state、quorum/stall/fix | strict round-robin、state.json、pending turn/stance、quorum/max-turns/continue/show/clean/fix fixtures、并发 run-id lock、terminal-state 释放进程·reader·lock·lease·pending-turn | 不并发写 findings；不默认信任 issue-link seed；不把 review 并发模型套到 investigate；**fix 入口未确认存在时不得声称 investigate fix 可用** |
-| AG-24 Gate 8 docs, tests, and compatibility closeout | AG-16~AG-23 | docs/tests/compat/release notes | 本文、`docs/development/agent.md`、`docs/commands/agent.md`、COMPATIBILITY、tests/INDEX 同步；旧 d0a714 分析关闭表；retention/GC/raw export 合规说明 | 不把 `claudecode` provider 写回文档；不让 MCP/control 面边界回退；不发布无 schema/version/retention 说明的 public surface |
+| AG-22 Agent review workflow parity | read-only: AG-16、AG-18（external RPC spawn）、AG-21；reviewer 是外部 agent 进程，fan-out 机制是 external RPC 并发 spawn + workspace 隔离，**不是**内部 `SubAgentDispatcher::dispatch_batch`（后者服务内部 sub-agent）；`materialize_isolated_workspace`（`sub_agent_dispatcher.rs:738`）可作为 reviewer worktree 隔离 helper 复用候选，须在 AG-22 中显式抽取为 public seam；fix 路径另需 AgentRuntime serialized fix 入口**经源码确认存在** | review workflow、findings manifest、可选 AgentRuntime fix bridge | read-only: multi-agent review fan-in、bounded sinks、findings schema、terminal states({success,error,cancelled,timeout,partial})、manual attach/provenance；fix-ready: `review --fix` 等价路径进入 AgentRuntime；fix-not-ready: `--fix` 稳定 unsupported 错误 | 不把 reviewer stdout 当 canonical result；不绕过 approval/sandbox 执行 fix；不让 cancel/timeout 泄漏进程或锁；**fix 入口未经源码确认存在时不得声称 `review --fix` 可用**（先交付 read-only） |
+| AG-23 Agent investigate workflow parity | read-only: AG-16、AG-18（external RPC spawn）、AG-21；与 AG-22 同理，investigate 的 multi-agent round-robin 启动外部 agent 进程，不依赖 AG-13 `dispatch_batch`；fix 路径同 AG-22 前置 | investigate workflow、run state、quorum/stall、可选 fix | read-only: strict round-robin、state.json、pending turn/stance、quorum/max-turns/continue/show/clean fixtures、并发 run-id lock、terminal-state 释放进程·reader·lock·lease·pending-turn；fix-not-ready: fix 返回稳定 unsupported 错误 | 不并发写 findings；不默认信任 issue-link seed；不把 review 并发模型套到 investigate；**fix 入口未确认存在时不得声称 investigate fix 可用** |
+| AG-24 Gate 8 docs, tests, and compatibility closeout | AG-16~AG-23 | docs/tests/compat/release notes | 本文、`docs/development/code-agent-runtime.md`、`docs/commands/agent.md`、COMPATIBILITY、tests/INDEX 同步；旧 d0a714 分析关闭表；retention/GC/raw export 合规说明 | 不把 `claudecode` provider 写回文档；不让 MCP/control 面边界回退；不发布无 schema/version/retention 说明的 public surface |
 
 ### 测试目标与 INDEX 同步
 
 > **2026-06-17 漂移修正**：当前仓库在 `Cargo.toml` / `tests/INDEX.md` 中只落地了 `compat_agent_docs_contract` 与 `compat_agent_run_non_exhaustive_guard` 两个相关 compat target。下表凡标记为「规划 target（未注册）」或「规划测试（未实现）」的项，都是 Gate 8 交付要求，**不是当前可运行命令**；迁移到「已注册」前必须同时补测试文件、`Cargo.toml [[test]]`、`tests/INDEX.md` 行和实际 `<target>::<test_fn>`。另外，`tests/command/agent_checkpoint_test.rs` 当前存在但未在 `tests/command/mod.rs` 中 re-export，因此不会进入 `command_test`。
+>
+> **2026-06-21 漂移修正**：内部运行时计划事实源已改为 `docs/development/code-agent-runtime.md`，`docs/development/agent.md` 不在当前工作区。后续 compat doc guard 应补一个 source-of-truth 测试，禁止本文或 companion doc 重新引入 `../agent.md` / `../web-only.md` 的 Markdown 链接。
 
 | AG / 契约 | target 状态 | 必须包含的 `<target>::<test_fn>` | 注册 / INDEX / 命令要求 |
 |---|---|---|---|
 | AG-16 / E1 / E9 | `compat_agent_capability_matrix_pin`：规划 target（未注册） | `compat_agent_capability_matrix_pin::declared_agent_caps_wire_keys_are_exactly_e1`; `compat_agent_capability_matrix_pin::known_agent_capability_matrix_matches_current_roster`; `compat_agent_capability_matrix_pin::unsupported_external_agent_kind_is_quarantined` | 新增 target 时同步 `Cargo.toml` + `tests/INDEX.md`；未注册前不得把该命令列入当前必跑清单 |
 | AG-16 + AG-24 | `compat_agent_architecture_guard`：规划 target（未注册） | `compat_agent_architecture_guard::observed_agent_modules_do_not_import_runtime_or_checkpoint_layers`; `compat_agent_architecture_guard::all_known_agent_kinds_resolve_non_null_adapter`; `compat_agent_architecture_guard::external_agent_info_is_required_for_registration`; `compat_agent_architecture_guard::agent_kind_enum_sql_check_and_doc_roster_stay_in_sync` | 新增 target 时同步 `Cargo.toml` + `tests/INDEX.md`；失败才可作为 Gate 8 阻断信号 |
 | AG-24 partial（已交付） | `compat_agent_docs_contract`：已注册 | `compat_agent_docs_contract::agent_doc_keeps_claudecode_marked_removed_not_active` | 当前唯一已落地的 public-agent doc 守卫；守卫 `claudecode` 不得复活 + 文档事实一致性 |
-| AG-24 docs/schema/compliance | `compat_agent_docs_contract`：规划测试（函数未实现） | `compat_agent_docs_contract::agent_doc_tracks_schema_versioning_and_retention_policy` | 该函数当前不存在；新增 public schema/retention/raw export 约束时补入同一 target，并更新 `tests/compat/agent_docs_contract.rs`、`tests/INDEX.md` 说明 |
+| AG-24 docs/schema/compliance/source-of-truth | `compat_agent_docs_contract`：规划测试（函数未实现） | `compat_agent_docs_contract::agent_doc_tracks_schema_versioning_and_retention_policy`; `compat_agent_docs_contract::agent_doc_tracks_code_agent_runtime_source_of_truth` | 这些函数当前不存在；新增 public schema/retention/raw export 约束或跨文档事实源变更时补入同一 target，并更新 `tests/compat/agent_docs_contract.rs`、`tests/INDEX.md` 说明 |
 | AG-24 partial（已交付） | `compat_agent_run_non_exhaustive_guard`：已注册 | （见 `agent_run/` 下 `#[non_exhaustive]` 各 enum） | Wave 1；守卫内部 agent run 类型演进 |
 | AG-17 | `command_test`：已注册 target，可复用；AG-17 具体测试未实现 | `command_test::agent_list_add_remove_aliases_parse`; `command_test::agent_list_json_contains_capability_fields`; `command_test::agent_add_non_hook_installable_returns_actionable_unsupported` | `list` / `add` / `remove` alias 落地时补测试；未补前不得声称 AG-17 有 command coverage |
 | AG-18 / E2 | `agent_rpc_external_test`：规划 target（未注册） | `agent_rpc_external_test::info_success_registers_binary`; `agent_rpc_external_test::version_mismatch_is_skipped_with_reason`; `agent_rpc_external_test::timeout_and_oversize_are_fail_closed`; `agent_rpc_external_test::undeclared_capability_method_is_rejected`; `agent_rpc_external_test::stderr_is_capped_redacted_and_not_inherited` | Wave 1/2；原场景名 `agent_external_protocol_v2_matrix` 只作为目的说明，不再作为命令名 |
@@ -1006,8 +1046,8 @@ libra 当前 `agent_checkpoint` 表关注 `parent_commit`、`tree_oid`、`metada
 | AG-20 / E4 / E5 | `agent_checkpoint_export_test`：规划 target（未注册） | `agent_checkpoint_export_test::exports_single_and_multi_session_layouts`; `agent_checkpoint_export_test::checkpoint_show_list_are_metadata_first`; `agent_checkpoint_export_test::content_hash_reader_accepts_legacy_bare_hex_and_writes_prefixed`; `agent_checkpoint_export_test::large_or_zstd_transcript_requires_explicit_detail`; `agent_checkpoint_export_test::doctor_repairs_partial_checkpoint_write`; `agent_checkpoint_export_test::concurrent_prune_does_not_delete_in_flight_checkpoint_objects` | Wave 2；原场景名 `agent_checkpoint_export_e4_fixtures` 落到该 target |
 | AG-20 existing rewind guard | `command_test`：文件存在但未接入 | `command::agent_checkpoint_test::agent_checkpoint_rewind_dry_run_and_apply_restore_worktree_only` | `tests/command/agent_checkpoint_test.rs` 当前未在 `tests/command/mod.rs` 中 re-export；接入前不会运行，接入后用 `cargo test --test command_test agent_checkpoint_rewind` 验证 |
 | AG-21 / E5 / E6 / E7 | `agent_transcript_intelligence_test`：规划 target（未注册） | `agent_transcript_intelligence_test::claude_codex_opencode_fixtures_extract_metadata_or_partial`; `agent_transcript_intelligence_test::token_usage_mapping_uses_e6_wire_keys`; `agent_transcript_intelligence_test::missing_optional_files_return_partial_not_panic`; `agent_transcript_intelligence_test::skill_events_project_for_claude_and_codex` | Wave 2；新增时同步 `tests/INDEX.md`；若拆 target，矩阵必须同步 |
-| AG-22 / E8 | `agent_review_workflow_test`：规划 target（未注册） | `agent_review_workflow_test::fake_reviewers_cover_success_error_cancel_and_slow_output`; `agent_review_workflow_test::review_sink_is_not_blocked_by_high_frequency_reviewer`; `agent_review_workflow_test::review_fix_bridge_enters_agent_runtime_mutating_path`; `agent_review_workflow_test::cancel_releases_reviewer_processes_and_locks` | Wave 3+；需 `--features test-provider` 时在命令中标注 |
-| AG-23 / E8 | `agent_investigate_workflow_test`：规划 target（未注册） | `agent_investigate_workflow_test::round_robin_reaches_quorum_and_max_turns`; `agent_investigate_workflow_test::stalled_cancelled_paused_and_continue_resume_are_pinned`; `agent_investigate_workflow_test::concurrent_same_run_id_fails_closed`; `agent_investigate_workflow_test::investigate_fix_bridge_enters_agent_runtime_mutating_path` | Wave 3+；需 `--features test-provider` 时在命令中标注 |
+| AG-22 / E8 | `agent_review_workflow_test`：规划 target（未注册） | `agent_review_workflow_test::fake_reviewers_cover_success_error_cancel_and_slow_output`; `agent_review_workflow_test::review_sink_is_not_blocked_by_high_frequency_reviewer`; `agent_review_workflow_test::review_read_only_emits_findings_manifest_and_manual_attach`; `agent_review_workflow_test::review_fix_returns_unsupported_until_bridge_ready`; `agent_review_workflow_test::review_fix_bridge_enters_agent_runtime_mutating_path`; `agent_review_workflow_test::cancel_releases_reviewer_processes_and_locks` | Wave 3+；`review_fix_bridge_enters_agent_runtime_mutating_path` 只有在 fix bridge 源码锚点存在时加入必跑；否则 `review_fix_returns_unsupported_until_bridge_ready` 必跑；需 `--features test-provider` 时在命令中标注 |
+| AG-23 / E8 | `agent_investigate_workflow_test`：规划 target（未注册） | `agent_investigate_workflow_test::round_robin_reaches_quorum_and_max_turns`; `agent_investigate_workflow_test::stalled_cancelled_paused_and_continue_resume_are_pinned`; `agent_investigate_workflow_test::investigate_read_only_persists_state_and_findings_doc`; `agent_investigate_workflow_test::investigate_fix_returns_unsupported_until_bridge_ready`; `agent_investigate_workflow_test::concurrent_same_run_id_fails_closed`; `agent_investigate_workflow_test::investigate_fix_bridge_enters_agent_runtime_mutating_path` | Wave 3+；fix bridge test 与 unsupported test 二选一按前置状态执行，read-only/state tests 必跑；需 `--features test-provider` 时在命令中标注 |
 
 AG-24 交付时必须逐行核对：没有 target、没有具体 test function、没有 `Cargo.toml` / `tests/INDEX.md` 注册、或验收命令未覆盖，均视为测试方案未闭环。
 
@@ -1045,6 +1085,7 @@ rg -n "AgentReviewWorkflow|AgentInvestigateWorkflow|findings_doc|pending_turn|qu
 
 # docs/source-of-truth drift
 rg -n "claudecode|claude-code|libra-agent-|agent list|agent add|agent remove|LifecycleEvent|refs/libra/agent-traces" docs/development docs/commands COMPATIBILITY.md tests/INDEX.md
+! rg -n "\\]\\(\\.\\./agent\\.md\\)|\\]\\(\\.\\./web-only\\.md\\)" docs/development/commands/agent.md docs/development/code-agent-runtime.md
 
 ```
 
@@ -1064,7 +1105,9 @@ rg -n "claudecode|claude-code|libra-agent-|agent list|agent add|agent remove|Lif
 | 外部二进制冒用内置 slug | PATH 上的 `libra-agent-claude-code`/`libra-agent-codex`/`libra-agent-opencode` 被注册为内置身份，对用户/JSON 呈现为可信内置 agent（仿冒） | discovery 对 slug ∈ 第一批 supported roster / built-in `AgentKind` 的外部二进制 skip-and-log；external agent JSON 带 `external_binary:true`+绝对路径；回归测试钉死 |
 | 把 redaction-before-persist 当作已生效不变量 | `RedactedSink`（`redaction.rs:219`）仍是 Phase-1 placeholder，redaction 只是 runtime 手工散点调用，新增持久化路径可绕过，raw prompt/PII 落盘 | AG-19/AG-20 把 writer/uploader 改为只收 `RedactedBytes`（类型层面挡 `&[u8]`）；redaction 失败＝写失败 fail-closed；未 wire 前不得宣称 raw-input-never-persisted |
 | 发布 public JSON 但没有 schema/version | 后续字段重命名或删除破坏脚本、Web UI 和外部 binary | 所有 `--json`、RPC `info`、checkpoint export、review/investigate state 都带 schema/protocol version 和 snapshot/schema pin test |
-| 没有 retention/GC/raw export 规则 | redacted 或 raw transcript、prompt/context、review findings 在本地/cloud 中无限期保留，难以满足隐私删除要求 | AG-24 必须记录 retention、GC、cloud restore/delete 一致性和 raw 读取显式授权规则 |
+| 没有 retention/GC/raw export 规则 | redacted 或 raw transcript、prompt/context、review findings 在本地或 cloud-enabled 部署中无限期保留，难以满足隐私删除要求 | AG-24 必须记录 retention、GC、本地删除一致性、cloud mirror 启用后的 restore/delete tombstone 和 raw 读取显式授权规则 |
+| 把完整内部 AgentRuntime / Web-only 迁移当作 `libra agent` 外部捕获前置 | AG-16~AG-21 被错误阻塞，或实现者把外部捕获能力塞进内部 Code UI runtime | 按前置依赖决策矩阵执行：外部捕获/read-only review 可独立推进；只有 mutating fix/action 依赖内部 AgentRuntime serialized fix bridge |
+| 把 AG-13 `dispatch_batch` 当作 review/investigate 的 multi-agent fan-out 机制 | reviewer 是外部 agent 进程（Claude Code/Codex/OpenCode），fan-out 依赖 AG-18 external RPC spawn；`dispatch_batch` 是内部 `SubAgentDispatcher` 方法，服务内部 sub-agent，两者是不同机制；误用会导致 review 无法启动外部 reviewer 或被迫先实现不相关的内部 batch dispatch | AG-22/AG-23 read-only 依赖 AG-18 external RPC spawn + AG-16/AG-21，不依赖 AG-13 `dispatch_batch`；`materialize_isolated_workspace` 可复用作 reviewer worktree 隔离，但须显式抽取 |
 
 ## 还未实现的功能
 
@@ -1105,8 +1148,8 @@ rg -n "claudecode|claude-code|libra-agent-|agent list|agent add|agent remove|Lif
 
 | 操作 | 本地 | `object_index` | D1 | R2 / cloud | 注意 |
 |---|---|---|---|---|---|
-| 删除单个 checkpoint | 重写 `refs/libra/agent-traces` 剔除该 checkpoint | 删除该 checkpoint 相关 OIDs | 删除 `agent_checkpoint` 行 | 异步 cloud delete | 单删对象不可达但 cloud restore 会复活，必须传播 delete |
-| 删除整个 session | 同上 + 删 `agent_session` + 删 session 目录 | 删相关 OIDs | 删 session + checkpoint 行 + usage | 异步 cloud delete | 保留期到后才真正物理删除 |
+| 删除单个 checkpoint | 重写 `refs/libra/agent-traces` 剔除该 checkpoint | 删除该 checkpoint 相关 OIDs | **仅 cloud mirror 启用后适用**：删除 `agent_checkpoint` mirror 行或写 tombstone | **仅 cloud mirror 启用后适用**：异步 cloud delete | 单删对象不可达但 cloud restore 会复活；未启用 D1/R2 mirror 时只能声明本地删除一致性 |
+| 删除整个 session | 同上 + 删 `agent_session` + 删 session 目录 | 删相关 OIDs | **仅 cloud mirror 启用后适用**：删 session + checkpoint mirror 行 + usage 或写 tombstone | **仅 cloud mirror 启用后适用**：异步 cloud delete | 保留期到后才真正物理删除；cloud tombstone 必须阻止 restore 复活 |
 | raw export（`--allow-raw`） | 写出到用户指定路径 | 不改动 | 写 audit 记录 | 不改动 | 必须记录 who/when/which checkpoint/scope |
 | **audit log 删除** | **不允许单行删除** | — | — | — | **追加写、不可逆**：audit log 是 append-only，删除整表/整文件须走合规审批流程 |
 
@@ -1149,7 +1192,7 @@ rg -n "claudecode|claude-code|libra-agent-|agent list|agent add|agent remove|Lif
 - 改进本命令前，必须先阅读并遵循 [docs/development/commands/_general.md](_general.md)；这是命令设计、实现、测试和文档同步的强制要求。
 - 任何行为变更都要先核对实现源码，再同步 `COMPATIBILITY.md`、`docs/commands/<cmd>.md` 和相关测试。
 - 新增 Git 兼容参数时必须明确 tier、错误码、JSON/机器输出契约和回归测试。
-- entireio/cli 对齐的具体执行步骤、wire 契约（E1–E9）、任务卡（AG-16~AG-24）与验收命令以本文作为 `libra agent` public surface 的事实源；[`docs/development/agent.md`](../agent.md) 只保留内部 AgentRuntime/Web-only 迁移、MCP/control-plane 边界与 Gate 8 总览追踪。本文与该计划任一处变更，另一处的边界说明与差距映射都要同步刷新。
+- entireio/cli 对齐的具体执行步骤、wire 契约（E1–E9）、任务卡（AG-16~AG-24）与验收命令以本文作为 `libra agent` public surface 的事实源；[`docs/development/code-agent-runtime.md`](../code-agent-runtime.md) 只保留内部 AgentRuntime/Web-only 迁移、MCP/control-plane 边界与 Gate 8 总览追踪。本文与该计划任一处变更，另一处的边界说明与差距映射都要同步刷新。
 - **跨文档同步**：修改涉及 "subagent" 语义、checkpoint scope 或 schema 时，同步检查/更新 `Cargo.toml` `subagent-scaffold` 特性注释（该注释引用本文档 "Step 2 audit closure"）。内部 CEX-S2-10 scaffold（`internal/ai/agent/*` 等）与本文档的外部捕获 subagent lifecycle 事件是不同层；混淆会导致特性 gate 与实现边界错位。
 
 ## 术语表与缩略语

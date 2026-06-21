@@ -1,6 +1,11 @@
 //! Implements `ls-files` to list files in the index with basic filters.
 
-use std::{collections::HashSet, fs, path::PathBuf};
+use std::{
+    collections::HashSet,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use clap::Parser;
 use git_internal::internal::{index::Index, object::blob::Blob};
@@ -21,7 +26,10 @@ EXAMPLES:
     libra ls-files --modified           Show only modified files
     libra ls-files --stage              Include stage information (for conflicts)
     libra ls-files --others             Show untracked files
-    libra ls-files --exclude-standard   Exclude files matching .gitignore
+    libra ls-files --exclude-standard   Exclude files matching .libraignore
+    libra ls-files tracked-dir          Limit output to a pathspec
+    libra ls-files --error-unmatch src  Fail if a pathspec matches nothing
+    libra ls-files -z --others          Emit NUL-delimited records for scripts
     libra ls-files -s                   Short output with stage info";
 
 #[derive(Parser, Debug)]
@@ -47,13 +55,25 @@ pub struct LsFilesArgs {
     #[clap(long)]
     pub others: bool,
 
-    /// Exclude files matching .gitignore patterns
+    /// Exclude files matching .libraignore patterns
     #[clap(long)]
     pub exclude_standard: bool,
+
+    /// Exit with an error when any pathspec matches no files
+    #[clap(long)]
+    pub error_unmatch: bool,
+
+    /// Separate records with NUL instead of newline
+    #[clap(short = 'z')]
+    pub nul_terminate: bool,
 
     /// Short output format with mode and hash
     #[clap(short = 's')]
     pub short: bool,
+
+    /// Limit output to files matching the given pathspec(s)
+    #[clap(value_name = "pathspec")]
+    pub pathspec: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +83,12 @@ pub struct FileEntry {
     mode: Option<String>,
     stage: Option<u32>,
     status: String,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedPathspec {
+    raw: String,
+    absolute: PathBuf,
 }
 
 pub async fn execute(args: LsFilesArgs) -> CliResult<()> {
@@ -80,6 +106,9 @@ pub async fn execute_safe(args: LsFilesArgs, output: &OutputConfig) -> CliResult
 
 fn run_ls_files(_args: &LsFilesArgs) -> CliResult<Vec<FileEntry>> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    let workdir = util::working_dir();
+    let current_dir = util::cur_dir();
+    let pathspecs = resolve_ls_files_pathspecs(_args, &workdir, &current_dir)?;
 
     let index = Index::load(path::index()).map_err(|source| {
         CliError::fatal(format!("failed to load index: {source}"))
@@ -97,10 +126,11 @@ fn run_ls_files(_args: &LsFilesArgs) -> CliResult<Vec<FileEntry>> {
         };
         for stage in stages {
             for entry in index.tracked_entries(*stage) {
-                let worktree_path = PathBuf::from(&entry.name);
+                let worktree_path = workdir.join(&entry.name);
                 let exists = worktree_path.exists();
                 let is_deleted = !exists;
-                let is_modified = exists && entry_modified(&entry.name, &entry.hash.to_string())?;
+                let is_modified =
+                    exists && entry_modified(&worktree_path, &entry.name, &entry.hash.to_string())?;
 
                 if _args.deleted && !is_deleted {
                     continue;
@@ -158,17 +188,101 @@ fn run_ls_files(_args: &LsFilesArgs) -> CliResult<Vec<FileEntry>> {
         }
     }
 
+    entries = filter_entries_by_pathspec(entries, &pathspecs, &workdir);
+    if _args.error_unmatch {
+        ensure_error_unmatch(&pathspecs, &entries, &workdir)?;
+    }
+
     entries.sort_by(|a, b| a.path.cmp(&b.path).then(a.stage.cmp(&b.stage)));
     Ok(entries)
 }
 
-fn entry_modified(path: &str, indexed_hash: &str) -> CliResult<bool> {
-    let data = match fs::read(path) {
+fn resolve_ls_files_pathspecs(
+    args: &LsFilesArgs,
+    workdir: &Path,
+    current_dir: &Path,
+) -> CliResult<Vec<ResolvedPathspec>> {
+    args.pathspec
+        .iter()
+        .map(|raw| {
+            let absolute = resolve_pathspec(Path::new(raw), current_dir);
+            if !util::is_sub_path(&absolute, workdir) {
+                return Err(CliError::fatal(format!(
+                    "'{raw}' is outside repository at '{}'",
+                    workdir.display()
+                ))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("all paths must be within the repository working tree"));
+            }
+            Ok(ResolvedPathspec {
+                raw: raw.clone(),
+                absolute,
+            })
+        })
+        .collect()
+}
+
+fn resolve_pathspec(pathspec: &Path, current_dir: &Path) -> PathBuf {
+    if pathspec.is_absolute() {
+        pathspec.to_path_buf()
+    } else {
+        current_dir.join(pathspec)
+    }
+}
+
+fn filter_entries_by_pathspec(
+    entries: Vec<FileEntry>,
+    pathspecs: &[ResolvedPathspec],
+    workdir: &Path,
+) -> Vec<FileEntry> {
+    if pathspecs.is_empty() {
+        return entries;
+    }
+
+    entries
+        .into_iter()
+        .filter(|entry| {
+            pathspecs
+                .iter()
+                .any(|pathspec| entry_matches_pathspec(entry, pathspec, workdir))
+        })
+        .collect()
+}
+
+fn ensure_error_unmatch(
+    pathspecs: &[ResolvedPathspec],
+    entries: &[FileEntry],
+    workdir: &Path,
+) -> CliResult<()> {
+    if let Some(unmatched) = pathspecs.iter().find(|pathspec| {
+        !entries
+            .iter()
+            .any(|entry| entry_matches_pathspec(entry, pathspec, workdir))
+    }) {
+        return Err(CliError::fatal(format!(
+            "pathspec '{}' did not match any files",
+            unmatched.raw
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidTarget)
+        .with_hint("check the path and try again.")
+        .with_hint("use 'libra ls-files' to inspect visible paths."));
+    }
+
+    Ok(())
+}
+
+fn entry_matches_pathspec(entry: &FileEntry, pathspec: &ResolvedPathspec, workdir: &Path) -> bool {
+    let entry_abs = workdir.join(Path::new(&entry.path));
+    util::is_sub_path(&entry_abs, &pathspec.absolute)
+}
+
+fn entry_modified(worktree_path: &Path, display_path: &str, indexed_hash: &str) -> CliResult<bool> {
+    let data = match fs::read(worktree_path) {
         Ok(data) => data,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(source) => {
             return Err(CliError::fatal(format!(
-                "failed to read working tree file '{path}': {source}"
+                "failed to read working tree file '{display_path}': {source}"
             ))
             .with_stable_code(StableErrorCode::IoReadFailed));
         }
@@ -182,6 +296,13 @@ fn render_output(
     args: &LsFilesArgs,
     output: &OutputConfig,
 ) -> CliResult<()> {
+    if args.nul_terminate && output.is_json() {
+        return Err(
+            CliError::fatal("ls-files -z cannot be combined with --json or --machine")
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("choose either NUL-delimited text output or JSON/machine output"),
+        );
+    }
     if output.is_json() {
         return emit_json_data("ls-files", &entries.to_vec(), output);
     }
@@ -189,9 +310,10 @@ fn render_output(
         return Ok(());
     }
 
+    let mut stdout = std::io::stdout().lock();
     for entry in entries {
-        if args.short || args.stage {
-            println!(
+        let record = if args.short || args.stage {
+            format!(
                 "{} {} {}\t{}",
                 entry.mode.as_deref().unwrap_or("000000"),
                 entry
@@ -200,10 +322,21 @@ fn render_output(
                     .unwrap_or("0000000000000000000000000000000000000000"),
                 entry.stage.unwrap_or(0),
                 entry.path
-            );
+            )
         } else {
-            println!("{}", entry.path);
-        }
+            entry.path.clone()
+        };
+
+        stdout.write_all(record.as_bytes()).map_err(|source| {
+            CliError::fatal(format!("failed to write ls-files output: {source}"))
+                .with_stable_code(StableErrorCode::IoWriteFailed)
+        })?;
+        stdout
+            .write_all(if args.nul_terminate { b"\0" } else { b"\n" })
+            .map_err(|source| {
+                CliError::fatal(format!("failed to write ls-files output: {source}"))
+                    .with_stable_code(StableErrorCode::IoWriteFailed)
+            })?;
     }
 
     Ok(())

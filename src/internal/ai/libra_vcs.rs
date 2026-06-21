@@ -9,18 +9,19 @@ use serde_json::json;
 use crate::internal::ai::runtime::hardening::{BlastRadius, SafetyDecision};
 
 pub const ALLOWED_COMMANDS: &[&str] = &[
-    "status", "diff", "branch", "log", "show", "show-ref", "add", "commit", "switch",
+    "status", "diff", "branch", "log", "show", "show-ref", "ls-files", "add", "commit", "switch",
 ];
 
 pub const ALLOWED_COMMANDS_DISPLAY: &str =
-    "status, diff, branch, log, show, show-ref, add, commit, switch";
+    "status, diff, branch, log, show, show-ref, ls-files, add, commit, switch";
 
 pub fn run_libra_vcs_tool_guidance() -> String {
     format!(
         "Allowed run_libra_vcs commands: {ALLOWED_COMMANDS_DISPLAY}. Pass flags and paths in \
          args. For working tree state prefer `status --json` or `status --porcelain v2 \
-         --untracked-files=all`. For raw file discovery use workspace file tools instead of \
-         `ls-files`. Do not use Git-only forms like `ls-files`, `status -uall`, or `status -a`."
+         --untracked-files=all`. Use `ls-files` for index and untracked-path inspection inside \
+         the repo, including `ls-files --others --exclude-standard` for ignore-aware untracked \
+         files. Do not use Git-only status shorthands like `status -uall` or `status -a`."
     )
 }
 
@@ -28,8 +29,8 @@ pub fn unsupported_command_message(prefix: &str, command: &str) -> String {
     format!(
         "unsupported {prefix} command '{command}'; allowed commands: {ALLOWED_COMMANDS_DISPLAY}. \
          For working tree state use `status --json` or `status --porcelain v2 \
-         --untracked-files=all`. For raw file discovery use workspace file tools instead of \
-         `ls-files`."
+         --untracked-files=all`. Use `ls-files` when you need tracked, modified, deleted, or \
+         untracked repository paths."
     )
 }
 
@@ -83,6 +84,7 @@ pub fn classify_run_libra_vcs_safety(command: &str, args: &[String]) -> SafetyDe
         "log" => classify_read_command_safety(args, log_arg_safety),
         "show" => classify_read_command_safety(args, show_arg_safety),
         "show-ref" => classify_read_command_safety(args, show_ref_arg_safety),
+        "ls-files" => classify_read_command_safety(args, ls_files_arg_safety),
         "branch" => classify_branch_safety(args),
         "add" | "commit" | "switch" => SafetyDecision::needs_human(
             "libra_vcs.recoverable_mutation",
@@ -485,6 +487,31 @@ fn show_ref_arg_safety(args: &[String], idx: usize) -> (ArgSafety, usize) {
     (ArgSafety::Unknown, idx + 1)
 }
 
+fn ls_files_arg_safety(args: &[String], idx: usize) -> (ArgSafety, usize) {
+    let arg = args[idx].as_str();
+    if matches!(
+        arg,
+        "--cached"
+            | "--deleted"
+            | "--modified"
+            | "--stage"
+            | "-s"
+            | "--others"
+            | "--exclude-standard"
+            | "--error-unmatch"
+            | "--json"
+            | "-J"
+            | "--machine"
+    ) || arg.starts_with("--json=")
+        || arg.starts_with("-J=")
+        || !arg.starts_with('-')
+    {
+        return (ArgSafety::Allow, idx + 1);
+    }
+
+    (ArgSafety::Unknown, idx + 1)
+}
+
 fn branch_args_are_read_only(args: &[String]) -> bool {
     if args.is_empty() {
         return true;
@@ -631,22 +658,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_guidance_mentions_allowed_commands_and_git_only_forms() {
+    fn tool_guidance_mentions_allowed_commands_and_read_only_hints() {
         let guidance = run_libra_vcs_tool_guidance();
 
         assert!(guidance.contains(ALLOWED_COMMANDS_DISPLAY));
         assert!(guidance.contains("status --json"));
         assert!(guidance.contains("ls-files"));
+        assert!(guidance.contains("--exclude-standard"));
         assert!(guidance.contains("status -uall"));
     }
 
     #[test]
     fn unsupported_command_message_is_actionable() {
-        let message = unsupported_command_message("run_libra_vcs", "ls-files");
+        let message = unsupported_command_message("run_libra_vcs", "remote");
 
         assert!(message.contains("allowed commands"));
         assert!(message.contains("status --json"));
-        assert!(message.contains("workspace file tools"));
+        assert!(message.contains("ls-files"));
     }
 
     #[test]

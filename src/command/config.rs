@@ -2134,10 +2134,10 @@ async fn get_all_cascaded(key: &str) -> Result<Vec<(ConfigKvEntry, ConfigScope)>
 }
 
 fn should_skip_config_scope_read_error(scope: ConfigScope, error: &str) -> bool {
-    scope == ConfigScope::Global
-        && error
-            .to_ascii_lowercase()
-            .contains("repository database schema is out of date")
+    // Out-of-date schemas are now upgraded automatically on connect; the only
+    // surviving incompatibility is a global config DB whose schema is newer
+    // than this binary supports — skip that scope rather than failing the read.
+    scope == ConfigScope::Global && error.contains("is newer than this Libra binary supports")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

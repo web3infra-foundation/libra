@@ -386,10 +386,10 @@ impl ClientStorage {
     /// message shape and ensures CLI commands keep working when remote storage
     /// is broken — the `Warning:` prefix mirrors the recovered, non-fatal
     /// nature of the degrade path so users do not mistake it for a fatal
-    /// command failure (e.g. an outdated `~/.libra/config.db` schema still
-    /// surfaces a chain like "Repository database schema is out of date... Run
-    /// 'libra db upgrade'", but the clone/init operation itself still
-    /// succeeds via `LocalStorage`).
+    /// command failure (e.g. a `~/.libra/config.db` whose schema is newer than
+    /// this binary supports still surfaces a chain like "Repository database
+    /// schema version ... is newer than this Libra binary supports", but the
+    /// clone/init operation itself still succeeds via `LocalStorage`).
     fn storage_config_resolution_fallback(
         base_path: &Path,
         name: &str,
@@ -988,7 +988,7 @@ async fn resolve_env_for_storage_init(name: &str) -> Result<Option<String>, Stri
         match read_config_env_value(name, &vault_key, &global_db_path, "global").await {
             Ok(Some(value)) => return Ok(Some(value)),
             Ok(None) => {}
-            Err(err) if is_schema_outdated_error(&err) => {}
+            Err(err) if is_schema_incompatible_error(&err) => {}
             Err(err) => return Err(err),
         }
     }
@@ -996,10 +996,13 @@ async fn resolve_env_for_storage_init(name: &str) -> Result<Option<String>, Stri
     Ok(None)
 }
 
-fn is_schema_outdated_error(error: &str) -> bool {
-    error
-        .to_ascii_lowercase()
-        .contains("repository database schema is out of date")
+/// A schema-compatibility failure on the global config database. Pending
+/// migrations are now applied automatically when the connection is opened, so
+/// the only surviving incompatibility is a schema *newer* than this binary
+/// supports — degrade gracefully (skip the global layer) instead of failing
+/// storage/config init.
+fn is_schema_incompatible_error(error: &str) -> bool {
+    error.contains("is newer than this Libra binary supports")
 }
 
 /// Read a single `vault.env.*` entry from a config database, decrypting if needed.

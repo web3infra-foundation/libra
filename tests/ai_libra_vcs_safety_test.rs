@@ -53,6 +53,8 @@ fn ai_libra_vcs_safety_allows_read_only_parameter_combinations() {
         ("show", vec!["HEAD", "--stat"]),
         ("show-ref", vec!["--heads"]),
         ("branch", vec!["--show-current"]),
+        ("ls-files", vec!["--others", "--exclude-standard"]),
+        ("ls-files", vec!["--error-unmatch", "src"]),
     ] {
         let decision = classify_run_libra_vcs_safety(command, &strings(&args));
 
@@ -81,6 +83,7 @@ fn ai_libra_vcs_safety_requires_human_for_recoverable_or_unknown_combinations() 
             vec!["feat/local-spike"],
             "libra_vcs.recoverable_mutation",
         ),
+        ("ls-files", vec!["-z"], "libra_vcs.unknown_args"),
         ("status", vec!["--unknown"], "libra_vcs.unknown_args"),
         ("stash", vec!["pop"], "libra_vcs.unknown_command"),
     ] {

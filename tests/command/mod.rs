@@ -313,6 +313,7 @@ mod init_separate_libra_dir_test;
 mod init_test;
 mod lfs_test;
 mod log_test;
+mod ls_files_test;
 mod ls_remote_options_test;
 mod ls_remote_test;
 mod ls_tree_test;

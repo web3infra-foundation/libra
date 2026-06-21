@@ -209,7 +209,7 @@
 | `maintenance run --dry-run --task gc` | `cli.gc-smoke` | 当前可用 maintenance 路径返回 JSON envelope |
 | `archive` | `cli.archive-smoke` | 当前未注册，runner 断言 JSON unknown-command 错误 |
 | `verify-pack [-v|-s] [--pack <pack>] <idx>...` | `cli.verify-pack-smoke` | idx/pack 对应校验、多 index sibling 推导、verbose 对象行、stat-only 摘要和 `--pack` 多 idx 拒绝路径可观察 |
-| `db status` / `db upgrade` / `db --json status` | `cli.schema-upgrade-observable` | fresh/current schema 状态、升级 no-op 和非 repo 失败可观察 |
+| schema 建链自动升级（普通命令打开数据库即升级） | `cli.schema-upgrade-observable` | fresh schema 可用、过期 schema 自动升级、非 repo 失败可观察 |
 | hidden `index-pack --stdin -o <idx>` / `--keep[=<MSG>]` / `--progress` / `--no-progress` | `cli.verify-pack-smoke` | 仅作为 pack fixture 辅助生成，不作为独立用户命令场景；断言 stdin 同 stem `.pack`、`.keep` 文件和消息换行，并执行 progress/no-progress 兼容入口 |
 
 

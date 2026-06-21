@@ -20,10 +20,10 @@ use sea_orm::{ConnectionTrait, Statement};
 
 use crate::{
     command,
-    internal::{config::ConfigKv, db, db::SchemaCompatibility},
+    internal::{config::ConfigKv, db},
     utils,
     utils::{
-        error::{CliError, CliResult, StableErrorCode},
+        error::{CliError, CliResult},
         output::OutputConfig,
     },
 };
@@ -31,12 +31,12 @@ use crate::{
 const ROOT_AFTER_HELP: &str = "\
 Command Groups:
   Repository Setup        init, clone, config
-  Working Tree            status, add, rm, mv, restore, clean, stash, lfs, worktree
+  Working Tree            status, add, rm, mv, restore, clean, stash, lfs, ls-files, worktree
   History Inspection      log, shortlog, show, show-ref, ls-remote, ls-tree, diff, grep, blame, describe, notes, archive
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing db, fsck, maintenance, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
+  Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -311,6 +311,11 @@ enum Commands {
     )]
     Lfs(command::lfs::LfsCmds),
     #[command(
+        about = "Show information about tracked and untracked files",
+        after_help = command::ls_files::LS_FILES_EXAMPLES
+    )]
+    LsFiles(command::ls_files::LsFilesArgs),
+    #[command(
         about = "Manage multiple working trees attached to this repository",
         alias = "wt",
         after_help = command::worktree::WORKTREE_EXAMPLES
@@ -447,8 +452,6 @@ enum Commands {
     Sandbox(command::sandbox::SandboxArgs),
     #[command(about = "Manage external-agent capture (Claude Code, Gemini, …)")]
     Agent(command::agent::AgentArgs),
-    #[command(about = "Inspect and upgrade the repository database schema")]
-    Db(command::db::DbArgs),
     #[command(
         about = "Build pack index file for an existing packed archive",
         hide = true
@@ -906,7 +909,12 @@ fn repo_not_found_error(path: Option<&Path>) -> CliError {
 
 struct CommandPreflight {
     storage: Option<std::path::PathBuf>,
-    check_schema: bool,
+    /// When `true`, the repository database is opened through the pooled,
+    /// schema-aware connection ([`set_local_hash_kind_for_storage`]), which
+    /// auto-applies any pending migrations. When `false`, a read-only raw
+    /// connection is used instead so the on-disk schema is left untouched
+    /// (e.g. read-only `hash-object` / `verify-pack`).
+    upgrade_schema: bool,
     set_hash_kind: bool,
 }
 
@@ -914,7 +922,7 @@ impl CommandPreflight {
     fn none() -> Self {
         Self {
             storage: None,
-            check_schema: false,
+            upgrade_schema: false,
             set_hash_kind: false,
         }
     }
@@ -922,7 +930,7 @@ impl CommandPreflight {
     fn sha1_without_repo() -> Self {
         Self {
             storage: None,
-            check_schema: false,
+            upgrade_schema: false,
             set_hash_kind: true,
         }
     }
@@ -930,23 +938,15 @@ impl CommandPreflight {
     fn repo(storage: std::path::PathBuf) -> Self {
         Self {
             storage: Some(storage),
-            check_schema: true,
+            upgrade_schema: true,
             set_hash_kind: true,
-        }
-    }
-
-    fn repo_without_schema_guard(storage: std::path::PathBuf) -> Self {
-        Self {
-            storage: Some(storage),
-            check_schema: false,
-            set_hash_kind: false,
         }
     }
 
     fn repo_hash_kind_without_schema_guard(storage: std::path::PathBuf) -> Self {
         Self {
             storage: Some(storage),
-            check_schema: false,
+            upgrade_schema: false,
             set_hash_kind: true,
         }
     }
@@ -992,55 +992,12 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
                 .map_err(|_| repo_not_found_error(graph_args.repo.as_deref()))?;
             Ok(CommandPreflight::repo(storage))
         }
-        Commands::Db(_) => {
-            let storage =
-                utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error(None))?;
-            Ok(CommandPreflight::repo_without_schema_guard(storage))
-        }
         _ => {
             let storage =
                 utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error(None))?;
             Ok(CommandPreflight::repo(storage))
         }
     }
-}
-
-async fn check_database_schema_for_storage(storage: &Path) -> CliResult<()> {
-    let db_path = storage.join(utils::util::DATABASE);
-    match db::inspect_database_schema(&db_path).await.map_err(|error| {
-        CliError::fatal(format!(
-            "failed to inspect repository database '{}': {}",
-            db_path.display(),
-            error
-        ))
-        .with_stable_code(StableErrorCode::RepoCorrupt)
-    })? {
-        SchemaCompatibility::Compatible { .. } => Ok(()),
-        SchemaCompatibility::UpgradeRequired {
-            current_version,
-            latest_version,
-        } => Err(CliError::fatal(format!(
-            "repository database schema is out of date (current: {}, required: {latest_version})",
-            format_schema_version(current_version)
-        ))
-        .with_stable_code(StableErrorCode::RepoCorrupt)
-        .with_hint("run 'libra db upgrade' in this repository to upgrade the database schema.")),
-        SchemaCompatibility::UnsupportedFuture {
-            current_version,
-            latest_version,
-        } => Err(CliError::fatal(format!(
-            "repository database schema version {current_version} is newer than this Libra binary supports (latest supported: {})",
-            format_schema_version(latest_version)
-        ))
-        .with_stable_code(StableErrorCode::RepoCorrupt)
-        .with_hint("install a newer Libra binary before running commands in this repository.")),
-    }
-}
-
-fn format_schema_version(version: Option<i64>) -> String {
-    version
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "none".to_string())
 }
 
 fn is_error_codes_help_topic(argv: &[String]) -> bool {
@@ -1176,11 +1133,11 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     }
     let preflight = command_preflight(&args.command)?;
     if let Some(storage) = preflight.storage.as_deref() {
-        if preflight.check_schema {
-            check_database_schema_for_storage(storage).await?;
-        }
         if preflight.set_hash_kind {
-            if preflight.check_schema {
+            if preflight.upgrade_schema {
+                // Opening the pooled connection here auto-applies any pending
+                // schema migrations (see `db::establish_connection`), so an
+                // older repository is brought up to date transparently.
                 set_local_hash_kind_for_storage(storage).await?;
             } else {
                 set_local_hash_kind_for_storage_without_schema_guard(storage).await?;
@@ -1249,6 +1206,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Clean(cmd_args) => command::clean::execute_safe(cmd_args, &output).await?,
         Commands::Stash(cmd) => command::stash::execute_safe(cmd, &output).await?,
         Commands::Lfs(cmd) => command::lfs::execute_safe(cmd, &output).await?,
+        Commands::LsFiles(cmd_args) => command::ls_files::execute_safe(cmd_args, &output).await?,
         Commands::Log(cmd_args) => command::log::execute_safe(cmd_args, &output).await?,
         Commands::Shortlog(cmd_args) => command::shortlog::execute_safe(cmd_args, &output).await?,
         Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
@@ -1299,7 +1257,6 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Open(cmd_args) => command::open::execute_safe(cmd_args, &output).await?,
         Commands::Pull(cmd_args) => command::pull::execute_safe(cmd_args, &output).await?,
         Commands::Config(cmd_args) => command::config::execute_safe(cmd_args, &output).await?,
-        Commands::Db(cmd_args) => command::db::execute_safe(cmd_args, &output).await?,
         Commands::Checkout(cmd_args) => command::checkout::execute_safe(cmd_args, &output).await?,
         Commands::Reflog(cmd_args) => command::reflog::execute_safe(cmd_args, &output).await?,
         Commands::Op(cmd_args) => command::op::execute_safe(cmd_args, &output).await?,
@@ -1444,7 +1401,7 @@ mod tests {
 
         let preflight = command_preflight(&cli.command).unwrap();
         assert!(preflight.storage.is_none());
-        assert!(!preflight.check_schema);
+        assert!(!preflight.upgrade_schema);
         assert!(!preflight.set_hash_kind);
     }
 
@@ -1458,7 +1415,7 @@ mod tests {
 
         let preflight = command_preflight(&cli.command).unwrap();
         assert!(preflight.storage.is_some());
-        assert!(!preflight.check_schema);
+        assert!(!preflight.upgrade_schema);
         assert!(preflight.set_hash_kind);
     }
 

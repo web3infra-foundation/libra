@@ -272,7 +272,10 @@ fn load_config_entry_sync(dotted_key: &str) -> Result<Option<ConfigKvEntry>, Str
     fn read_entry_sync(dotted_key: &str) -> Result<Option<ConfigKvEntry>, String> {
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| format!("failed to create tokio runtime for config read: {e}"))?;
-        rt.block_on(ConfigKv::get(dotted_key))
+        // `get_best_effort` returns an actionable `Err` (instead of panicking)
+        // when the repository database cannot be opened — e.g. an enclosing
+        // repo whose schema is out of date.
+        rt.block_on(ConfigKv::get_best_effort(dotted_key))
             .map_err(|e| format!("failed to read config key '{dotted_key}': {e}"))
     }
 
@@ -472,26 +475,29 @@ fn load_config_sync(configuration: &str, name: Option<&str>, key: &str) -> Optio
         None => format!("{configuration}.{key}"),
     };
 
+    // `get_best_effort` never panics when the (possibly *enclosing*) repository
+    // database is missing or its schema is out of date; it returns an `Err`
+    // that we log and swallow here, so transport setup degrades to "no config
+    // value" instead of dumping a panic to stderr during `clone`/`fetch`.
+    fn read_value_sync(dotted_key: &str) -> Option<String> {
+        let rt = tokio::runtime::Runtime::new().ok()?;
+        match rt.block_on(ConfigKv::get_best_effort(dotted_key)) {
+            Ok(entry) => entry.map(|e| e.value),
+            Err(err) => {
+                tracing::debug!("skipping config read for '{dotted_key}': {err}");
+                None
+            }
+        }
+    }
+
     match tokio::runtime::Handle::try_current() {
         Ok(_) => std::thread::scope(|s| {
-            s.spawn(|| {
-                let rt = tokio::runtime::Runtime::new().ok()?;
-                rt.block_on(ConfigKv::get(&dotted_key))
-                    .ok()
-                    .flatten()
-                    .map(|e| e.value)
-            })
-            .join()
-            .ok()
-            .flatten()
-        }),
-        Err(_) => {
-            let rt = tokio::runtime::Runtime::new().ok()?;
-            rt.block_on(ConfigKv::get(&dotted_key))
+            s.spawn(|| read_value_sync(&dotted_key))
+                .join()
                 .ok()
                 .flatten()
-                .map(|e| e.value)
-        }
+        }),
+        Err(_) => read_value_sync(&dotted_key),
     }
 }
 

@@ -102,7 +102,6 @@ const VISIBLE_COMMANDS: &[&str] = &[
     "graph",
     "sandbox",
     "agent",
-    "db",
 ];
 
 /// Phrases that should NEVER appear in any `<cmd> --help` body. Each
