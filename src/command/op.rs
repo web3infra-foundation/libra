@@ -256,57 +256,14 @@ async fn query_operation_log_page<C: sea_orm::ConnectionTrait>(
     let command_filter = command_filter
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    if let Some(filter) = command_filter {
-        let mut matching = Vec::new();
-        let mut fetch_page = 1;
-
-        loop {
-            let batch = OperationService::list_operations_by_repo_paginated_with_conn(
-                db,
-                repo_id,
-                OperationQueryPage {
-                    page: fetch_page,
-                    per_page: OperationQueryPage::MAX_PER_PAGE,
-                },
-            )
-            .await
-            .map_err(|e| CliError::fatal(format!("failed to query operations: {e}")))?;
-
-            matching.extend(
-                batch
-                    .items
-                    .into_iter()
-                    .filter(|item| item.command_name == filter),
-            );
-
-            if batch.page.saturating_mul(batch.per_page) >= batch.total {
-                break;
-            }
-
-            fetch_page += 1;
-        }
-
-        let normalized = query_page.normalized();
-        let start = normalized.offset() as usize;
-        let end = start
-            .saturating_add(normalized.per_page as usize)
-            .min(matching.len());
-        let page_items = if start >= matching.len() {
-            Vec::new()
-        } else {
-            matching[start..end].to_vec()
-        };
-
-        return Ok(OperationService::new_page(
-            page_items,
-            normalized,
-            matching.len() as u64,
-        ));
-    }
-
-    OperationService::list_operations_by_repo_paginated_with_conn(db, repo_id, query_page)
-        .await
-        .map_err(|e| CliError::fatal(format!("failed to query operations: {e}")))
+    OperationService::list_operations_by_repo_and_command_paginated_with_conn(
+        db,
+        repo_id,
+        command_filter,
+        query_page,
+    )
+    .await
+    .map_err(|e| CliError::fatal(format!("failed to query operations: {e}")))
 }
 
 /// Render one `op show` request after resolving the supplied operation reference.

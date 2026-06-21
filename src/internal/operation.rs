@@ -314,37 +314,55 @@ impl OperationService {
         repo_id: &str,
         query: OperationQueryPage,
     ) -> Result<OperationPage<OperationLogListItem>, OperationServiceError> {
+        Self::list_operations_by_repo_and_command_paginated_with_conn(db, repo_id, None, query)
+            .await
+    }
+
+    /// List operation log items by repository and optional command with pagination.
+    pub async fn list_operations_by_repo_and_command_paginated_with_conn<C: ConnectionTrait>(
+        db: &C,
+        repo_id: &str,
+        command_name: Option<&str>,
+        query: OperationQueryPage,
+    ) -> Result<OperationPage<OperationLogListItem>, OperationServiceError> {
         if repo_id.trim().is_empty() {
             return Err(OperationServiceError::InvalidArgument(
                 "repo_id must not be empty".to_string(),
             ));
         }
 
+        let command_name = command_name
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         let query = query.normalized();
-        let total = operation::Entity::find()
-            .filter(operation::Column::RepoId.eq(repo_id))
-            .count(db)
-            .await
-            .map_err(|err| {
-                OperationServiceError::Storage(format!(
-                    "failed to count operation logs for repository '{}': {err}",
-                    repo_id
-                ))
-            })?;
-
-        let models = Self::apply_repo_operation_order(
-            operation::Entity::find().filter(operation::Column::RepoId.eq(repo_id)),
-        )
-        .offset(query.offset())
-        .limit(query.per_page)
-        .all(db)
-        .await
-        .map_err(|err| {
+        let mut count_query =
+            operation::Entity::find().filter(operation::Column::RepoId.eq(repo_id));
+        if let Some(command_name) = command_name {
+            count_query = count_query.filter(operation::Column::CommandName.eq(command_name));
+        }
+        let total = count_query.count(db).await.map_err(|err| {
             OperationServiceError::Storage(format!(
-                "failed to list operation logs for repository '{}': {err}",
+                "failed to count operation logs for repository '{}': {err}",
                 repo_id
             ))
         })?;
+
+        let mut list_query =
+            operation::Entity::find().filter(operation::Column::RepoId.eq(repo_id));
+        if let Some(command_name) = command_name {
+            list_query = list_query.filter(operation::Column::CommandName.eq(command_name));
+        }
+        let models = Self::apply_repo_operation_order(list_query)
+            .offset(query.offset())
+            .limit(query.per_page)
+            .all(db)
+            .await
+            .map_err(|err| {
+                OperationServiceError::Storage(format!(
+                    "failed to list operation logs for repository '{}': {err}",
+                    repo_id
+                ))
+            })?;
 
         let items = models
             .into_iter()
