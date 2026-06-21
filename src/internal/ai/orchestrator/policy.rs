@@ -680,7 +680,7 @@ fn shell_invokes_git_version_control(arguments: &Value) -> bool {
 
 fn libra_vcs_action(command: &str) -> Result<&'static str, String> {
     match command.trim() {
-        "status" | "diff" | "branch" | "log" | "show" | "show-ref" => Ok("read"),
+        "status" | "diff" | "branch" | "log" | "show" | "show-ref" | "ls-files" => Ok("read"),
         "add" | "commit" | "switch" => Ok("write"),
         "" => Err("missing run_libra_vcs command".to_string()),
         other => Err(unsupported_command_message("run_libra_vcs", other)),
@@ -1079,15 +1079,16 @@ mod tests {
 
         assert_eq!(preflight.record.tool_name, "run_libra_vcs");
         assert_eq!(preflight.record.action, "read");
+        assert_eq!(libra_vcs_action("ls-files").unwrap(), "read");
     }
 
     #[test]
     fn test_run_libra_vcs_unknown_command_error_is_actionable() {
-        let error = libra_vcs_action("ls-files").unwrap_err();
+        let error = libra_vcs_action("remote").unwrap_err();
 
         assert!(error.contains("allowed commands"));
         assert!(error.contains("status --json"));
-        assert!(error.contains("workspace file tools"));
+        assert!(error.contains("ls-files"));
     }
 
     #[test]
