@@ -780,7 +780,10 @@ fn write_patch_file(
             CliError::fatal(format!("failed to write patch to stdout: {e}"))
                 .with_stable_code(StableErrorCode::IoWriteFailed)
         })?;
-        stdout.write_all(b"\n").ok();
+        stdout.write_all(b"\n").map_err(|e| {
+            CliError::fatal(format!("failed to finish writing patch to stdout: {e}"))
+                .with_stable_code(StableErrorCode::IoWriteFailed)
+        })?;
         Ok(PathBuf::from("<stdout>"))
     } else {
         let filename = patch_filename(
@@ -823,11 +826,11 @@ async fn resolve_signoff_identity() -> Result<(String, String), FormatPatchError
         .flatten()
         .map(|e| e.value);
 
-    let detail = match (name.is_some(), email.is_some()) {
-        (true, true) => return Ok((name.unwrap(), email.unwrap())),
-        (false, true) => "user.name is not configured".to_string(),
-        (true, false) => "user.email is not configured".to_string(),
-        (false, false) => "user.name and user.email are not configured".to_string(),
+    let detail = match (name, email) {
+        (Some(name), Some(email)) => return Ok((name, email)),
+        (None, Some(_)) => "user.name is not configured".to_string(),
+        (Some(_), None) => "user.email is not configured".to_string(),
+        (None, None) => "user.name and user.email are not configured".to_string(),
     };
     Err(FormatPatchError::IdentityMissing(detail))
 }
