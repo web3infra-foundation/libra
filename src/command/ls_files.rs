@@ -30,7 +30,8 @@ EXAMPLES:
     libra ls-files tracked-dir          Limit output to a pathspec
     libra ls-files --error-unmatch src  Fail if a pathspec matches nothing
     libra ls-files -z --others          Emit NUL-delimited records for scripts
-    libra ls-files -s                   Short output with stage info";
+    libra ls-files -s                   Short output with stage info
+    libra ls-files -t                   Prefix each path with a status tag";
 
 #[derive(Parser, Debug)]
 #[command(after_help = LS_FILES_EXAMPLES)]
@@ -70,6 +71,11 @@ pub struct LsFilesArgs {
     /// Short output format with mode and hash
     #[clap(short = 's')]
     pub short: bool,
+
+    /// Prefix each path with a status tag (H=cached, R=removed/deleted,
+    /// C=modified/changed, ?=other/untracked)
+    #[clap(short = 't')]
+    pub tag: bool,
 
     /// Limit output to files matching the given pathspec(s)
     #[clap(value_name = "pathspec")]
@@ -291,6 +297,18 @@ fn entry_modified(worktree_path: &Path, display_path: &str, indexed_hash: &str) 
     Ok(blob.id.to_string() != indexed_hash)
 }
 
+/// Map an entry's `status` to its `git ls-files -t` tag letter.
+fn status_tag(status: &str) -> char {
+    match status {
+        "deleted" => 'R',
+        "modified" => 'C',
+        "other" => '?',
+        "unmerged" => 'M',
+        // "cached" and anything else default to H (in the index).
+        _ => 'H',
+    }
+}
+
 fn render_output(
     entries: &[FileEntry],
     args: &LsFilesArgs,
@@ -312,7 +330,7 @@ fn render_output(
 
     let mut stdout = std::io::stdout().lock();
     for entry in entries {
-        let record = if args.short || args.stage {
+        let mut record = if args.short || args.stage {
             format!(
                 "{} {} {}\t{}",
                 entry.mode.as_deref().unwrap_or("000000"),
@@ -326,6 +344,10 @@ fn render_output(
         } else {
             entry.path.clone()
         };
+        // `-t` prefixes a status tag (matching `git ls-files -t`).
+        if args.tag {
+            record = format!("{} {}", status_tag(&entry.status), record);
+        }
 
         stdout.write_all(record.as_bytes()).map_err(|source| {
             CliError::fatal(format!("failed to write ls-files output: {source}"))

@@ -29,8 +29,8 @@
 | History | `shortlog` | `cli.grep-blame-describe-shortlog` |
 | History | `show` | `cli.object-readback` |
 | History | `show-ref` | `cli.object-readback`、`cli.show-ref-exclude-existing`、`cli.clone-fetch-pull-local` |
-| History | `for-each-ref` | 当前未注册，未纳入正向 runner 场景 |
-| History | `ls-files` | 当前未注册，未纳入正向 runner 场景 |
+| History | `for-each-ref` | 已注册命令；暂未纳入专属正向 runner 场景 |
+| History | `ls-files` | 已注册命令；暂未纳入专属正向 runner 场景 |
 | History | `ls-remote` | `cli.clone-fetch-pull-local` |
 | History | `ls-tree` | `cli.ls-tree-smoke` |
 | History | `diff` | `cli.restore-reset-diff` |

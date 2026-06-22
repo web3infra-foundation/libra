@@ -501,3 +501,52 @@ fn ls_files_rejects_z_with_machine_output() {
         report.message
     );
 }
+
+#[test]
+fn ls_files_t_prefixes_status_tags() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // Cached files are tagged H.
+    let out = run_libra_command(&["ls-files", "-t"], p);
+    assert_cli_success(&out, "ls-files -t");
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        s.lines().any(|l| l == "H tracked.txt"),
+        "cached -> H: {s:?}"
+    );
+    assert!(
+        s.lines().all(|l| l.starts_with("H ")),
+        "all cached -> H: {s:?}"
+    );
+
+    // Untracked files are tagged ?.
+    fs::write(p.join("untracked.txt"), "x\n").unwrap();
+    let out = run_libra_command(&["ls-files", "-t", "--others", "--exclude-standard"], p);
+    assert_cli_success(&out, "ls-files -t --others");
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        s.lines().any(|l| l == "? untracked.txt"),
+        "untracked -> ?: {s:?}"
+    );
+
+    // Modified files are tagged C.
+    fs::write(p.join("tracked.txt"), "tracked changed\n").unwrap();
+    let out = run_libra_command(&["ls-files", "-t", "--modified"], p);
+    assert_cli_success(&out, "ls-files -t --modified");
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        s.lines().any(|l| l == "C tracked.txt"),
+        "modified -> C: {s:?}"
+    );
+
+    // Deleted files are tagged R.
+    fs::remove_file(p.join("tracked.txt")).unwrap();
+    let out = run_libra_command(&["ls-files", "-t", "--deleted"], p);
+    assert_cli_success(&out, "ls-files -t --deleted");
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        s.lines().any(|l| l == "R tracked.txt"),
+        "deleted -> R: {s:?}"
+    );
+}
