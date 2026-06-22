@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。staged/old-new/pathspec/name/stat/numstat/output/algorithm 与位置性两点范围 `A..B`（`diff A..B`）已支持；位置性 `diff A B`（空格分隔双 rev）、三点范围 `A...B`（merge-base）、summary、word/binary diff、whitespace 和 external diff 尚未公开。
+- 兼容级别：`partial`。staged/old-new/pathspec/name/stat/numstat/summary/output/algorithm 与位置性两点范围 `A..B`（`diff A..B`）已支持；位置性 `diff A B`（空格分隔双 rev）、三点范围 `A...B`（merge-base）、word/binary diff、whitespace 和 external diff 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -46,8 +46,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/diff.md`。
-- Synopsis：`libra diff [--staged | --cached] [--old <COMMIT> --new <COMMIT>] [<commit>..<commit>] [--stat | --numstat | --name-only | --name-status] [<pathspec>...]`。
-- 公开参数/子命令包括：`--old <COMMIT>`、`--new <COMMIT>`、`--staged`（`--cached` 为 Git 兼容别名）、`[<pathspec>...]`、`--algorithm <NAME>`、`--output <FILENAME>`、`--name-only`、`--name-status`、`--numstat`、`--stat`。
+- Synopsis：`libra diff [--staged | --cached] [--old <COMMIT> --new <COMMIT>] [<commit>..<commit>] [--stat | --numstat | --name-only | --name-status | --summary] [<pathspec>...]`。
+- 公开参数/子命令包括：`--old <COMMIT>`、`--new <COMMIT>`、`--staged`（`--cached` 为 Git 兼容别名）、`[<pathspec>...]`、`--algorithm <NAME>`、`--output <FILENAME>`、`--name-only`、`--name-status`、`--numstat`、`--stat`、`--summary`。
 - 位置性两点范围 `diff A..B`：未给 `--old`/`--new`/`--staged` 且首个位置参数是两点范围、且两侧均能解析为提交时，由 `normalize_diff_range` 重写为 `--old A --new B`（`A..` 对工作树，`..B` 以 HEAD 为 old）；任一侧无法解析为提交则原样作为 pathspec（含 `..` 的真实路径不受影响）。三点 `A...B` 暂不处理。
 
 
@@ -55,7 +55,7 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容差异项 | Summary | 原始对照：不支持；相关参数/替代：--summary；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | Summary | `--summary` 输出 create/delete 的精简摘要（`format_diff_summary` 解析各文件 raw diff 头 `new file mode`/`deleted file mode`），格式与 `git diff --summary` 一致。Libra 的 diff 管线只生成这两类 file-mode 头——不做 rename 检测（重命名显示为 delete+create），也不暴露纯 mode 变更——故仅产出这两类摘要行。带集成测试（`test_diff_summary_lists_creates_and_deletes`）。 |
 | 兼容差异项 | Word diff | 原始对照：不支持；相关参数/替代：--word-diff / --color-words；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | Binary diff | 原始对照：不支持；相关参数/替代：--binary；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 上下文行 | 原始对照：不支持；相关参数/替代：-U<n> / --unified=<n>；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |

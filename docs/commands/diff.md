@@ -8,7 +8,7 @@ Compare differences between HEAD, the index, the working tree, or two revisions.
 libra diff [<pathspec>...]
 libra diff --staged [<pathspec>...]
 libra diff --old <commit> --new <commit> [<pathspec>...]
-libra diff [--name-only | --name-status | --numstat | --stat]
+libra diff [--name-only | --name-status | --numstat | --stat | --summary]
 libra diff [--algorithm <name>] [--output <file>]
 ```
 
@@ -16,7 +16,7 @@ libra diff [--algorithm <name>] [--output <file>]
 
 `libra diff` shows changes between different states of the repository. By default it compares the index against the working tree (unstaged changes). With `--staged`, it compares HEAD against the index (staged changes). With `--old` and `--new`, it compares two arbitrary commits.
 
-The diff engine supports multiple algorithms (histogram by default, with myers and myersMinimal as alternatives). Output can be directed to a file with `--output`, and several summary formats are available (`--name-only`, `--name-status`, `--numstat`, `--stat`).
+The diff engine supports multiple algorithms (histogram by default, with myers and myersMinimal as alternatives). Output can be directed to a file with `--output`, and several summary formats are available (`--name-only`, `--name-status`, `--numstat`, `--stat`, `--summary`).
 
 Pathspec arguments filter the diff to only show changes in matching files or directories.
 
@@ -34,6 +34,7 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | Name status | | `--name-status` | Show changed file names with a status letter (A/D/M). |
 | Numstat | | `--numstat` | Show insertion/deletion counts in a machine-friendly tab-separated format. |
 | Stat | | `--stat` | Show a diffstat summary with +/- bar graph. |
+| Summary | | `--summary` | Show a condensed summary of created and deleted files (no line for plain content edits). Libra's diff does not detect renames (shown as delete + create) or surface mode-only changes. |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Suppress stdout; exit code 1 if differences exist, 0 otherwise. When combined with `--output`, the file is still written. |
 
@@ -129,6 +130,7 @@ Supported output modes:
 - `--name-status`
 - `--numstat`
 - `--stat`
+- `--summary` (condensed create/delete summary; renames show as delete + create, mode-only changes are not surfaced)
 - `--quiet` suppresses stdout and uses exit `1` to signal that differences exist
 
 `--output <file>` writes human-readable output to a file. In `--quiet` mode the file is still written, but differences still return exit `1`. In `--json` mode this flag is ignored and output always goes to stdout.
@@ -210,7 +212,7 @@ These Git options provide alternative diff presentations that are useful for pro
 | Name with status | `--name-status` | `--name-status` | N/A |
 | Numeric stats | `--numstat` | `--numstat` | `--stat` (combined) |
 | Stat summary | `--stat` | `--stat` | `--stat` |
-| Summary | Not supported | `--summary` | `--summary` |
+| Summary | `--summary` | `--summary` | `--summary` |
 | Word diff | Not supported | `--word-diff` / `--color-words` | N/A |
 | Binary diff | Not supported | `--binary` | N/A |
 | Context lines | Not supported | `-U<n>` / `--unified=<n>` | `--context <n>` |

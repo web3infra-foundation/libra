@@ -93,6 +93,10 @@ pub struct DiffArgs {
     /// Show diff statistics
     #[clap(long)]
     pub stat: bool,
+
+    /// Show a condensed summary of created and deleted files
+    #[clap(long)]
+    pub summary: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -648,6 +652,8 @@ fn render_diff_output(
             .join("\n")
     } else if args.stat {
         format_diff_stat_output(result)
+    } else if args.summary {
+        format_diff_summary(result)
     } else {
         format_unified_diff(result)
     };
@@ -676,14 +682,45 @@ fn render_diff_output(
         return Ok(());
     }
     let mut pager = Pager::with_config(output)?;
-    let rendered = if args.name_only || args.name_status || args.numstat || args.stat {
-        rendered
-    } else {
-        maybe_colorize_diff(&rendered, io::stdout().is_terminal())
-    };
+    let rendered =
+        if args.name_only || args.name_status || args.numstat || args.stat || args.summary {
+            rendered
+        } else {
+            maybe_colorize_diff(&rendered, io::stdout().is_terminal())
+        };
     pager.write_str(&format!("{rendered}\n"))?;
     pager.finish()?;
     Ok(())
+}
+
+/// Render `--summary`: one line per created or deleted file (plain content
+/// modifications produce no line), matching `git diff --summary`. Libra's diff
+/// pipeline emits only `new file mode` / `deleted file mode` headers — it does
+/// not perform rename detection (a rename shows as delete + create) nor surface
+/// mode-only changes — so only those two summary kinds are produced.
+fn format_diff_summary(result: &DiffOutput) -> String {
+    result
+        .files
+        .iter()
+        .filter_map(summary_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn summary_line(file: &DiffFileStat) -> Option<String> {
+    let find = |prefix: &str| {
+        file.raw_diff
+            .lines()
+            .find_map(|l| l.strip_prefix(prefix))
+            .map(str::trim)
+    };
+    if let Some(mode) = find("new file mode ") {
+        return Some(format!(" create mode {} {}", mode, file.path));
+    }
+    if let Some(mode) = find("deleted file mode ") {
+        return Some(format!(" delete mode {} {}", mode, file.path));
+    }
+    None
 }
 
 fn diff_status_letter(status: &str) -> &'static str {
@@ -717,6 +754,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         name_status: false,
         numstat: false,
         stat: false,
+        summary: false,
     };
     let result = run_diff(&args).await?;
     Ok(format_unified_diff(&result))

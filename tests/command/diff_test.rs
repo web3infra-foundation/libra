@@ -974,3 +974,34 @@ async fn test_diff_algorithms() {
         "unsupported MyersMinimal should not write a default diff to the output file"
     );
 }
+
+#[test]
+fn test_diff_summary_lists_creates_and_deletes() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // Commit a file we will later delete.
+    std::fs::write(p.join("old.txt"), "old\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "old.txt"], p), "add old.txt");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "seed", "--no-verify"], p),
+        "commit seed",
+    );
+
+    // Stage a created file and a deletion.
+    std::fs::write(p.join("new.txt"), "new\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "new.txt"], p), "add new.txt");
+    std::fs::remove_file(p.join("old.txt")).unwrap();
+    assert_cli_success(&run_libra_command(&["add", "old.txt"], p), "stage deletion");
+
+    let out = run_libra_command(&["diff", "--cached", "--summary"], p);
+    assert_cli_success(&out, "diff --cached --summary");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.lines().any(|l| l == " create mode 100644 new.txt"),
+        "summary lists the created file in git's format: {s:?}"
+    );
+    assert!(
+        s.lines().any(|l| l == " delete mode 100644 old.txt"),
+        "summary lists the deleted file in git's format: {s:?}"
+    );
+}
