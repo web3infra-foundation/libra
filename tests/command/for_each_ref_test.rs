@@ -473,3 +473,52 @@ async fn test_for_each_ref_sort_version_refname() {
         "v1.10.1 before v2.0: {tags:?}"
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_format_short_atoms() {
+    let temp = tempdir().unwrap();
+    setup_repo_with_commit(&temp).await;
+    let p = temp.path();
+    run_libra_command(&["branch", "feature-x"], p);
+
+    // %(refname:short) strips the refs/heads/ namespace.
+    let out = run_libra_command(
+        &[
+            "for-each-ref",
+            "--heads",
+            "--format=%(refname) => %(refname:short)",
+        ],
+        p,
+    );
+    assert_cli_success(&out, "for-each-ref %(refname:short)");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("refs/heads/main => main"),
+        "short refname for main: {s:?}"
+    );
+    assert!(
+        s.contains("refs/heads/feature-x => feature-x"),
+        "short refname for feature-x: {s:?}"
+    );
+
+    // %(objectname:short) is the 7-char prefix of %(objectname).
+    let out = run_libra_command(
+        &[
+            "for-each-ref",
+            "--heads",
+            "--format=%(objectname) %(objectname:short)",
+        ],
+        p,
+    );
+    assert_cli_success(&out, "for-each-ref %(objectname:short)");
+    let s = String::from_utf8_lossy(&out.stdout);
+    let line = s.lines().next().unwrap_or("");
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    assert_eq!(parts.len(), 2, "expected full + short hash: {line:?}");
+    assert_eq!(parts[1].len(), 7, "short hash should be 7 chars: {line:?}");
+    assert!(
+        parts[0].starts_with(parts[1]),
+        "short hash must prefix the full hash: {line:?}"
+    );
+}

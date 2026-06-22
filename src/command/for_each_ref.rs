@@ -24,6 +24,7 @@ EXAMPLES:
     libra for-each-ref --remotes        List only remote-tracking refs
     libra for-each-ref --all            List all refs (default)
     libra for-each-ref --format='%(refname) %(objectname)'  Custom format
+    libra for-each-ref --format='%(refname:short) %(objectname:short)'  Short ref/object forms
     libra for-each-ref --sort=refname   Sort by ref name
     libra for-each-ref --sort=version:refname   Version-aware sort (v1.9 before v1.10)
     libra for-each-ref --points-at HEAD List refs that point at HEAD
@@ -463,8 +464,15 @@ fn render_output(
 }
 
 fn render_format(format: &str, entry: &RefEntry) -> CliResult<String> {
+    // `:short` modifiers: the short ref name (namespace prefix stripped) and the
+    // 7-char abbreviated object id. Substituted before the bare atoms (the
+    // strings are distinct, so order is not load-bearing, only for clarity).
+    let refname_short = short_refname(&entry.refname);
+    let objectname_short: String = entry.objectname.chars().take(7).collect();
     let mut out = format.to_string();
     for (atom, value) in [
+        ("%(refname:short)", refname_short.as_str()),
+        ("%(objectname:short)", objectname_short.as_str()),
         ("%(refname)", entry.refname.as_str()),
         ("%(objectname)", entry.objectname.as_str()),
         ("%(objecttype)", entry.objecttype.as_str()),
@@ -478,4 +486,16 @@ fn render_format(format: &str, entry: &RefEntry) -> CliResult<String> {
         );
     }
     Ok(out)
+}
+
+/// The `:short` form of a ref name: strip the well-known namespace prefix
+/// (`refs/heads/`, `refs/tags/`, `refs/remotes/`), falling back to stripping a
+/// leading `refs/`, otherwise the name unchanged.
+fn short_refname(refname: &str) -> String {
+    for prefix in ["refs/heads/", "refs/tags/", "refs/remotes/"] {
+        if let Some(rest) = refname.strip_prefix(prefix) {
+            return rest.to_string();
+        }
+    }
+    refname.strip_prefix("refs/").unwrap_or(refname).to_string()
 }
