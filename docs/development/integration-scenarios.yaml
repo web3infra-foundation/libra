@@ -284,7 +284,7 @@ scenarios:
   - id: cli.notes-smoke
     wave: 1
     group: history
-    purpose: "Document current notes command gap: `libra notes` is not registered, so the scenario asserts the stable JSON unknown-command error and verifies repository connectivity afterward."
+    purpose: "Smoke-test the registered `libra notes` command: add a note and show/list it (text and `--json`), operate on a custom `--ref` namespace, assert that a second `add` without `-f` fails with a stable 'already has a note' error, then remove the note and verify it is gone, with an fsck connectivity check afterward."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck, negative_exit, lbr_error]

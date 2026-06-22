@@ -1,18 +1,19 @@
 # `libra notes`
 
-Historical design for adding, showing, listing, or removing notes attached to
-commits without modifying the commits themselves.
+Add, append, copy, edit, show, list, or remove notes attached to commits
+without modifying the commits themselves.
 
 > Status: `partial`. `libra notes` is now registered in the public CLI. The core
-> operations (`add`, `append`, `copy`, `list`, `show`, `remove`) are supported.
-> Advanced Git notes subcommands (`edit`, `merge`, `prune`, `get-ref`) and
-> interactive editor support are not implemented.
+> operations (`add`, `append`, `copy`, `edit`, `list`, `show`, `remove`) are
+> supported. Advanced Git notes subcommands (`merge`, `prune`, `get-ref`) and
+> the interactive editor are not implemented.
 
 ## Synopsis
 
 ```
 libra notes add [-m <message> | -F <file>] [-f] [<object>]
 libra notes append [-m <message> | -F <file>] [<object>]
+libra notes edit [-m <message> | -F <file>] [<object>]
 libra notes copy [-f] <from-object> <to-object>
 libra notes list [<object>]
 libra notes show [<object>]
@@ -21,7 +22,7 @@ libra notes remove [<object>...]
 
 ## Description
 
-The unpublished design manages annotations attached to commit objects. Unlike commit
+`libra notes` manages annotations attached to commit objects. Unlike commit
 messages, notes can be added or removed after the commit is created — the
 original commit hash stays unchanged. This makes them useful for post-hoc
 metadata such as code-review results, CI status, or deploy tracking.
@@ -30,7 +31,7 @@ Notes are stored as blob objects under a notes ref (default
 `refs/notes/commits`). Use `--ref <ref>` to operate on a different namespace
 (e.g., `refs/notes/review`).
 
-If this command is published in a future release, omitting a subcommand should default to `list`.
+Omitting a subcommand defaults to `list`.
 
 ## Options
 
@@ -48,6 +49,7 @@ If this command is published in a future release, omitting a subcommand should d
 |------------|-------------|
 | `add` | Add a note to an object. Fails if a note already exists; use `-f` to overwrite. Requires `-m` or `-F`. |
 | `append` | Append a message to an object's note (separated by a blank line), creating the note if absent. Requires `-m` or `-F`. |
+| `edit` | Set (replace) an object's note, creating it if absent — overwrites unconditionally, unlike `add`. Requires `-m` or `-F` (no interactive editor). |
 | `copy` | Copy the note from `<from-object>` to `<to-object>`. Fails if the source has no note, or if the target already has one (use `-f` to overwrite). |
 | `list` | List note objects and the commits they annotate (default subcommand). |
 | `show` | Show the note text for an object. |
@@ -70,6 +72,9 @@ libra notes append -m "Deployed-by: CI"
 
 # Copy a note from one commit to another
 libra notes copy abc1234 def5678
+
+# Set (replace) HEAD's note unconditionally
+libra notes edit -m "Replaces any existing note"
 
 # List all notes
 libra notes list
@@ -116,7 +121,7 @@ libra notes --json show                         # Structured JSON output
 
 ## Structured Output (JSON examples)
 
-If this command is published in a future release, `--json` / `--machine` should use `action` to distinguish operations:
+With `--json` / `--machine`, the envelope's `action` field distinguishes operations:
 
 ### `add`
 
@@ -193,13 +198,13 @@ invocations — editors assume an interactive user and are incompatible with
 headless or agent-driven workflows. `-m <message>` or `-F <file>` is required
 for note creation.
 
-### Why no `edit`, `merge`, `prune`, `get-ref`?
+### Why no `merge`, `prune`, `get-ref`?
 
 These Git subcommands add complexity for niche or collaborative workflows.
-The core operations (`add`, `append`, `copy`, `list`, `show`, `remove`) cover the
-primary use case: attaching structured metadata to commits. The remaining
-subcommands can be emulated (`edit` is `remove` + `add`) and added incrementally
-if real users or agents need them.
+The core operations (`add`, `append`, `copy`, `edit`, `list`, `show`, `remove`)
+cover the primary use case: attaching structured metadata to commits. The
+remaining subcommands can be added incrementally if real users or agents need
+them.
 
 ### Why SQLite-backed notes refs?
 
@@ -218,7 +223,8 @@ scan), and concurrency safety via SQLite WAL mode.
 | Remove note | `git notes remove [<obj>...]` | `libra notes remove [<obj>...]` | N/A |
 | Append | `notes append` | Supported | N/A |
 | Copy | `notes copy [-f] <from> <to>` | Supported | N/A |
-| Edit / Merge / Prune | Supported | Not supported | N/A |
+| Edit | `notes edit` (`-m`/`-F`) | Supported | N/A |
+| Merge / Prune | Supported | Not supported | N/A |
 | Custom ref | `--ref <ref>` | `--ref <ref>` | N/A |
 | File input | `-F <file>` | `-F <file>` | N/A |
 | Editor support | Interactive editor (default) | Not supported (`-m` / `-F` required) | N/A |

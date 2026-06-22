@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra notes` 的目标是管理提交 notes，包括 add、append、copy、show、list、remove 等基础操作。当前已实现并公开接入顶层 CLI；后续按需补齐 edit/merge/prune 和编辑器支持。
+`libra notes` 的目标是管理提交 notes，包括 add、append、copy、edit、show、list、remove 等基础操作。当前已实现并公开接入顶层 CLI；后续按需补齐 merge/prune 和交互式编辑器支持。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 add/append/copy/show/list/remove 已公开；edit/merge/prune 和编辑器支持未实现。
+- 兼容级别：`partial`。基础 add/append/copy/edit/show/list/remove 已公开；merge/prune 和交互式编辑器未实现。
 
 
 ## 设计方案
@@ -52,7 +52,8 @@ flowchart TD
 | 兼容矩阵 | `COMPATIBILITY.md` 已登记该命令。 | 已纳入用户可见兼容矩阵和矩阵守卫。 |
 | ✅ 已实现 | Append | `notes append` 在现有 note 后追加（空行分隔；无 note 时新建，复用 `notes::show` 读取 + `notes::add(force)` 写入）。带集成测试（`notes_append_concatenates_to_existing_note`、`notes_append_creates_note_when_absent`）。 |
 | ✅ 已实现 | Copy | `notes copy [-f] <from> <to>` 复用 `notes::show(from)`（源无 note 报错）+ `notes::add(to, text, force)`（目标已有 note 且无 `-f` 报错）。带集成测试（`notes_copy_duplicates_note_to_another_object`、`notes_copy_fails_when_source_has_no_note`）。 |
-| 兼容差异项 | Edit / Merge / Prune | 原始对照：支持；相关参数/替代：不支持；当前说明：未实现。后续若需支持，补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | Edit | `notes edit` 无条件设置（替换）note，不存在则新建（区别于 `add` 已存在即失败）；复用 `notes::add(force=true)`。交互式编辑器未支持，故需 `-m`/`-F`。带集成测试（`notes_edit_sets_and_replaces_note`）。 |
+| 兼容差异项 | Merge / Prune | 原始对照：支持；相关参数/替代：不支持；当前说明：未实现。后续若需支持，补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | Editor support | 原始对照：Interactive editor (default)；相关参数/替代：不支持 (-m / -F required)；当前说明：未实现。
 
 ## 维护要求
@@ -60,4 +61,4 @@ flowchart TD
 - 改进本命令前，必须先阅读并遵循 [docs/development/commands/_general.md](_general.md)；这是命令设计、实现、测试和文档同步的强制要求。
 - 任何行为变更都要先核对实现源码，再同步 `COMPATIBILITY.md`、`docs/commands/<cmd>.md` 和相关测试。
 - 新增 Git 兼容参数时必须明确 tier、错误码、JSON/机器输出契约和回归测试。
-- 若决定发布该命令，最小闭环是：CLI 变体、`src/command/mod.rs` 导出、dispatch、用户文档、兼容矩阵和测试。
+- `libra notes` 已公开接入顶层 CLI；新增子命令/参数的最小闭环是：CLI 变体、`src/command/mod.rs` 导出、dispatch、用户文档、兼容矩阵和测试一起更新。

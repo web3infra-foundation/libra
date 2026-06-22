@@ -607,15 +607,12 @@ The following Git top-level commands are currently **not implemented** in Libra 
 
 - `gc` – garbage-collect unreachable objects and pack files
 - `prune` – remove loose objects that are no longer reachable
-- ~~`maintenance`~~ – ✅ `libra maintenance` (run, register, unregister, status)
 - `pack-objects` / `unpack-objects` – pack and unpack object collections
 - `remote show <name>`-style detailed inspection – show detailed remote info
 - `fetch-pack` / `push-pack` – low-level fetch/push operations
 - `filter-branch` (or `git filter-repo`) – rewrite history
-- `notes` – attach arbitrary metadata to objects
-- `archive` – create tar/zip archives of tree snapshots
 
-These commands are slated for future implementation according to the project roadmap. The full per-command compatibility status (`supported` / `partial` / `unsupported` / `intentionally-different`) is tracked in [`COMPATIBILITY.md`](COMPATIBILITY.md).
+These commands are slated for future implementation according to the project roadmap. (Several commands once listed here are now implemented — `maintenance`, `notes` (add/append/copy/edit/show/list/remove), and `archive` — and have moved out of this list.) The full per-command compatibility status (`supported` / `partial` / `unsupported` / `intentionally-different`) is tracked in [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
 ## Note on Submodule and Subtree
 

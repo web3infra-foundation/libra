@@ -1345,3 +1345,32 @@ fn notes_copy_fails_when_source_has_no_note() {
         String::from_utf8_lossy(&bad.stderr)
     );
 }
+
+#[test]
+fn notes_edit_sets_and_replaces_note() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // edit creates a note when absent...
+    assert_cli_success(
+        &run_libra_command(&["notes", "edit", "-m", "first"], p),
+        "notes edit (create)",
+    );
+    assert!(
+        String::from_utf8_lossy(&run_libra_command(&["notes", "show"], p).stdout).contains("first"),
+        "edit created the note"
+    );
+
+    // ...and replaces an existing note WITHOUT -f (unlike add).
+    assert_cli_success(
+        &run_libra_command(&["notes", "edit", "-m", "second"], p),
+        "notes edit (replace)",
+    );
+    let shown =
+        String::from_utf8_lossy(&run_libra_command(&["notes", "show"], p).stdout).into_owned();
+    assert!(
+        shown.contains("second"),
+        "edit replaced the note: {shown:?}"
+    );
+    assert!(!shown.contains("first"), "old note text is gone: {shown:?}");
+}

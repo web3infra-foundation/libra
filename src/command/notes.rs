@@ -17,6 +17,7 @@ EXAMPLES:
     libra notes add -m \"Reviewed-by: Alice\"         Add a note to HEAD
     libra notes append -m \"Deployed-by: CI\"         Append a line to HEAD's note
     libra notes copy <from> <to>                      Copy a note to another object
+    libra notes edit -m \"Replaces existing\"          Set (replace) HEAD's note
     libra notes show                                  Show the note on HEAD
     libra notes list                                  List all notes
     libra notes remove abc1234                        Remove a note
@@ -56,6 +57,20 @@ pub enum NotesSubcommand {
     },
     /// Append to an object's note (creating it if absent)
     Append {
+        /// Object to annotate (defaults to HEAD)
+        #[clap(required = false)]
+        object: Option<String>,
+
+        /// Note message text (repeatable; blank lines separate messages)
+        #[clap(short, long)]
+        message: Vec<String>,
+
+        /// Read note message from file (- for stdin)
+        #[clap(short = 'F', long)]
+        file: Vec<String>,
+    },
+    /// Set (replace) an object's note, creating it if absent
+    Edit {
         /// Object to annotate (defaults to HEAD)
         #[clap(required = false)]
         object: Option<String>,
@@ -112,6 +127,13 @@ pub enum NotesOutput {
     },
     #[serde(rename = "append")]
     Append {
+        #[serde(rename = "ref")]
+        notes_ref: String,
+        object: String,
+        note_hash: String,
+    },
+    #[serde(rename = "edit")]
+    Edit {
         #[serde(rename = "ref")]
         notes_ref: String,
         object: String,
@@ -229,6 +251,30 @@ pub async fn execute_safe(
                 .await
                 .map_err(NotesCliError::from)?;
             let out = NotesOutput::Append {
+                notes_ref: result.notes_ref,
+                object: result.object,
+                note_hash: result.note_hash,
+            };
+            render_output(&out, output)?;
+        }
+        NotesSubcommand::Edit {
+            object,
+            message: _,
+            file: _,
+        } => {
+            // `edit` sets (replaces) the note unconditionally, creating it if
+            // absent — distinct from `add`, which fails when one exists. The
+            // interactive editor form is not supported, so `-m`/`-F` is required.
+            let content = build_note_content(argv)?;
+            let result = notes::add(
+                notes_ref,
+                object.as_deref().unwrap_or("HEAD"),
+                &content,
+                true,
+            )
+            .await
+            .map_err(NotesCliError::from)?;
+            let out = NotesOutput::Edit {
                 notes_ref: result.notes_ref,
                 object: result.object,
                 note_hash: result.note_hash,
@@ -423,6 +469,17 @@ fn render_output(result: &NotesOutput, output: &OutputConfig) -> CliResult<()> {
         } => {
             println!(
                 "Appended to note for {} in {}",
+                short_display_hash(object),
+                notes_ref
+            );
+        }
+        NotesOutput::Edit {
+            notes_ref,
+            object,
+            note_hash: _,
+        } => {
+            println!(
+                "Set note for {} in {}",
                 short_display_hash(object),
                 notes_ref
             );

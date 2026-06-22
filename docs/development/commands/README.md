@@ -58,7 +58,7 @@
 | [`maintenance`](maintenance.md) | `partial` | `run` / `register` / `unregister` / `status` / `start` / `stop` exposed; commit-graph and prefetch tasks implemented with documented Git semantic differences |
 | [`merge`](merge.md) | `partial` | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |
 | [`mv`](mv.md) | `partial` | `-k` / `--skip-errors` supported; `--sparse` accepted as a no-op because Libra does not maintain sparse-checkout state |
-| [`notes`](notes.md) | `partial` | `add` / `append` / `copy` / `show` / `list` / `remove` supported; `--ref` supported; edit/merge/prune and editor support not implemented |
+| [`notes`](notes.md) | `partial` | `add` / `append` / `copy` / `edit` / `show` / `list` / `remove` supported; `--ref` supported; merge/prune and the interactive editor not implemented |
 | [`op`](op.md) | `intentionally-different` | Libra command-level operation history inspection/restore extension, not a Git command |
 | [`open`](open.md) | `supported` | 见命令文档。 |
 | [`publish`](publish.md) | `intentionally-different` | Libra Cloudflare publish extension, not a Git command |
