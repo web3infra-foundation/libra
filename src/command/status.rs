@@ -2153,7 +2153,11 @@ fn list_workdir_files_split_safe(workdir: &PathBuf) -> io::Result<(Vec<PathBuf>,
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
             let path = entry.path();
-            if entry.file_name() == std::ffi::OsStr::new(util::ROOT_DIR) {
+            // Always skip `.libra` (Libra metadata) and `.git` (like Git, which
+            // hardcodes ignoring `.git`); neither is ever surfaced or staged.
+            if entry.file_name() == std::ffi::OsStr::new(util::ROOT_DIR)
+                || entry.file_name() == std::ffi::OsStr::new(util::GIT_DIR)
+            {
                 continue;
             }
 
@@ -2192,7 +2196,11 @@ fn list_workdir_files_split_force(workdir: &PathBuf) -> io::Result<(Vec<PathBuf>
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
             let path = entry.path();
-            if entry.file_name() == std::ffi::OsStr::new(util::ROOT_DIR) {
+            // Always skip `.libra` (Libra metadata) and `.git` (like Git, which
+            // hardcodes ignoring `.git`); `--force` must not stage `.git` either.
+            if entry.file_name() == std::ffi::OsStr::new(util::ROOT_DIR)
+                || entry.file_name() == std::ffi::OsStr::new(util::GIT_DIR)
+            {
                 continue;
             }
 

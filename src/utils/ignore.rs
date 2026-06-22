@@ -561,4 +561,75 @@ mod tests {
             "OnlyIgnored policy should hide tracked files even if they match ignore patterns"
         );
     }
+
+    /// Regression test for issue #387: a nested `.git` directory must be
+    /// force-ignored like Git. It must not appear as untracked in status and
+    /// must not be staged by `add .` or `add --force`, even when a
+    /// `.libraignore` whitelist rule tries to un-ignore it.
+    #[tokio::test]
+    #[serial]
+    async fn git_directory_is_force_ignored_like_git() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        // Simulate a user-initialised nested git repository plus a real file.
+        fs::create_dir_all(".git/refs/heads").unwrap();
+        fs::write(".git/config", "[core]\n").unwrap();
+        fs::write(".git/HEAD", "ref: refs/heads/main\n").unwrap();
+        fs::write("real.txt", "hello").unwrap();
+        // A whitelist rule must NOT be able to un-ignore `.git`.
+        fs::write(".libraignore", "!.git\n!.git/**\n").unwrap();
+
+        let index = build_index();
+        assert!(should_ignore(
+            Path::new(".git"),
+            IgnorePolicy::Respect,
+            &index
+        ));
+        assert!(should_ignore(
+            Path::new(".git/config"),
+            IgnorePolicy::Respect,
+            &index
+        ));
+
+        // status must not surface `.git` contents as untracked.
+        let unstaged = crate::command::status::changes_to_be_staged().unwrap();
+        assert!(
+            !unstaged
+                .new
+                .iter()
+                .any(|p| p.starts_with(".git") && p != Path::new(".gitignore")),
+            ".git must never be reported as untracked"
+        );
+
+        // `add --force .` must not stage anything under `.git`.
+        add::execute(AddArgs {
+            pathspec: vec![".".into()],
+            all: false,
+            update: false,
+            refresh: false,
+            force: true,
+            verbose: false,
+            dry_run: false,
+            ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
+        })
+        .await;
+
+        let index = build_index();
+        assert!(
+            !index.tracked(".git/config", 0),
+            ".git/config must not be staged even with --force"
+        );
+        assert!(
+            !index.tracked(".git/HEAD", 0),
+            ".git/HEAD must not be staged even with --force"
+        );
+        assert!(
+            index.tracked("real.txt", 0),
+            "a normal file should still be staged"
+        );
+    }
 }

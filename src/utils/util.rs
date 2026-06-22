@@ -36,6 +36,10 @@ use crate::{
 // or cases where invariants are guaranteed by the code structure.
 
 pub const ROOT_DIR: &str = ".libra";
+/// The Git metadata directory. Like Git, Libra always force-ignores any `.git`
+/// directory in the worktree so a nested Git repository is never surfaced as
+/// untracked or staged, and it cannot be un-ignored via `.libraignore`.
+pub const GIT_DIR: &str = ".git";
 const LIBRAIGNORE_FILE: &str = ".libraignore";
 pub const DATABASE: &str = "libra.db";
 pub const ATTRIBUTES: &str = ".libra_attributes";
@@ -513,9 +517,10 @@ where
 pub fn list_files(path: &Path) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     if path.is_dir() {
-        // unwrap_or_default is safe: returns empty string which won't match ROOT_DIR
-        if path.file_name().unwrap_or_default() == ROOT_DIR {
-            // ignore `.libra`
+        // unwrap_or_default is safe: returns empty string which won't match ROOT_DIR/GIT_DIR
+        let name = path.file_name().unwrap_or_default();
+        if name == OsStr::new(ROOT_DIR) || name == OsStr::new(GIT_DIR) {
+            // ignore `.libra` (Libra metadata) and `.git` (always, like Git)
             return Ok(files);
         }
         for entry in fs::read_dir(path)? {
@@ -545,7 +550,8 @@ pub fn list_workdir_files_unfiltered() -> io::Result<Vec<PathBuf>> {
 
 fn list_files_respecting_libraignore(path: &Path) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    if !path.is_dir() || path.file_name().unwrap_or_default() == ROOT_DIR {
+    let name = path.file_name().unwrap_or_default();
+    if !path.is_dir() || name == OsStr::new(ROOT_DIR) || name == OsStr::new(GIT_DIR) {
         return Ok(files);
     }
 
@@ -558,7 +564,11 @@ fn list_files_respecting_libraignore(path: &Path) -> io::Result<Vec<PathBuf>> {
         .git_global(false)
         .git_exclude(false)
         .add_custom_ignore_filename(LIBRAIGNORE_FILE)
-        .filter_entry(|entry| entry.file_name() != OsStr::new(ROOT_DIR));
+        // Always skip `.libra` (Libra metadata) and `.git` (like Git).
+        .filter_entry(|entry| {
+            let name = entry.file_name();
+            name != OsStr::new(ROOT_DIR) && name != OsStr::new(GIT_DIR)
+        });
 
     for entry in builder.build() {
         let entry = entry.map_err(|error| io::Error::other(error.to_string()))?;
@@ -1033,8 +1043,21 @@ pub fn default_progress_bar(len: u64) -> ProgressBar {
     progress_bar
 }
 
+/// Returns `true` when any component of `target_file`, taken relative to
+/// `work_dir`, is a literal `.git` entry (see [`GIT_DIR`]). Only the portion
+/// below `work_dir` is inspected, so a repository that merely lives under an
+/// ancestor path containing `.git` is unaffected.
+fn path_has_git_dir_component(work_dir: &Path, target_file: &Path) -> bool {
+    let relative = target_file.strip_prefix(work_dir).unwrap_or(target_file);
+    relative
+        .components()
+        .any(|component| component.as_os_str() == OsStr::new(GIT_DIR))
+}
+
 /// Check each directory level from `work_dir` to `target_file` to see if there is a `.libraignore`
 /// file that matches `target_file`.
+///
+/// `.git` is always treated as ignored (like Git) regardless of any `.libraignore` rule.
 ///
 /// Low-level helper historically used by status/add flows. Prefer the higher-level wrappers in
 /// `crate::utils::ignore::{should_ignore, filter_workdir_paths}` so that ignore policies and index
@@ -1044,6 +1067,15 @@ pub fn default_progress_bar(len: u64) -> ProgressBar {
 /// Assume `target_file` is in `work_dir`.
 pub fn check_gitignore(work_dir: &PathBuf, target_file: &PathBuf) -> bool {
     assert!(target_file.starts_with(work_dir));
+
+    // Git hardcodes ignoring `.git`. Mirror that here, before consulting any
+    // `.libraignore` file, so a nested Git repository's metadata is always
+    // treated as ignored and can never be un-ignored by a `.libraignore`
+    // whitelist rule (e.g. `!.git`).
+    if path_has_git_dir_component(work_dir, target_file) {
+        return true;
+    }
+
     let mut dir = target_file.clone();
     dir.pop();
 
@@ -1665,6 +1697,33 @@ mod test {
         let target = workdir.join("tmp/tmp1/tmp2/foo.bar");
         assert!(!check_gitignore(&workdir, &target));
         fs::remove_dir_all(workdir.join("tmp")).unwrap();
+    }
+
+    /// `.git` must always be treated as ignored, like Git, even when a
+    /// `.libraignore` whitelist rule (`!.git`) tries to un-ignore it. A nested
+    /// `.git` at any depth is covered, while a normal file is left untouched.
+    #[test]
+    fn test_check_gitignore_force_ignores_git_dir_even_with_whitelist() {
+        let temp_path = tempdir().unwrap();
+        let workdir = temp_path.path().to_path_buf();
+        // A whitelist that tries to un-ignore `.git` must not win.
+        fs::write(workdir.join(".libraignore"), "!.git\n!.git/**\n").unwrap();
+
+        assert!(check_gitignore(&workdir, &workdir.join(".git")));
+        assert!(check_gitignore(
+            &workdir,
+            &workdir.join(".git").join("config")
+        ));
+        // Nested git repository (e.g. a submodule checkout) is covered too.
+        assert!(check_gitignore(
+            &workdir,
+            &workdir.join("sub").join(".git").join("HEAD")
+        ));
+        // A normal file is still not ignored.
+        assert!(!check_gitignore(
+            &workdir,
+            &workdir.join("src").join("main.rs")
+        ));
     }
 
     #[test]
