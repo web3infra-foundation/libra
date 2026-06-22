@@ -37,6 +37,13 @@ The `--format` option accepts a simple atom language. Supported atoms:
 | `%(committeremail)` | Commit committer email, angle-bracketed; empty for non-commit refs |
 | `%(taggername)` | Annotated-tag tagger name; empty for non-tag refs (lightweight tags and commits) |
 | `%(taggeremail)` | Annotated-tag tagger email, angle-bracketed; empty for non-tag refs |
+| `%(authordate)` | Commit author date in Git's default format; empty for non-commit refs |
+| `%(committerdate)` | Commit committer date in Git's default format; empty for non-commit refs |
+| `%(taggerdate)` | Annotated-tag tagger date in Git's default format; empty for non-tag refs |
+
+Date atoms use Git's default format (`Day Mon DD HH:MM:SS YYYY +ZZZZ`) and, like
+`libra log`, render in UTC (`+0000`) rather than the commit's original timezone.
+The `:short`/`:iso`/`:relative` date modifiers are not yet supported.
 
 ## Options
 
@@ -46,7 +53,7 @@ The `--format` option accepts a simple atom language. Supported atoms:
 | `--tags` | List tag refs under `refs/tags/`. |
 | `--remotes` | List remote-tracking refs under `refs/remotes/`. |
 | `--all` | List all supported ref namespaces. This is the default when no namespace flag is given. |
-| `--format=<format>` | Render simple atoms. Supported atoms: `%(refname)`, `%(refname:short)`, `%(objectname)`, `%(objectname:short)` (7-char), `%(objecttype)`, `%(HEAD)`, `%(upstream)`, `%(upstream:short)`, `%(subject)`, `%(authorname)`, `%(authoremail)`, `%(committername)`, `%(committeremail)`, `%(taggername)`, `%(taggeremail)`. |
+| `--format=<format>` | Render simple atoms. Supported atoms: `%(refname)`, `%(refname:short)`, `%(objectname)`, `%(objectname:short)` (7-char), `%(objecttype)`, `%(HEAD)`, `%(upstream)`, `%(upstream:short)`, `%(subject)`, `%(authorname)`, `%(authoremail)`, `%(committername)`, `%(committeremail)`, `%(taggername)`, `%(taggeremail)`, `%(authordate)`, `%(committerdate)`, `%(taggerdate)`. |
 | `--sort=<key>` | Sort by `refname`, `objectname`, or `version:refname` (alias `v:refname`; orders embedded numbers numerically, so `v1.9` precedes `v1.10`). Prefix any key with `-` to reverse. |
 | `--count=<n>` | Limit output to at most `n` refs after filtering and sorting. |
 | `--points-at=<object>` | Keep refs that point at the object. Annotated tags also match their peeled target. |

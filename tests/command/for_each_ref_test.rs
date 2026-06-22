@@ -727,3 +727,34 @@ async fn test_for_each_ref_tagger_atoms() {
         "tagger atoms empty for a commit ref: {s:?}"
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_date_atoms() {
+    let temp = tempdir().unwrap();
+    setup_repo_with_commit(&temp).await;
+    let p = temp.path();
+
+    // %(committerdate)/%(authordate) render in Git's default date format
+    // (`Day Mon DD HH:MM:SS YYYY +ZZZZ`), in UTC (consistent with `libra log`).
+    let out = run_libra_command(
+        &[
+            "for-each-ref",
+            "--heads",
+            "--format=%(authordate)|%(committerdate)",
+        ],
+        p,
+    );
+    assert_cli_success(&out, "for-each-ref date atoms");
+    let s = String::from_utf8_lossy(&out.stdout);
+    let line = s.lines().next().unwrap_or("");
+    let (adate, cdate) = line.split_once('|').unwrap_or(("", ""));
+    // Default format ends with a `+ZZZZ` zone and contains a 4-digit year.
+    for d in [adate, cdate] {
+        assert!(
+            d.contains("+0000"),
+            "date renders in UTC default format: {line:?}"
+        );
+        assert!(d.contains("20"), "date contains a year: {line:?}");
+    }
+}

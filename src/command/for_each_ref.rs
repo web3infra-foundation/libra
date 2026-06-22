@@ -12,7 +12,9 @@ use serde::Serialize;
 use crate::{
     command::load_object,
     common_utils::parse_commit_msg,
-    internal::{branch::Branch, config::ConfigKv, head::Head, tag},
+    internal::{
+        branch::Branch, config::ConfigKv, head::Head, log::formatter::format_timestamp_with, tag,
+    },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
@@ -533,14 +535,17 @@ fn render_format(
     // Commit-field atoms (`%(subject)`, author/committer name+email) require
     // loading the ref's object. Load it once, only when at least one such atom
     // is present, to avoid extra object reads.
-    const COMMIT_FIELD_ATOMS: [&str; 7] = [
+    const COMMIT_FIELD_ATOMS: [&str; 10] = [
         "%(subject)",
         "%(authorname)",
         "%(authoremail)",
+        "%(authordate)",
         "%(committername)",
         "%(committeremail)",
+        "%(committerdate)",
         "%(taggername)",
         "%(taggeremail)",
+        "%(taggerdate)",
     ];
     let fields = if COMMIT_FIELD_ATOMS.iter().any(|a| format.contains(a)) {
         commit_fields_for(entry)
@@ -550,17 +555,20 @@ fn render_format(
     // Atom name (inside `%(...)`) -> value. Single-pass substitution below
     // writes each value literally, so a value containing `%(` is never
     // re-parsed as an atom and never trips the unknown-atom check.
-    let atoms: [(&str, &str); 15] = [
+    let atoms: [(&str, &str); 18] = [
         ("HEAD", head_marker),
         ("upstream:short", upstream_short),
         ("upstream", upstream),
         ("subject", fields.subject.as_str()),
         ("authorname", fields.author_name.as_str()),
         ("authoremail", fields.author_email.as_str()),
+        ("authordate", fields.author_date.as_str()),
         ("committername", fields.committer_name.as_str()),
         ("committeremail", fields.committer_email.as_str()),
+        ("committerdate", fields.committer_date.as_str()),
         ("taggername", fields.tagger_name.as_str()),
         ("taggeremail", fields.tagger_email.as_str()),
+        ("taggerdate", fields.tagger_date.as_str()),
         ("refname:short", refname_short.as_str()),
         ("objectname:short", objectname_short.as_str()),
         ("refname", entry.refname.as_str()),
@@ -603,8 +611,11 @@ struct CommitFields {
     author_email: String,
     committer_name: String,
     committer_email: String,
+    author_date: String,
+    committer_date: String,
     tagger_name: String,
     tagger_email: String,
+    tagger_date: String,
 }
 
 /// Load the ref's object (once) and extract its commit-field atom values.
@@ -621,6 +632,8 @@ fn commit_fields_for(entry: &RefEntry) -> CommitFields {
                 author_email: format!("<{}>", c.author.email),
                 committer_name: c.committer.name.clone(),
                 committer_email: format!("<{}>", c.committer.email),
+                author_date: format_timestamp_with(c.author.timestamp as i64, ""),
+                committer_date: format_timestamp_with(c.committer.timestamp as i64, ""),
                 ..CommitFields::default()
             },
             Err(_) => CommitFields::default(),
@@ -632,6 +645,7 @@ fn commit_fields_for(entry: &RefEntry) -> CommitFields {
                 subject: first_subject_line(&t.message),
                 tagger_name: t.tagger.name.clone(),
                 tagger_email: format!("<{}>", t.tagger.email),
+                tagger_date: format_timestamp_with(t.tagger.timestamp as i64, ""),
                 ..CommitFields::default()
             },
             Err(_) => CommitFields::default(),
