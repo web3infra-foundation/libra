@@ -40,6 +40,8 @@ commits, the command exits with an error.
 | `--keep-subject` | | Keep the original `[PATCH]` prefix in the commit subject | false |
 | `--suffix <SFX>` | | Filename suffix for generated patches (e.g. `.txt`) | `.patch` |
 | `--zero-commit` | | Use an all-zero hash in each patch's `From <hash>` envelope line | false |
+| `--signature <SIGNATURE>` | | Text placed after the `-- ` line of each patch and the cover letter | libra version |
+| `--no-signature` | | Omit the `-- `/signature footer entirely | false |
 
 ## Examples
 
@@ -81,6 +83,9 @@ unified diff
 --
 <libra-version>
 ```
+
+The `-- ` footer defaults to the libra version; `--signature <text>` replaces
+it with custom text and `--no-signature` omits the footer entirely.
 
 With `--json` or `--machine`, `data.patches` lists every generated output.
 When `--cover-letter` is set, the list includes `0000-cover-letter` (with the

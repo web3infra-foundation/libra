@@ -758,3 +758,44 @@ fn zero_commit_zeroes_the_envelope_hash() {
         "zeroed envelope hash must match the real hash width: {hash_field:?} vs {def_hash:?}"
     );
 }
+
+#[test]
+#[serial]
+fn signature_controls_patch_footer() {
+    let repo = repo_with_commits(1);
+
+    // Custom signature replaces the default version line after `-- `.
+    let out = run_libra_command(
+        &[
+            "format-patch",
+            "--signature",
+            "MY SIG",
+            "--stdout",
+            "HEAD~1..HEAD",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&out, "format-patch --signature");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("-- \nMY SIG\n"),
+        "custom signature footer expected: {s:?}"
+    );
+
+    // --no-signature omits the `-- ` footer line entirely.
+    let out = run_libra_command(
+        &["format-patch", "--no-signature", "--stdout", "HEAD~1..HEAD"],
+        repo.path(),
+    );
+    assert_cli_success(&out, "format-patch --no-signature");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !s.contains("\n-- \n"),
+        "no `-- ` footer expected with --no-signature: {s:?}"
+    );
+
+    // Default keeps a `-- ` footer (libra version).
+    let out = run_libra_command(&["format-patch", "--stdout", "HEAD~1..HEAD"], repo.path());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("\n-- \n"), "default footer expected: {s:?}");
+}

@@ -53,6 +53,8 @@ fn format_patch_help_lists_expected_flags() {
         "--keep-subject",
         "--suffix",
         "--zero-commit",
+        "--signature",
+        "--no-signature",
         "revision-range",
     ] {
         assert!(

@@ -137,6 +137,15 @@ pub struct FormatPatchArgs {
     /// the commit hash (stable output for testing/reproducibility).
     #[arg(long = "zero-commit")]
     pub zero_commit: bool,
+
+    /// Signature placed after the `-- ` line of each patch (and the cover
+    /// letter). Defaults to the libra version; `--no-signature` takes priority.
+    #[arg(long = "signature", value_name = "SIGNATURE")]
+    pub signature: Option<String>,
+
+    /// Do not emit the `-- `/signature footer at all.
+    #[arg(long = "no-signature")]
+    pub no_signature: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -511,10 +520,23 @@ async fn format_patch_body(
     out.push_str(&diff);
 
     // ---- Footer ----
-    out.push_str("-- \n");
-    out.push_str(&format!("{}\n", env!("CARGO_PKG_VERSION")));
+    push_signature(&mut out, args);
 
     Ok(out)
+}
+
+/// Append the patch signature footer (`-- \n<sig>\n`), mirroring Git:
+/// `--no-signature` omits it entirely; `--signature <s>` sets the text;
+/// otherwise the libra version is used (Git uses its own version here).
+fn push_signature(out: &mut String, args: &FormatPatchArgs) {
+    if args.no_signature {
+        return;
+    }
+    out.push_str("-- \n");
+    match &args.signature {
+        Some(sig) => out.push_str(&format!("{sig}\n")),
+        None => out.push_str(&format!("{}\n", env!("CARGO_PKG_VERSION"))),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -611,8 +633,7 @@ fn format_cover_letter(args: &FormatPatchArgs, commits: &[Commit]) -> Result<Str
     }
     out.push('\n');
 
-    out.push_str("-- \n");
-    out.push_str(&format!("{}\n", env!("CARGO_PKG_VERSION")));
+    push_signature(&mut out, args);
 
     Ok(out)
 }
