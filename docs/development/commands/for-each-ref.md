@@ -53,7 +53,7 @@ flowchart TD
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | 兼容矩阵 | `COMPATIBILITY.md` 已登记该命令为 `partial`。 | 保持与矩阵对齐；新增参数时同步矩阵和守卫测试。 |
-| 功能缺口 | Git atom 语言子集 | 原始对照：完整 `%(atom)` 集合；相关参数/替代：`--format`；当前说明：支持 `%(refname)` / `%(refname:short)` / `%(objectname)` / `%(objectname:short)`（7 位）/ `%(objecttype)` / `%(HEAD)`（当前分支标 `*`）/ `%(upstream)` / `%(upstream:short)`（来自 `branch.<name>.remote`+`.merge` 的标准追踪 ref，自定义 refspec 映射未建模）/ `%(subject)`（提交或附注标签消息首行，经 `load_object` 读取），其余 atom（dates、`%(push)`、`%(authorname)` 等）仍缺。 后续扩展时需补回归测试并同步兼容矩阵。 |
+| 功能缺口 | Git atom 语言子集 | 原始对照：完整 `%(atom)` 集合；相关参数/替代：`--format`；当前说明：支持 `%(refname)` / `%(refname:short)` / `%(objectname)` / `%(objectname:short)`（7 位）/ `%(objecttype)` / `%(HEAD)`（当前分支标 `*`）/ `%(upstream)` / `%(upstream:short)`（来自 `branch.<name>.remote`+`.merge` 的标准追踪 ref，自定义 refspec 映射未建模）/ `%(subject)`（提交或附注标签消息首行，经 `load_object` 读取）/ `%(authorname)` / `%(authoremail)` / `%(committername)` / `%(committeremail)`（提交身份；email 带尖括号；非 commit ref 为空；commit 对象只加载一次），其余 atom（dates、`%(push)`、`%(taggername)` 等）仍缺。 后续扩展时需补回归测试并同步兼容矩阵。 |
 | ✅ 已实现 | `--sort=version:refname`（别名 `v:refname`，可加 `-` 反转） | 复用 `utils::util::version_refname_cmp`（与 `ls-remote` 共享）：数字串按数值比较，使 `v1.9` 排在 `v1.10` 前。带集成测试（`test_for_each_ref_sort_version_refname`）。其余 sort keys（date keys、`*objectname` 等）仍缺。 |
 | ✅ 已实现 | 高级过滤 | `--contains` / `--no-contains`、`--merged` / `--no-merged` 均已实现（基于 `log::get_reachable_commits` 的可达性判定，`--merged` 对目标提交计算一次可达集合后逐 ref 判定）；`--points-at` 支持 direct refs、lightweight tags 和 annotated tag peeled target。带集成测试（`test_for_each_ref_contains_filter`、`test_for_each_ref_merged_filter`）。 |
 | 功能缺口 | 引用命名空间 | 原始对照：`--format` 的 shell/perl/python/tcl 引用模式；当前说明：未实现。 后续实现时需要补对应回归测试并同步兼容矩阵。 |

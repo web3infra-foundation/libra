@@ -530,21 +530,33 @@ fn render_format(
         .map(String::as_str)
         .unwrap_or("");
     let upstream_short = upstream.strip_prefix("refs/remotes/").unwrap_or(upstream);
-    // `%(subject)`: first line of the ref object's message (commit or tag),
-    // loaded lazily only when the atom is present to avoid extra object reads.
-    let subject = if format.contains("%(subject)") {
-        subject_for(entry)
+    // Commit-field atoms (`%(subject)`, author/committer name+email) require
+    // loading the ref's object. Load it once, only when at least one such atom
+    // is present, to avoid extra object reads.
+    const COMMIT_FIELD_ATOMS: [&str; 5] = [
+        "%(subject)",
+        "%(authorname)",
+        "%(authoremail)",
+        "%(committername)",
+        "%(committeremail)",
+    ];
+    let fields = if COMMIT_FIELD_ATOMS.iter().any(|a| format.contains(a)) {
+        commit_fields_for(entry)
     } else {
-        String::new()
+        CommitFields::default()
     };
     // Atom name (inside `%(...)`) -> value. Single-pass substitution below
     // writes each value literally, so a value containing `%(` is never
     // re-parsed as an atom and never trips the unknown-atom check.
-    let atoms: [(&str, &str); 9] = [
+    let atoms: [(&str, &str); 13] = [
         ("HEAD", head_marker),
         ("upstream:short", upstream_short),
         ("upstream", upstream),
-        ("subject", subject.as_str()),
+        ("subject", fields.subject.as_str()),
+        ("authorname", fields.author_name.as_str()),
+        ("authoremail", fields.author_email.as_str()),
+        ("committername", fields.committer_name.as_str()),
+        ("committeremail", fields.committer_email.as_str()),
         ("refname:short", refname_short.as_str()),
         ("objectname:short", objectname_short.as_str()),
         ("refname", entry.refname.as_str()),
@@ -575,34 +587,59 @@ fn unsupported_atom_error() -> CliError {
         .with_stable_code(StableErrorCode::CliInvalidArguments)
 }
 
-/// First line of the ref object's message for `%(subject)`. Reads the commit
-/// (for refs pointing at a commit) or the annotated tag object's message;
-/// empty for trees/blobs or when the object cannot be loaded.
-fn subject_for(entry: &RefEntry) -> String {
+/// Commit-field atom values for one ref. `author_*`/`committer_*` are populated
+/// only for refs pointing directly at a commit (empty for annotated tags, which
+/// carry a tagger rather than an author, and for trees/blobs); `subject` is the
+/// first message line of a commit or annotated-tag object. The `*_email` values
+/// include the surrounding angle brackets, matching Git.
+#[derive(Default)]
+struct CommitFields {
+    subject: String,
+    author_name: String,
+    author_email: String,
+    committer_name: String,
+    committer_email: String,
+}
+
+/// Load the ref's object (once) and extract its commit-field atom values.
+fn commit_fields_for(entry: &RefEntry) -> CommitFields {
     let Ok(hash) = ObjectHash::from_str(&entry.objectname) else {
-        return String::new();
+        return CommitFields::default();
     };
-    let message = match entry.objecttype.as_str() {
-        // Strip a leading `gpgsig` header from signed commits so the subject is
-        // the real first message line, not the signature.
-        "commit" => load_object::<Commit>(&hash)
-            .ok()
-            .map(|c| parse_commit_msg(&c.message).0.to_string()),
-        "tag" => load_object::<GitTag>(&hash).ok().map(|t| t.message),
-        _ => None,
-    };
-    // Commit/tag messages can carry leading newlines from the header separator;
-    // strip them before taking the subject (first non-empty line).
+    match entry.objecttype.as_str() {
+        "commit" => match load_object::<Commit>(&hash) {
+            // Strip a leading `gpgsig`/`gpgsig-sha256` header before the subject.
+            Ok(c) => CommitFields {
+                subject: first_subject_line(parse_commit_msg(&c.message).0),
+                author_name: c.author.name.clone(),
+                author_email: format!("<{}>", c.author.email),
+                committer_name: c.committer.name.clone(),
+                committer_email: format!("<{}>", c.committer.email),
+            },
+            Err(_) => CommitFields::default(),
+        },
+        // Annotated tags have a message (subject) but no author/committer.
+        "tag" => CommitFields {
+            subject: load_object::<GitTag>(&hash)
+                .ok()
+                .map(|t| first_subject_line(&t.message))
+                .unwrap_or_default(),
+            ..CommitFields::default()
+        },
+        _ => CommitFields::default(),
+    }
+}
+
+/// First non-empty line of a commit/tag message (messages can carry leading
+/// newlines from the header separator).
+fn first_subject_line(message: &str) -> String {
     message
-        .map(|m| {
-            m.trim_start_matches('\n')
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string()
-        })
-        .unwrap_or_default()
+        .trim_start_matches('\n')
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 /// The `:short` form of a ref name: strip the well-known namespace prefix

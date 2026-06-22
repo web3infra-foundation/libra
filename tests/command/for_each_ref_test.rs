@@ -643,3 +643,38 @@ async fn test_for_each_ref_subject_with_percent_paren_is_literal() {
         String::from_utf8_lossy(&bad.stderr)
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_author_committer_atoms() {
+    let temp = tempdir().unwrap();
+    setup_repo_with_commit(&temp).await;
+    let p = temp.path();
+
+    let out = run_libra_command(
+        &[
+            "for-each-ref",
+            "--heads",
+            "--format=%(authorname)|%(authoremail)|%(committername)|%(committeremail)",
+        ],
+        p,
+    );
+    assert_cli_success(&out, "for-each-ref author/committer atoms");
+    let s = String::from_utf8_lossy(&out.stdout);
+    let line = s.lines().next().unwrap_or("");
+    let f: Vec<&str> = line.split('|').collect();
+    assert_eq!(f.len(), 4, "four author/committer fields: {line:?}");
+    assert!(
+        !f[0].is_empty(),
+        "authorname non-empty for a commit ref: {line:?}"
+    );
+    assert!(
+        f[1].starts_with('<') && f[1].ends_with('>'),
+        "authoremail is angle-bracketed: {line:?}"
+    );
+    assert!(!f[2].is_empty(), "committername non-empty: {line:?}");
+    assert!(
+        f[3].starts_with('<') && f[3].ends_with('>'),
+        "committeremail is angle-bracketed: {line:?}"
+    );
+}
