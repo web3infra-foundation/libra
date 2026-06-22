@@ -68,6 +68,7 @@ fn base_libra_command(args: &[&str], cwd: &Path) -> Command {
     let home = cwd.join(".libra-test-home");
     let config_home = home.join(".config");
     let global_db = home.join(".libra").join("config.db");
+    let llvm_profile_file = std::env::var_os("LLVM_PROFILE_FILE");
     fs::create_dir_all(&config_home).expect("failed to create isolated config directory");
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_libra"));
@@ -83,6 +84,11 @@ fn base_libra_command(args: &[&str], cwd: &Path) -> Command {
         .env("LANG", "C")
         .env("LC_ALL", "C")
         .env(LIBRA_TEST_ENV, "1");
+    if let Some(llvm_profile_file) = llvm_profile_file {
+        // Preserve the llvm-cov profile target for child CLI processes so they
+        // do not fall back to writing `default.profraw` inside the temp repo.
+        command.env("LLVM_PROFILE_FILE", llvm_profile_file);
+    }
     command
 }
 
@@ -315,6 +321,7 @@ mod maintenance_test;
 mod merge_test;
 mod mv_test;
 mod notes_test;
+mod op_test;
 mod open_test;
 mod output_flags_test;
 mod publish_test;

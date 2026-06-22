@@ -293,6 +293,13 @@ async fn test_config_get_all() {
 #[serial]
 async fn test_config_get_all_with_default() {
     let temp_path = tempdir().unwrap();
+    let global_db_dir = tempdir().unwrap();
+    let _scoped = ScopedConfigPathGuard::new(
+        &global_db_dir
+            .path()
+            .join("global_config_get_all_default.db"),
+    );
+
     // start a new libra repository in a temporary directory
     test::setup_with_new_libra_in(temp_path.path()).await;
 

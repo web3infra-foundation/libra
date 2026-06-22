@@ -488,6 +488,12 @@ async fn test_reset_pathspec_surfaces_subtree_corruption_as_repo_corrupt() {
 #[tokio::test]
 #[serial]
 async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
+    if skip_permission_denied_test_if_root(
+        "test_reset_hard_io_failure_rolls_back_index_and_keeps_head",
+    ) {
+        return;
+    }
+
     let temp_path = tempdir().unwrap();
     let _guard = ChangeDirGuard::new(temp_path.path());
     setup_with_new_libra_in(temp_path.path()).await;

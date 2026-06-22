@@ -51,6 +51,7 @@ pub mod maintenance;
 pub mod merge;
 pub mod mv;
 pub mod notes;
+pub mod op;
 pub mod open;
 pub mod package;
 pub mod publish;

@@ -70,6 +70,55 @@ CREATE TABLE IF NOT EXISTS `object_index` (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_object_repo_oid ON `object_index`(`repo_id`, `o_id`);
 CREATE INDEX IF NOT EXISTS idx_object_sync ON `object_index`(`repo_id`, `is_synced`);
 
+CREATE TABLE IF NOT EXISTS `operation` (
+    `op_id` TEXT PRIMARY KEY,
+    `repo_id` TEXT NOT NULL,
+    `view_id` TEXT NOT NULL,
+    `command_name` TEXT NOT NULL,
+    `description` TEXT NOT NULL,
+    `actor` TEXT NOT NULL,
+    `args_digest` TEXT,
+    `start_ts` INTEGER NOT NULL,
+    `end_ts` INTEGER,
+    `status` TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_operation_repo_order
+    ON `operation`(`repo_id`, `end_ts` DESC, `start_ts` DESC, `op_id` DESC);
+
+CREATE TABLE IF NOT EXISTS `operation_parent` (
+    `op_id` TEXT NOT NULL,
+    `parent_op_id` TEXT NOT NULL,
+    PRIMARY KEY (`op_id`, `parent_op_id`)
+);
+CREATE INDEX IF NOT EXISTS idx_operation_parent_parent
+    ON `operation_parent`(`parent_op_id`, `op_id`);
+
+CREATE TABLE IF NOT EXISTS `operation_view` (
+    `view_id` TEXT PRIMARY KEY,
+    `repo_id` TEXT NOT NULL,
+    `head_kind` TEXT NOT NULL,
+    `head_target` TEXT NOT NULL,
+    `created_at` INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_operation_view_repo_created
+    ON `operation_view`(`repo_id`, `created_at` DESC);
+
+CREATE TABLE IF NOT EXISTS `operation_view_ref` (
+    `view_id` TEXT NOT NULL,
+    `ref_kind` TEXT NOT NULL,
+    `ref_name` TEXT NOT NULL,
+    `ref_remote` TEXT NOT NULL,
+    `target_oid` TEXT NOT NULL,
+    PRIMARY KEY (`view_id`, `ref_kind`, `ref_name`, `ref_remote`)
+);
+
+CREATE TABLE IF NOT EXISTS `operation_view_workspace` (
+    `view_id` TEXT NOT NULL,
+    `pointer_kind` TEXT NOT NULL,
+    `pointer_value` TEXT NOT NULL,
+    PRIMARY KEY (`view_id`, `pointer_kind`)
+);
+
 -- BEGIN AI PROJECTION SCHEMA
 CREATE TABLE IF NOT EXISTS `ai_thread` (
     `thread_id` TEXT PRIMARY KEY,
