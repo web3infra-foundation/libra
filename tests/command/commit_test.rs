@@ -1429,3 +1429,100 @@ async fn test_commit_fixup_sets_subject() {
         "fixup! original subject"
     );
 }
+
+#[test]
+fn test_commit_porcelain_outputs_status_format() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    std::fs::write(p.join("staged.txt"), "s\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "staged.txt"], p),
+        "add staged.txt",
+    );
+    std::fs::write(p.join("untracked.txt"), "u\n").unwrap();
+
+    let before = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+
+    // --dry-run --porcelain: machine status (porcelain v1), no commit.
+    let output = run_libra_command(&["commit", "--dry-run", "--porcelain", "-m", "preview"], p);
+    assert_cli_success(&output, "commit --dry-run --porcelain");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("A  staged.txt"),
+        "staged file should appear in porcelain output: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("?? untracked.txt"),
+        "untracked file should appear in porcelain output: {stdout:?}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout).trim(),
+        before,
+        "--dry-run must not move HEAD"
+    );
+
+    // `--porcelain` implies `--dry-run` (Git semantics): it prints the porcelain
+    // preview and does NOT create a commit, even without an explicit --dry-run.
+    let output = run_libra_command(&["commit", "--porcelain", "-m", "add staged"], p);
+    assert_cli_success(&output, "commit --porcelain");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("A  staged.txt"),
+        "porcelain output expected: {stdout:?}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout).trim(),
+        before,
+        "commit --porcelain implies dry-run and must NOT create a commit"
+    );
+}
+
+#[test]
+fn test_commit_all_porcelain_shows_autostaged_as_staged() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // A tracked, committed file, then modified in the worktree (unstaged).
+    std::fs::write(p.join("tracked.txt"), "v1\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "tracked.txt"], p),
+        "add tracked.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "add tracked", "--no-verify"], p),
+        "commit tracked",
+    );
+    std::fs::write(p.join("tracked.txt"), "v2\n").unwrap();
+
+    // `commit -a --porcelain`: `-a` auto-stages the modification for the
+    // preview, so the porcelain must show it as STAGED ("M  tracked.txt"), not
+    // unstaged (" M tracked.txt") — the snapshot is taken after auto-staging.
+    let output = run_libra_command(&["commit", "-a", "--porcelain", "-m", "x"], p);
+    assert_cli_success(&output, "commit -a --porcelain");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("M  tracked.txt"),
+        "auto-staged (-a) modification must appear as staged in porcelain: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains(" M tracked.txt"),
+        "the -a modification must not appear as unstaged: {stdout:?}"
+    );
+
+    // The preview must NOT mutate the index: the modification is still unstaged
+    // afterwards (the dry-run `-a` auto-stage is rolled back).
+    let status = run_libra_command(&["status", "--porcelain"], p);
+    assert_cli_success(&status, "status --porcelain after preview");
+    let status_out = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        status_out.contains(" M tracked.txt"),
+        "commit -a --porcelain (dry-run) must not persist the auto-stage: {status_out:?}"
+    );
+    assert!(
+        !status_out.contains("M  tracked.txt"),
+        "the modification must remain unstaged after the preview: {status_out:?}"
+    );
+}

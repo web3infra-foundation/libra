@@ -162,6 +162,11 @@ pub struct CommitArgs {
     /// Show a diff of staged changes in the editor template or on stderr.
     #[arg(short = 'v', long = "verbose")]
     pub verbose: bool,
+
+    /// Print the working-tree status in machine-readable porcelain v1 format
+    /// instead of the human commit summary (mirrors `git commit --porcelain`).
+    #[arg(long)]
+    pub porcelain: bool,
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -351,6 +356,11 @@ pub struct CommitOutput {
     pub conventional: Option<bool>,
     /// Whether the commit was vault-GPG-signed
     pub signed: bool,
+    /// Pre-rendered porcelain v1 status of the committed state for
+    /// `--porcelain` (printed in place of the human summary). Not part of the
+    /// JSON envelope.
+    #[serde(skip)]
+    pub porcelain: Option<String>,
 }
 
 /// Parse author string in format "Name <email>" and return (name, email)
@@ -486,8 +496,18 @@ pub async fn run_commit(
     let is_conventional = args.conventional;
     let skip_hooks = args.disable_pre || args.no_verify;
     let skip_conventional_check = args.no_verify;
+    // `--porcelain` is a machine-readable preview and, like Git, implies
+    // `--dry-run`: it prints status and never creates the commit.
+    let dry_run = args.dry_run || args.porcelain;
 
-    // Auto-stage tracked modifications/deletions (git commit -a)
+    // Auto-stage tracked modifications/deletions (git commit -a). For a dry run
+    // this still computes the would-be-committed state, so snapshot the index
+    // first and restore it afterwards, leaving the working state untouched.
+    let index_snapshot = if dry_run && args.all {
+        Some(std::fs::read(path::index()).map_err(|e| CommitError::IndexLoad(e.to_string()))?)
+    } else {
+        None
+    };
     let auto_stage_applied = if args.all {
         auto_stage_tracked_changes()?
     } else {
@@ -510,6 +530,22 @@ pub async fn run_commit(
         .map_err(|e| CommitError::StagedChanges(e.to_string()))?;
     if staged_changes.is_empty() && !args.allow_empty && !is_amend {
         return Err(CommitError::NothingToCommit);
+    }
+
+    // `--porcelain` snapshot of the would-be-committed state: taken AFTER `-a`
+    // auto-staging and the staged recompute above so it reflects what would be
+    // committed. Inert under `--json`. `.take()` below hands it to whichever
+    // build_commit_output branch (amend/normal dry-run) runs.
+    let mut porcelain_text = if args.porcelain && !output.is_json() {
+        Some(gather_commit_porcelain().await?)
+    } else {
+        None
+    };
+
+    // Restore the pre-`-a` index for dry runs so the preview never mutates the
+    // working state (the snapshot is only taken for `dry_run && args.all`).
+    if let Some(bytes) = index_snapshot {
+        std::fs::write(path::index(), bytes).map_err(|e| CommitError::IndexSave(e.to_string()))?;
     }
 
     // INVARIANT: hooks and message validation must run before creating the
@@ -591,7 +627,7 @@ pub async fn run_commit(
             ));
         }
 
-        if args.dry_run {
+        if dry_run {
             let commit = Commit::new(
                 author,
                 committer,
@@ -611,6 +647,7 @@ pub async fn run_commit(
                     None
                 },
                 false,
+                porcelain_text.take(),
             )
             .await);
         }
@@ -651,6 +688,7 @@ pub async fn run_commit(
             is_signoff,
             conventional_result,
             gpg_sig.is_some(),
+            porcelain_text.take(),
         )
         .await);
     }
@@ -671,7 +709,7 @@ pub async fn run_commit(
         ));
     }
 
-    if args.dry_run {
+    if dry_run {
         let commit = Commit::new(
             author,
             committer,
@@ -691,6 +729,7 @@ pub async fn run_commit(
                 None
             },
             false,
+            porcelain_text.take(),
         )
         .await);
     }
@@ -731,6 +770,7 @@ pub async fn run_commit(
         is_signoff,
         conventional_result,
         gpg_sig.is_some(),
+        porcelain_text.take(),
     )
     .await)
 }
@@ -1039,6 +1079,9 @@ fn save_commit_object(storage: &ClientStorage, commit: &Commit) -> Result<(), Co
 ///
 /// `user_message` is the commit message as provided by the user (before GPG
 /// signature embedding), used to derive the `subject` field.
+// Assembles the structured commit result from already-computed parts; the
+// argument count is inherent to what a commit result records.
+#[allow(clippy::too_many_arguments)]
 async fn build_commit_output(
     commit: &Commit,
     user_message: &str,
@@ -1047,6 +1090,7 @@ async fn build_commit_output(
     signoff: bool,
     conventional: Option<bool>,
     signed: bool,
+    porcelain: Option<String>,
 ) -> CommitOutput {
     let (head_label, branch) = match Head::current().await {
         Head::Branch(name) => (name.clone(), Some(name)),
@@ -1076,6 +1120,7 @@ async fn build_commit_output(
         signoff,
         conventional,
         signed,
+        porcelain,
     }
 }
 
@@ -1146,9 +1191,40 @@ pub async fn execute(args: CommitArgs) {
 /// cannot be updated.
 pub async fn execute_safe(args: CommitArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_commit(args, output).await.map_err(CliError::from)?;
-    render_commit_output(&result, output)?;
+    // `--porcelain` replaces the human commit summary with `status --porcelain`
+    // output of the committed state (gathered inside run_commit AFTER any `-a`
+    // auto-staging, before the commit write); inert under `--json`.
+    if let Some(text) = &result.porcelain {
+        print!("{text}");
+    } else {
+        render_commit_output(&result, output)?;
+    }
     dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_COMMIT).await;
     Ok(())
+}
+
+/// Render the to-be-committed working-tree state in porcelain v1 format,
+/// identical to `libra status --porcelain` (staged changes in column 1,
+/// unstaged in column 2, untracked as `??`, with untracked directories
+/// collapsed). Returned as a string so the caller can emit it in place of the
+/// normal commit summary.
+async fn gather_commit_porcelain() -> Result<String, CommitError> {
+    let to_err = |e: String| CommitError::StagedChanges(e);
+    let staged = status::changes_to_be_committed_safe()
+        .await
+        .map(|c| c.to_relative())
+        .map_err(|e| to_err(e.to_string()))?;
+    let mut unstaged = status::changes_to_be_staged()
+        .map(|c| c.to_relative())
+        .map_err(|e| to_err(e.to_string()))?;
+    // Match `status --porcelain` default (`-unormal`): collapse untracked dirs.
+    let index = status::load_status_index().map_err(|e| to_err(e.to_string()))?;
+    unstaged.new = status::collapse_untracked_directories(unstaged.new, &index);
+
+    let mut buf: Vec<u8> = Vec::new();
+    status::output_porcelain(&staged, &unstaged, false, &mut buf)
+        .map_err(|e| to_err(e.to_string()))?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// If vault signing is enabled, sign the commit content and return the

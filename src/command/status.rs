@@ -540,7 +540,7 @@ fn filename_similarity(a: &str, b: &str) -> u8 {
     (lcs.saturating_mul(100) / max_len.max(1)).min(100) as u8
 }
 
-fn load_status_index() -> CliResult<Index> {
+pub(crate) fn load_status_index() -> CliResult<Index> {
     let index_path =
         path::try_index().map_err(|source| CliError::from(StatusError::Workdir { source }))?;
     Index::load(&index_path).map_err(|source| {
@@ -1862,7 +1862,10 @@ async fn is_bare_repository() -> bool {
 // Untracked directory collapsing
 // ---------------------------------------------------------------------------
 
-fn collapse_untracked_directories(untracked_files: Vec<PathBuf>, index: &Index) -> Vec<PathBuf> {
+pub(crate) fn collapse_untracked_directories(
+    untracked_files: Vec<PathBuf>,
+    index: &Index,
+) -> Vec<PathBuf> {
     use std::collections::BTreeSet;
 
     if untracked_files.is_empty() {

@@ -176,6 +176,20 @@ Do not actually create the commit. Show the commit summary that would be produce
 libra commit --dry-run -m "Draft commit"
 ```
 
+### `--porcelain`
+
+Print the working-tree status in machine-readable porcelain v1 format (the same as
+`libra status --porcelain`: staged changes in column 1, unstaged in column 2, untracked
+as `??`, untracked directories collapsed) instead of the human commit summary, mirroring
+`git commit --porcelain`. Like Git, `--porcelain` **implies `--dry-run`**: it prints the
+would-be-committed state and does **not** create the commit (and leaves the index
+untouched, even with `-a`, which is auto-staged only for the preview). Inert under
+`--json` (the JSON envelope is emitted instead).
+
+```bash
+libra commit --porcelain
+```
+
 ### `--fixup <COMMIT>`
 
 Create a fixup commit whose message is `fixup! <target subject>`.

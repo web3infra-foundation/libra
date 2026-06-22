@@ -36,7 +36,7 @@
 | [`cloud`](cloud.md) | `intentionally-different` | Libra cloud backup/restore extension, not a Git command |
 | [`code`](code.md) | `intentionally-different` | Libra AI extension, not a Git command |
 | [`code-control`](code-control.md) | `intentionally-different` | Libra AI automation extension, not a Git command |
-| [`commit`](commit.md) | `partial` | common commit flags plus cleanup/fixup/squash/trailer and `-e/--edit` + `-v/--verbose` (editor) supported; `--porcelain`/`--status`/`-t/--template` not exposed |
+| [`commit`](commit.md) | `partial` | common commit flags plus cleanup/fixup/squash/trailer, `-e/--edit` + `-v/--verbose` (editor), and `--porcelain` (status v1) supported; `--status`/`-t/--template` not exposed |
 | [`config`](config.md) | `partial` | vault-backed local/global config; system scope, editor round-trip, typed conversion, NUL output and section operations incomplete |
 | [`describe`](describe.md) | `partial` | basic describe, `--tags`, `--always`, `--abbrev`, `--exact-match`, `--long`, `--dirty[=<mark>]`, `--first-parent`, `--match`, `--exclude`, and `--candidates` (0 ⇒ exact-match) supported; contains/all not exposed |
 | [`diff`](diff.md) | `partial` | staged/old-new/pathspec/name/stat output supported; positional revspec, summary/word/binary/whitespace/ext-diff incomplete |
