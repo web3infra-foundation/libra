@@ -38,6 +38,8 @@ The `--format` option accepts a simple atom language. Supported atoms:
 | `--sort=<key>` | Sort by `refname`, `-refname`, `objectname`, or `-objectname`. |
 | `--count=<n>` | Limit output to at most `n` refs after filtering and sorting. |
 | `--points-at=<object>` | Keep refs that point at the object. Annotated tags also match their peeled target. |
+| `--contains=<commit>` / `--no-contains=<commit>` | Keep (or exclude) refs whose tip has `<commit>` as an ancestor. |
+| `--merged=<commit>` / `--no-merged=<commit>` | Keep (or exclude) refs whose tip is reachable from `<commit>` (already merged into it). |
 | `<pattern>...` | Keep refs whose full name matches, contains, or ends with the pattern. |
 
 ## Examples
@@ -53,7 +55,7 @@ libra --json for-each-ref --remotes
 
 ## Compatibility
 
-Compatibility tier is `partial`. `--contains` / `--no-contains` are supported (filter refs whose tip has, or does not have, the given commit as an ancestor). Deferred Git features include the full atom language, full sort keys, `--merged` / `--no-merged`, and shell/perl/python/tcl quoting modes. Git flat-file ref storage parity is intentionally not applicable to Libra.
+Compatibility tier is `partial`. `--contains` / `--no-contains` are supported (filter refs whose tip has, or does not have, the given commit as an ancestor), as are `--merged` / `--no-merged` (filter refs whose tip is, or is not, reachable from the given commit). Deferred Git features include the full atom language, full sort keys, and shell/perl/python/tcl quoting modes. Git flat-file ref storage parity is intentionally not applicable to Libra.
 
 ## Structured Output
 

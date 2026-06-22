@@ -94,6 +94,232 @@ fn test_for_each_ref_contains_filter() {
     );
 }
 
+#[test]
+fn test_for_each_ref_merged_filter() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    std::fs::write(p.join("f1.txt"), "1\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f1.txt"], p), "add f1");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit c1",
+    );
+    let c1 = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+    // `old` points at c1 and never advances.
+    assert_cli_success(&run_libra_command(&["branch", "old"], p), "branch old");
+    // An annotated tag at c1: its entry peels to the commit for reachability.
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "anno", "atag"], p),
+        "annotated tag atag at c1",
+    );
+
+    std::fs::write(p.join("f2.txt"), "2\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f2.txt"], p), "add f2");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c2", "--no-verify"], p),
+        "commit c2",
+    );
+    let c2 = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+    // A lightweight tag at c2, used to exercise fully-qualified ref targets.
+    assert_cli_success(
+        &run_libra_command(&["tag", "lw"], p),
+        "lightweight tag lw at c2",
+    );
+
+    // --merged=c2: both main (c2) and old (c1) are reachable from c2.
+    let out = run_libra_command(&["for-each-ref", "--heads", "--merged", &c2], p);
+    assert_cli_success(&out, "for-each-ref --merged c2");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("refs/heads/main") && stdout.contains("refs/heads/old"),
+        "both main and old should be merged into c2: {stdout}"
+    );
+
+    // --no-merged=c1: main (c2) is not reachable from c1; old (c1) is.
+    let out = run_libra_command(&["for-each-ref", "--heads", "--no-merged", &c1], p);
+    assert_cli_success(&out, "for-each-ref --no-merged c1");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("refs/heads/main"),
+        "main should NOT be merged into c1: {stdout}"
+    );
+    assert!(
+        !stdout.contains("refs/heads/old"),
+        "old should be merged into c1 and thus excluded: {stdout}"
+    );
+
+    // Annotated tag peeling: atag (at c1) is reachable from c2, so --merged=c2
+    // includes it; --no-merged=c1 excludes it (c1 is merged into c1).
+    let out = run_libra_command(&["for-each-ref", "--tags", "--merged", &c2], p);
+    assert_cli_success(&out, "for-each-ref --tags --merged c2");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("refs/tags/atag"),
+        "annotated tag atag should be merged into c2: {stdout}"
+    );
+
+    let out = run_libra_command(&["for-each-ref", "--tags", "--no-merged", &c1], p);
+    assert_cli_success(&out, "for-each-ref --tags --no-merged c1");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("refs/tags/atag"),
+        "annotated tag atag (c1) should be merged into c1 and excluded: {stdout}"
+    );
+
+    // The merge TARGET may itself be an annotated tag name; it peels to its
+    // commit (atag -> c1), so only refs reachable from c1 are "merged".
+    let out = run_libra_command(&["for-each-ref", "--heads", "--merged", "atag"], p);
+    assert_cli_success(&out, "for-each-ref --heads --merged atag");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("refs/heads/old"),
+        "old (c1) should be merged into atag (c1): {stdout}"
+    );
+    assert!(
+        !stdout.contains("refs/heads/main"),
+        "main (c2) should NOT be merged into atag (c1): {stdout}"
+    );
+
+    // Fully-qualified ref targets must resolve too (no regression vs the legacy
+    // resolver): --contains refs/tags/lw (lw -> c2) keeps only refs containing c2.
+    let out = run_libra_command(
+        &["for-each-ref", "--heads", "--contains", "refs/tags/lw"],
+        p,
+    );
+    assert_cli_success(&out, "for-each-ref --contains refs/tags/lw");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("refs/heads/main") && !stdout.contains("refs/heads/old"),
+        "only main should contain c2 (refs/tags/lw): {stdout}"
+    );
+
+    // Namespace disambiguation: a branch named `atag` at c2 collides with the
+    // annotated tag `atag` at c1. `--merged refs/tags/atag` must resolve the TAG
+    // (c1), not the branch (c2) — otherwise main (c2) would be reported merged.
+    assert_cli_success(
+        &run_libra_command(&["branch", "atag"], p),
+        "branch atag at c2 (collides with tag atag)",
+    );
+    let out = run_libra_command(
+        &["for-each-ref", "--heads", "--merged", "refs/tags/atag"],
+        p,
+    );
+    assert_cli_success(&out, "for-each-ref --merged refs/tags/atag");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("refs/heads/old") && !stdout.contains("refs/heads/main"),
+        "refs/tags/atag must resolve the TAG (c1), not branch atag (c2): {stdout}"
+    );
+
+    // The branch-namespace counterpart: refs/heads/atag must resolve the BRANCH
+    // (c2), so main (c2) IS reported merged — proving both directions.
+    let out = run_libra_command(
+        &["for-each-ref", "--heads", "--merged", "refs/heads/atag"],
+        p,
+    );
+    assert_cli_success(&out, "for-each-ref --merged refs/heads/atag");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("refs/heads/main") && stdout.contains("refs/heads/old"),
+        "refs/heads/atag must resolve the BRANCH (c2), so main is merged: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_merged_resolves_remote_tracking_namespace() {
+    use libra::internal::branch::Branch;
+
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp.path());
+    let p = temp.path();
+
+    // c1 then c2 on main.
+    std::fs::write("a.txt", "1\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("c1".into()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+    let c1 = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+
+    std::fs::write("a.txt", "2\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("c2".into()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    // Remote-tracking origin/main at c1, stored under the full ref name with the
+    // `remote` column set — exactly as `libra fetch` persists it — plus a
+    // colliding LOCAL branch literally named `refs/remotes/origin/main` at c2.
+    Branch::update_branch("refs/remotes/origin/main", &c1, Some("origin"))
+        .await
+        .expect("create remote-tracking origin/main");
+    assert_cli_success(
+        &run_libra_command(&["branch", "refs/remotes/origin/main"], p),
+        "create colliding local branch",
+    );
+
+    // `--no-merged refs/remotes/origin/main` must resolve the REMOTE-tracking ref
+    // (c1), so main (c2) is NOT merged into c1 and is listed. If the local shadow
+    // (c2) were used instead, main would be excluded.
+    let out = run_libra_command(
+        &[
+            "for-each-ref",
+            "--heads",
+            "--no-merged",
+            "refs/remotes/origin/main",
+        ],
+        p,
+    );
+    assert_cli_success(&out, "for-each-ref --no-merged refs/remotes/origin/main");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("refs/heads/main"),
+        "refs/remotes/origin/main must resolve the remote-tracking ref (c1), not \
+         the colliding local branch (c2); main should be listed: {stdout}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_for_each_ref_format_and_json() {
