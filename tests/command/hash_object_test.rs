@@ -268,3 +268,44 @@ async fn hash_object_rejects_unsupported_object_type() {
         report.hints
     );
 }
+
+#[tokio::test]
+async fn hash_object_stdin_paths_hashes_each_path_in_order() {
+    let repo = tempfile::tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+    let p = repo.path();
+    fs::write(p.join("f1.txt"), b"A\n").expect("write f1");
+    fs::write(p.join("f2.txt"), b"BB\n").expect("write f2");
+
+    // Reference hashes computed one path at a time.
+    let oid1 = String::from_utf8_lossy(&run_libra_command(&["hash-object", "f1.txt"], p).stdout)
+        .trim()
+        .to_string();
+    let oid2 = String::from_utf8_lossy(&run_libra_command(&["hash-object", "f2.txt"], p).stdout)
+        .trim()
+        .to_string();
+
+    // --stdin-paths hashes each newline-separated path, one hash per line in order.
+    let out =
+        run_libra_command_with_stdin(&["hash-object", "--stdin-paths"], p, "f1.txt\nf2.txt\n");
+    assert_cli_success(&out, "hash-object --stdin-paths should succeed");
+    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        lines,
+        vec![oid1, oid2],
+        "one hash per stdin path, in input order"
+    );
+
+    // Records are taken verbatim (no whitespace trimming): a trailing space
+    // names a different (missing) file, so hashing must fail rather than
+    // silently hashing "f1.txt".
+    let bad = run_libra_command_with_stdin(&["hash-object", "--stdin-paths"], p, "f1.txt \n");
+    assert!(
+        !bad.status.success(),
+        "trailing-space path must not be trimmed to an existing file: {}",
+        String::from_utf8_lossy(&bad.stdout)
+    );
+}

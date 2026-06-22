@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra hash-object` 的目标是计算 Git 兼容对象 ID，并可选地把 blob 写入对象库。实现需要支持文件、stdin、对象类型参数、`--path` 和 `--no-filters` 的兼容边界，同时把 `--literally`、不支持的对象类型和属性过滤行为清晰暴露。
+`libra hash-object` 的目标是计算 Git 兼容对象 ID，并可选地把 blob 写入对象库。实现需要支持文件、stdin、`--stdin-paths`、对象类型参数、`--path` 和 `--no-filters` 的兼容边界，同时把 `--literally`、不支持的对象类型和属性过滤行为清晰暴露。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。Blob hashing for files and `--stdin`; `-w` writes blob objects; `--path` and `--no-filters` are accepted for raw-byte hashing. Other object types and advanced Git hash-object flags are unsupported
+- 兼容级别：`partial`。Blob hashing for files, `--stdin`, and `--stdin-paths`; `-w` writes blob objects; `--path` and `--no-filters` are accepted for raw-byte hashing. Other object types and advanced Git hash-object flags are unsupported
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -46,14 +46,15 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/hash-object.md`。
-- 公开参数/子命令包括：`-w, --write`、`--stdin`、`--path <PATH>`、`--no-filters`、`-t, --type <TYPE>`（仅接受 `blob`，其余类型显式拒绝）、`<PATH>...`。
+- 公开参数/子命令包括：`-w, --write`、`--stdin`、`--stdin-paths`（从 stdin 读取换行分隔的路径，逐个哈希；与 `--stdin`/`--path`/位置 `<PATH>` 互斥）、`--path <PATH>`、`--no-filters`、`-t, --type <TYPE>`（仅接受 `blob`，其余类型显式拒绝）、`<PATH>...`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵说明 | Blob hashing for files and `--stdin`; `-w` writes blob objects; `--path` / `--no-filters` accepted for raw-byte hashing. Other object types and advanced Git hash-object flags are 不支持 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
+| ✅ 已实现 | `--stdin-paths`（从 stdin 读取换行分隔的路径，逐个哈希，每行输出一个 oid） | 通过 `effective_paths`/`read_stdin_paths` 复用现有 path-hashing 循环；与 `--stdin`/`--path`/位置路径互斥。带集成测试（`hash_object_stdin_paths_hashes_each_path_in_order`）。 |
+| 兼容矩阵说明 | Blob hashing for files, `--stdin`, and `--stdin-paths`; `-w` writes blob objects; `--path` / `--no-filters` accepted for raw-byte hashing. Other object types and advanced Git hash-object flags are 不支持 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 | 兼容差异项 | Path filters / attributes | 原始对照：Git 可用 `--path` 触发 attribute/filter 处理；相关参数/替代：`--path` 已接受但不应用 filters，`--no-filters` 为 raw-byte hashing no-op；当前说明：属性过滤仍不支持。 后续实现真正 filter/attribute 支持时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | Hash literally invalid objects | 原始对照：不支持；相关参数/替代：--literally；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 

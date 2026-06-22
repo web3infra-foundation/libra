@@ -37,6 +37,13 @@ pub struct HashObjectArgs {
     #[arg(long, conflicts_with = "paths")]
     pub stdin: bool,
 
+    /// Read file paths from standard input (one per line) and hash each
+    #[arg(
+        long = "stdin-paths",
+        conflicts_with_all = ["stdin", "paths", "filter_path"]
+    )]
+    pub stdin_paths: bool,
+
     /// Object type to hash. Only `blob` is currently supported.
     #[arg(
         short = 't',
@@ -47,7 +54,10 @@ pub struct HashObjectArgs {
     pub object_type: String,
 
     /// File paths to hash
-    #[arg(value_name = "PATH", required_unless_present = "stdin")]
+    #[arg(
+        value_name = "PATH",
+        required_unless_present_any = ["stdin", "stdin_paths"]
+    )]
     pub paths: Vec<PathBuf>,
 
     /// Path context label for compatibility with Git hash-object
@@ -115,8 +125,9 @@ fn hash_objects(args: &HashObjectArgs) -> CliResult<HashObjectOutput> {
             args.write,
         )?]
     } else {
-        let mut entries = Vec::with_capacity(args.paths.len());
-        for path in &args.paths {
+        let paths = effective_paths(args)?;
+        let mut entries = Vec::with_capacity(paths.len());
+        for path in &paths {
             entries.push(hash_one_source(
                 path.display().to_string(),
                 read_file(path)?,
@@ -147,12 +158,37 @@ fn hash_objects_streaming(args: &HashObjectArgs, output: &OutputConfig) -> CliRe
         return Ok(());
     }
 
-    for path in &args.paths {
+    for path in &effective_paths(args)? {
         let entry = hash_one_source(path.display().to_string(), read_file(path)?, args.write)?;
         write_hash_line(&mut writer, &entry.oid)?;
     }
 
     Ok(())
+}
+
+/// The paths to hash: the positional `paths`, or — with `--stdin-paths` — the
+/// newline-separated paths read from standard input, each taken verbatim except
+/// for the line terminator (blank records become empty paths that error).
+fn effective_paths(args: &HashObjectArgs) -> CliResult<Vec<PathBuf>> {
+    if args.stdin_paths {
+        read_stdin_paths()
+    } else {
+        Ok(args.paths.clone())
+    }
+}
+
+fn read_stdin_paths() -> CliResult<Vec<PathBuf>> {
+    let data = read_stdin()?;
+    let text = String::from_utf8(data).map_err(|_| {
+        CliError::fatal("--stdin-paths input is not valid UTF-8")
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint("provide newline-separated file paths on standard input.")
+    })?;
+    // Each record is a pathname; like Git, take it verbatim except for the line
+    // terminator. `str::lines()` strips only `\n` (and a trailing `\r`), so
+    // trailing spaces are preserved and blank records become empty paths that
+    // `read_file` then reports as errors — matching `git hash-object`.
+    Ok(text.lines().map(PathBuf::from).collect())
 }
 
 fn stdin_source(args: &HashObjectArgs) -> String {

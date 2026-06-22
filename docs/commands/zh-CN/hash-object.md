@@ -5,6 +5,7 @@
 ```bash
 libra hash-object [OPTIONS] <PATH>...
 libra hash-object --stdin [OPTIONS]
+libra hash-object --stdin-paths [OPTIONS]
 ```
 
 此初始实现支持 blob 对象。它会使用当前仓库对象格式，将原始字节按 Git blob 方式哈希。它不会应用 clean 过滤器、attributes 或 LFS 指针转换。`--path` 作为 Git 兼容路径上下文和 stdin JSON source label 接受；在实现路径过滤前，它不会改变被哈希的字节。
@@ -17,6 +18,7 @@ libra hash-object --stdin [OPTIONS]
 |--------|-------|-------------|
 | `<PATH>...` | | 要哈希的文件路径 |
 | `--stdin` | | 从标准输入读取字节，而不是读取文件路径 |
+| `--stdin-paths` | | 从标准输入读取文件路径（每行一个）并逐个哈希 |
 | `--write` | `-w` | 将计算出的 blob 存入仓库对象数据库 |
 | `--type <TYPE>` | `-t` | 要哈希的对象类型。目前仅支持 `blob` |
 | `--path <PATH>` | | Git hash-object 兼容路径上下文标签 |
@@ -85,6 +87,7 @@ b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0
 |---------|-------|-----|---------|
 | 将文件作为 blob 哈希 | `libra hash-object <path>` | `git hash-object <path>` | N/A |
 | 从 stdin 读取 | `--stdin` | `--stdin` | N/A |
+| 从 stdin 读取路径 | `--stdin-paths` | `--stdin-paths` | N/A |
 | 写入对象 | `-w` / `--write` | `-w` | N/A |
 | 选择对象类型 | 仅 `blob` | `-t <type>` | N/A |
 | 路径上下文 | 接受 `--path <path>`，不应用 filters | `--path <path>` | N/A |

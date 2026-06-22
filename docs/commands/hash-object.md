@@ -5,6 +5,7 @@ Compute the Git-compatible object ID for raw file contents or standard input.
 ```bash
 libra hash-object [OPTIONS] <PATH>...
 libra hash-object --stdin [OPTIONS]
+libra hash-object --stdin-paths [OPTIONS]
 ```
 
 This initial implementation supports blob objects. It hashes the raw bytes as a
@@ -23,6 +24,7 @@ repository because it stores the object in the repository object database.
 |--------|-------|-------------|
 | `<PATH>...` | | File paths to hash |
 | `--stdin` | | Read bytes from standard input instead of file paths |
+| `--stdin-paths` | | Read file paths from standard input (one per line) and hash each |
 | `--write` | `-w` | Store the computed blob in the repository object database |
 | `--type <TYPE>` | `-t` | Object type to hash. Only `blob` is currently supported |
 | `--path <PATH>` | | Path context label for compatibility with Git hash-object |
@@ -91,6 +93,7 @@ Structured output:
 |---------|-------|-----|---------|
 | Hash file as blob | `libra hash-object <path>` | `git hash-object <path>` | N/A |
 | Read from stdin | `--stdin` | `--stdin` | N/A |
+| Read paths from stdin | `--stdin-paths` | `--stdin-paths` | N/A |
 | Write object | `-w` / `--write` | `-w` | N/A |
 | Select object type | Only `blob` | `-t <type>` | N/A |
 | Path context | `--path <path>` accepted, no filters applied | `--path <path>` | N/A |
