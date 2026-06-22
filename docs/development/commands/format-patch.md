@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra format-patch` 将提交导出为 mbox 格式的邮件补丁文件。该命令解析 `A..B` 修订范围（空左右侧均默认 `HEAD`，单修订号按 `<spec>..HEAD` 处理），对范围内的每个非合并提交生成一个 `.patch` 文件。每个文件按 RFC 2822 标准生成 mbox 信封（`From ` 行）、邮件头（`From:`、`Date:`、`Subject:`、`Message-ID` 等）和邮件体（提交正文 + `---` 分隔 + diffstat + unified diff）。输出通过 `-o` 写入目录或通过 `--stdout` 输出到标准输出。
+`libra format-patch` 将提交导出为 mbox 格式的邮件补丁文件。该命令解析 `A..B` 修订范围（空左右侧均默认 `HEAD`，单修订号按 `<spec>..HEAD` 处理），对范围内的每个非合并提交生成一个补丁文件（文件名后缀由 `--suffix` 决定，默认 `.patch`）。每个文件按 RFC 2822 标准生成 mbox 信封（`From ` 行）、邮件头（`From:`、`Date:`、`Subject:`、`Message-ID` 等）和邮件体（提交正文 + `---` 分隔 + diffstat + unified diff）。输出通过 `-o` 写入目录或通过 `--stdout` 输出到标准输出。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。核心补丁导出能力已公开，支持 15+ 参数，merge 提交默认跳过。未实现的 Git 选项包括 `--attach`、`--inline`、`--suffix`、`--signature`、`--from`、`--to`、`--cc`、`--base`、`--interdiff`、`--range-diff`、`--notes`、`--encode-email-headers` 和 `--force`。
+- 兼容级别：`partial`。核心补丁导出能力已公开，支持 15+ 参数（含 `--suffix <sfx>`，默认 `.patch`），merge 提交默认跳过。未实现的 Git 选项包括 `--attach`、`--inline`、`--signature`、`--from`、`--to`、`--cc`、`--base`、`--interdiff`、`--range-diff`、`--notes`、`--encode-email-headers` 和 `--force`。
 
 ## 设计方案
 
@@ -28,12 +28,12 @@ flowchart TD
     E2 --> F
     E2 --> G["复用<br/>log::generate_diff<br/>log::compute_commit_stat"]
     D --> H["输出与错误<br/>CliResult / PatchRecord"]
-    H --> I["副作用边界<br/>只写 .patch 文件/stdout"]
+    H --> I["副作用边界<br/>只写补丁文件(后缀默认 .patch)/stdout"]
 ```
 
 - 底层操作对象：`Commit`（通过 `log::get_reachable_commits` 加载，读取 `id`、`tree_id`、`parent_commit_ids`、`author`、`committer`、`message`）；`Tree` / `Blob`（由 `log::generate_diff` 和 `log::compute_commit_stat` 内部加载）。
-- 输出与错误契约：`execute_safe` 支持 `--json` 输出结构化 `PatchRecord[]`；`--cover-letter` 写出 `0000-cover-letter.patch` 时，该文件以 `number = 0` 的记录出现在 `PatchRecord[]` 中；`--quiet` 抑制文件路径打印；`--no-pager` 跳过分页器；失败通过 `CliError` / `CliResult` 传播，携带稳定错误码：`RepoNotFound`（`LBR-REPO-001`）、`CliInvalidTarget`（`LBR-CLI-003`，范围无提交）、`IoWriteFailed`（`LBR-IO-002`，文件写入失败）。新增失败模式要补稳定错误码、用户提示和回归测试。
-- 副作用边界：该命令不应修改索引、对象库、refs/HEAD 或 reflog；唯一写入面是 `.patch` 文件或 stdout。
+- 输出与错误契约：`execute_safe` 支持 `--json` 输出结构化 `PatchRecord[]`；`--cover-letter` 写出 `0000-cover-letter`（后缀默认 `.patch`，由 `--suffix` 决定）时，该文件以 `number = 0` 的记录出现在 `PatchRecord[]` 中；`--quiet` 抑制文件路径打印；`--no-pager` 跳过分页器；失败通过 `CliError` / `CliResult` 传播，携带稳定错误码：`RepoNotFound`（`LBR-REPO-001`）、`CliInvalidTarget`（`LBR-CLI-003`，范围无提交）、`IoWriteFailed`（`LBR-IO-002`，文件写入失败）。新增失败模式要补稳定错误码、用户提示和回归测试。
+- 副作用边界：该命令不应修改索引、对象库、refs/HEAD 或 reflog；唯一写入面是补丁文件（后缀默认 `.patch`，可由 `--suffix` 改变）或 stdout。
 
 ## 实现历史
 
@@ -50,14 +50,14 @@ flowchart TD
 - 公开状态：已公开；模块状态：`src/command/mod.rs` 导出 `format_patch`，`src/cli.rs::Commands::FormatPatch` 负责 CLI 接入。
 - 用户文档：`docs/commands/format-patch.md`。
 - Synopsis：`libra format-patch [OPTIONS] [revision-range]`。
-- 公开参数包括：`[revision-range]`、`-o, --output-directory <DIR>`、`--stdout`、`-n, --numbered`、`--start-number <N>`、`--subject-prefix <PREFIX>`、`--cover-letter`、`--thread` / `--no-thread`、`--in-reply-to <MESSAGE_ID>`、`-v, --reroll-count <N>`、`-s, --signoff`、`--full-index`、`--no-stat`、`--keep-subject`。
+- 公开参数包括：`[revision-range]`、`-o, --output-directory <DIR>`、`--stdout`、`-n, --numbered`、`--start-number <N>`、`--subject-prefix <PREFIX>`、`--cover-letter`、`--thread` / `--no-thread`、`--in-reply-to <MESSAGE_ID>`、`-v, --reroll-count <N>`、`-s, --signoff`、`--full-index`、`--no-stat`、`--keep-subject`、`--suffix <SFX>`。
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | Git flag | `--attach` / `--inline` / `--no-attach`（MIME 附件/内联模式） | 未公开；当前固定输出 `text/plain; charset=UTF-8` 内联，不加 MIME multipart。命令层。 |
-| Git flag | `--suffix <sfx>`（文件名后缀，默认 `.patch`） | 未公开；后缀硬编码为 `.patch`。命令层。 |
+| ✅ 已实现 | `--suffix <sfx>`（文件名后缀，默认 `.patch`） | 已公开：通过 `patch_filename` 的 `suffix` 参数与 cover-letter 列表统一使用；默认 `.patch` 保持原行为。带集成测试（`suffix_changes_patch_filename_extension`）。 |
 | Git flag | `--signature <sig>` / `--signature-file <file>` / `--no-signature`（自定义签名） | 未公开；当前固定使用 libra 版本号作为尾部签名。命令层。 |
 | Git flag | `--from` / `--to` / `--cc` / `--no-to` / `--no-cc`（邮件收件人/抄送头） | 未公开；当前不生成这些头。命令层。 |
 | Git flag | `--base <tree-ish>`（记录基础提交，供 `git am --base` 使用） | 未公开；需生 `base-commit` 头。命令层。 |

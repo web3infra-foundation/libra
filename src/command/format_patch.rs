@@ -1,7 +1,8 @@
 //! Generate mbox-formatted email patch files from commits.
 //!
-//! `libra format-patch` walks a revision range, produces one `.patch` file per
-//! non-merge commit, and formats each as an mbox message with RFC 2822 headers,
+//! `libra format-patch` walks a revision range, produces one patch file per
+//! non-merge commit (named with `--suffix`, default `.patch`), and formats each
+//! as an mbox message with RFC 2822 headers,
 //! a plain-text diffstat, and a unified diff.  The output is designed for
 //! email-based patch review and is compatible with `git am`.
 
@@ -46,6 +47,9 @@ Examples:
 
   # All output to stdout (suitable for piping to `git am`)
   libra format-patch --stdout origin/main..
+
+  # Custom filename suffix (0001-subject.txt instead of .patch)
+  libra format-patch --suffix=.txt HEAD~2..HEAD
 ";
 
 // ---------------------------------------------------------------------------
@@ -124,6 +128,10 @@ pub struct FormatPatchArgs {
     /// instead of stripping it (default behaviour in Git).
     #[arg(long = "keep-subject")]
     pub keep_subject: bool,
+
+    /// Filename suffix for generated patches (default ".patch"); e.g. ".txt".
+    #[arg(long = "suffix", value_name = "SFX", default_value = ".patch")]
+    pub suffix: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +191,8 @@ pub async fn execute(args: FormatPatchArgs) {
 
 /// # Side Effects
 /// - Reads commit, tree, and blob objects from the object store.
-/// - When `--stdout` is not set, creates `.patch` files in the output
+/// - When `--stdout` is not set, creates patch files (suffix from `--suffix`,
+///   default `.patch`) in the output
 ///   directory (or the current working directory).  The working tree is
 ///   **not** modified.
 ///
@@ -581,9 +590,10 @@ fn format_cover_letter(args: &FormatPatchArgs, commits: &[Commit]) -> Result<Str
         let (msg, _) = parse_commit_msg(&commit.message);
         let _subject = msg.lines().next().unwrap_or("");
         out.push_str(&format!(
-            "{:0width$}-{}.patch\n",
+            "{:0width$}-{}{}\n",
             i + 1,
             patch_slug(commit, args),
+            args.suffix,
             width = number_width(commits.len())
         ));
     }
@@ -723,13 +733,14 @@ fn patch_filename(
     total: usize,
     start_num: usize,
     slug: &str,
+    suffix: &str,
 ) -> String {
     if slug.is_empty() {
         // Cover letter (only the cover-letter code path passes an empty slug)
-        "0000-cover-letter.patch".to_string()
+        format!("0000-cover-letter{suffix}")
     } else {
         let width = number_width(total + start_num - 1);
-        format!("{:0width$}-{}.patch", patch_num, slug)
+        format!("{:0width$}-{}{}", patch_num, slug, suffix)
     }
 }
 
@@ -768,7 +779,8 @@ fn resolve_output_dir(args: &FormatPatchArgs) -> Result<PathBuf, CliError> {
     }
 }
 
-/// Write `body` to a `.patch` file (or stdout when `--stdout` is set).
+/// Write `body` to a patch file (suffix from `--suffix`, default `.patch`) or
+/// stdout when `--stdout` is set.
 /// Returns the display path.
 fn write_patch_file(
     args: &FormatPatchArgs,
@@ -797,6 +809,7 @@ fn write_patch_file(
             total,
             start_num,
             slug,
+            &args.suffix,
         );
         let path = out_dir.join(&filename);
         std::fs::write(&path, body).map_err(|e| FormatPatchError::OutputWrite {

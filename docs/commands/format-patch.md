@@ -11,7 +11,8 @@ libra format-patch [OPTIONS] [revision-range]
 ## Description
 
 `libra format-patch` walks a revision range (`A..B` or a single commit treated
-as `<commit>..HEAD`), produces one `.patch` file per non-merge commit, and
+as `<commit>..HEAD`), produces one patch file per non-merge commit (named with
+the `--suffix`, default `.patch`), and
 formats each as an mbox message with RFC 2822 headers, a plain-text diffstat,
 and a unified diff. The output is compatible with `git am`.
 
@@ -37,6 +38,7 @@ commits, the command exits with an error.
 | `--full-index` | | Show full object IDs in diff index header lines | false |
 | `--no-stat` | | Suppress the diffstat summary | false |
 | `--keep-subject` | | Keep the original `[PATCH]` prefix in the commit subject | false |
+| `--suffix <SFX>` | | Filename suffix for generated patches (e.g. `.txt`) | `.patch` |
 
 ## Examples
 
@@ -80,8 +82,9 @@ unified diff
 ```
 
 With `--json` or `--machine`, `data.patches` lists every generated output.
-When `--cover-letter` is set, the list includes `0000-cover-letter.patch` as
-record number `0` before the commit patch records.
+When `--cover-letter` is set, the list includes `0000-cover-letter` (with the
+configured suffix, default `.patch`) as record number `0` before the commit
+patch records.
 
 ## Error Handling
 

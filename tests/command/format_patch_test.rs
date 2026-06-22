@@ -675,3 +675,41 @@ fn full_index_flag_outputs_full_hash() {
     );
     assert_cli_success(&output, "full-index flag accepted");
 }
+
+#[test]
+#[serial]
+fn suffix_changes_patch_filename_extension() {
+    let repo = repo_with_commits(2);
+    let out_dir = tempdir().unwrap();
+
+    let output = run_libra_command(
+        &[
+            "format-patch",
+            "--suffix=.txt",
+            "-o",
+            out_dir.path().to_str().unwrap(),
+            "HEAD~2..HEAD",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&output, "format-patch --suffix=.txt");
+
+    let names: Vec<String> = fs::read_dir(out_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(!names.is_empty(), "expected patch files: {names:?}");
+    assert!(
+        names.iter().all(|n| n.ends_with(".txt")),
+        "all patches must use the .txt suffix: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.starts_with("0001-")),
+        "numbered prefix is retained: {names:?}"
+    );
+    assert!(
+        names.iter().all(|n| !n.ends_with(".patch")),
+        "no .patch files when --suffix=.txt: {names:?}"
+    );
+}
