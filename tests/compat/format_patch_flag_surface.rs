@@ -55,6 +55,7 @@ fn format_patch_help_lists_expected_flags() {
         "--zero-commit",
         "--signature",
         "--no-signature",
+        "--numbered-files",
         "revision-range",
     ] {
         assert!(

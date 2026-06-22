@@ -12,7 +12,8 @@ libra format-patch [OPTIONS] [revision-range]
 
 `libra format-patch` walks a revision range (`A..B` or a single commit treated
 as `<commit>..HEAD`), produces one patch file per non-merge commit (named with
-the `--suffix`, default `.patch`), and
+the `--suffix`, default `.patch`, unless `--numbered-files` is set, which uses
+bare sequence numbers), and
 formats each as an mbox message with RFC 2822 headers, a plain-text diffstat,
 and a unified diff. The output is compatible with `git am`.
 
@@ -29,7 +30,7 @@ commits, the command exits with an error.
 | `--numbered` | `-n` | Name files with a leading sequence number (`0001-subject.patch`) | false |
 | `--start-number <N>` | | Start numbering at `N` | 1 |
 | `--subject-prefix <PREFIX>` | | Use `PREFIX` instead of `PATCH` in the Subject: line | `PATCH` |
-| `--cover-letter` | | Generate a `0000-cover-letter.patch` template | false |
+| `--cover-letter` | | Generate a cover-letter template (`0000-cover-letter<suffix>`, or `0` under `--numbered-files`) | false |
 | `--thread` | | Add `In-Reply-To` and `References` headers (default on) | true |
 | `--no-thread` | | Disable threading headers | false |
 | `--in-reply-to <MESSAGE_ID>` | | Make the first mail a reply to the given Message-ID | none |
@@ -38,10 +39,11 @@ commits, the command exits with an error.
 | `--full-index` | | Show full object IDs in diff index header lines | false |
 | `--no-stat` | | Suppress the diffstat summary | false |
 | `--keep-subject` | | Keep the original `[PATCH]` prefix in the commit subject | false |
-| `--suffix <SFX>` | | Filename suffix for generated patches (e.g. `.txt`) | `.patch` |
+| `--suffix <SFX>` | | Filename suffix for generated patches (e.g. `.txt`); ignored under `--numbered-files` | `.patch` |
 | `--zero-commit` | | Use an all-zero hash in each patch's `From <hash>` envelope line | false |
 | `--signature <SIGNATURE>` | | Text placed after the `-- ` line of each patch and the cover letter | libra version |
 | `--no-signature` | | Omit the `-- `/signature footer entirely | false |
+| `--numbered-files` | | Name output files by a bare sequence number (suffix not applied) | false |
 
 ## Examples
 
@@ -88,9 +90,10 @@ The `-- ` footer defaults to the libra version; `--signature <text>` replaces
 it with custom text and `--no-signature` omits the footer entirely.
 
 With `--json` or `--machine`, `data.patches` lists every generated output.
-When `--cover-letter` is set, the list includes `0000-cover-letter` (with the
-configured suffix, default `.patch`) as record number `0` before the commit
-patch records.
+When `--cover-letter` is set, the list includes the cover letter as record
+number `0` before the commit patch records. Its filename is
+`0000-cover-letter` with the configured suffix (default `.patch`), or just `0`
+under `--numbered-files`.
 
 ## Error Handling
 

@@ -1,7 +1,8 @@
 //! Generate mbox-formatted email patch files from commits.
 //!
 //! `libra format-patch` walks a revision range, produces one patch file per
-//! non-merge commit (named with `--suffix`, default `.patch`), and formats each
+//! non-merge commit (named with `--suffix`, default `.patch`, unless
+//! `--numbered-files` is set, which uses bare sequence numbers), and formats each
 //! as an mbox message with RFC 2822 headers,
 //! a plain-text diffstat, and a unified diff.  The output is designed for
 //! email-based patch review and is compatible with `git am`.
@@ -91,7 +92,8 @@ pub struct FormatPatchArgs {
     )]
     pub subject_prefix: String,
 
-    /// Generate a 0000-cover-letter.patch template before the actual patches.
+    /// Generate a cover-letter template before the actual patches (named
+    /// `0000-cover-letter<suffix>`, or `0` under `--numbered-files`).
     #[arg(long = "cover-letter")]
     pub cover_letter: bool,
 
@@ -130,6 +132,7 @@ pub struct FormatPatchArgs {
     pub keep_subject: bool,
 
     /// Filename suffix for generated patches (default ".patch"); e.g. ".txt".
+    /// Ignored under `--numbered-files` (which uses bare sequence numbers).
     #[arg(long = "suffix", value_name = "SFX", default_value = ".patch")]
     pub suffix: String,
 
@@ -146,6 +149,11 @@ pub struct FormatPatchArgs {
     /// Do not emit the `-- `/signature footer at all.
     #[arg(long = "no-signature")]
     pub no_signature: bool,
+
+    /// Name output files by a plain sequence number (1, 2, …) instead of
+    /// `NNNN-subject`; the `--suffix` is not applied in this mode (matches Git).
+    #[arg(long = "numbered-files")]
+    pub numbered_files: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -206,7 +214,8 @@ pub async fn execute(args: FormatPatchArgs) {
 /// # Side Effects
 /// - Reads commit, tree, and blob objects from the object store.
 /// - When `--stdout` is not set, creates patch files (suffix from `--suffix`,
-///   default `.patch`) in the output
+///   default `.patch`; bare sequence numbers under `--numbered-files`) in the
+///   output
 ///   directory (or the current working directory).  The working tree is
 ///   **not** modified.
 ///
@@ -587,7 +596,8 @@ fn push_threading_headers(
 // Cover letter
 // ---------------------------------------------------------------------------
 
-/// Generate a cover-letter template (0000-cover-letter.patch).
+/// Generate a cover-letter template (named `0000-cover-letter<suffix>`, or `0`
+/// under `--numbered-files`).
 fn format_cover_letter(args: &FormatPatchArgs, commits: &[Commit]) -> Result<String, CliError> {
     let now = Utc::now();
 
@@ -767,7 +777,13 @@ fn patch_filename(
     start_num: usize,
     slug: &str,
     suffix: &str,
+    numbered_files: bool,
 ) -> String {
+    if numbered_files {
+        // `--numbered-files`: bare sequence number, no slug and no suffix
+        // (the cover letter, with patch_num 0, becomes "0"), matching Git.
+        return patch_num.to_string();
+    }
     if slug.is_empty() {
         // Cover letter (only the cover-letter code path passes an empty slug)
         format!("0000-cover-letter{suffix}")
@@ -812,8 +828,9 @@ fn resolve_output_dir(args: &FormatPatchArgs) -> Result<PathBuf, CliError> {
     }
 }
 
-/// Write `body` to a patch file (suffix from `--suffix`, default `.patch`) or
-/// stdout when `--stdout` is set.
+/// Write `body` to a patch file (suffix from `--suffix`, default `.patch`;
+/// bare sequence number under `--numbered-files`) or stdout when `--stdout`
+/// is set.
 /// Returns the display path.
 fn write_patch_file(
     args: &FormatPatchArgs,
@@ -843,6 +860,7 @@ fn write_patch_file(
             start_num,
             slug,
             &args.suffix,
+            args.numbered_files,
         );
         let path = out_dir.join(&filename);
         std::fs::write(&path, body).map_err(|e| FormatPatchError::OutputWrite {

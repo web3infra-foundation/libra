@@ -799,3 +799,57 @@ fn signature_controls_patch_footer() {
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("\n-- \n"), "default footer expected: {s:?}");
 }
+
+#[test]
+#[serial]
+fn numbered_files_uses_bare_sequence_numbers() {
+    let repo = repo_with_commits(2);
+    let out_dir = tempdir().unwrap();
+
+    let output = run_libra_command(
+        &[
+            "format-patch",
+            "--numbered-files",
+            "-o",
+            out_dir.path().to_str().unwrap(),
+            "HEAD~2..HEAD",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&output, "format-patch --numbered-files");
+    let mut names: Vec<String> = fs::read_dir(out_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["1".to_string(), "2".to_string()],
+        "expected bare sequence-number files: {names:?}"
+    );
+
+    // `--suffix` is ignored under `--numbered-files` (matches git).
+    let out_dir2 = tempdir().unwrap();
+    let output = run_libra_command(
+        &[
+            "format-patch",
+            "--numbered-files",
+            "--suffix=.txt",
+            "-o",
+            out_dir2.path().to_str().unwrap(),
+            "HEAD~2..HEAD",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&output, "format-patch --numbered-files --suffix");
+    let names2: Vec<String> = fs::read_dir(out_dir2.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names2.iter().all(|n| !n.contains('.')),
+        "suffix must be ignored under --numbered-files: {names2:?}"
+    );
+}
