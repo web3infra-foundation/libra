@@ -522,3 +522,32 @@ async fn test_for_each_ref_format_short_atoms() {
         "short hash must prefix the full hash: {line:?}"
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_head_marker_atom() {
+    let temp = tempdir().unwrap();
+    setup_repo_with_commit(&temp).await; // checked out on main
+    let p = temp.path();
+    run_libra_command(&["branch", "feature-x"], p);
+
+    // %(HEAD) is `*` for the current branch and a space otherwise.
+    let out = run_libra_command(
+        &[
+            "for-each-ref",
+            "--heads",
+            "--format=%(HEAD)%(refname:short)",
+        ],
+        p,
+    );
+    assert_cli_success(&out, "for-each-ref %(HEAD)");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.lines().any(|l| l == "*main"),
+        "current branch should be marked with *: {s:?}"
+    );
+    assert!(
+        s.lines().any(|l| l == " feature-x"),
+        "non-current branch should get a space: {s:?}"
+    );
+}

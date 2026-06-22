@@ -7,7 +7,7 @@ use git_internal::hash::ObjectHash;
 use serde::Serialize;
 
 use crate::{
-    internal::{branch::Branch, config::ConfigKv, tag},
+    internal::{branch::Branch, config::ConfigKv, head::Head, tag},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
@@ -99,15 +99,17 @@ pub struct RefEntry {
 }
 
 pub async fn execute(args: ForEachRefArgs) -> CliResult<()> {
-    let output = OutputConfig::default();
-    let result = run_for_each_ref(&args).await?;
-    render_output(&result, &args, &output)?;
-    Ok(())
+    execute_safe(args, &OutputConfig::default()).await
 }
 
 pub async fn execute_safe(args: ForEachRefArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_for_each_ref(&args).await?;
-    render_output(&result, &args, output)?;
+    // Resolve the current HEAD branch so `%(HEAD)` can mark it with `*`.
+    let head_refname = match Head::current().await {
+        Head::Branch(name) => Some(format!("refs/heads/{name}")),
+        Head::Detached(_) => None,
+    };
+    render_output(&result, &args, output, head_refname.as_deref())?;
     Ok(())
 }
 
@@ -445,6 +447,7 @@ fn render_output(
     entries: &[RefEntry],
     args: &ForEachRefArgs,
     output: &OutputConfig,
+    head_refname: Option<&str>,
 ) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("for-each-ref", &entries.to_vec(), output);
@@ -455,7 +458,7 @@ fn render_output(
 
     for entry in entries {
         if let Some(format) = &args.format {
-            println!("{}", render_format(format, entry)?);
+            println!("{}", render_format(format, entry, head_refname)?);
         } else {
             println!("{} {}", entry.objectname, entry.refname);
         }
@@ -463,14 +466,21 @@ fn render_output(
     Ok(())
 }
 
-fn render_format(format: &str, entry: &RefEntry) -> CliResult<String> {
+fn render_format(format: &str, entry: &RefEntry, head_refname: Option<&str>) -> CliResult<String> {
     // `:short` modifiers: the short ref name (namespace prefix stripped) and the
     // 7-char abbreviated object id. Substituted before the bare atoms (the
     // strings are distinct, so order is not load-bearing, only for clarity).
     let refname_short = short_refname(&entry.refname);
     let objectname_short: String = entry.objectname.chars().take(7).collect();
+    // `%(HEAD)`: `*` for the currently checked-out branch, a space otherwise.
+    let head_marker = if head_refname == Some(entry.refname.as_str()) {
+        "*"
+    } else {
+        " "
+    };
     let mut out = format.to_string();
     for (atom, value) in [
+        ("%(HEAD)", head_marker),
         ("%(refname:short)", refname_short.as_str()),
         ("%(objectname:short)", objectname_short.as_str()),
         ("%(refname)", entry.refname.as_str()),

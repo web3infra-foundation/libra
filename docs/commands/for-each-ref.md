@@ -27,6 +27,7 @@ The `--format` option accepts a simple atom language. Supported atoms:
 | `%(objectname)` | Object hash the ref points to |
 | `%(objectname:short)` | Abbreviated object hash (7 characters) |
 | `%(objecttype)` | Object type: `commit`, `tag`, `tree`, or `blob` |
+| `%(HEAD)` | `*` if the ref is the currently checked-out branch, otherwise a space |
 
 ## Options
 
@@ -36,7 +37,7 @@ The `--format` option accepts a simple atom language. Supported atoms:
 | `--tags` | List tag refs under `refs/tags/`. |
 | `--remotes` | List remote-tracking refs under `refs/remotes/`. |
 | `--all` | List all supported ref namespaces. This is the default when no namespace flag is given. |
-| `--format=<format>` | Render simple atoms. Supported atoms: `%(refname)`, `%(refname:short)`, `%(objectname)`, `%(objectname:short)` (7-char), `%(objecttype)`. |
+| `--format=<format>` | Render simple atoms. Supported atoms: `%(refname)`, `%(refname:short)`, `%(objectname)`, `%(objectname:short)` (7-char), `%(objecttype)`, `%(HEAD)`. |
 | `--sort=<key>` | Sort by `refname`, `objectname`, or `version:refname` (alias `v:refname`; orders embedded numbers numerically, so `v1.9` precedes `v1.10`). Prefix any key with `-` to reverse. |
 | `--count=<n>` | Limit output to at most `n` refs after filtering and sorting. |
 | `--points-at=<object>` | Keep refs that point at the object. Annotated tags also match their peeled target. |
