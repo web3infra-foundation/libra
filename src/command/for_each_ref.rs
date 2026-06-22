@@ -533,12 +533,14 @@ fn render_format(
     // Commit-field atoms (`%(subject)`, author/committer name+email) require
     // loading the ref's object. Load it once, only when at least one such atom
     // is present, to avoid extra object reads.
-    const COMMIT_FIELD_ATOMS: [&str; 5] = [
+    const COMMIT_FIELD_ATOMS: [&str; 7] = [
         "%(subject)",
         "%(authorname)",
         "%(authoremail)",
         "%(committername)",
         "%(committeremail)",
+        "%(taggername)",
+        "%(taggeremail)",
     ];
     let fields = if COMMIT_FIELD_ATOMS.iter().any(|a| format.contains(a)) {
         commit_fields_for(entry)
@@ -548,7 +550,7 @@ fn render_format(
     // Atom name (inside `%(...)`) -> value. Single-pass substitution below
     // writes each value literally, so a value containing `%(` is never
     // re-parsed as an atom and never trips the unknown-atom check.
-    let atoms: [(&str, &str); 13] = [
+    let atoms: [(&str, &str); 15] = [
         ("HEAD", head_marker),
         ("upstream:short", upstream_short),
         ("upstream", upstream),
@@ -557,6 +559,8 @@ fn render_format(
         ("authoremail", fields.author_email.as_str()),
         ("committername", fields.committer_name.as_str()),
         ("committeremail", fields.committer_email.as_str()),
+        ("taggername", fields.tagger_name.as_str()),
+        ("taggeremail", fields.tagger_email.as_str()),
         ("refname:short", refname_short.as_str()),
         ("objectname:short", objectname_short.as_str()),
         ("refname", entry.refname.as_str()),
@@ -599,6 +603,8 @@ struct CommitFields {
     author_email: String,
     committer_name: String,
     committer_email: String,
+    tagger_name: String,
+    tagger_email: String,
 }
 
 /// Load the ref's object (once) and extract its commit-field atom values.
@@ -615,16 +621,20 @@ fn commit_fields_for(entry: &RefEntry) -> CommitFields {
                 author_email: format!("<{}>", c.author.email),
                 committer_name: c.committer.name.clone(),
                 committer_email: format!("<{}>", c.committer.email),
+                ..CommitFields::default()
             },
             Err(_) => CommitFields::default(),
         },
-        // Annotated tags have a message (subject) but no author/committer.
-        "tag" => CommitFields {
-            subject: load_object::<GitTag>(&hash)
-                .ok()
-                .map(|t| first_subject_line(&t.message))
-                .unwrap_or_default(),
-            ..CommitFields::default()
+        // Annotated tags have a message (subject) and a tagger, but no
+        // author/committer.
+        "tag" => match load_object::<GitTag>(&hash) {
+            Ok(t) => CommitFields {
+                subject: first_subject_line(&t.message),
+                tagger_name: t.tagger.name.clone(),
+                tagger_email: format!("<{}>", t.tagger.email),
+                ..CommitFields::default()
+            },
+            Err(_) => CommitFields::default(),
         },
         _ => CommitFields::default(),
     }

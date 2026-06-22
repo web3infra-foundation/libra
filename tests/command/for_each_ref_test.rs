@@ -678,3 +678,52 @@ async fn test_for_each_ref_author_committer_atoms() {
         "committeremail is angle-bracketed: {line:?}"
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_tagger_atoms() {
+    let temp = tempdir().unwrap();
+    setup_repo_with_commit(&temp).await;
+    let p = temp.path();
+    // Create an annotated tag (`-m` implies annotated; it carries a tagger).
+    run_libra_command(&["tag", "-m", "release one", "v1"], p);
+
+    // %(taggername)/%(taggeremail) populated for the annotated tag.
+    let out = run_libra_command(
+        &[
+            "for-each-ref",
+            "--tags",
+            "--format=%(taggername)|%(taggeremail)",
+        ],
+        p,
+    );
+    assert_cli_success(&out, "for-each-ref tagger atoms");
+    let s = String::from_utf8_lossy(&out.stdout);
+    let line = s.lines().next().unwrap_or("");
+    let f: Vec<&str> = line.split('|').collect();
+    assert_eq!(f.len(), 2, "two tagger fields: {line:?}");
+    assert!(
+        !f[0].is_empty(),
+        "taggername non-empty for annotated tag: {line:?}"
+    );
+    assert!(
+        f[1].starts_with('<') && f[1].ends_with('>'),
+        "taggeremail is angle-bracketed: {line:?}"
+    );
+
+    // For a commit (branch) ref, tagger atoms are empty.
+    let out = run_libra_command(
+        &[
+            "for-each-ref",
+            "--heads",
+            "--format=[%(taggername)][%(taggeremail)]",
+        ],
+        p,
+    );
+    assert_cli_success(&out, "for-each-ref tagger on commit");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.lines().any(|l| l == "[][]"),
+        "tagger atoms empty for a commit ref: {s:?}"
+    );
+}
