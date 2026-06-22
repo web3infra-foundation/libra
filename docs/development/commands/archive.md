@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 archive 创建能力已公开；`--format`、`--output`、`--prefix`、`--list` 和 `TREEISH <path>...` pathspec 限定均已支持。
+- 兼容级别：`partial`。基础 archive 创建能力已公开；`--format`、`--output`、`--prefix`、`--list`、`-v`/`--verbose` 和 `TREEISH <path>...` pathspec 限定均已支持。
 
 
 ## 设计方案
@@ -28,7 +28,7 @@ flowchart TD
 ```
 
 - 底层操作对象：`Blob`（`load_blob_content` 读取 `blob.data` 并原样写入归档，不识别或解引用 LFS pointer，LFS pointer blob 按原始字节写入）；`Commit`（提交对象，仅读取 `commit.tree_id`，不读取父提交关系或提交消息载荷）；`TreeItem` / `TreeItemMode`（tree 中的路径项和 mode）；`Tree`（`resolve_entries` 仅通过 `load_object::<Tree>(&commit.tree_id)` 从对象库加载，不访问索引）；`ObjectHash`（SHA-1/SHA-256 对象 ID 和 revision 解析结果）
-- 输出与错误契约：`execute_safe` 只产生二进制归档输出，签名中接收 `_output: &OutputConfig`（前导下划线表示有意未使用），全程不读取该参数，也没有 `--json` / `--machine` / quiet/verbose 分支或 `emit_json_data` 调用；失败通过 `CliError` / `CliResult` 传播，并已经携带多种稳定错误码：`CliInvalidArguments`（`LBR-CLI-002`，格式或前缀非法）、`CliInvalidTarget`（`LBR-CLI-003`，treeish 无法解析或空树）、`RepoCorrupt`（`LBR-REPO-002`，commit/tree 对象或不安全条目名不可读）、`IoReadFailed`（`LBR-IO-001`，blob 读取失败）、`IoWriteFailed`（`LBR-IO-002`，归档写出/落盘失败）；新增失败模式要补稳定错误码、用户提示和回归测试。
+- 输出与错误契约：`execute_safe` 把二进制归档写入 `-o`/stdout；签名中接收 `_output: &OutputConfig`（前导下划线表示有意未使用），不读取该参数，也没有 `--json` / `--machine` 分支或 `emit_json_data` 调用。`-v`/`--verbose` 是唯一的进度分支：把每个归档路径打印到 stderr（不影响 stdout 的归档字节）。失败通过 `CliError` / `CliResult` 传播，并已经携带多种稳定错误码：`CliInvalidArguments`（`LBR-CLI-002`，格式或前缀非法）、`CliInvalidTarget`（`LBR-CLI-003`，treeish 无法解析或空树）、`RepoCorrupt`（`LBR-REPO-002`，commit/tree 对象或不安全条目名不可读）、`IoReadFailed`（`LBR-IO-001`，blob 读取失败）、`IoWriteFailed`（`LBR-IO-002`，归档写出/落盘失败）；新增失败模式要补稳定错误码、用户提示和回归测试。
 - 副作用边界：该命令不应修改索引、对象库、refs/HEAD 或 reflog；唯一写入面是归档输出流/文件，发布前需要继续验证二进制输出不会误写终端或覆盖非预期路径。
 
 ## 实现历史
@@ -42,7 +42,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：`src/command/mod.rs` 导出 `archive`，`src/cli.rs::Commands::Archive` 负责 CLI 接入。
 - 用户文档：`docs/commands/archive.md`。
 - Synopsis：`libra archive [OPTIONS] [TREEISH] [PATH]...` / `libra archive --list`。
-- 公开参数包括：`[TREEISH]`、`[PATH]...`、`-l, --list`、`-f, --format <FMT>`、`-o, --output <FILE>`、`--prefix <PREFIX>`。
+- 公开参数包括：`[TREEISH]`、`[PATH]...`、`-l, --list`、`-f, --format <FMT>`、`-o, --output <FILE>`、`--prefix <PREFIX>`、`-v, --verbose`。
 
 
 ## 还未实现的功能
@@ -51,7 +51,7 @@ flowchart TD
 |---|---|---|
 | Git flag | `--add-file=<file>`（把未跟踪的工作区文件追加进归档） | 未公开；条目仅来自已解析的树，需要读文件系统并注入 `ArchiveEntry`。命令层。 |
 | Git flag | `-0`..`-9` / 压缩级别 | 未公开；gzip/bzip2/zip 均使用 `Compression::default()` 硬编码（`archive.rs`）。命令层。 |
-| Git flag | `-v` / `--verbose`（向 stderr 报告进度） | 未公开；命令当前只产出二进制流。命令层。 |
+| ✅ 已实现 | `-v` / `--verbose`（向 stderr 报告进度） | 已实现：在 `execute_safe` 写归档前，按归档条目顺序把每个（应用 `--prefix` 后的）路径打印到 stderr，对齐 `git archive -v`；归档字节仍走 `-o`/stdout，verbose 不污染 stdout。带集成测试（`test_archive_verbose_lists_paths_on_stderr`）。 |
 | Git flag | `--remote=<repo>` / `--exec=<cmd>`（从远端取归档） | 未公开；依赖 `upload-archive` 协议，需打通 `src/internal/protocol`，协议层改造。 |
 | 行为差异 | `.gitattributes` 的 `export-ignore` / `export-subst` 属性过滤 | 未实现；与 D5（`.gitattributes` filter/hooks bridge 有意差异）相关，按对象内容属性处理设计后再评估。 |
 | 兼容矩阵 | `COMPATIBILITY.md` 已登记该命令。 | 已纳入用户可见兼容矩阵和矩阵守卫。 |

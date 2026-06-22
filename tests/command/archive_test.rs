@@ -577,3 +577,42 @@ fn archive_tar_gz_file_output_is_not_truncated() {
     assert!(is_gzip(&data), "archive output should be gzip");
     assert!(data.len() > 20, "archive output should not be truncated");
 }
+
+#[test]
+fn test_archive_verbose_lists_paths_on_stderr() {
+    let repo = create_archive_test_repo();
+    let out = repo.path().join("verbose.tar");
+    let out_str = out.to_str().unwrap();
+
+    let output = run_libra_command(&["archive", "-v", "-o", out_str, "HEAD"], repo.path());
+    assert_cli_success(&output, "archive -v");
+
+    // `-v` reports each archived path to stderr (mirroring git archive -v); the
+    // archive bytes go to the -o file, so stdout stays empty.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("README.md"),
+        "verbose should list README.md on stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("src/main.rs"),
+        "verbose should list src/main.rs on stderr: {stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "with -o, the archive bytes must not leak to stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    // `--prefix` is applied to the reported paths too.
+    let output = run_libra_command(
+        &["archive", "-v", "-o", out_str, "--prefix", "app/", "HEAD"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "archive -v --prefix");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("app/README.md"),
+        "verbose should list the prefixed path on stderr: {stderr}"
+    );
+}

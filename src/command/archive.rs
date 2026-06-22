@@ -32,6 +32,7 @@ EXAMPLES:
     libra archive -o project.tar HEAD
     libra archive --format=tar.gz --prefix=project-v1/ -o project-v1.tar.gz v1.0
     libra archive --format=zip -o feature.zip feature-branch
+    libra archive -v -o project.tar HEAD   List archived paths on stderr
     libra archive --list";
 
 /// Supported archive output formats.
@@ -97,6 +98,10 @@ pub struct ArchiveArgs {
     /// Prepend a relative directory prefix to each archived path.
     #[arg(long, value_name = "PREFIX")]
     pub prefix: Option<String>,
+
+    /// Report each archived path to stderr as progress.
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
 }
 
 /// Collected metadata about a single tree entry for archiving.
@@ -588,6 +593,15 @@ pub async fn execute_safe(args: ArchiveArgs, _output: &OutputConfig) -> CliResul
         );
     }
     debug_assert!(entries.iter().all(entry_has_archive_metadata));
+
+    // `-v`/`--verbose` reports each archived path (with the prefix applied) to
+    // stderr, mirroring `git archive -v`. The listing follows the archive entry
+    // order so it lines up with what the writers emit to the output.
+    if args.verbose {
+        for entry in &entries {
+            eprintln!("{}", apply_prefix(prefix.as_deref(), &entry.path).display());
+        }
+    }
 
     create_archive(format, &entries, prefix.as_deref(), args.output.as_deref())
 }

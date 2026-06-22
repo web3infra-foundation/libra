@@ -31,6 +31,7 @@ matching files or directories inside that committed tree are archived.
 | `--format <FMT>` | `-f` | Archive format: `tar`, `tar.gz`, `tgz`, `tar.bz2`, `tbz2`, `tbz`, or `zip` | `tar` |
 | `--output <FILE>` | `-o` | Write archive bytes to a file instead of stdout | stdout |
 | `--prefix <PREFIX>` | | Prepend a relative directory prefix to each archived path | none |
+| `--verbose` | `-v` | Report each archived path (prefix applied) to stderr as progress | false |
 
 `--prefix <PREFIX>` must be relative. Absolute prefixes and prefixes containing
 `..` path components are rejected to prevent archive path traversal.
