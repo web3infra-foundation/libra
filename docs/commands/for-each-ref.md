@@ -28,6 +28,7 @@ The `--format` option accepts a simple atom language. Supported atoms:
 | `%(refname:rstrip=N)` | Ref name with `N` trailing path components removed (`N<0` keeps the first `|N|`) |
 | `%(objectname)` | Object hash the ref points to |
 | `%(objectname:short)` | Abbreviated object hash (7 characters) |
+| `%(objectname:short=N)` | Abbreviated object hash to `N` characters (capped at the full length) |
 | `%(objecttype)` | Object type: `commit`, `tag`, `tree`, or `blob` |
 | `%(HEAD)` | `*` if the ref is the currently checked-out branch, otherwise a space |
 | `%(upstream)` | The branch's upstream tracking ref (e.g. `refs/remotes/origin/main`); empty when none |
@@ -58,7 +59,7 @@ The `:short`/`:iso`/`:relative` date modifiers are not yet supported.
 | `--tags` | List tag refs under `refs/tags/`. |
 | `--remotes` | List remote-tracking refs under `refs/remotes/`. |
 | `--all` | List all supported ref namespaces. This is the default when no namespace flag is given. |
-| `--format=<format>` | Render simple atoms. Supported atoms: `%(refname)`, `%(refname:short)`, `%(refname:lstrip=N)`, `%(refname:rstrip=N)`, `%(objectname)`, `%(objectname:short)` (7-char), `%(objecttype)`, `%(HEAD)`, `%(upstream)`, `%(upstream:short)`, `%(subject)`, `%(contents)`, `%(contents:subject)`, `%(body)`, `%(contents:body)`, `%(authorname)`, `%(authoremail)`, `%(committername)`, `%(committeremail)`, `%(taggername)`, `%(taggeremail)`, `%(authordate)`, `%(committerdate)`, `%(taggerdate)`. |
+| `--format=<format>` | Render simple atoms. Supported atoms: `%(refname)`, `%(refname:short)`, `%(refname:lstrip=N)`, `%(refname:rstrip=N)`, `%(objectname)`, `%(objectname:short)` (7-char), `%(objectname:short=N)`, `%(objecttype)`, `%(HEAD)`, `%(upstream)`, `%(upstream:short)`, `%(subject)`, `%(contents)`, `%(contents:subject)`, `%(body)`, `%(contents:body)`, `%(authorname)`, `%(authoremail)`, `%(committername)`, `%(committeremail)`, `%(taggername)`, `%(taggeremail)`, `%(authordate)`, `%(committerdate)`, `%(taggerdate)`. |
 | `--sort=<key>` | Sort by `refname`, `objectname`, or `version:refname` (alias `v:refname`; orders embedded numbers numerically, so `v1.9` precedes `v1.10`). Prefix any key with `-` to reverse. |
 | `--count=<n>` | Limit output to at most `n` refs after filtering and sorting. |
 | `--points-at=<object>` | Keep refs that point at the object. Annotated tags also match their peeled target. |

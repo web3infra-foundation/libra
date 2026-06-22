@@ -849,3 +849,42 @@ async fn test_for_each_ref_contents_and_body_atoms() {
         "contents has subject and body: {contents:?}"
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_objectname_short_n() {
+    let temp = tempdir().unwrap();
+    setup_repo_with_commit(&temp).await;
+    let p = temp.path();
+
+    let full = {
+        let out = run_libra_command(&["for-each-ref", "--heads", "--format=%(objectname)"], p);
+        assert_cli_success(&out, "objectname");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    };
+    let field = |spec: &str| {
+        let fmt = format!("--format=%(objectname:short={spec})");
+        let out = run_libra_command(&["for-each-ref", "--heads", &fmt], p);
+        assert_cli_success(&out, spec);
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    };
+    let s10 = field("10");
+    assert_eq!(s10.len(), 10, "short=10 yields 10 chars: {s10:?}");
+    assert!(
+        full.starts_with(&s10),
+        "short=10 is a prefix of the full oid"
+    );
+    let s4 = field("4");
+    assert_eq!(s4.len(), 4, "short=4 yields 4 chars: {s4:?}");
+    // N beyond the hash length yields the full oid.
+    let big = field("64");
+    assert_eq!(big, full, "short=64 yields the full oid for sha1");
+}

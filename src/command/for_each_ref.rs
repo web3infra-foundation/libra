@@ -592,10 +592,16 @@ fn render_format(
             return Err(unsupported_atom_error());
         };
         let token = &after[2..end];
-        // Parameterized `%(refname:lstrip=N)` / `%(refname:rstrip=N)` are handled
-        // first; everything else is an exact atom-name match.
+        // Parameterized atoms (`%(refname:lstrip=N)` / `%(refname:rstrip=N)` and
+        // `%(objectname:short=N)`) are handled first; everything else is an exact
+        // atom-name match.
         if let Some(value) = refname_strip_atom(token, &entry.refname) {
             out.push_str(&value);
+        } else if let Some(n) = token
+            .strip_prefix("objectname:short=")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            out.push_str(&entry.objectname.chars().take(n).collect::<String>());
         } else {
             match atoms.iter().find(|(name, _)| *name == token) {
                 Some((_, value)) => out.push_str(value),
