@@ -49,6 +49,7 @@ this command.
 | `--abbrev <N>` | Number of hex digits for the abbreviated commit hash in the output. | `7` |
 | `--always` | When no tag can describe the target, fall back to the abbreviated commit hash instead of failing. | Off |
 | `--exact-match` | Only succeed when the target commit exactly matches a tag. | Off |
+| `--candidates <N>` | `N=0` requires an exact tag match (equivalent to `--exact-match`); `N>=1` keeps Libra's deterministic nearest-tag search (the positive bound is not enforced). | — |
 | `--long` | Force `tag-N-gHASH` output when a tag describes the target, including `tag-0-gHASH` for exact matches. | Off |
 | `--dirty[=<mark>]` | Append a dirty mark when tracked content differs from `HEAD`. | Off, default mark `-dirty` when enabled |
 | `--first-parent` | Follow only the first parent of merge commits when walking history. | Off |
@@ -224,10 +225,14 @@ When `--always` is used and no tag matches, `tag` and `distance` are `null` and
 
 Libra exposes `--match` and `--exclude` (wax globs, capped at 256 chars, with
 exclude taking precedence over match) and `--first-parent` (follow only the
-first parent of merge commits during the BFS walk). `--candidates`,
-`--contains`, and `--all` remain unimplemented: they depend on Git's
-multi-candidate / reverse-walk containment algorithm, which Libra's predictable
-BFS does not provide. They can be added incrementally if real users or agents
+first parent of merge commits during the BFS walk). `--candidates <N>` is
+exposed for its well-defined boundary: `N=0` means "only exact matches"
+(equivalent to `--exact-match`), while `N>=1` keeps Libra's predictable
+nearest-tag BFS (the candidate bound only affects which of several equally
+reachable tags Git would prefer, which Libra resolves deterministically).
+`--contains` and `--all` remain unimplemented: they depend on Git's
+reverse-walk containment / all-refs algorithms, which Libra's predictable BFS
+does not provide. They can be added incrementally if real users or agents
 need them.
 
 ### Why include both string and structured fields?
@@ -261,7 +266,7 @@ search, but this has not been a problem in practice.
 | Force long format | `--long` | `--long` | N/A |
 | Match tag pattern | `--match <glob>` (wax, ≤256 chars, repeatable) | `--match <glob>` | N/A |
 | Exclude tag pattern | `--exclude <glob>` (exclude wins over match) | `--exclude <glob>` | N/A |
-| Candidate count | All tags (BFS) | `--candidates=<N>` (default 10) | N/A |
+| Candidate count | `--candidates <N>` (N=0 ⇒ exact-match; N≥1 ⇒ nearest-tag BFS) | `--candidates=<N>` (default 10) | N/A |
 | First-parent only | `--first-parent` | `--first-parent` | N/A |
 | Dirty suffix | `--dirty[=<mark>]` | `--dirty[=<mark>]` | N/A |
 | JSON output | `--json` with typed fields | No | No |

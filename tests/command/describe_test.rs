@@ -427,3 +427,54 @@ fn test_describe_first_parent_linear_history() {
     assert_eq!(json["data"]["tag"], "v1.0");
     assert_eq!(json["data"]["result"], "v1.0");
 }
+
+#[test]
+fn test_describe_candidates_zero_requires_exact_match() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    let tag = run_libra_command(&["tag", "-m", "Release v1.0", "v1.0"], p);
+    assert_cli_success(&tag, "create annotated tag v1.0");
+
+    // HEAD is exactly tagged: `--candidates 0` succeeds with the exact match
+    // (Git documents `--candidates 0` as "only exact matches").
+    let output = run_libra_command(&["describe", "--candidates", "0"], p);
+    assert_cli_success(&output, "describe --candidates 0 on exact tag");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "v1.0");
+
+    // Advance HEAD past the tag.
+    std::fs::write(p.join("tracked.txt"), "next\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "tracked.txt"], p),
+        "add tracked.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "next", "--no-verify"], p),
+        "commit next",
+    );
+
+    // `--candidates 0` now fails (no exact match), exactly like `--exact-match`.
+    let output = run_libra_command(&["describe", "--candidates", "0"], p);
+    assert!(
+        !output.status.success(),
+        "describe --candidates 0 should fail when HEAD is not exactly tagged"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no tag exactly matches"),
+        "expected exact-match failure: {stderr}"
+    );
+
+    // `--candidates 5` (>=1) keeps the normal behavior: the nearest tag.
+    let output = run_libra_command(&["describe", "--tags", "--candidates", "5", "--json"], p);
+    assert_cli_success(&output, "describe --candidates 5");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["tag"], "v1.0");
+
+    // A non-integer value is rejected at the clap layer.
+    let output = run_libra_command(&["describe", "--candidates", "abc"], p);
+    assert!(
+        !output.status.success(),
+        "describe --candidates abc should be rejected"
+    );
+}

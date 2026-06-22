@@ -38,7 +38,7 @@
 | [`code-control`](code-control.md) | `intentionally-different` | Libra AI automation extension, not a Git command |
 | [`commit`](commit.md) | `partial` | common commit flags plus cleanup/fixup/squash/trailer and `-e/--edit` + `-v/--verbose` (editor) supported; `--porcelain`/`--status`/`-t/--template` not exposed |
 | [`config`](config.md) | `partial` | vault-backed local/global config; system scope, editor round-trip, typed conversion, NUL output and section operations incomplete |
-| [`describe`](describe.md) | `partial` | basic describe, `--tags`, `--always`, `--abbrev`, `--exact-match`, `--long`, `--dirty[=<mark>]`, `--first-parent`, `--match`, and `--exclude` supported; contains/candidates/all not exposed |
+| [`describe`](describe.md) | `partial` | basic describe, `--tags`, `--always`, `--abbrev`, `--exact-match`, `--long`, `--dirty[=<mark>]`, `--first-parent`, `--match`, `--exclude`, and `--candidates` (0 ⇒ exact-match) supported; contains/all not exposed |
 | [`diff`](diff.md) | `partial` | staged/old-new/pathspec/name/stat output supported; positional revspec, summary/word/binary/whitespace/ext-diff incomplete |
 | [`fetch`](fetch.md) | `partial` | repository/refspec, `--all`, `--depth`, `--dry-run`, `-v`, `--porcelain`, tag auto-follow (default; `--tags`/`--no-tags`, `remote.<name>.tagOpt`), `-f`/`--force`, `FETCH_HEAD`, and `--append` supported; refmap/atomic/prune and shallow expansion flags not exposed |
 | [`for-each-ref`](for-each-ref.md) | `partial` | `--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort` / `--count` / `--points-at` / `--contains` / `--no-contains` / `--merged` / `--no-merged` / `<pattern>` supported; full Git atom language and shell quoting modes are not exposed |

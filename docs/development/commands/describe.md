@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra describe` 的目标是根据可达 tag 为提交生成可读名称。当前实现刻意保持小而可验证的 Git 子集：支持 `[COMMIT]`、`--tags`、`--abbrev <N>`、`--always`、`--exact-match`、`--long`、`--dirty[=<mark>]`、`--first-parent`、`--match`/`--exclude`（wax glob，≤256 字符，exclude 优先于 match）与 JSON 输出，并在无法描述时给出稳定错误；候选数量、contains、all 等 Git 扩展尚未实现。
+`libra describe` 的目标是根据可达 tag 为提交生成可读名称。当前实现刻意保持小而可验证的 Git 子集：支持 `[COMMIT]`、`--tags`、`--abbrev <N>`、`--always`、`--exact-match`、`--long`、`--dirty[=<mark>]`、`--first-parent`、`--match`/`--exclude`（wax glob，≤256 字符，exclude 优先于 match）、`--candidates <N>`（N=0 等价 exact-match）与 JSON 输出，并在无法描述时给出稳定错误；contains、all 等 Git 扩展尚未实现。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 describe、`--tags`、`--always`、`--abbrev`、`--exact-match`、`--long`、`--dirty[=<mark>]`、`--first-parent` 和 `--match`/`--exclude` 已支持；contains/candidates/all 尚未公开。
+- 兼容级别：`partial`。基础 describe、`--tags`、`--always`、`--abbrev`、`--exact-match`、`--long`、`--dirty[=<mark>]`、`--first-parent`、`--match`/`--exclude` 和 `--candidates <n>`（n=0 等价于 exact-match）已支持；contains/all 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -36,7 +36,7 @@ flowchart TD
 ## 实现历史
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
-- 当前 `src/command/describe.rs` 实现 `[COMMIT]`、`--tags`、`--abbrev <N>`、`--always`、`--exact-match`、`--long`、`--dirty[=<mark>]`、`--first-parent`、`--match`/`--exclude` 与 `--json` 输出，基于一次有界 BFS 查找可达 tag；`--long` 会在精确匹配时输出 Git 兼容的 `tag-0-gHASH` 形式，并拒绝 `--long --abbrev=0`。`--first-parent` 在 BFS 中只跟随合并提交的第一个父；`--match`/`--exclude` 用 wax glob 过滤 tag 名（exclude 优先，模式 ≤256 字符，超长或非法模式以 `LBR-CLI-002`/129 拒绝）。2026-06-18 由 reconcile 丢失后恢复（原提交 0d12516/c543fae）。`--contains`、`--candidates`、`--all` 尚未在当前代码中实现。
+- 当前 `src/command/describe.rs` 实现 `[COMMIT]`、`--tags`、`--abbrev <N>`、`--always`、`--exact-match`、`--long`、`--dirty[=<mark>]`、`--first-parent`、`--match`/`--exclude` 与 `--json` 输出，基于一次有界 BFS 查找可达 tag；`--long` 会在精确匹配时输出 Git 兼容的 `tag-0-gHASH` 形式，并拒绝 `--long --abbrev=0`。`--first-parent` 在 BFS 中只跟随合并提交的第一个父；`--match`/`--exclude` 用 wax glob 过滤 tag 名（exclude 优先，模式 ≤256 字符，超长或非法模式以 `LBR-CLI-002`/129 拒绝）。2026-06-18 由 reconcile 丢失后恢复（原提交 0d12516/c543fae）。`--candidates <N>` 已实现（`N=0` 等价 `--exact-match`：`exact_match = args.exact_match || args.candidates == Some(0)`；`N≥1` 维持最近-tag BFS）；`--contains`、`--all` 尚未在当前代码中实现。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
 ## 当前状态
@@ -44,7 +44,8 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/describe.md`。
 - Synopsis：`libra describe [OPTIONS] [COMMIT]`。
-- 公开参数/子命令包括：`[COMMIT]`、`--tags`、`--abbrev <N>`、`--always`、`--exact-match`、`--long`、`--dirty[=<mark>]`、`--first-parent`、`--match <pattern>`、`--exclude <pattern>`。
+- 公开参数/子命令包括：`[COMMIT]`、`--tags`、`--abbrev <N>`、`--always`、`--exact-match`、`--long`、`--dirty[=<mark>]`、`--first-parent`、`--match <pattern>`、`--exclude <pattern>`、`--candidates <N>`。
+- `--candidates <N>`：`N=0` 等价于 `--exact-match`（仅当目标精确命中 tag 才输出，否则报 `no tag exactly matches`）；`N≥1` 维持当前最近-tag BFS 行为（不强制 Git 的候选数量上界，属有意子集）。实现复用既有 exact-match 路径（`exact_match = args.exact_match || args.candidates == Some(0)`）。
 
 
 ## 还未实现的功能
@@ -52,7 +53,7 @@ flowchart TD
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | 兼容差异项 | Find tags containing commit | 原始对照：未实现；相关参数/替代：--contains；当前说明：不适用（`DescribeArgs` 无此字段）。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | Consider N candidate tags | 原始对照：未实现；相关参数/替代：--candidates <n>；当前说明：不适用（`DescribeArgs` 无此字段）。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | Consider N candidate tags | `--candidates <N>` 已公开：`N=0` 等价 `--exact-match`，`N≥1` 维持最近-tag BFS。带集成测试（`test_describe_candidates_zero_requires_exact_match`，覆盖精确命中、off-tag 失败、N≥1 正常、非整数拒绝）。 |
 | 兼容差异项 | Consider all refs | 原始对照：未实现；相关参数/替代：--all；当前说明：不适用（`DescribeArgs` 无此字段）。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求

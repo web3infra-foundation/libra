@@ -36,6 +36,7 @@ EXAMPLES:
     libra describe --match 'v1.*'   Only consider tags whose name matches the glob
     libra describe --exclude '*rc*' Skip tags whose name matches the glob
     libra describe HEAD~1           Describe a specific commit-ish (hash, ref, or HEAD~N)
+    libra describe --candidates 0   Only succeed on an exact tag match (like --exact-match)
     libra describe --abbrev 12      Use 12 hex digits instead of the default 7 in the hash portion
     libra describe --json           Structured JSON output for agents";
 
@@ -65,6 +66,10 @@ pub struct DescribeArgs {
     /// Only output exact tag matches.
     #[clap(long)]
     pub exact_match: bool,
+
+    /// N=0 requires an exact tag match; N>=1 keeps the deterministic nearest-tag search.
+    #[clap(long, value_name = "N")]
+    pub candidates: Option<usize>,
 
     /// Always output the long format when a tag describes the target.
     #[clap(long)]
@@ -126,7 +131,9 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
         return Err(DescribeError::LongWithAbbrevZero);
     }
     let include_lightweight = args.tags;
-    let exact_match = args.exact_match;
+    // `--candidates 0` means "only exact matches", which is exactly the
+    // `--exact-match` behavior (Git documents `--candidates 0` this way).
+    let exact_match = args.exact_match || args.candidates == Some(0);
     let always = args.always;
     let dirty_mark = args.dirty;
     let first_parent = args.first_parent;
