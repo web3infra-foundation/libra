@@ -220,12 +220,16 @@ pub async fn execute_safe(args: FormatPatchArgs, output: &OutputConfig) -> CliRe
     let mut records = Vec::new();
     if args.cover_letter {
         let cover_body = format_cover_letter(&args, &commits)?;
+        let path = write_patch_file(&args, &out_dir, 0, total, start_num, "", &cover_body)?;
         if !output.quiet {
-            let path = write_patch_file(&args, &out_dir, 0, total, start_num, "", &cover_body)?;
             eprintln!("{}", path.display());
-        } else {
-            write_patch_file(&args, &out_dir, 0, total, start_num, "", &cover_body)?;
         }
+        records.push(PatchRecord {
+            number: 0,
+            commit: "0000000000000000000000000000000000000000".to_string(),
+            subject: "*** SUBJECT HERE ***".to_string(),
+            path: path.display().to_string(),
+        });
     }
 
     // 7. Iterate commits and generate patches
@@ -407,11 +411,9 @@ async fn format_patch_body(
     ));
 
     // ---- From: ----
-    out.push_str(&format!(
-        "From: {} <{}>\n",
-        commit.author.name.trim(),
-        commit.author.email.trim()
-    ));
+    let author_name = sanitize_header_value(commit.author.name.trim());
+    let author_email = sanitize_header_value(commit.author.email.trim());
+    out.push_str(&format!("From: {author_name} <{author_email}>\n"));
 
     // ---- Date: (RFC 2822) ----
     out.push_str(&format!("Date: {}\n", ts.to_rfc2822()));
@@ -419,13 +421,16 @@ async fn format_patch_body(
     // ---- Subject: ----
     let (raw_msg, _sig) = parse_commit_msg(&commit.message);
     let subject = raw_msg.lines().next().unwrap_or("").to_string();
-    let subject = clean_subject(&subject, args.keep_subject);
+    let subject = sanitize_header_value(&clean_subject(&subject, args.keep_subject));
 
     let version = args
         .reroll_count
         .map(|v| format!(" v{v}"))
         .unwrap_or_default();
-    let prefix = format!("{prefix}{version}", prefix = args.subject_prefix);
+    let prefix = format!(
+        "{prefix}{version}",
+        prefix = sanitize_header_value(&args.subject_prefix)
+    );
 
     let num_str = if args.numbered || args.cover_letter {
         let width = number_width(total);
@@ -502,7 +507,7 @@ fn build_thread_id(args: &FormatPatchArgs, commits: &[Commit]) -> Option<String>
         return None;
     }
     if let Some(ref reply_to) = args.in_reply_to {
-        return Some(reply_to.clone());
+        return Some(sanitize_header_value(reply_to));
     }
     commits.first().map(|c| {
         let ts = c.committer.timestamp;
@@ -555,7 +560,7 @@ fn format_cover_letter(args: &FormatPatchArgs, commits: &[Commit]) -> Result<Str
         .reroll_count
         .map(|v| format!(" v{v}"))
         .unwrap_or_default();
-    let prefix = format!("{}{}", args.subject_prefix, version);
+    let prefix = format!("{}{}", sanitize_header_value(&args.subject_prefix), version);
 
     out.push_str("From: \n");
     out.push_str(&format!("Date: {}\n", now.to_rfc2822()));
@@ -809,6 +814,19 @@ fn write_patch_file(
 /// Convert a commit's committer timestamp to a `DateTime<Utc>`.
 fn timestamp_from_commit(commit: &Commit) -> DateTime<Utc> {
     DateTime::from_timestamp(commit.committer.timestamp as i64, 0).unwrap_or(DateTime::UNIX_EPOCH)
+}
+
+/// Normalize untrusted text before interpolating it into single-line mail
+/// headers. This prevents CR/LF/control characters from creating extra mbox
+/// headers while preserving readable subject/prefix text.
+fn sanitize_header_value(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Resolve the Signed-off-by identity from `user.name` / `user.email` config.

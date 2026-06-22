@@ -300,6 +300,88 @@ fn json_output_returns_patch_records() {
 
 #[test]
 #[serial]
+fn json_output_includes_cover_letter_record() {
+    let repo = repo_with_commits(2);
+    let out_dir = tempdir().unwrap();
+
+    let output = run_libra_command(
+        &[
+            "--json",
+            "format-patch",
+            "--cover-letter",
+            "-n",
+            "-o",
+            out_dir.path().to_str().unwrap(),
+            "HEAD~1..HEAD",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&output, "json cover letter output");
+
+    let v = parse_json_stdout(&output);
+    let patches = v["data"]["patches"].as_array().expect("patches array");
+    let cover = patches
+        .iter()
+        .find(|record| {
+            record["number"].as_u64() == Some(0)
+                && record["path"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with("0000-cover-letter.patch"))
+        })
+        .expect("cover letter record");
+    assert_eq!(
+        cover["commit"].as_str(),
+        Some("0000000000000000000000000000000000000000")
+    );
+    assert_eq!(cover["subject"].as_str(), Some("*** SUBJECT HERE ***"));
+}
+
+#[test]
+#[serial]
+fn subject_header_sanitizes_control_characters() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("header.txt"), "header\n").unwrap();
+    run_libra_command(&["add", "header.txt"], repo.path());
+    let commit = run_libra_command(
+        &["commit", "-m", "bad\rBcc: injected", "--no-verify"],
+        repo.path(),
+    );
+    assert_cli_success(&commit, "commit header-control subject");
+
+    let output = run_libra_command(
+        &[
+            "format-patch",
+            "--stdout",
+            "--subject-prefix",
+            "PATCH\nCc: injected",
+            "HEAD~1",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&output, "sanitize subject header");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let header = stdout.split("\n\n").next().unwrap_or_default();
+    let subject = header
+        .lines()
+        .find(|line| line.starts_with("Subject: "))
+        .expect("subject header");
+    assert!(
+        subject.contains("[PATCH Cc: injected] bad Bcc: injected"),
+        "subject header should contain sanitized values: {subject}"
+    );
+    assert!(
+        !header.contains('\r'),
+        "header must not contain carriage returns: {header:?}"
+    );
+    assert!(
+        !header.contains("\nCc: injected") && !header.contains("\nBcc: injected"),
+        "control characters must not create extra headers: {header:?}"
+    );
+}
+
+#[test]
+#[serial]
 fn thread_flag_adds_message_id() {
     let repo = repo_with_commits(2);
     let out_dir = tempdir().unwrap();

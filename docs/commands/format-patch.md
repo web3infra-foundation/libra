@@ -79,6 +79,10 @@ unified diff
 <libra-version>
 ```
 
+With `--json` or `--machine`, `data.patches` lists every generated output.
+When `--cover-letter` is set, the list includes `0000-cover-letter.patch` as
+record number `0` before the commit patch records.
+
 ## Error Handling
 
 | Scenario | StableErrorCode |
