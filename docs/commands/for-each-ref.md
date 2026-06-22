@@ -35,7 +35,7 @@ The `--format` option accepts a simple atom language. Supported atoms:
 | `--remotes` | List remote-tracking refs under `refs/remotes/`. |
 | `--all` | List all supported ref namespaces. This is the default when no namespace flag is given. |
 | `--format=<format>` | Render simple atoms. Supported atoms: `%(refname)`, `%(objectname)`, `%(objecttype)`. |
-| `--sort=<key>` | Sort by `refname`, `-refname`, `objectname`, or `-objectname`. |
+| `--sort=<key>` | Sort by `refname`, `objectname`, or `version:refname` (alias `v:refname`; orders embedded numbers numerically, so `v1.9` precedes `v1.10`). Prefix any key with `-` to reverse. |
 | `--count=<n>` | Limit output to at most `n` refs after filtering and sorting. |
 | `--points-at=<object>` | Keep refs that point at the object. Annotated tags also match their peeled target. |
 | `--contains=<commit>` / `--no-contains=<commit>` | Keep (or exclude) refs whose tip has `<commit>` as an ancestor. |
@@ -55,7 +55,7 @@ libra --json for-each-ref --remotes
 
 ## Compatibility
 
-Compatibility tier is `partial`. `--contains` / `--no-contains` are supported (filter refs whose tip has, or does not have, the given commit as an ancestor), as are `--merged` / `--no-merged` (filter refs whose tip is, or is not, reachable from the given commit). Deferred Git features include the full atom language, full sort keys, and shell/perl/python/tcl quoting modes. Git flat-file ref storage parity is intentionally not applicable to Libra.
+Compatibility tier is `partial`. `--contains` / `--no-contains` are supported (filter refs whose tip has, or does not have, the given commit as an ancestor), as are `--merged` / `--no-merged` (filter refs whose tip is, or is not, reachable from the given commit). Supported sort keys are `refname`, `objectname`, and `version:refname` (each reversible with a `-` prefix). Deferred Git features include the full atom language, the remaining sort keys (e.g. `*objectname`, date keys), and shell/perl/python/tcl quoting modes. Git flat-file ref storage parity is intentionally not applicable to Libra.
 
 ## Structured Output
 

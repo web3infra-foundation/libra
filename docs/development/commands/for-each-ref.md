@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort` / `--count` / `--points-at` / `--contains` / `--no-contains` / `--merged` / `--no-merged` / `<pattern>` supported; full Git atom language and shell quoting modes are not exposed
+- 兼容级别：`partial`。`--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort`（`refname`/`objectname`/`version:refname`，均可加 `-` 反转）/ `--count` / `--points-at` / `--contains` / `--no-contains` / `--merged` / `--no-merged` / `<pattern>` supported; full Git atom language、其余 sort keys 和 shell quoting modes are not exposed
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -54,6 +54,7 @@ flowchart TD
 |---|---|---|
 | 兼容矩阵 | `COMPATIBILITY.md` 已登记该命令为 `partial`。 | 保持与矩阵对齐；新增参数时同步矩阵和守卫测试。 |
 | 功能缺口 | Git atom 语言子集 | 原始对照：完整 `%(atom)` 集合；相关参数/替代：`--format`；当前说明：仅支持 `%(refname)` / `%(objectname)` / `%(objecttype)`。 后续扩展时需补回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | `--sort=version:refname`（别名 `v:refname`，可加 `-` 反转） | 复用 `utils::util::version_refname_cmp`（与 `ls-remote` 共享）：数字串按数值比较，使 `v1.9` 排在 `v1.10` 前。带集成测试（`test_for_each_ref_sort_version_refname`）。其余 sort keys（date keys、`*objectname` 等）仍缺。 |
 | ✅ 已实现 | 高级过滤 | `--contains` / `--no-contains`、`--merged` / `--no-merged` 均已实现（基于 `log::get_reachable_commits` 的可达性判定，`--merged` 对目标提交计算一次可达集合后逐 ref 判定）；`--points-at` 支持 direct refs、lightweight tags 和 annotated tag peeled target。带集成测试（`test_for_each_ref_contains_filter`、`test_for_each_ref_merged_filter`）。 |
 | 功能缺口 | 引用命名空间 | 原始对照：`--format` 的 shell/perl/python/tcl 引用模式；当前说明：未实现。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 

@@ -428,3 +428,48 @@ async fn test_for_each_ref_unknown_sort_rejects() {
         "got: {stderr}"
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_sort_version_refname() {
+    let temp = tempdir().unwrap();
+    setup_repo_with_commit(&temp).await;
+    let p = temp.path();
+    for v in ["v1.10", "v1.9", "v1.2", "v2.0", "v1.10.1"] {
+        run_libra_command(&["tag", v], p);
+    }
+
+    let output = run_libra_command(
+        &[
+            "for-each-ref",
+            "--sort=version:refname",
+            "--format=%(refname)",
+        ],
+        p,
+    );
+    assert_cli_success(&output, "for-each-ref --sort=version:refname");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let tags: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("refs/tags/v"))
+        .collect();
+    let pos = |needle: &str| {
+        tags.iter()
+            .position(|l| l.ends_with(needle))
+            .unwrap_or_else(|| panic!("missing {needle} in {tags:?}"))
+    };
+    // Numeric ordering: v1.9 must come before v1.10 (lexical sort gets this wrong).
+    assert!(pos("v1.2") < pos("v1.9"), "v1.2 before v1.9: {tags:?}");
+    assert!(
+        pos("v1.9") < pos("v1.10"),
+        "v1.9 before v1.10 (numeric, not lexical): {tags:?}"
+    );
+    assert!(
+        pos("v1.10") < pos("v1.10.1"),
+        "v1.10 before v1.10.1: {tags:?}"
+    );
+    assert!(
+        pos("v1.10.1") < pos("v2.0"),
+        "v1.10.1 before v2.0: {tags:?}"
+    );
+}

@@ -1,9 +1,7 @@
-use std::cmp::Ordering;
-
 use regex::Regex;
 
 use super::{LsRemoteArgs, LsRemoteEntry, LsRemoteError};
-use crate::internal::protocol::DiscRef;
+use crate::{internal::protocol::DiscRef, utils::util::version_refname_cmp};
 
 pub(super) struct CompiledPattern {
     raw: String,
@@ -107,64 +105,5 @@ fn glob_to_regex(pattern: &str) -> Result<Regex, LsRemoteError> {
     })
 }
 
-fn version_refname_cmp(left: &str, right: &str) -> Ordering {
-    let mut left_chars = left.chars().peekable();
-    let mut right_chars = right.chars().peekable();
-
-    while left_chars.peek().is_some() && right_chars.peek().is_some() {
-        let left_is_digit = left_chars.peek().is_some_and(|ch| ch.is_ascii_digit());
-        let right_is_digit = right_chars.peek().is_some_and(|ch| ch.is_ascii_digit());
-        let left_run = take_char_run(&mut left_chars, left_is_digit);
-        let right_run = take_char_run(&mut right_chars, right_is_digit);
-        let ordering = if left_is_digit && right_is_digit {
-            numeric_run_cmp(&left_run, &right_run)
-        } else {
-            left_run.cmp(&right_run)
-        };
-        if ordering != Ordering::Equal {
-            return ordering;
-        }
-    }
-
-    left_chars
-        .peek()
-        .is_some()
-        .cmp(&right_chars.peek().is_some())
-}
-
-fn take_char_run<I>(chars: &mut std::iter::Peekable<I>, want_digit: bool) -> String
-where
-    I: Iterator<Item = char>,
-{
-    let mut run = String::new();
-    while chars
-        .peek()
-        .is_some_and(|ch| ch.is_ascii_digit() == want_digit)
-    {
-        if let Some(ch) = chars.next() {
-            run.push(ch);
-        }
-    }
-    run
-}
-
-fn numeric_run_cmp(left: &str, right: &str) -> Ordering {
-    let left_trimmed = left.trim_start_matches('0');
-    let right_trimmed = right.trim_start_matches('0');
-    let left_norm = if left_trimmed.is_empty() {
-        "0"
-    } else {
-        left_trimmed
-    };
-    let right_norm = if right_trimmed.is_empty() {
-        "0"
-    } else {
-        right_trimmed
-    };
-
-    left_norm
-        .len()
-        .cmp(&right_norm.len())
-        .then_with(|| left_norm.cmp(right_norm))
-        .then_with(|| left.len().cmp(&right.len()))
-}
+// `version_refname_cmp` now lives in `crate::utils::util` and is shared with
+// `for-each-ref`'s `--sort=version:refname`.

@@ -25,6 +25,7 @@ EXAMPLES:
     libra for-each-ref --all            List all refs (default)
     libra for-each-ref --format='%(refname) %(objectname)'  Custom format
     libra for-each-ref --sort=refname   Sort by ref name
+    libra for-each-ref --sort=version:refname   Version-aware sort (v1.9 before v1.10)
     libra for-each-ref --points-at HEAD List refs that point at HEAD
     libra for-each-ref --merged=main    List refs already merged into main
     libra for-each-ref --no-merged=main List refs not yet merged into main
@@ -53,7 +54,8 @@ pub struct ForEachRefArgs {
     #[clap(long, value_name = "FORMAT")]
     pub format: Option<String>,
 
-    /// Sort output by key (refname, objectname, taggerdate, etc.)
+    /// Sort output by key: `refname`, `objectname`, or `version:refname`
+    /// (alias `v:refname`); prefix with `-` to reverse.
     #[clap(long, value_name = "KEY")]
     pub sort: Option<String>,
 
@@ -420,6 +422,14 @@ fn sort_entries(entries: &mut [RefEntry], sort: Option<&str>) -> CliResult<()> {
         "-refname" => entries.sort_by(|a, b| b.refname.cmp(&a.refname)),
         "objectname" => entries.sort_by(|a, b| a.objectname.cmp(&b.objectname)),
         "-objectname" => entries.sort_by(|a, b| b.objectname.cmp(&a.objectname)),
+        // `version:refname` (and the `v:refname` alias) order embedded numbers
+        // numerically, so `v1.9` sorts before `v1.10`. Shared comparator.
+        "version:refname" | "v:refname" => {
+            entries.sort_by(|a, b| util::version_refname_cmp(&a.refname, &b.refname))
+        }
+        "-version:refname" | "-v:refname" => {
+            entries.sort_by(|a, b| util::version_refname_cmp(&b.refname, &a.refname))
+        }
         other => {
             return Err(CliError::command_usage(format!(
                 "unsupported for-each-ref sort key '{other}'"
