@@ -758,3 +758,39 @@ async fn test_for_each_ref_date_atoms() {
         assert!(d.contains("20"), "date contains a year: {line:?}");
     }
 }
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_refname_lstrip_rstrip() {
+    let temp = tempdir().unwrap();
+    setup_repo_with_commit(&temp).await; // refs/heads/main
+    let p = temp.path();
+    let f = |spec: &str| {
+        let fmt = format!("--format=%(refname:{spec})");
+        let out = run_libra_command(&["for-each-ref", "--heads", &fmt], p);
+        assert_cli_success(&out, spec);
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    };
+    assert_eq!(
+        f("lstrip=1"),
+        "heads/main",
+        "lstrip=1 drops 1 leading component"
+    );
+    assert_eq!(f("lstrip=2"), "main", "lstrip=2 drops 2 leading components");
+    assert_eq!(f("lstrip=-1"), "main", "lstrip=-1 keeps the last component");
+    assert_eq!(
+        f("rstrip=1"),
+        "refs/heads",
+        "rstrip=1 drops 1 trailing component"
+    );
+    assert_eq!(
+        f("rstrip=-1"),
+        "refs",
+        "rstrip=-1 keeps the first component"
+    );
+    assert_eq!(f("lstrip=5"), "", "lstrip beyond depth yields empty");
+}

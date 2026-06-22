@@ -1,6 +1,6 @@
 {
   "name": "libra",
-  "version": "0.17.1539",
+  "version": "0.17.1540",
   "private": true,
   "scripts": {
     "dev": "next dev",

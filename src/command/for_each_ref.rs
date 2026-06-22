@@ -584,9 +584,15 @@ fn render_format(
             return Err(unsupported_atom_error());
         };
         let token = &after[2..end];
-        match atoms.iter().find(|(name, _)| *name == token) {
-            Some((_, value)) => out.push_str(value),
-            None => return Err(unsupported_atom_error()),
+        // Parameterized `%(refname:lstrip=N)` / `%(refname:rstrip=N)` are handled
+        // first; everything else is an exact atom-name match.
+        if let Some(value) = refname_strip_atom(token, &entry.refname) {
+            out.push_str(&value);
+        } else {
+            match atoms.iter().find(|(name, _)| *name == token) {
+                Some((_, value)) => out.push_str(value),
+                None => return Err(unsupported_atom_error()),
+            }
         }
         rest = &after[end + 1..];
     }
@@ -676,4 +682,33 @@ fn short_refname(refname: &str) -> String {
         }
     }
     refname.strip_prefix("refs/").unwrap_or(refname).to_string()
+}
+
+/// Handle `%(refname:lstrip=N)` / `%(refname:rstrip=N)`, returning the stripped
+/// ref name. `N > 0` removes that many leading (lstrip) or trailing (rstrip)
+/// slash-separated components; `N < 0` keeps the last `|N|` (lstrip) or first
+/// `|N|` (rstrip) components. Returns `None` for any other token (including a
+/// non-integer N), so the caller treats it as an unknown atom.
+fn refname_strip_atom(token: &str, refname: &str) -> Option<String> {
+    let (from_left, num) = if let Some(n) = token.strip_prefix("refname:lstrip=") {
+        (true, n)
+    } else if let Some(n) = token.strip_prefix("refname:rstrip=") {
+        (false, n)
+    } else {
+        return None;
+    };
+    let n: i64 = num.parse().ok()?;
+    let comps: Vec<&str> = refname.split('/').collect();
+    let len = comps.len() as i64;
+    let kept: &[&str] = match (from_left, n >= 0) {
+        // lstrip=N: drop N leading components
+        (true, true) => comps.get(n.min(len) as usize..).unwrap_or(&[]),
+        // lstrip=-N: keep the last N components
+        (true, false) => &comps[(len - (-n).min(len)) as usize..],
+        // rstrip=N: drop N trailing components
+        (false, true) => &comps[..(len - n.min(len)) as usize],
+        // rstrip=-N: keep the first N components
+        (false, false) => comps.get(..(-n).min(len) as usize).unwrap_or(&comps),
+    };
+    Some(kept.join("/"))
 }
