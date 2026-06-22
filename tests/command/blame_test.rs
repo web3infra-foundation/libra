@@ -222,6 +222,57 @@ fn test_blame_human_output_handles_long_unicode_author_names() {
     );
 }
 
+/// Scenario: `-e` / `--show-email` replaces the author name with the author
+/// email (in Git's `<email>` form) in the default human output.
+#[test]
+fn test_blame_show_email_displays_author_email() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // Use short identities so the author column is not truncated.
+    assert_cli_success(
+        &run_libra_command(&["config", "user.name", "Zoe"], p),
+        "config name",
+    );
+    assert_cli_success(
+        &run_libra_command(&["config", "user.email", "z@e.io"], p),
+        "config email",
+    );
+    std::fs::write(p.join("tracked.txt"), "one line\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "tracked.txt"], p),
+        "add tracked.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "by zoe", "--no-verify"], p),
+        "commit by zoe",
+    );
+
+    // Default output shows the author name.
+    let out = run_libra_command(&["blame", "tracked.txt"], p);
+    assert_cli_success(&out, "blame default");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Zoe") && !stdout.contains("<z@e.io>"),
+        "default blame shows the name, not the email: {stdout}"
+    );
+
+    // `-e` and `--show-email` show `<email>` instead of the name.
+    for flag in ["-e", "--show-email"] {
+        let out = run_libra_command(&["blame", flag, "tracked.txt"], p);
+        assert_cli_success(&out, "blame show-email");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("<z@e.io>"),
+            "blame {flag} should show the email: {stdout}"
+        );
+        assert!(
+            !stdout.contains("Zoe"),
+            "blame {flag} must not show the name: {stdout}"
+        );
+    }
+}
+
 /// Scenario: each line in JSON blame output must reference the commit
 /// hash that introduced it. With the known 2-commit `foo.txt` history,
 /// line 1 maps to the first commit and line 2 to the second. The `date`
@@ -534,6 +585,7 @@ async fn blame_runs_with_sha1() {
         line_range: None,
         porcelain: false,
         line_porcelain: false,
+        show_email: false,
     })
     .await;
 }
@@ -555,6 +607,7 @@ async fn blame_runs_with_sha256() {
         line_range: None,
         porcelain: false,
         line_porcelain: false,
+        show_email: false,
     })
     .await;
 }

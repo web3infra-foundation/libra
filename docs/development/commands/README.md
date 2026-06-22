@@ -26,7 +26,7 @@
 | [`agent`](agent.md) | `intentionally-different` | Libra external-agent capture extension, not a Git command |
 | [`automation`](automation.md) | `intentionally-different` | Libra AI automation rules/history extension, not a Git command |
 | [`bisect`](bisect.md) | `partial` | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` supported; `replay` (see [docs/development/comma... |
-| [`blame`](blame.md) | `partial` | numeric `-L` ranges plus porcelain/line-porcelain supported; reverse/email/whitespace/incremental/copy-move detection remain incomplete |
+| [`blame`](blame.md) | `partial` | numeric `-L` ranges, porcelain/line-porcelain, and `-e`/`--show-email` supported; reverse/whitespace/incremental/copy-move detection remain incomplete |
 | [`branch`](branch.md) | `partial` | create/list/delete/rename/upstream set+unset/current/contains/points-at/ignore-case supported; copy/description/merged/sort/format not exposed |
 | [`cat-file`](cat-file.md) | `partial` | `-t` / `-s` / `-p` / `-e` plus default `--batch-check` / `--batch` supported; batch-command/all-objects/custom formats and `-e` JSON/machine output not exposed |
 | [`checkout`](checkout.md) | `partial` | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore... |

@@ -65,6 +65,10 @@ pub struct BlameArgs {
     /// Like --porcelain, but repeat the commit metadata header for every line.
     #[clap(long = "line-porcelain")]
     pub line_porcelain: bool,
+
+    /// Show the author email instead of the author name in the default output.
+    #[clap(short = 'e', long = "show-email")]
+    pub show_email: bool,
 }
 
 /// Single attributed line of a blame report. Serialised verbatim to JSON.
@@ -74,6 +78,7 @@ pub struct BlameLine {
     pub short_hash: String,
     pub hash: String,
     pub author: String,
+    pub author_email: String,
     pub date: String,
     pub content: String,
 }
@@ -93,6 +98,7 @@ struct LineBlame {
     line_number: usize,
     commit_id: ObjectHash,
     author: String,
+    author_email: String,
     timestamp: i64,
     content: String,
 }
@@ -197,11 +203,17 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
 
     let mut output = String::new();
     for blame in &result.lines {
-        let author_short = if blame.author.chars().count() > 15 {
-            let truncated: String = blame.author.chars().take(12).collect();
+        // `-e`/`--show-email` shows `<email>` (Git's form) in the author slot.
+        let display_author = if args.show_email {
+            format!("<{}>", blame.author_email)
+        } else {
+            blame.author.clone()
+        };
+        let author_short = if display_author.chars().count() > 15 {
+            let truncated: String = display_author.chars().take(12).collect();
             format!("{truncated}...")
         } else {
-            format!("{:15}", blame.author)
+            format!("{display_author:15}")
         };
         let date_formatted = blame
             .date
@@ -271,6 +283,7 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
             line_number: idx + 1,
             commit_id,
             author: commit_obj.author.name.clone(),
+            author_email: commit_obj.author.email.clone(),
             timestamp: commit_obj.author.timestamp as i64,
             content: content.clone(),
         })
@@ -311,6 +324,7 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
                             if Some(&blame.content) == parent_content {
                                 blame.commit_id = *parent_id;
                                 blame.author = parent_commit.author.name.clone();
+                                blame.author_email = parent_commit.author.email.clone();
                                 blame.timestamp = parent_commit.author.timestamp as i64;
                             }
                         }
@@ -344,6 +358,7 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
                     short_hash: hash.chars().take(8).collect(),
                     hash,
                     author: line.author,
+                    author_email: line.author_email,
                     date: format_blame_timestamp(line.timestamp),
                     content: line.content,
                 }

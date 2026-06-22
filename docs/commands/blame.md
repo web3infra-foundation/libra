@@ -23,6 +23,7 @@ For large files, the `-L` option restricts output to a specific line range, redu
 | File | | positional (required) | The file to blame. Must exist in the specified revision. |
 | Commit | | positional (optional) | The revision to start blame from. Defaults to `HEAD`. |
 | Line range | `-L` | `-L <RANGE>` | Restrict blame to a line range. See formats below. |
+| Show email | `-e` | `--show-email` | Show the author email (as `<email>`) instead of the author name in the default output. |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Validate inputs but suppress all blame output. |
 
@@ -141,7 +142,7 @@ The commit argument is positional (second argument after the file path) rather t
 | Line range (numeric) | `-L N,M` / `-L N,+C` / `-L N` | `-L <start>,<end>` | N/A |
 | Line range (regex) | Not supported | `-L :<funcname>` / `-L /regex/` | N/A |
 | Reverse blame | Not supported | `--reverse` | N/A |
-| Show email | Not supported | `-e` / `--show-email` | N/A |
+| Show email | `-e` / `--show-email` (default human output) | `-e` / `--show-email` | N/A |
 | Show timestamp | Included by default | `-t` (raw timestamp) | N/A |
 | Porcelain format | `--porcelain` / `--line-porcelain` (no original line numbers, `boundary`, or `previous` metadata) | `--porcelain` / `--line-porcelain` | N/A |
 | Incremental output | Not supported | `--incremental` | N/A |
